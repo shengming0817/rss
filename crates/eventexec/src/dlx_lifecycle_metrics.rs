@@ -1,0 +1,104 @@
+//! Low-cardinality DLX lifecycle metric emission.
+
+use diport::DlxArchiveBacklog;
+
+use crate::{RetentionOutcome, RetentionTarget};
+
+/// Lifecycle metrics port. Every label is a closed enum owned by eventexec.
+pub trait DlxLifecycleMetrics: Send + Sync {
+    fn record_sweep(
+        &self,
+        target: RetentionTarget,
+        outcome: RetentionOutcome,
+        deleted: u64,
+        duration_seconds: f64,
+    );
+
+    fn record_archive_backlog(&self, backlog: DlxArchiveBacklog);
+}
+
+/// `metrics` facade-backed production emitter.
+pub struct MetricsDlxLifecycleMetrics;
+
+impl DlxLifecycleMetrics for MetricsDlxLifecycleMetrics {
+    fn record_sweep(
+        &self,
+        target: RetentionTarget,
+        outcome: RetentionOutcome,
+        deleted: u64,
+        duration_seconds: f64,
+    ) {
+        metrics::counter!(
+            "retention_sweep_deleted_total",
+            "target" => target.as_label()
+        )
+        .increment(deleted);
+        metrics::counter!(
+            "retention_sweep_ticks_total",
+            "target" => target.as_label(),
+            "outcome" => outcome.as_label()
+        )
+        .increment(1);
+        metrics::histogram!(
+            "retention_sweep_duration_seconds",
+            "target" => target.as_label(),
+            "outcome" => outcome.as_label()
+        )
+        .record(duration_seconds);
+    }
+
+    fn record_archive_backlog(&self, backlog: DlxArchiveBacklog) {
+        metrics::gauge!("dead_letter_archive_pending_depth").set(backlog.depth() as f64);
+        metrics::gauge!("dead_letter_archive_oldest_pending_age_seconds")
+            .set(backlog.oldest_age_seconds() as f64);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DlxLifecycleMetrics, MetricsDlxLifecycleMetrics};
+    use crate::{RetentionOutcome, RetentionTarget};
+    use diport::DlxArchiveBacklog;
+
+    #[test]
+    fn backlog_is_value_only_without_label_strings() {
+        let sample = DlxArchiveBacklog::new(17, 31);
+        assert_eq!(sample.depth(), 17);
+        assert_eq!(sample.oldest_age_seconds(), 31);
+    }
+
+    #[test]
+    fn production_emitter_uses_only_closed_low_cardinality_labels() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let metrics = MetricsDlxLifecycleMetrics;
+            metrics.record_sweep(
+                RetentionTarget::DeadLetter,
+                RetentionOutcome::Success,
+                7,
+                0.25,
+            );
+            metrics.record_archive_backlog(DlxArchiveBacklog::new(11, 37));
+        });
+        let rendered = handle.render();
+        for metric in [
+            "retention_sweep_deleted_total",
+            "retention_sweep_ticks_total",
+            "retention_sweep_duration_seconds_count",
+            "dead_letter_archive_pending_depth",
+            "dead_letter_archive_oldest_pending_age_seconds",
+        ] {
+            assert!(rendered.contains(metric), "missing {metric}: {rendered}");
+        }
+        for label in ["target=\"dead_letter\"", "outcome=\"success\""] {
+            assert!(rendered.contains(label), "missing {label}: {rendered}");
+        }
+        for forbidden in ["tenant_id=", "dead_letter_id=", "payload=", "error="] {
+            assert!(
+                !rendered.contains(forbidden),
+                "high-cardinality label {forbidden} leaked: {rendered}"
+            );
+        }
+    }
+}

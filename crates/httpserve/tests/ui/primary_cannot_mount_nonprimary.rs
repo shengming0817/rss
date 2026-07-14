@@ -7,6 +7,7 @@ enum RouteMarker {}
 
 fn endpoint() -> httpserve::GeneratedEndpoint<(), vocab::http::LocalOnly> {
     let binding = vocab::HttpRouteBinding::<RouteMarker, vocab::http::LocalOnly>::from_static(
+        vocab::HttpContractOwner::domain("test"),
         vocab::ContractBinding::from_static(
             "test",
             "ui.non-primary",

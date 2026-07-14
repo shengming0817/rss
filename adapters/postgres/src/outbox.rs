@@ -39,7 +39,7 @@ use sqlx::Row;
 use crate::PgStore;
 use crate::cotx::{PgTenantPool, TxCapability, infra_tenant_scope};
 use crate::dead_letter_payload::{
-    DLX_ORIGINAL_ENTRY_ENCODING, DlxPayloadContext, DlxPayloadProtector,
+    DLX_REPLAY_CAPSULE_ENCODING, DlxPayloadContext, DlxPayloadProtector, SensitiveJson,
 };
 use crate::projection_events::{
     ProjectionWriteRegistry, append_projection_event_if_bound,
@@ -855,34 +855,9 @@ pub(crate) struct ReplayedOutboxAppend {
     pub(crate) contract_id: String,
     pub(crate) contract_version: String,
     pub(crate) schema_hash: String,
-    pub(crate) payload: Vec<u8>,
-    pub(crate) metadata_json: String,
+    pub(crate) payload: secure::Plaintext,
+    pub(crate) metadata_json: secure::Plaintext,
     pub(crate) causation_id: Option<String>,
-}
-
-impl ReplayedOutboxAppend {
-    fn envelope(&self) -> Result<OutboxEnvelope, OutboxAppendError> {
-        let metadata = serde_json::from_str::<serde_json::Value>(&self.metadata_json)
-            .map_err(|_| OutboxAppendError::InvalidIdentity)?;
-        let serde_json::Value::Object(map) = metadata else {
-            return Err(OutboxAppendError::InvalidIdentity);
-        };
-        Ok(OutboxEnvelope {
-            domain: self.domain.clone(),
-            contract_id: self.contract_id.clone(),
-            contract_version: self.contract_version.clone(),
-            schema_hash: self.schema_hash.clone(),
-            tenant: self.tenant,
-            metadata: OutboxMetadata {
-                tenant: self.tenant,
-                contract_version: self.contract_version.clone(),
-                schema_hash: self.schema_hash.clone(),
-                map,
-            },
-            causation_id: self.causation_id.clone(),
-            partition_key: None,
-        })
-    }
 }
 
 /// 在事务内向 outbox 双写一条 entry（L1 原子性硬约束）。
@@ -933,25 +908,11 @@ impl OutboxWriteEntry for StoredOutboxEntry {
     }
 }
 
-impl OutboxWriteEntry for ReplayedOutboxAppend {
-    fn topic_str(&self) -> &str {
-        &self.topic
-    }
-
-    fn event_id(&self) -> &str {
-        &self.event_id
-    }
-
-    fn payload(&self) -> &[u8] {
-        &self.payload
-    }
-}
-
 /// Adapter-private durable fact assembled from the complete write entry + envelope pair.
 ///
-/// This is the only production site that may construct [`OutboxFactIdentity`]. SQL writers bind
-/// every stable identity column through this value, so the bytes hashed by Rust and the values
-/// submitted for the database generated column cannot be assembled along separate paths.
+/// Standard emit SQL binds every stable identity column through this value. DLQ replay uses its
+/// own adjacent construction because its payload and metadata remain zeroize-on-drop all the way
+/// to the SQL bind boundary rather than being copied into ordinary envelope buffers.
 pub(crate) struct CanonicalOutboxFact<'a> {
     event_id: &'a str,
     tenant_id: String,
@@ -1111,8 +1072,30 @@ pub(crate) async fn append_replayed_outbox(
     tx: &mut TxCapability<'_>,
     replay: &ReplayedOutboxAppend,
 ) -> Result<OutboxAppendOutcome, OutboxAppendError> {
-    let env = replay.envelope()?;
-    let fact = CanonicalOutboxFact::from_entry_env(replay, &env);
+    let metadata = SensitiveJson::new(
+        serde_json::from_slice::<serde_json::Value>(replay.metadata_json.expose())
+            .map_err(|_| OutboxAppendError::InvalidIdentity)?,
+    );
+    if !metadata.expose().is_object() {
+        return Err(OutboxAppendError::InvalidIdentity);
+    }
+    let metadata_json = std::str::from_utf8(replay.metadata_json.expose())
+        .map_err(|_| OutboxAppendError::InvalidIdentity)?;
+    let tenant_id = replay.tenant.to_string();
+    let fingerprint = OutboxFactIdentity::new(
+        &replay.event_id,
+        &tenant_id,
+        &replay.domain,
+        &replay.topic,
+        &replay.contract_id,
+        &replay.contract_version,
+        &replay.schema_hash,
+        replay.payload.expose(),
+        None,
+        replay.causation_id.as_deref(),
+        metadata.expose(),
+    )
+    .fingerprint();
     let inserted = sqlx::query_scalar::<_, Vec<u8>>(
         r#"
         INSERT INTO outbox (
@@ -1124,19 +1107,19 @@ pub(crate) async fn append_replayed_outbox(
         RETURNING fact_fingerprint
         "#,
     )
-    .bind(fact.event_id())
-    .bind(fact.tenant_id())
-    .bind(fact.domain())
-    .bind(fact.topic())
-    .bind(fact.contract_id())
-    .bind(fact.contract_version())
-    .bind(fact.schema_hash())
-    .bind(fact.payload())
-    .bind(fact.metadata_json())
-    .bind(fact.causation_id())
+    .bind(&replay.event_id)
+    .bind(&tenant_id)
+    .bind(&replay.domain)
+    .bind(&replay.topic)
+    .bind(&replay.contract_id)
+    .bind(&replay.contract_version)
+    .bind(&replay.schema_hash)
+    .bind(replay.payload.expose())
+    .bind(metadata_json)
+    .bind(replay.causation_id.as_deref())
     .fetch_optional(tx.conn())
     .await?;
-    classify_append(tx, fact.event_id(), fact.fingerprint(), inserted).await
+    classify_append(tx, &replay.event_id, fingerprint, inserted).await
 }
 
 pub(crate) async fn append_replayed_outbox_with_projection(
@@ -2152,6 +2135,7 @@ async fn settle_dlx(
                                 &event_id,
                             ),
                             &payload,
+                            &metadata,
                         )
                         .await
                         .map_err(|e| {
@@ -2163,8 +2147,9 @@ async fn settle_dlx(
                         INSERT INTO dead_letter
                             (tenant_id, message_id, producer_domain, consumer_domain,
                              contract_id, topic, consumer_group,
-                             original_entry, original_entry_key_ref, original_entry_payload_len,
-                             original_entry_encoding, error_summary, num_attempts, source_kind, metadata)
+                             replay_capsule, replay_capsule_key_ref, payload_len,
+                             replay_capsule_encoding, metadata_digest,
+                             error_summary, num_attempts, source_kind)
                         VALUES ($1::uuid, $2, $3, NULL, $4, $5, NULL, $6, $7, $8, $9, $10, $11, $12, $13)
                         "#,
                     )
@@ -2173,14 +2158,14 @@ async fn settle_dlx(
                     .bind(domain)
                     .bind(contract_id)
                     .bind(topic)
-                    .bind(sqlx::types::Json(protected.original_entry()))
+                    .bind(sqlx::types::Json(protected.replay_capsule()))
                     .bind(protected.key_ref())
                     .bind(protected.payload_len())
-                    .bind(DLX_ORIGINAL_ENTRY_ENCODING)
+                    .bind(DLX_REPLAY_CAPSULE_ENCODING)
+                    .bind(protected.metadata_digest())
                     .bind(error_summary)
                     .bind(authoritative_retry_count)
                     .bind(DeadLetterSource::OutboxRelay.as_str())
-                    .bind(sqlx::types::Json(&metadata))
                     .execute(conn.conn())
                     .await
                     .map_err(|e| {

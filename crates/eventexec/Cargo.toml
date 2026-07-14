@@ -47,6 +47,9 @@ tokio-util = { workspace = true }
 # 自身 no-op）；不留 public no-op metrics 让生产静默降级（#1209 review F3 fail-closed）。同 tracing 层级。
 metrics = { workspace = true }
 sha2 = { workspace = true }
+# Canonical archive scratch bytes are zeroized if encoding unwinds before ownership moves into
+# secure::Plaintext; no capsule-derived String/Vec may outlive this funnel.
+zeroize = { workspace = true }
 
 [dev-dependencies]
 testkit = { path = "../testkit" }

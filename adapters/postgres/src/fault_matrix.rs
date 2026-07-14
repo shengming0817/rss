@@ -133,13 +133,13 @@ impl FaultMatrixDeadLetterSummary {
 /// Closed dead-letter payload encoding observer for the fault matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultMatrixDeadLetterEncoding {
-    KeyProviderV1,
+    KeyProviderV3,
 }
 
 impl FaultMatrixDeadLetterEncoding {
     fn parse(raw: &str) -> FaultMatrixResult<Self> {
         match raw {
-            crate::dead_letter_payload::DLX_ORIGINAL_ENTRY_ENCODING => Ok(Self::KeyProviderV1),
+            crate::dead_letter_payload::DLX_REPLAY_CAPSULE_ENCODING => Ok(Self::KeyProviderV3),
             _ => bail!("unexpected fault-matrix dead-letter encoding `{raw}`"),
         }
     }
@@ -151,7 +151,7 @@ pub struct FaultMatrixDeadLetterObservation {
     source: FaultMatrixDeadLetterSource,
     summary: FaultMatrixDeadLetterSummary,
     encoding: FaultMatrixDeadLetterEncoding,
-    original_entry_payload_len: i64,
+    payload_len: i64,
 }
 
 impl FaultMatrixDeadLetterObservation {
@@ -167,8 +167,8 @@ impl FaultMatrixDeadLetterObservation {
         self.encoding
     }
 
-    pub fn original_entry_payload_len(&self) -> i64 {
-        self.original_entry_payload_len
+    pub fn payload_len(&self) -> i64 {
+        self.payload_len
     }
 }
 
@@ -418,7 +418,7 @@ impl PgFaultMatrixHarness {
         event_id: &str,
     ) -> FaultMatrixResult<FaultMatrixDeadLetterObservation> {
         let row = sqlx::query(
-            "SELECT source_kind, error_summary, original_entry_encoding, original_entry_payload_len \
+            "SELECT source_kind, error_summary, replay_capsule_encoding, payload_len \
              FROM dead_letter WHERE tenant_id = $1::uuid AND message_id = $2",
         )
         .bind(tenant.to_string())
@@ -430,7 +430,7 @@ impl PgFaultMatrixHarness {
             source: FaultMatrixDeadLetterSource::parse(row.get::<String, _>(0).as_str())?,
             summary: FaultMatrixDeadLetterSummary::parse(row.get::<String, _>(1).as_str())?,
             encoding: FaultMatrixDeadLetterEncoding::parse(row.get::<String, _>(2).as_str())?,
-            original_entry_payload_len: row.get::<i64, _>(3),
+            payload_len: row.get::<i64, _>(3),
         })
     }
 
@@ -1357,6 +1357,6 @@ impl KeyProvider for FaultMatrixKeyProvider {
 fn test_dlx_payload_protector() -> FaultMatrixResult<DlxPayloadProtector> {
     Ok(DlxPayloadProtector::new(
         DynKeyProvider::new_box(FaultMatrixKeyProvider),
-        KeyName::try_new("fault-matrix-dlx")?,
+        eventexec::DlxHotKeyName::try_new("fault-matrix-dlx")?,
     ))
 }

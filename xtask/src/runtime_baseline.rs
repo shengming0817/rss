@@ -1117,6 +1117,9 @@ impl<'ast> Visit<'ast> for PgLifecycleCalls {
             "store_guard" | "audit_admin_store_guard" | "spawn_readiness_sampler" => {
                 self.forbidden = true;
             }
+            "setup_maintenance"
+            | "setup_maintenance_with_audit_admin_config"
+            | "run_migrations" => self.forbidden = true,
             _ => {}
         }
         syn::visit::visit_expr_method_call(self, call);
@@ -1129,6 +1132,9 @@ impl<'ast> Visit<'ast> for PgLifecycleCalls {
                 "spawn_readiness_sampler" | "store_guard" | "audit_admin_store_guard" => {
                     self.forbidden = true;
                 }
+                "setup_maintenance"
+                | "setup_maintenance_with_audit_admin_config"
+                | "run_migrations" => self.forbidden = true,
                 _ => {}
             }
         }
@@ -1143,6 +1149,21 @@ fn pg_lifecycle_calls(file: &syn::File) -> PgLifecycleCalls {
         calls.forbidden = true;
     }
     calls
+}
+
+#[cfg(test)]
+#[test]
+fn pg_lifecycle_guard_rejects_migrating_maintenance_bypass() {
+    let bypass = syn::parse_file(
+        "fn bypass() { PgRuntimeDeps::setup_maintenance(); owner.run_migrations(); }",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    assert!(pg_lifecycle_calls(&bypass).forbidden);
+
+    let connect_only =
+        syn::parse_file("fn maintenance() { PgRuntimeDeps::connect_maintenance(); }")
+            .unwrap_or_else(|_| unreachable!());
+    assert!(!pg_lifecycle_calls(&connect_only).forbidden);
 }
 
 fn is_canonical_pg_runtime_constructor(item: &syn::ItemFn) -> bool {
@@ -3240,11 +3261,6 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "build_runtime_oidc_provider().context(",
     },
     AnchorSpec {
-        id: "run.provider.pg",
-        path: RUNTIME_LIB_PATH,
-        pattern: "PgRuntimeDeps::setup_with_audit_admin_config",
-    },
-    AnchorSpec {
         id: "run.provider.vault",
         path: RUNTIME_LIB_PATH,
         pattern: "build_vault_runtime_deps(|name| std::env::var(name).ok())",
@@ -3258,6 +3274,11 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         id: "run.provider.s3",
         path: RUNTIME_LIB_PATH,
         pattern: "build_s3_runtime_deps_from(|name| std::env::var(name).ok())",
+    },
+    AnchorSpec {
+        id: "run.provider.pg",
+        path: RUNTIME_LIB_PATH,
+        pattern: "PgRuntimeDeps::setup_with_audit_admin_config",
     },
     AnchorSpec {
         id: "run.shared-deps",

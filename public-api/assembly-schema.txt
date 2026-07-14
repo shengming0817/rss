@@ -110,6 +110,8 @@ pub enum assembly_schema::DiportPort
 pub assembly_schema::DiportPort::AckableSubscriber
 pub assembly_schema::DiportPort::AuditSink
 pub assembly_schema::DiportPort::Cas
+pub assembly_schema::DiportPort::DlxArchiveStore
+pub assembly_schema::DiportPort::DlxLifecycleRepository
 pub assembly_schema::DiportPort::KeyProvider
 pub assembly_schema::DiportPort::Lock
 pub assembly_schema::DiportPort::ObjectStore

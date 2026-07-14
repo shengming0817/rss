@@ -104,6 +104,8 @@ enum InternalCheck {
     EventTransportGuard,
     /// inbox receipt runtime cutover 旧 token 回流守卫（INBOX-RECEIPTS-CUTOVER-01）。
     InboxCutoverGuard,
+    /// DLX verified WORM archive-before-purge 单漏斗守卫（DLX-LIFECYCLE-FUNNEL-01）。
+    DlxLifecycleFunnel,
     /// runtime assembly baseline 漂移门（RUNTIME-BASELINE-DRIFT-01）。
     RuntimeBaseline,
     /// SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）。
@@ -312,6 +314,14 @@ fn step_inbox_cutover_guard() -> Step {
         id: GateId::InboxCutoverGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::InboxCutoverGuard),
+        env: &[],
+    }
+}
+fn step_dlx_lifecycle_funnel() -> Step {
+    Step {
+        id: GateId::DlxLifecycleFunnel,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::DlxLifecycleFunnel),
         env: &[],
     }
 }
@@ -1116,6 +1126,9 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::InboxCutoverGuard => {
             run_check(&crate::inbox_cutover_guard::InboxCutoverGuard)
         }
+        InternalCheck::DlxLifecycleFunnel => {
+            run_check(&crate::dlx_lifecycle_funnel::DlxLifecycleFunnel)
+        }
         InternalCheck::RuntimeBaseline => run_check(&runtime_baseline::RuntimeBaseline),
         InternalCheck::RuntimeDepsGuard => run_check(&runtime_deps_guard::RuntimeDepsGuard),
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
@@ -1280,7 +1293,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 32);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 33);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -1364,14 +1377,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_50_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_51_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 50);
+        assert_eq!(plan.len(), 51);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 50);
+        assert_eq!(ids.len(), 51);
     }
 
     #[test]
@@ -1404,6 +1417,7 @@ mod tests {
                 "consistency-fixtures",
                 "event-transport-guard",
                 "inbox-cutover-guard",
+                "dlx-lifecycle-funnel",
                 "runtime-baseline",
                 "runtime-deps-guard",
                 "archrules",
@@ -1507,6 +1521,7 @@ mod tests {
                 "consistency-fixtures",
                 "event-transport-guard",
                 "inbox-cutover-guard",
+                "dlx-lifecycle-funnel",
                 "runtime-baseline",
                 "runtime-deps-guard",
                 "archrules",
@@ -1563,6 +1578,7 @@ mod tests {
                     "consistency-fixtures",
                     "event-transport-guard",
                     "inbox-cutover-guard",
+                    "dlx-lifecycle-funnel",
                     "runtime-baseline",
                     "runtime-deps-guard",
                     "archrules",
@@ -2049,6 +2065,7 @@ mod tests {
                 "consistency-fixtures",
                 "event-transport-guard",
                 "inbox-cutover-guard",
+                "dlx-lifecycle-funnel",
                 "runtime-baseline",
                 "runtime-deps-guard",
                 "archrules",
@@ -2166,6 +2183,7 @@ mod tests {
             "consistency-fixtures",
             "event-transport-guard",
             "inbox-cutover-guard",
+            "dlx-lifecycle-funnel",
             "runtime-baseline",
             "runtime-deps-guard",
             "archrules",
@@ -4138,7 +4156,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         let green = include_str!("../../.github/workflows/ci.yml");
         assert!(github_integration_workflow_has_shard_matrix(green));
         assert!(integration_matrix_rows(green).is_none());
-        assert_eq!(expected_integration_rows().len(), 7);
+        assert_eq!(expected_integration_rows().len(), 8);
         let mut future_catalog = expected_integration_shards();
         future_catalog.push("future-shard");
         assert!(
@@ -4927,6 +4945,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             "owned::start(Redis::default(), ContainerService::Redis).await?",
             "owned::start(RabbitMq::default(), ContainerService::RabbitMq).await?",
             "owned::start(Mosquitto::default(), ContainerService::Mosquitto).await?",
+            "owned::start(MinIO::default(), ContainerService::Minio).await?",
         ]
         .iter()
         .all(|call| exactly_once(rust, call));
@@ -4941,6 +4960,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ("Redis,", "Self::Redis => \"redis\""),
             ("RabbitMq,", "Self::RabbitMq => \"rabbitmq\""),
             ("Mosquitto,", "Self::Mosquitto => \"mosquitto\""),
+            ("Minio,", "Self::Minio => \"minio\""),
         ]
         .iter()
         .all(|(variant, arm)| {
@@ -4949,7 +4969,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             .lines()
             .filter(|line| line.trim().ends_with(','))
             .count()
-            == 4;
+            == 5;
         let context_env_is_closed = [
             ("CI_SCOPE_ENV", "RSS_CI_CONTAINER_SCOPE"),
             ("CI_SHARD_ENV", "RSS_CI_INTEGRATION_SHARD"),
@@ -4968,19 +4988,19 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ("io.rss.integration.scope", 1),
             ("io.rss.integration.shard", 1),
             ("io.rss.integration.partition", 1),
-            ("io.rss.integration.service", 4),
+            ("io.rss.integration.service", 5),
         ]
         .iter()
         .all(|(label, shell_count)| {
             exactly_once(service_impl, label)
                 && label_matcher.matches(label).count() == *shell_count
-        }) && ["postgres", "redis", "rabbitmq", "mosquitto"].iter().all(
-            |service| {
+        }) && ["postgres", "redis", "rabbitmq", "mosquitto", "minio"]
+            .iter()
+            .all(|service| {
                 label_matcher.contains(&format!(
                     ".[\"io.rss.integration.service\"] == \"{service}\""
                 ))
-            },
-        );
+            });
         let partition_contract_is_closed = rust.contains(
             "matches!(value, \"unpartitioned\" | \"1/2\" | \"2/2\")",
         ) && shell.contains(
@@ -6191,8 +6211,8 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ),
             ("inputs.partition == '1/2'", "inputs.partition == '2/2'"),
             (
-                "|cdc-projection-saga:) ;;",
-                "|future-shard:|cdc-projection-saga:) ;;",
+                "|cdc-projection-saga:|object-storage:) ;;",
+                "|future-shard:|cdc-projection-saga:|object-storage:) ;;",
             ),
             (
                 "requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",

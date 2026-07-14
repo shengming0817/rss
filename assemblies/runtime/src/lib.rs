@@ -90,12 +90,15 @@ use infra::oidc::{
     OIDC_JWKS_READY_PROBE_NAME, OidcJwksReadyProbe, build_provider_with_replay_guard,
     build_runtime_oidc_provider,
 };
-use infra::pg::{build_readiness_interval, legacy_config_plaintext_policy};
+use infra::pg::{
+    build_pg_dlx_archiver_config_from, build_pg_dlx_purger_config_from,
+    build_pg_dlx_verifier_config_from, build_readiness_interval, legacy_config_plaintext_policy,
+};
 use infra::redis::{
     REDIS_READY_PROBE_NAME, RedisReadyProbe, build_redis_readiness_interval,
     spawn_redis_readiness_sampler,
 };
-use infra::s3::{build_s3_canary_config_from, wire_s3_canary};
+use infra::s3::{build_s3_canary_config_from, build_s3_dlx_archive_store_from, wire_s3_canary};
 use infra::vault::build_vault_key_provider_from;
 use phase::{RuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
 
@@ -109,7 +112,9 @@ use base64::Engine as _;
 use consistency::{EngineErrorKind, IdemKey, ProjectionBatchLimit, SerialInOrder};
 #[cfg(test)]
 use crypto::RustCryptoMacVerifier;
-use diport::{DynKeyProvider, DynManagedResource, ManagedResource, ShutdownError};
+use diport::{
+    DynKeyProvider, DynManagedResource, KeyProvider, ManagedResource, RedactedBytes, ShutdownError,
+};
 use eventexec::{
     DeadLetterId, DlqCursor, DlqEntrySummary, DlqInspectRequest, DlqInspectTarget, DlqListQuery,
     DlqRedriveOutcome, DlqRedriveRequest, DlqReplayRequest, DlqStore, OperatorDlqCapability,
@@ -122,7 +127,7 @@ use eventexec::{
 use postgres::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
     ConfigValueMaintenanceOptions, ConfigValueProtection, MaintenanceAuditOutcome, PgDlqStore,
-    PgMaintenanceDeps, PgReconcileStore, PgRuntimeDeps, PgRuntimeHandle,
+    PgDlxLifecycleRuntime, PgMaintenanceDeps, PgReconcileStore, PgRuntimeDeps, PgRuntimeHandle,
     ProjectionPointerPrecondition, caps,
 };
 #[cfg(test)]
@@ -141,6 +146,78 @@ const DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV: &str = "RSS_DOMAIN_TRANSPORT_MTLS_LO
 const DOMAIN_TRANSPORT_URL_ENV_SUFFIX: &str = "DOMAIN_TRANSPORT_URL";
 const DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET_ENV_SUFFIX: &str =
     "DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET";
+
+/// Composition-root owner for a secret read from the process environment. The original `String`
+/// allocation is moved into this wrapper immediately, comparisons only borrow it, and every
+/// non-selected credential is wiped on drop. Selected credentials transfer the same allocation to
+/// the provider's own zeroize-on-drop token/credential owner.
+pub(crate) struct EnvSecret {
+    bytes: Vec<u8>,
+}
+
+impl EnvSecret {
+    pub(crate) fn required(
+        get: &impl Fn(&str) -> Option<String>,
+        name: &'static str,
+    ) -> anyhow::Result<Self> {
+        let value = get(name).ok_or_else(|| anyhow::anyhow!("missing required env var: {name}"))?;
+        anyhow::ensure!(!value.is_empty(), "{name} must not be empty");
+        anyhow::ensure!(
+            value.trim() == value,
+            "{name} must not have leading or trailing whitespace"
+        );
+        Ok(Self {
+            bytes: value.into_bytes(),
+        })
+    }
+
+    pub(crate) fn optional(
+        get: &impl Fn(&str) -> Option<String>,
+        name: &'static str,
+    ) -> anyhow::Result<Option<Self>> {
+        get(name)
+            .map(|value| {
+                anyhow::ensure!(!value.is_empty(), "{name} must not be empty");
+                anyhow::ensure!(
+                    value.trim() == value,
+                    "{name} must not have leading or trailing whitespace"
+                );
+                Ok(Self {
+                    bytes: value.into_bytes(),
+                })
+            })
+            .transpose()
+    }
+
+    #[allow(clippy::expect_used)]
+    // reason: construction moves bytes from a valid Rust String and no method mutates them.
+    pub(crate) fn expose(&self) -> &str {
+        std::str::from_utf8(&self.bytes).expect("EnvSecret preserves String UTF-8")
+    }
+
+    #[allow(clippy::expect_used)]
+    // reason: construction moves bytes from a valid Rust String and no method mutates them.
+    pub(crate) fn into_string(mut self) -> String {
+        let bytes = std::mem::take(&mut self.bytes);
+        String::from_utf8(bytes).expect("EnvSecret preserves String UTF-8")
+    }
+}
+
+impl std::fmt::Debug for EnvSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EnvSecret(<redacted>)")
+    }
+}
+
+impl Drop for EnvSecret {
+    fn drop(&mut self) {
+        wipe_env_secret(&mut self.bytes);
+    }
+}
+
+fn wipe_env_secret(bytes: &mut [u8]) {
+    bytes.fill(0);
+}
 /// 生产系统时钟（组合根注入 `OidcProvider`）。
 ///
 /// 组合根是 sanctioned 直读系统时钟点（`diport::Clock` rustdoc：「prod `SystemClock` 内部调 `SystemTime::now`，
@@ -153,6 +230,103 @@ impl diport::Clock for SystemClock {
         #[allow(clippy::disallowed_methods)]
         SystemTime::now()
     }
+}
+
+/// Fully parsed, independent DLX lifecycle dependencies that do not require external I/O.
+/// Startup capability probes consume this bundle only after every credential and key boundary has
+/// passed fail-fast validation.
+struct DlxLifecycleBootstrapConfig {
+    archiver_pg: postgres::PgConfig,
+    verifier_pg: postgres::PgConfig,
+    purger_pg: postgres::PgConfig,
+    archive_store: s3::S3DlxArchiveStore,
+    hot_vault_provider: vault::VaultKeyProvider,
+    archive_vault_provider: vault::VaultKeyProvider,
+    hot_key: eventexec::DlxHotKeyName,
+    archive_key: eventexec::DlxArchiveKeyName,
+}
+
+async fn build_dlx_lifecycle_bootstrap_config_from(
+    get: impl Fn(&str) -> Option<String>,
+    clock: Arc<dyn diport::Clock>,
+) -> anyhow::Result<DlxLifecycleBootstrapConfig> {
+    let archiver_pg =
+        build_pg_dlx_archiver_config_from(&get).context("build DLX archiver postgres config")?;
+    let verifier_pg =
+        build_pg_dlx_verifier_config_from(&get).context("build DLX verifier postgres config")?;
+    let purger_pg =
+        build_pg_dlx_purger_config_from(&get).context("build DLX purger postgres config")?;
+    let archive_key = event_transport::build_dlx_archive_key_name_from(&get)
+        .context("build DLX archive key name")?;
+    let hot_key = eventexec::DlxHotKeyName::try_new(
+        get("RSS_DLX_PAYLOAD_KEY_NAME")
+            .context("missing required env var: RSS_DLX_PAYLOAD_KEY_NAME")?,
+    )
+    .context("RSS_DLX_PAYLOAD_KEY_NAME is invalid")?;
+    let (hot_vault_provider, archive_vault_provider) =
+        event_transport::build_dlx_vault_key_providers_from(&get)
+            .context("build independent DLX Vault key providers")?;
+    let archive_store = build_s3_dlx_archive_store_from(&get, clock)
+        .await
+        .context("build DLX archive S3 store")?;
+    Ok(DlxLifecycleBootstrapConfig {
+        archiver_pg,
+        verifier_pg,
+        purger_pg,
+        archive_store,
+        hot_vault_provider,
+        archive_vault_provider,
+        hot_key,
+        archive_key,
+    })
+}
+
+async fn verify_dlx_vault_key_capability(
+    provider: &vault::VaultKeyProvider,
+    key: &diport::KeyName,
+    coordinate: &'static str,
+) -> anyhow::Result<()> {
+    const CANARY_TENANT: &str = "00000000-0000-4000-8000-000000001168";
+    const CANARY_PLAINTEXT: &[u8] = b"rss-dlx-vault-capability-v1";
+    let tenant = vocab::TenantId::parse(CANARY_TENANT).context("parse DLX canary tenant")?;
+    let aad =
+        secure::ProtectionContext::authorized_maintenance(tenant, coordinate, "startup-canary", 1)
+            .context("derive DLX Vault canary AAD")?
+            .derive();
+    let wrong_aad = secure::ProtectionContext::authorized_maintenance(
+        tenant,
+        coordinate,
+        "startup-canary-wrong-aad",
+        1,
+    )
+    .context("derive DLX Vault wrong-AAD canary")?
+    .derive();
+    let encrypted = provider
+        .encrypt(
+            key.clone(),
+            secure::Plaintext::new(CANARY_PLAINTEXT.to_vec()),
+            aad.clone(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("DLX Vault capability encrypt failed"))?;
+    let ciphertext = encrypted.ciphertext().to_vec();
+    let key_ref = encrypted.key().clone();
+    let opened = provider
+        .decrypt(RedactedBytes::new(ciphertext.clone()), key_ref.clone(), aad)
+        .await
+        .map_err(|_| anyhow::anyhow!("DLX Vault capability decrypt failed"))?;
+    anyhow::ensure!(
+        opened.expose() == CANARY_PLAINTEXT,
+        "DLX Vault capability plaintext mismatch"
+    );
+    anyhow::ensure!(
+        provider
+            .decrypt(RedactedBytes::new(ciphertext), key_ref, wrong_aad)
+            .await
+            .is_err(),
+        "DLX Vault capability accepted wrong AAD"
+    );
+    Ok(())
 }
 
 #[derive(Default)]
@@ -1358,7 +1532,7 @@ trait ProjectionControlRuntime {
 
     fn build_registry(&self) -> anyhow::Result<ProjectionTargetRegistry>;
 
-    async fn setup_maintenance(&self) -> anyhow::Result<Self::Session>;
+    async fn connect_maintenance(&self) -> anyhow::Result<Self::Session>;
 
     async fn record_projection_maintenance_audit(
         &self,
@@ -1396,8 +1570,8 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime {
         build_projection_target_registry()
     }
 
-    async fn setup_maintenance(&self) -> anyhow::Result<Self::Session> {
-        PgRuntimeDeps::setup_maintenance(&build_pg_migrator_config()?)
+    async fn connect_maintenance(&self) -> anyhow::Result<Self::Session> {
+        PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config()?)
             .await
             .context("setup postgres maintenance deps")
     }
@@ -1451,7 +1625,7 @@ where
     let registry = runtime.build_registry()?;
     ensure_projection_command_supported_by_registry(&registry, &parsed.command)?;
     let resource_id = projection_command_resource_id(&parsed);
-    let session = runtime.setup_maintenance().await?;
+    let session = runtime.connect_maintenance().await?;
     let start_action = format!("projection.{}.start", parsed.command.action().as_str());
     if let Err(err) = runtime
         .record_projection_maintenance_audit(
@@ -1783,7 +1957,7 @@ async fn audit_ledger_verify_operator_subject(
 trait AuditLedgerVerifyRuntime {
     type Session;
 
-    async fn setup_maintenance(&self) -> anyhow::Result<Self::Session>;
+    async fn connect_maintenance(&self) -> anyhow::Result<Self::Session>;
 
     async fn record_audit_ledger_verify_audit(
         &self,
@@ -1815,17 +1989,17 @@ struct ProductionAuditLedgerVerifyRuntime;
 impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime {
     type Session = PgMaintenanceDeps;
 
-    async fn setup_maintenance(&self) -> anyhow::Result<Self::Session> {
+    async fn connect_maintenance(&self) -> anyhow::Result<Self::Session> {
         let audit_admin_config =
             build_pg_audit_admin_config().context("build audit admin postgres config")?;
         match audit_admin_config.as_ref() {
-            Some(config) => PgRuntimeDeps::setup_maintenance_with_audit_admin_config(
+            Some(config) => PgRuntimeDeps::connect_maintenance_with_audit_admin_config(
                 &build_pg_migrator_config()?,
                 config,
             )
             .await
             .context("setup postgres maintenance deps with audit admin"),
-            None => PgRuntimeDeps::setup_maintenance(&build_pg_migrator_config()?)
+            None => PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config()?)
                 .await
                 .context("setup postgres maintenance deps"),
         }
@@ -1883,7 +2057,7 @@ where
 {
     let parsed = parse_audit_ledger_verify_args(args)?;
     let resource_id = audit_ledger_verify_resource_id(&parsed);
-    let session = runtime.setup_maintenance().await?;
+    let session = runtime.connect_maintenance().await?;
     if let Err(err) = runtime
         .record_audit_ledger_verify_audit(
             &session,
@@ -2058,9 +2232,8 @@ fn parse_dlq_limit(raw: &str) -> anyhow::Result<u32> {
 }
 
 fn parse_dlq_source(raw: &str) -> anyhow::Result<diport::DeadLetterSource> {
-    diport::DeadLetterSource::parse(raw).ok_or_else(|| {
-        anyhow::anyhow!("--source must be legacy|consumer|outbox_relay|saga|projection")
-    })
+    diport::DeadLetterSource::parse(raw)
+        .ok_or_else(|| anyhow::anyhow!("--source must be consumer|outbox_relay|saga|projection"))
 }
 
 fn parse_dlq_kind_target(kind: &str, id: &str) -> anyhow::Result<DlqInspectTarget> {
@@ -2914,7 +3087,7 @@ trait DlqControlRuntime {
     type Session;
     type Store: DlqStore;
 
-    async fn setup_maintenance(&self) -> anyhow::Result<Self::Session>;
+    async fn connect_maintenance(&self) -> anyhow::Result<Self::Session>;
 
     async fn record_dlq_maintenance_audit(
         &self,
@@ -2947,8 +3120,8 @@ impl DlqControlRuntime for ProductionDlqControlRuntime {
     type Session = PgMaintenanceDeps;
     type Store = PgDlqStore;
 
-    async fn setup_maintenance(&self) -> anyhow::Result<Self::Session> {
-        PgRuntimeDeps::setup_maintenance(&build_pg_migrator_config()?)
+    async fn connect_maintenance(&self) -> anyhow::Result<Self::Session> {
+        PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config()?)
             .await
             .context("setup postgres maintenance deps")
     }
@@ -3002,7 +3175,7 @@ where
 {
     let parsed = parse_dlq_args(args)?;
     let resource_id = dlq_command_resource_id(&parsed);
-    let session = runtime.setup_maintenance().await?;
+    let session = runtime.connect_maintenance().await?;
     let start_action = format!("dlq.{}.start", parsed.command.action().as_str());
     if let Err(err) = runtime
         .record_dlq_maintenance_audit(
@@ -3310,7 +3483,7 @@ pub async fn run_reconcile_target_command(args: &[String]) -> anyhow::Result<()>
     let resource_id = format!("tenant={} target_id={}", parsed.tenant, parsed.target_id);
     let start_action = format!("reconcile.target.{}.start", parsed.action.as_str());
     let finish_action = format!("reconcile.target.{}.finish", parsed.action.as_str());
-    let pg = PgRuntimeDeps::setup_maintenance(&build_pg_migrator_config()?)
+    let pg = PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config()?)
         .await
         .context("setup postgres maintenance deps")?;
     if let Err(error) = record_reconcile_audit(
@@ -3640,7 +3813,7 @@ pub async fn run_settings_config_value_maintenance(args: &[String]) -> anyhow::R
     let parsed = parse_settings_config_value_maintenance_args(args)?;
     let options = parsed.options.clone();
     let resource_id = settings_config_value_maintenance_resource_id(&options);
-    let pg = PgRuntimeDeps::setup_maintenance(&build_pg_migrator_config()?)
+    let pg = PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config()?)
         .await
         .context("setup postgres maintenance deps")?;
     pg.record_config_value_maintenance_audit(
@@ -4020,6 +4193,7 @@ struct RuntimeModuleAssemblyInputs {
     oidc_resource: Box<DynManagedResource<'static>>,
     domain_transport_module: DomainModuleResult,
     event_module: DomainModuleResult,
+    dlx_lifecycle_module: DomainModuleResult,
     redis_readiness_worker: bootstrap::WorkerSpec,
 }
 
@@ -4032,6 +4206,7 @@ fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> Domai
     module.resources.push(inputs.oidc_resource);
     module.merge(inputs.domain_transport_module);
     module.merge(inputs.event_module);
+    module.merge(inputs.dlx_lifecycle_module);
     module.workers.push(inputs.redis_readiness_worker);
     module
 }
@@ -4072,6 +4247,18 @@ fn validate_provider_output_bindings(
         actual.len()
     );
     Ok(())
+}
+
+async fn after_required_preflight<Capability, Output, Preflight, Migrate>(
+    preflight: Preflight,
+    migrate: impl FnOnce(Capability) -> Migrate,
+) -> anyhow::Result<Output>
+where
+    Preflight: std::future::Future<Output = anyhow::Result<Capability>>,
+    Migrate: std::future::Future<Output = anyhow::Result<Output>>,
+{
+    let capability = preflight.await?;
+    migrate(capability).await
 }
 
 /// 生产组合根入口：构造共享基础设施 → generated domains → `compose_bindings`
@@ -4119,42 +4306,29 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         deps,
         s3_canary_config,
         event_cfg,
+        dlx_lifecycle,
         domain_transport,
         metrics_exporter,
         _command_idempotency_keyring,
     ) = phase_result(
         RuntimePhase::BuildInfra,
         async {
-            // postgres capability bundle（#1423）：集中 connect + migrations + readiness handle（生产 fail-fast，
-            // 缺配/连不上/迁移失败不静默 ready）。`setup` 是唯一公开构造路径（PG-BUNDLE-FUNNEL-01）。
+            // Phase A parses every configuration and proves all external DLX capabilities before
+            // the forward-only 0062 migration can commit. A bad credential or WORM/key capability
+            // therefore cannot strand the deployment between incompatible schema generations.
             let audit_admin_config =
                 build_pg_audit_admin_config().context("build audit admin postgres config")?;
-            let pg_owner = PgRuntimeDeps::setup_with_audit_admin_config(
-                &build_pg_migrator_config()?,
-                &build_pg_config()?,
-                audit_admin_config.as_ref(),
-                legacy_config_plaintext_policy()?,
-                generated::event::PROJECTION_INPUT_GENERATION,
-                generated::event::PROJECTION_INPUTS,
-            )
-            .await
-            .context("setup postgres deps")?;
-            let pg = pg_owner.handle();
-
-            // vault capability bundle（#1498）：env → resolver → VaultRuntimeDeps（单源装配出口）。vault env 缺失即
-            // fail-fast（不静默装配 vault）；resolver 经 bundle dispatch 注入 settings，guard 经 runtime_resources 单源。
+            let migrator_config = build_pg_migrator_config()?;
+            let app_pg_config = build_pg_config()?;
+            let plaintext_policy = legacy_config_plaintext_policy()?;
             let vault = build_vault_runtime_deps(|name| std::env::var(name).ok())
                 .context("setup vault deps")?;
             let settings_config_value_key_name =
                 build_settings_config_value_key_name_from(|name| std::env::var(name).ok())
                     .context("settings config value key name")?;
-            // redis capability bundle（#1571 go-live）：Redis 是 distributed lock provider 的生产硬依赖。
-            // 缺 `RSS_REDIS_URL` 或启动期 PING 失败均 fail-fast，不保留 demo-optional 生产路径。
             let redis = build_redis_runtime_deps(|name| std::env::var(name).ok())
                 .await
                 .context("setup redis deps")?;
-            // s3 capability bundle（#1164）：生产 object-store 真实接线。缺 S3 env 或 TLS/endpoint 误配均 fail-fast；
-            // readiness 由下方 runtime canary worker 周期执行真实 put/get/delete/get-miss。
             let s3 = build_s3_runtime_deps_from(|name| std::env::var(name).ok())
                 .context("setup s3 deps")?;
             let s3_canary_config = build_s3_canary_config_from(|name| std::env::var(name).ok())
@@ -4170,6 +4344,106 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                      use durable-shared or durable-isolated"
                 );
             }
+            let dlx_bootstrap = build_dlx_lifecycle_bootstrap_config_from(
+                |name| std::env::var(name).ok(),
+                Arc::new(SystemClock),
+            )
+            .await?;
+            let DlxLifecycleBootstrapConfig {
+                archiver_pg: dlx_archiver_pg_config,
+                verifier_pg: dlx_verifier_pg_config,
+                purger_pg: dlx_purger_pg_config,
+                archive_store,
+                hot_vault_provider,
+                archive_vault_provider,
+                hot_key,
+                archive_key,
+            } = dlx_bootstrap;
+            let hot_payload_protector = event_cfg
+                .dlx_payload_protector
+                .clone()
+                .context("durable DLX hot payload protector missing")?;
+            let archive_key_for_preflight = archive_key.clone();
+
+            let (pg_owner, dlx_pg_owner, archive_store, archive_vault_provider) =
+                after_required_preflight(
+                    async move {
+                        PgDlxLifecycleRuntime::preflight_identities(
+                            &dlx_archiver_pg_config,
+                            &dlx_verifier_pg_config,
+                            &dlx_purger_pg_config,
+                        )
+                        .await
+                        .context("preflight independent DLX postgres identities")?;
+                        let archive_store = archive_store
+                            .verify()
+                            .await
+                            .context("verify DLX archive S3 WORM capability")?;
+                        verify_dlx_vault_key_capability(
+                            &hot_vault_provider,
+                            hot_key.as_key_name(),
+                            "dlx-hot-startup",
+                        )
+                        .await
+                        .context("verify DLX hot Vault capability")?;
+                        verify_dlx_vault_key_capability(
+                            &archive_vault_provider,
+                            archive_key_for_preflight.as_key_name(),
+                            "dlx-archive-startup",
+                        )
+                        .await
+                        .context("verify DLX archive Vault capability")?;
+                        Ok((
+                            dlx_archiver_pg_config,
+                            dlx_verifier_pg_config,
+                            dlx_purger_pg_config,
+                            archive_store,
+                            archive_vault_provider,
+                        ))
+                    },
+                    |(
+                        dlx_archiver_pg_config,
+                        dlx_verifier_pg_config,
+                        dlx_purger_pg_config,
+                        archive_store,
+                        archive_vault_provider,
+                    )| async move {
+                        // Phase B is the only destructive step. Exact function/table ACL checks run
+                        // through `setup` only after the migration has installed the closed surface.
+                        let pg_owner = PgRuntimeDeps::setup_with_audit_admin_config(
+                            &migrator_config,
+                            &app_pg_config,
+                            audit_admin_config.as_ref(),
+                            plaintext_policy,
+                            generated::event::PROJECTION_INPUT_GENERATION,
+                            generated::event::PROJECTION_INPUTS,
+                        )
+                        .await
+                        .context("setup postgres deps after DLX capability preflight")?;
+                        let dlx_pg_owner = PgDlxLifecycleRuntime::setup(
+                            &dlx_archiver_pg_config,
+                            &dlx_verifier_pg_config,
+                            &dlx_purger_pg_config,
+                            hot_payload_protector,
+                        )
+                        .await
+                        .context("verify exact DLX lifecycle postgres ACLs")?;
+                        Ok((
+                            pg_owner,
+                            dlx_pg_owner,
+                            archive_store,
+                            archive_vault_provider,
+                        ))
+                    },
+                )
+                .await?;
+            let pg = pg_owner.handle();
+            let dlx_lifecycle = event_transport::DlxLifecycleRuntimeDeps::new(
+                dlx_pg_owner,
+                archive_store,
+                archive_vault_provider,
+                archive_key,
+            );
             let domain_transport =
                 wire_domain_transport_from(event_cfg.topology, |name| std::env::var(name).ok())
                     .await
@@ -4204,6 +4478,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                 deps,
                 s3_canary_config,
                 event_cfg,
+                dlx_lifecycle,
                 domain_transport,
                 metrics_exporter,
                 command_idempotency_keyring,
@@ -4285,6 +4560,8 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             )
             .await
             .context("wire event transport")?;
+            let dlx_lifecycle_module =
+                event_transport::wire_dlx_lifecycle(dlx_lifecycle).context("wire DLX lifecycle")?;
             // 聚合各域 module result / provider capability guards / event transport outputs。
             let redis_for_sampler = deps.redis.clone();
             let redis_readiness_worker: bootstrap::WorkerSpec = Box::new(move |token| {
@@ -4303,6 +4580,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                 oidc_resource,
                 domain_transport_module,
                 event_module,
+                dlx_lifecycle_module,
                 redis_readiness_worker,
             });
 
@@ -4398,6 +4676,136 @@ mod tests {
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+    struct FixedDlxBootstrapClock;
+
+    impl diport::Clock for FixedDlxBootstrapClock {
+        fn now(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000)
+        }
+    }
+
+    #[test]
+    fn env_secret_is_redacted_borrow_compared_and_wiped_by_the_shared_funnel() {
+        let first = EnvSecret::required(
+            &|name| (name == "SECRET").then(|| "secret-value".to_owned()),
+            "SECRET",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let second = EnvSecret::required(
+            &|name| (name == "SECRET").then(|| "secret-value".to_owned()),
+            "SECRET",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(first.expose(), second.expose());
+        assert_eq!(format!("{first:?}"), "EnvSecret(<redacted>)");
+
+        let mut bytes = *b"secret-value";
+        wipe_env_secret(&mut bytes);
+        assert!(bytes.iter().all(|byte| *byte == 0));
+    }
+
+    fn full_dlx_bootstrap_env(name: &str) -> Option<String> {
+        match name {
+            "RSS_PG_HOST" => Some("postgres.internal".to_owned()),
+            "RSS_PG_PORT" => Some("5432".to_owned()),
+            "RSS_PG_DATABASE" => Some("rss".to_owned()),
+            "RSS_PG_DLX_ARCHIVER_USERNAME" => Some("rss_dlx_archiver".to_owned()),
+            "RSS_PG_DLX_ARCHIVER_PASSWORD" => Some("dlx-pg-secret".to_owned()),
+            "RSS_PG_DLX_VERIFIER_USERNAME" => Some("rss_dlx_verifier".to_owned()),
+            "RSS_PG_DLX_VERIFIER_PASSWORD" => Some("dlx-verify-secret".to_owned()),
+            "RSS_PG_DLX_PURGER_USERNAME" => Some("rss_dlx_purger".to_owned()),
+            "RSS_PG_DLX_PURGER_PASSWORD" => Some("dlx-purge-secret".to_owned()),
+            "RSS_PG_SSL_MODE" => Some("disable".to_owned()),
+            "RSS_S3_ENDPOINT_URL" => Some("https://s3.example.test".to_owned()),
+            "RSS_DLX_ARCHIVE_S3_BUCKET" => Some("rss-dlx-archive".to_owned()),
+            "RSS_VAULT_ADDR" => Some("https://vault.example.test".to_owned()),
+            "RSS_VAULT_TOKEN" => Some("vault-token".to_owned()),
+            "RSS_DLX_HOT_VAULT_TOKEN" => Some("dlx-hot-vault-token".to_owned()),
+            "RSS_DLX_ARCHIVE_VAULT_TOKEN" => Some("dlx-archive-vault-token".to_owned()),
+            "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_owned()),
+            "RSS_DLX_PAYLOAD_KEY_NAME" => Some("dlx-hot".to_owned()),
+            "RSS_DLX_ARCHIVE_KEY_NAME" => Some("dlx-archive".to_owned()),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dlx_bootstrap_config_requires_independent_credentials_and_key_domains() {
+        let general_pg_only = build_dlx_lifecycle_bootstrap_config_from(
+            |name| match name {
+                "RSS_PG_DLX_ARCHIVER_USERNAME" | "RSS_PG_DLX_ARCHIVER_PASSWORD" => None,
+                "RSS_PG_USERNAME" => Some("rss_app".to_owned()),
+                "RSS_PG_PASSWORD" => Some("app-secret".to_owned()),
+                _ => full_dlx_bootstrap_env(name),
+            },
+            Arc::new(FixedDlxBootstrapClock),
+        )
+        .await;
+        assert!(
+            general_pg_only
+                .err()
+                .is_some_and(|error| format!("{error:#}").contains("RSS_PG_DLX_ARCHIVER_USERNAME"))
+        );
+        let missing_verifier = build_dlx_lifecycle_bootstrap_config_from(
+            |name| match name {
+                "RSS_PG_DLX_VERIFIER_USERNAME" | "RSS_PG_DLX_VERIFIER_PASSWORD" => None,
+                _ => full_dlx_bootstrap_env(name),
+            },
+            Arc::new(FixedDlxBootstrapClock),
+        )
+        .await;
+        assert!(
+            missing_verifier
+                .err()
+                .is_some_and(|error| format!("{error:#}").contains("RSS_PG_DLX_VERIFIER_USERNAME"))
+        );
+
+        let missing_purger = build_dlx_lifecycle_bootstrap_config_from(
+            |name| match name {
+                "RSS_PG_DLX_PURGER_USERNAME" | "RSS_PG_DLX_PURGER_PASSWORD" => None,
+                _ => full_dlx_bootstrap_env(name),
+            },
+            Arc::new(FixedDlxBootstrapClock),
+        )
+        .await;
+        assert!(
+            missing_purger
+                .err()
+                .is_some_and(|error| format!("{error:#}").contains("RSS_PG_DLX_PURGER_USERNAME"))
+        );
+
+        let reused_key = build_dlx_lifecycle_bootstrap_config_from(
+            |name| match name {
+                "RSS_DLX_ARCHIVE_KEY_NAME" => Some("dlx-hot".to_owned()),
+                _ => full_dlx_bootstrap_env(name),
+            },
+            Arc::new(FixedDlxBootstrapClock),
+        )
+        .await;
+        assert!(
+            reused_key
+                .err()
+                .is_some_and(|error| format!("{error:#}").contains("must differ"))
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_dlx_preflight_never_enters_destructive_migration_phase() {
+        let migration_calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&migration_calls);
+        let result = after_required_preflight(
+            async { anyhow::bail!("preflight failed") },
+            move |(): ()| async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(migration_calls.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn generated_graph_evidence_matches_live_runtime_carriers() {
         assert!(validate_provider_output_evidence().is_ok());
@@ -4413,11 +4821,11 @@ mod tests {
             runtime_module_harness_transcript(),
             [
                 "phase-order: build_provider -> build_infra -> wire_domains -> finalize -> launch",
-                "module-probes: configs_ready, keyprovider_ready, session_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, dead_letter_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper",
-                "module-resources: redis, s3, vault-secret-resolver, vault-key-provider, oidc-jwks, domain-http-transport, identity-pub, identity-sub, settings-pub, settings-sub",
-                "module-workers: keyprovider-readiness-sampler, session-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, dead-letter-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, redis-readiness-sampler",
-                "readyz-probes-before-reporter: rls_ready, redis_ready, oidc_jwks_ready, configs_ready, keyprovider_ready, session_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, dead_letter_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper",
-                "reporter-probe-count: 19",
+                "module-probes: configs_ready, keyprovider_ready, session_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
+                "module-resources: redis, s3, vault-secret-resolver, vault-key-provider, oidc-jwks, domain-http-transport, identity-pub, identity-sub, settings-pub, settings-sub, postgres-dlx-lifecycle",
+                "module-workers: keyprovider-readiness-sampler, session-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, dlx-lifecycle, dlx-archive-readiness, redis-readiness-sampler",
+                "readyz-probes-before-reporter: rls_ready, redis_ready, oidc_jwks_ready, configs_ready, keyprovider_ready, session_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
+                "reporter-probe-count: 20",
                 "registry-probe-count-after-take: 0",
             ]
             .join("\n")
@@ -4497,6 +4905,17 @@ mod tests {
                 &[],
             ),
             event_module: event_transport_harness_module(),
+            dlx_lifecycle_module: harness_module(
+                &[
+                    event_transport::DLX_LIFECYCLE_PROBE,
+                    event_transport::DLX_ARCHIVE_READINESS_PROBE,
+                ],
+                &["postgres-dlx-lifecycle"],
+                &[
+                    event_transport::DLX_LIFECYCLE_WORKER_NAME,
+                    event_transport::DLX_ARCHIVE_READINESS_WORKER_NAME,
+                ],
+            ),
             redis_readiness_worker: harness_worker("redis-readiness-sampler"),
         })
     }
@@ -4523,12 +4942,6 @@ mod tests {
         module.workers.push(harness_worker("outbox-sampler"));
         module.probes.push(harness_probe(OUTBOX_SWEEPER_PROBE));
         module.workers.push(harness_worker(SWEEPER_WORKER_NAME));
-        module.probes.push(harness_probe(
-            crate::event_transport::DEAD_LETTER_SWEEPER_PROBE,
-        ));
-        module.workers.push(harness_worker(
-            crate::event_transport::DEAD_LETTER_SWEEPER_WORKER_NAME,
-        ));
         for (topic, consumer, group) in [
             (
                 "settings.config-version-changed",
@@ -5519,7 +5932,7 @@ mod tests {
             Ok(registry)
         }
 
-        async fn setup_maintenance(&self) -> anyhow::Result<Self::Session> {
+        async fn connect_maintenance(&self) -> anyhow::Result<Self::Session> {
             self.setup_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -6629,7 +7042,7 @@ mod tests {
     impl AuditLedgerVerifyRuntime for FakeAuditLedgerVerifyRuntime {
         type Session = ();
 
-        async fn setup_maintenance(&self) -> anyhow::Result<Self::Session> {
+        async fn connect_maintenance(&self) -> anyhow::Result<Self::Session> {
             self.setup_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -7262,7 +7675,7 @@ mod tests {
         type Session = ();
         type Store = FakeDlqStore;
 
-        async fn setup_maintenance(&self) -> anyhow::Result<Self::Session> {
+        async fn connect_maintenance(&self) -> anyhow::Result<Self::Session> {
             self.setup_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }

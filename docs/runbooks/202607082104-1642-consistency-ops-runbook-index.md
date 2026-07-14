@@ -14,6 +14,7 @@ redrive 权限均引用已有 Hard / Medium carrier。若某模块尚无 runtime
 |---|---|---|---|---|---|---|
 | Outbox relay / backlog | `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` | exported | `docs/ops/outbox-relay-alerts.rules.yaml` | `docs/ops/202607082104-1642-consistency-dashboard-checklist.md` | tenant-scoped `rss dlq redrive-outbox` | `OutboxMetricScope`, `RelayConfig`, `OutboxContractId`, `TenantId`; see `docs/rules/observability.md` |
 | Inbox / consumer | `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` | consumer exported; inbox backlog `not currently exported` (#1683) | `docs/ops/outbox-relay-alerts.rules.yaml` | same checklist; inbox backlog gap references #1683 | tenant-scoped `rss dlq replay-dead-letter` | `InboxReceiptContext`, `ConsumerMeta`, tenant authority validation, `TenantId`; see `docs/rules/observability.md` |
+| DLX lifecycle | this index | archive pending depth/oldest age + closed lifecycle outcome exported | `DlxArchiveLifecycleFailure`, `DlxArchiveOldestPendingHigh` | same checklist | no cold list/inspect/replay; expired receipt only via verified HEAD-missing proof | typed receipt/proof, dedicated PG/Vault/S3 credentials, verified WORM store; see `docs/rules/eventbus.md` / `observability.md` |
 | Saga | this index | saga DLX exported | `docs/ops/outbox-relay-alerts.rules.yaml` | same checklist | no replay; diagnostic DLX only | `SagaInstanceRef`, `SagaExecutorConfig` domain / contract binding, `saga_dead_letters_total` label closure |
 | LocalTx / generic UoW settlement | `docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md` | `localtx_retry_attempts_total`, `localtx_final_total`, `localtx_attempts`, `tx_settlement_final_total` | `docs/ops/localtx-alerts.rules.yaml` | same checklist | no automatic replay for unsafe settlement | `observ::LocalTxObservation` for HTTP contracts; Postgres generic runner for boundary-only internal UoW; closed boundary/retry/final-status enums; see `docs/rules/observability.md` |
 | Projection | `docs/runbooks/202607080828-1638-projection-replay-shadow-swap.md` | runtime metric `not currently exported` (#1684) | none for projection runtime metric | checklist marks gap #1684 | no replay to outbox; projection DLX is diagnostic | `ProjectionSelector`, `ProjectionVersion`, serial witness, projection DLX store |
@@ -78,6 +79,30 @@ On-call flow:
 
 Allowed labels are the closed sets documented in `docs/rules/observability.md`. Tenant, message id,
 payload, handler error and raw broker metadata do not enter consumer metric labels.
+
+## DLX Archive Lifecycle
+
+Operational signals:
+
+- `dead_letter_archive_pending_depth`
+- `dead_letter_archive_oldest_pending_age_seconds`
+- `retention_sweep_ticks_total{target="dead_letter",outcome="success|transient|invariant"}`
+- `retention_sweep_deleted_total{target="dead_letter"}`
+- readyz probes `dlx_lifecycle` and `dlx_archive_ready`
+
+On-call flow:
+
+1. `DlxArchiveLifecycleFailure` 触发后先确认 purge 已停止，不要手工删 HOT row 或 receipt。
+2. 同时查看两个 readyz probe；检查独立 archiver PG role 、hot/archive Vault token/key、archive
+   bucket credential、versioning、COMPLIANCE default retention 和 current/noncurrent lifecycle policy。
+3. `outcome="invariant"` 表示 AAD/格式/checksum/既有对象语义冲突；保留对象和 HOT row 证据，
+   不得通过改 receipt 或重写对象规避。
+4. `outcome="transient"` 恢复依赖后观察后续 tick 转 success、oldest age 下降且 pending depth 归零。
+5. backlog gauge 为 NaN/缺失时先恢复 sampler/PG；不得当作空 backlog。
+
+RSS 不得 DeleteObject/list/replay cold archive。Object Lock 到期后，只有 verified archive store HEAD
+确认 lifecycle 已删对象，才能产生 `MissingArchiveProof` 删 receipt；HOT row 尚在时会在下一轮
+重新归档。
 
 ## Saga
 

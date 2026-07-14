@@ -40,12 +40,9 @@ impl DeadLetterSummary {
 
 /// 死信来源单源。
 ///
-/// `legacy` 仅用于迁移前历史行；新写入必须选择具体来源，避免 outbox relay DLX 与 consumer/saga
-/// dead-letter 在同一表内语义漂移。
+/// Historical rows are rejected by the forward-only v3 migration; every row has exact provenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeadLetterSource {
-    /// 迁移前历史行保留值。
-    Legacy,
     /// 消费方重试预算耗尽后进入 DLQ。
     Consumer,
     /// outbox relay 发布失败进入 DLX，同时登记统一 DLQ 审计行。
@@ -60,7 +57,6 @@ impl DeadLetterSource {
     /// DB/API 稳定 wire 值。
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Legacy => "legacy",
             Self::Consumer => "consumer",
             Self::OutboxRelay => "outbox_relay",
             Self::Saga => "saga",
@@ -71,7 +67,6 @@ impl DeadLetterSource {
     /// Parse DB/API stable wire value.
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
-            "legacy" => Some(Self::Legacy),
             "consumer" => Some(Self::Consumer),
             "outbox_relay" => Some(Self::OutboxRelay),
             "saga" => Some(Self::Saga),

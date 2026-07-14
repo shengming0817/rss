@@ -22,6 +22,7 @@ enum AuthRouteMarker {}
 fn main() {
     let read_binding =
         vocab::HttpRouteBinding::<ReadRouteMarker, vocab::http::LocalOnly>::from_static(
+            vocab::HttpContractOwner::domain("test"),
             vocab::ContractBinding::from_static(
                 "test",
                 "ui.primary-local-only-read",
@@ -46,6 +47,7 @@ fn main() {
 
     let auth_binding =
         vocab::HttpRouteBinding::<AuthRouteMarker, vocab::http::LocalOnly>::from_static(
+            vocab::HttpContractOwner::domain("test"),
             vocab::ContractBinding::from_static(
                 "test",
                 "ui.primary-local-only-auth",

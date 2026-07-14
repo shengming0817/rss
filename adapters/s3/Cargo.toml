@@ -13,6 +13,9 @@ workspace = true
 # build 轻量、仍保 freeze smoke 类型断言），与 redis/amqp 同范式（仅声明真正用到的 dep，cargo-udeps 守）。
 [dependencies]
 diport = { path = "../../crates/diport" }
+# DLX lifecycle typed archive capability. The adapter only implements the port after its S3
+# bucket has passed the WORM startup probe.
+eventexec = { path = "../../crates/eventexec", optional = true }
 aws-sdk-s3 = { workspace = true, optional = true }
 # redacted 结构化日志（仅 backend）：secure::redact_error funnel + tracing（observability.md：错误经 redact）。
 secure = { path = "../../crates/secure", optional = true }
@@ -21,20 +24,23 @@ tracing = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 # get 读取 stream-first：把 aws ByteStream 经 futures::stream::unfold 映射为 diport::ObjectByteStream（不 collect 整对象）。
 futures = { workspace = true, optional = true }
+# S3 checksum headers are RFC 4648 base64 while the lifecycle port carries the raw SHA-256 digest.
+base64 = { workspace = true, optional = true }
 
 [features]
 default = []
-backend = ["dep:aws-sdk-s3", "dep:secure", "dep:tracing", "dep:thiserror", "dep:futures"]
-integration = ["backend"]
+backend = ["dep:aws-sdk-s3", "dep:secure", "dep:tracing", "dep:thiserror", "dep:futures", "dep:base64", "dep:eventexec"]
+integration = ["backend", "testkit/containers"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # aws-sdk-s3 客户端 mock：canned 响应（put/get/delete/NoSuchKey/错误）注入确定性测试，无 live 后端。
-# dev-only 经 test-util 传递引入 hyper 作 mock http client 载体；live MinIO ignored test 另经
-# aws-smithy-http-client 显式构造 rustls-ring / plaintext connector。production adapter lib 仍不内建 TLS。
+# dev-only 经 test-util 传递引入 hyper 作 mock http client 载体；受管 ObjectStorage shard 的 MinIO
+# capability test 另经 aws-smithy-http-client 显式构造 plaintext connector。production adapter lib 仍不内建 TLS。
 aws-smithy-mocks = { workspace = true }
 aws-smithy-http-client = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 # test-util 仅测试启用（with_test_defaults_v2 + mock http client 由 mock_client! 注入）；不进 production lib
 # 依赖面（production lib 仍不持 HTTP connector / hyper）。
 aws-sdk-s3 = { workspace = true, features = ["test-util"] }
+testkit = { path = "../../crates/testkit" }

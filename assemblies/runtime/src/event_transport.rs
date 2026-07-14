@@ -34,36 +34,44 @@ use bootstrap::{
 use consistency::{ConsumerGroup, RetentionSweeper};
 use crypto::RustCryptoMacVerifier;
 use diport::{
-    Clock, DynDeadLetterStore, DynKeyProvider, DynManagedResource, KeyName, ManagedResource,
-    ShutdownError, Topic,
+    Clock, DlxArchiveBacklog, DlxLifecycleError, DlxLifecycleRepository, DynDeadLetterStore,
+    DynKeyProvider, DynManagedResource, ManagedResource, ShutdownError, Topic,
 };
 use eventexec::{
-    ConsumerMeta, ConsumerTxHandlerFn, EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics,
-    OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayConfig,
+    ConsumerMeta, ConsumerTxHandlerFn, DlxArchiveKeyName, DlxHotKeyName, DlxLifecycle,
+    DlxLifecycleHealth, DlxLifecycleMetrics, DlxLifecycleTickReport, EVENT_CONSUMER_PROBE,
+    LeaseConfig, MetricsDlxLifecycleMetrics, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE,
+    OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayConfig, RetentionOutcome, RetentionTarget,
     SWEEPER_WORKER_NAME, SamplerConfig, SweeperConfig, SweeperWorker, TenantAuthority,
-    WorkerHealth, backlog_sampler_loop, spawn_consumer_ackable_tx_subscriber, spawn_relay,
-    sweeper_loop,
+    WorkerHealth, apply_dlx_lifecycle_health, backlog_sampler_loop,
+    spawn_consumer_ackable_tx_subscriber, spawn_relay, sweeper_loop,
 };
 use generated::event::{
     EventSpec, SubscriberReadiness, SubscriptionDispatchKey, SubscriptionEffect,
     SubscriptionExecution, SubscriptionSpec,
 };
-use postgres::{AuditConsumerTxEffect as _, DlxPayloadProtector, PgRuntimeHandle, caps};
+use postgres::{
+    AuditConsumerTxEffect as _, DlxPayloadProtector, PgDlxLifecycleRepository,
+    PgDlxLifecycleRuntime, PgRuntimeHandle, caps,
+};
 use primitives::{HealthCheck, MacKey, ProbeName};
 use vault::VaultKeyProvider;
 
-use crate::SystemClock;
 use crate::distributed_runtime::{
     CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, DistributedRuntimeDeps,
 };
 use crate::infra::plaintext_endpoint_policy_from;
 use crate::infra::vault::{DEFAULT_VAULT_TIMEOUT, build_vault_tls_client_from};
+use crate::{EnvSecret, SystemClock};
 
 const EVENT_CHANNELS: &[LifecycleChannel] = &[
     LifecycleChannel::Probes,
     LifecycleChannel::Resources,
     LifecycleChannel::Workers,
 ];
+const DLX_STORE_CHANNELS: &[LifecycleChannel] =
+    &[LifecycleChannel::Probes, LifecycleChannel::Workers];
+const DLX_KEY_PROVIDER_CHANNELS: &[LifecycleChannel] = &[LifecycleChannel::Workers];
 
 pub(crate) const PROVIDER_OUTPUT_BINDINGS: &[ProviderOutputBinding] = &[
     ProviderOutputBinding {
@@ -77,6 +85,24 @@ pub(crate) const PROVIDER_OUTPUT_BINDINGS: &[ProviderOutputBinding] = &[
         provider: "amqp::AmqpSubscriber",
         consumer: "eventexec",
         channels: EVENT_CHANNELS,
+    },
+    ProviderOutputBinding {
+        port: "diport::DlxLifecycleRepository",
+        provider: "postgres::PgDlxLifecycleRepository",
+        consumer: "eventexec",
+        channels: EVENT_CHANNELS,
+    },
+    ProviderOutputBinding {
+        port: "diport::DlxArchiveStore",
+        provider: "s3::VerifiedS3DlxArchiveStore",
+        consumer: "eventexec",
+        channels: DLX_STORE_CHANNELS,
+    },
+    ProviderOutputBinding {
+        port: "diport::KeyProvider",
+        provider: "vault::VaultKeyProvider",
+        consumer: "eventexec",
+        channels: DLX_KEY_PROVIDER_CHANNELS,
     },
 ];
 
@@ -102,28 +128,32 @@ pub struct EventTransportConfig {
     pub tenant_authority: Option<Arc<TenantAuthority>>,
     /// DLX payload protector（durable 必填；Demo 为 `None`）。
     pub dlx_payload_protector: Option<DlxPayloadProtector>,
-    /// dead_letter row 保留期（秒）。
-    pub dead_letter_retain_seconds: u64,
 }
 
 // ── 内部类型 ──────────────────────────────────────────────────────────────────
 
 pub(crate) const INBOX_SWEEPER_WORKER_NAME: &str = "inbox-sweeper";
 pub(crate) const INBOX_SWEEPER_PROBE: &str = "inbox_sweeper";
-pub(crate) const DEAD_LETTER_SWEEPER_WORKER_NAME: &str = "dead-letter-sweeper";
-pub(crate) const DEAD_LETTER_SWEEPER_PROBE: &str = "dead_letter_sweeper";
+pub(crate) const DLX_LIFECYCLE_WORKER_NAME: &str = "dlx-lifecycle";
+pub(crate) const DLX_LIFECYCLE_PROBE: &str = "dlx_lifecycle";
+pub(crate) const DLX_ARCHIVE_READINESS_WORKER_NAME: &str = "dlx-archive-readiness";
+pub(crate) const DLX_ARCHIVE_READINESS_PROBE: &str = "dlx_archive_ready";
+const DLX_LIFECYCLE_INTERVAL: Duration = Duration::from_secs(30);
+const DLX_LIFECYCLE_TICK_TIMEOUT: Duration = Duration::from_secs(25);
+const DLX_ARCHIVE_READINESS_INTERVAL: Duration = Duration::from_secs(60);
+const DLX_ARCHIVE_READINESS_TIMEOUT: Duration = Duration::from_secs(5);
 const TENANT_AUTHORITY_HMAC_KEY_ENV: &str = "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL";
 const TENANT_AUTHORITY_TTL_ENV: &str = "RSS_TENANT_AUTHORITY_TTL_SECS";
 const DEFAULT_TENANT_AUTHORITY_TTL_SECS: u64 = 3600;
 const TENANT_AUTHORITY_CLOCK_SKEW_ENV: &str = "RSS_TENANT_AUTHORITY_CLOCK_SKEW_SECS";
 const DEFAULT_TENANT_AUTHORITY_CLOCK_SKEW_SECS: u64 = 60;
 const DLX_PAYLOAD_KEY_NAME_ENV: &str = "RSS_DLX_PAYLOAD_KEY_NAME";
-const DEAD_LETTER_RETAIN_SECONDS_ENV: &str = "RSS_DEAD_LETTER_RETAIN_SECONDS";
-const DEFAULT_DEAD_LETTER_RETAIN_SECONDS: u64 = postgres::DEAD_LETTER_RETENTION_SECONDS;
+const DLX_ARCHIVE_KEY_NAME_ENV: &str = "RSS_DLX_ARCHIVE_KEY_NAME";
 const AMQP_ALLOW_PLAINTEXT_ENV: &str = "RSS_AMQP_ALLOW_PLAINTEXT";
 const VAULT_ADDR_ENV: &str = "RSS_VAULT_ADDR";
-const VAULT_TOKEN_ENV: &str = "RSS_VAULT_TOKEN";
 const VAULT_TRANSIT_MOUNT_ENV: &str = "RSS_VAULT_TRANSIT_MOUNT";
+pub(crate) const DLX_HOT_VAULT_TOKEN_ENV: &str = "RSS_DLX_HOT_VAULT_TOKEN";
+pub(crate) const DLX_ARCHIVE_VAULT_TOKEN_ENV: &str = "RSS_DLX_ARCHIVE_VAULT_TOKEN";
 
 /// worker 健康 → readyz `HealthCheck` 适配探针。
 pub(crate) struct WorkerHealthProbe {
@@ -197,7 +227,38 @@ struct RelayTiming {
     sample: Duration,
     sweep: Duration,
     retain_seconds: u64,
-    dead_letter_retain_seconds: u64,
+}
+
+/// Production-only verified dependencies for the DLX lifecycle worker. Construction requires the
+/// independent PostgreSQL role, a startup-verified WORM store, and a typed archive key.
+pub(crate) struct DlxLifecycleRuntimeDeps {
+    pg_owner: PgDlxLifecycleRuntime,
+    backlog_repository: PgDlxLifecycleRepository,
+    archive_store_readiness: s3::VerifiedS3DlxArchiveStore,
+    lifecycle:
+        DlxLifecycle<PgDlxLifecycleRepository, s3::VerifiedS3DlxArchiveStore, VaultKeyProvider>,
+}
+
+impl DlxLifecycleRuntimeDeps {
+    pub(crate) fn new(
+        pg_owner: PgDlxLifecycleRuntime,
+        archive_store: s3::VerifiedS3DlxArchiveStore,
+        archive_key_provider: VaultKeyProvider,
+        archive_key: DlxArchiveKeyName,
+    ) -> Self {
+        let repository = pg_owner.repository();
+        Self {
+            pg_owner,
+            backlog_repository: repository.clone(),
+            archive_store_readiness: archive_store.clone(),
+            lifecycle: DlxLifecycle::new(
+                repository,
+                archive_store,
+                archive_key_provider,
+                archive_key,
+            ),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -449,7 +510,6 @@ pub(crate) async fn wire_event_transport(
         sample: cfg.relay_sample_interval,
         sweep: cfg.outbox_sweep_interval,
         retain_seconds: cfg.outbox_retain_seconds,
-        dead_letter_retain_seconds: cfg.dead_letter_retain_seconds,
     };
     let security = event_security_for_topology(cfg.topology, &cfg)?;
     match resolve_event_decision(cfg.topology, cfg.transport, &required_refs)? {
@@ -469,6 +529,429 @@ pub(crate) async fn wire_event_transport(
     }
 }
 
+/// Wires the single production DLX lifecycle worker. The owner is consumed here so the dedicated
+/// PostgreSQL pool and worker are registered through the same lifecycle funnel.
+pub(crate) fn wire_dlx_lifecycle(
+    deps: DlxLifecycleRuntimeDeps,
+) -> anyhow::Result<DomainModuleResult> {
+    let DlxLifecycleRuntimeDeps {
+        pg_owner,
+        backlog_repository,
+        archive_store_readiness,
+        lifecycle,
+    } = deps;
+    let health = Arc::new(WorkerHealth::starting());
+    let worker = build_dlx_lifecycle_worker(lifecycle, backlog_repository, Arc::clone(&health));
+    let (probe_name, probe) = build_dlx_lifecycle_probe(health)?;
+    let archive_health = Arc::new(WorkerHealth::starting());
+    let archive_worker =
+        build_dlx_archive_readiness_worker(archive_store_readiness, Arc::clone(&archive_health));
+    let archive_probe_name = ProbeName::parse(DLX_ARCHIVE_READINESS_PROBE)
+        .context("parse DLX archive readiness probe name")?;
+    let archive_probe = Box::new(WorkerHealthProbe::new(
+        archive_probe_name.clone(),
+        archive_health,
+    ));
+    Ok(DomainModuleResult {
+        probes: vec![(probe_name, probe), (archive_probe_name, archive_probe)],
+        resources: vec![DynManagedResource::new_box(pg_owner)],
+        workers: vec![worker, archive_worker],
+    })
+}
+
+trait DlxArchiveReadiness {
+    async fn probe_archive_readiness(&self) -> Result<(), s3::S3DlxArchiveCapabilityError>;
+}
+
+impl DlxArchiveReadiness for s3::VerifiedS3DlxArchiveStore {
+    async fn probe_archive_readiness(&self) -> Result<(), s3::S3DlxArchiveCapabilityError> {
+        self.probe_readiness().await
+    }
+}
+
+fn dlx_archive_probe_health(
+    result: Result<(), s3::S3DlxArchiveCapabilityError>,
+) -> DlxLifecycleHealth {
+    match result {
+        Ok(()) => DlxLifecycleHealth::Healthy,
+        Err(s3::S3DlxArchiveCapabilityError::Provider) => DlxLifecycleHealth::Degraded,
+        Err(
+            s3::S3DlxArchiveCapabilityError::VersioningRequired
+            | s3::S3DlxArchiveCapabilityError::ObjectLockRequired
+            | s3::S3DlxArchiveCapabilityError::ComplianceRequired
+            | s3::S3DlxArchiveCapabilityError::RetentionTooShort
+            | s3::S3DlxArchiveCapabilityError::LifecycleRequired
+            | s3::S3DlxArchiveCapabilityError::CanaryInvariant,
+        ) => DlxLifecycleHealth::Unhealthy,
+    }
+}
+
+fn apply_dlx_archive_probe_result(
+    health: &WorkerHealth,
+    result: Result<(), s3::S3DlxArchiveCapabilityError>,
+) {
+    let probe_health = dlx_archive_probe_health(result);
+    apply_dlx_lifecycle_health(health, probe_health);
+    if probe_health != DlxLifecycleHealth::Healthy {
+        tracing::warn!(
+            invariant = probe_health == DlxLifecycleHealth::Unhealthy,
+            "DLX archive periodic readiness probe failed"
+        );
+    }
+}
+
+fn build_dlx_archive_readiness_worker<S>(store: S, health: Arc<WorkerHealth>) -> WorkerSpec
+where
+    S: DlxArchiveReadiness + Send + 'static,
+{
+    Box::new(move |token| {
+        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+            DLX_ARCHIVE_READINESS_WORKER_NAME,
+            token,
+            move |thread_token| {
+                let _stopped = health.stopped_on_exit();
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .enable_io()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        tracing::error!(error = %error, "DLX archive readiness runtime build failed");
+                        return;
+                    }
+                };
+                runtime.block_on(dlx_archive_readiness_loop(
+                    store,
+                    thread_token,
+                    Arc::clone(&health),
+                ));
+            },
+        ))
+    })
+}
+
+async fn dlx_archive_readiness_loop<S>(
+    store: S,
+    token: tokio_util::sync::CancellationToken,
+    health: Arc<WorkerHealth>,
+) where
+    S: DlxArchiveReadiness,
+{
+    let mut ticker = tokio::time::interval(DLX_ARCHIVE_READINESS_INTERVAL);
+    loop {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => break,
+            _ = ticker.tick() => {
+                if run_bounded_dlx_archive_readiness_probe(&store, &token, &health).await
+                    == DlxLoopStep::Cancelled
+                {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn run_bounded_dlx_archive_readiness_probe<S>(
+    store: &S,
+    token: &tokio_util::sync::CancellationToken,
+    health: &WorkerHealth,
+) -> DlxLoopStep
+where
+    S: DlxArchiveReadiness,
+{
+    tokio::select! {
+        biased;
+        () = token.cancelled() => DlxLoopStep::Cancelled,
+        probe = tokio::time::timeout(
+            DLX_ARCHIVE_READINESS_TIMEOUT,
+            store.probe_archive_readiness(),
+        ) => {
+            match probe {
+                Ok(result) => apply_dlx_archive_probe_result(health, result),
+                Err(_) => {
+                    apply_dlx_lifecycle_health(health, DlxLifecycleHealth::Degraded);
+                    tracing::warn!("DLX archive periodic readiness probe timed out");
+                }
+            }
+            DlxLoopStep::Continue
+        }
+    }
+}
+
+fn build_dlx_lifecycle_worker<L, B>(
+    lifecycle: L,
+    backlog_repository: B,
+    health: Arc<WorkerHealth>,
+) -> WorkerSpec
+where
+    L: DlxTickRunner + Send + 'static,
+    B: DlxBacklogReader + Send + 'static,
+{
+    Box::new(move |token| {
+        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+            DLX_LIFECYCLE_WORKER_NAME,
+            token,
+            move |thread_token| {
+                let _stopped = health.stopped_on_exit();
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .enable_io()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        tracing::error!(error = %error, "DLX lifecycle runtime build failed");
+                        return;
+                    }
+                };
+                runtime.block_on(dlx_lifecycle_loop(
+                    lifecycle,
+                    backlog_repository,
+                    thread_token,
+                    Arc::clone(&health),
+                    Arc::new(MetricsDlxLifecycleMetrics),
+                    Arc::new(SystemClock),
+                ));
+            },
+        ))
+    })
+}
+
+fn build_dlx_lifecycle_probe(
+    health: Arc<WorkerHealth>,
+) -> anyhow::Result<(ProbeName, Box<dyn bootstrap::HealthProbe>)> {
+    let probe_name =
+        ProbeName::parse(DLX_LIFECYCLE_PROBE).context("parse DLX lifecycle probe name")?;
+    let probe = Box::new(WorkerHealthProbe::new(probe_name.clone(), health));
+    Ok((probe_name, probe))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DlxTickObservation {
+    health: DlxLifecycleHealth,
+    archived: u64,
+    purged: u64,
+    receipts_reconciled: u64,
+    primary_failure: Option<DlxLifecycleError>,
+}
+
+impl DlxTickObservation {
+    const fn outcome(self) -> RetentionOutcome {
+        match self.health {
+            DlxLifecycleHealth::Healthy => RetentionOutcome::Success,
+            DlxLifecycleHealth::Degraded => RetentionOutcome::Transient,
+            DlxLifecycleHealth::Unhealthy => RetentionOutcome::Invariant,
+        }
+    }
+}
+
+impl From<DlxLifecycleTickReport> for DlxTickObservation {
+    fn from(report: DlxLifecycleTickReport) -> Self {
+        Self {
+            health: report.health(),
+            archived: report.archived(),
+            purged: report.purged(),
+            receipts_reconciled: report.receipts_reconciled(),
+            primary_failure: report.primary_failure(),
+        }
+    }
+}
+
+trait DlxTickRunner {
+    async fn tick_observation(&self, now_epoch_secs: i64) -> DlxTickObservation;
+}
+
+impl DlxTickRunner
+    for DlxLifecycle<PgDlxLifecycleRepository, s3::VerifiedS3DlxArchiveStore, VaultKeyProvider>
+{
+    async fn tick_observation(&self, now_epoch_secs: i64) -> DlxTickObservation {
+        self.tick(now_epoch_secs).await.into()
+    }
+}
+
+trait DlxBacklogReader {
+    async fn read_archive_backlog(&self) -> Result<DlxArchiveBacklog, DlxLifecycleError>;
+}
+
+impl DlxBacklogReader for PgDlxLifecycleRepository {
+    async fn read_archive_backlog(&self) -> Result<DlxArchiveBacklog, DlxLifecycleError> {
+        self.archive_backlog().await
+    }
+}
+
+async fn dlx_lifecycle_loop<L, B>(
+    lifecycle: L,
+    backlog_repository: B,
+    token: tokio_util::sync::CancellationToken,
+    health: Arc<WorkerHealth>,
+    metrics: Arc<dyn DlxLifecycleMetrics>,
+    clock: Arc<dyn Clock>,
+) where
+    L: DlxTickRunner,
+    B: DlxBacklogReader,
+{
+    let mut ticker = tokio::time::interval(DLX_LIFECYCLE_INTERVAL);
+    loop {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => break,
+            _ = ticker.tick() => {
+                if run_bounded_dlx_lifecycle_tick(
+                    &lifecycle,
+                    &backlog_repository,
+                    &token,
+                    &health,
+                    metrics.as_ref(),
+                    clock.as_ref(),
+                ).await == DlxLoopStep::Cancelled {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DlxLoopStep {
+    Continue,
+    Cancelled,
+}
+
+async fn run_bounded_dlx_lifecycle_tick<L, B>(
+    lifecycle: &L,
+    backlog_repository: &B,
+    token: &tokio_util::sync::CancellationToken,
+    health: &WorkerHealth,
+    metrics: &dyn DlxLifecycleMetrics,
+    clock: &dyn Clock,
+) -> DlxLoopStep
+where
+    L: DlxTickRunner,
+    B: DlxBacklogReader,
+{
+    tokio::select! {
+        biased;
+        () = token.cancelled() => DlxLoopStep::Cancelled,
+        result = tokio::time::timeout(
+            DLX_LIFECYCLE_TICK_TIMEOUT,
+            run_dlx_lifecycle_tick(lifecycle, backlog_repository, health, metrics, clock),
+        ) => {
+            if result.is_err() {
+                apply_dlx_lifecycle_health(health, DlxLifecycleHealth::Degraded);
+                metrics.record_sweep(
+                    RetentionTarget::DeadLetter,
+                    RetentionOutcome::Transient,
+                    0,
+                    DLX_LIFECYCLE_TICK_TIMEOUT.as_secs_f64(),
+                );
+                tracing::warn!("DLX lifecycle tick exceeded total I/O budget");
+            }
+            DlxLoopStep::Continue
+        }
+    }
+}
+
+async fn run_dlx_lifecycle_tick<L, B>(
+    lifecycle: &L,
+    backlog_repository: &B,
+    health: &WorkerHealth,
+    metrics: &dyn DlxLifecycleMetrics,
+    clock: &dyn Clock,
+) where
+    L: DlxTickRunner,
+    B: DlxBacklogReader,
+{
+    let started = clock.now();
+    let report = lifecycle
+        .tick_observation(epoch_secs_from_system_time(started))
+        .await;
+    let lifecycle_health = match backlog_repository.read_archive_backlog().await {
+        Ok(backlog) => {
+            metrics.record_archive_backlog(backlog);
+            report.health
+        }
+        Err(_) => {
+            mark_dlx_backlog_unavailable();
+            if report.health == DlxLifecycleHealth::Healthy {
+                DlxLifecycleHealth::Degraded
+            } else {
+                report.health
+            }
+        }
+    };
+    let final_outcome = DlxTickObservation {
+        health: lifecycle_health,
+        ..report
+    }
+    .outcome();
+    let duration = elapsed_seconds(started, clock.now());
+    if let Some(failure) = report.primary_failure {
+        record_dlx_primary_failure(failure);
+    }
+    // `tick_observation` aggregates candidate/archive/receipt/purge/reconcile. Emitting a single
+    // phase-labelled archive metric would invent granularity, so the aggregate uses the typed
+    // dead-letter retention target only, after backlog sampling has finalized the outcome.
+    metrics.record_sweep(
+        RetentionTarget::DeadLetter,
+        final_outcome,
+        report.purged,
+        duration,
+    );
+    apply_dlx_lifecycle_health(health, lifecycle_health);
+    tracing::debug!(
+        archived = report.archived,
+        purged = report.purged,
+        receipts_reconciled = report.receipts_reconciled,
+        outcome = final_outcome.as_label(),
+        "DLX lifecycle tick completed"
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DlxFailureLabels {
+    operation: &'static str,
+    reason: &'static str,
+}
+
+impl From<DlxLifecycleError> for DlxFailureLabels {
+    fn from(error: DlxLifecycleError) -> Self {
+        Self {
+            operation: error.operation().as_label(),
+            reason: error.reason().as_label(),
+        }
+    }
+}
+
+fn record_dlx_primary_failure(error: DlxLifecycleError) {
+    let labels = DlxFailureLabels::from(error);
+    metrics::counter!(
+        "dead_letter_lifecycle_failures_total",
+        "operation" => labels.operation,
+        "reason" => labels.reason,
+    )
+    .increment(1);
+    tracing::warn!(
+        dlx.operation = labels.operation,
+        dlx.reason = labels.reason,
+        "DLX lifecycle tick failed"
+    );
+}
+
+fn mark_dlx_backlog_unavailable() {
+    metrics::gauge!("dead_letter_archive_pending_depth").set(f64::NAN);
+    metrics::gauge!("dead_letter_archive_oldest_pending_age_seconds").set(f64::NAN);
+}
+
+fn elapsed_seconds(started: SystemTime, finished: SystemTime) -> f64 {
+    finished
+        .duration_since(started)
+        .map(|value| value.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 /// 从注入式 getter 构造 [`EventTransportConfig`]（无 env 侧效应，单测友好）。
 ///
 /// 必填 env var：
@@ -484,12 +967,12 @@ pub(crate) async fn wire_event_transport(
 /// - `RSS_RELAY_SAMPLE_INTERVAL_MS`（30000ms）
 /// - `RSS_OUTBOX_SWEEP_INTERVAL_MS`（300000ms）
 /// - `RSS_OUTBOX_RETAIN_SECONDS`（604800s）
-/// - `RSS_DEAD_LETTER_RETAIN_SECONDS`（2592000s）
 ///
 /// Durable 必填安全配置：
 /// - `RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL`（base64url no-pad，解码后至少 32 bytes）
 /// - `RSS_DLX_PAYLOAD_KEY_NAME`（Vault Transit key name）
-/// - `RSS_VAULT_ADDR` / `RSS_VAULT_TOKEN` / `RSS_VAULT_TRANSIT_MOUNT`（DLX payload Vault Transit provider）
+/// - `RSS_VAULT_ADDR` / `RSS_DLX_HOT_VAULT_TOKEN` / `RSS_DLX_ARCHIVE_VAULT_TOKEN` /
+///   `RSS_VAULT_TRANSIT_MOUNT`（DLX payload/archive 独立 Vault Transit workloads）
 pub fn build_event_transport_config_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<EventTransportConfig> {
@@ -565,11 +1048,6 @@ pub fn build_event_transport_config_from(
         ),
         tenant_authority,
         dlx_payload_protector,
-        dead_letter_retain_seconds: parse_u64_env(
-            get(DEAD_LETTER_RETAIN_SECONDS_ENV),
-            DEAD_LETTER_RETAIN_SECONDS_ENV,
-            DEFAULT_DEAD_LETTER_RETAIN_SECONDS,
-        ),
     })
 }
 
@@ -644,7 +1122,7 @@ async fn wire_durable(
         };
         wire_domain_relay(domain, outbox, &timing, &mut module)?;
     }
-    wire_outbox_maintenance(pg, distributed, &security, &timing, &mut module)?;
+    wire_outbox_maintenance(pg, distributed, &timing, &mut module)?;
 
     // Consumer resource bundle（per binding PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
     wire_consumer_resource_bundle(pg, subscribers, &amqp_map, &security, &timing, &mut module)?;
@@ -714,7 +1192,6 @@ fn wire_domain_relay(
 fn wire_outbox_maintenance(
     pg: &PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
-    security: &EventSecurity,
     timing: &RelayTiming,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
@@ -741,23 +1218,10 @@ fn wire_outbox_maintenance(
         sweeper_cfg,
         SWEEPER_WORKER_NAME,
         OUTBOX_SWEEPER_PROBE,
-        "outbox",
+        RetentionTarget::OutboxPublished,
         module,
     )?;
 
-    let dead_letter_cfg = SweeperConfig::new(timing.dead_letter_retain_seconds, timing.sweep)
-        .context("build dead_letter sweeper config")?;
-    let dead_letter = pg
-        .infra()
-        .dead_letter(security.dlx_payload_protector.clone());
-    wire_sweeper_worker(
-        CoordinatedRetentionSweeper::new(dead_letter, distributed.outbox_maintenance_coordinator()),
-        dead_letter_cfg,
-        DEAD_LETTER_SWEEPER_WORKER_NAME,
-        DEAD_LETTER_SWEEPER_PROBE,
-        "dead_letter",
-        module,
-    )?;
     Ok(())
 }
 
@@ -814,7 +1278,7 @@ fn wire_sweeper_worker<S>(
     config: SweeperConfig,
     worker_name: &'static str,
     probe_name: &'static str,
-    target: &'static str,
+    target: RetentionTarget,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()>
 where
@@ -842,6 +1306,7 @@ where
                 runtime.block_on(sweeper_loop(
                     Arc::new(maintenance),
                     config,
+                    Arc::new(SystemClock),
                     thread_token,
                     Arc::clone(&worker_health),
                     target,
@@ -1092,9 +1557,10 @@ fn wire_inbox_sweeper(
             sweeper_loop(
                 Arc::new(sweeper),
                 config,
+                Arc::new(SystemClock),
                 loop_token,
                 Arc::clone(&loop_health),
-                "inbox_receipts",
+                RetentionTarget::InboxReceipts,
             )
             .await;
         });
@@ -1227,9 +1693,11 @@ fn parse_required_u64_env(
 }
 
 fn system_epoch_secs() -> i64 {
-    SystemClock
-        .now()
-        .duration_since(SystemTime::UNIX_EPOCH)
+    epoch_secs_from_system_time(SystemClock.now())
+}
+
+fn epoch_secs_from_system_time(now: SystemTime) -> i64 {
+    now.duration_since(SystemTime::UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
@@ -1268,28 +1736,86 @@ fn build_tenant_authority_from(
 pub(crate) fn build_dlx_payload_protector_from(
     get: &impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<DlxPayloadProtector> {
-    let addr = get(VAULT_ADDR_ENV)
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_ADDR_ENV}"))?;
-    let token = get(VAULT_TOKEN_ENV)
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TOKEN_ENV}"))?;
-    let mount = get(VAULT_TRANSIT_MOUNT_ENV)
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TRANSIT_MOUNT_ENV}"))?;
     let key_name = get(DLX_PAYLOAD_KEY_NAME_ENV)
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {DLX_PAYLOAD_KEY_NAME_ENV}"))?;
-    let key_name = KeyName::try_new(key_name.trim().to_string())
+    let key_name = DlxHotKeyName::try_new(key_name.trim().to_string())
         .map_err(|e| anyhow::anyhow!("{DLX_PAYLOAD_KEY_NAME_ENV} is invalid: {e}"))?;
-    let provider = VaultKeyProvider::new(
-        build_vault_tls_client_from(|name| std::env::var(name).ok())?,
-        addr,
-        token,
-        mount,
-        DEFAULT_VAULT_TIMEOUT,
-    )
-    .map_err(|e| anyhow::anyhow!("vault dlx key provider config error: {e}"))?;
+    let provider = build_dlx_hot_vault_key_provider_from(get)?;
     Ok(DlxPayloadProtector::new(
         DynKeyProvider::new_box(provider),
         key_name,
     ))
+}
+
+pub(crate) fn build_dlx_hot_vault_key_provider_from(
+    get: &impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<VaultKeyProvider> {
+    build_dlx_vault_key_providers_from(get).map(|(hot, _archive)| hot)
+}
+
+#[cfg(test)]
+pub(crate) fn build_dlx_archive_vault_key_provider_from(
+    get: &impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<VaultKeyProvider> {
+    build_dlx_vault_key_providers_from(get).map(|(_hot, archive)| archive)
+}
+
+pub(crate) fn build_dlx_vault_key_providers_from(
+    get: &impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<(VaultKeyProvider, VaultKeyProvider)> {
+    let addr = get(VAULT_ADDR_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_ADDR_ENV}"))?;
+    let hot_token = EnvSecret::required(get, DLX_HOT_VAULT_TOKEN_ENV)?;
+    let archive_token = EnvSecret::required(get, DLX_ARCHIVE_VAULT_TOKEN_ENV)?;
+    anyhow::ensure!(
+        hot_token.expose() != archive_token.expose(),
+        "{DLX_HOT_VAULT_TOKEN_ENV} must differ from {DLX_ARCHIVE_VAULT_TOKEN_ENV}"
+    );
+    if let Some(general_token) = EnvSecret::optional(get, "RSS_VAULT_TOKEN")? {
+        anyhow::ensure!(
+            hot_token.expose() != general_token.expose(),
+            "{DLX_HOT_VAULT_TOKEN_ENV} must differ from RSS_VAULT_TOKEN"
+        );
+        anyhow::ensure!(
+            archive_token.expose() != general_token.expose(),
+            "{DLX_ARCHIVE_VAULT_TOKEN_ENV} must differ from RSS_VAULT_TOKEN"
+        );
+    }
+    let mount = get(VAULT_TRANSIT_MOUNT_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TRANSIT_MOUNT_ENV}"))?;
+    let hot = VaultKeyProvider::new(
+        build_vault_tls_client_from(get)?,
+        addr.clone(),
+        hot_token.into_string(),
+        mount.clone(),
+        DEFAULT_VAULT_TIMEOUT,
+    )
+    .map_err(|e| anyhow::anyhow!("DLX hot Vault key provider config error: {e}"))?;
+    let archive = VaultKeyProvider::new(
+        build_vault_tls_client_from(get)?,
+        addr,
+        archive_token.into_string(),
+        mount,
+        DEFAULT_VAULT_TIMEOUT,
+    )
+    .map_err(|e| anyhow::anyhow!("DLX archive Vault key provider config error: {e}"))?;
+    Ok((hot, archive))
+}
+
+/// Parses the independent cold-archive key and rejects reuse of the hot replay-capsule key.
+pub(crate) fn build_dlx_archive_key_name_from(
+    get: &impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<DlxArchiveKeyName> {
+    let archive = get(DLX_ARCHIVE_KEY_NAME_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {DLX_ARCHIVE_KEY_NAME_ENV}"))?;
+    let hot = get(DLX_PAYLOAD_KEY_NAME_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {DLX_PAYLOAD_KEY_NAME_ENV}"))?;
+    anyhow::ensure!(
+        archive.trim() != hot.trim(),
+        "{DLX_ARCHIVE_KEY_NAME_ENV} must differ from {DLX_PAYLOAD_KEY_NAME_ENV}"
+    );
+    DlxArchiveKeyName::try_new(archive.trim().to_owned())
+        .map_err(|error| anyhow::anyhow!("{DLX_ARCHIVE_KEY_NAME_ENV} is invalid: {error}"))
 }
 
 // ── 单元测试 ──────────────────────────────────────────────────────────────────
@@ -1298,6 +1824,7 @@ pub(crate) fn build_dlx_payload_protector_from(
 mod tests {
     use super::*;
     use bootstrap::SubscriberBinding;
+    use diport::{DlxLifecycleOperation, DlxLifecycleReason};
 
     #[allow(clippy::unwrap_used)]
     // reason: 测试构造合法 consumer group；parse 失败即测试写错。
@@ -1374,7 +1901,8 @@ mod tests {
             TENANT_AUTHORITY_HMAC_KEY_ENV => Some(test_hmac_key_b64url()),
             DLX_PAYLOAD_KEY_NAME_ENV => Some("dlx-payload".to_string()),
             VAULT_ADDR_ENV => Some("https://vault.example:8200".to_string()),
-            VAULT_TOKEN_ENV => Some("s.testtoken".to_string()),
+            DLX_HOT_VAULT_TOKEN_ENV => Some("s.dlx-hot-testtoken".to_string()),
+            DLX_ARCHIVE_VAULT_TOKEN_ENV => Some("s.dlx-archive-testtoken".to_string()),
             VAULT_TRANSIT_MOUNT_ENV => Some("transit".to_string()),
             _ => None,
         }
@@ -1795,10 +2323,6 @@ mod tests {
         assert_eq!(cfg.relay_sample_interval, Duration::from_millis(30_000));
         assert_eq!(cfg.outbox_sweep_interval, Duration::from_millis(300_000));
         assert_eq!(cfg.outbox_retain_seconds, 604_800);
-        assert_eq!(
-            cfg.dead_letter_retain_seconds,
-            DEFAULT_DEAD_LETTER_RETAIN_SECONDS
-        );
         assert!(cfg.tenant_authority.is_some());
         assert!(cfg.dlx_payload_protector.is_some());
     }
@@ -1837,14 +2361,12 @@ mod tests {
             "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
             "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("120000".into()),
             "RSS_OUTBOX_RETAIN_SECONDS" => Some("86400".into()),
-            DEAD_LETTER_RETAIN_SECONDS_ENV => Some("172800".into()),
             _ => durable_security_env(name),
         });
         assert!(result.is_ok(), "full durable config should succeed");
         let cfg = result.unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.outbox_sweep_interval, Duration::from_millis(120_000));
         assert_eq!(cfg.outbox_retain_seconds, 86_400);
-        assert_eq!(cfg.dead_letter_retain_seconds, 172_800);
     }
 
     #[test]
@@ -1854,16 +2376,636 @@ mod tests {
             "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
             "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("bad-ms".into()),
             "RSS_OUTBOX_RETAIN_SECONDS" => Some("bad-seconds".into()),
-            DEAD_LETTER_RETAIN_SECONDS_ENV => Some("bad-seconds".into()),
             _ => durable_security_env(name),
         });
         assert!(result.is_ok(), "invalid optional timing falls back");
         let cfg = result.unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.outbox_sweep_interval, Duration::from_millis(300_000));
         assert_eq!(cfg.outbox_retain_seconds, 604_800);
+    }
+
+    #[test]
+    fn archive_key_is_required_and_must_differ_from_hot_key() {
+        let missing = build_dlx_archive_key_name_from(&|name| match name {
+            DLX_PAYLOAD_KEY_NAME_ENV => Some("dlx-hot".to_owned()),
+            _ => None,
+        });
+        assert!(missing.is_err());
+
+        let reused = build_dlx_archive_key_name_from(&|name| match name {
+            DLX_PAYLOAD_KEY_NAME_ENV | DLX_ARCHIVE_KEY_NAME_ENV => Some("dlx-hot".to_owned()),
+            _ => None,
+        });
+        assert!(reused.is_err());
+
+        let distinct = build_dlx_archive_key_name_from(&|name| match name {
+            DLX_PAYLOAD_KEY_NAME_ENV => Some("dlx-hot".to_owned()),
+            DLX_ARCHIVE_KEY_NAME_ENV => Some("dlx-archive".to_owned()),
+            _ => None,
+        });
+        assert!(distinct.is_ok());
+    }
+
+    #[test]
+    fn dlx_vault_key_providers_require_distinct_workload_tokens() {
+        let reused = build_dlx_hot_vault_key_provider_from(&|name| match name {
+            VAULT_ADDR_ENV => Some("https://vault.example.test".to_owned()),
+            VAULT_TRANSIT_MOUNT_ENV => Some("transit".to_owned()),
+            DLX_HOT_VAULT_TOKEN_ENV | DLX_ARCHIVE_VAULT_TOKEN_ENV => Some("same-token".to_owned()),
+            _ => None,
+        });
+        let error = reused.err().map(|error| format!("{error:#}"));
+        assert!(error.is_some_and(|error| error.contains("must differ")));
+
+        let generic_only = build_dlx_hot_vault_key_provider_from(&|name| match name {
+            VAULT_ADDR_ENV => Some("https://vault.example.test".to_owned()),
+            VAULT_TRANSIT_MOUNT_ENV => Some("transit".to_owned()),
+            "RSS_VAULT_TOKEN" => Some("generic-token".to_owned()),
+            _ => None,
+        });
+        let error = generic_only.err().map(|error| format!("{error:#}"));
+        assert!(error.is_some_and(|error| error.contains(DLX_HOT_VAULT_TOKEN_ENV)));
+
+        let reused_general = build_dlx_archive_vault_key_provider_from(&|name| match name {
+            VAULT_ADDR_ENV => Some("https://vault.example.test".to_owned()),
+            VAULT_TRANSIT_MOUNT_ENV => Some("transit".to_owned()),
+            DLX_HOT_VAULT_TOKEN_ENV => Some("hot-token".to_owned()),
+            DLX_ARCHIVE_VAULT_TOKEN_ENV | "RSS_VAULT_TOKEN" => {
+                Some("shared-general-token".to_owned())
+            }
+            _ => None,
+        });
+        let error = reused_general.err().map(|error| format!("{error:#}"));
+        assert!(error.is_some_and(|error| error.contains("RSS_VAULT_TOKEN")));
+    }
+
+    #[derive(Clone)]
+    struct FakeDlxTickRunner {
+        observation: DlxTickObservation,
+        epochs: Arc<std::sync::Mutex<Vec<i64>>>,
+        cancel_after_tick: Option<tokio_util::sync::CancellationToken>,
+        tick_signal: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl FakeDlxTickRunner {
+        fn new(observation: DlxTickObservation) -> Self {
+            Self {
+                observation,
+                epochs: Arc::new(std::sync::Mutex::new(Vec::new())),
+                cancel_after_tick: None,
+                tick_signal: None,
+            }
+        }
+
+        fn cancelling(
+            observation: DlxTickObservation,
+            token: tokio_util::sync::CancellationToken,
+        ) -> Self {
+            Self {
+                observation,
+                epochs: Arc::new(std::sync::Mutex::new(Vec::new())),
+                cancel_after_tick: Some(token),
+                tick_signal: None,
+            }
+        }
+
+        fn signalling(
+            observation: DlxTickObservation,
+            token: tokio_util::sync::CancellationToken,
+            tick_signal: std::sync::mpsc::Sender<()>,
+        ) -> Self {
+            Self {
+                observation,
+                epochs: Arc::new(std::sync::Mutex::new(Vec::new())),
+                cancel_after_tick: Some(token),
+                tick_signal: Some(tick_signal),
+            }
+        }
+
+        fn epochs(&self) -> Vec<i64> {
+            self.epochs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl DlxTickRunner for FakeDlxTickRunner {
+        async fn tick_observation(&self, now_epoch_secs: i64) -> DlxTickObservation {
+            self.epochs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(now_epoch_secs);
+            if let Some(token) = &self.cancel_after_tick {
+                token.cancel();
+            }
+            if let Some(signal) = &self.tick_signal {
+                let _ignored = signal.send(());
+            }
+            self.observation
+        }
+    }
+
+    struct NeverCompletingDlxTickRunner;
+
+    impl DlxTickRunner for NeverCompletingDlxTickRunner {
+        async fn tick_observation(&self, _now_epoch_secs: i64) -> DlxTickObservation {
+            std::future::pending().await
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum FakeArchiveReadinessOutcome {
+        Healthy,
+        ProviderFailure,
+        InvariantFailure,
+    }
+
+    struct CancellingArchiveReadiness {
+        outcome: FakeArchiveReadinessOutcome,
+        token: tokio_util::sync::CancellationToken,
+    }
+
+    impl DlxArchiveReadiness for CancellingArchiveReadiness {
+        async fn probe_archive_readiness(&self) -> Result<(), s3::S3DlxArchiveCapabilityError> {
+            self.token.cancel();
+            match self.outcome {
+                FakeArchiveReadinessOutcome::Healthy => Ok(()),
+                FakeArchiveReadinessOutcome::ProviderFailure => {
+                    Err(s3::S3DlxArchiveCapabilityError::Provider)
+                }
+                FakeArchiveReadinessOutcome::InvariantFailure => {
+                    Err(s3::S3DlxArchiveCapabilityError::VersioningRequired)
+                }
+            }
+        }
+    }
+
+    struct NeverCompletingArchiveReadiness;
+
+    impl DlxArchiveReadiness for NeverCompletingArchiveReadiness {
+        async fn probe_archive_readiness(&self) -> Result<(), s3::S3DlxArchiveCapabilityError> {
+            std::future::pending().await
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct FakeDlxBacklogReader(Result<DlxArchiveBacklog, DlxLifecycleError>);
+
+    impl DlxBacklogReader for FakeDlxBacklogReader {
+        async fn read_archive_backlog(&self) -> Result<DlxArchiveBacklog, DlxLifecycleError> {
+            self.0
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct RecordedSweep {
+        target: RetentionTarget,
+        outcome: RetentionOutcome,
+        deleted: u64,
+        duration_seconds: f64,
+    }
+
+    #[derive(Default)]
+    struct RecordingDlxMetrics {
+        sweeps: std::sync::Mutex<Vec<RecordedSweep>>,
+        backlogs: std::sync::Mutex<Vec<DlxArchiveBacklog>>,
+    }
+
+    impl DlxLifecycleMetrics for RecordingDlxMetrics {
+        fn record_sweep(
+            &self,
+            target: RetentionTarget,
+            outcome: RetentionOutcome,
+            deleted: u64,
+            duration_seconds: f64,
+        ) {
+            self.sweeps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(RecordedSweep {
+                    target,
+                    outcome,
+                    deleted,
+                    duration_seconds,
+                });
+        }
+
+        fn record_archive_backlog(&self, backlog: DlxArchiveBacklog) {
+            self.backlogs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(backlog);
+        }
+    }
+
+    struct SequenceClock(std::sync::Mutex<std::collections::VecDeque<SystemTime>>);
+
+    impl SequenceClock {
+        fn new(times: impl IntoIterator<Item = SystemTime>) -> Self {
+            Self(std::sync::Mutex::new(times.into_iter().collect()))
+        }
+    }
+
+    impl Clock for SequenceClock {
+        fn now(&self) -> SystemTime {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        }
+    }
+
+    struct ClockAdvancingBacklogReader {
+        clock: Arc<SequenceClock>,
+        backlog: DlxArchiveBacklog,
+    }
+
+    impl DlxBacklogReader for ClockAdvancingBacklogReader {
+        async fn read_archive_backlog(&self) -> Result<DlxArchiveBacklog, DlxLifecycleError> {
+            let _after_backlog = self.clock.now();
+            Ok(self.backlog)
+        }
+    }
+
+    fn observation(health: DlxLifecycleHealth) -> DlxTickObservation {
+        DlxTickObservation {
+            health,
+            archived: 2,
+            purged: 3,
+            receipts_reconciled: 4,
+            primary_failure: None,
+        }
+    }
+
+    #[test]
+    fn dlx_primary_failure_metric_and_log_share_closed_labels() {
+        let failure = DlxLifecycleError::new(
+            DlxLifecycleOperation::VerifyArchive,
+            DlxLifecycleReason::ChecksumMismatch,
+        );
         assert_eq!(
-            cfg.dead_letter_retain_seconds,
-            DEFAULT_DEAD_LETTER_RETAIN_SECONDS
+            DlxFailureLabels::from(failure),
+            DlxFailureLabels {
+                operation: "verify_archive",
+                reason: "checksum_mismatch",
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn dlx_tick_records_bounded_work_backlog_and_healthy_state() {
+        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let clock = Arc::new(SequenceClock::new([
+            started,
+            started + Duration::from_millis(250),
+            started + Duration::from_millis(750),
+        ]));
+        let lifecycle = FakeDlxTickRunner::new(observation(DlxLifecycleHealth::Healthy));
+        let backlog = DlxArchiveBacklog::new(7, 11);
+        let metrics = RecordingDlxMetrics::default();
+        let health = WorkerHealth::starting();
+
+        run_dlx_lifecycle_tick(
+            &lifecycle,
+            &ClockAdvancingBacklogReader {
+                clock: Arc::clone(&clock),
+                backlog,
+            },
+            &health,
+            &metrics,
+            clock.as_ref(),
+        )
+        .await;
+
+        assert_eq!(lifecycle.epochs(), vec![100]);
+        assert_eq!(health.status(), primitives::healthz::HealthStatus::Healthy);
+        assert_eq!(health.detail(), "worker");
+        assert_eq!(
+            metrics
+                .sweeps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            &[RecordedSweep {
+                target: RetentionTarget::DeadLetter,
+                outcome: RetentionOutcome::Success,
+                deleted: 3,
+                duration_seconds: 0.75,
+            }]
+        );
+        assert_eq!(
+            metrics
+                .backlogs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            &[backlog]
+        );
+    }
+
+    #[tokio::test]
+    async fn dlx_tick_backlog_failure_degrades_an_otherwise_healthy_tick() {
+        let lifecycle = FakeDlxTickRunner::new(observation(DlxLifecycleHealth::Healthy));
+        let metrics = RecordingDlxMetrics::default();
+        let health = WorkerHealth::starting();
+        let clock = SequenceClock::new([SystemTime::UNIX_EPOCH; 2]);
+
+        run_dlx_lifecycle_tick(
+            &lifecycle,
+            &FakeDlxBacklogReader(Err(DlxLifecycleError::new(
+                DlxLifecycleOperation::ArchiveBacklog,
+                DlxLifecycleReason::ProviderUnavailable,
+            ))),
+            &health,
+            &metrics,
+            &clock,
+        )
+        .await;
+
+        assert_eq!(health.status(), primitives::healthz::HealthStatus::Degraded);
+        assert_eq!(health.detail(), "degraded");
+        assert!(
+            metrics
+                .backlogs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+        assert_eq!(
+            metrics
+                .sweeps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)[0]
+                .outcome,
+            RetentionOutcome::Transient
+        );
+    }
+
+    #[tokio::test]
+    async fn dlx_tick_invariant_health_is_not_masked_by_backlog_failure() {
+        let lifecycle = FakeDlxTickRunner::new(observation(DlxLifecycleHealth::Unhealthy));
+        let metrics = RecordingDlxMetrics::default();
+        let health = WorkerHealth::starting();
+        let clock = SequenceClock::new([SystemTime::UNIX_EPOCH; 2]);
+
+        run_dlx_lifecycle_tick(
+            &lifecycle,
+            &FakeDlxBacklogReader(Err(DlxLifecycleError::new(
+                DlxLifecycleOperation::ArchiveBacklog,
+                DlxLifecycleReason::ProviderUnavailable,
+            ))),
+            &health,
+            &metrics,
+            &clock,
+        )
+        .await;
+
+        assert_eq!(
+            health.status(),
+            primitives::healthz::HealthStatus::Unhealthy
+        );
+        assert_eq!(health.detail(), "invariant");
+        assert_eq!(
+            metrics
+                .sweeps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)[0]
+                .outcome,
+            RetentionOutcome::Invariant
+        );
+    }
+
+    #[tokio::test]
+    async fn dlx_loop_runs_immediate_tick_then_observes_cancellation() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let lifecycle =
+            FakeDlxTickRunner::cancelling(observation(DlxLifecycleHealth::Degraded), token.clone());
+        let epochs = Arc::clone(&lifecycle.epochs);
+        let metrics = Arc::new(RecordingDlxMetrics::default());
+        let health = Arc::new(WorkerHealth::starting());
+
+        dlx_lifecycle_loop(
+            lifecycle,
+            FakeDlxBacklogReader(Ok(DlxArchiveBacklog::new(1, 2))),
+            token,
+            Arc::clone(&health),
+            metrics,
+            Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH; 2])),
+        )
+        .await;
+
+        assert_eq!(
+            epochs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            &[0]
+        );
+        assert_eq!(health.status(), primitives::healthz::HealthStatus::Degraded);
+    }
+
+    #[tokio::test]
+    async fn dlx_loop_cancels_an_in_flight_tick_that_never_returns_io() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let loop_token = token.clone();
+        let handle = tokio::spawn(dlx_lifecycle_loop(
+            NeverCompletingDlxTickRunner,
+            FakeDlxBacklogReader(Ok(DlxArchiveBacklog::new(0, 0))),
+            loop_token,
+            Arc::new(WorkerHealth::starting()),
+            Arc::new(RecordingDlxMetrics::default()),
+            Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH])),
+        ));
+        tokio::task::yield_now().await;
+        token.cancel();
+
+        let stopped = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        assert!(matches!(stopped, Ok(Ok(()))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dlx_loop_degrades_when_total_tick_io_budget_expires() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let health = Arc::new(WorkerHealth::starting());
+        let metrics = Arc::new(RecordingDlxMetrics::default());
+        let handle = tokio::spawn(dlx_lifecycle_loop(
+            NeverCompletingDlxTickRunner,
+            FakeDlxBacklogReader(Ok(DlxArchiveBacklog::new(0, 0))),
+            token.clone(),
+            Arc::clone(&health),
+            Arc::clone(&metrics) as Arc<dyn DlxLifecycleMetrics>,
+            Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH])),
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(DLX_LIFECYCLE_TICK_TIMEOUT).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(health.status(), primitives::healthz::HealthStatus::Degraded);
+        assert_eq!(
+            metrics
+                .sweeps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)[0]
+                .outcome,
+            RetentionOutcome::Transient
+        );
+        token.cancel();
+        assert!(handle.await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dlx_archive_readiness_has_an_independent_degraded_carrier() {
+        for (outcome, expected) in [
+            (
+                FakeArchiveReadinessOutcome::Healthy,
+                primitives::healthz::HealthStatus::Healthy,
+            ),
+            (
+                FakeArchiveReadinessOutcome::ProviderFailure,
+                primitives::healthz::HealthStatus::Degraded,
+            ),
+            (
+                FakeArchiveReadinessOutcome::InvariantFailure,
+                primitives::healthz::HealthStatus::Unhealthy,
+            ),
+        ] {
+            let token = tokio_util::sync::CancellationToken::new();
+            let health = Arc::new(WorkerHealth::starting());
+            dlx_archive_readiness_loop(
+                CancellingArchiveReadiness {
+                    outcome,
+                    token: token.clone(),
+                },
+                token,
+                Arc::clone(&health),
+            )
+            .await;
+            assert_eq!(health.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn dlx_archive_invariant_failure_is_sticky_and_keeps_readyz_non_healthy() {
+        let health = WorkerHealth::starting();
+        let token = tokio_util::sync::CancellationToken::new();
+        let invariant = CancellingArchiveReadiness {
+            outcome: FakeArchiveReadinessOutcome::InvariantFailure,
+            token: token.clone(),
+        };
+        assert_eq!(
+            run_bounded_dlx_archive_readiness_probe(&invariant, &token, &health).await,
+            DlxLoopStep::Continue
+        );
+        assert_eq!(
+            health.status(),
+            primitives::healthz::HealthStatus::Unhealthy
+        );
+
+        let recovered = CancellingArchiveReadiness {
+            outcome: FakeArchiveReadinessOutcome::Healthy,
+            token: tokio_util::sync::CancellationToken::new(),
+        };
+        let live_token = tokio_util::sync::CancellationToken::new();
+        assert_eq!(
+            run_bounded_dlx_archive_readiness_probe(&recovered, &live_token, &health).await,
+            DlxLoopStep::Continue
+        );
+        assert_eq!(
+            health.status(),
+            primitives::healthz::HealthStatus::Unhealthy
+        );
+    }
+
+    #[tokio::test]
+    async fn dlx_archive_readiness_cancels_an_in_flight_provider_probe() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let health = Arc::new(WorkerHealth::starting());
+        let handle = tokio::spawn(dlx_archive_readiness_loop(
+            NeverCompletingArchiveReadiness,
+            token.clone(),
+            Arc::clone(&health),
+        ));
+        tokio::task::yield_now().await;
+        token.cancel();
+
+        let stopped = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        assert!(matches!(stopped, Ok(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn dlx_worker_builder_runs_tick_on_owned_runtime_and_stops_cleanly() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let (tick_signal, tick_observed) = std::sync::mpsc::channel();
+        let lifecycle = FakeDlxTickRunner::signalling(
+            observation(DlxLifecycleHealth::Healthy),
+            token.clone(),
+            tick_signal,
+        );
+        let epochs = Arc::clone(&lifecycle.epochs);
+        let health = Arc::new(WorkerHealth::starting());
+        let worker = build_dlx_lifecycle_worker(
+            lifecycle,
+            FakeDlxBacklogReader(Ok(DlxArchiveBacklog::new(0, 0))),
+            Arc::clone(&health),
+        );
+
+        let resource = worker(token);
+        assert!(tick_observed.recv_timeout(Duration::from_secs(2)).is_ok());
+        assert!(resource.shutdown().await.is_ok());
+        assert_eq!(
+            epochs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
+        assert_eq!(
+            health.status(),
+            primitives::healthz::HealthStatus::Unhealthy
+        );
+        assert_eq!(health.detail(), "stopped");
+    }
+
+    #[test]
+    fn dlx_probe_builder_exposes_closed_name_and_worker_health() {
+        let health = Arc::new(WorkerHealth::starting());
+        let built = build_dlx_lifecycle_probe(Arc::clone(&health));
+        assert!(built.is_ok());
+        let (name, probe) = built.unwrap_or_else(|_| unreachable!());
+        assert_eq!(name.as_str(), DLX_LIFECYCLE_PROBE);
+        assert_eq!(
+            probe.check().status(),
+            primitives::healthz::HealthStatus::Unhealthy
+        );
+
+        apply_dlx_lifecycle_health(&health, DlxLifecycleHealth::Healthy);
+        assert_eq!(
+            probe.check().status(),
+            primitives::healthz::HealthStatus::Healthy
+        );
+    }
+
+    #[test]
+    fn dlx_clock_helpers_fail_closed_for_pre_epoch_and_backwards_time() {
+        assert_eq!(
+            epoch_secs_from_system_time(SystemTime::UNIX_EPOCH - Duration::from_secs(1)),
+            0
+        );
+        assert_eq!(
+            elapsed_seconds(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            ),
+            0.0
+        );
+        assert_eq!(
+            elapsed_seconds(
+                SystemTime::UNIX_EPOCH,
+                SystemTime::UNIX_EPOCH + Duration::from_millis(125),
+            ),
+            0.125
         );
     }
 

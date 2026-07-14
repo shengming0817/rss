@@ -60,5 +60,9 @@ job = "integration/cdc-projection-saga"
 max_duration_seconds = 900
 
 [[duration_budgets]]
+job = "integration/object-storage"
+max_duration_seconds = 900
+
+[[duration_budgets]]
 job = "audit"
 max_duration_seconds = 300

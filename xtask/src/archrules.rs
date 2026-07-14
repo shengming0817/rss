@@ -2388,6 +2388,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
         role: GateDeclarationRole::PlanStep,
     },
     GateDeclaration {
+        path: "xtask/src/dlx_lifecycle_funnel.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
         path: "xtask/src/layerdeps.rs",
         tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,

@@ -63,3 +63,32 @@ tests:
             exp_annotations:
               summary: "Outbox same-ID 投递窗口到期（domain=shipping, phase=automatic）"
               description: "近 10min outbox_same_id_window_expired_total 增长/首次 series 信号 10；broker publish 已被 fail-closed 跳过。检查 DLX、partition blocked 与 dlq.maintenance audit，不从 metric 查 event id 或 deadline。"
+
+  - interval: 1m
+    input_series:
+      - series: 'retention_sweep_ticks_total{target="dead_letter",outcome="transient"}'
+        values: '_x5 1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DlxArchiveLifecycleFailure
+        exp_alerts:
+          - exp_labels:
+              outcome: transient
+              severity: critical
+            exp_annotations:
+              summary: "DLX archive lifecycle 失败（outcome=transient）"
+              description: "近 5min DLX archive-before-purge tick 失败信号 1；删除已 fail-closed 停止。检查 dlx_lifecycle/dlx_archive_ready probe、独立 PG/Vault/S3 凭据、WORM/lifecycle policy 与 worker 日志。"
+
+  - interval: 1m
+    input_series:
+      - series: 'dead_letter_archive_oldest_pending_age_seconds'
+        values: '360x12'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DlxArchiveOldestPendingHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "DLX 最老待归档记录超过 5min"
+              description: "dead_letter_archive_oldest_pending_age_seconds=360s；检查 pending depth、lifecycle failure 告警、archive bucket readiness 与 receipt CAS。该 gauge 为 NaN/缺失时先恢复 backlog sampler，不能按 0 解释。"

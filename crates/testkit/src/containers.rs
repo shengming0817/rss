@@ -30,6 +30,7 @@ use testcontainers::ContainerAsync;
 use testcontainers::ImageExt;
 use testcontainers::core::logs::LogFrame;
 use testcontainers::core::{CmdWaitFor, ExecCommand};
+use testcontainers_modules::minio::MinIO;
 use testcontainers_modules::mosquitto::Mosquitto;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::rabbitmq::RabbitMq;
@@ -44,6 +45,9 @@ type Result<T> = std::result::Result<T, FixtureError>;
 const PG_PORT: u16 = 5432;
 const AMQP_PORT: u16 = 5672;
 const MQTT_PORT: u16 = 1883;
+const MINIO_PORT: u16 = 9000;
+const MINIO_ACCESS_KEY_ID: &str = "minioadmin";
+const MINIO_SECRET_ACCESS_KEY: &str = "minioadmin";
 /// 容器路径 postgres db 名：含 `test` 以满足 adapters/postgres 毁灭性-DDL 守卫。
 const PG_DB: &str = "rss_test";
 const PG_USER: &str = "postgres";
@@ -170,6 +174,7 @@ enum ContainerService {
     Redis,
     RabbitMq,
     Mosquitto,
+    Minio,
 }
 
 impl ContainerService {
@@ -179,6 +184,7 @@ impl ContainerService {
             Self::Redis => "redis",
             Self::RabbitMq => "rabbitmq",
             Self::Mosquitto => "mosquitto",
+            Self::Minio => "minio",
         }
     }
 
@@ -912,6 +918,108 @@ pub async fn env_or_mosquitto() -> Result<MqttFixture> {
     })
 }
 
+// ── MinIO / S3-compatible object storage ────────────────────────────────────
+
+/// Live MinIO coordinates used by provider conformance tests.
+#[derive(Clone)]
+pub struct MinioConnParams {
+    endpoint_url: String,
+    access_key_id: String,
+    secret_access_key: String,
+}
+
+impl MinioConnParams {
+    pub fn endpoint_url(&self) -> &str {
+        &self.endpoint_url
+    }
+
+    pub fn access_key_id(&self) -> &str {
+        &self.access_key_id
+    }
+
+    pub fn secret_access_key(&self) -> &str {
+        &self.secret_access_key
+    }
+}
+
+impl std::fmt::Debug for MinioConnParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MinioConnParams")
+            .field("endpoint_url", &self.endpoint_url)
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"<redacted>")
+            .finish()
+    }
+}
+
+/// MinIO fixture guard. The container remains alive until this value is dropped.
+pub struct MinioFixture {
+    _container: Option<Box<ContainerAsync<MinIO>>>,
+    params: MinioConnParams,
+}
+
+impl MinioFixture {
+    pub fn params(&self) -> &MinioConnParams {
+        &self.params
+    }
+}
+
+fn minio_external_params_from_lookup<F>(lookup: F) -> Result<Option<MinioConnParams>>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    const ENDPOINT: &str = "RSS_S3_TEST_ENDPOINT";
+    const ACCESS_KEY: &str = "RSS_S3_TEST_ACCESS_KEY";
+    const SECRET_KEY: &str = "RSS_S3_TEST_SECRET_KEY";
+    let Some(endpoint_url) = non_empty_external_value(&lookup, ENDPOINT)? else {
+        return Ok(None);
+    };
+    let parsed = Url::parse(&endpoint_url)
+        .map_err(|_| anyhow::anyhow!("{ENDPOINT} 不是合法 absolute URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none() {
+        return Err(anyhow::anyhow!(
+            "{ENDPOINT} 须为包含 host 的 http:// 或 https:// URL"
+        ));
+    }
+    let access_key_id = non_empty_external_value(&lookup, ACCESS_KEY)?
+        .ok_or_else(|| anyhow::anyhow!("设置 {ENDPOINT} 时必须同时设置 {ACCESS_KEY}"))?;
+    let secret_access_key = non_empty_external_value(&lookup, SECRET_KEY)?
+        .ok_or_else(|| anyhow::anyhow!("设置 {ENDPOINT} 时必须同时设置 {SECRET_KEY}"))?;
+    Ok(Some(MinioConnParams {
+        endpoint_url,
+        access_key_id,
+        secret_access_key,
+    }))
+}
+
+/// Resolves an explicitly supplied live MinIO endpoint or starts a managed container by default.
+pub async fn env_or_minio() -> Result<MinioFixture> {
+    const KEYS: &[&str] = &[
+        "RSS_S3_TEST_ENDPOINT",
+        "RSS_S3_TEST_ACCESS_KEY",
+        "RSS_S3_TEST_SECRET_KEY",
+    ];
+    let values = environment_snapshot(KEYS)?;
+    if let Some(params) = minio_external_params_from_lookup(|key| values.get(key).cloned())? {
+        return Ok(MinioFixture {
+            _container: None,
+            params,
+        });
+    }
+    let container = owned::start(MinIO::default(), ContainerService::Minio).await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(MINIO_PORT).await?;
+    Ok(MinioFixture {
+        _container: Some(Box::new(container)),
+        params: MinioConnParams {
+            endpoint_url: format!("http://{host}:{port}"),
+            access_key_id: MINIO_ACCESS_KEY_ID.to_owned(),
+            secret_access_key: MINIO_SECRET_ACCESS_KEY.to_owned(),
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -1123,6 +1231,7 @@ mod tests {
             (ContainerService::Redis, "redis"),
             (ContainerService::RabbitMq, "rabbitmq"),
             (ContainerService::Mosquitto, "mosquitto"),
+            (ContainerService::Minio, "minio"),
         ] {
             let expected = BTreeMap::from([
                 ("io.rss.integration.managed".to_string(), "true".to_string()),
@@ -1145,6 +1254,35 @@ mod tests {
             ]);
             assert_eq!(service.labels(&context), expected);
         }
+    }
+
+    #[test]
+    fn minio_external_configuration_is_an_exact_redacted_tuple() {
+        assert!(
+            minio_external_params_from_lookup(lookup(&[]))
+                .expect("empty lookup")
+                .is_none()
+        );
+
+        let partial = [("RSS_S3_TEST_ENDPOINT", "http://127.0.0.1:9000")];
+        let error = minio_external_params_from_lookup(lookup(&partial))
+            .expect_err("partial external MinIO tuple must fail closed");
+        assert!(error.to_string().contains("RSS_S3_TEST_ACCESS_KEY"));
+
+        let values = [
+            ("RSS_S3_TEST_ENDPOINT", "http://127.0.0.1:9000"),
+            ("RSS_S3_TEST_ACCESS_KEY", "minio-access"),
+            ("RSS_S3_TEST_SECRET_KEY", "do-not-print-this-secret"),
+        ];
+        let params = minio_external_params_from_lookup(lookup(&values))
+            .expect("complete external MinIO tuple")
+            .expect("external tuple must be selected");
+        assert_eq!(params.endpoint_url(), "http://127.0.0.1:9000");
+        assert_eq!(params.access_key_id(), "minio-access");
+        assert_eq!(params.secret_access_key(), "do-not-print-this-secret");
+        let debug = format!("{params:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("do-not-print-this-secret"));
     }
 
     /// INVARIANT: INTEGRATION-CONTAINER-LOG-01 { level = "Medium", exec = "manual/opt-in", source = "code", synthetic_red = "bounded_log_consumer_truncates_at_one_mib_with_marker", anti_vacuity = "bounded_log_consumer_uses_unique_names_and_source_prefixes" } — each container gets a collision-free

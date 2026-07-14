@@ -11,8 +11,11 @@ ref: Spring Modulith spring-modulith-events/spring-modulith-events-jdbc/src/main
 - `rss dlq inspect`
 - `rss dlq replay-dead-letter`
 - `rss dlq redrive-outbox`
+- `rss dlq resolve-expired-outbox`
 
-v1 不提供 destructive `skip`。partition unblock 只通过 redrive outbox DLX 队头完成；队头重新发布成功后，后继按 outbox partition order 正常 poll。
+v1 不提供 destructive `skip`。deadline 内的 partition unblock 通过 redrive outbox DLX 队头完成；
+deadline 已过的队头只能经 `resolve-expired-outbox` terminal funnel 以受审计的
+`accepted_gap` 或 `compensated` 结清。
 
 ## Bounded same-ID policy
 
@@ -38,7 +41,9 @@ horizon；RSS 明确增加两个持久化绝对 deadline，防止 receipt 过期
 - 命令带 `--operator-service-token`、`--operator-tenant`、`--tenant`。
 - 环境变量 `RSS_DLQ_OPERATOR_GRANTS` 包含精确 grant：`subject|action|tenant`。
 - 仅 `replay-dead-letter` 需要 DLQ payload 解密依赖：`RSS_DLX_PAYLOAD_KEY_NAME`、`RSS_VAULT_ADDR`、`RSS_VAULT_TOKEN`、`RSS_VAULT_TRANSIT_MOUNT`。`list`、`inspect` 与 `redrive-outbox` 不依赖 payload key provider。
-- CLI 必须走离线 `PgRuntimeDeps::setup_maintenance` 的 migrator/maintenance 连接。长期 serving role
+- `resolve-expired-outbox` 不读 payload，但需要精确的
+  `subject|resolve-expired-outbox|tenant` grant、变更工单号，以及策略所要求的 evidence。
+- CLI 必须走离线、connect-only 的 `PgRuntimeDeps::connect_maintenance` 连接；它绝不执行 migration。长期 serving role
   `rss_app` 没有 `rss_outbox_redrive(text,uuid)` EXECUTE；不要把 migrator 凭据注入 server serving pool。
 
 审计固定写入：
@@ -100,6 +105,35 @@ rss dlq redrive-outbox \
   --event-id "$EVENT_ID"
 ```
 
+结清已过 same-ID deadline 的 outbox DLX 队头：
+
+```bash
+export RSS_DLQ_OPERATOR_GRANTS="ops-subject|resolve-expired-outbox|$TENANT"
+
+# 业务确认接受缺口：evidence 严格禁止。
+rss dlq resolve-expired-outbox \
+  --operator-service-token "$TOKEN" \
+  --operator-tenant "$OPERATOR_TENANT" \
+  --tenant "$TENANT" \
+  --event-id "$EVENT_ID" \
+  --change-ticket "$CHANGE_TICKET" \
+  --resolution-kind accepted_gap
+
+# 已由同 tenant 的 published compensation event 补偿：evidence 严格必填。
+rss dlq resolve-expired-outbox \
+  --operator-service-token "$TOKEN" \
+  --operator-tenant "$OPERATOR_TENANT" \
+  --tenant "$TENANT" \
+  --event-id "$EVENT_ID" \
+  --change-ticket "$CHANGE_TICKET" \
+  --resolution-kind compensated \
+  --evidence-event-id "$COMPENSATION_EVENT_ID"
+```
+
+`accepted_gap` 表示业务所有者通过变更工单明确接受未发布事件造成的缺口；
+`compensated` 表示另一已 published 事件完成了业务补偿。数据库会验证 compensation event
+与 blocked event 同 tenant，且 `causation_id` 精确指向 blocked event。不得用任意已发布事件充当 evidence。
+
 ## Partition Blocked
 
 告警 `OutboxPartitionBlocked` 触发时：
@@ -154,6 +188,12 @@ rss dlq redrive-outbox \
 
 6. 等 relay 发布该队头，再观察 `outbox_partition_blocked_depth{tenant_id,domain,contract_id}` 回到 0。
 
+如果第 5 步返回 `Expired`，不得重试 redrive。取得业务所有者和变更工单批准，按上述
+`accepted_gap` / `compensated` 选择执行 `resolve-expired-outbox`。命令只在目标是当前 tenant、
+仍为 DLX 且 deadline 已过时成功；成功后原行进入 `abandoned`，并在
+`outbox_expired_resolutions` 留下 change ticket、operator subject、resolution 和可选 evidence。
+验收时同时确认命令输出 `outcome=resolved`、finish audit 成功，以及 blocked depth 回到 0。
+
 `partition_key` 不在 metric、CLI 输出或 audit resource id 中暴露。需要精确定位时，用 event id 在受控 DB 访问路径中检查。
 
 ## Metrics
@@ -177,16 +217,20 @@ mutation，partition 不会被解锁。CLI 输出 `outcome=expired`、以非零�
 ## Failure Handling
 
 - `NotFound`：先核对 `--tenant` 与 id；wrong-tenant redrive 不泄漏存在性。
-- `Expired`：不要重复 redrive；绝对 deadline 不可续期，行保持 DLX/partition gate。按受控审计与业务恢复
-  流程处置，不直接 broker publish、不创建同 id 兼容路径。
+- `Expired`：不要重复 redrive；绝对 deadline 不可续期。只能在变更工单批准后执行
+  `resolve-expired-outbox --resolution-kind accepted_gap|compensated`；不直接 broker publish、不创建同 id 兼容路径。
+- `InvalidEvidence`：`compensated` evidence 不是同 tenant published event，或 `causation_id`
+  不指向 blocked event；修正 evidence，不得改用 `accepted_gap` 规避验证。
+- `NotExpired`：目标仍在 redrive window；修复上游后走 `redrive-outbox`，不得提前放弃。
 - `NotReplayable`：`outbox_relay`、`saga`、`projection` dead_letter 不支持 replay 成 outbox。
 - `InvalidSchemaHeaders` / `InvalidPayload`：先修数据/代码，不要重复 replay。
 - `PayloadKeyUnavailable` / `PayloadKeyForbidden`：恢复 Vault/key provider 后重试。
 - `Store`：检查 Postgres、RLS、SECURITY DEFINER 函数权限和 migration 版本。
 
-成功 redrive 不删除 `dead_letter` 审计行，不修改 payload/schema/seq/partition 或两个绝对 deadline；它只把
+成功 redrive 本身不删除 hot `dead_letter` 行，不修改 payload/schema/seq/partition 或两个绝对 deadline；它只把
 outbox DLX 行恢复为 `pending`、切 `same_id_delivery_phase='redrive'`，清 retry/lease，并同时清空
-`published_at`、`dlx_at`。旧 DLX 历史继续由 append-only `dead_letter` 审计行保存。
+`published_at`、`dlx_at`。hot DLX 历史随后由强制 archive-before-purge lifecycle 转入 WORM cold archive；
+operator CLI 不 list/inspect/replay cold archive。
 
 ## 0060 breaking rollout
 

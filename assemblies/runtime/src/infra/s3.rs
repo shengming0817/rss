@@ -2,14 +2,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
+use aws_sdk_s3::config::ProvideCredentials as _;
 use bootstrap::DomainModuleResult;
 use diport::{DynManagedResource, ManagedResource, ObjectStore, ShutdownError};
 use primitives::{HealthCheck, HealthStatus, ProbeName};
-use s3::{S3RuntimeDeps, S3Store};
+use s3::{S3DlxArchiveStore, S3RuntimeDeps, S3Store};
 use tokio_util::sync::CancellationToken;
 
-use crate::SharedRuntimeDeps;
 use crate::infra::plaintext_endpoint_policy_from;
+use crate::{EnvSecret, SharedRuntimeDeps};
 
 /// 默认 S3 canary 周期（60 秒）。
 const DEFAULT_S3_CANARY_INTERVAL: Duration = Duration::from_secs(60);
@@ -29,6 +30,7 @@ const S3_SESSION_TOKEN_ENV: &str = "RSS_S3_SESSION_TOKEN";
 const S3_REGION_ENV: &str = "RSS_S3_REGION";
 const S3_FORCE_PATH_STYLE_ENV: &str = "RSS_S3_FORCE_PATH_STYLE";
 const S3_ALLOW_PLAINTEXT_ENV: &str = "RSS_S3_ALLOW_PLAINTEXT";
+const DLX_ARCHIVE_S3_BUCKET_ENV: &str = "RSS_DLX_ARCHIVE_S3_BUCKET";
 const S3_CANARY_KEY_PREFIX_ENV: &str = "RSS_S3_CANARY_KEY_PREFIX";
 const S3_CANARY_INTERVAL_SECS_ENV: &str = "RSS_S3_CANARY_INTERVAL_SECS";
 const S3_CANARY_TIMEOUT_SECS_ENV: &str = "RSS_S3_CANARY_TIMEOUT_SECS";
@@ -63,32 +65,32 @@ fn parse_bool_env(
     }
 }
 
-fn validate_s3_bucket(raw: String) -> anyhow::Result<String> {
+fn validate_s3_bucket(raw: String, env: &'static str) -> anyhow::Result<String> {
     let bucket = raw.trim();
     anyhow::ensure!(
         (3..=63).contains(&bucket.len()),
-        "{S3_BUCKET_ENV} must be 3..=63 characters"
+        "{env} must be 3..=63 characters"
     );
     anyhow::ensure!(
         bucket
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-'),
-        "{S3_BUCKET_ENV} must contain only lowercase letters, digits, dots, or hyphens"
+        "{env} must contain only lowercase letters, digits, dots, or hyphens"
     );
     let first = bucket.as_bytes()[0];
     let last = bucket.as_bytes()[bucket.len() - 1];
     anyhow::ensure!(
         (first.is_ascii_lowercase() || first.is_ascii_digit())
             && (last.is_ascii_lowercase() || last.is_ascii_digit()),
-        "{S3_BUCKET_ENV} must start and end with a lowercase letter or digit"
+        "{env} must start and end with a lowercase letter or digit"
     );
     anyhow::ensure!(
         !bucket.contains("..") && !bucket.contains(".-") && !bucket.contains("-."),
-        "{S3_BUCKET_ENV} must not contain adjacent dots or dot-hyphen pairs"
+        "{env} must not contain adjacent dots or dot-hyphen pairs"
     );
     anyhow::ensure!(
         bucket.parse::<std::net::Ipv4Addr>().is_err(),
-        "{S3_BUCKET_ENV} must not be formatted as an IPv4 address"
+        "{env} must not be formatted as an IPv4 address"
     );
     Ok(bucket.to_string())
 }
@@ -96,26 +98,124 @@ fn validate_s3_bucket(raw: String) -> anyhow::Result<String> {
 pub fn build_s3_runtime_deps_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<S3RuntimeDeps> {
+    let bucket = validate_s3_bucket(required_env(&get, S3_BUCKET_ENV)?, S3_BUCKET_ENV)?;
+    let credentials = S3EnvCredentials {
+        access_key_id: required_env(&get, S3_ACCESS_KEY_ID_ENV)?,
+        secret_access_key: EnvSecret::required(&get, S3_SECRET_ACCESS_KEY_ENV)?,
+        session_token: EnvSecret::optional(&get, S3_SESSION_TOKEN_ENV)?,
+    };
+    let client = build_s3_client_from(&get, credentials, "rss-runtime-env")?;
+    let store = S3Store::new(client, bucket).context("construct s3 object store")?;
+    Ok(S3RuntimeDeps::new(store))
+}
+
+pub(crate) async fn build_s3_dlx_archive_store_from(
+    get: impl Fn(&str) -> Option<String>,
+    clock: Arc<dyn diport::Clock>,
+) -> anyhow::Result<S3DlxArchiveStore> {
+    let bucket = dlx_archive_bucket_from(&get)?;
+    let settings = s3_client_settings_from(&get)?;
+    let http_client = s3_http_client(&settings.endpoint);
+    let region = aws_sdk_s3::config::Region::new(settings.region.clone());
+    let provider_config = aws_config::provider_config::ProviderConfig::without_region()
+        .with_region(Some(region.clone()))
+        .with_http_client(http_client.clone());
+    let credentials_provider =
+        aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
+            .region(region)
+            .configure(provider_config)
+            .build()
+            .await;
+    let initial_credentials = credentials_provider
+        .provide_credentials()
+        .await
+        .context("resolve DLX archive credentials from the AWS default provider chain")?;
+    if let Some(general_access_key) = get(S3_ACCESS_KEY_ID_ENV) {
+        anyhow::ensure!(
+            initial_credentials.access_key_id() != general_access_key.trim(),
+            "DLX archive workload identity must differ from {S3_ACCESS_KEY_ID_ENV}"
+        );
+    }
+    let client = build_s3_client_from_settings(settings, credentials_provider, http_client);
+    S3DlxArchiveStore::new(client, bucket, clock).context("construct DLX archive S3 store")
+}
+
+fn dlx_archive_bucket_from(get: &impl Fn(&str) -> Option<String>) -> anyhow::Result<String> {
+    let bucket = validate_s3_bucket(
+        required_env(&get, DLX_ARCHIVE_S3_BUCKET_ENV)?,
+        DLX_ARCHIVE_S3_BUCKET_ENV,
+    )?;
+    if let Some(general_bucket) = get(S3_BUCKET_ENV) {
+        anyhow::ensure!(
+            bucket != general_bucket.trim(),
+            "{DLX_ARCHIVE_S3_BUCKET_ENV} must differ from {S3_BUCKET_ENV}"
+        );
+    }
+    Ok(bucket)
+}
+
+struct S3EnvCredentials {
+    access_key_id: String,
+    secret_access_key: EnvSecret,
+    session_token: Option<EnvSecret>,
+}
+
+fn build_s3_client_from(
+    get: &impl Fn(&str) -> Option<String>,
+    credentials: S3EnvCredentials,
+    credential_source: &'static str,
+) -> anyhow::Result<aws_sdk_s3::Client> {
+    let settings = s3_client_settings_from(get)?;
+    let http_client = s3_http_client(&settings.endpoint);
+    let S3EnvCredentials {
+        access_key_id,
+        secret_access_key,
+        session_token,
+    } = credentials;
+    let credentials = aws_sdk_s3::config::Credentials::new(
+        access_key_id,
+        secret_access_key.into_string(),
+        session_token.map(EnvSecret::into_string),
+        None,
+        credential_source,
+    );
+    Ok(build_s3_client_from_settings(
+        settings,
+        credentials,
+        http_client,
+    ))
+}
+
+struct S3ClientSettings {
+    endpoint: secure::S3Endpoint,
+    region: String,
+    force_path_style: bool,
+}
+
+fn s3_client_settings_from(
+    get: &impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<S3ClientSettings> {
     let endpoint = secure::S3Endpoint::parse(
         required_env(&get, S3_ENDPOINT_URL_ENV)?,
-        plaintext_endpoint_policy_from(&get, S3_ALLOW_PLAINTEXT_ENV)?,
+        plaintext_endpoint_policy_from(get, S3_ALLOW_PLAINTEXT_ENV)?,
     )
     .with_context(|| {
         format!("{S3_ENDPOINT_URL_ENV} must be https:// or loopback http:// with explicit opt-in")
     })?;
-    let bucket = validate_s3_bucket(required_env(&get, S3_BUCKET_ENV)?)?;
-    let access_key_id = required_env(&get, S3_ACCESS_KEY_ID_ENV)?;
-    let secret_access_key = required_env(&get, S3_SECRET_ACCESS_KEY_ENV)?;
-    let session_token = get(S3_SESSION_TOKEN_ENV).and_then(|raw| {
-        let trimmed = raw.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    });
     let region = get(S3_REGION_ENV)
         .map(|raw| raw.trim().to_string())
         .filter(|raw| !raw.is_empty())
         .unwrap_or_else(|| DEFAULT_S3_REGION.to_string());
     let force_path_style = parse_bool_env(&get, S3_FORCE_PATH_STYLE_ENV, false)?;
-    let http_client = if endpoint.is_plaintext() {
+    Ok(S3ClientSettings {
+        endpoint,
+        region,
+        force_path_style,
+    })
+}
+
+fn s3_http_client(endpoint: &secure::S3Endpoint) -> aws_sdk_s3::config::SharedHttpClient {
+    if endpoint.is_plaintext() {
         aws_smithy_http_client::Builder::new().build_http()
     } else {
         aws_smithy_http_client::Builder::new()
@@ -123,25 +223,23 @@ pub fn build_s3_runtime_deps_from(
                 aws_smithy_http_client::tls::rustls_provider::CryptoMode::Ring,
             ))
             .build_https()
-    };
-    let credentials = aws_sdk_s3::config::Credentials::new(
-        access_key_id,
-        secret_access_key,
-        session_token,
-        None,
-        "rss-runtime-env",
-    );
+    }
+}
+
+fn build_s3_client_from_settings(
+    settings: S3ClientSettings,
+    credentials_provider: impl aws_sdk_s3::config::ProvideCredentials + 'static,
+    http_client: impl aws_sdk_s3::config::HttpClient + 'static,
+) -> aws_sdk_s3::Client {
     let config = aws_sdk_s3::config::Builder::new()
         .behavior_version_latest()
-        .region(aws_sdk_s3::config::Region::new(region))
-        .credentials_provider(credentials)
-        .endpoint_url(endpoint.expose())
-        .force_path_style(force_path_style)
+        .region(aws_sdk_s3::config::Region::new(settings.region))
+        .credentials_provider(credentials_provider)
+        .endpoint_url(settings.endpoint.expose())
+        .force_path_style(settings.force_path_style)
         .http_client(http_client)
         .build();
-    let store = S3Store::new(aws_sdk_s3::Client::from_conf(config), bucket)
-        .context("construct s3 object store")?;
-    Ok(S3RuntimeDeps::new(store))
+    aws_sdk_s3::Client::from_conf(config)
 }
 
 fn parse_s3_duration_secs(
@@ -437,6 +535,92 @@ mod tests {
         let resources = deps.runtime_resources();
         assert_eq!(resources.len(), 1);
         assert_eq!(resources[0].name(), "s3");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn dlx_archive_requires_a_dedicated_bucket() {
+        let err = dlx_archive_bucket_from(&full_s3_get)
+            .expect_err("general object-store config must not satisfy DLX archive config");
+        assert!(format!("{err:#}").contains("RSS_DLX_ARCHIVE_S3_BUCKET"));
+
+        let err = dlx_archive_bucket_from(&|name| match name {
+            "RSS_DLX_ARCHIVE_S3_BUCKET" => Some("rss-prod-bucket".to_string()),
+            _ => full_s3_get(name),
+        })
+        .expect_err("archive bucket reuse must fail closed");
+        assert!(format!("{err:#}").contains("RSS_S3_BUCKET"));
+
+        let bucket = dlx_archive_bucket_from(&|name| match name {
+            "RSS_DLX_ARCHIVE_S3_BUCKET" => Some("rss-prod-dlx-archive".to_string()),
+            _ => full_s3_get(name),
+        })
+        .expect("dedicated archive bucket");
+        assert_eq!(bucket, "rss-prod-dlx-archive");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn archive_client_refreshes_expiring_provider_credentials() {
+        use aws_credential_types::Credentials;
+        use aws_credential_types::credential_fn::provide_credentials_fn;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&provider_calls);
+        let provider = provide_credentials_fn(move || {
+            let sequence = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {
+                Ok(Credentials::new(
+                    format!("rotating-access-{sequence}"),
+                    "rotating-secret",
+                    None,
+                    Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+                    "runtime-test-rotating-provider",
+                ))
+            }
+        });
+        let authorizations = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let captured = Arc::clone(&authorizations);
+        let http_client = aws_smithy_http_client::test_util::infallible_client_fn(move |request| {
+            if let Some(value) = request.headers().get(http::header::AUTHORIZATION) {
+                captured
+                    .lock()
+                    .expect("authorization capture mutex")
+                    .push(value.to_str().expect("ASCII authorization").to_string());
+            }
+            http::Response::builder()
+                .status(200)
+                .body(Vec::<u8>::new())
+                .expect("valid response")
+        });
+        let settings = s3_client_settings_from(&|name| match name {
+            "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:9000".to_string()),
+            "RSS_S3_ALLOW_PLAINTEXT" => Some("true".to_string()),
+            "RSS_S3_FORCE_PATH_STYLE" => Some("true".to_string()),
+            _ => full_s3_get(name),
+        })
+        .expect("valid test endpoint");
+        let client = build_s3_client_from_settings(settings, provider, http_client);
+
+        client
+            .head_bucket()
+            .bucket("rss-prod-dlx-archive")
+            .send()
+            .await
+            .expect("first signed request");
+        client
+            .head_bucket()
+            .bucket("rss-prod-dlx-archive")
+            .send()
+            .await
+            .expect("second signed request");
+
+        assert!(provider_calls.load(Ordering::SeqCst) >= 2);
+        let authorizations = authorizations.lock().expect("authorization capture mutex");
+        assert_eq!(authorizations.len(), 2);
+        assert!(authorizations[0].contains("rotating-access-1"));
+        assert!(authorizations[1].contains("rotating-access-2"));
     }
 
     #[derive(Clone, Copy)]

@@ -55,6 +55,7 @@ redis = { package = "redis-adapter", path = "../../adapters/redis", features = [
 s3 = { path = "../../adapters/s3", features = ["backend"] }
 eventexec = { path = "../../crates/eventexec" }
 generated = { path = "../../generated" }
+metrics = { workspace = true }
 deadpool-redis = { workspace = true }
 # Vault KV v2 secret 解析 adapter（VaultSecretResolver + TenantStoreAllowlist；backend feature 开）。
 vault = { path = "../../adapters/vault", features = ["backend"] }
@@ -63,6 +64,7 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
 # 一致）+ webpki-roots（打包 Mozilla 根，CDLA-Permissive-2.0 已在 deny allow-list）；对齐 sqlx/redis/otel 的 ring 口径。
 reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 aws-sdk-s3 = { workspace = true }
+aws-config = { workspace = true }
 aws-smithy-http-client = { workspace = true }
 axum = { workspace = true }
 tracing = { workspace = true }
@@ -104,6 +106,9 @@ prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"
 integration = ["testkit/containers", "identity/seed-login"]
 
 [dev-dependencies]
+aws-credential-types = { workspace = true }
+aws-smithy-http-client = { workspace = true, features = ["test-util"] }
+http = "1"
 settings-composition = { path = "../../composition/settings", features = ["test-support"] }
 # 默认单测仅启用 lazy typed capability bundle；不连接 postgres。
 postgres = { path = "../../adapters/postgres", features = ["domain-settings", "domain-identity", "domain-audit", "test-support"] }

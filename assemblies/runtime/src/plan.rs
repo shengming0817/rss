@@ -265,6 +265,7 @@ name = "runtime"
 profile = "demo"
 domains = ["identity", "settings", "audit"]
 topology = "durable-shared"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -292,10 +293,10 @@ domains = []
             summary.listeners(),
             ["primary", "internal", "admin", "health"]
         );
-        assert_eq!(summary.provider_counts().total, 12);
-        assert_eq!(summary.provider_counts().active, 10);
+        assert_eq!(summary.provider_counts().total, 15);
+        assert_eq!(summary.provider_counts().active, 13);
         assert_eq!(summary.provider_counts().draft, 2);
-        assert_eq!(summary.provider_counts().persistent, 10);
+        assert_eq!(summary.provider_counts().persistent, 13);
         assert_eq!(summary.provider_counts().ephemeral_memory, 2);
     }
 
@@ -401,6 +402,7 @@ name = "runtime"
 profile = "demo"
 domains = ["identity"]
 topology = "demo"
+frameworkContracts = []
 listeners = []
 
 [[diportProviders]]
@@ -429,6 +431,7 @@ name = "runtime"
 profile = "demo"
 domains = ["identity"]
 topology = "demo"
+frameworkContracts = []
 diportProviders = []
 
 [[listeners]]

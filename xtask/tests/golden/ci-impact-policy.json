@@ -17,25 +17,25 @@
       "status": "modified",
       "path": "docs/ops/localtx-alerts.rules.yaml",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "docs/ops/202607082104-1642-consistency-dashboard-checklist.md",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "docs/runbooks/202607081921-1633-cdc-outbox.md",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
@@ -77,25 +77,25 @@
       "status": "modified",
       "path": "Cargo.lock",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "generated/src/http/mod.rs",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "unowned/input.bin",
       "fullCause": "unknown-path",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "renamed",
       "path": "crates/identity/src/renamed.rs",
       "fullCause": "rename-or-copy",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     }
   ],
   "shadowMatrix": {
@@ -113,6 +113,7 @@
       {"jobKey":"integration/runtime-http-auth/2-of-2","displayName":"integration/runtime-http-auth/2-of-2","lane":"integration","shard":"runtime-http-auth","partition":"2/2","partitionLabel":"2-of-2","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},
       {"jobKey":"integration/consistency-fault","displayName":"integration/consistency-fault","lane":"integration","shard":"consistency-fault","partitionLabel":"unpartitioned","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},
       {"jobKey":"integration/cdc-projection-saga","displayName":"integration/cdc-projection-saga","lane":"integration","shard":"cdc-projection-saga","partitionLabel":"unpartitioned","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},
+      {"jobKey":"integration/object-storage","displayName":"integration/object-storage","lane":"integration","shard":"object-storage","partitionLabel":"unpartitioned","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},
       {"jobKey":"audit","displayName":"audit","lane":"audit","partitionLabel":"unpartitioned","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"}
     ]
   }

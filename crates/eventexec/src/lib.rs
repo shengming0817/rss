@@ -57,6 +57,21 @@ pub use dlq::{
     record_outbox_expired_resolution,
 };
 
+pub mod dlx_lifecycle;
+pub use dlx_lifecycle::{
+    DLX_HOT_RETENTION_SECONDS, DlxArchiveKeyName, DlxArchiveObjectKey, DlxHotKeyName, DlxLifecycle,
+    DlxLifecycleHealth, DlxLifecycleTickReport, ExpiredArchiveReceipt, MissingArchiveProof,
+    RetentionOutcome, RetentionTarget, VerifiedArchiveReceipt, apply_dlx_lifecycle_health,
+};
+mod dlx_archive_record;
+pub use dlx_archive_record::{
+    ArchiveCanonicalRecord, DlxArchiveCandidate, DlxArchiveSafeMetadata,
+    DlxArchiveSafeMetadataInput, DlxMetadataDigest,
+};
+mod dlx_archive_cipher;
+pub mod dlx_lifecycle_metrics;
+pub use dlx_lifecycle_metrics::{DlxLifecycleMetrics, MetricsDlxLifecycleMetrics};
+
 pub mod reconcile;
 pub use reconcile::{
     AttemptErrorKind, AttemptResult, AttemptScope, AttemptTrigger, BackoffError, BackoffPolicy,

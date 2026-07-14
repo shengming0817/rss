@@ -974,8 +974,8 @@ mod tests {
         assert_eq!(metrics.recommended_jobs, 1);
         assert_eq!(metrics.executed_jobs, CiJobKey::COUNT);
         assert_eq!(metrics.skipped_runner_jobs, CiJobKey::COUNT - 1);
-        assert_eq!(metrics.cpu_time_ms, 14_000);
-        assert_eq!(metrics.projected_saved_cpu_time_ms, 13_000);
+        assert_eq!(metrics.cpu_time_ms, 15_000);
+        assert_eq!(metrics.projected_saved_cpu_time_ms, 14_000);
         Ok(())
     }
 

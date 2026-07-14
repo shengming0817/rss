@@ -88,11 +88,11 @@ jobs:
           set -euo pipefail
           if [ "$RSS_LANE" = integration ]; then
             case "$RSS_SHARD" in
-              postgres-domain|event-transport|runtime-http-auth|consistency-fault|cdc-projection-saga) ;;
+              postgres-domain|event-transport|runtime-http-auth|consistency-fault|cdc-projection-saga|object-storage) ;;
               *) exit 64 ;;
             esac
             case "$RSS_SHARD:$RSS_PARTITION" in
-              postgres-domain:|event-transport:1/2|event-transport:2/2|runtime-http-auth:1/2|runtime-http-auth:2/2|consistency-fault:|cdc-projection-saga:) ;;
+              postgres-domain:|event-transport:1/2|event-transport:2/2|runtime-http-auth:1/2|runtime-http-auth:2/2|consistency-fault:|cdc-projection-saga:|object-storage:) ;;
               *) exit 64 ;;
             esac
           elif [ "$RSS_LANE" = ci-core-tests ]; then

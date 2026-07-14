@@ -691,6 +691,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "RSS_DLX_PAYLOAD_KEY_NAME" => Some("dlx-payload".to_string()),
         "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_string()),
         "RSS_VAULT_TOKEN" => Some("s.testtoken".to_string()),
+        "RSS_DLX_HOT_VAULT_TOKEN" => Some("s.dlx-hot-testtoken".to_string()),
+        "RSS_DLX_ARCHIVE_VAULT_TOKEN" => Some("s.dlx-archive-testtoken".to_string()),
         "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
         _ => None,
     })?;
@@ -720,6 +722,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let vault = build_vault_runtime_deps(|name| match name {
         "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_string()),
         "RSS_VAULT_TOKEN" => Some("s.testtoken".to_string()),
+        "RSS_DLX_HOT_VAULT_TOKEN" => Some("s.dlx-hot-testtoken".to_string()),
+        "RSS_DLX_ARCHIVE_VAULT_TOKEN" => Some("s.dlx-archive-testtoken".to_string()),
         "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
         _ => None,
     })?;
@@ -761,11 +765,11 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .iter()
         .map(|event| event.subscriptions().len())
         .sum::<usize>();
-    let expected_worker_count = generated_subscription_count + 6;
+    let expected_worker_count = generated_subscription_count + 5;
     assert_eq!(
         event_module.workers.len(),
         expected_worker_count,
-        "identity/settings relays + generated consumers + sampler + outbox sweeper + dead_letter sweeper + inbox sweeper"
+        "identity/settings relays + generated consumers + sampler + outbox sweeper + inbox sweeper"
     );
     let probe_names: Vec<&str> = event_module
         .probes
@@ -779,7 +783,6 @@ async fn event_transport_durable_e2e() -> Result<()> {
             "outbox_relay_settings",
             "outbox_sampler",
             "outbox_sweeper",
-            "dead_letter_sweeper",
             "event_consumer:settings_config-version-changed__settings__settings_config-version-changed",
             "event_consumer:identity_session-created__audit__audit_session-created",
             "event_consumer:identity_role-assigned__audit__audit_role-assigned",
@@ -810,7 +813,6 @@ async fn event_transport_durable_e2e() -> Result<()> {
             "outbox-relay-settings",
             "outbox-sampler",
             "outbox-sweeper",
-            "dead-letter-sweeper",
             "event-consumer:settings:settings.config-version-changed",
             "event-consumer:audit:identity.session-created",
             "event-consumer:audit:identity.role-assigned",

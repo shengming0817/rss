@@ -37,6 +37,8 @@ primitives = { path = "../primitives" }
 uuid = { workspace = true }
 # Subscriber port 返回 MessageStream = Pin<Box<dyn Stream + Send>>（futures::Stream）。
 futures = { workspace = true }
+# DLX archive provider observations carry a fixed SHA-256 integrity checksum.
+sha2 = { workspace = true }
 # Subscriber::subscribe 取消信号：tokio_util::sync::CancellationToken（与 bootstrap shutdown 同源）。
 tokio-util = { workspace = true }
 

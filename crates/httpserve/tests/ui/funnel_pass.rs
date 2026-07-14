@@ -8,6 +8,7 @@ enum StatefulRouteMarker {}
 fn main() {
     const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Auth];
     let binding = vocab::HttpRouteBinding::<RouteMarker, vocab::http::LocalOnly>::from_static(
+        vocab::HttpContractOwner::domain("test"),
         vocab::ContractBinding::from_static(
             "test",
             "ui.pass",
@@ -31,6 +32,7 @@ fn main() {
         let rb = rb.mount(endpoint)?;
         let stateful_binding =
             vocab::HttpRouteBinding::<StatefulRouteMarker, vocab::http::LocalTx>::from_static(
+                vocab::HttpContractOwner::domain("test"),
                 vocab::ContractBinding::from_static(
                     "test",
                     "ui.pass-stateful",

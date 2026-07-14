@@ -33,7 +33,7 @@ macro_rules! ci_job_catalog {
             $( $variant, )+
         }
 
-        const CI_JOB_DESCRIPTORS: [CiJobDescriptor; 14] = [
+        const CI_JOB_DESCRIPTORS: [CiJobDescriptor; 15] = [
             $(CiJobDescriptor {
                 key: CiJobKey::$variant,
                 name: $name,
@@ -44,7 +44,7 @@ macro_rules! ci_job_catalog {
         ];
 
         impl CiJobKey {
-            pub(crate) const ALL: [Self; 14] = [$(Self::$variant),+];
+            pub(crate) const ALL: [Self; 15] = [$(Self::$variant),+];
 
             const fn descriptor(self) -> &'static CiJobDescriptor {
                 match self {
@@ -106,6 +106,12 @@ ci_job_catalog! {
         "integration/cdc-projection-saga",
         Integration,
         Some("cdc-projection-saga"),
+        None
+    ),
+    IntegrationObjectStorage => (
+        "integration/object-storage",
+        Integration,
+        Some("object-storage"),
         None
     ),
     Audit => ("audit", Nightly, None, None),
@@ -490,6 +496,17 @@ macro_rules! gate_catalog {
                 gate(
                         GateId::InboxCutoverGuard,
                         "inbox-cutover-guard",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
+            DlxLifecycleFunnel => (step_dlx_lifecycle_funnel, Some("xtask/src/dlx_lifecycle_funnel.rs"),
+                gate(
+                        GateId::DlxLifecycleFunnel,
+                        "dlx-lifecycle-funnel",
                         META,
                         CompileKind::NoCompile,
                         INTERNAL,

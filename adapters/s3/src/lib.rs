@@ -13,12 +13,22 @@
 //! crate 保持 `forbid(unsafe_code)`（继承 workspace lints；只 import diport trait + aws-sdk，不 invoke dynosaur 宏）。
 
 #[cfg(feature = "backend")]
+mod dlx_archive;
+#[cfg(feature = "backend")]
 mod store;
+
+#[cfg(feature = "backend")]
+pub use dlx_archive::{
+    S3DlxArchiveCapabilityError, S3DlxArchiveConfigError, S3DlxArchiveStore,
+    VerifiedS3DlxArchiveStore,
+};
 
 #[cfg(feature = "backend")]
 use std::sync::Arc;
 
-use diport::{DynManagedResource, ManagedResource, ShutdownError};
+#[cfg(feature = "backend")]
+use diport::DynManagedResource;
+use diport::{ManagedResource, ShutdownError};
 
 /// S3 对象存储 adapter（sealed-marker）。
 ///

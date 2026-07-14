@@ -79,6 +79,36 @@ groups:
           summary: "Outbox partition 被队头阻塞（domain={{ $labels.domain }}, contract_id={{ $labels.contract_id }}）"
           description: "outbox_partition_blocked_depth={{ $value }}（tenant={{ $labels.tenant_id }}）；检查 outbox DLX 队头，按 runbook inspect/redrive，不要从 metric 追 partition_key。"
 
+      # DLX archive-before-purge 任一 transient/invariant tick 都会停止删除。Degraded readyz 保持 200，
+      # 因此该 counter 是值班分页面；首次 series 用 offset 分支补捉，避免 increase() 漏掉首个失败。
+      - alert: DlxArchiveLifecycleFailure
+        expr: |
+          sum by (outcome) (
+            (increase(retention_sweep_ticks_total{target="dead_letter",outcome=~"transient|invariant"}[5m]) > 0)
+            or
+            (
+              (retention_sweep_ticks_total{target="dead_letter",outcome=~"transient|invariant"} > 0)
+              unless
+              (retention_sweep_ticks_total{target="dead_letter",outcome=~"transient|invariant"} offset 5m)
+            )
+          ) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "DLX archive lifecycle 失败（outcome={{ $labels.outcome }}）"
+          description: "近 5min DLX archive-before-purge tick 失败信号 {{ $value }}；删除已 fail-closed 停止。检查 dlx_lifecycle/dlx_archive_ready probe、独立 PG/Vault/S3 凭据、WORM/lifecycle policy 与 worker 日志。"
+
+      # 正常候选应在固定 30s tick 内归档；持续超过 5min 表示 archive path 或 receipt CAS 卡住。
+      - alert: DlxArchiveOldestPendingHigh
+        expr: dead_letter_archive_oldest_pending_age_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "DLX 最老待归档记录超过 5min"
+          description: "dead_letter_archive_oldest_pending_age_seconds={{ $value }}s；检查 pending depth、lifecycle failure 告警、archive bucket readiness 与 receipt CAS。该 gauge 为 NaN/缺失时先恢复 backlog sampler，不能按 0 解释。"
+
       # 重试风暴（次级早期信号）：broker 抖动引发批量 Requeue，pending 上涨但 DLX 未增（预算未耗尽）的
       # 窗口期，oldest-age 超阈前的领先指标。阈值按部署基线调（此处 5/s 兜底）。
       - alert: OutboxRequeueStorm

@@ -2,6 +2,7 @@ enum RouteMarker {}
 
 fn main() {
     let binding = vocab::HttpRouteBinding::<RouteMarker, vocab::http::LocalTx>::from_static(
+        vocab::HttpContractOwner::domain("test"),
         vocab::ContractBinding::from_static(
             "test",
             "ui.consistency-mismatch",

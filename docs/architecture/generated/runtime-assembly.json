@@ -11,14 +11,14 @@
       "path": "assemblies/runtime/assembly.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "6d3ad9ca90ec6c1d13d52228bb3a5a3687310239d9ed71bdcdcd97524b649e69"
+        "value": "e24e1dc3a1b110a06df0a67e4238c4624f7aaf8944b100f0631a51854f91504b"
       }
     },
     {
       "path": "assemblies/runtime/src/generated/modules_gen.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "51b70bd404fa555e5b6bb7c411d4f1612e01b98061c1946404085c5e19228e6d"
+        "value": "1dc21a0cb86036c62055214791aeffd1ae1bb0b65fa7f8855fea9c90dd221d0b"
       }
     },
     {
@@ -271,6 +271,39 @@
       "lifecycle": "active",
       "durability": "persistent",
       "purpose": "runtime-s3-readiness-canary",
+      "requiredFeatures": [
+        "backend"
+      ]
+    },
+    {
+      "id": "n_cfb89aa1706a93c50c8da08c",
+      "kind": "provider",
+      "label": "postgres::PgDlxLifecycleRepository (postgres)",
+      "port": "diport::DlxLifecycleRepository",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "dead-letter-archive-receipt-purge-reconcile"
+    },
+    {
+      "id": "n_b066a55a6123234afda6d190",
+      "kind": "provider",
+      "label": "s3::VerifiedS3DlxArchiveStore (s3)",
+      "port": "diport::DlxArchiveStore",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "dead-letter-compliance-worm-archive",
+      "requiredFeatures": [
+        "backend"
+      ]
+    },
+    {
+      "id": "n_03a8af107ef75ec5eeb24e67",
+      "kind": "provider",
+      "label": "vault::VaultKeyProvider (vault)",
+      "port": "diport::KeyProvider",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "dead-letter-independent-archive-key-provider",
       "requiredFeatures": [
         "backend"
       ]
@@ -585,6 +618,66 @@
     {
       "from": "n_6df5db0fdf560b20204cbbd8",
       "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_2d40160c3e8818e1b7b6ae73",
+      "to": "n_cfb89aa1706a93c50c8da08c",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_cfb89aa1706a93c50c8da08c",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_cfb89aa1706a93c50c8da08c",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_cfb89aa1706a93c50c8da08c",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_cfb89aa1706a93c50c8da08c",
+      "to": "n_b07dcd04ac2a96bb91f67966",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_2d40160c3e8818e1b7b6ae73",
+      "to": "n_b066a55a6123234afda6d190",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_b066a55a6123234afda6d190",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_b066a55a6123234afda6d190",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_b066a55a6123234afda6d190",
+      "to": "n_b07dcd04ac2a96bb91f67966",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_2d40160c3e8818e1b7b6ae73",
+      "to": "n_03a8af107ef75ec5eeb24e67",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_03a8af107ef75ec5eeb24e67",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_03a8af107ef75ec5eeb24e67",
+      "to": "n_b07dcd04ac2a96bb91f67966",
       "kind": "contributes-output"
     },
     {

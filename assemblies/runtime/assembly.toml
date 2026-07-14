@@ -157,3 +157,38 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "runtime-s3-readiness-canary"
 outputs = ["resources"]
+
+# DLX lifecycle funnel (#1168/#1536-#1539): all cross-tenant PostgreSQL operations stay behind
+# the exact-role fixed-function repository; the archive store is only constructible after the
+# startup WORM capability gate; the existing KeyProvider port carries a distinct archive workload.
+[[diportProviders]]
+port = "diport::DlxLifecycleRepository"
+provider = "postgres::PgDlxLifecycleRepository"
+providerCrate = "postgres"
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "dead-letter-archive-receipt-purge-reconcile"
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+port = "diport::DlxArchiveStore"
+provider = "s3::VerifiedS3DlxArchiveStore"
+providerCrate = "s3"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "dead-letter-compliance-worm-archive"
+outputs = ["probes", "workers"]
+
+[[diportProviders]]
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "dead-letter-independent-archive-key-provider"
+outputs = ["workers"]

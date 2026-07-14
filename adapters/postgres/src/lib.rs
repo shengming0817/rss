@@ -40,6 +40,7 @@ mod dead_letter;
 mod dead_letter_payload;
 mod delivery_policy;
 mod dlq;
+mod dlx_lifecycle;
 mod emitter;
 #[cfg(feature = "fault-matrix-test-support")]
 pub mod fault_matrix;
@@ -99,9 +100,10 @@ pub use consumer_tx::PgSettingsConsumerTx;
 pub use consumer_tx::{AuditConsumerTxEffect, PgAuditConsumerTx};
 #[cfg(feature = "domain-identity")]
 pub use credential_repo::PgCredentialRepo;
-pub use dead_letter::{DEAD_LETTER_RETENTION_SECONDS, PgDeadLetterStore};
+pub use dead_letter::PgDeadLetterStore;
 pub use dead_letter_payload::DlxPayloadProtector;
 pub use dlq::PgDlqStore;
+pub use dlx_lifecycle::{PgDlxArchiveClaim, PgDlxLifecycleRepository, PgDlxLifecycleRuntime};
 pub use emitter::PgEmitter;
 pub use outbox::{PgOutbox, PgOutboxMaintenance};
 pub use outbox_cdc::PgOutboxCdcEmitter;

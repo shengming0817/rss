@@ -1,0 +1,21 @@
+error[E0451]: fields `id`, `tenant`, `object_key`, `checksum`, `archive_version_id`, `archive_key_ref`, `retain_until_epoch_secs` and `verified_at_epoch_secs` of struct `VerifiedArchiveReceipt` are private
+  --> tests/ui/dlx_verified_receipt_forge_fail.rs:9:9
+   |
+ 8 |     let _forged = VerifiedArchiveReceipt {
+   |                   ---------------------- in this type
+ 9 |         id: value(),
+   |         ^^ private field
+10 |         tenant: value(),
+   |         ^^^^^^ private field
+11 |         object_key: value(),
+   |         ^^^^^^^^^^ private field
+12 |         checksum: value(),
+   |         ^^^^^^^^ private field
+13 |         archive_version_id: value(),
+   |         ^^^^^^^^^^^^^^^^^^ private field
+14 |         archive_key_ref: value(),
+   |         ^^^^^^^^^^^^^^^ private field
+15 |         retain_until_epoch_secs: value(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^ private field
+16 |         verified_at_epoch_secs: value(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^ private field

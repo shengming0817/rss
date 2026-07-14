@@ -1,0 +1,5 @@
+error[E0599]: no method named `delete` found for reference `&S` in the current scope
+ --> tests/ui/dlx_archive_store_delete_fail.rs:5:11
+  |
+5 |     store.delete(key).await;
+  |           ^^^^^^ method not found in `&S`

@@ -87,6 +87,7 @@ pub mod cas_store;
 pub mod checkpoint_store;
 pub mod clock;
 pub mod dead_letter_store;
+pub mod dlx_lifecycle;
 mod effect;
 pub mod envelope;
 pub mod fenced_writer;
@@ -130,6 +131,14 @@ pub use clock::Clock;
 pub use dead_letter_store::{
     DeadLetterProvenance, DeadLetterRecord, DeadLetterSource, DeadLetterStore,
     DeadLetterStoreError, DeadLetterSummary, DynDeadLetterStore,
+};
+pub use dlx_lifecycle::{
+    ArchiveChecksum, ArchiveClaimSettleOutcome, ArchiveVersionId, ClaimedArchiveCandidate,
+    DLX_MAX_ARCHIVE_CIPHERTEXT_BYTES, DLX_MAX_HOT_CAPSULE_PLAINTEXT_BYTES, DlxArchiveBacklog,
+    DlxArchiveCiphertext, DlxArchiveHeadOutcome, DlxArchiveObjectMetadata, DlxArchivePutOutcome,
+    DlxArchivePutRequest, DlxArchiveStore, DlxLifecycleError, DlxLifecycleErrorKind,
+    DlxLifecycleOperation, DlxLifecycleReason, DlxLifecycleRepository, ObjectLockMode,
+    ReceiptCasOutcome,
 };
 pub use effect::{
     AuthEffect, CrossTenantPrivilege, DiPortEffect, LocalPrivilege, OutboxEffect, PortEffectClass,

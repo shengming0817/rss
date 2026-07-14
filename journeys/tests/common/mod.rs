@@ -15,7 +15,7 @@ use diport::{
     DynKeyProvider, EncryptOutput, EnvelopeMetadata, KeyName, KeyProvider, KeyProviderError,
     KeyRef, KeyVersion, OutboxEmitError, OutboxEnvelopeParts, RedactedBytes,
 };
-use eventexec::{TenantAuthority, TenantAuthorityBinding};
+use eventexec::{DlxHotKeyName, TenantAuthority, TenantAuthorityBinding};
 use generated::event::identity_v1::session_created;
 use identity::ports::{
     DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeRepo, DynRoleBindingLifecycle,
@@ -247,7 +247,7 @@ impl KeyProvider for JourneyKeyProvider {
 pub fn dlx_payload_protector() -> postgres::DlxPayloadProtector {
     postgres::DlxPayloadProtector::new(
         DynKeyProvider::new_box(JourneyKeyProvider),
-        KeyName::try_new("journey-dlx").expect("valid journey dlx key name"),
+        DlxHotKeyName::try_new("journey-dlx").expect("valid journey dlx key name"),
     )
 }
 

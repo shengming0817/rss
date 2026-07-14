@@ -31,6 +31,7 @@
 //!   `cargo xtask runtime-deps guard`    SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）
 //!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
 //!   `cargo xtask inbox-cutover-guard`    inbox receipt cutover 旧 token 回流守卫（CI 门）
+//!   `cargo xtask dlx-lifecycle-funnel`   DLX verified WORM archive-before-purge 单漏斗守卫（CI 门）
 //!   `cargo xtask pg-tenant-tx-guard`    Postgres tenant 表 raw-pool / TxManager bypass 守卫（CI 门）
 //!   `cargo xtask repo-scope-guard`      domain repo port 禁裸 TenantId / RowVisibility / RowScope 签名守卫（CI 门）
 //!   `cargo xtask reconcile-outbox-command-guard`
@@ -91,6 +92,7 @@ mod coverage;
 mod defergate;
 mod diagnostic;
 mod diffcov;
+mod dlx_lifecycle_funnel;
 mod doc_contracts;
 mod event_transport_guard;
 mod graph;
@@ -211,6 +213,8 @@ enum Command {
     SchemaRls,
     /// inbox receipt runtime cutover old-token guard（INBOX-RECEIPTS-CUTOVER-01）。
     InboxCutoverGuard,
+    /// DLX verified WORM archive-before-purge 单漏斗守卫（DLX-LIFECYCLE-FUNNEL-01）。
+    DlxLifecycleFunnel,
     /// tenant-scope SET-LOCAL 单漏斗守卫（TENANCY-SETLOCAL-FUNNEL-01）。
     SetLocalFunnel,
     /// Postgres tenant-table raw-pool / TxManager bypass guard（TENANCY-PG-TX-FUNNEL-01）。
@@ -281,6 +285,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         }),
         ["schema-rls"] => Ok(Command::SchemaRls),
         ["inbox-cutover-guard"] => Ok(Command::InboxCutoverGuard),
+        ["dlx-lifecycle-funnel"] => Ok(Command::DlxLifecycleFunnel),
         ["setlocal-funnel"] => Ok(Command::SetLocalFunnel),
         ["pg-tenant-tx-guard"] => Ok(Command::PgTenantTxGuard),
         ["repo-scope-guard"] => Ok(Command::RepoScopeGuard),
@@ -724,6 +729,9 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::SchemaRls => diagnostic::run_check(&schema_rls::SchemaRlsGuard),
         Command::InboxCutoverGuard => {
             diagnostic::run_check(&inbox_cutover_guard::InboxCutoverGuard)
+        }
+        Command::DlxLifecycleFunnel => {
+            diagnostic::run_check(&dlx_lifecycle_funnel::DlxLifecycleFunnel)
         }
         Command::SetLocalFunnel => diagnostic::run_check(&setlocal_funnel::SetLocalFunnelGuard),
         Command::PgTenantTxGuard => diagnostic::run_check(&pg_tenant_tx_guard::PgTenantTxGuard),
@@ -1798,6 +1806,21 @@ mod tests {
     fn parse_command_inbox_cutover_guard_rejects_trailing_args() {
         assert!(parse_command(&s(&["inbox-cutover-guard", "--bogus"])).is_err());
         assert!(parse_command(&s(&["inbox-cutover-guard", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_dlx_lifecycle_funnel() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["dlx-lifecycle-funnel"]))?,
+            Command::DlxLifecycleFunnel
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_dlx_lifecycle_funnel_rejects_trailing_args() {
+        assert!(parse_command(&s(&["dlx-lifecycle-funnel", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["dlx-lifecycle-funnel", "extra"])).is_err());
     }
 
     #[test]

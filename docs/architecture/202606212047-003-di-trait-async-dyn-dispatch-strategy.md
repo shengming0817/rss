@@ -6,6 +6,7 @@
 - **后续修订**：**ADR-005**（#1083，2026-06-23）把「所有 DI port 收敛 diport」部分化——域形 repo/service port 归域 crate（§6 偏离 2 + §7 行 1 已就地重写并重评威胁矩阵）。
 - **后续修订**：**Amendment（#1095，2026-06-23）**——async DI port 注入形态收口（`make(X: Send)` 的 `DynX` 是 Send 非 Sync ⇒ `Arc<DynX>` 是 `!Send`；多次调用 async 消费者用泛型静态分发而非 `Arc<DynX>`）。§4.3 / §4.5 冲突段就地重写、§7 威胁矩阵补行、Option A defer。见下「Amendment」节。
 - **后续修订**：**Amendment（#1142，2026-06-25）**——新增 ack-capable delivery seam（`Acker` / `AckableSubscriber` 两个 async DI port + `Delivery`/`AckAction` 值类型），照本 ADR 既定 `make(X: Send)`+dynosaur 范式扩端口（**非新机制**），使 AMQP 消费达成 at-least-once。§7 补行、威胁矩阵重评。见下「Amendment（#1142）」节。
+- **后续修订**：**Amendment（#1168，2026-07-14）**——DLX lifecycle 两个 provider-neutral port 归 `diport`，按 #1095 的多次 `Send + Sync` 调用形态使用 `trait_variant` Send 变体 + 静态泛型；不生成无消费方的 dyn wrapper。第三个 cipher port 删除，eventexec 直接静态消费既有 `KeyProvider`。见下「Amendment（#1168）」节。
 - **归属**：framework（DI 接缝是 provider-agnostic 基础设施，不绑单一域）
 - **AI-robust 评级**：见 §7（本 ADR 引入的 enforcement 逐条 Hard/Medium）
 
@@ -127,6 +128,37 @@ ack/requeue/reject 接到消费侧。
 - **provider 可互换性**：`AckableSubscriber` / `Acker` 经 trait bound + 构造器必填参注入，与 §2 一致，未削弱安全模型。
 - **范围边界**：consumer worker 生命周期（`run_consumer_ackable` spawn + `ManagedResource`/`ShutdownStack` + probe）
   与 MQTT manual-ack（#1265）不在本 amendment——前者派生 follow-up issue 跟踪、后者已有 open issue。
+
+---
+
+## Amendment（2026-07-14，#1168）：DLX lifecycle 静态 Send port 与 cipher seam 删除
+
+**触发**：`DlxLifecycleRepository` / `DlxArchiveStore` 是 provider-neutral 基础设施 port，却曾定义在
+`eventexec`；同时 `DlxArchiveCipher` 把既有 `KeyProvider` 再包装成第三个可替换 seam，并用
+`Arc<Mutex<Box<DynKeyProvider>>>` 补偿 `DynKeyProvider: Send + !Sync`。前者违反 ADR-005 category line，后者扩大
+能力面且把 #1095 已确认的 dyn 限制转化为运行期锁。
+
+**决策**：两个 port 迁入 `diport`。它们由 `trait_variant` 生成 Send future 变体，但不生成 `Dyn*`：DLX worker
+持有单一组合根静态选择的 provider，跨 tick 多次通过 `&self` 调用，所需形态正是 #1095 三分表的
+`P: Port + Send + Sync + 'static` 静态分发。`DlxLifecycle<R, S, K>` 直接约束既有 `K: KeyProvider`；archive
+AAD、typed archive key 与 seal/open 编排留在 eventexec 私有具体 service。不存在 cipher port、dyn wrapper、
+兼容 re-export 或 provider fallback。
+
+repository 的 candidate / verified receipt / expired receipt / missing proof 仍由 eventexec 拥有，并通过 port 的
+associated types 表达；eventexec 在 `DlxLifecycle` bound 中把 associated types 精确绑定到四个 sealed 类型。
+`diport` 的 trait 签名不命名也不依赖 eventexec，依赖方向保持单向。
+
+### 威胁矩阵 / 安全模型重评
+
+- **错误 proof/provider 组合**：associated-type equality + 私有 proof 构造器使错误 receipt/proof 类型无法注入
+  `DlxLifecycle`（Hard）；`DlxArchiveStore::ObjectKey` 同样精确绑定 typed `DlxArchiveObjectKey`。
+- **archive/hot key 混用**：eventexec 私有 crypto service 只接收 `DlxArchiveKeyName`，并在 encrypt/decrypt 边界
+  校验 `KeyRef.name`；运行时另以独立 Vault workload token 限权。删除 cipher port不削弱该边界。
+- **运行期替换能力**：无退化。组合根仍可用 trait bound 选择任一 production/test provider；当前不存在运行期
+  异构 provider 集合，故无消费方的 dyn wrapper 不是能力。
+- **治理载体**：port 定义归属由 crate 图 + `diport` 无 eventexec 依赖守（Hard）；生产 impl 站点复用
+  `rss_diport_impl_allowlist`，旧 eventexec port/cipher token 由 `DLX-LIFECYCLE-FUNNEL-01` synthetic red +
+  recursive anti-vacuity 拒绝（Medium）。无 Soft 例外。
 
 ---
 

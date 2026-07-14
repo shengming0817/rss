@@ -16,13 +16,12 @@ use eventexec::{
 
 use crate::PgStore;
 use crate::cotx::{PgTenantPool, infra_tenant_scope};
-use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
+use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector, SensitiveJson};
 use crate::outbox::{
     OutboxAppendError, ReplayedOutboxAppend, STATUS_DLX, append_replayed_outbox_with_projection,
 };
 use crate::projection_events::ProjectionWriteRegistry;
 
-const KEY_RELAY_FAILURE_REASON: &str = "relayFailureReason";
 const OUTBOX_RELAY_DLX_FALLBACK_SUMMARY: &str = "outbox relay dlx";
 #[cfg(test)]
 const LIST_DEAD_LETTER_BIND_COUNT: u32 = 11;
@@ -34,7 +33,7 @@ const LIST_DEAD_LETTER_SQL: &str = r#"
            contract_id,
            topic,
            consumer_group,
-           original_entry_payload_len,
+           payload_len,
            error_summary,
            num_attempts,
            source_kind,
@@ -146,8 +145,8 @@ impl DlqStore for PgDlqStore {
                         let row: Option<ReplayDeadLetterRow> = sqlx::query_as(
                             r#"
                             SELECT source_kind, message_id, producer_domain, consumer_domain,
-                                   contract_id, original_entry,
-                                   original_entry_key_ref, topic, consumer_group, metadata
+                                   contract_id, replay_capsule,
+                                   replay_capsule_key_ref, topic, consumer_group
                             FROM dead_letter
                             WHERE id = $1::uuid
                               AND tenant_id = $2::uuid
@@ -165,11 +164,10 @@ impl DlqStore for PgDlqStore {
                             producer_domain,
                             consumer_domain,
                             contract_id,
-                            original_entry,
+                            replay_capsule,
                             key_ref,
                             topic,
                             consumer_group,
-                            metadata,
                         )) = row
                         else {
                             return Err(DlqError::NotFound);
@@ -177,16 +175,15 @@ impl DlqStore for PgDlqStore {
 
                         match parse_source(&source)? {
                             DeadLetterSource::Consumer => {}
-                            DeadLetterSource::Legacy
-                            | DeadLetterSource::OutboxRelay
+                            DeadLetterSource::OutboxRelay
                             | DeadLetterSource::Projection
                             | DeadLetterSource::Saga => {
                                 return Err(DlqError::NotReplayable);
                             }
                         }
 
-                        let payload = payload_protector
-                            .decrypt(
+                        let decoded = payload_protector
+                            .decrypt_replay_capsule(
                                 DlxPayloadContext::new(
                                     request.tenant(),
                                     &source,
@@ -197,24 +194,29 @@ impl DlqStore for PgDlqStore {
                                     consumer_group.as_deref(),
                                     &message_id,
                                 ),
-                                &original_entry,
+                                &replay_capsule,
                                 &key_ref,
                             )
                             .await
                             .map_err(|err| {
                                 dlq_payload_error(
-                                    "replay.decrypt_original_entry",
+                                    "replay.decrypt_replay_capsule",
                                     request.dead_letter_id().as_str(),
                                     request.tenant(),
                                     err,
                                 )
                             })?;
-                        let (contract_version, schema_hash) = replay_schema_columns(&metadata)?;
-                        let metadata = replay_metadata(
-                            metadata,
+                        let (payload, mut metadata) = decoded.into_parts();
+                        let (contract_version, schema_hash) =
+                            replay_schema_columns(metadata.expose())?;
+                        let metadata = SensitiveJson::new(replay_metadata(
+                            metadata.take(),
                             request.tenant(),
                             request.dead_letter_id().as_str(),
                             &message_id,
+                        ));
+                        let metadata_json = secure::Plaintext::new(
+                            serde_json::to_vec(metadata.expose()).map_err(|_| DlqError::Store)?,
                         );
 
                         let outcome = append_replayed_outbox_with_projection(
@@ -228,7 +230,7 @@ impl DlqStore for PgDlqStore {
                                 contract_version,
                                 schema_hash,
                                 payload,
-                                metadata_json: metadata.to_string(),
+                                metadata_json,
                                 causation_id: None,
                             },
                             &projection_registry,
@@ -379,7 +381,7 @@ impl PgDlqStore {
                                contract_id,
                                topic,
                                consumer_group,
-                               original_entry_payload_len,
+                               payload_len,
                                error_summary,
                                num_attempts,
                                source_kind,
@@ -422,16 +424,16 @@ impl PgDlqStore {
                                    o.contract_id,
                                    o.topic,
                                    octet_length(o.payload)::bigint,
-                                   COALESCE(dl.metadata ->> $4, dl.error_summary, $5),
+                                   COALESCE(dl.error_summary, $4),
                                    o.retry_count,
                                    EXTRACT(EPOCH FROM o.dlx_at)::bigint
                             FROM outbox o
                             LEFT JOIN LATERAL (
-                                SELECT dl.error_summary, dl.metadata
+                                SELECT dl.error_summary
                                 FROM dead_letter dl
                                 WHERE dl.tenant_id = o.tenant_id
                                   AND dl.message_id = o.event_id
-                                  AND dl.source_kind = $6
+                                  AND dl.source_kind = $5
                                 ORDER BY dl.last_attempt_at DESC, dl.id DESC
                                 LIMIT 1
                             ) dl ON true
@@ -443,7 +445,6 @@ impl PgDlqStore {
                         .bind(STATUS_DLX)
                         .bind(tenant.to_string())
                         .bind(event_id)
-                        .bind(KEY_RELAY_FAILURE_REASON)
                         .bind(OUTBOX_RELAY_DLX_FALLBACK_SUMMARY)
                         .bind(DeadLetterSource::OutboxRelay.as_str())
                         .fetch_optional(&mut *conn)
@@ -546,16 +547,16 @@ impl PgDlqStore {
                                    o.contract_id,
                                    o.topic,
                                    octet_length(o.payload)::bigint,
-                                   COALESCE(dl.metadata ->> $9, dl.error_summary, $10),
+                                   COALESCE(dl.error_summary, $9),
                                    o.retry_count,
                                    EXTRACT(EPOCH FROM o.dlx_at)::bigint
                             FROM outbox o
                             LEFT JOIN LATERAL (
-                                SELECT dl.error_summary, dl.metadata
+                                SELECT dl.error_summary
                                 FROM dead_letter dl
                                 WHERE dl.tenant_id = o.tenant_id
                                   AND dl.message_id = o.event_id
-                                  AND dl.source_kind = $11
+                                  AND dl.source_kind = $10
                                 ORDER BY dl.last_attempt_at DESC, dl.id DESC
                                 LIMIT 1
                             ) dl ON true
@@ -577,7 +578,7 @@ impl PgDlqStore {
                                     )
                               )
                             ORDER BY EXTRACT(EPOCH FROM o.dlx_at)::bigint DESC, o.event_id ASC
-                            LIMIT $12
+                            LIMIT $11
                             "#,
                         )
                         .bind(STATUS_DLX)
@@ -588,7 +589,6 @@ impl PgDlqStore {
                         .bind(DlqEntryKind::OutboxDlx.cursor_part())
                         .bind(cursor_kind)
                         .bind(cursor_id)
-                        .bind(KEY_RELAY_FAILURE_REASON)
                         .bind(OUTBOX_RELAY_DLX_FALLBACK_SUMMARY)
                         .bind(DeadLetterSource::OutboxRelay.as_str())
                         .bind(limit)
@@ -631,7 +631,6 @@ type ReplayDeadLetterRow = (
     String,
     String,
     Option<String>,
-    serde_json::Value,
 );
 type OutboxRow = (String, String, String, String, i64, String, i32, i64);
 
@@ -802,7 +801,7 @@ fn dlq_payload_error(
         dead_letter_id,
         tenant_id = %tenant,
         key_provider_kind = ?kind,
-        "dlq: original_entry payload decrypt failed"
+        "dlq: replay capsule decrypt failed"
     );
     match kind {
         KeyProviderErrorKind::Rejected => DlqError::InvalidPayload,

@@ -16,6 +16,8 @@ const RATE_LIMITER_PORT: &str = "diport::RateLimiter";
 const LOCK_STORE_PORT: &str = "diport::LockStore";
 const CAS_STORE_PORT: &str = "diport::CasStore";
 const OBJECT_STORE_PORT: &str = "diport::ObjectStore";
+const DLX_LIFECYCLE_REPOSITORY_PORT: &str = "diport::DlxLifecycleRepository";
+const DLX_ARCHIVE_STORE_PORT: &str = "diport::DlxArchiveStore";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -337,6 +339,10 @@ pub enum DiportPort {
     Cas,
     #[serde(rename = "diport::ObjectStore")]
     ObjectStore,
+    #[serde(rename = "diport::DlxLifecycleRepository")]
+    DlxLifecycleRepository,
+    #[serde(rename = "diport::DlxArchiveStore")]
+    DlxArchiveStore,
 }
 
 impl DiportPort {
@@ -353,6 +359,8 @@ impl DiportPort {
             Self::Lock => LOCK_STORE_PORT,
             Self::Cas => CAS_STORE_PORT,
             Self::ObjectStore => OBJECT_STORE_PORT,
+            Self::DlxLifecycleRepository => DLX_LIFECYCLE_REPOSITORY_PORT,
+            Self::DlxArchiveStore => DLX_ARCHIVE_STORE_PORT,
         }
     }
 }
@@ -523,6 +531,36 @@ outputs = ["resources", "workers"]
             [LifecycleChannel::Resources, LifecycleChannel::Workers]
         );
         manifest.validate_basic().expect("valid manifest");
+    }
+
+    #[test]
+    fn parses_closed_dlx_lifecycle_provider_ports() {
+        for (port, expected) in [
+            (
+                "diport::DlxLifecycleRepository",
+                DiportPort::DlxLifecycleRepository,
+            ),
+            ("diport::DlxArchiveStore", DiportPort::DlxArchiveStore),
+        ] {
+            let source = MINIMAL.replace("diport::Pdp", port);
+            let manifest = AssemblyManifest::from_toml_str(&source).expect("DLX port parses");
+            assert_eq!(manifest.diport_providers[0].port, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_retired_eventexec_dlx_ports_and_cipher_port() {
+        for retired in [
+            ["eventexec::DlxLifecycle", "Repository"].concat(),
+            ["eventexec::DlxArchive", "Store"].concat(),
+            ["eventexec::DlxArchive", "Cipher"].concat(),
+        ] {
+            let source = MINIMAL.replace("diport::Pdp", &retired);
+            assert!(
+                AssemblyManifest::from_toml_str(&source).is_err(),
+                "retired port unexpectedly parsed: {retired}"
+            );
+        }
     }
 
     #[test]

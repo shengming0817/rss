@@ -263,6 +263,33 @@ label 闭值集纪律：
 新增或改名上述 metric / label 必须同步 schema、tests、dashboard、`docs/ops/outbox-relay-alerts.rules.yaml`
 与 emit site。
 
+### DLX Lifecycle Metrics（#1168）
+
+DLX archive-before-purge worker 发射：
+
+| metric | 类型 | label | 语义 |
+|--------|------|-------|------|
+| `retention_sweep_deleted_total` | Counter | `target` | 已删除的 terminal durable rows；DLX 只记 verified hot purge |
+| `retention_sweep_ticks_total` | Counter | `target`,`outcome` | 有界 sweep/lifecycle tick 结果 |
+| `retention_sweep_duration_seconds` | Histogram | `target`,`outcome` | 完整 tick 耗时 |
+| `dead_letter_archive_pending_depth` | Gauge | none | 尚无 verified receipt 的 HOT DLX 数量 |
+| `dead_letter_archive_oldest_pending_age_seconds` | Gauge | none | 最早待归档 HOT DLX 的年龄 |
+
+- DLX lifecycle 只使用 `target="dead_letter"`；`outcome` 闭合于
+  `success|transient|invariant`，由 `RetentionTarget` / `RetentionOutcome` 类型产出。不存在任意
+  phase/error label，禁止 tenant、dead-letter id、object key、payload、checksum 或错误文本进入 label。
+- backlog 查询失败时 runtime 把两个 gauge 设为 `NaN`，并把最终 tick outcome 记为
+  `transient`；不得把 stale sample 或缺失 series 解释为 0。
+- `DlxArchiveLifecycleFailure` 对 transient/invariant 分页。transient 仍遵守全局 Degraded
+  readyz 语义（HTTP 200），但删除已 fail-closed 停止；告警是运维响应面，不得为了摘流
+  把 transient 伪报为 Unhealthy。
+- `DlxArchiveOldestPendingHigh` 在最早待归档行超过 5 分钟且持续 5 分钟时分页。
+  值班先查 `dlx_lifecycle` / `dlx_archive_ready`，再查独立 PG/Vault/S3 凭据、WORM/lifecycle
+  policy 和 receipt CAS。
+
+任何 metric 名、阈值或 outcome 变更必须同步 emit test、Prometheus rule/test、dashboard 和
+consistency ops runbook index。
+
 ### Consumer Settle Metrics（#1142）
 
 at-least-once consumer（`eventexec::run_consumer_ackable`）每次向 broker 结算投递发射：

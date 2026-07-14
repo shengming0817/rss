@@ -428,7 +428,7 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
             runtime_missing,
             Err(crate::PgError::EventDeliveryPolicyMismatch)
         ));
-        let maintenance_missing = PgRuntimeDeps::setup_maintenance(&config).await;
+        let maintenance_missing = PgRuntimeDeps::connect_maintenance(&config).await;
         assert!(matches!(
             maintenance_missing,
             Err(crate::PgError::EventDeliveryPolicyMismatch)
@@ -455,11 +455,44 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
             runtime_drift,
             Err(crate::PgError::EventDeliveryPolicyMismatch)
         ));
-        let maintenance_drift = PgRuntimeDeps::setup_maintenance(&config).await;
+        let maintenance_drift = PgRuntimeDeps::connect_maintenance(&config).await;
         assert!(matches!(
             maintenance_drift,
             Err(crate::PgError::EventDeliveryPolicyMismatch)
         ));
+        Ok(())
+    }
+    .await;
+
+    let cleanup = drop_isolated_database(&admin, &database).await;
+    admin.shutdown().await?;
+    cleanup?;
+    verdict
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn maintenance_connect_cannot_apply_pending_migrations() -> TestResult {
+    let (fixture, admin) = connect_pg().await?;
+    let database = create_isolated_database(&admin, "maintenance_connect_only").await?;
+    let config = isolated_database_config(fixture.params(), &database);
+
+    let verdict: TestResult = async {
+        let result = PgRuntimeDeps::connect_maintenance(&config).await;
+        assert!(
+            result.is_err(),
+            "empty schema must fail instead of being migrated"
+        );
+
+        let observer = PgStore::connect(&config).await?;
+        let migrations_absent: bool =
+            sqlx::query_scalar("SELECT to_regclass('public._sqlx_migrations') IS NULL")
+                .fetch_one(&observer.pool)
+                .await?;
+        assert!(
+            migrations_absent,
+            "maintenance connect must never create migration ledger"
+        );
+        observer.shutdown().await?;
         Ok(())
     }
     .await;
@@ -8970,110 +9003,912 @@ async fn t_inbox_sweeper_rss_app_uses_frozen_policy_without_free_retain_argument
     Ok(())
 }
 
-// ── #1210 dead_letter 保留期清理：超期死信被删；保留期内死信存活（anti-vacuity）。──
+// ── #1168 DLX archive-before-purge: fixed role/functions and verified receipt gate. ──
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
-// reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
-async fn t_dead_letter_sweep_rss_app_removes_old_keeps_recent() -> TestResult {
+// reason: integration fixtures use known-valid UUIDs and assert fail-loud.
+async fn t_dlx_lifecycle_requires_verified_worm_receipt_before_bounded_purge() -> TestResult {
     use diport::{
         DeadLetterProvenance, DeadLetterRecord, DeadLetterStore, DeadLetterSummary,
         EnvelopeMetadata,
     };
-    let (pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &store).await?;
-    let dl = app.dead_letter(test_dlx_payload_protector());
-    let domain = unique_domain("dl-sweep");
-    let (owner, owner_can_login, owner_bypass, rss_app_can_execute): (String, bool, bool, bool) =
-        sqlx::query_as(
-            r#"
-            SELECT pg_get_userbyid(p.proowner),
-                   r.rolcanlogin,
-                   r.rolbypassrls,
-                   has_function_privilege('rss_app', 'rss_sweep_dead_letter(bigint)', 'EXECUTE')
-            FROM pg_proc p
-            JOIN pg_roles r ON r.oid = p.proowner
-            WHERE p.proname = 'rss_sweep_dead_letter'
-            "#,
-        )
-        .fetch_one(&store.pool)
-        .await?;
-    assert_eq!(owner, "rss_dead_letter_maintenance");
-    assert!(
-        !owner_can_login,
-        "dead-letter maintenance definer must be NOLOGIN"
-    );
-    assert!(
-        owner_bypass,
-        "FORCE RLS global sweep must be owned by explicit BYPASSRLS maintenance role"
-    );
-    assert!(
-        rss_app_can_execute,
-        "rss_app must only receive EXECUTE on the fixed sweep function"
-    );
 
-    // old 死信：写入 → 回拨 last_attempt_at 过默认保留期。
-    dl.write_dead_letter(DeadLetterRecord::new(
-        vocab::TenantId::parse(COTX_TENANT_A).unwrap(),
-        "msg-dl-old",
-        DeadLetterProvenance::consumer(domain.as_str(), "dl-sweep-consumer"),
-        "contract-x",
-        "dl.old",
-        Some("dl-sweep-consumer".to_string()),
-        b"payload".to_vec(),
-        DeadLetterSummary::new("aged dead letter"),
-        10,
-        EnvelopeMetadata::empty(),
-    ))
-    .await?;
-    sqlx::query(
-        "UPDATE dead_letter SET last_attempt_at = now() - make_interval(secs => $1) \
-         WHERE producer_domain = $2 AND topic = $3",
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    sqlx::query("GRANT rss_dlx_archiver, rss_dlx_verifier, rss_dlx_purger TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let catalog: (bool, bool, bool, bool, bool) = sqlx::query_as(
+        r#"
+        SELECT attribute.attnotnull,
+               relation.relrowsecurity,
+               relation.relforcerowsecurity,
+               has_function_privilege('rss_app', 'rss_dlx_purge_verified()', 'EXECUTE'),
+               to_regprocedure('rss_sweep_dead_letter(bigint)') IS NULL
+        FROM pg_attribute AS attribute
+        JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+        WHERE relation.oid = 'dead_letter'::regclass
+          AND attribute.attname = 'tenant_id'
+        "#,
     )
-    .bind((crate::DEAD_LETTER_RETENTION_SECONDS + 3600) as i64)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(catalog, (true, true, true, false, true));
+
+    let role: (bool, bool, bool) = sqlx::query_as(
+        "SELECT rolsuper, rolbypassrls, rolcanlogin FROM pg_roles WHERE rolname = 'rss_dlx_archiver'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(role, (false, false, false));
+
+    let hardened_definers: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM pg_catalog.pg_proc AS procedure
+        JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
+        WHERE namespace.nspname = 'public'
+          AND procedure.proname = ANY(ARRAY[
+              'rss_dlx_archive_backlog',
+              'rss_dlx_claim_archive_candidates',
+              'rss_dlx_settle_archive_retry',
+              'rss_dlx_quarantine_archive_candidate',
+              'rss_dlx_record_archive_receipt',
+              'rss_dlx_purge_verified',
+              'rss_dlx_reconcile_expired_receipts',
+              'rss_dlx_delete_missing_archive_receipt'
+          ])
+          AND procedure.prosecdef
+          AND 'search_path=pg_catalog, pg_temp' = ANY(procedure.proconfig)
+        "#,
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(hardened_definers, 8);
+
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let domain = unique_domain("dlx-lifecycle");
+    let writer = store.dead_letter(test_dlx_payload_protector());
+    for message in ["verified-old", "unverified-old", "verified-recent"] {
+        writer
+            .write_dead_letter(DeadLetterRecord::new(
+                tenant,
+                message,
+                DeadLetterProvenance::consumer(domain.as_str(), "dlx-consumer"),
+                "contract-x",
+                "dlx.topic",
+                Some("dlx-consumer".to_string()),
+                b"payload".to_vec(),
+                DeadLetterSummary::new("safe summary"),
+                3,
+                EnvelopeMetadata::empty(),
+            ))
+            .await?;
+    }
+    sqlx::query(
+        "UPDATE dead_letter SET last_attempt_at = now() - interval '31 days' \
+         WHERE producer_domain = $1 AND message_id <> 'verified-recent'",
+    )
     .bind(&domain)
-    .bind("dl.old")
     .execute(&store.pool)
     .await?;
 
-    // recent 死信（anti-vacuity）：写入，不回拨。
-    dl.write_dead_letter(DeadLetterRecord::new(
-        vocab::TenantId::parse(COTX_TENANT_A).unwrap(),
-        "msg-dl-recent",
-        DeadLetterProvenance::consumer(domain.as_str(), "dl-sweep-consumer"),
-        "contract-x",
-        "dl.recent",
-        Some("dl-sweep-consumer".to_string()),
-        b"payload".to_vec(),
-        DeadLetterSummary::new("recent dead letter"),
-        10,
-        EnvelopeMetadata::empty(),
-    ))
-    .await?;
-
-    // sweep 默认保留期：仅 old（超过 30 天）被删。
-    let deleted = dl.sweep(crate::DEAD_LETTER_RETENTION_SECONDS).await?;
-    assert!(deleted >= 1, "至少删除老死信: deleted={deleted}");
-
-    let cnt_old: (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM dead_letter WHERE producer_domain = $1 AND topic = $2",
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id::text, message_id FROM dead_letter WHERE producer_domain = $1 ORDER BY message_id",
     )
     .bind(&domain)
-    .bind("dl.old")
-    .fetch_one(&store.pool)
+    .fetch_all(&store.pool)
     .await?;
-    assert_eq!(cnt_old.0, 0, "超保留期死信必须被 sweep 删");
+    let claims: Vec<(String, String)> = sqlx::query_as(
+        "SELECT dead_letter_id::text, archive_claim_token::text FROM rss_dlx_claim_archive_candidates()",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    for (id, _) in rows
+        .iter()
+        .filter(|(_, message)| message != "unverified-old")
+    {
+        let claim_token = claims
+            .iter()
+            .find(|(claimed_id, _)| claimed_id == id)
+            .map(|(_, token)| token)
+            .ok_or("verified fixture must have a durable archive claim")?;
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_dlx_verifier")
+            .execute(&mut *tx)
+            .await?;
+        let applied: i64 = sqlx::query_scalar(
+            r#"
+            SELECT rss_dlx_record_archive_receipt(
+                $1::uuid, $2::uuid, $3::uuid, 'version-1', decode(repeat('ab', 32), 'hex'),
+                'archive-key:1', 'COMPLIANCE', now() + interval '31 days'
+            )
+            "#,
+        )
+        .bind(tenant.to_string())
+        .bind(id)
+        .bind(claim_token)
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(applied, 1);
+        tx.commit().await?;
+    }
 
-    let cnt_recent: (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM dead_letter WHERE producer_domain = $1 AND topic = $2",
+    let mut tx = store.pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE rss_dlx_purger")
+        .execute(&mut *tx)
+        .await?;
+    let deleted: i64 = sqlx::query_scalar("SELECT rss_dlx_purge_verified()")
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert_eq!(
+        deleted, 1,
+        "only old + verified + retained HOT row is purgeable"
+    );
+
+    let survivors: Vec<String> = sqlx::query_scalar(
+        "SELECT message_id FROM dead_letter WHERE producer_domain = $1 ORDER BY message_id",
     )
     .bind(&domain)
-    .bind("dl.recent")
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(survivors, vec!["unverified-old", "verified-recent"]);
+    let purged_id = rows
+        .iter()
+        .find(|(_, message)| message == "verified-old")
+        .map(|(id, _)| id)
+        .ok_or("verified-old fixture must exist")?;
+    let retry_after_purge: i64 = sqlx::query_scalar(
+        r#"
+        SELECT rss_dlx_record_archive_receipt(
+            receipt.tenant_id,
+            receipt.dead_letter_id,
+            'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'::uuid,
+            receipt.object_version_id,
+            receipt.checksum_sha256,
+            receipt.archive_key_ref,
+            receipt.object_lock_mode,
+            receipt.object_lock_retain_until
+        )
+        FROM dead_letter_archive_receipts AS receipt
+        WHERE receipt.tenant_id = $1::uuid AND receipt.dead_letter_id = $2::uuid
+        "#,
+    )
+    .bind(tenant.to_string())
+    .bind(purged_id)
     .fetch_one(&store.pool)
     .await?;
-    assert_eq!(cnt_recent.0, 1, "保留期内死信不应被 sweep 删");
+    assert_eq!(
+        retry_after_purge, 0,
+        "same receipt retry remains idempotent after another worker purges HOT"
+    );
+    let receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dead_letter_archive_receipts WHERE tenant_id = $1::uuid",
+    )
+    .bind(tenant.to_string())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(receipts, 2, "purge must retain archive receipt evidence");
 
-    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t_dlx_archiver_pool_gate_requires_exact_role_and_function_only_privileges() -> TestResult {
+    let (fixture, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    sqlx::raw_sql(
+        r#"
+        ALTER ROLE rss_dlx_archiver LOGIN PASSWORD 'rss_dlx_archiver_test_pw' NOBYPASSRLS NOSUPERUSER;
+        ALTER ROLE rss_dlx_verifier LOGIN PASSWORD 'rss_dlx_verifier_test_pw' NOBYPASSRLS NOSUPERUSER;
+        ALTER ROLE rss_dlx_purger LOGIN PASSWORD 'rss_dlx_purger_test_pw' NOBYPASSRLS NOSUPERUSER;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+    let params = fixture.params();
+    let config = |username: &str, password: &str| {
+        PgConfig::new(
+            params.host.clone(),
+            params.port,
+            params.database.clone(),
+            username,
+            PgPassword::new(password),
+        )
+        .with_ssl_mode(PgSslMode::Prefer)
+        .with_acquire_timeout(std::time::Duration::from_secs(5))
+    };
+    let archiver = config("rss_dlx_archiver", "rss_dlx_archiver_test_pw");
+    let verifier = config("rss_dlx_verifier", "rss_dlx_verifier_test_pw");
+    let purger = config("rss_dlx_purger", "rss_dlx_purger_test_pw");
+
+    crate::PgDlxLifecycleRuntime::preflight_identities(&archiver, &verifier, &purger).await?;
+    let runtime = crate::PgDlxLifecycleRuntime::setup(
+        &archiver,
+        &verifier,
+        &purger,
+        test_dlx_payload_protector(),
+    )
+    .await?;
+    let _repository = runtime.repository();
+    runtime.shutdown().await?;
+
+    sqlx::query("GRANT SELECT ON dead_letter TO rss_dlx_archiver")
+        .execute(&store.pool)
+        .await?;
+    let rejected = crate::PgDlxLifecycleRuntime::setup(
+        &archiver,
+        &verifier,
+        &purger,
+        test_dlx_payload_protector(),
+    )
+    .await;
+    assert!(
+        matches!(rejected, Err(crate::PgError::DlxLifecyclePrivileges)),
+        "table DML must reject archiver pool startup"
+    );
+    sqlx::query("REVOKE SELECT ON dead_letter FROM rss_dlx_archiver")
+        .execute(&store.pool)
+        .await?;
+    sqlx::query("CREATE ROLE rss_dlx_forbidden_parent NOLOGIN NOSUPERUSER")
+        .execute(&store.pool)
+        .await?;
+    sqlx::query("GRANT rss_dlx_forbidden_parent TO rss_dlx_archiver")
+        .execute(&store.pool)
+        .await?;
+    let rejected =
+        crate::PgDlxLifecycleRuntime::preflight_identities(&archiver, &verifier, &purger).await;
+    assert!(
+        matches!(rejected, Err(crate::PgError::DlxLifecycleBypassRole)),
+        "SET ROLE membership must reject pre-migration identity preflight"
+    );
+    sqlx::raw_sql(
+        r#"
+        REVOKE rss_dlx_forbidden_parent FROM rss_dlx_archiver;
+        DROP ROLE rss_dlx_forbidden_parent;
+        CREATE ROLE rss_dlx_forbidden_child NOLOGIN NOSUPERUSER;
+        GRANT rss_dlx_archiver TO rss_dlx_forbidden_child;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+    let rejected =
+        crate::PgDlxLifecycleRuntime::preflight_identities(&archiver, &verifier, &purger).await;
+    assert!(
+        matches!(rejected, Err(crate::PgError::DlxLifecycleBypassRole)),
+        "role inheriting archiver must reject identity preflight"
+    );
+    sqlx::raw_sql(
+        r#"
+        REVOKE rss_dlx_archiver FROM rss_dlx_forbidden_child;
+        DROP ROLE rss_dlx_forbidden_child;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration fixtures use known-valid UUIDs and exercise opaque durable claims.
+async fn t_dlx_poison_candidate_is_quarantined_without_starving_retryable_peer() -> TestResult {
+    use diport::{
+        DeadLetterProvenance, DeadLetterRecord, DeadLetterStore, DeadLetterSummary,
+        DlxLifecycleError, DlxLifecycleOperation, DlxLifecycleReason, DlxLifecycleRepository,
+        EnvelopeMetadata,
+    };
+
+    let (fixture, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    sqlx::raw_sql(
+        r#"
+        ALTER ROLE rss_dlx_archiver LOGIN PASSWORD 'rss_dlx_archiver_test_pw' NOBYPASSRLS NOSUPERUSER;
+        ALTER ROLE rss_dlx_verifier LOGIN PASSWORD 'rss_dlx_verifier_test_pw' NOBYPASSRLS NOSUPERUSER;
+        ALTER ROLE rss_dlx_purger LOGIN PASSWORD 'rss_dlx_purger_test_pw' NOBYPASSRLS NOSUPERUSER;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+    let params = fixture.params();
+    let config = |username: &str, password: &str| {
+        PgConfig::new(
+            params.host.clone(),
+            params.port,
+            params.database.clone(),
+            username,
+            PgPassword::new(password),
+        )
+        .with_ssl_mode(PgSslMode::Prefer)
+        .with_acquire_timeout(std::time::Duration::from_secs(5))
+    };
+    let runtime = crate::PgDlxLifecycleRuntime::setup(
+        &config("rss_dlx_archiver", "rss_dlx_archiver_test_pw"),
+        &config("rss_dlx_verifier", "rss_dlx_verifier_test_pw"),
+        &config("rss_dlx_purger", "rss_dlx_purger_test_pw"),
+        test_dlx_payload_protector(),
+    )
+    .await?;
+    let repository = runtime.repository();
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let domain = unique_domain("dlx-poison-claim");
+    let poison_message = unique_event_id("dlx-poison");
+    let retryable_message = unique_event_id("dlx-retryable");
+    let writer = store.dead_letter(test_dlx_payload_protector());
+    for message_id in [&poison_message, &retryable_message] {
+        writer
+            .write_dead_letter(DeadLetterRecord::new(
+                tenant,
+                message_id,
+                DeadLetterProvenance::consumer(domain.as_str(), "audit"),
+                "contract-poison",
+                "dlx.poison",
+                Some("audit".to_owned()),
+                b"payload".to_vec(),
+                DeadLetterSummary::new("safe summary"),
+                1,
+                EnvelopeMetadata::empty(),
+            ))
+            .await?;
+    }
+    sqlx::query(
+        r#"
+        UPDATE dead_letter
+        SET replay_capsule = '{"ciphertext":"corrupt"}'::jsonb
+        WHERE producer_domain = $1 AND message_id = $2
+        "#,
+    )
+    .bind(&domain)
+    .bind(&poison_message)
+    .execute(&store.pool)
+    .await?;
+
+    let mut claimed = repository.claim_archive_candidates().await?;
+    assert_eq!(
+        claimed.len(),
+        1,
+        "poison decode must settle only itself and return the healthy peer"
+    );
+    assert_eq!(
+        claimed[0]
+            .candidate()
+            .canonical()
+            .safe_metadata()
+            .message_id(),
+        retryable_message
+    );
+    let poison_state: (bool, bool, i32, Option<String>) = sqlx::query_as(
+        r#"
+        SELECT archive_quarantined_at IS NOT NULL,
+               archive_claim_token IS NULL,
+               archive_failure_count,
+               archive_last_failure_reason
+        FROM dead_letter
+        WHERE producer_domain = $1 AND message_id = $2
+        "#,
+    )
+    .bind(&domain)
+    .bind(&poison_message)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        poison_state,
+        (true, true, 1, Some("key_rejected".to_owned()))
+    );
+
+    let first_token: String = sqlx::query_scalar(
+        "SELECT archive_claim_token::text FROM dead_letter WHERE producer_domain = $1 AND message_id = $2",
+    )
+    .bind(&domain)
+    .bind(&retryable_message)
+    .fetch_one(&store.pool)
+    .await?;
+    let claimed = claimed.pop().ok_or("healthy claimed candidate missing")?;
+    let (claim, _) = claimed.into_parts();
+    let settlement = repository
+        .settle_archive_failure(
+            claim,
+            DlxLifecycleError::new(
+                DlxLifecycleOperation::PutArchive,
+                DlxLifecycleReason::ProviderUnavailable,
+            ),
+        )
+        .await?;
+    assert_eq!(settlement, diport::ArchiveClaimSettleOutcome::Applied);
+    let retry_state: (bool, bool, i32, Option<String>) = sqlx::query_as(
+        r#"
+        SELECT archive_claim_token IS NULL,
+               archive_next_attempt_at > now(),
+               archive_failure_count,
+               archive_last_failure_reason
+        FROM dead_letter
+        WHERE producer_domain = $1 AND message_id = $2
+        "#,
+    )
+    .bind(&domain)
+    .bind(&retryable_message)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        retry_state,
+        (true, true, 1, Some("provider_unavailable".to_owned()))
+    );
+    assert!(repository.claim_archive_candidates().await?.is_empty());
+
+    sqlx::query(
+        "UPDATE dead_letter SET archive_next_attempt_at = now() - interval '1 second' \
+         WHERE producer_domain = $1 AND message_id = $2",
+    )
+    .bind(&domain)
+    .bind(&retryable_message)
+    .execute(&store.pool)
+    .await?;
+    assert_eq!(repository.claim_archive_candidates().await?.len(), 1);
+    let second_token: String = sqlx::query_scalar(
+        "SELECT archive_claim_token::text FROM dead_letter WHERE producer_domain = $1 AND message_id = $2",
+    )
+    .bind(&domain)
+    .bind(&retryable_message)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_ne!(
+        first_token, second_token,
+        "reclaim must rotate the opaque CAS token"
+    );
+
+    runtime.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration fixture uses a known-valid tenant UUID.
+async fn t_dlx_receipt_retention_boundary_and_hot_row_rearchive_recovery() -> TestResult {
+    use diport::{
+        DeadLetterProvenance, DeadLetterRecord, DeadLetterStore, DeadLetterSummary,
+        EnvelopeMetadata,
+    };
+
+    let (_fixture, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let message_id = unique_event_id("dlx-retention-boundary");
+    store
+        .dead_letter(test_dlx_payload_protector())
+        .write_dead_letter(DeadLetterRecord::new(
+            tenant,
+            &message_id,
+            DeadLetterProvenance::consumer("identity", "audit"),
+            "contract-retention-boundary",
+            "dlx.retention.boundary",
+            Some("audit".to_string()),
+            b"payload".to_vec(),
+            DeadLetterSummary::new("safe summary"),
+            1,
+            EnvelopeMetadata::empty(),
+        ))
+        .await?;
+    let id: String = sqlx::query_scalar(
+        "SELECT id::text FROM dead_letter WHERE tenant_id = $1::uuid AND message_id = $2",
+    )
+    .bind(tenant.to_string())
+    .bind(&message_id)
+    .fetch_one(&store.pool)
+    .await?;
+    let claim_token: String = sqlx::query_scalar(
+        "SELECT archive_claim_token::text FROM rss_dlx_claim_archive_candidates() WHERE dead_letter_id = $1::uuid",
+    )
+    .bind(&id)
+    .fetch_one(&store.pool)
+    .await?;
+
+    let exact_boundary: Result<i64, sqlx::Error> = sqlx::query_scalar(
+        r#"
+        SELECT rss_dlx_record_archive_receipt(
+            $1::uuid, $2::uuid, $3::uuid, 'version-1', decode(repeat('ab', 32), 'hex'),
+            'archive-key:1', 'COMPLIANCE', now() + interval '30 days'
+        )
+        "#,
+    )
+    .bind(tenant.to_string())
+    .bind(&id)
+    .bind(&claim_token)
+    .fetch_one(&store.pool)
+    .await;
+    assert!(
+        exact_boundary.is_err(),
+        "exactly 30 days must fail the strict retention boundary"
+    );
+
+    let applied: i64 = sqlx::query_scalar(
+        r#"
+        SELECT rss_dlx_record_archive_receipt(
+            $1::uuid, $2::uuid, $3::uuid, 'version-1', decode(repeat('ab', 32), 'hex'),
+            'archive-key:1', 'COMPLIANCE',
+            now() + interval '30 days 1 second'
+        )
+        "#,
+    )
+    .bind(tenant.to_string())
+    .bind(&id)
+    .bind(&claim_token)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(applied, 1, "30 days plus epsilon must be accepted");
+
+    sqlx::query(
+        r#"
+        UPDATE dead_letter_archive_receipts
+        SET verified_at = now() - interval '31 days',
+            object_lock_retain_until = now() - interval '1 second',
+            reconcile_after = now() - interval '1 second'
+        WHERE tenant_id = $1::uuid AND dead_letter_id = $2::uuid
+        "#,
+    )
+    .bind(tenant.to_string())
+    .bind(&id)
+    .execute(&store.pool)
+    .await?;
+    let expired: (String, String, String, String, Vec<u8>) = sqlx::query_as(
+        r#"
+        SELECT tenant_id::text, dead_letter_id::text, object_key, object_version_id,
+               checksum_sha256
+        FROM rss_dlx_reconcile_expired_receipts()
+        WHERE tenant_id = $1::uuid AND dead_letter_id = $2::uuid
+        "#,
+    )
+    .bind(tenant.to_string())
+    .bind(&id)
+    .fetch_one(&store.pool)
+    .await?;
+    let deleted: i64 = sqlx::query_scalar(
+        "SELECT rss_dlx_delete_missing_archive_receipt($1::uuid, $2::uuid, $3, $4, $5)",
+    )
+    .bind(&expired.0)
+    .bind(&expired.1)
+    .bind(&expired.2)
+    .bind(&expired.3)
+    .bind(&expired.4)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        deleted, 1,
+        "verified HEAD-missing proof may delete an expired receipt while HOT remains"
+    );
+
+    let candidate_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rss_dlx_claim_archive_candidates() WHERE dead_letter_id = $1::uuid",
+    )
+    .bind(&id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        candidate_count, 1,
+        "HOT row must become re-archivable after proof CAS"
+    );
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration fixture uses a known-valid tenant UUID.
+async fn t_dlx_verified_receipt_concurrent_cas_is_single_winner() -> TestResult {
+    use diport::{
+        DeadLetterProvenance, DeadLetterRecord, DeadLetterStore, DeadLetterSummary,
+        EnvelopeMetadata,
+    };
+
+    let (_fixture, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let message_id = unique_event_id("dlx-receipt-cas");
+    store
+        .dead_letter(test_dlx_payload_protector())
+        .write_dead_letter(DeadLetterRecord::new(
+            tenant,
+            &message_id,
+            DeadLetterProvenance::consumer("identity", "audit"),
+            "contract-cas",
+            "dlx.cas",
+            Some("audit".to_string()),
+            b"payload".to_vec(),
+            DeadLetterSummary::new("safe summary"),
+            1,
+            EnvelopeMetadata::empty(),
+        ))
+        .await?;
+    let id: String = sqlx::query_scalar(
+        "SELECT id::text FROM dead_letter WHERE tenant_id = $1::uuid AND message_id = $2",
+    )
+    .bind(tenant.to_string())
+    .bind(&message_id)
+    .fetch_one(&store.pool)
+    .await?;
+    let claim_token: String = sqlx::query_scalar(
+        "SELECT archive_claim_token::text FROM rss_dlx_claim_archive_candidates() WHERE dead_letter_id = $1::uuid",
+    )
+    .bind(&id)
+    .fetch_one(&store.pool)
+    .await?;
+    let record = |checksum: &'static str| {
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT rss_dlx_record_archive_receipt(
+                $1::uuid, $2::uuid, $3::uuid, 'version-1', decode(repeat($4, 32), 'hex'),
+                'archive-key:1', 'COMPLIANCE',
+                to_timestamp(2000000000)
+            )
+            "#,
+        )
+        .bind(tenant.to_string())
+        .bind(&id)
+        .bind(&claim_token)
+        .bind(checksum)
+        .fetch_one(&store.pool)
+    };
+    let (left, right) = tokio::join!(record("ab"), record("ab"));
+    let mut outcomes = [left?, right?];
+    outcomes.sort_unstable();
+    assert_eq!(outcomes, [0, 1]);
+
+    let conflict = record("cd").await;
+    assert!(
+        conflict.is_err(),
+        "semantic receipt conflict must fail closed"
+    );
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration fixture uses a known-valid tenant UUID.
+async fn t_dlx_lifecycle_fixed_batch_boundaries_are_100_1000_100() -> TestResult {
+    use diport::{
+        DeadLetterProvenance, DeadLetterRecord, DeadLetterStore, DeadLetterSummary,
+        EnvelopeMetadata,
+    };
+
+    let (_fixture, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let domain = unique_domain("dlx-fixed-batches");
+    let seed_message = unique_event_id("dlx-fixed-seed");
+    store
+        .dead_letter(test_dlx_payload_protector())
+        .write_dead_letter(DeadLetterRecord::new(
+            tenant,
+            &seed_message,
+            DeadLetterProvenance::consumer(domain.as_str(), "audit"),
+            "contract-batch",
+            "dlx.batch",
+            Some("audit".to_string()),
+            b"payload".to_vec(),
+            DeadLetterSummary::new("safe summary"),
+            1,
+            EnvelopeMetadata::empty(),
+        ))
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO dead_letter (
+            tenant_id, message_id, producer_domain, consumer_domain, contract_id, topic,
+            consumer_group, replay_capsule, replay_capsule_key_ref, payload_len,
+            replay_capsule_encoding, metadata_digest, error_summary, num_attempts, source_kind
+        )
+        SELECT seed.tenant_id,
+               seed.message_id,
+               seed.producer_domain,
+               seed.consumer_domain,
+               seed.contract_id,
+               seed.topic,
+               seed.consumer_group,
+               seed.replay_capsule,
+               seed.replay_capsule_key_ref,
+               seed.payload_len,
+               seed.replay_capsule_encoding,
+               seed.metadata_digest,
+               seed.error_summary,
+               seed.num_attempts,
+               seed.source_kind
+        FROM dead_letter AS seed
+        CROSS JOIN generate_series(1, 1000) AS series(value)
+        WHERE seed.message_id = $1
+        "#,
+    )
+    .bind(&seed_message)
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE dead_letter SET first_attempt_at = now() - interval '31 days', \
+         last_attempt_at = now() - interval '31 days' WHERE producer_domain = $1",
+    )
+    .bind(&domain)
+    .execute(&store.pool)
+    .await?;
+
+    let candidates: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM rss_dlx_claim_archive_candidates()")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(candidates, 100);
+    let backlog: (i64, i64) =
+        sqlx::query_as("SELECT pending_depth, oldest_age_seconds FROM rss_dlx_archive_backlog()")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(backlog.0, 1001);
+    assert!(backlog.1 >= 30 * 24 * 3600);
+
+    sqlx::query(
+        r#"
+        INSERT INTO dead_letter_archive_receipts (
+            tenant_id, dead_letter_id, object_key, object_version_id, checksum_sha256,
+            archive_key_ref, object_lock_mode, object_lock_retain_until, verified_at,
+            reconcile_after
+        )
+        SELECT tenant_id,
+               id,
+               'dead-letter/' || id::text || '.v1.enc',
+               'version-1',
+               decode(repeat('ab', 32), 'hex'),
+               'archive-key:1',
+               'COMPLIANCE',
+               now() + interval '31 days',
+               now(),
+               now() + interval '31 days'
+        FROM dead_letter
+        WHERE producer_domain = $1
+        "#,
+    )
+    .bind(&domain)
+    .execute(&store.pool)
+    .await?;
+    let first: i64 = sqlx::query_scalar("SELECT rss_dlx_purge_verified()")
+        .fetch_one(&store.pool)
+        .await?;
+    let second: i64 = sqlx::query_scalar("SELECT rss_dlx_purge_verified()")
+        .fetch_one(&store.pool)
+        .await?;
+    let third: i64 = sqlx::query_scalar("SELECT rss_dlx_purge_verified()")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!((first, second, third), (1000, 1, 0));
+
+    sqlx::query(
+        "UPDATE dead_letter_archive_receipts \
+         SET verified_at = now() - interval '31 days', \
+             object_lock_retain_until = now() - interval '1 second', \
+             reconcile_after = now() - interval '1 second' \
+         WHERE tenant_id = $1::uuid",
+    )
+    .bind(tenant.to_string())
+    .execute(&store.pool)
+    .await?;
+    let first_reconcile: Vec<String> =
+        sqlx::query_scalar("SELECT dead_letter_id::text FROM rss_dlx_reconcile_expired_receipts()")
+            .fetch_all(&store.pool)
+            .await?;
+    let second_reconcile: Vec<String> =
+        sqlx::query_scalar("SELECT dead_letter_id::text FROM rss_dlx_reconcile_expired_receipts()")
+            .fetch_all(&store.pool)
+            .await?;
+    assert_eq!(first_reconcile.len(), 100);
+    assert_eq!(second_reconcile.len(), 100);
+    assert!(
+        first_reconcile
+            .iter()
+            .all(|id| !second_reconcile.contains(id)),
+        "claim-time reconcile_after CAS must advance beyond a permanently Present first page"
+    );
+    let proof: (String, String, String, String, Vec<u8>) = sqlx::query_as(
+        "SELECT tenant_id::text, dead_letter_id::text, object_key, object_version_id, checksum_sha256 \
+         FROM rss_dlx_reconcile_expired_receipts() LIMIT 1",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    let stale: i64 = sqlx::query_scalar(
+        "SELECT rss_dlx_delete_missing_archive_receipt( \
+         $1::uuid, $2::uuid, $3, $4, decode(repeat('cd', 32), 'hex'))",
+    )
+    .bind(&proof.0)
+    .bind(&proof.1)
+    .bind(&proof.2)
+    .bind(&proof.3)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(stale, 0, "stale/mismatched proof must not delete receipt");
+    let applied: i64 = sqlx::query_scalar(
+        "SELECT rss_dlx_delete_missing_archive_receipt($1::uuid, $2::uuid, $3, $4, $5)",
+    )
+    .bind(&proof.0)
+    .bind(&proof.1)
+    .bind(&proof.2)
+    .bind(&proof.3)
+    .bind(&proof.4)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(applied, 1);
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t_outbox_published_sweep_deletes_1001_rows_in_two_stable_batches() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let domain = unique_domain("outbox-bounded-sweep");
+    let seed_id = unique_event_id("outbox-bounded-seed");
+    let entry = make_entry(&seed_id);
+    let envelope = make_test_env(&domain, "bounded.sweep");
+    let outcome = store
+        .run_global_transaction::<_, _, crate::outbox::OutboxAppendError>(|cap| {
+            Box::pin(async move { append_outbox(cap, &entry, &envelope).await })
+        })
+        .await?;
+    assert_eq!(outcome, consistency::OutboxAppendOutcome::Inserted);
+
+    sqlx::query(
+        r#"
+        INSERT INTO outbox (
+            event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
+            payload, metadata, partition_key, causation_id
+        )
+        SELECT $1 || '-' || series.value::text,
+               seed.tenant_id,
+               seed.domain,
+               seed.topic,
+               seed.contract_id,
+               seed.contract_version,
+               seed.schema_hash,
+               seed.payload,
+               seed.metadata,
+               NULL,
+               NULL
+        FROM outbox AS seed
+        CROSS JOIN generate_series(1, 1000) AS series(value)
+        WHERE seed.event_id = $2
+        "#,
+    )
+    .bind(&seed_id)
+    .bind(&seed_id)
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE outbox
+        SET status = 'published',
+            automatic_retry_deadline = COALESCE(
+                automatic_retry_deadline,
+                now() + interval '24 hours'
+            ),
+            lease_token = NULL,
+            lease_until = NULL,
+            published_at = now() - interval '2 days',
+            dlx_at = NULL,
+            updated_at = now() - interval '2 days'
+        WHERE domain = $1
+        "#,
+    )
+    .bind(&domain)
+    .execute(&store.pool)
+    .await?;
+
+    let first: i64 = sqlx::query_scalar("SELECT rss_sweep_outbox_published(86400)")
+        .fetch_one(&store.pool)
+        .await?;
+    let second: i64 = sqlx::query_scalar("SELECT rss_sweep_outbox_published(86400)")
+        .fetch_one(&store.pool)
+        .await?;
+    let third: i64 = sqlx::query_scalar("SELECT rss_sweep_outbox_published(86400)")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!((first, second, third), (1000, 1, 0));
     store.shutdown().await?;
     Ok(())
 }
@@ -9469,33 +10304,6 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         .execute(&store.pool)
         .await?;
 
-    sqlx::query("UPDATE dead_letter SET metadata = metadata - $1 WHERE id = $2::uuid")
-        .bind(KEY_SCHEMA_HASH)
-        .bind(&dead_letter_id)
-        .execute(&store.pool)
-        .await?;
-    let missing_schema_hash = dlq
-        .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
-            DeadLetterId::parse(&dead_letter_id)?,
-            IdemKey::parse(&unique_event_id("replay-missing-schema")).unwrap(),
-            cap,
-        ))
-        .await;
-    assert!(
-        matches!(missing_schema_hash, Err(DlqError::InvalidSchemaHeaders)),
-        "missing schema replay header must not be reported as an invalid payload"
-    );
-    sqlx::query(
-        "UPDATE dead_letter \
-         SET metadata = jsonb_set(metadata, '{schemaHash}', to_jsonb($1::text), true) \
-         WHERE id = $2::uuid",
-    )
-    .bind(TEST_SCHEMA_HASH)
-    .bind(&dead_letter_id)
-    .execute(&store.pool)
-    .await?;
-
     let outcome = dlq
         .replay_dead_letter(DlqReplayRequest::new(
             tenant,
@@ -9755,10 +10563,12 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         r#"
         INSERT INTO dead_letter
             (tenant_id, message_id, producer_domain, consumer_domain, contract_id, topic,
-             original_entry, original_entry_key_ref, original_entry_payload_len,
-             original_entry_encoding, error_summary, num_attempts, source_kind, metadata)
+             replay_capsule, replay_capsule_key_ref, payload_len,
+             replay_capsule_encoding, metadata_digest,
+             error_summary, num_attempts, source_kind)
         VALUES ($1::uuid, $2, $3, 'dlq-replay-consumer', $4, $5,
-                $6, 'dlx-test:1', 3, $7, $8, $9, 'consumer', '{}'::jsonb)
+                $6, 'dlx-test:1', 3, $7, decode(repeat('00', 32), 'hex'),
+                $8, $9, 'consumer')
         RETURNING id::text
         "#,
     )
@@ -9768,7 +10578,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     .bind("contract-dlq")
     .bind("test.invalid")
     .bind(sqlx::types::Json(&invalid_entry))
-    .bind(crate::dead_letter_payload::DLX_ORIGINAL_ENTRY_ENCODING)
+    .bind(crate::dead_letter_payload::DLX_REPLAY_CAPSULE_ENCODING)
     .bind("invalid payload row")
     .bind(1_i32)
     .fetch_one(&mut *tx)
@@ -9784,7 +10594,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         .await;
     assert!(
         matches!(invalid_payload, Err(DlqError::InvalidPayload)),
-        "malformed original_entry must map to InvalidPayload"
+        "malformed replay capsule must map to InvalidPayload"
     );
 
     let first_page = dlq
@@ -9862,9 +10672,9 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
 
     let mut tx = store.pool.begin().await?;
     crate::cotx::set_local_tenant(&mut tx, tenant).await?;
-    let row: (String, String, String, i32, serde_json::Value) = sqlx::query_as(
+    let row: (String, String, String, i32, serde_json::Value, Vec<u8>) = sqlx::query_as(
         r#"
-        SELECT id::text, source_kind, message_id, num_attempts, metadata
+        SELECT id::text, source_kind, message_id, num_attempts, replay_capsule, metadata_digest
         FROM dead_letter
         WHERE tenant_id = $1::uuid
           AND message_id = $2
@@ -9878,19 +10688,15 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     assert_eq!(row.1, "outbox_relay");
     assert_eq!(row.2, event_id);
     assert_eq!(row.3, 1);
-    assert_eq!(row.4["tenantId"], COTX_TENANT_A);
-    assert_eq!(row.4["schemaVersion"], "v1");
-    assert_eq!(row.4["schemaHash"], TEST_SCHEMA_HASH);
+    assert!(row.4.get("tenantId").is_none());
+    assert!(row.4.get("schemaVersion").is_none());
+    assert_eq!(row.5.len(), 32);
 
-    sqlx::query(
-        "UPDATE dead_letter \
-         SET metadata = jsonb_set(metadata, '{relayFailureReason}', to_jsonb($1::text), true) \
-         WHERE id = $2::uuid",
-    )
-    .bind("envelope_invalid_schema_hash")
-    .bind(&row.0)
-    .execute(&store.pool)
-    .await?;
+    sqlx::query("UPDATE dead_letter SET error_summary = $1 WHERE id = $2::uuid")
+        .bind("envelope_invalid_schema_hash")
+        .bind(&row.0)
+        .execute(&store.pool)
+        .await?;
 
     let dlq = store.dlq_with_projection_registry(
         test_dlx_payload_protector(),
@@ -9966,7 +10772,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     assert_eq!(
         listed.data()[0].error_summary(),
         "envelope_invalid_schema_hash",
-        "outbox DLQ list must expose the relay failure reason from dead_letter metadata"
+        "outbox DLQ list must expose only the safe dead-letter summary"
     );
     assert!(listed.has_more(), "two DLX rows with limit=1 must paginate");
     let continuation = dlq
@@ -10251,8 +11057,8 @@ async fn same_id_automatic_deadline_is_frozen_and_expiry_never_calls_broker() ->
         terminal,
         ("dlx".to_string(), "automatic".to_string(), true, true)
     );
-    let durable_reason: (String, String) = sqlx::query_as(
-        "SELECT error_summary, metadata->>'relayFailureReason' FROM dead_letter \
+    let durable_reason: String = sqlx::query_scalar(
+        "SELECT error_summary FROM dead_letter \
          WHERE message_id = $1 ORDER BY last_attempt_at DESC LIMIT 1",
     )
     .bind(&event_id)
@@ -10260,10 +11066,7 @@ async fn same_id_automatic_deadline_is_frozen_and_expiry_never_calls_broker() ->
     .await?;
     assert_eq!(
         durable_reason,
-        (
-            "outbox same-ID automatic delivery window expired".to_string(),
-            "automatic_window_expired".to_string(),
-        )
+        "outbox same-ID automatic delivery window expired"
     );
     let rendered = metrics_handle.render();
     assert!(
@@ -10320,7 +11123,7 @@ async fn same_id_redrive_preflight_expiry_never_calls_broker() -> TestResult {
     assert_eq!(*calls.lock().unwrap(), 0);
 
     let durable: (String, String, String) = sqlx::query_as(
-        "SELECT o.status, o.same_id_delivery_phase, d.metadata->>'relayFailureReason' \
+        "SELECT o.status, o.same_id_delivery_phase, d.error_summary \
          FROM outbox AS o JOIN dead_letter AS d ON d.message_id = o.event_id \
          WHERE o.event_id = $1 ORDER BY d.last_attempt_at DESC LIMIT 1",
     )
@@ -10332,7 +11135,7 @@ async fn same_id_redrive_preflight_expiry_never_calls_broker() -> TestResult {
         (
             "dlx".to_string(),
             "redrive".to_string(),
-            "redrive_window_expired".to_string(),
+            "outbox same-ID redrive delivery window expired".to_string(),
         )
     );
     let rendered = metrics_handle.render();
@@ -14016,6 +14819,170 @@ fn migrations_through(max_version: i64) -> sqlx::migrate::Migrator {
         ),
         ..sqlx::migrate::Migrator::DEFAULT
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0062_rejects_nonempty_v2_without_destructive_escape() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(61).run(&store.pool).await?;
+
+    let message_id = unique_event_id("0062-nonempty");
+    sqlx::query(
+        r#"
+        INSERT INTO dead_letter (
+            tenant_id, message_id, producer_domain, consumer_domain, contract_id, topic,
+            consumer_group, original_entry, original_entry_key_ref,
+            original_entry_payload_len, original_entry_encoding, error_summary,
+            num_attempts, source_kind, metadata
+        ) VALUES (
+            $1::uuid, $2, 'identity', 'audit', 'contract-v2', 'migration.v2',
+            'migration-consumer', '{"ciphertext":[]}'::jsonb, 'old-key:1',
+            0, 'key-provider-v2', 'safe summary', 1, 'consumer', '{}'::jsonb
+        )
+        "#,
+    )
+    .bind(COTX_TENANT_A)
+    .bind(&message_id)
+    .execute(&store.pool)
+    .await?;
+
+    let result = sqlx::migrate!("./migrations").run(&store.pool).await;
+    let Err(error) = result else {
+        return Err("0062 must reject nonempty dead_letter".into());
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("legacy dead_letter must be empty before DLX v3"),
+        "unexpected 0062 fail-fast error: {error}"
+    );
+    let retained: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM dead_letter WHERE message_id = $1")
+            .bind(&message_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        retained, 1,
+        "failed cutover must leave the v2 row untouched"
+    );
+
+    let escape_surfaces: (bool, bool) = sqlx::query_as(
+        r#"
+        SELECT to_regprocedure(
+                   'public.rss_cutover_legacy_dead_letter(bytea,bigint,text,text)'
+               ) IS NULL,
+               to_regclass('public.dead_letter_legacy_cutover_audit') IS NULL
+        "#,
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        escape_surfaces,
+        (true, true),
+        "0062 must not install digest-authorized disposal or a deletion audit surrogate"
+    );
+
+    // Test-only cleanup models completion of the separately reviewed export/restore migration.
+    // No production migration or runtime capability receives this destructive authority.
+    sqlx::query("TRUNCATE TABLE public.dead_letter")
+        .execute(&store.pool)
+        .await?;
+
+    // sqlx 0.8 leaves its session advisory lock on the pooled connection when a migration body
+    // fails. All calls above are sequential and reuse that sole connection; explicitly release
+    // only test-owned session locks before proving the forward retry.
+    sqlx::query("SELECT pg_catalog.pg_advisory_unlock_all()")
+        .execute(&store.pool)
+        .await?;
+    sqlx::migrate!("./migrations").run(&store.pool).await?;
+    let lifecycle_installed: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure('public.rss_dlx_claim_archive_candidates()') IS NOT NULL",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(lifecycle_installed);
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0063_rejects_bidirectional_and_owner_role_escalation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(61).run(&store.pool).await?;
+    sqlx::raw_sql(
+        r#"
+        CREATE ROLE rss_dlx_archiver NOLOGIN NOBYPASSRLS NOSUPERUSER
+            NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT;
+        CREATE ROLE rss_dlx_forbidden_parent NOLOGIN NOSUPERUSER;
+        GRANT rss_dlx_forbidden_parent TO rss_dlx_archiver;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+
+    let result = sqlx::migrate!("./migrations").run(&store.pool).await;
+    let Err(error) = result else {
+        return Err("0063 must reject archiver SET ROLE membership".into());
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("DLX workload roles must have no role memberships"),
+        "unexpected 0063 role-membership error: {error}"
+    );
+    sqlx::raw_sql(
+        r#"
+        REVOKE rss_dlx_forbidden_parent FROM rss_dlx_archiver;
+        DROP ROLE rss_dlx_forbidden_parent;
+        CREATE ROLE rss_dlx_forbidden_child NOLOGIN NOSUPERUSER;
+        GRANT rss_dlx_archiver TO rss_dlx_forbidden_child;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::query("SELECT pg_catalog.pg_advisory_unlock_all()")
+        .execute(&store.pool)
+        .await?;
+    let result = sqlx::migrate!("./migrations").run(&store.pool).await;
+    let Err(error) = result else {
+        return Err("0063 must reject roles inheriting the archiver".into());
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("DLX workload roles must have no role memberships"),
+        "unexpected incoming role-membership error: {error}"
+    );
+    sqlx::raw_sql(
+        r#"
+        REVOKE rss_dlx_archiver FROM rss_dlx_forbidden_child;
+        DROP ROLE rss_dlx_forbidden_child;
+        DROP ROLE rss_dlx_archiver;
+        CREATE ROLE rss_dlx_lifecycle_owner LOGIN BYPASSRLS NOSUPERUSER;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::query("SELECT pg_catalog.pg_advisory_unlock_all()")
+        .execute(&store.pool)
+        .await?;
+    let result = sqlx::migrate!("./migrations").run(&store.pool).await;
+    let Err(error) = result else {
+        return Err("0063 must reject a pre-existing unsafe lifecycle owner".into());
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("pre-existing rss_dlx_lifecycle_owner has forbidden role attributes"),
+        "unexpected lifecycle-owner error: {error}"
+    );
+    sqlx::query("DROP ROLE rss_dlx_lifecycle_owner")
+        .execute(&store.pool)
+        .await?;
+    store.shutdown().await?;
+    Ok(())
 }
 
 /// 0060 upgrades the real 0059 ledger, backfills every historical state to one expired cutover,

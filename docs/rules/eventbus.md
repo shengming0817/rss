@@ -320,7 +320,8 @@ redrive deadline 尚未到期时允许运维 re-drive（`eventexec::DlqRedriveRe
 terminal resolution 把队头结清为 `abandoned`；claim blocker 只把 `published|abandoned` 视为 resolved。`outbox.status='dlx'` 仍是 relay
 状态与 partition ordering gate；统一 DLQ 审计行写入 `dead_letter(source_kind='outbox_relay')`，不搬迁/删除
 原 outbox 行；expired redrive 不修改行也不解除 partition gate，成功 redrive 清除 `dlx_at` 后，既往 DLX 历史
-继续由 append-only `dead_letter` 留存。代价有界且可观测：dlx `error!` 日志 + 行保留（sweep 不删）+
+继续由 `dead_letter` hot row 留存，随后经 verified WORM archive-before-purge lifecycle 转入冷归档。代价有界且可观测：
+dlx `error!` 日志 + hot/archive backlog 指标 +
 backlog `oldest_age` 增长 + same-ID expiry counter。
 **已知前提**：队头判据假设同 partition 行按 seq 序提交，成立于同 partition 写入由
 聚合根并发控制串行化（partition = aggregate 标准契约）。**backlog 例外**：head-of-partition gate 是 claim-only，
@@ -399,19 +400,28 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
 
 ## DLX 与幂等
 
-- 永久错误进入 DLX。统一审计表为 `dead_letter`，`source_kind` 闭值集为 `consumer` / `outbox_relay` / `saga` /
-  `projection`（`legacy` 仅迁移前历史行）。`dead_letter.metadata` 保留 delivery envelope metadata；`consumer`
-  来源必须记录 subscription `consumer_group`；`projection` 来源必须记录 projection id 作为 `consumer_group`。
-  PG `original_entry` 只允许
-  `KeyProvider`/Vault transit 加密后的 `{"ciphertext":[...]}` shape，并同时写
-  `original_entry_key_ref`、`original_entry_payload_len`、`original_entry_encoding='key-provider-v1'`；
-  `{"bytes":[...]}` 明文 shape 禁止写入且 replay 必须拒绝。新增 migration 若发现既有 `dead_letter`
-  行直接 fail-fast，不做 plaintext 迁移。
+- 永久错误进入 DLX。统一 hot 表为 `dead_letter`，`source_kind` 闭值集只有 `consumer` / `outbox_relay` /
+  `saga` / `projection`。payload 与全部 persisted delivery metadata 必须一次封装为 `key-provider-v3` replay capsule；
+  `tenantAuthority` 只在入站验证期存在，永不落入 capsule。tenant、来源、producer/consumer provenance、安全摘要与
+  payload 长度保留为独立可查询安全列。`consumer` 来源必须记录 subscription `consumer_group`；`projection`
+  来源必须记录 projection id。不存在旧 decoder、明文 shape、双写或 fallback；0062 migration 发现任何既有
+  `dead_letter` 行直接 fail-fast。
+- DLX lifecycle 固定为 `HOT → WORM 对象语义/校验和已验证 → VerifiedArchiveReceipt → bounded purge → COLD`。
+  archive canonical envelope 使用独立 `RSS_DLX_ARCHIVE_KEY_NAME` 加密并写入独立 S3 bucket；该 bucket 必须启用
+  versioning、默认 Object Lock `COMPLIANCE` 且默认留存严格长于 hot 的精确 30 天。provider 只有
+  conditional put/get/head/verify，没有 delete/list；普通 DLQ API 不读取、检查或 replay cold archive。
+  `AlreadyExists` 只能在解密既有对象并与 canonical record 语义相等后补 receipt，否则 Invariant fail-closed。
+  S3 lifecycle 最终删除到期冷对象；RSS 只在 verified HEAD-missing 生成 `MissingArchiveProof` 后回收 receipt。
+  `DlxLifecycleRepository` / `DlxArchiveStore` 是 `diport` 的两个 provider-neutral 静态 Send port；eventexec 以
+  associated-type equality 绑定 sealed receipt/proof 与 typed object key。不存在第三个 archive cipher port：
+  eventexec 私有 DLX crypto service 直接消费既有 `diport::KeyProvider`，不得增加 dyn wrapper、fallback 或 shim。
 - durable runtime 必须配置 `RSS_DLX_PAYLOAD_KEY_NAME` 以及 Vault transit provider
-  `RSS_VAULT_ADDR` / `RSS_VAULT_TOKEN` / `RSS_VAULT_TRANSIT_MOUNT`；broker tenant authority 另必填
-	  `RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL`，可选 `RSS_TENANT_AUTHORITY_TTL_SECS`（默认 3600）和
-	  `RSS_TENANT_AUTHORITY_CLOCK_SKEW_SECS`（默认 60，上限 300）。`rss dlq replay-dead-letter`
-	  需要同一 DLX payload key provider；`list` / `inspect` / `redrive-outbox` / `resolve-expired-outbox` 是 payload-free 路径，不因
+  `RSS_VAULT_ADDR` / `RSS_VAULT_TRANSIT_MOUNT`，并分别提供 `RSS_DLX_HOT_VAULT_TOKEN` /
+  `RSS_DLX_ARCHIVE_VAULT_TOKEN`；两枚 workload token 必须不同，archive token 不回退或复用通用
+  `RSS_VAULT_TOKEN`。broker tenant authority 另必填
+  `RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL`，可选 `RSS_TENANT_AUTHORITY_TTL_SECS`（默认 3600）和
+  `RSS_TENANT_AUTHORITY_CLOCK_SKEW_SECS`（默认 60，上限 300）。`rss dlq replay-dead-letter`
+  需要同一 DLX payload key provider；`list` / `inspect` / `redrive-outbox` / `resolve-expired-outbox` 是 payload-free 路径，不因
 	  Vault/key provider 不可用而阻断。DLX list API 只返回 payload 长度与摘要元数据，
   不返回 payload 内容；返回 `DlqListResult { data, has_more, next_cursor }`，`next_cursor` 是
   `(last_attempt_epoch_secs DESC, kind, id)` keyset cursor，调用方必须用它稳定续页，不能用 offset 或假设一次
@@ -426,9 +436,9 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
   partition unblock 定义为 deadline 内 redrive outbox DLX 队头后让 relay 正常发布。CLI 经离线
   `PgRuntimeDeps::setup_maintenance` 使用 migrator/maintenance 连接；长期 serving role `rss_app` 被显式撤销
   `rss_outbox_redrive(text,uuid)` 或 `rss_outbox_resolve_expired(text,uuid,text,text,text,text)` EXECUTE，不能取得 mutation 权限。
-- Consumer `dead_letter` replay 必须传 `OperatorDlqCapability`、typed `DeadLetterId` 与调用方提供的新
-  `IdemKey`，由同一 `KeyProvider` 解密原 payload 后插入一条新的 outbox 行；不得删除原 `dead_letter`，
-  不得重置 `inbox_receipts done`，不得直接 broker replay。replay 从 `dead_letter.metadata` 恢复 schema header
+- Consumer hot `dead_letter` replay 必须传 `OperatorDlqCapability`、typed `DeadLetterId` 与调用方提供的新
+  `IdemKey`，由 hot `KeyProvider` 解密 v3 capsule 后插入一条新的 outbox 行；operator 路径不得删除原
+  `dead_letter`，不得重置 `inbox_receipts done`，不得直接 broker replay。replay 从同一 v3 capsule 恢复 schema header
   并写入 outbox `contract_version` / `schema_hash` 物理列；缺失或非法 fail-closed。Outbox relay DLX redrive 同样必须传
   `OperatorDlqCapability`；deadline 内只恢复原 outbox 行为 `pending`、切换到 `redrive` phase 并保留两个绝对
   deadline，已过期则返回 typed `Expired` 且不 mutation。outbox DLX payload 副本保留在 `dead_letter`

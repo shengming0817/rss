@@ -1,6 +1,6 @@
 # Integration capability shards
 
-> #1730：真集成 lane 按 capability 拆成五个 target-level shard。分类、资源和串并行调度的单一事实源是
+> #1730：真集成 lane 按 capability 拆成六个 target-level shard。分类、资源和串并行调度的单一事实源是
 > `xtask/src/integration_shards.rs` 的 catalog；本文只解释其运维语义。
 
 ## 入口与闭集
@@ -16,7 +16,7 @@ shard 不传 partition。每次 invocation 的 JUnit/JSON、空 bucket 与重放
 [`202607111501-1731-nextest-test-evidence.md`](./202607111501-1731-nextest-test-evidence.md)。
 
 `<name>` 只能是 `postgres-domain`、`event-transport`、`runtime-http-auth`、
-`consistency-fault`、`cdc-projection-saga`。缺失、重复、未知 shard、额外尾参、自由 filter 和 `--all`
+`consistency-fault`、`cdc-projection-saga`、`object-storage`。缺失、重复、未知 shard、额外尾参、自由 filter 和 `--all`
 均 fail-closed。旧 `cargo xtask integration` 已删除，不提供 alias 或兼容 shim。
 
 本地确需在缺少 nextest 或 Docker 时跳过，可显式追加 `--allow-missing-tools`；CI 不使用该宽限。
@@ -33,6 +33,7 @@ serial，再跑 parallel。`.config/nextest.toml` 不承载 selector/test-group�
 | `runtime-http-auth` | Postgres、Redis | `runtime:runtime` (lib)、`runtime:configs_ready_e2e`、`runtime:identity_login_wire_e2e`、`runtime:wire_contract_e2e` | `runtime:auth_e2e`、`runtime:infra_builders_api`、`runtime:refresh_mint_e2e`、`runtime:runtime_serve_e2e` |
 | `consistency-fault` | Postgres、Redis、AMQP | `redis-adapter:integration_claimer`、`journeys-fault-matrix:consistency_fault_matrix_journey` | `redis-adapter:redis` (lib)、`journeys:device_command_ack_timeout_journey` |
 | `cdc-projection-saga` | Postgres | `runtime:settings_config_publish_durable_e2e` | `journeys:journeys` (lib)、`journeys:saga_projection_deps_journey`、`journeys:settings_config_publish_journey` |
+| `object-storage` | MinIO / S3-compatible object storage | `s3:integration_object_store` | `s3:s3` (lib)、`s3:dlx_archive_store` |
 
 表中未标 `(lib)` 的项均为 Cargo test target。selector 只能由 typed execution unit 渲染为精确的
 `package(=...) and binary(=...) and kind(=...)`；环境变量或 CLI 输入不会进入 selector。
@@ -47,6 +48,7 @@ serial，再跑 parallel。`.config/nextest.toml` 不承载 selector/test-group�
 - Redis：非空 `REDIS_TEST_URL`。
 - AMQP：非空 `RSS_AMQP_TEST_URL`。
 - MQTT：非空 `RSS_MQTT_TEST_URL`。
+- Object storage：`RSS_S3_TEST_ENDPOINT`、`RSS_S3_TEST_ACCESS_KEY`、`RSS_S3_TEST_SECRET_KEY` 均非空；未提供时 testkit 自建 MinIO。
 
 例如 `postgres-domain` 不要求 Redis、AMQP 或 MQTT；`consistency-fault` 不要求 MQTT。外部 AMQP
 用于 fault matrix 时仍须预建测试所需 vhost 并为 URL 用户授权。
@@ -54,12 +56,12 @@ serial，再跑 parallel。`.config/nextest.toml` 不承载 selector/test-group�
 ## Coverage fail-closed
 
 每次运行 shard 前，xtask 执行 `cargo metadata --locked --no-deps --format-version 1`，校验旧 integration
-lane 的七个 package：`postgres`、`redis-adapter`、`amqp`、`mqtt`、`journeys`、`runtime`、
-`journeys-fault-matrix`。其中每个 lib/test target 必须在 catalog 中恰好出现一次，每个 shard 必须非空；
+lane 的九个 package：`postgres`、`redis-adapter`、`amqp`、`mqtt`、`journeys`、`runtime`、
+`journeys-fault-matrix`、`testkit`、`s3`。其中每个 lib/test target 必须在 catalog 中恰好出现一次，每个 shard 必须非空；
 新增未分类 target、过期 target、重复归属或缺 package 都在编译/运行测试前失败。
 
-`s3:integration_object_store` 是具名 standalone exclusion：它要求外部管理的 MinIO endpoint，且不属于旧
-integration lane，因此不伪装成任一 shard 的覆盖。需要验证 S3/MinIO 时继续使用其独立运行路径。
+`s3:integration_object_store` 由 `object-storage` shard 强制执行；测试默认自建 MinIO，并在每轮创建启用
+versioning、COMPLIANCE Object Lock 与有界 lifecycle 的独立 bucket，不存在 standalone 旁路。
 
 ## 本地运行与故障定位
 
@@ -73,6 +75,7 @@ cargo xtask ci-integration --shard runtime-http-auth --partition 1/2
 cargo xtask ci-integration --shard runtime-http-auth --partition 2/2
 cargo xtask ci-integration --shard consistency-fault
 cargo xtask ci-integration --shard cdc-projection-saga
+cargo xtask ci-integration --shard object-storage
 ```
 
 定位顺序：

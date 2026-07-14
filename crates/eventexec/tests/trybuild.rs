@@ -54,3 +54,12 @@ fn command_authoring_is_sealed() {
     t.compile_fail("tests/ui/command_wrong_request_fail.rs");
     t.compile_fail("tests/ui/command_wrong_policy_fail.rs");
 }
+
+#[test]
+fn dlx_lifecycle_proofs_and_capabilities_are_sealed() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/dlx_hot_archive_key_swap_fail.rs");
+    t.compile_fail("tests/ui/dlx_verified_receipt_forge_fail.rs");
+    t.compile_fail("tests/ui/dlx_missing_archive_proof_forge_fail.rs");
+    t.compile_fail("tests/ui/dlx_archive_store_delete_fail.rs");
+}

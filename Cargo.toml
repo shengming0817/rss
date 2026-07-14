@@ -193,6 +193,10 @@ rumqttc = { version = "0.25", default-features = false }
 # default-features=false 关默认 HTTPS client；生产 HTTPS connector 由 runtime 组合根显式注入 rustls+ring
 # `aws-smithy-http-client`，明文 HTTP 仅 loopback MinIO/test opt-in。ref: awslabs/aws-sdk-rust sdk/s3/src/client.rs
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio"] }
+# DLX WORM archive 使用 AWS 官方默认凭据链（env/profile/web-identity/ECS/IMDS）与 SDK identity cache
+# 刷新短期 workload credentials。禁用默认 HTTPS client，所有 provider I/O 复用组合根显式 rustls+ring connector。
+aws-config = { version = "1.8.11", default-features = false, features = ["rt-tokio"] }
+aws-credential-types = { version = "1", default-features = false }
 # AWS SDK HTTP client（runtime S3 生产接线）：只启 rustls-ring；禁 default aws-lc / native-tls / openssl 漂移。
 aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
 # Vault Transit 签名 HTTP 客户端（adapters/vault，#1011）：TLS-agnostic —— default-features=false 不绑 crypto

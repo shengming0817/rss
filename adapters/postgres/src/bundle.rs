@@ -19,7 +19,7 @@
 //! ## INVARIANT
 //!
 //! - **PG-BUNDLE-FUNNEL-01**（Hard，可见性封装）：公开 store 构造路径只允许两个受控 funnel：
-//!   [`PgRuntimeDeps::setup`]（serving runtime）与 [`PgRuntimeDeps::setup_maintenance`]（离线维护）。二者之外
+//!   [`PgRuntimeDeps::setup`]（serving runtime）与 [`PgRuntimeDeps::connect_maintenance`]（离线维护）。二者之外
 //!   `PgStore::connect` / `run_migrations` 已降 `pub(crate)`，外部无法 mint `PgStore`、也拿不到 `&PgStore`；
 //!   且**所有** `&PgStore`-taking repo 构造器（含 credential/role/refresh_token/emitter + dead_letter/
 //!   checkpoint/saga/projection）均 `pub(crate)`——serving repo 只能经 `PgDomainDeps` / `PgInfraDeps` 构造，
@@ -337,12 +337,14 @@ impl PgRuntimeDeps {
         })
     }
 
-    /// 构造离线维护能力包：migrator 连接 + migration，不跑 serving/RLS/legacy deny。
-    pub async fn setup_maintenance(
+    /// 连接离线维护能力包，但绝不运行 migration。
+    ///
+    /// 破坏式 migration 只能由完成全部外部 capability preflight 的 runtime bootstrap 执行；CLI
+    /// maintenance 连接若隐式迁移会绕过该顺序门。schema/policy 缺失时，本入口读取固定 policy 即失败。
+    pub async fn connect_maintenance(
         migrator_config: &PgConfig,
     ) -> Result<PgMaintenanceDeps, PgError> {
         let store = Arc::new(PgStore::connect(migrator_config).await?);
-        store.run_migrations().await?;
         let delivery_policy = store.load_event_delivery_policy().await?;
         Ok(PgMaintenanceDeps {
             store,
@@ -356,12 +358,11 @@ impl PgRuntimeDeps {
     ///
     /// `migrator_config` 仍只负责 migration / durable audit 写入；`audit_admin_config` 必须直连
     /// `rss_audit_admin`，并通过 exact read-only capability gate。
-    pub async fn setup_maintenance_with_audit_admin_config(
+    pub async fn connect_maintenance_with_audit_admin_config(
         migrator_config: &PgConfig,
         audit_admin_config: &PgConfig,
     ) -> Result<PgMaintenanceDeps, PgError> {
         let store = Arc::new(PgStore::connect(migrator_config).await?);
-        store.run_migrations().await?;
         let delivery_policy = store.load_event_delivery_policy().await?;
         let audit_admin_store = Arc::new(PgStore::connect(audit_admin_config).await?);
         audit_admin_store.verify_audit_admin_capability().await?;
@@ -1168,8 +1169,8 @@ impl PgInfraDeps {
         self.store.inbox()
     }
 
-    /// dead-letter store（DLX 终态）。同时 impl `consistency::RetentionSweeper`——组合根可经此句柄取死信
-    /// 保留期 sweeper（`DEAD_LETTER_RETENTION_SECONDS` 默认 30 天，#1210）。
+    /// Tenant-scoped HOT dead-letter writer. Archive/purge is intentionally absent from this
+    /// serving capability and lives in the independent [`crate::PgDlxLifecycleRuntime`].
     #[must_use]
     pub fn dead_letter(&self, payload_protector: DlxPayloadProtector) -> PgDeadLetterStore {
         self.store.dead_letter(payload_protector)

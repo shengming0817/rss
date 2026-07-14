@@ -76,7 +76,7 @@ Medium）扫描 schema 快照，缺三件套即门红。
   `0032` 同时 `REVOKE DELETE ON sessions FROM rss_app`，不保留 `rss_app` 表级删除权限或 tenant/raw SQL/retain
   参数入口。
 - `0015` `credentials`、`0017` `refresh_tokens`：补全 DML（tenant 表）。
-- append-only 表只授 SELECT + INSERT（无 UPDATE/DELETE）：`0018` `audit_entries`、`0019` `auth_audit_events`（+ 其 id 序列）、`0021` `dead_letter`。`dead_letter` 保留期清理由 `0030` 的窄 `rss_sweep_dead_letter(bigint)` SECURITY DEFINER 函数授权给 `rss_app`，不授直接 DELETE；该函数 owner 是 NOLOGIN `rss_dead_letter_maintenance`，仅用于 FORCE RLS 下的全域 30 天 retention sweep。
+- append-only 表只授 SELECT + INSERT（无 UPDATE/DELETE）：`0018` `audit_entries`、`0019` `auth_audit_events`（+ 其 id 序列）、`0021` `dead_letter`。`0030` 的历史 retention-only 删除面已由 `0063` 破坏式移除；当前 `rss_app` 不可执行任何 DLX lifecycle 函数，HOT 删除只能由独立 `rss_dlx_archiver` 经 archive-before-purge 固定函数完成。
 
 生产 `rss_app` LOGIN 凭据 out-of-band 注入，committed SQL 不含密码。后续新增 tenant / append-only 表须在其
 建表迁移内为 `rss_app` 补最小授权（tenant 表 DML、append-only 表 SELECT+INSERT），与上表同范式。
@@ -240,7 +240,8 @@ typed `Expired`。
 7d，只删 done receipt，每次按确定顺序最多 1000 行。旧 retain 参数签名不存在。`rss_app` 继续只可 EXECUTE
 claim/publish-preflight/mark-DLX 与零参数 inbox sweep；`rss_outbox_redrive(text,uuid)` 归
 `rss_outbox_maintenance` 所有，PUBLIC 与 `rss_app` 均被显式 REVOKE，operator CLI 只能走离线
-`PgRuntimeDeps::setup_maintenance` 的 migrator/maintenance 连接。
+`PgRuntimeDeps::connect_maintenance` 的 migrator/maintenance 连接。该入口只连接已迁移 schema，绝不隐式
+运行 migration；破坏式 migration 仅允许经过 runtime 全部外部 capability preflight 的 bootstrap 执行。
 
 ### 0060 breaking cutover runbook（一次性、无兼容路径）
 
@@ -271,6 +272,43 @@ claim/publish-preflight/mark-DLX 与零参数 inbox sweep；`rss_outbox_redrive(
 0060/0061 transaction watchdog 的完整执行说明，单一维护在
 `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` 的「0060 breaking rollout」章节。执行值只由
 `docs/ops/0060-outbox-capacity-gate.sh` 持有；本 migration ledger 不复制阈值、命令或取消查询。
+
+`0062` 是不可绕过的 fail-closed cutover gate：取得 `dead_letter` 的 ACCESS EXCLUSIVE 锁后，只要存在一行
+legacy 数据就中止。inventory digest/row count 不能证明数据可恢复，因此本迁移不创建清理函数、审计删除账本，
+也绝不执行 legacy DELETE。非空部署必须先提交一条单独评审的 forward migration：把完整加密行、key refs、
+schema/object version 与 checksum 导出到受控存储，并用 restore drill 证明可恢复；该 migration 不属于自动 rollout。
+
+`0063` 将 DLX 切换为强制 `HOT → verified WORM receipt → bounded purge → COLD` 生命周期。核心迁移只接受空
+`dead_letter`，否则以静态错误中止；不会读取 v1/v2 ciphertext、猜测 metadata、自动删除 legacy 行、
+双写或保留 decoder。空表门通过后直接完成 schema 切换。物理
+`tenant_id NOT NULL`、v3 replay capsule、32-byte metadata digest 与独立安全 provenance 列一次完成切换。
+`dead_letter_archive_receipts` 使用 FORCE RLS，但回执在 HOT 行 purge 后继续保留；Object Lock 到期只使回执
+进入 HEAD reconcile 候选，不会自动删除。回执保存 provider-issued S3 version id；HEAD/get 与 missing proof
+必须 version-qualified。claim 在返回最多 100 条前以 CAS 把 `reconcile_after` 推迟 1 天，因此持续 Present 的
+第一页不会饿死后续 receipt。只有 verified store 产生的 missing proof 经 tenant/id/object-key/version-id/
+checksum CAS 才可删除回执。
+
+三个长期 workload role 必须分别直连、NOBYPASSRLS、非 superuser、NOINHERIT、无角色 membership，且没有
+public relation DML 或 schema CREATE。`rss_dlx_archiver` 仅拥有 backlog、原子 claim、transient retry settle 与
+invariant quarantine；`rss_dlx_verifier` 仅可用 fresh opaque claim token 写 verified receipt；
+`rss_dlx_purger` 仅拥有 verified purge、expired receipt claim 与 missing-proof CAS。archive claim/5 分钟 lease、
+失败计数、指数 backoff 与 quarantine 均持久化，坏行只结算自身而不会阻塞整批。函数由独立 NOLOGIN
+`rss_dlx_lifecycle_owner` 执行；`rss_app` 不拥有上述任一函数。30 天 HOT predicate 与批量值均冻结在 SQL，
+runtime/env 无 retention 或 batch override。published outbox sweep 同迁移改为 `(published_at,event_id)` 稳定
+排序、每 tick 最多 1000 行；1001 行必须分两 tick。
+
+### 0062/0063 breaking cutover runbook
+
+1. 停止旧 binary 与所有旧 retention worker，确认 `dead_letter` 为空。若非空，停止 rollout；不得用 inventory
+   digest、row count、临时函数或直接 DELETE 继续。先另提 forward migration，完成完整加密行导出与 restore drill。
+2. 部署前创建独立 archive bucket、COMPLIANCE Object Lock 与生命周期删除策略，并 provision 独立 S3/Vault
+   workload identity 与 archiver/verifier/purger 三个 PG 凭据。不要复用 serving credentials。
+3. 运行唯一 migration runner。0062/0063 任一 emptiness gate 失败都保持原数据不变；修复只能走上一步的独立、
+   可恢复且经评审的数据迁移，不能修改已提交 migration。
+4. 确认旧 sweep regprocedure/maintenance role 均不存在；v3 列、claim/lease/backoff/quarantine、receipt RLS、八个
+   固定函数 owner/ACL 与三个 workload role 的精确权限完全匹配。
+5. 只有 S3 WORM startup probe、三个 PG exact-role gate 与 v3 hot-key/archive-key provider 均通过才启动新 worker。
+   任一能力缺失保持 HOT 行且停止 purge，不恢复旧函数或旧 env。
 
 `0043` 新增 `saga_instances` tenant 表，并前向 tenantize `saga_journal`。`saga_instances` 保存
 instance status 与 lease token/holder/epoch/expiry，授予 `rss_app` SELECT/INSERT/UPDATE 且不授 DELETE；

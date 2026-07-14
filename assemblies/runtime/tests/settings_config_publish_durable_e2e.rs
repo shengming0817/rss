@@ -404,7 +404,7 @@ fn config_value_protections() -> Result<ConfigValueProtections> {
 }
 
 fn dlx_payload_protector() -> Result<DlxPayloadProtector> {
-    let key = KeyName::try_new("settings-durable-dlx")?;
+    let key = eventexec::DlxHotKeyName::try_new("settings-durable-dlx")?;
     Ok(DlxPayloadProtector::new(
         DynKeyProvider::new_box(TestKeyProvider),
         key,

@@ -187,31 +187,35 @@ funnel，未校验 config 类型层不可表达）：
 | `sample_interval` | [1s, 60s] | 0 → 采样聚合查询热轮询；>60s → 5min SLO 窗口采样不足 |
 | sampler `domains` | 1..=64 + canonical | 空 → sampler 无 scope；过多/非法 → metrics label 基数失控；relay domain 不走此参数 |
 | `sweep_interval` | ≥1s | 0 → DELETE 热轮询 |
-| `retain_seconds` | >0（仅 outbox/dead_letter caller config；per-table 下限见下） | outbox 0/负数由 DB 函数 fail-closed；inbox_receipts 不接受 caller retain 参数 |
+| `retain_seconds` | >0（仅 outbox caller config） | outbox 0/负数由 DB 函数 fail-closed；inbox_receipts 与 dead_letter lifecycle 不接受 caller retain 参数 |
 
 same-ID 正确性策略不属于上述性能/保留期调参。数据库 singleton `event_delivery_policy` 冻结
 `same-id-delivery-v1`：automatic retry 24h、same-ID redrive 24h、safety 24h、inbox receipt 7d。runtime
 启动期只接受数据库中唯一一行与 release 常量完全一致，且 retention 必须严格覆盖三段窗口；不提供 correctness
 环境变量、CLI 参数或 assembly override。
 
-## 保留期清理（三张 durable 表，#1210）
+## 保留期与 DLX lifecycle（三张 durable 表，#1210/#1168）
 
-同一泛化 `consistency::RetentionSweeper` / `sweeper_loop<S>` 驱动三张表的保留期清理（删除超期**已终结**行，
-防无界膨胀）；各表终结谓词 + 时间列 + 默认保留期 + 误配风险：
+outbox/inbox 使用 bounded retention sweep；dead_letter 使用独立 archive-before-purge state machine：
 
 | 表 | 终结谓词（删除目标） | 时间列 | 默认保留期 | 误配风险 |
 |----|---------------------|--------|-----------|----------|
 | `outbox` | `status='published'`（dlx 保留供巡检） | `published_at` | 组合根配置（必须 >0） | 非正数 fail-closed；从真实 publish 终态起算，长期 pending 后刚发布不会提前清理 |
 | `inbox_receipts` | `status='done'`（claimed 行不删） | `committed_at` | **7 天**（数据库 singleton policy） | 必须严格大于 automatic 24h + redrive 24h + safety 24h；DB CHECK 与 runtime 精确策略 hydration 双重 fail-closed，避免 receipt 先删除后同 event id 再次执行 |
-| `dead_letter` | 全部行（死信均终结） | `last_attempt_at` | **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向） | 过短 → 合规审计物料过早灭失（清理前冷存储导出见 #1536） |
+| `dead_letter` | verified WORM receipt 存在且 lock 尚有效 | `last_attempt_at` | hot **精确 30 天**（不可配置） | 未归档、回执不完整、lock 非 COMPLIANCE/已到期均 fail-closed 不删 |
 
 - 删除时间谓词均用 DB clock（不注入 Clock，多实例无跨进程偏移）；sweeper 日志带 `target_table` 区分清理目标（per-target readyz 名见 `SweeperWorker::adopt`）。inbox sweeper 调用零参数
   `rss_sweep_inbox_receipts()`，函数从 policy 读取 7d，每 tick 按 `(committed_at,tenant_id,event_id,consumer_group)`
   固定最多删除 1000 条 done receipt；不存在 retain 参数 overload。
 - #1429 已接 runtime `outbox` published-row sweeper（`RSS_OUTBOX_RETAIN_SECONDS`，默认 7 天）+ sampler +
-  per-domain relay；#1650 已接 runtime `inbox_receipts` sweeper（PG inbox consumer bundle 同源）；#1535 接入
-  runtime `dead_letter` sweeper（`RSS_DEAD_LETTER_RETAIN_SECONDS`，默认 30 天）。
-- 无界 DELETE → post-GA 批量分页 / 分区见 #1539；inbox_receipts/dead_letter 多租户分租清理见 #1537；sweeper 删除条数 metrics 见 #1538。
+  per-domain relay；#1650 已接 `inbox_receipts` sweep。两者均稳定排序且每轮最多 1000 条。
+- DLX worker 每轮最多处理 100 个 archive candidate、1000 个 verified hot purge、100 个 expired receipt
+  reconcile；归档 transient failure 保留 hot row并继续本批、health 为 Degraded，AAD/格式/既有对象语义冲突为
+  Invariant、health 为 Unhealthy 且本轮禁止 purge。
+- 低基数指标固定为 `retention_sweep_deleted_total{target}`、`retention_sweep_ticks_total{target,outcome}`、
+  `retention_sweep_duration_seconds{target,outcome}`，以及 archive pending depth/oldest age/outcome/duration；
+  `target/outcome` 来自闭枚举；不伪造未单独计时的 phase 粒度，并禁止
+  tenant/id/object key/payload/error text 标签。
 
 ## Session expiry sweeper（#1233）
 
@@ -240,5 +244,6 @@ runtime durable event transport 现在把 outbox relay / sampler / sweeper 与 c
   sweep interval 调用数据库 policy-bound 零参数函数，清理超 7d 的 done 去重行；assembly 不传 retain 值。
 - saga worker：live saga contract/factory registration 才注册 `saga_executor:<owner>__<contract_slug>` readyz
   probe；source/store infra 错误 Degraded，worker 停止 Unhealthy。无 live registration 不注册假 probe。
-- dead-letter sweeper：`dead_letter_sweeper` readyz probe，按 `RSS_OUTBOX_SWEEP_INTERVAL_MS` 清理超
-  `RSS_DEAD_LETTER_RETAIN_SECONDS` 的 dead_letter 行。
+- DLX lifecycle：`dlx_lifecycle` readyz probe + `dlx-lifecycle` worker，以固定 30 秒周期按 hot
+  30 天策略执行 archive/receipt/purge/reconcile。它不复用 outbox/inbox sweep interval，也没有
+  retention env。

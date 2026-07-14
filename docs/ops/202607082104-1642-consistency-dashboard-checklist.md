@@ -32,6 +32,9 @@ Dashboard 不是 enforcement carrier。metric 名、label 闭值集、PII 边界
 | Outbox oldest pending age | `max by (domain) (outbox_oldest_pending_age_seconds)` | `domain` | `OutboxBacklogOldestAgeHigh`; check relay / broker / DB |
 | Outbox pending depth | `sum by (domain) (outbox_pending_depth)` | `domain` | `OutboxPendingDepthHigh`; check throughput and relay batch |
 | Outbox partition blocked | `sum by (domain, contract_id, tenant_id) (outbox_partition_blocked_depth)` | `domain`, `contract_id`, `tenant_id` | `OutboxPartitionBlocked`; inspect DLX head, no partition key in metric |
+| DLX archive pending | `dead_letter_archive_pending_depth` | none | 与 oldest age 一起看；NaN/缺失不是 0 |
+| DLX archive oldest pending | `dead_letter_archive_oldest_pending_age_seconds` | none | `DlxArchiveOldestPendingHigh`；查 `dlx_lifecycle` / `dlx_archive_ready` 与独立依赖 |
+| DLX lifecycle outcome | `sum by (outcome) (increase(retention_sweep_ticks_total{target="dead_letter"}[5m]))` | `outcome` | `DlxArchiveLifecycleFailure`；transient/invariant 均已停止 purge |
 | Outbox publish disposition | `sum by (domain, status) (rate(outbox_publish_total[5m]))` | `domain`, `status` | Requeue storm / reject path diagnosis |
 | Outbox DLX rate | `sum by (domain) (rate(outbox_dlx_total[5m]))` | `domain` | `OutboxDlxGrowth`; identify tenant before tenant-scoped DLQ CLI |
 | Outbox same-ID window expiry | `sum by (domain, phase) ((increase(outbox_same_id_window_expired_total[10m]) > 0) or ((outbox_same_id_window_expired_total > 0) unless (outbox_same_id_window_expired_total offset 10m)))` | `domain`, `phase` (`automatic`/`redrive`) | `OutboxSameIdWindowExpired`; filtering zero increase prevents it from masking the `unless offset` first-series arm; broker publish was skipped, inspect DLX and maintenance audit |

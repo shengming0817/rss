@@ -160,6 +160,48 @@ pub fn build_pg_migrator_config() -> anyhow::Result<PgConfig> {
     build_pg_migrator_config_from(|name| std::env::var(name).ok())
 }
 
+/// 从注入的配置读取器构造 DLX lifecycle 专用长期连接配置。
+///
+/// Host / port / database / TLS 与 serving 连接一致；凭据必须来自窄角色
+/// `RSS_PG_DLX_ARCHIVER_USERNAME` / `RSS_PG_DLX_ARCHIVER_PASSWORD`。该 pool 不得复用
+/// `rss_app` serving credentials。
+pub(crate) fn build_pg_dlx_archiver_config_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<PgConfig> {
+    build_pg_config_with_user_env(
+        &get,
+        "RSS_PG_DLX_ARCHIVER_USERNAME",
+        "RSS_PG_DLX_ARCHIVER_PASSWORD",
+    )
+}
+
+/// 从 `std::env` 构造 DLX lifecycle 专用长期连接配置。
+pub fn build_pg_dlx_archiver_config() -> anyhow::Result<PgConfig> {
+    build_pg_dlx_archiver_config_from(|name| std::env::var(name).ok())
+}
+
+/// Constructs the independently credentialed DLX verification pool configuration.
+pub(crate) fn build_pg_dlx_verifier_config_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<PgConfig> {
+    build_pg_config_with_user_env(
+        &get,
+        "RSS_PG_DLX_VERIFIER_USERNAME",
+        "RSS_PG_DLX_VERIFIER_PASSWORD",
+    )
+}
+
+/// Constructs the independently credentialed DLX purge/reconcile pool configuration.
+pub(crate) fn build_pg_dlx_purger_config_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<PgConfig> {
+    build_pg_config_with_user_env(
+        &get,
+        "RSS_PG_DLX_PURGER_USERNAME",
+        "RSS_PG_DLX_PURGER_PASSWORD",
+    )
+}
+
 /// 从注入的配置读取器构造 legacy plaintext `ConfigValue` 启动策略。
 ///
 /// `RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES` 是安全豁免开关：缺省为 deny；显式非法值 fail-fast。
@@ -292,6 +334,81 @@ mod tests {
         let debug = format!("{cfg:?}");
         assert!(debug.contains("postgres"));
         assert!(!debug.contains("rss_app"));
+    }
+
+    #[allow(clippy::panic)]
+    #[test]
+    fn pg_dlx_archiver_config_requires_and_uses_dedicated_credentials() {
+        let missing = build_pg_dlx_archiver_config_from(full_pg_get);
+        match missing {
+            Ok(_) => panic!("missing DLX archiver credentials should fail"),
+            Err(err) => assert!(err.to_string().contains("RSS_PG_DLX_ARCHIVER_USERNAME")),
+        }
+
+        let missing_password = build_pg_dlx_archiver_config_from(|name| match name {
+            "RSS_PG_DLX_ARCHIVER_USERNAME" => Some("rss_dlx_archiver".to_string()),
+            _ => full_pg_get(name),
+        });
+        match missing_password {
+            Ok(_) => panic!("missing DLX archiver password should fail"),
+            Err(err) => assert!(err.to_string().contains("RSS_PG_DLX_ARCHIVER_PASSWORD")),
+        }
+
+        let cfg = match build_pg_dlx_archiver_config_from(|name| match name {
+            "RSS_PG_DLX_ARCHIVER_USERNAME" => Some("rss_dlx_archiver".to_string()),
+            "RSS_PG_DLX_ARCHIVER_PASSWORD" => Some("dlx_pw".to_string()),
+            _ => full_pg_get(name),
+        }) {
+            Ok(cfg) => cfg,
+            Err(err) => panic!("DLX archiver config: {err}"),
+        };
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("rss_dlx_archiver"));
+        assert!(!debug.contains("rss_app"));
+        assert!(!debug.contains("dlx_pw"));
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn pg_dlx_verifier_and_purger_configs_require_distinct_credentials() {
+        let verifier = build_pg_dlx_verifier_config_from(|name| match name {
+            "RSS_PG_DLX_VERIFIER_USERNAME" => Some("rss_dlx_verifier".to_string()),
+            "RSS_PG_DLX_VERIFIER_PASSWORD" => Some("verify_pw".to_string()),
+            _ => full_pg_get(name),
+        })
+        .unwrap_or_else(|error| panic!("DLX verifier config: {error}"));
+        let purger = build_pg_dlx_purger_config_from(|name| match name {
+            "RSS_PG_DLX_PURGER_USERNAME" => Some("rss_dlx_purger".to_string()),
+            "RSS_PG_DLX_PURGER_PASSWORD" => Some("purge_pw".to_string()),
+            _ => full_pg_get(name),
+        })
+        .unwrap_or_else(|error| panic!("DLX purger config: {error}"));
+
+        let verifier_debug = format!("{verifier:?}");
+        let purger_debug = format!("{purger:?}");
+        assert!(verifier_debug.contains("rss_dlx_verifier"));
+        assert!(purger_debug.contains("rss_dlx_purger"));
+        assert!(!verifier_debug.contains("verify_pw"));
+        assert!(!purger_debug.contains("purge_pw"));
+
+        let missing_verifier = match build_pg_dlx_verifier_config_from(full_pg_get) {
+            Ok(_) => panic!("verifier credentials are mandatory"),
+            Err(error) => error,
+        };
+        assert!(
+            missing_verifier
+                .to_string()
+                .contains("RSS_PG_DLX_VERIFIER_USERNAME")
+        );
+        let missing_purger = match build_pg_dlx_purger_config_from(full_pg_get) {
+            Ok(_) => panic!("purger credentials are mandatory"),
+            Err(error) => error,
+        };
+        assert!(
+            missing_purger
+                .to_string()
+                .contains("RSS_PG_DLX_PURGER_USERNAME")
+        );
     }
 
     // ── build_pg_config_from 测试 ──────────────────────────────────────────────────────────

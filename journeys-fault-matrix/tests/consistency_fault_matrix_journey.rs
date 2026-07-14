@@ -527,16 +527,16 @@ fn run_outbox_permanent_publish_failure<'a>(
                 dlx.summary()
             );
         }
-        if dlx.encoding() != FaultMatrixDeadLetterEncoding::KeyProviderV1 {
+        if dlx.encoding() != FaultMatrixDeadLetterEncoding::KeyProviderV3 {
             bail!(
                 "outbox DLX payload should use protected encoding, got {:?}",
                 dlx.encoding()
             );
         }
-        if dlx.original_entry_payload_len() != 1 {
+        if dlx.payload_len() != 1 {
             bail!(
                 "outbox DLX should record original payload length 1, got {}",
-                dlx.original_entry_payload_len()
+                dlx.payload_len()
             );
         }
         assert_outbox_count(pg, scope.tenant, &event_id, FaultMatrixOutboxStatus::Dlx, 1).await

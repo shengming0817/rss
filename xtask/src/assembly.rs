@@ -1736,6 +1736,12 @@ fn provider_spec(provider: &str) -> Option<ProviderSpec> {
             required_features: &[],
             provider_crate: "postgres",
         }),
+        "postgres::PgDlxLifecycleRepository" => Some(ProviderSpec {
+            port: DiportPort::DlxLifecycleRepository,
+            durability: ProviderDurability::Persistent,
+            required_features: &[],
+            provider_crate: "postgres",
+        }),
         "vault::VaultSigner" => Some(ProviderSpec {
             port: DiportPort::Signer,
             durability: ProviderDurability::Persistent,
@@ -1756,6 +1762,12 @@ fn provider_spec(provider: &str) -> Option<ProviderSpec> {
         }),
         "s3::S3Store" => Some(ProviderSpec {
             port: DiportPort::ObjectStore,
+            durability: ProviderDurability::Persistent,
+            required_features: &["backend"],
+            provider_crate: "s3",
+        }),
+        "s3::VerifiedS3DlxArchiveStore" => Some(ProviderSpec {
+            port: DiportPort::DlxArchiveStore,
             durability: ProviderDurability::Persistent,
             required_features: &["backend"],
             provider_crate: "s3",

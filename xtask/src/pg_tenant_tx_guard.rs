@@ -38,6 +38,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::diagnostic::{self, GovernanceCheck, finding};
+use crate::dlx_lifecycle_funnel::FIXED_FUNCTIONS as DLX_FIXED_FUNCTIONS;
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
@@ -61,6 +62,10 @@ pub(crate) enum Rule {
     SecretRefMutationBypass,
     /// canonical `LockedSecretKey` mutation sites are absent or duplicated.
     SecretRefMutationSitesAbsent,
+    /// DLX cross-tenant repository escaped its fixed SECURITY DEFINER function funnel.
+    DlxLifecycleBypass,
+    /// Exact DLX lifecycle repository/function sites are missing (anti-vacuity).
+    DlxLifecycleSitesAbsent,
 }
 
 pub(crate) struct PgTenantTxGuard;
@@ -90,12 +95,116 @@ impl GovernanceCheck for PgTenantTxGuard {
         let settings_ports = std::fs::read_to_string(&settings_ports_path)
             .with_context(|| format!("读 {} 失败", settings_ports_path.display()))?;
         let (summary, mut findings) = scan_guard(&migrations, &files);
+        let dlx_path = root.join("adapters/postgres/src/dlx_lifecycle.rs");
+        let dlx_source = std::fs::read_to_string(&dlx_path)
+            .with_context(|| format!("读 {} 失败", dlx_path.display()))?;
+        findings.extend(dlx_lifecycle_funnel_findings(&dlx_source));
         findings.extend(secret_repo_read_only_findings(
             "crates/settings/src/ports.rs",
             &settings_ports,
         ));
         Ok((summary, findings))
     }
+}
+
+fn dlx_lifecycle_funnel_findings(source: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let parsed = syn::parse_file(source).ok();
+    if parsed.as_ref().is_none_or(|file| {
+        !file.items.iter().any(
+            |item| matches!(item, syn::Item::Struct(item) if item.ident == "PgDlxLifecycleRuntime"),
+        )
+    }) {
+        findings.push(finding(
+            Rule::DlxLifecycleSitesAbsent,
+            "dlx_lifecycle.rs",
+            "dedicated DLX lifecycle funnel missing struct `PgDlxLifecycleRuntime`".to_owned(),
+        ));
+    }
+    for (method, required) in [
+        ("archive_backlog", DLX_FIXED_FUNCTIONS[7]),
+        ("claim_archive_candidates", DLX_FIXED_FUNCTIONS[0]),
+        ("settle_archive_failure", DLX_FIXED_FUNCTIONS[1]),
+        ("settle_archive_failure", DLX_FIXED_FUNCTIONS[2]),
+        ("record_verified_receipt", DLX_FIXED_FUNCTIONS[3]),
+        ("purge_verified", DLX_FIXED_FUNCTIONS[4]),
+        ("claim_expired_receipts", DLX_FIXED_FUNCTIONS[5]),
+        ("delete_expired_receipt", DLX_FIXED_FUNCTIONS[6]),
+    ] {
+        if parsed.as_ref().is_none_or(|file| {
+            !repository_method_sql_literals(file, method)
+                .iter()
+                .any(|sql| sql_calls_function(sql, required))
+        }) {
+            findings.push(finding(
+                Rule::DlxLifecycleSitesAbsent,
+                "dlx_lifecycle.rs",
+                format!("dedicated DLX lifecycle method `{method}` missing `{required}` SQL call"),
+            ));
+        }
+    }
+    for forbidden in [
+        "DELETE FROM dead_letter",
+        "INSERT INTO dead_letter_archive_receipts",
+        "UPDATE dead_letter SET",
+        "pub fn pool(",
+        "pub pool:",
+        "PgTenantPool",
+        "run_global_transaction",
+    ] {
+        if source.contains(forbidden) {
+            findings.push(finding(
+                Rule::DlxLifecycleBypass,
+                "dlx_lifecycle.rs",
+                format!("DLX lifecycle repository bypasses fixed functions via `{forbidden}`"),
+            ));
+        }
+    }
+    findings
+}
+
+fn repository_method_sql_literals(file: &syn::File, method: &str) -> Vec<String> {
+    use syn::visit::Visit as _;
+
+    let Some(item) = file.items.iter().find_map(|item| match item {
+        syn::Item::Impl(item)
+            if item.trait_.as_ref().is_some_and(|(_, path, _)| {
+                path.segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "DlxLifecycleRepository")
+            }) =>
+        {
+            Some(item)
+        }
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let Some(method) = item.items.iter().find_map(|item| match item {
+        syn::ImplItem::Fn(item) if item.sig.ident == method => Some(item),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    #[derive(Default)]
+    struct StringLiterals(Vec<String>);
+    impl<'ast> syn::visit::Visit<'ast> for StringLiterals {
+        fn visit_lit_str(&mut self, literal: &'ast syn::LitStr) {
+            self.0.push(literal.value());
+        }
+    }
+    let mut literals = StringLiterals::default();
+    literals.visit_block(&method.block);
+    literals.0
+}
+
+fn sql_calls_function(sql: &str, function: &str) -> bool {
+    let compact = sql
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    compact.contains(&format!("select{function}(")) || compact.contains(&format!("from{function}("))
 }
 
 fn load_sql_files(dir: &Path) -> Result<Vec<(String, String)>> {
@@ -4375,5 +4484,20 @@ pub trait SecretRepoLocal: Send + Sync {
         let port_findings = secret_repo_read_only_findings("crates/settings/src/ports.rs", &ports);
         assert!(port_findings.is_empty(), "{port_findings:?}");
         Ok(())
+    }
+
+    #[test]
+    fn dlx_lifecycle_repository_rejects_raw_cross_tenant_sql() {
+        let red = dlx_lifecycle_funnel_findings(
+            "PgDlxLifecycleRuntime DELETE FROM dead_letter pub fn pool(",
+        );
+        assert!(
+            red.iter()
+                .any(|finding| finding.rule == Rule::DlxLifecycleBypass)
+        );
+        assert!(
+            red.iter()
+                .any(|finding| finding.rule == Rule::DlxLifecycleSitesAbsent)
+        );
     }
 }

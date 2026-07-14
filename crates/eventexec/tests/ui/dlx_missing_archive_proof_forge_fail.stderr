@@ -1,0 +1,5 @@
+error[E0451]: field `receipt` of struct `MissingArchiveProof` is private
+ --> tests/ui/dlx_missing_archive_proof_forge_fail.rs:8:41
+  |
+8 |     let _forged = MissingArchiveProof { receipt: value() };
+  |                                         ^^^^^^^ private field

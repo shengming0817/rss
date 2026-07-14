@@ -209,10 +209,13 @@ remaining plaintext；runtime 必须验签 operator service-token，用已验证
 普通 serving 读写路径不能读取
 scheme=0 plaintext。`rss audit-ledger verify` 是另一条命名维护入口：migrator/owner 连接只用于 migration
 与 `auth_audit_events` start/finish，审计链读取只能经 `rss_audit_admin` 只读 pool + typed `TenantId`
-scope，不能使用 owner pool 扫 `audit_entries`。`dead_letter` retention sweep 和 outbox relay/retention/backlog 不保留 owner/maintenance
-长期连接，也不授 `rss_app` 直接 DELETE/UPDATE；
-它们由迁移安装的窄 `SECURITY DEFINER` 函数承载，函数 owner 是 NOLOGIN BYPASSRLS 维护角色，只开放固定
-参数的全域维护能力。runtime 仍经 `rss_app` 调用这些函数；outbox relay 将 publish 失败写入 `dead_letter`
+scope，不能使用 owner pool 扫 `audit_entries`。outbox relay/retention/backlog 不保留 owner/maintenance 长期连接，也不授
+`rss_app` 直接 DELETE/UPDATE；它们由迁移安装的窄 `SECURITY DEFINER` 函数承载。
+`dead_letter` lifecycle 进一步拆为三个独立长期登录角色：`rss_dlx_archiver` 只能 claim/retry/quarantine，
+`rss_dlx_verifier` 只能记录已验证回执，`rss_dlx_purger` 只能 purge/reconcile。三者都必须非 superuser、
+NOBYPASSRLS、无任何表级 DML/DDL，且 `rss_app` 对 lifecycle 函数全部无权。runtime 用三组独立
+`RSS_PG_DLX_{ARCHIVER,VERIFIER,PURGER}_{USERNAME,PASSWORD}` 建 pool，启动时精确验证 current role 与能力集合；
+repository 内部按方法路由 pool，且不暴露 raw pool。outbox relay 将 publish 失败写入 `dead_letter`
 前必须从 outbox metadata 取 tenant，并在同一事务内经 `set_local_tenant` 注入 tenant scope 后写入。
 
 **启动期 RLS 能力门控**：`PgRuntimeDeps::setup` 在迁移完成后调用

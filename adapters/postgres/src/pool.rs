@@ -107,6 +107,18 @@ pub enum PgError {
     /// The database policy is missing, duplicated, invalid, overflowing, or mismatched to binary.
     #[error("postgres event delivery policy does not match this binary")]
     EventDeliveryPolicyMismatch,
+    /// A DLX lifecycle pool exact-role/privilege catalog probe failed.
+    #[error("postgres DLX lifecycle capability probe failed")]
+    DlxLifecycleCapability(#[source] sqlx::Error),
+    /// DLX lifecycle pool must connect directly as the fixed workload role.
+    #[error("postgres DLX lifecycle capability: unexpected workload role")]
+    DlxLifecycleUnexpectedRole,
+    /// DLX workload roles may not bypass RLS or own cluster-wide administrative capabilities.
+    #[error("postgres DLX lifecycle capability: role bypasses lifecycle confinement")]
+    DlxLifecycleBypassRole,
+    /// Each DLX workload role must have exactly its fixed function executions.
+    #[error("postgres DLX lifecycle capability: privileges are not exact")]
+    DlxLifecyclePrivileges,
 }
 
 /// 启动期 legacy plaintext `ConfigValue` 行策略。

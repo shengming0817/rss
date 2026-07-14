@@ -21,6 +21,7 @@ pub(crate) enum Resource {
     Redis,
     Amqp,
     Mqtt,
+    ObjectStorage,
 }
 
 impl Resource {
@@ -30,6 +31,7 @@ impl Resource {
             Self::Redis => "redis",
             Self::Amqp => "amqp",
             Self::Mqtt => "mqtt",
+            Self::ObjectStorage => "object-storage",
         }
     }
 }
@@ -213,6 +215,15 @@ integration_shard_catalog! {
             ("runtime", "settings_config_publish_durable_e2e", Test, Serial),
         ],
     },
+    ObjectStorage => {
+        name: "object-storage",
+        resources: [ObjectStorage],
+        units: [
+            ("s3", "s3", Lib, Parallel),
+            ("s3", "dlx_archive_store", Test, Parallel),
+            ("s3", "integration_object_store", Test, Serial),
+        ],
+    },
 }
 
 impl fmt::Display for IntegrationShard {
@@ -231,9 +242,10 @@ impl IntegrationShard {
     pub(crate) const fn partition_policy(self) -> PartitionPolicy {
         match self {
             Self::EventTransport | Self::RuntimeHttpAuth => PartitionPolicy::TwoWayHash,
-            Self::PostgresDomain | Self::ConsistencyFault | Self::CdcProjectionSaga => {
-                PartitionPolicy::Unpartitioned
-            }
+            Self::PostgresDomain
+            | Self::ConsistencyFault
+            | Self::CdcProjectionSaga
+            | Self::ObjectStorage => PartitionPolicy::Unpartitioned,
         }
     }
 
@@ -339,14 +351,8 @@ const LEGACY_PACKAGES: &[&str] = &[
     "runtime",
     "journeys-fault-matrix",
     "testkit",
-];
-
-pub(crate) const STANDALONE_EXCLUSIONS: &[(&str, &str, TargetKind, &str)] = &[(
     "s3",
-    "integration_object_store",
-    TargetKind::Test,
-    "requires an externally managed MinIO endpoint and was not in the legacy integration lane",
-)];
+];
 
 type TargetId = (String, String, String);
 
@@ -366,20 +372,11 @@ fn unique_targets(units: impl IntoIterator<Item = ExecutionUnit>) -> Result<BTre
 }
 
 fn expected_targets() -> Result<BTreeSet<TargetId>> {
-    let expected = unique_targets(
+    unique_targets(
         IntegrationShard::ALL
             .iter()
             .flat_map(|shard| shard.spec().units.iter().copied()),
-    )?;
-    for (package, target, _, reason) in STANDALONE_EXCLUSIONS {
-        if reason.is_empty() {
-            bail!("standalone integration exclusion {package}/{target} is missing a reason");
-        }
-        if expected.iter().any(|(p, t, _)| p == package && t == target) {
-            bail!("standalone integration target also assigned to a shard: {package}/{target}");
-        }
-    }
-    Ok(expected)
+    )
 }
 
 fn metadata_targets(metadata: &Value) -> Result<BTreeSet<TargetId>> {
@@ -429,40 +426,6 @@ fn metadata_targets(metadata: &Value) -> Result<BTreeSet<TargetId>> {
     Ok(actual)
 }
 
-fn all_metadata_targets(metadata: &Value) -> Result<BTreeSet<TargetId>> {
-    let packages = metadata
-        .get("packages")
-        .and_then(Value::as_array)
-        .context("cargo metadata JSON missing packages array")?;
-    let mut actual = BTreeSet::new();
-    for package in packages {
-        let name = package
-            .get("name")
-            .and_then(Value::as_str)
-            .context("cargo metadata package missing name")?;
-        let targets = package
-            .get("targets")
-            .and_then(Value::as_array)
-            .context("cargo metadata package missing targets")?;
-        for target in targets {
-            let target_name = target
-                .get("name")
-                .and_then(Value::as_str)
-                .context("cargo metadata target missing name")?;
-            let kinds = target
-                .get("kind")
-                .and_then(Value::as_array)
-                .context("cargo metadata target missing kind")?;
-            for kind in kinds.iter().filter_map(Value::as_str) {
-                if matches!(kind, "lib" | "test") {
-                    actual.insert((name.to_owned(), target_name.to_owned(), kind.to_owned()));
-                }
-            }
-        }
-    }
-    Ok(actual)
-}
-
 pub(crate) fn validate_metadata(metadata: &Value) -> Result<()> {
     let expected = expected_targets()?;
     let actual = metadata_targets(metadata)?;
@@ -470,21 +433,6 @@ pub(crate) fn validate_metadata(metadata: &Value) -> Result<()> {
     let stale: Vec<_> = expected.difference(&actual).cloned().collect();
     if !unassigned.is_empty() || !stale.is_empty() {
         bail!("integration shard coverage mismatch; unassigned={unassigned:?}; stale={stale:?}");
-    }
-    let all_actual = all_metadata_targets(metadata)?;
-    let stale_exclusions: Vec<_> = STANDALONE_EXCLUSIONS
-        .iter()
-        .filter_map(|(package, target, kind, _)| {
-            let id = (
-                (*package).to_owned(),
-                (*target).to_owned(),
-                kind.as_str().to_owned(),
-            );
-            (!all_actual.contains(&id)).then_some(id)
-        })
-        .collect();
-    if !stale_exclusions.is_empty() {
-        bail!("standalone integration exclusions are stale: {stale_exclusions:?}");
     }
     Ok(())
 }
@@ -532,6 +480,13 @@ pub(crate) fn external_resource_present(resource: Resource) -> bool {
         Resource::Redis => nonempty("REDIS_TEST_URL"),
         Resource::Amqp => nonempty("RSS_AMQP_TEST_URL"),
         Resource::Mqtt => nonempty("RSS_MQTT_TEST_URL"),
+        Resource::ObjectStorage => [
+            "RSS_S3_TEST_ENDPOINT",
+            "RSS_S3_TEST_ACCESS_KEY",
+            "RSS_S3_TEST_SECRET_KEY",
+        ]
+        .iter()
+        .all(|name| nonempty(name)),
     }
 }
 
@@ -564,6 +519,7 @@ mod tests {
                 "runtime-http-auth",
                 "consistency-fault",
                 "cdc-projection-saga",
+                "object-storage",
             ]
         );
         for shard in IntegrationShard::ALL {
@@ -594,6 +550,7 @@ mod tests {
             ("testkit", "testkit"),
             ("journeys-fault-matrix", "consistency_fault_matrix_journey"),
             ("runtime", "settings_config_publish_durable_e2e"),
+            ("s3", "integration_object_store"),
         ]);
         let actual_serial: BTreeSet<_> = all_units()
             .into_iter()
@@ -672,6 +629,10 @@ mod tests {
                 IntegrationShard::CdcProjectionSaga,
                 &[Resource::Postgres][..],
             ),
+            (
+                IntegrationShard::ObjectStorage,
+                &[Resource::ObjectStorage][..],
+            ),
         ];
         assert_eq!(IntegrationShard::ALL.len(), expected.len());
         for (shard, resources) in expected {
@@ -680,7 +641,7 @@ mod tests {
         }
     }
 
-    fn metadata_from(targets: &[ExecutionUnit], include_standalone: bool) -> Value {
+    fn metadata_from(targets: &[ExecutionUnit]) -> Value {
         let mut packages: BTreeMap<&str, Vec<&ExecutionUnit>> = BTreeMap::new();
         for unit in targets {
             packages.entry(unit.package).or_default().push(unit);
@@ -695,10 +656,7 @@ mod tests {
                         "kind": [unit.kind.as_str()],
                     })).collect::<Vec<_>>()
                 })
-            }).chain(include_standalone.then(|| json!({
-                "name": "s3",
-                "targets": [{"name": "integration_object_store", "kind": ["test"]}],
-            }))).collect::<Vec<_>>()
+            }).collect::<Vec<_>>()
         })
     }
 
@@ -712,11 +670,11 @@ mod tests {
     #[test]
     fn metadata_coverage_rejects_missing_duplicate_and_unknown_targets() -> Result<()> {
         let units = all_units();
-        validate_metadata(&metadata_from(&units, true))?;
+        validate_metadata(&metadata_from(&units))?;
 
         let mut missing = units.clone();
         missing.pop();
-        assert!(validate_metadata(&metadata_from(&missing, true)).is_err());
+        assert!(validate_metadata(&metadata_from(&missing)).is_err());
 
         let mut unknown = units;
         unknown.push(ExecutionUnit::new(
@@ -725,12 +683,11 @@ mod tests {
             TargetKind::Test,
             Scheduling::Parallel,
         ));
-        assert!(validate_metadata(&metadata_from(&unknown, true)).is_err());
+        assert!(validate_metadata(&metadata_from(&unknown)).is_err());
 
         let mut duplicate = all_units();
         duplicate.push(duplicate[0]);
         assert!(unique_targets(duplicate).is_err());
-        assert!(validate_metadata(&metadata_from(&all_units(), false)).is_err());
         Ok(())
     }
 
@@ -740,14 +697,18 @@ mod tests {
     }
 
     #[test]
-    fn standalone_minio_target_is_not_smuggled_into_a_shard() {
-        assert_eq!(STANDALONE_EXCLUSIONS.len(), 1);
-        assert!(IntegrationShard::ALL.iter().all(|shard| {
-            shard
-                .spec()
-                .units
-                .iter()
-                .all(|unit| !(unit.package == "s3" && unit.target == "integration_object_store"))
-        }));
+    fn live_minio_target_is_owned_by_the_object_storage_shard() {
+        let spec = IntegrationShard::ObjectStorage.spec();
+        assert_eq!(spec.resources, [Resource::ObjectStorage]);
+        let live_targets: Vec<_> = spec
+            .units
+            .iter()
+            .filter(|unit| unit.target == "integration_object_store")
+            .collect();
+        assert_eq!(live_targets.len(), 1);
+        let live = live_targets[0];
+        assert_eq!(live.package, "s3");
+        assert_eq!(live.kind, TargetKind::Test);
+        assert_eq!(live.scheduling, Scheduling::Serial);
     }
 }

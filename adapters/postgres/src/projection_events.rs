@@ -206,6 +206,9 @@ pub(crate) async fn append_replayed_projection_event_if_bound(
         return Ok(None);
     }
 
+    let metadata_json = std::str::from_utf8(replay.metadata_json.expose())
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+
     append_projection_event(
         tx,
         ProjectionAppend {
@@ -213,12 +216,12 @@ pub(crate) async fn append_replayed_projection_event_if_bound(
             domain: &replay.domain,
             aggregate_id: &replay.event_id,
             topic: &replay.topic,
-            payload: &replay.payload,
+            payload: replay.payload.expose(),
             correlation_id: replay.causation_id.as_deref(),
             contract_id: &replay.contract_id,
             contract_version: &replay.contract_version,
             schema_hash: &replay.schema_hash,
-            metadata_json: &replay.metadata_json,
+            metadata_json,
             partition_key: None,
             causation_id: replay.causation_id.as_deref(),
         },

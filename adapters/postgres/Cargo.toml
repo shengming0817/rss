@@ -61,6 +61,8 @@ uuid = { workspace = true }
 base64 = { workspace = true }
 # Stable deployment generation for additive projection-input registration.
 sha2 = { workspace = true }
+# DLX replay plaintext JSON/string buffers are wiped on every success/error path.
+zeroize = { workspace = true }
 # 后台周期 DB liveness 采样 loop（pg_readiness_sampling_loop + PgReadinessSampler worker）。
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 # CancellationToken（tokio_util::sync::CancellationToken）——adopt 式 worker 两阶段关闭。

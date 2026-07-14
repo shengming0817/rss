@@ -98,16 +98,15 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | 列 | 类型 | 说明 |
 |----|------|------|
 | id | uuid PK | |
-| tenant_id | uuid | RLS scope（必填） |
+| tenant_id | uuid NOT NULL | RLS scope（物理必填） |
 | message_id | text | 原 broker message id / outbox event id |
-| source_kind | text | `legacy` / `consumer` / `outbox_relay` / `saga` / `projection` |
-| domain/contract_id/topic | text | |
+| source_kind | text | `consumer` / `outbox_relay` / `saga` / `projection` |
+| producer_domain/consumer_domain/contract_id/topic | text | 可查询 provenance |
 | consumer_group | text NULL | subscription consumer group；projection 来源为 projection id |
-| original_entry | jsonb | 加密原始 entry，唯一允许 shape 为 `{"ciphertext":[...]}` |
-| original_entry_key_ref | text | KeyProvider/Vault transit key reference |
-| original_entry_payload_len | bigint | 解密后 payload 长度；DLQ list 只暴露该长度 |
-| original_entry_encoding | text | 固定 `key-provider-v1` |
-| metadata | jsonb | 原始 delivery envelope metadata（重放时保留 trace/correlation/tenant） |
+| replay_capsule | jsonb | `key-provider-v3` 一次加密的 payload + 全部 persisted metadata |
+| replay_capsule_key_ref | text | hot KeyProvider/Vault transit key reference |
+| payload_len | bigint | 解密后 payload 长度；DLQ list 只暴露该长度 |
+| replay_capsule_encoding | text | 固定 `key-provider-v3` |
 | error_summary | text | 安全摘要（经 `secure` redaction + 长度截断约 512 chars，不直接写 handler 的 Display/Debug 原文、不含原始 payload 片段；runtime 数据只经 `with_internal` 进服务端 tracing） |
 | num_attempts | int | |
 | first_attempt_at/last_attempt_at | timestamptz | |
@@ -115,16 +114,26 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 - `dead_letter` 是统一 DLQ 审计表。outbox relay 进入 `dlx` 时在同一事务登记
   `dead_letter(source_kind='outbox_relay')`，但原 outbox 行仍保持 `status='dlx'` 作为 relay 状态与
   partition ordering gate。
-- 新增加密列的 migration 对既有 `dead_letter` 行 fail-fast，不做 plaintext 迁移；DB 约束拒绝
-  `original_entry` 含 `bytes` 的明文 shape。所有新写入必须经 `KeyProvider` 加密，runtime durable 使用
-  Vault transit key `RSS_DLX_PAYLOAD_KEY_NAME`。
+- 0062 migration 对既有 `dead_letter` 行 fail-fast，不做数据迁移；旧列、旧 decoder 与旧函数直接删除。
+  所有新写入必须经 hot `KeyProvider` 把 payload 与 metadata 一次加密，runtime durable 使用 Vault transit key
+  `RSS_DLX_PAYLOAD_KEY_NAME`；`tenantAuthority` 永不持久化。
 - 内部 DLQ API 区分分页 `DlqListResult { data, has_more, next_cursor }`、`DlqReplayRequest`
   （consumer/saga dead_letter → 新 outbox id）与 `DlqRedriveRequest`（outbox dlx → 原 outbox 行恢复
   pending）。replay/redrive 均必须携带 `OperatorDlqCapability`；replay 的 dead_letter id 先经 typed
   `DeadLetterId` UUID parse，非法输入不进入 SQL cast。只有 replay 使用同一 `KeyProvider` 解密；
   `redrive-outbox` 是 payload-free 原 outbox 状态转换。plaintext replay row/shape 必须失败；consumer replay
   不删除原死信、不重置 `inbox_receipts done`。outbox redrive deadline 到期返回 typed `Expired`，不修改行。
-- 保留期清理（#1210）：`PgDeadLetterStore::sweep` 删 `last_attempt_at ≤ now()-retain` 的死信（**全域**，所有行均终结）；默认/最小 **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向）。清理索引 `(last_attempt_at)`（migration 0021）。语义由「immutable append（只 INSERT）」改为「保留期内不可变、超期清理」——`rss_app` 无直接 DELETE，仅可调用 NOLOGIN maintenance owner 承载的 `rss_sweep_dead_letter(bigint)` 固定函数；清理前冷存储导出（合规归档）见 #1536。
+- 生命周期清理：worker 经 `rss_dlx_archiver` claim/retry、`rss_dlx_verifier` 写 verified receipt、
+  `rss_dlx_purger` purge/reconcile，尽快把 hot row 归档为 verified S3 Object Lock
+  `COMPLIANCE` 对象并 CAS 写 receipt；只有 `last_attempt_at ≤ now()-30d`、receipt 已验证且
+  `retain_until > now()` 的行才进入每轮最多 1000 条 purge。hot 30 天固定且不可配置；archive candidates
+  每轮 100，receipt reconcile 每轮 100。`rss_app` 无 lifecycle 函数权限，归档 repository 也不暴露 raw pool。
+
+### dead_letter_archive_receipts
+
+receipt 是 tenant-scoped FORCE RLS 证明表，记录 dead-letter id、对象 key、checksum、archive key ref、
+Object Lock mode/retain-until 与 verified time。lock 到期不立即删 receipt；只有 verified archive store 的 HEAD
+确认 S3 lifecycle 已删除对象，才能构造 `MissingArchiveProof` 并 CAS 回收 receipt。
 
 ### saga_instances / saga_journal（P9 + #1632）
 `saga_instances`:

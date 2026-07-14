@@ -590,6 +590,26 @@ CREATE POLICY tenant_isolation ON inbox_receipts
     }
 
     #[test]
+    fn green_dead_letter_archive_receipts_target_schema_has_force_rls() {
+        let sql = r#"
+CREATE TABLE dead_letter_archive_receipts (
+    tenant_id uuid NOT NULL,
+    dead_letter_id uuid NOT NULL,
+    object_key text NOT NULL,
+    PRIMARY KEY (tenant_id, dead_letter_id)
+);
+ALTER TABLE dead_letter_archive_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dead_letter_archive_receipts FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON dead_letter_archive_receipts
+    USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
+"#;
+        let (count, findings) = scan_rls(&files(sql));
+        assert_eq!(count, 1);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
     fn red_alter_add_tenant_column_missing_rls() {
         let sql = r#"
 CREATE TABLE dead_letter (id bigserial PRIMARY KEY);

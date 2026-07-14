@@ -28,6 +28,7 @@ use vocab::DomainName;
 
 use crate::relay_config::{RelayConfig, SamplerConfig, SweeperConfig};
 use crate::relay_metrics::{OutboxMetricScope, OutboxMetrics, RelayPhase};
+use crate::{DlxLifecycleMetrics, MetricsDlxLifecycleMetrics, RetentionOutcome, RetentionTarget};
 
 // ── probe 名常量 ────────────────────────────────────────────────────────────
 
@@ -50,13 +51,15 @@ const SAMPLER_WORKER_NAME: &str = "outbox-sampler";
 /// worker 关闭超时：重 I/O drain，覆盖默认 30s（relay/sweeper 同值）。
 const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 
-// AtomicU8 编码：0=Healthy 1=Degraded 2=Unhealthy 3=Starting 4=SubscriberUnavailable 5=DlxWriteError
+// AtomicU8 编码：0=Healthy 1=Degraded 2=Unhealthy 3=Starting 4=SubscriberUnavailable
+// 5=DlxWriteError 6=Invariant
 const HEALTH_HEALTHY: u8 = 0;
 const HEALTH_DEGRADED: u8 = 1;
 const HEALTH_UNHEALTHY: u8 = 2;
 const HEALTH_STARTING: u8 = 3;
 const HEALTH_SUBSCRIBER_UNAVAILABLE: u8 = 4;
 const HEALTH_DLX_WRITE_ERROR: u8 = 5;
+const HEALTH_INVARIANT: u8 = 6;
 
 // ── WorkerHealth ────────────────────────────────────────────────────────────
 
@@ -101,7 +104,9 @@ impl WorkerHealth {
         match self.0.load(Ordering::Acquire) {
             HEALTH_HEALTHY => HealthStatus::Healthy,
             HEALTH_DEGRADED | HEALTH_DLX_WRITE_ERROR => HealthStatus::Degraded,
-            HEALTH_STARTING | HEALTH_SUBSCRIBER_UNAVAILABLE => HealthStatus::Unhealthy,
+            HEALTH_STARTING | HEALTH_SUBSCRIBER_UNAVAILABLE | HEALTH_INVARIANT => {
+                HealthStatus::Unhealthy
+            }
             // `_` 兜底 HEALTH_UNHEALTHY + 任何非法编码（AtomicU8 仅由本类型三 const 写入；
             // clippy::wildcard_in_or_patterns 拒 `CONST | _`，故用裸 `_`）。
             _ => HealthStatus::Unhealthy,
@@ -116,6 +121,7 @@ impl WorkerHealth {
             HEALTH_STARTING => "starting",
             HEALTH_SUBSCRIBER_UNAVAILABLE => "subscriber-unavailable",
             HEALTH_DLX_WRITE_ERROR => "dlx-write-error",
+            HEALTH_INVARIANT => "invariant",
             _ => "stopped",
         }
     }
@@ -124,6 +130,9 @@ impl WorkerHealth {
     ///
     /// 与 [`WorkerHealth::mark_degraded`] 同档（无条件 store）；仅在运行期由 tick 调用。
     pub(crate) fn mark_healthy(&self) {
+        if self.0.load(Ordering::Acquire) == HEALTH_INVARIANT {
+            return;
+        }
         self.0.store(HEALTH_HEALTHY, Ordering::Release);
     }
 
@@ -133,6 +142,9 @@ impl WorkerHealth {
     /// `mark_healthy`/`mark_degraded`，退出时恰调一次终态 `mark_stopped`（Unhealthy）；cancel 后不再
     /// tick，故 Unhealthy 之后不会被运行期标记回退。
     pub(crate) fn mark_degraded(&self) {
+        if self.0.load(Ordering::Acquire) == HEALTH_INVARIANT {
+            return;
+        }
         self.0.store(HEALTH_DEGRADED, Ordering::Release);
     }
 
@@ -147,9 +159,17 @@ impl WorkerHealth {
         self.0.store(HEALTH_DLX_WRITE_ERROR, Ordering::Release);
     }
 
+    /// A verified safety invariant failed. This state is latched for the worker lifetime.
+    pub(crate) fn mark_invariant(&self) {
+        self.0.store(HEALTH_INVARIANT, Ordering::Release);
+    }
+
     /// loop 退出（worker 停止运行）→ Unhealthy；readyz 据此翻。
     pub(crate) fn mark_stopped(&self) {
-        if self.0.load(Ordering::Acquire) == HEALTH_SUBSCRIBER_UNAVAILABLE {
+        if matches!(
+            self.0.load(Ordering::Acquire),
+            HEALTH_SUBSCRIBER_UNAVAILABLE | HEALTH_INVARIANT
+        ) {
             return;
         }
         self.0.store(HEALTH_UNHEALTHY, Ordering::Release);
@@ -365,18 +385,20 @@ fn log_claimed(domain: &str, claimed: usize) {
 /// [`SweeperConfig`] funnel 已校验（`sweep_interval`≠0、`retain_seconds`≠0，SWEEPER-CONFIG-01）。
 /// 取消/错误处理与 `relay_loop` 同骨架。
 ///
-/// 泛型 `S: RetentionSweeper` ⇒ 可驱动任一 durable 表的保留清理（outbox / inbox_receipts / dead_letter）；
+/// 泛型 `S: RetentionSweeper` ⇒ 可驱动 outbox / inbox receipt 的有界保留清理；
+/// dead-letter 使用独立的 archive-before-purge lifecycle，不能接入此 sweeper。
 /// 各表的终结谓词 + 时间列由对应 adapter impl 决定，本 loop 只负责 tick 调度与健康/取消骨架。
 ///
-/// `target`（低基数 `&'static str`，如 `outbox` / `inbox_receipts` / `dead_letter`）= 本 loop 驱动的清理目标——
+/// `target`（低基数 `&'static str`，如 `outbox` / `inbox_receipts`）= 本 loop 驱动的清理目标——
 /// 泛型 store 自身无表身份，故由 spawn 端显式传入并写入每轮成功/失败日志，使多表 sweeper 的日志可归因（#327
 /// review F2）。worker 身份见 [`SweeperWorker::adopt`] 的 `name` 参数（per-target readyz 命名）。
 pub async fn sweeper_loop<S>(
     store: Arc<S>,
     config: SweeperConfig,
+    clock: Arc<dyn diport::Clock>,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-    target: &'static str,
+    target: RetentionTarget,
 ) where
     S: RetentionSweeper,
 {
@@ -385,7 +407,13 @@ pub async fn sweeper_loop<S>(
         tokio::select! {
             biased;
             () = token.cancelled() => break,
-            _ = ticker.tick() => sweeper_tick(&store, config.retain_seconds(), &health, target).await,
+            _ = ticker.tick() => sweeper_tick(
+                &store,
+                config.retain_seconds(),
+                clock.as_ref(),
+                &health,
+                target,
+            ).await,
         }
     }
     health.mark_stopped();
@@ -395,18 +423,37 @@ pub async fn sweeper_loop<S>(
 async fn sweeper_tick<S>(
     store: &Arc<S>,
     retain_seconds: u64,
+    clock: &dyn diport::Clock,
     health: &Arc<WorkerHealth>,
-    target: &'static str,
+    target: RetentionTarget,
 ) where
     S: RetentionSweeper,
 {
+    let started = clock.now();
+    let metrics = MetricsDlxLifecycleMetrics;
     match store.sweep(retain_seconds).await {
         Ok(deleted) => {
-            tracing::debug!(target_table = target, deleted, "sweeper: tick completed");
+            metrics.record_sweep(
+                target,
+                RetentionOutcome::Success,
+                deleted,
+                secs_since(clock, started),
+            );
+            tracing::debug!(
+                target_table = target.as_label(),
+                deleted,
+                "sweeper: tick completed"
+            );
             health.mark_healthy(); // 干净一轮 → 恢复 Healthy（F5：瞬态故障自愈，非单向 latch）。
         }
         Err(e) => {
-            log_sweep_failed(target, &e);
+            metrics.record_sweep(
+                target,
+                RetentionOutcome::Transient,
+                0,
+                secs_since(clock, started),
+            );
+            log_sweep_failed(target.as_label(), &e);
             health.mark_degraded();
         }
     }
@@ -658,7 +705,7 @@ adopt_worker!(
 
 /// 保留期 sweeper 后台 worker（结构与 [`RelayWorker`] 同构，但 **readyz name 运行期携带**）。
 ///
-/// 同一泛化 `sweeper_loop` 可服务多张 durable 表（outbox / inbox_receipts / dead_letter），故 worker 身份不再是
+/// 同一泛化 `sweeper_loop` 可服务 outbox / inbox receipt durable 表，故 worker 身份不再是
 /// 编译期常量——由 [`SweeperWorker::adopt`] 的 `name` 参数（per-target，如 [`SWEEPER_WORKER_NAME`]）决定，使
 /// readyz 聚合能区分各表 sweeper（#327 review F2）。adopt 式：先在具体类型处 `tokio::spawn(sweeper_loop::<S>(..))` 再 `adopt`。
 pub struct SweeperWorker {
@@ -668,7 +715,7 @@ pub struct SweeperWorker {
 
 impl SweeperWorker {
     /// 组合根/测试：先 spawn `sweeper_loop`(具体类型)，再 adopt JoinHandle + 同一 health/token + per-target `name`
-    /// （readyz 命名，如 `outbox-sweeper` / `inbox-dedup-sweeper` / `dead-letter-sweeper`）。
+    /// （readyz 命名，如 `outbox-sweeper` / `inbox-dedup-sweeper`）。
     pub fn adopt(
         name: &'static str,
         handle: JoinHandle<()>,
@@ -727,6 +774,7 @@ mod tests {
         OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, SWEEPER_WORKER_NAME,
         SamplerWorker, SweeperWorker, WorkerHealth, backlog_sampler_loop, sweeper_loop,
     };
+    use crate::RetentionTarget;
     use crate::relay::{RelayWorker, relay_loop};
     use crate::relay_config::{RelayConfig, SamplerConfig, SweeperConfig};
     use crate::relay_metrics::{OutboxMetricScope, OutboxMetrics, RelayPhase};
@@ -1245,9 +1293,10 @@ mod tests {
         let handle = tokio::spawn(sweeper_loop(
             sweeper.clone(),
             sweeper_config(86400, Duration::from_secs(60)),
+            fixed_clock(),
             token.clone(),
             health.clone(),
-            "outbox",
+            RetentionTarget::OutboxPublished,
         ));
 
         let worker =
@@ -1485,9 +1534,10 @@ mod tests {
         let _handle = tokio::spawn(sweeper_loop(
             sweeper.clone(),
             sweeper_config(86400, Duration::from_secs(1)),
+            fixed_clock(),
             token.clone(),
             health.clone(),
-            "outbox",
+            RetentionTarget::OutboxPublished,
         ));
 
         tokio::time::advance(std::time::Duration::from_secs(2)).await;
@@ -1591,9 +1641,10 @@ mod tests {
             let handle = tokio::spawn(sweeper_loop(
                 FakeSweeper::new(),
                 sweeper_config(86400, Duration::from_secs(60)),
+                fixed_clock(),
                 token.clone(),
                 health.clone(),
-                name,
+                RetentionTarget::OutboxPublished,
             ));
             SweeperWorker::adopt(name, handle, health, token)
         }

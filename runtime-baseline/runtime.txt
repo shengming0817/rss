@@ -17,6 +17,7 @@ assembly-schema = path=../../crates/assembly-schema
 audit = path=../../crates/audit
 audit-composition = path=../../composition/audit
 authn = path=../../crates/authn
+aws-config = workspace=true
 aws-sdk-s3 = workspace=true
 aws-smithy-http-client = workspace=true
 axum = workspace=true
@@ -34,6 +35,7 @@ httpd = path=../../adapters/httpd
 httpserve = path=../../crates/httpserve
 identity = path=../../crates/identity
 identity-composition = path=../../composition/identity
+metrics = workspace=true
 oidc = path=../../adapters/oidc; features=[backend]
 otel = path=../../adapters/otel; features=[backend]
 p256 = workspace=true; features=[ecdsa,pem]
@@ -79,6 +81,9 @@ listeners = [primary,internal,admin,health]
 10 | port=diport::CasStore | provider=postgres::PgCasStore | providerCrate=postgres | requiredFeatures=[] | consumer=distributed | lifecycle=active | durability=persistent | purpose=distributed-state-cas
 11 | port=diport::CasStore | provider=redis::RedisCasStore | providerCrate=redis | requiredFeatures=[] | consumer=distributed | lifecycle=draft | durability=persistent | purpose=distributed-state-cas-redis-alternative
 12 | port=diport::ObjectStore | provider=s3::S3Store | providerCrate=s3 | requiredFeatures=[backend] | consumer=runtime | lifecycle=active | durability=persistent | purpose=runtime-s3-readiness-canary
+13 | port=diport::DlxLifecycleRepository | provider=postgres::PgDlxLifecycleRepository | providerCrate=postgres | requiredFeatures=[] | consumer=eventexec | lifecycle=active | durability=persistent | purpose=dead-letter-archive-receipt-purge-reconcile
+14 | port=diport::DlxArchiveStore | provider=s3::VerifiedS3DlxArchiveStore | providerCrate=s3 | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | purpose=dead-letter-compliance-worm-archive
+15 | port=diport::KeyProvider | provider=vault::VaultKeyProvider | providerCrate=vault | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | purpose=dead-letter-independent-archive-key-provider
 
 [sharedRuntimeDeps.fields]
 pg = PgRuntimeHandle
@@ -98,10 +103,10 @@ mergeExtends = probes,resources,workers
 [runtime.run.orderedAnchors]
 01 | run.plan.load | assemblies/runtime/src/lib.rs | plan::RuntimePlan::bundled().context( | status=ok
 02 | run.provider.oidc | assemblies/runtime/src/lib.rs | build_runtime_oidc_provider().context( | status=ok
-03 | run.provider.pg | assemblies/runtime/src/lib.rs | PgRuntimeDeps::setup_with_audit_admin_config | status=ok
-04 | run.provider.vault | assemblies/runtime/src/lib.rs | build_vault_runtime_deps(|name| std::env::var(name).ok()) | status=ok
-05 | run.provider.redis | assemblies/runtime/src/lib.rs | build_redis_runtime_deps(|name| std::env::var(name).ok()) | status=ok
-06 | run.provider.s3 | assemblies/runtime/src/lib.rs | build_s3_runtime_deps_from(|name| std::env::var(name).ok()) | status=ok
+03 | run.provider.vault | assemblies/runtime/src/lib.rs | build_vault_runtime_deps(|name| std::env::var(name).ok()) | status=ok
+04 | run.provider.redis | assemblies/runtime/src/lib.rs | build_redis_runtime_deps(|name| std::env::var(name).ok()) | status=ok
+05 | run.provider.s3 | assemblies/runtime/src/lib.rs | build_s3_runtime_deps_from(|name| std::env::var(name).ok()) | status=ok
+06 | run.provider.pg | assemblies/runtime/src/lib.rs | PgRuntimeDeps::setup_with_audit_admin_config | status=ok
 07 | run.shared-deps | assemblies/runtime/src/lib.rs | let deps = SharedRuntimeDeps { | status=ok
 08 | run.wire.generated-domains | assemblies/runtime/src/lib.rs | modules_gen::wire_domains(&deps) | status=ok
 09 | run.module.input.domains | assemblies/runtime/src/lib.rs | let (mut registry, domains_module) = | status=ok

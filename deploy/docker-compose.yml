@@ -79,6 +79,19 @@ services:
         mc alias set local "$${RSS_S3_ENDPOINT_URL}" "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
         mc mb --ignore-existing "local/$${RSS_S3_BUCKET}"
         mc stat "local/$${RSS_S3_BUCKET}" >/dev/null
+        mc mb --ignore-existing --with-lock "local/$${RSS_DLX_ARCHIVE_S3_BUCKET}"
+        mc retention set --default COMPLIANCE 31d "local/$${RSS_DLX_ARCHIVE_S3_BUCKET}"
+        printf '%s' '{"Rules":[{"ID":"rss-dlx-archive-expiration","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"Days":32},"NoncurrentVersionExpiration":{"NoncurrentDays":32}},{"ID":"rss-dlx-archive-delete-markers","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"ExpiredObjectDeleteMarker":true}}]}' \
+          | mc ilm rule import "local/$${RSS_DLX_ARCHIVE_S3_BUCKET}"
+        policy_file="$$(mktemp)"
+        printf '%s' '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketVersioning","s3:GetBucketObjectLockConfiguration","s3:GetLifecycleConfiguration"],"Resource":["arn:aws:s3:::'"$${RSS_DLX_ARCHIVE_S3_BUCKET}"'"]},{"Effect":"Allow","Action":["s3:PutObject","s3:GetObject","s3:GetObjectVersion","s3:GetObjectAttributes","s3:GetObjectRetention"],"Resource":["arn:aws:s3:::'"$${RSS_DLX_ARCHIVE_S3_BUCKET}"'/*"]}]}' >"$${policy_file}"
+        mc admin policy create local rss-dlx-archiver "$${policy_file}"
+        rm -f "$${policy_file}"
+        mc admin user add local \
+          "$${AWS_ACCESS_KEY_ID}" \
+          "$${AWS_SECRET_ACCESS_KEY}"
+        mc admin policy attach local rss-dlx-archiver \
+          --user "$${AWS_ACCESS_KEY_ID}"
 
   vault:
     image: hashicorp/vault:1.17 # 演示用 dev-tls；生产钉 digest 并使用正式 Vault 集群。
@@ -125,6 +138,28 @@ services:
         export VAULT_TOKEN="$${RSS_VAULT_TOKEN}"
         vault secrets enable -path="$${RSS_VAULT_TRANSIT_MOUNT}" transit 2>/dev/null || true
         vault write "$${RSS_VAULT_TRANSIT_MOUNT}/keys/$${RSS_SETTINGS_CONFIG_VALUE_KEY_NAME}" derived=true
+        vault write "$${RSS_VAULT_TRANSIT_MOUNT}/keys/$${RSS_DLX_PAYLOAD_KEY_NAME}" derived=true
+        vault write "$${RSS_VAULT_TRANSIT_MOUNT}/keys/$${RSS_DLX_ARCHIVE_KEY_NAME}" derived=true
+        printf 'path "%s/encrypt/%s" { capabilities = ["update"] }\npath "%s/decrypt/%s" { capabilities = ["update"] }\n' \
+          "$${RSS_VAULT_TRANSIT_MOUNT}" "$${RSS_DLX_PAYLOAD_KEY_NAME}" \
+          "$${RSS_VAULT_TRANSIT_MOUNT}" "$${RSS_DLX_PAYLOAD_KEY_NAME}" \
+          | vault policy write rss-dlx-hot -
+        printf 'path "%s/encrypt/%s" { capabilities = ["update"] }\npath "%s/decrypt/%s" { capabilities = ["update"] }\n' \
+          "$${RSS_VAULT_TRANSIT_MOUNT}" "$${RSS_DLX_ARCHIVE_KEY_NAME}" \
+          "$${RSS_VAULT_TRANSIT_MOUNT}" "$${RSS_DLX_ARCHIVE_KEY_NAME}" \
+          | vault policy write rss-dlx-archive -
+        vault write auth/token/create \
+          id="$${RSS_DLX_HOT_VAULT_TOKEN}" \
+          policies=rss-dlx-hot \
+          no_default_policy=true \
+          no_parent=true \
+          renewable=false >/dev/null
+        vault write auth/token/create \
+          id="$${RSS_DLX_ARCHIVE_VAULT_TOKEN}" \
+          policies=rss-dlx-archive \
+          no_default_policy=true \
+          no_parent=true \
+          renewable=false >/dev/null
         vault write -f "$${RSS_VAULT_TRANSIT_MOUNT}/keys/$${RSS_JWT_ES256_KEY_ID}" type=ecdsa-p256
 
   oidc-jwks-init:

@@ -352,7 +352,8 @@ labels_match() {
     .["io.rss.integration.shard"] == $shard and
     .["io.rss.integration.partition"] == $partition and
     (.["io.rss.integration.service"] == "postgres" or .["io.rss.integration.service"] == "redis" or
-     .["io.rss.integration.service"] == "rabbitmq" or .["io.rss.integration.service"] == "mosquitto")
+     .["io.rss.integration.service"] == "rabbitmq" or .["io.rss.integration.service"] == "mosquitto" or
+     .["io.rss.integration.service"] == "minio")
   ' <<EOF >/dev/null 2>&1
 $labels
 EOF

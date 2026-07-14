@@ -612,7 +612,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::dead_letter_store::Dead
 impl core::panic::unwind_safe::UnwindSafe for diport::dead_letter_store::DeadLetterProvenance
 pub enum diport::dead_letter_store::DeadLetterSource
 pub diport::dead_letter_store::DeadLetterSource::Consumer
-pub diport::dead_letter_store::DeadLetterSource::Legacy
 pub diport::dead_letter_store::DeadLetterSource::OutboxRelay
 pub diport::dead_letter_store::DeadLetterSource::Projection
 pub diport::dead_letter_store::DeadLetterSource::Saga
@@ -751,6 +750,414 @@ pub async fn diport::dead_letter_store::DeadLetterStoreLocal::write_dead_letter(
 impl<TraitVariantBlanketType: diport::dead_letter_store::DeadLetterStore> diport::dead_letter_store::DeadLetterStoreLocal for TraitVariantBlanketType
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::dead_letter_store::DeadLetterStoreError>
 pub async fn TraitVariantBlanketType::write_dead_letter(&self, diport::dead_letter_store::DeadLetterRecord) -> core::result::Result<(), diport::dead_letter_store::DeadLetterStoreError>
+pub mod diport::dlx_lifecycle
+pub enum diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+pub diport::dlx_lifecycle::ArchiveClaimSettleOutcome::Applied
+pub diport::dlx_lifecycle::ArchiveClaimSettleOutcome::Stale
+impl core::clone::Clone for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+pub fn diport::dlx_lifecycle::ArchiveClaimSettleOutcome::clone(&self) -> diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::cmp::Eq for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::cmp::PartialEq for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+pub fn diport::dlx_lifecycle::ArchiveClaimSettleOutcome::eq(&self, &diport::dlx_lifecycle::ArchiveClaimSettleOutcome) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+pub fn diport::dlx_lifecycle::ArchiveClaimSettleOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::marker::Freeze for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::marker::Send for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::marker::Sync for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::marker::Unpin for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+pub enum diport::dlx_lifecycle::DlxArchiveHeadOutcome
+pub diport::dlx_lifecycle::DlxArchiveHeadOutcome::Missing
+pub diport::dlx_lifecycle::DlxArchiveHeadOutcome::Present(diport::dlx_lifecycle::DlxArchiveObjectMetadata)
+impl core::clone::Clone for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+pub fn diport::dlx_lifecycle::DlxArchiveHeadOutcome::clone(&self) -> diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+pub fn diport::dlx_lifecycle::DlxArchiveHeadOutcome::eq(&self, &diport::dlx_lifecycle::DlxArchiveHeadOutcome) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+pub fn diport::dlx_lifecycle::DlxArchiveHeadOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::marker::Send for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::marker::Sync for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+pub enum diport::dlx_lifecycle::DlxArchivePutOutcome
+pub diport::dlx_lifecycle::DlxArchivePutOutcome::AlreadyExists(diport::dlx_lifecycle::DlxArchiveObjectMetadata)
+pub diport::dlx_lifecycle::DlxArchivePutOutcome::Created(diport::dlx_lifecycle::DlxArchiveObjectMetadata)
+impl core::clone::Clone for diport::dlx_lifecycle::DlxArchivePutOutcome
+pub fn diport::dlx_lifecycle::DlxArchivePutOutcome::clone(&self) -> diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxArchivePutOutcome
+pub fn diport::dlx_lifecycle::DlxArchivePutOutcome::eq(&self, &diport::dlx_lifecycle::DlxArchivePutOutcome) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxArchivePutOutcome
+pub fn diport::dlx_lifecycle::DlxArchivePutOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::marker::Send for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::marker::Sync for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxArchivePutOutcome
+pub enum diport::dlx_lifecycle::DlxLifecycleErrorKind
+pub diport::dlx_lifecycle::DlxLifecycleErrorKind::Invariant
+pub diport::dlx_lifecycle::DlxLifecycleErrorKind::Transient
+impl core::clone::Clone for diport::dlx_lifecycle::DlxLifecycleErrorKind
+pub fn diport::dlx_lifecycle::DlxLifecycleErrorKind::clone(&self) -> diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxLifecycleErrorKind
+pub fn diport::dlx_lifecycle::DlxLifecycleErrorKind::eq(&self, &diport::dlx_lifecycle::DlxLifecycleErrorKind) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxLifecycleErrorKind
+pub fn diport::dlx_lifecycle::DlxLifecycleErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::marker::Send for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::marker::Sync for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxLifecycleErrorKind
+pub enum diport::dlx_lifecycle::DlxLifecycleOperation
+pub diport::dlx_lifecycle::DlxLifecycleOperation::ArchiveBacklog
+pub diport::dlx_lifecycle::DlxLifecycleOperation::ClaimArchiveCandidates
+pub diport::dlx_lifecycle::DlxLifecycleOperation::ClaimExpiredReceipts
+pub diport::dlx_lifecycle::DlxLifecycleOperation::DecodeArchiveCandidate
+pub diport::dlx_lifecycle::DlxLifecycleOperation::DecodeExpiredReceipt
+pub diport::dlx_lifecycle::DlxLifecycleOperation::DecryptArchive
+pub diport::dlx_lifecycle::DlxLifecycleOperation::DeleteExpiredReceipt
+pub diport::dlx_lifecycle::DlxLifecycleOperation::EncodeArchive
+pub diport::dlx_lifecycle::DlxLifecycleOperation::EncryptArchive
+pub diport::dlx_lifecycle::DlxLifecycleOperation::GetArchive
+pub diport::dlx_lifecycle::DlxLifecycleOperation::HeadArchive
+pub diport::dlx_lifecycle::DlxLifecycleOperation::ParseArchiveVersion
+pub diport::dlx_lifecycle::DlxLifecycleOperation::PurgeVerified
+pub diport::dlx_lifecycle::DlxLifecycleOperation::PutArchive
+pub diport::dlx_lifecycle::DlxLifecycleOperation::RecordArchiveReceipt
+pub diport::dlx_lifecycle::DlxLifecycleOperation::VerifyArchive
+impl diport::dlx_lifecycle::DlxLifecycleOperation
+pub const fn diport::dlx_lifecycle::DlxLifecycleOperation::as_label(self) -> &'static str
+impl core::clone::Clone for diport::dlx_lifecycle::DlxLifecycleOperation
+pub fn diport::dlx_lifecycle::DlxLifecycleOperation::clone(&self) -> diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxLifecycleOperation
+pub fn diport::dlx_lifecycle::DlxLifecycleOperation::eq(&self, &diport::dlx_lifecycle::DlxLifecycleOperation) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxLifecycleOperation
+pub fn diport::dlx_lifecycle::DlxLifecycleOperation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::dlx_lifecycle::DlxLifecycleOperation
+pub fn diport::dlx_lifecycle::DlxLifecycleOperation::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::marker::Send for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::marker::Sync for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxLifecycleOperation
+pub enum diport::dlx_lifecycle::DlxLifecycleReason
+pub diport::dlx_lifecycle::DlxLifecycleReason::ArithmeticOverflow
+pub diport::dlx_lifecycle::DlxLifecycleReason::CanonicalMismatch
+pub diport::dlx_lifecycle::DlxLifecycleReason::CasRejected
+pub diport::dlx_lifecycle::DlxLifecycleReason::ChecksumMismatch
+pub diport::dlx_lifecycle::DlxLifecycleReason::InternalInvariant
+pub diport::dlx_lifecycle::DlxLifecycleReason::InvalidArchiveFormat
+pub diport::dlx_lifecycle::DlxLifecycleReason::InvalidPersistedData
+pub diport::dlx_lifecycle::DlxLifecycleReason::KeyForbidden
+pub diport::dlx_lifecycle::DlxLifecycleReason::KeyMismatch
+pub diport::dlx_lifecycle::DlxLifecycleReason::KeyNotFound
+pub diport::dlx_lifecycle::DlxLifecycleReason::KeyRejected
+pub diport::dlx_lifecycle::DlxLifecycleReason::ObjectMissing
+pub diport::dlx_lifecycle::DlxLifecycleReason::ProviderTimeout
+pub diport::dlx_lifecycle::DlxLifecycleReason::ProviderUnavailable
+pub diport::dlx_lifecycle::DlxLifecycleReason::RetentionInvalid
+pub diport::dlx_lifecycle::DlxLifecycleReason::SizeLimitExceeded
+pub diport::dlx_lifecycle::DlxLifecycleReason::UnexpectedProviderResponse
+pub diport::dlx_lifecycle::DlxLifecycleReason::VersionDrift
+impl diport::dlx_lifecycle::DlxLifecycleReason
+pub const fn diport::dlx_lifecycle::DlxLifecycleReason::as_label(self) -> &'static str
+pub const fn diport::dlx_lifecycle::DlxLifecycleReason::kind(self) -> diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::clone::Clone for diport::dlx_lifecycle::DlxLifecycleReason
+pub fn diport::dlx_lifecycle::DlxLifecycleReason::clone(&self) -> diport::dlx_lifecycle::DlxLifecycleReason
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxLifecycleReason
+pub fn diport::dlx_lifecycle::DlxLifecycleReason::eq(&self, &diport::dlx_lifecycle::DlxLifecycleReason) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxLifecycleReason
+pub fn diport::dlx_lifecycle::DlxLifecycleReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::dlx_lifecycle::DlxLifecycleReason
+pub fn diport::dlx_lifecycle::DlxLifecycleReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::marker::Send for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::marker::Sync for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxLifecycleReason
+pub enum diport::dlx_lifecycle::ObjectLockMode
+pub diport::dlx_lifecycle::ObjectLockMode::Compliance
+impl diport::dlx_lifecycle::ObjectLockMode
+pub const fn diport::dlx_lifecycle::ObjectLockMode::as_str(self) -> &'static str
+impl core::clone::Clone for diport::dlx_lifecycle::ObjectLockMode
+pub fn diport::dlx_lifecycle::ObjectLockMode::clone(&self) -> diport::dlx_lifecycle::ObjectLockMode
+impl core::cmp::Eq for diport::dlx_lifecycle::ObjectLockMode
+impl core::cmp::PartialEq for diport::dlx_lifecycle::ObjectLockMode
+pub fn diport::dlx_lifecycle::ObjectLockMode::eq(&self, &diport::dlx_lifecycle::ObjectLockMode) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::ObjectLockMode
+pub fn diport::dlx_lifecycle::ObjectLockMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dlx_lifecycle::ObjectLockMode
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::ObjectLockMode
+impl core::marker::Freeze for diport::dlx_lifecycle::ObjectLockMode
+impl core::marker::Send for diport::dlx_lifecycle::ObjectLockMode
+impl core::marker::Sync for diport::dlx_lifecycle::ObjectLockMode
+impl core::marker::Unpin for diport::dlx_lifecycle::ObjectLockMode
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::ObjectLockMode
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ObjectLockMode
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ObjectLockMode
+pub enum diport::dlx_lifecycle::ReceiptCasOutcome
+pub diport::dlx_lifecycle::ReceiptCasOutcome::AlreadyApplied
+pub diport::dlx_lifecycle::ReceiptCasOutcome::Applied
+impl core::clone::Clone for diport::dlx_lifecycle::ReceiptCasOutcome
+pub fn diport::dlx_lifecycle::ReceiptCasOutcome::clone(&self) -> diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::cmp::Eq for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::cmp::PartialEq for diport::dlx_lifecycle::ReceiptCasOutcome
+pub fn diport::dlx_lifecycle::ReceiptCasOutcome::eq(&self, &diport::dlx_lifecycle::ReceiptCasOutcome) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::ReceiptCasOutcome
+pub fn diport::dlx_lifecycle::ReceiptCasOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::marker::Freeze for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::marker::Send for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::marker::Sync for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::marker::Unpin for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ReceiptCasOutcome
+pub struct diport::dlx_lifecycle::ArchiveChecksum(_)
+impl diport::dlx_lifecycle::ArchiveChecksum
+pub const fn diport::dlx_lifecycle::ArchiveChecksum::as_bytes(&self) -> &[u8; 32]
+pub fn diport::dlx_lifecycle::ArchiveChecksum::as_hex(&self) -> alloc::string::String
+pub const fn diport::dlx_lifecycle::ArchiveChecksum::from_sha256_bytes([u8; 32]) -> Self
+pub fn diport::dlx_lifecycle::ArchiveChecksum::sha256(&[u8]) -> Self
+impl core::clone::Clone for diport::dlx_lifecycle::ArchiveChecksum
+pub fn diport::dlx_lifecycle::ArchiveChecksum::clone(&self) -> diport::dlx_lifecycle::ArchiveChecksum
+impl core::cmp::Eq for diport::dlx_lifecycle::ArchiveChecksum
+impl core::cmp::PartialEq for diport::dlx_lifecycle::ArchiveChecksum
+pub fn diport::dlx_lifecycle::ArchiveChecksum::eq(&self, &diport::dlx_lifecycle::ArchiveChecksum) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::ArchiveChecksum
+pub fn diport::dlx_lifecycle::ArchiveChecksum::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::dlx_lifecycle::ArchiveChecksum
+pub fn diport::dlx_lifecycle::ArchiveChecksum::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::dlx_lifecycle::ArchiveChecksum
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::ArchiveChecksum
+impl core::marker::Freeze for diport::dlx_lifecycle::ArchiveChecksum
+impl core::marker::Send for diport::dlx_lifecycle::ArchiveChecksum
+impl core::marker::Sync for diport::dlx_lifecycle::ArchiveChecksum
+impl core::marker::Unpin for diport::dlx_lifecycle::ArchiveChecksum
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::ArchiveChecksum
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ArchiveChecksum
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ArchiveChecksum
+pub struct diport::dlx_lifecycle::ArchiveVersionId(_)
+impl diport::dlx_lifecycle::ArchiveVersionId
+pub fn diport::dlx_lifecycle::ArchiveVersionId::as_str(&self) -> &str
+pub fn diport::dlx_lifecycle::ArchiveVersionId::try_from_provider(&str) -> core::result::Result<Self, diport::dlx_lifecycle::DlxLifecycleError>
+impl core::clone::Clone for diport::dlx_lifecycle::ArchiveVersionId
+pub fn diport::dlx_lifecycle::ArchiveVersionId::clone(&self) -> diport::dlx_lifecycle::ArchiveVersionId
+impl core::cmp::Eq for diport::dlx_lifecycle::ArchiveVersionId
+impl core::cmp::PartialEq for diport::dlx_lifecycle::ArchiveVersionId
+pub fn diport::dlx_lifecycle::ArchiveVersionId::eq(&self, &diport::dlx_lifecycle::ArchiveVersionId) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::ArchiveVersionId
+pub fn diport::dlx_lifecycle::ArchiveVersionId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::dlx_lifecycle::ArchiveVersionId
+pub fn diport::dlx_lifecycle::ArchiveVersionId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::ArchiveVersionId
+impl core::marker::Freeze for diport::dlx_lifecycle::ArchiveVersionId
+impl core::marker::Send for diport::dlx_lifecycle::ArchiveVersionId
+impl core::marker::Sync for diport::dlx_lifecycle::ArchiveVersionId
+impl core::marker::Unpin for diport::dlx_lifecycle::ArchiveVersionId
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::ArchiveVersionId
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ArchiveVersionId
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ArchiveVersionId
+pub struct diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>
+impl<C, T> diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>
+pub const fn diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>::candidate(&self) -> &T
+pub const fn diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>::claim(&self) -> &C
+pub fn diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>::into_parts(self) -> (C, T)
+pub fn diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>::new(C, T) -> Self
+impl<C: core::fmt::Debug, T: core::fmt::Debug> core::fmt::Debug for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>
+pub fn diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<C, T> core::marker::Freeze for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::marker::Freeze, T: core::marker::Freeze
+impl<C, T> core::marker::Send for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::marker::Send, T: core::marker::Send
+impl<C, T> core::marker::Sync for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::marker::Sync, T: core::marker::Sync
+impl<C, T> core::marker::Unpin for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::marker::Unpin, T: core::marker::Unpin
+impl<C, T> core::marker::UnsafeUnpin for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::marker::UnsafeUnpin, T: core::marker::UnsafeUnpin
+impl<C, T> core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::panic::unwind_safe::RefUnwindSafe, T: core::panic::unwind_safe::RefUnwindSafe
+impl<C, T> core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::panic::unwind_safe::UnwindSafe, T: core::panic::unwind_safe::UnwindSafe
+pub struct diport::dlx_lifecycle::DlxArchiveBacklog
+impl diport::dlx_lifecycle::DlxArchiveBacklog
+pub const fn diport::dlx_lifecycle::DlxArchiveBacklog::depth(self) -> u64
+pub const fn diport::dlx_lifecycle::DlxArchiveBacklog::new(u64, u64) -> Self
+pub const fn diport::dlx_lifecycle::DlxArchiveBacklog::oldest_age_seconds(self) -> u64
+impl core::clone::Clone for diport::dlx_lifecycle::DlxArchiveBacklog
+pub fn diport::dlx_lifecycle::DlxArchiveBacklog::clone(&self) -> diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxArchiveBacklog
+pub fn diport::dlx_lifecycle::DlxArchiveBacklog::eq(&self, &diport::dlx_lifecycle::DlxArchiveBacklog) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxArchiveBacklog
+pub fn diport::dlx_lifecycle::DlxArchiveBacklog::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::marker::Send for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::marker::Sync for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxArchiveBacklog
+pub struct diport::dlx_lifecycle::DlxArchiveCiphertext
+impl diport::dlx_lifecycle::DlxArchiveCiphertext
+pub const fn diport::dlx_lifecycle::DlxArchiveCiphertext::ciphertext(&self) -> &diport::RedactedBytes
+pub const fn diport::dlx_lifecycle::DlxArchiveCiphertext::key_ref(&self) -> &diport::key_provider::KeyRef
+pub fn diport::dlx_lifecycle::DlxArchiveCiphertext::new(diport::RedactedBytes, diport::key_provider::KeyRef) -> Self
+impl core::clone::Clone for diport::dlx_lifecycle::DlxArchiveCiphertext
+pub fn diport::dlx_lifecycle::DlxArchiveCiphertext::clone(&self) -> diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxArchiveCiphertext
+pub fn diport::dlx_lifecycle::DlxArchiveCiphertext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::marker::Send for diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::marker::Sync for diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxArchiveCiphertext
+pub struct diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl diport::dlx_lifecycle::DlxArchiveObjectMetadata
+pub const fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::checksum(&self) -> diport::dlx_lifecycle::ArchiveChecksum
+pub const fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::new(diport::dlx_lifecycle::ArchiveChecksum, diport::dlx_lifecycle::ArchiveVersionId, i64) -> Self
+pub const fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::object_lock_mode(&self) -> diport::dlx_lifecycle::ObjectLockMode
+pub const fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::retain_until_epoch_secs(&self) -> i64
+pub const fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::version_id(&self) -> &diport::dlx_lifecycle::ArchiveVersionId
+impl core::clone::Clone for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+pub fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::clone(&self) -> diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+pub fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::eq(&self, &diport::dlx_lifecycle::DlxArchiveObjectMetadata) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+pub fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::marker::Send for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::marker::Sync for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+pub struct diport::dlx_lifecycle::DlxArchivePutRequest<K>
+impl<K> diport::dlx_lifecycle::DlxArchivePutRequest<K>
+pub const fn diport::dlx_lifecycle::DlxArchivePutRequest<K>::checksum(&self) -> diport::dlx_lifecycle::ArchiveChecksum
+pub const fn diport::dlx_lifecycle::DlxArchivePutRequest<K>::ciphertext(&self) -> &diport::dlx_lifecycle::DlxArchiveCiphertext
+pub fn diport::dlx_lifecycle::DlxArchivePutRequest<K>::new(K, diport::dlx_lifecycle::DlxArchiveCiphertext) -> Self
+pub const fn diport::dlx_lifecycle::DlxArchivePutRequest<K>::object_key(&self) -> &K
+impl<K: core::clone::Clone> core::clone::Clone for diport::dlx_lifecycle::DlxArchivePutRequest<K>
+pub fn diport::dlx_lifecycle::DlxArchivePutRequest<K>::clone(&self) -> diport::dlx_lifecycle::DlxArchivePutRequest<K>
+impl<K: core::fmt::Debug> core::fmt::Debug for diport::dlx_lifecycle::DlxArchivePutRequest<K>
+pub fn diport::dlx_lifecycle::DlxArchivePutRequest<K>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<K> core::marker::Freeze for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::marker::Freeze
+impl<K> core::marker::Send for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::marker::Send
+impl<K> core::marker::Sync for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::marker::Sync
+impl<K> core::marker::Unpin for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::marker::Unpin
+impl<K> core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::marker::UnsafeUnpin
+impl<K> core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::panic::unwind_safe::RefUnwindSafe
+impl<K> core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::panic::unwind_safe::UnwindSafe
+pub struct diport::dlx_lifecycle::DlxLifecycleError
+impl diport::dlx_lifecycle::DlxLifecycleError
+pub const fn diport::dlx_lifecycle::DlxLifecycleError::kind(self) -> diport::dlx_lifecycle::DlxLifecycleErrorKind
+pub const fn diport::dlx_lifecycle::DlxLifecycleError::new(diport::dlx_lifecycle::DlxLifecycleOperation, diport::dlx_lifecycle::DlxLifecycleReason) -> Self
+pub const fn diport::dlx_lifecycle::DlxLifecycleError::operation(self) -> diport::dlx_lifecycle::DlxLifecycleOperation
+pub const fn diport::dlx_lifecycle::DlxLifecycleError::reason(self) -> diport::dlx_lifecycle::DlxLifecycleReason
+impl core::clone::Clone for diport::dlx_lifecycle::DlxLifecycleError
+pub fn diport::dlx_lifecycle::DlxLifecycleError::clone(&self) -> diport::dlx_lifecycle::DlxLifecycleError
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxLifecycleError
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxLifecycleError
+pub fn diport::dlx_lifecycle::DlxLifecycleError::eq(&self, &diport::dlx_lifecycle::DlxLifecycleError) -> bool
+impl core::error::Error for diport::dlx_lifecycle::DlxLifecycleError
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxLifecycleError
+pub fn diport::dlx_lifecycle::DlxLifecycleError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::dlx_lifecycle::DlxLifecycleError
+pub fn diport::dlx_lifecycle::DlxLifecycleError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dlx_lifecycle::DlxLifecycleError
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxLifecycleError
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxLifecycleError
+impl core::marker::Send for diport::dlx_lifecycle::DlxLifecycleError
+impl core::marker::Sync for diport::dlx_lifecycle::DlxLifecycleError
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxLifecycleError
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxLifecycleError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxLifecycleError
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxLifecycleError
+pub const diport::dlx_lifecycle::DLX_MAX_ARCHIVE_CIPHERTEXT_BYTES: usize
+pub const diport::dlx_lifecycle::DLX_MAX_HOT_CAPSULE_PLAINTEXT_BYTES: usize
+pub trait diport::dlx_lifecycle::DlxArchiveStore: core::marker::Send + core::marker::Sync + core::marker::Send
+pub type diport::dlx_lifecycle::DlxArchiveStore::ObjectKey: core::clone::Clone + core::marker::Send + core::marker::Sync + 'static
+pub fn diport::dlx_lifecycle::DlxArchiveStore::get_ciphertext(&self, &Self::ObjectKey, &diport::dlx_lifecycle::ArchiveVersionId) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<diport::dlx_lifecycle::DlxArchiveCiphertext>, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::dlx_lifecycle::DlxArchiveStore::head(&self, &Self::ObjectKey, &diport::dlx_lifecycle::ArchiveVersionId) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::DlxArchiveHeadOutcome, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::dlx_lifecycle::DlxArchiveStore::put_if_absent(&self, diport::dlx_lifecycle::DlxArchivePutRequest<Self::ObjectKey>) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::DlxArchivePutOutcome, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub trait diport::dlx_lifecycle::DlxArchiveStoreLocal: core::marker::Send + core::marker::Sync
+pub type diport::dlx_lifecycle::DlxArchiveStoreLocal::ObjectKey: core::clone::Clone + core::marker::Send + core::marker::Sync + 'static
+pub async fn diport::dlx_lifecycle::DlxArchiveStoreLocal::get_ciphertext(&self, &Self::ObjectKey, &diport::dlx_lifecycle::ArchiveVersionId) -> core::result::Result<core::option::Option<diport::dlx_lifecycle::DlxArchiveCiphertext>, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn diport::dlx_lifecycle::DlxArchiveStoreLocal::head(&self, &Self::ObjectKey, &diport::dlx_lifecycle::ArchiveVersionId) -> core::result::Result<diport::dlx_lifecycle::DlxArchiveHeadOutcome, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn diport::dlx_lifecycle::DlxArchiveStoreLocal::put_if_absent(&self, diport::dlx_lifecycle::DlxArchivePutRequest<Self::ObjectKey>) -> core::result::Result<diport::dlx_lifecycle::DlxArchivePutOutcome, diport::dlx_lifecycle::DlxLifecycleError>
+impl<TraitVariantBlanketType: diport::dlx_lifecycle::DlxArchiveStore> diport::dlx_lifecycle::DlxArchiveStoreLocal for TraitVariantBlanketType
+pub type TraitVariantBlanketType::ObjectKey = <TraitVariantBlanketType as diport::dlx_lifecycle::DlxArchiveStore>::ObjectKey
+pub async fn TraitVariantBlanketType::get_ciphertext(&self, &Self::ObjectKey, &diport::dlx_lifecycle::ArchiveVersionId) -> core::result::Result<core::option::Option<diport::dlx_lifecycle::DlxArchiveCiphertext>, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn TraitVariantBlanketType::head(&self, &Self::ObjectKey, &diport::dlx_lifecycle::ArchiveVersionId) -> core::result::Result<diport::dlx_lifecycle::DlxArchiveHeadOutcome, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn TraitVariantBlanketType::put_if_absent(&self, diport::dlx_lifecycle::DlxArchivePutRequest<Self::ObjectKey>) -> core::result::Result<diport::dlx_lifecycle::DlxArchivePutOutcome, diport::dlx_lifecycle::DlxLifecycleError>
+pub trait diport::dlx_lifecycle::DlxLifecycleRepository: core::marker::Send + core::marker::Sync + core::marker::Send
+pub type diport::dlx_lifecycle::DlxLifecycleRepository::ArchiveCandidate: core::marker::Send + 'static
+pub type diport::dlx_lifecycle::DlxLifecycleRepository::ArchiveClaim: core::marker::Send + core::marker::Sync + 'static
+pub type diport::dlx_lifecycle::DlxLifecycleRepository::ExpiredReceipt: core::marker::Send + 'static
+pub type diport::dlx_lifecycle::DlxLifecycleRepository::MissingProof: core::marker::Send + 'static
+pub type diport::dlx_lifecycle::DlxLifecycleRepository::VerifiedReceipt: core::marker::Send + 'static
+pub fn diport::dlx_lifecycle::DlxLifecycleRepository::archive_backlog(&self) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::DlxArchiveBacklog, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::dlx_lifecycle::DlxLifecycleRepository::claim_archive_candidates(&self) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::dlx_lifecycle::ClaimedArchiveCandidate<Self::ArchiveClaim, Self::ArchiveCandidate>>, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::dlx_lifecycle::DlxLifecycleRepository::claim_expired_receipts(&self) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<Self::ExpiredReceipt>, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::dlx_lifecycle::DlxLifecycleRepository::delete_expired_receipt(&self, Self::MissingProof) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::ReceiptCasOutcome, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::dlx_lifecycle::DlxLifecycleRepository::purge_verified(&self) -> impl core::future::future::Future<Output = core::result::Result<u64, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::dlx_lifecycle::DlxLifecycleRepository::record_verified_receipt(&self, &Self::ArchiveClaim, Self::VerifiedReceipt) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::ReceiptCasOutcome, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::dlx_lifecycle::DlxLifecycleRepository::settle_archive_failure(&self, Self::ArchiveClaim, diport::dlx_lifecycle::DlxLifecycleError) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::ArchiveClaimSettleOutcome, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub trait diport::dlx_lifecycle::DlxLifecycleRepositoryLocal: core::marker::Send + core::marker::Sync
+pub type diport::dlx_lifecycle::DlxLifecycleRepositoryLocal::ArchiveCandidate: core::marker::Send + 'static
+pub type diport::dlx_lifecycle::DlxLifecycleRepositoryLocal::ArchiveClaim: core::marker::Send + core::marker::Sync + 'static
+pub type diport::dlx_lifecycle::DlxLifecycleRepositoryLocal::ExpiredReceipt: core::marker::Send + 'static
+pub type diport::dlx_lifecycle::DlxLifecycleRepositoryLocal::MissingProof: core::marker::Send + 'static
+pub type diport::dlx_lifecycle::DlxLifecycleRepositoryLocal::VerifiedReceipt: core::marker::Send + 'static
+pub async fn diport::dlx_lifecycle::DlxLifecycleRepositoryLocal::archive_backlog(&self) -> core::result::Result<diport::dlx_lifecycle::DlxArchiveBacklog, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn diport::dlx_lifecycle::DlxLifecycleRepositoryLocal::claim_archive_candidates(&self) -> core::result::Result<alloc::vec::Vec<diport::dlx_lifecycle::ClaimedArchiveCandidate<Self::ArchiveClaim, Self::ArchiveCandidate>>, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn diport::dlx_lifecycle::DlxLifecycleRepositoryLocal::claim_expired_receipts(&self) -> core::result::Result<alloc::vec::Vec<Self::ExpiredReceipt>, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn diport::dlx_lifecycle::DlxLifecycleRepositoryLocal::delete_expired_receipt(&self, Self::MissingProof) -> core::result::Result<diport::dlx_lifecycle::ReceiptCasOutcome, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn diport::dlx_lifecycle::DlxLifecycleRepositoryLocal::purge_verified(&self) -> core::result::Result<u64, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn diport::dlx_lifecycle::DlxLifecycleRepositoryLocal::record_verified_receipt(&self, &Self::ArchiveClaim, Self::VerifiedReceipt) -> core::result::Result<diport::dlx_lifecycle::ReceiptCasOutcome, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn diport::dlx_lifecycle::DlxLifecycleRepositoryLocal::settle_archive_failure(&self, Self::ArchiveClaim, diport::dlx_lifecycle::DlxLifecycleError) -> core::result::Result<diport::dlx_lifecycle::ArchiveClaimSettleOutcome, diport::dlx_lifecycle::DlxLifecycleError>
+impl<TraitVariantBlanketType: diport::dlx_lifecycle::DlxLifecycleRepository> diport::dlx_lifecycle::DlxLifecycleRepositoryLocal for TraitVariantBlanketType
+pub type TraitVariantBlanketType::ArchiveCandidate = <TraitVariantBlanketType as diport::dlx_lifecycle::DlxLifecycleRepository>::ArchiveCandidate
+pub type TraitVariantBlanketType::ArchiveClaim = <TraitVariantBlanketType as diport::dlx_lifecycle::DlxLifecycleRepository>::ArchiveClaim
+pub type TraitVariantBlanketType::ExpiredReceipt = <TraitVariantBlanketType as diport::dlx_lifecycle::DlxLifecycleRepository>::ExpiredReceipt
+pub type TraitVariantBlanketType::MissingProof = <TraitVariantBlanketType as diport::dlx_lifecycle::DlxLifecycleRepository>::MissingProof
+pub type TraitVariantBlanketType::VerifiedReceipt = <TraitVariantBlanketType as diport::dlx_lifecycle::DlxLifecycleRepository>::VerifiedReceipt
+pub async fn TraitVariantBlanketType::archive_backlog(&self) -> core::result::Result<diport::dlx_lifecycle::DlxArchiveBacklog, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn TraitVariantBlanketType::claim_archive_candidates(&self) -> core::result::Result<alloc::vec::Vec<diport::dlx_lifecycle::ClaimedArchiveCandidate<Self::ArchiveClaim, Self::ArchiveCandidate>>, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn TraitVariantBlanketType::claim_expired_receipts(&self) -> core::result::Result<alloc::vec::Vec<Self::ExpiredReceipt>, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn TraitVariantBlanketType::delete_expired_receipt(&self, Self::MissingProof) -> core::result::Result<diport::dlx_lifecycle::ReceiptCasOutcome, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn TraitVariantBlanketType::purge_verified(&self) -> core::result::Result<u64, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn TraitVariantBlanketType::record_verified_receipt(&self, &Self::ArchiveClaim, Self::VerifiedReceipt) -> core::result::Result<diport::dlx_lifecycle::ReceiptCasOutcome, diport::dlx_lifecycle::DlxLifecycleError>
+pub async fn TraitVariantBlanketType::settle_archive_failure(&self, Self::ArchiveClaim, diport::dlx_lifecycle::DlxLifecycleError) -> core::result::Result<diport::dlx_lifecycle::ArchiveClaimSettleOutcome, diport::dlx_lifecycle::DlxLifecycleError>
 pub mod diport::envelope
 pub enum diport::envelope::EnvelopeHeaderError
 pub diport::envelope::EnvelopeHeaderError::InvalidSchemaHash
@@ -3317,6 +3724,25 @@ impl core::marker::Unpin for diport::acker::AckAction
 impl core::marker::UnsafeUnpin for diport::acker::AckAction
 impl core::panic::unwind_safe::RefUnwindSafe for diport::acker::AckAction
 impl core::panic::unwind_safe::UnwindSafe for diport::acker::AckAction
+pub enum diport::ArchiveClaimSettleOutcome
+pub diport::ArchiveClaimSettleOutcome::Applied
+pub diport::ArchiveClaimSettleOutcome::Stale
+impl core::clone::Clone for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+pub fn diport::dlx_lifecycle::ArchiveClaimSettleOutcome::clone(&self) -> diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::cmp::Eq for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::cmp::PartialEq for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+pub fn diport::dlx_lifecycle::ArchiveClaimSettleOutcome::eq(&self, &diport::dlx_lifecycle::ArchiveClaimSettleOutcome) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+pub fn diport::dlx_lifecycle::ArchiveClaimSettleOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::marker::Freeze for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::marker::Send for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::marker::Sync for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::marker::Unpin for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ArchiveClaimSettleOutcome
 #[non_exhaustive] pub enum diport::AuditOutcome
 pub diport::AuditOutcome::Failure
 pub diport::AuditOutcome::Failure::reason: &'static str
@@ -3434,7 +3860,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::dead_letter_store::Dead
 impl core::panic::unwind_safe::UnwindSafe for diport::dead_letter_store::DeadLetterProvenance
 pub enum diport::DeadLetterSource
 pub diport::DeadLetterSource::Consumer
-pub diport::DeadLetterSource::Legacy
 pub diport::DeadLetterSource::OutboxRelay
 pub diport::DeadLetterSource::Projection
 pub diport::DeadLetterSource::Saga
@@ -3457,6 +3882,138 @@ impl core::marker::Unpin for diport::dead_letter_store::DeadLetterSource
 impl core::marker::UnsafeUnpin for diport::dead_letter_store::DeadLetterSource
 impl core::panic::unwind_safe::RefUnwindSafe for diport::dead_letter_store::DeadLetterSource
 impl core::panic::unwind_safe::UnwindSafe for diport::dead_letter_store::DeadLetterSource
+pub enum diport::DlxArchiveHeadOutcome
+pub diport::DlxArchiveHeadOutcome::Missing
+pub diport::DlxArchiveHeadOutcome::Present(diport::dlx_lifecycle::DlxArchiveObjectMetadata)
+impl core::clone::Clone for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+pub fn diport::dlx_lifecycle::DlxArchiveHeadOutcome::clone(&self) -> diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+pub fn diport::dlx_lifecycle::DlxArchiveHeadOutcome::eq(&self, &diport::dlx_lifecycle::DlxArchiveHeadOutcome) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+pub fn diport::dlx_lifecycle::DlxArchiveHeadOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::marker::Send for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::marker::Sync for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxArchiveHeadOutcome
+pub enum diport::DlxArchivePutOutcome
+pub diport::DlxArchivePutOutcome::AlreadyExists(diport::dlx_lifecycle::DlxArchiveObjectMetadata)
+pub diport::DlxArchivePutOutcome::Created(diport::dlx_lifecycle::DlxArchiveObjectMetadata)
+impl core::clone::Clone for diport::dlx_lifecycle::DlxArchivePutOutcome
+pub fn diport::dlx_lifecycle::DlxArchivePutOutcome::clone(&self) -> diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxArchivePutOutcome
+pub fn diport::dlx_lifecycle::DlxArchivePutOutcome::eq(&self, &diport::dlx_lifecycle::DlxArchivePutOutcome) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxArchivePutOutcome
+pub fn diport::dlx_lifecycle::DlxArchivePutOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::marker::Send for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::marker::Sync for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxArchivePutOutcome
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxArchivePutOutcome
+pub enum diport::DlxLifecycleErrorKind
+pub diport::DlxLifecycleErrorKind::Invariant
+pub diport::DlxLifecycleErrorKind::Transient
+impl core::clone::Clone for diport::dlx_lifecycle::DlxLifecycleErrorKind
+pub fn diport::dlx_lifecycle::DlxLifecycleErrorKind::clone(&self) -> diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxLifecycleErrorKind
+pub fn diport::dlx_lifecycle::DlxLifecycleErrorKind::eq(&self, &diport::dlx_lifecycle::DlxLifecycleErrorKind) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxLifecycleErrorKind
+pub fn diport::dlx_lifecycle::DlxLifecycleErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::marker::Send for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::marker::Sync for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxLifecycleErrorKind
+pub enum diport::DlxLifecycleOperation
+pub diport::DlxLifecycleOperation::ArchiveBacklog
+pub diport::DlxLifecycleOperation::ClaimArchiveCandidates
+pub diport::DlxLifecycleOperation::ClaimExpiredReceipts
+pub diport::DlxLifecycleOperation::DecodeArchiveCandidate
+pub diport::DlxLifecycleOperation::DecodeExpiredReceipt
+pub diport::DlxLifecycleOperation::DecryptArchive
+pub diport::DlxLifecycleOperation::DeleteExpiredReceipt
+pub diport::DlxLifecycleOperation::EncodeArchive
+pub diport::DlxLifecycleOperation::EncryptArchive
+pub diport::DlxLifecycleOperation::GetArchive
+pub diport::DlxLifecycleOperation::HeadArchive
+pub diport::DlxLifecycleOperation::ParseArchiveVersion
+pub diport::DlxLifecycleOperation::PurgeVerified
+pub diport::DlxLifecycleOperation::PutArchive
+pub diport::DlxLifecycleOperation::RecordArchiveReceipt
+pub diport::DlxLifecycleOperation::VerifyArchive
+impl diport::dlx_lifecycle::DlxLifecycleOperation
+pub const fn diport::dlx_lifecycle::DlxLifecycleOperation::as_label(self) -> &'static str
+impl core::clone::Clone for diport::dlx_lifecycle::DlxLifecycleOperation
+pub fn diport::dlx_lifecycle::DlxLifecycleOperation::clone(&self) -> diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxLifecycleOperation
+pub fn diport::dlx_lifecycle::DlxLifecycleOperation::eq(&self, &diport::dlx_lifecycle::DlxLifecycleOperation) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxLifecycleOperation
+pub fn diport::dlx_lifecycle::DlxLifecycleOperation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::dlx_lifecycle::DlxLifecycleOperation
+pub fn diport::dlx_lifecycle::DlxLifecycleOperation::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::marker::Send for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::marker::Sync for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxLifecycleOperation
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxLifecycleOperation
+pub enum diport::DlxLifecycleReason
+pub diport::DlxLifecycleReason::ArithmeticOverflow
+pub diport::DlxLifecycleReason::CanonicalMismatch
+pub diport::DlxLifecycleReason::CasRejected
+pub diport::DlxLifecycleReason::ChecksumMismatch
+pub diport::DlxLifecycleReason::InternalInvariant
+pub diport::DlxLifecycleReason::InvalidArchiveFormat
+pub diport::DlxLifecycleReason::InvalidPersistedData
+pub diport::DlxLifecycleReason::KeyForbidden
+pub diport::DlxLifecycleReason::KeyMismatch
+pub diport::DlxLifecycleReason::KeyNotFound
+pub diport::DlxLifecycleReason::KeyRejected
+pub diport::DlxLifecycleReason::ObjectMissing
+pub diport::DlxLifecycleReason::ProviderTimeout
+pub diport::DlxLifecycleReason::ProviderUnavailable
+pub diport::DlxLifecycleReason::RetentionInvalid
+pub diport::DlxLifecycleReason::SizeLimitExceeded
+pub diport::DlxLifecycleReason::UnexpectedProviderResponse
+pub diport::DlxLifecycleReason::VersionDrift
+impl diport::dlx_lifecycle::DlxLifecycleReason
+pub const fn diport::dlx_lifecycle::DlxLifecycleReason::as_label(self) -> &'static str
+pub const fn diport::dlx_lifecycle::DlxLifecycleReason::kind(self) -> diport::dlx_lifecycle::DlxLifecycleErrorKind
+impl core::clone::Clone for diport::dlx_lifecycle::DlxLifecycleReason
+pub fn diport::dlx_lifecycle::DlxLifecycleReason::clone(&self) -> diport::dlx_lifecycle::DlxLifecycleReason
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxLifecycleReason
+pub fn diport::dlx_lifecycle::DlxLifecycleReason::eq(&self, &diport::dlx_lifecycle::DlxLifecycleReason) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxLifecycleReason
+pub fn diport::dlx_lifecycle::DlxLifecycleReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::dlx_lifecycle::DlxLifecycleReason
+pub fn diport::dlx_lifecycle::DlxLifecycleReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::marker::Send for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::marker::Sync for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxLifecycleReason
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxLifecycleReason
 pub enum diport::EnvelopeHeaderError
 pub diport::EnvelopeHeaderError::InvalidSchemaHash
 pub diport::EnvelopeHeaderError::InvalidSchemaVersion
@@ -3600,6 +4157,26 @@ impl core::marker::Unpin for diport::envelope::MetadataError
 impl core::marker::UnsafeUnpin for diport::envelope::MetadataError
 impl core::panic::unwind_safe::RefUnwindSafe for diport::envelope::MetadataError
 impl core::panic::unwind_safe::UnwindSafe for diport::envelope::MetadataError
+pub enum diport::ObjectLockMode
+pub diport::ObjectLockMode::Compliance
+impl diport::dlx_lifecycle::ObjectLockMode
+pub const fn diport::dlx_lifecycle::ObjectLockMode::as_str(self) -> &'static str
+impl core::clone::Clone for diport::dlx_lifecycle::ObjectLockMode
+pub fn diport::dlx_lifecycle::ObjectLockMode::clone(&self) -> diport::dlx_lifecycle::ObjectLockMode
+impl core::cmp::Eq for diport::dlx_lifecycle::ObjectLockMode
+impl core::cmp::PartialEq for diport::dlx_lifecycle::ObjectLockMode
+pub fn diport::dlx_lifecycle::ObjectLockMode::eq(&self, &diport::dlx_lifecycle::ObjectLockMode) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::ObjectLockMode
+pub fn diport::dlx_lifecycle::ObjectLockMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dlx_lifecycle::ObjectLockMode
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::ObjectLockMode
+impl core::marker::Freeze for diport::dlx_lifecycle::ObjectLockMode
+impl core::marker::Send for diport::dlx_lifecycle::ObjectLockMode
+impl core::marker::Sync for diport::dlx_lifecycle::ObjectLockMode
+impl core::marker::Unpin for diport::dlx_lifecycle::ObjectLockMode
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::ObjectLockMode
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ObjectLockMode
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ObjectLockMode
 pub enum diport::ObjectStoreError
 pub diport::ObjectStoreError::Backend
 pub diport::ObjectStoreError::Backend::source: diport::RedactedSource
@@ -3695,6 +4272,25 @@ impl core::marker::Unpin for diport::rate_limiter::RateLimitDecision
 impl core::marker::UnsafeUnpin for diport::rate_limiter::RateLimitDecision
 impl core::panic::unwind_safe::RefUnwindSafe for diport::rate_limiter::RateLimitDecision
 impl core::panic::unwind_safe::UnwindSafe for diport::rate_limiter::RateLimitDecision
+pub enum diport::ReceiptCasOutcome
+pub diport::ReceiptCasOutcome::AlreadyApplied
+pub diport::ReceiptCasOutcome::Applied
+impl core::clone::Clone for diport::dlx_lifecycle::ReceiptCasOutcome
+pub fn diport::dlx_lifecycle::ReceiptCasOutcome::clone(&self) -> diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::cmp::Eq for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::cmp::PartialEq for diport::dlx_lifecycle::ReceiptCasOutcome
+pub fn diport::dlx_lifecycle::ReceiptCasOutcome::eq(&self, &diport::dlx_lifecycle::ReceiptCasOutcome) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::ReceiptCasOutcome
+pub fn diport::dlx_lifecycle::ReceiptCasOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::marker::Freeze for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::marker::Send for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::marker::Sync for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::marker::Unpin for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ReceiptCasOutcome
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ReceiptCasOutcome
 #[non_exhaustive] pub enum diport::SagaContractIdError
 pub diport::SagaContractIdError::Empty
 pub diport::SagaContractIdError::Format
@@ -3849,6 +4445,51 @@ impl core::marker::Unpin for diport::acker::AckError
 impl core::marker::UnsafeUnpin for diport::acker::AckError
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::acker::AckError
 impl !core::panic::unwind_safe::UnwindSafe for diport::acker::AckError
+pub struct diport::ArchiveChecksum(_)
+impl diport::dlx_lifecycle::ArchiveChecksum
+pub const fn diport::dlx_lifecycle::ArchiveChecksum::as_bytes(&self) -> &[u8; 32]
+pub fn diport::dlx_lifecycle::ArchiveChecksum::as_hex(&self) -> alloc::string::String
+pub const fn diport::dlx_lifecycle::ArchiveChecksum::from_sha256_bytes([u8; 32]) -> Self
+pub fn diport::dlx_lifecycle::ArchiveChecksum::sha256(&[u8]) -> Self
+impl core::clone::Clone for diport::dlx_lifecycle::ArchiveChecksum
+pub fn diport::dlx_lifecycle::ArchiveChecksum::clone(&self) -> diport::dlx_lifecycle::ArchiveChecksum
+impl core::cmp::Eq for diport::dlx_lifecycle::ArchiveChecksum
+impl core::cmp::PartialEq for diport::dlx_lifecycle::ArchiveChecksum
+pub fn diport::dlx_lifecycle::ArchiveChecksum::eq(&self, &diport::dlx_lifecycle::ArchiveChecksum) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::ArchiveChecksum
+pub fn diport::dlx_lifecycle::ArchiveChecksum::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::dlx_lifecycle::ArchiveChecksum
+pub fn diport::dlx_lifecycle::ArchiveChecksum::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::dlx_lifecycle::ArchiveChecksum
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::ArchiveChecksum
+impl core::marker::Freeze for diport::dlx_lifecycle::ArchiveChecksum
+impl core::marker::Send for diport::dlx_lifecycle::ArchiveChecksum
+impl core::marker::Sync for diport::dlx_lifecycle::ArchiveChecksum
+impl core::marker::Unpin for diport::dlx_lifecycle::ArchiveChecksum
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::ArchiveChecksum
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ArchiveChecksum
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ArchiveChecksum
+pub struct diport::ArchiveVersionId(_)
+impl diport::dlx_lifecycle::ArchiveVersionId
+pub fn diport::dlx_lifecycle::ArchiveVersionId::as_str(&self) -> &str
+pub fn diport::dlx_lifecycle::ArchiveVersionId::try_from_provider(&str) -> core::result::Result<Self, diport::dlx_lifecycle::DlxLifecycleError>
+impl core::clone::Clone for diport::dlx_lifecycle::ArchiveVersionId
+pub fn diport::dlx_lifecycle::ArchiveVersionId::clone(&self) -> diport::dlx_lifecycle::ArchiveVersionId
+impl core::cmp::Eq for diport::dlx_lifecycle::ArchiveVersionId
+impl core::cmp::PartialEq for diport::dlx_lifecycle::ArchiveVersionId
+pub fn diport::dlx_lifecycle::ArchiveVersionId::eq(&self, &diport::dlx_lifecycle::ArchiveVersionId) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::ArchiveVersionId
+pub fn diport::dlx_lifecycle::ArchiveVersionId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::dlx_lifecycle::ArchiveVersionId
+pub fn diport::dlx_lifecycle::ArchiveVersionId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::ArchiveVersionId
+impl core::marker::Freeze for diport::dlx_lifecycle::ArchiveVersionId
+impl core::marker::Send for diport::dlx_lifecycle::ArchiveVersionId
+impl core::marker::Sync for diport::dlx_lifecycle::ArchiveVersionId
+impl core::marker::Unpin for diport::dlx_lifecycle::ArchiveVersionId
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::ArchiveVersionId
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ArchiveVersionId
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ArchiveVersionId
 pub struct diport::AuditEvent
 pub diport::AuditEvent::action: &'static str
 pub diport::AuditEvent::correlation_id: core::option::Option<alloc::string::String>
@@ -4100,6 +4741,21 @@ impl core::marker::Unpin for diport::checkpoint_store::CheckpointVersion
 impl core::marker::UnsafeUnpin for diport::checkpoint_store::CheckpointVersion
 impl core::panic::unwind_safe::RefUnwindSafe for diport::checkpoint_store::CheckpointVersion
 impl core::panic::unwind_safe::UnwindSafe for diport::checkpoint_store::CheckpointVersion
+pub struct diport::ClaimedArchiveCandidate<C, T>
+impl<C, T> diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>
+pub const fn diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>::candidate(&self) -> &T
+pub const fn diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>::claim(&self) -> &C
+pub fn diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>::into_parts(self) -> (C, T)
+pub fn diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>::new(C, T) -> Self
+impl<C: core::fmt::Debug, T: core::fmt::Debug> core::fmt::Debug for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>
+pub fn diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<C, T> core::marker::Freeze for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::marker::Freeze, T: core::marker::Freeze
+impl<C, T> core::marker::Send for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::marker::Send, T: core::marker::Send
+impl<C, T> core::marker::Sync for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::marker::Sync, T: core::marker::Sync
+impl<C, T> core::marker::Unpin for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::marker::Unpin, T: core::marker::Unpin
+impl<C, T> core::marker::UnsafeUnpin for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::marker::UnsafeUnpin, T: core::marker::UnsafeUnpin
+impl<C, T> core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::panic::unwind_safe::RefUnwindSafe, T: core::panic::unwind_safe::RefUnwindSafe
+impl<C, T> core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ClaimedArchiveCandidate<C, T> where C: core::panic::unwind_safe::UnwindSafe, T: core::panic::unwind_safe::UnwindSafe
 pub struct diport::CrossTenantPrivilege
 impl diport::PortPrivilegeClass for diport::CrossTenantPrivilege
 impl core::marker::Freeze for diport::CrossTenantPrivilege
@@ -4185,6 +4841,107 @@ impl core::marker::Unpin for diport::acker::Delivery
 impl core::marker::UnsafeUnpin for diport::acker::Delivery
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::acker::Delivery
 impl !core::panic::unwind_safe::UnwindSafe for diport::acker::Delivery
+pub struct diport::DlxArchiveBacklog
+impl diport::dlx_lifecycle::DlxArchiveBacklog
+pub const fn diport::dlx_lifecycle::DlxArchiveBacklog::depth(self) -> u64
+pub const fn diport::dlx_lifecycle::DlxArchiveBacklog::new(u64, u64) -> Self
+pub const fn diport::dlx_lifecycle::DlxArchiveBacklog::oldest_age_seconds(self) -> u64
+impl core::clone::Clone for diport::dlx_lifecycle::DlxArchiveBacklog
+pub fn diport::dlx_lifecycle::DlxArchiveBacklog::clone(&self) -> diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxArchiveBacklog
+pub fn diport::dlx_lifecycle::DlxArchiveBacklog::eq(&self, &diport::dlx_lifecycle::DlxArchiveBacklog) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxArchiveBacklog
+pub fn diport::dlx_lifecycle::DlxArchiveBacklog::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::marker::Send for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::marker::Sync for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxArchiveBacklog
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxArchiveBacklog
+pub struct diport::DlxArchiveCiphertext
+impl diport::dlx_lifecycle::DlxArchiveCiphertext
+pub const fn diport::dlx_lifecycle::DlxArchiveCiphertext::ciphertext(&self) -> &diport::RedactedBytes
+pub const fn diport::dlx_lifecycle::DlxArchiveCiphertext::key_ref(&self) -> &diport::key_provider::KeyRef
+pub fn diport::dlx_lifecycle::DlxArchiveCiphertext::new(diport::RedactedBytes, diport::key_provider::KeyRef) -> Self
+impl core::clone::Clone for diport::dlx_lifecycle::DlxArchiveCiphertext
+pub fn diport::dlx_lifecycle::DlxArchiveCiphertext::clone(&self) -> diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxArchiveCiphertext
+pub fn diport::dlx_lifecycle::DlxArchiveCiphertext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::marker::Send for diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::marker::Sync for diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxArchiveCiphertext
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxArchiveCiphertext
+pub struct diport::DlxArchiveObjectMetadata
+impl diport::dlx_lifecycle::DlxArchiveObjectMetadata
+pub const fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::checksum(&self) -> diport::dlx_lifecycle::ArchiveChecksum
+pub const fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::new(diport::dlx_lifecycle::ArchiveChecksum, diport::dlx_lifecycle::ArchiveVersionId, i64) -> Self
+pub const fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::object_lock_mode(&self) -> diport::dlx_lifecycle::ObjectLockMode
+pub const fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::retain_until_epoch_secs(&self) -> i64
+pub const fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::version_id(&self) -> &diport::dlx_lifecycle::ArchiveVersionId
+impl core::clone::Clone for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+pub fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::clone(&self) -> diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+pub fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::eq(&self, &diport::dlx_lifecycle::DlxArchiveObjectMetadata) -> bool
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+pub fn diport::dlx_lifecycle::DlxArchiveObjectMetadata::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::marker::Send for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::marker::Sync for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxArchiveObjectMetadata
+pub struct diport::DlxArchivePutRequest<K>
+impl<K> diport::dlx_lifecycle::DlxArchivePutRequest<K>
+pub const fn diport::dlx_lifecycle::DlxArchivePutRequest<K>::checksum(&self) -> diport::dlx_lifecycle::ArchiveChecksum
+pub const fn diport::dlx_lifecycle::DlxArchivePutRequest<K>::ciphertext(&self) -> &diport::dlx_lifecycle::DlxArchiveCiphertext
+pub fn diport::dlx_lifecycle::DlxArchivePutRequest<K>::new(K, diport::dlx_lifecycle::DlxArchiveCiphertext) -> Self
+pub const fn diport::dlx_lifecycle::DlxArchivePutRequest<K>::object_key(&self) -> &K
+impl<K: core::clone::Clone> core::clone::Clone for diport::dlx_lifecycle::DlxArchivePutRequest<K>
+pub fn diport::dlx_lifecycle::DlxArchivePutRequest<K>::clone(&self) -> diport::dlx_lifecycle::DlxArchivePutRequest<K>
+impl<K: core::fmt::Debug> core::fmt::Debug for diport::dlx_lifecycle::DlxArchivePutRequest<K>
+pub fn diport::dlx_lifecycle::DlxArchivePutRequest<K>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<K> core::marker::Freeze for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::marker::Freeze
+impl<K> core::marker::Send for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::marker::Send
+impl<K> core::marker::Sync for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::marker::Sync
+impl<K> core::marker::Unpin for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::marker::Unpin
+impl<K> core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::marker::UnsafeUnpin
+impl<K> core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::panic::unwind_safe::RefUnwindSafe
+impl<K> core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxArchivePutRequest<K> where K: core::panic::unwind_safe::UnwindSafe
+pub struct diport::DlxLifecycleError
+impl diport::dlx_lifecycle::DlxLifecycleError
+pub const fn diport::dlx_lifecycle::DlxLifecycleError::kind(self) -> diport::dlx_lifecycle::DlxLifecycleErrorKind
+pub const fn diport::dlx_lifecycle::DlxLifecycleError::new(diport::dlx_lifecycle::DlxLifecycleOperation, diport::dlx_lifecycle::DlxLifecycleReason) -> Self
+pub const fn diport::dlx_lifecycle::DlxLifecycleError::operation(self) -> diport::dlx_lifecycle::DlxLifecycleOperation
+pub const fn diport::dlx_lifecycle::DlxLifecycleError::reason(self) -> diport::dlx_lifecycle::DlxLifecycleReason
+impl core::clone::Clone for diport::dlx_lifecycle::DlxLifecycleError
+pub fn diport::dlx_lifecycle::DlxLifecycleError::clone(&self) -> diport::dlx_lifecycle::DlxLifecycleError
+impl core::cmp::Eq for diport::dlx_lifecycle::DlxLifecycleError
+impl core::cmp::PartialEq for diport::dlx_lifecycle::DlxLifecycleError
+pub fn diport::dlx_lifecycle::DlxLifecycleError::eq(&self, &diport::dlx_lifecycle::DlxLifecycleError) -> bool
+impl core::error::Error for diport::dlx_lifecycle::DlxLifecycleError
+impl core::fmt::Debug for diport::dlx_lifecycle::DlxLifecycleError
+pub fn diport::dlx_lifecycle::DlxLifecycleError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::dlx_lifecycle::DlxLifecycleError
+pub fn diport::dlx_lifecycle::DlxLifecycleError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dlx_lifecycle::DlxLifecycleError
+impl core::marker::StructuralPartialEq for diport::dlx_lifecycle::DlxLifecycleError
+impl core::marker::Freeze for diport::dlx_lifecycle::DlxLifecycleError
+impl core::marker::Send for diport::dlx_lifecycle::DlxLifecycleError
+impl core::marker::Sync for diport::dlx_lifecycle::DlxLifecycleError
+impl core::marker::Unpin for diport::dlx_lifecycle::DlxLifecycleError
+impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxLifecycleError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxLifecycleError
+impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxLifecycleError
 #[repr(transparent)] pub struct diport::DynAckableSubscriber<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynAckableSubscriber<'dynosaur_struct>
 pub const fn diport::DynAckableSubscriber<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::acker::AckableSubscriber + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>
@@ -6059,6 +6816,8 @@ impl core::marker::UnsafeUnpin for diport::WriteEffect
 impl core::panic::unwind_safe::RefUnwindSafe for diport::WriteEffect
 impl core::panic::unwind_safe::UnwindSafe for diport::WriteEffect
 pub const diport::DEFAULT_SHUTDOWN_TIMEOUT: core::time::Duration
+pub const diport::DLX_MAX_ARCHIVE_CIPHERTEXT_BYTES: usize
+pub const diport::DLX_MAX_HOT_CAPSULE_PLAINTEXT_BYTES: usize
 pub const diport::KEY_ACTOR: &str
 pub const diport::KEY_CORRELATION: &str
 pub const diport::KEY_OCCURRED_AT: &str
@@ -6234,6 +6993,24 @@ pub type alloc::boxed::Box<T>::Privilege = <T as diport::DiPortEffect>::Privileg
 impl<T: ?core::marker::Sized + diport::DiPortEffect> diport::DiPortEffect for alloc::sync::Arc<T>
 pub type alloc::sync::Arc<T>::Effect = <T as diport::DiPortEffect>::Effect
 pub type alloc::sync::Arc<T>::Privilege = <T as diport::DiPortEffect>::Privilege
+pub trait diport::DlxArchiveStore: core::marker::Send + core::marker::Sync + core::marker::Send
+pub type diport::DlxArchiveStore::ObjectKey: core::clone::Clone + core::marker::Send + core::marker::Sync + 'static
+pub fn diport::DlxArchiveStore::get_ciphertext(&self, &Self::ObjectKey, &diport::dlx_lifecycle::ArchiveVersionId) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<diport::dlx_lifecycle::DlxArchiveCiphertext>, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::DlxArchiveStore::head(&self, &Self::ObjectKey, &diport::dlx_lifecycle::ArchiveVersionId) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::DlxArchiveHeadOutcome, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::DlxArchiveStore::put_if_absent(&self, diport::dlx_lifecycle::DlxArchivePutRequest<Self::ObjectKey>) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::DlxArchivePutOutcome, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub trait diport::DlxLifecycleRepository: core::marker::Send + core::marker::Sync + core::marker::Send
+pub type diport::DlxLifecycleRepository::ArchiveCandidate: core::marker::Send + 'static
+pub type diport::DlxLifecycleRepository::ArchiveClaim: core::marker::Send + core::marker::Sync + 'static
+pub type diport::DlxLifecycleRepository::ExpiredReceipt: core::marker::Send + 'static
+pub type diport::DlxLifecycleRepository::MissingProof: core::marker::Send + 'static
+pub type diport::DlxLifecycleRepository::VerifiedReceipt: core::marker::Send + 'static
+pub fn diport::DlxLifecycleRepository::archive_backlog(&self) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::DlxArchiveBacklog, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::DlxLifecycleRepository::claim_archive_candidates(&self) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::dlx_lifecycle::ClaimedArchiveCandidate<Self::ArchiveClaim, Self::ArchiveCandidate>>, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::DlxLifecycleRepository::claim_expired_receipts(&self) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<Self::ExpiredReceipt>, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::DlxLifecycleRepository::delete_expired_receipt(&self, Self::MissingProof) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::ReceiptCasOutcome, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::DlxLifecycleRepository::purge_verified(&self) -> impl core::future::future::Future<Output = core::result::Result<u64, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::DlxLifecycleRepository::record_verified_receipt(&self, &Self::ArchiveClaim, Self::VerifiedReceipt) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::ReceiptCasOutcome, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub fn diport::DlxLifecycleRepository::settle_archive_failure(&self, Self::ArchiveClaim, diport::dlx_lifecycle::DlxLifecycleError) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::ArchiveClaimSettleOutcome, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
 pub trait diport::FencedWriter: core::marker::Send
 pub fn diport::FencedWriter::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::fenced_writer::FencedWriterError>> + core::marker::Send
 pub fn diport::FencedWriter::write(&self, diport::fenced_writer::FencedWriteRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::fenced_writer::WriteOutcome, diport::fenced_writer::FencedWriterError>> + core::marker::Send

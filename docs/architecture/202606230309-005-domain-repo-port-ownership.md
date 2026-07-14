@@ -1,6 +1,6 @@
 # ADR-005：域 repo / 领域服务 DI port 归属（Option 2：域内 port + DIP 内向实现）
 
-- **状态**：Accepted（消解 layer-diport.md ↔ data-model.md 待决项#1 矛盾；amend ADR-003 §6/§7 + ADR-004 C1/C7）；**§9 amended by #1192**（co-tx Unit-of-Work seam 交付 #1083 session 接缝，威胁矩阵重评见 §9.3）；**§10 amended by #1278**（`SessionUnitOfWork` + `SessionRepo` 合并为单一 `SessionLifecycle`，威胁矩阵重评见 §10.3）
+- **状态**：Accepted（消解 layer-diport.md ↔ data-model.md 待决项#1 矛盾；amend ADR-003 §6/§7 + ADR-004 C1/C7）；**§9 amended by #1192**（co-tx Unit-of-Work seam 交付 #1083 session 接缝，威胁矩阵重评见 §9.3）；**§10 amended by #1278**（`SessionUnitOfWork` + `SessionRepo` 合并为单一 `SessionLifecycle`，威胁矩阵重评见 §10.3）；**§11 amended by #1168**（DLX provider-neutral port 归位 + associated proof binding）
 - **日期**：2026-06-23（§9 amendment：2026-06-25；§10 amendment：2026-06-26）
 - **关联**：issue #1083 [RW-G0.2] · #1192（§9 co-tx UoW amendment）· #1278（§10 SessionLifecycle 合并 amendment）· epic #991 · spike 来源 PR #1051(PR-4) / #1049(PR-diport) · 解锁 W 阶段（#1000–#1016）repo 接缝单元
 - **依赖 ADR**：**ADR-003**（DI async+dyn 派发 = dynosaur，本 ADR 复用其派发范式不变）· **ADR-004**（签名约定单源）
@@ -214,6 +214,29 @@ identity 在 RoleRepo 落地时已完成 §8.1 步骤 2/4/5（dynosaur/trait-var
 | 两个未绑定 session port 来自**不同底层 store**（persist 写 store A、find/revoke 查 store B），login 后 logout 失效（接缝悬空，PR #255 F3） | **Hard（类型系统）**：合并为单一 `SessionLifecycle` 域形 port——`LoginService::new` 由 5 必填位置参减为 4（`sessions` + `session_uow` 两独立必填参 → 单一 `lifecycle`），「两 store 选型空间」经**构造器必填参数 + typed function choice** 消除（违反不可表达）。anti-vacuity：service 级 `login_then_logout_revokes_via_shared_lifecycle`（login 写入 → 同 lifecycle find=Some → logout → find=None）守「create/find/revoke 同源」非恒真 | **否（安全模型加强）**：tenant 隔离仍由 `find` / `revoke` 签名的 `TenantId` 位置参承载（跨租 fail-closed）；OUTBOX-COTX-SESSION-01 combined 方法不变；audit actor = canonical user_id（#1277 F1）不受影响。零新增 crate-graph 风险（`adapter→域` 边、dynosaur 白名单对 `identity` 已覆盖） |
 
 durable `find` / `revoke` 由 postgres `PgSessionLifecycle` 实写（tenant-scope SELECT/UPDATE + `0011_add_sessions_revoked.sql` 引入 `revoked` 列；集成测试 t20–t22 覆盖 persist→find / revoke→find None / 跨租隔离）——**补齐原 #1116 的 session durable 闭合**。合并 trait 的必然要求：单一 `SessionLifecycle` 强制 provider 交付完整生命周期，故 postgres **不留 `todo!()` 半实现**（否则 `LoginService::logout` 经 `revoke` 落到 runtime panic——把合并前「无 `PgSessionRepo` ⇒ 编译期挡住」的保护退化成运行期 panic，PR #273 codex F1）。`SessionLifecycle` 的「单一完整 provider」类型约束与生产行为至此闭合一致。
+
+## 11. Amendment（#1168）：DLX provider-neutral port 与 sealed proof associated binding
+
+`DlxLifecycleRepository` 与 `DlxArchiveStore` 的方法语义是 PostgreSQL/S3 可替换的基础设施能力，不是
+eventexec 域形实体仓储；其签名可只引用 port-owned observation DTO 与 associated types。因此按 §2.1 category
+line 归 `diport`。`DlxArchiveCipher` 不构成独立 provider 能力：它只是既有 `KeyProvider` 上的 DLX-specific AAD
+编排，已删除并收回 eventexec 私有具体 service。
+
+repository 仍需传递 eventexec 独占构造的 candidate/receipt/proof。为避免 `diport → eventexec` back-path，port
+声明四个 associated types；eventexec 消费侧以 equality bound 精确绑定到自身 sealed 类型。associated type 声明
+本身不命名服务类型，binding 发生在 `eventexec → diport` 的合法下行依赖侧，因此 category line 与 crate DAG
+同时成立。archive store 同理只声明 `ObjectKey`，eventexec 将其绑定到只能由 typed `DeadLetterId` 派生的
+`DlxArchiveObjectKey`，不开放 raw-string 构造。
+
+### 11.1 派发与威胁重评
+
+- 两个 port 由组合根静态选择、被 worker 多次调用，采用 ADR-003 #1095 已批准的 Send+Sync 静态泛型，不新增
+  dyn wrapper；provider prod/test 可换性仍由 trait bound 保持。
+- proof 类型错误绑定、raw object key provider 无法满足 `DlxLifecycle` equality bound（Hard）；proof 私有构造器
+  不变。
+- `diport` 不依赖 eventexec，由 layer-deps/cargo DAG 守（Hard）；adapter impl 站点由既有
+  `rss_diport_impl_allowlist` 守（Medium）。旧 eventexec port/cipher 由 DLX funnel recursive scan 拒绝（Medium）。
+- 无新增 Soft enforcement，安全模型不退化。
 
 ## 对标证据（ref）
 

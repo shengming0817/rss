@@ -12,6 +12,7 @@ enum RouteMarker {}
 
 fn main() {
     let binding = vocab::HttpRouteBinding::<RouteMarker, vocab::http::LocalOnly>::from_static(
+        vocab::HttpContractOwner::domain("test"),
         vocab::ContractBinding::from_static(
             "test",
             "ui.primary-local-only-write",
