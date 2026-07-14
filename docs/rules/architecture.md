@@ -184,27 +184,40 @@ rss/
 | 组合根 DI 接线(SharedDeps / `module()`) | 手工 `main` + `bootstrap` crate | — |
 | outbox/saga/reconcile/projection/command_journal 引擎 + topology-gated resolver | tokio 自写(`consistency` 态机 + `eventexec` 执行 + 各 deps resolver) | — |
 
-**残留运行期/CI 检查**(类型系统 / crate 图管不到)显式为 **Medium(xtask/CI 门),严禁 Soft**:active subscriber
+**残留运行期/CI 检查**(类型系统 / crate 图管不到)的机器载体显式为 **Medium(xtask/CI 门)**，不得用文档或
+人工约定替代：active subscriber
 存在性、active HTTP outbox producer 目标 readiness、consistency capability evidence、contract 扇出完整性、migration 只增不改、覆盖率阈值、no-op 业务理由、分层依赖残留(crate 图仅 Hard
 守已声明边的「下层依赖上层成环」；不成环的反向边 / 兄弟域互斥 / adapter·generated scope 由 `cargo xtask layer-deps`
 source-centric 补，免疫裸名×crates.io 命名冲突)。治理重心在 "crate-graph lint + clippy + 类型系统"(见
-`.claude/rules/rss/ai-robust.md`)。
+`.claude/rules/rss/ai-robust.md`)。这里的 Medium 评级描述 gate 被调用时的机器证据，不等同于 active PR 已自动
+调度该 gate 或以其阻断合入。
 
-这些 Medium(CI 门)由 **GitHub Actions typed adaptive CI** 在 PR 上自动执行：
+这些 Medium gate 已有 **GitHub Actions typed CI** carrier：
 `.github/workflows/ci.yml` 只保留 `ci-plan`、一个从闭合 `CiJobKey` 派生的动态 matrix executor 与稳定
-`ci-gate`；Shadow 和 develop/schedule/dispatch 执行完整 14-job catalog，未知输入自动 full fallback。
+`ci-gate`；实际触发的 GitHub PR Shadow、匹配分支 push、develop/schedule/dispatch 运行完整 14-job catalog，
+未知输入自动 full fallback。
 INVARIANT CI-ADAPTIVE-WORKFLOW-01 以结构化 YAML 闭集校验、synthetic red 与 anti-vacuity 锁定 planner、
 matrix、always gate、只读权限和唯一 reusable 委托，不允许 workflow 重列路径/job 策略。gate registry 的闭枚举、穷举 dispatch 与唯一/完整断言由
-Rust 编译期证明（Hard），YAML 边界由 xtask/CI 守卫证明（Medium），无依赖人工记忆的 Soft 约束。
-本地仍可用 `cargo xtask ci` 兼容聚合四条 lane 的 46 个唯一 gate；它不是 GitHub workflow lane 或 required check。
+Rust 编译期证明（Hard），YAML carrier 边界由 xtask/CI 守卫证明（Medium）。但 Azure 仍是 active PR forge，
+`AZURE_HAS_CI=false`，Azure PR 不会自动触发 same-head GitHub run，`ci-gate` 也不是 Azure required check；因此
+当前合入调度边界仍依赖人工、评级为 Soft。workflow 存在性不得外推成 active PR 的 Medium enforcement；升级由
+#1765 跟踪。
+本地仍可用 `cargo xtask ci` 兼容聚合 registry 派生的 lane 联集；它不是 GitHub workflow lane 或 required check。
 门集包含 `verify` 全门（build/clippy 升 `--all-features --all-targets`）、覆盖率门
 (`cargo llvm-cov`,引擎-基础 ≥90%、无 ratchet 例外)、`public-api --check`
 (轴 A;`cargo-semver-checks` 因全 crate `publish=false` 空转、本轮 deferred) 与 cargo-audit(供应链漏洞,#1133)。
-**供应链门**(#1133):`cargo deny check`(advisories/RustSec+licenses+bans+sources)+ cargo-audit 在 PR 门阻断合入;
+**供应链门**(#1133):`cargo deny check`(advisories/RustSec+licenses+bans+sources)+ cargo-audit 在 GitHub Shadow
+运行中 fail-closed；当前 `ci-gate` 尚非 Azure 合入阻断;
 另有每日 GitHub Actions `schedule:` cron 定时刷新 lane(`cargo xtask audit`=advisory-scoped deny+cargo-audit),捕「未变依赖」新披露
-CVE(PR 门覆盖不到的时间维度,告警语义)。Azure Pipelines 不再作为 RSS 的 CI carrier；Azure PR/check 状态同步不在
-本仓 forge 脚本中实现。
-设计 + 激活 runbook 见 `docs/ops/202606231530-001-ci-lane.md`。
+CVE(PR 门覆盖不到的时间维度,告警语义)。Azure Pipelines 不再作为 RSS 的 CI carrier，但 Azure 仍是 active
+PR/Boards forge；Azure PR/check 状态同步不在本仓 forge 脚本中实现。Shadow 现状与激活条件以
+[`202607130824-1765-diff-adaptive-ci.md`](../ops/202607130824-1765-diff-adaptive-ci.md) 为准，设计见
+[`202606231530-001-ci-lane.md`](../ops/202606231530-001-ci-lane.md)。
+
+L0/L1 验证沿用同一 typed plan，不在规则文档维护第二份 gate inventory：`verify --fast` 闭合声明、codegen
+与静态证据，完整 `verify` 增加编译和默认行为测试并仅编译 integration targets，真实 Postgres LocalTx matrix
+与 active L1 journey 由 `ci-integration --shard postgres-domain` 执行。具体采用顺序与失败边界分别见
+[`consistency-l0.md`](./consistency-l0.md) 和 [`localtx.md`](./localtx.md)。
 
 ArchRules 反向索引由 `cargo xtask archrules list` 从真实 carrier 的 `INVARIANT:` 锚点派生，展示
 rule id → carrier → source → fixture/baseline → gate；`cargo xtask archrules verify` 接入 verify/ci 的

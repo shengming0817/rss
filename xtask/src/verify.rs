@@ -1,25 +1,13 @@
 //! `cargo xtask verify` —— 本地全量治理门聚合入口。
 //!
-//! RSS 本地全量治理门。GitHub Actions 以 Meta / Core / Security / Coverage 四类门作为合入阻断，
-//! 其中 Core 拆成单次 prerequisites 与两份 partition tests；本命令保留为 stable-only 本地快门。
-//! 聚合（fail-fast，无编译的步最先）：
+//! RSS 本地全量治理门。Azure 是 active PR forge；GitHub typed lanes 当前用于 Shadow 取证，
+//! `ci-gate` 尚不是 required check。完整门集与顺序只由 typed registry 派生，本说明不复制 gate inventory。
+//! 聚合按 fail-fast 执行：no-compile Meta 证明优先，随后是 workspace/feature 编译、lint、默认与
+//! feature-gated 行为测试、供应链检查和注册 lint。
 //!
-//!   1. `cargo fmt --all -- --check`
-//!   2. in-process meta：contract validate + assembly validate + runtime-baseline + runtime-deps-guard + archrules + layer-deps + codegen --check + localtx-coverage + local-only-effects + repo-scope-guard + tenancy-closeout
-//!   3. `cargo build --workspace`
-//!   4. Postgres feature compile matrix：core、三个单域、all-features
-//!   5. `cargo clippy --workspace --all-targets -- -D warnings`
-//!   6. `cargo nextest run --workspace --no-tests=pass`（外部工具）
-//!   7. feature-gated 行为测试门（确定性 mock / lazy）：`cargo nextest run -p s3 --features backend` +
-//!      `-p redis-adapter --features backend`（默认 feature workspace nextest 不编入这些 `#[cfg(feature)]`
-//!      测试模块；按 registry 的 Core gate 显式补跑——不用 `--all-features --workspace` 以免误触
-//!      postgres/redis 的 `integration`（需 live 后端）门）
-//!   8. `cargo deny check`（外部工具）
-//!   9. `cargo dylint --all`（外部工具；跑 `lints/` 嵌套 nightly workspace；`DYLINT_RUSTFLAGS=-D warnings`
-//!      把默认 `Warn` 的注册 lint 升为 fail-closed）
-//!
-//! `--fast` 只跑无需编译的步（fmt + meta + deny），供快速迭代。`--allow-missing-tools` 在缺
-//! 外部工具时显式宽限（默认 fail-closed）。
+//! `--fast` 的 inner typed plan 只跑标记为 `CompileKind::NoCompile` 的 gate（fmt + meta + deny），
+//! 供快速迭代；冷缓存或 xtask 变更时，外层 Cargo 仍会构建 xtask 启动器。`--allow-missing-tools`
+//! 在缺外部工具时显式宽限（默认 fail-closed）。
 //!
 //! **`cargo xtask ci`（[`run_ci`]）= 本地兼容 CI 聚合**（issue #1132）：
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
@@ -29,9 +17,9 @@
 //!
 //! **`cargo xtask audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，GitHub Actions
 //! `schedule:` 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
-//! （皆 no-compile、快）。PR 门（ci）已含全量 `deny check`（advisories+licenses+bans+sources）+ cargo-audit；
-//! audit lane 专攻**时间维度**——对「未变依赖」新披露的 CVE，PR 门要等下个 PR 才捕获，故每日重跑漏洞维度。
-//! audit lane = **告警**（无 PR 可阻断）；PR 门 ci = **合入阻断**。
+//! （皆 no-compile、快）。PR-triggered Shadow plan 含全量 `deny check`
+//! （advisories+licenses+bans+sources）+ cargo-audit；scheduled audit 专攻**时间维度**，捕获未改依赖的新披露
+//! CVE。两者在各自 run 内 fail-closed；`ci-gate` 激活为 required check 或建立 forge bridge 前均不阻断 Azure 合入。
 //!
 //! **`cargo-udeps` 仍不入三者**（多余/未声明依赖，需 nightly `-Z`，与根 stable 1.96 冲突）——独立可选门。
 //! `cargo-semver-checks`（轴 A 语义破坏检测）当前所有 crate `publish = false` ⇒ `--workspace` 选 0 包、门
@@ -78,7 +66,8 @@ use std::process::Stdio;
 /// verify 选项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VerifyOpts {
-    /// 只跑无需编译的步（fmt + meta + deny），跳过 build/clippy/nextest/dylint。
+    /// Inner typed plan 只跑 `CompileKind::NoCompile` gate（fmt + meta + deny），跳过
+    /// build/clippy/nextest/dylint；外层 Cargo 仍可能构建 xtask 启动器。
     fast: bool,
     /// 缺外部工具时显式宽限（默认 fail-closed，唯一门不建议）。
     allow_missing_tools: bool,
@@ -471,7 +460,7 @@ fn step_deny() -> Step {
     }
 }
 /// audit 定时 lane 专用：advisory-scoped `cargo deny check advisories`（只查 RustSec 漏洞库，
-/// licenses/bans 留给 PR 门的全量 [`step_deny`]）。issue #1133 每日 cron 刷新只需漏洞维度。
+/// licenses/bans 留给 PR-triggered Shadow plan 的全量 [`step_deny`]）。issue #1133 每日 cron 只刷新漏洞维度。
 fn step_deny_advisories() -> Step {
     Step {
         id: GateId::DenyAdvisories,
@@ -834,7 +823,7 @@ crate::ci_lanes::gate_catalog!(define_step_dispatch);
 
 /// audit 精简供应链门步计划（issue #1133；统一 GitHub CI 的 typed Audit job 调 `cargo xtask audit`）。
 /// advisory-scoped deny + cargo-audit 两门，皆 no-compile、快——定时刷新只查漏洞库（捕获「未变依赖」新
-/// 披露 CVE）。**不含** licenses/bans：它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；PR 门的
+/// 披露 CVE）。**不含** licenses/bans：它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；
 /// `CompatibilityCi` 计划已用全量 `deny check` + cargo-audit 覆盖。audit 步与 ci 共享同一
 /// [`step_cargo_audit`] 构造。
 ///
@@ -1617,59 +1606,70 @@ mod tests {
     }
 
     #[test]
-    fn local_only_effects_is_no_compile_internal_gate_after_codegen_in_all_lanes()
-    -> anyhow::Result<()> {
-        for (name, plan) in [
-            ("full", plan_for(PlanTarget::Verify)),
-            ("fast", verify_plan(&opts(true, false))),
-            ("ci", plan_for(PlanTarget::CompatibilityCi)),
-        ] {
-            let labels = labels(&plan);
-            let codegen = labels
-                .iter()
-                .position(|label| *label == "codegen-check")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 codegen-check"))?;
-            let effects = labels
-                .iter()
-                .position(|label| *label == "local-only-effects")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 local-only-effects"))?;
-            assert_eq!(effects, codegen + 2, "{name} lane order drift");
-            assert!(
-                !plan[effects].needs_compile(),
-                "{name} gate must be no-compile"
-            );
-            assert!(matches!(
-                plan[effects].kind,
-                StepKind::Internal(InternalCheck::LocalOnlyEffects)
-            ));
-        }
-        Ok(())
-    }
+    fn l0_l1_closeout_gates_have_typed_membership_and_order() -> anyhow::Result<()> {
+        const GATES: [(GateId, InternalCheck); 5] = [
+            (GateId::ContractValidate, InternalCheck::ContractValidate),
+            (GateId::ContractBreaking, InternalCheck::ContractBreaking),
+            (GateId::CodegenCheck, InternalCheck::CodegenCheck),
+            (GateId::LocalTxCoverage, InternalCheck::LocalTxCoverage),
+            (GateId::LocalOnlyEffects, InternalCheck::LocalOnlyEffects),
+        ];
 
-    #[test]
-    fn localtx_coverage_is_no_compile_internal_gate_immediately_after_codegen() -> anyhow::Result<()>
-    {
+        for (id, expected_check) in GATES {
+            let spec = id.spec();
+            assert_eq!(spec.lanes(), [Some(CiLane::Meta), None], "{id:?}");
+            assert_eq!(spec.compile_kind(), CompileKind::NoCompile, "{id:?}");
+            assert_eq!(
+                spec.verify_membership(),
+                VerifyMembership::Included,
+                "{id:?}"
+            );
+            assert_eq!(spec.compat(), CompatMembership::Included, "{id:?}");
+            assert_eq!(spec.tool(), ToolRequirement::InProcess, "{id:?}");
+            assert_eq!(
+                step_for_id(id).kind,
+                StepKind::Internal(expected_check),
+                "{id:?} executor mapping drift"
+            );
+        }
+
         for (name, plan) in [
             ("full", plan_for(PlanTarget::Verify)),
             ("fast", verify_plan(&opts(true, false))),
-            ("ci", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
         ] {
-            let labels = labels(&plan);
-            let codegen = labels
-                .iter()
-                .position(|label| *label == "codegen-check")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 codegen-check"))?;
-            let coverage = labels
-                .iter()
-                .position(|label| *label == "localtx-coverage")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 localtx-coverage"))?;
-            assert_eq!(coverage, codegen + 1, "{name} lane order drift");
-            assert!(!plan[coverage].needs_compile());
-            assert!(matches!(
-                plan[coverage].kind,
-                StepKind::Internal(InternalCheck::LocalTxCoverage)
-            ));
+            let positions = GATES
+                .map(|(id, _)| {
+                    plan.iter()
+                        .position(|step| step.id == id)
+                        .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 {id:?}"))
+                })
+                .into_iter()
+                .collect::<anyhow::Result<Vec<_>>>()?;
+
+            assert!(
+                positions.windows(2).all(|pair| pair[0] < pair[1]),
+                "{name} contract/codegen/L0/L1 order drift: {positions:?}"
+            );
+            assert_eq!(positions[3], positions[2] + 1, "{name} LocalTx order drift");
+            assert_eq!(
+                positions[4],
+                positions[2] + 2,
+                "{name} LocalOnly order drift"
+            );
         }
+
+        for lane in [CiLane::Core, CiLane::Security, CiLane::Coverage] {
+            let plan = plan_for(PlanTarget::Lane(lane));
+            for (id, _) in GATES {
+                assert!(
+                    plan.iter().all(|step| step.id != id),
+                    "{id:?} must not be duplicated into {lane:?}"
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -2027,8 +2027,8 @@ mod tests {
 
     // ---- ci 超集计划（issue #1132）----
 
-    /// CompatibilityCi 顺序与门集（单一事实源；CI lane 实跑顺序）。`audit`（cargo-audit）紧随 `deny` 后
-    /// （issue #1133：供应链漏洞门入 PR 阻断 lane，防御纵深独立于 deny advisories）。
+    /// CompatibilityCi 顺序与门集（单一事实源；本地兼容聚合顺序）。`audit`（cargo-audit）紧随 `deny` 后
+    /// （issue #1133：供应链漏洞检查进入兼容计划，防御纵深独立于 deny advisories）。
     #[test]
     fn compatibility_plan_order_and_count() {
         assert_eq!(
@@ -2197,7 +2197,7 @@ mod tests {
     // ---- audit 精简供应链 lane（issue #1133；每日 cron advisory 刷新）----
 
     /// audit_plan 顺序与门集（单一事实源；scheduled lane 实跑顺序）：advisory-scoped deny + cargo-audit。
-    /// 不含 licenses/bans——它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；PR 门的 ci 已全查。
+    /// 不含 licenses/bans——它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；CompatibilityCi 已全查。
     #[test]
     fn audit_plan_order_and_count() {
         assert_eq!(labels(&audit_plan()), vec!["deny-advisories", "audit"]);
@@ -2227,7 +2227,7 @@ mod tests {
     }
 
     /// audit lane 的 deny 步是 **advisory-scoped**（`deny check advisories`），非裸 `deny check`——
-    /// 定时刷新只查漏洞库，licenses/bans 留给 PR 门的全量 `deny check`。
+    /// 定时刷新只查漏洞库，licenses/bans 留给 PR-triggered Shadow plan 的全量 `deny check`。
     #[test]
     fn audit_plan_deny_is_advisories_scoped() -> anyhow::Result<()> {
         let plan = audit_plan();
@@ -2274,7 +2274,7 @@ mod tests {
         );
     }
 
-    /// cargo-audit 步在 ci（PR 阻断门）与 audit（定时 lane）里**逐字相同**（同一构造，不漂移）。
+    /// cargo-audit 步在 CompatibilityCi 与 audit（定时 lane）里**逐字相同**（同一构造，不漂移）。
     #[test]
     fn cargo_audit_step_shared_between_ci_and_audit_verbatim() {
         let find = |plan: &[Step]| plan.iter().find(|s| s.label() == "audit").cloned();

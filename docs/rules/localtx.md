@@ -1,8 +1,22 @@
 # LocalTx 规则
 
-本文件记录 L1/LocalTx 的当前声明边界。机器真源是 `xtask` 的 typed manifest、R22 校验、
-`vocab::LocalTx*` 闭值类型与 `::generated::http::LOCAL_TX_SPECS`；后续 metrics 与 journey 见
-`docs/spec/006-l0-l1-consistency-hardening/` 的 #1697+ 分解。
+本文件记录 L1/LocalTx 已落地的声明、执行与验证边界。机器真源是 `xtask` typed manifest/R22、
+`vocab::LocalTx*` 闭值、generated `LOCAL_TX_SPECS`、typed route/provider marker、conformance、Postgres
+runner、metrics 和 scoped journey；本文不维护平行 gate inventory。
+
+## Proof chain and validation levels
+
+采用顺序是 contract LocalTx evidence → generated registry → owner/production route → domain conformance →
+typed backend profile/provider probes → Postgres runner settlement/telemetry → scoped journey。任一层缺失、重复、
+未知、孤立、伪造或 route/provider 身份不一致都 fail-closed。
+
+- `verify --fast` 的 inner typed plan 执行 contract/codegen 漂移和 `localtx-coverage` 静态闭环；不包含
+  workspace build/test 编译门，也不运行 conformance 或连接 Postgres；冷缓存或 xtask 变更时，外层 Cargo
+  仍会构建 xtask 启动器。
+- 完整 `verify` 额外执行 workspace/default conformance 和 integration-target compile-only；编译成功不等于
+  真实事务矩阵已执行。
+- `ci-integration --shard postgres-domain` 执行真实 SecretRepo/Identity matrices 与 #1706 admitted journey，
+  required tooling、服务启动和编译后测试 inventory 均 fail-closed，closeout 不使用 `--allow-missing-tools`。
 
 ## Contract evidence
 
@@ -185,8 +199,9 @@ retry exhausted 在 metrics 与 warn trace 中显式可见，且不改变 #1699 
 ## Static coverage gate
 
 `cargo xtask localtx-coverage` 以 active LocalTx HTTP manifest 为真源，逐条闭合 generated
-`LOCAL_TX_SPECS`、owner domain、生产 typed route mount 与测试 marker。该检查是无需编译的静态门，进入
-`cargo xtask verify --fast`；缺失、重复、孤儿或错误 owner 的证据均 fail-closed。
+`LOCAL_TX_SPECS`、owner domain、生产 typed route mount 与测试 marker。该检查的 inner gate 不调用
+workspace build/test 编译，并进入 `cargo xtask verify --fast`；缺失、重复、孤儿或错误 owner 的证据均
+fail-closed。
 
 生产 route 证据只接受绝对 typed `impl ::bootstrap::Domain for ...` 的 `init` 方法：registry 参数必须写成
 `&mut ::bootstrap::Registry`，且 `route_group` 必须是该参数在 `init` 顶层语句中的直接调用。endpoint 必须
@@ -260,22 +275,22 @@ tenant-scoped-UoW matrix 必须把 conflict 声明为不适用并给出原因，
 该 board 只覆盖 issue #1706 的三条 contract，不对其余 active LocalTx contract 声称全局穷尽；其它 scope
 的 journey artifact 不得被强塞进 `issue-1706` board。
 
-## Follow-up boundary
+## Failure and adoption semantics
 
-#1687 的边界是 manifest authoring：
+新建或修改 LocalTx contract 时，先选择与实现一致的 `txModel` 并补齐全部闭值 evidence，再生成 registry、绑定
+唯一 owner/production route、为真实域路径补 conformance，并在需要 Postgres 事务语义时注册一对一的 typed
+backend profile/provider probes。只有 admitted scope 才进入 journey；metrics/traces 必须复用闭值 label，不能
+用自由字符串、第二套 enum、toy transaction 或文档声明替代证据。
 
-- 补齐 LocalTx 三个新增字段。
-- 迁移真实 L1 HTTP `contract.toml`。
-- R22 守住 L1 完整证据与 stray capability。
+静态门会拒绝 manifest/generated/owner/route/test、backend profile/provider/probe、journey board/spec/fixture/
+runner/lane 的缺失、重复、未知或孤立关系。validation/authorization 路径必须证明 no-write；CAS conflict 与
+permanent error 恰好一次且零写；transient 只在确认 rollback 后按预算重建 transaction scope。`commit_unknown`
+和 `rollback_failed` 都只能断言 attempt = 1：第一次 attempt 可能已经 durable，禁止 replay，也禁止伪造 snapshot
+或 no-write 结论。
 
-#1688 的边界是 generated metadata；#1698 将其中 LocalTx evidence enum 上移为共享 vocab 类型：
+#1706 的 durable journey 只覆盖 status board admitted 的 Settings/Identity contracts，不宣称所有 active LocalTx
+全局穷尽。`identity.logout` 的第四路径验证并发/重复请求幂等收敛，不能为满足矩阵而伪造业务 conflict。
 
-- `::generated::http` 暴露 `LocalTxSpec`，四个字段直接使用 `vocab::LocalTx*`，不保留 generated 镜像 enum。
-- LocalTx active HTTP `SPEC` 必填 `local_tx: Some(...)`，非 LocalTx 为 `None`。
-- `LOCAL_TX_SPECS` active-only 派生当前 L1 HTTP contract 子集。
-- consistency/effect/auth/path/method 已由 #1690 收进 `SPEC.route: HttpRouteEvidence` 并随 endpoint/RouteMeta
-  原样传播；`local_tx` 继续只表达 L1 专属 transaction capability，不复制 route proof。
-- 不做 LocalTx runner、coverage gate、metrics label 或 domain proof。
-
-#1697 建立上述 LocalTx coverage gate；#1698 以共享类型身份收口 LocalTx vocabulary/closed labels；#1699 已接入
-Postgres runner；#1700+ 再补真实域路径、rollback/conflict 与 conformance 证明。
+历史交付链 #1687/#1688/#1697–#1706 已完成 manifest、共享 vocab/generated metadata、coverage、runner、
+domain/adapters、conformance、metrics 和 journey。旧 boundary-only evidence、generated 镜像 enum、bare marker、
+legacy runner 和手制 observation 均已删除，不提供兼容入口。

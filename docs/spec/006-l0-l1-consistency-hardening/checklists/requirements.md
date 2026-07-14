@@ -1,38 +1,38 @@
-# Requirements Checklist: L0/L1 Consistency Hardening SpecKit Baseline
+# Requirements Checklist: L0/L1 Consistency Hardening
 
 **Feature**: `docs/spec/006-l0-l1-consistency-hardening`
 
-**Created**: 2026-07-08
+**Reviewed**: 2026-07-14
 
-**Scope**: Docs-only C-00 baseline for epic #1685 and PBI #1708.
+**Status**: Complete
 
-## Content Quality
+## Machine Truth
 
-- [x] The feature directory contains `spec.md`, `plan.md`, `tasks.md`, `quickstart.md`, and this checklist.
-- [x] The specification has concrete user stories, acceptance scenarios, functional requirements, entities, success criteria, and assumptions.
-- [x] The plan records source inputs, scope constraints, issue map, natural dependency DAG, and verification plan.
-- [x] The task list is PR/PBI-level and uses real issue numbers #1708 and #1686..#1707.
-- [x] The quickstart explains how to validate C-00 and how to start later `/ship` work.
+- [x] Typed `GateId` metadata remains the single source for full, fast, real Meta-lane, and compatibility membership.
+- [x] No new gate, CLI, workflow, CI job, generated output, runtime path, public interface, wire schema, or migration was introduced.
+- [x] Contract review and codegen-adjacent LocalTx/LocalOnly ordering has table-driven regression coverage.
+- [x] Static proof, full/default conformance, integration compilation, and live Postgres execution are described as distinct boundaries.
+- [x] SpecKit completion is documentation state, not a new continuous-enforcement mechanism.
 
-## Issue and DAG Integrity
+## L0/L1 Semantics
 
-- [x] C-00 #1708 is marked as the only issue closed by this docs-only PR.
-- [x] Shared carrier PBIs #1686, #1687, and #1688 are listed before L0/L1 fan-out.
-- [x] L0 PBIs #1689..#1696 are grouped under effect-proven LocalOnly.
-- [x] L1 PBIs #1697..#1706 are grouped under executable LocalTx validation.
-- [x] C-04 #1707 is reserved for final implementation docs/verify closeout.
-- [x] Maximum natural parallelism is documented without a wave-size cap.
+- [x] LocalOnly failure semantics cover effect closure, production mounts, state/provenance, tenant isolation, and local privilege.
+- [x] Every active LocalTx contract has contract-to-route-to-test-to-backend closure; only status-board admitted contracts require journey closure.
+- [x] `commit_unknown` and `rollback_failed` are terminal and non-replayable.
+- [x] The #1706 journey is described by its admitted contract scope and does not overclaim global coverage.
+- [x] Report JSON `status`, not the process exit code alone, is documented as the evidence verdict.
 
-## Scope Control
+## Documentation Closeout
 
-- [x] The baseline states that Rust code, contract schemas, generated files, migrations, and `docs/rules/**` rule bodies are out of scope.
-- [x] The expected PR diff is limited to `.specify/feature.json` and `docs/spec/006-l0-l1-consistency-hardening/**`.
-- [x] The L0 and L1 downloaded SpecKit packages are cited as inputs, not copied wholesale into runtime-facing paths.
-- [x] The PR benchmark line is specified as docs-only with no runtime, codegen, or interface comparison required.
+- [x] T001–T023 are all recorded complete.
+- [x] Historical C-00 restrictions are identified as historical rather than active instructions.
+- [x] Root, architecture, CI operations, L0/L1 rules, and the full SpecKit pack describe current behavior.
+- [x] Hard-coded gate counts, obsolete ship ordering, and the stale #1707 blocker instruction are removed.
+- [x] Documentation remains a thin explanation of executable sources and does not duplicate the complete gate inventory.
 
-## Verification
+## Supply Chain and Acceptance
 
-- [x] Placeholder-marker scan is part of the test plan.
-- [x] `cargo xtask verify --fast` is part of the test plan.
-- [x] Diff allowlist validation is part of the test plan.
-- [x] `.specify/feature.json` points to `docs/spec/006-l0-l1-consistency-hardening`.
+- [x] `spin 0.9.8` and `0.10.0` yanked failures were reproduced before the update.
+- [x] `Cargo.lock` resolves the existing transitive chains to `spin 0.9.9` and `0.10.1` without parent declaration or deny-policy changes.
+- [x] Deny, dependency-tree, adapter, focused gate, fast, workspace, clippy, and live Postgres validation are in the acceptance plan.
+- [x] The PR closes #1707 and #1770 and includes the required rust-analyzer benchmark reference.

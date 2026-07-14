@@ -1,108 +1,90 @@
-# Quickstart: L0/L1 Consistency Hardening Baseline
+# Quickstart: L0/L1 Consistency Verification
 
-This quickstart is for the docs-only C-00 PR and later `/ship` execution of the implementation PBIs.
+Use the typed verification entrypoints below. `xtask/src/ci_lanes.rs` is the machine source for membership; this guide intentionally does not enumerate the repository's complete gate catalog.
 
-## C-00 Docs-Only PR
+## Gate Matrix
 
-Tracking:
+| Level | L0/L1 evidence | Compilation and backend boundary |
+|-------|----------------|----------------------------------|
+| Fast | Contract validate/breaking review, codegen drift, LocalTx closure, LocalOnly effect proof | The inner typed plan contains no workspace build/test compilation gate; Cargo may build or rebuild the xtask launcher. No runtime conformance, Docker, or live Postgres |
+| Full | Fast evidence plus workspace/default behavior checks and integration-target compilation | Integration targets are compiled but real backends are not executed |
+| Live Postgres | SecretRepo and Identity matrices plus the scoped #1706 validation journey | Runs the `postgres-domain` shard against real Postgres; required tools and test inventory fail closed |
 
-- Epic: #1685
-- Docs-only PBI: #1708
-- Branch: `docs/1708-l0-l1-spec-baseline`
-- Worktree: `worktrees/docs/1708-l0-l1-spec-baseline`
-
-Validate the baseline from the worktree:
-
-```bash
-patterns='NEEDS CLAR''IFICATION|\[FEATURE NAME\]|TO''DO|T''BD'
-if rg -n "$patterns" docs/spec/006-l0-l1-consistency-hardening .specify/feature.json; then
-  echo "unresolved template marker found"
-  exit 1
-else
-  echo "placeholder scan passed"
-fi
-cargo xtask verify --fast
-/usr/bin/git diff --name-only origin/develop...HEAD
-```
-
-Expected diff allowlist:
-
-```text
-.specify/feature.json
-docs/spec/006-l0-l1-consistency-hardening/**
-```
-
-The PR body must include:
-
-```text
-本 PR 无需对标：docs-only SpecKit baseline，未改 runtime/codegen/interface
-```
-
-Close only #1708 from the PR body. Do not close #1686..#1707.
-
-## Starting Follow-Up Work
-
-Start with the shared carrier chain:
-
-```text
-/ship --level=L2 #1686
-/ship --level=L2 #1687
-/ship --level=L2 #1688
-```
-
-After #1688 lands, the natural fan-out is:
-
-```text
-/ship --level=L2 #1689
-/ship --level=L2 #1690
-/ship --level=L2 #1691
-/ship --level=L2 #1692
-/ship --level=L2 #1697
-/ship --level=L2 #1698
-```
-
-Continue according to `tasks.md` dependency stages. Do not start #1707 until #1686..#1706 are complete.
-
-## L0-08 Consistency / Effect Breaking Review
-
-From the #1696 worktree, validate the current manifests and compare against the PR base:
+Canonical commands:
 
 ```bash
-cargo run -q -p xtask -- contract validate
-cargo run -q -p xtask -- contract breaking --against origin/develop
+make verify-fast
+./hack/cargo.sh xtask verify
+./hack/cargo.sh xtask ci-integration --shard postgres-domain
 ```
 
-Expected review behavior:
+Do not use `--allow-missing-tools` for closeout acceptance. `cargo xtask ci` is a local compatibility aggregation; it is not a claim that GitHub Shadow, Azure, or live Integration all ran locally.
 
-- `LOCAL_ONLY_BOUNDARY_CHANGED`, `EFFECT_ADDED`, and `EFFECT_REMOVED` remain deterministic warn findings;
-  active findings fail closed without the exact `Contract-Review-Ack` trailer printed by the command.
-- Review the complete rule/subject/detail set, then place the exact trailer in the change commit or a follow-up
-  commit. A base or finding change invalidates the old fingerprint.
-- A non-L0 consistency drift or any other active breaking rule remains deny; mixed warn + deny output fails.
-- Draft contracts are skipped and deprecated findings remain non-blocking warn without an acknowledgement.
-- Missing, empty, duplicate, or unknown HTTP effect profiles fail before a trustworthy comparison is emitted.
+## Adoption Order
 
-Run the focused regression surface before the full ship funnel:
+When adding or changing a consistency contract:
+
+1. Declare the consistency level and closed evidence in the contract manifests.
+2. Regenerate and review consistency, effect, and LocalTx registries.
+3. Bind the generated metadata to exactly one production route/mount and classify captured ports.
+4. Add LocalOnly or LocalTx conformance proof at the domain boundary.
+5. Add real adapter matrices when the contract depends on Postgres transaction behavior.
+6. Admit only the scoped active contracts to the durable journey and keep metrics/traces on closed labels.
+7. Run fast, then full, then live validation according to the changed boundary.
+
+Cross-tenant behavior is never inferred from an ordinary read classification. It must retain `CrossTenantPrivilege` and tenant evidence through production binding, which makes that capability ineligible for LocalOnly and requires the governed non-L0 path.
+
+## Focused Diagnostics
 
 ```bash
-cargo test -p xtask contract::breaking::tests::
-cargo test -p xtask --test consistency_report_cli
-cargo clippy -p xtask --all-targets -- -D warnings
+./hack/cargo.sh xtask contract validate
+./hack/cargo.sh xtask contract breaking --against origin/develop
+./hack/cargo.sh xtask localtx-coverage
+./hack/cargo.sh xtask consistency local-only-effects
 ```
 
-## Using Another SpecKit Feature
-
-`.specify/feature.json` now points to this feature. For older feature work, use a separate branch or worktree and treat `SPECIFY_FEATURE_DIRECTORY` as a persistent pointer override, not a purely temporary shell override:
+The consistency report is an evidence artifact, not the blocking LocalOnly gate. Parse its JSON status explicitly because a report process exit code alone is not the verdict:
 
 ```bash
-SPECIFY_FEATURE_DIRECTORY=docs/spec/001-runtime-assembly-plan <speckit-command>
-/usr/bin/git diff -- .specify/feature.json
+report_file="$(mktemp)"
+trap 'rm -f "$report_file"' EXIT
+./hack/cargo.sh xtask consistency report --format json >"$report_file"
+jq -e '.status == "passed"' "$report_file"
 ```
 
-If `.specify/feature.json` changed only for the older feature command, restore or commit that pointer change intentionally before leaving the worktree. Replace the path with the feature directory required by that work item.
+## Failure Modes
+
+Fast verification fails closed for:
+
+- Missing, empty, duplicate, unknown, or stray consistency/effect/LocalTx evidence.
+- Generated registry drift or an active contract's route, owner, mount, test, backend profile, or provider probe that does not close.
+- A status-board admitted journey whose board, fixture, runner, or `postgres-domain` lane evidence does not close.
+- A LocalOnly forbidden effect, unclassified capture, ambiguous production mount, or untrusted state/provenance claim.
+- An active consistency/effect review finding without the exact `Contract-Review-Ack`; non-L0 or wire-breaking changes remain deny findings.
+
+Full verification additionally catches compile, lint, default-feature conformance, and integration-target compile failures. It does not prove a live backend transaction.
+
+The live Postgres shard catches rollback/concurrency behavior, empty compiled test inventory, missing required infrastructure, and journey drift. `commit_unknown` and `rollback_failed` remain attempt-one terminal outcomes: neither may be replayed, and neither may be presented as a proven no-write outcome.
+
+The #1706 journey covers its admitted Settings and Identity contracts; it does not claim every active LocalTx contract is globally journey-covered. The logout concurrency/idempotency path must not be relabeled as a synthetic conflict.
+
+## Supply-Chain Diagnostics
+
+```bash
+./hack/cargo.sh deny check
+./hack/cargo.sh tree --workspace --all-features -i spin@0.9.9
+./hack/cargo.sh tree --workspace --all-features -i spin@0.10.1
+```
+
+The accepted closeout resolves the `flume` chains to `spin 0.9.9` and the `crc-fast`/AWS S3 chain to `spin 0.10.1`. It does not change `lapin`, `rumqttc`, AWS SDK declarations, `Cargo.toml`, or `deny.toml`.
 
 ## Source Material
 
-- L0 planning package: imported SpecKit source for effect-proven LocalOnly; relevant planning content is folded into this feature directory.
-- L1 planning package: imported SpecKit source for executable LocalTx hardening; relevant planning content is folded into this feature directory.
-- Repo baseline: `docs/spec/006-l0-l1-consistency-hardening/`
+- [L0 LocalOnly rule](../../rules/consistency-l0.md)
+- [L1 LocalTx rule](../../rules/localtx.md)
+- [Architecture verification ladder](../../rules/architecture.md)
+- [Current CI status](../../ops/202607130824-1765-diff-adaptive-ci.md)
+
+External benchmark:
+
+`ref: rust-lang/rust-analyzer xtask/src/flags.rs@63a6f0d4bcfd3bbcf36383fcbcbcd93456ed1653`

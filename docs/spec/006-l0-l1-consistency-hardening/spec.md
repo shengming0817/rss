@@ -1,147 +1,105 @@
-# Feature Specification: L0/L1 Consistency Hardening SpecKit Baseline
+# Feature Specification: L0/L1 Consistency Hardening
 
-**Feature Branch**: `docs/1708-l0-l1-spec-baseline`
+**Feature Branch**: `docs/1707-l0-l1-closeout`
 
 **Created**: 2026-07-08
 
-**Status**: Draft
+**Completed**: 2026-07-14
 
-**Tracking**: Epic #1685, docs-only PBI #1708
+**Status**: Complete
 
-**Input**: User request to create a docs-only SpecKit baseline for the L0/L1 consistency hardening DAG, closing only C-00 and leaving #1686..#1707 for later implementation PRs.
+**Tracking**: Epic #1685, closeout #1707, supply-chain repair #1770
 
-## User Scenarios & Testing *(mandatory)*
+## Outcome
 
-### User Story 1 - Repo has a single SpecKit source for #1685 (Priority: P1)
+The L0 LocalOnly and L1 LocalTx proof chains are implemented and connected to the existing typed verification registry. The closeout does not add a `GateId`, CLI, CI job, workflow, generated artifact, public API, wire schema, runtime path, or migration.
 
-As an implementer or reviewer, I can open `docs/spec/006-l0-l1-consistency-hardening/` and see the scope, issue map, dependencies, verification rules, and follow-up ship order for epic #1685 without relying on local downloads or historical chat context.
+The original C-00 restriction was a historical constraint for #1708: that PR created a docs-only baseline while #1686–#1707 remained open. It is not a current scope restriction. This closeout updates the rule documents and verification tests after #1686–#1706 landed, and repairs the yanked transitive `spin` versions tracked by #1770.
 
-**Why this priority**: The L0 and L1 packages were generated separately, while the real delivery plan now uses one epic with common carrier PBIs and two implementation tracks. A repo-local SpecKit source prevents drift between the issue tracker, downloaded planning files, and future `/ship` work.
+## User Scenarios & Testing
 
-**Independent Test**: Read `spec.md`, `plan.md`, `tasks.md`, `quickstart.md`, and `checklists/requirements.md`; confirm they identify C-00 #1708 as docs-only, list #1686..#1707 as follow-up PBIs, and state that this PR does not modify runtime, codegen, interface, migration, generated, or `docs/rules/**` rule bodies.
+### User Story 1 - LocalOnly is effect-proven (Priority: P1)
 
-**Acceptance Scenarios**:
+As a reviewer, I can determine from generated evidence and machine checks whether a `LocalOnly` route has only permitted local effects, uses an unambiguous production mount, and preserves tenant and privilege boundaries.
 
-1. **Given** a reviewer opens the feature directory, **When** they inspect the documents, **Then** the epic, C-00 PBI, and implementation PBIs are all visible with real issue numbers.
-2. **Given** a future implementer starts `/ship #1686`, **When** they consult this feature, **Then** they can see that #1686 is the first shared carrier and not a L0-only or L1-only task.
-3. **Given** this docs-only PR is reviewed, **When** the diff is checked, **Then** only `.specify/feature.json` and `docs/spec/006-l0-l1-consistency-hardening/**` changed.
+**Independent test**: Run `consistency local-only-effects`; a missing, duplicate, unknown, stray, ambiguous, or forbidden effect fails with the affected contract or mount.
 
----
+**Acceptance scenarios**:
 
-### User Story 2 - Shared carriers unblock L0 and L1 without artificial serialization (Priority: P1)
+1. A strict LocalOnly handler that captures write, transaction, outbox, publish, workflow, saga, reconcile, worker, or cross-tenant audit effects is rejected.
+2. Cross-tenant reads require `CrossTenantPrivilege`, which makes the capability ineligible for LocalOnly; classifying it as an ordinary read cannot bypass that boundary.
+3. Generated effect and route evidence is checked against source manifests, so hand-written documentation cannot attest compliance.
 
-As a planning maintainer, I need the common PBIs to be explicit so L0 and L1 implementation can branch in parallel after their shared generated metadata and evidence carriers exist.
+### User Story 2 - LocalTx is executable and observable (Priority: P1)
 
-**Why this priority**: L0 effect proof and L1 LocalTx validation both depend on generated consistency metadata and evidence schema work. Treating the tracks as simple copy-paste or fully serialized work would hide the real coupling and reduce safe parallelism.
+As a domain developer or operator, I can trace every active `LocalTx` contract through generated evidence, route ownership, tests, adapter behavior, and bounded metrics; contracts admitted by the status board additionally close through the live Postgres validation journey.
 
-**Independent Test**: `plan.md` and `tasks.md` show #1686 -> #1687 -> #1688 as the shared carrier chain, then list L0 and L1 PBIs in natural DAG stages without applying a wave-size cap.
+**Independent test**: Run `localtx-coverage` for static closure and `ci-integration --shard postgres-domain` for real Postgres matrices and the #1706 journey.
 
-**Acceptance Scenarios**:
+**Acceptance scenarios**:
 
-1. **Given** #1688 is complete, **When** work is assigned, **Then** L0 #1689/#1690/#1691/#1692 and L1 #1697/#1698 can start in parallel if their file ownership is kept scoped.
-2. **Given** #1697 and #1698 are complete, **When** L1 implementation continues, **Then** settings, identity, Postgres runner, and observability work can advance according to their own dependencies.
-3. **Given** #1693 is not complete, **When** L0 conformance or reporting is considered, **Then** only the PBIs that depend on the forbidden side-effect guard wait.
+1. Every active LocalTx contract closes its manifest, generated registry, owner, route, test, backend profile, and provider probes.
+2. Status-board admitted contracts additionally close board, fixture, runner, and `postgres-domain` lane evidence; #1706 does not claim global journey coverage.
+3. Validation and authorization failures prove rollback or no-write behavior, while `commit_unknown` and `rollback_failed` remain terminal and non-replayable.
 
----
+### User Story 3 - Verification membership cannot silently drift (Priority: P1)
 
-### User Story 3 - L0 LocalOnly track is effect-proven (Priority: P1)
+As a maintainer, I can rely on typed gate metadata to derive full, fast, `ci-meta`, and compatibility plans without duplicating command inventories in documentation or workflows.
 
-As a reviewer of LocalOnly routes, I need the L0 follow-up PBIs to mature LocalOnly from contract declaration to machine-checkable handler effect proof.
+**Independent test**: The table-driven verify-plan regression checks the L0/L1 gate metadata, membership, exclusions, `CompileKind::NoCompile` property, and required order around codegen.
 
-**Why this priority**: `LocalOnly` currently exists as contract metadata, but strict L0 requires proof that handlers do not carry write, transaction, outbox, publish, workflow, saga, reconcile, worker, or cross-tenant audit side effects.
+**Acceptance scenarios**:
 
-**Independent Test**: The L0 PBIs in `tasks.md` cover generated consistency/effect carriers, route metadata binding, port classification, ambiguous `audit.list-entries` correction, local-only lint, forbidden side-effect guard, conformance, report output, and breaking review.
+1. Static L0/L1 proofs remain in full verify, fast verify, the real Meta lane, and local compatibility CI.
+2. The same gates do not migrate into Core, Security, or Coverage lanes as duplicate execution paths.
+3. Contract checks precede codegen consumers; `localtx-coverage` and `local-only-effects` remain immediately after codegen in that order.
 
-**Acceptance Scenarios**:
+### User Story 4 - Operators have an honest validation ladder (Priority: P1)
 
-1. **Given** a LocalOnly HTTP contract, **When** codegen and the L0 gates run after implementation PBIs land, **Then** the route has runtime-visible consistency and an effect profile.
-2. **Given** a LocalOnly route captures a forbidden side-effect port, **When** the L0 guard runs, **Then** it fails with the contract id and forbidden effect.
-3. **Given** `audit.list-entries` mixes scoped read and cross-tenant audited write behavior, **When** #1692 is implemented, **Then** the strict L0 path is separated or the audited path is explicitly non-L0.
+As a contributor, I can select fast, full, or live validation without confusing compile-only coverage, artifact reporting, and real backend execution.
 
----
+**Independent test**: Follow `quickstart.md` and confirm each command provides the documented evidence and failure behavior.
 
-### User Story 4 - L1 LocalTx track is executable and verifiable (Priority: P1)
+**Acceptance scenarios**:
 
-As a domain developer or operator, I need the L1 follow-up PBIs to prove LocalTx semantics through contract evidence, route coverage, adapter behavior, conformance, metrics, and journeys.
+1. The fast inner typed plan runs static in-process proof and contains no workspace build/test compilation gate or live Postgres work; Cargo may still build or rebuild the xtask launcher.
+2. Full verification adds workspace/default behavior checks and integration compilation, but does not claim to run real backend matrices.
+3. The Postgres-domain shard runs without `--allow-missing-tools` and fails closed if its required environment or compiled test inventory is unavailable.
 
-**Why this priority**: RSS has active L1 contracts and transaction primitives, but the validation chain is not yet unavoidable across generated metadata, route binding, rollback/concurrency tests, and operational evidence.
-
-**Independent Test**: The L1 PBIs in `tasks.md` cover LocalTx coverage, boundary vocabulary, Postgres runner closure, settings and identity tests, conformance suites, adapter matrices, metrics/traces, journeys, and final verify integration.
-
-**Acceptance Scenarios**:
-
-1. **Given** an active `LocalTx` contract, **When** L1 gates run after implementation PBIs land, **Then** generated metadata, route binding, evidence, and test coverage are all checked.
-2. **Given** a LocalTx write fails validation or authorization, **When** its conformance test runs, **Then** rollback/no-write behavior is proven.
-3. **Given** a LocalTx commit has an unknown outcome, **When** metrics and retry classification are inspected, **Then** the status is visible and not retried as a normal transient failure.
-
----
-
-### User Story 5 - Follow-up ship work can be scheduled from the DAG (Priority: P2)
-
-As the person driving delivery, I can start each implementation PR from its PBI and know which work is blocked, which work is parallel, and which PBI is reserved for final closeout.
-
-**Why this priority**: The implementation spans generated metadata, xtask gates, runtime route binding, adapters, testkit, docs, and journeys. A maximum-parallel DAG is needed to keep work moving without conflating this docs-only PR with runtime changes.
-
-**Independent Test**: `quickstart.md` gives the C-00 PR validation flow and the follow-up `/ship` order; `tasks.md` includes a maximum natural parallelism table and states that C-04 #1707 is only for final implementation closeout.
-
-**Acceptance Scenarios**:
-
-1. **Given** this baseline PR merges, **When** work resumes, **Then** `/ship --level=L2 #1686` is the first implementation PR.
-2. **Given** any PBI is selected out of order, **When** its dependencies are checked, **Then** the blocking issue numbers are available in `tasks.md`.
-3. **Given** #1707 is considered, **When** any earlier implementation PBI is still open, **Then** #1707 remains blocked.
-
-## Edge Cases
-
-- `.specify/feature.json` becomes the default feature pointer. Older SpecKit work must use a separate branch or worktree if it needs another feature pointer, because the SpecKit helper can persist `SPECIFY_FEATURE_DIRECTORY` back into `.specify/feature.json`.
-- Generated code may create large future diffs, but this baseline PR does not regenerate or commit generated files.
-- The L0 and L1 packages use different original feature directories; this repo baseline intentionally consolidates them under one issue DAG.
-- `#1707 C-04` is not a substitute for this baseline PR. It is the final closeout after implementation PBIs land.
-- Existing rule documents remain rule sources. This feature references them and does not alter `docs/rules/**` bodies.
-
-## Requirements *(mandatory)*
+## Requirements
 
 ### Functional Requirements
 
-- **FR-001**: System MUST provide `docs/spec/006-l0-l1-consistency-hardening/` with `spec.md`, `plan.md`, `tasks.md`, `quickstart.md`, and `checklists/requirements.md`.
-- **FR-002**: System MUST update `.specify/feature.json` to point at `docs/spec/006-l0-l1-consistency-hardening`.
-- **FR-003**: `tasks.md` MUST list C-00 #1708 and follow-up PBIs #1686..#1707 using real issue numbers.
-- **FR-004**: `tasks.md` MUST describe natural DAG maximum parallelism and MUST NOT apply a wave-size cap.
-- **FR-005**: The baseline PR MUST close only #1708 and MUST NOT close #1686..#1707.
-- **FR-006**: The baseline MUST keep #1707 C-04 as final implementation docs/verify closeout after earlier PBIs are done.
-- **FR-007**: The baseline MUST identify #1686, #1687, and #1688 as shared carriers that unblock both L0 and L1.
-- **FR-008**: The baseline MUST distinguish L0 effect-proof work from L1 LocalTx validation work.
-- **FR-009**: The baseline MUST keep the diff limited to `.specify/feature.json` and `docs/spec/006-l0-l1-consistency-hardening/**`.
-- **FR-010**: The baseline MUST NOT modify Rust code, contract schemas, generated files, migrations, or `docs/rules/**` rule bodies.
-- **FR-011**: The baseline MUST include verification instructions for the placeholder scan and `cargo xtask verify --fast`.
-- **FR-012**: The baseline MUST preserve external source attribution to the L0 and L1 SpecKit packages without copying their optional schema artifacts into this PR.
+- **FR-001**: `gate_catalog` and typed plan derivation MUST remain the sole machine source for verification membership.
+- **FR-002**: L0/L1 static gates MUST carry `CompileKind::NoCompile` Meta metadata and remain included in full, fast, real `ci-meta`, and compatibility plans.
+- **FR-003**: Contract validation and breaking review MUST precede codegen; LocalTx coverage and LocalOnly effect proof MUST follow codegen in that order.
+- **FR-004**: LocalOnly enforcement MUST fail closed for incomplete or ambiguous effect, mount, state, provenance, tenant, and privilege evidence.
+- **FR-005**: Every active LocalTx contract MUST fail closed when its manifest, generated, owner, route, test, backend profile, or provider-probe evidence is missing, duplicated, unknown, or empty.
+- **FR-006**: Live Postgres matrices and the scoped #1706 journey MUST remain in `postgres-domain`; only status-board admitted contracts require journey board, fixture, and runner closure, and fast or compile-only validation MUST NOT represent that evidence as completed.
+- **FR-007**: Consistency reports MUST expose their verdict in `status`; callers MUST NOT treat the report process exit code as the gate verdict.
+- **FR-008**: Documentation MUST explain machine truth and diagnostics without maintaining a second gate inventory or claiming that SpecKit completion is continuous enforcement.
+- **FR-009**: The supply-chain repair MUST update only `spin 0.9.8` to `0.9.9` and `spin 0.10.0` to `0.10.1`, without changing parent dependency declarations.
+- **FR-010**: The closeout MUST NOT add compatibility aliases, parallel workflows, deny allowlists, public API changes, or runtime migrations.
 
 ### Key Entities
 
-- **Epic #1685**: Parent work item for L0/L1 consistency hardening.
-- **C-00 #1708**: Docs-only baseline PBI closed by this PR.
-- **Shared Carrier PBIs**: #1686, #1687, and #1688; common generated metadata and evidence foundations.
-- **L0 Track PBIs**: #1689..#1696; effect-proven LocalOnly work.
-- **L1 Track PBIs**: #1697..#1706; executable LocalTx validation work.
-- **C-04 #1707**: Final implementation docs/verify closeout after L0 and L1 tracks land.
-- **Natural DAG Stage**: A dependency level that can run in parallel once all previous blockers are complete.
-- **SpecKit Baseline**: The repo-local documents that future `/ship` work uses as planning truth.
+- **Typed gate catalog**: Closed `GateId` metadata registry that derives verification plans.
+- **LocalOnly effect proof**: Generated and checked evidence that a local route has no forbidden effects and respects tenant/privilege boundaries.
+- **LocalTx closure**: Contract-to-route-to-test-to-adapter evidence required for every active LocalTx contract.
+- **Scoped LocalTx journey**: Additional board/fixture/runner/lane closure for status-board admitted contracts only.
+- **Consistency report**: Diagnostic evidence artifact whose JSON `status` carries its verdict.
+- **Postgres-domain shard**: Live acceptance boundary for real Postgres matrices and the active L1 journey.
 
-## Success Criteria *(mandatory)*
+## Success Criteria
 
-### Measurable Outcomes
-
-- **SC-001**: The new feature directory contains all five required documents.
-- **SC-002**: `.specify/feature.json` resolves to `docs/spec/006-l0-l1-consistency-hardening`.
-- **SC-003**: A scan for unresolved template markers returns no matches in the new feature directory and `.specify/feature.json`.
-- **SC-004**: `cargo xtask verify --fast` is attempted from the docs worktree and the result is recorded in the PR.
-- **SC-005**: The final PR diff contains only `.specify/feature.json` and files under `docs/spec/006-l0-l1-consistency-hardening/`.
-- **SC-006**: `tasks.md` gives each follow-up PBI a dependency set and a maximum-parallel DAG stage.
-- **SC-007**: The PR body includes `本 PR 无需对标：docs-only SpecKit baseline，未改 runtime/codegen/interface`.
-- **SC-008**: No implementation PBI #1686..#1707 is closed by this PR.
+- **SC-001**: `cargo deny check` passes and the all-features dependency tree contains `spin 0.9.9` and `0.10.1`, with neither yanked version present.
+- **SC-002**: Focused typed-plan tests prove metadata, membership, exclusions, and order without a copied full label snapshot.
+- **SC-003**: Direct contract, LocalTx, LocalOnly, report-status, fast, workspace, clippy, and live Postgres validations pass.
+- **SC-004**: Active documentation contains no hard-coded gate count, stale blocker instruction, incomplete T001–T023 task, or unresolved SpecKit marker.
+- **SC-005**: The PR closes #1707 and #1770 and cites the rust-analyzer typed dispatch/check-only benchmark.
 
 ## Assumptions
 
-- This PR is intentionally docs-only and does not implement any runtime, codegen, interface, migration, generated, or rule-body change.
-- The existing issue tracker entries #1685..#1708 are the authoritative work item numbers.
-- The imported L0 and L1 SpecKit packages are planning inputs whose relevant content has been folded into this directory; no local download path is an execution dependency.
-- If an older SpecKit feature still needs to run, callers will isolate the pointer change in a branch or worktree and explicitly restore `.specify/feature.json` before leaving that context.
+- #1686–#1706 are complete and their existing machine gates are the implementation truth.
+- Azure is the active PR/Boards forge; GitHub CI is Shadow evidence and `ci-gate` is not a required check.
+- Periodic yank preflight, parent dependency major-version refresh, adaptive-CI activation, and forge-state synchronization remain out of scope.

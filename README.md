@@ -12,19 +12,30 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 
 本地保留聚合验证入口；GitHub Actions 由 typed `ci-plan` 从闭合 `CiJobKey` 派生唯一动态 matrix，
 执行 `ci-meta`、Core、Security、Coverage、Integration 与 Audit 的合法子集，再由稳定 `ci-gate`
-核对计划、聚合结果和 evidence v4 回执。当前 Shadow 模式仍执行完整 14-job catalog：
+核对计划、聚合结果和 evidence v4 回执。Azure 当前仍是 active PR/Boards forge；GitHub 处于 Shadow
+取证阶段并执行完整 14-job catalog，`ci-gate` 尚未配置为 required check。当前状态与激活条件见
+[`docs/ops/202607130824-1765-diff-adaptive-ci.md`](docs/ops/202607130824-1765-diff-adaptive-ci.md)：
 
 ```bash
 make verify                              # 推荐：受控 bootstrap + 完整 verify gate plan
 ./hack/cargo.sh xtask verify             # 与 make verify 相同的受控入口
-./hack/cargo.sh xtask verify --fast      # 只跑无需编译的步（fmt + meta + deny），快速迭代
+./hack/cargo.sh xtask verify --fast      # inner plan 只跑 NoCompile gate；冷缓存时 Cargo 仍会编译 xtask
 ./hack/cargo.sh xtask verify --allow-missing-tools  # 缺外部工具时显式宽限（默认 fail-closed）
-./hack/cargo.sh xtask ci                 # 本地去重兼容聚合：46 个唯一 gate；Coverage 取代 Core 的 default-nextest
+./hack/cargo.sh xtask ci                 # 本地去重兼容聚合；Coverage 取代 Core 的 default-nextest
 ```
 
 Make 通过 `hack/cargo.sh` 启动 xtask，是本地治理门的受控 bootstrap。直接运行 `cargo xtask ...`
 仍执行相同 typed gate plan，并与 wrapper 共用 worktree-local target 默认值；但启动 xtask 的外层 Cargo
 不会获得 wrapper 的 build-jobs 默认值、ambient rustc-wrapper 清洗或 sccache 自动策略，因此不是等价入口。
+
+L0/L1 的 canonical 验证分三层：`make verify-fast` 的 inner typed plan 只运行 contract/codegen/静态闭包，
+不包含 workspace build/test 编译门；冷缓存或 xtask 变更时，外层 Cargo 仍会构建 xtask 启动器。`make verify`
+再加入编译、默认行为测试与 integration target 编译，但不执行真实后端测试；
+`./hack/cargo.sh xtask ci-integration --shard postgres-domain` 才实跑 Postgres LocalTx matrix 与 active L1
+journey。最终证据不得使用 `--allow-missing-tools` 跳过工具或 Docker。L0/L1 的采用与故障语义分别见
+[`docs/rules/consistency-l0.md`](docs/rules/consistency-l0.md) 与
+[`docs/rules/localtx.md`](docs/rules/localtx.md)；精确 gate 成员与顺序只以 typed registry 和
+`xtask/src/verify.rs` 派生计划为准。
 
 `./hack/cargo.sh xtask ci` 覆盖四类 lane 的兼容 gate 联集，但不复现 typed planner、14 个独立 runner、
 artifact 回执或 `ci-gate` 聚合。它不重复运行 Core 的 `ci-core` profile nextest，而 Coverage 复用同一测试

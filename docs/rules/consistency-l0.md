@@ -1,8 +1,24 @@
 # L0 一致性规则
 
-本文件记录 L0/LocalOnly 的当前声明边界。机器真源仍是 `xtask` 的 typed manifest、R22 校验与
-`generated::http::HttpSpec::route.effect_profile()`；后续可执行证明见
-`docs/spec/006-l0-l1-consistency-hardening/` 的 #1689+ 分解。
+本文件记录 L0/LocalOnly 已落地的声明与证明边界。机器真源是 `xtask` 的 typed manifest、R22、generated
+route evidence、typed production mount 和 LocalOnly 静态/运行时检查；本文只解释采用方式和失败语义，
+不维护 gate inventory，也不以文档完成态代替持续 enforcement。
+
+## Proof chain and validation levels
+
+采用顺序是 contract `effectProfile` → generated route evidence → production route/state mount → owner-sealed
+port effect/privilege → runtime conformance。任一层缺失、重复、未知、孤立、歧义或与上一层不一致都 fail-closed；
+不得用手写 allowlist、字符串 marker、任意 counter 或报告文本补洞。
+
+- `verify --fast` 的 inner typed plan 执行 contract/codegen 漂移与 `consistency local-only-effects` 静态闭环，
+  不包含 workspace build/test 编译门，也不运行 conformance 或连接 Postgres；冷缓存或 xtask 变更时，外层
+  Cargo 仍会构建 xtask 启动器。
+- 完整 `verify` 额外执行 workspace/default conformance，并编译 integration targets，但不声称运行真实 backend。
+- `ci-integration --shard postgres-domain` 承载需要真实 Postgres 的相邻 L1 adapter/journey 验收；L0 准入本身
+  不能借 live 环境缺失而宽限。
+
+跨租户 capability 即使是 read 也必须携带 `CrossTenantPrivilege`，因此不满足 LocalOnly 所需的
+`LocalPrivilege`。posture report、命名约定或普通 `ReadEffect` 都不能把跨租户访问升级成零信任 attest。
 
 ## Contract carrier
 
@@ -71,7 +87,7 @@ LocalOnly 注入面只允许 `read` 与 `auth`。`auth` 可包含限流、replay
 effect 后把跨租户读取当作普通本地 read。
 
 该 marker 证明的是 canonical port 注入面，不声称覆盖 handler 直接使用文件系统、网络 client 或全局状态的
-副作用；非 port 副作用与实际调用次数由 #1694 conformance testkit 继续闭合。
+副作用；非 port 副作用与实际调用次数由下文已接入的 conformance testkit 闭合。
 
 ## Posture report
 
@@ -91,7 +107,7 @@ model 渲染、稳定排序，且不包含时间、主机、Git SHA、绝对路�
 并完整解析 JSON。`consistency local-only-effects` 仍是阻断式 Medium gate，
 继续消费相同 LocalOnly proof。非 LocalOnly route 只报告 declaration 与 mount，effect proof 明示
 `declarationOnly/notApplicable`，不得解释为实际副作用证明或完整零信任 attest。非 port 副作用、实际调用及
-runtime conformance 仍由 #1694 闭合，auth/scope posture 不属于本报告。
+runtime conformance 由下文测试面闭合，auth/scope posture 不属于本报告。
 
 ## Consistency / effect breaking review
 
@@ -175,21 +191,17 @@ LocalOnly conformance suite。
 旁路 smoke test。该 handler 保持 audit append 与 inbox commit 同一事务。两条路径均不向 ambient route
 暴露可同时读写的宽 capability。
 
-## Follow-up boundary
+## Failure and adoption semantics
 
-#1687 的边界是 manifest authoring：
+新建或修改 LocalOnly route 时，先声明闭合 effect，再生成 `HttpRouteEvidence`，随后通过 generated endpoint
+绑定唯一 production mount；有状态 handler 必须使用 classified state，注入 port 必须按最强 effect 和 privilege
+分类，最后补成功、鉴权拒绝和读取失败路径的 runtime conformance。不要先写 handler 再用文档或 marker 猜测能力。
 
-- 新增 `[effectProfile]` carrier。
-- 迁移真实 HTTP `contract.toml`。
-- R22 守住 HTTP 必填、非 HTTP 禁止、空/重复 effect、未知字段/枚举。
+静态门会拒绝缺失/空/重复/未知 effect、stray capability、普通 `with_state`、未分类或不透明 state、生产 mount
+缺失/重复/歧义、owner/provenance 不可证，以及伪造 marker。运行时 conformance 会拒绝 write/outbox/publish
+计数增长或倒退，并以 synthetic red 证明 observer 非恒真。`consistency report` 的 process success 只表示 artifact
+生成成功；其 verdict 必须从 JSON `status` 完整解析，阻断 verdict 仍由 `local-only-effects` gate 给出。
 
-#1688 提供了 generated metadata 的初始字段；#1690 已将其破坏式收敛为单一 carrier：
-
-- 闭词汇迁入基础层 `vocab::{HttpConsistencyLevel,HttpEffectKind,HttpEffectProfile}`。
-- 每个 active HTTP `SPEC` 只用必填 `route: HttpRouteEvidence` 携带 contract/path/method/auth/scope/
-  consistency/effects；旧平行字段与 generated 镜像类型均已删除。
-- `GeneratedEndpoint` / `GeneratedPrimaryEndpoint` 把 evidence 与 handler 原子绑定，并原样传播到 `RouteMeta`。
-
-#1691 已补 owner-sealed port effect 分类与 audit 读写 capability 拆分；#1693 在 typed route proof 基础上
-补齐 LocalOnly state Hard funnel 与 Medium 注入面闭环；`LOCAL-ONLY-RUNTIME-EFFECTS-01` 再补非 port 的
-运行时 conformance 证明。
+历史交付链 #1687/#1688/#1690/#1691/#1693/#1694 已分别完成 manifest、generated carrier、route binding、
+port 分类、typed state funnel 与运行时证明。旧平行字段、generated 镜像类型、宽 audit capability 和任意
+observer 入口均已删除，不提供兼容路径。
