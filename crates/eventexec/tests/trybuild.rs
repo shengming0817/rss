@@ -56,6 +56,12 @@ fn command_authoring_is_sealed() {
 }
 
 #[test]
+fn relay_budget_fields_are_private() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/relay_budget_private_fields_fail.rs");
+}
+
+#[test]
 fn dlx_lifecycle_proofs_and_capabilities_are_sealed() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/dlx_hot_archive_key_swap_fail.rs");

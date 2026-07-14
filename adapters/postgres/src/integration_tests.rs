@@ -440,9 +440,12 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
             INSERT INTO event_delivery_policy (
                 singleton, policy_revision, automatic_retry_window_seconds,
                 same_id_redrive_horizon_seconds, safety_margin_seconds,
-                inbox_receipt_retention_seconds
+                inbox_receipt_retention_seconds, relay_budget_revision,
+                relay_lease_ttl_ms, relay_publish_timeout_ms,
+                relay_settle_timeout_ms, relay_safety_margin_ms
             )
-            VALUES (true, 'same-id-delivery-v1', 86401, 86400, 86400, 604800)
+            VALUES (true, 'same-id-delivery-v1', 86401, 86400, 86400, 604800,
+                    'relay-budget-v1', 60000, 40000, 5000, 5000)
             "#,
         )
         .execute(&mutator.pool)
@@ -5097,8 +5100,8 @@ use diport::{
     PublishRequest, Publisher, PublisherError,
 };
 use eventexec::{
-    ConsumerMeta, LeaseConfig, MAX_REDELIVERY, TenantAuthority, TenantAuthorityBinding,
-    run_consumer_ackable,
+    ConsumerMeta, LeaseConfig, MAX_REDELIVERY, RelayBudget, TenantAuthority,
+    TenantAuthorityBinding, run_consumer_ackable,
 };
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use testkit::eventing_conformance as eventconf;
@@ -6351,6 +6354,54 @@ struct RecordingPublisher {
     calls: Arc<Mutex<u32>>,
 }
 
+/// 首次 publish 在测试控制器持有 outbox 行锁后才返回；后续 publish 立即成功。
+/// 由此把真实 relay 稳定停在 settle SQL，而不依赖猜测调度时序。
+struct SettleLockPublisher {
+    calls: Arc<AtomicU32>,
+    first_publish_started: Arc<tokio::sync::Notify>,
+    release_first_publish: Arc<tokio::sync::Notify>,
+}
+
+struct SettleLockPublisherControl {
+    calls: Arc<AtomicU32>,
+    first_publish_started: Arc<tokio::sync::Notify>,
+    release_first_publish: Arc<tokio::sync::Notify>,
+}
+
+impl SettleLockPublisher {
+    fn new() -> (Self, SettleLockPublisherControl) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let first_publish_started = Arc::new(tokio::sync::Notify::new());
+        let release_first_publish = Arc::new(tokio::sync::Notify::new());
+        (
+            Self {
+                calls: Arc::clone(&calls),
+                first_publish_started: Arc::clone(&first_publish_started),
+                release_first_publish: Arc::clone(&release_first_publish),
+            },
+            SettleLockPublisherControl {
+                calls,
+                first_publish_started,
+                release_first_publish,
+            },
+        )
+    }
+}
+
+impl Publisher for SettleLockPublisher {
+    async fn publish(&self, _request: PublishRequest) -> Result<(), PublisherError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.first_publish_started.notify_one();
+            self.release_first_publish.notified().await;
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), PublisherError> {
+        Ok(())
+    }
+}
+
 impl RecordingPublisher {
     fn always_ok() -> (Self, Arc<Mutex<u32>>) {
         let calls = Arc::new(Mutex::new(0u32));
@@ -6418,6 +6469,45 @@ fn make_pg_outbox(store: &PgStore, pub_result_fn: fn() -> Result<(), PublisherEr
     make_pg_outbox_with_publisher(store, pub_)
 }
 
+#[allow(clippy::expect_used)]
+fn test_relay_budget() -> RelayBudget {
+    RelayBudget::new(
+        Duration::from_secs(60),
+        Duration::from_secs(40),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )
+    .expect("test relay budget must be valid")
+}
+
+async fn set_test_relay_budget_policy(store: &PgStore, budget: RelayBudget) -> TestResult {
+    let affected = sqlx::query(
+        r#"
+        UPDATE event_delivery_policy
+        SET relay_lease_ttl_ms = $1,
+            relay_publish_timeout_ms = $2,
+            relay_settle_timeout_ms = $3,
+            relay_safety_margin_ms = $4
+        WHERE singleton
+        "#,
+    )
+    .bind(budget.lease_ttl_millis())
+    .bind(budget.publish_timeout_millis())
+    .bind(budget.settle_timeout_millis())
+    .bind(budget.safety_margin_millis())
+    .execute(&store.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(affected, 1, "test relay policy singleton must exist");
+    Ok(())
+}
+
+#[allow(clippy::expect_used)]
+fn test_relay_lease_ttl_seconds() -> i64 {
+    i64::try_from(test_relay_budget().lease_ttl().as_secs())
+        .expect("test lease ttl must fit signed seconds")
+}
+
 fn make_pg_outbox_with_publisher(
     store: &PgStore,
     publisher: impl Publisher + Sync + 'static,
@@ -6432,10 +6522,21 @@ fn make_pg_outbox_for_domain(
     domain: &str,
     publisher: impl Publisher + Sync + 'static,
 ) -> PgOutbox {
+    make_pg_outbox_for_domain_with_budget(store, domain, publisher, test_relay_budget())
+}
+
+#[allow(clippy::expect_used)]
+fn make_pg_outbox_for_domain_with_budget(
+    store: &PgStore,
+    domain: &str,
+    publisher: impl Publisher + Sync + 'static,
+    relay_budget: RelayBudget,
+) -> PgOutbox {
     PgOutbox::new(
         store,
         vocab::DomainName::parse(domain).expect("valid test outbox domain"),
         DynPublisher::new_box(publisher),
+        relay_budget,
         test_tenant_authority(),
         test_dlx_payload_protector(),
     )
@@ -6799,7 +6900,7 @@ async fn conf_backdate_publishing(store: &PgStore, event_id: String) -> Result<(
              lease_until = now() - interval '10 seconds' \
          WHERE event_id = $2",
     )
-    .bind(crate::outbox::LEASE_TTL_SECONDS + 10)
+    .bind(test_relay_lease_ttl_seconds() + 10)
     .bind(&event_id)
     .execute(&store.pool)
     .await
@@ -8013,7 +8114,7 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
         .await?;
 
     // 模拟崩溃：把行置 publishing + updated_at 很久之前。
-    let lease_ttl = crate::outbox::LEASE_TTL_SECONDS;
+    let lease_ttl = test_relay_lease_ttl_seconds();
     sqlx::query(
         "UPDATE outbox SET status='publishing', lease_token=gen_random_uuid(), \
          automatic_retry_deadline=COALESCE(automatic_retry_deadline, now()+interval '24 hours'), \
@@ -8203,18 +8304,27 @@ async fn t7b_atomic_claim_uses_independent_database_connections() -> TestResult 
 
     let first_domain = domain.clone();
     let second_domain = domain.clone();
+    let relay_budget = test_relay_budget();
     let (first_claim, second_claim) = tokio::join!(
         async {
-            sqlx::query_scalar::<_, String>("SELECT event_id FROM rss_outbox_claim_batch($1, 10)")
-                .bind(first_domain)
-                .fetch_all(&mut *first)
-                .await
+            sqlx::query_scalar::<_, String>(
+                "SELECT event_id FROM rss_outbox_claim_batch($1, 10, $2, $3)",
+            )
+            .bind(first_domain)
+            .bind(relay_budget.lease_ttl_millis())
+            .bind(relay_budget.required_budget_millis())
+            .fetch_all(&mut *first)
+            .await
         },
         async {
-            sqlx::query_scalar::<_, String>("SELECT event_id FROM rss_outbox_claim_batch($1, 10)")
-                .bind(second_domain)
-                .fetch_all(&mut *second)
-                .await
+            sqlx::query_scalar::<_, String>(
+                "SELECT event_id FROM rss_outbox_claim_batch($1, 10, $2, $3)",
+            )
+            .bind(second_domain)
+            .bind(relay_budget.lease_ttl_millis())
+            .bind(relay_budget.required_budget_millis())
+            .fetch_all(&mut *second)
+            .await
         }
     );
     let claimed: Vec<String> = first_claim?.into_iter().chain(second_claim?).collect();
@@ -8313,7 +8423,7 @@ async fn relay_rejects_claim_from_another_provider_instance() -> TestResult {
     Ok(())
 }
 
-/// Publish preflight reserves the settle margin inside the fixed 60-second database lease.
+/// Publish preflight reserves the complete typed required budget inside the configured lease.
 #[tokio::test(flavor = "multi_thread")]
 async fn lease_publish_preflight_requires_full_publish_budget() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -8343,6 +8453,7 @@ async fn lease_publish_preflight_requires_full_publish_budget() -> TestResult {
         },
     );
     let claim = claim_entry_for_relay(&outbox, &event_id).await?;
+    let relay_budget = test_relay_budget();
 
     let short_deadline: i64 = sqlx::query_scalar(
         "UPDATE outbox SET lease_until = clock_timestamp() + interval '49 seconds' \
@@ -8353,10 +8464,12 @@ async fn lease_publish_preflight_requires_full_publish_budget() -> TestResult {
     .fetch_one(&store.pool)
     .await?;
     let short_budget: i16 =
-        sqlx::query_scalar("SELECT rss_outbox_publish_preflight($1, $2::uuid, $3)")
+        sqlx::query_scalar("SELECT rss_outbox_publish_preflight($1, $2::uuid, $3, $4, $5)")
             .bind(&event_id)
             .bind(claim.lease_token())
             .bind(short_deadline)
+            .bind(relay_budget.lease_ttl_millis())
+            .bind(relay_budget.required_budget_millis())
             .fetch_one(&store.pool)
             .await?;
     assert!(
@@ -8373,10 +8486,12 @@ async fn lease_publish_preflight_requires_full_publish_budget() -> TestResult {
     .fetch_one(&store.pool)
     .await?;
     let full_budget: i16 =
-        sqlx::query_scalar("SELECT rss_outbox_publish_preflight($1, $2::uuid, $3)")
+        sqlx::query_scalar("SELECT rss_outbox_publish_preflight($1, $2::uuid, $3, $4, $5)")
             .bind(&event_id)
             .bind(claim.lease_token())
             .bind(full_deadline)
+            .bind(relay_budget.lease_ttl_millis())
+            .bind(relay_budget.required_budget_millis())
             .fetch_one(&store.pool)
             .await?;
     assert!(
@@ -8385,6 +8500,303 @@ async fn lease_publish_preflight_requires_full_publish_budget() -> TestResult {
     );
 
     store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relay_budget_sql_boundary_is_fail_closed_and_claim_uses_configured_ttl() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let invalid_budgets: &[(Option<i64>, Option<i64>)] = &[
+        (None, Some(1_i64)),
+        (Some(1), None),
+        (Some(0), Some(1)),
+        (Some(1), Some(0)),
+        (Some(1), Some(1)),
+        (Some(1), Some(2)),
+        (Some(86_400_001), Some(1)),
+        (Some(86_400_000), Some(86_400_001)),
+        (Some(9_223_372_036_854_776), Some(1)),
+    ];
+    for &(lease_ms, required_ms) in invalid_budgets {
+        let claim =
+            sqlx::query("SELECT * FROM rss_outbox_claim_batch('invalid-budget', 1, $1, $2)")
+                .bind(lease_ms)
+                .bind(required_ms)
+                .execute(&store.pool)
+                .await;
+        assert!(claim.is_err(), "claim accepted invalid relay budget");
+
+        let preflight = sqlx::query(
+            "SELECT rss_outbox_publish_preflight('missing', \
+             '550e8400-e29b-41d4-a716-446655440000'::uuid, 1, $1, $2)",
+        )
+        .bind(lease_ms)
+        .bind(required_ms)
+        .execute(&store.pool)
+        .await;
+        assert!(
+            preflight.is_err(),
+            "preflight accepted invalid relay budget"
+        );
+    }
+
+    let legacy_overloads: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (VALUES \
+         ('rss_outbox_claim_batch(text,bigint)'), \
+         ('rss_outbox_publish_preflight(text,uuid,bigint)')) AS old(signature) \
+         WHERE to_regprocedure(signature) IS NOT NULL",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(legacy_overloads, 0);
+
+    let maximum_domain = unique_domain("maximum-relay-budget");
+    let maximum_event_id = unique_event_id("maximum-relay-budget");
+    let maximum_entry = make_entry(&maximum_event_id);
+    let maximum_env = make_test_env(&maximum_domain, "maximum.relay.budget");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _ = append_outbox(cap, &maximum_entry, &maximum_env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+    let maximum_budget = RelayBudget::new(
+        Duration::from_millis(86_400_000),
+        Duration::from_millis(86_399_997),
+        Duration::from_millis(1),
+        Duration::from_millis(1),
+    )?;
+    set_test_relay_budget_policy(&store, maximum_budget).await?;
+    let maximum_claim: (String, String, i64) = sqlx::query_as(
+        "SELECT event_id, lease_token, deadline_epoch_micros \
+         FROM rss_outbox_claim_batch($1, 1, $2, $3)",
+    )
+    .bind(&maximum_domain)
+    .bind(maximum_budget.lease_ttl_millis())
+    .bind(maximum_budget.required_budget_millis())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(maximum_claim.0, maximum_event_id);
+    let maximum_preflight: i16 =
+        sqlx::query_scalar("SELECT rss_outbox_publish_preflight($1, $2::uuid, $3, $4, $5)")
+            .bind(&maximum_claim.0)
+            .bind(&maximum_claim.1)
+            .bind(maximum_claim.2)
+            .bind(maximum_budget.lease_ttl_millis())
+            .bind(maximum_budget.required_budget_millis())
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        maximum_preflight, 1,
+        "maximum representable required budget must complete without interval/timestamp overflow"
+    );
+
+    let budget = RelayBudget::new(
+        Duration::from_secs(3),
+        Duration::from_secs(1),
+        Duration::from_millis(500),
+        Duration::from_millis(500),
+    )?;
+    set_test_relay_budget_policy(&store, budget).await?;
+    let domain = unique_domain("configured-lease");
+    let event_id = unique_event_id("configured-lease");
+    let entry = make_entry(&event_id);
+    let env = make_test_env(&domain, "configured.lease");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _ = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+    let outbox = make_pg_outbox_for_domain_with_budget(
+        &store,
+        &domain,
+        RecordingPublisher::always_ok().0,
+        budget,
+    );
+    let claim = claim_entry_for_relay(&outbox, &event_id).await?;
+    let db_now_micros: i64 =
+        sqlx::query_scalar("SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::bigint")
+            .fetch_one(&store.pool)
+            .await?;
+    let remaining_ms = (claim.lease_deadline_epoch_micros() - db_now_micros) / 1000;
+    assert!(
+        (1_500..=3_000).contains(&remaining_ms),
+        "claim must use configured 3s lease, remaining_ms={remaining_ms}"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn insufficient_preflight_budget_never_calls_publisher() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let budget = RelayBudget::new(
+        Duration::from_secs(2),
+        Duration::from_secs(1),
+        Duration::from_millis(500),
+        Duration::from_millis(499),
+    )?;
+    set_test_relay_budget_policy(&store, budget).await?;
+    let domain = unique_domain("preflight-no-broker");
+    let event_id = unique_event_id("preflight-no-broker");
+    let entry = make_entry(&event_id);
+    let env = make_test_env(&domain, "preflight.no-broker");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _ = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+    let (publisher, calls) = RecordingPublisher::always_ok();
+    let outbox = make_pg_outbox_for_domain_with_budget(&store, &domain, publisher, budget);
+    let claim = claim_entry_for_relay(&outbox, &event_id).await?;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let Err(error) = outbox.relay(claim).await else {
+        return Err("insufficient preflight budget must fail before publish".into());
+    };
+    assert_eq!(error.kind(), EngineErrorKind::Transient);
+    #[allow(clippy::unwrap_used)]
+    {
+        assert_eq!(*calls.lock().unwrap(), 0);
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preflight_pool_starvation_expires_inside_safety_margin_without_publishing() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    setup_outbox(&owner).await?;
+    let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(5)).await?;
+    let budget = RelayBudget::new(
+        Duration::from_secs(2),
+        Duration::from_secs(1),
+        Duration::from_millis(500),
+        Duration::from_millis(100),
+    )?;
+    set_test_relay_budget_policy(&owner, budget).await?;
+
+    let domain = unique_domain("preflight-starvation");
+    let event_id = unique_event_id("preflight-starvation");
+    let entry = make_entry(&event_id);
+    let env = make_test_env(&domain, "preflight.starvation");
+    owner
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _ = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+    let (publisher, calls) = RecordingPublisher::always_ok();
+    let outbox = make_pg_outbox_for_domain_with_budget(&app, &domain, publisher, budget);
+    let claim = claim_entry_for_relay(&outbox, &event_id).await?;
+    let held = app.pool.acquire().await?;
+
+    let result = tokio::time::timeout(Duration::from_secs(1), outbox.relay(claim)).await?;
+    assert!(
+        matches!(result, Err(error) if error.kind() == EngineErrorKind::Transient),
+        "starved preflight must return transient"
+    );
+    #[allow(clippy::unwrap_used)]
+    {
+        assert_eq!(*calls.lock().unwrap(), 0);
+    }
+
+    drop(held);
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn timed_out_owned_transaction_evicts_backend_and_recovers_a_max_two_pool() -> TestResult {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    let (pg, owner) = connect_pg().await?;
+    setup_outbox(&owner).await?;
+    let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 2, Duration::from_secs(2)).await?;
+    let held = app.pool.acquire().await?;
+    let timed_out_pid = Arc::new(AtomicI32::new(0));
+    let operation_pid = Arc::clone(&timed_out_pid);
+    let deadline = crate::cotx::io_deadline_after(Duration::from_millis(100));
+    let result = crate::cotx::deadline_global_transaction(
+        &app.pool,
+        deadline,
+        move |connection| {
+            Box::pin(async move {
+                let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(connection)
+                    .await
+                    .map_err(|_| consistency::EngineError::new(EngineErrorKind::Transient))?;
+                operation_pid.store(pid, Ordering::SeqCst);
+                std::future::pending::<Result<(), consistency::EngineError>>().await
+            })
+        },
+        |_| consistency::EngineError::new(EngineErrorKind::Transient),
+        || consistency::EngineError::new(EngineErrorKind::Transient),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(error) if error.kind() == EngineErrorKind::Transient
+    ));
+    let old_pid = timed_out_pid.load(Ordering::SeqCst);
+    assert!(
+        old_pid > 0,
+        "the timed-out transaction must acquire a real backend"
+    );
+
+    let mut replacement =
+        tokio::time::timeout(Duration::from_secs(1), app.pool.acquire()).await??;
+    let replacement_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *replacement)
+        .await?;
+    assert_ne!(
+        replacement_pid, old_pid,
+        "the poisoned backend must not be reused"
+    );
+    let mut old_backend_gone = false;
+    for _ in 0..20 {
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid = $1")
+            .bind(old_pid)
+            .fetch_one(&owner.pool)
+            .await?;
+        if count == 0 {
+            old_backend_gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        old_backend_gone,
+        "close_on_drop must terminate the timed-out backend"
+    );
+
+    drop(replacement);
+    drop(held);
+    app.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 
@@ -11398,9 +11810,12 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
     .execute(&store.pool)
     .await?;
 
+    let relay_budget = test_relay_budget();
     let blocked: Vec<String> =
-        sqlx::query_scalar("SELECT event_id FROM rss_outbox_claim_batch($1, 10)")
+        sqlx::query_scalar("SELECT event_id FROM rss_outbox_claim_batch($1, 10, $2, $3)")
             .bind(&domain)
+            .bind(relay_budget.lease_ttl_millis())
+            .bind(relay_budget.required_budget_millis())
             .fetch_all(&store.pool)
             .await?;
     assert!(
@@ -11505,8 +11920,10 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
     );
 
     let released: Vec<String> =
-        sqlx::query_scalar("SELECT event_id FROM rss_outbox_claim_batch($1, 10)")
+        sqlx::query_scalar("SELECT event_id FROM rss_outbox_claim_batch($1, 10, $2, $3)")
             .bind(&domain)
+            .bind(relay_budget.lease_ttl_millis())
+            .bind(relay_budget.required_budget_millis())
             .fetch_all(&store.pool)
             .await?;
     assert!(
@@ -12083,6 +12500,357 @@ async fn t9d_each_settle_takes_expiry_clock_after_row_lock() -> TestResult {
 
     store.shutdown().await?;
     Ok(())
+}
+
+/// relay 已发布后若 settle 被数据库行锁阻塞，typed settle budget 必须返回 Transient；timeout 本身不得
+/// 追加 retry/DLX/terminal 写入。释放锁并令原租约过期后，同一 event ID 可重新 claim 并正常收敛。
+#[tokio::test(flavor = "multi_thread")]
+async fn t9e_relay_settle_timeout_preserves_state_and_same_id_reclaim_converges() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let event_id = unique_event_id("t9e-settle-timeout");
+    let domain = unique_domain("t9e-settle-timeout");
+    let entry = make_entry(&event_id);
+    let env = make_test_env(&domain, "settle.timeout");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let budget = RelayBudget::new(
+        Duration::from_secs(10),
+        Duration::from_secs(2),
+        Duration::from_millis(250),
+        Duration::from_secs(1),
+    )?;
+    set_test_relay_budget_policy(&store, budget).await?;
+    let (publisher, control) = SettleLockPublisher::new();
+    let outbox = make_pg_outbox_for_domain_with_budget(&store, domain.as_str(), publisher, budget);
+    let claim = claim_entry_for_relay(&outbox, &event_id).await?;
+    let relay_completed = tokio::sync::Notify::new();
+    let relay_run = async {
+        let result = outbox.relay(claim).await;
+        relay_completed.notify_one();
+        result
+    };
+    let lock_controller = async {
+        control.first_publish_started.notified().await;
+        let mut blocker = store.pool.begin().await?;
+        let locked: String =
+            sqlx::query_scalar("SELECT event_id FROM outbox WHERE event_id = $1 FOR UPDATE")
+                .bind(&event_id)
+                .fetch_one(&mut *blocker)
+                .await?;
+        assert_eq!(locked, event_id);
+        control.release_first_publish.notify_one();
+        relay_completed.notified().await;
+
+        let durable_while_locked: (String, i32, bool, bool) = sqlx::query_as(
+            "SELECT status, retry_count, published_at IS NULL, dlx_at IS NULL \
+             FROM outbox WHERE event_id = $1",
+        )
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(
+            durable_while_locked,
+            (crate::outbox::STATUS_PUBLISHING.to_string(), 0, true, true),
+            "timeout must not append a terminal or retry state write"
+        );
+        let dead_letters: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM dead_letter WHERE message_id = $1")
+                .bind(&event_id)
+                .fetch_one(&store.pool)
+                .await?;
+        assert_eq!(dead_letters, 0, "settle timeout must not directly DLX");
+
+        // 在持锁事务内让原 capability 失效；即便被取消的旧 SQL 在解锁后到达，也只能 CAS miss。
+        sqlx::query(
+            "UPDATE outbox SET updated_at = clock_timestamp() - interval '11 seconds', \
+             lease_until = clock_timestamp() - interval '1 second' WHERE event_id = $1",
+        )
+        .bind(&event_id)
+        .execute(&mut *blocker)
+        .await?;
+        blocker.commit().await?;
+        Ok::<(), TestError>(())
+    };
+    let (first_result, lock_controller_result) = tokio::join!(relay_run, lock_controller);
+    lock_controller_result?;
+    assert!(
+        matches!(first_result, Err(error) if error.kind() == EngineErrorKind::Transient),
+        "settle timeout must remain transient"
+    );
+    assert_eq!(control.calls.load(Ordering::SeqCst), 1);
+
+    let reclaimed = claim_entry_for_relay(&outbox, &event_id).await?;
+    assert_eq!(reclaimed.idem_key().as_str(), event_id);
+    assert_eq!(outbox.relay(reclaimed).await?, Disposition::Ack);
+    assert_eq!(control.calls.load(Ordering::SeqCst), 2);
+
+    let converged: (String, i32, bool, bool) = sqlx::query_as(
+        "SELECT status, retry_count, published_at IS NOT NULL, dlx_at IS NULL \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        converged,
+        (crate::outbox::STATUS_PUBLISHED.to_string(), 0, true, true),
+        "same-ID reclaim must converge after the timed-out settlement"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum TimedOutSettlePath {
+    Retry,
+    OrdinaryDlx,
+    SameIdExpiryDlx,
+}
+
+impl TimedOutSettlePath {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::OrdinaryDlx => "ordinary-dlx",
+            Self::SameIdExpiryDlx => "same-id-expiry-dlx",
+        }
+    }
+
+    fn publisher(self) -> (RecordingPublisher, Arc<Mutex<u32>>) {
+        match self {
+            Self::Retry => RecordingPublisher::always_transient(),
+            Self::OrdinaryDlx => RecordingPublisher::always_permanent(),
+            Self::SameIdExpiryDlx => RecordingPublisher::always_ok(),
+        }
+    }
+
+    fn expected_publish_calls(self) -> u32 {
+        match self {
+            Self::Retry | Self::OrdinaryDlx => 2,
+            Self::SameIdExpiryDlx => 0,
+        }
+    }
+}
+
+type TimedOutSettleSnapshot = (String, i32, bool, bool, bool, bool, bool, bool);
+type ConvergedSettleSnapshot = (String, i32, bool, bool, bool, bool);
+
+async fn seed_timed_out_settle_entry(
+    store: &PgStore,
+    path: TimedOutSettlePath,
+) -> Result<(String, String), TestError> {
+    let event_id = unique_event_id(path.label());
+    let domain = unique_domain(path.label());
+    let entry = make_entry(&event_id);
+    let env = make_test_env(&domain, "settle.timeout.outcome");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+    Ok((event_id, domain))
+}
+
+async fn timed_out_settle_snapshot(
+    store: &PgStore,
+    event_id: &str,
+) -> Result<TimedOutSettleSnapshot, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT status, retry_count, retry_after IS NULL, lease_token IS NOT NULL, \
+                lease_until IS NOT NULL, published_at IS NULL, dlx_at IS NULL, abandoned_at IS NULL \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(&store.pool)
+    .await
+}
+
+async fn dead_letter_count(store: &PgStore, event_id: &str) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT count(*) FROM dead_letter WHERE message_id = $1")
+        .bind(event_id)
+        .fetch_one(&store.pool)
+        .await
+}
+
+/// 用真实 `FOR UPDATE` gate 稳定阻塞目标 settle SQL；在持锁事务内使旧 lease capability 失效，
+/// 保证解锁后的已取消 SQL 即便到达也只能 CAS miss。
+async fn assert_locked_settle_timeout(
+    store: &PgStore,
+    outbox: &PgOutbox,
+    claim: PgClaimedOutboxEntry,
+    event_id: &str,
+    path: TimedOutSettlePath,
+    before: &TimedOutSettleSnapshot,
+) -> TestResult {
+    let mut blocker = store.pool.begin().await?;
+    let locked: String =
+        sqlx::query_scalar("SELECT event_id FROM outbox WHERE event_id = $1 FOR UPDATE")
+            .bind(event_id)
+            .fetch_one(&mut *blocker)
+            .await?;
+    assert_eq!(locked, event_id);
+
+    let first_result = outbox.relay(claim).await;
+    assert!(
+        matches!(first_result, Err(error) if error.kind() == EngineErrorKind::Transient),
+        "{} settle timeout must remain transient",
+        path.label()
+    );
+    assert_eq!(
+        timed_out_settle_snapshot(store, event_id).await?,
+        *before,
+        "{} timeout must not append retry/terminal state",
+        path.label()
+    );
+    assert_eq!(
+        dead_letter_count(store, event_id).await?,
+        0,
+        "{} timeout must not append a durable error",
+        path.label()
+    );
+
+    sqlx::query(
+        "UPDATE outbox SET updated_at = clock_timestamp() - interval '11 seconds', \
+         lease_until = clock_timestamp() - interval '1 second' WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .execute(&mut *blocker)
+    .await?;
+    blocker.commit().await?;
+    Ok(())
+}
+
+#[allow(clippy::unwrap_used)]
+async fn assert_timed_out_settle_convergence(
+    store: &PgStore,
+    outbox: &PgOutbox,
+    event_id: &str,
+    path: TimedOutSettlePath,
+    calls: &Arc<Mutex<u32>>,
+) -> TestResult {
+    let reclaimed = claim_entry_for_relay(outbox, event_id).await?;
+    assert_eq!(reclaimed.idem_key().as_str(), event_id);
+    let disposition = outbox.relay(reclaimed).await?;
+    let converged: ConvergedSettleSnapshot = sqlx::query_as(
+        "SELECT status, retry_count, retry_after IS NOT NULL, lease_token IS NULL, \
+                published_at IS NULL, dlx_at IS NOT NULL \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    let dead_letters_after = dead_letter_count(store, event_id).await?;
+
+    match path {
+        TimedOutSettlePath::Retry => {
+            assert_eq!(disposition, Disposition::Requeue);
+            assert_eq!(
+                converged,
+                ("pending".to_string(), 1, true, true, true, false)
+            );
+            assert_eq!(dead_letters_after, 0);
+        }
+        TimedOutSettlePath::OrdinaryDlx | TimedOutSettlePath::SameIdExpiryDlx => {
+            assert_eq!(disposition, Disposition::Reject);
+            assert_eq!(
+                converged,
+                (
+                    crate::outbox::STATUS_DLX.to_string(),
+                    1,
+                    false,
+                    true,
+                    true,
+                    true
+                )
+            );
+            assert_eq!(dead_letters_after, 1, "DLX must be inserted exactly once");
+        }
+    }
+    assert_eq!(*calls.lock().unwrap(), path.expected_publish_calls());
+    Ok(())
+}
+
+/// timeout 时比较整行状态快照，随后以同一 event ID 重 claim，验证 retry / 普通 DLX / expiry DLX
+/// 各自只结算一次。
+async fn assert_relay_settle_timeout_outcome(path: TimedOutSettlePath) -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let (event_id, domain) = seed_timed_out_settle_entry(&store, path).await?;
+
+    let budget = RelayBudget::new(
+        Duration::from_secs(10),
+        Duration::from_secs(2),
+        Duration::from_millis(250),
+        Duration::from_secs(1),
+    )?;
+    set_test_relay_budget_policy(&store, budget).await?;
+    let (publisher, calls) = path.publisher();
+    let outbox = make_pg_outbox_for_domain_with_budget(&store, &domain, publisher, budget);
+    let claim = claim_entry_for_relay(&outbox, &event_id).await?;
+    if matches!(path, TimedOutSettlePath::SameIdExpiryDlx) {
+        sqlx::query(
+            "UPDATE outbox SET automatic_retry_deadline = clock_timestamp() - interval '1 second' \
+             WHERE event_id = $1",
+        )
+        .bind(&event_id)
+        .execute(&store.pool)
+        .await?;
+    }
+
+    // retry_after is the durable next-attempt field; relay has no outbox last_error column, and a
+    // dead_letter row is the only durable error summary. Both are included in the assertions below.
+    let before = timed_out_settle_snapshot(&store, &event_id).await?;
+    assert_eq!(
+        before,
+        (
+            crate::outbox::STATUS_PUBLISHING.to_string(),
+            0,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+        )
+    );
+
+    assert_locked_settle_timeout(&store, &outbox, claim, &event_id, path, &before).await?;
+    assert_timed_out_settle_convergence(&store, &outbox, &event_id, path, &calls).await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t9e_retry_settle_timeout_preserves_state_then_converges_once() -> TestResult {
+    assert_relay_settle_timeout_outcome(TimedOutSettlePath::Retry).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t9e_ordinary_dlx_settle_timeout_preserves_state_then_converges_once() -> TestResult {
+    assert_relay_settle_timeout_outcome(TimedOutSettlePath::OrdinaryDlx).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t9e_same_id_expiry_settle_timeout_preserves_state_then_converges_once() -> TestResult {
+    assert_relay_settle_timeout_outcome(TimedOutSettlePath::SameIdExpiryDlx).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -13378,7 +14146,7 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
     // per-run 唯一 domain：sample_backlog 按 domain 聚合，跨轮持久库须唯一防旧行计入（#1194 review F1）。
     let domain = unique_domain("t19-domain");
     let domain = domain.as_str();
-    let lease_ttl = crate::outbox::LEASE_TTL_SECONDS;
+    let lease_ttl = test_relay_lease_ttl_seconds();
 
     // seed 两行 publishing：stale（lease_until 已过期）+ fresh（lease_until 在将来）。
     for (prefix, stale) in [("t19-stale", true), ("t19-fresh", false)] {
@@ -13449,7 +14217,7 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
 // t28: crash recovery 保持 partition 顺序（stale publishing 头 gate 后继）
 // t29: sample_backlog 计入 gated 后继（backlog claim-only by design）
 
-use crate::outbox::{LEASE_TTL_SECONDS, STATUS_DLX, STATUS_PENDING};
+use crate::outbox::{STATUS_DLX, STATUS_PENDING};
 
 /// t24：append 3 行（同 domain，无 partition）→ SELECT seq 严格递增、互异、非空；
 /// 尝试 INSERT 显式写 seq 被 GENERATED ALWAYS 拒（应用不可伪造）。
@@ -14355,8 +15123,8 @@ async fn outbox_terminal_timestamp_catalog_matches_current_authority() -> TestRe
         FROM pg_proc p
         JOIN pg_roles owner ON owner.oid = p.proowner
         WHERE p.oid IN (
-            'rss_outbox_claim_batch(text, bigint)'::regprocedure,
-            'rss_outbox_publish_preflight(text, uuid, bigint)'::regprocedure,
+            'rss_outbox_claim_batch(text, bigint, bigint, bigint)'::regprocedure,
+            'rss_outbox_publish_preflight(text, uuid, bigint, bigint, bigint)'::regprocedure,
             'rss_outbox_settle_published(text, uuid, bigint)'::regprocedure,
             'rss_outbox_settle_retry(text, uuid, bigint)'::regprocedure,
             'rss_outbox_mark_dlx(text, uuid, bigint)'::regprocedure,
@@ -14412,7 +15180,7 @@ async fn event_delivery_policy_constraints_loader_and_acl_fail_closed() -> TestR
                has_table_privilege('rss_app', 'event_delivery_policy', 'DELETE'),
                has_function_privilege('rss_app', 'rss_outbox_redrive(text, uuid)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_resolve_expired(text, uuid, text, text, text, text)', 'EXECUTE'),
-               has_function_privilege('rss_app', 'rss_outbox_publish_preflight(text, uuid, bigint)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_publish_preflight(text, uuid, bigint, bigint, bigint)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_sweep_inbox_receipts()', 'EXECUTE')
         "#,
     )
@@ -14422,6 +15190,12 @@ async fn event_delivery_policy_constraints_loader_and_acl_fail_closed() -> TestR
         privileges,
         (false, false, false, false, false, false, true, true)
     );
+    let policy_owner: String = sqlx::query_scalar(
+        "SELECT tableowner FROM pg_tables WHERE schemaname = 'public' AND tablename = 'event_delivery_policy'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(policy_owner, "rss_outbox_maintenance");
 
     let resolution_acl: (bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r#"
@@ -14591,7 +15365,10 @@ async fn event_delivery_policy_constraints_loader_and_acl_fail_closed() -> TestR
         "UPDATE event_delivery_policy SET same_id_redrive_horizon_seconds = -1",
         "UPDATE event_delivery_policy SET inbox_receipt_retention_seconds = automatic_retry_window_seconds + same_id_redrive_horizon_seconds + safety_margin_seconds",
         "UPDATE event_delivery_policy SET automatic_retry_window_seconds = 9223372036854775807, same_id_redrive_horizon_seconds = 9223372036854775807, safety_margin_seconds = 9223372036854775807, inbox_receipt_retention_seconds = 9223372036854775807",
-        "INSERT INTO event_delivery_policy (singleton, policy_revision, automatic_retry_window_seconds, same_id_redrive_horizon_seconds, safety_margin_seconds, inbox_receipt_retention_seconds) VALUES (true, 'same-id-delivery-v1', 86400, 86400, 86400, 604800)",
+        "UPDATE event_delivery_policy SET relay_lease_ttl_ms = 0",
+        "UPDATE event_delivery_policy SET relay_lease_ttl_ms = 86400001",
+        "UPDATE event_delivery_policy SET relay_publish_timeout_ms = relay_lease_ttl_ms - relay_settle_timeout_ms - relay_safety_margin_ms",
+        "INSERT INTO event_delivery_policy (singleton, policy_revision, automatic_retry_window_seconds, same_id_redrive_horizon_seconds, safety_margin_seconds, inbox_receipt_retention_seconds, relay_budget_revision, relay_lease_ttl_ms, relay_publish_timeout_ms, relay_settle_timeout_ms, relay_safety_margin_ms) VALUES (true, 'same-id-delivery-v1', 86400, 86400, 86400, 604800, 'relay-budget-v1', 60000, 40000, 5000, 5000)",
     ] {
         let result = sqlx::query(statement).execute(&store.pool).await;
         assert!(
@@ -14599,6 +15376,33 @@ async fn event_delivery_policy_constraints_loader_and_acl_fail_closed() -> TestR
             "policy constraint must reject: {statement}"
         );
     }
+
+    sqlx::query(
+        "UPDATE event_delivery_policy SET relay_publish_timeout_ms = relay_publish_timeout_ms - 1",
+    )
+    .execute(&store.pool)
+    .await?;
+    let alternate_policy = store.load_event_delivery_policy().await?;
+    let alternate_budget = RelayBudget::new(
+        Duration::from_secs(60),
+        Duration::from_millis(39_999),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )?;
+    assert!(
+        alternate_policy
+            .validate_relay_budget(alternate_budget)
+            .is_ok()
+    );
+    assert!(matches!(
+        alternate_policy.validate_relay_budget(test_relay_budget()),
+        Err(crate::PgError::EventDeliveryPolicyMismatch)
+    ));
+    sqlx::query(
+        "UPDATE event_delivery_policy SET relay_publish_timeout_ms = relay_publish_timeout_ms + 1",
+    )
+    .execute(&store.pool)
+    .await?;
 
     sqlx::query(
         "UPDATE event_delivery_policy SET automatic_retry_window_seconds = automatic_retry_window_seconds + 1",
@@ -15056,11 +15860,14 @@ async fn migration_0060_upgrades_0059_and_expires_all_historical_same_id_paths()
     );
 
     let pending_claim = claimed_entry_for_event(&store, &fixtures[0].0).await?;
+    let relay_budget = test_relay_budget();
     let preflight: i16 =
-        sqlx::query_scalar("SELECT rss_outbox_publish_preflight($1, $2::uuid, $3)")
+        sqlx::query_scalar("SELECT rss_outbox_publish_preflight($1, $2::uuid, $3, $4, $5)")
             .bind(&fixtures[0].0)
             .bind(pending_claim.lease_token())
             .bind(pending_claim.lease_deadline_epoch_micros())
+            .bind(relay_budget.lease_ttl_millis())
+            .bind(relay_budget.required_budget_millis())
             .fetch_one(&store.pool)
             .await?;
     assert_eq!(
@@ -15702,9 +16509,12 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
             .execute(&mut *tx)
             .await?;
         crate::cotx::set_local_tenant(&mut tx, test_tenant()).await?;
+        let relay_budget = test_relay_budget();
         let result = sqlx::query(&format!(
-            "SELECT * FROM rss_outbox_claim_batch('outbox-perm', {limit_sql})"
+            "SELECT * FROM rss_outbox_claim_batch('outbox-perm', {limit_sql}, $1, $2)"
         ))
+        .bind(relay_budget.lease_ttl_millis())
+        .bind(relay_budget.required_budget_millis())
         .execute(&mut *tx)
         .await;
         let Err(err) = result else {
@@ -15724,9 +16534,11 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
     crate::cotx::set_local_tenant(&mut claim_tx, test_tenant()).await?;
     let lease: (String, i64) = sqlx::query_as(
         "SELECT lease_token, deadline_epoch_micros \
-         FROM rss_outbox_claim_batch('outbox-perm', 1) WHERE event_id = $1",
+         FROM rss_outbox_claim_batch('outbox-perm', 1, $2, $3) WHERE event_id = $1",
     )
     .bind(&event_id)
+    .bind(test_relay_budget().lease_ttl_millis())
+    .bind(test_relay_budget().required_budget_millis())
     .fetch_one(&mut *claim_tx)
     .await?;
     claim_tx.commit().await?;
@@ -15780,9 +16592,11 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
     crate::cotx::set_local_tenant(&mut high_claim_tx, test_tenant()).await?;
     let high_lease: (String, i64) = sqlx::query_as(
         "SELECT lease_token, deadline_epoch_micros \
-         FROM rss_outbox_claim_batch('outbox-perm', 1) WHERE event_id = $1",
+         FROM rss_outbox_claim_batch('outbox-perm', 1, $2, $3) WHERE event_id = $1",
     )
     .bind(&event_id)
+    .bind(test_relay_budget().lease_ttl_millis())
+    .bind(test_relay_budget().required_budget_millis())
     .fetch_one(&mut *high_claim_tx)
     .await?;
     high_claim_tx.commit().await?;
@@ -15826,8 +16640,8 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
 
     let can_execute: (bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r#"
-        SELECT has_function_privilege('rss_app', 'rss_outbox_claim_batch(text, bigint)', 'EXECUTE'),
-               has_function_privilege('rss_app', 'rss_outbox_publish_preflight(text, uuid, bigint)', 'EXECUTE'),
+        SELECT has_function_privilege('rss_app', 'rss_outbox_claim_batch(text, bigint, bigint, bigint)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_publish_preflight(text, uuid, bigint, bigint, bigint)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_settle_published(text, uuid, bigint)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_settle_retry(text, uuid, bigint)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_mark_dlx(text, uuid, bigint)', 'EXECUTE'),
@@ -15850,6 +16664,8 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
             ('rss_outbox_poll_pending(text,bigint)'),
             ('rss_outbox_acquire_lease(text)'),
             ('rss_outbox_lease_can_publish(text,uuid,bigint)'),
+            ('rss_outbox_claim_batch(text,bigint)'),
+            ('rss_outbox_publish_preflight(text,uuid,bigint)'),
             ('rss_outbox_settle_published(text,uuid)'),
             ('rss_outbox_settle_retry(text,integer,bigint,uuid)'),
             ('rss_outbox_settle_retry(text,integer,bigint,uuid,bigint)'),
@@ -15916,7 +16732,7 @@ async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
          updated_at=now()-make_interval(secs => $1), lease_until=now()-interval '10 seconds' \
          WHERE event_id = $2",
     )
-    .bind(LEASE_TTL_SECONDS + 10)
+    .bind(test_relay_lease_ttl_seconds() + 10)
     .bind(&h_id)
     .execute(&store.pool)
     .await?;

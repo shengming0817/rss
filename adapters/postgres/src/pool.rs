@@ -104,8 +104,9 @@ pub enum PgError {
     /// Frozen same-ID delivery policy could not be loaded from the migrator-owned singleton.
     #[error("postgres event delivery policy probe failed")]
     EventDeliveryPolicyProbe(#[source] sqlx::Error),
-    /// The database policy is missing, duplicated, invalid, overflowing, or mismatched to binary.
-    #[error("postgres event delivery policy does not match this binary")]
+    /// The database policy is missing, duplicated, invalid, overflowing, or does not match the
+    /// runtime relay budget being activated.
+    #[error("postgres event delivery policy is invalid or does not match the runtime")]
     EventDeliveryPolicyMismatch,
     /// A DLX lifecycle pool exact-role/privilege catalog probe failed.
     #[error("postgres DLX lifecycle capability probe failed")]

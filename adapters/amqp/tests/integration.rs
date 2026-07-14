@@ -20,6 +20,8 @@ use futures::StreamExt;
 use testkit::FixtureError;
 use tokio_util::sync::CancellationToken;
 
+const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
+
 fn amqp_endpoint(url: &str) -> anyhow::Result<secure::AmqpEndpoint> {
     Ok(secure::AmqpEndpoint::parse(
         url,
@@ -29,7 +31,7 @@ fn amqp_endpoint(url: &str) -> anyhow::Result<secure::AmqpEndpoint> {
 
 async fn connect_publisher(url: &str, name: &str) -> anyhow::Result<AmqpPublisher> {
     let endpoint = amqp_endpoint(url)?;
-    Ok(AmqpPublisher::connect(&endpoint, name).await?)
+    Ok(AmqpPublisher::connect(&endpoint, name, TEST_PUBLISH_TIMEOUT).await?)
 }
 
 async fn connect_subscriber(url: &str, name: &str) -> anyhow::Result<AmqpSubscriber> {
@@ -39,7 +41,7 @@ async fn connect_subscriber(url: &str, name: &str) -> anyhow::Result<AmqpSubscri
 
 async fn connect_runtime_deps(url: &str, name: &str) -> anyhow::Result<AmqpRuntimeDeps> {
     let endpoint = amqp_endpoint(url)?;
-    Ok(AmqpRuntimeDeps::connect(&endpoint, name).await?)
+    Ok(AmqpRuntimeDeps::connect(&endpoint, name, TEST_PUBLISH_TIMEOUT).await?)
 }
 
 /// 连接失败：错误面安全（Display 是常量，无 URL/凭据）+ source 保留。**无需 broker**（连不可达端口）。
@@ -65,6 +67,27 @@ async fn integration_connect_failure_returns_safe_error() {
                 err.chain().nth(1).is_some(),
                 "lapin error preserved as internal source"
             );
+        }
+    }
+}
+
+/// 非法 timeout 必须在触达 endpoint 前 fail-closed，且错误面不得泄漏 URL userinfo。
+#[tokio::test]
+// reason: fixture 必须解析；无 Debug 的成功值必须显式 match 断言错误路径。
+#[allow(clippy::expect_used, clippy::panic)]
+async fn integration_invalid_publish_timeout_rejected_before_connect() {
+    let endpoint = amqp_endpoint("amqp://user:secretpass@127.0.0.1:1/%2f")
+        .expect("fixture endpoint must parse");
+    match AmqpPublisher::connect(&endpoint, "amqp-invalid-timeout", Duration::ZERO).await {
+        Ok(_) => panic!("zero publish timeout must be rejected"),
+        Err(err) => {
+            assert_eq!(err.to_string(), "amqp connect failed");
+            let source = std::error::Error::source(&err)
+                .expect("typed timeout source must be preserved")
+                .to_string();
+            assert_eq!(source, "invalid amqp publisher timeout");
+            assert!(!source.contains("user"));
+            assert!(!source.contains("secretpass"));
         }
     }
 }

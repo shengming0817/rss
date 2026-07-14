@@ -41,9 +41,9 @@ use eventexec::{
     ConsumerMeta, ConsumerTxHandlerFn, DlxArchiveKeyName, DlxHotKeyName, DlxLifecycle,
     DlxLifecycleHealth, DlxLifecycleMetrics, DlxLifecycleTickReport, EVENT_CONSUMER_PROBE,
     LeaseConfig, MetricsDlxLifecycleMetrics, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE,
-    OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayConfig, RetentionOutcome, RetentionTarget,
-    SWEEPER_WORKER_NAME, SamplerConfig, SweeperConfig, SweeperWorker, TenantAuthority,
-    WorkerHealth, apply_dlx_lifecycle_health, backlog_sampler_loop,
+    OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayBudget, RelayConfig, RetentionOutcome,
+    RetentionTarget, SWEEPER_WORKER_NAME, SamplerConfig, SweeperConfig, SweeperWorker,
+    TenantAuthority, WorkerHealth, apply_dlx_lifecycle_health, backlog_sampler_loop,
     spawn_consumer_ackable_tx_subscriber, spawn_relay, sweeper_loop,
 };
 use generated::event::{
@@ -118,6 +118,8 @@ pub struct EventTransportConfig {
     pub relay_poll_interval: Duration,
     /// Outbox relay 单轮最大在途 claim/publish 数。
     pub relay_max_in_flight: usize,
+    /// Outbox relay 的 typed lease/publish/settle/safety 预算。
+    pub relay_budget: RelayBudget,
     /// Outbox relay backlog 采样间隔。
     pub relay_sample_interval: Duration,
     /// Outbox published-row sweeper 扫描间隔。
@@ -152,6 +154,14 @@ const DLX_ARCHIVE_KEY_NAME_ENV: &str = "RSS_DLX_ARCHIVE_KEY_NAME";
 const AMQP_ALLOW_PLAINTEXT_ENV: &str = "RSS_AMQP_ALLOW_PLAINTEXT";
 const VAULT_ADDR_ENV: &str = "RSS_VAULT_ADDR";
 const VAULT_TRANSIT_MOUNT_ENV: &str = "RSS_VAULT_TRANSIT_MOUNT";
+const RELAY_LEASE_TTL_ENV: &str = "RSS_RELAY_LEASE_TTL_MS";
+const RELAY_PUBLISH_TIMEOUT_ENV: &str = "RSS_RELAY_PUBLISH_TIMEOUT_MS";
+const RELAY_SETTLE_TIMEOUT_ENV: &str = "RSS_RELAY_SETTLE_TIMEOUT_MS";
+const RELAY_SAFETY_MARGIN_ENV: &str = "RSS_RELAY_SAFETY_MARGIN_MS";
+const DEFAULT_RELAY_LEASE_TTL_MS: u64 = 60_000;
+const DEFAULT_RELAY_PUBLISH_TIMEOUT_MS: u64 = 40_000;
+const DEFAULT_RELAY_SETTLE_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_RELAY_SAFETY_MARGIN_MS: u64 = 5_000;
 pub(crate) const DLX_HOT_VAULT_TOKEN_ENV: &str = "RSS_DLX_HOT_VAULT_TOKEN";
 pub(crate) const DLX_ARCHIVE_VAULT_TOKEN_ENV: &str = "RSS_DLX_ARCHIVE_VAULT_TOKEN";
 
@@ -224,6 +234,7 @@ impl ManagedResource for ThreadedEventWorker {
 struct RelayTiming {
     poll: Duration,
     max_in_flight: usize,
+    budget: RelayBudget,
     sample: Duration,
     sweep: Duration,
     retain_seconds: u64,
@@ -507,6 +518,7 @@ pub(crate) async fn wire_event_transport(
     let timing = RelayTiming {
         poll: cfg.relay_poll_interval,
         max_in_flight: cfg.relay_max_in_flight,
+        budget: cfg.relay_budget,
         sample: cfg.relay_sample_interval,
         sweep: cfg.outbox_sweep_interval,
         retain_seconds: cfg.outbox_retain_seconds,
@@ -524,6 +536,8 @@ pub(crate) async fn wire_event_transport(
         }
         EventDecision::Durable { per_domain } => {
             let security = security.context("durable event security config missing")?;
+            pg.validate_relay_budget(timing.budget)
+                .context("runtime relay budget does not match governed database policy")?;
             wire_durable(pg, distributed, subscribers, per_domain, timing, security).await
         }
     }
@@ -964,6 +978,10 @@ fn elapsed_seconds(started: SystemTime, finished: SystemTime) -> f64 {
 /// 可选 env var（缺失时使用括号内默认值）：
 /// - `RSS_RELAY_POLL_INTERVAL_MS`（200ms）
 /// - `RSS_RELAY_MAX_IN_FLIGHT`（16）
+/// - `RSS_RELAY_LEASE_TTL_MS`（60000ms；最大 86400000ms，存在但非法时 fail-fast）
+/// - `RSS_RELAY_PUBLISH_TIMEOUT_MS`（40000ms；最大 86400000ms，存在但非法时 fail-fast）
+/// - `RSS_RELAY_SETTLE_TIMEOUT_MS`（5000ms；最大 86400000ms，存在但非法时 fail-fast）
+/// - `RSS_RELAY_SAFETY_MARGIN_MS`（5000ms；最大 86400000ms，存在但非法时 fail-fast）
 /// - `RSS_RELAY_SAMPLE_INTERVAL_MS`（30000ms）
 /// - `RSS_OUTBOX_SWEEP_INTERVAL_MS`（300000ms）
 /// - `RSS_OUTBOX_RETAIN_SECONDS`（604800s）
@@ -1017,6 +1035,29 @@ pub fn build_event_transport_config_from(
             Some(build_dlx_payload_protector_from(&get)?),
         )
     };
+    let relay_budget = RelayBudget::new(
+        parse_strict_duration_ms_env(
+            get(RELAY_LEASE_TTL_ENV),
+            RELAY_LEASE_TTL_ENV,
+            DEFAULT_RELAY_LEASE_TTL_MS,
+        )?,
+        parse_strict_duration_ms_env(
+            get(RELAY_PUBLISH_TIMEOUT_ENV),
+            RELAY_PUBLISH_TIMEOUT_ENV,
+            DEFAULT_RELAY_PUBLISH_TIMEOUT_MS,
+        )?,
+        parse_strict_duration_ms_env(
+            get(RELAY_SETTLE_TIMEOUT_ENV),
+            RELAY_SETTLE_TIMEOUT_ENV,
+            DEFAULT_RELAY_SETTLE_TIMEOUT_MS,
+        )?,
+        parse_strict_duration_ms_env(
+            get(RELAY_SAFETY_MARGIN_ENV),
+            RELAY_SAFETY_MARGIN_ENV,
+            DEFAULT_RELAY_SAFETY_MARGIN_MS,
+        )?,
+    )
+    .context("invalid outbox relay budget")?;
 
     Ok(EventTransportConfig {
         topology,
@@ -1031,6 +1072,7 @@ pub fn build_event_transport_config_from(
             "RSS_RELAY_MAX_IN_FLIGHT",
             16,
         ),
+        relay_budget,
         relay_sample_interval: parse_duration_ms_env(
             get("RSS_RELAY_SAMPLE_INTERVAL_MS"),
             "RSS_RELAY_SAMPLE_INTERVAL_MS",
@@ -1095,9 +1137,10 @@ async fn wire_durable(
     let mut amqp_map: BTreeMap<String, amqp::AmqpRuntimeDeps> = BTreeMap::new();
     for (domain_upper, url) in &per_domain {
         let domain = domain_upper.to_ascii_lowercase();
-        let amqp_deps = amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain)
-            .await
-            .with_context(|| format!("connect amqp for domain '{domain}'"))?;
+        let amqp_deps =
+            amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain, timing.budget.publish_timeout())
+                .await
+                .with_context(|| format!("connect amqp for domain '{domain}'"))?;
         module.resources.extend(amqp_deps.runtime_resources());
         tracing::info!(domain, "durable event transport: amqp connected");
         amqp_map.insert(domain, amqp_deps);
@@ -1111,11 +1154,13 @@ async fn wire_durable(
         let outbox = match producer {
             generated::event::ProducerDomain::Identity => pg.for_domain::<caps::Identity>().outbox(
                 publisher,
+                timing.budget,
                 Arc::clone(&security.tenant_authority),
                 security.dlx_payload_protector.clone(),
             ),
             generated::event::ProducerDomain::Settings => pg.for_domain::<caps::Settings>().outbox(
                 publisher,
+                timing.budget,
                 Arc::clone(&security.tenant_authority),
                 security.dlx_payload_protector.clone(),
             ),
@@ -1637,6 +1682,22 @@ fn parse_duration_ms_env(raw: Option<String>, env_name: &'static str, default_ms
             Duration::from_millis(default_ms)
         }
     }
+}
+
+/// 正确性预算 env：缺失使用 canonical 默认；一旦存在，任何解析/范围/关系错误均由 builder fail-fast。
+fn parse_strict_duration_ms_env(
+    raw: Option<String>,
+    env_name: &'static str,
+    default_ms: u64,
+) -> anyhow::Result<Duration> {
+    let Some(raw) = raw else {
+        return Ok(Duration::from_millis(default_ms));
+    };
+    let millis = raw
+        .trim()
+        .parse::<u64>()
+        .with_context(|| format!("{env_name} must be an unsigned integer millisecond value"))?;
+    Ok(Duration::from_millis(millis))
 }
 
 /// 可选 `usize` env var → `usize`（解析失败或缺失时 warn + 回退 default）。
@@ -2321,10 +2382,69 @@ mod tests {
         assert_eq!(cfg.relay_poll_interval, Duration::from_millis(200));
         assert_eq!(cfg.relay_max_in_flight, 16);
         assert_eq!(cfg.relay_sample_interval, Duration::from_millis(30_000));
+        assert_eq!(cfg.relay_budget.lease_ttl(), Duration::from_secs(60));
+        assert_eq!(cfg.relay_budget.publish_timeout(), Duration::from_secs(40));
+        assert_eq!(cfg.relay_budget.settle_timeout(), Duration::from_secs(5));
+        assert_eq!(cfg.relay_budget.safety_margin(), Duration::from_secs(5));
+        assert_eq!(cfg.relay_budget.required_budget(), Duration::from_secs(50));
         assert_eq!(cfg.outbox_sweep_interval, Duration::from_millis(300_000));
         assert_eq!(cfg.outbox_retain_seconds, 604_800);
         assert!(cfg.tenant_authority.is_some());
         assert!(cfg.dlx_payload_protector.is_some());
+    }
+
+    #[test]
+    fn config_builder_relay_budget_overrides_are_strict_and_typed() {
+        let result = build_event_transport_config_from(|name| match name {
+            "RSS_TOPOLOGY" => Some("durable-shared".into()),
+            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
+            "RSS_RELAY_LEASE_TTL_MS" => Some("90000".into()),
+            "RSS_RELAY_PUBLISH_TIMEOUT_MS" => Some("60000".into()),
+            "RSS_RELAY_SETTLE_TIMEOUT_MS" => Some("10000".into()),
+            "RSS_RELAY_SAFETY_MARGIN_MS" => Some("10000".into()),
+            _ => durable_security_env(name),
+        });
+        assert!(
+            result.is_ok(),
+            "valid relay budget overrides should succeed"
+        );
+        let cfg = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(cfg.relay_budget.lease_ttl_millis(), 90_000);
+        assert_eq!(cfg.relay_budget.publish_timeout_millis(), 60_000);
+        assert_eq!(cfg.relay_budget.settle_timeout_millis(), 10_000);
+        assert_eq!(cfg.relay_budget.safety_margin_millis(), 10_000);
+        assert_eq!(cfg.relay_budget.required_budget_millis(), 80_000);
+    }
+
+    #[test]
+    fn config_builder_relay_budget_invalid_values_fail_fast() {
+        let cases = [
+            ("RSS_RELAY_LEASE_TTL_MS", "not-a-number"),
+            ("RSS_RELAY_PUBLISH_TIMEOUT_MS", "0"),
+            ("RSS_RELAY_SETTLE_TIMEOUT_MS", "18446744073709551615"),
+            ("RSS_RELAY_SAFETY_MARGIN_MS", "0"),
+            ("RSS_RELAY_LEASE_TTL_MS", "86400001"),
+        ];
+        for (invalid_name, invalid_value) in cases {
+            let result = build_event_transport_config_from(|name| match name {
+                "RSS_TOPOLOGY" => Some("durable-shared".into()),
+                "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
+                _ if name == invalid_name => Some(invalid_value.into()),
+                _ => durable_security_env(name),
+            });
+            assert!(result.is_err(), "{invalid_name}={invalid_value} must fail");
+        }
+    }
+
+    #[test]
+    fn config_builder_relay_budget_equal_to_lease_fails_fast() {
+        let result = build_event_transport_config_from(|name| match name {
+            "RSS_TOPOLOGY" => Some("durable-shared".into()),
+            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
+            "RSS_RELAY_LEASE_TTL_MS" => Some("50000".into()),
+            _ => durable_security_env(name),
+        });
+        assert!(result.is_err(), "required budget equal to lease must fail");
     }
 
     #[test]

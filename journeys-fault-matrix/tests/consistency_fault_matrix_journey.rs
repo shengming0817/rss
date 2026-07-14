@@ -17,6 +17,7 @@ use diport::{
     AckAction, AckableSubscriber, Acker, DynPublisher, EnvelopeSubjectId, MessageId, OpaqueActorId,
     OutboxActor, PublishRequest, Publisher, Topic,
 };
+use eventexec::RelayBudget;
 use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use futures::StreamExt;
 use futures::future::LocalBoxFuture;
@@ -31,6 +32,15 @@ use uuid::Uuid;
 
 const RABBIT_VHOST: &str = "rss_fault_matrix";
 const PROJECTION_OWNER: &str = "fault-matrix-projection";
+
+fn relay_budget() -> Result<RelayBudget> {
+    Ok(RelayBudget::new(
+        Duration::from_secs(60),
+        Duration::from_secs(40),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )?)
+}
 
 type CaseRunFn = for<'a> fn(
     &'a CrashCase,
@@ -244,6 +254,7 @@ async fn pg_harness() -> Result<PgHarness> {
     );
     let harness = PgFaultMatrixHarness::setup(
         config,
+        relay_budget()?,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )
@@ -280,7 +291,12 @@ fn amqp_endpoint(url: &str) -> Result<secure::AmqpEndpoint> {
 }
 
 async fn connect_publisher(url: &str, name: &str) -> Result<AmqpPublisher> {
-    Ok(AmqpPublisher::connect(&amqp_endpoint(url)?, name).await?)
+    Ok(AmqpPublisher::connect(
+        &amqp_endpoint(url)?,
+        name,
+        relay_budget()?.publish_timeout(),
+    )
+    .await?)
 }
 
 async fn connect_subscriber(url: &str, name: &str) -> Result<AmqpSubscriber> {

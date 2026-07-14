@@ -4387,7 +4387,7 @@ async fn wire_durable() {
     let mut amqp_map = BTreeMap::new();
     for (domain_upper, url) in &per_domain {
         let domain = domain_upper.to_ascii_lowercase();
-        let amqp_deps = amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain).await?;
+        let amqp_deps = amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain, publish_timeout).await?;
         module.resources.extend(amqp_deps.runtime_resources());
         amqp_map.insert(domain, amqp_deps);
     }
@@ -4663,7 +4663,7 @@ async fn wire_durable() {
     let mut module = DomainModuleResult::default();
     for (domain_upper, url) in &per_domain {
         let domain = domain_upper.to_ascii_lowercase();
-        let amqp_deps = amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain).await?;
+        let amqp_deps = amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain, publish_timeout).await?;
         module.resources.extend(amqp_deps.runtime_resources());
         amqp_map.insert(domain, amqp_deps);
     }

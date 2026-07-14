@@ -96,9 +96,14 @@ exactly-once，也不能撤销已经成功的 publish。duplicate 由 tenant-sco
 返回后同批 entry 立即并发 dispatch，不得整批串行等待；SQL head-of-partition gate 保证同批对每个非空
 `(tenant_id, domain, partition_key)` 至多返回唯一队头，故不同 partition 与无序 entry 可并行而不破坏
 分区内顺序。每条 broker publish 前，Postgres provider 必须以 DB 当前时间做 lease budget preflight：只有
-当前 token/deadline 仍匹配且剩余租约足以覆盖完整 publish deadline 才调用 broker。单条 publish timeout
-固定为 40s；preflight 不足不得发 broker 请求，timeout/confirm 不确定结果仍按 at-least-once 语义以稳定
-身份重试，不能把本地超时解释为 broker 未收到。
+当前 token/deadline 仍匹配且剩余租约严格大于 `publish + settle + safety` 才调用 broker。四项预算经
+`RelayBudget` 单一 typed funnel 构造，默认 `lease=60s / publish=40s / settle=5s / safety=5s`；AMQP 的
+`basic_publish` 与 confirm 共用同一个 publish deadline，Postgres 通用 publisher watchdog 为
+`publish + safety`，所有 settle 完整操作受 settle deadline 约束。preflight 不足不得发 broker 请求，
+timeout/confirm/settle 不确定结果仍按 at-least-once 语义以稳定身份重试，不能把本地超时解释为 broker
+未收到。每个预算分量统一以 `86_400_000ms`（24h，含边界）为 operational ceiling；Rust typed funnel、
+AMQP 二次构造校验与 claim/preflight SQL 入口都拒绝 `86_400_001ms`。预算 env 一旦存在但非法，runtime
+启动失败，不回退默认值。
 
 ### 有界 same-ID 投递窗口
 

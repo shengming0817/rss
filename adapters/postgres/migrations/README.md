@@ -273,6 +273,34 @@ claim/publish-preflight/mark-DLX 与零参数 inbox sweep；`rss_outbox_redrive(
 `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` 的「0060 breaking rollout」章节。执行值只由
 `docs/ops/0060-outbox-capacity-gate.sh` 持有；本 migration ledger 不复制阈值、命令或取消查询。
 
+### 0064 breaking relay-budget cutover（一次性、禁止滚动混跑）
+
+`0064` 删除 claim/preflight 旧 overload，并安装显式接收 `lease_ttl_ms` 与
+`required_budget_ms` 的新签名。数据库入口每次调用都验证 non-null、正值、统一 `86400000ms`（24h，含边界）
+operational ceiling 以及
+`required_budget_ms < lease_ttl_ms`；claim 用配置 TTL 铸造 lease，preflight 用数据库时钟要求剩余 lease
+严格大于 required budget。该迁移不提供默认别名、兼容 shim 或双路径。
+
+1. 停止全部旧 relay，并确认没有旧 binary、job 或 CLI 仍会调用两项旧签名；禁止新旧版本滚动混跑。
+2. 由唯一正式 migration runner 执行 0064。失败时保持 relay 停止，只允许 forward-only 修复，不修改历史迁移。
+3. 验证新签名
+   `rss_outbox_claim_batch(text,bigint,bigint,bigint)` 与
+   `rss_outbox_publish_preflight(text,uuid,bigint,bigint,bigint)` 存在，两个旧 overload 均不存在。
+4. 验证两函数 owner 为 NOLOGIN `rss_outbox_maintenance`、`search_path=public, pg_temp`、PUBLIC 无 EXECUTE，
+   且 `rss_app` 仅获新签名的精确 EXECUTE。
+5. 只有以上验证全部通过，才启动持有同一 typed `RelayBudget` 的新 binary；不得恢复旧函数或在应用侧回退默认值。
+
+### 0065 governed relay-budget cutover（forward-only）
+
+`0065` 把 release relay budget 固化进 maintenance-owned `event_delivery_policy` singleton。Rust
+调用者仍传入 typed lease/required 值作为精确握手，但 claim/preflight 只使用 singleton 中的四项值计算
+lease 和可发布窗口；任意不一致在锁 outbox 行之前 fail closed。`rss_app` 对 policy 表保持零权限，只能执行
+精确的新函数签名。迁移同时移除三个 settle 函数遗留的固定 `lock_timeout`，由每次事务内先于客户端绝对
+deadline 设置的 `SET LOCAL statement_timeout/lock_timeout` 统一治理。部署仍遵循 0064 的停旧 relay、迁移、
+验证 owner/search path/ACL、再启动新 binary 的非滚动顺序。
+
+### 0062/0063 dead-letter lifecycle breaking cutover
+
 `0062` 是不可绕过的 fail-closed cutover gate：取得 `dead_letter` 的 ACCESS EXCLUSIVE 锁后，只要存在一行
 legacy 数据就中止。inventory digest/row count 不能证明数据可恢复，因此本迁移不创建清理函数、审计删除账本，
 也绝不执行 legacy DELETE。非空部署必须先提交一条单独评审的 forward migration：把完整加密行、key refs、

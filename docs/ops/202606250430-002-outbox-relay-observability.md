@@ -83,13 +83,18 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 - SQL head-of-partition gate 保证同批对每个非空 `(tenant_id, domain, partition_key)` 至多一个唯一队头；
   不同 partition 与无序 entry 可并发，分区内顺序仍由数据库 gate 承载。
 - 每条 broker publish 前，Postgres provider 以 DB 当前时间做 token/deadline lease budget preflight；剩余
-  预算不足以覆盖 40s publish timeout 时不得调用 broker。timeout/confirm 不确定结果可能已经 delivery，按
-  at-least-once 路径用稳定身份重试，不能从客户端 timeout 推断“broker 未收到”。
+  租约必须严格大于 typed `publish + settle + safety` 预算，否则不得调用 broker。默认预算是
+  `60s / 40s / 5s / 5s`；每项最大 `86_400_000ms`（24h，含边界），`86_400_001ms` 会在 runtime、
+  AMQP 二次构造或 SQL claim/preflight 边界 fail-closed。四项 `RSS_RELAY_*_MS` 缺失才使用默认，存在但非法会阻止启动。
+  AMQP basic publish 与 confirm 共享 40s publish deadline；Postgres 通用 watchdog 默认 45s，所有 settle
+  完整操作默认限时 5s。timeout/confirm/settle 不确定结果可能已经 delivery，按 at-least-once 路径用稳定
+  身份重试，不能从客户端 timeout 推断“broker 未收到”。
 - 同一 preflight 先按行的 `same_id_delivery_phase=automatic|redrive` 检查对应持久化绝对 deadline。到期时
   不调用 broker，写安全 DLX 摘要并增加 `outbox_same_id_window_expired_total`；自动重试与 operator redrive
   因而都无法无限延长同一 event id 的投递寿命。
-- `publish` phase histogram 记录这一批即时并发 relay 的 wall time，不是各 entry 耗时之和。接近 40s 的
-  样本优先排查 broker confirm 延迟、publish timeout 与 lost-lease/reclaim 日志。
+- `publish` phase histogram 记录这一批即时并发 relay 的 wall time，不是各 entry 耗时之和。接近配置的
+  publish/watchdog deadline 时，优先排查 broker confirm 延迟、`phase=basic_publish|confirm|publisher_watchdog`
+  与 lost-lease/reclaim 日志；不得把 payload/metadata/连接 URL 复制到排障日志或工单。
 
 ## SLO 与告警
 

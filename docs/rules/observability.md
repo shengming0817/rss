@@ -450,8 +450,12 @@ claim 按值交给同一 provider 的 relay 路径。relay 在 provider 内部�
 再携入 `PublishRequest`。`RelayConfig::max_in_flight` 构造期限制为 `1..=64`，同时封住 claim 数与并发数；
 同批 claim 立即并发 dispatch，SQL gate 保证每个非空 `(tenant_id, domain, partition_key)` 在同批只有唯一
 队头，不用以整批串行换取分区顺序。每条 broker call 前，provider 以 DB 当前时间执行 token/deadline
-lease budget preflight，并只在剩余预算覆盖 40s publish timeout 时发出请求；预算不足不触达 broker，
-timeout/confirm 不确定结果仍可能已经 delivery，后续按稳定身份重试。adapter publisher 映射进
+lease budget preflight，并只在剩余租约严格覆盖 typed `publish + settle + safety` 预算时发出请求；
+预算不足不触达 broker。AMQP `basic_publish` / confirm 共用 publish deadline，Postgres watchdog 与所有
+settle 操作分别受 typed deadline 约束。每个预算分量的统一 operational ceiling 是 `86_400_000ms`
+（24h，边界合法）；runtime、AMQP 和 SQL 对 `86_400_001ms` 均 fail-closed。timeout/confirm/settle 不确定结果仍可能已经 delivery，后续按
+稳定身份重试。timeout 日志只允许低基数 phase、预算毫秒值、`delivery_outcome="unknown"` 与
+`broker_may_have_received`，禁止 URL、payload、metadata、tenant authority、Vault token 与原始错误链。adapter publisher 映射进
 broker header（AMQP `with_timestamp`(occurred_at) + transport-safe `FieldTable` headers / MQTT v5
 transport-safe `user_properties` / memory 直传）。broker-visible metadata 只能来自
 `EnvelopeMetadata::iter_transport_headers()` allowlist：`trace`、`correlation`、`occurredAt`、`tenantId`、

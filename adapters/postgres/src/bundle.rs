@@ -60,7 +60,7 @@ use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
 use diport::DynPublisher;
 use diport::{Clock, DynCasStore, DynManagedResource, ManagedResource};
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-use eventexec::TenantAuthority;
+use eventexec::{RelayBudget, TenantAuthority};
 #[cfg(feature = "domain-settings")]
 use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo, DynSecretUnitOfWork};
 #[cfg(feature = "test-support")]
@@ -421,6 +421,13 @@ impl PgRuntimeDeps {
 }
 
 impl PgRuntimeHandle {
+    /// Fail closed unless the runtime budget exactly matches the policy loaded from the
+    /// maintenance-owned database singleton during setup. This synchronous gate is intentionally
+    /// callable before any AMQP connection is attempted.
+    pub fn validate_relay_budget(&self, budget: eventexec::RelayBudget) -> Result<(), PgError> {
+        self.delivery_policy.validate_relay_budget(budget)
+    }
+
     /// 派发 per-domain 受控句柄（`Arc<PgStore>` clone + `PhantomData<D>`）。
     ///
     /// 对标 kube-rs `Controller::run(.., Arc<Ctx>)` 注入 shared context。
@@ -510,9 +517,14 @@ impl PgRuntimeDeps {
     }
 }
 
-#[cfg(all(test, feature = "integration"))]
+#[cfg(all(
+    test,
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
 impl PgRuntimeHandle {
-    /// 从既有 lazy store 构造 crate 内集成测试 capability handle，不铸造 lifecycle owner。
+    /// 从既有 lazy store 构造 crate 内测试 capability handle，不铸造 lifecycle owner。
     pub(crate) fn from_store_for_test(store: Arc<PgStore>) -> Self {
         Self {
             store,
@@ -857,6 +869,7 @@ impl PgDomainDeps<caps::Settings> {
     pub fn outbox(
         &self,
         publisher: Box<DynPublisher<'static>>,
+        relay_budget: RelayBudget,
         tenant_authority: Arc<TenantAuthority>,
         payload_protector: DlxPayloadProtector,
     ) -> PgOutbox {
@@ -864,6 +877,7 @@ impl PgDomainDeps<caps::Settings> {
             &self.store,
             bound_domain::<caps::Settings>(),
             publisher,
+            relay_budget,
             tenant_authority,
             payload_protector,
         )
@@ -954,6 +968,7 @@ impl PgDomainDeps<caps::Identity> {
     pub fn outbox(
         &self,
         publisher: Box<DynPublisher<'static>>,
+        relay_budget: RelayBudget,
         tenant_authority: Arc<TenantAuthority>,
         payload_protector: DlxPayloadProtector,
     ) -> PgOutbox {
@@ -961,6 +976,7 @@ impl PgDomainDeps<caps::Identity> {
             &self.store,
             bound_domain::<caps::Identity>(),
             publisher,
+            relay_budget,
             tenant_authority,
             payload_protector,
         )
@@ -1365,6 +1381,17 @@ mod tests {
         crate::dead_letter_payload::tests::test_protector()
     }
 
+    #[allow(clippy::expect_used)]
+    fn relay_budget() -> RelayBudget {
+        RelayBudget::new(
+            Duration::from_secs(60),
+            Duration::from_secs(40),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .expect("test relay budget must be valid")
+    }
+
     /// lazy pool（不发真实连接）构造 `Arc<PgStore>`——单元测专用（免 DB）。
     fn lazy_store() -> Arc<PgStore> {
         let opts = PgConnectOptions::new()
@@ -1500,6 +1527,7 @@ mod tests {
         let _ = i.session_lifecycle(Box::new(EpochClock));
         let _ = i.outbox(
             DynPublisher::new_box(StubPublisher),
+            relay_budget(),
             tenant_authority(),
             payload_protector(),
         );
@@ -1610,6 +1638,31 @@ mod tests {
             Arc::ptr_eq(&infra.store, &c.store),
             "PgInfraDeps clone 廉价共享 store Arc"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn runtime_handle_relay_budget_gate_is_synchronous_and_exact() {
+        let handle = PgRuntimeHandle::from_store_for_test(lazy_store());
+        let release = eventexec::RelayBudget::new(
+            Duration::from_secs(60),
+            Duration::from_secs(40),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .expect("valid release budget");
+        let mismatch = eventexec::RelayBudget::new(
+            Duration::from_secs(61),
+            Duration::from_secs(40),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .expect("valid mismatched budget");
+        assert!(handle.validate_relay_budget(release).is_ok());
+        assert!(matches!(
+            handle.validate_relay_budget(mismatch),
+            Err(PgError::EventDeliveryPolicyMismatch)
+        ));
     }
 
     /// consuming factory 立即 cancel → `shutdown` 两阶段收敛 Ok（覆盖 spawn/adopt 接线）。

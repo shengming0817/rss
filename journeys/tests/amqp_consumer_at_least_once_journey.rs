@@ -44,6 +44,7 @@ use tokio_util::sync::CancellationToken;
 const TOPIC: &str = "rss.it.consumer-alo";
 /// 去重锚点 EventId（两次发布同此 id 验幂等）。
 const EVENT_ID: &str = "evt-consumer-alo";
+const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
 
 fn amqp_endpoint(url: &str) -> anyhow::Result<secure::AmqpEndpoint> {
     Ok(secure::AmqpEndpoint::parse(
@@ -54,7 +55,7 @@ fn amqp_endpoint(url: &str) -> anyhow::Result<secure::AmqpEndpoint> {
 
 async fn connect_publisher(url: &str, name: &str) -> anyhow::Result<AmqpPublisher> {
     let endpoint = amqp_endpoint(url)?;
-    Ok(AmqpPublisher::connect(&endpoint, name).await?)
+    Ok(AmqpPublisher::connect(&endpoint, name, TEST_PUBLISH_TIMEOUT).await?)
 }
 
 async fn connect_subscriber(url: &str, name: &str) -> anyhow::Result<AmqpSubscriber> {

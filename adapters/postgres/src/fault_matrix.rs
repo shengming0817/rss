@@ -34,8 +34,9 @@ use eventexec::reconcile::{
     ReconcileScheduleStore, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
 };
 use eventexec::{
-    ProjectionHarness, ProjectionStop, SagaExecutor, SagaExecutorConfig, SagaExecutorDeps,
-    SagaExecutorImpl, SagaOutcome, SagaRuntimeLock, TenantAuthority, TypedSagaActionFactory,
+    ProjectionHarness, ProjectionStop, RelayBudget, SagaExecutor, SagaExecutorConfig,
+    SagaExecutorDeps, SagaExecutorImpl, SagaOutcome, SagaRuntimeLock, TenantAuthority,
+    TypedSagaActionFactory,
 };
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use secure::Plaintext;
@@ -225,12 +226,14 @@ impl FaultMatrixProjectionProbe {
 pub struct PgFaultMatrixHarness {
     deps: PgRuntimeDeps,
     owner_pool: PgPool,
+    relay_budget: RelayBudget,
 }
 
 impl PgFaultMatrixHarness {
     /// Provision the least-privilege serving role, run migrations, and construct runtime deps.
     pub async fn setup(
         config: PgFaultMatrixConfig,
+        relay_budget: RelayBudget,
         projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> FaultMatrixResult<Self> {
@@ -258,7 +261,11 @@ impl PgFaultMatrixHarness {
         )
         .await?;
         let owner_pool = owner_pool(&config).await?;
-        Ok(Self { deps, owner_pool })
+        Ok(Self {
+            deps,
+            owner_pool,
+            relay_budget,
+        })
     }
 
     /// Close private postgres resources.
@@ -299,6 +306,7 @@ impl PgFaultMatrixHarness {
                 .for_domain::<crate::caps::Identity>()
                 .outbox(
                     publisher,
+                    self.relay_budget,
                     test_tenant_authority()?,
                     test_dlx_payload_protector()?,
                 ),
@@ -308,6 +316,7 @@ impl PgFaultMatrixHarness {
                 .for_domain::<crate::caps::Settings>()
                 .outbox(
                     publisher,
+                    self.relay_budget,
                     test_tenant_authority()?,
                     test_dlx_payload_protector()?,
                 ),
@@ -344,6 +353,7 @@ impl PgFaultMatrixHarness {
         crate::outbox::fault_matrix_publish_before_settle(
             &self.owner_pool,
             publisher,
+            self.relay_budget,
             test_tenant_authority()?,
             test_dlx_payload_protector()?,
             "identity",
@@ -361,7 +371,7 @@ impl PgFaultMatrixHarness {
         domain: &str,
         publisher: Box<DynPublisher<'static>>,
     ) -> FaultMatrixResult<()> {
-        age_outbox_publishing(&self.owner_pool, tenant, event_id).await?;
+        age_outbox_publishing(&self.owner_pool, tenant, event_id, self.relay_budget).await?;
         let outbox = match domain {
             "identity" => self
                 .deps
@@ -369,6 +379,7 @@ impl PgFaultMatrixHarness {
                 .for_domain::<crate::caps::Identity>()
                 .outbox(
                     publisher,
+                    self.relay_budget,
                     test_tenant_authority()?,
                     test_dlx_payload_protector()?,
                 ),
@@ -378,6 +389,7 @@ impl PgFaultMatrixHarness {
                 .for_domain::<crate::caps::Settings>()
                 .outbox(
                     publisher,
+                    self.relay_budget,
                     test_tenant_authority()?,
                     test_dlx_payload_protector()?,
                 ),
@@ -939,17 +951,18 @@ async fn age_outbox_publishing(
     pool: &PgPool,
     tenant: vocab::TenantId,
     event_id: &str,
+    relay_budget: RelayBudget,
 ) -> FaultMatrixResult<()> {
     sqlx::query(
         "UPDATE outbox \
-         SET updated_at = clock_timestamp() - make_interval(secs => $4::int), \
+         SET updated_at = clock_timestamp() - $4 * interval '1 millisecond', \
              lease_until = clock_timestamp() - interval '1 second' \
          WHERE tenant_id = $1::uuid AND event_id = $2 AND status = $3",
     )
     .bind(tenant.to_string())
     .bind(event_id)
     .bind(crate::outbox::STATUS_PUBLISHING)
-    .bind(crate::outbox::LEASE_TTL_SECONDS + 10)
+    .bind(relay_budget.lease_ttl_millis().saturating_add(10_000))
     .execute(pool)
     .await?;
     Ok(())

@@ -56,6 +56,8 @@ use runtime::{
 };
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 
+const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
+
 // ── 共用常量（自 journeys/tests/common/mod.rs 复制，runtime 测试不能 mod common）────────────
 
 const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -1021,7 +1023,9 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // 即证明其之前的 duplicate 已被 consumer 真实消费+settle（而非未投递）。去重生效 → 最终稳定 len==2
     // （original + tracer）；去重失效 → duplicate 也 append、升到 3，被下方 fail-fast 捕获。
     let redeliver_endpoint = amqp_endpoint(&vhost_url)?;
-    let pubr = amqp::AmqpPublisher::connect(&redeliver_endpoint, "e2e-redeliver").await?;
+    let pubr =
+        amqp::AmqpPublisher::connect(&redeliver_endpoint, "e2e-redeliver", TEST_PUBLISH_TIMEOUT)
+            .await?;
     pubr.publish(
         PublishRequest::new(
             Topic::new(SESSION_CREATED_TOPIC),

@@ -19,7 +19,15 @@ pub(crate) const REPLY_SUCCESS: u16 = 200;
 #[error("amqp connect failed")]
 pub struct AmqpConnectError {
     #[source]
-    source: lapin::Error,
+    source: AmqpConnectErrorSource,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AmqpConnectErrorSource {
+    #[error(transparent)]
+    Transport(#[from] lapin::Error),
+    #[error("invalid amqp publisher timeout")]
+    InvalidPublisherTimeout,
 }
 
 impl std::fmt::Debug for AmqpConnectError {
@@ -41,27 +49,39 @@ pub(crate) async fn connect(
     #[allow(clippy::disallowed_methods)]
     // reason: 唯一 AMQP driver connect callsite；endpoint 已在组合根经 secure::AmqpEndpoint 校验。
     let url = endpoint.expose();
-    let conn = Connection::connect(url, ConnectionProperties::default())
-        .await
-        .map_err(|source| connect_err(source, url, name))?;
-    let channel = conn
-        .create_channel()
-        .await
-        .map_err(|source| connect_err(source, url, name))?;
-    if confirm {
-        // publisher confirms：publish 后 await PublisherConfirm 才能拿到真实 Ack/Nack（否则 NotRequested）。
-        channel
-            .confirm_select(ConfirmSelectOptions::default())
+    let conn = Arc::new(
+        Connection::connect(url, ConnectionProperties::default())
             .await
-            .map_err(|source| connect_err(source, url, name))?;
-    }
+            .map_err(|source| connect_err(source, url, name))?,
+    );
+    let channel = if confirm {
+        confirmed_channel(conn.as_ref())
+            .await
+            .map_err(|source| connect_err(source, url, name))?
+    } else {
+        conn.create_channel()
+            .await
+            .map_err(|source| connect_err(source, url, name))?
+    };
     tracing::info!(
         target: "amqp",
         resource = name,
         endpoint = %secure::redact_url_credentials(url),
         "amqp connected",
     );
-    Ok((Arc::new(conn), channel))
+    Ok((conn, channel))
+}
+
+/// 在既有 publisher connection 上创建一个全新的 confirm channel。
+///
+/// 初始连接和 timeout 后的 channel rotation 共用这一接缝，避免 replacement 忘记
+/// `confirm_select` 而把 [`lapin::Confirmation::NotRequested`] 误当 durable publish 成功。
+pub(crate) async fn confirmed_channel(conn: &Connection) -> lapin::Result<Channel> {
+    let channel = conn.create_channel().await?;
+    channel
+        .confirm_select(ConfirmSelectOptions::default())
+        .await?;
+    Ok(channel)
 }
 
 fn connect_err(source: lapin::Error, url: &str, name: &str) -> AmqpConnectError {
@@ -74,5 +94,15 @@ fn connect_err(source: lapin::Error, url: &str, name: &str) -> AmqpConnectError 
         error = %secure::redact_error(&source),
         "amqp connect failed",
     );
-    AmqpConnectError { source }
+    AmqpConnectError {
+        source: source.into(),
+    }
+}
+
+/// 构造 publisher timeout 配置错误。仅供 publisher 在任何 endpoint 暴露/网络连接前 fail-closed；
+/// 对外错误面仍是固定安全摘要，避免把配置细节与连接信息拼接进日志。
+pub(crate) fn invalid_publisher_timeout() -> AmqpConnectError {
+    AmqpConnectError {
+        source: AmqpConnectErrorSource::InvalidPublisherTimeout,
+    }
 }

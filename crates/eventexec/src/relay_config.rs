@@ -12,6 +12,12 @@
 //! 热轮询打爆连接池）、`max_in_flight=0`（claim 恒空 → relay 永不推进、静默积压）或并发上限过大，
 //! 均在构造点即拒。relay domain 由 provider 绑定，不进入 config，避免双输入错插。
 //!
+//! # INVARIANT: RELAY-BUDGET-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields plus the sole validated constructor; external struct literals fail to compile" }
+//!
+//! [`RelayBudget`] 私有字段 + 唯一 [`RelayBudget::new`] funnel，使零值、非整毫秒、超过 24h operational
+//! ceiling、数据库不可表示以及 `publish + settle + safety >= lease` 的预算不可表达。跨 await 的 deadline 与数据库调用只消费
+//! accessor，避免各 adapter 重算并漂移。
+//!
 //! # INVARIANT: SAMPLER-CONFIG-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
 //! `backlog_sampler_loop` 只接 [`SamplerConfig`]；`domains` 数量上限 + 经 `vocab::DomainName`
@@ -46,6 +52,166 @@ const MAX_DOMAINS: usize = 64;
 
 /// sweeper 扫描间隔下限：非零 + 防热轮询 DELETE。
 const MIN_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Relay 单项时序预算的统一运维上限：24 小时（毫秒）。
+///
+/// Rust adapter、runtime env 与 PostgreSQL 函数必须与该值保持精确一致。
+pub const RELAY_BUDGET_MAX_MILLIS: u64 = 86_400_000;
+
+// ── RelayBudget ──────────────────────────────────────────────────────────────
+
+/// [`RelayBudget`] 构造校验错误（构造期，非 wire）。
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RelayBudgetError {
+    /// 任一预算分量为零。
+    #[error("relay budget {field} must be non-zero")]
+    Zero { field: &'static str },
+    /// 数据库边界只接受整毫秒，拒绝静默截断。
+    #[error("relay budget {field} must be an integral number of milliseconds")]
+    NonIntegralMilliseconds { field: &'static str },
+    /// 任一单项预算超过统一 24h 运维上限。
+    #[error("relay budget {field} exceeds operational maximum {max_millis}ms")]
+    OperationalRangeExceeded {
+        field: &'static str,
+        max_millis: u64,
+    },
+    /// required budget 的 `Duration` 加法溢出。
+    #[error("relay required budget overflows Duration")]
+    RequiredBudgetOverflow,
+    /// 完整 publish/settle/safety 窗口必须严格位于 lease 内。
+    #[error("relay required budget {required:?} must be strictly below lease {lease:?}")]
+    RequiredBudgetNotBelowLease { lease: Duration, required: Duration },
+}
+
+/// Outbox relay 的单一 I/O 预算。
+///
+/// 私有字段和唯一 [`RelayBudget::new`] 构造器保证所有派生 deadline 与数据库毫秒值同源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayBudget {
+    lease_ttl: Duration,
+    publish_timeout: Duration,
+    settle_timeout: Duration,
+    safety_margin: Duration,
+}
+
+impl RelayBudget {
+    /// 构造经过完整校验的 relay I/O 预算。
+    pub fn new(
+        lease_ttl: Duration,
+        publish_timeout: Duration,
+        settle_timeout: Duration,
+        safety_margin: Duration,
+    ) -> Result<Self, RelayBudgetError> {
+        let required_budget = publish_timeout
+            .checked_add(settle_timeout)
+            .and_then(|budget| budget.checked_add(safety_margin))
+            .ok_or(RelayBudgetError::RequiredBudgetOverflow)?;
+
+        for (field, duration) in [
+            ("lease_ttl", lease_ttl),
+            ("publish_timeout", publish_timeout),
+            ("settle_timeout", settle_timeout),
+            ("safety_margin", safety_margin),
+        ] {
+            validate_budget_duration(field, duration)?;
+        }
+        if required_budget >= lease_ttl {
+            return Err(RelayBudgetError::RequiredBudgetNotBelowLease {
+                lease: lease_ttl,
+                required: required_budget,
+            });
+        }
+
+        Ok(Self {
+            lease_ttl,
+            publish_timeout,
+            settle_timeout,
+            safety_margin,
+        })
+    }
+
+    /// 数据库 claim 铸造 lease deadline 使用的 TTL。
+    pub fn lease_ttl(&self) -> Duration {
+        self.lease_ttl
+    }
+
+    /// AMQP `basic_publish` 与 confirm 共享的总 timeout。
+    pub fn publish_timeout(&self) -> Duration {
+        self.publish_timeout
+    }
+
+    /// 一次 settlement 完整异步操作的 timeout。
+    pub fn settle_timeout(&self) -> Duration {
+        self.settle_timeout
+    }
+
+    /// lease 中不分配给 publish/settle 的安全余量。
+    pub fn safety_margin(&self) -> Duration {
+        self.safety_margin
+    }
+
+    /// preflight 必须保有的 `publish + settle + safety` 完整预算。
+    pub fn required_budget(&self) -> Duration {
+        self.publish_timeout
+            .saturating_add(self.settle_timeout)
+            .saturating_add(self.safety_margin)
+    }
+
+    /// 通用 publisher 外层 watchdog：`publish + safety`。
+    pub fn publisher_watchdog_timeout(&self) -> Duration {
+        self.publish_timeout.saturating_add(self.safety_margin)
+    }
+
+    /// [`Self::lease_ttl`] 的精确数据库毫秒值。
+    pub fn lease_ttl_millis(&self) -> i64 {
+        self.lease_ttl.as_millis() as i64
+    }
+
+    /// [`Self::publish_timeout`] 的精确数据库/审计毫秒值。
+    pub fn publish_timeout_millis(&self) -> i64 {
+        self.publish_timeout.as_millis() as i64
+    }
+
+    /// [`Self::settle_timeout`] 的精确数据库/审计毫秒值。
+    pub fn settle_timeout_millis(&self) -> i64 {
+        self.settle_timeout.as_millis() as i64
+    }
+
+    /// [`Self::safety_margin`] 的精确数据库/审计毫秒值。
+    pub fn safety_margin_millis(&self) -> i64 {
+        self.safety_margin.as_millis() as i64
+    }
+
+    /// [`Self::required_budget`] 的精确数据库毫秒值。
+    pub fn required_budget_millis(&self) -> i64 {
+        self.required_budget().as_millis() as i64
+    }
+
+    /// [`Self::publisher_watchdog_timeout`] 的精确审计毫秒值。
+    pub fn publisher_watchdog_timeout_millis(&self) -> i64 {
+        self.publisher_watchdog_timeout().as_millis() as i64
+    }
+}
+
+fn validate_budget_duration(
+    field: &'static str,
+    duration: Duration,
+) -> Result<(), RelayBudgetError> {
+    if duration.is_zero() {
+        return Err(RelayBudgetError::Zero { field });
+    }
+    if !duration.subsec_nanos().is_multiple_of(1_000_000) {
+        return Err(RelayBudgetError::NonIntegralMilliseconds { field });
+    }
+    if duration.as_millis() > u128::from(RELAY_BUDGET_MAX_MILLIS) {
+        return Err(RelayBudgetError::OperationalRangeExceeded {
+            field,
+            max_millis: RELAY_BUDGET_MAX_MILLIS,
+        });
+    }
+    Ok(())
+}
 
 // ── RelayConfig ───────────────────────────────────────────────────────────────
 
@@ -241,6 +407,206 @@ impl SweeperConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── RelayBudget：typed I/O budget funnel ─────────────────────────────────
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: 表驱动 happy-path 使用静态合法预算；失败即测试夹具错误。
+    fn relay_budget_accessors_round_trip_exact_values() {
+        let budget = RelayBudget::new(
+            Duration::from_secs(60),
+            Duration::from_secs(40),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .expect("valid relay budget");
+
+        assert_eq!(budget.lease_ttl(), Duration::from_secs(60));
+        assert_eq!(budget.publish_timeout(), Duration::from_secs(40));
+        assert_eq!(budget.settle_timeout(), Duration::from_secs(5));
+        assert_eq!(budget.safety_margin(), Duration::from_secs(5));
+        assert_eq!(budget.required_budget(), Duration::from_secs(50));
+        assert_eq!(budget.publisher_watchdog_timeout(), Duration::from_secs(45));
+        assert_eq!(budget.lease_ttl_millis(), 60_000);
+        assert_eq!(budget.publish_timeout_millis(), 40_000);
+        assert_eq!(budget.settle_timeout_millis(), 5_000);
+        assert_eq!(budget.safety_margin_millis(), 5_000);
+        assert_eq!(budget.required_budget_millis(), 50_000);
+        assert_eq!(budget.publisher_watchdog_timeout_millis(), 45_000);
+    }
+
+    #[test]
+    fn relay_budget_rejects_each_zero_component() {
+        let valid = Duration::from_millis(1);
+        let cases = [
+            ("lease_ttl", [Duration::ZERO, valid, valid, valid]),
+            ("publish_timeout", [valid, Duration::ZERO, valid, valid]),
+            ("settle_timeout", [valid, valid, Duration::ZERO, valid]),
+            ("safety_margin", [valid, valid, valid, Duration::ZERO]),
+        ];
+
+        for (field, [lease, publish, settle, safety]) in cases {
+            assert_eq!(
+                RelayBudget::new(lease, publish, settle, safety),
+                Err(RelayBudgetError::Zero { field }),
+                "field={field}"
+            );
+        }
+    }
+
+    #[test]
+    fn relay_budget_rejects_non_integral_milliseconds() {
+        let valid = Duration::from_millis(10);
+        let sub_millisecond = Duration::from_micros(1);
+        let cases = [
+            ("lease_ttl", [sub_millisecond, valid, valid, valid]),
+            ("publish_timeout", [valid, sub_millisecond, valid, valid]),
+            ("settle_timeout", [valid, valid, sub_millisecond, valid]),
+            ("safety_margin", [valid, valid, valid, sub_millisecond]),
+        ];
+
+        for (field, [lease, publish, settle, safety]) in cases {
+            assert_eq!(
+                RelayBudget::new(lease, publish, settle, safety),
+                Err(RelayBudgetError::NonIntegralMilliseconds { field }),
+                "field={field}"
+            );
+        }
+    }
+
+    #[test]
+    fn relay_budget_operational_ceiling_also_rejects_database_unrepresentable_duration() {
+        let too_large = Duration::from_millis((i64::MAX as u64 / 1_000) + 1);
+
+        assert_eq!(
+            RelayBudget::new(
+                too_large,
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+            ),
+            Err(RelayBudgetError::OperationalRangeExceeded {
+                field: "lease_ttl",
+                max_millis: RELAY_BUDGET_MAX_MILLIS,
+            })
+        );
+    }
+
+    #[test]
+    fn relay_budget_rejects_duration_sum_overflow() {
+        assert_eq!(
+            RelayBudget::new(
+                Duration::MAX,
+                Duration::new(u64::MAX, 0),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            Err(RelayBudgetError::RequiredBudgetOverflow)
+        );
+    }
+
+    #[test]
+    fn relay_budget_requires_budget_strictly_below_lease() {
+        let cases = [
+            (Duration::from_millis(30), Duration::from_millis(30)),
+            (Duration::from_millis(29), Duration::from_millis(30)),
+        ];
+
+        for (lease, required) in cases {
+            assert_eq!(
+                RelayBudget::new(
+                    lease,
+                    Duration::from_millis(10),
+                    Duration::from_millis(10),
+                    Duration::from_millis(10),
+                ),
+                Err(RelayBudgetError::RequiredBudgetNotBelowLease { lease, required })
+            );
+        }
+    }
+
+    #[test]
+    fn relay_budget_accepts_one_millisecond_slack() {
+        assert!(
+            RelayBudget::new(
+                Duration::from_millis(31),
+                Duration::from_millis(10),
+                Duration::from_millis(10),
+                Duration::from_millis(10),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn relay_budget_operational_ceiling_is_inclusive_and_public() {
+        assert_eq!(RELAY_BUDGET_MAX_MILLIS, 86_400_000);
+        let budget = RelayBudget::new(
+            Duration::from_millis(RELAY_BUDGET_MAX_MILLIS),
+            Duration::from_millis(RELAY_BUDGET_MAX_MILLIS - 3),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        )
+        .expect("24h ceiling with one millisecond slack must be valid");
+        assert_eq!(budget.lease_ttl_millis(), 86_400_000);
+        assert_eq!(budget.required_budget_millis(), 86_399_999);
+    }
+
+    #[test]
+    fn relay_budget_rejects_each_component_above_operational_ceiling() {
+        let max = Duration::from_millis(RELAY_BUDGET_MAX_MILLIS);
+        let above = Duration::from_millis(RELAY_BUDGET_MAX_MILLIS + 1);
+        let cases = [
+            (
+                "lease_ttl",
+                [
+                    above,
+                    Duration::from_millis(1),
+                    Duration::from_millis(1),
+                    Duration::from_millis(1),
+                ],
+            ),
+            (
+                "publish_timeout",
+                [
+                    max,
+                    above,
+                    Duration::from_millis(1),
+                    Duration::from_millis(1),
+                ],
+            ),
+            (
+                "settle_timeout",
+                [
+                    max,
+                    Duration::from_millis(1),
+                    above,
+                    Duration::from_millis(1),
+                ],
+            ),
+            (
+                "safety_margin",
+                [
+                    max,
+                    Duration::from_millis(1),
+                    Duration::from_millis(1),
+                    above,
+                ],
+            ),
+        ];
+
+        for (field, [lease, publish, settle, safety]) in cases {
+            assert_eq!(
+                RelayBudget::new(lease, publish, settle, safety),
+                Err(RelayBudgetError::OperationalRangeExceeded {
+                    field,
+                    max_millis: RELAY_BUDGET_MAX_MILLIS,
+                }),
+                "field={field}"
+            );
+        }
+    }
 
     // ── RelayConfig：表驱动越界拒绝 + happy 边界放行 ──────────────────────────
     #[test]

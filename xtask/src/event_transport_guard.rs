@@ -10,6 +10,9 @@
 //! production outbox relay providers, runtime wiring, eventexec dispatch, and post-cutover SQL must
 //! remain on the single claimed-entry protocol; cross-crate/source-set completeness is enforced by
 //! AST/SQL synthetic-red plus a canonical workspace green fixture.
+//! INVARIANT: OUTBOX-RELAY-BUDGET-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::relay_budget_guard_synthetic_red_breaks_each_carrier", anti_vacuity = "tests::relay_budget_guard_accepts_canonical_workspace" }——
+//! runtime typed config、AMQP 单 deadline、Postgres typed watchdog/settlement 与 0064 SQL 签名必须保持
+//! 同一预算能力链；carrier 生产 Rust 禁止回流固定 40/50/60 秒 deadline。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -73,6 +76,7 @@ pub(crate) enum Rule {
     ProductionConsumerBundleBypass,
     ProducerTopology,
     OutboxClaimCutover,
+    OutboxRelayBudget,
 }
 
 pub(crate) struct EventTransportGuard;
@@ -95,6 +99,11 @@ impl GovernanceCheck for EventTransportGuard {
         findings.extend(scan_event_producers(&root)?);
         let claim_cutover_sources = load_outbox_claim_cutover_sources(&root)?;
         findings.extend(scan_outbox_claim_cutover_sources(&claim_cutover_sources));
+        let relay_budget_sources = load_relay_budget_sources(&root)?;
+        findings.extend(scan_relay_budget_sources(&relay_budget_sources));
+        findings.extend(scan_relay_budget_constructor_callsites(
+            &claim_cutover_sources,
+        ));
         Ok((
             format!(
                 "{TARGET} 经 generated topology bridge + ConsumerTx PG inbox bundle 接线，生产 src 无散装 consumer bundle/outbox split claim"
@@ -1260,6 +1269,17 @@ fn expr_is_infra_call(expr: &syn::Expr) -> bool {
 
 const EVENTEXEC_RELAY_PATH: &str = "crates/eventexec/src/relay.rs";
 const POSTGRES_OUTBOX_PATH: &str = "adapters/postgres/src/outbox.rs";
+const RELAY_BUDGET_SOURCE_PATHS: &[&str] = &[
+    "crates/eventexec/src/relay_config.rs",
+    "assemblies/runtime/src/event_transport.rs",
+    "assemblies/runtime/src/lib.rs",
+    "adapters/amqp/src/publisher.rs",
+    "adapters/amqp/src/bundle.rs",
+    "adapters/postgres/src/outbox.rs",
+    "adapters/postgres/src/integration_tests.rs",
+    "adapters/postgres/src/bundle.rs",
+    "adapters/postgres/migrations/0064_parameterize_outbox_relay_budget.sql",
+];
 const LEGACY_OUTBOX_MIGRATIONS: &[&str] = &[
     "adapters/postgres/migrations/0031_harden_outbox_tenant_scope.sql",
     "adapters/postgres/migrations/0036_add_outbox_schema_columns.sql",
@@ -1268,6 +1288,886 @@ const LEGACY_OUTBOX_MIGRATIONS: &[&str] = &[
 const RETIRED_OUTBOX_FUNCTIONS: &[&str] = &["RSS_OUTBOX_POLL_PENDING", "RSS_OUTBOX_ACQUIRE_LEASE"];
 const ATOMIC_OUTBOX_CLAIM_MIGRATION: &str =
     "adapters/postgres/migrations/0057_atomic_outbox_claim.sql";
+
+fn load_relay_budget_sources(root: &Path) -> Result<Vec<(PathBuf, String)>> {
+    RELAY_BUDGET_SOURCE_PATHS
+        .iter()
+        .map(|relative| {
+            let path = root.join(relative);
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("relay budget guard: read {}", path.display()))?;
+            Ok((PathBuf::from(relative), content))
+        })
+        .collect()
+}
+
+fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>> {
+    let source_map = sources
+        .iter()
+        .map(|(path, content)| (path.as_path(), content.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut findings = Vec::new();
+    for (path, required) in [
+        (
+            "crates/eventexec/src/relay_config.rs",
+            &["pub const RELAY_BUDGET_MAX_MILLIS: u64 = 86_400_000"][..],
+        ),
+        (
+            "assemblies/runtime/src/event_transport.rs",
+            &[
+                "pub relay_budget: RelayBudget",
+                "budget: RelayBudget",
+                "const RELAY_LEASE_TTL_ENV: &str = \"RSS_RELAY_LEASE_TTL_MS\"",
+                "const RELAY_PUBLISH_TIMEOUT_ENV: &str = \"RSS_RELAY_PUBLISH_TIMEOUT_MS\"",
+                "const RELAY_SETTLE_TIMEOUT_ENV: &str = \"RSS_RELAY_SETTLE_TIMEOUT_MS\"",
+                "const RELAY_SAFETY_MARGIN_ENV: &str = \"RSS_RELAY_SAFETY_MARGIN_MS\"",
+            ][..],
+        ),
+        (
+            "adapters/amqp/src/publisher.rs",
+            &[
+                "const MAX_PUBLISH_TIMEOUT_MILLIS: u64 = 86_400_000",
+                "publish_timeout: Duration",
+            ][..],
+        ),
+        (
+            "adapters/amqp/src/bundle.rs",
+            &["publish_timeout: Duration"][..],
+        ),
+        (
+            "adapters/postgres/src/outbox.rs",
+            &["relay_budget: RelayBudget"][..],
+        ),
+        (
+            "adapters/postgres/src/bundle.rs",
+            &["relay_budget: RelayBudget"][..],
+        ),
+        (
+            "adapters/postgres/migrations/0064_parameterize_outbox_relay_budget.sql",
+            &[
+                "rss_outbox_claim_batch(text, bigint, bigint, bigint)",
+                "rss_outbox_publish_preflight(text, uuid, bigint, bigint, bigint)",
+                "p_required_budget_ms >= p_lease_ttl_ms",
+                "p_lease_ttl_ms > 86400000 OR p_required_budget_ms > 86400000",
+                "p_required_budget_ms * interval",
+                "DROP FUNCTION rss_outbox_claim_batch(text, bigint)",
+                "DROP FUNCTION rss_outbox_publish_preflight(text, uuid, bigint)",
+            ][..],
+        ),
+    ] {
+        let content = source_map.get(Path::new(path)).copied().unwrap_or_default();
+        let structural = if path.ends_with(".rs") {
+            production_rust_structure(content).unwrap_or_default()
+        } else {
+            relay_budget_sql_code(content)
+        };
+        for fragment in required {
+            let normalized = fragment
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            if !structural.contains(&normalized) {
+                findings.push(finding(
+                    Rule::OutboxRelayBudget,
+                    path.to_string(),
+                    format!("OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `{fragment}`"),
+                ));
+            }
+        }
+    }
+    findings.extend(scan_relay_budget_live_seams(&source_map));
+
+    // Boundary tests are part of the Medium gate: parse the complete Rust token stream so comments
+    // cannot satisfy these anchors, while retaining cfg(test) bodies and SQL macro literals.
+    for (path, required) in [
+        (
+            "crates/eventexec/src/relay_config.rs",
+            &[
+                "fn relay_budget_operational_ceiling_is_inclusive_and_public",
+                "RELAY_BUDGET_MAX_MILLIS + 1",
+            ][..],
+        ),
+        (
+            "assemblies/runtime/src/event_transport.rs",
+            &[
+                "fn config_builder_relay_budget_invalid_values_fail_fast",
+                "(\"RSS_RELAY_LEASE_TTL_MS\", \"86400001\")",
+            ][..],
+        ),
+        (
+            "adapters/amqp/src/publisher.rs",
+            &["MAX_PUBLISH_TIMEOUT_MILLIS + 1"][..],
+        ),
+        (
+            "adapters/postgres/src/outbox.rs",
+            &["fn relay_budget_migration_is_parameterized_breaking_and_least_privilege"][..],
+        ),
+        (
+            "adapters/postgres/src/integration_tests.rs",
+            &[
+                "fn relay_budget_sql_boundary_is_fail_closed_and_claim_uses_configured_ttl",
+                "Some(86_400_001)",
+            ][..],
+        ),
+    ] {
+        let content = source_map.get(Path::new(path)).copied().unwrap_or_default();
+        let structure = syn::parse_file(content)
+            .map(|file| normalized_tokens(&file))
+            .unwrap_or_default();
+        for fragment in required {
+            let normalized = fragment
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            if !structure.contains(&normalized) {
+                findings.push(finding(
+                    Rule::OutboxRelayBudget,
+                    path.to_string(),
+                    format!("OUTBOX-RELAY-BUDGET-01 缺边界测试 fragment `{fragment}`"),
+                ));
+            }
+        }
+    }
+    for (path, content) in sources {
+        if path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+            && path != Path::new("crates/eventexec/src/relay_config.rs")
+            && path != Path::new("adapters/postgres/src/integration_tests.rs")
+        {
+            findings.extend(scan_hardcoded_relay_budget(path, content));
+        }
+    }
+    for (path, marker, function, required) in [
+        (
+            "assemblies/runtime/src/lib.rs",
+            "runtime event transport budget loaded",
+            "run",
+            &[
+                "runtime.event_topology",
+                "relay.lease_ttl_ms",
+                "relay.publish_timeout_ms",
+                "relay.settle_timeout_ms",
+                "relay.safety_margin_ms",
+                "relay.required_budget_ms",
+            ][..],
+        ),
+        (
+            "adapters/amqp/src/publisher.rs",
+            "amqp publisher confirm deadline elapsed",
+            "publish",
+            &[
+                "phase",
+                "publish_timeout_ms",
+                "delivery_outcome",
+                "broker_may_have_received",
+            ][..],
+        ),
+        (
+            "adapters/postgres/src/outbox.rs",
+            "outbox publisher watchdog timed out",
+            "with_publisher_watchdog",
+            &[
+                "phase",
+                "publish_timeout_ms",
+                "publisher_watchdog_timeout_ms",
+                "delivery_outcome",
+                "broker_may_have_received",
+            ][..],
+        ),
+        (
+            "adapters/postgres/src/outbox.rs",
+            "outbox settlement timed out",
+            "settlement_timeout_error",
+            &[
+                "phase",
+                "settle_timeout_ms",
+                "delivery_outcome",
+                "broker_may_have_received",
+            ][..],
+        ),
+    ] {
+        let content = source_map.get(Path::new(path)).copied().unwrap_or_default();
+        findings.extend(scan_relay_budget_audit(
+            path, content, marker, function, required,
+        ));
+    }
+    findings
+}
+
+#[derive(Default)]
+struct ProductionDeclarationsVisitor {
+    parts: Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for ProductionDeclarationsVisitor {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if !has_test_attr(&node.attrs) {
+            syn::visit::visit_item_mod(self, node);
+        }
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if !has_test_attr(&node.attrs) {
+            self.parts.push(normalized_tokens(&node.sig));
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if !has_test_attr(&node.attrs) {
+            self.parts.push(normalized_tokens(&node.sig));
+        }
+    }
+
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        if !has_test_attr(&node.attrs) {
+            self.parts.push(normalized_tokens(node));
+        }
+    }
+
+    fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
+        if !has_test_attr(&node.attrs) {
+            self.parts.push(normalized_tokens(node));
+        }
+    }
+}
+
+fn production_rust_structure(content: &str) -> Option<String> {
+    let file = syn::parse_file(content).ok()?;
+    let mut visitor = ProductionDeclarationsVisitor::default();
+    visitor.visit_file(&file);
+    Some(visitor.parts.join("\n"))
+}
+
+#[derive(Default)]
+struct RelayLiveFacts {
+    facts: Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for RelayLiveFacts {
+    // A nested production helper is not a live fact of its enclosing relay owner.
+    fn visit_item_fn(&mut self, _: &'ast syn::ItemFn) {}
+
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        self.facts.push(normalized_tokens(node));
+        syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        self.facts.push(normalized_tokens(node));
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.facts.push(normalized_tokens(node));
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        self.facts.push(normalized_tokens(node));
+        syn::visit::visit_expr_struct(self, node);
+    }
+}
+
+fn relay_owner_facts(file: &syn::File, owner: Option<&str>, name: &str) -> Option<Vec<String>> {
+    let mut blocks = Vec::new();
+    for item in &file.items {
+        match item {
+            syn::Item::Fn(function)
+                if owner.is_none()
+                    && function.sig.ident == name
+                    && !has_test_attr(&function.attrs) =>
+            {
+                blocks.push(function.block.as_ref());
+            }
+            syn::Item::Impl(item_impl)
+                if owner.is_some_and(|owner| normalized_tokens(&item_impl.self_ty) == owner)
+                    && !has_test_attr(&item_impl.attrs) =>
+            {
+                blocks.extend(item_impl.items.iter().filter_map(|item| match item {
+                    syn::ImplItem::Fn(function)
+                        if function.sig.ident == name && !has_test_attr(&function.attrs) =>
+                    {
+                        Some(&function.block)
+                    }
+                    _ => None,
+                }));
+            }
+            _ => {}
+        }
+    }
+    let [block] = blocks.as_slice() else {
+        return None;
+    };
+    let mut facts = RelayLiveFacts::default();
+    facts.visit_block(block);
+    Some(facts.facts)
+}
+
+fn missing_live_seam_facts(
+    file: &syn::File,
+    owner: Option<&str>,
+    function: &str,
+    required: &[&str],
+) -> Vec<String> {
+    let Some(facts) = relay_owner_facts(file, owner, function) else {
+        return vec!["<owner missing or ambiguous>".to_string()];
+    };
+    required
+        .iter()
+        .filter_map(|required| {
+            let required = required.replace(char::is_whitespace, "");
+            (!facts.iter().any(|fact| fact.contains(&required))).then_some(required)
+        })
+        .collect()
+}
+
+fn scan_live_seam_file(
+    path: &str,
+    content: &str,
+    seams: &[(Option<&str>, &str, &[&str])],
+) -> Vec<Finding<Rule>> {
+    let Ok(file) = syn::parse_file(content) else {
+        return vec![finding(
+            Rule::OutboxRelayBudget,
+            path.to_string(),
+            "OUTBOX-RELAY-BUDGET-01 live carrier Rust AST 无法解析".to_string(),
+        )];
+    };
+    seams
+        .iter()
+        .filter_map(|(owner, function, required)| {
+            let missing = missing_live_seam_facts(&file, *owner, function, required);
+            (!missing.is_empty()).then_some((owner, function, missing))
+        })
+        .map(|(owner, function, missing)| {
+            let owner = owner.map_or_else(String::new, |owner| format!("{owner}::"));
+            finding(
+                Rule::OutboxRelayBudget,
+                path.to_string(),
+                format!(
+                    "OUTBOX-RELAY-BUDGET-01 live seam `{owner}{function}` 未消费 canonical typed budget/deadline: {missing:?}"
+                ),
+            )
+        })
+        .collect()
+}
+
+fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<Rule>> {
+    let mut findings = Vec::new();
+    for (path, seams) in [
+        (
+            "assemblies/runtime/src/event_transport.rs",
+            &[
+                (
+                    None,
+                    "wire_event_transport",
+                    &[
+                        "budget: cfg.relay_budget",
+                        "pg.validate_relay_budget(timing.budget)",
+                        "wire_durable(pg, distributed, subscribers, per_domain, timing, security)",
+                    ][..],
+                ),
+                (
+                    None,
+                    "build_event_transport_config_from",
+                    &["RelayBudget::new(", "relay_budget,"][..],
+                ),
+                (
+                    None,
+                    "wire_durable",
+                    &[
+                        "amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain, timing.budget.publish_timeout())",
+                    ][..],
+                ),
+            ][..],
+        ),
+        (
+            "adapters/amqp/src/publisher.rs",
+            &[
+                (
+                    None,
+                    "run_publish_pipeline",
+                    &[
+                        "tokio::time::timeout(publish_timeout, async",
+                        "basic_publish.await",
+                        "confirm(pending).await",
+                    ][..],
+                ),
+                (
+                    Some("AmqpPublisher"),
+                    "connect",
+                    &[
+                        "validate_publish_timeout(publish_timeout)",
+                        "Self { conn, channels:",
+                        "publish_timeout,",
+                    ][..],
+                ),
+                (
+                    Some("AmqpPublisher"),
+                    "publish",
+                    &[
+                        "run_publish_pipeline(self.publish_timeout, channel.channel.basic_publish(",
+                        "self.retire_timed_out_channel(channel.generation)",
+                    ][..],
+                ),
+            ],
+        ),
+        (
+            "adapters/amqp/src/bundle.rs",
+            &[(
+                Some("AmqpRuntimeDeps"),
+                "connect",
+                &["AmqpPublisher::connect(endpoint, format!(\"{name}-pub\"), publish_timeout)"][..],
+            )],
+        ),
+        (
+            "adapters/postgres/src/outbox.rs",
+            &[
+                (
+                    Some("PgOutbox"),
+                    "claim_batch",
+                    &[
+                        "bind(self.relay_budget.lease_ttl_millis())",
+                        "bind(self.relay_budget.required_budget_millis())",
+                    ][..],
+                ),
+                (
+                    Some("PgOutbox"),
+                    "relay",
+                    &[
+                        "io_deadline_after(self.relay_budget.publisher_watchdog_timeout())",
+                        "let preflight_deadline = publish_deadline - self.relay_budget.publish_timeout()",
+                        "publish_preflight(&self.pool, &claimed, self.relay_budget, preflight_deadline)",
+                        "self.publish_claimed_before(&claimed, publish_deadline)",
+                        "settle_published_before(&self.pool, &claimed, settle_deadline(self.relay_budget), self.relay_budget.settle_timeout_millis()",
+                    ][..],
+                ),
+                (
+                    Some("PgOutbox"),
+                    "publish_claimed_before",
+                    &[
+                        "with_publisher_watchdog(deadline, self.relay_budget, self.publisher.publish(request))",
+                    ][..],
+                ),
+                (
+                    None,
+                    "with_publisher_watchdog",
+                    &["tokio::time::timeout_at(deadline, future)"][..],
+                ),
+                (
+                    None,
+                    "publish_preflight",
+                    &[
+                        "let lease_ttl_millis = relay_budget.lease_ttl_millis()",
+                        "let required_budget_millis = relay_budget.required_budget_millis()",
+                        "deadline_global_transaction(pool, deadline,",
+                        "bind(lease_ttl_millis).bind(required_budget_millis)",
+                    ][..],
+                ),
+                (
+                    Some("PgOutbox"),
+                    "settle_delivery_window_expired",
+                    &[
+                        "settle_dlx(&self.tenant_pool, &self.payload_protector,",
+                        "settle_deadline(self.relay_budget)",
+                        "self.relay_budget.settle_timeout_millis()",
+                    ],
+                ),
+                (
+                    Some("PgOutbox"),
+                    "settle_publish_failure",
+                    &[
+                        "settle_dlx(&self.tenant_pool, &self.payload_protector,",
+                        "settle_deadline(self.relay_budget), \"settle_dlx\", self.relay_budget.settle_timeout_millis()",
+                        "settle_retry(&self.pool, claimed, settle_deadline(self.relay_budget), self.relay_budget.settle_timeout_millis()",
+                    ],
+                ),
+                (
+                    None,
+                    "settle_published_before",
+                    &["deadline_global_transaction(pool, deadline,"][..],
+                ),
+                (
+                    None,
+                    "settle_retry",
+                    &["deadline_global_transaction(pool, deadline,"][..],
+                ),
+                (
+                    None,
+                    "settle_dlx",
+                    &["deadline_write(infra_tenant_scope(tenant), deadline,"][..],
+                ),
+            ],
+        ),
+        (
+            "adapters/postgres/src/bundle.rs",
+            &[
+                (
+                    Some("PgRuntimeHandle"),
+                    "validate_relay_budget",
+                    &["self.delivery_policy.validate_relay_budget(budget)"][..],
+                ),
+                (
+                    Some("PgDomainDeps<caps::Settings>"),
+                    "outbox",
+                    &[
+                        "PgOutbox::new(&self.store, bound_domain::<caps::Settings>(), publisher, relay_budget,",
+                    ][..],
+                ),
+                (
+                    Some("PgDomainDeps<caps::Identity>"),
+                    "outbox",
+                    &[
+                        "PgOutbox::new(&self.store, bound_domain::<caps::Identity>(), publisher, relay_budget,",
+                    ][..],
+                ),
+            ],
+        ),
+    ] {
+        findings.extend(scan_live_seam_file(
+            path,
+            sources.get(Path::new(path)).copied().unwrap_or_default(),
+            seams,
+        ));
+    }
+    let runtime_path = "assemblies/runtime/src/event_transport.rs";
+    if let Ok(file) = syn::parse_file(
+        sources
+            .get(Path::new(runtime_path))
+            .copied()
+            .unwrap_or_default(),
+    ) && let Some(facts) = relay_owner_facts(&file, None, "wire_event_transport")
+    {
+        let gate = facts
+            .iter()
+            .position(|fact| fact.contains("pg.validate_relay_budget(timing.budget)"));
+        let connect = facts.iter().position(|fact| fact.contains("wire_durable("));
+        if !matches!((gate, connect), (Some(gate), Some(connect)) if gate < connect) {
+            findings.push(finding(
+                Rule::OutboxRelayBudget,
+                runtime_path.to_string(),
+                "OUTBOX-RELAY-BUDGET-01 database policy gate 必须先于 AMQP wire_durable"
+                    .to_string(),
+            ));
+        }
+    }
+    findings
+}
+
+struct RelayConstructorVisitor<'a> {
+    path: &'a Path,
+    owner: Option<String>,
+    findings: Vec<Finding<Rule>>,
+}
+
+impl RelayConstructorVisitor<'_> {
+    fn inspect(&mut self, call: &syn::ExprCall) {
+        let callee = normalized_tokens(call.func.as_ref());
+        let owner = self.owner.as_deref().unwrap_or("<module>");
+        let allowed = if callee.ends_with("amqp::AmqpRuntimeDeps::connect") {
+            self.path == Path::new("assemblies/runtime/src/event_transport.rs")
+                && owner == "wire_durable"
+        } else if callee.ends_with("AmqpPublisher::connect") {
+            self.path == Path::new("adapters/amqp/src/bundle.rs")
+                && owner == "AmqpRuntimeDeps::connect"
+        } else if callee.ends_with("PgOutbox::new") {
+            (self.path == Path::new("adapters/postgres/src/bundle.rs")
+                && matches!(
+                    owner,
+                    "PgDomainDeps<caps::Settings>::outbox" | "PgDomainDeps<caps::Identity>::outbox"
+                ))
+                || (self.path == Path::new("adapters/postgres/src/outbox.rs")
+                    && owner == "fault_matrix_publish_before_settle")
+        } else {
+            return;
+        };
+        if !allowed {
+            self.findings.push(finding(
+                Rule::OutboxRelayBudget,
+                self.path.display().to_string(),
+                format!("OUTBOX-RELAY-BUDGET-01 unregistered constructor `{callee}` in `{owner}`"),
+            ));
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for RelayConstructorVisitor<'_> {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if !is_claim_test_only(&node.attrs) {
+            syn::visit::visit_item_mod(self, node);
+        }
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if is_claim_test_only(&node.attrs) {
+            return;
+        }
+        let previous = self.owner.replace(node.sig.ident.to_string());
+        syn::visit::visit_item_fn(self, node);
+        self.owner = previous;
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        if is_claim_test_only(&node.attrs) {
+            return;
+        }
+        let self_ty = normalized_tokens(&node.self_ty);
+        for item in &node.items {
+            let syn::ImplItem::Fn(function) = item else {
+                continue;
+            };
+            if is_claim_test_only(&function.attrs) {
+                continue;
+            }
+            let previous = self
+                .owner
+                .replace(format!("{self_ty}::{}", function.sig.ident));
+            syn::visit::visit_impl_item_fn(self, function);
+            self.owner = previous;
+        }
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        self.inspect(node);
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+fn scan_relay_budget_constructor_callsites(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>> {
+    let test_only_files = external_cfg_test_module_paths(sources);
+    let mut findings = Vec::new();
+    for (path, content) in sources.iter().filter(|(path, _)| {
+        path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+            && !test_only_files.contains(path)
+    }) {
+        let Ok(file) = syn::parse_file(content) else {
+            continue;
+        };
+        let mut visitor = RelayConstructorVisitor {
+            path,
+            owner: None,
+            findings: Vec::new(),
+        };
+        visitor.visit_file(&file);
+        findings.extend(visitor.findings);
+    }
+    findings
+}
+
+/// 保留 migration 的 executable dollar-quoted function body，但剔除注释与普通字符串 bait。
+fn relay_budget_sql_code(content: &str) -> String {
+    fn strip(content: &str) -> String {
+        let bytes = content.as_bytes();
+        let mut output = String::with_capacity(content.len());
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if bytes[cursor..].starts_with(b"--") {
+                cursor = skip_sql_line_comment(bytes, cursor + 2);
+            } else if bytes[cursor..].starts_with(b"/*") {
+                cursor = skip_sql_block_comment(bytes, cursor + 2);
+            } else if matches!(bytes[cursor], b'\'' | b'"') {
+                cursor = skip_sql_quote(bytes, cursor, bytes[cursor]);
+                output.push(' ');
+            } else if let Some(tag) = sql_dollar_tag(bytes, cursor) {
+                let Some((body_start, body_end, next)) = sql_dollar_body(bytes, cursor, tag) else {
+                    break;
+                };
+                output.push_str(&strip(&content[body_start..body_end]));
+                cursor = next;
+            } else {
+                output.push(char::from(bytes[cursor]));
+                cursor += 1;
+            }
+        }
+        output
+    }
+    strip(content)
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+#[derive(Default)]
+struct RelayBudgetAuditVisitor {
+    function: Option<String>,
+    macros: Vec<(String, String)>,
+}
+
+impl<'ast> Visit<'ast> for RelayBudgetAuditVisitor {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if !has_test_attr(&node.attrs) {
+            syn::visit::visit_item_mod(self, node);
+        }
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if !has_test_attr(&node.attrs) {
+            let previous = self.function.replace(node.sig.ident.to_string());
+            syn::visit::visit_item_fn(self, node);
+            self.function = previous;
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if !has_test_attr(&node.attrs) {
+            let previous = self.function.replace(node.sig.ident.to_string());
+            syn::visit::visit_impl_item_fn(self, node);
+            self.function = previous;
+        }
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        let name = node
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string());
+        if matches!(name.as_deref(), Some("info" | "warn" | "error"))
+            && let Some(function) = &self.function
+        {
+            self.macros
+                .push((function.clone(), node.tokens.to_string()));
+        }
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+fn scan_relay_budget_audit(
+    path: &str,
+    content: &str,
+    marker: &str,
+    expected_function: &str,
+    required: &[&str],
+) -> Vec<Finding<Rule>> {
+    let Ok(file) = syn::parse_file(content) else {
+        return Vec::new();
+    };
+    let mut visitor = RelayBudgetAuditVisitor::default();
+    visitor.visit_file(&file);
+    let matches = visitor
+        .macros
+        .into_iter()
+        .filter(|(function, tokens)| function == expected_function && tokens.contains(marker))
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return vec![finding(
+            Rule::OutboxRelayBudget,
+            path.to_string(),
+            format!("生产函数 `{expected_function}` 必须且只能有一个审计事件 `{marker}`"),
+        )];
+    }
+    let tokens = &matches[0].1;
+    let compact = tokens
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let mut findings = required
+        .iter()
+        .filter(|field| !compact.contains(*field))
+        .map(|field| {
+            finding(
+                Rule::OutboxRelayBudget,
+                path.to_string(),
+                format!("审计事件 `{marker}` 缺安全字段 `{field}`"),
+            )
+        })
+        .collect::<Vec<_>>();
+    for forbidden in [
+        "endpoint",
+        "payload",
+        "metadata",
+        "tenant_authority",
+        "tenantAuthority",
+        "vault_token",
+        "Vault token",
+        "error=",
+        "?event_cfg",
+    ] {
+        if compact.contains(forbidden) {
+            findings.push(finding(
+                Rule::OutboxRelayBudget,
+                path.to_string(),
+                format!("审计事件 `{marker}` 泄漏禁止字段 `{forbidden}`"),
+            ));
+        }
+    }
+    findings
+}
+
+#[derive(Default)]
+struct HardcodedRelayBudgetVisitor {
+    occurrences: Vec<(usize, String)>,
+}
+
+impl<'ast> Visit<'ast> for HardcodedRelayBudgetVisitor {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if !has_test_attr(&node.attrs) {
+            syn::visit::visit_item_mod(self, node);
+        }
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if !has_test_attr(&node.attrs) {
+            syn::visit::visit_item_fn(self, node);
+        }
+    }
+
+    fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
+        let name = node.ident.to_string();
+        let relay_budget_const = [
+            "RELAY",
+            "LEASE_TTL",
+            "PUBLISH_TIMEOUT",
+            "SETTLE_TIMEOUT",
+            "SAFETY_MARGIN",
+            "REQUIRED_BUDGET",
+            "PUBLISHER_WATCHDOG",
+        ]
+        .iter()
+        .any(|marker| name.contains(marker));
+        if !has_test_attr(&node.attrs) && relay_budget_const {
+            syn::visit::visit_item_const(self, node);
+        }
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        let rendered = normalized_tokens(node).replace('_', "");
+        let forbidden = [
+            "Duration::fromsecs(40)",
+            "Duration::fromsecs(50)",
+            "Duration::fromsecs(60)",
+            "Duration::frommillis(40000)",
+            "Duration::frommillis(50000)",
+            "Duration::frommillis(60000)",
+        ];
+        if forbidden.iter().any(|needle| rendered.contains(needle)) {
+            self.occurrences.push((node.span().start().line, rendered));
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+fn scan_hardcoded_relay_budget(path: &Path, content: &str) -> Vec<Finding<Rule>> {
+    let Ok(file) = syn::parse_file(content) else {
+        return vec![finding(
+            Rule::OutboxRelayBudget,
+            path.display().to_string(),
+            "OUTBOX-RELAY-BUDGET-01 carrier Rust AST 无法解析".to_string(),
+        )];
+    };
+    let mut visitor = HardcodedRelayBudgetVisitor::default();
+    visitor.visit_file(&file);
+    visitor
+        .occurrences
+        .into_iter()
+        .map(|(line, rendered)| {
+            finding(
+                Rule::OutboxRelayBudget,
+                format!("{}:{line}", path.display()),
+                format!("生产 relay carrier 禁止固定 40/50/60 秒预算：`{rendered}`"),
+            )
+        })
+        .collect()
+}
 
 #[derive(Debug)]
 struct ForbiddenOccurrence {
@@ -5051,5 +5951,442 @@ $do$;
 
         let findings = scan_claim_cutover_fixtures(&fixtures);
         assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: governance test fixture 必须能读取当前 workspace；失败即测试环境/仓库布局错误。
+    fn relay_budget_guard_accepts_canonical_workspace() {
+        let root = workspace_root().expect("workspace root");
+        let sources = load_relay_budget_sources(&root).expect("relay budget sources");
+        let findings = scan_relay_budget_sources(&sources);
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn relay_budget_guard_discovers_constructor_callsites_workspacewide() {
+        let root = workspace_root().expect("workspace root");
+        let mut sources = load_outbox_claim_cutover_sources(&root).expect("workspace sources");
+        assert!(scan_relay_budget_constructor_callsites(&sources).is_empty());
+        sources.push((
+            PathBuf::from("crates/rogue/src/lib.rs"),
+            "async fn rogue() { let _ = amqp::AmqpRuntimeDeps::connect(endpoint, name, timeout).await; }".to_string(),
+        ));
+        let findings = scan_relay_budget_constructor_callsites(&sources);
+        assert!(findings.iter().any(|finding| {
+            finding.subject == "crates/rogue/src/lib.rs"
+                && finding.detail.contains("AmqpRuntimeDeps::connect")
+        }));
+    }
+
+    #[derive(Clone, Copy)]
+    enum RelayBudgetMutation<'a> {
+        ReplaceAll { from: &'a str, to: &'a str },
+        InsertAfter { needle: &'a str, addition: &'a str },
+    }
+
+    struct RelayBudgetRedCase<'a> {
+        name: &'a str,
+        path: &'a str,
+        mutation: RelayBudgetMutation<'a>,
+        expected: &'a [(&'a str, &'a str)],
+        hardcode_detail: Option<&'a str>,
+    }
+
+    impl<'a> RelayBudgetRedCase<'a> {
+        const fn replace(
+            name: &'a str,
+            path: &'a str,
+            from: &'a str,
+            to: &'a str,
+            expected: &'a [(&'a str, &'a str)],
+        ) -> Self {
+            Self {
+                name,
+                path,
+                mutation: RelayBudgetMutation::ReplaceAll { from, to },
+                expected,
+                hardcode_detail: None,
+            }
+        }
+
+        const fn hardcode(
+            name: &'a str,
+            path: &'a str,
+            needle: &'a str,
+            addition: &'a str,
+            hardcode_detail: &'a str,
+        ) -> Self {
+            Self {
+                name,
+                path,
+                mutation: RelayBudgetMutation::InsertAfter { needle, addition },
+                expected: &[],
+                hardcode_detail: Some(hardcode_detail),
+            }
+        }
+    }
+
+    #[allow(clippy::panic)]
+    // reason: test fixture corruption must fail with the exact mutation case/carrier context.
+    fn assert_relay_budget_red_case(
+        canonical_sources: &[(PathBuf, String)],
+        case: &RelayBudgetRedCase<'_>,
+    ) {
+        let mut mutated_sources = canonical_sources.to_vec();
+        let (_, content) = mutated_sources
+            .iter_mut()
+            .find(|(path, _)| path == Path::new(case.path))
+            .unwrap_or_else(|| panic!("{}: missing carrier {}", case.name, case.path));
+        match case.mutation {
+            RelayBudgetMutation::ReplaceAll { from, to } => {
+                assert!(
+                    content.contains(from),
+                    "{}: mutation source fragment missing: {from}",
+                    case.name
+                );
+                *content = content.replace(from, to);
+            }
+            RelayBudgetMutation::InsertAfter { needle, addition } => {
+                assert!(
+                    content.contains(needle),
+                    "{}: insertion anchor missing: {needle}",
+                    case.name
+                );
+                *content = content.replacen(needle, &format!("{needle}{addition}"), 1);
+            }
+        }
+
+        let expected = if let Some(detail) = case.hardcode_detail {
+            let line = content
+                .lines()
+                .position(|line| line.contains("Duration::from_secs(40)"))
+                .map(|index| index + 1)
+                .unwrap_or_else(|| panic!("{}: hardcode mutation missing", case.name));
+            vec![finding(
+                Rule::OutboxRelayBudget,
+                format!("{}:{line}", case.path),
+                detail,
+            )]
+        } else {
+            case.expected
+                .iter()
+                .map(|(subject, detail)| finding(Rule::OutboxRelayBudget, *subject, *detail))
+                .collect()
+        };
+        let findings = scan_relay_budget_sources(&mutated_sources);
+        assert_eq!(findings, expected, "synthetic-red case `{}`", case.name);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: synthetic-red 从 canonical workspace 逐 mutation 破坏，读取失败即夹具错误。
+    fn relay_budget_guard_synthetic_red_breaks_each_carrier() {
+        let root = workspace_root().expect("workspace root");
+        let sources = load_relay_budget_sources(&root).expect("relay budget sources");
+        let cases = [
+            RelayBudgetRedCase::replace(
+                "typed budget operational ceiling",
+                "crates/eventexec/src/relay_config.rs",
+                "pub const RELAY_BUDGET_MAX_MILLIS: u64 = 86_400_000;",
+                "pub const RELAY_BUDGET_MAX_MILLIS: u64 = 86_400_001;",
+                &[(
+                    "crates/eventexec/src/relay_config.rs",
+                    "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `pub const RELAY_BUDGET_MAX_MILLIS: u64 = 86_400_000`",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "runtime maximum plus one boundary",
+                "assemblies/runtime/src/event_transport.rs",
+                "(\"RSS_RELAY_LEASE_TTL_MS\", \"86400001\")",
+                "(\"RSS_RELAY_LEASE_TTL_MS\", \"86400002\")",
+                &[(
+                    "assemblies/runtime/src/event_transport.rs",
+                    "OUTBOX-RELAY-BUDGET-01 缺边界测试 fragment `(\"RSS_RELAY_LEASE_TTL_MS\", \"86400001\")`",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "amqp operational ceiling",
+                "adapters/amqp/src/publisher.rs",
+                "const MAX_PUBLISH_TIMEOUT_MILLIS: u64 = 86_400_000;",
+                "const MAX_PUBLISH_TIMEOUT_MILLIS: u64 = 86_400_001;",
+                &[(
+                    "adapters/amqp/src/publisher.rs",
+                    "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `const MAX_PUBLISH_TIMEOUT_MILLIS: u64 = 86_400_000`",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "postgres operational ceiling",
+                "adapters/postgres/migrations/0064_parameterize_outbox_relay_budget.sql",
+                "p_lease_ttl_ms > 86400000 OR p_required_budget_ms > 86400000",
+                "p_lease_ttl_ms > 86400001 OR p_required_budget_ms > 86400001",
+                &[(
+                    "adapters/postgres/migrations/0064_parameterize_outbox_relay_budget.sql",
+                    "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `p_lease_ttl_ms > 86400000 OR p_required_budget_ms > 86400000`",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "postgres maximum plus one boundary",
+                "adapters/postgres/src/integration_tests.rs",
+                "Some(86_400_001)",
+                "Some(86_400_002)",
+                &[(
+                    "adapters/postgres/src/integration_tests.rs",
+                    "OUTBOX-RELAY-BUDGET-01 缺边界测试 fragment `Some(86_400_001)`",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "runtime typed carrier",
+                "assemblies/runtime/src/event_transport.rs",
+                "pub relay_budget: RelayBudget",
+                "pub relay_budget_ms: u64",
+                &[(
+                    "assemblies/runtime/src/event_transport.rs",
+                    "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `pub relay_budget: RelayBudget`",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "runtime startup carrier",
+                "assemblies/runtime/src/lib.rs",
+                "relay.required_budget_ms = event_cfg.relay_budget.required_budget_millis()",
+                "relay.required_budget = event_cfg.relay_budget.required_budget_millis()",
+                &[(
+                    "assemblies/runtime/src/lib.rs",
+                    "审计事件 `runtime event transport budget loaded` 缺安全字段 `relay.required_budget_ms`",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "amqp publisher carrier",
+                "adapters/amqp/src/publisher.rs",
+                "tokio::time::timeout(publish_timeout, async",
+                "tokio::time::timeout(deadline, async",
+                &[(
+                    "adapters/amqp/src/publisher.rs",
+                    "OUTBOX-RELAY-BUDGET-01 live seam `run_publish_pipeline` 未消费 canonical typed budget/deadline: [\"tokio::time::timeout(publish_timeout,async\"]",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "amqp bundle carrier",
+                "adapters/amqp/src/bundle.rs",
+                "publish_timeout).await?",
+                "Duration::ZERO).await?",
+                &[(
+                    "adapters/amqp/src/bundle.rs",
+                    "OUTBOX-RELAY-BUDGET-01 live seam `AmqpRuntimeDeps::connect` 未消费 canonical typed budget/deadline: [\"AmqpPublisher::connect(endpoint,format!(\\\"{name}-pub\\\"),publish_timeout)\"]",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "postgres outbox carrier",
+                "adapters/postgres/src/outbox.rs",
+                "with_publisher_watchdog(deadline, self.relay_budget",
+                "with_publisher_watchdog(deadline, RelayBudget::for_tests()",
+                &[(
+                    "adapters/postgres/src/outbox.rs",
+                    "OUTBOX-RELAY-BUDGET-01 live seam `PgOutbox::publish_claimed_before` 未消费 canonical typed budget/deadline: [\"with_publisher_watchdog(deadline,self.relay_budget,self.publisher.publish(request))\"]",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "postgres bundle carrier",
+                "adapters/postgres/src/bundle.rs",
+                "relay_budget: RelayBudget",
+                "publish_timeout: Duration",
+                &[(
+                    "adapters/postgres/src/bundle.rs",
+                    "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `relay_budget: RelayBudget`",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "postgres migration carrier",
+                "adapters/postgres/migrations/0064_parameterize_outbox_relay_budget.sql",
+                "p_required_budget_ms >= p_lease_ttl_ms",
+                "p_required_budget_ms > p_lease_ttl_ms",
+                &[(
+                    "adapters/postgres/migrations/0064_parameterize_outbox_relay_budget.sql",
+                    "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `p_required_budget_ms >= p_lease_ttl_ms`",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "audit required field",
+                "adapters/amqp/src/publisher.rs",
+                "publish_timeout_ms = self.publish_timeout.as_millis() as i64,",
+                "deadline_ms = self.publish_timeout.as_millis() as i64,",
+                &[(
+                    "adapters/amqp/src/publisher.rs",
+                    "审计事件 `amqp publisher confirm deadline elapsed` 缺安全字段 `publish_timeout_ms`",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "audit forbidden field",
+                "adapters/amqp/src/publisher.rs",
+                "delivery_outcome = \"unknown\",",
+                "payload = ?request, delivery_outcome = \"unknown\",",
+                &[(
+                    "adapters/amqp/src/publisher.rs",
+                    "审计事件 `amqp publisher confirm deadline elapsed` 泄漏禁止字段 `payload`",
+                )],
+            ),
+            RelayBudgetRedCase::hardcode(
+                "production hardcode",
+                "assemblies/runtime/src/event_transport.rs",
+                "fn parse_topology(s: &str) -> anyhow::Result<bootstrap::Topology> {",
+                "\n    let _ = Duration::from_secs(40);",
+                "生产 relay carrier 禁止固定 40/50/60 秒预算：`Duration::fromsecs(40)`",
+            ),
+            RelayBudgetRedCase::hardcode(
+                "production relay const hardcode",
+                "assemblies/runtime/src/event_transport.rs",
+                "const RELAY_LEASE_TTL_ENV: &str = \"RSS_RELAY_LEASE_TTL_MS\";",
+                "\nconst RELAY_BUDGET_HARDCODE: Duration = Duration::from_secs(40);",
+                "生产 relay carrier 禁止固定 40/50/60 秒预算：`Duration::fromsecs(40)`",
+            ),
+        ];
+
+        for case in &cases {
+            assert_relay_budget_red_case(&sources, case);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn relay_budget_guard_rejects_comment_test_string_and_audit_bait() {
+        let root = workspace_root().expect("workspace root");
+        let canonical = load_relay_budget_sources(&root).expect("relay budget sources");
+        let cases = [
+            (
+                "rust comment bait",
+                "assemblies/runtime/src/event_transport.rs",
+                "pub relay_budget: RelayBudget",
+                "pub relay_budget_ms: u64, // pub relay_budget: RelayBudget",
+            ),
+            (
+                "rust cfg(test) bait",
+                "adapters/amqp/src/publisher.rs",
+                "tokio::time::timeout(publish_timeout, async",
+                "tokio::time::timeout(deadline, async",
+            ),
+            (
+                "sql string bait",
+                "adapters/postgres/migrations/0064_parameterize_outbox_relay_budget.sql",
+                "p_required_budget_ms >= p_lease_ttl_ms",
+                "p_required_budget_ms > p_lease_ttl_ms",
+            ),
+            (
+                "audit cfg(test) bait",
+                "adapters/amqp/src/publisher.rs",
+                "amqp publisher confirm deadline elapsed",
+                "amqp production timeout marker removed",
+            ),
+        ];
+
+        for (name, path, from, to) in cases {
+            let mut sources = canonical.clone();
+            let (_, content) = sources
+                .iter_mut()
+                .find(|(candidate, _)| candidate == Path::new(path))
+                .expect("carrier");
+            assert!(content.contains(from), "{name}: mutation anchor");
+            *content = if name == "sql string bait" {
+                content.replace(from, to)
+            } else {
+                content.replacen(from, to, 1)
+            };
+            match name {
+                "rust cfg(test) bait" => content.push_str(
+                    "\n#[cfg(test)] mod relay_budget_bait { async fn bait(publish_timeout: std::time::Duration) { let _ = tokio::time::timeout(publish_timeout, async {}).await; } }\n",
+                ),
+                "sql string bait" => {
+                    content.push_str("\nSELECT 'p_required_budget_ms >= p_lease_ttl_ms';\n")
+                }
+                "audit cfg(test) bait" => content.push_str(
+                    r#"
+#[cfg(test)]
+mod relay_budget_audit_bait {
+    fn bait() {
+        tracing::warn!(
+            phase = "confirm",
+            publish_timeout_ms = 1,
+            delivery_outcome = "unknown",
+            broker_may_have_received = true,
+            "amqp publisher confirm deadline elapsed"
+        );
+    }
+}
+"#,
+                ),
+                _ => {}
+            }
+            assert!(
+                !scan_relay_budget_sources(&sources).is_empty(),
+                "{name} must not satisfy OUTBOX-RELAY-BUDGET-01"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn relay_budget_guard_rejects_live_seam_drift_with_production_dead_helper_bait() {
+        let root = workspace_root().expect("workspace root");
+        let canonical = load_relay_budget_sources(&root).expect("relay budget sources");
+        let cases = [
+            (
+                "runtime gate",
+                "assemblies/runtime/src/event_transport.rs",
+                "pg.validate_relay_budget(timing.budget)",
+                "pg.validate_relay_budget(relay_budget_dead_value())",
+                "\n#[allow(dead_code)] fn dead(pg: &PgRuntimeHandle, timing: RelayTiming) { let _ = pg.validate_relay_budget(timing.budget); }\n",
+                "wire_event_transport",
+            ),
+            (
+                "amqp shared deadline",
+                "adapters/amqp/src/publisher.rs",
+                "tokio::time::timeout(publish_timeout, async",
+                "tokio::time::timeout(Duration::from_millis(1), async",
+                "\n#[allow(dead_code)] async fn dead(publish_timeout: Duration) { let _ = tokio::time::timeout(publish_timeout, async {}).await; }\n",
+                "run_publish_pipeline",
+            ),
+            (
+                "amqp timeout channel retirement",
+                "adapters/amqp/src/publisher.rs",
+                "self.retire_timed_out_channel(channel.generation)",
+                "let _timed_out_generation = channel.generation",
+                "\nimpl AmqpPublisher { #[allow(dead_code)] fn dead_timeout_cleanup(&self, channel: ChannelSnapshot<Channel>) { self.retire_timed_out_channel(channel.generation); } }\n",
+                "AmqpPublisher::publish",
+            ),
+            (
+                "postgres watchdog",
+                "adapters/postgres/src/outbox.rs",
+                "with_publisher_watchdog(deadline, self.relay_budget",
+                "with_publisher_watchdog(deadline, relay_budget_dead_value()",
+                "\nimpl PgOutbox { #[allow(dead_code)] async fn dead(&self, deadline: tokio::time::Instant, request: PublishRequest) { let _ = with_publisher_watchdog(deadline, self.relay_budget, self.publisher.publish(request)).await; } }\n",
+                "publish_claimed_before",
+            ),
+            (
+                "postgres settle retry",
+                "adapters/postgres/src/outbox.rs",
+                "settle_retry(\n                &self.pool,\n                claimed,\n                settle_deadline(self.relay_budget),",
+                "settle_retry(\n                &self.pool,\n                claimed,\n                io_deadline_after(Duration::from_millis(1)),",
+                "\nimpl PgOutbox { #[allow(dead_code)] async fn dead_settle(&self, claimed: &PgClaimedOutboxEntry) { let _ = settle_retry(&self.pool, claimed, settle_deadline(self.relay_budget), self.relay_budget.settle_timeout_millis()).await; } }\n",
+                "settle_publish_failure",
+            ),
+        ];
+
+        for (name, path, from, to, bait, owner) in cases {
+            let mut sources = canonical.clone();
+            let (_, content) = sources
+                .iter_mut()
+                .find(|(candidate, _)| candidate == Path::new(path))
+                .expect("relay carrier");
+            assert!(content.contains(from), "{name}: mutation anchor");
+            *content = content.replacen(from, to, 1);
+            content.push_str(bait);
+            let findings = scan_relay_budget_sources(&sources);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.detail.contains(owner)),
+                "{name}: dead helper must not satisfy live owner: {findings:#?}"
+            );
+        }
     }
 }

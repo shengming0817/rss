@@ -48,6 +48,7 @@
 //! 连接相关逻辑（bundle connect / guard shutdown）走 integration feature。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use diport::{
     AckableSubscriber, DeliveryStream, DynAckableSubscriber, DynManagedResource, DynPublisher,
@@ -72,7 +73,7 @@ impl AmqpRuntimeDeps {
     /// 唯一公开装配路径：从单个 per-domain AMQP URL（`amqp://user:pass@host/vhost`）打开该域 vhost 的
     /// publisher（confirm channel）+ subscriber（per-subscription channel 按需）连接。`name` 派生
     /// `ManagedResource` 可读名（`<name>-pub` / `<name>-sub`）。连接失败经 redaction funnel 记日志，URL
-    /// 原文绝不进日志。
+    /// 原文绝不进日志。`publish_timeout` 必填并由 publisher 在网络连接前再次校验。
     ///
     /// `name` 应使用该 vhost 所属**域名 kebab-case**（如 `"identity"` / `"settings"`），产生
     /// `<域>-pub` / `<域>-sub` 的稳定 `ManagedResource` 名，供 ShutdownStack 关停日志与告警规则建立
@@ -82,8 +83,11 @@ impl AmqpRuntimeDeps {
     pub async fn connect(
         endpoint: &secure::AmqpEndpoint,
         name: &str,
+        publish_timeout: Duration,
     ) -> Result<Self, AmqpConnectError> {
-        let publisher = Arc::new(AmqpPublisher::connect(endpoint, format!("{name}-pub")).await?);
+        let publisher = Arc::new(
+            AmqpPublisher::connect(endpoint, format!("{name}-pub"), publish_timeout).await?,
+        );
         let subscriber = Arc::new(AmqpSubscriber::connect(endpoint, format!("{name}-sub")).await?);
         Ok(Self {
             publisher,

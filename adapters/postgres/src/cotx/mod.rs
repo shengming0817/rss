@@ -22,7 +22,8 @@ use consistency::EventEntry;
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use diport::OutboxEmitError;
 use futures::future::BoxFuture;
-use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use sqlx::{Acquire, PgConnection, PgPool, Postgres, Transaction};
+use tokio::time::Instant;
 use vocab::TenantId;
 
 use crate::PgStore;
@@ -47,6 +48,14 @@ pub(crate) use settlement::{LocalTxAttempt, LocalTxRetryError, commit_unknown};
 pub(crate) use settlement::{LocalTxAttempt, commit_unknown};
 
 const TX_RETRY_LOCK_TIMEOUT: &str = "5s";
+
+/// Tokio I/O deadlines require a monotonic clock; the wall-clock [`diport::Clock`] contract cannot
+/// represent or safely derive these instants. Keeping this one adapter-private boundary also makes
+/// paused-time tests deterministic.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn io_deadline_after(duration: std::time::Duration) -> Instant {
+    Instant::now() + duration
+}
 
 pub(crate) trait TenantScopeHandle: Copy + Send {
     fn tenant(self) -> TenantId;
@@ -255,6 +264,34 @@ impl PgTenantPool {
             .into_result()
     }
 
+    /// Run one tenant-scoped transaction before an absolute deadline. The connection is owned by
+    /// this operation so a client-side timeout can poison it instead of returning an executor with
+    /// an unknown PostgreSQL backend state to the idle pool.
+    pub(crate) async fn deadline_write<S, T, F, E>(
+        &self,
+        scope: S,
+        deadline: Instant,
+        write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
+        map_timeout: impl Fn() -> E + Send + Sync,
+    ) -> Result<T, E>
+    where
+        S: TenantScopeHandle,
+        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: Send,
+        T: Send,
+    {
+        deadline_transaction(
+            &self.pool,
+            Some(scope.tenant()),
+            deadline,
+            write,
+            map_storage,
+            map_timeout,
+        )
+        .await
+    }
+
     /// Run a tenant-scoped write with a lock wait bound but without replaying the operation.
     ///
     /// This is for mutation paths such as an idempotent tombstone append that have no generated
@@ -354,6 +391,99 @@ impl PgTenantPool {
         )
         .await
     }
+}
+
+/// Run one unscoped infrastructure transaction before an absolute deadline.
+///
+/// Acquire, transaction setup, operation and commit all consume the same deadline. Once a
+/// connection has been acquired, elapsed timeout marks it `close_on_drop`; SQLx must never ping an
+/// executor with an unknown in-flight query back into the idle pool.
+pub(crate) async fn deadline_global_transaction<T, F, E>(
+    pool: &PgPool,
+    deadline: Instant,
+    operation: F,
+    map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
+    map_timeout: impl Fn() -> E + Send + Sync,
+) -> Result<T, E>
+where
+    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+    E: Send,
+    T: Send,
+{
+    deadline_transaction(pool, None, deadline, operation, map_storage, map_timeout).await
+}
+
+async fn deadline_transaction<T, F, E>(
+    pool: &PgPool,
+    tenant: Option<TenantId>,
+    deadline: Instant,
+    operation: F,
+    map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
+    map_timeout: impl Fn() -> E + Send + Sync,
+) -> Result<T, E>
+where
+    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+    E: Send,
+    T: Send,
+{
+    let mut connection = match tokio::time::timeout_at(deadline, pool.acquire()).await {
+        Ok(Ok(connection)) => connection,
+        Ok(Err(error)) => return Err(map_storage(error)),
+        Err(_) => return Err(map_timeout()),
+    };
+
+    let transaction = async {
+        let mut tx = connection.begin().await.map_err(&map_storage)?;
+        set_local_deadline_timeouts(&mut tx, deadline)
+            .await
+            .map_err(&map_storage)?;
+        if let Some(tenant) = tenant {
+            set_local_tenant(&mut tx, tenant)
+                .await
+                .map_err(&map_storage)?;
+        }
+        let result = operation(&mut tx).await;
+        match result {
+            Ok(value) => {
+                tx.commit().await.map_err(&map_storage)?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    };
+
+    match tokio::time::timeout_at(deadline, transaction).await {
+        Ok(result) => result,
+        Err(_) => {
+            connection.close_on_drop();
+            Err(map_timeout())
+        }
+    }
+}
+
+async fn set_local_deadline_timeouts(
+    connection: &mut PgConnection,
+    deadline: Instant,
+) -> Result<(), sqlx::Error> {
+    let remaining_millis = deadline
+        .saturating_duration_since(io_deadline_after(std::time::Duration::ZERO))
+        .as_millis();
+    // The server must fire before the outer Tokio deadline. Connection poisoning remains the
+    // fail-safe for sub-3ms residual windows and broken transports.
+    let statement_millis = remaining_millis.saturating_sub(2).max(1);
+    let lock_millis = statement_millis.saturating_sub(1).max(1);
+    sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+        .bind(format!("{statement_millis}ms"))
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(format!("{lock_millis}ms"))
+        .execute(connection)
+        .await?;
+    Ok(())
 }
 
 /// tenant-scoped 只读事务：begin → SET LOCAL `rss.tenant_id` → 读闭包 → commit。

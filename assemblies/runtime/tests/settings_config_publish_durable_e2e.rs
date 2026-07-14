@@ -29,8 +29,8 @@ use diport::{
     PublisherError, RedactedBytes,
 };
 use eventexec::{
-    OutboxMetricScope, OutboxMetrics, RelayConfig, RelayPhase, SamplerConfig, WorkerHealth,
-    backlog_sampler_loop,
+    OutboxMetricScope, OutboxMetrics, RelayBudget, RelayConfig, RelayPhase, SamplerConfig,
+    WorkerHealth, backlog_sampler_loop,
 };
 use generated::event::settings_v1::{
     self, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
@@ -568,6 +568,12 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
     let publisher = CapturingPublisher::default();
     let outbox = settings_deps.outbox(
         DynPublisher::new_box(publisher.clone()),
+        RelayBudget::new(
+            Duration::from_secs(60),
+            Duration::from_secs(40),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )?,
         journeys_common_tenant_authority()?,
         dlx_payload_protector()?,
     );

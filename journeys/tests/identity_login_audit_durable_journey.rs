@@ -44,7 +44,9 @@ use diport::{
     EnvelopeMetadata, KEY_CORRELATION, KEY_SUBJECT_ID, ManagedResource, Message, MessageId,
     PublishRequest, Publisher, Subscriber, Topic,
 };
-use eventexec::{ConsumerMeta, LeaseConfig, TenantAuthority, TenantAuthorityBinding, run_consumer};
+use eventexec::{
+    ConsumerMeta, LeaseConfig, RelayBudget, TenantAuthority, TenantAuthorityBinding, run_consumer,
+};
 use futures::future::BoxFuture;
 use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
 use generated::http::identity_v1::login::IdentityLoginRequest;
@@ -372,6 +374,12 @@ async fn login_audit_durable_topology() -> Result<()> {
         )?;
         let relay = id.outbox(
             DynPublisher::new_box(bus.publisher()),
+            RelayBudget::new(
+                Duration::from_secs(60),
+                Duration::from_secs(40),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )?,
             Arc::clone(&durable_authority),
             dlx_payload_protector(),
         );

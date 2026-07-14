@@ -4336,7 +4336,12 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             let event_cfg = build_event_transport_config().context("event transport config")?;
             tracing::info!(
                 runtime.event_topology = topology_label(event_cfg.topology),
-                "runtime event topology loaded"
+                relay.lease_ttl_ms = event_cfg.relay_budget.lease_ttl_millis(),
+                relay.publish_timeout_ms = event_cfg.relay_budget.publish_timeout_millis(),
+                relay.settle_timeout_ms = event_cfg.relay_budget.settle_timeout_millis(),
+                relay.safety_margin_ms = event_cfg.relay_budget.safety_margin_millis(),
+                relay.required_budget_ms = event_cfg.relay_budget.required_budget_millis(),
+                "runtime event transport budget loaded"
             );
             if event_cfg.topology == bootstrap::Topology::Demo {
                 anyhow::bail!(
