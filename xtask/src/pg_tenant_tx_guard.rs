@@ -10,8 +10,8 @@
 //! and the canonical fact funnels in `outbox.rs` / `outbox_cdc.rs`.
 //!
 //! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries" } —
-//! Postgres retry wrappers are confined to their exact config commit, secret mutation, password
-//! change, and session logout boundaries. Each LocalTx owner must consume its command-carried
+//! Postgres retry wrappers are confined to their exact config, secret, identity, and audit
+//! mutation boundaries. Each LocalTx owner must consume its command-carried
 //! generated observation beside `retry_write`; `PgSecretUnitOfWork::publish` is the only settings
 //! secret LocalTx owner;
 //! internal publish / republish must use the generic runner and may not impersonate the HTTP
@@ -419,6 +419,9 @@ fn required_retry_site_findings(
         "settings-secret-republish",
         "identity-password-change",
         "identity-session-logout",
+        "identity-refresh-rotate",
+        "audit-append",
+        "audit-list-tenant-append",
     ]
     .into_iter()
     .filter(|required| !sites.contains(required))
@@ -617,6 +620,7 @@ fn retry_placement_findings(
         "session_lifecycle.rs" => Some(("logout", "identity-session-logout")),
         "refresh_token_store.rs" => Some(("rotate", "identity-refresh-rotate")),
         "audit_repo.rs" => Some(("append", "audit-append")),
+        "auth_audit_sink.rs" => Some(("append", "audit-list-tenant-append")),
         _ => None,
     };
     let Some((fn_marker, site)) = allowed else {
@@ -651,6 +655,7 @@ fn retry_placement_findings(
             "session_lifecycle.rs" => valid_identity_logout_retry(calls[0]),
             "refresh_token_store.rs" => valid_identity_refresh_retry(calls[0]),
             "audit_repo.rs" => valid_audit_append_retry(calls[0]),
+            "auth_audit_sink.rs" => valid_audit_list_tenant_retry(calls[0]),
             _ => false,
         };
     if valid {
@@ -885,6 +890,7 @@ enum CommandEvidence {
     SessionLogout,
     RefreshRotation,
     SecretPublish,
+    AuditListTenantAppend,
 }
 
 struct RetryAstScan {
@@ -1171,6 +1177,15 @@ fn valid_audit_append_retry(call: &RetryCall) -> bool {
         && !call.arguments[1].legacy_write
 }
 
+fn valid_audit_list_tenant_retry(call: &RetryCall) -> bool {
+    call.wrapper == Some(RetryWrapper::Local)
+        && call.arguments.len() == 3
+        && call.arguments[0].command_evidence == Some(CommandEvidence::AuditListTenantAppend)
+        && call.arguments[1].operation_method.as_deref() == Some("retry_write")
+        && call.arguments[1].scoped_operation_calls == 1
+        && !call.arguments[1].legacy_write
+}
+
 fn valid_settings_secret_retry(call: &RetryCall) -> bool {
     call.wrapper == Some(RetryWrapper::Local)
         && call.arguments.len() == 3
@@ -1236,6 +1251,7 @@ fn typed_command_param(signature: &syn::Signature) -> Option<(String, CommandEvi
             "PasswordChangeMutation" => CommandEvidence::PasswordChange,
             "SessionLogoutMutation" => CommandEvidence::SessionLogout,
             "RefreshRotationMutation" => CommandEvidence::RefreshRotation,
+            "AuditListTenantAppend" => CommandEvidence::AuditListTenantAppend,
             _ => return None,
         };
         let syn::Pat::Ident(binding) = &*typed.pat else {
@@ -4355,47 +4371,56 @@ pub trait SecretRepoLocal: Send + Sync {
     #[test]
     fn retry_guard_accepts_all_exact_boundaries() {
         let mut sites = BTreeSet::new();
-        let config = retry_placement_findings(
+        assert_retry_shape(
+            &mut sites,
             "config_repo.rs",
             "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
-            &mut sites,
         );
-        let identity = retry_placement_findings(
+        assert_retry_shape(
+            &mut sites,
             "credential_repo.rs",
             "impl Repo { async fn apply_password_change(&self, mutation: PasswordChangeMutation){ let (_, _, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
-            &mut sites,
         );
-        let logout = retry_placement_findings(
+        assert_retry_shape(
+            &mut sites,
             "session_lifecycle.rs",
             "impl Repo { async fn logout(&self, mutation: SessionLogoutMutation){ let (_, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
-            &mut sites,
         );
-        let refresh = retry_placement_findings(
+        assert_retry_shape(
+            &mut sites,
             "refresh_token_store.rs",
             "impl Repo { async fn rotate(&self, mutation: RefreshRotationMutation){ let (_, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
-            &mut sites,
         );
-        let audit = retry_placement_findings(
+        assert_retry_shape(
+            &mut sites,
             "audit_repo.rs",
             "impl Repo { async fn append(&self){ run_pg_tx_retry(AUDIT_APPEND_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
-            &mut sites,
         );
-        let secret =
-            retry_placement_findings("secret_repo.rs", secret_retry_green_source(), &mut sites);
-        assert!(config.is_empty(), "{config:?}");
-        assert!(identity.is_empty(), "{identity:?}");
-        assert!(logout.is_empty(), "{logout:?}");
-        assert!(refresh.is_empty(), "{refresh:?}");
-        assert!(audit.is_empty(), "{audit:?}");
-        assert!(secret.is_empty(), "{secret:?}");
-        assert!(sites.contains("settings-config-commit"));
-        assert!(sites.contains("settings-secret-publish"));
-        assert!(sites.contains("settings-secret-publish-internal"));
-        assert!(sites.contains("settings-secret-republish"));
-        assert!(sites.contains("identity-password-change"));
-        assert!(sites.contains("identity-session-logout"));
-        assert!(sites.contains("identity-refresh-rotate"));
-        assert!(sites.contains("audit-append"));
+        assert_retry_shape(
+            &mut sites,
+            "auth_audit_sink.rs",
+            "impl AuditListTenantAppender for PgAuthAuditSink { async fn append(&self, command: AuditListTenantAppend){ let (scope, event, observation) = command.into_parts(); run_pg_localtx_retry(observation, || async { self.pool.retry_write(scope, |_tx| async { persist(event) }, storage) }, classify).await; } }",
+        );
+        assert_retry_shape(&mut sites, "secret_repo.rs", secret_retry_green_source());
+        assert_eq!(
+            sites,
+            BTreeSet::from([
+                "audit-append",
+                "audit-list-tenant-append",
+                "identity-password-change",
+                "identity-refresh-rotate",
+                "identity-session-logout",
+                "settings-config-commit",
+                "settings-secret-publish",
+                "settings-secret-publish-internal",
+                "settings-secret-republish",
+            ])
+        );
+    }
+
+    fn assert_retry_shape(sites: &mut BTreeSet<&'static str>, rel: &str, source: &str) {
+        let findings = retry_placement_findings(rel, source, sites);
+        assert!(findings.is_empty(), "{rel}: {findings:?}");
     }
 
     #[test]
@@ -4408,6 +4433,14 @@ pub trait SecretRepoLocal: Send + Sync {
             (
                 "audit_repo.rs",
                 "impl Repo { async fn append(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
+            ),
+            (
+                "auth_audit_sink.rs",
+                "impl AuditListTenantAppender for PgAuthAuditSink { async fn append(&self, command: AuditListTenantAppend){ let (scope, event, observation) = command.into_parts(); run_pg_tx_retry(AUDIT_APPEND_BOUNDARY, || async { self.pool.retry_write(scope, |_tx| async { persist(event) }, storage) }, classify).await; } }",
+            ),
+            (
+                "auth_audit_sink.rs",
+                "impl AuditListTenantAppender for PgAuthAuditSink { async fn append(&self, command: AuditListTenantAppend){ let (scope, event, observation) = command.into_parts(); run_pg_localtx_retry(observation, || async { raw_write(event) }, classify).await; } }",
             ),
         ] {
             let mut sites = BTreeSet::new();
@@ -4437,6 +4470,7 @@ pub trait SecretRepoLocal: Send + Sync {
                     | "session_lifecycle.rs"
                     | "refresh_token_store.rs"
                     | "audit_repo.rs"
+                    | "auth_audit_sink.rs"
             )
         }) {
             findings.extend(retry_placement_findings(rel, source, &mut sites));
@@ -4449,6 +4483,7 @@ pub trait SecretRepoLocal: Send + Sync {
                 "identity-refresh-rotate",
                 "identity-session-logout",
                 "audit-append",
+                "audit-list-tenant-append",
                 "settings-config-commit",
                 "settings-secret-publish",
                 "settings-secret-publish-internal",
@@ -4456,6 +4491,28 @@ pub trait SecretRepoLocal: Send + Sync {
             ])
         );
         Ok(())
+    }
+
+    #[test]
+    fn retry_guard_requires_the_closed_nine_site_set() {
+        let files = vec![("tx_retry.rs".to_string(), String::new())];
+        let findings = required_retry_site_findings(&files, &BTreeSet::new());
+        assert_eq!(findings.len(), 9, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject == "identity-refresh-rotate")
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject == "audit-append")
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject == "audit-list-tenant-append")
+        );
     }
 
     #[test]

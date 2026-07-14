@@ -1,43 +1,53 @@
-//! #1706 active LocalTx durable validation journey.
+//! Shared harness for contract-scoped Active LocalTx durable journeys.
 //!
-//! The three scoped HTTP contracts are driven through the production
-//! `compose -> finalize_routes -> finalize_primary_auth` funnel.  Mutations land in a real
-//! PostgreSQL instance supplied by `testkit::env_or_postgres`; the only test doubles are read-side
-//! barriers which deterministically make two requests observe the same CAS version.
+//! Every active LocalTx HTTP contract is driven through its production compose/finalize funnel.
+//! Mutations land in a real PostgreSQL instance supplied by `testkit::env_or_postgres`; the only
+//! test doubles are read-side barriers/probes that make concurrency and ordering deterministic.
 
 #![cfg(feature = "integration")]
 
+#[path = "../common/mod.rs"]
 mod common;
 
 use std::collections::HashMap;
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, anyhow, ensure};
+use audit::ports::{
+    AuditAdminRepo, AuditChainHasher, AuditError, AuditLedgerVerifyReport, AuditListResult,
+    AuditOutcome, AuditPage, AuditRecord, AuditWriteRepo, CrossTenantReadScope, DynAuditAdminRepo,
+    DynAuditReadRepo, ResourceRef, TenantRepoScope as AuditScope,
+};
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use diport::{
     DynKeyProvider, EncryptOutput, KeyName, KeyProvider, KeyProviderError, KeyRef, KeyVersion,
     ManagedResource, RedactedBytes,
 };
+use generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse;
 use generated::http::identity_v1::{
     login::IdentityLoginRequest,
     logout::{IdentityLogoutRequest, IdentityLogoutResponse},
     password_change::{IdentityPasswordChangeRequest, IdentityPasswordChangeResponse},
+    refresh::{IdentityRefreshRequest, IdentityRefreshResponse},
 };
 use generated::http::settings_v2::{SettingsSecretPublishRequest, SettingsSecretPublishResponse};
-use identity::LoginService;
 use identity::ports::{
-    AuthOutcome, Credential, CredentialRepo, DynCredentialRepo, DynSessionLifecycle, IdentityError,
-    LoginIdentifier, PasswordChangeMutation, TenantRepoScope as IdentityScope,
+    AuthOutcome, Credential, CredentialRepo, DynCredentialRepo, DynRefreshTokenStore,
+    DynSessionLifecycle, IdentityError, LoginIdentifier, PasswordChangeMutation,
+    RefreshRotationMutation, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
+    RefreshTokenStore, TenantRepoScope as IdentityScope,
 };
+use identity::{LoginService, RefreshService, SeedSigner};
 use memory::{FixedClock, MemBus, MemEmitter};
 use postgres::{
-    ConfigValueProtections, PgConfig, PgCredentialRepo, PgPassword, PgRuntimeDeps, PgSslMode, caps,
+    ConfigValueProtections, PgAuditAdminRepo, PgConfig, PgCredentialRepo, PgPassword,
+    PgRefreshTokenStore, PgRuntimeDeps, PgSslMode, caps,
 };
-use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme};
+use primitives::{AuthPlan, AuthScheme, ListenerKind, MacKey, RequiredScheme};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use settings::ports::{
@@ -48,6 +58,7 @@ use settings::{SettingsDomain, SettingsService};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tokio::sync::Barrier;
 use tower::ServiceExt;
+use uuid::Uuid;
 use vocab::{PrincipalKind, TenantId};
 
 const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -59,16 +70,26 @@ const OTHER_USER: &str = "11111111-2222-4333-8444-555555555554";
 const TENANT_B_USER: &str = "11111111-2222-4333-8444-555555555555";
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
-const RSS_APP_ROLE: &str = "rss_app";
-const RSS_APP_PASSWORD: &str = "rss_app_test_pw";
+static RSS_APP_LOGIN: TestPgCredential = TestPgCredential::new("rss_app", "rss_app_test_pw");
+static RSS_AUDIT_ADMIN_LOGIN: TestPgCredential =
+    TestPgCredential::new("rss_audit_admin", "rss_audit_admin_test_pw");
 const CURRENT_PASSWORD: &str = "journey-current-password-sentinel";
 const NEW_PASSWORD: &str = "journey-new-password-sentinel";
 const CONFLICT_PASSWORD_A: &str = "journey-conflict-password-a-sentinel";
 const CONFLICT_PASSWORD_B: &str = "journey-conflict-password-b-sentinel";
+const AUDIT_LEDGER_ACTION: &str = "audit:journey_entry";
+const AUDIT_LEDGER_RESOURCE_KIND: &str = "journey-audit-resource";
+const AUDIT_LEDGER_RESOURCE_SENTINEL: &str = "audit-ledger-resource-sentinel";
 
-const SETTINGS_FIXTURE: &str = include_str!("../../fixtures/settings-secret-publish-localtx.toml");
-const PASSWORD_FIXTURE: &str = include_str!("../../fixtures/identity-password-change-localtx.toml");
-const LOGOUT_FIXTURE: &str = include_str!("../../fixtures/identity-logout-localtx.toml");
+const SETTINGS_FIXTURE: &str =
+    include_str!("../../../fixtures/settings-secret-publish-localtx.toml");
+const PASSWORD_FIXTURE: &str =
+    include_str!("../../../fixtures/identity-password-change-localtx.toml");
+const LOGOUT_FIXTURE: &str = include_str!("../../../fixtures/identity-logout-localtx.toml");
+const AUDIT_TENANT_FIXTURE: &str =
+    include_str!("../../../fixtures/audit-list-tenant-entries-localtx.toml");
+const REFRESH_FIXTURE: &str = include_str!("../../../fixtures/identity-refresh-localtx.toml");
+const AUDIT_ROUTE_ACTION: &str = "audit:list-cross-tenant";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -85,14 +106,14 @@ struct JourneyFixture {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct JourneyCase {
+pub(crate) struct JourneyCase {
     id: String,
     scenario: String,
     http_status: u16,
     error_code: String,
     retryable: bool,
     attempts: u16,
-    commits: u16,
+    commits: Option<u16>,
     redact_sentinels: Vec<String>,
     #[serde(skip)]
     observation: Arc<CaseObservation>,
@@ -118,23 +139,48 @@ impl JourneyCase {
     }
 }
 
-#[derive(Clone, Copy)]
-struct FixtureIdentity<'a> {
-    id: &'a str,
-    contract_id: &'a str,
-    tx_model: &'a str,
-    spec: &'a str,
-    marker: &'a str,
+fn assert_active_case_scenario(case: &JourneyCase) -> Result<()> {
+    let expected = match case.id.as_str() {
+        "identity-refresh-happy" | "audit-list-tenant-entries-happy" => "happy",
+        "identity-refresh-unknown"
+        | "audit-list-tenant-entries-unauthenticated"
+        | "audit-list-tenant-entries-non-superadmin-deny" => "auth-failure",
+        "identity-refresh-malformed" | "audit-list-tenant-entries-validation" => {
+            "validation-failure"
+        }
+        "identity-refresh-contention-winner"
+        | "identity-refresh-contention-loser"
+        | "audit-list-tenant-entries-contention" => "contention",
+        "identity-refresh-commit-unknown" => "commit-unknown",
+        other => return Err(anyhow!("unknown active journey case `{other}`")),
+    };
+    ensure!(
+        case.scenario == expected,
+        "case `{}` scenario drift: expected `{expected}`, got `{}`",
+        case.id,
+        case.scenario
+    );
+    Ok(())
 }
 
-struct FixtureBook {
+#[derive(Clone, Copy)]
+pub(crate) struct FixtureIdentity<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) contract_id: &'a str,
+    pub(crate) tx_model: &'a str,
+    pub(crate) spec: &'a str,
+    pub(crate) runner: &'a str,
+    pub(crate) marker: &'a str,
+}
+
+pub(crate) struct FixtureBook {
     fixture_id: String,
     cases: HashMap<String, JourneyCase>,
     receipts: Vec<(String, Arc<CaseObservation>)>,
 }
 
 impl FixtureBook {
-    fn load(source: &str, expected: FixtureIdentity<'_>) -> Result<Self> {
+    pub(crate) fn load(source: &str, expected: FixtureIdentity<'_>) -> Result<Self> {
         let fixture: JourneyFixture = toml::from_str(source).context("parse closed v1 fixture")?;
         ensure!(
             fixture.schema_version == 1,
@@ -150,10 +196,7 @@ impl FixtureBook {
             "fixture txModel drift"
         );
         ensure!(fixture.spec == expected.spec, "fixture spec drift");
-        ensure!(
-            fixture.runner == "journeys/tests/localtx_validation_journey.rs",
-            "fixture runner drift"
-        );
+        ensure!(fixture.runner == expected.runner, "fixture runner drift");
         ensure!(fixture.marker == expected.marker, "fixture marker drift");
 
         let mut cases = HashMap::with_capacity(fixture.cases.len());
@@ -173,13 +216,13 @@ impl FixtureBook {
         })
     }
 
-    fn take_case(&mut self, id: &str) -> Result<JourneyCase> {
+    pub(crate) fn take_case(&mut self, id: &str) -> Result<JourneyCase> {
         self.cases
             .remove(id)
             .with_context(|| format!("fixture `{}` is missing case `{id}`", self.fixture_id))
     }
 
-    fn assert_exhausted(&self) -> Result<()> {
+    pub(crate) fn assert_exhausted(&self) -> Result<()> {
         ensure!(
             self.cases.is_empty(),
             "fixture `{}` has unconsumed cases: {:?}",
@@ -370,6 +413,7 @@ struct LocalTxMetrics {
     finals: u16,
     committed: u16,
     rolled_back: u16,
+    commit_unknown: u16,
 }
 
 impl LocalTxMetrics {
@@ -396,6 +440,10 @@ impl LocalTxMetrics {
                     .rolled_back
                     .checked_add(sample.rolled_back)
                     .context("LocalTx rolled-back sum overflow")?,
+                commit_unknown: sum
+                    .commit_unknown
+                    .checked_add(sample.commit_unknown)
+                    .context("LocalTx commit-unknown sum overflow")?,
             })
         })
     }
@@ -421,6 +469,12 @@ impl LocalTxMetrics {
                 "localtx_final_total",
                 contract_id,
                 Some(("final_status", "rolled_back")),
+            )?,
+            commit_unknown: metric_sum(
+                rendered,
+                "localtx_final_total",
+                contract_id,
+                Some(("final_status", "commit_unknown")),
             )?,
         })
     }
@@ -483,23 +537,8 @@ struct WireError {
     request_id: String,
 }
 
-async fn send(
-    router: &axum::Router,
-    uri: &str,
-    body: Vec<u8>,
-    request_id: &str,
-) -> Result<HttpResult> {
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri(uri)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header("x-request-id", request_id)
-                .body(Body::from(body))?,
-        )
-        .await?;
+async fn send_request(router: &axum::Router, request: Request<Body>) -> Result<HttpResult> {
+    let response = router.clone().oneshot(request).await?;
     let status = response.status();
     let response_request_id = response
         .headers()
@@ -515,6 +554,18 @@ async fn send(
     })
 }
 
+async fn send_request_recorded(
+    router: &axum::Router,
+    request: Request<Body>,
+    contract_id: &str,
+) -> Result<RecordedHttpResult> {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let response = poll_with_local_recorder(&recorder, send_request(router, request)).await?;
+    let localtx = LocalTxMetrics::from_prometheus(&handle.render(), contract_id)?;
+    Ok(RecordedHttpResult { response, localtx })
+}
+
 async fn send_recorded(
     router: &axum::Router,
     uri: &str,
@@ -522,11 +573,54 @@ async fn send_recorded(
     request_id: &str,
     contract_id: &str,
 ) -> Result<RecordedHttpResult> {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    let response = poll_with_local_recorder(&recorder, send(router, uri, body, request_id)).await?;
-    let localtx = LocalTxMetrics::from_prometheus(&handle.render(), contract_id)?;
-    Ok(RecordedHttpResult { response, localtx })
+    send_request_recorded(
+        router,
+        Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-request-id", request_id)
+            .body(Body::from(body))?,
+        contract_id,
+    )
+    .await
+}
+
+async fn send_refresh_recorded(
+    router: &axum::Router,
+    body: Vec<u8>,
+    request_id: &str,
+    tenant: TenantId,
+) -> Result<RecordedHttpResult> {
+    send_request_recorded(
+        router,
+        Request::builder()
+            .method(Method::POST)
+            .uri(generated::http::identity_v1::refresh::PATH)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-request-id", request_id)
+            .header("x-tenant-id", tenant.to_string())
+            .body(Body::from(body))?,
+        generated::http::identity_v1::refresh::CONTRACT_ID,
+    )
+    .await
+}
+
+async fn send_audit_recorded(
+    router: &axum::Router,
+    uri: String,
+    request_id: &str,
+) -> Result<RecordedHttpResult> {
+    send_request_recorded(
+        router,
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("x-request-id", request_id)
+            .body(Body::empty())?,
+        generated::http::audit_v1::list_tenant_entries::CONTRACT_ID,
+    )
+    .await
 }
 
 fn case_sentinels(
@@ -711,8 +805,8 @@ fn assert_accounting(
         ),
     }
     ensure!(
-        case.commits == commits,
-        "case `{}` commits drift: fixture={}, observed={commits}",
+        case.commits == Some(commits),
+        "case `{}` commits drift: fixture={:?}, observed={commits}",
         case.id,
         case.commits
     );
@@ -743,7 +837,7 @@ fn assert_cas_conflict_accounting(
         "CAS loser LocalTx accounting drift"
     );
     ensure!(
-        case.commits == 0,
+        case.commits == Some(0),
         "CAS loser fixture must declare zero commits"
     );
     ensure!(
@@ -803,19 +897,65 @@ fn pg_config(params: &testkit::PgConnParams) -> PgConfig {
     .with_acquire_timeout(Duration::from_secs(5))
 }
 
-fn pg_config_for(params: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
-    PgConfig::new(
-        params.host.clone(),
-        params.port,
-        params.database.clone(),
-        username.to_owned(),
-        PgPassword::new(password.to_owned()),
-    )
-    .with_ssl_mode(PgSslMode::Prefer)
-    .with_acquire_timeout(Duration::from_secs(5))
+struct TestPgCredential {
+    role: &'static str,
+    password: &'static str,
 }
 
-async fn provision_rss_app_login(params: &testkit::PgConnParams) -> Result<()> {
+impl TestPgCredential {
+    const fn new(role: &'static str, password: &'static str) -> Self {
+        Self { role, password }
+    }
+}
+
+/// Capability minted only after the matching role/password DDL transaction commits.
+struct ProvisionedTestPgCredential {
+    credential: &'static TestPgCredential,
+    _seal: (),
+}
+
+impl ProvisionedTestPgCredential {
+    fn config(&self, params: &testkit::PgConnParams) -> PgConfig {
+        PgConfig::new(
+            params.host.clone(),
+            params.port,
+            params.database.clone(),
+            self.credential.role.to_owned(),
+            PgPassword::new(self.credential.password.to_owned()),
+        )
+        .with_ssl_mode(PgSslMode::Prefer)
+        .with_acquire_timeout(Duration::from_secs(5))
+    }
+}
+
+async fn provision_test_login(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    credential: &TestPgCredential,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(credential.role)
+        .execute(&mut **tx)
+        .await?;
+    let ddl: String = sqlx::query_scalar(
+        r#"
+        SELECT CASE
+            WHEN EXISTS (SELECT FROM pg_roles WHERE rolname = $1)
+                THEN format('ALTER ROLE %I LOGIN PASSWORD %L NOBYPASSRLS', $1, $2)
+            ELSE format('CREATE ROLE %I LOGIN PASSWORD %L NOBYPASSRLS', $1, $2)
+        END
+        "#,
+    )
+    .bind(credential.role)
+    .bind(credential.password)
+    .fetch_one(&mut **tx)
+    .await?;
+    sqlx::query(&ddl).execute(&mut **tx).await?;
+    Ok(())
+}
+
+async fn provision_test_logins(
+    params: &testkit::PgConnParams,
+) -> Result<(ProvisionedTestPgCredential, ProvisionedTestPgCredential)> {
     let options = PgConnectOptions::new()
         .host(&params.host)
         .port(params.port)
@@ -828,24 +968,21 @@ async fn provision_rss_app_login(params: &testkit::PgConnParams) -> Result<()> {
         .acquire_timeout(Duration::from_secs(5))
         .connect_with(options)
         .await?;
-    sqlx::query(
-        r#"
-        DO $$
-        BEGIN
-            PERFORM pg_advisory_xact_lock(hashtext('rss_app'));
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app') THEN
-                CREATE ROLE rss_app LOGIN PASSWORD 'rss_app_test_pw' NOBYPASSRLS;
-            ELSE
-                ALTER ROLE rss_app LOGIN PASSWORD 'rss_app_test_pw' NOBYPASSRLS;
-            END IF;
-        END
-        $$;
-        "#,
-    )
-    .execute(&pool)
-    .await?;
+    let mut tx = pool.begin().await?;
+    provision_test_login(&mut tx, &RSS_APP_LOGIN).await?;
+    provision_test_login(&mut tx, &RSS_AUDIT_ADMIN_LOGIN).await?;
+    tx.commit().await?;
     pool.close().await;
-    Ok(())
+    Ok((
+        ProvisionedTestPgCredential {
+            credential: &RSS_APP_LOGIN,
+            _seal: (),
+        },
+        ProvisionedTestPgCredential {
+            credential: &RSS_AUDIT_ADMIN_LOGIN,
+            _seal: (),
+        },
+    ))
 }
 
 async fn observation_pool(params: &testkit::PgConnParams) -> Result<sqlx::PgPool> {
@@ -966,29 +1103,29 @@ fn finish_with_pg_cleanup(body: Result<()>, cleanup: Result<()>) -> Result<()> {
     }
 }
 
-struct SettingsCases {
-    happy: JourneyCase,
-    auth_failure: JourneyCase,
-    validation_failure: JourneyCase,
-    conflict: JourneyCase,
+pub(crate) struct SettingsCases {
+    pub(crate) happy: JourneyCase,
+    pub(crate) auth_failure: JourneyCase,
+    pub(crate) validation_failure: JourneyCase,
+    pub(crate) conflict: JourneyCase,
 }
 
-struct PasswordCases {
-    happy: JourneyCase,
-    unauthenticated: JourneyCase,
-    invalid_subject: JourneyCase,
-    validation_failure: JourneyCase,
-    conflict: JourneyCase,
+pub(crate) struct PasswordCases {
+    pub(crate) happy: JourneyCase,
+    pub(crate) unauthenticated: JourneyCase,
+    pub(crate) invalid_subject: JourneyCase,
+    pub(crate) validation_failure: JourneyCase,
+    pub(crate) conflict: JourneyCase,
 }
 
-struct LogoutCases {
-    happy: JourneyCase,
-    unauthenticated: JourneyCase,
-    other_owner: JourneyCase,
-    validation_failure: JourneyCase,
-    contention: JourneyCase,
-    repeat: JourneyCase,
-    cross_tenant: JourneyCase,
+pub(crate) struct LogoutCases {
+    pub(crate) happy: JourneyCase,
+    pub(crate) unauthenticated: JourneyCase,
+    pub(crate) other_owner: JourneyCase,
+    pub(crate) validation_failure: JourneyCase,
+    pub(crate) contention: JourneyCase,
+    pub(crate) repeat: JourneyCase,
+    pub(crate) cross_tenant: JourneyCase,
 }
 
 fn secret_commit_delta(before: &SecretSnapshot, after: &SecretSnapshot) -> Result<u16> {
@@ -1933,8 +2070,969 @@ async fn drive_logout(
     drive_logout_contention(harness, observation_pool, &cases.contention).await
 }
 
-#[test]
-fn changed_fixture_behavior_is_observably_red() -> Result<()> {
+pub(crate) struct RefreshCases {
+    pub(crate) happy: JourneyCase,
+    pub(crate) unknown: JourneyCase,
+    pub(crate) malformed: JourneyCase,
+    pub(crate) contention_winner: JourneyCase,
+    pub(crate) contention_loser: JourneyCase,
+    pub(crate) commit_unknown: JourneyCase,
+}
+
+struct RefreshSeed {
+    id: String,
+    secret: String,
+}
+
+impl RefreshSeed {
+    fn unique(secret_sentinel: &str) -> Self {
+        let nonce = Uuid::new_v4();
+        Self {
+            id: nonce.to_string(),
+            secret: format!("{secret_sentinel}-{nonce}"),
+        }
+    }
+
+    fn hash(&self) -> [u8; 32] {
+        secure::digest(&self.secret)
+    }
+
+    fn record(&self, tenant: TenantId) -> RefreshTokenRecord {
+        RefreshTokenRecord::hydrate(
+            self.id.clone(),
+            tenant,
+            HAPPY_USER,
+            PrincipalKind::User,
+            secure::digest(&self.secret),
+            None,
+            self.id.clone(),
+            RefreshStatus::Active,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(NOW_SECS),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(NOW_SECS + TTL_SECS),
+        )
+    }
+}
+
+struct BarrierRefreshStore {
+    inner: PgRefreshTokenStore,
+    gated_hash: [u8; 32],
+    barrier: Arc<Barrier>,
+}
+
+impl RefreshTokenStore for BarrierRefreshStore {
+    async fn insert(
+        &self,
+        scope: IdentityScope,
+        record: RefreshTokenRecord,
+    ) -> Result<(), IdentityError> {
+        self.inner.insert(scope, record).await
+    }
+
+    async fn find_by_hash(
+        &self,
+        scope: IdentityScope,
+        hash: RefreshTokenHash,
+    ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
+        let gated = hash.as_bytes() == &self.gated_hash;
+        let record = self.inner.find_by_hash(scope, hash).await?;
+        if gated {
+            self.barrier.wait().await;
+        }
+        Ok(record)
+    }
+
+    async fn rotate(
+        &self,
+        scope: IdentityScope,
+        mutation: RefreshRotationMutation,
+    ) -> Result<bool, IdentityError> {
+        self.inner.rotate(scope, mutation).await
+    }
+
+    async fn revoke_lineage(
+        &self,
+        scope: IdentityScope,
+        lineage_id: RefreshTokenId,
+    ) -> Result<(), IdentityError> {
+        self.inner.revoke_lineage(scope, lineage_id).await
+    }
+}
+
+fn refresh_service(
+    store: Box<DynRefreshTokenStore<'static>>,
+) -> Result<Arc<RefreshService<SeedSigner>>> {
+    let issuer = authn::JwtIssuer::new(
+        Arc::new(SeedSigner),
+        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        authn::JwtIssuerConfig {
+            key: diport::KeyId::new("journey-refresh-key"),
+            alg: authn::JwtAlg::Es256,
+            purpose: diport::SigningPurpose::new("journey-refresh-signing"),
+            issuer: "https://journey.local".to_owned(),
+            audience: "rss-journey".to_owned(),
+            ttl: Duration::from_secs(900),
+        },
+    )?;
+    Ok(Arc::new(RefreshService::new(
+        store,
+        Arc::new(issuer),
+        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Duration::from_secs(TTL_SECS),
+    )))
+}
+
+fn refresh_router(
+    deps: &PgRuntimeDeps,
+    store: Box<DynRefreshTokenStore<'static>>,
+) -> Result<axum::Router> {
+    let identity_deps = deps.handle().for_domain::<caps::Identity>();
+    let refresh = refresh_service(store)?;
+    let login = Arc::new(LoginService::new(
+        Arc::from(DynCredentialRepo::new_box(identity_deps.credential_repo())),
+        Arc::from(DynSessionLifecycle::new_box(
+            identity_deps.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
+        )),
+        Arc::clone(&refresh),
+        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Duration::from_secs(TTL_SECS),
+    ));
+    let domain = common::identity_domain(login, refresh);
+    finalized_router(&domain, None, None)
+}
+
+async fn seed_refresh(
+    store: &PgRefreshTokenStore,
+    tenant: TenantId,
+    seed: &RefreshSeed,
+) -> Result<()> {
+    store
+        .insert(IdentityScope::for_test(tenant), seed.record(tenant))
+        .await?;
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RefreshLineageSnapshot {
+    old_status: Option<String>,
+    successors: Vec<(String, String, String)>,
+}
+
+async fn refresh_lineage_snapshot(
+    pool: &sqlx::PgPool,
+    tenant: TenantId,
+    old_id: &str,
+) -> Result<RefreshLineageSnapshot> {
+    let old_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM refresh_tokens WHERE tenant_id = $1::uuid AND id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(old_id)
+    .fetch_optional(pool)
+    .await?;
+    let successors = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT id::text, status, lineage_id::text FROM refresh_tokens \
+         WHERE tenant_id = $1::uuid AND parent_id = $2::uuid ORDER BY id",
+    )
+    .bind(tenant.to_string())
+    .bind(old_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(RefreshLineageSnapshot {
+        old_status,
+        successors,
+    })
+}
+
+async fn refresh_status_by_secret(
+    pool: &sqlx::PgPool,
+    tenant: TenantId,
+    secret: &str,
+) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT status FROM refresh_tokens WHERE tenant_id = $1::uuid AND token_hash = $2",
+    )
+    .bind(tenant.to_string())
+    .bind(secure::digest(secret).as_slice())
+    .fetch_optional(pool)
+    .await?)
+}
+
+async fn refresh_row_count(pool: &sqlx::PgPool, tenant: TenantId) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid",
+    )
+    .bind(tenant.to_string())
+    .fetch_one(pool)
+    .await?)
+}
+
+fn assert_refresh_accounting(
+    case: &JourneyCase,
+    samples: &[&LocalTxMetrics],
+    expected_committed: u16,
+    expected_commit_unknown: u16,
+) -> Result<()> {
+    assert_active_case_scenario(case)?;
+    let observed = LocalTxMetrics::combine(samples)?;
+    ensure!(observed.attempts == case.attempts, "refresh attempts drift");
+    ensure!(
+        observed.failed_attempts == expected_commit_unknown,
+        "refresh failed-attempt accounting drift"
+    );
+    ensure!(
+        observed.finals == expected_committed + expected_commit_unknown,
+        "refresh final accounting drift"
+    );
+    ensure!(
+        observed.committed == expected_committed
+            && observed.rolled_back == 0
+            && observed.commit_unknown == expected_commit_unknown,
+        "refresh settlement accounting drift"
+    );
+    if let Some(commits) = case.commits {
+        ensure!(
+            commits == expected_committed,
+            "refresh fixture commits drift"
+        );
+    } else {
+        ensure!(
+            expected_commit_unknown == 1,
+            "only commit-unknown may omit commits"
+        );
+    }
+    case.mark_accounting_observed();
+    Ok(())
+}
+
+fn refresh_body(secret: &str) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&IdentityRefreshRequest {
+        refresh_token: secret.to_owned(),
+    })?)
+}
+
+async fn drive_refresh_happy(
+    deps: &PgRuntimeDeps,
+    observation_pool: &sqlx::PgPool,
+    tenant: TenantId,
+    case: &JourneyCase,
+) -> Result<()> {
+    let seed = RefreshSeed::unique("refresh-happy-secret-sentinel");
+    let store = deps
+        .handle()
+        .for_domain::<caps::Identity>()
+        .refresh_token_store();
+    seed_refresh(&store, tenant, &seed).await?;
+    let router = refresh_router(deps, DynRefreshTokenStore::new_box(store))?;
+    let response = send_refresh_recorded(
+        &router,
+        refresh_body(&seed.secret)?,
+        "rid-refresh-happy",
+        tenant,
+    )
+    .await?;
+    let decoded: IdentityRefreshResponse = decode_case_success(
+        case,
+        &response.response,
+        "rid-refresh-happy",
+        &case.redact_sentinels,
+    )?;
+    let snapshot = refresh_lineage_snapshot(observation_pool, tenant, &seed.id).await?;
+    ensure!(snapshot.old_status.as_deref() == Some("consumed"));
+    ensure!(snapshot.successors.len() == 1);
+    ensure!(snapshot.successors[0].1 == "active");
+    ensure!(snapshot.successors[0].2 == seed.id);
+    ensure!(
+        refresh_status_by_secret(observation_pool, tenant, &decoded.data.refresh_token).await?
+            == Some("active".to_owned())
+    );
+    assert_refresh_accounting(case, &[&response.localtx], 1, 0)
+}
+
+async fn drive_refresh_rejections(
+    deps: &PgRuntimeDeps,
+    observation_pool: &sqlx::PgPool,
+    tenant: TenantId,
+    unknown: &JourneyCase,
+    malformed: &JourneyCase,
+) -> Result<()> {
+    let before = refresh_row_count(observation_pool, tenant).await?;
+    let router = refresh_router(
+        deps,
+        DynRefreshTokenStore::new_box(
+            deps.handle()
+                .for_domain::<caps::Identity>()
+                .refresh_token_store(),
+        ),
+    )?;
+    let unknown_secret = format!("refresh-unknown-secret-sentinel-{}", Uuid::new_v4());
+    let unknown_response = send_refresh_recorded(
+        &router,
+        refresh_body(&unknown_secret)?,
+        "rid-refresh-unknown",
+        tenant,
+    )
+    .await?;
+    assert_case_error(
+        unknown,
+        &unknown_response.response,
+        "rid-refresh-unknown",
+        &unknown.redact_sentinels,
+    )?;
+    assert_refresh_accounting(unknown, &[&unknown_response.localtx], 0, 0)?;
+    ensure!(refresh_row_count(observation_pool, tenant).await? == before);
+
+    let malformed_secret = format!("refresh-malformed-secret-sentinel-{}", Uuid::new_v4());
+    let malformed_response = send_refresh_recorded(
+        &router,
+        format!(r#"{{"refreshToken":"{malformed_secret}","extra":true}}"#).into_bytes(),
+        "rid-refresh-malformed",
+        tenant,
+    )
+    .await?;
+    assert_case_error(
+        malformed,
+        &malformed_response.response,
+        "rid-refresh-malformed",
+        &malformed.redact_sentinels,
+    )?;
+    assert_refresh_accounting(malformed, &[&malformed_response.localtx], 0, 0)?;
+    ensure!(refresh_row_count(observation_pool, tenant).await? == before);
+    Ok(())
+}
+
+async fn drive_refresh_contention(
+    deps: &PgRuntimeDeps,
+    observation_pool: &sqlx::PgPool,
+    tenant: TenantId,
+    winner_case: &JourneyCase,
+    loser_case: &JourneyCase,
+) -> Result<()> {
+    let success_status = StatusCode::from_u16(winner_case.http_status)?;
+    let seed = RefreshSeed::unique("refresh-contention-secret-sentinel");
+    let store = deps
+        .handle()
+        .for_domain::<caps::Identity>()
+        .refresh_token_store();
+    seed_refresh(&store, tenant, &seed).await?;
+    let router = refresh_router(
+        deps,
+        DynRefreshTokenStore::new_box(BarrierRefreshStore {
+            inner: store,
+            gated_hash: seed.hash(),
+            barrier: Arc::new(Barrier::new(2)),
+        }),
+    )?;
+    let body = refresh_body(&seed.secret)?;
+    let pair = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(
+            send_refresh_recorded(&router, body.clone(), "rid-refresh-contention-a", tenant),
+            send_refresh_recorded(&router, body, "rid-refresh-contention-b", tenant),
+        )
+    })
+    .await
+    .context("concurrent refresh exceeded 15 seconds")?;
+    let (a, b) = (pair.0?, pair.1?);
+    let (winner, loser, winner_request_id, loser_request_id) =
+        if a.response.status == success_status {
+            (
+                &a,
+                &b,
+                "rid-refresh-contention-a",
+                "rid-refresh-contention-b",
+            )
+        } else {
+            (
+                &b,
+                &a,
+                "rid-refresh-contention-b",
+                "rid-refresh-contention-a",
+            )
+        };
+    let bundle: IdentityRefreshResponse = decode_success(
+        &winner.response,
+        success_status,
+        winner_request_id,
+        &winner_case.redact_sentinels,
+    )?;
+    winner_case.mark_response_observed();
+    assert_case_error(
+        loser_case,
+        &loser.response,
+        loser_request_id,
+        &loser_case.redact_sentinels,
+    )?;
+    let snapshot = refresh_lineage_snapshot(observation_pool, tenant, &seed.id).await?;
+    ensure!(snapshot.old_status.as_deref() == Some("revoked"));
+    ensure!(snapshot.successors.len() == 1);
+    ensure!(snapshot.successors[0].1 == "revoked");
+    ensure!(snapshot.successors[0].2 == seed.id);
+    ensure!(
+        refresh_status_by_secret(observation_pool, tenant, &bundle.data.refresh_token).await?
+            == Some("revoked".to_owned())
+    );
+    assert_refresh_accounting(winner_case, &[&winner.localtx], 1, 0)?;
+    assert_refresh_accounting(loser_case, &[&loser.localtx], 1, 0)
+}
+
+async fn drive_refresh_commit_unknown(
+    deps: &PgRuntimeDeps,
+    observation_pool: &sqlx::PgPool,
+    tenant: TenantId,
+    case: &JourneyCase,
+) -> Result<()> {
+    let seed = RefreshSeed::unique("refresh-commit-unknown-secret-sentinel");
+    let store = deps
+        .handle()
+        .for_domain::<caps::Identity>()
+        .refresh_token_store_with_commit_unknown_once(&seed.id);
+    seed_refresh(&store, tenant, &seed).await?;
+    let router = refresh_router(deps, DynRefreshTokenStore::new_box(store))?;
+    let response = send_refresh_recorded(
+        &router,
+        refresh_body(&seed.secret)?,
+        "rid-refresh-commit-unknown",
+        tenant,
+    )
+    .await?;
+    assert_case_error(
+        case,
+        &response.response,
+        "rid-refresh-commit-unknown",
+        &case.redact_sentinels,
+    )?;
+    assert_refresh_accounting(case, &[&response.localtx], 0, 1)?;
+    let snapshot = refresh_lineage_snapshot(observation_pool, tenant, &seed.id).await?;
+    ensure!(snapshot.old_status.as_deref() == Some("consumed"));
+    ensure!(snapshot.successors.len() <= 1);
+    ensure!(
+        snapshot.successors.len() == 1
+            && snapshot.successors[0].1 == "active"
+            && snapshot.successors[0].2 == seed.id,
+        "after-commit seam must leave one durable active successor"
+    );
+    Ok(())
+}
+
+async fn drive_refresh(
+    deps: &PgRuntimeDeps,
+    observation_pool: &sqlx::PgPool,
+    tenant: TenantId,
+    cases: RefreshCases,
+) -> Result<()> {
+    drive_refresh_happy(deps, observation_pool, tenant, &cases.happy).await?;
+    drive_refresh_rejections(
+        deps,
+        observation_pool,
+        tenant,
+        &cases.unknown,
+        &cases.malformed,
+    )
+    .await?;
+    drive_refresh_contention(
+        deps,
+        observation_pool,
+        tenant,
+        &cases.contention_winner,
+        &cases.contention_loser,
+    )
+    .await?;
+    drive_refresh_commit_unknown(deps, observation_pool, tenant, &cases.commit_unknown).await
+}
+
+pub(crate) struct AuditCases {
+    pub(crate) happy: JourneyCase,
+    pub(crate) unauthenticated: JourneyCase,
+    pub(crate) non_superadmin_deny: JourneyCase,
+    pub(crate) validation: JourneyCase,
+    pub(crate) contention: JourneyCase,
+}
+
+struct AuditRequestIds {
+    happy: String,
+    unauthenticated: String,
+    denied: String,
+    validation: String,
+    contention_a: String,
+    contention_b: String,
+}
+
+impl AuditRequestIds {
+    fn new(run_namespace: Uuid) -> Self {
+        Self {
+            happy: format!("rid-audit-happy-{run_namespace}"),
+            unauthenticated: format!("rid-audit-unauthenticated-{run_namespace}"),
+            denied: format!("rid-audit-denied-{run_namespace}"),
+            validation: format!("rid-audit-validation-{run_namespace}"),
+            contention_a: format!("rid-audit-contention-a-{run_namespace}"),
+            contention_b: format!("rid-audit-contention-b-{run_namespace}"),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AuditReadAuthorizer;
+
+impl httpserve::RouteAuthorizer for AuditReadAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        request: httpserve::RouteAuthorizationRequest,
+    ) -> std::pin::Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>>
+    {
+        Box::pin(async move {
+            if request.contract_id == generated::http::audit_v1::list_tenant_entries::CONTRACT_ID
+                && request.permission == vocab::AUDIT_READ_PERMISSION
+            {
+                httpserve::RouteAuthorizationDecision::Allow
+            } else {
+                httpserve::RouteAuthorizationDecision::Deny
+            }
+        })
+    }
+}
+
+struct OrderedAuditAdminRepo {
+    inner: PgAuditAdminRepo<common::CapturingVerifier>,
+    observation_pool: sqlx::PgPool,
+    expected_request_id: String,
+    read_barrier: Option<Arc<Barrier>>,
+    list_calls: Arc<AtomicUsize>,
+}
+
+impl AuditAdminRepo for OrderedAuditAdminRepo {
+    async fn list_tenant(
+        &self,
+        scope: CrossTenantReadScope,
+        page: AuditPage,
+    ) -> Result<AuditListResult, AuditError> {
+        let durable = route_audit_request_count(
+            &self.observation_pool,
+            &self.expected_request_id,
+            Some("success"),
+        )
+        .await
+        .map_err(AuditError::storage)?;
+        if durable != 1 {
+            return Err(AuditError::storage(std::io::Error::other(
+                "target-tenant admin read lacks its request-bound durable audit append",
+            )));
+        }
+        if let Some(barrier) = &self.read_barrier {
+            barrier.wait().await;
+        }
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.list_tenant(scope, page).await
+    }
+
+    async fn verify_tenant(
+        &self,
+        tenant: TenantId,
+        batch: vocab::Limit,
+    ) -> Result<AuditLedgerVerifyReport, AuditError> {
+        self.inner.verify_tenant(tenant, batch).await
+    }
+}
+
+struct AuditHarness {
+    happy: axum::Router,
+    validation: axum::Router,
+    contention_a: axum::Router,
+    contention_b: axum::Router,
+    admin: axum::Router,
+    unauthenticated: axum::Router,
+    list_calls: Arc<AtomicUsize>,
+}
+
+fn audit_hasher() -> Result<AuditChainHasher<common::CapturingVerifier>> {
+    AuditChainHasher::new(
+        common::CapturingVerifier::default(),
+        MacKey::from_bytes(common::AUDIT_KEY.to_vec()),
+    )
+    .context("journey audit key must satisfy minimum strength")
+}
+
+async fn seed_audit_projection_row(deps: &PgRuntimeDeps, target: TenantId) -> Result<()> {
+    let repo = deps
+        .handle()
+        .for_domain::<caps::Audit>()
+        .audit_repo(audit_hasher()?);
+    repo.append(
+        AuditScope::for_test(target),
+        AuditRecord {
+            tenant: target,
+            actor: ids::UserId::parse(HAPPY_USER)?,
+            actor_kind: PrincipalKind::SuperAdmin,
+            action: vocab::Action::parse(AUDIT_LEDGER_ACTION)?,
+            resource: ResourceRef::new(AUDIT_LEDGER_RESOURCE_KIND, AUDIT_LEDGER_RESOURCE_SENTINEL),
+            outcome: AuditOutcome::Success,
+            recorded_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW_SECS),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+fn assert_seeded_audit_projection(page: &AuditListTenantEntriesResponse) -> Result<()> {
+    ensure!(
+        page.data.len() == 1,
+        "target audit journey must return the seeded ledger row"
+    );
+    let entry = &page.data[0];
+    ensure!(entry.action == AUDIT_LEDGER_ACTION);
+    ensure!(entry.resource_kind == AUDIT_LEDGER_RESOURCE_KIND);
+    ensure!(entry.outcome == "success");
+    ensure!(entry.actor_kind == "superAdmin");
+    ensure!(
+        entry.tenant_id == "<redacted>"
+            && entry.actor == "<redacted>"
+            && entry.resource_id == "<redacted>",
+        "target audit projection must mask tenant, actor, and resource id"
+    );
+    Ok(())
+}
+
+async fn route_audit_request_count(
+    pool: &sqlx::PgPool,
+    request_id: &str,
+    outcome: Option<&str>,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM auth_audit_events \
+         WHERE action = $1 AND request_id = $2 AND ($3::text IS NULL OR outcome = $3)",
+    )
+    .bind(AUDIT_ROUTE_ACTION)
+    .bind(request_id)
+    .bind(outcome)
+    .fetch_one(pool)
+    .await
+}
+
+fn finalized_audit_router(
+    domain: &dyn bootstrap::Domain,
+    auth_sink: postgres::PgAuthAuditSink,
+    principal_kind: Option<PrincipalKind>,
+    target: TenantId,
+) -> Result<axum::Router> {
+    let mut registry = bootstrap::compose(&[domain])?;
+    let routes = registry.finalize_routes()?;
+    let (_, admin) = routes
+        .into_iter()
+        .find(|(listener, _)| *listener == ListenerKind::Admin)
+        .context("audit admin routes missing")?;
+    let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::Jwt)?;
+    let router = httpserve::finalize_auth_with_audit_and_authorizer(
+        admin,
+        plan,
+        httpserve::AuditSinkHandle::new(auth_sink),
+        Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Arc::new(AuditReadAuthorizer),
+    )?
+    .into_router_for_test();
+    let Some(kind) = principal_kind else {
+        return Ok(router);
+    };
+    let evidence_tenant = (kind != PrincipalKind::SuperAdmin).then_some(target);
+    let principal = Arc::new(authn::test_support::principal(
+        kind,
+        HAPPY_USER,
+        evidence_tenant,
+    ));
+    Ok(router.layer(axum::middleware::from_fn(
+        move |mut request: axum::extract::Request, next: axum::middleware::Next| {
+            let principal = Arc::clone(&principal);
+            async move {
+                request
+                    .extensions_mut()
+                    .insert(httpserve::Authenticated::new(
+                        RequiredScheme::Jwt,
+                        kind,
+                        HAPPY_USER,
+                        evidence_tenant,
+                    ));
+                request.extensions_mut().insert(principal);
+                request
+                    .extensions_mut()
+                    .insert(httpserve::PendingScopeCtx::new(
+                        runctx::test_support::app_ctx_with_kind(target, kind, HAPPY_USER),
+                    ));
+                next.run(request).await
+            }
+        },
+    )))
+}
+
+fn ordered_audit_router(
+    deps: &PgRuntimeDeps,
+    observation_pool: &sqlx::PgPool,
+    target: TenantId,
+    expected_request_id: &str,
+    principal_kind: Option<PrincipalKind>,
+    read_barrier: Option<Arc<Barrier>>,
+    list_calls: Arc<AtomicUsize>,
+) -> Result<axum::Router> {
+    let audit_deps = deps.handle().for_domain::<caps::Audit>();
+    let read: Arc<DynAuditReadRepo<'static>> = Arc::from(DynAuditReadRepo::new_box(
+        audit_deps.audit_repo(audit_hasher()?),
+    ));
+    let admin = audit_deps
+        .audit_admin_repo(audit_hasher()?)
+        .context("audit-admin capability must be configured")?;
+    let ordered_admin: Arc<DynAuditAdminRepo<'static>> =
+        Arc::from(DynAuditAdminRepo::new_box(OrderedAuditAdminRepo {
+            inner: admin,
+            observation_pool: observation_pool.clone(),
+            expected_request_id: expected_request_id.to_owned(),
+            read_barrier,
+            list_calls,
+        }));
+    let domain = audit::AuditDomain::new(
+        read,
+        Some(ordered_admin),
+        audit_deps.auth_audit_sink(),
+        Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+    );
+    finalized_audit_router(
+        &domain,
+        audit_deps.auth_audit_sink(),
+        principal_kind,
+        target,
+    )
+}
+
+fn build_audit_harness(
+    deps: &PgRuntimeDeps,
+    observation_pool: &sqlx::PgPool,
+    target: TenantId,
+    request_ids: &AuditRequestIds,
+) -> Result<AuditHarness> {
+    let list_calls = Arc::new(AtomicUsize::new(0));
+    let contention_barrier = Arc::new(Barrier::new(2));
+    Ok(AuditHarness {
+        happy: ordered_audit_router(
+            deps,
+            observation_pool,
+            target,
+            &request_ids.happy,
+            Some(PrincipalKind::SuperAdmin),
+            None,
+            Arc::clone(&list_calls),
+        )?,
+        validation: ordered_audit_router(
+            deps,
+            observation_pool,
+            target,
+            &request_ids.validation,
+            Some(PrincipalKind::SuperAdmin),
+            None,
+            Arc::clone(&list_calls),
+        )?,
+        contention_a: ordered_audit_router(
+            deps,
+            observation_pool,
+            target,
+            &request_ids.contention_a,
+            Some(PrincipalKind::SuperAdmin),
+            Some(Arc::clone(&contention_barrier)),
+            Arc::clone(&list_calls),
+        )?,
+        contention_b: ordered_audit_router(
+            deps,
+            observation_pool,
+            target,
+            &request_ids.contention_b,
+            Some(PrincipalKind::SuperAdmin),
+            Some(contention_barrier),
+            Arc::clone(&list_calls),
+        )?,
+        admin: ordered_audit_router(
+            deps,
+            observation_pool,
+            target,
+            &request_ids.denied,
+            Some(PrincipalKind::Admin),
+            None,
+            Arc::clone(&list_calls),
+        )?,
+        unauthenticated: ordered_audit_router(
+            deps,
+            observation_pool,
+            target,
+            &request_ids.unauthenticated,
+            None,
+            None,
+            Arc::clone(&list_calls),
+        )?,
+        list_calls,
+    })
+}
+
+fn audit_uri(target: &str, query: &str) -> String {
+    format!(
+        "{}{}",
+        generated::http::audit_v1::list_tenant_entries::PATH.replace("{tenantId}", target),
+        query
+    )
+}
+
+fn assert_audit_accounting(
+    case: &JourneyCase,
+    samples: &[&LocalTxMetrics],
+    expected_committed: u16,
+) -> Result<()> {
+    assert_active_case_scenario(case)?;
+    let observed = LocalTxMetrics::combine(samples)?;
+    ensure!(observed.attempts == case.attempts, "audit attempts drift");
+    ensure!(
+        observed.failed_attempts == 0
+            && observed.finals == expected_committed
+            && observed.committed == expected_committed
+            && observed.rolled_back == 0
+            && observed.commit_unknown == 0,
+        "audit LocalTx accounting drift"
+    );
+    ensure!(case.commits == Some(expected_committed));
+    case.mark_accounting_observed();
+    Ok(())
+}
+
+async fn drive_audit_rejections(
+    harness: &AuditHarness,
+    pool: &sqlx::PgPool,
+    target: TenantId,
+    cases: &AuditCases,
+    request_ids: &AuditRequestIds,
+) -> Result<()> {
+    let unauth = send_audit_recorded(
+        &harness.unauthenticated,
+        audit_uri(&target.to_string(), "?limit=1"),
+        &request_ids.unauthenticated,
+    )
+    .await?;
+    assert_case_error(
+        &cases.unauthenticated,
+        &unauth.response,
+        &request_ids.unauthenticated,
+        &cases.unauthenticated.redact_sentinels,
+    )?;
+    ensure!(route_audit_request_count(pool, &request_ids.unauthenticated, None).await? == 0);
+    assert_audit_accounting(&cases.unauthenticated, &[&unauth.localtx], 0)?;
+
+    let reads_before = harness.list_calls.load(Ordering::SeqCst);
+    let denied = send_audit_recorded(
+        &harness.admin,
+        audit_uri(&target.to_string(), "?limit=1"),
+        &request_ids.denied,
+    )
+    .await?;
+    assert_case_error(
+        &cases.non_superadmin_deny,
+        &denied.response,
+        &request_ids.denied,
+        &cases.non_superadmin_deny.redact_sentinels,
+    )?;
+    ensure!(route_audit_request_count(pool, &request_ids.denied, Some("failure")).await? == 1);
+    ensure!(harness.list_calls.load(Ordering::SeqCst) == reads_before);
+    assert_audit_accounting(&cases.non_superadmin_deny, &[&denied.localtx], 1)?;
+
+    let validation = send_audit_recorded(
+        &harness.validation,
+        audit_uri("audit-validation-sentinel", "?limit=1"),
+        &request_ids.validation,
+    )
+    .await?;
+    assert_case_error(
+        &cases.validation,
+        &validation.response,
+        &request_ids.validation,
+        &cases.validation.redact_sentinels,
+    )?;
+    ensure!(route_audit_request_count(pool, &request_ids.validation, None).await? == 0);
+    ensure!(harness.list_calls.load(Ordering::SeqCst) == reads_before);
+    assert_audit_accounting(&cases.validation, &[&validation.localtx], 0)
+}
+
+async fn drive_audit_happy_and_contention(
+    harness: &AuditHarness,
+    pool: &sqlx::PgPool,
+    target: TenantId,
+    cases: &AuditCases,
+    request_ids: &AuditRequestIds,
+) -> Result<()> {
+    let happy = send_audit_recorded(
+        &harness.happy,
+        audit_uri(&target.to_string(), "?limit=1"),
+        &request_ids.happy,
+    )
+    .await?;
+    let page: AuditListTenantEntriesResponse = decode_case_success(
+        &cases.happy,
+        &happy.response,
+        &request_ids.happy,
+        &cases.happy.redact_sentinels,
+    )?;
+    assert_seeded_audit_projection(&page)?;
+    ensure!(route_audit_request_count(pool, &request_ids.happy, Some("success")).await? == 1);
+    ensure!(harness.list_calls.load(Ordering::SeqCst) == 1);
+    assert_audit_accounting(&cases.happy, &[&happy.localtx], 1)?;
+
+    ensure!(
+        cases.contention.error_code == "none" && !cases.contention.retryable,
+        "audit contention fixture must describe its successful responses"
+    );
+    let contention_status = StatusCode::from_u16(cases.contention.http_status)?;
+    let uri = audit_uri(&target.to_string(), "?limit=1");
+    let pair = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(
+            send_audit_recorded(
+                &harness.contention_a,
+                uri.clone(),
+                &request_ids.contention_a,
+            ),
+            send_audit_recorded(&harness.contention_b, uri, &request_ids.contention_b,)
+        )
+    })
+    .await
+    .context("concurrent audit reads exceeded 15 seconds")?;
+    let (a, b) = (pair.0?, pair.1?);
+    let page_a: AuditListTenantEntriesResponse = decode_success(
+        &a.response,
+        contention_status,
+        &request_ids.contention_a,
+        &cases.contention.redact_sentinels,
+    )?;
+    let page_b: AuditListTenantEntriesResponse = decode_success(
+        &b.response,
+        contention_status,
+        &request_ids.contention_b,
+        &cases.contention.redact_sentinels,
+    )?;
+    assert_seeded_audit_projection(&page_a)?;
+    assert_seeded_audit_projection(&page_b)?;
+    cases.contention.mark_response_observed();
+    ensure!(
+        route_audit_request_count(pool, &request_ids.contention_a, Some("success")).await? == 1
+    );
+    ensure!(
+        route_audit_request_count(pool, &request_ids.contention_b, Some("success")).await? == 1
+    );
+    ensure!(harness.list_calls.load(Ordering::SeqCst) == 3);
+    assert_audit_accounting(&cases.contention, &[&a.localtx, &b.localtx], 2)
+}
+
+async fn drive_audit(
+    deps: &PgRuntimeDeps,
+    observation_pool: &sqlx::PgPool,
+    target: TenantId,
+    run_namespace: Uuid,
+    cases: AuditCases,
+) -> Result<()> {
+    let request_ids = AuditRequestIds::new(run_namespace);
+    seed_audit_projection_row(deps, target).await?;
+    let harness = build_audit_harness(deps, observation_pool, target, &request_ids)?;
+    drive_audit_rejections(&harness, observation_pool, target, &cases, &request_ids).await?;
+    drive_audit_happy_and_contention(&harness, observation_pool, target, &cases, &request_ids).await
+}
+
+pub(crate) fn changed_fixture_behavior_is_observably_red() -> Result<()> {
     let changed = SETTINGS_FIXTURE.replacen("ERR_CORE_UNAUTHENTICATED", "ERR_CORE_FORBIDDEN", 1);
     let fixture: JourneyFixture = toml::from_str(&changed)?;
     let case = fixture
@@ -1954,139 +3052,126 @@ fn changed_fixture_behavior_is_observably_red() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn active_localtx_validation_journey() -> Result<()> {
-    const LOCALTX_JOURNEY_SETTINGS_SECRET_PUBLISH: ::vocab::HttpRouteBinding<
-        ::generated::http::settings_v2::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::settings_v2::ROUTE;
-    const LOCALTX_JOURNEY_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::logout::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::logout::ROUTE;
-    const LOCALTX_JOURNEY_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::password_change::ROUTE;
-    let _ = (
-        LOCALTX_JOURNEY_SETTINGS_SECRET_PUBLISH,
-        LOCALTX_JOURNEY_IDENTITY_LOGOUT,
-        LOCALTX_JOURNEY_IDENTITY_PASSWORD_CHANGE,
+pub(crate) fn swapped_active_fixture_scenarios_are_observably_red() -> Result<()> {
+    let mut fixture: JourneyFixture = toml::from_str(REFRESH_FIXTURE)?;
+    let happy = fixture
+        .cases
+        .iter()
+        .position(|case| case.id == "identity-refresh-happy")
+        .context("refresh happy fixture case missing")?;
+    let contention = fixture
+        .cases
+        .iter()
+        .position(|case| case.id == "identity-refresh-contention-winner")
+        .context("refresh contention fixture case missing")?;
+    let happy_scenario = fixture.cases[happy].scenario.clone();
+    fixture.cases[happy].scenario = fixture.cases[contention].scenario.clone();
+    fixture.cases[contention].scenario = happy_scenario;
+    ensure!(
+        assert_active_case_scenario(&fixture.cases[happy]).is_err()
+            && assert_active_case_scenario(&fixture.cases[contention]).is_err(),
+        "swapping two active case scenarios must make executable assertions red"
     );
+    Ok(())
+}
 
-    let mut settings_fixtures = FixtureBook::load(
-        SETTINGS_FIXTURE,
-        FixtureIdentity {
-            id: "settings-secret-publish-localtx",
-            contract_id: generated::http::settings_v2::CONTRACT_ID,
-            tx_model: "repo-atomic-cas",
-            spec: "journeys/settings-secret-publish-localtx-journey.toml",
-            marker: "SETTINGS_SECRET_PUBLISH",
-        },
-    )?;
-    let settings_happy = settings_fixtures.take_case("settings-secret-publish-happy")?;
-    let settings_auth_failure =
-        settings_fixtures.take_case("settings-secret-publish-auth-failure")?;
-    let settings_validation_failure =
-        settings_fixtures.take_case("settings-secret-publish-validation-failure")?;
-    let settings_conflict = settings_fixtures.take_case("settings-secret-publish-conflict")?;
-    let settings_cases = SettingsCases {
-        happy: settings_happy,
-        auth_failure: settings_auth_failure,
-        validation_failure: settings_validation_failure,
-        conflict: settings_conflict,
-    };
-    let mut password_fixtures = FixtureBook::load(
-        PASSWORD_FIXTURE,
-        FixtureIdentity {
-            id: "identity-password-change-localtx",
-            contract_id: generated::http::identity_v1::password_change::CONTRACT_ID,
-            tx_model: "repo-atomic-cas",
-            spec: "journeys/identity-password-change-localtx-journey.toml",
-            marker: "IDENTITY_PASSWORD_CHANGE",
-        },
-    )?;
-    let password_happy = password_fixtures.take_case("identity-password-change-happy")?;
-    let password_unauthenticated =
-        password_fixtures.take_case("identity-password-change-unauthenticated")?;
-    let password_invalid_subject =
-        password_fixtures.take_case("identity-password-change-invalid-subject")?;
-    let password_validation_failure =
-        password_fixtures.take_case("identity-password-change-validation-failure")?;
-    let password_conflict = password_fixtures.take_case("identity-password-change-conflict")?;
-    let password_cases = PasswordCases {
-        happy: password_happy,
-        unauthenticated: password_unauthenticated,
-        invalid_subject: password_invalid_subject,
-        validation_failure: password_validation_failure,
-        conflict: password_conflict,
-    };
-    let mut logout_fixtures = FixtureBook::load(
-        LOGOUT_FIXTURE,
-        FixtureIdentity {
-            id: "identity-logout-localtx",
-            contract_id: generated::http::identity_v1::logout::CONTRACT_ID,
-            tx_model: "tenant-scoped-uow",
-            spec: "journeys/identity-logout-localtx-journey.toml",
-            marker: "IDENTITY_LOGOUT",
-        },
-    )?;
-    let logout_happy = logout_fixtures.take_case("identity-logout-happy")?;
-    let logout_unauthenticated = logout_fixtures.take_case("identity-logout-unauthenticated")?;
-    let logout_other_owner = logout_fixtures.take_case("identity-logout-other-owner")?;
-    let logout_validation_failure =
-        logout_fixtures.take_case("identity-logout-validation-failure")?;
-    let logout_contention = logout_fixtures.take_case("identity-logout-contention")?;
-    let logout_repeat = logout_fixtures.take_case("identity-logout-repeat")?;
-    let logout_cross_tenant = logout_fixtures.take_case("identity-logout-cross-tenant")?;
-    let logout_cases = LogoutCases {
-        happy: logout_happy,
-        unauthenticated: logout_unauthenticated,
-        other_owner: logout_other_owner,
-        validation_failure: logout_validation_failure,
-        contention: logout_contention,
-        repeat: logout_repeat,
-        cross_tenant: logout_cross_tenant,
-    };
-    let pg = testkit::env_or_postgres().await?;
-    provision_rss_app_login(pg.params()).await?;
-    let owner = pg_config(pg.params());
-    let app = pg_config_for(pg.params(), RSS_APP_ROLE, RSS_APP_PASSWORD);
-    let deps = PgRuntimeDeps::setup(
-        &owner,
-        &app,
-        generated::event::PROJECTION_INPUT_GENERATION,
-        generated::event::PROJECTION_INPUTS,
-    )
-    .await?;
-    let observer = observation_pool(pg.params()).await?;
-    let body = async {
-        let tenant_a = TenantId::parse(TENANT_A)?;
-        let tenant_b = TenantId::parse(TENANT_B)?;
-        let identity = build_identity_harness(&deps, tenant_a, tenant_b).await?;
-        drive_settings(
-            &deps,
-            tenant_a,
-            tenant_b,
-            Arc::clone(&identity.primary_authorizer),
-            settings_cases,
+struct LocalTxJourneyRuntime {
+    _pg: testkit::PgFixture,
+    deps: PgRuntimeDeps,
+    observer: sqlx::PgPool,
+    tenant_a: TenantId,
+    tenant_b: TenantId,
+}
+
+impl LocalTxJourneyRuntime {
+    async fn setup() -> Result<Self> {
+        let pg = testkit::env_or_postgres().await?;
+        let (app_login, audit_admin_login) = provision_test_logins(pg.params()).await?;
+        let owner = pg_config(pg.params());
+        let app = app_login.config(pg.params());
+        let audit_admin = audit_admin_login.config(pg.params());
+        let deps = PgRuntimeDeps::setup_with_audit_admin_config(
+            &owner,
+            &app,
+            Some(&audit_admin),
+            postgres::LegacyConfigPlaintextPolicy::Deny,
+            generated::event::PROJECTION_INPUT_GENERATION,
+            generated::event::PROJECTION_INPUTS,
         )
         .await?;
-        drive_password(&identity, password_cases).await?;
-        drive_logout(&identity, &observer, logout_cases).await
+        let observer = observation_pool(pg.params()).await?;
+        let tenant_a = TenantId::parse(TENANT_A)?;
+        let tenant_b = TenantId::parse(TENANT_B)?;
+        Ok(Self {
+            _pg: pg,
+            deps,
+            observer,
+            tenant_a,
+            tenant_b,
+        })
     }
-    .await;
-    observer.close().await;
-    let cleanup: Result<()> = async {
-        let (resources, _sampler_factory) = deps.into_runtime_parts(Duration::from_secs(1));
-        for resource in resources.into_iter().rev() {
-            resource.shutdown().await?;
+
+    async fn finish(self, body: Result<()>) -> Result<()> {
+        self.observer.close().await;
+        let cleanup: Result<()> = async {
+            let deps = self.deps;
+            let (resources, _sampler_factory) = deps.into_runtime_parts(Duration::from_secs(1));
+            for resource in resources.into_iter().rev() {
+                resource.shutdown().await?;
+            }
+            Ok(())
         }
-        Ok(())
+        .await;
+        finish_with_pg_cleanup(body, cleanup)
     }
+}
+
+pub(crate) async fn drive_settings_journey(cases: SettingsCases) -> Result<()> {
+    let runtime = LocalTxJourneyRuntime::setup().await?;
+    let identity =
+        build_identity_harness(&runtime.deps, runtime.tenant_a, runtime.tenant_b).await?;
+    let body = drive_settings(
+        &runtime.deps,
+        runtime.tenant_a,
+        runtime.tenant_b,
+        Arc::clone(&identity.primary_authorizer),
+        cases,
+    )
     .await;
-    finish_with_pg_cleanup(body, cleanup)?;
-    settings_fixtures.assert_exhausted()?;
-    password_fixtures.assert_exhausted()?;
-    logout_fixtures.assert_exhausted()
+    runtime.finish(body).await
+}
+
+pub(crate) async fn drive_password_journey(cases: PasswordCases) -> Result<()> {
+    let runtime = LocalTxJourneyRuntime::setup().await?;
+    let identity =
+        build_identity_harness(&runtime.deps, runtime.tenant_a, runtime.tenant_b).await?;
+    let body = drive_password(&identity, cases).await;
+    runtime.finish(body).await
+}
+
+pub(crate) async fn drive_logout_journey(cases: LogoutCases) -> Result<()> {
+    let runtime = LocalTxJourneyRuntime::setup().await?;
+    let identity =
+        build_identity_harness(&runtime.deps, runtime.tenant_a, runtime.tenant_b).await?;
+    let body = drive_logout(&identity, &runtime.observer, cases).await;
+    runtime.finish(body).await
+}
+
+pub(crate) async fn drive_refresh_journey(cases: RefreshCases) -> Result<()> {
+    let runtime = LocalTxJourneyRuntime::setup().await?;
+    let body = drive_refresh(&runtime.deps, &runtime.observer, runtime.tenant_a, cases).await;
+    runtime.finish(body).await
+}
+
+pub(crate) async fn drive_audit_journey(cases: AuditCases) -> Result<()> {
+    let runtime = LocalTxJourneyRuntime::setup().await?;
+    let body = drive_audit(
+        &runtime.deps,
+        &runtime.observer,
+        runtime.tenant_a,
+        Uuid::new_v4(),
+        cases,
+    )
+    .await;
+    runtime.finish(body).await
 }

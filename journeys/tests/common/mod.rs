@@ -8,7 +8,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use audit::ports::{AuditChainHasher, DynAuditReadRepo, DynAuditWriteRepo};
+use audit::ports::{
+    AuditChainHasher, AuditListTenantAppender, DynAuditReadRepo, DynAuditWriteRepo,
+};
 use audit::{AuditDomain, InMemAuditRepo};
 use consistency::EventEntry;
 use diport::{
@@ -60,6 +62,16 @@ impl diport::AuditSink for NoopAuditSink {
 
     async fn shutdown(&self) -> Result<(), diport::AuditSinkError> {
         Ok(())
+    }
+}
+
+impl AuditListTenantAppender for NoopAuditSink {
+    async fn append(
+        &self,
+        command: audit::ports::AuditListTenantAppend,
+    ) -> Result<(), diport::AuditSinkError> {
+        let (_scope, event, _observation) = command.into_parts();
+        diport::AuditSink::record(self, event).await
     }
 }
 

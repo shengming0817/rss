@@ -24,11 +24,6 @@
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-#[cfg(all(test, feature = "integration"))]
-use std::collections::HashMap;
-#[cfg(all(test, feature = "integration"))]
-use std::sync::Mutex;
-
 use audit::ports::{
     AuditAdminRepo, AuditChainHasher, AuditEntry, AuditError, AuditLedgerVerifyReport,
     AuditListResult, AuditOutcome, AuditPage, AuditReadRepo, AuditRecord, AuditWriteRepo,
@@ -66,50 +61,6 @@ const TABLE: &str = "audit_entries";
 pub struct PgAuditRepo<M: primitives::MacVerifier> {
     pool: PgTenantPool,
     hasher: Arc<AuditChainHasher<M>>,
-    #[cfg(all(test, feature = "integration"))]
-    append_faults: Arc<Mutex<AuditAppendFaultState>>,
-}
-
-#[cfg(all(test, feature = "integration"))]
-#[derive(Clone, Copy)]
-pub(crate) enum AuditAppendFault {
-    Permanent,
-    Transient,
-    TransientBeforeWrite,
-    CommitUnknown,
-    RollbackFailed,
-}
-
-#[cfg(all(test, feature = "integration"))]
-#[derive(Clone, Copy)]
-struct AuditAppendFaultPlan {
-    fault: AuditAppendFault,
-    remaining: usize,
-}
-
-#[cfg(all(test, feature = "integration"))]
-#[derive(Default)]
-struct AuditAppendFaultState {
-    plans: HashMap<String, AuditAppendFaultPlan>,
-    attempts: HashMap<String, usize>,
-}
-
-#[cfg(all(test, feature = "integration"))]
-pub(crate) struct AuditAppendAttemptProbe {
-    state: Arc<Mutex<AuditAppendFaultState>>,
-}
-
-#[cfg(all(test, feature = "integration"))]
-impl AuditAppendAttemptProbe {
-    pub(crate) fn attempts(&self, tenant: TenantId) -> usize {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .attempts
-            .get(&tenant_str(tenant))
-            .copied()
-            .unwrap_or_default()
-    }
 }
 
 /// audit 审计链的跨租户只读 admin adapter。
@@ -127,65 +78,8 @@ impl<M: MacVerifier + Send + Sync> PgAuditRepo<M> {
         Self {
             pool: PgTenantPool::new(store),
             hasher: Arc::new(hasher),
-            #[cfg(all(test, feature = "integration"))]
-            append_faults: Arc::new(Mutex::new(AuditAppendFaultState::default())),
         }
     }
-
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn with_append_fault(
-        self,
-        tenant: TenantId,
-        fault: AuditAppendFault,
-        remaining: usize,
-    ) -> Self {
-        assert!(remaining > 0, "fault plan must affect at least one attempt");
-        self.append_faults
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .plans
-            .insert(
-                tenant_str(tenant),
-                AuditAppendFaultPlan { fault, remaining },
-            );
-        self
-    }
-
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn append_attempt_probe(&self) -> AuditAppendAttemptProbe {
-        AuditAppendAttemptProbe {
-            state: Arc::clone(&self.append_faults),
-        }
-    }
-}
-
-#[cfg(all(test, feature = "integration"))]
-fn record_append_attempt(state: &Mutex<AuditAppendFaultState>, tenant: &str) {
-    let mut state = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *state.attempts.entry(tenant.to_owned()).or_default() += 1;
-}
-
-#[cfg(all(test, feature = "integration"))]
-fn take_append_fault_if(
-    state: &Mutex<AuditAppendFaultState>,
-    tenant: &str,
-    predicate: impl FnOnce(AuditAppendFault) -> bool,
-) -> Option<AuditAppendFault> {
-    let mut state = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let plan = state.plans.get_mut(tenant)?;
-    let fault = plan.fault;
-    if !predicate(fault) {
-        return None;
-    }
-    plan.remaining -= 1;
-    if plan.remaining == 0 {
-        state.plans.remove(tenant);
-    }
-    Some(fault)
 }
 
 impl<M: MacVerifier + Send + Sync> PgAuditAdminRepo<M> {
@@ -632,32 +526,18 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditWriteRepo for PgAuditRepo<M> {
         let tenant_uuid = tenant_str(record.tenant);
         let lock_key = advisory_lock_key(record.tenant);
         let record = Arc::new(record);
-        #[cfg(all(test, feature = "integration"))]
-        let append_faults = Arc::clone(&self.append_faults);
         run_pg_tx_retry(
             AUDIT_APPEND_BOUNDARY,
             |_attempt| {
                 let tenant_uuid = tenant_uuid.clone();
                 let record = Arc::clone(&record);
                 let hasher = Arc::clone(&self.hasher);
-                #[cfg(all(test, feature = "integration"))]
-                let append_faults = Arc::clone(&append_faults);
-                #[cfg(all(test, feature = "integration"))]
-                record_append_attempt(&append_faults, &tenant_uuid);
                 async move {
                     self.pool
                         .retry_write(
                             scope,
                             move |tx| {
                                 Box::pin(async move {
-                                    #[cfg(all(test, feature = "integration"))]
-                                    if take_append_fault_if(&append_faults, &tenant_uuid, |fault| {
-                                        matches!(fault, AuditAppendFault::TransientBeforeWrite)
-                                    })
-                                    .is_some()
-                                    {
-                                        return Err(storage(sqlx::Error::PoolTimedOut));
-                                    }
                                     append_in_tx(
                                         tx.conn(),
                                         &tenant_uuid,
@@ -666,39 +546,6 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditWriteRepo for PgAuditRepo<M> {
                                         &hasher,
                                     )
                                     .await?;
-                                    #[cfg(all(test, feature = "integration"))]
-                                    if let Some(fault) = take_append_fault_if(
-                                        &append_faults,
-                                        &tenant_uuid,
-                                        |fault| {
-                                            !matches!(fault, AuditAppendFault::TransientBeforeWrite)
-                                        },
-                                    ) {
-                                        match fault {
-                                            AuditAppendFault::Permanent => {
-                                                return Err(AuditError::SequenceGap);
-                                            }
-                                            AuditAppendFault::Transient => {
-                                                return Err(storage(sqlx::Error::PoolTimedOut));
-                                            }
-                                            AuditAppendFault::TransientBeforeWrite => {
-                                                unreachable!(
-                                                    "before-write fault is consumed before SQL"
-                                                )
-                                            }
-                                            AuditAppendFault::CommitUnknown => {
-                                                tx.inject_commit_unknown_after_commit()
-                                                    .await
-                                                    .map_err(storage)?;
-                                            }
-                                            AuditAppendFault::RollbackFailed => {
-                                                tx.inject_rollback_failed_after_rollback()
-                                                    .await
-                                                    .map_err(storage)?;
-                                                return Err(storage(sqlx::Error::PoolTimedOut));
-                                            }
-                                        }
-                                    }
                                     Ok(())
                                 })
                             },

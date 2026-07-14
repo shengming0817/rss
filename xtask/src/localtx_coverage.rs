@@ -1,8 +1,8 @@
 //! LocalTx static coverage closure gate.
 //!
 //! INVARIANT: LOCALTX-COVERAGE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "missing_route_and_duplicate_marker_are_rejected", anti_vacuity = "green_fixture_closes_every_active_localtx_contract" }.
-//! INVARIANT: LOCALTX-BACKEND-PROFILE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "active_contract_without_backend_profile_is_rejected|backend_profile_missing_required_probe_is_rejected|unawaited_backend_probe_does_not_count|tenant_contract_cannot_enroll_repo_atomic_probe_set|multiple_backend_profiles_in_one_test_function_are_rejected", anti_vacuity = "single_backend_profile_in_test_function_is_accepted|actual_workspace_has_non_empty_complete_localtx_closure" }.
-//! INVARIANT: LOCALTX-JOURNEY-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "fixture_mutation_requires_exactly_one_match|journey_missing_entry_is_rejected|journey_duplicate_entry_is_rejected|journey_wrong_tx_model_is_rejected|journey_missing_scenario_is_rejected|journey_fake_logout_conflict_is_rejected|journey_missing_board_is_rejected|journey_unknown_board_field_is_rejected|journey_unknown_spec_field_is_rejected|journey_unknown_fixture_field_is_rejected|journey_dangling_spec_is_rejected|journey_spec_metadata_drift_identifies_field_and_values|journey_fixture_metadata_drift_identifies_field_and_values|journey_missing_typed_marker_is_rejected|journey_marker_without_test_attribute_is_rejected|journey_marker_in_unused_closure_is_rejected|journey_ignored_test_is_rejected|journey_cfg_disabled_test_is_rejected|journey_cfg_disabled_ancestor_is_rejected|journey_should_panic_test_is_rejected|journey_return_expression_is_rejected|journey_wrong_route_marker_is_rejected|journey_missing_case_consumption_is_rejected|journey_duplicate_case_consumption_is_rejected|journey_dynamic_case_consumption_is_rejected|journey_case_consumption_in_unused_helper_is_rejected|journey_case_consumption_in_another_test_is_rejected|journey_case_consumption_in_noncanonical_flow_is_rejected|journey_unobserved_case_values_are_rejected|journey_target_must_require_integration", anti_vacuity = "journey_green_fixture_closes_scoped_matrix|journey_scope_does_not_claim_global_exhaustiveness|actual_workspace_closes_issue_1706_journeys" }.
+//! INVARIANT: LOCALTX-BACKEND-PROFILE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "active_contract_without_backend_profile_is_rejected|backend_profile_missing_required_probe_is_rejected|unawaited_backend_probe_does_not_count|tenant_contract_cannot_enroll_repo_atomic_probe_set|multiple_backend_profiles_in_one_test_function_are_rejected|backend_profile_shadow_constructor_is_rejected|backend_profile_nested_constructor_bait_is_rejected|backend_profile_synthetic_action_is_rejected|backend_profile_observer_binding_does_not_count|backend_profile_bare_provider_reference_is_rejected|backend_profile_free_function_provider_argument_is_rejected|backend_profile_discarded_provider_call_is_rejected|backend_profile_discarded_call_cannot_launder_result|backend_profile_tuple_projection_cannot_launder_result|backend_profile_struct_projection_cannot_launder_result|backend_profile_direct_projection_cannot_launder_result|backend_profile_tail_block_cannot_launder_discarded_call|backend_profile_unpolled_provider_future_is_rejected", anti_vacuity = "single_backend_profile_in_test_function_is_accepted|actual_workspace_has_non_empty_complete_localtx_closure" }.
+//! INVARIANT: LOCALTX-JOURNEY-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "fixture_mutation_requires_exactly_one_match|journey_missing_entry_is_rejected|journey_extra_entry_is_rejected|journey_duplicate_entry_is_rejected|journey_legacy_scope_is_rejected|journey_wrong_tx_model_is_rejected|journey_missing_scenario_is_rejected|journey_non_commit_unknown_case_requires_commits|journey_fake_logout_conflict_is_rejected|journey_missing_board_is_rejected|journey_unknown_board_field_is_rejected|journey_unknown_spec_field_is_rejected|journey_unknown_fixture_field_is_rejected|journey_dangling_spec_is_rejected|journey_spec_metadata_drift_identifies_field_and_values|journey_fixture_metadata_drift_identifies_field_and_values|journey_missing_typed_marker_is_rejected|journey_marker_without_test_attribute_is_rejected|journey_marker_in_unused_closure_is_rejected|journey_ignored_test_is_rejected|journey_cfg_disabled_test_is_rejected|journey_cfg_disabled_ancestor_is_rejected|journey_should_panic_test_is_rejected|journey_return_expression_is_rejected|journey_wrong_route_marker_is_rejected|journey_missing_case_consumption_is_rejected|journey_duplicate_case_consumption_is_rejected|journey_dynamic_case_consumption_is_rejected|journey_case_consumption_in_unused_helper_is_rejected|journey_case_consumption_in_another_test_is_rejected|journey_case_consumption_in_noncanonical_flow_is_rejected|journey_unobserved_case_values_are_rejected|journey_target_must_require_integration|journey_runner_extra_marker_is_rejected|journey_runner_duplicate_marker_is_rejected", anti_vacuity = "journey_green_fixture_closes_active_matrix|journey_markers_may_span_real_tests|journey_entries_may_use_distinct_runners|journey_commit_unknown_case_may_omit_commits|actual_workspace_closes_active_localtx_journeys" }.
 
 use crate::contract::manifest::{
     ConsistencyLevel, ContractKind, ContractOwner, Lifecycle, LocalTxModel,
@@ -179,7 +179,7 @@ struct BackendProfileMarker {
 struct BackendProviderBinding {
     name: String,
     key: String,
-    fixture: String,
+    provider_path: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,12 +204,8 @@ struct OpaqueTrigger {
 }
 
 const JOURNEY_BOARD_PATH: &str = "journeys/status-board.toml";
-const JOURNEY_RUNNER_PATH: &str = "journeys/tests/localtx_validation_journey.rs";
-const ISSUE_1706_CONTRACTS: [&str; 3] = [
-    "identity.logout",
-    "identity.password-change",
-    "settings.secret-publish",
-];
+#[cfg(test)]
+const GREEN_JOURNEY_RUNNER_PATH: &str = "journeys/tests/localtx_validation_journey.rs";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -217,7 +213,6 @@ struct JourneyBoard {
     #[serde(rename = "schemaVersion")]
     schema_version: u8,
     scope: String,
-    runner: String,
     journeys: Vec<JourneyBoardEntry>,
 }
 
@@ -231,6 +226,7 @@ struct JourneyBoardEntry {
     tx_model: LocalTxModel,
     spec: String,
     fixture: String,
+    runner: String,
     marker: String,
 }
 
@@ -274,6 +270,7 @@ enum JourneyScenarioKind {
     ValidationFailure,
     Conflict,
     Contention,
+    CommitUnknown,
 }
 
 impl JourneyScenarioKind {
@@ -284,6 +281,7 @@ impl JourneyScenarioKind {
             Self::ValidationFailure => "validation-failure",
             Self::Conflict => "conflict",
             Self::Contention => "contention",
+            Self::CommitUnknown => "commit-unknown",
         }
     }
 }
@@ -307,7 +305,7 @@ struct JourneyCase {
     error_code: String,
     retryable: bool,
     attempts: u16,
-    commits: u16,
+    commits: Option<u16>,
     #[serde(rename = "redactSentinels")]
     redact_sentinels: Vec<String>,
 }
@@ -316,20 +314,31 @@ struct JourneyCase {
 struct JourneyClosureEntry {
     contract_id: String,
     tx_model: LocalTxModel,
+    runner: String,
     marker: String,
     marker_key: String,
+    case_ids: BTreeSet<String>,
 }
 
 #[derive(Debug)]
 struct JourneyClosure {
     entries: Vec<JourneyClosureEntry>,
+    runners: BTreeSet<String>,
 }
 
 #[derive(Debug)]
 struct JourneyRunnerEvidence {
     markers: BTreeMap<String, String>,
+    marker_tests: BTreeMap<String, usize>,
     case_ids: BTreeSet<String>,
+    case_tests: BTreeMap<String, usize>,
     observation_error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct JourneyRunnerExpectation {
+    markers: BTreeSet<String>,
+    cases: BTreeSet<String>,
 }
 
 #[derive(Debug)]
@@ -360,7 +369,7 @@ fn check_root_inner(root: &Path) -> Result<(String, Vec<Finding>)> {
     let registry = parse_registry(root, &generated_root.join("mod.rs"))?;
     let generated = parse_generated_specs(root, &generated_root)?;
     let workspace_crates = load_workspace_crates(root)?;
-    validate_journey_cargo_target(root, &workspace_crates)?;
+    validate_journey_cargo_targets(root, &workspace_crates, &journey_closure.runners)?;
     let expected_packages: BTreeMap<_, _> = workspace_crates
         .iter()
         .map(|member| (member.name.clone(), member.root.clone()))
@@ -552,11 +561,8 @@ fn load_journey_closure(root: &Path) -> Result<JourneyClosure> {
     if board.schema_version != 1 {
         bail!("{JOURNEY_BOARD_PATH}: schemaVersion must be 1");
     }
-    if board.scope != "issue-1706" {
-        bail!("{JOURNEY_BOARD_PATH}: scope must be `issue-1706`");
-    }
-    if board.runner != JOURNEY_RUNNER_PATH {
-        bail!("{JOURNEY_BOARD_PATH}: runner must be `{JOURNEY_RUNNER_PATH}`");
+    if board.scope != "active-localtx" {
+        bail!("{JOURNEY_BOARD_PATH}: scope must be `active-localtx`");
     }
     if board.journeys.is_empty() {
         bail!("{JOURNEY_BOARD_PATH}: journeys must not be empty");
@@ -568,6 +574,7 @@ fn load_journey_closure(root: &Path) -> Result<JourneyClosure> {
     let mut fixtures = BTreeSet::new();
     let mut markers = BTreeSet::new();
     let mut case_ids = BTreeSet::new();
+    let mut runner_expectations = BTreeMap::<String, JourneyRunnerExpectation>::new();
     let mut entries = Vec::new();
     for entry in board.journeys {
         validate_board_entry(&entry)?;
@@ -579,45 +586,74 @@ fn load_journey_closure(root: &Path) -> Result<JourneyClosure> {
 
         let spec_path = scoped_artifact(root, &entry.spec, "journeys", "-localtx-journey.toml")?;
         let fixture_path = scoped_artifact(root, &entry.fixture, "fixtures", "-localtx.toml")?;
+        scoped_artifact(root, &entry.runner, "journeys/tests", "_journey.rs")?;
         let spec: JourneySpec = parse_journey_toml(root, &spec_path)?;
         let fixture: JourneyFixture = parse_journey_toml(root, &fixture_path)?;
         validate_spec(&entry, &spec)?;
         validate_fixture(&entry, &fixture, &mut case_ids)?;
         validate_scenario_matrix(entry.tx_model, &spec.scenarios, &fixture.cases, &entry.id)?;
+        let expected = runner_expectations.entry(entry.runner.clone()).or_default();
+        expected.markers.insert(entry.marker.clone());
+        expected
+            .cases
+            .extend(fixture.cases.iter().map(|case| case.id.clone()));
 
         entries.push(JourneyClosureEntry {
             contract_id: entry.contract_id,
             tx_model: entry.tx_model,
+            runner: entry.runner,
             marker: entry.marker,
             marker_key: String::new(),
+            case_ids: fixture.cases.iter().map(|case| case.id.clone()).collect(),
         });
     }
-    let runner = scan_journey_runner(root, &root.join(JOURNEY_RUNNER_PATH))?;
-    let expected_markers: BTreeSet<_> = entries.iter().map(|entry| entry.marker.clone()).collect();
-    let actual_markers: BTreeSet<_> = runner.markers.keys().cloned().collect();
-    if actual_markers != expected_markers {
-        bail!(
-            "{JOURNEY_RUNNER_PATH}: LOCALTX_JOURNEY markers differ from status board; expected {expected_markers:?}, found {actual_markers:?}"
-        );
-    }
-    if runner.case_ids != case_ids {
-        bail!(
-            "{JOURNEY_RUNNER_PATH}: literal `take_case` calls differ from fixture cases; expected {case_ids:?}, found {:?}",
-            runner.case_ids
-        );
-    }
-    if let Some(error) = runner.observation_error {
-        bail!("{error}");
-    }
-    for entry in &mut entries {
-        entry.marker_key = runner
-            .markers
-            .get(&entry.marker)
-            .cloned()
-            .ok_or_else(|| anyhow!("journey marker accounting failed"))?;
+    for (runner_path, expected) in &runner_expectations {
+        let runner = scan_journey_runner(root, &root.join(runner_path))?;
+        let actual_markers: BTreeSet<_> = runner.markers.keys().cloned().collect();
+        if actual_markers != expected.markers {
+            bail!(
+                "{runner_path}: LOCALTX_JOURNEY markers differ from its status-board entries; expected {:?}, found {actual_markers:?}",
+                expected.markers
+            );
+        }
+        if runner.case_ids != expected.cases {
+            bail!(
+                "{runner_path}: literal `take_case` calls differ from its fixture cases; expected {:?}, found {:?}",
+                expected.cases,
+                runner.case_ids
+            );
+        }
+        if let Some(error) = runner.observation_error {
+            bail!("{runner_path}: {error}");
+        }
+        for entry in entries
+            .iter_mut()
+            .filter(|entry| entry.runner == *runner_path)
+        {
+            entry.marker_key = runner
+                .markers
+                .get(&entry.marker)
+                .cloned()
+                .ok_or_else(|| anyhow!("journey marker accounting failed"))?;
+            let marker_test = runner
+                .marker_tests
+                .get(&entry.marker)
+                .ok_or_else(|| anyhow!("journey marker test accounting failed"))?;
+            for case_id in &entry.case_ids {
+                if runner.case_tests.get(case_id) != Some(marker_test) {
+                    bail!(
+                        "{runner_path}: fixture case `{case_id}` must be consumed in the same real test as `LOCALTX_JOURNEY_{}`",
+                        entry.marker
+                    );
+                }
+            }
+        }
     }
     entries.sort_by(|left, right| left.contract_id.cmp(&right.contract_id));
-    Ok(JourneyClosure { entries })
+    Ok(JourneyClosure {
+        entries,
+        runners: runner_expectations.into_keys().collect(),
+    })
 }
 
 fn validate_journey_contracts(closure: &JourneyClosure, contracts: &[Contract]) -> Result<()> {
@@ -625,6 +661,17 @@ fn validate_journey_contracts(closure: &JourneyClosure, contracts: &[Contract]) 
         .iter()
         .map(|contract| (contract.id.as_str(), contract))
         .collect();
+    let expected: BTreeSet<_> = contracts_by_id.keys().copied().collect();
+    let actual: BTreeSet<_> = closure
+        .entries
+        .iter()
+        .map(|entry| entry.contract_id.as_str())
+        .collect();
+    if actual != expected {
+        bail!(
+            "{JOURNEY_BOARD_PATH}: active-localtx must contain exactly the discovered active LocalTx contracts; expected {expected:?}, found {actual:?}"
+        );
+    }
     for entry in &closure.entries {
         let contract = contracts_by_id
             .get(entry.contract_id.as_str())
@@ -642,7 +689,8 @@ fn validate_journey_contracts(closure: &JourneyClosure, contracts: &[Contract]) 
         }
         if entry.marker_key != contract.key {
             bail!(
-                "{JOURNEY_RUNNER_PATH}: marker `LOCALTX_JOURNEY_{}` binds `{}`; expected `{}` for contract `{}`",
+                "{}: marker `LOCALTX_JOURNEY_{}` binds `{}`; expected `{}` for contract `{}`",
+                entry.runner,
                 entry.marker,
                 entry.marker_key,
                 contract.key,
@@ -651,55 +699,45 @@ fn validate_journey_contracts(closure: &JourneyClosure, contracts: &[Contract]) 
         }
     }
 
-    let issue_contracts: BTreeSet<_> = ISSUE_1706_CONTRACTS.iter().copied().collect();
-    if contracts_by_id
-        .keys()
-        .any(|contract_id| issue_contracts.contains(contract_id))
-    {
-        let actual: BTreeSet<_> = closure
-            .entries
-            .iter()
-            .map(|entry| entry.contract_id.as_str())
-            .collect();
-        if actual != issue_contracts {
-            bail!(
-                "{JOURNEY_BOARD_PATH}: issue-1706 must contain exactly {issue_contracts:?}; found {actual:?}"
-            );
-        }
-    }
     Ok(())
 }
 
-fn validate_journey_cargo_target(root: &Path, workspace_crates: &[WorkspaceCrate]) -> Result<()> {
-    let expected = std::fs::canonicalize(root.join(JOURNEY_RUNNER_PATH))
-        .context("canonicalize LocalTx journey runner")?;
+fn validate_journey_cargo_targets(
+    root: &Path,
+    workspace_crates: &[WorkspaceCrate],
+    runners: &BTreeSet<String>,
+) -> Result<()> {
     let member = workspace_crates
         .iter()
         .find(|member| member.relative == Path::new("journeys"))
         .ok_or_else(|| anyhow!("journeys must be a workspace package"))?;
-    let matching: Vec<_> = member
-        .targets
-        .iter()
-        .filter_map(|target| {
-            std::fs::canonicalize(&target.path)
-                .ok()
-                .filter(|path| path == &expected)
-                .map(|_| target)
-        })
-        .collect();
-    let [target] = matching.as_slice() else {
-        bail!("{JOURNEY_RUNNER_PATH}: must be registered as exactly one Cargo target");
-    };
-    if !target.integration_test
-        || target.required_features != BTreeSet::from(["integration".to_string()])
-    {
-        bail!(
-            "{JOURNEY_RUNNER_PATH}: Cargo target must be an integration test with required-features = [\"integration\"]"
-        );
+    for runner in runners {
+        let expected = std::fs::canonicalize(root.join(runner))
+            .with_context(|| format!("canonicalize LocalTx journey runner `{runner}`"))?;
+        let matching: Vec<_> = member
+            .targets
+            .iter()
+            .filter_map(|target| {
+                std::fs::canonicalize(&target.path)
+                    .ok()
+                    .filter(|path| path == &expected)
+                    .map(|_| target)
+            })
+            .collect();
+        let [target] = matching.as_slice() else {
+            bail!("{runner}: must be registered as exactly one Cargo target");
+        };
+        if !target.integration_test
+            || target.required_features != BTreeSet::from(["integration".to_string()])
+        {
+            bail!(
+                "{runner}: Cargo target must be an integration test with required-features = [\"integration\"]"
+            );
+        }
     }
     let batch = crate::integration_shards::localtx_journey_execution_batch()?;
     if !crate::nextest::integration_batch_fails_on_empty(&batch) {
-        bail!("{JOURNEY_RUNNER_PATH}: postgres-domain Serial execution must use --no-tests=fail");
+        bail!("LocalTx journey runners: postgres-domain Serial execution must use --no-tests=fail");
     }
     Ok(())
 }
@@ -707,6 +745,9 @@ fn validate_journey_cargo_target(root: &Path, workspace_crates: &[WorkspaceCrate
 fn validate_board_entry(entry: &JourneyBoardEntry) -> Result<()> {
     validate_slug(&entry.id, "journey id")?;
     validate_contract_id(&entry.contract_id)?;
+    if entry.runner.trim().is_empty() {
+        bail!("journey runner must not be empty");
+    }
     validate_marker_suffix(&entry.marker)?;
     Ok(())
 }
@@ -729,7 +770,7 @@ fn validate_spec(entry: &JourneyBoardEntry, spec: &JourneySpec) -> Result<()> {
         localtx_model_label(spec.tx_model),
     )?;
     require_journey_metadata(&entry.spec, "fixture", &entry.fixture, &spec.fixture)?;
-    require_journey_metadata(&entry.spec, "runner", JOURNEY_RUNNER_PATH, &spec.runner)?;
+    require_journey_metadata(&entry.spec, "runner", &entry.runner, &spec.runner)?;
     require_journey_metadata(&entry.spec, "marker", &entry.marker, &spec.marker)?;
     Ok(())
 }
@@ -756,12 +797,7 @@ fn validate_fixture(
         localtx_model_label(fixture.tx_model),
     )?;
     require_journey_metadata(&entry.fixture, "spec", &entry.spec, &fixture.spec)?;
-    require_journey_metadata(
-        &entry.fixture,
-        "runner",
-        JOURNEY_RUNNER_PATH,
-        &fixture.runner,
-    )?;
+    require_journey_metadata(&entry.fixture, "runner", &entry.runner, &fixture.runner)?;
     require_journey_metadata(&entry.fixture, "marker", &entry.marker, &fixture.marker)?;
     if fixture.cases.is_empty() {
         bail!("{}: cases must not be empty", entry.fixture);
@@ -783,7 +819,14 @@ fn validate_fixture(
                 case.id
             );
         }
-        if case.commits > case.attempts {
+        if case.scenario != JourneyScenarioKind::CommitUnknown && case.commits.is_none() {
+            bail!(
+                "{}: case `{}` may omit commits only for the commit-unknown scenario",
+                entry.fixture,
+                case.id
+            );
+        }
+        if case.commits.is_some_and(|commits| commits > case.attempts) {
             bail!(
                 "{}: case `{}` commits exceed attempts",
                 entry.fixture,
@@ -827,7 +870,7 @@ fn validate_scenario_matrix(
     cases: &[JourneyCase],
     journey_id: &str,
 ) -> Result<()> {
-    let expected: BTreeSet<_> = match tx_model {
+    let required: BTreeSet<_> = match tx_model {
         LocalTxModel::RepoAtomicCas => [
             JourneyScenarioKind::Happy,
             JourneyScenarioKind::AuthFailure,
@@ -846,6 +889,8 @@ fn validate_scenario_matrix(
         .into_iter()
         .collect(),
     };
+    let mut allowed = required.clone();
+    allowed.insert(JourneyScenarioKind::CommitUnknown);
     let mut declared = BTreeMap::new();
     for scenario in scenarios {
         if declared.insert(scenario.kind, scenario).is_some() {
@@ -873,9 +918,9 @@ fn validate_scenario_matrix(
         }
     }
     let actual: BTreeSet<_> = declared.keys().copied().collect();
-    if actual != expected {
+    if !required.is_subset(&actual) || !actual.is_subset(&allowed) {
         bail!(
-            "journey `{journey_id}` scenario closure differs for txModel; expected {expected:?}, found {actual:?}"
+            "journey `{journey_id}` scenario closure differs for txModel; required {required:?}, allowed {allowed:?}, found {actual:?}"
         );
     }
     if tx_model == LocalTxModel::RepoAtomicCas
@@ -908,6 +953,12 @@ fn validate_scenario_matrix(
                 "journey `{journey_id}` tenant-scoped-uow conflict must be applicable=false with a reason"
             );
         }
+    }
+    if declared
+        .get(&JourneyScenarioKind::CommitUnknown)
+        .is_some_and(|scenario| !scenario.applicable)
+    {
+        bail!("journey `{journey_id}` declared commit-unknown scenario must be applicable");
     }
 
     let covered: BTreeSet<_> = cases.iter().map(|case| case.scenario).collect();
@@ -1099,9 +1150,7 @@ fn scan_journey_runner(root: &Path, path: &Path) -> Result<JourneyRunnerEvidence
         fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
             if call.method == "take_case" {
                 let case_id = if !self.canonical_top_level && self.current_test.is_some() {
-                    Err(format!(
-                        "{JOURNEY_RUNNER_PATH}: `take_case` must be a test-body top-level `let <ident> = <ident>.take_case(\"literal\")?;`"
-                    ))
+                    Err("journey runner: `take_case` must be a test-body top-level `let <ident> = <ident>.take_case(\"literal\")?;`".to_string())
                 } else {
                     match call.args.first() {
                         Some(Expr::Lit(literal)) if call.args.len() == 1 => match &literal.lit {
@@ -1111,16 +1160,19 @@ fn scan_journey_runner(root: &Path, path: &Path) -> Result<JourneyRunnerEvidence
                             .map(|binding| (value.value(), binding))
                             .ok_or_else(|| {
                                 format!(
-                                    "{JOURNEY_RUNNER_PATH}: canonical `take_case` binding accounting failed"
+                                    "journey runner: canonical `take_case` binding accounting failed for `{}`",
+                                    value.value()
                                 )
                             }),
-                            _ => Err(format!(
-                                "{JOURNEY_RUNNER_PATH}: `take_case` requires a single string literal"
-                            )),
+                            _ => Err(
+                                "journey runner: `take_case` requires a single string literal"
+                                    .to_string(),
+                            ),
                         },
-                        _ => Err(format!(
-                            "{JOURNEY_RUNNER_PATH}: `take_case` requires a single string literal"
-                        )),
+                        _ => Err(
+                            "journey runner: `take_case` requires a single string literal"
+                                .to_string(),
+                        ),
                     }
                 };
                 self.case_calls.push(JourneyCaseCallEvidence {
@@ -1191,16 +1243,17 @@ fn scan_journey_runner(root: &Path, path: &Path) -> Result<JourneyRunnerEvidence
     let mut markers = BTreeMap::new();
     let mut keys = BTreeSet::new();
     let mut marker_tests = BTreeSet::new();
+    let mut marker_test_by_suffix = BTreeMap::new();
     for (suffix, key, test, canonical_top_level) in collector.markers {
         validate_marker_suffix(&suffix)?;
         let test = test.ok_or_else(|| {
             anyhow!(
-                "{JOURNEY_RUNNER_PATH}: `LOCALTX_JOURNEY_{suffix}` must be inside a real #[test] or #[tokio::test] function"
+                "journey runner: `LOCALTX_JOURNEY_{suffix}` must be inside a real #[test] or #[tokio::test] function"
             )
         })?;
         if !canonical_top_level {
             bail!(
-                "{JOURNEY_RUNNER_PATH}: `LOCALTX_JOURNEY_{suffix}` must be a test-body top-level const item"
+                "journey runner: `LOCALTX_JOURNEY_{suffix}` must be a test-body top-level const item"
             );
         }
         if let Some(reason) = collector
@@ -1209,90 +1262,105 @@ fn scan_journey_runner(root: &Path, path: &Path) -> Result<JourneyRunnerEvidence
             .and_then(|reason| reason.as_deref())
         {
             bail!(
-                "{JOURNEY_RUNNER_PATH}: `LOCALTX_JOURNEY_{suffix}` is inside a non-canonical journey test: {reason}"
+                "journey runner: `LOCALTX_JOURNEY_{suffix}` is inside a non-canonical journey test: {reason}"
             );
         }
         marker_tests.insert(test);
+        marker_test_by_suffix.insert(suffix.clone(), test);
         let key = key.ok_or_else(|| {
             anyhow!(
-                "{JOURNEY_RUNNER_PATH}: `LOCALTX_JOURNEY_{suffix}` must be an absolute typed HttpRouteBinding<RouteMarker, LocalTx> = generated::ROUTE marker"
+                "journey runner: `LOCALTX_JOURNEY_{suffix}` must be an absolute typed HttpRouteBinding<RouteMarker, LocalTx> = generated::ROUTE marker"
             )
         })?;
         if markers.insert(suffix.clone(), key.clone()).is_some() {
-            bail!("{JOURNEY_RUNNER_PATH}: duplicate marker `LOCALTX_JOURNEY_{suffix}`");
+            bail!("journey runner: duplicate marker `LOCALTX_JOURNEY_{suffix}`");
         }
         if !keys.insert(key.clone()) {
-            bail!("{JOURNEY_RUNNER_PATH}: generated route `{key}` has duplicate journey markers");
+            bail!("journey runner: generated route `{key}` has duplicate journey markers");
         }
     }
-    if marker_tests.len() > 1 {
-        bail!(
-            "{JOURNEY_RUNNER_PATH}: all LOCALTX_JOURNEY markers must be inside one real test function"
-        );
-    }
-
-    let marker_test = marker_tests.iter().next().copied();
     let mut case_ids = BTreeSet::new();
-    let mut case_bindings = BTreeMap::new();
+    let mut case_tests = BTreeMap::new();
+    let mut case_bindings = BTreeMap::<usize, BTreeMap<String, String>>::new();
     for evidence in collector.case_calls {
         let JourneyCaseCallEvidence { parsed, test } = evidence;
-        if test != marker_test {
-            continue;
-        }
         let (case_id, binding) = parsed.map_err(anyhow::Error::msg)?;
-        if !case_ids.insert(case_id.clone()) {
-            bail!("{JOURNEY_RUNNER_PATH}: duplicate `take_case` for `{case_id}`");
+        let test = test.ok_or_else(|| {
+            anyhow!(
+                "journey runner: `take_case` for `{case_id}` must be inside a real journey test"
+            )
+        })?;
+        if !marker_tests.contains(&test) {
+            bail!(
+                "journey runner: `take_case` for `{case_id}` is inside a test without a LOCALTX_JOURNEY marker"
+            );
         }
-        if case_bindings.insert(binding.clone(), case_id).is_some() {
-            bail!("{JOURNEY_RUNNER_PATH}: duplicate journey case binding `{binding}`");
+        if !case_ids.insert(case_id.clone()) {
+            bail!("journey runner: duplicate `take_case` for `{case_id}`");
+        }
+        case_tests.insert(case_id.clone(), test);
+        if case_bindings
+            .entry(test)
+            .or_default()
+            .insert(binding.clone(), case_id)
+            .is_some()
+        {
+            bail!("journey runner: duplicate journey case binding `{binding}`");
         }
     }
 
-    let observation_error = validate_journey_observation_closure(
-        &case_bindings,
-        collector.case_groups,
-        collector.observed_groups,
-        marker_test,
-    )
-    .err()
-    .map(|error| format!("{error:#}"));
+    let mut observation_error = None;
+    for marker_test in marker_tests {
+        let empty = BTreeMap::new();
+        if let Err(error) = validate_journey_observation_closure(
+            case_bindings.get(&marker_test).unwrap_or(&empty),
+            &collector.case_groups,
+            &collector.observed_groups,
+            marker_test,
+        ) {
+            observation_error = Some(format!("{error:#}"));
+            break;
+        }
+    }
     Ok(JourneyRunnerEvidence {
         markers,
+        marker_tests: marker_test_by_suffix,
         case_ids,
+        case_tests,
         observation_error,
     })
 }
 
 fn validate_journey_observation_closure(
     case_bindings: &BTreeMap<String, String>,
-    case_groups: Vec<(String, BTreeSet<String>, Option<usize>)>,
-    observed_groups: Vec<(String, Option<usize>)>,
-    marker_test: Option<usize>,
+    case_groups: &[(String, BTreeSet<String>, Option<usize>)],
+    observed_groups: &[(String, Option<usize>)],
+    marker_test: usize,
 ) -> Result<()> {
     let expected_bindings: BTreeSet<_> = case_bindings.keys().cloned().collect();
     let mut grouped_bindings = BTreeSet::new();
     let mut observation_groups = BTreeSet::new();
     for (group, bindings, test) in case_groups {
-        if test != marker_test {
+        if *test != Some(marker_test) {
             continue;
         }
         let relevant: BTreeSet<_> = bindings.intersection(&expected_bindings).cloned().collect();
         if relevant.is_empty() {
             continue;
         }
-        if relevant != bindings {
+        if relevant != *bindings {
             bail!(
-                "{JOURNEY_RUNNER_PATH}: journey observation group `{group}` mixes case and non-case bindings"
+                "journey runner: journey observation group `{group}` mixes case and non-case bindings"
             );
         }
         for binding in relevant {
             if !grouped_bindings.insert(binding.clone()) {
                 bail!(
-                    "{JOURNEY_RUNNER_PATH}: journey case binding `{binding}` enters multiple observation groups"
+                    "journey runner: journey case binding `{binding}` enters multiple observation groups"
                 );
             }
         }
-        observation_groups.insert(group);
+        observation_groups.insert(group.clone());
     }
     if grouped_bindings != expected_bindings {
         let missing: BTreeSet<_> = expected_bindings
@@ -1300,21 +1368,21 @@ fn validate_journey_observation_closure(
             .cloned()
             .collect();
         bail!(
-            "{JOURNEY_RUNNER_PATH}: journey case bindings missing from an observation closure: {missing:?}"
+            "journey runner: journey case bindings missing from an observation closure: {missing:?}"
         );
     }
 
     let mut observed_counts = BTreeMap::<String, usize>::new();
     for (binding, test) in observed_groups {
-        if test == marker_test && observation_groups.contains(&binding) {
-            *observed_counts.entry(binding).or_default() += 1;
+        if *test == Some(marker_test) && observation_groups.contains(binding) {
+            *observed_counts.entry(binding.clone()).or_default() += 1;
         }
     }
     for group in observation_groups {
         let count = observed_counts.get(&group).copied().unwrap_or_default();
         if count != 1 {
             bail!(
-                "{JOURNEY_RUNNER_PATH}: journey observation closure group `{group}` must enter exactly one executed `drive_*`/`observe_*` consumer; found {count}"
+                "journey runner: journey observation closure group `{group}` must enter exactly one executed `drive_*`/`observe_*` consumer; found {count}"
             );
         }
     }
@@ -1558,11 +1626,12 @@ fn append_backend_profile_findings(
 }
 
 fn required_backend_probes(model: LocalTxModel) -> Vec<(BackendProbe, usize)> {
+    // HTTP validation/authorization are route preconditions and close in the durable journey;
+    // retry ownership closes in pg-tenant-tx-guard. If a backend profile nevertheless enrolls
+    // either helper, backend_enrollments_in_test still requires every action to use the provider.
     let mut required = vec![
         (BackendProbe::Commit, 1),
-        (BackendProbe::RejectedNoWrite, 2),
         (BackendProbe::TenantIsolation, 1),
-        (BackendProbe::RetryBoundary, 1),
         (BackendProbe::CommitUnknownNoReplay, 1),
     ];
     if model == LocalTxModel::TenantScopedUow {
@@ -4029,7 +4098,8 @@ fn backend_enrollments_in_test(
             }),
         };
     }
-    if !provider_fixture_constructed(block, &binding.fixture) {
+    let construction = provider_construction_bindings(block, &binding.provider_path, resolver);
+    if construction.bindings.is_empty() {
         return BackendTestEvidence {
             enrollments: Vec::new(),
             violation: Some(BackendProfileViolation {
@@ -4038,18 +4108,55 @@ fn backend_enrollments_in_test(
                 path: source.to_string(),
                 function: function.to_string(),
                 detail: format!(
-                    "typed provider fixture `{}` is not constructed through `{}::new(...)` in the enrolled test",
-                    binding.fixture, binding.fixture
+                    "typed provider `{}` is not constructed through its canonical `{}::new(...)` path in the enrolled test; observed constructors: {:?}",
+                    binding.provider_path.join("::"),
+                    binding.provider_path.join("::"),
+                    construction.observed
                 ),
             }),
         };
     }
     let mut probes = BTreeMap::new();
-    for probe in block
+    for (probe, call) in block
         .stmts
         .iter()
         .filter_map(|statement| backend_probe_from_statement(statement, resolver))
     {
+        let Some(actions) = backend_probe_actions(probe, call) else {
+            return BackendTestEvidence {
+                enrollments: Vec::new(),
+                violation: Some(BackendProfileViolation {
+                    rule: Rule::ForbiddenBackendProfileEvidence,
+                    provider: provider.to_string(),
+                    path: source.to_string(),
+                    function: function.to_string(),
+                    detail: format!(
+                        "probe `{}` does not expose its canonical provider-bound action slots",
+                        probe.label()
+                    ),
+                }),
+            };
+        };
+        if actions.is_empty()
+            || actions
+                .iter()
+                .any(|action| !provider_bound_call_drives_action(action, &construction.bindings))
+        {
+            return BackendTestEvidence {
+                enrollments: Vec::new(),
+                violation: Some(BackendProfileViolation {
+                    rule: Rule::ForbiddenBackendProfileEvidence,
+                    provider: provider.to_string(),
+                    path: source.to_string(),
+                    function: function.to_string(),
+                    detail: format!(
+                        "probe `{}` requires every provider-bound action to drive its outcome through a method call whose receiver or argument is a value constructed as `{}`",
+                        probe.label(),
+                        binding.provider_path.join("::")
+                    ),
+                }),
+            };
+        }
         *probes.entry(probe).or_insert(0) += 1;
     }
     let enrollments = markers
@@ -4057,7 +4164,7 @@ fn backend_enrollments_in_test(
         .map(|key| BackendEnrollmentOccurrence {
             key: key.key,
             provider: provider.to_string(),
-            provider_fixture: binding.fixture.clone(),
+            provider_fixture: binding.provider_path.join("::"),
             path: source.to_string(),
             probes: probes.clone(),
         })
@@ -4068,7 +4175,10 @@ fn backend_enrollments_in_test(
     }
 }
 
-fn backend_probe_from_statement(statement: &Stmt, resolver: &Resolver) -> Option<BackendProbe> {
+fn backend_probe_from_statement<'a>(
+    statement: &'a Stmt,
+    resolver: &Resolver,
+) -> Option<(BackendProbe, &'a ExprCall)> {
     let Stmt::Expr(expr, _) = statement else {
         return None;
     };
@@ -4081,7 +4191,7 @@ fn backend_probe_from_statement(statement: &Stmt, resolver: &Resolver) -> Option
     let Expr::Call(call) = peel_expr(&awaited.base) else {
         return None;
     };
-    backend_probe_from_call(call, resolver)
+    backend_probe_from_call(call, resolver).map(|probe| (probe, call))
 }
 
 fn strict_backend_profile_key(item: &ItemConst, resolver: &Resolver) -> Option<String> {
@@ -4196,7 +4306,10 @@ fn strict_backend_provider_binding(
     let Type::Path(provider) = binding.elems.iter().nth(1)? else {
         return None;
     };
-    let fixture = provider.path.segments.last()?.ident.to_string();
+    if provider.qself.is_some() {
+        return None;
+    }
+    let provider_path = canonical_provider_identity(&provider.path, resolver)?;
     let Expr::Path(value) = peel_expr(&item.expr) else {
         return None;
     };
@@ -4206,13 +4319,16 @@ fn strict_backend_provider_binding(
     {
         return None;
     }
-    Some(BackendProviderBinding { name, key, fixture })
+    Some(BackendProviderBinding {
+        name,
+        key,
+        provider_path,
+    })
 }
 
 #[derive(Default)]
 struct BackendProfileBodyVisitor {
     forbidden: Option<String>,
-    constructed: BTreeSet<String>,
 }
 
 impl<'ast> Visit<'ast> for BackendProfileBodyVisitor {
@@ -4229,10 +4345,15 @@ impl<'ast> Visit<'ast> for BackendProfileBodyVisitor {
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         if let Expr::Path(path) = peel_expr(&node.func) {
             let segments = raw_segments(&path.path);
-            if let [.., fixture, constructor] = segments.as_slice()
-                && constructor == "new"
+            if segments
+                .last()
+                .is_some_and(|segment| segment == "synthetic")
+                && self.forbidden.is_none()
             {
-                self.constructed.insert(fixture.clone());
+                self.forbidden = Some(
+                    "calls a synthetic result constructor; backend evidence requires a provider-bound action"
+                        .to_string(),
+                );
             }
         }
         visit::visit_expr_call(self, node);
@@ -4259,10 +4380,469 @@ fn forbidden_backend_profile_evidence(block: &syn::Block) -> Option<String> {
     inspect_backend_profile_body(block).forbidden
 }
 
-fn provider_fixture_constructed(block: &syn::Block, fixture: &str) -> bool {
-    inspect_backend_profile_body(block)
-        .constructed
-        .contains(fixture)
+fn canonical_provider_identity(path: &syn::Path, resolver: &Resolver) -> Option<Vec<String>> {
+    let raw = raw_segments(path);
+    let first = raw.first()?;
+    if first == "crate" {
+        return Some(raw);
+    }
+    if let Some(imported) = resolver.local_aliases.get(first) {
+        return Some(
+            std::iter::once("crate".to_string())
+                .chain(imported.iter().cloned())
+                .chain(raw.into_iter().skip(1))
+                .collect(),
+        );
+    }
+    if let Some(imported) = resolver.aliases.get(first) {
+        return Some(
+            imported
+                .iter()
+                .cloned()
+                .chain(raw.into_iter().skip(1))
+                .collect(),
+        );
+    }
+    Some(raw)
+}
+
+#[derive(Default)]
+struct ProviderConstructionEvidence {
+    bindings: BTreeSet<String>,
+    observed: BTreeSet<String>,
+}
+
+struct ProviderConstructorVisitor<'a> {
+    resolver: &'a Resolver,
+    observed: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for ProviderConstructorVisitor<'_> {
+    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+        if let Expr::Path(function) = peel_expr(&node.func) {
+            let raw = raw_segments(&function.path);
+            if raw.last().is_some_and(|segment| segment == "new") {
+                let mut identity =
+                    canonical_provider_identity(&function.path, self.resolver).unwrap_or(raw);
+                identity.pop();
+                self.observed.insert(identity.join("::"));
+            }
+        }
+        visit::visit_expr_call(self, node);
+    }
+}
+
+/// Accept only a constructor whose value is the initializer's dataflow root. Method chaining and
+/// `Arc::new(provider)` preserve that root; blocks, tuples, branches and other calls do not. This
+/// keeps a dead/nested canonical constructor from lending identity to an unrelated action value.
+fn provider_initializer_matches(
+    expression: &Expr,
+    provider_path: &[String],
+    resolver: &Resolver,
+) -> bool {
+    match peel_expr(expression) {
+        Expr::MethodCall(call) => {
+            provider_initializer_matches(&call.receiver, provider_path, resolver)
+        }
+        Expr::Call(call) => {
+            let Expr::Path(function) = peel_expr(&call.func) else {
+                return false;
+            };
+            let Some(mut identity) = canonical_provider_identity(&function.path, resolver) else {
+                return false;
+            };
+            if identity.last().is_some_and(|segment| segment == "new") {
+                identity.pop();
+                if identity == provider_path {
+                    return true;
+                }
+                let is_arc = identity.as_slice()
+                    == ["std".to_string(), "sync".to_string(), "Arc".to_string()];
+                return is_arc
+                    && call.args.len() == 1
+                    && provider_initializer_matches(&call.args[0], provider_path, resolver);
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn provider_construction_bindings(
+    block: &syn::Block,
+    provider_path: &[String],
+    resolver: &Resolver,
+) -> ProviderConstructionEvidence {
+    let mut evidence = ProviderConstructionEvidence::default();
+    for statement in &block.stmts {
+        let Stmt::Local(local) = statement else {
+            continue;
+        };
+        let Some(binding) = simple_pattern_ident(&local.pat) else {
+            continue;
+        };
+        let Some(initializer) = &local.init else {
+            continue;
+        };
+        let mut visitor = ProviderConstructorVisitor {
+            resolver,
+            observed: BTreeSet::new(),
+        };
+        visitor.visit_expr(&initializer.expr);
+        evidence.observed.extend(visitor.observed);
+        if provider_initializer_matches(&initializer.expr, provider_path, resolver) {
+            evidence.bindings.insert(binding);
+        }
+    }
+    evidence
+}
+
+fn backend_probe_actions(probe: BackendProbe, call: &ExprCall) -> Option<Vec<&Expr>> {
+    match probe {
+        BackendProbe::Commit
+        | BackendProbe::Rollback
+        | BackendProbe::RejectedNoWrite
+        | BackendProbe::CommitUnknownNoReplay
+        | BackendProbe::RollbackFailedNoReplay => {
+            let case = call.args.first()?;
+            let Expr::Call(case) = peel_expr(case) else {
+                return None;
+            };
+            case_constructor_action(case).map(|action| vec![action])
+        }
+        BackendProbe::TenantIsolation => call.args.iter().nth(2).map(|action| vec![action]),
+        BackendProbe::RetryBoundary => {
+            let policy = call.args.first()?;
+            let Expr::Call(policy) = peel_expr(policy) else {
+                return None;
+            };
+            if !call_has_constructor_suffix(policy, "RetryBoundaryCase") {
+                return None;
+            }
+            let mut actions = Vec::new();
+            for path in policy.args.iter().take(4) {
+                let Expr::Call(path) = peel_expr(path) else {
+                    return None;
+                };
+                if !matches!(
+                    constructor_owner(path).as_deref(),
+                    Some(
+                        "TransientSuccessPath"
+                            | "ConflictPath"
+                            | "PermanentPath"
+                            | "TransientExhaustionPath"
+                    )
+                ) {
+                    return None;
+                }
+                actions.push(path.args.first()?);
+            }
+            (actions.len() == 4).then_some(actions)
+        }
+    }
+}
+
+fn case_constructor_action(call: &ExprCall) -> Option<&Expr> {
+    matches!(
+        constructor_owner(call).as_deref(),
+        Some(
+            "CommitCase"
+                | "RollbackCase"
+                | "RejectedNoWriteCase"
+                | "CommitUnknownCase"
+                | "RollbackFailedCase"
+        )
+    )
+    .then(|| call.args.first())?
+}
+
+fn constructor_owner(call: &ExprCall) -> Option<String> {
+    let Expr::Path(function) = peel_expr(&call.func) else {
+        return None;
+    };
+    let segments = raw_segments(&function.path);
+    let [.., owner, constructor] = segments.as_slice() else {
+        return None;
+    };
+    (constructor == "new").then(|| owner.clone())
+}
+
+fn call_has_constructor_suffix(call: &ExprCall, owner: &str) -> bool {
+    constructor_owner(call).as_deref() == Some(owner)
+}
+
+fn expr_is_provider_binding(expression: &Expr, bindings: &BTreeSet<String>) -> bool {
+    let Expr::Path(path) = peel_expr(expression) else {
+        return false;
+    };
+    path.qself.is_none()
+        && path.path.leading_colon.is_none()
+        && path.path.segments.len() == 1
+        && bindings.contains(&path.path.segments[0].ident.to_string())
+}
+
+fn expr_is_provider_bound_call(expression: &Expr, bindings: &BTreeSet<String>) -> bool {
+    let Expr::MethodCall(call) = peel_expr(expression) else {
+        return false;
+    };
+    expr_is_provider_binding(&call.receiver, bindings)
+        || call
+            .args
+            .iter()
+            .any(|argument| expr_is_provider_binding(argument, bindings))
+}
+
+fn expanded_provider_bindings(action: &Expr, roots: &BTreeSet<String>) -> BTreeSet<String> {
+    struct AliasVisitor<'a> {
+        bindings: &'a BTreeSet<String>,
+        aliases: BTreeSet<String>,
+    }
+
+    impl<'ast> Visit<'ast> for AliasVisitor<'_> {
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            if let (Some(alias), Some(initializer)) =
+                (simple_pattern_ident(&local.pat), local.init.as_ref())
+                && expr_is_provider_binding(&initializer.expr, self.bindings)
+            {
+                self.aliases.insert(alias);
+            }
+            visit::visit_local(self, local);
+        }
+    }
+
+    let mut bindings = roots.clone();
+    loop {
+        let mut visitor = AliasVisitor {
+            bindings: &bindings,
+            aliases: BTreeSet::new(),
+        };
+        visitor.visit_expr(action);
+        let previous = bindings.len();
+        bindings.extend(visitor.aliases);
+        if bindings.len() == previous {
+            return bindings;
+        }
+    }
+}
+
+fn block_tail_depends_on<F>(block: &syn::Block, is_signal: &F) -> bool
+where
+    F: Fn(&Expr) -> bool,
+{
+    block.stmts.last().is_some_and(
+        |statement| matches!(statement, Stmt::Expr(tail, None) if expression_value_depends_on(tail, is_signal)),
+    )
+}
+
+fn expression_value_depends_on<F>(expression: &Expr, is_signal: &F) -> bool
+where
+    F: Fn(&Expr) -> bool,
+{
+    let expression = peel_expr(expression);
+    if is_signal(expression) {
+        return true;
+    }
+    match expression {
+        Expr::Array(array) => array
+            .elems
+            .iter()
+            .any(|item| expression_value_depends_on(item, is_signal)),
+        Expr::Await(awaited) => expression_value_depends_on(&awaited.base, is_signal),
+        Expr::Binary(binary) => {
+            expression_value_depends_on(&binary.left, is_signal)
+                || expression_value_depends_on(&binary.right, is_signal)
+        }
+        Expr::Block(block) => block_tail_depends_on(&block.block, is_signal),
+        Expr::Call(call) => call
+            .args
+            .iter()
+            .any(|argument| expression_value_depends_on(argument, is_signal)),
+        Expr::Cast(cast) => expression_value_depends_on(&cast.expr, is_signal),
+        // A projection may select an untainted aggregate member. Without type/MIR place
+        // information, treating the base as evidence would promote one member to the whole value.
+        Expr::Field(_) | Expr::Index(_) => false,
+        Expr::MethodCall(call) => {
+            expression_value_depends_on(&call.receiver, is_signal)
+                || call
+                    .args
+                    .iter()
+                    .any(|argument| expression_value_depends_on(argument, is_signal))
+        }
+        Expr::Repeat(repeat) => expression_value_depends_on(&repeat.expr, is_signal),
+        Expr::Struct(structure) => {
+            structure
+                .fields
+                .iter()
+                .any(|field| expression_value_depends_on(&field.expr, is_signal))
+                || structure
+                    .rest
+                    .as_deref()
+                    .is_some_and(|rest| expression_value_depends_on(rest, is_signal))
+        }
+        Expr::Try(result) => expression_value_depends_on(&result.expr, is_signal),
+        Expr::Tuple(tuple) => tuple
+            .elems
+            .iter()
+            .any(|item| expression_value_depends_on(item, is_signal)),
+        Expr::Unary(unary) => expression_value_depends_on(&unary.expr, is_signal),
+        _ => false,
+    }
+}
+
+fn expression_has_control_signal<F>(expression: &Expr, is_signal: &F) -> bool
+where
+    F: Fn(&Expr) -> bool,
+{
+    struct ControlVisitor<'a, F> {
+        is_signal: &'a F,
+        found: bool,
+    }
+
+    impl<'ast, F> Visit<'ast> for ControlVisitor<'_, F>
+    where
+        F: Fn(&Expr) -> bool,
+    {
+        fn visit_expr_async(&mut self, _expression: &'ast syn::ExprAsync) {
+            // An async block is inert unless the surrounding value-flow polls it.
+        }
+
+        fn visit_expr_closure(&mut self, _expression: &'ast syn::ExprClosure) {
+            // A nested closure may never be called; its body cannot prove outer control flow.
+        }
+
+        fn visit_expr_return(&mut self, expression: &'ast syn::ExprReturn) {
+            if expression
+                .expr
+                .as_deref()
+                .is_some_and(|value| expression_value_depends_on(value, self.is_signal))
+            {
+                self.found = true;
+            }
+            visit::visit_expr_return(self, expression);
+        }
+
+        fn visit_expr_try(&mut self, expression: &'ast syn::ExprTry) {
+            if expression_value_depends_on(&expression.expr, self.is_signal) {
+                self.found = true;
+            }
+            visit::visit_expr_try(self, expression);
+        }
+    }
+
+    let mut visitor = ControlVisitor {
+        is_signal,
+        found: false,
+    };
+    visitor.visit_expr(expression);
+    visitor.found
+}
+
+fn block_drives_outcome<F>(block: &syn::Block, is_signal: &F) -> bool
+where
+    F: Fn(&Expr) -> bool,
+{
+    block.stmts.iter().any(|statement| match statement {
+        Stmt::Local(local) => local
+            .init
+            .as_ref()
+            .is_some_and(|initializer| expression_has_control_signal(&initializer.expr, is_signal)),
+        Stmt::Expr(expression, Some(_)) => expression_has_control_signal(expression, is_signal),
+        Stmt::Expr(expression, None) => expression_drives_outcome(expression, is_signal),
+        Stmt::Item(_) | Stmt::Macro(_) => false,
+    })
+}
+
+fn expression_drives_outcome<F>(expression: &Expr, is_signal: &F) -> bool
+where
+    F: Fn(&Expr) -> bool,
+{
+    match peel_expr(expression) {
+        Expr::Async(expression) => block_drives_outcome(&expression.block, is_signal),
+        Expr::Block(expression) => block_drives_outcome(&expression.block, is_signal),
+        Expr::Closure(expression) => expression_drives_outcome(&expression.body, is_signal),
+        Expr::Return(expression) => expression
+            .expr
+            .as_deref()
+            .is_some_and(|value| expression_value_depends_on(value, is_signal)),
+        Expr::Try(expression) => expression_value_depends_on(&expression.expr, is_signal),
+        expression => expression_value_depends_on(expression, is_signal),
+    }
+}
+
+fn provider_bound_call_is_transparent_value(
+    expression: &Expr,
+    provider_bindings: &BTreeSet<String>,
+) -> bool {
+    match expression {
+        Expr::Paren(paren) => {
+            provider_bound_call_is_transparent_value(&paren.expr, provider_bindings)
+        }
+        Expr::Group(group) => {
+            provider_bound_call_is_transparent_value(&group.expr, provider_bindings)
+        }
+        Expr::Await(awaited) => {
+            provider_bound_call_is_transparent_value(&awaited.base, provider_bindings)
+        }
+        Expr::Try(result) => {
+            provider_bound_call_is_transparent_value(&result.expr, provider_bindings)
+        }
+        Expr::MethodCall(call) => {
+            expr_is_provider_bound_call(expression, provider_bindings)
+                || provider_bound_call_is_transparent_value(&call.receiver, provider_bindings)
+        }
+        _ => false,
+    }
+}
+
+fn provider_call_result_bindings(
+    action: &Expr,
+    provider_bindings: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    struct ResultVisitor<'a> {
+        provider_bindings: &'a BTreeSet<String>,
+        results: BTreeSet<String>,
+    }
+
+    impl<'ast> Visit<'ast> for ResultVisitor<'_> {
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            if let (Some(result), Some(initializer)) =
+                (simple_pattern_ident(&local.pat), local.init.as_ref())
+                && provider_bound_call_is_transparent_value(
+                    &initializer.expr,
+                    self.provider_bindings,
+                )
+            {
+                self.results.insert(result);
+            }
+            visit::visit_local(self, local);
+        }
+    }
+
+    let mut visitor = ResultVisitor {
+        provider_bindings,
+        results: BTreeSet::new(),
+    };
+    visitor.visit_expr(action);
+    visitor.results
+}
+
+fn expr_references_any_name(expression: &Expr, names: &BTreeSet<String>) -> bool {
+    let Expr::Path(path) = peel_expr(expression) else {
+        return false;
+    };
+    path.qself.is_none()
+        && path.path.leading_colon.is_none()
+        && path.path.segments.len() == 1
+        && names.contains(&path.path.segments[0].ident.to_string())
+}
+
+fn provider_bound_call_drives_action(action: &Expr, bindings: &BTreeSet<String>) -> bool {
+    let provider_bindings = expanded_provider_bindings(action, bindings);
+    let provider_results = provider_call_result_bindings(action, &provider_bindings);
+    expression_drives_outcome(action, &|candidate| {
+        expr_is_provider_bound_call(candidate, &provider_bindings)
+            || expr_references_any_name(candidate, &provider_results)
+    })
 }
 
 fn backend_probe_from_call(call: &ExprCall, resolver: &Resolver) -> Option<BackendProbe> {
@@ -4922,7 +5502,7 @@ mod tests {
     #[test]
     fn journey_missing_typed_marker_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-missing-marker")?;
-        fs::write(temp.path.join(JOURNEY_RUNNER_PATH), "")?;
+        fs::write(temp.path.join(GREEN_JOURNEY_RUNNER_PATH), "")?;
         assert!(check_root(&temp.path).is_err());
         Ok(())
     }
@@ -4930,7 +5510,7 @@ mod tests {
     #[test]
     fn journey_marker_without_test_attribute_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-marker-without-test-attribute")?;
-        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
         fs::write(
             &runner,
             fs::read_to_string(&runner)?.replacen("#[test]\n", "", 1),
@@ -4949,7 +5529,7 @@ mod tests {
     #[test]
     fn journey_marker_in_unused_closure_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-marker-in-unused-closure")?;
-        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
         let source = fs::read_to_string(&runner)?;
         fs::write(
             &runner,
@@ -4982,7 +5562,7 @@ mod tests {
     #[test]
     fn journey_ignored_test_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-ignored-test")?;
-        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
         fs::write(
             &runner,
             fs::read_to_string(&runner)?.replacen("#[test]\n", "#[ignore]\n#[test]\n", 1),
@@ -5009,7 +5589,7 @@ mod tests {
             ),
         ] {
             let temp = FixtureCopy::new(&format!("localtx-journey-{name}-test"))?;
-            let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+            let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
             fs::write(
                 &runner,
                 fs::read_to_string(&runner)?.replacen(
@@ -5037,7 +5617,7 @@ mod tests {
             ("cfg-attr-ancestor", "#[cfg_attr(all(), cfg(any()))]"),
         ] {
             let temp = FixtureCopy::new(&format!("localtx-journey-{name}"))?;
-            let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+            let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
             fs::write(
                 &runner,
                 format!(
@@ -5060,7 +5640,7 @@ mod tests {
     #[test]
     fn journey_should_panic_test_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-should-panic-test")?;
-        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
         fs::write(
             &runner,
             fs::read_to_string(&runner)?.replacen("#[test]\n", "#[should_panic]\n#[test]\n", 1),
@@ -5079,7 +5659,7 @@ mod tests {
     #[test]
     fn journey_return_expression_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-early-return")?;
-        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
         fs::write(
             &runner,
             fs::read_to_string(&runner)?.replace(
@@ -5101,7 +5681,7 @@ mod tests {
     #[test]
     fn journey_missing_case_consumption_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-missing-case-consumption")?;
-        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
         fs::write(
             &runner,
             fs::read_to_string(&runner)?.replace(
@@ -5120,7 +5700,7 @@ mod tests {
     #[test]
     fn journey_duplicate_case_consumption_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-duplicate-case-consumption")?;
-        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
         fs::write(
             &runner,
             fs::read_to_string(&runner)?.replace(
@@ -5140,7 +5720,7 @@ mod tests {
     #[test]
     fn journey_dynamic_case_consumption_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-dynamic-case-consumption")?;
-        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
         fs::write(
             &runner,
             fs::read_to_string(&runner)?.replace(
@@ -5162,7 +5742,7 @@ mod tests {
     #[test]
     fn journey_case_consumption_in_unused_helper_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-case-in-unused-helper")?;
-        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
         let source = fs::read_to_string(&runner)?.replace(
             "    let contention = fixtures.take_case(\"demo-write-contention\")?;\n",
             "",
@@ -5187,7 +5767,7 @@ mod tests {
     #[test]
     fn journey_case_consumption_in_another_test_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-case-in-another-test")?;
-        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
         let source = fs::read_to_string(&runner)?.replace(
             "    let contention = fixtures.take_case(\"demo-write-contention\")?;\n",
             "",
@@ -5230,7 +5810,7 @@ mod tests {
             ),
         ] {
             let temp = FixtureCopy::new(&format!("localtx-journey-case-{name}"))?;
-            let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+            let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
             fs::write(
                 &runner,
                 fs::read_to_string(&runner)?.replace(
@@ -5253,7 +5833,7 @@ mod tests {
     #[test]
     fn journey_unobserved_case_values_are_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-unobserved-cases")?;
-        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
         fs::write(
             &runner,
             replace_exact_once(
@@ -5277,7 +5857,7 @@ mod tests {
     #[test]
     fn journey_wrong_route_marker_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-wrong-route-marker")?;
-        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
         fs::write(
             &runner,
             fs::read_to_string(&runner)?.replace("demo_v1::write", "demo_v1::other"),
@@ -5299,7 +5879,7 @@ mod tests {
     }
 
     #[test]
-    fn journey_green_fixture_closes_scoped_matrix() -> anyhow::Result<()> {
+    fn journey_green_fixture_closes_active_matrix() -> anyhow::Result<()> {
         let closure = load_journey_closure(&fixture("green"))?;
         assert_eq!(closure.entries.len(), 1);
         assert_eq!(closure.entries[0].contract_id, "demo.write");
@@ -5308,29 +5888,188 @@ mod tests {
     }
 
     #[test]
-    fn journey_scope_does_not_claim_global_exhaustiveness() -> anyhow::Result<()> {
-        let temp = FixtureCopy::new("localtx-journey-scoped-board")?;
+    fn journey_markers_may_span_real_tests() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-split-test-runner")?;
+        let runner = temp.path.join("split_journey.rs");
         fs::write(
-            temp.path.join("journeys/unrelated-localtx-journey.toml"),
-            "this file belongs to a different scoped board",
+            &runner,
+            r#"
+            #[test]
+            fn first() {
+                const LOCALTX_JOURNEY_DEMO_FIRST: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::first::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::first::ROUTE;
+                let _ = LOCALTX_JOURNEY_DEMO_FIRST;
+            }
+
+            #[test]
+            fn second() {
+                const LOCALTX_JOURNEY_DEMO_SECOND: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::second::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::second::ROUTE;
+                let _ = LOCALTX_JOURNEY_DEMO_SECOND;
+            }
+            "#,
         )?;
+        let evidence = scan_journey_runner(&temp.path, &runner)?;
+        assert_eq!(
+            evidence.markers.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["DEMO_FIRST".to_string(), "DEMO_SECOND".to_string()])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_entries_may_use_distinct_runners() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-distinct-entry-runners")?;
+        let old_runner = "journeys/tests/localtx_validation_journey.rs";
+        let new_runner = "journeys/tests/demo_read_localtx_journey.rs";
+        let board = temp.path.join(JOURNEY_BOARD_PATH);
         fs::write(
-            temp.path.join("fixtures/unrelated-localtx.toml"),
-            "this file belongs to a different scoped board",
+            &board,
+            format!(
+                "{}\n[[journeys]]\nid = \"demo-read-localtx\"\ncontractId = \"demo.read\"\ntxModel = \"tenant-scoped-uow\"\nspec = \"journeys/demo-read-localtx-journey.toml\"\nfixture = \"fixtures/demo-read-localtx.toml\"\nrunner = \"{new_runner}\"\nmarker = \"DEMO_READ\"\n",
+                fs::read_to_string(&board)?
+            ),
         )?;
+        let spec = fs::read_to_string(temp.path.join("journeys/demo-write-localtx-journey.toml"))?
+            .replace("demo-write", "demo-read")
+            .replace("demo.write", "demo.read")
+            .replace(old_runner, new_runner)
+            .replace("DEMO_WRITE", "DEMO_READ");
+        fs::write(
+            temp.path.join("journeys/demo-read-localtx-journey.toml"),
+            spec,
+        )?;
+        let fixture = fs::read_to_string(temp.path.join("fixtures/demo-write-localtx.toml"))?
+            .replace("demo-write", "demo-read")
+            .replace("demo.write", "demo.read")
+            .replace(old_runner, new_runner)
+            .replace("DEMO_WRITE", "DEMO_READ");
+        fs::write(temp.path.join("fixtures/demo-read-localtx.toml"), fixture)?;
+        let old_path = temp.path.join(old_runner);
+        let new_path = temp.path.join(new_runner);
+        let runner = fs::read_to_string(old_path)?
+            .replace("demo-write", "demo-read")
+            .replace("demo_v1::write", "demo_v1::read")
+            .replace("DEMO_WRITE", "DEMO_READ");
+        fs::write(new_path, runner)?;
+
         let closure = load_journey_closure(&temp.path)?;
-        assert_eq!(closure.entries.len(), 1);
+        assert_eq!(closure.entries.len(), 2);
+        assert_eq!(
+            closure.runners,
+            BTreeSet::from([old_runner.to_string(), new_runner.to_string()])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_runner_extra_marker_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-runner-extra-marker")?;
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
+        let source = fs::read_to_string(&runner)?.replace(
+            "    let _ = LOCALTX_JOURNEY_DEMO_WRITE;",
+            r#"    const LOCALTX_JOURNEY_DEMO_EXTRA: ::vocab::HttpRouteBinding<
+        ::generated::http::demo_v1::extra::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::demo_v1::extra::ROUTE;
+    let _ = (LOCALTX_JOURNEY_DEMO_WRITE, LOCALTX_JOURNEY_DEMO_EXTRA);"#,
+        );
+        fs::write(&runner, source)?;
+        let error = required_error(
+            load_journey_closure(&temp.path),
+            "an extra marker in one runner must fail",
+        )?;
+        assert!(format!("{error:#}").contains("DEMO_EXTRA"));
+        Ok(())
+    }
+
+    #[test]
+    fn journey_runner_duplicate_marker_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-runner-duplicate-marker")?;
+        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
+        fs::write(
+            &runner,
+            format!(
+                "{}\n#[test]\nfn duplicate_marker() {{\n    const LOCALTX_JOURNEY_DEMO_WRITE: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE;\n    let _ = LOCALTX_JOURNEY_DEMO_WRITE;\n}}\n",
+                fs::read_to_string(&runner)?
+            ),
+        )?;
+        let error = required_error(
+            load_journey_closure(&temp.path),
+            "a duplicate marker across tests must fail",
+        )?;
+        assert!(format!("{error:#}").contains("duplicate marker"));
+        Ok(())
+    }
+
+    #[test]
+    fn journey_legacy_scope_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-legacy-scope")?;
+        let board = temp.path.join(JOURNEY_BOARD_PATH);
+        fs::write(
+            &board,
+            replace_exact_once(
+                &fs::read_to_string(&board)?,
+                "scope = \"active-localtx\"",
+                "scope = \"issue-1706\"",
+                "replace active journey scope",
+            )?,
+        )?;
+        let error = required_error(load_journey_closure(&temp.path), "legacy scope must fail")?;
+        assert!(format!("{error:#}").contains("scope must be `active-localtx`"));
         Ok(())
     }
 
     #[test]
     fn journey_missing_entry_is_rejected() -> anyhow::Result<()> {
-        let temp = FixtureCopy::new("localtx-journey-missing-entry")?;
-        fs::write(
-            temp.path.join(JOURNEY_BOARD_PATH),
-            "schemaVersion = 1\nscope = \"issue-1706\"\nrunner = \"journeys/tests/localtx_validation_journey.rs\"\njourneys = []\n",
+        let closure = load_journey_closure(&fixture("green"))?;
+        let contract = |id: &str, key: &str| Contract {
+            id: id.to_owned(),
+            owner: "demo".to_owned(),
+            key: key.to_owned(),
+            subject: format!("contracts/demo/v1/{id}/contract.toml"),
+            valid_owner: true,
+            tx_model: LocalTxModel::TenantScopedUow,
+        };
+        let contracts = [
+            contract("demo.write", "demo_v1::write"),
+            contract("demo.missing", "demo_v1::missing"),
+        ];
+        let error = required_error(
+            validate_journey_contracts(&closure, &contracts),
+            "non-empty board missing one active contract must fail",
         )?;
-        assert!(check_root(&temp.path).is_err());
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("active-localtx must contain exactly"));
+        assert!(diagnostic.contains("demo.missing"));
+        assert!(diagnostic.contains("demo.write"));
+        Ok(())
+    }
+
+    #[test]
+    fn journey_extra_entry_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-extra-entry")?;
+        for path in [
+            JOURNEY_BOARD_PATH,
+            "journeys/demo-write-localtx-journey.toml",
+            "fixtures/demo-write-localtx.toml",
+        ] {
+            let path = temp.path.join(path);
+            fs::write(
+                &path,
+                fs::read_to_string(&path)?
+                    .replace("contractId = \"demo.write\"", "contractId = \"demo.extra\""),
+            )?;
+        }
+        let error = required_error(check_root(&temp.path), "extra journey entry must fail")?;
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("active-localtx must contain exactly"));
+        assert!(diagnostic.contains("demo.extra"));
+        assert!(diagnostic.contains("demo.write"));
         Ok(())
     }
 
@@ -5379,6 +6118,62 @@ mod tests {
     }
 
     #[test]
+    fn journey_non_commit_unknown_case_requires_commits() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-missing-commits")?;
+        let fixture = temp.path.join("fixtures/demo-write-localtx.toml");
+        fs::write(
+            &fixture,
+            replace_exact_once(
+                &fs::read_to_string(&fixture)?,
+                "attempts = 1\ncommits = 1",
+                "attempts = 1",
+                "remove happy-path commits",
+            )?,
+        )?;
+        let error = required_error(
+            load_journey_closure(&temp.path),
+            "missing commits must fail",
+        )?;
+        assert!(
+            format!("{error:#}").contains("may omit commits only for the commit-unknown scenario")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_commit_unknown_case_may_omit_commits() -> anyhow::Result<()> {
+        let entry = JourneyBoardEntry {
+            id: "demo-write-localtx".to_string(),
+            contract_id: "demo.write".to_string(),
+            tx_model: LocalTxModel::TenantScopedUow,
+            spec: "journeys/demo-write-localtx-journey.toml".to_string(),
+            fixture: "fixtures/demo-write-localtx.toml".to_string(),
+            runner: GREEN_JOURNEY_RUNNER_PATH.to_string(),
+            marker: "DEMO_WRITE".to_string(),
+        };
+        let fixture = JourneyFixture {
+            schema_version: 1,
+            id: entry.id.clone(),
+            contract_id: entry.contract_id.clone(),
+            tx_model: entry.tx_model,
+            spec: entry.spec.clone(),
+            runner: GREEN_JOURNEY_RUNNER_PATH.to_string(),
+            marker: entry.marker.clone(),
+            cases: vec![JourneyCase {
+                id: "demo-write-commit-unknown".to_string(),
+                scenario: JourneyScenarioKind::CommitUnknown,
+                http_status: 500,
+                error_code: "ERR_CORE_INTERNAL".to_string(),
+                retryable: false,
+                attempts: 1,
+                commits: None,
+                redact_sentinels: vec!["demo-secret".to_string()],
+            }],
+        };
+        validate_fixture(&entry, &fixture, &mut BTreeSet::new())
+    }
+
+    #[test]
     fn journey_fake_logout_conflict_is_rejected() {
         let scenarios = [
             JourneyScenario {
@@ -5416,7 +6211,7 @@ mod tests {
                 error_code: "none".to_string(),
                 retryable: false,
                 attempts: 1,
-                commits: 1,
+                commits: Some(1),
                 redact_sentinels: vec!["session-sentinel".to_string()],
             })
             .collect();
@@ -5432,14 +6227,25 @@ mod tests {
     }
 
     #[test]
-    fn actual_workspace_closes_issue_1706_journeys() -> anyhow::Result<()> {
-        let closure = load_journey_closure(&crate::workspace_root()?)?;
+    fn actual_workspace_closes_active_localtx_journeys() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let closure = load_journey_closure(&root)?;
         let actual: BTreeSet<_> = closure
             .entries
             .iter()
             .map(|entry| entry.contract_id.as_str())
             .collect();
-        assert_eq!(actual, ISSUE_1706_CONTRACTS.into_iter().collect());
+        let discovered = discover(&root)?;
+        let expected: BTreeSet<_> = discovered
+            .iter()
+            .map(|contract| contract.id.as_str())
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual.len(),
+            5,
+            "active LocalTx journey board must close 5/5"
+        );
         Ok(())
     }
 
@@ -5499,7 +6305,11 @@ mod tests {
         let source = fs::read_to_string(&profile)?;
         fs::write(
             &profile,
-            source.replacen("::testkit::localtx::assert_rollback().await?;\n", "", 1),
+            source.replacen(
+                "::testkit::localtx::assert_rollback(",
+                "::testkit::localtx::ignored_rollback(",
+                1,
+            ),
         )?;
         let (_, findings) = check_root(&temp.path)?;
         assert!(
@@ -5519,10 +6329,14 @@ mod tests {
         fs::write(
             &profile,
             source
-                .replacen("::testkit::localtx::assert_rollback().await?;\n", "", 1)
                 .replacen(
-                    "::testkit::localtx::assert_rollback_failed_no_replay().await?;\n",
-                    "",
+                    "::testkit::localtx::assert_rollback(",
+                    "::testkit::localtx::ignored_rollback(",
+                    1,
+                )
+                .replacen(
+                    "::testkit::localtx::assert_rollback_failed_no_replay(",
+                    "::testkit::localtx::ignored_rollback_failed_no_replay(",
                     1,
                 ),
         )?;
@@ -5556,10 +6370,14 @@ mod tests {
         fs::write(
             &profile,
             source
-                .replacen("::testkit::localtx::assert_rollback().await?;\n", "", 1)
                 .replacen(
-                    "::testkit::localtx::assert_rollback_failed_no_replay().await?;\n",
-                    "",
+                    "::testkit::localtx::assert_rollback(",
+                    "::testkit::localtx::ignored_rollback(",
+                    1,
+                )
+                .replacen(
+                    "::testkit::localtx::assert_rollback_failed_no_replay(",
+                    "::testkit::localtx::ignored_rollback_failed_no_replay(",
                     1,
                 ),
         )?;
@@ -5607,7 +6425,7 @@ mod tests {
                     "redactSentinels = [\"demo-conflict\"]",
                 ),
         )?;
-        let runner = root.join(JOURNEY_RUNNER_PATH);
+        let runner = root.join(GREEN_JOURNEY_RUNNER_PATH);
         let source = replace_exact_once(
             &fs::read_to_string(&runner)?,
             "fixtures.take_case(\"demo-write-contention\")",
@@ -5630,15 +6448,17 @@ mod tests {
     fn unawaited_backend_probe_does_not_count() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-unawaited-backend-probe")?;
         let profile = temp.path.join("adapters/pg/src/lib.rs");
-        let source = fs::read_to_string(&profile)?;
-        fs::write(
-            &profile,
-            source.replacen(
-                "::testkit::localtx::assert_rollback().await?;",
-                "let _unpolled = ::testkit::localtx::assert_rollback();",
-                1,
-            ),
-        )?;
+        let mut source = fs::read_to_string(&profile)?;
+        let probe = source
+            .find("::testkit::localtx::assert_rollback(")
+            .context("green rollback probe")?;
+        let await_suffix = "\n        .await?;";
+        let awaited = probe
+            + source[probe..]
+                .find(await_suffix)
+                .context("green rollback await")?;
+        source.replace_range(awaited..awaited + await_suffix.len(), ";");
+        fs::write(&profile, source)?;
         let (_, findings) = check_root(&temp.path)?;
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::MissingBackendProbe && finding.detail.contains("rollback")
@@ -5683,27 +6503,6 @@ mod tests {
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::UnexpectedBackendProfile
                 && finding.detail.contains("has no active LocalTx manifest")
-        }));
-        Ok(())
-    }
-
-    #[test]
-    fn validation_and_authorization_require_two_no_write_probes() -> anyhow::Result<()> {
-        let temp = FixtureCopy::new("localtx-one-rejection-probe")?;
-        let profile = temp.path.join("adapters/pg/src/lib.rs");
-        let source = fs::read_to_string(&profile)?;
-        fs::write(
-            &profile,
-            source.replacen(
-                "::testkit::localtx::assert_rejected_no_write().await?;\n",
-                "",
-                1,
-            ),
-        )?;
-        let (_, findings) = check_root(&temp.path)?;
-        assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::MissingBackendProbe
-                && finding.detail.contains("rejected-no-write")
         }));
         Ok(())
     }
@@ -5772,8 +6571,13 @@ mod tests {
                     ::generated::http::demo_v1::write::RouteMarker,
                     DemoProviderFixture,
                 )> = ::std::marker::PhantomData;
-                let _fixture = DemoProviderFixture::new();
-                ::testkit::localtx::assert_commit().await?;
+                let fixture = DemoProviderFixture::new();
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async {
+                        let result = fixture.execute().await;
+                        result
+                    })
+                ).await?;
                 Ok(())
             }"#,
         )?;
@@ -5789,6 +6593,355 @@ mod tests {
         assert_eq!(enrollments.len(), 1);
         assert_eq!(enrollments[0].key, "demo_v1::write");
         assert_eq!(enrollments[0].probes.get(&BackendProbe::Commit), Some(&1));
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_bare_provider_reference_is_rejected() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    DemoProviderFixture,
+                )> = ::std::marker::PhantomData;
+                let fixture = DemoProviderFixture::new();
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async {
+                        let _ = &fixture;
+                        Ok::<(), ()>(())
+                    })
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("a bare provider reference must fail closed"))?;
+        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
+        assert!(
+            violation
+                .detail
+                .contains("drive its outcome through a method call")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_discarded_provider_call_is_rejected() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    DemoProviderFixture,
+                )> = ::std::marker::PhantomData;
+                let fixture = DemoProviderFixture::new();
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async {
+                        fixture.execute().await;
+                        Ok::<(), ()>(())
+                    })
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("a discarded provider call must fail closed"))?;
+        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
+        assert!(
+            violation
+                .detail
+                .contains("drive its outcome through a method call")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_free_function_provider_argument_is_rejected() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    DemoProviderFixture,
+                )> = ::std::marker::PhantomData;
+                let fixture = DemoProviderFixture::new();
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async {
+                        execute_provider(&fixture).await
+                    })
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("a free helper must not prove provider execution"))?;
+        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_discarded_call_cannot_launder_result() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    DemoProviderFixture,
+                )> = ::std::marker::PhantomData;
+                let fixture = DemoProviderFixture::new();
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async {
+                        let result = {
+                            fixture.execute().await;
+                            Ok::<(), ()>(())
+                        };
+                        result
+                    })
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("a discarded call must not launder an unrelated result"))?;
+        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_tuple_projection_cannot_launder_result() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    DemoProviderFixture,
+                )> = ::std::marker::PhantomData;
+                let fixture = DemoProviderFixture::new();
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async {
+                        let result = (fixture.execute().await, Ok::<(), ()>(()));
+                        result.1
+                    })
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("an unrelated tuple projection must fail closed"))?;
+        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_struct_projection_cannot_launder_result() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    DemoProviderFixture,
+                )> = ::std::marker::PhantomData;
+                let fixture = DemoProviderFixture::new();
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async {
+                        let result = ProjectionBait {
+                            provider: fixture.execute().await,
+                            outcome: Ok::<(), ()>(()),
+                        };
+                        result.outcome
+                    })
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("an unrelated struct projection must fail closed"))?;
+        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_direct_projection_cannot_launder_result() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    DemoProviderFixture,
+                )> = ::std::marker::PhantomData;
+                let fixture = DemoProviderFixture::new();
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async {
+                        (fixture.execute().await, Ok::<(), ()>(())).1
+                    })
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("a direct unrelated projection must fail closed"))?;
+        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_tail_block_cannot_launder_discarded_call() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    DemoProviderFixture,
+                )> = ::std::marker::PhantomData;
+                let fixture = DemoProviderFixture::new();
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async {
+                        {
+                            fixture.execute().await;
+                            Ok::<(), ()>(())
+                        }
+                    })
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("a tail block must not launder a discarded provider call"))?;
+        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_unpolled_provider_future_is_rejected() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    DemoProviderFixture,
+                )> = ::std::marker::PhantomData;
+                let fixture = DemoProviderFixture::new();
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async {
+                        async { fixture.execute().await };
+                        Ok::<(), ()>(())
+                    })
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("an unpolled provider future must fail closed"))?;
+        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
         Ok(())
     }
 
@@ -5816,6 +6969,154 @@ mod tests {
             evidence.enrollments.is_empty(),
             "a route marker without a typed provider fixture binding must not enroll"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_shadow_constructor_is_rejected() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES: ::vocab::HttpRouteBinding<
+                    ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::audit_v1::list_tenant_entries::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES: ::std::marker::PhantomData<(
+                    ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+                    crate::PgAuthAuditSink,
+                )> = ::std::marker::PhantomData;
+                let sink = fake::PgAuthAuditSink::new();
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async { sink.append().await })
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "postgres",
+            "integration_tests.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("a shadow constructor must fail closed"))?;
+        assert_eq!(violation.rule, Rule::MissingBackendProviderBinding);
+        assert!(violation.detail.contains("crate::PgAuthAuditSink"));
+        assert!(violation.detail.contains("fake::PgAuthAuditSink"));
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_nested_constructor_bait_is_rejected() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES: ::vocab::HttpRouteBinding<
+                    ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::audit_v1::list_tenant_entries::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES: ::std::marker::PhantomData<(
+                    ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+                    crate::PgAuthAuditSink,
+                )> = ::std::marker::PhantomData;
+                let sink = {
+                    let _bait = crate::PgAuthAuditSink::new();
+                    fake::PgAuthAuditSink::new()
+                };
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async { sink.append().await })
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "postgres",
+            "integration_tests.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("nested constructor bait must fail closed"))?;
+        assert_eq!(violation.rule, Rule::MissingBackendProviderBinding);
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_synthetic_action_is_rejected() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES: ::vocab::HttpRouteBinding<
+                    ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::audit_v1::list_tenant_entries::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES: ::std::marker::PhantomData<(
+                    ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+                    crate::PgAuthAuditSink,
+                )> = ::std::marker::PhantomData;
+                let _sink = crate::PgAuthAuditSink::new();
+                ::testkit::localtx::assert_commit(
+                    ::testkit::localtx::CommitCase::new(|| async {
+                        Err(AuditLocalTxProfileError::synthetic())
+                    })
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "postgres",
+            "integration_tests.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("a synthetic provider action must fail closed"))?;
+        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
+        assert!(violation.detail.contains("provider-bound action"));
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_observer_binding_does_not_count() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    crate::DemoProvider,
+                )> = ::std::marker::PhantomData;
+                let provider = crate::DemoProvider::new();
+                ::testkit::localtx::assert_rejected_no_write(
+                    ::testkit::localtx::RejectedNoWriteCase::new(
+                        || async { Err::<(), ()>(()) },
+                        || async { provider.snapshot().await },
+                    )
+                ).await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        let violation = evidence
+            .violation
+            .ok_or_else(|| anyhow!("observer-only provider use must fail closed"))?;
+        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
+        assert!(violation.detail.contains("provider-bound action"));
         Ok(())
     }
 

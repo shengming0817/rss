@@ -3,7 +3,7 @@
 //! INVARIANT: INTEGRATION-SHARD-REGISTRY-01 { level = "Hard", exec = "native-compile", source = "code", native = "catalog macro generates the closed enum, ALL, lookup, resources, and execution units" }.
 //! INVARIANT: INTEGRATION-SHARD-SELECTOR-01 { level = "Hard", exec = "native-compile", source = "code", native = "filtersets render only from typed package/binary/kind execution units" }.
 //! INVARIANT: INTEGRATION-SHARD-COVERAGE-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "metadata_coverage_rejects_missing_duplicate_and_unknown_targets", anti_vacuity = "workspace_metadata_covers_legacy_integration_targets" }.
-//! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journey_is_one_unpartitioned_serial_batch" }.
+//! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journeys_form_one_unpartitioned_serial_batch" }.
 
 #[cfg(test)]
 use crate::workspace_root;
@@ -158,7 +158,11 @@ integration_shard_catalog! {
             ("postgres", "feature_manifest", Test, Parallel),
             ("postgres", "migration_ops_contract", Test, Parallel),
             ("postgres", "tx_capability_trybuild", Test, Parallel),
-            ("journeys", "localtx_validation_journey", Test, Serial),
+            ("journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial),
+            ("journeys", "identity_logout_localtx_journey", Test, Serial),
+            ("journeys", "identity_password_change_localtx_journey", Test, Serial),
+            ("journeys", "identity_refresh_localtx_journey", Test, Serial),
+            ("journeys", "settings_secret_publish_localtx_journey", Test, Serial),
             ("runtime", "settings_secret_e2e", Test, Serial),
         ],
     },
@@ -320,6 +324,14 @@ pub(crate) fn batches(shard: IntegrationShard) -> Vec<ShardBatch> {
         .collect()
 }
 
+pub(crate) const LOCALTX_JOURNEY_TARGETS: &[&str] = &[
+    "audit_list_tenant_entries_localtx_journey",
+    "identity_logout_localtx_journey",
+    "identity_password_change_localtx_journey",
+    "identity_refresh_localtx_journey",
+    "settings_secret_publish_localtx_journey",
+];
+
 pub(crate) fn localtx_journey_execution_batch() -> Result<ShardBatch> {
     if IntegrationShard::PostgresDomain.partition_policy() != PartitionPolicy::Unpartitioned {
         bail!("LocalTx journey shard must remain unpartitioned");
@@ -330,7 +342,7 @@ pub(crate) fn localtx_journey_execution_batch() -> Result<ShardBatch> {
             batch.scheduling == Scheduling::Serial
                 && batch.kind == TargetKind::Test
                 && batch.package == "journeys"
-                && batch.targets == ["localtx_validation_journey"]
+                && batch.targets.as_slice() == LOCALTX_JOURNEY_TARGETS
         })
         .collect::<Vec<_>>();
     let [batch] = matches.as_slice() else {
@@ -535,7 +547,11 @@ mod tests {
     fn scheduling_plan_rejects_dangerous_target_parallelism() {
         let expected_serial = BTreeSet::from([
             ("postgres", "postgres"),
-            ("journeys", "localtx_validation_journey"),
+            ("journeys", "audit_list_tenant_entries_localtx_journey"),
+            ("journeys", "identity_logout_localtx_journey"),
+            ("journeys", "identity_password_change_localtx_journey"),
+            ("journeys", "identity_refresh_localtx_journey"),
+            ("journeys", "settings_secret_publish_localtx_journey"),
             ("runtime", "settings_secret_e2e"),
             ("amqp", "integration"),
             ("mqtt", "integration"),
@@ -576,12 +592,12 @@ mod tests {
     }
 
     #[test]
-    fn localtx_journey_is_one_unpartitioned_serial_batch() -> Result<()> {
+    fn localtx_journeys_form_one_unpartitioned_serial_batch() -> Result<()> {
         let batch = localtx_journey_execution_batch()?;
         assert_eq!(batch.scheduling, Scheduling::Serial);
         assert_eq!(batch.kind, TargetKind::Test);
         assert_eq!(batch.package, "journeys");
-        assert_eq!(batch.targets, ["localtx_validation_journey"]);
+        assert_eq!(batch.targets, LOCALTX_JOURNEY_TARGETS);
         Ok(())
     }
 

@@ -88,25 +88,6 @@ struct SessionLogoutFaultState {
     attempts: HashMap<String, usize>,
 }
 
-/// Instance-scoped attempt probe retained after the concrete lifecycle is erased behind its port.
-#[cfg(all(test, feature = "integration"))]
-pub(crate) struct SessionLogoutAttemptProbe {
-    state: Arc<Mutex<SessionLogoutFaultState>>,
-}
-
-#[cfg(all(test, feature = "integration"))]
-impl SessionLogoutAttemptProbe {
-    pub(crate) fn attempts(&self, session_id: &str) -> usize {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .attempts
-            .get(session_id)
-            .copied()
-            .unwrap_or_default()
-    }
-}
-
 impl PgSessionLifecycle {
     /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
     ///
@@ -157,13 +138,6 @@ impl PgSessionLifecycle {
             .get(session_id)
             .copied()
             .unwrap_or_default()
-    }
-
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn logout_attempt_probe(&self) -> SessionLogoutAttemptProbe {
-        SessionLogoutAttemptProbe {
-            state: Arc::clone(&self.logout_faults),
-        }
     }
 }
 

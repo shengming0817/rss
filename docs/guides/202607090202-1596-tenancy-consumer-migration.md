@@ -86,7 +86,8 @@ request body/query schema 中的 `tenantId` 不是 tenant source。HTTP request 
 `audit.list-tenant-entries`:
 
 - path 为 `/api/v1/audit/tenants/{tenantId}/entries`，仅 verified SuperAdmin。
-- durable audit append 提交成功后，audited visibility 被消费为 `CrossTenantReadScope`，再执行 admin read。
+- authn 先签发不含 All-scope 的 target-bound grant；typed durable audit append 提交成功后，audit 域的
+  sealed receipt 才铸造 `CrossTenantReadScope`，再执行 admin read。
 - append 是 LocalTx 唯一写 UoW；read 不与 append 处于同一事务。
 
 role assign/revoke:
@@ -98,8 +99,9 @@ role assign/revoke:
 ## Row and field obligations
 
 `RowVisibility` 是 sealed row obligation。普通 user/device/admin 分别映射到 self/device/tenant scope。
-`RowScope::All` 不从普通 `Principal::row_visibility` 签发；跨租户读必须经 audited
-`Principal::audited_cross_tenant_visibility(...)`，先 durable audit append 成功，再发 sealed capability。
+`RowScope::All` 不从普通 `Principal::row_visibility` 签发；跨租户读必须经
+`Principal::cross_tenant_audit_grant(...)` 取得不含 visibility 的 target-bound grant，先完成 typed durable
+audit append，再由 audit-owned sealed receipt 铸造 read scope。
 
 `ResourceProjection` 是 field obligation carrier。coarse allow 不等于字段明文 allow：
 

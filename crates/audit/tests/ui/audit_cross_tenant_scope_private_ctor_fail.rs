@@ -1,7 +1,7 @@
 use audit::ports::CrossTenantReadScope;
 
-fn bypass(audited: authn::AuditedCrossTenantVisibility) {
-    let _scope = CrossTenantReadScope::from_audited_visibility(audited);
+fn bypass() {
+    let _scope = CrossTenantReadScope::from_durable_append(todo!());
 }
 
 fn main() {}

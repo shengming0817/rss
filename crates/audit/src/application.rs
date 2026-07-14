@@ -11,7 +11,7 @@
 //! `AppCtx.principal` 是 `Arc<dyn runctx::PrincipalFacet>`（authn 的 `Principal` 经擦除注入；`runctx → authn`
 //! 是禁止的依赖环，故 runctx 不按具体类型持有 principal，#1105）。本 handler 对普通 scoped read 只读 ctx
 //! **tenant**；对 target-tenant cross-tenant read 则使用 runtime bridge 写入的具体 `Arc<authn::Principal>`
-//! 做 SuperAdmin 判定，再经 `Principal::audited_cross_tenant_visibility` 先写持久审计。未配置专用
+//! 做 SuperAdmin 判定，消费 target-bound grant 并先写 route-specific 持久审计，再 mint read scope。未配置专用
 //! `rss_audit_admin` repo 时 privileged read 返回 501 fail-closed。Admin listener auth 限定可达者。
 //!
 //! ref: open-telemetry/opentelemetry-rust opentelemetry/src/logs/logger.rs@main（audit sink 接缝）
@@ -66,8 +66,9 @@ use primitives::ListenerKind;
 
 use crate::domain::{AuditEntry, AuditError, AuditOutcome, ResourceRef};
 use crate::ports::{
-    AuditAdminRepo, AuditListResult, AuditPage, AuditReadRepo, AuditRecord, CrossTenantReadScope,
-    DynAuditAdminRepo, DynAuditReadRepo, TenantRepoScope,
+    AuditAdminRepo, AuditListResult, AuditListTenantAppend, AuditListTenantAppender, AuditPage,
+    AuditReadRepo, AuditRecord, CrossTenantReadScope, DynAuditAdminRepo, DynAuditReadRepo,
+    TenantRepoScope,
 };
 
 /// 本域 DomainId（在 generated event spec 中筛选本域那条订阅；非 wire 元数据，是本域身份）。
@@ -90,6 +91,26 @@ const AUDIT_ROUTE_PREFIX: &str = "/api/v1/audit";
 const RESOURCE_KIND_AUDIT_ENTRIES: &str = "audit_entries";
 const ACTION_AUDIT_LIST_CROSS_TENANT: &str = "audit:list-cross-tenant";
 const AUDIT_FORBIDDEN_REASON: &str = "forbidden";
+
+/// Module-sealed proof that the route-specific append completed successfully for `target`.
+///
+/// The type is visible to `ports` so [`CrossTenantReadScope`] can consume it, but its fields and
+/// constructor remain private to this application module. No other audit module or adapter can
+/// mint a successful durable append receipt.
+pub(crate) struct AuditListTenantAppendReceipt {
+    target: vocab::TenantId,
+    _seal: (),
+}
+
+impl AuditListTenantAppendReceipt {
+    fn after_success(target: vocab::TenantId) -> Self {
+        Self { target, _seal: () }
+    }
+
+    pub(crate) fn target(&self) -> vocab::TenantId {
+        self.target
+    }
+}
 
 /// Audit consumer event variants that can be converted into [`AuditRecord`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,7 +174,7 @@ enum AuditReadAuthError {
 
 struct TargetAuditReadDeps<S>
 where
-    S: diport::AuditSink + Send + Sync + 'static,
+    S: AuditListTenantAppender + Send + Sync + 'static,
 {
     admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
     audit_sink: Arc<S>,
@@ -169,7 +190,7 @@ struct TargetReadRequest {
 
 impl<S> Clone for TargetAuditReadDeps<S>
 where
-    S: diport::AuditSink + Send + Sync + 'static,
+    S: AuditListTenantAppender + Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -586,10 +607,11 @@ async fn record_cross_tenant_denial<S>(
     request: &TargetReadRequest,
 ) -> Result<(), diport::AuditSinkError>
 where
-    S: diport::AuditSink + Send + Sync + 'static,
+    S: AuditListTenantAppender + Send + Sync + 'static,
 {
     deps.audit_sink
-        .record(
+        .append(AuditListTenantAppend::new(
+            target,
             authenticated.audit_event(httpserve::AuthenticatedAuditEvent {
                 occurred_at: deps.audit_clock.now(),
                 tenant_id: Some(target),
@@ -602,7 +624,7 @@ where
                 request_id: Some(request.request_id.clone()),
                 correlation_id: Some(request.correlation_id.clone()),
             }),
-        )
+        ))
         .await
 }
 
@@ -613,7 +635,7 @@ async fn audited_forbidden_response<S>(
     request: &TargetReadRequest,
 ) -> Response
 where
-    S: diport::AuditSink + Send + Sync + 'static,
+    S: AuditListTenantAppender + Send + Sync + 'static,
 {
     let Some(authenticated) = authenticated else {
         return httpserve::error::internal_error(&request.request_id);
@@ -632,7 +654,7 @@ async fn audited_cross_tenant_scope<S>(
     request: &TargetReadRequest,
 ) -> Result<CrossTenantReadScope, Response>
 where
-    S: diport::AuditSink + Send + Sync + 'static,
+    S: AuditListTenantAppender + Send + Sync + 'static,
 {
     let facet: Arc<dyn runctx::PrincipalFacet> = principal.clone();
     let ctx = runctx::RequestCtx::new(target, facet);
@@ -644,29 +666,30 @@ where
         request.correlation_id.as_str(),
     )
     .map_err(|_| httpserve::error::internal_error(&request.request_id))?;
-    match principal
-        .audited_cross_tenant_visibility(
-            &ctx,
-            deps.audit_sink.as_ref(),
-            deps.audit_clock.as_ref(),
-            &audit,
-        )
-        .await
-    {
-        Ok(audited_visibility) => Ok(CrossTenantReadScope::from_audited_visibility(
-            audited_visibility,
-        )),
+    let grant = match principal.cross_tenant_audit_grant(&ctx, deps.audit_clock.as_ref(), &audit) {
+        Ok(grant) => grant,
         // Caller has already checked SuperAdmin and audited both final deny branches. Reaching a
         // different authn verdict here is an internal invariant failure, never an unaudited 403.
-        Err(authn::CrossTenantError::NotSuperAdmin) => {
-            Err(httpserve::error::internal_error(&request.request_id))
+        Err(authn::CrossTenantGrantError::NotSuperAdmin) => {
+            return Err(httpserve::error::internal_error(&request.request_id));
         }
-        Err(error @ authn::CrossTenantError::Audit(_)) => {
-            log_cross_tenant_audit_append_failure(target, request, &error);
-            Err(httpserve::error::internal_error(&request.request_id))
-        }
-        Err(_) => Err(httpserve::error::internal_error(&request.request_id)),
+        Err(_) => return Err(httpserve::error::internal_error(&request.request_id)),
+    };
+    let grant_target = grant.target();
+    if grant_target != target {
+        return Err(httpserve::error::internal_error(&request.request_id));
     }
+    if let Err(error) = deps
+        .audit_sink
+        .append(AuditListTenantAppend::new(grant_target, grant.into_event()))
+        .await
+    {
+        log_cross_tenant_audit_append_failure(target, request, &error);
+        return Err(httpserve::error::internal_error(&request.request_id));
+    }
+    Ok(CrossTenantReadScope::from_durable_append(
+        AuditListTenantAppendReceipt::after_success(grant_target),
+    ))
 }
 
 async fn list_target_page(
@@ -703,7 +726,7 @@ async fn list_entries_target_tenant<S>(
     request: TargetReadRequest,
 ) -> Response
 where
-    S: diport::AuditSink + Send + Sync + 'static,
+    S: AuditListTenantAppender + Send + Sync + 'static,
 {
     let target = match vocab::TenantId::parse(&request.target_raw) {
         Ok(tenant) => tenant,
@@ -886,7 +909,7 @@ fn register_audit_subscriber(reg: &mut Registry, event: EventSpec) -> Result<(),
 /// 不在本域——本域只消费已装配的 erased provider。
 pub struct AuditDomain<S>
 where
-    S: diport::AuditSink + Send + Sync + 'static,
+    S: AuditListTenantAppender + Send + Sync + 'static,
 {
     read_repo: Arc<DynAuditReadRepo<'static>>,
     admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
@@ -896,7 +919,7 @@ where
 
 impl<S> AuditDomain<S>
 where
-    S: diport::AuditSink + Send + Sync + 'static,
+    S: AuditListTenantAppender + Send + Sync + 'static,
 {
     /// 注入 erased 审计仓储 provider 构造。
     ///
@@ -919,7 +942,7 @@ where
 
 impl<S> ::bootstrap::Domain for AuditDomain<S>
 where
-    S: diport::AuditSink + Send + Sync + 'static,
+    S: AuditListTenantAppender + Send + Sync + 'static,
 {
     fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
         // 订阅元数据（contract_id / topic / group）单源自 generated event `SPEC`（契约 codegen 派生）——
@@ -1108,6 +1131,15 @@ mod tests {
         }
 
         async fn shutdown(&self) -> Result<(), diport::AuditSinkError> {
+            Ok(())
+        }
+    }
+
+    impl crate::ports::AuditListTenantAppender for NoopAuditSink {
+        async fn append(
+            &self,
+            _command: crate::ports::AuditListTenantAppend,
+        ) -> Result<(), diport::AuditSinkError> {
             Ok(())
         }
     }
@@ -1380,6 +1412,17 @@ mod tests {
 
         async fn shutdown(&self) -> Result<(), diport::AuditSinkError> {
             Ok(())
+        }
+    }
+
+    impl crate::ports::AuditListTenantAppender for RecordingAuditSink {
+        async fn append(
+            &self,
+            command: crate::ports::AuditListTenantAppend,
+        ) -> Result<(), diport::AuditSinkError> {
+            let (scope, event, _observation) = command.into_parts();
+            debug_assert_eq!(event.tenant_id, Some(scope.tenant()));
+            diport::AuditSink::record(self, event).await
         }
     }
 
@@ -2064,7 +2107,7 @@ mod tests {
         query: &str,
     ) -> (StatusCode, Vec<u8>)
     where
-        S: diport::AuditSink + Send + Sync + 'static,
+        S: AuditListTenantAppender + Send + Sync + 'static,
     {
         get_entries_with_sink_and_authorizer(
             repo,
@@ -2089,7 +2132,7 @@ mod tests {
         query: &str,
     ) -> (StatusCode, Vec<u8>)
     where
-        S: diport::AuditSink + Send + Sync + 'static,
+        S: AuditListTenantAppender + Send + Sync + 'static,
     {
         let target_deps = TargetAuditReadDeps {
             admin_repo,
@@ -2283,7 +2326,7 @@ mod tests {
         query: &str,
     ) -> (StatusCode, Vec<u8>)
     where
-        S: diport::AuditSink + Send + Sync + 'static,
+        S: AuditListTenantAppender + Send + Sync + 'static,
     {
         get_target_entries_with_sink_and_authorizer(
             repo,
@@ -2307,7 +2350,7 @@ mod tests {
         query: &str,
     ) -> (StatusCode, Vec<u8>)
     where
-        S: diport::AuditSink + Send + Sync + 'static,
+        S: AuditListTenantAppender + Send + Sync + 'static,
     {
         get_entries_with_sink_and_authorizer(
             repo,

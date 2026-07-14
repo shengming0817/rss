@@ -18,6 +18,7 @@ runctx = { path = "../runctx" }
 diagctx = { path = "../diagctx" }
 secure = { path = "../secure" }
 consistency = { path = "../consistency" }
+observ = { path = "../observ" }
 primitives = { path = "../primitives" }
 httpserve = { path = "../httpserve" }
 authn = { path = "../authn" }

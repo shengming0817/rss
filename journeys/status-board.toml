@@ -1,6 +1,14 @@
 schemaVersion = 1
-scope = "issue-1706"
-runner = "journeys/tests/localtx_validation_journey.rs"
+scope = "active-localtx"
+
+[[journeys]]
+id = "audit-list-tenant-entries-localtx"
+contractId = "audit.list-tenant-entries"
+txModel = "tenant-scoped-uow"
+spec = "journeys/audit-list-tenant-entries-localtx-journey.toml"
+fixture = "fixtures/audit-list-tenant-entries-localtx.toml"
+marker = "AUDIT_LIST_TENANT_ENTRIES"
+runner = "journeys/tests/audit_list_tenant_entries_localtx_journey.rs"
 
 [[journeys]]
 id = "identity-logout-localtx"
@@ -9,6 +17,7 @@ txModel = "tenant-scoped-uow"
 spec = "journeys/identity-logout-localtx-journey.toml"
 fixture = "fixtures/identity-logout-localtx.toml"
 marker = "IDENTITY_LOGOUT"
+runner = "journeys/tests/identity_logout_localtx_journey.rs"
 
 [[journeys]]
 id = "identity-password-change-localtx"
@@ -17,6 +26,16 @@ txModel = "repo-atomic-cas"
 spec = "journeys/identity-password-change-localtx-journey.toml"
 fixture = "fixtures/identity-password-change-localtx.toml"
 marker = "IDENTITY_PASSWORD_CHANGE"
+runner = "journeys/tests/identity_password_change_localtx_journey.rs"
+
+[[journeys]]
+id = "identity-refresh-localtx"
+contractId = "identity.refresh"
+txModel = "tenant-scoped-uow"
+spec = "journeys/identity-refresh-localtx-journey.toml"
+fixture = "fixtures/identity-refresh-localtx.toml"
+marker = "IDENTITY_REFRESH"
+runner = "journeys/tests/identity_refresh_localtx_journey.rs"
 
 [[journeys]]
 id = "settings-secret-publish-localtx"
@@ -25,3 +44,4 @@ txModel = "repo-atomic-cas"
 spec = "journeys/settings-secret-publish-localtx-journey.toml"
 fixture = "fixtures/settings-secret-publish-localtx.toml"
 marker = "SETTINGS_SECRET_PUBLISH"
+runner = "journeys/tests/settings_secret_publish_localtx_journey.rs"

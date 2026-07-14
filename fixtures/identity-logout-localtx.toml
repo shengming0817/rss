@@ -3,7 +3,7 @@ id = "identity-logout-localtx"
 contractId = "identity.logout"
 txModel = "tenant-scoped-uow"
 spec = "journeys/identity-logout-localtx-journey.toml"
-runner = "journeys/tests/localtx_validation_journey.rs"
+runner = "journeys/tests/identity_logout_localtx_journey.rs"
 marker = "IDENTITY_LOGOUT"
 
 [[cases]]

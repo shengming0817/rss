@@ -37,7 +37,7 @@ fn feature_set(
 
 fn expected_domain_feature_members(domain: &str) -> BTreeSet<String> {
     let mut expected = BTreeSet::from([format!("dep:{domain}")]);
-    if matches!(domain, "settings" | "identity") {
+    if matches!(domain, "settings" | "identity" | "audit") {
         expected.insert("dep:observ".to_owned());
     }
     expected
@@ -120,7 +120,7 @@ fn domain_feature_shared_capability_allowlist_is_closed() {
     );
     assert_eq!(
         expected_domain_feature_members("audit"),
-        BTreeSet::from(["dep:audit".to_owned()])
+        BTreeSet::from(["dep:audit".to_owned(), "dep:observ".to_owned()])
     );
     assert_ne!(
         expected_domain_feature_members("settings"),
@@ -131,4 +131,74 @@ fn domain_feature_shared_capability_allowlist_is_closed() {
         ]),
         "unknown shared dependencies must not be accepted"
     );
+}
+
+#[test]
+fn journey_fault_support_is_independent_from_general_test_support()
+-> Result<(), Box<dyn std::error::Error>> {
+    let manifest = manifest()?;
+    let features = manifest
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| std::io::Error::other("features must be a table"))?;
+
+    assert_eq!(
+        feature_set(features, "test-support")?,
+        BTreeSet::new(),
+        "general test support must not activate journey transaction faults"
+    );
+    assert_eq!(
+        feature_set(features, "journey-fault-support")?,
+        BTreeSet::new(),
+        "journey fault support must remain an explicit leaf feature"
+    );
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for source in ["src/cotx/mod.rs", "src/refresh_token_store.rs"] {
+        let source = fs::read_to_string(root.join(source))?;
+        assert!(
+            !source.contains("feature = \"test-support\""),
+            "transaction fault code must not be compiled by general test support"
+        );
+    }
+    let bundle = fs::read_to_string(root.join("src/bundle.rs"))?;
+    assert!(
+        bundle.contains(
+            "#[cfg(feature = \"journey-fault-support\")]\n    #[must_use]\n    pub fn refresh_token_store_with_commit_unknown_once"
+        ),
+        "the public one-shot constructor must be owned by the narrow journey fault feature"
+    );
+    Ok(())
+}
+
+#[cfg(all(feature = "domain-identity", feature = "journey-fault-support"))]
+#[test]
+fn journey_fault_feature_exposes_only_the_named_refresh_constructor() {
+    let _constructor: fn(
+        &postgres::PgDomainDeps<postgres::caps::Identity>,
+        &str,
+    ) -> postgres::PgRefreshTokenStore = postgres::PgDomainDeps::<
+        postgres::caps::Identity,
+    >::refresh_token_store_with_commit_unknown_once;
+}
+
+#[test]
+fn backend_profiles_do_not_hand_author_provider_outcomes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/integration_tests.rs"),
+    )?;
+    for forbidden in [
+        "AuditLocalTxProfileError::synthetic",
+        "refresh request rejected before rotate",
+        "cross-tenant refresh rejected before rotate",
+        "let conflict_attempts = AtomicUsize::new(0)",
+        "let rejected_mutations = AtomicUsize::new(0)",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "backend profile must not hand-author provider outcome via `{forbidden}`"
+        );
+    }
+    Ok(())
 }

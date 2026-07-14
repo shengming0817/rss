@@ -1597,9 +1597,16 @@ mod tests {
             None,
         )?;
         let args = invocation.execution_argv();
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--test", "localtx_validation_journey"])
+        let selected: BTreeSet<_> = args
+            .windows(2)
+            .filter_map(|pair| (pair[0] == "--test").then_some(pair[1].as_str()))
+            .collect();
+        assert_eq!(
+            selected,
+            crate::integration_shards::LOCALTX_JOURNEY_TARGETS
+                .iter()
+                .copied()
+                .collect()
         );
         assert!(args.iter().any(|argument| argument == "--no-tests=fail"));
         assert!(!args.iter().any(|argument| argument == "--no-tests=pass"));

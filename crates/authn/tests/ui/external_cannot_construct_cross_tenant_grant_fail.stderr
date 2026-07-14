@@ -1,0 +1,11 @@
+error[E0451]: fields `target`, `event` and `_seal` of struct `CrossTenantAuditGrant` are private
+ --> tests/ui/external_cannot_construct_cross_tenant_grant_fail.rs:3:9
+  |
+2 |     let _grant = authn::CrossTenantAuditGrant {
+  |                  ---------------------------- in this type
+3 |         target,
+  |         ^^^^^^ private field
+4 |         event,
+  |         ^^^^^ private field
+5 |         _seal: (),
+  |         ^^^^^ private field

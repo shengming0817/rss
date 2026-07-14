@@ -34,22 +34,20 @@ impl core::marker::Unpin for authn::CrossTenantAuditError
 impl core::marker::UnsafeUnpin for authn::CrossTenantAuditError
 impl core::panic::unwind_safe::RefUnwindSafe for authn::CrossTenantAuditError
 impl core::panic::unwind_safe::UnwindSafe for authn::CrossTenantAuditError
-#[non_exhaustive] pub enum authn::CrossTenantError
-pub authn::CrossTenantError::Audit(diport::audit_sink::AuditSinkError)
-pub authn::CrossTenantError::NotSuperAdmin
-impl core::error::Error for authn::CrossTenantError
-pub fn authn::CrossTenantError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
-impl core::fmt::Debug for authn::CrossTenantError
-pub fn authn::CrossTenantError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for authn::CrossTenantError
-pub fn authn::CrossTenantError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for authn::CrossTenantError
-impl core::marker::Send for authn::CrossTenantError
-impl core::marker::Sync for authn::CrossTenantError
-impl core::marker::Unpin for authn::CrossTenantError
-impl core::marker::UnsafeUnpin for authn::CrossTenantError
-impl !core::panic::unwind_safe::RefUnwindSafe for authn::CrossTenantError
-impl !core::panic::unwind_safe::UnwindSafe for authn::CrossTenantError
+#[non_exhaustive] pub enum authn::CrossTenantGrantError
+pub authn::CrossTenantGrantError::NotSuperAdmin
+impl core::error::Error for authn::CrossTenantGrantError
+impl core::fmt::Debug for authn::CrossTenantGrantError
+pub fn authn::CrossTenantGrantError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for authn::CrossTenantGrantError
+pub fn authn::CrossTenantGrantError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::CrossTenantGrantError
+impl core::marker::Send for authn::CrossTenantGrantError
+impl core::marker::Sync for authn::CrossTenantGrantError
+impl core::marker::Unpin for authn::CrossTenantGrantError
+impl core::marker::UnsafeUnpin for authn::CrossTenantGrantError
+impl core::panic::unwind_safe::RefUnwindSafe for authn::CrossTenantGrantError
+impl core::panic::unwind_safe::UnwindSafe for authn::CrossTenantGrantError
 pub enum authn::JwtAccessPrincipal<'a>
 pub authn::JwtAccessPrincipal::Admin
 pub authn::JwtAccessPrincipal::Admin::subject: &'a str
@@ -196,17 +194,6 @@ impl core::marker::Unpin for authn::AccessToken
 impl core::marker::UnsafeUnpin for authn::AccessToken
 impl core::panic::unwind_safe::RefUnwindSafe for authn::AccessToken
 impl core::panic::unwind_safe::UnwindSafe for authn::AccessToken
-pub struct authn::AuditedCrossTenantVisibility
-impl authn::AuditedCrossTenantVisibility
-pub fn authn::AuditedCrossTenantVisibility::target(&self) -> vocab::tenant::TenantId
-pub fn authn::AuditedCrossTenantVisibility::visibility(&self) -> &vocab::tenant::RowVisibility
-impl core::marker::Freeze for authn::AuditedCrossTenantVisibility
-impl core::marker::Send for authn::AuditedCrossTenantVisibility
-impl core::marker::Sync for authn::AuditedCrossTenantVisibility
-impl core::marker::Unpin for authn::AuditedCrossTenantVisibility
-impl core::marker::UnsafeUnpin for authn::AuditedCrossTenantVisibility
-impl core::panic::unwind_safe::RefUnwindSafe for authn::AuditedCrossTenantVisibility
-impl core::panic::unwind_safe::UnwindSafe for authn::AuditedCrossTenantVisibility
 pub struct authn::CrossTenantAuditContext
 impl authn::CrossTenantAuditContext
 pub fn authn::CrossTenantAuditContext::new(&'static str, impl core::convert::Into<alloc::string::String>, &'static str, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, authn::CrossTenantAuditError>
@@ -219,6 +206,17 @@ impl core::marker::Unpin for authn::CrossTenantAuditContext
 impl core::marker::UnsafeUnpin for authn::CrossTenantAuditContext
 impl core::panic::unwind_safe::RefUnwindSafe for authn::CrossTenantAuditContext
 impl core::panic::unwind_safe::UnwindSafe for authn::CrossTenantAuditContext
+pub struct authn::CrossTenantAuditGrant
+impl authn::CrossTenantAuditGrant
+pub fn authn::CrossTenantAuditGrant::into_event(self) -> diport::audit_sink::AuditEvent
+pub fn authn::CrossTenantAuditGrant::target(&self) -> vocab::tenant::TenantId
+impl core::marker::Freeze for authn::CrossTenantAuditGrant
+impl core::marker::Send for authn::CrossTenantAuditGrant
+impl core::marker::Sync for authn::CrossTenantAuditGrant
+impl core::marker::Unpin for authn::CrossTenantAuditGrant
+impl core::marker::UnsafeUnpin for authn::CrossTenantAuditGrant
+impl core::panic::unwind_safe::RefUnwindSafe for authn::CrossTenantAuditGrant
+impl core::panic::unwind_safe::UnwindSafe for authn::CrossTenantAuditGrant
 pub struct authn::Jwt
 impl authn::Jwt
 pub fn authn::Jwt::as_str(&self) -> &str
@@ -363,7 +361,7 @@ pub fn authn::Principal::matches_subject(&self, &str) -> bool
 pub fn authn::Principal::row_visibility(&self, &runctx::ctx::AppCtx) -> core::result::Result<vocab::tenant::RowVisibility, runctx::local::MissingCtx>
 pub fn authn::Principal::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
 impl authn::Principal
-pub async fn authn::Principal::audited_cross_tenant_visibility<S>(&self, &runctx::ctx::AppCtx, &S, &dyn diport::clock::Clock, &authn::CrossTenantAuditContext) -> core::result::Result<authn::AuditedCrossTenantVisibility, authn::CrossTenantError> where S: diport::audit_sink::AuditSink + core::marker::Send + core::marker::Sync + 'static
+pub fn authn::Principal::cross_tenant_audit_grant(&self, &runctx::ctx::AppCtx, &dyn diport::clock::Clock, &authn::CrossTenantAuditContext) -> core::result::Result<authn::CrossTenantAuditGrant, authn::CrossTenantGrantError>
 impl runctx::ctx::PrincipalFacet for authn::Principal
 pub fn authn::Principal::kind(&self) -> vocab::principal::PrincipalKind
 pub fn authn::Principal::matches_subject(&self, &str) -> bool

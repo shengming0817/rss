@@ -2,12 +2,12 @@
 
 本文件记录 L1/LocalTx 已落地的声明、执行与验证边界。机器真源是 `xtask` typed manifest/R22、
 `vocab::LocalTx*` 闭值、generated `LOCAL_TX_SPECS`、typed route/provider marker、conformance、Postgres
-runner、metrics 和 scoped journey；本文不维护平行 gate inventory。
+runner、metrics 和 active journey；本文不维护平行 gate inventory。
 
 ## Proof chain and validation levels
 
 采用顺序是 contract LocalTx evidence → generated registry → owner/production route → domain conformance →
-typed backend profile/provider probes → Postgres runner settlement/telemetry → scoped journey。任一层缺失、重复、
+typed backend profile/provider probes → Postgres runner settlement/telemetry → active journey。任一层缺失、重复、
 未知、孤立、伪造或 route/provider 身份不一致都 fail-closed。
 
 - `verify --fast` 的 inner typed plan 执行 contract/codegen 漂移和 `localtx-coverage` 静态闭环；不包含
@@ -15,7 +15,7 @@ typed backend profile/provider probes → Postgres runner settlement/telemetry �
   仍会构建 xtask 启动器。
 - 完整 `verify` 额外执行 workspace/default conformance 和 integration-target compile-only；编译成功不等于
   真实事务矩阵已执行。
-- `ci-integration --shard postgres-domain` 执行真实 SecretRepo/Identity matrices 与 #1706 admitted journey，
+- `ci-integration --shard postgres-domain` 执行真实 SecretRepo/Identity matrices 与 active LocalTx 5/5 journey，
   required tooling、服务启动和编译后测试 inventory 均 fail-closed，closeout 不使用 `--allow-missing-tools`。
 
 ## Contract evidence
@@ -85,7 +85,14 @@ publish/publish、publish/delete 与 delete/delete 均按同一 key 线性化，
 
 `audit.list-tenant-entries` 的 LocalTx UoW 只覆盖持久 `auth_audit_events` append。append 成功提交后才签发
 `CrossTenantReadScope` 并执行专用 admin pool read；append 与 read 不在同一事务，系统也不自动重试整条
-append+read 序列。
+append+read 序列。应用层只能构造 `AuditListTenantAppend`，将 target-derived `TenantRepoScope`、规范化事件与
+`LocalTxObservation<AuditListTenantRouteMarker>` 同源封装；`AuditListTenantAppender` 只消费该 route-specific
+typed command，adapter 不能把其它 route 的 observation、裸 tenant 或 generic append 接到该事务边界。
+
+`identity.refresh` 通过 `RefreshRotationMutation` 将 sealed rotation 与
+`LocalTxObservation<RefreshRotationRouteMarker>` 同源封装，adapter 只能消费该 typed mutation。durable journey 的
+`commit-unknown` case 返回 500 / `ERR_CORE_INTERNAL`，`retryable = false` 且 `attempts = 1`；fixture 特意省略
+`commits`，因为首次提交可能已经 durable，unknown outcome 既不能伪断言提交数，也不能自动 replay 轮换。
 
 `LocalTxFinalStatus`、`cotx` 与 handler 级 UoW settlement 语义只描述 `tenant-scoped-uow`，不可外推为
 `repo-atomic-cas` 的业务模型（handler 不持有显式 UoW，也不按 UoW 语义重放整条 find→mutate 序列）。
@@ -110,7 +117,10 @@ tests；每个测试函数只能声明一个 `LOCALTX_BACKEND_PROFILE_*` marker�
 每个 shard 还必须声明匹配的 `LOCALTX_BACKEND_PROVIDER_*: PhantomData<(RouteMarker, ProviderFixture)>`，并在
 测试体中通过 `ProviderFixture::new(...)` 构造真实 provider；`run_global_transaction` 与
 `localtx_profile_probe` toy table 明确禁止作为 backend evidence。缺 enrollment、错用较小 profile、缺 probe、
-缺 provider binding、单测试多 marker、伪造 dependency 或孤儿 marker 均阻断 verify。
+缺 provider binding、单测试多 marker、伪造 dependency 或孤儿 marker 均阻断 verify。对于
+`audit.list-tenant-entries`，provider binding 进一步闭合为 `crate::PgAuthAuditSink`；五个 shard 均经 sealed
+`AuditListTenantAppend::for_test` 驱动真实 `auth_audit_events` append，并由 route-local fault seam 验证 retry 与
+unsafe settlement。正确 route marker 配错 `PgAuditRepo` 等 provider 仍 fail-closed。
 类型签名承担 Hard 的 route 身份约束，跨 manifest/source/test 的完整闭环评级为 Medium。
 
 `tenant-scoped-uow` profile 必须组合：
@@ -253,16 +263,24 @@ const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
 ```
 
 该 marker 必须是 `LOCALTX_BACKEND_PROFILE_*` 具名 const、处于真实 test function，并由同一 adapter provider 的
-同一 typed provider fixture 的测试 shards 合计提供 manifest-derived required probes；provider binding 名必须与
-profile suffix 一致，route marker 必须一致，且 fixture 构造必须出现在同一 test body。helper 只有作为 test body
-顶层且实际 `.await?` 才计入，未轮询 future、分支内符号或别名调用都不构成 evidence。
-`tenant-scoped-uow` 额外要求 rollback 与 rollback-failed-no-replay，两个 profile 都要求 validation 与 authorization
-各一次 no-write（因此 `assert_rejected_no_write` 至少出现两次）。该闭环由
+typed shards 合计提供 manifest-derived required probes；provider binding 名必须与 profile suffix 一致，route marker
+必须一致。每个 probe 的 provider action 都必须把一个以 canonical `Provider::new(...)` 为 initializer dataflow root
+的绑定直接传入 method receiver/实参，并让该 method call 经 `?`、显式 `return` 或 action 尾表达式决定结果；普通
+free function、裸引用、丢弃 call 结果、aggregate result binding/projection、同名 shadow constructor、
+block/tuple/dead-branch bait、observer-only 引用和 `.synthetic()` outcome 都不计。若需先观测数据库状态再返回 provider
+错误，只允许把 provider method 的透明 `await`/`?`/receiver-method chain 直接绑定为结果，不允许经 tuple/struct/array 包装。
+helper 只有作为 test body 顶层且实际 `.await?` 才计入，未轮询 future、分支内符号或别名调用都不构成 evidence。
+`tenant-scoped-uow` 额外要求 rollback 与 rollback-failed-no-replay。HTTP validation、unauthenticated 和 route
+authorization rejection 若发生在 provider 之前，只由真实 journey 证明零写，禁止登记成手造 backend outcome；
+`rejected-no-write` 仅在 action 真调用绑定 provider 时可计。该闭环由
 `LOCALTX-BACKEND-PROFILE-CLOSURE-01` 的 missing-binding、toy-transaction、multiple-marker、missing-probe
 synthetic red 与真实 workspace anti-vacuity 承载（Medium）。
 
-Issue #1706 的 active L1 journey 另由 scoped v1 status board 将三条准入 contract 与 spec、fixture、唯一
-`localtx_validation_journey` runner 做 1:1 闭合。Runner 中具名
+active L1 journey 由 `scope = "active-localtx"` 的 v1 status board 将全部五条 active LocalTx HTTP contract
+（`audit.list-tenant-entries`、`identity.logout`、`identity.password-change`、`identity.refresh`、
+`settings.secret-publish`）与 spec、fixture、各自唯一的 contract-specific runner 做 1:1 闭合。board contract
+集合直接等于 active manifest discovery；新增、遗漏、重复或非 active entry 均 fail-closed，不维护 issue allowlist。
+Runner 中具名
 `LOCALTX_JOURNEY_*: HttpRouteBinding<RouteMarker, LocalTx> = generated::ROUTE` 由 rustc 固定 route 与一致性级
 身份（Hard）；跨 TOML、manifest 与 runner 的完整性由 `LOCALTX-JOURNEY-CLOSURE-01` 接入 verify 阻断
 （Medium，含 synthetic red 与真实 workspace anti-vacuity）。该 Medium 闭环同时拒绝祖先 `cfg/cfg_attr`
@@ -272,25 +290,29 @@ durable runner 逐请求隔离采集 `localtx_retry_attempts_total`、`localtx_f
 测试结束时确认每个 case 的 HTTP response 与 LocalTx accounting 均已被观测，拒绝用请求数字面量自证。
 `identity.logout` 不伪造业务 conflict：其
 tenant-scoped-UoW matrix 必须把 conflict 声明为不适用并给出原因，实际第四路径验证并发与重复请求幂等收敛。
-该 board 只覆盖 issue #1706 的三条 contract，不对其余 active LocalTx contract 声称全局穷尽；其它 scope
-的 journey artifact 不得被强塞进 `issue-1706` board。
+`audit.list-tenant-entries` 与 `identity.refresh` 同样把不暴露业务 CAS conflict 的原因显式声明为
+`applicable = false`。`commit-unknown` 是 closed journey scenario，只在具备该可观测路径的 journey 中声明；仅该
+scenario 的 fixture case 可省略 `commits`，其它 case 必须提供精确 attempts/commits accounting。
 
 ## Failure and adoption semantics
 
 新建或修改 LocalTx contract 时，先选择与实现一致的 `txModel` 并补齐全部闭值 evidence，再生成 registry、绑定
 唯一 owner/production route、为真实域路径补 conformance，并在需要 Postgres 事务语义时注册一对一的 typed
-backend profile/provider probes。只有 admitted scope 才进入 journey；metrics/traces 必须复用闭值 label，不能
-用自由字符串、第二套 enum、toy transaction 或文档声明替代证据。
+backend profile/provider probes。每条 active LocalTx HTTP contract 都必须进入 active journey；metrics/traces 必须
+复用闭值 label，不能用自由字符串、第二套 enum、toy transaction 或文档声明替代证据。
 
 静态门会拒绝 manifest/generated/owner/route/test、backend profile/provider/probe、journey board/spec/fixture/
-runner/lane 的缺失、重复、未知或孤立关系。validation/authorization 路径必须证明 no-write；CAS conflict 与
-permanent error 恰好一次且零写；transient 只在确认 rollback 后按预算重建 transaction scope。`commit_unknown`
+runner/lane 的缺失、重复、未知或孤立关系。前置 validation 与 unauthenticated 路径必须证明 no-write；已认证
+authorization deny 若契约要求 durable denial audit，只允许写该目标绑定的拒绝审计，业务读/写仍必须为零且
+fixture 必须精确声明 attempts/commits。CAS conflict 与 permanent error 恰好一次且零写；transient 只在确认 rollback
+后按预算重建 transaction scope。`commit_unknown`
 和 `rollback_failed` 都只能断言 attempt = 1：第一次 attempt 可能已经 durable，禁止 replay，也禁止伪造 snapshot
 或 no-write 结论。
 
-#1706 的 durable journey 只覆盖 status board admitted 的 Settings/Identity contracts，不宣称所有 active LocalTx
-全局穷尽。`identity.logout` 的第四路径验证并发/重复请求幂等收敛，不能为满足矩阵而伪造业务 conflict。
+durable journeys 对五条 active LocalTx contract 做 5/5 穷尽闭合；`identity.logout` 的第四路径验证并发/重复请求
+幂等收敛，不能为满足矩阵而伪造业务 conflict。refresh 的 unknown settlement 只证明一次 attempt 与不可重放，
+不能把 outcome unknown 降格成 confirmed rollback 或零提交。
 
-历史交付链 #1687/#1688/#1697–#1706 已完成 manifest、共享 vocab/generated metadata、coverage、runner、
+历史交付链 #1687/#1688/#1697–#1706 与 #1775 已完成 manifest、共享 vocab/generated metadata、coverage、runner、
 domain/adapters、conformance、metrics 和 journey。旧 boundary-only evidence、generated 镜像 enum、bare marker、
 legacy runner 和手制 observation 均已删除，不提供兼容入口。

@@ -19,7 +19,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result};
-use audit::ports::{AuditChainHasher, DynAuditReadRepo};
+use audit::ports::{
+    AuditChainHasher, AuditListTenantAppend, AuditListTenantAppender, DynAuditReadRepo,
+};
 use audit::{AuditDomain, InMemAuditRepo};
 use base64::Engine as _;
 use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
@@ -51,8 +53,8 @@ use tokio_util::sync::CancellationToken;
 use runtime::event_transport::{bridge_generated_subscriptions, build_event_transport_config_from};
 use runtime::test_support::wire_event_transport;
 use runtime::{
-    SharedRuntimeDeps, SystemClock, TracingAuthAuditSink, build_redis_runtime_deps,
-    build_vault_runtime_deps, wire_distributed,
+    SharedRuntimeDeps, SystemClock, build_redis_runtime_deps, build_vault_runtime_deps,
+    wire_distributed,
 };
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 
@@ -247,15 +249,29 @@ impl MacVerifier for CapturingVerifier {
 
 // ── audit_domain helper（自 journeys/tests/common/mod.rs 复制）───────────────────────────
 
+#[derive(Clone, Default)]
+struct TestAuditListTenantAppender;
+
+impl AuditListTenantAppender for TestAuditListTenantAppender {
+    async fn append(&self, _command: AuditListTenantAppend) -> Result<(), diport::AuditSinkError> {
+        Ok(())
+    }
+}
+
 #[allow(clippy::expect_used)]
 // reason: 32B audit key 满足 AuditChainHasher MIN_KEY_LEN（失败意味测试常量有误），panic 正当。
-fn audit_domain() -> (AuditDomain<TracingAuthAuditSink>, CapturingVerifier) {
+fn audit_domain() -> (AuditDomain<TestAuditListTenantAppender>, CapturingVerifier) {
     let verifier = CapturingVerifier::default();
     let hasher = AuditChainHasher::new(verifier.clone(), MacKey::from_bytes(AUDIT_KEY.to_vec()))
         .expect("32B audit key satisfies MIN_KEY_LEN");
     let provider = Arc::new(InMemAuditRepo::new(hasher));
     let read_repo: Arc<DynAuditReadRepo<'static>> = Arc::from(DynAuditReadRepo::new_box(provider));
-    let domain = AuditDomain::new(read_repo, None, TracingAuthAuditSink, Arc::new(SystemClock));
+    let domain = AuditDomain::new(
+        read_repo,
+        None,
+        TestAuditListTenantAppender,
+        Arc::new(SystemClock),
+    );
     (domain, verifier)
 }
 

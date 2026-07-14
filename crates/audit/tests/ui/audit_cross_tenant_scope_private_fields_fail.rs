@@ -1,7 +1,11 @@
 use audit::ports::CrossTenantReadScope;
 
-fn bypass(audited: authn::AuditedCrossTenantVisibility) {
-    let _scope = CrossTenantReadScope { audited, _seal: () };
+fn bypass(visibility: vocab::RowVisibility, target: vocab::TenantId) {
+    let _scope = CrossTenantReadScope {
+        visibility,
+        target,
+        _seal: (),
+    };
 }
 
 fn main() {}

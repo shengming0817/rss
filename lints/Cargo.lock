@@ -514,6 +514,7 @@ dependencies = [
  "ids",
  "primitives",
  "secure",
+ "sha2",
  "thiserror 2.0.18",
  "tokio-util",
  "trait-variant",
@@ -712,6 +713,7 @@ dependencies = [
  "tracing",
  "uuid",
  "vocab",
+ "zeroize",
 ]
 
 [[package]]

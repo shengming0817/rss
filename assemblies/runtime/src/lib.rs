@@ -386,6 +386,18 @@ impl diport::AuditSink for TracingAuthAuditSink {
     }
 }
 
+#[cfg(test)]
+impl audit::ports::AuditListTenantAppender for TracingAuthAuditSink {
+    async fn append(
+        &self,
+        command: audit::ports::AuditListTenantAppend,
+    ) -> Result<(), diport::AuditSinkError> {
+        let (scope, event, _observation) = command.into_parts();
+        debug_assert_eq!(event.tenant_id, Some(scope.tenant()));
+        diport::AuditSink::record(self, event).await
+    }
+}
+
 /// 从 `std::env` 构造 [`event_transport::EventTransportConfig`]。
 pub fn build_event_transport_config() -> anyhow::Result<event_transport::EventTransportConfig> {
     event_transport::build_event_transport_config_from(|name| std::env::var(name).ok())

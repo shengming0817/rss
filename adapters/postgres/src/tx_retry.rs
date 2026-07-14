@@ -15,7 +15,11 @@ use consistency::{
 };
 #[cfg(feature = "domain-identity")]
 use identity::ports::IdentityError;
-#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+#[cfg(any(
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
 use observ::LocalTxObservation;
 #[cfg(feature = "domain-settings")]
 use settings::ports::{ConfigRepoError, SecretRepoError};
@@ -37,6 +41,8 @@ pub(crate) enum PgTxRetryBoundary {
     IdentityRefresh,
     #[cfg(feature = "domain-audit")]
     AuditAppend,
+    #[cfg(feature = "domain-audit")]
+    AuditListTenantAppend,
 }
 
 impl PgTxRetryBoundary {
@@ -54,6 +60,8 @@ impl PgTxRetryBoundary {
             Self::IdentityRefresh => "identity.refresh",
             #[cfg(feature = "domain-audit")]
             Self::AuditAppend => "audit.append",
+            #[cfg(feature = "domain-audit")]
+            Self::AuditListTenantAppend => "audit.list-tenant-entries",
         }
     }
 }
@@ -77,6 +85,10 @@ pub(crate) const IDENTITY_REFRESH_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundar
 /// Retry boundary for the durable audit append transaction.
 #[cfg(feature = "domain-audit")]
 pub(crate) const AUDIT_APPEND_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::AuditAppend;
+/// Retry boundary for the route-specific target-tenant auth audit append.
+#[cfg(feature = "domain-audit")]
+pub(crate) const AUDIT_LIST_TENANT_APPEND_BOUNDARY: PgTxRetryBoundary =
+    PgTxRetryBoundary::AuditListTenantAppend;
 
 /// Closed route-marker to Postgres retry-boundary mapping.
 ///
@@ -105,6 +117,11 @@ impl PgLocalTxOperation for identity::ports::SessionLogoutRouteMarker {
 #[cfg(feature = "domain-identity")]
 impl PgLocalTxOperation for identity::ports::RefreshRotationRouteMarker {
     const BOUNDARY: PgTxRetryBoundary = IDENTITY_REFRESH_BOUNDARY;
+}
+
+#[cfg(feature = "domain-audit")]
+impl PgLocalTxOperation for audit::ports::AuditListTenantRouteMarker {
+    const BOUNDARY: PgTxRetryBoundary = AUDIT_LIST_TENANT_APPEND_BOUNDARY;
 }
 
 /// Classify a SQLSTATE code.
@@ -208,7 +225,11 @@ where
 }
 
 /// Run a typed LocalTx Postgres UoW and emit retry and settlement observability.
-#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+#[cfg(any(
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
 pub(crate) async fn run_pg_localtx_retry<M, T, E, Op, OpFut, Classify>(
     observation: LocalTxObservation<M>,
     op: Op,
@@ -440,6 +461,8 @@ fn record_final(boundary: PgTxRetryBoundary, report: TxRetryReport, reason: &'st
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "domain-audit")]
+    use super::{AUDIT_LIST_TENANT_APPEND_BOUNDARY, PgLocalTxOperation};
     #[cfg(feature = "domain-settings")]
     use super::{SETTINGS_SECRET_BOUNDARY, classify_config_repo_error, classify_secret_repo_error};
     use super::{
@@ -451,6 +474,19 @@ mod tests {
     #[cfg(feature = "domain-settings")]
     use settings::ports::{ConfigRepoError, SecretRepoError};
     use std::time::Duration;
+
+    #[cfg(feature = "domain-audit")]
+    #[test]
+    fn audit_list_tenant_route_maps_to_its_closed_retry_boundary() {
+        assert_eq!(
+            <audit::ports::AuditListTenantRouteMarker as PgLocalTxOperation>::BOUNDARY,
+            AUDIT_LIST_TENANT_APPEND_BOUNDARY
+        );
+        assert_eq!(
+            AUDIT_LIST_TENANT_APPEND_BOUNDARY.as_label(),
+            "audit.list-tenant-entries"
+        );
+    }
 
     #[cfg(feature = "domain-settings")]
     #[test]

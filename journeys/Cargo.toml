@@ -14,8 +14,28 @@ workspace = true
 [dependencies]
 
 [[test]]
-name = "localtx_validation_journey"
-path = "tests/localtx_validation_journey.rs"
+name = "audit_list_tenant_entries_localtx_journey"
+path = "tests/audit_list_tenant_entries_localtx_journey.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "identity_logout_localtx_journey"
+path = "tests/identity_logout_localtx_journey.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "identity_password_change_localtx_journey"
+path = "tests/identity_password_change_localtx_journey.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "identity_refresh_localtx_journey"
+path = "tests/identity_refresh_localtx_journey.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "settings_secret_publish_localtx_journey"
+path = "tests/settings_secret_publish_localtx_journey.rs"
 required-features = ["integration"]
 
 # journey 集成测试组装根：组合根可依赖所有库 crate（deny.toml wrappers 已含 journeys）。
@@ -23,6 +43,7 @@ required-features = ["integration"]
 # seed-login：启用 identity 的明文种子登录构造器（仅 journeys/demo；生产组合根不启用，PR #186 F1）。
 # test-support：journey 测试显式构造 TenantRepoScope，证明外部测试只能走测试入口而非裸 TenantId。
 identity = { path = "../crates/identity", features = ["seed-login", "test-support"] }
+authn = { path = "../crates/authn", features = ["test-support"] }
 audit = { path = "../crates/audit", features = ["test-support"] }
 httpserve = { path = "../crates/httpserve", features = ["test-util"] }
 # seed-data：启用 settings 的 in-mem 配置 / flag 仓储构造器（仅 journeys/demo；生产组合根不启用）。
@@ -37,6 +58,7 @@ diport = { path = "../crates/diport" }
 secure = { path = "../crates/secure" }
 # #1160 durable journey：correlation ambient 信道，端到端断言 outbox→relay→broker→consumer metadata 保真。
 diagctx = { path = "../crates/diagctx" }
+runctx = { path = "../crates/runctx", features = ["test-support"] }
 primitives = { path = "../crates/primitives" }
 # settings 配置发布 journey 需 TenantId 构造 + 事件 payload 解码。
 vocab = { path = "../crates/vocab" }
@@ -54,7 +76,7 @@ anyhow = { workspace = true }
 # adapt 在 handler Err→Nack 处记录错误（兜底可观测，与 eventexec/audit 日志同链）。
 tracing = { workspace = true }
 # durable 拓扑 journey（`integration` feature）：PgStore/PgEmitter/PgOutbox/PgInboxStore 端到端闭环。
-postgres = { path = "../adapters/postgres", features = ["domain-settings", "domain-identity", "domain-audit"] }
+postgres = { path = "../adapters/postgres", features = ["domain-settings", "domain-identity", "domain-audit", "journey-fault-support", "test-support"] }
 sqlx = { workspace = true }
 # #1171 §6：AMQP at-least-once journey（`integration` feature）——AmqpSubscriber/AmqpPublisher 真 broker
 # 驱动 run_consumer_ackable。无 integration feature 时 amqp 退化为 sealed-marker 签名壳（非本文件编译）。

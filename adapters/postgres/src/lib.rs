@@ -71,7 +71,11 @@ mod service_token_replay;
 mod session_lifecycle;
 mod session_sweeper;
 mod tx;
-#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+#[cfg(any(
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
 mod tx_retry;
 
 #[cfg(feature = "domain-audit")]

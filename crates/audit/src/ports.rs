@@ -22,6 +22,9 @@
 use std::time::SystemTime;
 
 use dynosaur::dynosaur;
+use generated::http::audit_v1::list_tenant_entries::{
+    LOCAL_TX as AUDIT_LIST_TENANT_LOCAL_TX, ROUTE as AUDIT_LIST_TENANT_ROUTE,
+};
 
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造仍经受控 funnel）。
 pub use crate::application::{
@@ -32,6 +35,9 @@ pub use crate::domain::{
     actor_kind_from_db, actor_kind_to_db,
 };
 pub use vocab::TenantId;
+
+/// Generated route marker retained by the target-tenant audit append command.
+pub type AuditListTenantRouteMarker = generated::http::audit_v1::list_tenant_entries::RouteMarker;
 
 /// Tenant-scoped repo capability for ordinary audit storage ports.
 ///
@@ -91,28 +97,97 @@ impl RowRepoScope {
 
 /// Audited cross-tenant read capability for the admin repository.
 ///
-/// The crate-private constructor consumes the non-cloneable, target-bound
-/// [`authn::AuditedCrossTenantVisibility`] returned only after
-/// `Principal::audited_cross_tenant_visibility` durably records access to that same tenant. A bare
-/// tenant or an independently obtained row visibility is insufficient for invoking the read port.
+/// The crate-private constructor requires the application module's unforgeable durable append
+/// receipt. A bare target, authn grant, or independently obtained row visibility is insufficient.
 pub struct CrossTenantReadScope {
-    audited: authn::AuditedCrossTenantVisibility,
+    visibility: vocab::RowVisibility,
+    target: TenantId,
     _seal: (),
 }
 
 impl CrossTenantReadScope {
-    pub(crate) fn from_audited_visibility(audited: authn::AuditedCrossTenantVisibility) -> Self {
-        Self { audited, _seal: () }
+    pub(crate) fn from_durable_append(
+        receipt: crate::application::AuditListTenantAppendReceipt,
+    ) -> Self {
+        let capability = vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin();
+        let visibility = vocab::RowVisibility::new_cross_tenant(
+            vocab::CrossTenantVisibility::authorize(capability),
+        );
+        Self {
+            visibility,
+            target: receipt.target(),
+            _seal: (),
+        }
     }
 
     /// Explicit target tenant authorized by this audited capability.
     pub fn target(&self) -> TenantId {
-        self.audited.target()
+        self.target
     }
 
     /// Audited row visibility proof retained by this capability.
     pub fn visibility(&self) -> &vocab::RowVisibility {
-        self.audited.visibility()
+        &self.visibility
+    }
+}
+
+/// Unforgeable durable audit append for the target-tenant list route.
+///
+/// The target-derived tenant scope, normalized audit event, and generated LocalTx observation are
+/// minted together inside this crate. Postgres adapters can consume the command but cannot pair a
+/// target with evidence from another route.
+pub struct AuditListTenantAppend {
+    scope: TenantRepoScope,
+    event: diport::AuditEvent,
+    observation: observ::LocalTxObservation<AuditListTenantRouteMarker>,
+}
+
+impl AuditListTenantAppend {
+    pub(crate) fn new(target: TenantId, mut event: diport::AuditEvent) -> Self {
+        event.tenant_id = Some(target);
+        Self {
+            scope: TenantRepoScope::from_authenticated_tenant(target),
+            event,
+            observation: observ::LocalTxObservation::new(
+                AUDIT_LIST_TENANT_ROUTE,
+                AUDIT_LIST_TENANT_LOCAL_TX.boundary,
+            ),
+        }
+    }
+
+    /// Test-support factory that preserves the production target-to-scope and typed observation
+    /// minting funnel. External fixtures may supply an event, but cannot replace either proof.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(target: TenantId, event: diport::AuditEvent) -> Self {
+        Self::new(target, event)
+    }
+
+    /// Adapter lowering funnel for the target-bound scope, event, and exact LocalTx evidence.
+    pub fn into_parts(
+        self,
+    ) -> (
+        TenantRepoScope,
+        diport::AuditEvent,
+        observ::LocalTxObservation<AuditListTenantRouteMarker>,
+    ) {
+        (self.scope, self.event, self.observation)
+    }
+}
+
+/// Route-specific append capability for audited target-tenant reads.
+#[trait_variant::make(AuditListTenantAppender: Send)]
+#[dynosaur(pub DynAuditListTenantAppender = dyn(box) AuditListTenantAppender, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+pub trait AuditListTenantAppenderLocal: Send + Sync {
+    async fn append(&self, command: AuditListTenantAppend) -> Result<(), diport::AuditSinkError>;
+}
+
+impl<T> AuditListTenantAppender for std::sync::Arc<T>
+where
+    T: AuditListTenantAppender + ?Sized,
+{
+    async fn append(&self, command: AuditListTenantAppend) -> Result<(), diport::AuditSinkError> {
+        T::append(self, command).await
     }
 }
 
@@ -379,5 +454,33 @@ mod smoke {
         let repo: Arc<DynAuditAdminRepo<'static>> =
             Arc::from(DynAuditAdminRepo::new_box(NoopAuditAdminRepo));
         assert_send_sync(&repo);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // reason: fixed canonical UUID fixtures must parse.
+    fn audit_list_tenant_append_binds_scope_and_event_to_target() {
+        let target = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("canonical target tenant");
+        let other = TenantId::parse("00000000-0000-4000-8000-000000000abc")
+            .expect("canonical other tenant");
+        let command = super::AuditListTenantAppend::new(
+            target,
+            diport::AuditEvent {
+                occurred_at: std::time::UNIX_EPOCH,
+                principal_id: "principal".to_string(),
+                principal_kind: vocab::PrincipalKind::SuperAdmin,
+                tenant_id: Some(other),
+                resource_kind: "audit_entries",
+                resource_id: target.to_string(),
+                action: "audit:list-cross-tenant",
+                outcome: diport::AuditOutcome::Success,
+                request_id: Some("request".to_string()),
+                correlation_id: Some("correlation".to_string()),
+            },
+        );
+
+        let (scope, event, _observation) = command.into_parts();
+        assert_eq!(scope.tenant(), target);
+        assert_eq!(event.tenant_id, Some(target));
     }
 }

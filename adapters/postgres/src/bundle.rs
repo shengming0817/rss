@@ -1031,6 +1031,24 @@ impl PgDomainDeps<caps::Identity> {
     pub fn refresh_token_store(&self) -> PgRefreshTokenStore {
         PgRefreshTokenStore::new(&self.store)
     }
+
+    /// Journey-only refresh store that loses the commit acknowledgement for one named token
+    /// rotation after PostgreSQL accepts the commit.
+    ///
+    /// The narrow seam is absent from default builds and exposes neither generic fault selection
+    /// nor raw transaction/pool access.
+    #[cfg(feature = "journey-fault-support")]
+    #[must_use]
+    pub fn refresh_token_store_with_commit_unknown_once(
+        &self,
+        old_id: &str,
+    ) -> PgRefreshTokenStore {
+        PgRefreshTokenStore::new(&self.store).with_rotation_fault(
+            old_id,
+            crate::refresh_token_store::RefreshRotationFault::CommitUnknown,
+            1,
+        )
+    }
 }
 
 #[cfg(feature = "domain-audit")]

@@ -160,7 +160,8 @@ label 闭值集纪律：
   `connection` / `pool_timeout` / `pool_closed` / `database` / `database_unknown` / `settlement_wrapper` /
   `storage` / `domain` / `none`；不得放原始错误、SQLSTATE、租户或 key。
 - `boundary` 闭合于 adapter 私有构造面的 `PgTxRetryBoundary::as_label()`（当前 `settings.config` /
-  `settings.secret` / `identity.credential` / `identity.session`）；HTTP LocalTx 路径由 route marker 经
+  `settings.secret` / `identity.credential` / `identity.session` / `identity.refresh` / `audit.append` /
+  `audit.list-tenant-entries`）；HTTP LocalTx 路径由 route marker 经
   crate-private `PgLocalTxOperation` 唯一派生，不得从租户、key、
   SQL、handler 或请求输入派生。
 - `settings.secret` 的 generic retry telemetry 覆盖非 HTTP `publish_internal` 与 rollback `republish`；它只描述

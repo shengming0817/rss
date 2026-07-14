@@ -1,10 +1,22 @@
-error[E0624]: associated function `from_audited_visibility` is private
+error[E0624]: associated function `from_durable_append` is private
  --> tests/ui/audit_cross_tenant_scope_private_ctor_fail.rs:4:40
   |
-4 |     let _scope = CrossTenantReadScope::from_audited_visibility(audited);
-  |                                        ^^^^^^^^^^^^^^^^^^^^^^^ private associated function
+4 |       let _scope = CrossTenantReadScope::from_durable_append(todo!());
+  |                                          ^^^^^^^^^^^^^^^^^^^ private associated function
   |
  ::: src/ports.rs
   |
-  |     pub(crate) fn from_audited_visibility(audited: authn::AuditedCrossTenantVisibility) -> Self {
-  |     ------------------------------------------------------------------------------------------- private associated function defined here
+  | /     pub(crate) fn from_durable_append(
+  | |         receipt: crate::application::AuditListTenantAppendReceipt,
+  | |     ) -> Self {
+  | |_____________- private associated function defined here
+
+warning: unreachable call
+ --> tests/ui/audit_cross_tenant_scope_private_ctor_fail.rs:4:18
+  |
+4 |     let _scope = CrossTenantReadScope::from_durable_append(todo!());
+  |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
+  |                  |
+  |                  unreachable call
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default

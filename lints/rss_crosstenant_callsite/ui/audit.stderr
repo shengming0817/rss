@@ -1,0 +1,11 @@
+warning: 跨租户 All-scope mint 仅 audit durable-receipt scope mint 可执行：vocab 跨租户 mint 函数不得在此调用
+  --> $DIR/audit.rs:16:23
+   |
+LL |     let _capability = vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin();
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 先完成 typed durable append，再由 `CrossTenantReadScope::from_durable_append` mint；其它调用须经治理评审并显式 allow
+   = note: `#[warn(rss_crosstenant_callsite)]` on by default
+
+warning: 1 warning emitted
+

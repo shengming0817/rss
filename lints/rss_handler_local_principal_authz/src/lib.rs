@@ -60,7 +60,7 @@ const AUTHN_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &[
     "alg_allows_kind",
     "issue_inner",
     "row_visibility",
-    "audited_cross_tenant_visibility",
+    "cross_tenant_audit_grant",
 ];
 const AUTHN_PRINCIPAL_BRANCH_ALLOWED_METHODS: &[(&str, &[&str])] =
     &[("authorize", &["ProjectionMaintenanceGrantSet"])];

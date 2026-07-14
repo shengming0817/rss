@@ -24,7 +24,7 @@ UUID。service / auth 边界使用 typed tenant 参数，不传裸 `String`；te
 `tenant::RowVisibility::new` 接收 `ScopedTenant`，类型层排除 `RowScope::All`。跨租户可见性只能由
 `tenant::RowVisibility::new_cross_tenant()` 生产；跨租户读取 API 必须接收 sealed
 `tenant::CrossTenantVisibility` 位置参，不能接收普通 `RowVisibility` 或裸 scope。
-`RowScope::All` 只能从 `authn` 的 super-admin 派生路径进入业务；派生必须与强制审计同址：跨租户 super-admin 访问**必须写持久 audit ledger**（字段至少含 tenant / principal / resource / action / request / correlation），tracing span 仅作关联信号、不替代持久审计。「同址」由 `authn` audited 派生 funnel 类型层强制——先写审计成功才签发 All-scope，audit 写失败 fail-closed（INVARIANT: TENANCY-CROSSTENANT-AUDIT-01，封闭符号见 `crates/authn/src/lib.rs`）；裸同步 `Principal::row_visibility` 的 super-admin 分支不再签发 All-scope（无 `AuditSink` 无法同址，返回 deny）。runtime JWT verify bridge 在认证成功后把具体 `Arc<authn::Principal>` 写入 request extension；跨租户 audit read handler 使用该 principal 做 SuperAdmin 判定和 durable audit。
+`RowScope::All` 只能从 audit 域的 durable-receipt scope mint 进入业务：`authn` 先签发不含 visibility 的 target-bound `CrossTenantAuditGrant`，audit 应用层消费规范化事件，经 route-specific typed appender 成功后铸造模块私有 receipt，`CrossTenantReadScope` 只接受该 receipt。跨租户访问必须写持久 audit ledger（tenant / principal / resource / action / request / correlation），tracing 不替代 ledger；append 失败 fail-closed，裸同步 `Principal::row_visibility` 永不签发 All-scope。外部 no-op callback 旁路由 compile-fail 删除，All-scope vocab mint callsite 由 `rss_crosstenant_callsite` 精确函数门守护。
 
 `GET /api/v1/audit/entries` 只读 ambient `runctx` 租户，query 仅允许 `limit`/`cursor`；旧
 `?tenantId=` 输入返回 400。指定租户读取只走
@@ -91,7 +91,7 @@ service-token principal 自身同样无 tenant；只有验签通过的 service-t
 - normal user -> self
 - device -> device
 - admin -> tenant
-- super-admin -> fail-closed（裸同步 `row_visibility` 不签发 All-scope；跨租户 All 仅经 `Principal::audited_cross_tenant_visibility(...)` 同址审计派生，见上文 §RowScope）
+- super-admin -> fail-closed（裸同步 `row_visibility` 不签发 All-scope；跨租户读仅经 grant→typed append→durable receipt→scope，见上文 §RowScope）
 - service / anonymous / unknown -> fail-closed
 
 ## RLS 与 PG scope

@@ -1,0 +1,11 @@
+error[E0451]: fields `scope`, `event` and `observation` of struct `AuditListTenantAppend` are private
+  --> tests/ui/audit_list_tenant_append_private_fields_fail.rs:9:9
+   |
+ 8 |     let _command = AuditListTenantAppend {
+   |                    --------------------- in this type
+ 9 |         scope: fake(),
+   |         ^^^^^ private field
+10 |         event: fake(),
+   |         ^^^^^ private field
+11 |         observation: fake(),
+   |         ^^^^^^^^^^^ private field

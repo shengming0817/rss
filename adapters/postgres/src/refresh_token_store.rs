@@ -28,9 +28,9 @@ use identity::ports::{
 };
 use sqlx::Row;
 
-#[cfg(all(test, feature = "integration"))]
+#[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
 use std::collections::HashMap;
-#[cfg(all(test, feature = "integration"))]
+#[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
 use std::sync::{Arc, Mutex};
 
 use crate::PgStore;
@@ -44,32 +44,38 @@ use crate::tx_retry::{classify_identity_error, run_pg_localtx_retry};
 /// **Clock 不注入**：issued_at/expires_at 来自 record，由 `RefreshService` 的 Clock 派生，adapter 只透传落库。
 pub struct PgRefreshTokenStore {
     pool: PgTenantPool,
-    #[cfg(all(test, feature = "integration"))]
+    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
     rotation_faults: Arc<Mutex<RefreshRotationFaultState>>,
 }
 
-#[cfg(all(test, feature = "integration"))]
+#[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
 #[derive(Clone, Copy)]
 pub(crate) enum RefreshRotationFault {
+    #[cfg(all(test, feature = "integration"))]
     Permanent,
+    #[cfg(all(test, feature = "integration"))]
     Transient,
+    #[cfg(all(test, feature = "integration"))]
     TransientBeforeWrite,
+    #[cfg(all(test, feature = "integration"))]
     Conflict,
     CommitUnknown,
+    #[cfg(all(test, feature = "integration"))]
     RollbackFailed,
 }
 
-#[cfg(all(test, feature = "integration"))]
+#[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
 #[derive(Clone, Copy)]
 struct RefreshRotationFaultPlan {
     fault: RefreshRotationFault,
     remaining: usize,
 }
 
-#[cfg(all(test, feature = "integration"))]
+#[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
 #[derive(Default)]
 struct RefreshRotationFaultState {
     plans: HashMap<String, RefreshRotationFaultPlan>,
+    #[cfg(all(test, feature = "integration"))]
     attempts: HashMap<String, usize>,
 }
 
@@ -98,12 +104,12 @@ impl PgRefreshTokenStore {
     pub(crate) fn new(store: &PgStore) -> Self {
         Self {
             pool: PgTenantPool::new(store),
-            #[cfg(all(test, feature = "integration"))]
+            #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
             rotation_faults: Arc::new(Mutex::new(RefreshRotationFaultState::default())),
         }
     }
 
-    #[cfg(all(test, feature = "integration"))]
+    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
     pub(crate) fn with_rotation_fault(
         self,
         old_id: &str,
@@ -138,7 +144,7 @@ fn record_rotation_attempt(state: &Mutex<RefreshRotationFaultState>, old_id: &st
     *state.attempts.entry(old_id.to_owned()).or_default() += 1;
 }
 
-#[cfg(all(test, feature = "integration"))]
+#[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
 fn take_rotation_fault_if(
     state: &Mutex<RefreshRotationFaultState>,
     old_id: &str,
@@ -369,19 +375,19 @@ impl RefreshTokenStore for PgRefreshTokenStore {
             ))));
         }
         let tenant_uuid = tenant.as_uuid().to_string();
-        #[cfg(all(test, feature = "integration"))]
+        #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
         let old_id_key = old_id.as_str().to_owned();
-        #[cfg(all(test, feature = "integration"))]
+        #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
         let rotation_faults = Arc::clone(&self.rotation_faults);
         run_pg_localtx_retry(
             observation,
             |_attempt| {
                 let tenant_uuid = tenant_uuid.clone();
                 let old_id = old_id.clone();
-                #[cfg(all(test, feature = "integration"))]
+                #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
                 let old_id_key = old_id_key.clone();
                 let new = new.clone();
-                #[cfg(all(test, feature = "integration"))]
+                #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
                 let rotation_faults = Arc::clone(&rotation_faults);
                 #[cfg(all(test, feature = "integration"))]
                 record_rotation_attempt(&rotation_faults, &old_id_key);
@@ -410,18 +416,30 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                                         do_rotate_tx(&tenant_uuid, tx.conn(), &old_id, &new)
                                             .await
                                             .map_err(storage)?;
-                                    #[cfg(all(test, feature = "integration"))]
+                                    #[cfg(any(
+                                        all(test, feature = "integration"),
+                                        feature = "journey-fault-support"
+                                    ))]
                                     if let Some(fault) = take_rotation_fault_if(
                                         &rotation_faults,
                                         &old_id_key,
                                         |fault| {
-                                            !matches!(
-                                                fault,
-                                                RefreshRotationFault::TransientBeforeWrite
-                                            )
+                                            #[cfg(all(test, feature = "integration"))]
+                                            {
+                                                !matches!(
+                                                    fault,
+                                                    RefreshRotationFault::TransientBeforeWrite
+                                                )
+                                            }
+                                            #[cfg(not(all(test, feature = "integration")))]
+                                            {
+                                                let _ = fault;
+                                                true
+                                            }
                                         },
                                     ) {
                                         match fault {
+                                            #[cfg(all(test, feature = "integration"))]
                                             RefreshRotationFault::Permanent => {
                                                 return Err(IdentityError::Storage(Box::new(
                                                     std::io::Error::other(
@@ -429,14 +447,17 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                                                     ),
                                                 )));
                                             }
+                                            #[cfg(all(test, feature = "integration"))]
                                             RefreshRotationFault::Transient => {
                                                 return Err(storage(sqlx::Error::PoolTimedOut));
                                             }
+                                            #[cfg(all(test, feature = "integration"))]
                                             RefreshRotationFault::TransientBeforeWrite => {
                                                 unreachable!(
                                                     "before-write fault is consumed before SQL"
                                                 )
                                             }
+                                            #[cfg(all(test, feature = "integration"))]
                                             RefreshRotationFault::Conflict => {
                                                 return Err(IdentityError::VersionConflict);
                                             }
@@ -445,6 +466,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                                                     .await
                                                     .map_err(storage)?;
                                             }
+                                            #[cfg(all(test, feature = "integration"))]
                                             RefreshRotationFault::RollbackFailed => {
                                                 tx.inject_rollback_failed_after_rollback()
                                                     .await

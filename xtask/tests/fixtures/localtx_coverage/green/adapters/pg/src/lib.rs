@@ -6,6 +6,10 @@ mod tests {
         const fn new() -> Self {
             Self
         }
+
+        async fn execute(&self) -> Result<(), ()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -19,15 +23,60 @@ mod tests {
             DemoProviderFixture,
         )> = ::std::marker::PhantomData;
         let _typed_enrollment = LOCALTX_BACKEND_PROFILE_DEMO_WRITE;
-        let _provider = DemoProviderFixture::new();
-        ::testkit::localtx::assert_commit().await?;
-        ::testkit::localtx::assert_rollback().await?;
-        ::testkit::localtx::assert_rejected_no_write().await?;
-        ::testkit::localtx::assert_rejected_no_write().await?;
-        ::testkit::tenant_conformance::assert_tenant_isolation().await?;
-        ::testkit::repo_conformance::assert_retry_boundary_policy().await?;
-        ::testkit::localtx::assert_commit_unknown_no_replay().await?;
-        ::testkit::localtx::assert_rollback_failed_no_replay().await?;
+        let provider = DemoProviderFixture::new();
+        ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(|| async {
+            provider.execute().await
+        }))
+        .await?;
+        ::testkit::localtx::assert_rollback(::testkit::localtx::RollbackCase::new(|| async {
+            provider.execute().await
+        }))
+        .await?;
+        ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+            || async { provider.execute().await },
+        ))
+        .await?;
+        ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+            || async { provider.execute().await },
+        ))
+        .await?;
+        ::testkit::tenant_conformance::assert_tenant_isolation(
+            (),
+            (),
+            || async { provider.execute().await },
+            || async { Ok::<(), ()>(()) },
+            |_: ()| (),
+        )
+        .await?;
+        ::testkit::repo_conformance::assert_retry_boundary_policy(
+            ::testkit::repo_conformance::RetryBoundaryCase::new(
+                ::testkit::repo_conformance::TransientSuccessPath::new(|| async {
+                    provider.execute().await
+                }),
+                ::testkit::repo_conformance::ConflictPath::new(|| async {
+                    provider.execute().await
+                }),
+                ::testkit::repo_conformance::PermanentPath::new(|| async {
+                    provider.execute().await
+                }),
+                ::testkit::repo_conformance::TransientExhaustionPath::new(|| async {
+                    provider.execute().await
+                }),
+            ),
+        )
+        .await?;
+        ::testkit::localtx::assert_commit_unknown_no_replay(
+            ::testkit::localtx::CommitUnknownCase::new(|| async {
+                provider.execute().await
+            }),
+        )
+        .await?;
+        ::testkit::localtx::assert_rollback_failed_no_replay(
+            ::testkit::localtx::RollbackFailedCase::new(|| async {
+                provider.execute().await
+            }),
+        )
+        .await?;
         Ok(())
     }
 }

@@ -1,14 +1,13 @@
 #![feature(rustc_private)]
 //! `rss_crosstenant_callsite` — RSS G0.4 治理 dylint lint：限定跨租户 All-scope mint 三步
 //! `CrossTenantCapability::issue_for_verified_super_admin()` / `CrossTenantVisibility::authorize()` /
-//! `RowVisibility::new_cross_tenant()` 仅 `authn` crate 可调用。
+//! `RowVisibility::new_cross_tenant()` 仅 audit durable-receipt scope mint 函数可调用。
 //!
 //! INVARIANT: TENANCY-CROSSTENANT-CAP-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
 //! 跨租户可见性是 super-admin 越权面：`CrossTenantCapability` 私有字段（`_seal: ()`）已让**构造**只能经
-//! funnel（type-layer Hard，上游）；但「funnel 只许 `authn` 已校验 super-admin 路径调用」无法跨 crate 真
-//! seal（domain-patterns.md：sealed-trait 仅定义-crate 内封闭，vocab 无法对 authn sealing）。本 lint 承载
-//! 该 **下游** 约束（callsite-allowlist，Medium，AST 级最强可用载体）：非 allowlist crate 调用该 funnel 即报。
+//! funnel（type-layer Hard，上游）；但「funnel 只许 audit 在 durable append receipt 后调用」无法跨 crate
+//! 真 seal。本 lint 承载该 **下游** 约束（精确函数 allowlist，Medium）：其它函数调用即报。
 //!
 //! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
 //! - 上游（mint）：私有 `_seal` 字段 ⇒ struct-literal 不可表达，编译错误（Hard，在 vocab）。
@@ -18,9 +17,9 @@
 //! 函数项别名、fn-pointer 强转都解析到同一 `DefId`，杜绝「先别名再调用」绕过。
 //!
 //! 盲区：① 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦，azure 无 CI
-//! ⇒ verify 是唯一实际 gate；② `ALLOWED_CALLER_CRATES` 扩项无机器复核，靠 greppable + 治理评审；③ **跨函数**
-//! 洗白仍未覆盖（intraprocedural）：allowlist crate 内 `pub fn wrap() -> Cap { …issue…() }` 被外部调用 `wrap()`，
-//! lint 只见各自直接引用、不跨函数追（收紧待 authn 模块可见性，跟踪 #1085）。注：vocab 自身 smoke 测试引用该
+//! ⇒ verify 是唯一实际 gate；② **跨函数**洗白仍未覆盖（intraprocedural），但唯一放行函数为
+//! `audit::ports::CrossTenantReadScope::from_durable_append`，且其入参 receipt 由 application 模块私有字段 Hard
+//! seal。注：vocab 自身 smoke 测试引用该
 //! fn-item 会命中，但属 `#[cfg(test)]`，`cargo dylint --all` 不扫测试子树 ⇒ 实际 gate 无误报。
 
 extern crate rustc_hir;
@@ -32,11 +31,12 @@ use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_hir::{Expr, ExprKind, HirId};
 use rustc_lint::{LateContext, LateLintPass};
+use rustc_middle::ty::TyKind;
 use rustc_span::Span;
 
-/// 仅这些 crate 可调用跨租户 All-scope mint 三步——单一 greppable 真源，扩项须治理评审
-/// （等同对 funnel 本身的审视）。`authn` 持有「已校验 super-admin → 签发 capability」的派生路径。
-const ALLOWED_CALLER_CRATES: &[&str] = &["authn"];
+const ALLOWED_CALLER_CRATE: &str = "audit";
+const ALLOWED_CALLER_FUNCTION: &str = "from_durable_append";
+const ALLOWED_CALLER_TYPE: &str = "ports::CrossTenantReadScope";
 
 const FORBIDDEN_ASSOC_FNS: &[&str] = &[
     "issue_for_verified_super_admin",
@@ -46,29 +46,26 @@ const FORBIDDEN_ASSOC_FNS: &[&str] = &[
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
-    /// 标记非 `authn` crate 对 vocab 跨租户 All-scope mint 三步的
+    /// 标记非 audit durable-receipt scope mint 函数对 vocab 跨租户 All-scope mint 三步的
     /// **任意 path 引用**（直接 call、`let f = Type::fn` 别名、fn-pointer 强转——凡解析到该 assoc fn DefId）。
     ///
     /// ### Why is this bad?
     /// 跨租户可见性是 super-admin 越权面。capability 的**构造**已由 vocab 私有字段封到 funnel（Hard），但
-    /// 「funnel 只许 authn 已校验 super-admin 路径调用」跨 crate 不可真 seal，故由本 callsite-allowlist lint
-    /// 承载（Medium）。非 authn crate 取得该 fn-item（直接调或别名后调）⇒ 绕过 super-admin 校验、跨租户越权。
+    /// 「funnel 只许 durable receipt 消费点调用」跨 crate 不可真 seal，故由本 exact-function lint承载。
     /// INVARIANT: TENANCY-CROSSTENANT-CAP-01 { level = "Medium", exec = "verify", source = "dylint" }。
     ///
     /// ### Known problems
-    /// 仍 intraprocedural：allowlist crate 内 wrapper fn（`pub fn wrap() -> Cap { …issue…() }`）被外部 `wrap()`
-    /// 调用会**跨函数**洗白（lint 只见各自直接引用，跟踪 #1085）。`ALLOWED_CALLER_CRATES` 扩项无机器复核（靠
-    /// greppable + 治理）。确需在 allowlist 外引用加 `#[allow(rss_crosstenant_callsite)] // reason: ...`。
+    /// 仍 intraprocedural；确需在 allowlist 外引用须显式 `#[allow(rss_crosstenant_callsite)]` 并评审。
     ///
     /// ### Example
     /// ```ignore
-    /// // 非 authn crate：
+    /// // 非 durable receipt scope mint：
     /// let cap = vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin(); // 触发
     /// ```
-    /// Use instead: 在 `authn` 的已校验 super-admin 派生路径里完成 issue→authorize→new_cross_tenant。
+    /// Use instead: 先完成 typed durable append，再由 `CrossTenantReadScope::from_durable_append` mint。
     pub RSS_CROSSTENANT_CALLSITE,
     Warn,
-    "跨租户 capability 签发仅限 authn 已校验 super-admin 路径（callsite-allowlist，INVARIANT TENANCY-CROSSTENANT-CAP-01）"
+    "跨租户 capability 签发仅限 audit durable-receipt scope mint（exact-function allowlist，INVARIANT TENANCY-CROSSTENANT-CAP-01）"
 }
 
 impl<'tcx> LateLintPass<'tcx> for RssCrosstenantCallsite {
@@ -81,7 +78,7 @@ impl<'tcx> LateLintPass<'tcx> for RssCrosstenantCallsite {
         let Res::Def(DefKind::AssocFn | DefKind::Fn, did) = cx.qpath_res(qpath, expr.hir_id) else {
             return;
         };
-        if is_cross_tenant_funnel_did(cx, did) && !caller_is_allowed(cx) {
+        if is_cross_tenant_funnel_did(cx, did) && !caller_is_allowed(cx, expr.hir_id) {
             emit(cx, expr.hir_id, expr.span);
         }
     }
@@ -94,10 +91,24 @@ fn is_cross_tenant_funnel_did(cx: &LateContext<'_>, did: DefId) -> bool {
         && matches!(cx.tcx.def_kind(cx.tcx.parent(did)), DefKind::Impl { .. })
 }
 
-/// 当前被编译 crate（caller）在 allowlist 内。`LOCAL_CRATE` 是 caller，区别于 callee 的 `did.krate`；
-/// 按 crate 名判定不可被「在别的 crate 里 `mod authn`」伪造。
-fn caller_is_allowed(cx: &LateContext<'_>) -> bool {
-    ALLOWED_CALLER_CRATES.contains(&cx.tcx.crate_name(LOCAL_CRATE).as_str())
+/// 只放行 audit crate 内 `CrossTenantReadScope` 的 durable-receipt scope mint 方法。
+fn caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
+    if cx.tcx.crate_name(LOCAL_CRATE).as_str() != ALLOWED_CALLER_CRATE {
+        return false;
+    }
+    let owner = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
+    if cx.tcx.item_name(owner).as_str() != ALLOWED_CALLER_FUNCTION {
+        return false;
+    }
+    let impl_def_id = cx.tcx.parent(owner);
+    if !matches!(cx.tcx.def_kind(impl_def_id), DefKind::Impl { .. }) {
+        return false;
+    }
+    let self_ty = cx.tcx.type_of(impl_def_id).instantiate_identity();
+    matches!(
+        self_ty.kind(),
+        TyKind::Adt(def, _) if cx.tcx.def_path_str(def.did()) == ALLOWED_CALLER_TYPE
+    )
 }
 
 /// 在调用处报告；用调用 expr 的 `HirId` 解析 lint 级别，使 item/expr 级
@@ -108,10 +119,10 @@ fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span) {
         RSS_CROSSTENANT_CALLSITE,
         hir_id,
         span,
-        "跨租户 All-scope mint 仅 `authn` 已校验 super-admin 路径可执行：vocab 跨租户 mint 函数不得在此 crate 调用",
+        "跨租户 All-scope mint 仅 audit durable-receipt scope mint 可执行：vocab 跨租户 mint 函数不得在此调用",
         |diag| {
             diag.help(
-                "在 `authn` 的已校验 super-admin 派生路径里完成 issue→authorize→new_cross_tenant；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_crosstenant_callsite)] // reason: ...`",
+                "先完成 typed durable append，再由 `CrossTenantReadScope::from_durable_append` mint；其它调用须经治理评审并显式 allow",
             );
         },
     );
@@ -124,8 +135,6 @@ fn ui_disallowed() {
 }
 
 #[test]
-fn ui_authn_allowed() {
-    // example target 名 `authn`（= 生产 allowlist 项）⇒ crate_name(LOCAL_CRATE)=="authn" ⇒ 调 funnel 不触发，
-    // 验证 allowlist 分支（anti-vacuity：lint 非恒报）。golden ui/authn.stderr 为空。
-    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "authn");
+fn ui_audit_exact_receipt_mint_only() {
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "audit");
 }

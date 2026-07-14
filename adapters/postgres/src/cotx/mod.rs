@@ -152,8 +152,9 @@ impl<'tx> TxCapability<'tx> {
 
     /// Integration-only seam that simulates losing the commit acknowledgement after PostgreSQL
     /// has accepted the commit. The transaction-local marker is consumed by the settlement funnel;
-    /// production callers cannot construct or trigger it.
-    #[cfg(all(test, feature = "integration"))]
+    /// the default production feature graph cannot construct or trigger it. External journey
+    /// access is admitted only through the named store constructor behind `journey-fault-support`.
+    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
     pub(crate) async fn inject_commit_unknown_after_commit(&mut self) -> Result<(), sqlx::Error> {
         sqlx::query("SELECT set_config('rss.test_commit_unknown_after_commit', '1', true)")
             .execute(&mut *self.conn)
@@ -743,10 +744,10 @@ where
         Ok(value) => {
             #[allow(unused_mut)]
             let mut tx = tx;
-            #[cfg(all(test, feature = "integration"))]
+            #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
             let inject_commit_unknown = test_commit_unknown_after_commit_requested(&mut tx).await;
             let commit_result = tx.commit().await;
-            #[cfg(all(test, feature = "integration"))]
+            #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
             let commit_result = if inject_commit_unknown && commit_result.is_ok() {
                 Err(sqlx::Error::PoolTimedOut)
             } else {
@@ -772,7 +773,7 @@ where
     }
 }
 
-#[cfg(all(test, feature = "integration"))]
+#[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
 async fn test_commit_unknown_after_commit_requested(tx: &mut Transaction<'_, Postgres>) -> bool {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT current_setting('rss.test_commit_unknown_after_commit', true)",
