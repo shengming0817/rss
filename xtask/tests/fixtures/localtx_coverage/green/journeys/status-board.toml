@@ -1,0 +1,11 @@
+schemaVersion = 1
+scope = "issue-1706"
+runner = "journeys/tests/localtx_validation_journey.rs"
+
+[[journeys]]
+id = "demo-write-localtx"
+contractId = "demo.write"
+txModel = "tenant-scoped-uow"
+spec = "journeys/demo-write-localtx-journey.toml"
+fixture = "fixtures/demo-write-localtx.toml"
+marker = "DEMO_WRITE"

@@ -246,6 +246,20 @@ profile suffix 一致，route marker 必须一致，且 fixture 构造必须出�
 `LOCALTX-BACKEND-PROFILE-CLOSURE-01` 的 missing-binding、toy-transaction、multiple-marker、missing-probe
 synthetic red 与真实 workspace anti-vacuity 承载（Medium）。
 
+Issue #1706 的 active L1 journey 另由 scoped v1 status board 将三条准入 contract 与 spec、fixture、唯一
+`localtx_validation_journey` runner 做 1:1 闭合。Runner 中具名
+`LOCALTX_JOURNEY_*: HttpRouteBinding<RouteMarker, LocalTx> = generated::ROUTE` 由 rustc 固定 route 与一致性级
+身份（Hard）；跨 TOML、manifest 与 runner 的完整性由 `LOCALTX-JOURNEY-CLOSURE-01` 接入 verify 阻断
+（Medium，含 synthetic red 与真实 workspace anti-vacuity）。该 Medium 闭环同时拒绝祖先 `cfg/cfg_attr`
+禁用的 runner，要求每个 fixture case 唯一流入已执行的 `drive_*` / `observe_*` consumer，并把 target 固定为
+`postgres-domain` 的唯一 Serial batch；该 batch 显式 `--no-tests=fail`，因此编译后的测试清单为空会失败。
+durable runner 逐请求隔离采集 `localtx_retry_attempts_total`、`localtx_final_total` 与 `localtx_attempts`，并在
+测试结束时确认每个 case 的 HTTP response 与 LocalTx accounting 均已被观测，拒绝用请求数字面量自证。
+`identity.logout` 不伪造业务 conflict：其
+tenant-scoped-UoW matrix 必须把 conflict 声明为不适用并给出原因，实际第四路径验证并发与重复请求幂等收敛。
+该 board 只覆盖 issue #1706 的三条 contract，不对其余 active LocalTx contract 声称全局穷尽；其它 scope
+的 journey artifact 不得被强塞进 `issue-1706` board。
+
 ## Follow-up boundary
 
 #1687 的边界是 manifest authoring：

@@ -5,7 +5,7 @@
 //! INVARIANT: NEXTEST-EVIDENCE-DTO-01 { level = "Hard", exec = "native-compile", source = "code", native = "Evidence construction requires the closed typed DTO and Outcome enum" }——证据内部状态只能由闭合类型构造。
 //! INVARIANT: NEXTEST-EVIDENCE-SCHEMA-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "evidence_schema_rejects_wire_drift", anti_vacuity = "evidence_schema_matches_golden" }——serde wire 形态由可失败的 committed golden 治理。
 //! INVARIANT: NEXTEST-CONFIG-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "config_policy_rejects_retry_override_and_missing_timeout", anti_vacuity = "committed_nextest_config_obeys_policy" }——CI profiles 零重试、JUnit 与 timeout fail-closed。
-//! INVARIANT: NEXTEST-EXECUTION-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "execution_funnel_rejects_private_capability_api_bypass", anti_vacuity = "real_nextest_call_sites_use_funnel" }——xtask 的 nextest 子进程只能经 typed cargo capability 构造。
+//! INVARIANT: NEXTEST-EXECUTION-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "execution_funnel_rejects_private_capability_api_bypass", anti_vacuity = "real_nextest_call_sites_use_funnel|localtx_journey_serial_batch_fails_when_compiled_inventory_is_empty" }——xtask 的 nextest 子进程只能经 typed cargo capability 构造。
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -1017,6 +1017,14 @@ pub(crate) fn replay(sidecar: &Path, root: &Path) -> Result<()> {
     }
 }
 
+pub(crate) fn integration_batch_fails_on_empty(
+    batch: &crate::integration_shards::ShardBatch,
+) -> bool {
+    let args = integration_batch_args(batch, false);
+    args.iter().any(|argument| argument == "--no-tests=fail")
+        && !args.iter().any(|argument| argument == "--no-tests=pass")
+}
+
 fn integration_batch_args(
     batch: &crate::integration_shards::ShardBatch,
     allow_empty_partition: bool,
@@ -1566,6 +1574,35 @@ mod tests {
                 "hash:2/2",
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn localtx_journey_serial_batch_fails_when_compiled_inventory_is_empty() -> Result<()> {
+        let batch = crate::integration_shards::localtx_journey_execution_batch()?;
+        assert!(integration_batch_fails_on_empty(&batch));
+        let batches = crate::integration_shards::batches(
+            crate::integration_shards::IntegrationShard::PostgresDomain,
+        );
+        let number = batches
+            .iter()
+            .position(|candidate| candidate == &batch)
+            .context("LocalTx journey batch missing from postgres-domain plan")?
+            + 1;
+        let invocation = NextestInvocation::for_integration_batch(
+            IntegrationBatchId::new(
+                crate::integration_shards::IntegrationShard::PostgresDomain,
+                number,
+            )?,
+            None,
+        )?;
+        let args = invocation.execution_argv();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--test", "localtx_validation_journey"])
+        );
+        assert!(args.iter().any(|argument| argument == "--no-tests=fail"));
+        assert!(!args.iter().any(|argument| argument == "--no-tests=pass"));
         Ok(())
     }
 

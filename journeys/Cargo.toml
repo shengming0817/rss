@@ -13,6 +13,11 @@ workspace = true
 # bootstrap/eventexec 接线）；lib 暂为 demo 占位，故被组装 crate 全部为 dev-dependencies。
 [dependencies]
 
+[[test]]
+name = "localtx_validation_journey"
+path = "tests/localtx_validation_journey.rs"
+required-features = ["integration"]
+
 # journey 集成测试组装根：组合根可依赖所有库 crate（deny.toml wrappers 已含 journeys）。
 [dev-dependencies]
 # seed-login：启用 identity 的明文种子登录构造器（仅 journeys/demo；生产组合根不启用，PR #186 F1）。
@@ -56,6 +61,8 @@ sqlx = { workspace = true }
 amqp = { path = "../adapters/amqp" }
 # F6：durable journey 经 payload 解码关联本轮 session-created entry（F1 后 idem_key = 独立 EventId ≠ session_id）。
 serde_json = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 # F9：从 canonical UUID 字符串算 16B 原始字节，断言 tenant/actor 贯穿审计链 canonical 输入。

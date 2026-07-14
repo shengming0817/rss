@@ -1,0 +1,28 @@
+schemaVersion = 1
+id = "identity-logout-localtx"
+contractId = "identity.logout"
+txModel = "tenant-scoped-uow"
+fixture = "fixtures/identity-logout-localtx.toml"
+runner = "journeys/tests/localtx_validation_journey.rs"
+marker = "IDENTITY_LOGOUT"
+
+[[scenarios]]
+kind = "happy"
+applicable = true
+
+[[scenarios]]
+kind = "auth-failure"
+applicable = true
+
+[[scenarios]]
+kind = "validation-failure"
+applicable = true
+
+[[scenarios]]
+kind = "contention"
+applicable = true
+
+[[scenarios]]
+kind = "conflict"
+applicable = false
+reason = "logout is an idempotent tenant-scoped unit of work; concurrent requests converge instead of exposing a business conflict"

@@ -1,0 +1,27 @@
+schemaVersion = 1
+scope = "issue-1706"
+runner = "journeys/tests/localtx_validation_journey.rs"
+
+[[journeys]]
+id = "identity-logout-localtx"
+contractId = "identity.logout"
+txModel = "tenant-scoped-uow"
+spec = "journeys/identity-logout-localtx-journey.toml"
+fixture = "fixtures/identity-logout-localtx.toml"
+marker = "IDENTITY_LOGOUT"
+
+[[journeys]]
+id = "identity-password-change-localtx"
+contractId = "identity.password-change"
+txModel = "repo-atomic-cas"
+spec = "journeys/identity-password-change-localtx-journey.toml"
+fixture = "fixtures/identity-password-change-localtx.toml"
+marker = "IDENTITY_PASSWORD_CHANGE"
+
+[[journeys]]
+id = "settings-secret-publish-localtx"
+contractId = "settings.secret-publish"
+txModel = "repo-atomic-cas"
+spec = "journeys/settings-secret-publish-localtx-journey.toml"
+fixture = "fixtures/settings-secret-publish-localtx.toml"
+marker = "SETTINGS_SECRET_PUBLISH"

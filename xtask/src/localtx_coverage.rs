@@ -2,6 +2,7 @@
 //!
 //! INVARIANT: LOCALTX-COVERAGE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "missing_route_and_duplicate_marker_are_rejected", anti_vacuity = "green_fixture_closes_every_active_localtx_contract" }.
 //! INVARIANT: LOCALTX-BACKEND-PROFILE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "active_contract_without_backend_profile_is_rejected|backend_profile_missing_required_probe_is_rejected|unawaited_backend_probe_does_not_count|tenant_contract_cannot_enroll_repo_atomic_probe_set|multiple_backend_profiles_in_one_test_function_are_rejected", anti_vacuity = "single_backend_profile_in_test_function_is_accepted|actual_workspace_has_non_empty_complete_localtx_closure" }.
+//! INVARIANT: LOCALTX-JOURNEY-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "fixture_mutation_requires_exactly_one_match|journey_missing_entry_is_rejected|journey_duplicate_entry_is_rejected|journey_wrong_tx_model_is_rejected|journey_missing_scenario_is_rejected|journey_fake_logout_conflict_is_rejected|journey_missing_board_is_rejected|journey_unknown_board_field_is_rejected|journey_unknown_spec_field_is_rejected|journey_unknown_fixture_field_is_rejected|journey_dangling_spec_is_rejected|journey_spec_metadata_drift_identifies_field_and_values|journey_fixture_metadata_drift_identifies_field_and_values|journey_missing_typed_marker_is_rejected|journey_marker_without_test_attribute_is_rejected|journey_marker_in_unused_closure_is_rejected|journey_ignored_test_is_rejected|journey_cfg_disabled_test_is_rejected|journey_cfg_disabled_ancestor_is_rejected|journey_should_panic_test_is_rejected|journey_return_expression_is_rejected|journey_wrong_route_marker_is_rejected|journey_missing_case_consumption_is_rejected|journey_duplicate_case_consumption_is_rejected|journey_dynamic_case_consumption_is_rejected|journey_case_consumption_in_unused_helper_is_rejected|journey_case_consumption_in_another_test_is_rejected|journey_case_consumption_in_noncanonical_flow_is_rejected|journey_unobserved_case_values_are_rejected|journey_target_must_require_integration", anti_vacuity = "journey_green_fixture_closes_scoped_matrix|journey_scope_does_not_claim_global_exhaustiveness|actual_workspace_closes_issue_1706_journeys" }.
 
 use crate::contract::manifest::{
     ConsistencyLevel, ContractKind, ContractOwner, Lifecycle, LocalTxModel,
@@ -9,6 +10,7 @@ use crate::contract::manifest::{
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -81,6 +83,7 @@ struct WorkspaceCrate {
 struct CargoTarget {
     path: PathBuf,
     integration_test: bool,
+    required_features: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +113,8 @@ struct MetadataPackage {
 struct MetadataTarget {
     src_path: PathBuf,
     kind: Vec<String>,
+    #[serde(default, rename = "required-features")]
+    required_features: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -198,6 +203,141 @@ struct OpaqueTrigger {
     attribute: String,
 }
 
+const JOURNEY_BOARD_PATH: &str = "journeys/status-board.toml";
+const JOURNEY_RUNNER_PATH: &str = "journeys/tests/localtx_validation_journey.rs";
+const ISSUE_1706_CONTRACTS: [&str; 3] = [
+    "identity.logout",
+    "identity.password-change",
+    "settings.secret-publish",
+];
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JourneyBoard {
+    #[serde(rename = "schemaVersion")]
+    schema_version: u8,
+    scope: String,
+    runner: String,
+    journeys: Vec<JourneyBoardEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JourneyBoardEntry {
+    id: String,
+    #[serde(rename = "contractId")]
+    contract_id: String,
+    #[serde(rename = "txModel")]
+    tx_model: LocalTxModel,
+    spec: String,
+    fixture: String,
+    marker: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JourneySpec {
+    #[serde(rename = "schemaVersion")]
+    schema_version: u8,
+    id: String,
+    #[serde(rename = "contractId")]
+    contract_id: String,
+    #[serde(rename = "txModel")]
+    tx_model: LocalTxModel,
+    fixture: String,
+    runner: String,
+    marker: String,
+    scenarios: Vec<JourneyScenario>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JourneyFixture {
+    #[serde(rename = "schemaVersion")]
+    schema_version: u8,
+    id: String,
+    #[serde(rename = "contractId")]
+    contract_id: String,
+    #[serde(rename = "txModel")]
+    tx_model: LocalTxModel,
+    spec: String,
+    runner: String,
+    marker: String,
+    cases: Vec<JourneyCase>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum JourneyScenarioKind {
+    Happy,
+    AuthFailure,
+    ValidationFailure,
+    Conflict,
+    Contention,
+}
+
+impl JourneyScenarioKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Happy => "happy",
+            Self::AuthFailure => "auth-failure",
+            Self::ValidationFailure => "validation-failure",
+            Self::Conflict => "conflict",
+            Self::Contention => "contention",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JourneyScenario {
+    kind: JourneyScenarioKind,
+    applicable: bool,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JourneyCase {
+    id: String,
+    scenario: JourneyScenarioKind,
+    #[serde(rename = "httpStatus")]
+    http_status: u16,
+    #[serde(rename = "errorCode")]
+    error_code: String,
+    retryable: bool,
+    attempts: u16,
+    commits: u16,
+    #[serde(rename = "redactSentinels")]
+    redact_sentinels: Vec<String>,
+}
+
+#[derive(Debug)]
+struct JourneyClosureEntry {
+    contract_id: String,
+    tx_model: LocalTxModel,
+    marker: String,
+    marker_key: String,
+}
+
+#[derive(Debug)]
+struct JourneyClosure {
+    entries: Vec<JourneyClosureEntry>,
+}
+
+#[derive(Debug)]
+struct JourneyRunnerEvidence {
+    markers: BTreeMap<String, String>,
+    case_ids: BTreeSet<String>,
+    observation_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct JourneyCaseCallEvidence {
+    parsed: Result<(String, String), String>,
+    test: Option<usize>,
+}
+
 fn check_root(root: &Path) -> Result<(String, Vec<Finding>)> {
     check_root_inner(root).map_err(|error| sanitized(root, error))
 }
@@ -212,12 +352,15 @@ fn check_root_inner(root: &Path) -> Result<(String, Vec<Finding>)> {
     if expected.len() != contracts.len() {
         bail!("localtx-coverage: duplicate generated identity among active LocalTx contracts");
     }
+    let journey_closure = load_journey_closure(root)?;
+    validate_journey_contracts(&journey_closure, &contracts)?;
 
     let generated_root = root.join("generated/src/http");
     reject_symlinks(root, &generated_root)?;
     let registry = parse_registry(root, &generated_root.join("mod.rs"))?;
     let generated = parse_generated_specs(root, &generated_root)?;
     let workspace_crates = load_workspace_crates(root)?;
+    validate_journey_cargo_target(root, &workspace_crates)?;
     let expected_packages: BTreeMap<_, _> = workspace_crates
         .iter()
         .map(|member| (member.name.clone(), member.root.clone()))
@@ -403,6 +546,952 @@ fn check_root_inner(root: &Path) -> Result<(String, Vec<Finding>)> {
     ))
 }
 
+fn load_journey_closure(root: &Path) -> Result<JourneyClosure> {
+    let board_path = root.join(JOURNEY_BOARD_PATH);
+    let board: JourneyBoard = parse_journey_toml(root, &board_path)?;
+    if board.schema_version != 1 {
+        bail!("{JOURNEY_BOARD_PATH}: schemaVersion must be 1");
+    }
+    if board.scope != "issue-1706" {
+        bail!("{JOURNEY_BOARD_PATH}: scope must be `issue-1706`");
+    }
+    if board.runner != JOURNEY_RUNNER_PATH {
+        bail!("{JOURNEY_BOARD_PATH}: runner must be `{JOURNEY_RUNNER_PATH}`");
+    }
+    if board.journeys.is_empty() {
+        bail!("{JOURNEY_BOARD_PATH}: journeys must not be empty");
+    }
+
+    let mut ids = BTreeSet::new();
+    let mut contract_ids = BTreeSet::new();
+    let mut specs = BTreeSet::new();
+    let mut fixtures = BTreeSet::new();
+    let mut markers = BTreeSet::new();
+    let mut case_ids = BTreeSet::new();
+    let mut entries = Vec::new();
+    for entry in board.journeys {
+        validate_board_entry(&entry)?;
+        require_unique(&mut ids, &entry.id, "journey id")?;
+        require_unique(&mut contract_ids, &entry.contract_id, "journey contractId")?;
+        require_unique(&mut specs, &entry.spec, "journey spec path")?;
+        require_unique(&mut fixtures, &entry.fixture, "journey fixture path")?;
+        require_unique(&mut markers, &entry.marker, "journey marker")?;
+
+        let spec_path = scoped_artifact(root, &entry.spec, "journeys", "-localtx-journey.toml")?;
+        let fixture_path = scoped_artifact(root, &entry.fixture, "fixtures", "-localtx.toml")?;
+        let spec: JourneySpec = parse_journey_toml(root, &spec_path)?;
+        let fixture: JourneyFixture = parse_journey_toml(root, &fixture_path)?;
+        validate_spec(&entry, &spec)?;
+        validate_fixture(&entry, &fixture, &mut case_ids)?;
+        validate_scenario_matrix(entry.tx_model, &spec.scenarios, &fixture.cases, &entry.id)?;
+
+        entries.push(JourneyClosureEntry {
+            contract_id: entry.contract_id,
+            tx_model: entry.tx_model,
+            marker: entry.marker,
+            marker_key: String::new(),
+        });
+    }
+    let runner = scan_journey_runner(root, &root.join(JOURNEY_RUNNER_PATH))?;
+    let expected_markers: BTreeSet<_> = entries.iter().map(|entry| entry.marker.clone()).collect();
+    let actual_markers: BTreeSet<_> = runner.markers.keys().cloned().collect();
+    if actual_markers != expected_markers {
+        bail!(
+            "{JOURNEY_RUNNER_PATH}: LOCALTX_JOURNEY markers differ from status board; expected {expected_markers:?}, found {actual_markers:?}"
+        );
+    }
+    if runner.case_ids != case_ids {
+        bail!(
+            "{JOURNEY_RUNNER_PATH}: literal `take_case` calls differ from fixture cases; expected {case_ids:?}, found {:?}",
+            runner.case_ids
+        );
+    }
+    if let Some(error) = runner.observation_error {
+        bail!("{error}");
+    }
+    for entry in &mut entries {
+        entry.marker_key = runner
+            .markers
+            .get(&entry.marker)
+            .cloned()
+            .ok_or_else(|| anyhow!("journey marker accounting failed"))?;
+    }
+    entries.sort_by(|left, right| left.contract_id.cmp(&right.contract_id));
+    Ok(JourneyClosure { entries })
+}
+
+fn validate_journey_contracts(closure: &JourneyClosure, contracts: &[Contract]) -> Result<()> {
+    let contracts_by_id: BTreeMap<_, _> = contracts
+        .iter()
+        .map(|contract| (contract.id.as_str(), contract))
+        .collect();
+    for entry in &closure.entries {
+        let contract = contracts_by_id
+            .get(entry.contract_id.as_str())
+            .ok_or_else(|| {
+                anyhow!(
+                    "{JOURNEY_BOARD_PATH}: contractId `{}` is not an active LocalTx HTTP contract",
+                    entry.contract_id
+                )
+            })?;
+        if entry.tx_model != contract.tx_model {
+            bail!(
+                "{JOURNEY_BOARD_PATH}: contract `{}` txModel drifts from its manifest",
+                entry.contract_id
+            );
+        }
+        if entry.marker_key != contract.key {
+            bail!(
+                "{JOURNEY_RUNNER_PATH}: marker `LOCALTX_JOURNEY_{}` binds `{}`; expected `{}` for contract `{}`",
+                entry.marker,
+                entry.marker_key,
+                contract.key,
+                entry.contract_id
+            );
+        }
+    }
+
+    let issue_contracts: BTreeSet<_> = ISSUE_1706_CONTRACTS.iter().copied().collect();
+    if contracts_by_id
+        .keys()
+        .any(|contract_id| issue_contracts.contains(contract_id))
+    {
+        let actual: BTreeSet<_> = closure
+            .entries
+            .iter()
+            .map(|entry| entry.contract_id.as_str())
+            .collect();
+        if actual != issue_contracts {
+            bail!(
+                "{JOURNEY_BOARD_PATH}: issue-1706 must contain exactly {issue_contracts:?}; found {actual:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_journey_cargo_target(root: &Path, workspace_crates: &[WorkspaceCrate]) -> Result<()> {
+    let expected = std::fs::canonicalize(root.join(JOURNEY_RUNNER_PATH))
+        .context("canonicalize LocalTx journey runner")?;
+    let member = workspace_crates
+        .iter()
+        .find(|member| member.relative == Path::new("journeys"))
+        .ok_or_else(|| anyhow!("journeys must be a workspace package"))?;
+    let matching: Vec<_> = member
+        .targets
+        .iter()
+        .filter_map(|target| {
+            std::fs::canonicalize(&target.path)
+                .ok()
+                .filter(|path| path == &expected)
+                .map(|_| target)
+        })
+        .collect();
+    let [target] = matching.as_slice() else {
+        bail!("{JOURNEY_RUNNER_PATH}: must be registered as exactly one Cargo target");
+    };
+    if !target.integration_test
+        || target.required_features != BTreeSet::from(["integration".to_string()])
+    {
+        bail!(
+            "{JOURNEY_RUNNER_PATH}: Cargo target must be an integration test with required-features = [\"integration\"]"
+        );
+    }
+    let batch = crate::integration_shards::localtx_journey_execution_batch()?;
+    if !crate::nextest::integration_batch_fails_on_empty(&batch) {
+        bail!("{JOURNEY_RUNNER_PATH}: postgres-domain Serial execution must use --no-tests=fail");
+    }
+    Ok(())
+}
+
+fn validate_board_entry(entry: &JourneyBoardEntry) -> Result<()> {
+    validate_slug(&entry.id, "journey id")?;
+    validate_contract_id(&entry.contract_id)?;
+    validate_marker_suffix(&entry.marker)?;
+    Ok(())
+}
+
+fn validate_spec(entry: &JourneyBoardEntry, spec: &JourneySpec) -> Result<()> {
+    if spec.schema_version != 1 {
+        bail!("{}: schemaVersion must be 1", entry.spec);
+    }
+    require_journey_metadata(&entry.spec, "id", &entry.id, &spec.id)?;
+    require_journey_metadata(
+        &entry.spec,
+        "contractId",
+        &entry.contract_id,
+        &spec.contract_id,
+    )?;
+    require_journey_metadata(
+        &entry.spec,
+        "txModel",
+        localtx_model_label(entry.tx_model),
+        localtx_model_label(spec.tx_model),
+    )?;
+    require_journey_metadata(&entry.spec, "fixture", &entry.fixture, &spec.fixture)?;
+    require_journey_metadata(&entry.spec, "runner", JOURNEY_RUNNER_PATH, &spec.runner)?;
+    require_journey_metadata(&entry.spec, "marker", &entry.marker, &spec.marker)?;
+    Ok(())
+}
+
+fn validate_fixture(
+    entry: &JourneyBoardEntry,
+    fixture: &JourneyFixture,
+    global_case_ids: &mut BTreeSet<String>,
+) -> Result<()> {
+    if fixture.schema_version != 1 {
+        bail!("{}: schemaVersion must be 1", entry.fixture);
+    }
+    require_journey_metadata(&entry.fixture, "id", &entry.id, &fixture.id)?;
+    require_journey_metadata(
+        &entry.fixture,
+        "contractId",
+        &entry.contract_id,
+        &fixture.contract_id,
+    )?;
+    require_journey_metadata(
+        &entry.fixture,
+        "txModel",
+        localtx_model_label(entry.tx_model),
+        localtx_model_label(fixture.tx_model),
+    )?;
+    require_journey_metadata(&entry.fixture, "spec", &entry.spec, &fixture.spec)?;
+    require_journey_metadata(
+        &entry.fixture,
+        "runner",
+        JOURNEY_RUNNER_PATH,
+        &fixture.runner,
+    )?;
+    require_journey_metadata(&entry.fixture, "marker", &entry.marker, &fixture.marker)?;
+    if fixture.cases.is_empty() {
+        bail!("{}: cases must not be empty", entry.fixture);
+    }
+    for case in &fixture.cases {
+        validate_slug(&case.id, "journey case id")?;
+        require_unique(global_case_ids, &case.id, "journey case id")?;
+        if !(100..=599).contains(&case.http_status) {
+            bail!(
+                "{}: case `{}` has invalid httpStatus",
+                entry.fixture,
+                case.id
+            );
+        }
+        if case.error_code.trim().is_empty() {
+            bail!(
+                "{}: case `{}` has an empty errorCode",
+                entry.fixture,
+                case.id
+            );
+        }
+        if case.commits > case.attempts {
+            bail!(
+                "{}: case `{}` commits exceed attempts",
+                entry.fixture,
+                case.id
+            );
+        }
+        if case.redact_sentinels.is_empty()
+            || case
+                .redact_sentinels
+                .iter()
+                .any(|sentinel| sentinel.trim().is_empty())
+        {
+            bail!(
+                "{}: case `{}` must declare non-empty redactSentinels",
+                entry.fixture,
+                case.id
+            );
+        }
+        let _ = case.retryable;
+    }
+    Ok(())
+}
+
+fn require_journey_metadata(
+    artifact: &str,
+    field: &str,
+    expected: &str,
+    actual: &str,
+) -> Result<()> {
+    if actual != expected {
+        bail!(
+            "{artifact}: field `{field}` drifts from {JOURNEY_BOARD_PATH}; expected `{expected}`, actual `{actual}`"
+        );
+    }
+    Ok(())
+}
+
+fn validate_scenario_matrix(
+    tx_model: LocalTxModel,
+    scenarios: &[JourneyScenario],
+    cases: &[JourneyCase],
+    journey_id: &str,
+) -> Result<()> {
+    let expected: BTreeSet<_> = match tx_model {
+        LocalTxModel::RepoAtomicCas => [
+            JourneyScenarioKind::Happy,
+            JourneyScenarioKind::AuthFailure,
+            JourneyScenarioKind::ValidationFailure,
+            JourneyScenarioKind::Conflict,
+        ]
+        .into_iter()
+        .collect(),
+        LocalTxModel::TenantScopedUow => [
+            JourneyScenarioKind::Happy,
+            JourneyScenarioKind::AuthFailure,
+            JourneyScenarioKind::ValidationFailure,
+            JourneyScenarioKind::Conflict,
+            JourneyScenarioKind::Contention,
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let mut declared = BTreeMap::new();
+    for scenario in scenarios {
+        if declared.insert(scenario.kind, scenario).is_some() {
+            bail!(
+                "journey `{journey_id}` has duplicate `{}` scenario",
+                scenario.kind.label()
+            );
+        }
+        if scenario.applicable && scenario.reason.is_some() {
+            bail!(
+                "journey `{journey_id}` applicable `{}` scenario must not have a reason",
+                scenario.kind.label()
+            );
+        }
+        if !scenario.applicable
+            && scenario
+                .reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+        {
+            bail!(
+                "journey `{journey_id}` non-applicable `{}` scenario needs a reason",
+                scenario.kind.label()
+            );
+        }
+    }
+    let actual: BTreeSet<_> = declared.keys().copied().collect();
+    if actual != expected {
+        bail!(
+            "journey `{journey_id}` scenario closure differs for txModel; expected {expected:?}, found {actual:?}"
+        );
+    }
+    if tx_model == LocalTxModel::RepoAtomicCas
+        && declared.values().any(|scenario| !scenario.applicable)
+    {
+        bail!("journey `{journey_id}` repo-atomic-cas scenarios must all be applicable");
+    }
+    if tx_model == LocalTxModel::TenantScopedUow {
+        for required in [
+            JourneyScenarioKind::Happy,
+            JourneyScenarioKind::AuthFailure,
+            JourneyScenarioKind::ValidationFailure,
+            JourneyScenarioKind::Contention,
+        ] {
+            if !declared
+                .get(&required)
+                .is_some_and(|scenario| scenario.applicable)
+            {
+                bail!(
+                    "journey `{journey_id}` `{}` scenario must be applicable",
+                    required.label()
+                );
+            }
+        }
+        if declared
+            .get(&JourneyScenarioKind::Conflict)
+            .is_none_or(|scenario| scenario.applicable)
+        {
+            bail!(
+                "journey `{journey_id}` tenant-scoped-uow conflict must be applicable=false with a reason"
+            );
+        }
+    }
+
+    let covered: BTreeSet<_> = cases.iter().map(|case| case.scenario).collect();
+    let applicable: BTreeSet<_> = declared
+        .values()
+        .filter_map(|scenario| scenario.applicable.then_some(scenario.kind))
+        .collect();
+    if covered != applicable {
+        bail!(
+            "journey `{journey_id}` fixture cases must cover exactly applicable scenarios; expected {applicable:?}, found {covered:?}"
+        );
+    }
+    Ok(())
+}
+
+fn parse_journey_toml<T: DeserializeOwned>(root: &Path, path: &Path) -> Result<T> {
+    ensure_contained(root, root, path)?;
+    reject_symlinks(root, path)?;
+    let subject = relative(root, path)?;
+    let source = std::fs::read_to_string(path).with_context(|| format!("read `{subject}`"))?;
+    toml::from_str(&source).with_context(|| format!("parse closed v1 TOML `{subject}`"))
+}
+
+fn scoped_artifact(root: &Path, value: &str, parent: &str, suffix: &str) -> Result<PathBuf> {
+    let relative = Path::new(value);
+    if relative.is_absolute()
+        || relative.parent() != Some(Path::new(parent))
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || relative
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_none_or(|name| !name.ends_with(suffix))
+    {
+        bail!("journey artifact path `{value}` must be a direct `{parent}/*{suffix}` path");
+    }
+    let path = root.join(relative);
+    ensure_contained(root, root, &path)?;
+    reject_symlinks(root, &path)?;
+    Ok(path)
+}
+
+fn require_unique(set: &mut BTreeSet<String>, value: &str, label: &str) -> Result<()> {
+    if !set.insert(value.to_string()) {
+        bail!("duplicate {label} `{value}`");
+    }
+    Ok(())
+}
+
+fn validate_slug(value: &str, label: &str) -> Result<()> {
+    if value.is_empty()
+        || value.starts_with('-')
+        || value.ends_with('-')
+        || value.contains("--")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        bail!("{label} `{value}` must be a lowercase kebab-case slug");
+    }
+    Ok(())
+}
+
+fn validate_contract_id(value: &str) -> Result<()> {
+    let segments: Vec<_> = value.split('.').collect();
+    if segments.len() < 2 {
+        bail!("contractId `{value}` must be dotted");
+    }
+    for segment in segments {
+        validate_slug(segment, "contractId segment")?;
+    }
+    Ok(())
+}
+
+fn validate_marker_suffix(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.starts_with('_')
+        || value.ends_with('_')
+        || value.contains("__")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        bail!("journey marker `{value}` must be an uppercase snake-case suffix");
+    }
+    Ok(())
+}
+
+fn scan_journey_runner(root: &Path, path: &Path) -> Result<JourneyRunnerEvidence> {
+    reject_symlinks(root, path)?;
+    let syntax = parse_file(root, path)?;
+    struct Collector {
+        markers: Vec<(String, Option<String>, Option<usize>, bool)>,
+        case_calls: Vec<JourneyCaseCallEvidence>,
+        case_groups: Vec<(String, BTreeSet<String>, Option<usize>)>,
+        observed_groups: Vec<(String, Option<usize>)>,
+        test_rejections: BTreeMap<usize, Option<String>>,
+        current_test: Option<usize>,
+        current_case_binding: Option<String>,
+        ancestor_rejection: Option<String>,
+        next_test: usize,
+        canonical_top_level: bool,
+        observation_enabled: bool,
+    }
+    impl Collector {
+        fn reject_current_test(&mut self, reason: &str) {
+            let Some(test) = self.current_test else {
+                return;
+            };
+            let rejection = self.test_rejections.entry(test).or_default();
+            if rejection.is_none() {
+                *rejection = Some(reason.to_owned());
+            }
+        }
+    }
+    impl<'ast> Visit<'ast> for Collector {
+        fn visit_item_fn(&mut self, item: &'ast ItemFn) {
+            let previous_test = self.current_test;
+            let previous_canonical = self.canonical_top_level;
+            if is_journey_test(item) {
+                let test = self.next_test;
+                self.next_test += 1;
+                self.current_test = Some(test);
+                self.test_rejections.insert(
+                    test,
+                    forbidden_journey_attribute(&item.attrs)
+                        .or_else(|| self.ancestor_rejection.clone()),
+                );
+                for statement in &item.block.stmts {
+                    match statement {
+                        Stmt::Item(Item::Const(marker))
+                            if marker.ident.to_string().starts_with("LOCALTX_JOURNEY_") =>
+                        {
+                            self.canonical_top_level = true;
+                            self.visit_item_const(marker);
+                        }
+                        _ => {
+                            if let Some((binding, call)) = canonical_journey_case_call(statement) {
+                                self.canonical_top_level = true;
+                                let previous_binding = self.current_case_binding.replace(binding);
+                                self.visit_expr_method_call(call);
+                                self.current_case_binding = previous_binding;
+                            } else {
+                                if let Some((group, cases)) =
+                                    canonical_journey_case_group(statement)
+                                {
+                                    self.case_groups.push((group, cases, self.current_test));
+                                }
+                                self.canonical_top_level = false;
+                                visit::visit_stmt(self, statement);
+                            }
+                        }
+                    }
+                }
+            } else {
+                self.current_test = None;
+                self.canonical_top_level = false;
+                visit::visit_item_fn(self, item);
+            }
+            self.current_test = previous_test;
+            self.canonical_top_level = previous_canonical;
+        }
+
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            let previous = self.ancestor_rejection.clone();
+            if self.ancestor_rejection.is_none()
+                && let Some(reason) = forbidden_journey_attribute(&item.attrs)
+            {
+                self.ancestor_rejection = Some(format!("ancestor {reason}"));
+            }
+            visit::visit_item_mod(self, item);
+            self.ancestor_rejection = previous;
+        }
+
+        fn visit_item_const(&mut self, item: &'ast ItemConst) {
+            let name = item.ident.to_string();
+            if let Some(suffix) = name.strip_prefix("LOCALTX_JOURNEY_") {
+                self.markers.push((
+                    suffix.to_string(),
+                    strict_journey_marker_key(item),
+                    self.current_test,
+                    self.canonical_top_level,
+                ));
+            }
+            visit::visit_item_const(self, item);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+            if call.method == "take_case" {
+                let case_id = if !self.canonical_top_level && self.current_test.is_some() {
+                    Err(format!(
+                        "{JOURNEY_RUNNER_PATH}: `take_case` must be a test-body top-level `let <ident> = <ident>.take_case(\"literal\")?;`"
+                    ))
+                } else {
+                    match call.args.first() {
+                        Some(Expr::Lit(literal)) if call.args.len() == 1 => match &literal.lit {
+                        syn::Lit::Str(value) => self
+                            .current_case_binding
+                            .clone()
+                            .map(|binding| (value.value(), binding))
+                            .ok_or_else(|| {
+                                format!(
+                                    "{JOURNEY_RUNNER_PATH}: canonical `take_case` binding accounting failed"
+                                )
+                            }),
+                            _ => Err(format!(
+                                "{JOURNEY_RUNNER_PATH}: `take_case` requires a single string literal"
+                            )),
+                        },
+                        _ => Err(format!(
+                            "{JOURNEY_RUNNER_PATH}: `take_case` requires a single string literal"
+                        )),
+                    }
+                };
+                self.case_calls.push(JourneyCaseCallEvidence {
+                    parsed: case_id,
+                    test: self.current_test,
+                });
+            }
+            visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+            if self.observation_enabled
+                && is_journey_observer_call(call)
+                && self.current_test.is_some()
+            {
+                for argument in &call.args {
+                    if let Some(binding) = single_identifier(argument) {
+                        self.observed_groups.push((binding, self.current_test));
+                    }
+                }
+            }
+            visit::visit_expr_call(self, call);
+        }
+
+        fn visit_expr_closure(&mut self, expression: &'ast syn::ExprClosure) {
+            let previous = self.observation_enabled;
+            self.observation_enabled = false;
+            visit::visit_expr_closure(self, expression);
+            self.observation_enabled = previous;
+        }
+
+        fn visit_expr_async(&mut self, expression: &'ast syn::ExprAsync) {
+            let previous = self.observation_enabled;
+            self.observation_enabled = false;
+            visit::visit_expr_async(self, expression);
+            self.observation_enabled = previous;
+        }
+
+        fn visit_expr_await(&mut self, expression: &'ast syn::ExprAwait) {
+            if let Expr::Async(block) = expression.base.as_ref() {
+                for statement in &block.block.stmts {
+                    self.visit_stmt(statement);
+                }
+            } else {
+                self.visit_expr(expression.base.as_ref());
+            }
+        }
+
+        fn visit_expr_return(&mut self, expression: &'ast syn::ExprReturn) {
+            self.reject_current_test("`return` expressions are forbidden");
+            visit::visit_expr_return(self, expression);
+        }
+    }
+    let mut collector = Collector {
+        markers: Vec::new(),
+        case_calls: Vec::new(),
+        case_groups: Vec::new(),
+        observed_groups: Vec::new(),
+        test_rejections: BTreeMap::new(),
+        current_test: None,
+        current_case_binding: None,
+        ancestor_rejection: None,
+        next_test: 0,
+        canonical_top_level: false,
+        observation_enabled: true,
+    };
+    collector.visit_file(&syntax);
+    let mut markers = BTreeMap::new();
+    let mut keys = BTreeSet::new();
+    let mut marker_tests = BTreeSet::new();
+    for (suffix, key, test, canonical_top_level) in collector.markers {
+        validate_marker_suffix(&suffix)?;
+        let test = test.ok_or_else(|| {
+            anyhow!(
+                "{JOURNEY_RUNNER_PATH}: `LOCALTX_JOURNEY_{suffix}` must be inside a real #[test] or #[tokio::test] function"
+            )
+        })?;
+        if !canonical_top_level {
+            bail!(
+                "{JOURNEY_RUNNER_PATH}: `LOCALTX_JOURNEY_{suffix}` must be a test-body top-level const item"
+            );
+        }
+        if let Some(reason) = collector
+            .test_rejections
+            .get(&test)
+            .and_then(|reason| reason.as_deref())
+        {
+            bail!(
+                "{JOURNEY_RUNNER_PATH}: `LOCALTX_JOURNEY_{suffix}` is inside a non-canonical journey test: {reason}"
+            );
+        }
+        marker_tests.insert(test);
+        let key = key.ok_or_else(|| {
+            anyhow!(
+                "{JOURNEY_RUNNER_PATH}: `LOCALTX_JOURNEY_{suffix}` must be an absolute typed HttpRouteBinding<RouteMarker, LocalTx> = generated::ROUTE marker"
+            )
+        })?;
+        if markers.insert(suffix.clone(), key.clone()).is_some() {
+            bail!("{JOURNEY_RUNNER_PATH}: duplicate marker `LOCALTX_JOURNEY_{suffix}`");
+        }
+        if !keys.insert(key.clone()) {
+            bail!("{JOURNEY_RUNNER_PATH}: generated route `{key}` has duplicate journey markers");
+        }
+    }
+    if marker_tests.len() > 1 {
+        bail!(
+            "{JOURNEY_RUNNER_PATH}: all LOCALTX_JOURNEY markers must be inside one real test function"
+        );
+    }
+
+    let marker_test = marker_tests.iter().next().copied();
+    let mut case_ids = BTreeSet::new();
+    let mut case_bindings = BTreeMap::new();
+    for evidence in collector.case_calls {
+        let JourneyCaseCallEvidence { parsed, test } = evidence;
+        if test != marker_test {
+            continue;
+        }
+        let (case_id, binding) = parsed.map_err(anyhow::Error::msg)?;
+        if !case_ids.insert(case_id.clone()) {
+            bail!("{JOURNEY_RUNNER_PATH}: duplicate `take_case` for `{case_id}`");
+        }
+        if case_bindings.insert(binding.clone(), case_id).is_some() {
+            bail!("{JOURNEY_RUNNER_PATH}: duplicate journey case binding `{binding}`");
+        }
+    }
+
+    let observation_error = validate_journey_observation_closure(
+        &case_bindings,
+        collector.case_groups,
+        collector.observed_groups,
+        marker_test,
+    )
+    .err()
+    .map(|error| format!("{error:#}"));
+    Ok(JourneyRunnerEvidence {
+        markers,
+        case_ids,
+        observation_error,
+    })
+}
+
+fn validate_journey_observation_closure(
+    case_bindings: &BTreeMap<String, String>,
+    case_groups: Vec<(String, BTreeSet<String>, Option<usize>)>,
+    observed_groups: Vec<(String, Option<usize>)>,
+    marker_test: Option<usize>,
+) -> Result<()> {
+    let expected_bindings: BTreeSet<_> = case_bindings.keys().cloned().collect();
+    let mut grouped_bindings = BTreeSet::new();
+    let mut observation_groups = BTreeSet::new();
+    for (group, bindings, test) in case_groups {
+        if test != marker_test {
+            continue;
+        }
+        let relevant: BTreeSet<_> = bindings.intersection(&expected_bindings).cloned().collect();
+        if relevant.is_empty() {
+            continue;
+        }
+        if relevant != bindings {
+            bail!(
+                "{JOURNEY_RUNNER_PATH}: journey observation group `{group}` mixes case and non-case bindings"
+            );
+        }
+        for binding in relevant {
+            if !grouped_bindings.insert(binding.clone()) {
+                bail!(
+                    "{JOURNEY_RUNNER_PATH}: journey case binding `{binding}` enters multiple observation groups"
+                );
+            }
+        }
+        observation_groups.insert(group);
+    }
+    if grouped_bindings != expected_bindings {
+        let missing: BTreeSet<_> = expected_bindings
+            .difference(&grouped_bindings)
+            .cloned()
+            .collect();
+        bail!(
+            "{JOURNEY_RUNNER_PATH}: journey case bindings missing from an observation closure: {missing:?}"
+        );
+    }
+
+    let mut observed_counts = BTreeMap::<String, usize>::new();
+    for (binding, test) in observed_groups {
+        if test == marker_test && observation_groups.contains(&binding) {
+            *observed_counts.entry(binding).or_default() += 1;
+        }
+    }
+    for group in observation_groups {
+        let count = observed_counts.get(&group).copied().unwrap_or_default();
+        if count != 1 {
+            bail!(
+                "{JOURNEY_RUNNER_PATH}: journey observation closure group `{group}` must enter exactly one executed `drive_*`/`observe_*` consumer; found {count}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_journey_test(item: &ItemFn) -> bool {
+    item.attrs.iter().any(|attribute| {
+        let path = raw_segments(attribute.path());
+        match path.as_slice() {
+            [name] if name == "test" => matches!(attribute.meta, Meta::Path(_)),
+            [root, name] if root == "tokio" && name == "test" => item.sig.asyncness.is_some(),
+            _ => false,
+        }
+    })
+}
+
+fn forbidden_journey_attribute(attributes: &[Attribute]) -> Option<String> {
+    attributes.iter().find_map(|attribute| {
+        let segments = raw_segments(attribute.path());
+        matches!(segments.as_slice(), [name] if matches!(name.as_str(), "ignore" | "cfg" | "cfg_attr" | "should_panic"))
+            .then(|| format!("#[{}] is forbidden", segments[0]))
+    })
+}
+
+fn canonical_journey_case_call(statement: &Stmt) -> Option<(String, &ExprMethodCall)> {
+    let Stmt::Local(local) = statement else {
+        return None;
+    };
+    let syn::Pat::Ident(binding) = &local.pat else {
+        return None;
+    };
+    if !local.attrs.is_empty()
+        || !binding.attrs.is_empty()
+        || binding.by_ref.is_some()
+        || binding.mutability.is_some()
+        || binding.subpat.is_some()
+    {
+        return None;
+    }
+    let initializer = local.init.as_ref()?;
+    if initializer.diverge.is_some() {
+        return None;
+    }
+    let Expr::Try(attempt) = initializer.expr.as_ref() else {
+        return None;
+    };
+    if !attempt.attrs.is_empty() {
+        return None;
+    }
+    let Expr::MethodCall(call) = attempt.expr.as_ref() else {
+        return None;
+    };
+    let Expr::Path(receiver) = call.receiver.as_ref() else {
+        return None;
+    };
+    let receiver_is_identifier = receiver.attrs.is_empty()
+        && receiver.qself.is_none()
+        && receiver.path.leading_colon.is_none()
+        && receiver.path.segments.len() == 1
+        && matches!(receiver.path.segments[0].arguments, PathArguments::None);
+    (call.attrs.is_empty()
+        && call.method == "take_case"
+        && call.turbofish.is_none()
+        && receiver_is_identifier)
+        .then(|| (binding.ident.to_string(), call))
+}
+
+fn canonical_journey_case_group(statement: &Stmt) -> Option<(String, BTreeSet<String>)> {
+    let Stmt::Local(local) = statement else {
+        return None;
+    };
+    let syn::Pat::Ident(binding) = &local.pat else {
+        return None;
+    };
+    if !local.attrs.is_empty()
+        || !binding.attrs.is_empty()
+        || binding.by_ref.is_some()
+        || binding.mutability.is_some()
+        || binding.subpat.is_some()
+        || local.init.as_ref()?.diverge.is_some()
+    {
+        return None;
+    }
+    let Expr::Struct(group) = local.init.as_ref()?.expr.as_ref() else {
+        return None;
+    };
+    if !group.attrs.is_empty()
+        || group.rest.is_some()
+        || !group
+            .path
+            .segments
+            .last()?
+            .ident
+            .to_string()
+            .ends_with("Cases")
+        || group.fields.is_empty()
+    {
+        return None;
+    }
+    let mut cases = BTreeSet::new();
+    for field in &group.fields {
+        if !field.attrs.is_empty() || !matches!(field.member, syn::Member::Named(_)) {
+            return None;
+        }
+        let case = single_identifier(&field.expr)?;
+        if !cases.insert(case) {
+            return None;
+        }
+    }
+    Some((binding.ident.to_string(), cases))
+}
+
+fn is_journey_observer_call(call: &ExprCall) -> bool {
+    let Expr::Path(function) = call.func.as_ref() else {
+        return false;
+    };
+    function.path.segments.last().is_some_and(|segment| {
+        let name = segment.ident.to_string();
+        name.starts_with("drive_") || name.starts_with("observe_")
+    })
+}
+
+fn single_identifier(expression: &Expr) -> Option<String> {
+    let Expr::Path(path) = expression else {
+        return None;
+    };
+    (path.attrs.is_empty()
+        && path.qself.is_none()
+        && path.path.leading_colon.is_none()
+        && path.path.segments.len() == 1
+        && matches!(path.path.segments[0].arguments, PathArguments::None))
+    .then(|| path.path.segments[0].ident.to_string())
+}
+
+fn strict_journey_marker_key(item: &ItemConst) -> Option<String> {
+    let Type::Path(binding) = item.ty.as_ref() else {
+        return None;
+    };
+    if binding.qself.is_some()
+        || binding.path.leading_colon.is_none()
+        || raw_segments(&binding.path).as_slice() != ["vocab", "HttpRouteBinding"]
+    {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &binding.path.segments.last()?.arguments else {
+        return None;
+    };
+    if arguments.args.len() != 2 {
+        return None;
+    }
+    let GenericArgument::Type(Type::Path(marker)) = arguments.args.first()? else {
+        return None;
+    };
+    if marker.qself.is_some() || marker.path.leading_colon.is_none() {
+        return None;
+    }
+    let marker_segments = raw_segments(&marker.path);
+    let GenericArgument::Type(Type::Path(consistency)) = arguments.args.iter().nth(1)? else {
+        return None;
+    };
+    if consistency.qself.is_some()
+        || consistency.path.leading_colon.is_none()
+        || raw_segments(&consistency.path).as_slice() != ["vocab", "http", "LocalTx"]
+    {
+        return None;
+    }
+    let key = key_from_segments(&marker_segments, "RouteMarker")?;
+    let Expr::Path(route) = item.expr.as_ref() else {
+        return None;
+    };
+    if route.qself.is_some() || route.path.leading_colon.is_none() {
+        return None;
+    }
+    (key_from_segments(&raw_segments(&route.path), "ROUTE").as_deref() == Some(&key)).then_some(key)
+}
+
 fn append_backend_profile_findings(
     findings: &mut Vec<Finding>,
     contract: &Contract,
@@ -572,6 +1661,7 @@ fn load_workspace_crates(root: &Path) -> Result<Vec<WorkspaceCrate>> {
                 targets.push(CargoTarget {
                     path: target.src_path,
                     integration_test: true,
+                    required_features: target.required_features.into_iter().collect(),
                 });
             } else if target.kind.iter().any(|kind| {
                 matches!(
@@ -637,6 +1727,7 @@ fn normal_target(path: PathBuf) -> CargoTarget {
     CargoTarget {
         path,
         integration_test: false,
+        required_features: BTreeSet::new(),
     }
 }
 
@@ -3588,6 +4679,43 @@ mod tests {
             .join(name)
     }
 
+    fn required_error<T>(
+        result: anyhow::Result<T>,
+        message: &str,
+    ) -> anyhow::Result<anyhow::Error> {
+        match result {
+            Ok(_) => bail!("{message}"),
+            Err(error) => Ok(error),
+        }
+    }
+
+    fn replace_exact_once(
+        source: &str,
+        needle: &str,
+        replacement: &str,
+        context: &str,
+    ) -> anyhow::Result<String> {
+        if needle.is_empty() {
+            bail!("{context}: mutation needle must not be empty");
+        }
+        let matches = source.match_indices(needle).take(2).count();
+        if matches != 1 {
+            bail!("{context}: expected exactly one mutation match, found {matches}");
+        }
+        Ok(source.replacen(needle, replacement, 1))
+    }
+
+    #[test]
+    fn fixture_mutation_requires_exactly_one_match() -> anyhow::Result<()> {
+        assert!(replace_exact_once("alpha", "missing", "beta", "missing mutation").is_err());
+        assert!(replace_exact_once("alpha alpha", "alpha", "beta", "duplicate mutation").is_err());
+        assert_eq!(
+            replace_exact_once("alpha", "alpha", "beta", "single mutation")?,
+            "beta"
+        );
+        Ok(())
+    }
+
     #[test]
     fn framework_routes_trait_is_a_canonical_serving_root() -> anyhow::Result<()> {
         let item: syn::ItemImpl = syn::parse_str(
@@ -3668,6 +4796,650 @@ mod tests {
         let (summary, findings) = check_root(&fixture("green"))?;
         assert_eq!(summary, "1 active LocalTx HTTP contract(s) covered");
         assert!(findings.is_empty(), "{findings:#?}");
+        Ok(())
+    }
+
+    #[test]
+    fn journey_missing_board_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-missing-board")?;
+        let board = temp.path.join("journeys/status-board.toml");
+        if board.exists() {
+            fs::remove_file(board)?;
+        }
+        assert!(
+            check_root(&temp.path).is_err(),
+            "a scoped journey closure without its status board must fail closed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_unknown_board_field_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-unknown-board-field")?;
+        let board = temp.path.join("journeys/status-board.toml");
+        fs::write(
+            &board,
+            fs::read_to_string(&board)?.replacen(
+                "runner = \"journeys/tests/localtx_validation_journey.rs\"\n",
+                "runner = \"journeys/tests/localtx_validation_journey.rs\"\nlegacyEntries = []\n",
+                1,
+            ),
+        )?;
+        let error = required_error(check_root(&temp.path), "unknown board field must fail")?;
+        assert!(
+            format!("{error:#}").contains("legacyEntries"),
+            "diagnostic must identify the unknown board field: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_unknown_spec_field_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-unknown-spec-field")?;
+        let spec = temp.path.join("journeys/demo-write-localtx-journey.toml");
+        fs::write(
+            &spec,
+            fs::read_to_string(&spec)?.replacen(
+                "\n[[scenarios]]",
+                "\nlegacyAlias = true\n\n[[scenarios]]",
+                1,
+            ),
+        )?;
+        let error = required_error(check_root(&temp.path), "unknown spec field must fail")?;
+        assert!(
+            format!("{error:#}").contains("legacyAlias"),
+            "diagnostic must identify the unknown spec field: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_unknown_fixture_field_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-unknown-fixture-field")?;
+        let fixture = temp.path.join("fixtures/demo-write-localtx.toml");
+        fs::write(
+            &fixture,
+            fs::read_to_string(&fixture)?.replacen(
+                "\n[[cases]]",
+                "\nlegacyCases = []\n\n[[cases]]",
+                1,
+            ),
+        )?;
+        let error = required_error(check_root(&temp.path), "unknown fixture field must fail")?;
+        assert!(
+            format!("{error:#}").contains("legacyCases"),
+            "diagnostic must identify the unknown fixture field: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_spec_metadata_drift_identifies_field_and_values() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-spec-metadata-drift")?;
+        let spec = temp.path.join("journeys/demo-write-localtx-journey.toml");
+        fs::write(
+            &spec,
+            fs::read_to_string(&spec)?.replace(
+                "fixture = \"fixtures/demo-write-localtx.toml\"",
+                "fixture = \"fixtures/drift-localtx.toml\"",
+            ),
+        )?;
+        let error = required_error(load_journey_closure(&temp.path), "spec drift must fail")?;
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("journeys/demo-write-localtx-journey.toml"));
+        assert!(diagnostic.contains("field `fixture`"));
+        assert!(diagnostic.contains("expected `fixtures/demo-write-localtx.toml`"));
+        assert!(diagnostic.contains("actual `fixtures/drift-localtx.toml`"));
+        Ok(())
+    }
+
+    #[test]
+    fn journey_fixture_metadata_drift_identifies_field_and_values() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-fixture-metadata-drift")?;
+        let fixture = temp.path.join("fixtures/demo-write-localtx.toml");
+        fs::write(
+            &fixture,
+            fs::read_to_string(&fixture)?
+                .replace("marker = \"DEMO_WRITE\"", "marker = \"DEMO_DRIFT\""),
+        )?;
+        let error = required_error(load_journey_closure(&temp.path), "fixture drift must fail")?;
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("fixtures/demo-write-localtx.toml"));
+        assert!(diagnostic.contains("field `marker`"));
+        assert!(diagnostic.contains("expected `DEMO_WRITE`"));
+        assert!(diagnostic.contains("actual `DEMO_DRIFT`"));
+        Ok(())
+    }
+
+    #[test]
+    fn journey_dangling_spec_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-dangling-spec")?;
+        fs::remove_file(temp.path.join("journeys/demo-write-localtx-journey.toml"))?;
+        assert!(check_root(&temp.path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn journey_missing_typed_marker_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-missing-marker")?;
+        fs::write(temp.path.join(JOURNEY_RUNNER_PATH), "")?;
+        assert!(check_root(&temp.path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn journey_marker_without_test_attribute_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-marker-without-test-attribute")?;
+        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        fs::write(
+            &runner,
+            fs::read_to_string(&runner)?.replacen("#[test]\n", "", 1),
+        )?;
+        let error = required_error(
+            load_journey_closure(&temp.path),
+            "marker-only runner must fail",
+        )?;
+        assert!(
+            format!("{error:#}").contains("must be inside a real"),
+            "diagnostic must reject marker-only runner: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_marker_in_unused_closure_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-marker-in-unused-closure")?;
+        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let source = fs::read_to_string(&runner)?;
+        fs::write(
+            &runner,
+            source.replace(
+                r#"    const LOCALTX_JOURNEY_DEMO_WRITE: ::vocab::HttpRouteBinding<
+        ::generated::http::demo_v1::write::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::demo_v1::write::ROUTE;
+"#,
+                r#"    let _bait = || {
+        const LOCALTX_JOURNEY_DEMO_WRITE: ::vocab::HttpRouteBinding<
+            ::generated::http::demo_v1::write::RouteMarker,
+            ::vocab::http::LocalTx,
+        > = ::generated::http::demo_v1::write::ROUTE;
+    };
+"#,
+            ),
+        )?;
+        let error = required_error(
+            load_journey_closure(&temp.path),
+            "marker in an unused closure must fail",
+        )?;
+        assert!(
+            format!("{error:#}").contains("top-level const item"),
+            "diagnostic must reject a marker hidden in an unused closure: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_ignored_test_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-ignored-test")?;
+        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        fs::write(
+            &runner,
+            fs::read_to_string(&runner)?.replacen("#[test]\n", "#[ignore]\n#[test]\n", 1),
+        )?;
+        let error = required_error(
+            load_journey_closure(&temp.path),
+            "an ignored marker test must fail",
+        )?;
+        assert!(
+            format!("{error:#}").contains("#[ignore] is forbidden"),
+            "diagnostic must reject ignored journey tests: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_cfg_disabled_test_is_rejected() -> anyhow::Result<()> {
+        for (name, attribute, diagnostic) in [
+            ("cfg", "#[cfg(any())]\n", "#[cfg] is forbidden"),
+            (
+                "cfg-attr",
+                "#[cfg_attr(all(), ignore)]\n",
+                "#[cfg_attr] is forbidden",
+            ),
+        ] {
+            let temp = FixtureCopy::new(&format!("localtx-journey-{name}-test"))?;
+            let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+            fs::write(
+                &runner,
+                fs::read_to_string(&runner)?.replacen(
+                    "#[test]\n",
+                    &format!("{attribute}#[test]\n"),
+                    1,
+                ),
+            )?;
+            let error = required_error(
+                load_journey_closure(&temp.path),
+                "a conditionally disabled marker test must fail",
+            )?;
+            assert!(
+                format!("{error:#}").contains(diagnostic),
+                "diagnostic must reject conditionally disabled journey tests: {error:#}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn journey_cfg_disabled_ancestor_is_rejected() -> anyhow::Result<()> {
+        for (name, attribute) in [
+            ("cfg-ancestor", "#[cfg(any())]"),
+            ("cfg-attr-ancestor", "#[cfg_attr(all(), cfg(any()))]"),
+        ] {
+            let temp = FixtureCopy::new(&format!("localtx-journey-{name}"))?;
+            let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+            fs::write(
+                &runner,
+                format!(
+                    "{attribute}\nmod disabled {{\n{}\n}}\n",
+                    fs::read_to_string(&runner)?
+                ),
+            )?;
+            let error = required_error(
+                load_journey_closure(&temp.path),
+                "a conditionally disabled ancestor must not supply journey evidence",
+            )?;
+            assert!(
+                format!("{error:#}").contains("ancestor"),
+                "diagnostic must reject {name}: {error:#}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn journey_should_panic_test_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-should-panic-test")?;
+        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        fs::write(
+            &runner,
+            fs::read_to_string(&runner)?.replacen("#[test]\n", "#[should_panic]\n#[test]\n", 1),
+        )?;
+        let error = required_error(
+            load_journey_closure(&temp.path),
+            "a should-panic marker test must fail",
+        )?;
+        assert!(
+            format!("{error:#}").contains("#[should_panic] is forbidden"),
+            "diagnostic must reject should-panic journey tests: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_return_expression_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-early-return")?;
+        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        fs::write(
+            &runner,
+            fs::read_to_string(&runner)?.replace(
+                "    let mut fixtures = Fixtures;",
+                "    return Ok(());\n    let mut fixtures = Fixtures;",
+            ),
+        )?;
+        let error = required_error(
+            load_journey_closure(&temp.path),
+            "an early-return marker test must fail",
+        )?;
+        assert!(
+            format!("{error:#}").contains("`return` expressions are forbidden"),
+            "diagnostic must reject return expressions in journey tests: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_missing_case_consumption_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-missing-case-consumption")?;
+        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        fs::write(
+            &runner,
+            fs::read_to_string(&runner)?.replace(
+                "    let contention = fixtures.take_case(\"demo-write-contention\")?;\n",
+                "",
+            ),
+        )?;
+        let error = required_error(load_journey_closure(&temp.path), "missing case must fail")?;
+        assert!(
+            format!("{error:#}").contains("demo-write-contention"),
+            "diagnostic must name the unconsumed case: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_duplicate_case_consumption_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-duplicate-case-consumption")?;
+        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        fs::write(
+            &runner,
+            fs::read_to_string(&runner)?.replace(
+                "    let contention = fixtures.take_case(\"demo-write-contention\")?;",
+                "    let contention = fixtures.take_case(\"demo-write-contention\")?;\n    let contention = fixtures.take_case(\"demo-write-contention\")?;",
+            ),
+        )?;
+        let error = required_error(load_journey_closure(&temp.path), "duplicate case must fail")?;
+        assert!(
+            format!("{error:#}").contains("duplicate")
+                && format!("{error:#}").contains("demo-write-contention"),
+            "diagnostic must name the duplicate case: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_dynamic_case_consumption_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-dynamic-case-consumption")?;
+        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        fs::write(
+            &runner,
+            fs::read_to_string(&runner)?.replace(
+                "    let contention = fixtures.take_case(\"demo-write-contention\")?;",
+                "    let case_id = \"demo-write-contention\";\n    let contention = fixtures.take_case(case_id)?;",
+            ),
+        )?;
+        let error = required_error(
+            load_journey_closure(&temp.path),
+            "dynamic case id must fail",
+        )?;
+        assert!(
+            format!("{error:#}").contains("single string literal"),
+            "diagnostic must reject dynamic case ids: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_case_consumption_in_unused_helper_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-case-in-unused-helper")?;
+        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let source = fs::read_to_string(&runner)?.replace(
+            "    let contention = fixtures.take_case(\"demo-write-contention\")?;\n",
+            "",
+        );
+        fs::write(
+            &runner,
+            format!(
+                "{source}\nfn unused_bait() -> Result<(), ()> {{\n    let mut fixtures = Fixtures;\n    let _contention = fixtures.take_case(\"demo-write-contention\")?;\n    Ok(())\n}}\n"
+            ),
+        )?;
+        let error = required_error(
+            load_journey_closure(&temp.path),
+            "case consumption in an unused helper must not count",
+        )?;
+        assert!(
+            format!("{error:#}").contains("demo-write-contention"),
+            "diagnostic must name the case missing from the marker test: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_case_consumption_in_another_test_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-case-in-another-test")?;
+        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        let source = fs::read_to_string(&runner)?.replace(
+            "    let contention = fixtures.take_case(\"demo-write-contention\")?;\n",
+            "",
+        );
+        fs::write(
+            &runner,
+            format!(
+                "{source}\n#[test]\nfn bait_test() -> Result<(), ()> {{\n    let mut fixtures = Fixtures;\n    let _contention = fixtures.take_case(\"demo-write-contention\")?;\n    Ok(())\n}}\n"
+            ),
+        )?;
+        let error = required_error(
+            load_journey_closure(&temp.path),
+            "case consumption in another test must not count",
+        )?;
+        assert!(
+            format!("{error:#}").contains("demo-write-contention"),
+            "diagnostic must name the case missing from the marker test: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_case_consumption_in_noncanonical_flow_is_rejected() -> anyhow::Result<()> {
+        for (name, replacement) in [
+            (
+                "unused-closure",
+                "    let _bait = || {\n        let _ = fixtures.take_case(\"demo-write-contention\");\n    };",
+            ),
+            (
+                "unused-async-block",
+                "    let _bait = async {\n        let _ = fixtures.take_case(\"demo-write-contention\");\n    };",
+            ),
+            (
+                "nested-block",
+                "    {\n        let _ = fixtures.take_case(\"demo-write-contention\");\n    }",
+            ),
+            (
+                "dead-control-flow",
+                "    if false {\n        let _ = fixtures.take_case(\"demo-write-contention\");\n    }",
+            ),
+        ] {
+            let temp = FixtureCopy::new(&format!("localtx-journey-case-{name}"))?;
+            let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+            fs::write(
+                &runner,
+                fs::read_to_string(&runner)?.replace(
+                    "    let contention = fixtures.take_case(\"demo-write-contention\")?;",
+                    replacement,
+                ),
+            )?;
+            let error = required_error(
+                load_journey_closure(&temp.path),
+                "non-canonical case consumption must fail",
+            )?;
+            assert!(
+                format!("{error:#}").contains("test-body top-level"),
+                "diagnostic must reject {name} case bait: {error:#}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn journey_unobserved_case_values_are_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-unobserved-cases")?;
+        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        fs::write(
+            &runner,
+            replace_exact_once(
+                &fs::read_to_string(&runner)?,
+                "    observe_demo_cases(demo_cases)?;\n",
+                "",
+                "remove green observation closure",
+            )?,
+        )?;
+        let error = required_error(
+            load_journey_closure(&temp.path),
+            "take_case values without an observation closure must fail",
+        )?;
+        assert!(
+            format!("{error:#}").contains("observation closure"),
+            "diagnostic must reject unobserved fixture values: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journey_wrong_route_marker_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-wrong-route-marker")?;
+        let runner = temp.path.join(JOURNEY_RUNNER_PATH);
+        fs::write(
+            &runner,
+            fs::read_to_string(&runner)?.replace("demo_v1::write", "demo_v1::other"),
+        )?;
+        assert!(check_root(&temp.path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn journey_target_must_require_integration() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-target-feature")?;
+        let manifest = temp.path.join("journeys/Cargo.toml");
+        fs::write(
+            &manifest,
+            fs::read_to_string(&manifest)?.replace("required-features = [\"integration\"]\n", ""),
+        )?;
+        assert!(check_root(&temp.path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn journey_green_fixture_closes_scoped_matrix() -> anyhow::Result<()> {
+        let closure = load_journey_closure(&fixture("green"))?;
+        assert_eq!(closure.entries.len(), 1);
+        assert_eq!(closure.entries[0].contract_id, "demo.write");
+        assert_eq!(closure.entries[0].marker, "DEMO_WRITE");
+        Ok(())
+    }
+
+    #[test]
+    fn journey_scope_does_not_claim_global_exhaustiveness() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-scoped-board")?;
+        fs::write(
+            temp.path.join("journeys/unrelated-localtx-journey.toml"),
+            "this file belongs to a different scoped board",
+        )?;
+        fs::write(
+            temp.path.join("fixtures/unrelated-localtx.toml"),
+            "this file belongs to a different scoped board",
+        )?;
+        let closure = load_journey_closure(&temp.path)?;
+        assert_eq!(closure.entries.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn journey_missing_entry_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-missing-entry")?;
+        fs::write(
+            temp.path.join(JOURNEY_BOARD_PATH),
+            "schemaVersion = 1\nscope = \"issue-1706\"\nrunner = \"journeys/tests/localtx_validation_journey.rs\"\njourneys = []\n",
+        )?;
+        assert!(check_root(&temp.path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn journey_duplicate_entry_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-duplicate-entry")?;
+        let board = temp.path.join(JOURNEY_BOARD_PATH);
+        let source = fs::read_to_string(&board)?;
+        let entry = source
+            .split_once("[[journeys]]")
+            .map(|(_, entry)| entry)
+            .context("green board entry")?;
+        fs::write(&board, format!("{source}\n[[journeys]]{entry}"))?;
+        assert!(check_root(&temp.path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn journey_wrong_tx_model_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-wrong-tx-model")?;
+        let board = temp.path.join(JOURNEY_BOARD_PATH);
+        fs::write(
+            &board,
+            fs::read_to_string(&board)?.replace(
+                "txModel = \"tenant-scoped-uow\"",
+                "txModel = \"repo-atomic-cas\"",
+            ),
+        )?;
+        assert!(check_root(&temp.path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn journey_missing_scenario_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-journey-missing-scenario")?;
+        let spec = temp.path.join("journeys/demo-write-localtx-journey.toml");
+        fs::write(
+            &spec,
+            fs::read_to_string(&spec)?.replace(
+                "\n[[scenarios]]\nkind = \"contention\"\napplicable = true\n",
+                "",
+            ),
+        )?;
+        assert!(check_root(&temp.path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn journey_fake_logout_conflict_is_rejected() {
+        let scenarios = [
+            JourneyScenario {
+                kind: JourneyScenarioKind::Happy,
+                applicable: true,
+                reason: None,
+            },
+            JourneyScenario {
+                kind: JourneyScenarioKind::AuthFailure,
+                applicable: true,
+                reason: None,
+            },
+            JourneyScenario {
+                kind: JourneyScenarioKind::ValidationFailure,
+                applicable: true,
+                reason: None,
+            },
+            JourneyScenario {
+                kind: JourneyScenarioKind::Contention,
+                applicable: true,
+                reason: None,
+            },
+            JourneyScenario {
+                kind: JourneyScenarioKind::Conflict,
+                applicable: true,
+                reason: None,
+            },
+        ];
+        let cases: Vec<_> = scenarios
+            .iter()
+            .map(|scenario| JourneyCase {
+                id: format!("logout-{}", scenario.kind.label()),
+                scenario: scenario.kind,
+                http_status: 200,
+                error_code: "none".to_string(),
+                retryable: false,
+                attempts: 1,
+                commits: 1,
+                redact_sentinels: vec!["session-sentinel".to_string()],
+            })
+            .collect();
+        assert!(
+            validate_scenario_matrix(
+                LocalTxModel::TenantScopedUow,
+                &scenarios,
+                &cases,
+                "identity-logout-localtx",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn actual_workspace_closes_issue_1706_journeys() -> anyhow::Result<()> {
+        let closure = load_journey_closure(&crate::workspace_root()?)?;
+        let actual: BTreeSet<_> = closure
+            .entries
+            .iter()
+            .map(|entry| entry.contract_id.as_str())
+            .collect();
+        assert_eq!(actual, ISSUE_1706_CONTRACTS.into_iter().collect());
         Ok(())
     }
 
@@ -3778,6 +5550,7 @@ mod tests {
                 "txModel = \"repo-atomic-cas\"",
             ),
         )?;
+        set_green_journey_to_repo_atomic(&temp.path)?;
         let profile = temp.path.join("adapters/pg/src/lib.rs");
         let source = fs::read_to_string(&profile)?;
         fs::write(
@@ -3792,6 +5565,64 @@ mod tests {
         )?;
         let (_, findings) = check_root(&temp.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
+        Ok(())
+    }
+
+    fn set_green_journey_to_repo_atomic(root: &Path) -> anyhow::Result<()> {
+        for path in [
+            "journeys/status-board.toml",
+            "journeys/demo-write-localtx-journey.toml",
+            "fixtures/demo-write-localtx.toml",
+        ] {
+            let path = root.join(path);
+            fs::write(
+                &path,
+                fs::read_to_string(&path)?.replace(
+                    "txModel = \"tenant-scoped-uow\"",
+                    "txModel = \"repo-atomic-cas\"",
+                ),
+            )?;
+        }
+        let spec = root.join("journeys/demo-write-localtx-journey.toml");
+        fs::write(
+            &spec,
+            fs::read_to_string(&spec)?
+                .replace(
+                    "\n[[scenarios]]\nkind = \"contention\"\napplicable = true\n",
+                    "",
+                )
+                .replace(
+                    "applicable = false\nreason = \"tenant-scoped-uow validates concurrent idempotent convergence, not CAS conflict\"",
+                    "applicable = true",
+                ),
+        )?;
+        let fixture = root.join("fixtures/demo-write-localtx.toml");
+        fs::write(
+            &fixture,
+            fs::read_to_string(&fixture)?
+                .replace("demo-write-contention", "demo-write-conflict")
+                .replace("scenario = \"contention\"", "scenario = \"conflict\"")
+                .replace(
+                    "redactSentinels = [\"demo-contention\"]",
+                    "redactSentinels = [\"demo-conflict\"]",
+                ),
+        )?;
+        let runner = root.join(JOURNEY_RUNNER_PATH);
+        let source = replace_exact_once(
+            &fs::read_to_string(&runner)?,
+            "fixtures.take_case(\"demo-write-contention\")",
+            "fixtures.take_case(\"demo-write-conflict\")",
+            "repo-atomic journey runner case",
+        )?;
+        fs::write(
+            &runner,
+            replace_exact_once(
+                &source,
+                "cases.contention.id == \"demo-write-contention\"",
+                "cases.contention.id == \"demo-write-conflict\"",
+                "repo-atomic green observer case",
+            )?,
+        )?;
         Ok(())
     }
 
@@ -4419,8 +6250,12 @@ impl ::bootstrap::Domain for Demo {
         let workspace = temp.path.join("Cargo.toml");
         fs::write(
             &workspace,
-            fs::read_to_string(&workspace)?
-                .replace(", \"generated\"]", ", \"generated\", \"crates/other\"]"),
+            replace_exact_once(
+                &fs::read_to_string(&workspace)?,
+                ", \"generated\", \"journeys\"]",
+                ", \"generated\", \"journeys\", \"crates/other\"]",
+                "enroll wrong-owner marker fixture",
+            )?,
         )?;
         fs::create_dir_all(temp.path.join("crates/other/src"))?;
         fs::write(
@@ -4805,8 +6640,12 @@ fn init() {
         let workspace = temp.path.join("Cargo.toml");
         fs::write(
             &workspace,
-            fs::read_to_string(&workspace)?
-                .replace(", \"generated\"]", ", \"generated\", \"adapters/other\"]"),
+            replace_exact_once(
+                &fs::read_to_string(&workspace)?,
+                ", \"generated\", \"journeys\"]",
+                ", \"generated\", \"journeys\", \"adapters/other\"]",
+                "enroll non-domain marker fixture",
+            )?,
         )?;
         fs::create_dir_all(temp.path.join("adapters/other/src"))?;
         fs::write(
