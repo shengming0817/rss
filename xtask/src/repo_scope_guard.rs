@@ -225,7 +225,11 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ("adapters/postgres/src/inbox.rs", "release"),
     ("adapters/postgres/src/inbox.rs", "sample_inbox_backlog"),
     ("adapters/postgres/src/inbox.rs", "try_claim"),
-    ("adapters/postgres/src/outbox.rs", "settle_dlx"),
+    (
+        "adapters/postgres/src/outbox/settlement.rs",
+        "execute_scalar",
+    ),
+    ("adapters/postgres/src/outbox/settlement.rs", "execute_dlx"),
     ("adapters/postgres/src/outbox_cdc.rs", "emit"),
     ("adapters/postgres/src/reconcile.rs", "acquire_lease"),
     ("adapters/postgres/src/reconcile.rs", "append_attempt"),
@@ -704,8 +708,10 @@ mod tests {
     fn green_infra_tenant_scope_allowed_for_infra_funnels() {
         let files = vec![
             (
-                "adapters/postgres/src/outbox.rs".to_string(),
-                "async fn settle_dlx() { infra_tenant_scope(tenant); }".to_string(),
+                "adapters/postgres/src/outbox/settlement.rs".to_string(),
+                "async fn execute_scalar() { infra_tenant_scope(tenant); }\n\
+                 async fn execute_dlx() { infra_tenant_scope(tenant); }"
+                    .to_string(),
             ),
             (
                 "adapters/postgres/src/command_journal.rs".to_string(),

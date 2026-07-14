@@ -23,6 +23,7 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | `outbox_partition_blocked_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | backlog 采样器 | 同 tenant/domain/partition 前序未 published 阻塞的行数；不暴露 `partition_key` |
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick | phase=`claim`(原子租约相)/`publish`(同批即时并发中继的 wall time + adapter 内 settle 相) |
 | `outbox_same_id_window_expired_total` | Counter | `domain`,`contract_id`,`tenant_id`,`phase` | broker publish 前 DB preflight | phase=`automatic`/`redrive` 的绝对 same-ID deadline 到期；不调用 broker，行 settle 到 DLX |
+| `outbox_relay_settlement_failure_total` | Counter | `domain`,`contract_id`,`tenant_id`,`operation`,`reason` | postgres settlement funnel | operation=`published|retry|dlx|same_id_expiry_dlx`；reason=`timeout|expired|lost_lease|storage|payload_protection|invariant` |
 | `dlq_redrive_total` | Counter | `tenant_id`,`kind`,`outcome` | `rss dlq replay-dead-letter` / `redrive-outbox` | operator mutation 结果；kind=`dead_letter_replay`/`outbox_dlx_redrive`；一次性 CLI 发射，长期告警看 audit/log |
 | `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed preflight path | 跳过 app DLX 写入的诊断计数；reason 为 malformed id / tenant authority / envelope header / inbox receipt context 闭集 |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | consumer app DLX store wrapper | app DLX 写入结果；outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
@@ -39,6 +40,12 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 - `outbox_same_id_window_expired_total.phase`：闭合于 postgres `SameIdDeliveryPhase::as_label()`，值
   `automatic`/`redrive`。同名 `phase` key 必须用 metric 名限定其闭值集；该 counter 不携带 event id、
   deadline/timestamp、payload、error text 或 partition key。
+- `outbox_relay_settlement_failure_total.operation`：闭合于 postgres `SettlementOperation::as_label()`，值
+  `published`/`retry`/`dlx`/`same_id_expiry_dlx`；`reason` 闭合于
+  `SettlementFailureReason::as_label()`，值 `timeout`/`expired`/`lost_lease`/`storage`/
+  `payload_protection`/`invariant`。Tokio deadline、pool timeout、SQLSTATE `57014`/`55P03` 统一映射为
+  `timeout`；普通连接/事务/SQL 错误、DLX capsule 保护错误和闭值/行形状违约分别映射后三类。event id、
+  lease token、deadline/timestamp、payload 与错误文本均不得进入 label。
 - `claim` 相完整覆盖 `PgOutbox::claim_batch`。该 provider 铸造并按值交接 opaque
   `PgClaimedOutboxEntry`；lease/durable context 不进 `consistency` 公开可 hydrate 面，也不进 metric
   label。relay 只借出 typed metric subject，因此 operator 不应从 metric 反推 token/deadline。
@@ -103,6 +110,9 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | 投递延迟（最老 pending 龄） | > 5min 持续 2min | critical | `OutboxBacklogOldestAgeHigh` |
 | DLX 增长 | 10min 内增长 > 0 | critical | `OutboxDlxGrowth` |
 | same-ID 窗口到期 | 10min 内增长 > 0，或首次非零 series 且 10min offset 不存在 | critical | `OutboxSameIdWindowExpired` |
+| settlement lease 到期 | 5min 内 `reason="expired"` 增长 > 0，或首次非零 series 且 5min offset 不存在 | critical | `OutboxSettlementExpired` |
+| settlement integrity/protection | 5min 内 `reason=~"payload_protection|invariant"` 增长 > 0，或首次非零 series 且 5min offset 不存在 | critical | `OutboxSettlementIntegrityFailure` |
+| settlement timeout/lost lease/storage | 按 domain/reason 的 5min rate > 1/s 持续 5min | warning | `OutboxSettlementFailureRateHigh` |
 | pending 深度 | > 10k 持续 5min | warning | `OutboxPendingDepthHigh` |
 | partition blocked 深度 | > 0 持续 10min | critical | `OutboxPartitionBlocked` |
 | 重试风暴（requeue 速率） | > 5/s 持续 5min | warning | `OutboxRequeueStorm` |
@@ -114,7 +124,8 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | saga DLX 写失败 | 5min 内 `outcome="write_error"` 增长 > 0 | critical | `SagaDeadLetterWriteError` |
 
 outbox 告警在 PromQL 层按 domain 聚合：depth 用 `sum by (domain)`，oldest age 用 `max by (domain)`，
-DLX/requeue 用 `sum by (domain)`，tick 用 `by (phase)`。scoped backlog gauges 对 adapter 返回或进程内已观测的
+DLX/requeue 用 `sum by (domain)`，settlement failure 用 `sum by (domain, reason)`，tick 用
+`by (phase)`。scoped backlog gauges 对 adapter 返回或进程内已观测的
 `(domain, tenant_id, contract_id)` 输出；已观测 scope drain / sweep 后会保留零值 series，空部署、从未出现、
 新进程尚未观测或 recorder 已清理的 scope 可以没有 `outbox_pending_depth` series，因此 Prometheus 侧不再用
 `absent_over_time(outbox_pending_depth)` 判采样器停更。
@@ -134,6 +145,8 @@ counter series，窗口内只有一个样本时 `increase` 可能没有结果。
 ((counter > 0) unless (counter offset 10m))` 补捉新 series；连续存在的旧非零 series 因 offset 已存在而不触发，
 新 series 到达 offset 边界后也退出，因此不会把历史累计值持续重复分页。可执行语义锁见
 `docs/ops/outbox-relay-alerts.test.yaml`，同时覆盖首次单次到期、旧 series 静止和已有 series 后续增长。
+`OutboxSettlementExpired` 与 `OutboxSettlementIntegrityFailure` 使用同一 first-series 语义，窗口为 5min；
+timeout/lost-lease/storage 告警由持续速率测试锁定。
 
 ## Dashboard 面板建议
 
@@ -146,8 +159,11 @@ counter series，窗口内只有一个样本时 `increase` 可能没有结果。
    ((outbox_same_id_window_expired_total > 0) unless
    (outbox_same_id_window_expired_total offset 10m)))`；`phase` 在此只显示 `automatic|redrive`。右侧是首次
    非零 series 补偿；左侧的 `> 0` 必须保留，否则零增长 series 会遮住补偿分支。
-7. **Saga DLX 速率**：`sum by (domain, contract_id, outcome) (rate(saga_dead_letters_total[5m]))`。
-8. **relay tick 耗时**：`histogram_quantile(0.95, sum by (phase, le) (rate(outbox_relay_tick_duration_seconds_bucket[5m])))`（classic histogram 须 `sum by (..., le)` 包住 `rate(..._bucket)` 再 `histogram_quantile`；此处 `phase=claim|publish`）。
+7. **settlement failure**：`sum by (domain, operation, reason) (rate(outbox_relay_settlement_failure_total[5m]))`；
+   `expired|payload_protection|invariant` 直接按 critical 规则处置，`timeout|lost_lease|storage` 用于连接池、
+   锁等待、事务和 ownership 诊断。
+8. **Saga DLX 速率**：`sum by (domain, contract_id, outcome) (rate(saga_dead_letters_total[5m]))`。
+9. **relay tick 耗时**：`histogram_quantile(0.95, sum by (phase, le) (rate(outbox_relay_tick_duration_seconds_bucket[5m])))`（classic histogram 须 `sum by (..., le)` 包住 `rate(..._bucket)` 再 `histogram_quantile`；此处 `phase=claim|publish`）。
 
 ## 已知差距 / 范围说明
 

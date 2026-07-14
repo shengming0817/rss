@@ -8,7 +8,8 @@
 #   promtool check rules docs/ops/outbox-relay-alerts.rules.yaml
 #   (cd docs/ops && promtool test rules outbox-relay-alerts.test.yaml)
 #
-# 注：outbox settle/backlog gauge/counter 均带 `domain`,`contract_id`,`tenant_id` label。
+# 注：outbox scoped counter/gauge 均带 `domain`,`contract_id`,`tenant_id`；settlement failure 另带闭值
+# `operation`,`reason`。
 # 告警按 domain 聚合：depth=sum by(domain)，oldest age=max by(domain)，outbox/consumer DLX/requeue=sum by(domain)；
 # saga DLX 保留 contract_id，按 (domain, contract_id) 聚合，保 annotation 可靠呈现来源。
 groups:
@@ -56,6 +57,57 @@ groups:
         annotations:
           summary: "Outbox same-ID 投递窗口到期（domain={{ $labels.domain }}, phase={{ $labels.phase }}）"
           description: "近 10min outbox_same_id_window_expired_total 增长/首次 series 信号 {{ $value }}；broker publish 已被 fail-closed 跳过。检查 DLX、partition blocked 与 dlq.maintenance audit，不从 metric 查 event id 或 deadline。"
+
+      # Settlement 持锁后发现 lease 已到期属于正确性信号。首次创建值为 1 的 counter 可能没有足够样本供
+      # increase() 计算，因此以 5min offset 缺失补捉新 series；旧的静止 series 不重复分页。
+      - alert: OutboxSettlementExpired
+        expr: |
+          sum by (domain) (
+            (increase(outbox_relay_settlement_failure_total{reason="expired"}[5m]) > 0)
+            or
+            (
+              (outbox_relay_settlement_failure_total{reason="expired"} > 0)
+              unless
+              (outbox_relay_settlement_failure_total{reason="expired"} offset 5m)
+            )
+          ) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox settlement lease 到期（domain={{ $labels.domain }}）"
+          description: "近 5min settlement expired 增长/首次 series 信号 {{ $value }}；停止依赖性处置，检查 relay 调度、settle budget、数据库锁等待与连接池压力。"
+
+      # payload protection/invariant 任一失败均代表 DLX 安全依赖或数据库闭契约失效，沿用 first-series
+      # 补偿以捕获仅发生一次的 counter。
+      - alert: OutboxSettlementIntegrityFailure
+        expr: |
+          sum by (domain, reason) (
+            (increase(outbox_relay_settlement_failure_total{reason=~"payload_protection|invariant"}[5m]) > 0)
+            or
+            (
+              (outbox_relay_settlement_failure_total{reason=~"payload_protection|invariant"} > 0)
+              unless
+              (outbox_relay_settlement_failure_total{reason=~"payload_protection|invariant"} offset 5m)
+            )
+          ) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox settlement 完整性失败（domain={{ $labels.domain }}, reason={{ $labels.reason }}）"
+          description: "近 5min settlement {{ $labels.reason }} 增长/首次 series 信号 {{ $value }}；停止 relay 依赖性处置，检查 DLX key provider、0066 闭值契约与返回行形状。"
+
+      # timeout/lost_lease/storage 持续高于 1/s 才告警。按 domain/reason 聚合，operation、contract
+      # 与 tenant 仅用于 dashboard drilldown，不进入 alert identity。
+      - alert: OutboxSettlementFailureRateHigh
+        expr: sum by (domain, reason) (rate(outbox_relay_settlement_failure_total{reason=~"timeout|lost_lease|storage"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox settlement 失败率持续偏高（domain={{ $labels.domain }}, reason={{ $labels.reason }}）"
+          description: "settlement failure rate={{ $value }}/s；检查数据库连接池、锁等待、事务/SQL、settle timeout 与 lease ownership。"
 
       # 积压深度持续高（次级信号；阈值按部署容量调，此处保守 10k 兜底防无界增长）。
       # 新增 contract/tenant label 后先按 domain 求和；for:5m 承担持续性判断，避免先对各 scope

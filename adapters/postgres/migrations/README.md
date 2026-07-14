@@ -299,6 +299,26 @@ lease 和可发布窗口；任意不一致在锁 outbox 行之前 fail closed。
 deadline 设置的 `SET LOCAL statement_timeout/lock_timeout` 统一治理。部署仍遵循 0064 的停旧 relay、迁移、
 验证 owner/search path/ACL、再启动新 binary 的非滚动顺序。
 
+### 0066 sealed settlement outcome cutover（一次性、禁止滚动混跑）
+
+`0066` 以同签名破坏式替换 published/retry/DLX 三个 settlement 函数：旧 `bigint`/optional-row
+返回语义被 PostgreSQL enum `settled | expired | lost_lease` 完全取代，不提供 overload、别名、shim 或双路径。
+旧 binary 会按旧形状解码新返回值，因此绝对禁止新旧 relay 滚动混跑。
+
+1. 停止全部 relay，等待当前 publish/settlement 任务退出，并确认没有旧 binary、job 或 CLI 持续调用三个
+   settlement 签名；记录仍为 `publishing` 的行数作为 cutover inventory，不导出 payload、metadata、token
+   或 deadline。
+2. 由唯一正式 migration runner 执行 0066。5 秒内无法取得 DDL 锁或 5 分钟内无法完成时保持 relay 停止；
+   只允许提交新的 forward migration 修复，不修改 0066，也不恢复旧返回语义。
+3. 验证 `rss_outbox_settlement_outcome` 的三值精确闭集、owner 为 NOLOGIN
+   `rss_outbox_maintenance`、PUBLIC 无 USAGE、`rss_app` 有 USAGE；验证三个函数同 owner、固定
+   `search_path=public, pg_temp`、PUBLIC 无 EXECUTE、`rss_app` 有精确 EXECUTE。
+4. 在受控事务中用 stale token、当前未过期 token 和已过期当前 token 各探测一次，分别确认
+   `lost_lease`、`settled`、`expired`；回滚探测事务并确认 outbox/dead-letter 状态未改变。
+5. 只有 catalog、ACL、闭值探测全部通过才启动新 binary。若启动失败，撤销本次启动并保持 relay 停止；
+   数据库保持 0066，旧 binary 不得连接已迁移 schema。只允许部署修复后的 0066-compatible binary；
+   需要 schema 修正时提交新的 forward migration，不得恢复旧返回语义。
+
 ### 0062/0063 dead-letter lifecycle breaking cutover
 
 `0062` 是不可绕过的 fail-closed cutover gate：取得 `dead_letter` 的 ACCESS EXCLUSIVE 锁后，只要存在一行

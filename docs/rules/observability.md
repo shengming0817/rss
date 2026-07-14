@@ -226,6 +226,7 @@ outbox relay/sampler 发射下列 metric（bare 名；通用 relay emit site = `
 | `outbox_partition_blocked_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | 同 tenant/domain/partition 前序未 published 导致被队头阻塞的 outbox 行数；不暴露 `partition_key` |
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick 耗时（phase=claim/publish；settle 并入 publish，见 §settle 相说明） |
 | `outbox_same_id_window_expired_total` | Counter | `domain`,`contract_id`,`tenant_id`,`phase` | broker publish 前发现 same-ID 绝对 deadline 到期；phase=automatic/redrive，过期 entry 不调用 broker |
+| `outbox_relay_settlement_failure_total` | Counter | `domain`,`contract_id`,`tenant_id`,`operation`,`reason` | relay settlement 未成功；operation 与 reason 均为 adapter 私有闭枚举 |
 | `dlq_redrive_total` | Counter | `tenant_id`,`kind`,`outcome` | operator DLQ replay/redrive mutation 结果计数；kind=dead_letter_replay/outbox_dlx_redrive；仅在进程安装 metrics recorder 时可采集，一次性 `rss dlq` 的长期告警看 `dlq.maintenance` audit/log |
 
 label 闭值集纪律：
@@ -236,6 +237,12 @@ label 闭值集纪律：
   `outbox_same_id_window_expired_total.phase` 闭合于 postgres `SameIdDeliveryPhase::as_label()`
   （`automatic`/`redrive`）。两个 metric 的同名 label key 不共享值集，必须用 metric 名限定语义；它们均由
   crate 自有闭映射产生，不接受 free-form phase。
+- `outbox_relay_settlement_failure_total.operation` 闭合于 postgres `SettlementOperation::as_label()`：
+  `published` / `retry` / `dlx` / `same_id_expiry_dlx`；`reason` 闭合于
+  `SettlementFailureReason::as_label()`：`timeout` / `expired` / `lost_lease` / `storage` /
+  `payload_protection` / `invariant`。Tokio deadline、pool timeout、SQLSTATE `57014` / `55P03` 均归入
+  `timeout`；其余连接/事务/SQL 失败归 `storage`，DLX capsule 加密失败归 `payload_protection`，闭值解码或
+  DLX 行形状违约归 `invariant`。不得从错误文本派生 label。
 - `outbox_relay_envelope_validation_failure_total.reason` 闭合于 postgres relay 的
   `RelayEnvelopeValidationReason::as_label()`：`envelope_missing_tenant_id` / `envelope_invalid_tenant_id` /
   `envelope_missing_schema_version` / `envelope_invalid_schema_version` / `envelope_missing_schema_hash` /
@@ -254,7 +261,8 @@ label 闭值集纪律：
   `consistency::OutboxContractId` canonical dotted grammar 校验，`tenant_id` 必须来自 typed
   `vocab::TenantId`。这是本节对「业务 ID 不入 label」的有界例外，不外推到其它 metric。
 - PII / 高基数边界：outbox metric label 仍禁止 payload、topic、subject、actor、metadata、error text、
-  handler error、event id、deadline/timestamp 或任意请求输入。same-ID expiry metric 只使用既有 typed
+  handler error、event id、lease token、deadline/timestamp 或任意请求输入。settlement failure metric 只使用
+  typed route scope 与闭 operation/reason；same-ID expiry metric 只使用既有 typed
   route scope 与 closed phase，不输出具体行或时间。backlog zero sample 对 adapter 返回的历史 outbox scope 以及同一 sampler
   进程内曾返回、后续成功采样时消失的 `(domain, tenant_id, contract_id)` 输出；从未出现、新进程尚未观测或
   recorder 已清理的 scope 不造假 label。`outbox_partition_blocked_depth` 与 backlog gauge 同 scope 输出；

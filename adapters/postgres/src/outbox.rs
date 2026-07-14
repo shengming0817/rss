@@ -49,6 +49,8 @@ use crate::projection_events::{
     append_replayed_projection_event_if_bound,
 };
 
+mod settlement;
+
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
 /// relay 每次最多重试次数（含当次）；超过后转 dlx。
@@ -182,25 +184,47 @@ impl PgClaimedOutboxEntry {
         self.claimed_at_epoch_seconds
     }
 
-    pub(crate) fn lease_token(&self) -> &str {
+    fn lease_token(&self) -> &str {
         self.lease.token()
     }
 
-    pub(crate) fn lease_deadline_epoch_micros(&self) -> i64 {
+    fn lease_deadline_epoch_micros(&self) -> i64 {
         self.lease.deadline_epoch_micros()
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn test_lease_token(&self) -> &str {
+        self.lease_token()
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn test_lease_deadline_epoch_micros(&self) -> i64 {
+        self.lease_deadline_epoch_micros()
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn test_override_lease_deadlines(
+        &mut self,
+        deadline_epoch_micros: i64,
+        monotonic_remaining: std::time::Duration,
+    ) {
+        self.lease
+            .test_override_deadlines(deadline_epoch_micros, monotonic_remaining);
     }
 }
 
 struct OutboxLease {
     token: String,
     deadline_epoch_micros: i64,
+    monotonic_deadline: tokio::time::Instant,
 }
 
 impl std::fmt::Debug for OutboxLease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OutboxLease")
             .field("token", &"<redacted>")
-            .field("deadline_epoch_micros", &self.deadline_epoch_micros)
+            .field("deadline_epoch_micros", &"<sealed>")
+            .field("monotonic_deadline", &"<sealed>")
             .finish()
     }
 }
@@ -216,7 +240,11 @@ enum OutboxLeaseError {
 }
 
 impl OutboxLease {
-    fn hydrate(token: String, deadline_epoch_micros: i64) -> Result<Self, OutboxLeaseError> {
+    fn hydrate(
+        token: String,
+        deadline_epoch_micros: i64,
+        monotonic_deadline: tokio::time::Instant,
+    ) -> Result<Self, OutboxLeaseError> {
         let parsed = uuid::Uuid::try_parse(&token).map_err(|_| OutboxLeaseError::Token)?;
         if parsed.hyphenated().to_string() != token {
             return Err(OutboxLeaseError::Token);
@@ -230,6 +258,7 @@ impl OutboxLease {
         Ok(Self {
             token,
             deadline_epoch_micros,
+            monotonic_deadline,
         })
     }
 
@@ -239,6 +268,16 @@ impl OutboxLease {
 
     fn deadline_epoch_micros(&self) -> i64 {
         self.deadline_epoch_micros
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    fn test_override_deadlines(
+        &mut self,
+        deadline_epoch_micros: i64,
+        monotonic_remaining: std::time::Duration,
+    ) {
+        self.deadline_epoch_micros = deadline_epoch_micros;
+        self.monotonic_deadline = io_deadline_after(monotonic_remaining);
     }
 }
 
@@ -1328,6 +1367,10 @@ impl OutboxRelay for PgOutbox {
             tracing::warn!(target: "postgres", domain, error = %secure::redact_error(&e), "outbox: claim_batch begin error");
             EngineError::new(EngineErrorKind::Transient)
         })?;
+        // Pool acquisition is not part of a lease that PostgreSQL has not minted yet. Start the
+        // conservative local clock immediately before the claim SQL; any SQL/hydration/commit delay
+        // still consumes this bound and is rechecked before publish I/O.
+        let monotonic_deadline = io_deadline_after(self.relay_budget.lease_ttl());
         let rows: Vec<ClaimedOutboxRow> = sqlx::query_as(
             r#"
             SELECT tenant_id, contract_id, topic, event_id, payload, retry_count, metadata,
@@ -1349,7 +1392,7 @@ impl OutboxRelay for PgOutbox {
 
         let claims = rows
             .into_iter()
-            .map(|row| hydrate_claimed_outbox_row(row, &self.provider))
+            .map(|row| hydrate_claimed_outbox_row(row, &self.provider, monotonic_deadline))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| {
                 tracing::error!(
@@ -1377,6 +1420,9 @@ impl OutboxRelay for PgOutbox {
     async fn relay(&self, claimed: Self::Claim) -> Result<consistency::Disposition, EngineError> {
         let event_id = claimed.idem_key().as_str();
         self.validate_claim_provider(&claimed)?;
+        if !local_publish_budget_available(claimed.lease.monotonic_deadline, self.relay_budget) {
+            return Err(expired_lease_error(event_id, "pre_publish_local_budget"));
+        }
         let publish_deadline = io_deadline_after(self.relay_budget.publisher_watchdog_timeout());
         let preflight_deadline = publish_deadline - self.relay_budget.publish_timeout();
         match publish_preflight(&self.pool, &claimed, self.relay_budget, preflight_deadline).await?
@@ -1419,23 +1465,28 @@ impl OutboxRelay for PgOutbox {
                 // 3a. 发布成功 → published（以本次 lease_token 比对，防 stale 持租者结算）。
                 // LostLease（0 行 CAS）不是干净成功：即使 broker 已收到事件，当前 worker 也未能证明
                 // durable settle，故返 Transient 让调度层显式感知并按租约状态恢复。
-                if settle_published_before(
-                    &self.pool,
-                    &claimed,
-                    settle_deadline(self.relay_budget),
-                    self.relay_budget.settle_timeout_millis(),
-                )
-                .await?
-                    == SettleOutcome::LostLease
-                {
-                    return Err(lost_lease_error(event_id, "settle_published"));
+                match settlement::published(&self.tenant_pool, &claimed, self.relay_budget).await? {
+                    settlement::Settlement::Settled((), _) => Ok(consistency::Disposition::Ack),
+                    settlement::Settlement::Expired(_) => {
+                        Err(expired_lease_error(event_id, "settle_published"))
+                    }
+                    settlement::Settlement::LostLease(_) => {
+                        Err(lost_lease_error(event_id, "settle_published"))
+                    }
                 }
-                Ok(consistency::Disposition::Ack)
             }
             // 3b. 发布失败 → dlx（预算耗尽）/ retry（退避），见 helper。
             Err(e) => self.settle_publish_failure(tenant, &claimed, &e).await,
         }
     }
+}
+
+fn local_publish_budget_available(
+    monotonic_deadline: tokio::time::Instant,
+    relay_budget: RelayBudget,
+) -> bool {
+    monotonic_deadline.saturating_duration_since(io_deadline_after(std::time::Duration::ZERO))
+        > relay_budget.required_budget()
 }
 
 impl PgOutbox {
@@ -1446,26 +1497,25 @@ impl PgOutbox {
         phase: SameIdDeliveryPhase,
     ) -> Result<consistency::Disposition, EngineError> {
         let event_id = claimed.idem_key().as_str();
-        match settle_dlx(
+        match settlement::same_id_expiry_dlx(
             &self.tenant_pool,
             &self.payload_protector,
-            DlxSettlement {
-                tenant,
-                claimed,
-                error_summary: phase.dlx_summary(),
-                relay_failure_reason: Some(phase.failure_reason()),
-            },
-            settle_deadline(self.relay_budget),
-            "settle_delivery_window_expired",
-            self.relay_budget.settle_timeout_millis(),
+            tenant,
+            claimed,
+            phase,
+            self.relay_budget,
         )
         .await?
         {
-            DlxSettleOutcome::Settled(_) => {
+            settlement::Settlement::Settled(_, _) => {
                 record_same_id_window_expired(claimed.domain(), claimed.subject(), phase);
                 Ok(consistency::Disposition::Reject)
             }
-            DlxSettleOutcome::LostLease => {
+            settlement::Settlement::Expired(_) => Err(expired_lease_error(
+                event_id,
+                "settle_delivery_window_expired",
+            )),
+            settlement::Settlement::LostLease(_) => {
                 Err(lost_lease_error(event_id, "settle_delivery_window_expired"))
             }
         }
@@ -1613,6 +1663,7 @@ fn hydrate_claimed_metadata(map: &serde_json::Map<String, serde_json::Value>) ->
 fn hydrate_claimed_outbox_row(
     row: ClaimedOutboxRow,
     provider: &Arc<OutboxProviderIdentity>,
+    monotonic_deadline: tokio::time::Instant,
 ) -> Result<PgClaimedOutboxEntry, ClaimHydrationError> {
     let subject = parse_metric_subject(&row.tenant_id, &row.contract_id)
         .map_err(|_| ClaimHydrationError::MetricSubject)?;
@@ -1633,14 +1684,16 @@ fn hydrate_claimed_outbox_row(
         Ok(serde_json::Value::Object(metadata)) => metadata,
         Ok(_) | Err(_) => return Err(ClaimHydrationError::Metadata),
     };
-    let lease =
-        OutboxLease::hydrate(row.lease_token, row.deadline_epoch_micros).map_err(|error| {
-            match error {
-                OutboxLeaseError::Token => ClaimHydrationError::LeaseToken,
-                OutboxLeaseError::TokenVersion => ClaimHydrationError::LeaseTokenVersion,
-                OutboxLeaseError::Deadline => ClaimHydrationError::LeaseDeadline,
-            }
-        })?;
+    let lease = OutboxLease::hydrate(
+        row.lease_token,
+        row.deadline_epoch_micros,
+        monotonic_deadline,
+    )
+    .map_err(|error| match error {
+        OutboxLeaseError::Token => ClaimHydrationError::LeaseToken,
+        OutboxLeaseError::TokenVersion => ClaimHydrationError::LeaseTokenVersion,
+        OutboxLeaseError::Deadline => ClaimHydrationError::LeaseDeadline,
+    })?;
     if row.contract_version.is_empty() {
         return Err(ClaimHydrationError::ContractVersion);
     }
@@ -1735,22 +1788,17 @@ impl PgOutbox {
         let permanent = err.is_permanent();
         log_publish_failed(event_id, entry.topic().as_str(), retry_count, err);
         if dlx_decision(permanent, new_count) {
-            match settle_dlx(
+            match settlement::ordinary_dlx(
                 &self.tenant_pool,
                 &self.payload_protector,
-                DlxSettlement {
-                    tenant,
-                    claimed,
-                    error_summary: err.dlx_summary(),
-                    relay_failure_reason: err.relay_failure_reason(),
-                },
-                settle_deadline(self.relay_budget),
-                "settle_dlx",
-                self.relay_budget.settle_timeout_millis(),
+                tenant,
+                claimed,
+                err,
+                self.relay_budget,
             )
             .await?
             {
-                DlxSettleOutcome::Settled(authoritative_retry_count) => {
+                settlement::Settlement::Settled(authoritative_retry_count, _) => {
                     log_dlx(
                         event_id,
                         authoritative_retry_count,
@@ -1759,19 +1807,22 @@ impl PgOutbox {
                     );
                     Ok(consistency::Disposition::Reject)
                 }
-                DlxSettleOutcome::LostLease => Err(lost_lease_error(event_id, "settle_dlx")),
+                settlement::Settlement::Expired(_) => {
+                    Err(expired_lease_error(event_id, "settle_dlx"))
+                }
+                settlement::Settlement::LostLease(_) => {
+                    Err(lost_lease_error(event_id, "settle_dlx"))
+                }
             }
         } else {
-            match settle_retry(
-                &self.pool,
-                claimed,
-                settle_deadline(self.relay_budget),
-                self.relay_budget.settle_timeout_millis(),
-            )
-            .await?
-            {
-                SettleOutcome::Settled => Ok(consistency::Disposition::Requeue),
-                SettleOutcome::LostLease => Err(lost_lease_error(event_id, "settle_retry")),
+            match settlement::retry(&self.tenant_pool, claimed, self.relay_budget).await? {
+                settlement::Settlement::Settled((), _) => Ok(consistency::Disposition::Requeue),
+                settlement::Settlement::Expired(_) => {
+                    Err(expired_lease_error(event_id, "settle_retry"))
+                }
+                settlement::Settlement::LostLease(_) => {
+                    Err(lost_lease_error(event_id, "settle_retry"))
+                }
             }
         }
     }
@@ -1838,6 +1889,11 @@ fn log_lost_lease(event_id: &str, operation: &str) {
 
 fn lost_lease_error(event_id: &str, operation: &str) -> EngineError {
     log_lost_lease(event_id, operation);
+    EngineError::new(EngineErrorKind::Transient)
+}
+
+fn expired_lease_error(event_id: &str, operation: &str) -> EngineError {
+    tracing::warn!(target: "postgres", event_id, operation, "outbox: settlement lease expired");
     EngineError::new(EngineErrorKind::Transient)
 }
 
@@ -1966,38 +2022,6 @@ async fn sample_outbox_backlog(
 
 // ── relay 拆分 helper fn（认知复杂度 ≤ 15）────────────────────────────────────
 
-/// CAS settle 结果：本租约确实结算（1 行），或租约已 stale（0 行 = lost-lease fencing miss）。
-///
-/// 调用方据此区分「干净结算」与「丢租约」——后者不得当成功静默吞（F3）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SettleOutcome {
-    /// 本租约成功结算（`rows_affected() == 1`）。
-    Settled,
-    /// 租约已 stale——0 行更新（行被新租约接管或已终结）。
-    LostLease,
-}
-
-struct DlxSettlement<'a> {
-    tenant: vocab::TenantId,
-    claimed: &'a PgClaimedOutboxEntry,
-    error_summary: &'static str,
-    relay_failure_reason: Option<&'static str>,
-}
-
-enum DlxSettleOutcome {
-    Settled(i32),
-    LostLease,
-}
-
-/// `rows_affected()` → [`SettleOutcome`]（1 = Settled，否则 LostLease）——三个 settle helper 同源映射。
-fn settle_outcome(rows_affected: u64) -> SettleOutcome {
-    if rows_affected == 1 {
-        SettleOutcome::Settled
-    } else {
-        SettleOutcome::LostLease
-    }
-}
-
 async fn with_publisher_watchdog<F>(
     deadline: tokio::time::Instant,
     relay_budget: RelayBudget,
@@ -2024,22 +2048,6 @@ where
             )))
         }
     }
-}
-
-fn settle_deadline(relay_budget: RelayBudget) -> tokio::time::Instant {
-    io_deadline_after(relay_budget.settle_timeout())
-}
-
-fn settlement_timeout_error(phase: &'static str, settle_timeout_ms: i64) -> EngineError {
-    tracing::warn!(
-        target: "postgres",
-        phase,
-        settle_timeout_ms,
-        delivery_outcome = "unknown",
-        broker_may_have_received = true,
-        "outbox settlement timed out"
-    );
-    EngineError::new(EngineErrorKind::Transient)
 }
 
 /// The preflight starts and completes inside the safety-margin deadline. It owns the acquired
@@ -2107,230 +2115,6 @@ async fn publish_preflight(
         );
         EngineError::new(EngineErrorKind::Invariant)
     })
-}
-
-#[cfg(all(test, feature = "integration"))]
-// reason(dead_code): direct lease-fencing probe used only by the feature-gated real-Postgres tests.
-#[allow(dead_code)]
-pub(crate) async fn settle_published(
-    pool: &sqlx::PgPool,
-    claimed: &PgClaimedOutboxEntry,
-) -> Result<SettleOutcome, EngineError> {
-    let event_id = claimed.idem_key().as_str();
-    let row: (i64,) = sqlx::query_as(
-        r#"
-        SELECT rss_outbox_settle_published($1, $2::uuid, $3)
-        "#,
-    )
-    .bind(event_id)
-    .bind(claimed.lease_token())
-    .bind(claimed.lease_deadline_epoch_micros())
-    .fetch_one(pool)
-    .await
-    .map_err(|e| {
-        tracing::warn!(target: "postgres", event_id, operation = "settle_published", error = %secure::redact_error(&e), "outbox: settle_published db error");
-        EngineError::new(EngineErrorKind::Transient)
-    })?;
-    let rows = u64::try_from(row.0).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-    Ok(settle_outcome(rows))
-}
-
-async fn settle_published_before(
-    pool: &sqlx::PgPool,
-    claimed: &PgClaimedOutboxEntry,
-    deadline: tokio::time::Instant,
-    settle_timeout_ms: i64,
-) -> Result<SettleOutcome, EngineError> {
-    let event_id = claimed.idem_key().as_str().to_string();
-    let lease_token = claimed.lease_token().to_string();
-    let lease_deadline_epoch_micros = claimed.lease_deadline_epoch_micros();
-    let query_event_id = event_id.clone();
-    deadline_global_transaction(
-        pool,
-        deadline,
-        move |connection| {
-            Box::pin(async move {
-                let row: (i64,) = sqlx::query_as(
-                    "SELECT rss_outbox_settle_published($1, $2::uuid, $3)",
-                )
-                .bind(query_event_id)
-                .bind(lease_token)
-                .bind(lease_deadline_epoch_micros)
-                .fetch_one(connection)
-                .await
-                .map_err(|error| {
-                    tracing::warn!(target: "postgres", operation = "settle_published", error = %secure::redact_error(&error), "outbox: settle_published db error");
-                    EngineError::new(EngineErrorKind::Transient)
-                })?;
-                let rows = u64::try_from(row.0)
-                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-                Ok(settle_outcome(rows))
-            })
-        },
-        move |error| {
-            tracing::warn!(target: "postgres", event_id, operation = "settle_published.tx", error = %secure::redact_error(&error), "outbox: settle_published transaction error");
-            EngineError::new(EngineErrorKind::Transient)
-        },
-        move || settlement_timeout_error("settle_published", settle_timeout_ms),
-    )
-    .await
-}
-
-/// 预算耗尽后把行置 dlx（以 `lease_token` 比对，防 stale 持租者把已被新租约结算的行误标 dlx）。
-async fn settle_dlx(
-    tenant_pool: &PgTenantPool,
-    payload_protector: &DlxPayloadProtector,
-    input: DlxSettlement<'_>,
-    deadline: tokio::time::Instant,
-    phase: &'static str,
-    settle_timeout_ms: i64,
-) -> Result<DlxSettleOutcome, EngineError> {
-    let DlxSettlement {
-        tenant,
-        claimed,
-        error_summary,
-        relay_failure_reason,
-    } = input;
-    let event_id = claimed.idem_key().as_str();
-    type MarkDlxRow = (
-        String,
-        String,
-        String,
-        String,
-        Vec<u8>,
-        String,
-        String,
-        String,
-        i32,
-    );
-
-    let payload_protector = payload_protector.clone();
-    let event_id = event_id.to_string();
-    let lease_token = claimed.lease_token().to_string();
-    let lease_deadline_epoch_micros = claimed.lease_deadline_epoch_micros();
-    let tx_event_id = event_id.clone();
-
-    tenant_pool
-        .deadline_write(
-            infra_tenant_scope(tenant),
-            deadline,
-            move |conn| {
-                let payload_protector = payload_protector.clone();
-                let event_id = event_id.clone();
-                let lease_token = lease_token.clone();
-                Box::pin(async move {
-                    let row: Option<MarkDlxRow> = sqlx::query_as(
-                        r#"
-                        SELECT tenant_id, domain, contract_id, topic, payload, metadata,
-                               contract_version, schema_hash, retry_count
-                        FROM rss_outbox_mark_dlx($1, $2::uuid, $3)
-                        "#,
-                    )
-                    .bind(&event_id)
-                    .bind(&lease_token)
-                    .bind(lease_deadline_epoch_micros)
-                    .fetch_optional(&mut *conn)
-                    .await
-                    .map_err(|e| {
-                        tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx db error");
-                        EngineError::new(EngineErrorKind::Transient)
-                    })?;
-
-                    let Some((
-                        tenant_id,
-                        domain,
-                        contract_id,
-                        topic,
-                        payload,
-                        metadata_json,
-                        contract_version,
-                        schema_hash,
-                        authoritative_retry_count,
-                    )) = row
-                    else {
-                        return Ok(DlxSettleOutcome::LostLease);
-                    };
-
-                    let row_tenant = parse_tenant_id(&tenant_id)?;
-                    if row_tenant != tenant {
-                        tracing::error!(
-                            target: "postgres",
-                            event_id,
-                            expected_tenant = %tenant,
-                            row_tenant = %row_tenant,
-                            "outbox: settle_dlx returned a row for a different tenant"
-                        );
-                        return Err(EngineError::new(EngineErrorKind::Invariant));
-                    }
-                    let metadata = metadata_json_with_relay_failure(
-                        &metadata_json,
-                        tenant,
-                        &contract_version,
-                        &schema_hash,
-                        relay_failure_reason,
-                    )?;
-
-                    let protected = payload_protector
-                        .encrypt(
-                            DlxPayloadContext::new(
-                                tenant,
-                                DeadLetterSource::OutboxRelay.as_str(),
-                                &domain,
-                                None,
-                                &contract_id,
-                                &topic,
-                                None,
-                                &event_id,
-                            ),
-                            &payload,
-                            &metadata,
-                        )
-                        .await
-                        .map_err(|e| {
-                            tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx encrypt payload error");
-                            EngineError::new(EngineErrorKind::Transient)
-                        })?;
-                    sqlx::query(
-                        r#"
-                        INSERT INTO dead_letter
-                            (tenant_id, message_id, producer_domain, consumer_domain,
-                             contract_id, topic, consumer_group,
-                             replay_capsule, replay_capsule_key_ref, payload_len,
-                             replay_capsule_encoding, metadata_digest,
-                             error_summary, num_attempts, source_kind)
-                        VALUES ($1::uuid, $2, $3, NULL, $4, $5, NULL, $6, $7, $8, $9, $10, $11, $12, $13)
-                        "#,
-                    )
-                    .bind(tenant.to_string())
-                    .bind(&event_id)
-                    .bind(domain)
-                    .bind(contract_id)
-                    .bind(topic)
-                    .bind(sqlx::types::Json(protected.replay_capsule()))
-                    .bind(protected.key_ref())
-                    .bind(protected.payload_len())
-                    .bind(DLX_REPLAY_CAPSULE_ENCODING)
-                    .bind(protected.metadata_digest())
-                    .bind(error_summary)
-                    .bind(authoritative_retry_count)
-                    .bind(DeadLetterSource::OutboxRelay.as_str())
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(|e| {
-                        tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx dead_letter db error");
-                        EngineError::new(EngineErrorKind::Transient)
-                    })?;
-
-                    Ok(DlxSettleOutcome::Settled(authoritative_retry_count))
-                })
-            },
-            move |e| {
-                tracing::warn!(target: "postgres", event_id = %tx_event_id, operation = "settle_dlx.tx", error = %secure::redact_error(&e), "outbox: settle_dlx tenant-scoped tx db error");
-                EngineError::new(EngineErrorKind::Transient)
-            },
-            move || settlement_timeout_error(phase, settle_timeout_ms),
-        )
-        .await
 }
 
 fn parse_metadata_json(json: &str) -> Result<serde_json::Value, EngineError> {
@@ -2403,48 +2187,6 @@ fn metadata_json_with_relay_failure(
     Ok(metadata)
 }
 
-/// 还有预算时把行退回 pending + 退避（以 `lease_token` 比对，防 stale 持租者结算；WHERE 先于 SET 求值）。
-async fn settle_retry(
-    pool: &sqlx::PgPool,
-    claimed: &PgClaimedOutboxEntry,
-    deadline: tokio::time::Instant,
-    settle_timeout_ms: i64,
-) -> Result<SettleOutcome, EngineError> {
-    let event_id = claimed.idem_key().as_str().to_string();
-    let lease_token = claimed.lease_token().to_string();
-    let lease_deadline_epoch_micros = claimed.lease_deadline_epoch_micros();
-    let query_event_id = event_id.clone();
-    deadline_global_transaction(
-        pool,
-        deadline,
-        move |connection| {
-            Box::pin(async move {
-                let row: (i64,) = sqlx::query_as(
-                    "SELECT rss_outbox_settle_retry($1, $2::uuid, $3)",
-                )
-                .bind(query_event_id)
-                .bind(lease_token)
-                .bind(lease_deadline_epoch_micros)
-                .fetch_one(connection)
-                .await
-                .map_err(|error| {
-                    tracing::warn!(target: "postgres", operation = "settle_retry", error = %secure::redact_error(&error), "outbox: settle_retry db error");
-                    EngineError::new(EngineErrorKind::Transient)
-                })?;
-                let rows = u64::try_from(row.0)
-                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-                Ok(settle_outcome(rows))
-            })
-        },
-        move |error| {
-            tracing::warn!(target: "postgres", event_id, operation = "settle_retry.tx", error = %secure::redact_error(&error), "outbox: settle_retry transaction error");
-            EngineError::new(EngineErrorKind::Transient)
-        },
-        move || settlement_timeout_error("settle_retry", settle_timeout_ms),
-    )
-    .await
-}
-
 // ── 纯函数（单测覆盖）────────────────────────────────────────────────────────
 
 /// 该次 publish 失败是否应进 DLX（而非退避重试）——#1212 瞬态/永久分流谓词。
@@ -2477,6 +2219,20 @@ pub(crate) const fn backoff_seconds(retry_count: i32) -> i64 {
 
 // ── 单测 ──────────────────────────────────────────────────────────────────────
 
+#[cfg(all(test, feature = "integration"))]
+impl PgOutbox {
+    pub(crate) async fn test_published_settlement_outcome(
+        &self,
+        claimed: &PgClaimedOutboxEntry,
+    ) -> Result<&'static str, EngineError> {
+        match settlement::published(&self.tenant_pool, claimed, self.relay_budget).await? {
+            settlement::Settlement::Settled((), _) => Ok("settled"),
+            settlement::Settlement::Expired(_) => Ok("expired"),
+            settlement::Settlement::LostLease(_) => Ok("lost_lease"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -2491,8 +2247,8 @@ mod tests {
         STATUS_PUBLISHED, STATUS_PUBLISHING, apply_schema_headers_from_columns, backoff_seconds,
         classify_append_fingerprint, dlx_decision, hydrate_claimed_outbox_row,
         hydrate_envelope_metadata, metadata_with_ambient, publish_request,
-        record_relay_envelope_validation_failure, settlement_timeout_error, unix_secs,
-        validate_publish_request_envelope, with_publisher_watchdog,
+        record_relay_envelope_validation_failure, unix_secs, validate_publish_request_envelope,
+        with_publisher_watchdog,
     };
     use diport::{
         EnvelopeMetadata, EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT,
@@ -2543,15 +2299,27 @@ mod tests {
     #[test]
     fn provider_lease_rejects_invalid_token_version_and_deadline() {
         assert!(matches!(
-            OutboxLease::hydrate("not-a-uuid".to_string(), 1),
+            OutboxLease::hydrate(
+                "not-a-uuid".to_string(),
+                1,
+                super::io_deadline_after(Duration::from_secs(1))
+            ),
             Err(OutboxLeaseError::Token)
         ));
         assert!(matches!(
-            OutboxLease::hydrate("f47ac10b-58cc-1372-a567-0e02b2c3d479".to_string(), 1),
+            OutboxLease::hydrate(
+                "f47ac10b-58cc-1372-a567-0e02b2c3d479".to_string(),
+                1,
+                super::io_deadline_after(Duration::from_secs(1))
+            ),
             Err(OutboxLeaseError::TokenVersion)
         ));
         assert!(matches!(
-            OutboxLease::hydrate("f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(), 0),
+            OutboxLease::hydrate(
+                "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                0,
+                super::io_deadline_after(Duration::from_secs(1))
+            ),
             Err(OutboxLeaseError::Deadline)
         ));
     }
@@ -2575,29 +2343,11 @@ mod tests {
         assert!(PublishPreflight::try_from(4).is_err());
     }
 
-    #[test]
-    fn settlement_timeout_is_transient() {
-        let error = settlement_timeout_error("test_settlement", 5);
-        assert_eq!(error.kind(), consistency::EngineErrorKind::Transient);
-    }
-
     const SETTLE_TIMEOUT_BRANCH_WIRINGS: [(&str, &str); 4] = [
-        (
-            "published",
-            "settle_published_before(&self.pool,&claimed,settle_deadline(self.relay_budget),self.relay_budget.settle_timeout_millis(),)",
-        ),
-        (
-            "same_id_expiry_dlx",
-            "\"settle_delivery_window_expired\",self.relay_budget.settle_timeout_millis(),",
-        ),
-        (
-            "ordinary_dlx",
-            "\"settle_dlx\",self.relay_budget.settle_timeout_millis(),",
-        ),
-        (
-            "retry",
-            "settle_retry(&self.pool,claimed,settle_deadline(self.relay_budget),self.relay_budget.settle_timeout_millis(),)",
-        ),
+        ("published", "settlement::published("),
+        ("same_id_expiry_dlx", "settlement::same_id_expiry_dlx("),
+        ("ordinary_dlx", "settlement::ordinary_dlx("),
+        ("retry", "settlement::retry("),
     ];
 
     fn compact_production_outbox_source() -> String {
@@ -2639,6 +2389,20 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn local_publish_budget_requires_strictly_more_than_the_full_budget() {
+        let budget = relay_budget();
+        let now = crate::cotx::io_deadline_after(Duration::ZERO);
+        assert!(!super::local_publish_budget_available(
+            now + budget.required_budget(),
+            budget,
+        ));
+        assert!(super::local_publish_budget_available(
+            now + budget.required_budget() + Duration::from_millis(1),
+            budget,
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn publisher_watchdog_uses_the_shared_absolute_deadline() {
         let budget = relay_budget();
         assert!(budget.publisher_watchdog_timeout() > budget.publish_timeout());
@@ -2659,8 +2423,12 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: fixed provider hydration fixture is valid by construction.
     fn provider_claim_hydration_is_complete_and_debug_redacted() {
-        let claim = hydrate_claimed_outbox_row(valid_claimed_row(), &test_provider_identity())
-            .expect("valid provider claim");
+        let claim = hydrate_claimed_outbox_row(
+            valid_claimed_row(),
+            &test_provider_identity(),
+            super::io_deadline_after(Duration::from_secs(60)),
+        )
+        .expect("valid provider claim");
         assert_eq!(claim.subject().tenant_id(), tenant());
         assert_eq!(
             claim.subject().contract_id().as_str(),
@@ -2676,6 +2444,7 @@ mod tests {
 
         let debug = format!("{claim:?}");
         assert!(!debug.contains("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(!debug.contains("1700000060000000"));
         assert!(!debug.contains("SECRET_CLAIM_PAYLOAD"));
         assert!(!debug.contains("SECRET_CLAIM_METADATA"));
     }
@@ -2684,7 +2453,12 @@ mod tests {
     fn provider_claim_hydration_reports_typed_failure_phase() {
         let mut row = valid_claimed_row();
         row.retry_count = -1;
-        let error = hydrate_claimed_outbox_row(row, &test_provider_identity()).err();
+        let error = hydrate_claimed_outbox_row(
+            row,
+            &test_provider_identity(),
+            super::io_deadline_after(Duration::from_secs(60)),
+        )
+        .err();
         assert_eq!(error, Some(ClaimHydrationError::RetryCount));
         assert_eq!(error.map(ClaimHydrationError::phase), Some("retry_count"));
     }
@@ -3671,6 +3445,64 @@ mod tests {
         }
         assert!(!MIGRATION.contains("p_lease_ttl_ms * interval '1 millisecond'"));
         assert!(!MIGRATION.contains("p_required_budget_ms * interval '1 millisecond'"));
+    }
+
+    #[test]
+    fn sealed_settlement_migration_has_closed_type_and_least_privilege() {
+        let migration = include_str!("../migrations/0066_seal_outbox_settlement_outcomes.sql");
+        assert!(migration.contains(
+            "CREATE TYPE rss_outbox_settlement_outcome AS ENUM ('settled', 'expired', 'lost_lease')"
+        ));
+        assert!(
+            migration.contains(
+                "ALTER TYPE rss_outbox_settlement_outcome OWNER TO rss_outbox_maintenance"
+            )
+        );
+        assert!(migration.contains("REVOKE ALL ON TYPE rss_outbox_settlement_outcome FROM PUBLIC"));
+        assert!(migration.contains("GRANT USAGE ON TYPE rss_outbox_settlement_outcome TO rss_app"));
+    }
+
+    #[test]
+    fn sealed_settlement_migration_replaces_each_function_and_restores_acl() {
+        let migration = include_str!("../migrations/0066_seal_outbox_settlement_outcomes.sql");
+        for signature in [
+            "rss_outbox_settle_published(text, uuid, bigint)",
+            "rss_outbox_settle_retry(text, uuid, bigint)",
+            "rss_outbox_mark_dlx(text, uuid, bigint)",
+        ] {
+            assert!(migration.contains(&format!("DROP FUNCTION {signature}")));
+            assert!(migration.contains(&format!(
+                "ALTER FUNCTION {signature} OWNER TO rss_outbox_maintenance"
+            )));
+            assert!(migration.contains(&format!("REVOKE ALL ON FUNCTION {signature} FROM PUBLIC")));
+            assert!(
+                migration.contains(&format!("GRANT EXECUTE ON FUNCTION {signature} TO rss_app"))
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_settlement_migration_locks_before_clock_and_keeps_exact_cas() {
+        let migration = include_str!("../migrations/0066_seal_outbox_settlement_outcomes.sql");
+        assert_eq!(migration.matches("FOR UPDATE OF o").count(), 3);
+        assert_eq!(
+            migration
+                .matches("v_settled_at := clock_timestamp()")
+                .count(),
+            3
+        );
+        assert_eq!(migration.matches("RETURN 'expired'").count(), 2);
+        assert!(migration.contains("'expired'::rss_outbox_settlement_outcome"));
+        assert_eq!(
+            migration.matches("o.lease_token = p_lease_token").count(),
+            6
+        );
+        assert_eq!(
+            migration
+                .matches("p_lease_deadline_epoch_micros * interval '1 microsecond'")
+                .count(),
+            6
+        );
     }
 
     #[test]

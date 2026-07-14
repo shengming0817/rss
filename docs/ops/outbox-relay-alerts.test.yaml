@@ -4,6 +4,82 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
+  # A first settlement-expired sample must page even when increase() has only
+  # one sample. Once the 5m offset exists, an unchanged counter stops paging.
+  - interval: 1m
+    input_series:
+      - series: 'outbox_relay_settlement_failure_total{domain="orders",contract_id="order.created.v1",tenant_id="tenant-a",operation="published",reason="expired"}'
+        values: '_x5 1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OutboxSettlementExpired
+        exp_alerts:
+          - exp_labels:
+              domain: orders
+              severity: critical
+            exp_annotations:
+              summary: "Outbox settlement lease 到期（domain=orders）"
+              description: "近 5min settlement expired 增长/首次 series 信号 1；停止依赖性处置，检查 relay 调度、settle budget、数据库锁等待与连接池压力。"
+      - eval_time: 11m
+        alertname: OutboxSettlementExpired
+        exp_alerts: []
+
+  # Sustained timeout/lost-lease/storage settlement failures retain the closed reason
+  # label and aggregate away operation/contract/tenant cardinality.
+  - interval: 1m
+    input_series:
+      - series: 'outbox_relay_settlement_failure_total{domain="billing",contract_id="invoice.issued.v1",tenant_id="tenant-b",operation="retry",reason="timeout"}'
+        values: '0+120x12'
+      - series: 'outbox_relay_settlement_failure_total{domain="billing",contract_id="invoice.issued.v1",tenant_id="tenant-c",operation="dlx",reason="lost_lease"}'
+        values: '0+90x12'
+      - series: 'outbox_relay_settlement_failure_total{domain="billing",contract_id="invoice.issued.v1",tenant_id="tenant-d",operation="published",reason="storage"}'
+        values: '0+75x12'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OutboxSettlementFailureRateHigh
+        exp_alerts:
+          - exp_labels:
+              domain: billing
+              reason: timeout
+              severity: warning
+            exp_annotations:
+              summary: "Outbox settlement 失败率持续偏高（domain=billing, reason=timeout）"
+              description: "settlement failure rate=2/s；检查数据库连接池、锁等待、事务/SQL、settle timeout 与 lease ownership。"
+          - exp_labels:
+              domain: billing
+              reason: lost_lease
+              severity: warning
+            exp_annotations:
+              summary: "Outbox settlement 失败率持续偏高（domain=billing, reason=lost_lease）"
+              description: "settlement failure rate=1.5/s；检查数据库连接池、锁等待、事务/SQL、settle timeout 与 lease ownership。"
+          - exp_labels:
+              domain: billing
+              reason: storage
+              severity: warning
+            exp_annotations:
+              summary: "Outbox settlement 失败率持续偏高（domain=billing, reason=storage）"
+              description: "settlement failure rate=1.25/s；检查数据库连接池、锁等待、事务/SQL、settle timeout 与 lease ownership。"
+
+  # Invariant/protection failures page on the first sample and stop after the 5m offset exists.
+  - interval: 1m
+    input_series:
+      - series: 'outbox_relay_settlement_failure_total{domain="identity",contract_id="identity.session-created",tenant_id="tenant-a",operation="dlx",reason="invariant"}'
+        values: '_x5 1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OutboxSettlementIntegrityFailure
+        exp_alerts:
+          - exp_labels:
+              domain: identity
+              reason: invariant
+              severity: critical
+            exp_annotations:
+              summary: "Outbox settlement 完整性失败（domain=identity, reason=invariant）"
+              description: "近 5min settlement invariant 增长/首次 series 信号 1；停止 relay 依赖性处置，检查 DLX key provider、0066 闭值契约与返回行形状。"
+      - eval_time: 11m
+        alertname: OutboxSettlementIntegrityFailure
+        exp_alerts: []
+
   # A counter created at 1 stays invisible to increase() even after several
   # unchanged scrapes. Filtering zero increase before `or` lets the new-series
   # branch page until the 10m offset exists, then stop for the unchanged series.

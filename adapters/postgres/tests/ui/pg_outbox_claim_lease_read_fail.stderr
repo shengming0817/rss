@@ -6,5 +6,5 @@ error[E0624]: method `lease_token` is private
   |
  ::: src/outbox.rs
   |
-  |     pub(crate) fn lease_token(&self) -> &str {
-  |     ---------------------------------------- private method defined here
+  |     fn lease_token(&self) -> &str {
+  |     ----------------------------- private method defined here

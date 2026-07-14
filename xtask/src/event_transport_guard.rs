@@ -13,12 +13,17 @@
 //! INVARIANT: OUTBOX-RELAY-BUDGET-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::relay_budget_guard_synthetic_red_breaks_each_carrier", anti_vacuity = "tests::relay_budget_guard_accepts_canonical_workspace" }——
 //! runtime typed config、AMQP 单 deadline、Postgres typed watchdog/settlement 与 0064 SQL 签名必须保持
 //! 同一预算能力链；carrier 生产 Rust 禁止回流固定 40/50/60 秒 deadline。
+//! INVARIANT: PG-OUTBOX-SETTLEMENT-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::settlement_funnel_guard_synthetic_red_rejects_each_raw_function_and_query_path", anti_vacuity = "tests::settlement_funnel_guard_accepts_canonical_workspace" }——
+//! production Rust 只能在私有 `outbox::settlement` 模块执行三个 raw settlement SQL
+//! function；守卫以 Rust AST 中的 executable SQL call argument 识别调用，并要求私有模块持有
+//! 三个 canonical execution witness，避免 comment/const/string bait 形成空门。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use quote::ToTokens;
+use syn::parse::Parser as _;
 use syn::spanned::Spanned as _;
 use syn::visit::Visit;
 
@@ -77,6 +82,7 @@ pub(crate) enum Rule {
     ProducerTopology,
     OutboxClaimCutover,
     OutboxRelayBudget,
+    PostgresOutboxSettlementFunnel,
 }
 
 pub(crate) struct EventTransportGuard;
@@ -99,6 +105,7 @@ impl GovernanceCheck for EventTransportGuard {
         findings.extend(scan_event_producers(&root)?);
         let claim_cutover_sources = load_outbox_claim_cutover_sources(&root)?;
         findings.extend(scan_outbox_claim_cutover_sources(&claim_cutover_sources));
+        findings.extend(scan_settlement_funnel_sources(&claim_cutover_sources).findings);
         let relay_budget_sources = load_relay_budget_sources(&root)?;
         findings.extend(scan_relay_budget_sources(&relay_budget_sources));
         findings.extend(scan_relay_budget_constructor_callsites(
@@ -1269,6 +1276,12 @@ fn expr_is_infra_call(expr: &syn::Expr) -> bool {
 
 const EVENTEXEC_RELAY_PATH: &str = "crates/eventexec/src/relay.rs";
 const POSTGRES_OUTBOX_PATH: &str = "adapters/postgres/src/outbox.rs";
+const POSTGRES_OUTBOX_SETTLEMENT_PATH: &str = "adapters/postgres/src/outbox/settlement.rs";
+const OUTBOX_SETTLEMENT_RAW_FUNCTIONS: &[&str] = &[
+    "rss_outbox_settle_published",
+    "rss_outbox_settle_retry",
+    "rss_outbox_mark_dlx",
+];
 const RELAY_BUDGET_SOURCE_PATHS: &[&str] = &[
     "crates/eventexec/src/relay_config.rs",
     "assemblies/runtime/src/event_transport.rs",
@@ -1276,6 +1289,7 @@ const RELAY_BUDGET_SOURCE_PATHS: &[&str] = &[
     "adapters/amqp/src/publisher.rs",
     "adapters/amqp/src/bundle.rs",
     "adapters/postgres/src/outbox.rs",
+    "adapters/postgres/src/outbox/settlement.rs",
     "adapters/postgres/src/integration_tests.rs",
     "adapters/postgres/src/bundle.rs",
     "adapters/postgres/migrations/0064_parameterize_outbox_relay_budget.sql",
@@ -1299,6 +1313,421 @@ fn load_relay_budget_sources(root: &Path) -> Result<Vec<(PathBuf, String)>> {
             Ok((PathBuf::from(relative), content))
         })
         .collect()
+}
+
+#[derive(Debug, Default)]
+struct SettlementFunnelScan {
+    findings: Vec<Finding<Rule>>,
+    canonical_calls: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSettlementSql {
+    value: String,
+    line: usize,
+}
+
+fn scan_settlement_funnel_sources(sources: &[(PathBuf, String)]) -> SettlementFunnelScan {
+    let test_only_files = external_cfg_test_module_paths(sources);
+    let mut scan = SettlementFunnelScan::default();
+    for (path, content) in sources.iter().filter(|(path, _)| {
+        path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+            && !test_only_files.contains(path)
+    }) {
+        let Ok(file) = syn::parse_file(content) else {
+            scan.findings.push(finding(
+                Rule::PostgresOutboxSettlementFunnel,
+                path.display().to_string(),
+                "PG-OUTBOX-SETTLEMENT-FUNNEL-01 production Rust AST 无法解析".to_string(),
+            ));
+            continue;
+        };
+        if is_claim_test_only(&file.attrs) {
+            continue;
+        }
+        let allowed = path == Path::new(POSTGRES_OUTBOX_SETTLEMENT_PATH);
+        let mut visitor = SettlementSqlVisitor {
+            path,
+            allowed,
+            scan: &mut scan,
+            bindings: vec![static_string_bindings(&file)],
+            builders: vec![BTreeMap::new()],
+            local_executor_arguments: if allowed {
+                local_settlement_executor_arguments(&file)
+            } else {
+                BTreeMap::new()
+            },
+        };
+        visitor.visit_file(&file);
+    }
+    for function in OUTBOX_SETTLEMENT_RAW_FUNCTIONS {
+        if !scan.canonical_calls.contains(*function) {
+            scan.findings.push(finding(
+                Rule::PostgresOutboxSettlementFunnel,
+                POSTGRES_OUTBOX_SETTLEMENT_PATH,
+                format!(
+                    "PG-OUTBOX-SETTLEMENT-FUNNEL-01 缺 canonical raw function `{function}` execution witness"
+                ),
+            ));
+        }
+    }
+    scan
+}
+
+struct SettlementSqlVisitor<'a> {
+    path: &'a Path,
+    allowed: bool,
+    scan: &'a mut SettlementFunnelScan,
+    bindings: Vec<BTreeMap<String, ResolvedSettlementSql>>,
+    builders: Vec<BTreeMap<String, ResolvedSettlementSql>>,
+    local_executor_arguments: BTreeMap<String, BTreeSet<usize>>,
+}
+
+impl SettlementSqlVisitor<'_> {
+    fn inspect_sql(&mut self, sql: &str, line: usize) {
+        for function in raw_settlement_function_calls(sql) {
+            let canonical = OUTBOX_SETTLEMENT_RAW_FUNCTIONS.contains(&function.as_str());
+            if self.allowed && canonical {
+                self.scan.canonical_calls.insert(function);
+            } else {
+                self.scan.findings.push(finding(
+                    Rule::PostgresOutboxSettlementFunnel,
+                    format!("{}:{line}", self.path.display()),
+                    format!(
+                        "PG-OUTBOX-SETTLEMENT-FUNNEL-01 raw function `{function}` 只能在 `{POSTGRES_OUTBOX_SETTLEMENT_PATH}` 执行"
+                    ),
+                ));
+            }
+        }
+    }
+
+    fn scoped_sql(
+        scopes: &[BTreeMap<String, ResolvedSettlementSql>],
+        name: &str,
+    ) -> Option<ResolvedSettlementSql> {
+        scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn resolve_sql(&self, expression: &syn::Expr) -> Option<ResolvedSettlementSql> {
+        if let Some(sql) = expr_string_literal(expression) {
+            return Some(ResolvedSettlementSql {
+                value: sql.value(),
+                line: sql.span().start().line,
+            });
+        }
+        if let Some(name) = simple_expr_ident(expression)
+            && let Some(sql) = Self::scoped_sql(&self.bindings, &name)
+        {
+            return Some(sql);
+        }
+        let syn::Expr::Macro(expression) = peel_expr(expression) else {
+            return None;
+        };
+        if !path_ends_with(&expression.mac.path, "concat") {
+            return None;
+        }
+        let expressions = parse_macro_expressions(&expression.mac.tokens)?;
+        let mut value = String::new();
+        for part in expressions {
+            value.push_str(&self.resolve_sql(&part)?.value);
+        }
+        Some(ResolvedSettlementSql {
+            value,
+            line: expression.mac.span().start().line,
+        })
+    }
+
+    fn query_sql(&self, expression: &syn::Expr) -> Option<ResolvedSettlementSql> {
+        match peel_expr(expression) {
+            syn::Expr::MethodCall(call) => self.query_sql(&call.receiver),
+            syn::Expr::Call(call) => {
+                let syn::Expr::Path(function) = peel_expr(&call.func) else {
+                    return None;
+                };
+                sqlx_query_path(&function.path).then(|| {
+                    call.args
+                        .iter()
+                        .find_map(|argument| self.resolve_sql(argument))
+                })?
+            }
+            syn::Expr::Macro(expression) if sqlx_query_path(&expression.mac.path) => {
+                parse_macro_expressions(&expression.mac.tokens)?
+                    .iter()
+                    .find_map(|argument| self.resolve_sql(argument))
+            }
+            syn::Expr::Path(_) => {
+                let name = simple_expr_ident(expression)?;
+                Self::scoped_sql(&self.builders, &name)
+            }
+            _ => None,
+        }
+    }
+
+    fn inspect_awaited_expression(&mut self, expression: &syn::Expr) {
+        if let Some(receiver) = awaited_sqlx_terminal_receiver(expression)
+            && let Some(sql) = self.query_sql(receiver)
+        {
+            self.inspect_sql(&sql.value, sql.line);
+            return;
+        }
+
+        let syn::Expr::Call(call) = peel_expr(expression) else {
+            return;
+        };
+        let syn::Expr::Path(function) = peel_expr(&call.func) else {
+            return;
+        };
+        let Some(name) = function.path.get_ident().map(ToString::to_string) else {
+            return;
+        };
+        let Some(arguments) = self.local_executor_arguments.get(&name).cloned() else {
+            return;
+        };
+        for index in arguments {
+            if let Some(sql) = call
+                .args
+                .iter()
+                .nth(index)
+                .and_then(|argument| self.resolve_sql(argument))
+            {
+                self.inspect_sql(&sql.value, sql.line);
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for SettlementSqlVisitor<'_> {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if !is_claim_test_only(&node.attrs) {
+            syn::visit::visit_item_mod(self, node);
+        }
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if !is_claim_test_only(&node.attrs) {
+            self.bindings.push(BTreeMap::new());
+            self.builders.push(BTreeMap::new());
+            syn::visit::visit_item_fn(self, node);
+            self.builders.pop();
+            self.bindings.pop();
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if !is_claim_test_only(&node.attrs) {
+            self.bindings.push(BTreeMap::new());
+            self.builders.push(BTreeMap::new());
+            syn::visit::visit_impl_item_fn(self, node);
+            self.builders.pop();
+            self.bindings.pop();
+        }
+    }
+
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if let (Some(name), Some(init)) = (pat_ident(&node.pat), node.init.as_ref()) {
+            if let Some(sql) = self.resolve_sql(&init.expr)
+                && let Some(scope) = self.bindings.last_mut()
+            {
+                scope.insert(name.clone(), sql);
+            }
+            if let Some(sql) = self.query_sql(&init.expr)
+                && let Some(scope) = self.builders.last_mut()
+            {
+                scope.insert(name, sql);
+            }
+        }
+        syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
+        self.inspect_awaited_expression(&node.base);
+        syn::visit::visit_expr_await(self, node);
+    }
+}
+
+fn static_string_bindings(file: &syn::File) -> BTreeMap<String, ResolvedSettlementSql> {
+    #[derive(Default)]
+    struct Collector(BTreeMap<String, ResolvedSettlementSql>);
+
+    impl<'ast> Visit<'ast> for Collector {
+        fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+            if !is_claim_test_only(&node.attrs) {
+                syn::visit::visit_item_mod(self, node);
+            }
+        }
+
+        fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
+            if !is_claim_test_only(&node.attrs)
+                && let Some(sql) = expr_string_literal(&node.expr)
+            {
+                self.0.insert(
+                    node.ident.to_string(),
+                    ResolvedSettlementSql {
+                        value: sql.value(),
+                        line: sql.span().start().line,
+                    },
+                );
+            }
+        }
+
+        fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
+            if !is_claim_test_only(&node.attrs)
+                && let Some(sql) = expr_string_literal(&node.expr)
+            {
+                self.0.insert(
+                    node.ident.to_string(),
+                    ResolvedSettlementSql {
+                        value: sql.value(),
+                        line: sql.span().start().line,
+                    },
+                );
+            }
+        }
+    }
+
+    let mut collector = Collector::default();
+    collector.visit_file(file);
+    collector.0
+}
+
+fn parse_macro_expressions(
+    tokens: &proc_macro2::TokenStream,
+) -> Option<syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>> {
+    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+        .parse2(tokens.clone())
+        .ok()
+}
+
+fn path_ends_with(path: &syn::Path, expected: &str) -> bool {
+    path.segments
+        .last()
+        .is_some_and(|segment| segment.ident == expected)
+}
+
+fn awaited_sqlx_terminal_receiver(expression: &syn::Expr) -> Option<&syn::Expr> {
+    let syn::Expr::MethodCall(call) = peel_expr(expression) else {
+        return None;
+    };
+    matches!(
+        call.method.to_string().as_str(),
+        "execute"
+            | "execute_many"
+            | "fetch"
+            | "fetch_many"
+            | "fetch_all"
+            | "fetch_one"
+            | "fetch_optional"
+    )
+    .then_some(call.receiver.as_ref())
+}
+
+fn local_settlement_executor_arguments(file: &syn::File) -> BTreeMap<String, BTreeSet<usize>> {
+    let mut executors = BTreeMap::new();
+    for item in &file.items {
+        let syn::Item::Fn(function) = item else {
+            continue;
+        };
+        let parameters = function
+            .sig
+            .inputs
+            .iter()
+            .filter_map(|input| match input {
+                syn::FnArg::Typed(argument) => pat_ident(&argument.pat),
+                syn::FnArg::Receiver(_) => None,
+            })
+            .enumerate()
+            .map(|(index, name)| (name, index))
+            .collect::<BTreeMap<_, _>>();
+        let mut visitor = ExecutedSqlParameterVisitor {
+            parameters: parameters.keys().cloned().collect(),
+            executed: BTreeSet::new(),
+        };
+        visitor.visit_block(&function.block);
+        let arguments = visitor
+            .executed
+            .into_iter()
+            .filter_map(|name| parameters.get(&name).copied())
+            .collect::<BTreeSet<_>>();
+        if !arguments.is_empty() {
+            executors.insert(function.sig.ident.to_string(), arguments);
+        }
+    }
+    executors
+}
+
+struct ExecutedSqlParameterVisitor {
+    parameters: BTreeSet<String>,
+    executed: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for ExecutedSqlParameterVisitor {
+    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
+        if let Some(receiver) = awaited_sqlx_terminal_receiver(&node.base)
+            && let Some(argument) = sqlx_query_argument(receiver)
+            && let Some(name) = simple_expr_ident(argument)
+            && self.parameters.contains(&name)
+        {
+            self.executed.insert(name);
+        }
+        syn::visit::visit_expr_await(self, node);
+    }
+}
+
+fn sqlx_query_argument(expression: &syn::Expr) -> Option<&syn::Expr> {
+    match peel_expr(expression) {
+        syn::Expr::MethodCall(call) => sqlx_query_argument(&call.receiver),
+        syn::Expr::Call(call) => {
+            let syn::Expr::Path(function) = peel_expr(&call.func) else {
+                return None;
+            };
+            sqlx_query_path(&function.path).then(|| call.args.first())?
+        }
+        _ => None,
+    }
+}
+
+fn raw_settlement_function_calls(sql: &str) -> BTreeSet<String> {
+    direct_sql_statements(sql)
+        .into_iter()
+        .flat_map(|statement| settlement_function_identifiers(&statement.text))
+        .collect()
+}
+
+fn settlement_function_identifiers(statement: &str) -> BTreeSet<String> {
+    let statement = statement.as_bytes();
+    let mut functions = BTreeSet::new();
+    let mut cursor = 0;
+    while cursor < statement.len() {
+        if !is_sql_ident_byte(statement[cursor]) {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while statement
+            .get(cursor)
+            .is_some_and(|byte| is_sql_ident_byte(*byte))
+        {
+            cursor += 1;
+        }
+        let mut after = cursor;
+        while statement.get(after).is_some_and(u8::is_ascii_whitespace) {
+            after += 1;
+        }
+        let identifier = String::from_utf8_lossy(&statement[start..cursor]).to_ascii_lowercase();
+        if statement.get(after) == Some(&b'(')
+            && (identifier.starts_with("rss_outbox_settle_") || identifier == "rss_outbox_mark_dlx")
+        {
+            functions.insert(identifier);
+        }
+    }
+    functions
+}
+
+fn is_sql_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>> {
@@ -1474,7 +1903,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
             ][..],
         ),
         (
-            "adapters/postgres/src/outbox.rs",
+            "adapters/postgres/src/outbox/settlement.rs",
             "outbox settlement timed out",
             "settlement_timeout_error",
             &[
@@ -1738,7 +2167,7 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                         "let preflight_deadline = publish_deadline - self.relay_budget.publish_timeout()",
                         "publish_preflight(&self.pool, &claimed, self.relay_budget, preflight_deadline)",
                         "self.publish_claimed_before(&claimed, publish_deadline)",
-                        "settle_published_before(&self.pool, &claimed, settle_deadline(self.relay_budget), self.relay_budget.settle_timeout_millis()",
+                        "settlement::published(&self.tenant_pool, &claimed, self.relay_budget)",
                     ][..],
                 ),
                 (
@@ -1766,35 +2195,74 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                 (
                     Some("PgOutbox"),
                     "settle_delivery_window_expired",
-                    &[
-                        "settle_dlx(&self.tenant_pool, &self.payload_protector,",
-                        "settle_deadline(self.relay_budget)",
-                        "self.relay_budget.settle_timeout_millis()",
-                    ],
+                    &["settlement::same_id_expiry_dlx(", "self.relay_budget"],
                 ),
                 (
                     Some("PgOutbox"),
                     "settle_publish_failure",
                     &[
-                        "settle_dlx(&self.tenant_pool, &self.payload_protector,",
-                        "settle_deadline(self.relay_budget), \"settle_dlx\", self.relay_budget.settle_timeout_millis()",
-                        "settle_retry(&self.pool, claimed, settle_deadline(self.relay_budget), self.relay_budget.settle_timeout_millis()",
+                        "settlement::ordinary_dlx(",
+                        "settlement::retry(&self.tenant_pool, claimed, self.relay_budget)",
+                        "self.relay_budget",
                     ],
                 ),
+            ],
+        ),
+        (
+            "adapters/postgres/src/outbox/settlement.rs",
+            &[
                 (
                     None,
-                    "settle_published_before",
-                    &["deadline_global_transaction(pool, deadline,"][..],
+                    "published",
+                    &[
+                        "deadline_or_expired(claimed, relay_budget",
+                        "execute_scalar(tenant_pool, claimed, relay_budget, deadline",
+                    ][..],
                 ),
                 (
                     None,
-                    "settle_retry",
-                    &["deadline_global_transaction(pool, deadline,"][..],
+                    "retry",
+                    &[
+                        "deadline_or_expired(claimed, relay_budget",
+                        "execute_scalar(tenant_pool, claimed, relay_budget, deadline",
+                    ][..],
                 ),
                 (
                     None,
-                    "settle_dlx",
-                    &["deadline_write(infra_tenant_scope(tenant), deadline,"][..],
+                    "ordinary_dlx",
+                    &[
+                        "let operation = SettlementOperation::Dlx",
+                        "execute_dlx(tenant_pool, payload_protector",
+                        "relay_budget, \"settle_dlx\"",
+                        "finalize(scope, operation)",
+                    ][..],
+                ),
+                (
+                    None,
+                    "same_id_expiry_dlx",
+                    &[
+                        "let operation = SettlementOperation::SameIdExpiryDlx",
+                        "execute_dlx(tenant_pool, payload_protector",
+                        "relay_budget, \"settle_delivery_window_expired\"",
+                        "finalize(scope, operation)",
+                    ][..],
+                ),
+                (
+                    None,
+                    "execute_scalar",
+                    &[
+                        "tenant_pool.deadline_write(infra_tenant_scope(tenant), deadline",
+                        "map_outer_timeout(phase, relay_budget)",
+                    ][..],
+                ),
+                (
+                    None,
+                    "execute_dlx",
+                    &[
+                        "deadline_or_expired(claimed, relay_budget",
+                        "deadline_write(infra_tenant_scope(tenant), deadline",
+                        "map_outer_timeout(phase, relay_budget)",
+                    ][..],
                 ),
             ],
         ),
@@ -5965,6 +6433,208 @@ $do$;
 
     #[test]
     #[allow(clippy::expect_used)]
+    fn settlement_funnel_guard_accepts_canonical_workspace() {
+        let root = workspace_root().expect("workspace root");
+        let sources = load_outbox_claim_cutover_sources(&root).expect("workspace sources");
+        let scan = scan_settlement_funnel_sources(&sources);
+        assert!(scan.findings.is_empty(), "{:#?}", scan.findings);
+        assert_eq!(
+            scan.canonical_calls,
+            BTreeSet::from([
+                "rss_outbox_mark_dlx".to_string(),
+                "rss_outbox_settle_published".to_string(),
+                "rss_outbox_settle_retry".to_string(),
+            ]),
+            "canonical settlement module must exercise every raw SQL function"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn settlement_capability_and_raw_sql_funnel_have_distinct_strength_ids() {
+        let root = workspace_root().expect("workspace root");
+        let capability =
+            std::fs::read_to_string(root.join("adapters/postgres/src/outbox/settlement.rs"))
+                .expect("private settlement module");
+        let raw_sql_guard =
+            std::fs::read_to_string(root.join("xtask/src/event_transport_guard.rs"))
+                .expect("raw SQL funnel guard");
+
+        assert!(
+            capability.contains("INVARIANT: PG-OUTBOX-SETTLEMENT-CAPABILITY-01 { level = \"Hard\""),
+            "native capability boundary must have its own Hard invariant ID"
+        );
+        assert!(
+            raw_sql_guard
+                .contains("INVARIANT: PG-OUTBOX-SETTLEMENT-FUNNEL-01 { level = \"Medium\""),
+            "workspace raw SQL funnel must remain honestly Medium"
+        );
+        assert!(
+            !capability.contains("INVARIANT: PG-OUTBOX-SETTLEMENT-FUNNEL-01 { level = \"Hard\""),
+            "the Medium workspace policy must not be advertised as native Hard"
+        );
+    }
+
+    #[test]
+    fn settlement_funnel_guard_synthetic_red_rejects_each_raw_function_and_query_path() {
+        let cases = [
+            (
+                "rss_outbox_settle_published",
+                r#"async fn bypass(c: &mut C) { sqlx::query("SELECT rss_outbox_settle_published($1, $2, $3)").execute(c).await; }"#,
+            ),
+            (
+                "rss_outbox_settle_retry",
+                r#"async fn bypass(c: &mut C) { sqlx::query_scalar("SELECT rss_outbox_settle_retry($1, $2, $3)").fetch_one(c).await; }"#,
+            ),
+            (
+                "rss_outbox_mark_dlx",
+                r#"async fn bypass(c: &mut C) { sqlx::query_as!(Row, "SELECT * FROM rss_outbox_mark_dlx($1, $2, $3)").fetch_one(c).await; }"#,
+            ),
+            (
+                "rss_outbox_settle_published",
+                r#"const SQL: &str = "SELECT rss_outbox_settle_published($1, $2, $3)"; async fn bypass(c: &mut C) { sqlx::query(SQL).execute(c).await; }"#,
+            ),
+            (
+                "rss_outbox_settle_retry",
+                r#"async fn bypass(c: &mut C) { let sql = "SELECT rss_outbox_settle_retry($1, $2, $3)"; sqlx::query(sql).execute(c).await; }"#,
+            ),
+            (
+                "rss_outbox_settle_force",
+                r#"async fn bypass(c: &mut C) { sqlx::query("SELECT rss_outbox_settle_force($1)").execute(c).await; }"#,
+            ),
+        ];
+        for (function, content) in cases {
+            let sources = vec![(
+                PathBuf::from("adapters/postgres/src/settlement_bypass.rs"),
+                content.to_string(),
+            )];
+            let scan = scan_settlement_funnel_sources(&sources);
+            let bypasses = scan
+                .findings
+                .iter()
+                .filter(|finding| finding.subject.contains("settlement_bypass.rs"))
+                .collect::<Vec<_>>();
+            assert_eq!(bypasses.len(), 1, "{function}: {:#?}", scan.findings);
+            assert!(bypasses[0].detail.contains(function));
+        }
+    }
+
+    #[test]
+    fn settlement_funnel_counts_only_awaited_sqlx_execution_and_folds_concat() {
+        let outside = PathBuf::from("adapters/postgres/src/settlement_bypass.rs");
+        let inert = scan_settlement_funnel_sources(&[(
+            outside.clone(),
+            r#"
+                fn bait() {
+                    drop("SELECT rss_outbox_settle_published($1, $2, $3)");
+                    let _query = sqlx::query("SELECT rss_outbox_settle_retry($1, $2, $3)");
+                }
+            "#
+            .to_string(),
+        )]);
+        assert!(
+            inert
+                .findings
+                .iter()
+                .all(|finding| !finding.subject.contains("settlement_bypass.rs")),
+            "arbitrary strings and unawaited builders are not execution witnesses: {:#?}",
+            inert.findings
+        );
+
+        let executed = scan_settlement_funnel_sources(&[(
+            outside,
+            r#"
+                async fn bypass(connection: &mut sqlx::PgConnection) {
+                    let sql = concat!("SELECT ", "rss_outbox_settle_published", "($1, $2, $3)");
+                    let query = sqlx::query(sql).bind("event");
+                    query.execute(connection).await.unwrap();
+                }
+            "#
+            .to_string(),
+        )]);
+        assert!(
+            executed.findings.iter().any(|finding| {
+                finding.subject.contains("settlement_bypass.rs")
+                    && finding.detail.contains("rss_outbox_settle_published")
+            }),
+            "awaited SQLx execution with literal concat must be rejected: {:#?}",
+            executed.findings
+        );
+    }
+
+    #[test]
+    fn settlement_funnel_canonical_witness_requires_awaited_terminal() {
+        let unawaited = scan_settlement_funnel_sources(&[(
+            PathBuf::from(POSTGRES_OUTBOX_SETTLEMENT_PATH),
+            r#"
+                fn bait() {
+                    let _query = sqlx::query(
+                        "SELECT rss_outbox_settle_published($1, $2, $3)"
+                    );
+                }
+            "#
+            .to_string(),
+        )]);
+        assert!(
+            !unawaited
+                .canonical_calls
+                .contains("rss_outbox_settle_published"),
+            "constructing a query without execute/fetch await must not satisfy anti-vacuity"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn settlement_funnel_guard_canonical_anti_vacuity_rejects_string_bait() {
+        let absent = scan_settlement_funnel_sources(&[]);
+        assert_eq!(
+            absent.findings.len(),
+            OUTBOX_SETTLEMENT_RAW_FUNCTIONS.len(),
+            "absent canonical module must fail closed"
+        );
+        let root = workspace_root().expect("workspace root");
+        let mut sources = load_outbox_claim_cutover_sources(&root).expect("workspace sources");
+        let (_, settlement) = sources
+            .iter_mut()
+            .find(|(path, _)| path == Path::new("adapters/postgres/src/outbox/settlement.rs"))
+            .expect("private settlement module");
+        assert!(settlement.contains("rss_outbox_settle_published"));
+        let unknown_family = settlement.replacen(
+            "SELECT rss_outbox_settle_published($1, $2::uuid, $3)::text",
+            "SELECT rss_outbox_settle_force($1, $2::uuid, $3)::text",
+            1,
+        );
+        let unknown_scan = scan_settlement_funnel_sources(&[(
+            PathBuf::from(POSTGRES_OUTBOX_SETTLEMENT_PATH),
+            unknown_family,
+        )]);
+        assert!(
+            unknown_scan
+                .findings
+                .iter()
+                .any(|finding| finding.detail.contains("rss_outbox_settle_force")),
+            "private module must reject unknown settlement family members: {:#?}",
+            unknown_scan.findings
+        );
+        *settlement = settlement.replacen(
+            "SELECT rss_outbox_settle_published($1, $2::uuid, $3)::text",
+            "SELECT rss_outbox_settle_published_broken($1, $2::uuid, $3)::text",
+            1,
+        );
+        settlement
+            .push_str(r#"\nconst SETTLEMENT_STRING_BAIT: &str = "rss_outbox_settle_published";\n"#);
+        let scan = scan_settlement_funnel_sources(&sources);
+        assert!(
+            scan.findings.iter().any(|finding| finding
+                .detail
+                .contains("canonical raw function `rss_outbox_settle_published`")),
+            "non-executable string bait must not satisfy anti-vacuity: {:#?}",
+            scan.findings
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
     fn relay_budget_guard_discovers_constructor_callsites_workspacewide() {
         let root = workspace_root().expect("workspace root");
         let mut sources = load_outbox_claim_cutover_sources(&root).expect("workspace sources");
@@ -6187,6 +6857,36 @@ $do$;
                 )],
             ),
             RelayBudgetRedCase::replace(
+                "postgres settlement tenant carrier",
+                "adapters/postgres/src/outbox.rs",
+                "settlement::published(&self.tenant_pool, &claimed, self.relay_budget)",
+                "settlement::published(&self.pool, &claimed, self.relay_budget)",
+                &[(
+                    "adapters/postgres/src/outbox.rs",
+                    "OUTBOX-RELAY-BUDGET-01 live seam `PgOutbox::relay` 未消费 canonical typed budget/deadline: [\"settlement::published(&self.tenant_pool,&claimed,self.relay_budget)\"]",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "postgres scalar settlement deadline carrier",
+                "adapters/postgres/src/outbox/settlement.rs",
+                "tenant_pool\n            .deadline_write(",
+                "pool\n            .deadline_global_transaction(",
+                &[(
+                    "adapters/postgres/src/outbox/settlement.rs",
+                    "OUTBOX-RELAY-BUDGET-01 live seam `execute_scalar` 未消费 canonical typed budget/deadline: [\"tenant_pool.deadline_write(infra_tenant_scope(tenant),deadline\"]",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
+                "postgres DLX settlement deadline carrier",
+                "adapters/postgres/src/outbox/settlement.rs",
+                "tenant_pool\n        .deadline_write(",
+                "pool\n        .deadline_global_transaction(",
+                &[(
+                    "adapters/postgres/src/outbox/settlement.rs",
+                    "OUTBOX-RELAY-BUDGET-01 live seam `execute_dlx` 未消费 canonical typed budget/deadline: [\"deadline_write(infra_tenant_scope(tenant),deadline\"]",
+                )],
+            ),
+            RelayBudgetRedCase::replace(
                 "postgres bundle carrier",
                 "adapters/postgres/src/bundle.rs",
                 "relay_budget: RelayBudget",
@@ -6364,9 +7064,9 @@ mod relay_budget_audit_bait {
             (
                 "postgres settle retry",
                 "adapters/postgres/src/outbox.rs",
-                "settle_retry(\n                &self.pool,\n                claimed,\n                settle_deadline(self.relay_budget),",
-                "settle_retry(\n                &self.pool,\n                claimed,\n                io_deadline_after(Duration::from_millis(1)),",
-                "\nimpl PgOutbox { #[allow(dead_code)] async fn dead_settle(&self, claimed: &PgClaimedOutboxEntry) { let _ = settle_retry(&self.pool, claimed, settle_deadline(self.relay_budget), self.relay_budget.settle_timeout_millis()).await; } }\n",
+                "settlement::retry(&self.tenant_pool, claimed, self.relay_budget)",
+                "settlement::retry(&self.tenant_pool, claimed, relay_budget_dead_value())",
+                "\nimpl PgOutbox { #[allow(dead_code)] async fn dead_settle(&self, claimed: &PgClaimedOutboxEntry) { let _ = settlement::retry(&self.tenant_pool, claimed, self.relay_budget).await; } }\n",
                 "settle_publish_failure",
             ),
         ];

@@ -1,0 +1,38 @@
+error[E0603]: module `outbox` is private
+ --> tests/ui/pg_outbox_settlement_capability_access_fail.rs:4:30
+  |
+4 |     let _outcome = postgres::outbox::settlement::Settlement::<()>::expired();
+  |                              ^^^^^^              ---------- enum `Settlement` is not publicly re-exported
+  |                              |
+  |                              private module
+  |
+note: the module `outbox` is defined here
+ --> src/lib.rs
+  |
+  | mod outbox;
+  | ^^^^^^^^^^
+
+error[E0603]: module `outbox` is private
+ --> tests/ui/pg_outbox_settlement_capability_access_fail.rs:5:35
+  |
+5 |     let _raw_executor = postgres::outbox::settlement::published;
+  |                                   ^^^^^^              --------- function `published` is not publicly re-exported
+  |                                   |
+  |                                   private module
+  |
+note: the module `outbox` is defined here
+ --> src/lib.rs
+  |
+  | mod outbox;
+  | ^^^^^^^^^^
+
+error[E0624]: associated function `expired` is private
+ --> tests/ui/pg_outbox_settlement_capability_access_fail.rs:4:68
+  |
+4 |     let _outcome = postgres::outbox::settlement::Settlement::<()>::expired();
+  |                                                                    ^^^^^^^ private associated function
+  |
+ ::: src/outbox/settlement.rs
+  |
+  |     fn expired() -> Self {
+  |     -------------------- private associated function defined here

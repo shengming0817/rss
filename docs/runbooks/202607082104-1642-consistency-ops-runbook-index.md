@@ -12,7 +12,7 @@ redrive 权限均引用已有 Hard / Medium carrier。若某模块尚无 runtime
 
 | Module | Runbook | Metric | Alert | Dashboard | Redrive | Carrier |
 |---|---|---|---|---|---|---|
-| Outbox relay / backlog | `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` | exported | `docs/ops/outbox-relay-alerts.rules.yaml` | `docs/ops/202607082104-1642-consistency-dashboard-checklist.md` | tenant-scoped `rss dlq redrive-outbox` | `OutboxMetricScope`, `RelayConfig`, `OutboxContractId`, `TenantId`; see `docs/rules/observability.md` |
+| Outbox relay / backlog | `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` | exported | `docs/ops/outbox-relay-alerts.rules.yaml` | `docs/ops/202607082104-1642-consistency-dashboard-checklist.md` | tenant-scoped `rss dlq redrive-outbox` | `OutboxMetricScope`, `RelayConfig`, `OutboxContractId`, `TenantId`, closed settlement operation/reason; see `docs/rules/observability.md` |
 | Inbox / consumer | `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` | consumer exported; inbox backlog `not currently exported` (#1683) | `docs/ops/outbox-relay-alerts.rules.yaml` | same checklist; inbox backlog gap references #1683 | tenant-scoped `rss dlq replay-dead-letter` | `InboxReceiptContext`, `ConsumerMeta`, tenant authority validation, `TenantId`; see `docs/rules/observability.md` |
 | DLX lifecycle | this index | archive pending depth/oldest age + closed lifecycle outcome exported | `DlxArchiveLifecycleFailure`, `DlxArchiveOldestPendingHigh` | same checklist | no cold list/inspect/replay; expired receipt only via verified HEAD-missing proof | typed receipt/proof, dedicated PG/Vault/S3 credentials, verified WORM store; see `docs/rules/eventbus.md` / `observability.md` |
 | Saga | this index | saga DLX exported | `docs/ops/outbox-relay-alerts.rules.yaml` | same checklist | no replay; diagnostic DLX only | `SagaInstanceRef`, `SagaExecutorConfig` domain / contract binding, `saga_dead_letters_total` label closure |
@@ -33,6 +33,7 @@ Operational signals:
 - `outbox_publish_total{domain,contract_id,tenant_id,status}`
 - `outbox_dlx_total{domain,contract_id,tenant_id}`
 - `outbox_relay_tick_duration_seconds{phase}`
+- `outbox_relay_settlement_failure_total{domain,contract_id,tenant_id,operation,reason}`
 
 On-call flow:
 
@@ -46,10 +47,16 @@ On-call flow:
    `rss dlq redrive-outbox` after the upstream schema / payload / tenant-envelope cause is fixed.
 4. After redrive, watch `outbox_partition_blocked_depth` return to zero and confirm the matching
    publish counter moves to `status="ack"`.
+5. If `OutboxSettlementExpired` fires, treat it as a correctness signal: stop dependency-only
+   remediation and inspect relay scheduling delay, settle budget, connection pool and lock waits.
+   If `OutboxSettlementIntegrityFailure` fires, stop relay dependency-only remediation and use
+   `reason=payload_protection|invariant` to inspect the DLX key provider or settlement contract/row
+   shape. If `OutboxSettlementFailureRateHigh` fires, use `reason=timeout|lost_lease|storage` and the
+   dashboard operation split to distinguish resource pressure, transaction failures and lease ownership churn.
 
 Failure handling stays in the redrive runbook. Direct SQL updates, destructive skip, cross-tenant
-redrive, and metric labels derived from payload, error text, subject, actor, event id or partition
-key are out of bounds.
+redrive, and metric labels derived from payload, error text, subject, actor, event id, lease token,
+deadline or partition key are out of bounds.
 
 ## Inbox / Consumer
 

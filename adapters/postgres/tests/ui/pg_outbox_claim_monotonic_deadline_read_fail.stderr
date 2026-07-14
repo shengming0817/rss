@@ -1,0 +1,5 @@
+error[E0616]: field `lease` of struct `postgres::outbox::PgClaimedOutboxEntry` is private
+ --> tests/ui/pg_outbox_claim_monotonic_deadline_read_fail.rs:6:19
+  |
+6 |     let _ = claim.lease.monotonic_deadline;
+  |                   ^^^^^ private field
