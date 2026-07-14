@@ -1,6 +1,6 @@
-use consistency::OutboxSource;
+use consistency::OutboxRelay;
 
-fn clone_claim<S: OutboxSource>(claim: S::Claim) -> S::Claim {
+fn clone_claim<S: OutboxRelay>(claim: S::Claim) -> S::Claim {
     claim.clone()
 }
 

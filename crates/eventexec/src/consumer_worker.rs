@@ -57,7 +57,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use consistency::InboxStore;
-use consistency::{HandleResult, OutboxRelay, OutboxSource};
+use consistency::{HandleResult, OutboxRelay};
 use diport::{
     AckableSubscriber, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeliveryStream,
     DynAckableSubscriber, DynDeadLetterStore, Message, MessageStream, Topic,
@@ -299,7 +299,7 @@ pub fn spawn_relay<A>(
     metrics: Arc<dyn crate::OutboxMetrics>,
 ) -> ConsumerWorker
 where
-    A: OutboxSource + OutboxRelay + Send + 'static,
+    A: OutboxRelay + Send + 'static,
 {
     let health_loop = Arc::clone(&health);
     let token_run = token.clone();
@@ -998,7 +998,7 @@ mod tests {
         subject: consistency::OutboxMetricSubject,
     }
 
-    impl consistency::OutboxSource for NoopRelayStore {
+    impl consistency::OutboxRelay for NoopRelayStore {
         type Claim = NoopRelayClaim;
 
         fn claim_subject(claim: &Self::Claim) -> &consistency::OutboxMetricSubject {
@@ -1015,9 +1015,6 @@ mod tests {
         ) -> Result<Vec<Self::Claim>, consistency::error::EngineError> {
             Ok(vec![])
         }
-    }
-
-    impl consistency::OutboxRelay for NoopRelayStore {
         async fn relay(
             &self,
             _entry: Self::Claim,

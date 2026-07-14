@@ -65,7 +65,7 @@ pub enum RelayConfigError {
     MaxInFlightOutOfRange { got: usize, min: usize, max: usize },
 }
 
-/// relay 驱动配置；domain 由实现 [`consistency::OutboxSource`] 的 provider 自身绑定。
+/// relay 驱动配置；domain 由实现 [`consistency::OutboxRelay`] 的 provider 自身绑定。
 ///
 /// 私有字段 + 唯一 [`RelayConfig::new`] funnel（RELAY-CONFIG-01）。
 #[derive(Debug, Clone, PartialEq, Eq)]

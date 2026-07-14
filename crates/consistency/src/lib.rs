@@ -58,7 +58,7 @@ pub use outbox::{
     BacklogMetricSample, BacklogSample, Disposition, EventEntry, EventTopic, EventTopicError,
     HandleResult, OutboxAppendOutcome, OutboxBacklog, OutboxContractId, OutboxContractIdError,
     OutboxFactConflict, OutboxFactFingerprint, OutboxFactIdentity, OutboxMetricSubject,
-    OutboxPayload, OutboxRelay, OutboxSource, PartitionKey, PartitionKeyError, PermanentError,
+    OutboxPayload, OutboxRelay, PartitionKey, PartitionKeyError, PermanentError,
     PermanentErrorKind, RetentionSweeper, StoredOutboxEntry, StoredOutboxEntryError,
     StoredOutboxTopic, is_canonical_topic_name,
 };
@@ -111,7 +111,7 @@ mod static_dispatch_smoke {
     //! 方法体 todo!() 永不调用（无 `.await`），故无 panic 实际触发。
 
     use super::inbox::{InboxBacklog, InboxStore};
-    use super::outbox::{OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper};
+    use super::outbox::{OutboxBacklog, OutboxRelay, RetentionSweeper};
     use super::projection::{
         PartitionSerialDelivery, ProjectionEvent, ProjectionEventSource, Projector,
         SerialInOrderGuarantor,
@@ -128,8 +128,6 @@ mod static_dispatch_smoke {
     fn _drives_inbox_backlog<B: InboxBacklog>(_b: &B) {}
     #[allow(dead_code)] // reason: 同上。
     fn _drives_relay<R: OutboxRelay>(_r: &R) {}
-    #[allow(dead_code)] // reason: 同上，证 OutboxSource 读侧端口可泛型静态分发消费。
-    fn _drives_source<S: OutboxSource>(_s: &S) {}
     #[allow(dead_code)] // reason: 同上，证 RetentionSweeper 清理端口可泛型静态分发消费。
     fn _drives_sweeper<S: RetentionSweeper>(_s: &S) {}
     #[allow(dead_code)] // reason: 同上，证 OutboxBacklog 采样端口可泛型静态分发消费。

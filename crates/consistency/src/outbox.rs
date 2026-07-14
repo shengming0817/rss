@@ -1,16 +1,16 @@
-//! Outbox 接缝（L1 原子写 + L2 OutboxFact 投递）—— 纯类型 disposition + relay/source/sweep 策略。
+//! Outbox 接缝（L1 原子写 + L2 OutboxFact 投递）—— 纯类型 disposition + relay/sweep 策略。
 //!
 //! `Disposition`/`HandleResult`/`PermanentError`/`EventEntry`/`StoredOutboxEntry` 是
 //! **纯态机类型**（sync，穷尽闭值集）；
-//! `OutboxRelay`/`OutboxSource` 是 L2 OutboxFact 引擎策略 trait（native AFIT：原子 claim 已持久化 entry
-//! 并中继到 broker）；`RetentionSweeper` 是同 crate 暂置的通用保留期维护 trait，可驱动 outbox /
+//! `OutboxRelay` 是 L2 OutboxFact 引擎策略 trait（native AFIT：原子 claim 已持久化 entry 并中继到
+//! broker）；`RetentionSweeper` 是同 crate 暂置的通用保留期维护 trait，可驱动 outbox /
 //! inbox_receipts / dead_letter 等 durable 表清理。真实 broker I/O（AMQP）与 in-memory bus 在 `eventexec`/
 //! adapters，consistency 只冻类型 + 策略接缝。
 //! 语义见 `docs/rules/eventbus.md` §Disposition / §ConsumerBase。
 //!
 //! # INVARIANT: OUTBOX-ENGINE-PORT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
-//! `OutboxRelay`/`OutboxSource`/`RetentionSweeper`/`OutboxBacklog` 是**引擎策略接缝**（签名引持久化 entry/
+//! `OutboxRelay`/`RetentionSweeper`/`OutboxBacklog` 是**引擎策略接缝**（签名引持久化 entry/
 //! `Disposition`/`BacklogSample`/`EngineError` 等 consistency 内部类型），按 ADR-005 category line **不能**在
 //! `diport` 内编译（否则 diport 反依赖引擎），故正确归属本引擎 crate——非 provider-agnostic 的 diport DI
 //! port。native AFIT、不引 dynosaur。
@@ -771,30 +771,28 @@ impl OutboxMetricSubject {
     }
 }
 
-/// Outbox 中继策略（L1 引擎策略 trait，native AFIT）。
-///
-/// 把**已持久化**的 outbox entry 中继到 broker（demo=进程内 bus / postgres=真实 broker，eventbus.md
-/// topology-gated）。native AFIT ⇒ 非 object-safe，消费方泛型 `<R: OutboxRelay>`，禁 `Box<dyn>`。
-#[allow(async_fn_in_trait)]
-// reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
-pub trait OutboxRelay: OutboxSource {
-    /// 消费式中继单条已 claim entry。返回处置驱动 receipt commit / DLX / 退避（穷尽 `Disposition`）。
-    async fn relay(&self, entry: Self::Claim) -> Result<Disposition, crate::error::EngineError>;
-}
-
-/// Provider-bound outbox claim 源（L1 引擎策略 trait，native AFIT）。
+/// Provider-bound outbox claim + relay 策略（L1 引擎策略 trait，native AFIT）。
 ///
 /// Provider 构造时绑定唯一 domain；调用方只能从该 domain claim **待发** entry 批次（status=pending 且到期，
-/// 含 lease 过期可回收的 in-flight），不能在每次调用时注入 raw domain。读侧端口与 [`OutboxRelay`]
-/// （写侧中继）同源构成 outbox 引擎接缝——SQL 在 adapter，本 crate 只冻接缝。native AFIT ⇒ 非 object-safe，
-/// 消费方泛型 `<S: OutboxSource>`，禁 `Box<dyn>`。
+/// 含 lease 过期可回收的 in-flight），不能在每次调用时注入 raw domain；已 claim entry 随后由同一
+/// capability 按值中继到 broker（demo=进程内 bus / postgres=真实 broker，eventbus.md topology-gated）。
+/// SQL 在 adapter，本 crate 只冻接缝。native AFIT ⇒ 非 object-safe，消费方泛型 `<R: OutboxRelay>`，
+/// 禁 `Box<dyn>`。
 ///
 /// `Claim` 是 provider-owned opaque capability：adapter 只公开类型名，不公开构造器或 durable/lease
 /// 字段。这样 production relay 只能消费同一 provider 的 `claim_batch` 返回值，调用方无法伪造或重建
 /// claim。任一行 hydration 失败须回滚整个事务。
+///
+/// # INVARIANT: OUTBOX-CLAIM-RELAY-CAPABILITY-01 { level = "Hard", exec = "native-compile", source = "code", native = "single OutboxRelay associated Claim and by-value relay ownership" }
+///
+/// 单一 trait 在类型层强制 provider 同时提供 claim 与 relay，且两步共享同一个关联 `Claim` 类型；
+/// `relay(Self::Claim)` 的按值参数使未声明 `Clone`/`Copy` 的 claim 不能被泛型调用方重复消费；adapter
+/// 选用 distinct opaque `Claim` 时，raw [`StoredOutboxEntry`] 也不能冒充该 claim。该 Hard 约束只证明
+/// **实现类型级**的 capability 配对与消费所有权：claim 是否确为 opaque、同类型不同 provider 实例间
+/// 的 provenance、lease token/deadline CAS 与 broker I/O 语义仍必须由具体 adapter 的封装和行为守卫保证。
 #[allow(async_fn_in_trait)]
 // reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
-pub trait OutboxSource {
+pub trait OutboxRelay {
     /// Adapter 私有铸造、按值消费的 claim capability。
     type Claim;
 
@@ -811,11 +809,14 @@ pub trait OutboxSource {
     /// `(tenant_id, domain, partition_key)` 仅放行 min(seq) 的队头行，确保同 tenant partition 内严格按
     /// seq 顺序投递。参见
     /// `INVARIANT: OUTBOX-PARTITION-ORDER-01` { level = "Medium", exec = "manual/opt-in", source = "code" }（定义在 adapter impl，`adapters/postgres/src/outbox.rs`
-    /// `OutboxSource for PgOutbox`）。
+    /// `OutboxRelay for PgOutbox`）。
     async fn claim_batch(
         &self,
         limit: usize,
     ) -> Result<Vec<Self::Claim>, crate::error::EngineError>;
+
+    /// 消费式中继单条已 claim entry。返回处置驱动 receipt commit / DLX / 退避（穷尽 `Disposition`）。
+    async fn relay(&self, entry: Self::Claim) -> Result<Disposition, crate::error::EngineError>;
 }
 
 /// 保留期清理端口（L1 引擎策略 trait，native AFIT）——**跨 durable 表通用**。
@@ -928,14 +929,14 @@ impl BacklogMetricSample {
 /// Outbox 积压采样端口（L1 引擎策略 trait，native AFIT）。
 ///
 /// 由可观测性采样背景 worker 周期驱动：聚合某 domain 的 pending 深度 + 最老 pending 龄，发射 backlog
-/// gauge（#1209）。与 [`OutboxSource`]（扫描）/ [`OutboxRelay`]（中继）/ [`RetentionSweeper`]（清理）同源
-/// 构成 outbox 背景机器的引擎接缝；聚合 SQL 在 adapter，本 crate 只冻接缝。读侧聚合端口，与 `claim_batch`
-/// 的行取扫描分离（不同访问形态、不同消费方），故独立 trait 而非扩 [`OutboxSource`]。
+/// gauge（#1209）。与 [`OutboxRelay`]（claim + 中继）/ [`RetentionSweeper`]（清理）同源构成 outbox
+/// 背景机器的引擎接缝；聚合 SQL 在 adapter，本 crate 只冻接缝。读侧聚合端口，与 `claim_batch` 的行取
+/// 扫描分离（不同访问形态、不同消费方），故独立 trait 而非扩 [`OutboxRelay`]。
 /// native AFIT ⇒ 非 object-safe，消费方泛型 `<B: OutboxBacklog>`，禁 `Box<dyn>`。
 #[allow(async_fn_in_trait)]
 // reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
 pub trait OutboxBacklog {
-    /// 采样某 `domain` 的**可投递 backlog**（depth + 最老积压龄）。统计集合与 [`OutboxSource::claim_batch`]
+    /// 采样某 `domain` 的**可投递 backlog**（depth + 最老积压龄）。统计集合与 [`OutboxRelay::claim_batch`]
     /// 的可重捞集合**同源**：`(pending 且到期) OR (stale publishing，lease 过期可被 relay 重捞)`——stale
     /// publishing 会被重投，属可恢复积压必须计入；只排除 lease 仍有效的正常 in-flight，避免把正常中继中的行
     /// 误计入。已观测 `(tenant_id, contract_id)` scope 无可投递行 ⇒ 带 [`BacklogSample::empty`] 的样本；

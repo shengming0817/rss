@@ -1036,13 +1036,12 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::StoredOutb
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::StoredOutboxTopic
 pub trait consistency::outbox::OutboxBacklog
 pub async fn consistency::outbox::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<alloc::vec::Vec<consistency::outbox::BacklogMetricSample>, consistency::error::EngineError>
-pub trait consistency::outbox::OutboxRelay: consistency::outbox::OutboxSource
+pub trait consistency::outbox::OutboxRelay
+pub type consistency::outbox::OutboxRelay::Claim
+pub async fn consistency::outbox::OutboxRelay::claim_batch(&self, usize) -> core::result::Result<alloc::vec::Vec<Self::Claim>, consistency::error::EngineError>
+pub fn consistency::outbox::OutboxRelay::claim_domain(&self) -> &vocab::contract::owner::DomainName
+pub fn consistency::outbox::OutboxRelay::claim_subject(&Self::Claim) -> &consistency::outbox::OutboxMetricSubject
 pub async fn consistency::outbox::OutboxRelay::relay(&self, Self::Claim) -> core::result::Result<consistency::outbox::Disposition, consistency::error::EngineError>
-pub trait consistency::outbox::OutboxSource
-pub type consistency::outbox::OutboxSource::Claim
-pub async fn consistency::outbox::OutboxSource::claim_batch(&self, usize) -> core::result::Result<alloc::vec::Vec<Self::Claim>, consistency::error::EngineError>
-pub fn consistency::outbox::OutboxSource::claim_domain(&self) -> &vocab::contract::owner::DomainName
-pub fn consistency::outbox::OutboxSource::claim_subject(&Self::Claim) -> &consistency::outbox::OutboxMetricSubject
 pub trait consistency::outbox::RetentionSweeper
 pub async fn consistency::outbox::RetentionSweeper::sweep(&self, u64) -> core::result::Result<u64, consistency::error::EngineError>
 pub fn consistency::outbox::is_canonical_topic_name(&str) -> bool
@@ -4338,13 +4337,12 @@ pub async fn consistency::InboxStore::release(&self, &consistency::inbox::InboxR
 pub async fn consistency::InboxStore::try_claim(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub trait consistency::OutboxBacklog
 pub async fn consistency::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<alloc::vec::Vec<consistency::outbox::BacklogMetricSample>, consistency::error::EngineError>
-pub trait consistency::OutboxRelay: consistency::outbox::OutboxSource
+pub trait consistency::OutboxRelay
+pub type consistency::OutboxRelay::Claim
+pub async fn consistency::OutboxRelay::claim_batch(&self, usize) -> core::result::Result<alloc::vec::Vec<Self::Claim>, consistency::error::EngineError>
+pub fn consistency::OutboxRelay::claim_domain(&self) -> &vocab::contract::owner::DomainName
+pub fn consistency::OutboxRelay::claim_subject(&Self::Claim) -> &consistency::outbox::OutboxMetricSubject
 pub async fn consistency::OutboxRelay::relay(&self, Self::Claim) -> core::result::Result<consistency::outbox::Disposition, consistency::error::EngineError>
-pub trait consistency::OutboxSource
-pub type consistency::OutboxSource::Claim
-pub async fn consistency::OutboxSource::claim_batch(&self, usize) -> core::result::Result<alloc::vec::Vec<Self::Claim>, consistency::error::EngineError>
-pub fn consistency::OutboxSource::claim_domain(&self) -> &vocab::contract::owner::DomainName
-pub fn consistency::OutboxSource::claim_subject(&Self::Claim) -> &consistency::outbox::OutboxMetricSubject
 pub trait consistency::PartitionSerialDelivery
 pub trait consistency::ProjectionEvent
 pub fn consistency::ProjectionEvent::lsn(&self) -> consistency::projection::Lsn

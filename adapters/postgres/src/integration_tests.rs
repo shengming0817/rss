@@ -5054,7 +5054,7 @@ use std::sync::{Arc, Mutex};
 use consistency::{
     BacklogMetricSample, BacklogSample, Disposition, EngineErrorKind, EventEntry, EventTopic,
     HandleResult, OutboxAppendOutcome, OutboxBacklog, OutboxFactIdentity, OutboxRelay,
-    OutboxSource, RetentionSweeper,
+    RetentionSweeper,
 };
 use diport::{
     AckAction, Acker, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, Delivery,

@@ -35,8 +35,8 @@ use common::{
     session_created_subscription,
 };
 use consistency::{
-    Disposition, EngineError, EngineErrorKind, HandleResult, OutboxRelay, OutboxSource,
-    PermanentError, PermanentErrorKind,
+    Disposition, EngineError, EngineErrorKind, HandleResult, OutboxRelay, PermanentError,
+    PermanentErrorKind,
 };
 use diagctx::{CorrelationId, DiagnosticCtx};
 use diport::{
@@ -376,7 +376,7 @@ async fn login_audit_durable_topology() -> Result<()> {
             dlx_payload_protector(),
         );
         anyhow::ensure!(
-            OutboxSource::claim_domain(&relay).as_str() == IDENTITY_DOMAIN,
+            OutboxRelay::claim_domain(&relay).as_str() == IDENTITY_DOMAIN,
             "identity relay 必须绑定 identity claim domain"
         );
 
@@ -402,7 +402,7 @@ async fn login_audit_durable_topology() -> Result<()> {
             let (event_id, payload) = {
                 let mut found = None;
                 for _ in 0..50 {
-                    let claimed = OutboxSource::claim_batch(&relay, 64).await?;
+                    let claimed = OutboxRelay::claim_batch(&relay, 64).await?;
                     for entry in claimed {
                         let disposition = OutboxRelay::relay(&relay, entry).await?;
                         anyhow::ensure!(

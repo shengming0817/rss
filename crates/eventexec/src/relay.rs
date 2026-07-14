@@ -2,8 +2,8 @@
 //!
 //! # 设计摘要
 //!
-//! `consistency` 的三个 AFIT trait（`OutboxSource`/`OutboxRelay`/`RetentionSweeper`）是 native AFIT、
-//! **无 Send 变体**。`tokio::spawn` 要求 future Send，而泛型 `<A: OutboxSource>` 下 `A::claim_batch(..)`
+//! `consistency` 的两个 AFIT trait（`OutboxRelay`/`RetentionSweeper`）是 native AFIT、**无 Send 变体**。
+//! `tokio::spawn` 要求 future Send，而泛型 `<A: OutboxRelay>` 下 `A::claim_batch(..)`
 //! 的 future 在 stable Rust 上无法证明 Send（RTN 未稳定）。因此：
 //! - 泛型 `relay_loop` / `sweeper_loop`：纯 loop 体，**不 spawn**——泛型 async fn 不要求 Send，能编过。
 //! - spawn 发生在**具体类型 call site**（生产=组合根 PgOutbox，测试=具体 Fake）——单态化后 future 具体 Send。
@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use consistency::{
     BacklogSample, Disposition, OutboxBacklog, OutboxContractId, OutboxMetricSubject, OutboxRelay,
-    OutboxSource, RetentionSweeper,
+    RetentionSweeper,
 };
 use primitives::healthz::HealthStatus;
 use vocab::DomainName;
@@ -175,7 +175,7 @@ pub async fn relay_loop<A>(
     health: Arc<WorkerHealth>,
     metrics: Arc<dyn OutboxMetrics>,
 ) where
-    A: OutboxSource + OutboxRelay,
+    A: OutboxRelay,
 {
     let mut ticker = tokio::time::interval(config.poll_interval());
     loop {
@@ -218,7 +218,7 @@ async fn relay_tick<A>(
     health: &Arc<WorkerHealth>,
     metrics: &dyn OutboxMetrics,
 ) where
-    A: OutboxSource + OutboxRelay,
+    A: OutboxRelay,
 {
     let domain = store.claim_domain();
     let tick = relay_domain_once(store, domain, max_in_flight, clock, metrics).await;
@@ -248,7 +248,7 @@ async fn relay_domain_once<A>(
     metrics: &dyn OutboxMetrics,
 ) -> TickOutcome
 where
-    A: OutboxSource + OutboxRelay,
+    A: OutboxRelay,
 {
     let claim_start = clock.now();
     let claim_result = store.claim_batch(batch).await;
@@ -716,7 +716,7 @@ mod tests {
     use consistency::outbox::{
         BacklogMetricSample, BacklogSample, Disposition, OutboxContractId, OutboxMetricSubject,
     };
-    use consistency::{OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper};
+    use consistency::{OutboxBacklog, OutboxRelay, RetentionSweeper};
     use diport::ManagedResource;
     use primitives::healthz::{HealthStatus, ProbeName};
     use tokio::sync::Barrier;
@@ -942,7 +942,7 @@ mod tests {
         health.status() == want
     }
 
-    /// Fake store：同时 impl OutboxSource + OutboxRelay。
+    /// Fake store：统一实现 claim + relay capability。
     /// - claim：按轮次从预置队列吐 entries（每次 claim 返回队列头部至多 batch 条）。
     /// - relay：计数调用，按预置策略返 Ok(Disposition)/Err。
     struct FakeStore {
@@ -1014,7 +1014,7 @@ mod tests {
         }
     }
 
-    impl OutboxSource for FakeStore {
+    impl OutboxRelay for FakeStore {
         type Claim = FakeClaim;
 
         fn claim_subject(claim: &Self::Claim) -> &OutboxMetricSubject {
@@ -1039,9 +1039,6 @@ mod tests {
             let batch = claims.drain(..drain_end).collect();
             Ok(batch)
         }
-    }
-
-    impl OutboxRelay for FakeStore {
         async fn relay(
             &self,
             _entry: Self::Claim,
@@ -1069,7 +1066,7 @@ mod tests {
         }
     }
 
-    impl OutboxSource for ConcurrentRelayStore {
+    impl OutboxRelay for ConcurrentRelayStore {
         type Claim = FakeClaim;
 
         fn claim_subject(claim: &Self::Claim) -> &OutboxMetricSubject {
@@ -1086,9 +1083,6 @@ mod tests {
         ) -> Result<Vec<Self::Claim>, consistency::error::EngineError> {
             Ok(Vec::new())
         }
-    }
-
-    impl OutboxRelay for ConcurrentRelayStore {
         async fn relay(
             &self,
             _entry: Self::Claim,

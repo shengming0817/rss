@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime};
 
 use consistency::{
     BacklogSample, Disposition, InboxState, LeaseOutcome, LeaseToken, OutboxContractId,
-    OutboxMetricSubject, OutboxRelay, OutboxSource, SeenState,
+    OutboxMetricSubject, OutboxRelay, SeenState,
 };
 use eventexec::{
     OutboxMetricScope, OutboxMetrics, RelayConfig, RelayPhase, WorkerHealth, relay_loop,
@@ -207,7 +207,7 @@ impl CrashStore {
     }
 }
 
-impl OutboxSource for CrashStore {
+impl OutboxRelay for CrashStore {
     type Claim = CrashClaim;
 
     fn claim_subject(claim: &Self::Claim) -> &OutboxMetricSubject {
@@ -246,9 +246,6 @@ impl OutboxSource for CrashStore {
         }
         Ok(claimed)
     }
-}
-
-impl OutboxRelay for CrashStore {
     #[allow(clippy::expect_used)]
     // reason: hermetic fake uses fixed rows; missing/poisoned state is a test invariant failure.
     async fn relay(&self, entry: Self::Claim) -> Result<Disposition, consistency::EngineError> {

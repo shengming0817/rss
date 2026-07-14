@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `consistency::OutboxSource`
+ --> tests/ui/legacy_outbox_source_fail.rs:1:5
+  |
+1 | use consistency::OutboxSource;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^ no `OutboxSource` in the root

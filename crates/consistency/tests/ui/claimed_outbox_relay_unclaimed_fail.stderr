@@ -6,9 +6,9 @@ error[E0308]: mismatched types
   |                   |
   |                   arguments to this method are incorrect
   |
-  = note: expected associated type `<R as OutboxSource>::Claim`
+  = note: expected associated type `<R as OutboxRelay>::Claim`
                       found struct `StoredOutboxEntry`
-  = help: consider constraining the associated type `<R as OutboxSource>::Claim` to `StoredOutboxEntry`
+  = help: consider constraining the associated type `<R as OutboxRelay>::Claim` to `StoredOutboxEntry`
   = note: for more information, visit https://doc.rust-lang.org/book/ch19-03-advanced-traits.html
 note: method defined here
  --> src/outbox.rs

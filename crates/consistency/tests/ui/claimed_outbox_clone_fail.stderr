@@ -1,5 +1,5 @@
-error[E0599]: no method named `clone` found for associated type `<S as OutboxSource>::Claim` in the current scope
+error[E0599]: no method named `clone` found for associated type `<S as OutboxRelay>::Claim` in the current scope
  --> tests/ui/claimed_outbox_clone_fail.rs:4:11
   |
 4 |     claim.clone()
-  |           ^^^^^ method not found in `<S as OutboxSource>::Claim`
+  |           ^^^^^ method not found in `<S as OutboxRelay>::Claim`

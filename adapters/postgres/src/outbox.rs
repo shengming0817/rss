@@ -1,7 +1,7 @@
 //! Outbox 持久化实现——L2 OutboxFact adapter（#1117 P4）。
 //!
-//! [`PgOutbox`] impl [`consistency::OutboxSource`] / [`consistency::OutboxRelay`] /
-//! [`consistency::RetentionSweeper`]——三个 native AFIT trait（泛型静态分发，非 dyn，不引 dynosaur）。
+//! [`PgOutbox`] impl [`consistency::OutboxRelay`] / [`consistency::RetentionSweeper`]——两个 native
+//! AFIT trait（泛型静态分发，非 dyn，不引 dynosaur）。
 //!
 //! **`append_outbox`**（`pub(crate)` free fn，收 `&mut TxCapability`）是 L1 原子性的编译期硬约束：
 //! 只能在已有事务内调用，不能脱离事务双写；tenant-scoped 业务写经
@@ -25,7 +25,7 @@ use consistency::{
     BacklogMetricSample, BacklogSample, EngineError, EngineErrorKind, EventEntry, IdemKey,
     OutboxAppendOutcome, OutboxBacklog, OutboxContractId, OutboxFactConflict,
     OutboxFactFingerprint, OutboxFactIdentity, OutboxMetricSubject, OutboxPayload, OutboxRelay,
-    OutboxSource, RetentionSweeper, StoredOutboxEntry,
+    RetentionSweeper, StoredOutboxEntry,
 };
 use diport::{
     DeadLetterSource, DynPublisher, EnvelopeCausationId, EnvelopeHeaderError, EnvelopeMetadata,
@@ -111,7 +111,7 @@ struct ClaimedOutboxRow {
 
 /// PostgreSQL 原子 claim 返回的 provider-owned relay capability。
 ///
-/// 字段与构造路径均封闭在 postgres adapter；外部调用方只能从 [`OutboxSource::claim_batch`]
+/// 字段与构造路径均封闭在 postgres adapter；外部调用方只能从 [`OutboxRelay::claim_batch`]
 /// 获得并按值交给同一 provider 的 [`OutboxRelay::relay`]。本类型刻意不实现 `Clone`。
 pub struct PgClaimedOutboxEntry {
     provider: Arc<OutboxProviderIdentity>,
@@ -1201,7 +1201,7 @@ pub(crate) fn classify_append_fingerprint(
 
 // ── PgOutbox ──────────────────────────────────────────────────────────────────
 
-/// PostgreSQL outbox adapter：impl [`OutboxSource`] + [`OutboxRelay`] + [`RetentionSweeper`]。
+/// PostgreSQL outbox adapter：impl [`OutboxRelay`] + [`RetentionSweeper`]。
 ///
 /// 持 `PgPool`（clone 自 [`PgStore`]）、`Box<DynPublisher>`（Send 变体，跨 await 安全）、
 /// [`TenantAuthority`]（租户权威签名）与 [`DlxPayloadProtector`]（DLX payload 加密）。这些持久化、
@@ -1308,9 +1308,9 @@ impl PgOutboxMaintenance {
     }
 }
 
-// ── OutboxSource impl ─────────────────────────────────────────────────────────
+// ── OutboxRelay impl ──────────────────────────────────────────────────────────
 
-impl OutboxSource for PgOutbox {
+impl OutboxRelay for PgOutbox {
     type Claim = PgClaimedOutboxEntry;
 
     fn claim_subject(claim: &Self::Claim) -> &OutboxMetricSubject {
@@ -1389,11 +1389,7 @@ impl OutboxSource for PgOutbox {
         })?;
         Ok(claims)
     }
-}
 
-// ── OutboxRelay impl ──────────────────────────────────────────────────────────
-
-impl OutboxRelay for PgOutbox {
     /// relay 单条 typed claim：publish → strict-deadline settle。
     ///
     /// `PublisherError` 携 kind（#1212）——`Permanent`（序列化 / 路由 / 编码非法）首投即 dlx（跳过重试预算）；
@@ -1874,7 +1870,7 @@ impl RetentionSweeper for PgOutboxMaintenance {
 impl OutboxBacklog for PgOutbox {
     /// 采样 `domain` 的**可投递积压**（深度 + 最老积压龄）。
     ///
-    /// 谓词与 [`OutboxSource::claim_batch`] 的可重捞集合**同源**：
+    /// 谓词与 [`OutboxRelay::claim_batch`] 的可重捞集合**同源**：
     /// `(status=pending 且到期) OR (status=publishing 且显式 `lease_until <= clock_timestamp()`)`。
     /// stale `publishing`（崩溃/超时 in-flight）会被 relay 重投，属可投递积压，**必须计入**——否则 oldest-age
     /// SLO 对可恢复积压失明（relay 重捞但 gauge 报 0）。只排除 lease 仍有效的正常 in-flight。无可投递行 ⇒

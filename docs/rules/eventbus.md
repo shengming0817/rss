@@ -85,7 +85,7 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event/m
 `claim_batch` 在同一数据库语句内选取、铸造 token/deadline 并持久化。Postgres provider
 只经 `PgOutbox::claim_batch` 铸造 provider-owned opaque `PgClaimedOutboxEntry`；调用方只能将它
 按值交给同一 `PgOutbox` 的 relay 路径，无法构造、hydrate 或读取 provider-private 的
-lease/durable context。`consistency::OutboxSource::Claim` 只是 provider 关联类型接缝，不定义可
+lease/durable context。`consistency::OutboxRelay::Claim` 只是 provider 关联类型接缝，不定义可
 hydrate 的通用 claim 实体。settle CAS 同时匹配 token 与精确 deadline，且拒绝已过期
 租约。这只围栏当前 lease holder 与 stale writer 的状态写回，不提供 broker
 exactly-once，也不能撤销已经成功的 publish。duplicate 由 tenant-scoped `Inbox` / `ConsumerTx` 收口重复数据库副作用：

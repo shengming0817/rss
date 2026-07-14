@@ -1,4 +1,4 @@
-use consistency::{Disposition, EngineError, OutboxMetricSubject, OutboxRelay, OutboxSource};
+use consistency::{Disposition, EngineError, OutboxMetricSubject, OutboxRelay};
 
 mod provider {
     use super::*;
@@ -11,7 +11,7 @@ mod provider {
         domain: vocab::DomainName,
     }
 
-    impl OutboxSource for Store {
+    impl OutboxRelay for Store {
         type Claim = Claim;
 
         fn claim_subject(claim: &Self::Claim) -> &OutboxMetricSubject {
@@ -25,9 +25,7 @@ mod provider {
         async fn claim_batch(&self, _limit: usize) -> Result<Vec<Self::Claim>, EngineError> {
             Ok(Vec::new())
         }
-    }
 
-    impl OutboxRelay for Store {
         async fn relay(&self, _claim: Self::Claim) -> Result<Disposition, EngineError> {
             Ok(Disposition::Ack)
         }

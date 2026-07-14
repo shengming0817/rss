@@ -4,7 +4,7 @@
 //! baseline），不引入手写规则目录；文档仅作为 `doc_ref`。
 //! INVARIANT: ARCHRULES-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code" } —— [`ArchRules`] 作为 no-compile governance gate 接入 verify/ci，
 //! 缺 carrier / fixture / gate 证据时 fail-closed。
-//! INVARIANT: PERSISTENCE-FUNNEL-MATRIX-01 { level = "Medium", exec = "verify", source = "code", facet = "derived-matrix" } —— 14 个持久化 funnel 仅引用真实 rule key，强度和证明从 carrier 反向派生。
+//! INVARIANT: PERSISTENCE-FUNNEL-MATRIX-01 { level = "Medium", exec = "verify", source = "code", facet = "derived-matrix" } —— 持久化 funnel 固定集合仅引用真实 rule key，强度和证明从 carrier 反向派生。
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::workspace_root;
@@ -74,6 +74,21 @@ pub(crate) enum MatrixAction {
 
 const MATRIX_DOC: &str =
     "docs/architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md";
+const EXPECTED_FUNNEL_COUNT: usize = 15;
+const FUNNEL_ISSUE_RANGE_START: u32 = 1422;
+const FUNNEL_ISSUE_RANGE_END: u32 = 1442;
+const ISSUE_PG_RUNTIME_CUTOVER: u32 = 1677;
+const ISSUE_EVENT_TRANSPORT_OUTPUT: u32 = 1678;
+const ISSUE_OUTBOX_CLAIM_CAPABILITY: u32 = 1741;
+const ISSUE_SAME_ID_DELIVERY: u32 = 1742;
+const ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER: u32 = 1743;
+const EXTRA_FUNNEL_ISSUES: &[u32] = &[
+    ISSUE_PG_RUNTIME_CUTOVER,
+    ISSUE_EVENT_TRANSPORT_OUTPUT,
+    ISSUE_OUTBOX_CLAIM_CAPABILITY,
+    ISSUE_SAME_ID_DELIVERY,
+    ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct InvariantKey {
@@ -123,7 +138,7 @@ const FUNNELS: &[FunnelSpec] = &[
     },
     FunnelSpec {
         key: "pg-runtime-lifecycle",
-        source_issues: &[1677],
+        source_issues: &[ISSUE_PG_RUNTIME_CUTOVER],
         upstream: &[
             invariant("PG-RUNTIME-OWNER-01"),
             invariant("PG-RUNTIME-HANDLE-02"),
@@ -139,7 +154,7 @@ const FUNNELS: &[FunnelSpec] = &[
     },
     FunnelSpec {
         key: "event-transport-output",
-        source_issues: &[1678],
+        source_issues: &[ISSUE_EVENT_TRANSPORT_OUTPUT],
         upstream: &[invariant("EVENT-TRANSPORT-OUTPUT-TYPE-01")],
         downstream: &[invariant("EVENT-TRANSPORT-OUTPUT-FUNNEL-01")],
         residual: ResidualDisposition::AcceptedMedium {
@@ -238,8 +253,21 @@ const FUNNELS: &[FunnelSpec] = &[
         },
     },
     FunnelSpec {
+        key: "outbox-relay-claim",
+        source_issues: &[
+            ISSUE_OUTBOX_CLAIM_CAPABILITY,
+            ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER,
+        ],
+        upstream: &[invariant("OUTBOX-CLAIM-RELAY-CAPABILITY-01")],
+        downstream: &[invariant("OUTBOX-RELAY-CLAIM-CUTOVER-01")],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "跨 crate provider 集合、eventexec/runtime 调用图与 migration 退役序列仍可能出现 AST/SQL 扫描未识别的新语法形态",
+            why_no_low_cost_hardening: "类型系统已 Hard 锁定关联 Claim 与按值消费，但无法表达 workspace exact provider、跨文件调用图和 SQL 历史序列；synthetic-red/anti-vacuity 守卫覆盖 canonical seam",
+        },
+    },
+    FunnelSpec {
         key: "same-id-delivery",
-        source_issues: &[1742],
+        source_issues: &[ISSUE_SAME_ID_DELIVERY],
         upstream: &[invariant("OUTBOX-SAME-ID-WINDOW-01")],
         downstream: &[invariant("INBOX-RECEIPTS-CUTOVER-01")],
         residual: ResidualDisposition::AcceptedMedium {
@@ -342,9 +370,20 @@ pub(crate) fn matrix(action: MatrixAction) -> Result<()> {
                 .with_context(|| format!("写入 matrix `{}`", path.display()))?;
             eprintln!("archrules matrix: 已写入 {MATRIX_DOC}");
         }
-        MatrixAction::Check => eprintln!("archrules matrix: 14 行与 committed 文档一致"),
+        MatrixAction::Check => {
+            eprintln!("archrules matrix: {EXPECTED_FUNNEL_COUNT} 行与 committed 文档一致")
+        }
     }
     Ok(())
+}
+
+fn expected_issue_partition(range_separator: &str) -> String {
+    let extras = EXTRA_FUNNEL_ISSUES
+        .iter()
+        .map(|issue| format!("#{issue}"))
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("#{FUNNEL_ISSUE_RANGE_START}{range_separator}#{FUNNEL_ISSUE_RANGE_END} + {extras}")
 }
 
 fn validate_matrix(
@@ -353,16 +392,20 @@ fn validate_matrix(
     check_doc_drift: bool,
 ) -> Result<Vec<Finding<Rule>>> {
     let mut findings = Vec::new();
-    let mut expected_issues = (1422_u32..=1442).collect::<BTreeSet<_>>();
-    expected_issues.extend([1677, 1678, 1742]);
+    let mut expected_issues =
+        (FUNNEL_ISSUE_RANGE_START..=FUNNEL_ISSUE_RANGE_END).collect::<BTreeSet<_>>();
+    expected_issues.extend(EXTRA_FUNNEL_ISSUES);
     let mut actual_issues = BTreeSet::new();
     let mut seen_issues = BTreeSet::new();
     let mut keys = BTreeSet::new();
-    if FUNNELS.len() != 14 {
+    if FUNNELS.len() != EXPECTED_FUNNEL_COUNT {
         findings.push(finding(
             Rule::MatrixCoverage,
             "FUNNELS",
-            format!("必须恰好 14 行，实际 {} 行", FUNNELS.len()),
+            format!(
+                "必须恰好 {EXPECTED_FUNNEL_COUNT} 行，实际 {} 行",
+                FUNNELS.len()
+            ),
         ));
     }
     for funnel in FUNNELS {
@@ -435,7 +478,8 @@ fn validate_matrix(
             Rule::MatrixCoverage,
             "source issues",
             format!(
-                "来源 issue 并集必须恰为 #1422..#1442 + #1677/#1678/#1742；missing={:?}, extra={:?}",
+                "来源 issue 并集必须恰为 {}；missing={:?}, extra={:?}",
+                expected_issue_partition(".."),
                 expected_issues
                     .difference(&actual_issues)
                     .collect::<Vec<_>>(),
@@ -622,10 +666,11 @@ fn render_matrix(records: &[RuleRecord]) -> Result<String> {
             funnel.key, issues, upstream, downstream, residual
         ));
     }
-    out.push_str(
+    out.push_str(&format!(
         "\n## Verification\n\n\
-`cargo xtask archrules matrix --check` 校验固定 14 行、#1422–#1442 + #1677/#1678/#1742 精确覆盖、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。该检查随 `archrules` 进入 `verify`/`ci`。\n",
-    );
+`cargo xtask archrules matrix --check` 校验固定 {EXPECTED_FUNNEL_COUNT} 行、{} 精确覆盖、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。该检查随 `archrules` 进入 `verify`/`ci`。\n",
+        expected_issue_partition("–")
+    ));
     Ok(out)
 }
 
@@ -3557,19 +3602,26 @@ members = ["rss_demo"]
 
     #[test]
     fn funnel_matrix_has_exact_rows_and_issue_partition() -> Result<()> {
-        assert_eq!(FUNNELS.len(), 14);
+        assert_eq!(FUNNELS.len(), EXPECTED_FUNNEL_COUNT);
         let issues = FUNNELS
             .iter()
             .flat_map(|funnel| funnel.source_issues.iter().copied())
             .collect::<Vec<_>>();
-        assert_eq!(issues.len(), 24, "每个来源 issue 必须且只能归属一行");
-        let mut expected = (1422_u32..=1442).collect::<BTreeSet<_>>();
-        expected.extend([1677, 1678, 1742]);
+        let expected_issue_count = (FUNNEL_ISSUE_RANGE_END - FUNNEL_ISSUE_RANGE_START + 1) as usize
+            + EXTRA_FUNNEL_ISSUES.len();
+        assert_eq!(
+            issues.len(),
+            expected_issue_count,
+            "每个来源 issue 必须且只能归属一行"
+        );
+        let mut expected =
+            (FUNNEL_ISSUE_RANGE_START..=FUNNEL_ISSUE_RANGE_END).collect::<BTreeSet<_>>();
+        expected.extend(EXTRA_FUNNEL_ISSUES);
         assert_eq!(issues.iter().copied().collect::<BTreeSet<_>>(), expected);
         let pg_runtime = FUNNELS
             .iter()
-            .find(|funnel| funnel.source_issues == [1677])
-            .context("#1677 lifecycle funnel")?;
+            .find(|funnel| funnel.source_issues == [ISSUE_PG_RUNTIME_CUTOVER])
+            .with_context(|| format!("#{ISSUE_PG_RUNTIME_CUTOVER} lifecycle funnel"))?;
         assert_eq!(
             pg_runtime.upstream,
             [
@@ -3588,10 +3640,39 @@ members = ["rss_demo"]
             pg_runtime.residual,
             ResidualDisposition::AcceptedMedium { .. }
         ));
+        let outbox_relay = FUNNELS
+            .iter()
+            .find(|funnel| {
+                funnel.source_issues
+                    == [
+                        ISSUE_OUTBOX_CLAIM_CAPABILITY,
+                        ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER,
+                    ]
+            })
+            .with_context(|| {
+                format!(
+                    "#{}/#{} claimed relay funnel",
+                    ISSUE_OUTBOX_CLAIM_CAPABILITY, ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER
+                )
+            })?;
+        assert_eq!(
+            outbox_relay.upstream,
+            [invariant("OUTBOX-CLAIM-RELAY-CAPABILITY-01")]
+        );
+        assert_eq!(
+            outbox_relay.downstream,
+            [invariant("OUTBOX-RELAY-CLAIM-CUTOVER-01")]
+        );
+        assert!(matches!(
+            outbox_relay.residual,
+            ResidualDisposition::AcceptedMedium { .. }
+        ));
         let event_output = FUNNELS
             .iter()
-            .find(|funnel| funnel.source_issues == [1678])
-            .context("#1678 event transport output funnel")?;
+            .find(|funnel| funnel.source_issues == [ISSUE_EVENT_TRANSPORT_OUTPUT])
+            .with_context(|| {
+                format!("#{ISSUE_EVENT_TRANSPORT_OUTPUT} event transport output funnel")
+            })?;
         assert_eq!(
             event_output.upstream,
             [invariant("EVENT-TRANSPORT-OUTPUT-TYPE-01")]
@@ -3609,10 +3690,29 @@ members = ["rss_demo"]
     }
 
     #[test]
+    fn funnel_matrix_configuration_is_single_source() {
+        let source = include_str!("archrules.rs");
+        for scattered in [
+            format!("FUNNELS.len() != {EXPECTED_FUNNEL_COUNT}"),
+            format!("({FUNNEL_ISSUE_RANGE_START}_u32..={FUNNEL_ISSUE_RANGE_END})"),
+            format!("expected.extend({EXTRA_FUNNEL_ISSUES:?})"),
+            ["EXTRA_FUNNEL_ISSUES", "["].concat(),
+        ] {
+            assert!(
+                !source.contains(&scattered),
+                "matrix configuration remains duplicated: {scattered}"
+            );
+        }
+    }
+
+    #[test]
     fn real_workspace_archrules_and_derived_matrix_pass() -> Result<()> {
         let (summary, findings) = ArchRules.check()?;
         assert!(findings.is_empty(), "{findings:?}");
-        assert!(summary.contains("14 行持久化 funnel"), "{summary}");
+        assert!(
+            summary.contains(&format!("{EXPECTED_FUNNEL_COUNT} 行持久化 funnel")),
+            "{summary}"
+        );
         matrix(MatrixAction::Check)?;
         Ok(())
     }

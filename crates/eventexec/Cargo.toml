@@ -18,7 +18,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 # run_dispatch 对 Nack 丢弃 / Requeue 耗尽做结构化日志（防静默消息丢失，observability.md §日志）。
 tracing = { workspace = true }
-# outbox relay/sweeper 引擎接缝（OutboxSource/OutboxRelay/RetentionSweeper/Entry/Disposition）。
+# outbox relay/sweeper 引擎接缝（OutboxRelay/RetentionSweeper/Entry/Disposition）。
 consistency = { path = "../consistency" }
 # Command dispatchers implement the contract-generated CommandEmit/CommandJournal seams.
 generated = { path = "../../generated" }
