@@ -98,9 +98,15 @@ production mount 和 effect proof。route owner 直接来自 generated `HttpRout
 assembly `frameworkContracts` 声明定位，并扫描同一个 `bootstrap::FrameworkRoutes::register` funnel。
 两种 owner 经闭合 `ServingScope::Domain | Framework` 进入同一个 LocalOnly proof evaluator；assembly 名不得
 作为 domain owner 或 owner-sealed macro namespace 使用。无状态 route 不要求无关的 port proof；classified
-Framework state 只允许 `diport` 全局 sealed capability，不能借用任意 domain-private 分类。JSON v1
+Framework state 只允许 `diport` 全局 sealed capability，不能借用任意 domain-private 分类。JSON v2
 面向 CI/PR artifact，Markdown 面向人工 review；两者由同一 typed
 model 渲染、稳定排序，且不包含时间、主机、Git SHA、绝对路径或运行态 tenant/device 数据。
+
+v2 同时输出独立的 `localOnlyReceiptCoverage` 与 per-contract `sourceReceiptRegistration`。后者显式携带
+`evidence=sourceRegistered`、`enforcement=reportOnly` 和 `status=registered|missing|notApplicable`；顶层
+`status` 仍只表示静态 posture finding，receipt registration status 不与静态 `ProofStatus` 复用。
+`registered` 只表示 canonical source receipt site 可发现，不声称本次 report 命令执行过测试。v1 不再输出或
+接受，不提供 alias 或双 schema。
 
 报告与 gate 的职责不同：posture finding 会令报告内 `status = "failed"`，但命令仍成功并输出完整 artifact；
 采集、结构或序列化失败在 stdout 写入前非零退出；stdout 写入失败本身可能留下截断文件，消费方必须检查退出码
@@ -144,11 +150,28 @@ red + compiling green anti-vacuity）。该门不从方法名猜能力，混合 
 
 ## LocalOnly runtime conformance
 
+Active LocalOnly 集合由 codegen 从 active HTTP manifests 同源生成
+`generated::http::LOCAL_ONLY_SPECS`；每个 active LocalOnly module 同时获得专用
+`LocalOnlyConformanceMarker`。route 失活或改为非 L0 时 marker 消失，canonical receipt site 在编译期失败
+（Hard）。testkit 的 opaque `LocalOnlyConformanceReceipt<Marker>` 只能由完整 post-check 成功路径铸造；
+构造器与字段不公开。
+
+跨 crate 登记闭环由 `LOCAL-ONLY-RECEIPT-COVERAGE-01` Medium 门承担：逐 receipt 接受无 cfg/ignore 的
+canonical test 顶层 fail-loud statement，并要求完整限定 marker、同模块 `SPEC` ID；同一词法模块内的
+`self::factory` 必须在同一个 `UnfinalizedRoutes` 上先铸 mounted-route proof、再把该 routes 交给受控
+finalizer，并把同一个 router/proof 作为 tuple 返回。三维直属 observer initializer 与仅含同模块 generated GET
+的零参 move operation 必须消费这对证书；随后还必须用 `::core::assert_eq!` 断言
+`receipt.contract_id()`。decoy/bait、错 route/path/method/provider、空或 wrong-but-finalized routes、
+cfg/sibling bait、async/closure/spawn、控制流、macro、wrapper/alias 与忽略 Result 的形状均
+fail-closed，并与 active registry exact-set 对账。缺少 receipt 保持 report-only。当前基线为 2/6 registered，
+4 条 missing，详见 `docs/runbooks/202607141556-1771-local-only-proof.md`。
+
 `testkit::local_only::assert_local_only` 在完整 await 一次 HTTP operation 前后，比较调用方必须同时提供的
 `write` / `outbox` / `publish` 三维证据。存在运行时 seam 时，provider 必须持有维度化
 `ProviderCounter<Dimension>`，conformance 只消费其共享只读 handle；任意 `FnMut() -> u64` 入口已删除，三个
 marker 不可互换。能力已被 typed route/state funnel 排除时使用显式 `StaticExclusion::from_governed(&proof)`，
-proof 必须来自 httpserve 的 canonical classified-state / stateless generated-route constructor。不得拿无关计数器、
+proof 必须来自 httpserve 对将要 finalize 的同一 `UnfinalizedRoutes` 做 exact evidence membership 检查的
+canonical classified-state / stateless mounted-route constructor。不得拿空 routes、另一条 route、无关计数器、
 恒零闭包、空 owner trait 或任意值冒充观察。跨 crate provenance 由 `consistency local-only-effects` 的 direct-shape
 源码门与 synthetic red 验证，仍诚实定级 Medium，不虚称 Rust Hard proof。任一 runtime 计数增长即失败，
 计数倒退也 fail-loud；非零 fixture baseline 合法。testkit 自身用

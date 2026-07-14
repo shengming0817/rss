@@ -1,7 +1,18 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "status": "failed",
   "activeHttpContractCount": 2,
+  "localOnlyReceiptCoverage": {
+    "enforcement": "reportOnly",
+    "evidence": "sourceRegistered",
+    "status": "partial",
+    "activeCount": 1,
+    "registeredCount": 0,
+    "missingCount": 1,
+    "missingContracts": [
+      "a.local"
+    ]
+  },
   "findings": [
     {
       "rule": "forbiddenStateEffect",
@@ -38,6 +49,11 @@
         "effectClass": "ReadEffect",
         "privilegeClass": "LocalPrivilege"
       },
+      "sourceReceiptRegistration": {
+        "enforcement": "reportOnly",
+        "evidence": "sourceRegistered",
+        "status": "missing"
+      },
       "findings": [
         {
           "rule": "forbiddenStateEffect",
@@ -66,6 +82,11 @@
         "stateKind": null,
         "effectClass": null,
         "privilegeClass": null
+      },
+      "sourceReceiptRegistration": {
+        "enforcement": "reportOnly",
+        "evidence": "sourceRegistered",
+        "status": "notApplicable"
       },
       "findings": [
         {

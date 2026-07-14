@@ -1,0 +1,11 @@
+error[E0308]: mismatched types
+  --> tests/ui/local_only_route_state_proof_marker_mismatch.rs:32:9
+   |
+31 |       let _: httpserve::LocalOnlyMountedRouteProof<SecondRoute, ReadState> =
+   |              ------------------------------------------------------------- expected due to this
+32 | /         ::httpserve::prove_local_only_mounted_route_state::<ReadState, _>(&routes, &binding)
+33 | |             .unwrap();
+   | |_____________________^ expected `SecondRoute`, found `FirstRoute`
+   |
+   = note: expected struct `LocalOnlyMountedRouteProof<SecondRoute, ReadState>`
+              found struct `LocalOnlyMountedRouteProof<FirstRoute, ReadState>`

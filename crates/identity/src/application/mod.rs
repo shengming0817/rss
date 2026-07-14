@@ -3257,7 +3257,12 @@ mod tests {
         capture: CapturingSessionLifecycle,
         profile_permissions: &[&str],
         auth_sink: RecordingAuthAuditSink,
-    ) -> axum::Router {
+    ) -> (
+        axum::Router,
+        ::httpserve::StatelessLocalOnlyMountedRouteProof<
+            ::generated::http::identity_v1::profile::RouteMarker,
+        >,
+    ) {
         let domain =
             seed_domain_with_profile_permissions(capture, 1_000, 3_600, profile_permissions);
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
@@ -3270,9 +3275,14 @@ mod tests {
         assert_eq!(finalized.len(), 1, "identity owns one Primary listener");
         let (listener, routes) = finalized.pop().expect("identity Primary routes");
         assert_eq!(listener, ListenerKind::Primary);
+        let proof = ::httpserve::prove_stateless_local_only_mounted_route(
+            &routes,
+            &::generated::http::identity_v1::profile::ROUTE,
+        )
+        .expect("identity profile route is mounted in finalized routes");
         let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
             .expect("Primary JWT auth plan");
-        httpserve::finalize_primary_auth_with_audit(
+        let router = ::httpserve::finalize_primary_auth_with_audit(
             routes,
             plan,
             httpserve::AuditSinkHandle::new(auth_sink),
@@ -3280,14 +3290,17 @@ mod tests {
             authorizer,
         )
         .expect("finalize Primary auth")
-        .into_router_for_test()
+        .into_router_for_test();
+        (router, proof)
     }
 
-    #[allow(clippy::expect_used)]
-    async fn profile_local_only_call(
+    fn profile_local_only_parts(
         router: axum::Router,
+        proof: ::httpserve::StatelessLocalOnlyMountedRouteProof<
+            ::generated::http::identity_v1::profile::RouteMarker,
+        >,
         authenticated: Option<(vocab::PrincipalKind, &str)>,
-    ) -> testkit::ContractResponse {
+    ) -> (axum::Router, ::testkit::local_only::LocalOnlyObservers) {
         let router = if let Some((kind, subject)) = authenticated {
             router.layer(axum::Extension(httpserve::Authenticated::new(
                 primitives::RequiredScheme::Jwt,
@@ -3302,7 +3315,6 @@ mod tests {
         // Profile is mounted stateless by the typed LocalOnly funnel. It has no runtime provider
         // seam to observe, so all three forbidden dimensions are explicit static exclusions rather
         // than interchangeable closures over an unrelated domain capture.
-        let proof = ::httpserve::prove_stateless_local_only_route(&PROFILE_HTTP_ROUTE);
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Write>::from_governed(
                 &proof,
@@ -3314,6 +3326,18 @@ mod tests {
                 &proof,
             ),
         );
+        (router, observers)
+    }
+
+    #[allow(clippy::expect_used)]
+    async fn profile_local_only_call(
+        router: axum::Router,
+        proof: ::httpserve::StatelessLocalOnlyMountedRouteProof<
+            ::generated::http::identity_v1::profile::RouteMarker,
+        >,
+        authenticated: Option<(vocab::PrincipalKind, &str)>,
+    ) -> testkit::ContractResponse {
+        let (router, observers) = profile_local_only_parts(router, proof, authenticated);
         ::testkit::local_only::assert_local_only(observers, || {
             testkit::call(router, ContractRequest::get(PROFILE_HTTP_SPEC.route.path()))
         })
@@ -6192,9 +6216,46 @@ mod tests {
     async fn profile_local_only_finalized_route_keeps_default_projection_masked() {
         let capture = CapturingSessionLifecycle::default();
         let auth_sink = RecordingAuthAuditSink::default();
-        let router = finalized_profile_router(capture, &[], auth_sink.clone());
-        let response =
-            profile_local_only_call(router, Some((vocab::PrincipalKind::User, CANON_USER))).await;
+        let (router, proof) = self::finalized_profile_router(capture, &[], auth_sink.clone());
+        let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            vocab::PrincipalKind::User,
+            CANON_USER,
+            Some(tid(CANON_TENANT)),
+        )));
+        let observers = ::testkit::local_only::LocalOnlyObservers::new(
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Write>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                &proof,
+            ),
+        );
+        #[rustfmt::skip]
+        let (response, receipt) = ::testkit::local_only::assert_local_only_with_receipt::<
+            ::generated::http::identity_v1::profile::LocalOnlyConformanceMarker,
+            _,
+            _,
+            _,
+        >(
+            ::generated::http::identity_v1::profile::SPEC
+                .route
+                .contract_id(),
+            observers,
+            move || ::testkit::call(router, ::testkit::ContractRequest::get(::generated::http::identity_v1::profile::SPEC.route.path())),
+        )
+        .await
+        .expect("profile remains LocalOnly");
+        ::core::assert_eq!(
+            receipt.contract_id(),
+            ::generated::http::identity_v1::profile::SPEC
+                .route
+                .contract_id()
+        );
+        let response = response.expect("call finalized profile route");
 
         response.ensure_status(StatusCode::OK).expect("profile 200");
         let decoded: IdentityProfileResponse = response.json().expect("profile json");
@@ -6213,13 +6274,17 @@ mod tests {
     async fn profile_local_only_finalized_route_applies_explicit_projection() {
         let capture = CapturingSessionLifecycle::default();
         let auth_sink = RecordingAuthAuditSink::default();
-        let router = finalized_profile_router(
+        let (router, proof) = finalized_profile_router(
             capture,
             &[vocab::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION.as_str()],
             auth_sink.clone(),
         );
-        let response =
-            profile_local_only_call(router, Some((vocab::PrincipalKind::User, CANON_USER))).await;
+        let response = profile_local_only_call(
+            router,
+            proof,
+            Some((vocab::PrincipalKind::User, CANON_USER)),
+        )
+        .await;
 
         response.ensure_status(StatusCode::OK).expect("profile 200");
         let decoded: IdentityProfileResponse = response.json().expect("profile json");
@@ -6238,8 +6303,8 @@ mod tests {
     async fn profile_local_only_finalized_route_rejects_missing_authentication() {
         let capture = CapturingSessionLifecycle::default();
         let auth_sink = RecordingAuthAuditSink::default();
-        let router = finalized_profile_router(capture, &[], auth_sink.clone());
-        let response = profile_local_only_call(router, None).await;
+        let (router, proof) = finalized_profile_router(capture, &[], auth_sink.clone());
+        let response = profile_local_only_call(router, proof, None).await;
 
         response
             .ensure_status(StatusCode::UNAUTHORIZED)
@@ -6252,9 +6317,13 @@ mod tests {
     async fn profile_local_only_finalized_route_rejects_unauthorized_principal() {
         let capture = CapturingSessionLifecycle::default();
         let auth_sink = RecordingAuthAuditSink::default();
-        let router = finalized_profile_router(capture, &[], auth_sink.clone());
-        let response =
-            profile_local_only_call(router, Some((vocab::PrincipalKind::Device, CANON_USER))).await;
+        let (router, proof) = finalized_profile_router(capture, &[], auth_sink.clone());
+        let response = profile_local_only_call(
+            router,
+            proof,
+            Some((vocab::PrincipalKind::Device, CANON_USER)),
+        )
+        .await;
 
         response
             .ensure_status(StatusCode::FORBIDDEN)

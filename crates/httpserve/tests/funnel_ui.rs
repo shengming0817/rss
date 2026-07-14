@@ -33,6 +33,7 @@ fn ui() {
     t.compile_fail("tests/ui/local_only_cannot_with_state.rs");
     t.compile_fail("tests/ui/local_only_rejects_write_state.rs");
     t.compile_fail("tests/ui/local_only_rejects_cross_tenant_state.rs");
+    t.compile_fail("tests/ui/local_only_route_state_proof_marker_mismatch.rs");
     t.compile_fail("tests/ui/consistency_marker_mismatch.rs");
     t.compile_fail("tests/ui/primary_local_only_cannot_with_state.rs");
     t.compile_fail("tests/ui/primary_local_only_rejects_write_state.rs");

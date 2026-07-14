@@ -50,7 +50,20 @@ report_file="$(mktemp)"
 trap 'rm -f "$report_file"' EXIT
 ./hack/cargo.sh xtask consistency report --format json >"$report_file"
 jq -e '.status == "passed"' "$report_file"
+jq -e '
+  .schemaVersion == 2 and
+  .localOnlyReceiptCoverage.enforcement == "reportOnly" and
+  .localOnlyReceiptCoverage.evidence == "sourceRegistered"
+' "$report_file"
 ```
+
+The top-level `status` remains the static posture verdict. LocalOnly receipt coverage is a separate
+report-only dimension: `registered` means a canonical source site exists, not that this invocation
+ran the route test. The Medium source certificate additionally closes marker/ID/mounted-ROUTE proof,
+three direct observers, a module-qualified factory that proves and finalizes the same routes before
+returning the same router/proof tuple, and the same generated GET operation
+per receipt site. A `missing` receipt does not fail the static gate; malformed, duplicate, stale,
+unknown, mismatched, decoy/bait, aliased, wrapped, or unawaited evidence fails provenance collection.
 
 ## Failure Modes
 

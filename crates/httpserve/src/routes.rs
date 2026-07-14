@@ -22,6 +22,7 @@ use crate::{
 };
 use axum::extract::FromRequestParts;
 use axum::handler::Handler;
+use core::any::TypeId;
 use core::marker::PhantomData;
 use diport::{AuthEffect, LocalPrivilege, PortEffectClass, PortPrivilegeClass, ReadEffect};
 use primitives::{AuthPlan, ListenerKind};
@@ -56,30 +57,155 @@ pub trait ClassifiedRouteState {
     type Privilege: PortPrivilegeClass;
 }
 
-/// Opaque test-only proof that a state satisfies the production `LocalOnly` capability bounds.
+/// Opaque test-only proof that one generated `LocalOnly` route is mounted in a concrete
+/// [`UnfinalizedRoutes`] value and uses classified state `S`.
+///
+/// The proof itself retains the route marker and state type. Cross-crate source analysis is still
+/// responsible for proving that a receipt site consumes the proof returned beside the finalized
+/// router; this type does not claim that source-level relationship as a native Hard guarantee.
 #[cfg(any(test, feature = "test-util"))]
-pub struct LocalOnlyStateProof<S>(PhantomData<fn() -> S>);
+pub struct LocalOnlyMountedRouteProof<M, S>(PhantomData<fn() -> (M, S)>);
 
-/// Produces a proof only when `S` passes the same bounds as `with_classified_state`.
+/// Opaque test-only proof that one generated stateless `LocalOnly` route is mounted.
 #[cfg(any(test, feature = "test-util"))]
-pub fn prove_local_only_state<S>() -> LocalOnlyStateProof<S>
+pub struct StatelessLocalOnlyMountedRouteProof<M>(PhantomData<fn() -> M>);
+
+/// Failure to find the generated route binding in the exact pre-finalization route accumulator.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("generated LocalOnly route is not mounted in the supplied unfinalized routes")]
+pub struct LocalOnlyRouteNotMounted;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MountedRouteState {
+    Stateless,
+    Stateful(TypeId),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct GeneratedRouteIdentity {
+    marker: TypeId,
+    state: MountedRouteState,
+}
+
+impl GeneratedRouteIdentity {
+    fn stateless<M: 'static>() -> Self {
+        Self {
+            marker: TypeId::of::<M>(),
+            state: MountedRouteState::Stateless,
+        }
+    }
+
+    fn with_state<S: 'static>(self) -> Self {
+        Self {
+            marker: self.marker,
+            state: MountedRouteState::Stateful(TypeId::of::<S>()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MountedRouteIdentity {
+    #[cfg(any(test, feature = "test-util"))]
+    Raw,
+    Generated(GeneratedRouteIdentity),
+}
+
+#[derive(Default)]
+struct MountedRoutes {
+    evidence: Vec<HttpRouteEvidence>,
+    identity: Vec<MountedRouteIdentity>,
+}
+
+impl MountedRoutes {
+    #[cfg(any(test, feature = "test-util"))]
+    fn push_raw(&mut self, evidence: HttpRouteEvidence) {
+        self.evidence.push(evidence);
+        self.identity.push(MountedRouteIdentity::Raw);
+    }
+
+    fn push_generated(&mut self, evidence: HttpRouteEvidence, identity: GeneratedRouteIdentity) {
+        self.evidence.push(evidence);
+        self.identity
+            .push(MountedRouteIdentity::Generated(identity));
+    }
+
+    fn append(&mut self, mut other: Self) {
+        self.evidence.append(&mut other.evidence);
+        self.identity.append(&mut other.identity);
+    }
+
+    fn evidence(&self) -> &[HttpRouteEvidence] {
+        &self.evidence
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    fn contains_generated(
+        &self,
+        evidence: HttpRouteEvidence,
+        identity: GeneratedRouteIdentity,
+    ) -> bool {
+        self.evidence
+            .iter()
+            .zip(&self.identity)
+            .any(|(mounted_evidence, mounted_identity)| {
+                mounted_evidence == &evidence
+                    && mounted_identity == &MountedRouteIdentity::Generated(identity)
+            })
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+fn route_is_mounted<M>(
+    routes: &UnfinalizedRoutes,
+    binding: &HttpRouteBinding<M, LocalOnly>,
+    identity: GeneratedRouteIdentity,
+) -> bool {
+    routes
+        .mounted
+        .contains_generated(binding.evidence(), identity)
+}
+
+/// Proves that classified state and one generated `LocalOnly` route are mounted together.
+///
+/// The constructor checks the exact evidence stored in `routes` before auth finalization and
+/// applies the same state bounds as [`GeneratedEndpoint::with_classified_state`] and
+/// [`GeneratedPrimaryEndpoint::with_classified_state`].
+#[cfg(any(test, feature = "test-util"))]
+pub fn prove_local_only_mounted_route_state<S, M>(
+    routes: &UnfinalizedRoutes,
+    binding: &HttpRouteBinding<M, LocalOnly>,
+) -> Result<LocalOnlyMountedRouteProof<M, S>, LocalOnlyRouteNotMounted>
 where
+    M: 'static,
     S: Clone + Send + Sync + 'static + ClassifiedRouteState<Privilege = LocalPrivilege>,
     S::Effect: LocalOnlyAllowedEffect,
 {
-    LocalOnlyStateProof(PhantomData)
+    if route_is_mounted(
+        routes,
+        binding,
+        GeneratedRouteIdentity::stateless::<M>().with_state::<S>(),
+    ) {
+        Ok(LocalOnlyMountedRouteProof(PhantomData))
+    } else {
+        Err(LocalOnlyRouteNotMounted)
+    }
 }
 
-/// Opaque test-only proof bound to one generated stateless `LocalOnly` route marker.
+/// Proves that one generated stateless `LocalOnly` route is mounted before auth finalization.
 #[cfg(any(test, feature = "test-util"))]
-pub struct StatelessLocalOnlyRouteProof<M>(PhantomData<fn() -> M>);
-
-/// Binds a stateless proof to one generated `LocalOnly` route identity.
-#[cfg(any(test, feature = "test-util"))]
-pub fn prove_stateless_local_only_route<M>(
-    _binding: &HttpRouteBinding<M, LocalOnly>,
-) -> StatelessLocalOnlyRouteProof<M> {
-    StatelessLocalOnlyRouteProof(PhantomData)
+pub fn prove_stateless_local_only_mounted_route<M>(
+    routes: &UnfinalizedRoutes,
+    binding: &HttpRouteBinding<M, LocalOnly>,
+) -> Result<StatelessLocalOnlyMountedRouteProof<M>, LocalOnlyRouteNotMounted>
+where
+    M: 'static,
+{
+    if route_is_mounted(routes, binding, GeneratedRouteIdentity::stateless::<M>()) {
+        Ok(StatelessLocalOnlyMountedRouteProof(PhantomData))
+    } else {
+        Err(LocalOnlyRouteNotMounted)
+    }
 }
 
 /// Zero-cost extractor carrying one generated HTTP contract identity into a handler signature.
@@ -150,18 +276,20 @@ impl_contract_handler_args!(
 
 struct Endpoint<S> {
     evidence: HttpRouteEvidence,
+    identity: GeneratedRouteIdentity,
     method: axum::http::Method,
     handler: axum::routing::MethodRouter<S>,
 }
 
 /// INVARIANT: ROUTE-ENDPOINT-REQUIRED-01 { level = "Hard", exec = "native-compile", source = "code", native = "public endpoint constructors require a non-optional HttpRouteBinding<M, C> plus a handler whose argument tuple starts with ContractMarker<M>; trybuild omits each and rejects cross-contract markers" }
-/// INVARIANT: ROUTE-ENDPOINT-ATOMIC-01 { level = "Hard", exec = "native-compile", source = "code", native = "private Endpoint owns evidence, parsed method, and MethodRouter as one move-only mount value" }
+/// INVARIANT: ROUTE-ENDPOINT-ATOMIC-01 { level = "Hard", exec = "native-compile", source = "code", native = "private Endpoint owns evidence, typed route/state identity, parsed method, and MethodRouter as one move-only mount value" }
 impl<S> Endpoint<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    fn new<H, T>(evidence: HttpRouteEvidence, handler: H) -> Result<Self, RouteGroupError>
+    fn new<M, H, T>(evidence: HttpRouteEvidence, handler: H) -> Result<Self, RouteGroupError>
     where
+        M: 'static,
         H: Handler<T, S>,
         T: 'static,
     {
@@ -171,6 +299,7 @@ where
             .map_err(|_| invalid_method(evidence))?;
         Ok(Self {
             evidence,
+            identity: GeneratedRouteIdentity::stateless::<M>(),
             method,
             handler: axum::routing::on(filter, handler),
         })
@@ -179,6 +308,7 @@ where
     fn with_state(self, state: S) -> Endpoint<()> {
         Endpoint {
             evidence: self.evidence,
+            identity: self.identity.with_state::<S>(),
             method: self.method,
             handler: self.handler.with_state(state),
         }
@@ -203,10 +333,12 @@ where
         handler: H,
     ) -> Result<Self, RouteGroupError>
     where
+        M: 'static,
         H: Handler<T, S>,
         T: ContractHandlerArgs<M> + 'static,
     {
-        Endpoint::new(binding.evidence(), handler).map(|endpoint| Self(endpoint, PhantomData))
+        Endpoint::new::<M, _, _>(binding.evidence(), handler)
+            .map(|endpoint| Self(endpoint, PhantomData))
     }
 
     /// Borrow the atomic route proof.
@@ -257,10 +389,12 @@ where
         handler: H,
     ) -> Result<Self, RouteGroupError>
     where
+        M: 'static,
         H: Handler<T, S>,
         T: ContractHandlerArgs<M> + 'static,
     {
-        Endpoint::new(binding.evidence(), handler).map(|endpoint| Self(endpoint, PhantomData))
+        Endpoint::new::<M, _, _>(binding.evidence(), handler)
+            .map(|endpoint| Self(endpoint, PhantomData))
     }
 
     /// Borrow the atomic route proof.
@@ -484,7 +618,7 @@ impl NonPrimaryListener for Admin {}
 pub struct ListenerRouter<L: Listener> {
     inner: axum::Router,
     prefix: &'static str,
-    evidence: Vec<HttpRouteEvidence>,
+    mounted: MountedRoutes,
     _l: PhantomData<fn() -> L>,
 }
 
@@ -499,13 +633,13 @@ impl<L: Listener> ListenerRouter<L> {
         Self {
             inner: router,
             prefix,
-            evidence: Vec::new(),
+            mounted: MountedRoutes::default(),
             _l: PhantomData,
         }
     }
 
-    pub(crate) fn into_parts(self) -> (axum::Router, Vec<HttpRouteEvidence>) {
-        (self.inner, self.evidence)
+    fn into_parts(self) -> (axum::Router, MountedRoutes) {
+        (self.inner, self.mounted)
     }
 
     /// Test-only raw framework router mount. Production builds do not contain this API.
@@ -531,16 +665,14 @@ impl<L: Listener> ListenerRouter<L> {
         } else {
             None
         };
+        let mut mounted = self.mounted;
+        mounted.push_raw(evidence);
         Ok(Self {
             inner: self
                 .inner
                 .route(path, handler.layer(enforce_layer(authz, method, evidence))),
             prefix: self.prefix,
-            evidence: {
-                let mut mounted = self.evidence;
-                mounted.push(evidence);
-                mounted
-            },
+            mounted,
             _l: PhantomData,
         })
     }
@@ -557,17 +689,15 @@ impl ListenerRouter<Primary> {
         let method = axum::http::Method::from_bytes(route.evidence.method().as_bytes())
             .map_err(|_| invalid_method(route.evidence))?;
         let path = relative_path(route.evidence, self.prefix, ListenerKind::Primary)?;
+        let mut mounted = self.mounted;
+        mounted.push_raw(route.evidence);
         Ok(Self {
             inner: self.inner.route(
                 path,
                 handler.layer(enforce_layer(Some(route.authz), method, route.evidence)),
             ),
             prefix: self.prefix,
-            evidence: {
-                let mut mounted = self.evidence;
-                mounted.push(route.evidence);
-                mounted
-            },
+            mounted,
             _l: PhantomData,
         })
     }
@@ -582,21 +712,20 @@ impl<L: NonPrimaryListener> ListenerRouter<L> {
     ) -> Result<Self, RouteGroupError> {
         let Endpoint {
             evidence,
+            identity,
             method,
             handler,
         } = endpoint.0;
         let authz = nonprimary_authz::<C>(evidence, L::KIND)?;
         let path = relative_path(evidence, self.prefix, L::KIND)?;
+        let mut mounted = self.mounted;
+        mounted.push_generated(evidence, identity);
         Ok(Self {
             inner: self
                 .inner
                 .route(path, handler.layer(enforce_layer(authz, method, evidence))),
             prefix: self.prefix,
-            evidence: {
-                let mut mounted = self.evidence;
-                mounted.push(evidence);
-                mounted
-            },
+            mounted,
             _l: PhantomData,
         })
     }
@@ -610,22 +739,21 @@ impl ListenerRouter<Primary> {
     ) -> Result<Self, RouteGroupError> {
         let Endpoint {
             evidence,
+            identity,
             method,
             handler,
         } = endpoint.0;
         let path = relative_path(evidence, self.prefix, ListenerKind::Primary)?;
         let authz = primary_authz(evidence)?;
+        let mut mounted = self.mounted;
+        mounted.push_generated(evidence, identity);
         Ok(Self {
             inner: self.inner.route(
                 path,
                 handler.layer(enforce_layer(Some(authz), method, evidence)),
             ),
             prefix: self.prefix,
-            evidence: {
-                let mut mounted = self.evidence;
-                mounted.push(evidence);
-                mounted
-            },
+            mounted,
             _l: PhantomData,
         })
     }
@@ -640,7 +768,7 @@ impl ListenerRouter<Health> {
         Self {
             inner: self.inner.route(path, handler),
             prefix: self.prefix,
-            evidence: self.evidence,
+            mounted: self.mounted,
             _l: PhantomData,
         }
     }
@@ -754,11 +882,12 @@ fn permission_authz(
 /// INVARIANT: ROUTE-AUTH-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 无 public bindable 出口（无 `into_make_service`）；唯一前进路径是
 /// [`finalize_auth`]（同 crate 读私有字段）换 [`AuthenticatedRoutes`] ⇒ 未跑 auth 装配的 router 无法 bind。
 /// 经 [`empty`](Self::empty) + [`nest_group`](Self::nest_group) 累加（裸 `axum::Router` 不出 httpserve），
+/// 并原子保留 generated route marker 与 stateless/stateful identity；raw test mount 不具 generated identity。
 /// 由 `bootstrap::finalize_routes` 经受控 `bootstrap → httpserve` 边驱动（ADR-009）。
 #[must_use = "UnfinalizedRoutes 须经 finalize_auth 换 AuthenticatedRoutes 才能 bind"]
 pub struct UnfinalizedRoutes {
     router: axum::Router,
-    evidence: Vec<HttpRouteEvidence>,
+    mounted: MountedRoutes,
     listener: Option<ListenerKind>,
     conflicting_listener: Option<ListenerKind>,
 }
@@ -768,7 +897,7 @@ impl UnfinalizedRoutes {
     pub fn empty() -> Self {
         Self {
             router: axum::Router::new(),
-            evidence: Vec::new(),
+            mounted: MountedRoutes::default(),
             listener: None,
             conflicting_listener: None,
         }
@@ -787,7 +916,7 @@ impl UnfinalizedRoutes {
     where
         L: Listener,
     {
-        let (group, mut group_evidence) =
+        let (group, group_routes) =
             register(ListenerRouter::<L>::new(axum::Router::new(), prefix))?.into_parts();
         let listener = self.listener.or(Some(L::KIND));
         let conflicting_listener = self.conflicting_listener.or_else(|| {
@@ -795,13 +924,11 @@ impl UnfinalizedRoutes {
                 .filter(|registered| *registered != L::KIND)
                 .map(|_| L::KIND)
         });
+        let mut mounted = self.mounted;
+        mounted.append(group_routes);
         Ok(Self {
             router: self.router.nest(prefix, group),
-            evidence: {
-                let mut evidence = self.evidence;
-                evidence.append(&mut group_evidence);
-                evidence
-            },
+            mounted,
             listener,
             conflicting_listener,
         })
@@ -810,7 +937,7 @@ impl UnfinalizedRoutes {
     /// Exact generated route evidence mounted into this listener before auth finalization.
     #[must_use]
     pub fn route_evidence(&self) -> &[HttpRouteEvidence] {
-        &self.evidence
+        self.mounted.evidence()
     }
 
     /// 测试专用：取回裸 Router 做 `tower::ServiceExt::oneshot` listener 隔离断言。
@@ -1110,10 +1237,10 @@ fn listener_mismatch(routes: &UnfinalizedRoutes, finalized: ListenerKind) -> Rou
 pub fn unfinalized_for_test<L: Listener>(
     build: impl FnOnce(ListenerRouter<L>) -> Result<ListenerRouter<L>, RouteGroupError>,
 ) -> Result<UnfinalizedRoutes, RouteGroupError> {
-    let (router, evidence) = build(ListenerRouter::<L>::new(axum::Router::new(), ""))?.into_parts();
+    let (router, mounted) = build(ListenerRouter::<L>::new(axum::Router::new(), ""))?.into_parts();
     Ok(UnfinalizedRoutes {
         router,
-        evidence,
+        mounted,
         listener: Some(L::KIND),
         conflicting_listener: None,
     })
@@ -1148,6 +1275,23 @@ mod tests {
         &[vocab::HttpEffectKind::Auth, vocab::HttpEffectKind::Read];
 
     enum TestRouteMarker {}
+    enum OtherTestRouteMarker {}
+
+    #[derive(Clone)]
+    struct TestReadState;
+
+    impl ClassifiedRouteState for TestReadState {
+        type Effect = ReadEffect;
+        type Privilege = LocalPrivilege;
+    }
+
+    #[derive(Clone)]
+    struct OtherTestReadState;
+
+    impl ClassifiedRouteState for OtherTestReadState {
+        type Effect = ReadEffect;
+        type Privilege = LocalPrivilege;
+    }
 
     fn test_binding(
         path: &'static str,
@@ -1163,6 +1307,24 @@ mod tests {
         method: &'static str,
         auth: vocab::HttpRouteAuth,
     ) -> vocab::HttpRouteBinding<TestRouteMarker, vocab::http::LocalOnly> {
+        test_binding_for_with_method(path, contract_id, method, auth, TEST_EFFECTS)
+    }
+
+    fn test_binding_for<M>(
+        path: &'static str,
+        contract_id: &'static str,
+        auth: vocab::HttpRouteAuth,
+    ) -> vocab::HttpRouteBinding<M, vocab::http::LocalOnly> {
+        test_binding_for_with_method(path, contract_id, "GET", auth, TEST_EFFECTS)
+    }
+
+    fn test_binding_for_with_method<M>(
+        path: &'static str,
+        contract_id: &'static str,
+        method: &'static str,
+        auth: vocab::HttpRouteAuth,
+        effects: &'static [vocab::HttpEffectKind],
+    ) -> vocab::HttpRouteBinding<M, vocab::http::LocalOnly> {
         vocab::HttpRouteBinding::from_static(
             vocab::HttpContractOwner::domain("test"),
             vocab::ContractBinding::from_static(
@@ -1178,7 +1340,7 @@ mod tests {
             auth,
             None,
             false,
-            vocab::HttpEffectProfile::new(TEST_EFFECTS),
+            vocab::HttpEffectProfile::new(effects),
         )
     }
 
@@ -1188,6 +1350,14 @@ mod tests {
             path,
             contract_id: "test.admin.list",
         }
+    }
+
+    #[test]
+    fn local_only_mounted_route_proof_is_zero_cost() {
+        assert_eq!(
+            core::mem::size_of::<LocalOnlyMountedRouteProof<TestRouteMarker, TestReadState>>(),
+            0
+        );
     }
 
     #[allow(clippy::expect_used)]
@@ -1214,6 +1384,127 @@ mod tests {
                 rb.mount(endpoint)
             })?;
         assert_eq!(routes.route_evidence(), &[expected]);
+        assert!(
+            prove_local_only_mounted_route_state::<TestReadState, _>(&routes, &binding).is_err()
+        );
+        assert!(prove_stateless_local_only_mounted_route(&routes, &binding).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn stateful_mount_only_mints_matching_stateful_proof() -> Result<(), RouteGroupError> {
+        let binding = test_binding(
+            "/api/v1/stateful",
+            "test.stateful",
+            vocab::HttpRouteAuth::Public,
+        );
+        let routes =
+            UnfinalizedRoutes::empty().nest_group::<Primary, RouteGroupError>("/api/v1", |rb| {
+                let endpoint = GeneratedPrimaryEndpoint::new(
+                    binding,
+                    |_: ContractMarker<TestRouteMarker>,
+                     axum::extract::State(_): axum::extract::State<TestReadState>| async {
+                        "ok"
+                    },
+                )?
+                .with_classified_state(TestReadState);
+                rb.mount(endpoint)
+            })?;
+
+        assert!(
+            prove_local_only_mounted_route_state::<TestReadState, _>(&routes, &binding).is_ok()
+        );
+        assert!(
+            prove_local_only_mounted_route_state::<OtherTestReadState, _>(&routes, &binding)
+                .is_err()
+        );
+        assert!(prove_stateless_local_only_mounted_route(&routes, &binding).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn mounted_route_proof_rejects_same_evidence_with_different_marker()
+    -> Result<(), RouteGroupError> {
+        let binding = test_binding("/api/v1/typed", "test.typed", vocab::HttpRouteAuth::Public);
+        let forged = test_binding_for::<OtherTestRouteMarker>(
+            "/api/v1/typed",
+            "test.typed",
+            vocab::HttpRouteAuth::Public,
+        );
+        let routes =
+            UnfinalizedRoutes::empty().nest_group::<Primary, RouteGroupError>("/api/v1", |rb| {
+                let endpoint = GeneratedPrimaryEndpoint::new(
+                    binding,
+                    |_: ContractMarker<TestRouteMarker>| async { "ok" },
+                )?;
+                rb.mount(endpoint)
+            })?;
+
+        assert_eq!(binding.evidence(), forged.evidence());
+        assert!(prove_stateless_local_only_mounted_route(&routes, &forged).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn raw_test_mount_cannot_mint_generated_route_proof() -> Result<(), RouteGroupError> {
+        const RAW_EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Auth];
+        let binding = test_binding_for_with_method::<TestRouteMarker>(
+            "/raw",
+            "test.raw",
+            "GET",
+            vocab::HttpRouteAuth::ServiceOwned,
+            RAW_EFFECTS,
+        );
+        let routes = unfinalized_for_test::<Admin>(|rb| {
+            rb.mount_raw_for_test(
+                TestRoute {
+                    method: Method::GET,
+                    path: "/raw",
+                    contract_id: "test.raw",
+                },
+                get(|| async { "raw" }),
+            )
+        })?;
+
+        assert_eq!(routes.route_evidence(), &[binding.evidence()]);
+        assert!(prove_stateless_local_only_mounted_route(&routes, &binding).is_err());
+        assert!(
+            prove_local_only_mounted_route_state::<TestReadState, _>(&routes, &binding).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mounted_route_proof_rejects_empty_and_different_routes() -> Result<(), RouteGroupError> {
+        let expected: HttpRouteBinding<TestRouteMarker, LocalOnly> = test_binding(
+            "/api/v1/expected",
+            "test.expected",
+            vocab::HttpRouteAuth::Public,
+        );
+        let different: HttpRouteBinding<TestRouteMarker, LocalOnly> = test_binding(
+            "/api/v1/different",
+            "test.different",
+            vocab::HttpRouteAuth::Public,
+        );
+        let routes =
+            UnfinalizedRoutes::empty().nest_group::<Primary, RouteGroupError>("/api/v1", |rb| {
+                let endpoint = GeneratedPrimaryEndpoint::new(
+                    different,
+                    |_: ContractMarker<TestRouteMarker>| async { "ok" },
+                )?;
+                rb.mount(endpoint)
+            })?;
+        assert!(
+            prove_local_only_mounted_route_state::<TestReadState, _>(
+                &UnfinalizedRoutes::empty(),
+                &expected,
+            )
+            .is_err()
+        );
+        assert!(
+            prove_local_only_mounted_route_state::<TestReadState, _>(&routes, &expected).is_err()
+        );
+        assert!(prove_stateless_local_only_mounted_route(&routes, &expected).is_err());
         Ok(())
     }
 

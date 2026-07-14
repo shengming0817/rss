@@ -31,8 +31,8 @@ pub use routes::{
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use routes::{
-    LocalOnlyStateProof, StatelessLocalOnlyRouteProof, prove_local_only_state,
-    prove_stateless_local_only_route,
+    LocalOnlyMountedRouteProof, LocalOnlyRouteNotMounted, StatelessLocalOnlyMountedRouteProof,
+    prove_local_only_mounted_route_state, prove_stateless_local_only_mounted_route,
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use routes::{TestPrimaryRoute, TestRoute, TestRoutePermission, TestRouteResourceScope};

@@ -3590,6 +3590,9 @@ pub mod policies_get {
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
 
+    /// Receipt target proving this active LocalOnly HTTP contract has a canonical conformance site.
+    pub enum LocalOnlyConformanceMarker {}
+
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
 
@@ -4564,6 +4567,9 @@ pub mod policies_list {
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Receipt target proving this active LocalOnly HTTP contract has a canonical conformance site.
+    pub enum LocalOnlyConformanceMarker {}
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
@@ -6763,6 +6769,9 @@ pub mod profile {
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
 
+    /// Receipt target proving this active LocalOnly HTTP contract has a canonical conformance site.
+    pub enum LocalOnlyConformanceMarker {}
+
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
 
@@ -7409,6 +7418,9 @@ pub mod roles_list {
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Receipt target proving this active LocalOnly HTTP contract has a canonical conformance site.
+    pub enum LocalOnlyConformanceMarker {}
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}

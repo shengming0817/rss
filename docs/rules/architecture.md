@@ -146,6 +146,7 @@ rss/
 | 错误 message const | `thiserror` enum variant(const `&'static str`,非格式化字符串) |
 | 数据竞争 | `Send`/`Sync` 编译期 |
 | wire struct 字段/tag 冻结 | serde derive 单源生成 |
+| active LocalOnly receipt target | codegen 只为 active LocalOnly 生成 `LocalOnlyConformanceMarker` + `LOCAL_ONLY_SPECS`；失活/改级后 canonical callsite 编译失败，opaque receipt 仅由成功 post-check 铸造（LOCAL-ONLY-RECEIPT-TARGET-01） |
 | 进程隔离测试 | `cargo-nextest`(每测试独立进程,原生) |
 
 ### 二档(Medium)· Cargo 生态既有工具(配置 / 少量代码)
@@ -181,6 +182,7 @@ rss/
 | wire contract 版本目录(轴 B) | `xtask` | Medium(CI 门) |
 | 分层依赖残留(无 back-path 反向边 / 兄弟域互斥 / adapter·generated scope / test-support 双向 shipped confinement / wrappers⟷源一致) | `cargo xtask layer-deps`(source-centric：读各成员 Cargo.toml shipped 依赖表按 §分层矩阵及 LAYER-DEPS-08/10 校验；接入 `verify`；符号/规则/盲区见 `xtask/src/layerdeps.rs` rustdoc 的 LAYER-DEPS-01..10) | Medium(CI 门) |
 | `SharedRuntimeDeps` 字段仅基础设施 / value object（禁域 service / repo） | `cargo xtask runtime-deps guard`(syn 字段扫描 + `xtask/runtime-deps-guard.toml` 配置单源 + synthetic red；接入 `verify`) | Medium(CI 门) |
+| active LocalOnly ↔ source receipt exact-set、唯一性与逐 site marker/ID/mounted ROUTE proof/三维 observers/同一 routes finalize+tuple factory/generated GET operation 闭合 AST 证书 | `cargo xtask consistency local-only-effects`（LOCAL-ONLY-RECEIPT-COVERAGE-01；module/cfg-aware synthetic red + real 2/6 anti-vacuity；missing 仅 report-only） | Medium(CI 门) |
 | 组合根 DI 接线(SharedDeps / `module()`) | 手工 `main` + `bootstrap` crate | — |
 | outbox/saga/reconcile/projection/command_journal 引擎 + topology-gated resolver | tokio 自写(`consistency` 态机 + `eventexec` 执行 + 各 deps resolver) | — |
 

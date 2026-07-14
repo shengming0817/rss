@@ -87,6 +87,16 @@ pub const SPECS: &[HttpSpec] = &[
     settings_v6::SPEC,
 ];
 
+/// Root registry for active LocalOnly HTTP specs generated from `consistencyLevel = "LocalOnly"`.
+pub const LOCAL_ONLY_SPECS: &[HttpSpec] = &[
+    audit_v1::list_entries::SPEC,
+    identity_v1::policies_get::SPEC,
+    identity_v1::policies_list::SPEC,
+    identity_v1::profile::SPEC,
+    identity_v1::roles_list::SPEC,
+    settings_v4::SPEC,
+];
+
 /// Root registry for active LocalTx HTTP specs generated from `consistencyLevel = "LocalTx"`.
 pub const LOCAL_TX_SPECS: &[HttpSpec] = &[
     audit_v1::list_tenant_entries::SPEC,

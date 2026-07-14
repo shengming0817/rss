@@ -7,31 +7,79 @@ fn run(args: &[&str]) -> anyhow::Result<Output> {
         .map_err(Into::into)
 }
 
+fn assert_successful_pair(first: &Output, second: &Output) {
+    assert!(first.status.success(), "{:?}", first.stderr);
+    assert_eq!(first.stdout, second.stdout);
+    assert!(first.stderr.is_empty());
+}
+
+fn assert_json_coverage(json: &serde_json::Value) {
+    let coverage = &json["localOnlyReceiptCoverage"];
+    assert_eq!(coverage["enforcement"], "reportOnly");
+    assert_eq!(coverage["evidence"], "sourceRegistered");
+    assert_eq!(coverage["status"], "partial");
+    assert_eq!(coverage["activeCount"], 6);
+    assert_eq!(coverage["registeredCount"], 2);
+    assert_eq!(coverage["missingCount"], 4);
+    assert_eq!(
+        coverage["missingContracts"],
+        serde_json::json!([
+            "identity.policies-get",
+            "identity.policies-list",
+            "identity.roles-list",
+            "settings.config-get"
+        ])
+    );
+}
+
+fn assert_json_rows(json: &serde_json::Value) {
+    assert_eq!(json["schemaVersion"], 2);
+    assert_eq!(json["status"], "passed");
+    assert_eq!(json["activeHttpContractCount"], 20);
+    assert_eq!(json["contracts"].as_array().map(Vec::len), Some(20));
+    assert_eq!(
+        json["contracts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|contract| {
+                contract["sourceReceiptRegistration"]
+                    == serde_json::json!({
+                        "enforcement": "reportOnly",
+                        "evidence": "sourceRegistered",
+                        "status": "registered"
+                    })
+            })
+            .count(),
+        2
+    );
+    assert!(
+        json["contracts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|contract| contract.get("runtimeConformance").is_none())
+    );
+}
+
 #[test]
 fn consistency_report_cli_emits_complete_deterministic_artifacts() -> anyhow::Result<()> {
     let first_json = run(&["consistency", "report", "--format", "json"])?;
     let second_json = run(&["consistency", "report", "--format", "json"])?;
-    assert!(first_json.status.success(), "{:?}", first_json.stderr);
-    assert_eq!(first_json.stdout, second_json.stdout);
-    assert!(first_json.stderr.is_empty());
+    assert_successful_pair(&first_json, &second_json);
     let json: serde_json::Value = serde_json::from_slice(&first_json.stdout)?;
-    assert_eq!(json["schemaVersion"], 1);
-    assert_eq!(json["status"], "passed");
-    assert_eq!(json["activeHttpContractCount"], 20);
-    assert_eq!(json["contracts"].as_array().map(Vec::len), Some(20));
+    assert_json_rows(&json);
+    assert_json_coverage(&json);
 
     let first_markdown = run(&["consistency", "report", "--format", "md"])?;
     let second_markdown = run(&["consistency", "report", "--format", "md"])?;
-    assert!(
-        first_markdown.status.success(),
-        "{:?}",
-        first_markdown.stderr
-    );
-    assert_eq!(first_markdown.stdout, second_markdown.stdout);
-    assert!(first_markdown.stderr.is_empty());
+    assert_successful_pair(&first_markdown, &second_markdown);
     let markdown = String::from_utf8(first_markdown.stdout)?;
     assert!(markdown.starts_with("# Consistency / Effect Posture\n"));
-    assert!(markdown.contains("Status: **passed** · Active HTTP contracts: **20**"));
+    assert!(markdown.contains("Static status: **passed** · Active HTTP contracts: **20**"));
+    assert!(markdown.contains(
+        "Source receipt registration (report-only; tests not executed): **2/6 registered** · Missing: **4**"
+    ));
     assert!(markdown.ends_with('\n'));
     Ok(())
 }

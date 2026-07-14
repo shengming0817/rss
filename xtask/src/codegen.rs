@@ -5,6 +5,7 @@
 //! INVARIANT: EVENT-TOPOLOGY-GENERATED-01 { level = "Hard", exec = "verify", source = "codegen", facet = "single-registry", golden = "generated/src/event/mod.rs", synthetic_red = "codegen::tests::event_partition_strategy_mismatch_rejected", anti_vacuity = "codegen::tests::event_glue_with_subscription_emitted" }
 //! INVARIANT: COMMAND-JOURNAL-GENERATED-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-policy", golden = "generated/src/command/mod.rs", synthetic_red = "codegen::tests::command_missing_policy_is_rejected", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }
 //! INVARIANT: ROUTE-EVIDENCE-CODEGEN-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-to-generated-atomic-http-route", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::codegen_rejects_active_http_without_effect_profile", anti_vacuity = "codegen::tests::codegen_emits_http_consistency_level_inside_route_evidence" }
+//! INVARIANT: LOCAL-ONLY-RECEIPT-TARGET-01 { level = "Hard", exec = "verify", source = "codegen", facet = "active-http-local-only-marker-registry", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::local_only_receipt_targets_exclude_non_active_and_non_local_only_http", anti_vacuity = "codegen::tests::codegen_emits_local_only_receipt_target" }
 //! INVARIANT: GENERATED-RUSTDOC-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "codegen::tests::owned_event_and_command_seam_templates_document_public_api", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }—— owned event/command templates require rustdoc on every public item, variant, accessor and associated item.
 //! golden = committed 文件 diff（rust-analyzer `ensure_file_contents` 模式）；
 //! anti-vacuity：注入漂移 / 孤儿文件必失（见 `#[cfg(test)]`）。
@@ -617,6 +618,8 @@ pub const CONTRACT: ::vocab::ContractBinding =
         HttpAuthMode::ServiceOwned => "::vocab::HttpRouteAuth::ServiceOwned".to_string(),
     };
     let consistency_level = render_http_consistency_level(c.manifest.consistency_level);
+    let local_only_conformance_marker =
+        render_local_only_conformance_marker(c.manifest.consistency_level);
     let mount_key = render_http_mount_key(c)?;
     let success_status = http.success_status;
     let idempotency = match http.idempotency {
@@ -736,6 +739,7 @@ pub const PATH: &str = "{path}";
 /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PROJECTION_FIELDS: &[{sup}HttpProjectionFieldSpec] = &[{projection_fields_body}];
 {effect_profile}
+{local_only_conformance_marker}
 
 /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
 pub enum RouteMarker {{}}
@@ -780,6 +784,21 @@ fn render_http_consistency_level(level: ConsistencyLevel) -> &'static str {
         ConsistencyLevel::OutboxFact => "OutboxFact",
         ConsistencyLevel::WorkflowEventual => "WorkflowEventual",
         ConsistencyLevel::DeviceLatent => "DeviceLatent",
+    }
+}
+
+fn render_local_only_conformance_marker(level: ConsistencyLevel) -> &'static str {
+    match level {
+        ConsistencyLevel::LocalOnly => {
+            r#"
+/// Receipt target proving this active LocalOnly HTTP contract has a canonical conformance site.
+pub enum LocalOnlyConformanceMarker {}
+"#
+        }
+        ConsistencyLevel::LocalTx
+        | ConsistencyLevel::OutboxFact
+        | ConsistencyLevel::WorkflowEventual
+        | ConsistencyLevel::DeviceLatent => "",
     }
 }
 
@@ -1942,6 +1961,7 @@ fn render_http_spec_path(c: &DiscoveredContract) -> Result<String> {
 
 fn render_http_root_specs(contracts: &[DiscoveredContract]) -> Result<String> {
     let mut entries = Vec::new();
+    let mut local_only_entries = Vec::new();
     let mut local_tx_entries = Vec::new();
     for c in contracts
         .iter()
@@ -1949,8 +1969,12 @@ fn render_http_root_specs(contracts: &[DiscoveredContract]) -> Result<String> {
         .filter(|c| c.manifest.lifecycle == Lifecycle::Active)
     {
         let path = render_http_spec_path(c)?;
-        if c.manifest.consistency_level == ConsistencyLevel::LocalTx {
-            local_tx_entries.push(format!("    {path}"));
+        match c.manifest.consistency_level {
+            ConsistencyLevel::LocalOnly => local_only_entries.push(format!("    {path}")),
+            ConsistencyLevel::LocalTx => local_tx_entries.push(format!("    {path}")),
+            ConsistencyLevel::OutboxFact
+            | ConsistencyLevel::WorkflowEventual
+            | ConsistencyLevel::DeviceLatent => {}
         }
         entries.push(format!("    {path}"));
     }
@@ -1964,10 +1988,18 @@ fn render_http_root_specs(contracts: &[DiscoveredContract]) -> Result<String> {
     } else {
         format!("\n{},\n", local_tx_entries.join(",\n"))
     };
+    let local_only_body = if local_only_entries.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", local_only_entries.join(",\n"))
+    };
     Ok(format!(
         r#"
 /// Root registry for active HTTP specs generated from every HTTP contract.
 pub const SPECS: &[HttpSpec] = &[{body}];
+
+/// Root registry for active LocalOnly HTTP specs generated from `consistencyLevel = "LocalOnly"`.
+pub const LOCAL_ONLY_SPECS: &[HttpSpec] = &[{local_only_body}];
 
 /// Root registry for active LocalTx HTTP specs generated from `consistencyLevel = "LocalTx"`.
 pub const LOCAL_TX_SPECS: &[HttpSpec] = &[{local_tx_body}];
@@ -3397,6 +3429,105 @@ mod tests {
                 "LocalTx endpoint SPEC should carry generated closed-enum evidence",
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_emits_local_only_receipt_target() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-local-only-receipt-target");
+        seed_http(&root)?;
+        write_seed_active_http(
+            &root,
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"identity:policy:read\"\n",
+            ),
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let root_mod = std::fs::read_to_string(gen_src.join("http/mod.rs"))?;
+        let local_only_specs = generated_http_spec_slice(&root_mod, "LOCAL_ONLY_SPECS")?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_generated_contains(
+            &rendered,
+            "pub enum LocalOnlyConformanceMarker {}",
+            "active LocalOnly HTTP endpoint should expose its unforgeable receipt target type",
+        );
+        assert_generated_contains(
+            local_only_specs,
+            "_seed_v1::SPEC",
+            "active LocalOnly HTTP endpoint should enter LOCAL_ONLY_SPECS",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_only_receipt_targets_exclude_non_active_and_non_local_only_http() -> anyhow::Result<()>
+    {
+        for lifecycle in ["draft", "deprecated"] {
+            let root = unique_tmp("codegen-non-active-local-only-receipt-target");
+            seed_http(&root)?;
+            let manifest_path = root.join("contracts/http/_seed/v1/contract.toml");
+            let manifest = std::fs::read_to_string(&manifest_path)?.replace(
+                "lifecycle = \"draft\"",
+                &format!("lifecycle = \"{lifecycle}\""),
+            );
+            std::fs::write(manifest_path, manifest)?;
+            let gen_src = root.join("generated/src");
+            generate(&root.join("contracts"), &gen_src, false)?;
+            let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+            let root_mod = std::fs::read_to_string(gen_src.join("http/mod.rs"))?;
+            let _ = std::fs::remove_dir_all(&root);
+
+            assert!(
+                !rendered.contains("LocalOnlyConformanceMarker"),
+                "{lifecycle} LocalOnly HTTP endpoint must not expose a receipt target"
+            );
+            assert!(
+                generated_http_spec_slice(&root_mod, "LOCAL_ONLY_SPECS")?.contains("&[]"),
+                "{lifecycle} LocalOnly HTTP endpoint must not enter LOCAL_ONLY_SPECS"
+            );
+        }
+
+        let root = unique_tmp("codegen-non-local-only-receipt-target");
+        seed_http(&root)?;
+        write_seed_active_http_contract(
+            &root,
+            "LocalTx",
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"identity:policy:read\"\n",
+            ),
+            Some(concat!(
+                "[effectProfile]\n",
+                "effects = [\"auth\", \"write\", \"transaction\"]\n",
+            )),
+            concat!(
+                "[capabilities.localTx]\n",
+                "boundary = \"single-domain\"\n",
+                "txModel = \"tenant-scoped-uow\"\n",
+                "retry = \"bounded-transient\"\n",
+                "commitUnknown = \"not-retryable\"\n",
+            ),
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let root_mod = std::fs::read_to_string(gen_src.join("http/mod.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            !rendered.contains("LocalOnlyConformanceMarker"),
+            "active non-LocalOnly HTTP endpoint must not expose a receipt target"
+        );
+        assert!(
+            generated_http_spec_slice(&root_mod, "LOCAL_ONLY_SPECS")?.contains("&[]"),
+            "active non-LocalOnly HTTP endpoint must not enter LOCAL_ONLY_SPECS"
+        );
         Ok(())
     }
 

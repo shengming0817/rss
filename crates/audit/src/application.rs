@@ -1277,10 +1277,6 @@ mod tests {
             self.list_calls.load(std::sync::atomic::Ordering::SeqCst)
         }
 
-        fn record_write_effect(&self) {
-            self.write_effects.record();
-        }
-
         fn scopes(&self) -> Vec<vocab::TenantId> {
             self.scopes
                 .lock()
@@ -1299,7 +1295,7 @@ mod tests {
             _scope: TenantRepoScope,
             _record: AuditRecord,
         ) -> Result<(), AuditError> {
-            self.record_write_effect();
+            self.write_effects.record();
             Ok(())
         }
     }
@@ -1317,7 +1313,7 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner())
                 .push(scope.tenant());
             if self.inject_forbidden_write {
-                self.record_write_effect();
+                self.write_effects.record();
             }
             if self.fail {
                 Err(AuditError::HashMismatch)
@@ -2214,7 +2210,13 @@ mod tests {
         ambient_principal_kind: vocab::PrincipalKind,
         ambient_subject: &'static str,
         authorizer: Arc<dyn httpserve::RouteAuthorizer>,
-    ) -> axum::Router {
+    ) -> (
+        axum::Router,
+        ::httpserve::LocalOnlyMountedRouteProof<
+            ::generated::http::audit_v1::list_entries::RouteMarker,
+            AuditListHandlerState,
+        >,
+    ) {
         let domain = AuditDomain::new(
             repo.read,
             Some(admin_repo),
@@ -2222,50 +2224,44 @@ mod tests {
             audit_clock(),
         );
         let mut registry = bootstrap::compose(&[&domain]).expect("compose audit domain");
-        let routes = registry.finalize_routes().expect("finalize routes");
-        let (_, admin) = routes
+        let finalized = registry.finalize_routes().expect("finalize routes");
+        let (_, routes) = finalized
             .into_iter()
             .find(|(listener, _)| matches!(listener, ListenerKind::Admin))
             .expect("admin routes");
+        let proof = ::httpserve::prove_local_only_mounted_route_state::<AuditListHandlerState, _>(
+            &routes,
+            &::generated::http::audit_v1::list_entries::ROUTE,
+        )
+        .expect("audit list route is mounted in finalized routes");
         let plan = primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt)
             .expect("admin jwt plan");
         let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
         let bridge_principal = principal(vocab::PrincipalKind::Admin, evidence_tenant);
-        let evidence_principal = bridge_principal.clone();
-        httpserve::finalize_auth_with_audit_and_authorizer(
-            admin,
+        let authenticated = httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            vocab::PrincipalKind::Admin,
+            CANON_SUBJECT,
+            evidence_tenant,
+        );
+        let scope = httpserve::PendingScopeCtx::new(runctx::test_support::app_ctx_with_kind(
+            ambient,
+            ambient_principal_kind,
+            ambient_subject,
+        ));
+        let router = ::httpserve::finalize_auth_with_audit_and_authorizer(
+            routes,
             plan,
             httpserve::AuditSinkHandle::new(auth_sink),
             audit_clock(),
             authorizer,
         )
         .expect("finalize auth")
-        .layer(axum::middleware::from_fn(
-            move |mut request: axum::extract::Request, next: axum::middleware::Next| {
-                let principal = evidence_principal.clone();
-                async move {
-                    request
-                        .extensions_mut()
-                        .insert(httpserve::Authenticated::new(
-                            primitives::RequiredScheme::Jwt,
-                            vocab::PrincipalKind::Admin,
-                            CANON_SUBJECT,
-                            evidence_tenant,
-                        ));
-                    request.extensions_mut().insert(principal);
-                    let ctx = runctx::test_support::app_ctx_with_kind(
-                        ambient,
-                        ambient_principal_kind,
-                        ambient_subject,
-                    );
-                    request
-                        .extensions_mut()
-                        .insert(httpserve::PendingScopeCtx::new(ctx));
-                    next.run(request).await
-                }
-            },
-        ))
-        .into_router_for_test()
+        .layer(::axum::Extension(scope))
+        .layer(::axum::Extension(bridge_principal))
+        .layer(::axum::Extension(authenticated))
+        .into_router_for_test();
+        (router, proof)
     }
 
     async fn get_target_entries_with(
@@ -2650,7 +2646,7 @@ mod tests {
             let domain_sink = RecordingAuditSink::ok();
             let auth_sink = RecordingAuditSink::ok();
             let authorizer = Arc::new(ProjectionAuthorizer::new(&[], case.allow));
-            let router = finalized_scoped_router(
+            let (router, proof) = finalized_scoped_router(
                 repo_probe.test_repo(),
                 admin_probe.boxed(),
                 domain_sink.clone(),
@@ -2660,7 +2656,6 @@ mod tests {
                 case.ambient_subject,
                 authorizer.clone(),
             );
-            let proof = ::httpserve::prove_local_only_state::<AuditListHandlerState>();
             let observers = ::testkit::local_only::LocalOnlyObservers::new(
                 repo_probe.write_effects.handle(),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
@@ -2750,11 +2745,11 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn local_only_real_route_provider_write_effect_trips_typed_probe() {
+    async fn local_only_scoped_read_registers_top_level_source_receipt() {
         let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
-        let repo_probe = CountingScopedReadRepo::with_forbidden_write();
+        let repo_probe = CountingScopedReadRepo::default();
         let domain_sink = RecordingAuditSink::ok();
-        let router = finalized_scoped_router(
+        let (router, proof) = self::finalized_scoped_router(
             repo_probe.test_repo(),
             CountingAdminRepo::default().boxed(),
             domain_sink.clone(),
@@ -2764,7 +2759,60 @@ mod tests {
             CANON_SUBJECT,
             Arc::new(ProjectionAuthorizer::new(&[], true)),
         );
-        let proof = ::httpserve::prove_local_only_state::<AuditListHandlerState>();
+        let observers = ::testkit::local_only::LocalOnlyObservers::new(
+            repo_probe.write_effects.handle(),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                &proof,
+            ),
+        );
+
+        #[rustfmt::skip]
+        let (response, receipt) = ::testkit::local_only::assert_local_only_with_receipt::<
+            ::generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker,
+            _,
+            _,
+            _,
+        >(
+            ::generated::http::audit_v1::list_entries::SPEC
+                .route
+                .contract_id(),
+            observers,
+            move || ::testkit::call(router, ::testkit::ContractRequest::get(::generated::http::audit_v1::list_entries::SPEC.route.path())),
+        )
+        .await
+        .expect("LocalOnly conformance");
+        ::core::assert_eq!(
+            receipt.contract_id(),
+            ::generated::http::audit_v1::list_entries::SPEC
+                .route
+                .contract_id()
+        );
+        let response = response.expect("call finalized audit route");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(repo_probe.list_calls(), 1);
+        assert!(domain_sink.events().is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn local_only_real_route_provider_write_effect_trips_typed_probe() {
+        let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
+        let repo_probe = CountingScopedReadRepo::with_forbidden_write();
+        let domain_sink = RecordingAuditSink::ok();
+        let (router, proof) = finalized_scoped_router(
+            repo_probe.test_repo(),
+            CountingAdminRepo::default().boxed(),
+            domain_sink.clone(),
+            RecordingAuditSink::ok(),
+            Some(ambient),
+            vocab::PrincipalKind::Admin,
+            CANON_SUBJECT,
+            Arc::new(ProjectionAuthorizer::new(&[], true)),
+        );
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
             repo_probe.write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(

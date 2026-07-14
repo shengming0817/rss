@@ -115,7 +115,8 @@ enum InternalCheck {
     CodegenCheck,
     /// active LocalTx manifest/generated/owner route/test typed marker closure.
     LocalTxCoverage,
-    /// active LocalOnly HTTP contracts effect profile allowlist（LOCAL-ONLY-EFFECTS-01）。
+    /// active LocalOnly effect closure + canonical source receipt coverage
+    /// （LOCAL-ONLY-EFFECTS-01 / LOCAL-ONLY-RECEIPT-COVERAGE-01）。
     LocalOnlyEffects,
     /// bins 生产 src 的 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门计数门（信任根二次门，PDP-ALLOW-CONFINE-01）。
     PdpAllowGuard,

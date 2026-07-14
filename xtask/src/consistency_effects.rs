@@ -1,6 +1,7 @@
 //! Static LocalOnly route/state/port effect closure gate.
 //!
 //! INVARIANT: LOCAL-ONLY-EFFECTS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "forged_observation_provenance_is_rejected", anti_vacuity = "governed_observation_provenance_is_accepted" }.
+//! INVARIANT: LOCAL-ONLY-RECEIPT-COVERAGE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "local_only_receipt_coverage_rejects_noncanonical_sources", anti_vacuity = "real_workspace_local_only_receipt_coverage_is_non_vacuous" }.
 
 use crate::ReportFormat;
 use crate::contract::DiscoveredContract;
@@ -71,6 +72,63 @@ enum StateKind {
     Opaque,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum SourceReceiptRegistrationStatus {
+    Registered,
+    Missing,
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ReceiptCoverageEnforcement {
+    ReportOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ReceiptCoverageEvidence {
+    SourceRegistered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ReceiptCoverageStatus {
+    Complete,
+    Partial,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceReceiptRegistration {
+    enforcement: ReceiptCoverageEnforcement,
+    evidence: ReceiptCoverageEvidence,
+    status: SourceReceiptRegistrationStatus,
+}
+
+impl SourceReceiptRegistration {
+    const fn report_only(status: SourceReceiptRegistrationStatus) -> Self {
+        Self {
+            enforcement: ReceiptCoverageEnforcement::ReportOnly,
+            evidence: ReceiptCoverageEvidence::SourceRegistered,
+            status,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalOnlyReceiptCoverage {
+    enforcement: ReceiptCoverageEnforcement,
+    evidence: ReceiptCoverageEvidence,
+    status: ReceiptCoverageStatus,
+    active_count: usize,
+    registered_count: usize,
+    missing_count: usize,
+    missing_contracts: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReportFinding {
@@ -107,6 +165,7 @@ struct ContractPosture {
     effects: Vec<String>,
     route: RoutePosture,
     effect_proof: EffectProof,
+    source_receipt_registration: SourceReceiptRegistration,
     findings: Vec<ReportFinding>,
 }
 
@@ -116,6 +175,7 @@ struct ConsistencyReport {
     schema_version: u8,
     status: ReportStatus,
     active_http_contract_count: usize,
+    local_only_receipt_coverage: LocalOnlyReceiptCoverage,
     findings: Vec<ReportFinding>,
     contracts: Vec<ContractPosture>,
 }
@@ -144,22 +204,76 @@ struct Contract {
     subject: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct LocalOnlyReceiptTarget {
+    contract_id: String,
+    module_path: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReceiptRegistration {
+    registered_contracts: BTreeSet<String>,
+    missing_contracts: Vec<String>,
+}
+
+impl ReceiptRegistration {
+    fn report(&self, active_count: usize) -> LocalOnlyReceiptCoverage {
+        let missing_count = self.missing_contracts.len();
+        LocalOnlyReceiptCoverage {
+            enforcement: ReceiptCoverageEnforcement::ReportOnly,
+            evidence: ReceiptCoverageEvidence::SourceRegistered,
+            status: if missing_count == 0 {
+                ReceiptCoverageStatus::Complete
+            } else {
+                ReceiptCoverageStatus::Partial
+            },
+            active_count,
+            registered_count: self.registered_contracts.len(),
+            missing_count,
+            missing_contracts: self.missing_contracts.clone(),
+        }
+    }
+}
+
 fn check_root(root: &Path) -> Result<(String, Vec<Finding>)> {
     let discovered = discover_without_absolute_paths(root)?;
     let (contracts, mut findings) = contracts_and_profile_findings(root, &discovered)?;
+    let targets = contracts
+        .iter()
+        .map(|contract| LocalOnlyReceiptTarget {
+            contract_id: contract.id.clone(),
+            module_path: module_path_from_mount_key(&contract.key),
+        })
+        .collect::<Vec<_>>();
+    let mut receipt_registration = ReceiptRegistration {
+        registered_contracts: BTreeSet::new(),
+        missing_contracts: targets
+            .iter()
+            .map(|target| target.contract_id.clone())
+            .collect(),
+    };
     // Contract-only fixtures are intentionally supported by the cross-field unit tests. A real
     // workspace always has Cargo.toml and therefore must close generated/source evidence.
     if root.join("Cargo.toml").is_file() {
+        let inventory = local_only_source_inventory(root)?;
         findings.extend(source_findings(root, &contracts)?);
-        findings.extend(observation_provenance_findings(root)?);
+        findings.extend(observation_provenance_findings(&inventory));
+        receipt_registration = local_only_receipt_registration_in_inventory(&inventory, &targets)?;
     }
     findings
         .sort_by(|a, b| (&a.rule, &a.subject, &a.detail).cmp(&(&b.rule, &b.subject, &b.detail)));
     findings.dedup();
     Ok((
         format!(
-            "{} active LocalOnly HTTP contract(s) checked",
-            contracts.len()
+            "{} active LocalOnly HTTP contract(s) checked; source receipts registered {}/{}; missing: {}",
+            contracts.len(),
+            receipt_registration.registered_contracts.len(),
+            contracts.len(),
+            if receipt_registration.missing_contracts.is_empty() {
+                "none".to_string()
+            } else {
+                receipt_registration.missing_contracts.join(", ")
+            }
         ),
         findings,
     ))
@@ -227,6 +341,18 @@ fn canonical_evidence_for_scope(
 }
 
 fn collect_report(root: &Path) -> Result<ConsistencyReport> {
+    let registry_ids = generated::http::LOCAL_ONLY_SPECS
+        .iter()
+        .map(|spec| spec.route.contract_id())
+        .collect::<BTreeSet<_>>();
+    let filtered_ids = generated::http::SPECS
+        .iter()
+        .filter(|spec| spec.route.consistency_level() == vocab::HttpConsistencyLevel::LocalOnly)
+        .map(|spec| spec.route.contract_id())
+        .collect::<BTreeSet<_>>();
+    if registry_ids != filtered_ids {
+        bail!("generated LOCAL_ONLY_SPECS disagrees with the active HTTP registry");
+    }
     collect_report_with_specs(root, generated::http::SPECS)
 }
 
@@ -234,6 +360,15 @@ fn collect_report_with_specs(
     root: &Path,
     specs: &[generated::http::HttpSpec],
 ) -> Result<ConsistencyReport> {
+    let receipt_targets = specs
+        .iter()
+        .filter(|spec| spec.route.consistency_level() == vocab::HttpConsistencyLevel::LocalOnly)
+        .map(|spec| LocalOnlyReceiptTarget {
+            contract_id: spec.route.contract_id().to_string(),
+            module_path: module_path_from_mount_key(spec.mount_key),
+        })
+        .collect::<Vec<_>>();
+    let receipt_registration = local_only_receipt_registration(root, &receipt_targets)?;
     let mut serving_scopes = BTreeSet::new();
     let mut scopes_by_contract = BTreeMap::new();
     let mut identities = BTreeSet::new();
@@ -283,7 +418,11 @@ fn collect_report_with_specs(
             proof_sources.get(scope),
         )?);
     }
-    finalize_report(contracts)
+    finalize_report(contracts, &receipt_registration.registered_contracts)
+}
+
+fn module_path_from_mount_key(mount_key: &str) -> Vec<String> {
+    mount_key.split("::").map(ToString::to_string).collect()
 }
 
 fn framework_serving_assembly(root: &Path, contract_id: &str) -> Result<String> {
@@ -320,10 +459,39 @@ fn framework_serving_assembly(root: &Path, contract_id: &str) -> Result<String> 
     }
 }
 
-fn finalize_report(mut contracts: Vec<ContractPosture>) -> Result<ConsistencyReport> {
+fn finalize_report(
+    mut contracts: Vec<ContractPosture>,
+    registered_contracts: &BTreeSet<String>,
+) -> Result<ConsistencyReport> {
     contracts.sort_by(|a, b| {
         (&a.contract_id, &a.method, &a.path).cmp(&(&b.contract_id, &b.method, &b.path))
     });
+    let active_local_only = contracts
+        .iter()
+        .filter(|contract| contract.consistency_level == "LocalOnly")
+        .map(|contract| contract.contract_id.clone())
+        .collect::<BTreeSet<_>>();
+    if !registered_contracts.is_subset(&active_local_only) {
+        bail!("registered LocalOnly receipt is not an active LocalOnly report row");
+    }
+    for contract in &mut contracts {
+        contract.source_receipt_registration =
+            SourceReceiptRegistration::report_only(if contract.consistency_level != "LocalOnly" {
+                SourceReceiptRegistrationStatus::NotApplicable
+            } else if registered_contracts.contains(&contract.contract_id) {
+                SourceReceiptRegistrationStatus::Registered
+            } else {
+                SourceReceiptRegistrationStatus::Missing
+            });
+    }
+    let missing_contracts = active_local_only
+        .difference(registered_contracts)
+        .cloned()
+        .collect::<Vec<_>>();
+    let receipt_registration = ReceiptRegistration {
+        registered_contracts: registered_contracts.clone(),
+        missing_contracts,
+    };
     let mut findings: Vec<_> = contracts
         .iter()
         .flat_map(|contract| contract.findings.iter().cloned())
@@ -331,13 +499,14 @@ fn finalize_report(mut contracts: Vec<ContractPosture>) -> Result<ConsistencyRep
     findings.sort();
     findings.dedup();
     Ok(ConsistencyReport {
-        schema_version: 1,
+        schema_version: 2,
         status: if findings.is_empty() {
             ReportStatus::Passed
         } else {
             ReportStatus::Failed
         },
         active_http_contract_count: contracts.len(),
+        local_only_receipt_coverage: receipt_registration.report(active_local_only.len()),
         findings,
         contracts,
     })
@@ -425,6 +594,11 @@ fn build_contract_posture(
             mount_sources,
         },
         effect_proof,
+        source_receipt_registration: SourceReceiptRegistration::report_only(if local_only {
+            SourceReceiptRegistrationStatus::Missing
+        } else {
+            SourceReceiptRegistrationStatus::NotApplicable
+        }),
         findings,
     })
 }
@@ -457,11 +631,48 @@ fn render_report(report: &ConsistencyReport, format: ReportFormat) -> Result<Str
 }
 
 fn validate_report(report: &ConsistencyReport) -> Result<()> {
-    if report.schema_version != 1 {
+    if report.schema_version != 2 {
         bail!("unsupported consistency report schema version");
     }
     if report.active_http_contract_count != report.contracts.len() {
         bail!("activeHttpContractCount does not match contracts");
+    }
+    let active_local_only = report
+        .contracts
+        .iter()
+        .filter(|contract| contract.consistency_level == "LocalOnly")
+        .collect::<Vec<_>>();
+    let registered = active_local_only
+        .iter()
+        .filter(|contract| {
+            contract.source_receipt_registration.status
+                == SourceReceiptRegistrationStatus::Registered
+        })
+        .count();
+    let missing_contracts = active_local_only
+        .iter()
+        .filter(|contract| {
+            contract.source_receipt_registration.status == SourceReceiptRegistrationStatus::Missing
+        })
+        .map(|contract| contract.contract_id.clone())
+        .collect::<Vec<_>>();
+    if report.local_only_receipt_coverage.active_count != active_local_only.len()
+        || report.local_only_receipt_coverage.registered_count != registered
+        || report.local_only_receipt_coverage.missing_count != missing_contracts.len()
+        || report.local_only_receipt_coverage.missing_contracts != missing_contracts
+        || report.local_only_receipt_coverage.status
+            != if missing_contracts.is_empty() {
+                ReceiptCoverageStatus::Complete
+            } else {
+                ReceiptCoverageStatus::Partial
+            }
+        || report.contracts.iter().any(|contract| {
+            contract.consistency_level != "LocalOnly"
+                && contract.source_receipt_registration.status
+                    != SourceReceiptRegistrationStatus::NotApplicable
+        })
+    {
+        bail!("LocalOnly receipt coverage does not match contract rows");
     }
     if report.status == ReportStatus::Passed
         && (!report.findings.is_empty()
@@ -477,13 +688,31 @@ fn validate_report(report: &ConsistencyReport) -> Result<()> {
 
 fn render_markdown(report: &ConsistencyReport) -> String {
     let mut output = format!(
-        "# Consistency / Effect Posture\n\nStatus: **{}** · Active HTTP contracts: **{}** · Findings: **{}**\n\n| Contract | Owner | Method | Path | Consistency | Effects | Mount | LocalOnly Proof | Findings |\n|---|---|---|---|---|---|---|---|---|\n",
+        "# Consistency / Effect Posture\n\nStatic status: **{}** · Active HTTP contracts: **{}** · Findings: **{}**\n\nSource receipt registration (report-only; tests not executed): **{}/{} registered** · Missing: **{}**{}\n\n| Contract | Owner | Method | Path | Consistency | Effects | Mount | LocalOnly Proof | Source Receipt Registration | Findings |\n|---|---|---|---|---|---|---|---|---|---|\n",
         match report.status {
             ReportStatus::Passed => "passed",
             ReportStatus::Failed => "failed",
         },
         report.active_http_contract_count,
-        report.findings.len()
+        report.findings.len(),
+        report.local_only_receipt_coverage.registered_count,
+        report.local_only_receipt_coverage.active_count,
+        report.local_only_receipt_coverage.missing_count,
+        if report
+            .local_only_receipt_coverage
+            .missing_contracts
+            .is_empty()
+        {
+            String::new()
+        } else {
+            format!(
+                " · Contracts: {}",
+                report
+                    .local_only_receipt_coverage
+                    .missing_contracts
+                    .join(", ")
+            )
+        }
     );
     for contract in &report.contracts {
         let proof = match contract.effect_proof.kind {
@@ -526,7 +755,7 @@ fn render_markdown(report: &ConsistencyReport) -> String {
                 .join("; ")
         };
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             literal_cell(&contract.contract_id),
             literal_cell(&contract.owner),
             literal_cell(&contract.method),
@@ -535,6 +764,9 @@ fn render_markdown(report: &ConsistencyReport) -> String {
             literal_cell(&contract.effects.join(", ")),
             literal_cell(&mount),
             literal_cell(&proof),
+            literal_cell(source_receipt_registration_status_wire(
+                contract.source_receipt_registration.status,
+            )),
             literal_cell(&findings),
         ));
     }
@@ -802,7 +1034,15 @@ fn mount_requires_source(
 /// non-interchangeable; this source gate binds those values back to the canonical owner-side
 /// provider/route evidence. Only direct, mechanically auditable shapes are accepted. Wrappers and
 /// aliases that the scanner cannot prove are rejected instead of guessed through.
-fn observation_provenance_findings(root: &Path) -> Result<Vec<Finding>> {
+struct ParsedLocalOnlySource {
+    subject: String,
+    syntax: syn::File,
+    scoped_recorded_provider_fields: BTreeMap<(Vec<String>, String), BTreeSet<String>>,
+    canonical_test_repo_fields: BTreeMap<(Vec<String>, String), BTreeSet<String>>,
+    receipt_namespace_error: Option<String>,
+}
+
+fn local_only_source_inventory(root: &Path) -> Result<Vec<ParsedLocalOnlySource>> {
     let mut files = Vec::new();
     for member in workspace_member_paths(root)? {
         if member == Path::new("crates/testkit") {
@@ -813,34 +1053,50 @@ fn observation_provenance_findings(root: &Path) -> Result<Vec<Finding>> {
             root.join(&member).join("tests"),
         ] {
             if source_root.is_dir() {
-                files.extend(rust_files(&source_root)?);
+                files.extend(
+                    rust_files(&source_root)?
+                        .into_iter()
+                        .map(|file| (member.clone(), file)),
+                );
             }
         }
     }
     files.sort();
 
     let mut parsed = Vec::new();
-    for file in files {
+    for (member, file) in files {
         let subject = relative(root, &file)?;
         let syntax = syn::parse_file(
             &std::fs::read_to_string(&file).with_context(|| format!("read `{subject}`"))?,
         )
         .with_context(|| format!("parse `{subject}`"))?;
-        let mut recorded_provider_fields = BTreeMap::new();
-        collect_recorded_provider_fields(&syntax.items, &mut recorded_provider_fields);
-        parsed.push((subject, syntax, recorded_provider_fields));
-    }
-
-    let mut findings = Vec::new();
-    for (subject, syntax, recorded_provider_fields) in &parsed {
-        provenance_findings_in_items(
-            &syntax.items,
+        let scoped_recorded_provider_fields =
+            collect_scoped_recorded_provider_fields(&syntax.items);
+        let canonical_test_repo_fields = collect_canonical_test_repo_fields(&syntax.items);
+        let receipt_namespace_error = validate_receipt_namespace(root, &member).err();
+        parsed.push(ParsedLocalOnlySource {
             subject,
-            recorded_provider_fields,
+            syntax,
+            scoped_recorded_provider_fields,
+            canonical_test_repo_fields,
+            receipt_namespace_error,
+        });
+    }
+    Ok(parsed)
+}
+
+fn observation_provenance_findings(inventory: &[ParsedLocalOnlySource]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for source in inventory {
+        provenance_findings_in_items(
+            &source.syntax.items,
+            &source.subject,
+            &source.scoped_recorded_provider_fields,
+            &mut Vec::new(),
             &mut findings,
         );
     }
-    Ok(findings)
+    findings
 }
 
 fn workspace_member_paths(root: &Path) -> Result<Vec<PathBuf>> {
@@ -877,56 +1133,2413 @@ fn workspace_member_paths(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn collect_recorded_provider_fields(items: &[Item], out: &mut BTreeMap<String, BTreeSet<String>>) {
-    for item in items {
-        match item {
-            Item::Impl(item) => {
-                if let Some(owner) = terminal_type_ident(&item.self_ty) {
-                    let fields = directly_recorded_fields(&item.items);
-                    if !fields.is_empty() {
-                        out.entry(owner).or_default().extend(fields);
+fn validate_receipt_namespace(root: &Path, member: &Path) -> std::result::Result<(), String> {
+    let manifest_text = std::fs::read_to_string(root.join(member).join("Cargo.toml"))
+        .map_err(|_| "receipt owner manifest is unreadable".to_string())?;
+    let manifest: toml::Value = toml::from_str(&manifest_text)
+        .map_err(|_| "receipt owner manifest is malformed".to_string())?;
+    let expected = [
+        ("testkit", Path::new("crates/testkit")),
+        ("generated", Path::new("generated")),
+        ("httpserve", Path::new("crates/httpserve")),
+    ];
+    for (name, target) in expected {
+        let target_manifest = std::fs::read_to_string(root.join(target).join("Cargo.toml"))
+            .map_err(|_| format!("canonical `{name}` workspace package is missing"))?;
+        let target_value: toml::Value = toml::from_str(&target_manifest)
+            .map_err(|_| format!("canonical `{name}` workspace package manifest is malformed"))?;
+        if target_value
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str)
+            != Some(name)
+        {
+            return Err(format!("canonical `{name}` path names another package"));
+        }
+        let mut found = false;
+        for section in ["dependencies", "dev-dependencies"] {
+            let Some(dependencies) = manifest.get(section).and_then(toml::Value::as_table) else {
+                continue;
+            };
+            for (key, value) in dependencies {
+                let Some(table) = value.as_table() else {
+                    if key == name {
+                        return Err(format!(
+                            "canonical `{name}` dependency must use an exact path"
+                        ));
                     }
+                    continue;
+                };
+                if table.get("package").and_then(toml::Value::as_str) == Some(name) && key != name {
+                    return Err(format!("canonical `{name}` dependency may not be renamed"));
+                }
+                if key != name {
+                    continue;
+                }
+                if table.contains_key("package") {
+                    return Err(format!(
+                        "canonical `{name}` dependency may not override package"
+                    ));
+                }
+                let path = table
+                    .get("path")
+                    .and_then(toml::Value::as_str)
+                    .ok_or_else(|| {
+                        format!("canonical `{name}` dependency must use an exact path")
+                    })?;
+                let actual = root
+                    .join(member)
+                    .join(path)
+                    .canonicalize()
+                    .map_err(|_| format!("canonical `{name}` dependency path is invalid"))?;
+                let expected = root
+                    .join(target)
+                    .canonicalize()
+                    .map_err(|_| format!("canonical `{name}` workspace path is invalid"))?;
+                if actual != expected {
+                    return Err(format!(
+                        "canonical `{name}` dependency points outside its workspace package"
+                    ));
+                }
+                found = true;
+            }
+        }
+        if !found {
+            return Err(format!("canonical `{name}` dependency is missing"));
+        }
+    }
+    Ok(())
+}
+
+/// Reconciles canonical source receipt sites with the generated active LocalOnly target set.
+/// Missing sites are report-only; every malformed or stale site is a structural error.
+fn local_only_receipt_registration(
+    root: &Path,
+    targets: &[LocalOnlyReceiptTarget],
+) -> Result<ReceiptRegistration> {
+    let inventory = local_only_source_inventory(root)?;
+    local_only_receipt_registration_in_inventory(&inventory, targets)
+}
+
+fn local_only_receipt_registration_in_inventory(
+    inventory: &[ParsedLocalOnlySource],
+    targets: &[LocalOnlyReceiptTarget],
+) -> Result<ReceiptRegistration> {
+    let mut by_module = BTreeMap::new();
+    let mut active_ids = BTreeSet::new();
+    for target in targets {
+        if target.module_path.is_empty() {
+            bail!("LocalOnly receipt target has an empty generated module path");
+        }
+        if !active_ids.insert(target.contract_id.clone()) {
+            bail!(
+                "duplicate active LocalOnly receipt target `{}`",
+                target.contract_id
+            );
+        }
+        if by_module
+            .insert(target.module_path.clone(), target.contract_id.clone())
+            .is_some()
+        {
+            bail!("duplicate generated LocalOnly receipt target module");
+        }
+    }
+
+    let mut registered = BTreeMap::<String, String>::new();
+    for source in inventory {
+        let factories = verified_router_factories(&source.syntax.items);
+        let sites = receipt_sites_in_file(
+            &source.syntax,
+            &source.subject,
+            &source.scoped_recorded_provider_fields,
+            &source.canonical_test_repo_fields,
+            source.receipt_namespace_error.as_deref(),
+            &factories,
+        )?;
+        for site in sites {
+            let contract_id = by_module.get(&site.module_path).ok_or_else(|| {
+                anyhow!(
+                    "{}: receipt marker does not name an active LocalOnly generated target",
+                    site.subject
+                )
+            })?;
+            if let Some(previous) = registered.insert(contract_id.clone(), site.subject.clone()) {
+                bail!(
+                    "{}: duplicate LocalOnly receipt registration for `{contract_id}` (first at {previous})",
+                    site.subject
+                );
+            }
+        }
+    }
+
+    let registered_contracts = registered.into_keys().collect::<BTreeSet<_>>();
+    let missing_contracts = active_ids
+        .difference(&registered_contracts)
+        .cloned()
+        .collect();
+    Ok(ReceiptRegistration {
+        registered_contracts,
+        missing_contracts,
+    })
+}
+
+#[derive(Debug)]
+struct CanonicalReceiptSite {
+    module_path: Vec<String>,
+    subject: String,
+}
+
+#[derive(Default)]
+struct ReceiptCallScan<'ast> {
+    calls: BTreeMap<(usize, usize), &'ast syn::ExprCall>,
+    proven_statement_calls: BTreeSet<(usize, usize)>,
+    canonical_call_blocks: BTreeMap<(usize, usize), &'ast syn::Block>,
+    canonical_call_modules: BTreeMap<(usize, usize), Vec<String>>,
+    assertion_path_locations: BTreeSet<(usize, usize)>,
+    called_assertion_locations: BTreeSet<(usize, usize)>,
+    forbidden_locations: Vec<(usize, &'static str)>,
+    module_path: Vec<String>,
+    function_depth: usize,
+}
+
+impl<'ast> Visit<'ast> for ReceiptCallScan<'ast> {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if node
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "assert_local_only_with_receipt")
+        {
+            let start = node.span().start();
+            self.assertion_path_locations
+                .insert((start.line, start.column));
+        }
+        visit::visit_expr_path(self, node);
+    }
+
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        if use_tree_contains_receipt_api(&node.tree) {
+            self.forbidden_locations.push((
+                node.span().start().line,
+                "LocalOnly receipt APIs and markers may not be imported or renamed",
+            ));
+        }
+        visit::visit_item_use(self, node);
+    }
+
+    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        if type_contains_receipt_api(&node.ty) {
+            self.forbidden_locations.push((
+                node.span().start().line,
+                "LocalOnly receipt API type aliases are forbidden",
+            ));
+        }
+        visit::visit_item_type(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if self.function_depth == 0 && attrs_mark_canonical_test(&node.attrs) {
+            for location in proven_receipt_statements(&node.block) {
+                self.proven_statement_calls.insert(location);
+                self.canonical_call_blocks.insert(location, &node.block);
+                self.canonical_call_modules
+                    .insert(location, self.module_path.clone());
+            }
+        }
+        self.function_depth += 1;
+        visit::visit_item_fn(self, node);
+        self.function_depth -= 1;
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.function_depth += 1;
+        visit::visit_impl_item_fn(self, node);
+        self.function_depth -= 1;
+    }
+
+    fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+        let exposed = node
+            .rename
+            .as_ref()
+            .map_or(&node.ident, |(_, rename)| rename);
+        if matches!(
+            exposed.to_string().as_str(),
+            "axum" | "testkit" | "generated" | "httpserve"
+        ) {
+            self.forbidden_locations.push((
+                node.span().start().line,
+                "canonical receipt crate roots may not be shadowed with `extern crate`",
+            ));
+        }
+        visit::visit_item_extern_crate(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        self.module_path.push(node.ident.to_string());
+        visit::visit_item_mod(self, node);
+        self.module_path.pop();
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if is_receipt_assertion_call(node) {
+            let location = expr_location(&node.func);
+            self.calls.insert(location, node);
+            self.called_assertion_locations.insert(location);
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if token_stream_contains_ident(&node.tokens, "assert_local_only_with_receipt") {
+            self.forbidden_locations.push((
+                node.span().start().line,
+                "LocalOnly receipt assertions may not be hidden in macro tokens",
+            ));
+        }
+        visit::visit_macro(self, node);
+    }
+
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        if node
+            .segments
+            .iter()
+            .any(|segment| segment.ident == "LocalOnlyConformanceReceipt")
+        {
+            self.forbidden_locations.push((
+                node.span().start().line,
+                "LocalOnlyConformanceReceipt may only be produced by the canonical assertion",
+            ));
+        }
+        visit::visit_path(self, node);
+    }
+}
+
+fn token_stream_contains_ident(tokens: &proc_macro2::TokenStream, expected: &str) -> bool {
+    tokens.clone().into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Ident(ident) => ident == expected,
+        proc_macro2::TokenTree::Group(group) => {
+            token_stream_contains_ident(&group.stream(), expected)
+        }
+        _ => false,
+    })
+}
+
+fn receipt_sites_in_file(
+    syntax: &syn::File,
+    subject: &str,
+    recorded_provider_fields: &BTreeMap<(Vec<String>, String), BTreeSet<String>>,
+    canonical_test_repo_fields: &BTreeMap<(Vec<String>, String), BTreeSet<String>>,
+    receipt_namespace_error: Option<&str>,
+    factories: &VerifiedRouterFactories,
+) -> Result<Vec<CanonicalReceiptSite>> {
+    let mut scan = ReceiptCallScan::default();
+    scan.visit_file(syntax);
+    scan.forbidden_locations.sort();
+    if let Some((line, detail)) = scan.forbidden_locations.first() {
+        bail!("{subject}:{line}: {detail}");
+    }
+    if !scan.calls.is_empty()
+        && let Some(detail) = receipt_namespace_error
+    {
+        bail!("{subject}: {detail}");
+    }
+    if let Some((line, _)) = scan
+        .assertion_path_locations
+        .difference(&scan.called_assertion_locations)
+        .next()
+    {
+        bail!(
+            "{subject}:{line}: LocalOnly receipt assertion function aliases and wrappers are forbidden"
+        );
+    }
+
+    let mut sites = Vec::new();
+    for (location, call) in scan.calls {
+        let call_subject = format!("{subject}:{}", call.span().start().line);
+        if !scan.proven_statement_calls.contains(&location) {
+            bail!(
+                "{call_subject}: LocalOnly receipt assertion must be a top-level `let (output, receipt) = ...await.expect(...)` statement in a canonical, enabled test and the receipt must be asserted"
+            );
+        }
+        let marker_module = canonical_receipt_marker_module(call).ok_or_else(|| {
+            anyhow!(
+                "{call_subject}: LocalOnly receipt assertion must use the exact absolute testkit path and generated marker"
+            )
+        })?;
+        let spec_module = canonical_receipt_contract_module(call).ok_or_else(|| {
+            anyhow!(
+                "{call_subject}: first argument must be the same generated module's SPEC.route.contract_id()"
+            )
+        })?;
+        if marker_module != spec_module {
+            bail!("{call_subject}: LocalOnly receipt marker and SPEC contract identity disagree");
+        }
+        let block = scan.canonical_call_blocks.get(&location).ok_or_else(|| {
+            anyhow!("{call_subject}: receipt assertion has no canonical test block")
+        })?;
+        let lexical_module = scan.canonical_call_modules.get(&location).ok_or_else(|| {
+            anyhow!("{call_subject}: receipt assertion has no lexical module certificate")
+        })?;
+        certify_receipt_source(
+            call,
+            block,
+            lexical_module,
+            &marker_module,
+            ReceiptSourceEvidence {
+                recorded_provider_fields,
+                canonical_test_repo_fields,
+                factories,
+            },
+            &call_subject,
+        )?;
+        sites.push(CanonicalReceiptSite {
+            module_path: marker_module,
+            subject: call_subject,
+        });
+    }
+    Ok(sites)
+}
+
+struct ReceiptSourceEvidence<'a> {
+    recorded_provider_fields: &'a BTreeMap<(Vec<String>, String), BTreeSet<String>>,
+    canonical_test_repo_fields: &'a BTreeMap<(Vec<String>, String), BTreeSet<String>>,
+    factories: &'a VerifiedRouterFactories,
+}
+
+fn attrs_mark_canonical_test(attrs: &[syn::Attribute]) -> bool {
+    let test_attributes = attrs
+        .iter()
+        .filter(|attribute| {
+            path_is(attribute.path(), &["test"])
+                || path_is(attribute.path(), &["tokio", "test"])
+                || path_is(attribute.path(), &["rstest"])
+        })
+        .count();
+    test_attributes == 1 && attrs.iter().all(canonical_test_attribute)
+}
+
+fn canonical_test_attribute(attribute: &syn::Attribute) -> bool {
+    if path_is(attribute.path(), &["test"])
+        || path_is(attribute.path(), &["tokio", "test"])
+        || path_is(attribute.path(), &["rstest"])
+    {
+        return true;
+    }
+    if !path_is(attribute.path(), &["allow"]) {
+        return false;
+    }
+    attribute
+        .meta
+        .require_list()
+        .is_ok_and(|list| list.tokens.to_string() == "clippy :: expect_used")
+}
+
+fn path_is(path: &syn::Path, expected: &[&str]) -> bool {
+    path.leading_colon.is_none()
+        && path.segments.len() == expected.len()
+        && path
+            .segments
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.ident == *expected)
+}
+
+fn absolute_path_is(path: &syn::Path, expected: &[&str]) -> bool {
+    path.leading_colon.is_some()
+        && path.segments.len() == expected.len()
+        && path
+            .segments
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| {
+                actual.ident == *expected && matches!(actual.arguments, PathArguments::None)
+            })
+}
+
+fn proven_receipt_statements(block: &syn::Block) -> BTreeSet<(usize, usize)> {
+    let mut proven = BTreeSet::new();
+    for (index, statement) in block.stmts.iter().enumerate() {
+        let Some((location, receipt)) = receipt_binding_statement(statement) else {
+            continue;
+        };
+        if block.stmts[..index]
+            .iter()
+            .any(statement_may_skip_following_receipt)
+        {
+            continue;
+        }
+        if block
+            .stmts
+            .get(index + 1)
+            .is_some_and(|statement| statement_asserts_receipt(statement, &receipt))
+        {
+            proven.insert(location);
+        }
+    }
+    proven
+}
+
+fn statement_may_skip_following_receipt(statement: &syn::Stmt) -> bool {
+    #[derive(Default)]
+    struct SkipFlow(bool);
+    impl<'ast> Visit<'ast> for SkipFlow {
+        fn visit_expr_return(&mut self, _node: &'ast syn::ExprReturn) {
+            self.0 = true;
+        }
+
+        fn visit_expr_try(&mut self, _node: &'ast syn::ExprTry) {
+            self.0 = true;
+        }
+
+        fn visit_expr_if(&mut self, _node: &'ast syn::ExprIf) {
+            self.0 = true;
+        }
+
+        fn visit_expr_match(&mut self, _node: &'ast syn::ExprMatch) {
+            self.0 = true;
+        }
+
+        fn visit_expr_loop(&mut self, _node: &'ast syn::ExprLoop) {
+            self.0 = true;
+        }
+
+        fn visit_expr_while(&mut self, _node: &'ast syn::ExprWhile) {
+            self.0 = true;
+        }
+
+        fn visit_expr_for_loop(&mut self, _node: &'ast syn::ExprForLoop) {
+            self.0 = true;
+        }
+    }
+    let mut scan = SkipFlow::default();
+    scan.visit_stmt(statement);
+    scan.0
+}
+
+fn receipt_binding_statement(statement: &syn::Stmt) -> Option<((usize, usize), String)> {
+    let syn::Stmt::Local(local) = statement else {
+        return None;
+    };
+    let syn::Pat::Tuple(tuple) = &local.pat else {
+        return None;
+    };
+    if tuple.elems.len() != 2 {
+        return None;
+    }
+    let syn::Pat::Ident(receipt) = &tuple.elems[1] else {
+        return None;
+    };
+    if receipt.by_ref.is_some() || receipt.mutability.is_some() || receipt.subpat.is_some() {
+        return None;
+    }
+    let initializer = local.init.as_ref()?;
+    let Expr::MethodCall(expect) = peel_expr(&initializer.expr) else {
+        return None;
+    };
+    if expect.method != "expect" || expect.args.len() != 1 {
+        return None;
+    }
+    let Expr::Await(awaited) = peel_expr(&expect.receiver) else {
+        return None;
+    };
+    let Expr::Call(call) = peel_expr(&awaited.base) else {
+        return None;
+    };
+    is_receipt_assertion_call(call).then(|| (expr_location(&call.func), receipt.ident.to_string()))
+}
+
+fn statement_asserts_receipt(statement: &syn::Stmt, receipt: &str) -> bool {
+    let mac = match statement {
+        syn::Stmt::Macro(statement) => &statement.mac,
+        syn::Stmt::Expr(Expr::Macro(expression), _) => &expression.mac,
+        _ => return false,
+    };
+    if !absolute_path_is(&mac.path, &["core", "assert_eq"]) {
+        return false;
+    }
+    use syn::parse::Parser as _;
+    let Ok(arguments) = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated
+        .parse2(mac.tokens.clone())
+    else {
+        return false;
+    };
+    arguments
+        .iter()
+        .take(2)
+        .any(|argument| expression_is_receipt_read(argument, receipt))
+}
+
+fn expression_is_receipt_read(expression: &Expr, receipt: &str) -> bool {
+    let Expr::MethodCall(call) = peel_expr(expression) else {
+        return false;
+    };
+    call.method == "contract_id"
+        && call.args.is_empty()
+        && matches!(peel_expr(&call.receiver), Expr::Path(path) if path.path.is_ident(receipt))
+}
+
+fn asserted_receipt_contract_module(
+    block: &syn::Block,
+    call_location: (usize, usize),
+) -> Option<Vec<String>> {
+    for (index, statement) in block.stmts.iter().enumerate() {
+        let Some((location, receipt)) = receipt_binding_statement(statement) else {
+            continue;
+        };
+        if location != call_location {
+            continue;
+        }
+        let statement = block.stmts.get(index + 1)?;
+        let mac = match statement {
+            syn::Stmt::Macro(statement) => &statement.mac,
+            syn::Stmt::Expr(Expr::Macro(expression), _) => &expression.mac,
+            _ => return None,
+        };
+        if !absolute_path_is(&mac.path, &["core", "assert_eq"]) {
+            return None;
+        }
+        use syn::parse::Parser as _;
+        let arguments = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated
+            .parse2(mac.tokens.clone())
+            .ok()?;
+        if arguments.len() != 2 {
+            return None;
+        }
+        return arguments
+            .iter()
+            .find(|argument| !expression_is_receipt_read(argument, &receipt))
+            .and_then(generated_contract_id_expression_module);
+    }
+    None
+}
+
+fn generated_contract_id_expression_module(expression: &Expr) -> Option<Vec<String>> {
+    let Expr::MethodCall(contract_id) = peel_expr(expression) else {
+        return None;
+    };
+    if contract_id.method != "contract_id" || !contract_id.args.is_empty() {
+        return None;
+    }
+    let Expr::Field(route) = peel_expr(&contract_id.receiver) else {
+        return None;
+    };
+    if !matches!(&route.member, syn::Member::Named(member) if member == "route") {
+        return None;
+    }
+    let Expr::Path(spec) = peel_expr(&route.base) else {
+        return None;
+    };
+    generated_terminal_module(&spec.path, "SPEC")
+}
+
+fn expr_location(expression: &Expr) -> (usize, usize) {
+    let start = expression.span().start();
+    (start.line, start.column)
+}
+
+fn is_receipt_assertion_call(call: &syn::ExprCall) -> bool {
+    let Expr::Path(function) = peel_expr(&call.func) else {
+        return false;
+    };
+    function
+        .path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "assert_local_only_with_receipt")
+}
+
+fn canonical_receipt_marker_module(call: &syn::ExprCall) -> Option<Vec<String>> {
+    let Expr::Path(function) = peel_expr(&call.func) else {
+        return None;
+    };
+    let path = &function.path;
+    if path.leading_colon.is_none()
+        || path.segments.len() != 3
+        || path.segments[0].ident != "testkit"
+        || path.segments[1].ident != "local_only"
+        || path.segments[2].ident != "assert_local_only_with_receipt"
+    {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &path.segments[2].arguments else {
+        return None;
+    };
+    if arguments.args.len() != 4
+        || !arguments
+            .args
+            .iter()
+            .skip(1)
+            .all(|argument| matches!(argument, GenericArgument::Type(Type::Infer(_))))
+        || call.args.len() != 3
+    {
+        return None;
+    }
+    let GenericArgument::Type(Type::Path(marker)) = arguments.args.first()? else {
+        return None;
+    };
+    generated_marker_module(&marker.path)
+}
+
+fn generated_marker_module(path: &syn::Path) -> Option<Vec<String>> {
+    if path.leading_colon.is_none()
+        || path.segments.len() < 4
+        || path.segments[0].ident != "generated"
+        || path.segments[1].ident != "http"
+        || path.segments.last()?.ident != "LocalOnlyConformanceMarker"
+        || path
+            .segments
+            .iter()
+            .any(|segment| !matches!(segment.arguments, PathArguments::None))
+    {
+        return None;
+    }
+    Some(
+        path.segments
+            .iter()
+            .skip(2)
+            .take(path.segments.len() - 3)
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+    )
+}
+
+fn canonical_receipt_contract_module(call: &syn::ExprCall) -> Option<Vec<String>> {
+    let argument = call.args.first()?;
+    let Expr::MethodCall(contract_id) = peel_expr(argument) else {
+        return None;
+    };
+    if contract_id.method != "contract_id" || !contract_id.args.is_empty() {
+        return None;
+    }
+    let Expr::Field(route) = peel_expr(&contract_id.receiver) else {
+        return None;
+    };
+    if !matches!(&route.member, syn::Member::Named(member) if member == "route") {
+        return None;
+    }
+    let Expr::Path(spec) = peel_expr(&route.base) else {
+        return None;
+    };
+    let path = &spec.path;
+    if path.leading_colon.is_none()
+        || path.segments.len() < 4
+        || path.segments[0].ident != "generated"
+        || path.segments[1].ident != "http"
+        || path.segments.last()?.ident != "SPEC"
+        || path
+            .segments
+            .iter()
+            .any(|segment| !matches!(segment.arguments, PathArguments::None))
+    {
+        return None;
+    }
+    Some(
+        path.segments
+            .iter()
+            .skip(2)
+            .take(path.segments.len() - 3)
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+    )
+}
+
+fn certify_receipt_source(
+    call: &syn::ExprCall,
+    block: &syn::Block,
+    lexical_module: &[String],
+    module: &[String],
+    evidence: ReceiptSourceEvidence<'_>,
+    subject: &str,
+) -> Result<()> {
+    let Some(observers_argument) = call.args.iter().nth(1) else {
+        bail!("{subject}: receipt assertion requires three canonical arguments");
+    };
+    let observers_ident = simple_ident(observers_argument)
+        .ok_or_else(|| anyhow!("{subject}: receipt observers must be one direct local binding"))?;
+    let observers = unique_direct_initializer(block, &observers_ident).ok_or_else(|| {
+        anyhow!("{subject}: receipt observers binding must be unique and direct in the test block")
+    })?;
+    let Expr::Call(observer_call) = peel_expr(observers) else {
+        bail!("{subject}: observers must be initialized directly with LocalOnlyObservers::new");
+    };
+    if !absolute_call_path_is(
+        &observer_call.func,
+        &["testkit", "local_only", "LocalOnlyObservers", "new"],
+    ) || observer_call.args.len() != 3
+    {
+        bail!("{subject}: observers must use the exact three-dimension absolute initializer");
+    }
+
+    let expected_dimensions = ["Write", "Outbox", "Publish"];
+    let mut proof_ident: Option<String> = None;
+    let mut runtime_observers = Vec::new();
+    for (argument, dimension) in observer_call.args.iter().zip(expected_dimensions) {
+        if let Some(proof) = canonical_static_exclusion_proof(argument, dimension) {
+            if proof_ident.as_ref().is_some_and(|known| known != &proof) {
+                bail!("{subject}: all static exclusions must share one route-bound proof");
+            }
+            proof_ident = Some(proof);
+        } else if let Some((provider, field)) = canonical_provider_handle(argument) {
+            runtime_observers.push((provider, field));
+        } else {
+            bail!(
+                "{subject}: {dimension} observer must be a direct governed exclusion or provider-owned handle"
+            );
+        }
+    }
+
+    let proof = proof_ident.as_ref().ok_or_else(|| {
+        anyhow!("{subject}: receipt observers require one route-bound governed proof")
+    })?;
+    if asserted_receipt_contract_module(block, expr_location(&call.func)).as_deref() != Some(module)
+    {
+        bail!("{subject}: receipt assertion must compare against the same generated SPEC ID");
+    }
+
+    let Some(operation) = call.args.iter().nth(2) else {
+        bail!("{subject}: receipt assertion requires a canonical operation argument");
+    };
+    let (router, operation_module) = canonical_receipt_operation(operation).ok_or_else(|| {
+        anyhow!(
+            "{subject}: operation must be a zero-argument move closure containing only the direct generated GET testkit call"
+        )
+    })?;
+    if operation_module != module {
+        bail!("{subject}: receipt operation path must use the same generated SPEC");
+    }
+    let (factory_name, factory_call) = mounted_factory_call(block, &router, proof).ok_or_else(|| {
+        anyhow!(
+            "{subject}: router and governed proof must be the direct tuple returned by `self::factory(...)`"
+        )
+    })?;
+    let factory = evidence
+        .factories
+        .get(&(lexical_module.to_vec(), factory_name.clone()))
+        .ok_or_else(|| {
+            anyhow!(
+                "{subject}: `self::{factory_name}` is not a cfg-valid mounted route factory in the receipt's lexical module"
+            )
+        })?;
+    if factory.route_module.as_slice() != module {
+        bail!("{subject}: mounted factory proof names a different generated ROUTE");
+    }
+    if factory_call.args.len() != factory.parameters.len() {
+        bail!("{subject}: mounted factory call does not match its certified parameter list");
+    }
+
+    for (provider, field) in runtime_observers {
+        if unique_direct_initializer(block, &provider).is_none() {
+            bail!("{subject}: runtime observer provider must have one direct test binding");
+        }
+        let matching_parameters = factory_call
+            .args
+            .iter()
+            .enumerate()
+            .filter_map(|(index, argument)| {
+                canonical_test_repo_provider(argument)
+                    .filter(|actual| actual == &provider)
+                    .and_then(|_| factory.parameters.get(index))
+            })
+            .collect::<Vec<_>>();
+        let owner = unique_direct_initializer(block, &provider).and_then(unique_constructor_owner);
+        let repo_fields = owner.as_ref().and_then(|owner| {
+            evidence
+                .canonical_test_repo_fields
+                .get(&(lexical_module.to_vec(), owner.clone()))
+        });
+        if matching_parameters.len() != 1
+            || !factory
+                .constructor_parameters
+                .contains(matching_parameters[0])
+            || factory
+                .constructor_repo_fields
+                .get(matching_parameters[0])
+                .is_none_or(|fields| {
+                    repo_fields.is_none_or(|provided| fields.is_disjoint(provided))
+                })
+            || factory_call
+                .args
+                .iter()
+                .filter_map(canonical_test_repo_provider)
+                .any(|actual| actual != provider)
+        {
+            bail!(
+                "{subject}: runtime observer provider must map through `test_repo()` to the factory parameter used by the mounted Domain/state constructor"
+            );
+        }
+        if repo_fields.is_none() {
+            bail!(
+                "{subject}: runtime observer provider must expose the canonical `test_repo()` provider bridge"
+            );
+        }
+        if owner.as_ref().is_none_or(|owner| {
+            evidence
+                .recorded_provider_fields
+                .get(&(lexical_module.to_vec(), owner.clone()))
+                .is_none_or(|fields| !fields.contains(&field))
+        }) {
+            bail!("{subject}: runtime observer field has no provider-owned record mutation path");
+        }
+    }
+
+    let counts = certificate_api_counts(block);
+    let expected_static = observer_call.args.len() - counts.runtime_handles;
+    if counts.receipt_calls != 1
+        || counts.observer_initializers != 1
+        || counts.testkit_calls != 1
+        || counts.route_proofs != 0
+        || counts.static_exclusions != expected_static
+        || counts.runtime_handles != observer_call.args.len() - expected_static
+    {
+        bail!("{subject}: receipt test contains duplicate, shadow, helper, or bait evidence calls");
+    }
+    Ok(())
+}
+
+fn simple_ident(expression: &Expr) -> Option<String> {
+    let Expr::Path(path) = peel_expr(expression) else {
+        return None;
+    };
+    path.path.get_ident().map(ToString::to_string)
+}
+
+fn unique_direct_initializer<'a>(block: &'a syn::Block, expected: &str) -> Option<&'a Expr> {
+    struct Count<'name> {
+        expected: &'name str,
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for Count<'_> {
+        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+            if node.ident == self.expected {
+                self.count += 1;
+            }
+            visit::visit_pat_ident(self, node);
+        }
+    }
+    let mut count = Count { expected, count: 0 };
+    count.visit_block(block);
+    if count.count != 1 {
+        return None;
+    }
+    block.stmts.iter().find_map(|statement| {
+        let syn::Stmt::Local(local) = statement else {
+            return None;
+        };
+        let syn::Pat::Ident(pattern) = &local.pat else {
+            return None;
+        };
+        (pattern.ident == expected && pattern.subpat.is_none())
+            .then(|| local.init.as_ref().map(|init| &*init.expr))
+            .flatten()
+    })
+}
+
+fn canonical_static_exclusion_proof(expression: &Expr, dimension: &str) -> Option<String> {
+    let Expr::Call(call) = peel_expr(expression) else {
+        return None;
+    };
+    let Expr::Path(function) = peel_expr(&call.func) else {
+        return None;
+    };
+    let path = &function.path;
+    if path.leading_colon.is_none() || path.segments.len() != 4 || call.args.len() != 1 {
+        return None;
+    }
+    let expected = ["testkit", "local_only", "StaticExclusion", "from_governed"];
+    if path
+        .segments
+        .iter()
+        .zip(expected)
+        .any(|(actual, expected)| actual.ident != expected)
+    {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &path.segments[2].arguments else {
+        return None;
+    };
+    if arguments.args.len() != 1
+        || !matches!(arguments.args.first(), Some(GenericArgument::Type(Type::Path(ty))) if ty.path.leading_colon.is_some() && ty.path.segments.len() == 3 && ty.path.segments[0].ident == "testkit" && ty.path.segments[1].ident == "local_only" && ty.path.segments[2].ident == dimension)
+        || !matches!(path.segments[0].arguments, PathArguments::None)
+        || !matches!(path.segments[1].arguments, PathArguments::None)
+        || !matches!(path.segments[3].arguments, PathArguments::None)
+    {
+        return None;
+    }
+    referenced_ident(call.args.first()?)
+}
+
+fn canonical_provider_handle(expression: &Expr) -> Option<(String, String)> {
+    let Expr::MethodCall(call) = peel_expr(expression) else {
+        return None;
+    };
+    if call.method != "handle" || !call.args.is_empty() || call.turbofish.is_some() {
+        return None;
+    }
+    let Expr::Field(field) = peel_expr(&call.receiver) else {
+        return None;
+    };
+    let syn::Member::Named(member) = &field.member else {
+        return None;
+    };
+    let provider = simple_ident(&field.base)?;
+    Some((provider, member.to_string()))
+}
+
+fn generated_route_reference_module(expression: &Expr) -> Option<Vec<String>> {
+    let expression = match expression {
+        Expr::Reference(reference) if reference.mutability.is_none() => peel_expr(&reference.expr),
+        _ => return None,
+    };
+    let Expr::Path(path) = expression else {
+        return None;
+    };
+    generated_terminal_module(&path.path, "ROUTE")
+}
+
+fn generated_terminal_module(path: &syn::Path, terminal: &str) -> Option<Vec<String>> {
+    if path.leading_colon.is_none()
+        || path.segments.len() < 4
+        || path.segments[0].ident != "generated"
+        || path.segments[1].ident != "http"
+        || path.segments.last()?.ident != terminal
+        || path
+            .segments
+            .iter()
+            .any(|segment| !matches!(segment.arguments, PathArguments::None))
+    {
+        return None;
+    }
+    Some(
+        path.segments
+            .iter()
+            .skip(2)
+            .take(path.segments.len() - 3)
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+    )
+}
+
+fn canonical_receipt_operation(expression: &Expr) -> Option<(String, Vec<String>)> {
+    let Expr::Closure(closure) = peel_expr(expression) else {
+        return None;
+    };
+    if closure.capture.is_none()
+        || closure.asyncness.is_some()
+        || closure.constness.is_some()
+        || !closure.inputs.is_empty()
+    {
+        return None;
+    }
+    let Expr::Call(call) = peel_expr(&closure.body) else {
+        return None;
+    };
+    if !absolute_call_path_is(&call.func, &["testkit", "call"]) || call.args.len() != 2 {
+        return None;
+    }
+    let router = simple_ident(call.args.first()?)?;
+    let Expr::Call(request) = peel_expr(call.args.iter().nth(1)?) else {
+        return None;
+    };
+    if !absolute_call_path_is(&request.func, &["testkit", "ContractRequest", "get"])
+        || request.args.len() != 1
+    {
+        return None;
+    }
+    let Expr::MethodCall(path) = peel_expr(request.args.first()?) else {
+        return None;
+    };
+    if path.method != "path" || !path.args.is_empty() {
+        return None;
+    }
+    let Expr::Field(route) = peel_expr(&path.receiver) else {
+        return None;
+    };
+    if !matches!(&route.member, syn::Member::Named(member) if member == "route") {
+        return None;
+    }
+    let Expr::Path(spec) = peel_expr(&route.base) else {
+        return None;
+    };
+    Some((router, generated_terminal_module(&spec.path, "SPEC")?))
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedRouterFactory {
+    route_module: Vec<String>,
+    parameters: Vec<String>,
+    constructor_parameters: BTreeSet<String>,
+    constructor_repo_fields: BTreeMap<String, BTreeSet<String>>,
+}
+
+type VerifiedRouterFactories = BTreeMap<(Vec<String>, String), VerifiedRouterFactory>;
+
+fn mounted_factory_call<'a>(
+    block: &'a syn::Block,
+    router: &str,
+    proof: &str,
+) -> Option<(String, &'a syn::ExprCall)> {
+    let mut tuple_call = None;
+    let mut router_bindings = 0usize;
+    let mut proof_bindings = 0usize;
+    for statement in &block.stmts {
+        let syn::Stmt::Local(local) = statement else {
+            continue;
+        };
+        match &local.pat {
+            syn::Pat::Tuple(tuple) if tuple.elems.len() == 2 => {
+                let (syn::Pat::Ident(router_pat), syn::Pat::Ident(proof_pat)) =
+                    (&tuple.elems[0], &tuple.elems[1])
+                else {
+                    continue;
+                };
+                if router_pat.ident != router || proof_pat.ident != proof {
+                    continue;
+                }
+                if !immutable_plain_binding(router_pat) || !immutable_plain_binding(proof_pat) {
+                    return None;
+                }
+                router_bindings += 1;
+                proof_bindings += 1;
+                let Expr::Call(call) = peel_expr(&local.init.as_ref()?.expr) else {
+                    return None;
+                };
+                let Expr::Path(path) = peel_expr(&call.func) else {
+                    return None;
+                };
+                if path.path.leading_colon.is_some()
+                    || path.path.segments.len() != 2
+                    || path.path.segments[0].ident != "self"
+                    || !matches!(path.path.segments[0].arguments, PathArguments::None)
+                    || !matches!(path.path.segments[1].arguments, PathArguments::None)
+                {
+                    return None;
+                }
+                tuple_call = Some((path.path.segments[1].ident.to_string(), call));
+            }
+            syn::Pat::Ident(pattern) if pattern.ident == router => {
+                if !immutable_plain_binding(pattern) {
+                    return None;
+                }
+                router_bindings += 1;
+                if !canonical_identity_router_layer(local, router) {
+                    return None;
                 }
             }
-            Item::Mod(item) => {
-                if let Some((_, nested)) = &item.content {
-                    collect_recorded_provider_fields(nested, out);
+            syn::Pat::Ident(pattern) if pattern.ident == proof => {
+                if !immutable_plain_binding(pattern) {
+                    return None;
                 }
+                proof_bindings += 1;
             }
             _ => {}
         }
     }
+    if block_reassigns_any(block, &[router, proof]) {
+        return None;
+    }
+    (tuple_call.is_some() && matches!(router_bindings, 1 | 2) && proof_bindings == 1)
+        .then_some(tuple_call?)
+}
+
+fn immutable_plain_binding(pattern: &syn::PatIdent) -> bool {
+    pattern.by_ref.is_none() && pattern.mutability.is_none() && pattern.subpat.is_none()
+}
+
+fn canonical_identity_router_layer(local: &syn::Local, router: &str) -> bool {
+    let Some(initializer) = &local.init else {
+        return false;
+    };
+    let Expr::MethodCall(layer) = peel_expr(&initializer.expr) else {
+        return false;
+    };
+    if layer.method != "layer"
+        || layer.args.len() != 1
+        || layer.turbofish.is_some()
+        || simple_ident(&layer.receiver).as_deref() != Some(router)
+    {
+        return false;
+    }
+    let Some(Expr::Call(extension)) = layer.args.first().map(peel_expr) else {
+        return false;
+    };
+    if !absolute_call_path_is(&extension.func, &["axum", "Extension"]) || extension.args.len() != 1
+    {
+        return false;
+    }
+    let Some(Expr::Call(authenticated)) = extension.args.first().map(peel_expr) else {
+        return false;
+    };
+    if !relative_call_path_is(&authenticated.func, &["httpserve", "Authenticated", "new"])
+        || authenticated.args.len() != 4
+    {
+        return false;
+    }
+    expression_path_is(
+        authenticated.args.first(),
+        &["primitives", "RequiredScheme", "Jwt"],
+    ) && expression_path_is(
+        authenticated.args.iter().nth(1),
+        &["vocab", "PrincipalKind", "User"],
+    ) && authenticated
+        .args
+        .iter()
+        .nth(2)
+        .is_some_and(|argument| simple_ident(argument).as_deref() == Some("CANON_USER"))
+        && authenticated
+            .args
+            .iter()
+            .nth(3)
+            .is_some_and(canonical_identity_tenant)
+}
+
+fn canonical_identity_tenant(expression: &Expr) -> bool {
+    let Expr::Call(some) = peel_expr(expression) else {
+        return false;
+    };
+    if !relative_call_path_is(&some.func, &["Some"]) || some.args.len() != 1 {
+        return false;
+    }
+    let Some(Expr::Call(tid)) = some.args.first().map(peel_expr) else {
+        return false;
+    };
+    relative_call_path_is(&tid.func, &["tid"])
+        && tid.args.len() == 1
+        && tid
+            .args
+            .first()
+            .is_some_and(|argument| simple_ident(argument).as_deref() == Some("CANON_TENANT"))
+}
+
+fn relative_call_path_is(expression: &Expr, expected: &[&str]) -> bool {
+    let Expr::Path(path) = peel_expr(expression) else {
+        return false;
+    };
+    path_is(&path.path, expected)
+        && path
+            .path
+            .segments
+            .iter()
+            .all(|segment| matches!(segment.arguments, PathArguments::None))
+}
+
+fn expression_path_is(expression: Option<&Expr>, expected: &[&str]) -> bool {
+    let Some(Expr::Path(path)) = expression.map(peel_expr) else {
+        return false;
+    };
+    path_is(&path.path, expected)
+        && path
+            .path
+            .segments
+            .iter()
+            .all(|segment| matches!(segment.arguments, PathArguments::None))
+}
+
+#[derive(Default)]
+struct DomainProviderCertificate {
+    constructor_fields: Vec<Option<String>>,
+    field_states: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl DomainProviderCertificate {
+    fn parameter_closes_state(&self, index: usize, state: &str) -> bool {
+        self.constructor_fields
+            .get(index)
+            .and_then(Option::as_ref)
+            .and_then(|field| self.field_states.get(field))
+            .is_some_and(|states| states.contains(state))
+    }
+}
+
+fn collect_domain_provider_certificates(
+    items: &[Item],
+) -> BTreeMap<String, DomainProviderCertificate> {
+    fn walk<'a>(items: &'a [Item], impls: &mut Vec<&'a ItemImpl>) {
+        for item in items {
+            match item {
+                Item::Impl(item) => impls.push(item),
+                Item::Mod(module) => {
+                    if let Some((_, nested)) = &module.content {
+                        walk(nested, impls);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut impls = Vec::new();
+    walk(items, &mut impls);
+    let mut certificates = BTreeMap::<String, DomainProviderCertificate>::new();
+    for item in &impls {
+        if item.trait_.is_some() {
+            continue;
+        }
+        let Some(owner) = outer_type_ident(&item.self_ty) else {
+            continue;
+        };
+        let Some(function) = item.items.iter().find_map(|child| match child {
+            ImplItem::Fn(function) if function.sig.ident == "new" => Some(function),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let parameters = function
+            .sig
+            .inputs
+            .iter()
+            .filter_map(|input| match input {
+                syn::FnArg::Typed(argument) => match &*argument.pat {
+                    syn::Pat::Ident(pattern) => Some(pattern.ident.to_string()),
+                    _ => None,
+                },
+                syn::FnArg::Receiver(_) => None,
+            })
+            .collect::<Vec<_>>();
+        if parameters.len() != function.sig.inputs.len() {
+            continue;
+        }
+        let Some(Expr::Struct(returned)) = function
+            .block
+            .stmts
+            .last()
+            .and_then(tail_expression)
+            .map(peel_expr)
+        else {
+            continue;
+        };
+        if !returned.path.is_ident("Self") || returned.rest.is_some() {
+            continue;
+        }
+        let mut fields = vec![None; parameters.len()];
+        for field in &returned.fields {
+            let syn::Member::Named(member) = &field.member else {
+                continue;
+            };
+            if let Some(root) = direct_ident_or_field_root(&field.expr)
+                && let Some(index) = parameters.iter().position(|parameter| parameter == &root)
+            {
+                fields[index] = Some(member.to_string());
+            }
+        }
+        certificates.entry(owner).or_default().constructor_fields = fields;
+    }
+    for item in impls {
+        let Some((_, trait_path, _)) = &item.trait_ else {
+            continue;
+        };
+        if trait_path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != "Domain")
+        {
+            continue;
+        }
+        let Some(owner) = outer_type_ident(&item.self_ty) else {
+            continue;
+        };
+        let Some(init) = item.items.iter().find_map(|child| match child {
+            ImplItem::Fn(function) if function.sig.ident == "init" => Some(function),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let aliases = init
+            .block
+            .stmts
+            .iter()
+            .filter_map(|statement| {
+                let syn::Stmt::Local(local) = statement else {
+                    return None;
+                };
+                let syn::Pat::Ident(alias) = &local.pat else {
+                    return None;
+                };
+                let initializer = local.init.as_ref()?;
+                self_field_receiver(&initializer.expr).map(|field| (alias.ident.to_string(), field))
+            })
+            .collect::<BTreeMap<_, _>>();
+        struct StateFields<'a> {
+            aliases: &'a BTreeMap<String, String>,
+            found: BTreeMap<String, BTreeSet<String>>,
+        }
+        impl<'ast> Visit<'ast> for StateFields<'_> {
+            fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+                let Some(state) = node
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+                else {
+                    return;
+                };
+                if state.ends_with("State") {
+                    for field in &node.fields {
+                        if let Some(root) = root_receiver_ident(&field.expr)
+                            && let Some(domain_field) = self.aliases.get(&root)
+                        {
+                            self.found
+                                .entry(domain_field.clone())
+                                .or_default()
+                                .insert(state.clone());
+                        }
+                    }
+                }
+                visit::visit_expr_struct(self, node);
+            }
+        }
+        let mut scan = StateFields {
+            aliases: &aliases,
+            found: BTreeMap::new(),
+        };
+        scan.visit_block(&init.block);
+        certificates.entry(owner).or_default().field_states = scan.found;
+    }
+    certificates
+}
+
+fn direct_ident_or_field_root(expression: &Expr) -> Option<String> {
+    match expression {
+        Expr::Path(path) => path.path.get_ident().map(ToString::to_string),
+        Expr::Field(field) => direct_ident_or_field_root(&field.base),
+        Expr::Paren(parenthesized) => direct_ident_or_field_root(&parenthesized.expr),
+        Expr::Group(grouped) => direct_ident_or_field_root(&grouped.expr),
+        _ => None,
+    }
+}
+
+fn self_field_receiver(expression: &Expr) -> Option<String> {
+    let mut expression = peel_expr(expression);
+    while let Expr::MethodCall(call) = expression {
+        expression = peel_expr(&call.receiver);
+    }
+    let Expr::Field(field) = expression else {
+        return None;
+    };
+    let syn::Member::Named(member) = &field.member else {
+        return None;
+    };
+    matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
+        .then(|| member.to_string())
+}
+
+fn outer_type_ident(ty: &Type) -> Option<String> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    path.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+}
+
+fn verified_router_factories(items: &[Item]) -> VerifiedRouterFactories {
+    fn collect(
+        items: &[Item],
+        module_path: &mut Vec<String>,
+        module_cfg_valid: bool,
+        declarations: &mut BTreeMap<(Vec<String>, String), usize>,
+        verified: &mut VerifiedRouterFactories,
+        domain_certificates: &BTreeMap<String, DomainProviderCertificate>,
+    ) {
+        for item in items {
+            match item {
+                Item::Fn(function) => {
+                    let key = (module_path.clone(), function.sig.ident.to_string());
+                    *declarations.entry(key.clone()).or_default() += 1;
+                    if module_cfg_valid
+                        && factory_attrs_are_canonical(&function.attrs)
+                        && let Some(certificate) =
+                            verify_router_factory(function, domain_certificates)
+                    {
+                        verified.insert(key, certificate);
+                    }
+                }
+                Item::Mod(module) => {
+                    if let Some((_, nested)) = &module.content {
+                        module_path.push(module.ident.to_string());
+                        collect(
+                            nested,
+                            module_path,
+                            module_cfg_valid && module_cfg_is_canonical(&module.attrs),
+                            declarations,
+                            verified,
+                            domain_certificates,
+                        );
+                        module_path.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut declarations = BTreeMap::new();
+    let mut verified = BTreeMap::new();
+    let domain_certificates = collect_domain_provider_certificates(items);
+    collect(
+        items,
+        &mut Vec::new(),
+        true,
+        &mut declarations,
+        &mut verified,
+        &domain_certificates,
+    );
+    verified.retain(|key, _| declarations.get(key) == Some(&1));
+    verified
+}
+
+fn module_cfg_is_canonical(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().all(|attribute| {
+        if path_is(attribute.path(), &["cfg"]) {
+            attribute.meta.require_list().is_ok_and(|list| {
+                syn::parse2::<syn::Path>(list.tokens.clone())
+                    .is_ok_and(|path| path_is(&path, &["test"]))
+            })
+        } else {
+            !path_is(attribute.path(), &["cfg_attr"]) && !path_is(attribute.path(), &["ignore"])
+        }
+    })
+}
+
+fn factory_attrs_are_canonical(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().all(|attribute| {
+        path_is(attribute.path(), &["allow"])
+            && attribute.meta.require_list().is_ok_and(|list| {
+                matches!(
+                    list.tokens.to_string().as_str(),
+                    "clippy :: expect_used" | "clippy :: too_many_arguments"
+                )
+            })
+    })
+}
+
+fn verify_router_factory(
+    function: &syn::ItemFn,
+    domain_certificates: &BTreeMap<String, DomainProviderCertificate>,
+) -> Option<VerifiedRouterFactory> {
+    if function.sig.asyncness.is_some()
+        || function.sig.unsafety.is_some()
+        || !function.sig.generics.params.is_empty()
+        || function.sig.generics.where_clause.is_some()
+        || block_contains_return(&function.block)
+    {
+        return None;
+    }
+    let route_module_from_type = mounted_proof_return_module(&function.sig.output)?;
+    let parameters = function
+        .sig
+        .inputs
+        .iter()
+        .map(|argument| match argument {
+            syn::FnArg::Typed(argument) => match &*argument.pat {
+                syn::Pat::Ident(ident)
+                    if ident.by_ref.is_none()
+                        && ident.mutability.is_none()
+                        && ident.subpat.is_none() =>
+                {
+                    Some(ident.ident.to_string())
+                }
+                _ => None,
+            },
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let (tail_router, tail_proof) = factory_tail_tuple(&function.block)?;
+    let proof_initializer = unique_direct_initializer(&function.block, &tail_proof)?;
+    let (proof_routes, proof_module, proof_state) = mounted_route_proof(proof_initializer)?;
+    if proof_module != route_module_from_type {
+        return None;
+    }
+    let router_initializer = unique_direct_initializer(&function.block, &tail_router)?;
+    let finalizer_routes = finalized_router_routes(router_initializer)?;
+    if proof_routes != finalizer_routes {
+        return None;
+    }
+    let lineage = registry_lineage(&function.block, &proof_routes)?;
+    if block_reassigns_any(
+        &function.block,
+        &[
+            &tail_router,
+            &tail_proof,
+            &proof_routes,
+            &lineage.finalized,
+            &lineage.registry,
+            &lineage.domain,
+        ],
+    ) {
+        return None;
+    }
+    if block_has_mutable_binding(
+        &function.block,
+        &[&tail_router, &tail_proof, &proof_routes, &finalizer_routes],
+    ) {
+        return None;
+    }
+    Some(VerifiedRouterFactory {
+        route_module: proof_module,
+        constructor_parameters: mounted_constructor_parameters(
+            &function.block,
+            &parameters,
+            &lineage.domain,
+            proof_state.as_deref(),
+            domain_certificates,
+        ),
+        constructor_repo_fields: mounted_constructor_repo_fields(
+            &function.block,
+            &parameters,
+            &lineage.domain,
+        ),
+        parameters,
+    })
+}
+
+fn mounted_proof_return_module(output: &syn::ReturnType) -> Option<Vec<String>> {
+    let syn::ReturnType::Type(_, output) = output else {
+        return None;
+    };
+    let Type::Tuple(tuple) = &**output else {
+        return None;
+    };
+    if tuple.elems.len() != 2 || !is_axum_router_type(&tuple.elems[0]) {
+        return None;
+    }
+    let Type::Path(proof) = &tuple.elems[1] else {
+        return None;
+    };
+    let path = &proof.path;
+    if path.leading_colon.is_none()
+        || path.segments.len() != 2
+        || path.segments[0].ident != "httpserve"
+    {
+        return None;
+    }
+    let proof_segment = &path.segments[1];
+    let PathArguments::AngleBracketed(arguments) = &proof_segment.arguments else {
+        return None;
+    };
+    let expected_arguments = match proof_segment.ident.to_string().as_str() {
+        "LocalOnlyMountedRouteProof" => 2,
+        "StatelessLocalOnlyMountedRouteProof" => 1,
+        _ => return None,
+    };
+    if arguments.args.len() != expected_arguments {
+        return None;
+    }
+    let GenericArgument::Type(Type::Path(marker)) = arguments.args.first()? else {
+        return None;
+    };
+    generated_terminal_module(&marker.path, "RouteMarker")
+}
+
+fn is_axum_router_type(ty: &Type) -> bool {
+    let Type::Path(router) = ty else {
+        return false;
+    };
+    let path = &router.path;
+    path.leading_colon.is_none()
+        && path.segments.len() == 2
+        && path.segments[0].ident == "axum"
+        && path.segments[1].ident == "Router"
+        && path
+            .segments
+            .iter()
+            .all(|segment| matches!(segment.arguments, PathArguments::None))
+}
+
+fn factory_tail_tuple(block: &syn::Block) -> Option<(String, String)> {
+    let Expr::Tuple(tuple) = peel_expr(block.stmts.last().and_then(tail_expression)?) else {
+        return None;
+    };
+    if tuple.elems.len() != 2 {
+        return None;
+    }
+    Some((
+        simple_ident(&tuple.elems[0])?,
+        simple_ident(&tuple.elems[1])?,
+    ))
+}
+
+fn mounted_route_proof(expression: &Expr) -> Option<(String, Vec<String>, Option<String>)> {
+    let Expr::MethodCall(expect) = peel_expr(expression) else {
+        return None;
+    };
+    if expect.method != "expect" || expect.args.len() != 1 || expect.turbofish.is_some() {
+        return None;
+    }
+    let Expr::Call(call) = peel_expr(&expect.receiver) else {
+        return None;
+    };
+    let state = match current_mounted_proof_kind(call)? {
+        MountedProofKind::Stateful(state) => Some(state),
+        MountedProofKind::Stateless => None,
+    };
+    let routes = referenced_ident(call.args.first()?)?;
+    let module = generated_route_reference_module(call.args.iter().nth(1)?)?;
+    Some((routes, module, state))
+}
+
+enum MountedProofKind {
+    Stateful(String),
+    Stateless,
+}
+
+fn current_mounted_proof_kind(call: &syn::ExprCall) -> Option<MountedProofKind> {
+    if call.args.len() != 2 {
+        return None;
+    }
+    let Expr::Path(function) = peel_expr(&call.func) else {
+        return None;
+    };
+    let path = &function.path;
+    if path.leading_colon.is_none()
+        || path.segments.len() != 2
+        || path.segments[0].ident != "httpserve"
+    {
+        return None;
+    }
+    let function = &path.segments[1];
+    match function.ident.to_string().as_str() {
+        "prove_local_only_mounted_route_state" => {
+            let PathArguments::AngleBracketed(arguments) = &function.arguments else {
+                return None;
+            };
+            if arguments.args.len() != 2
+                || !matches!(
+                    arguments.args.iter().nth(1),
+                    Some(GenericArgument::Type(Type::Infer(_)))
+                )
+            {
+                return None;
+            }
+            let Some(GenericArgument::Type(Type::Path(state))) = arguments.args.first() else {
+                return None;
+            };
+            Some(MountedProofKind::Stateful(
+                state.path.segments.last()?.ident.to_string(),
+            ))
+        }
+        "prove_stateless_local_only_mounted_route"
+            if matches!(function.arguments, PathArguments::None) =>
+        {
+            Some(MountedProofKind::Stateless)
+        }
+        _ => None,
+    }
+}
+
+fn finalized_router_routes(expression: &Expr) -> Option<String> {
+    let mut expression = peel_expr(expression);
+    loop {
+        match expression {
+            Expr::MethodCall(call)
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "into_router_for_test" | "layer"
+                ) =>
+            {
+                if call.turbofish.is_some()
+                    || (call.method == "into_router_for_test" && !call.args.is_empty())
+                    || (call.method == "layer" && !is_transparent_extension_layer(call))
+                {
+                    return None;
+                }
+                expression = peel_expr(&call.receiver);
+            }
+            Expr::MethodCall(call)
+                if call.method == "expect" && call.args.len() == 1 && call.turbofish.is_none() =>
+            {
+                let Expr::Call(finalizer) = peel_expr(&call.receiver) else {
+                    return None;
+                };
+                const FINALIZERS: &[&[&str]] = &[
+                    &["httpserve", "finalize_auth"],
+                    &["httpserve", "finalize_auth_with_audit"],
+                    &["httpserve", "finalize_auth_with_audit_and_authorizer"],
+                    &["httpserve", "finalize_primary_auth"],
+                    &["httpserve", "finalize_primary_auth_with_audit"],
+                ];
+                if !FINALIZERS
+                    .iter()
+                    .any(|expected| absolute_call_path_is(&finalizer.func, expected))
+                {
+                    return None;
+                }
+                return simple_ident(finalizer.args.first()?);
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn is_transparent_extension_layer(call: &syn::ExprMethodCall) -> bool {
+    if call.args.len() != 1 {
+        return false;
+    }
+    let Some(Expr::Call(extension)) = call.args.first().map(peel_expr) else {
+        return false;
+    };
+    absolute_call_path_is(&extension.func, &["axum", "Extension"]) && extension.args.len() == 1
+}
+
+struct RegistryLineage {
+    domain: String,
+    registry: String,
+    finalized: String,
+}
+
+fn registry_lineage(block: &syn::Block, routes: &str) -> Option<RegistryLineage> {
+    let mut route_source = None;
+    let mut route_bindings = 0usize;
+    for statement in &block.stmts {
+        let syn::Stmt::Local(local) = statement else {
+            continue;
+        };
+        let binds_routes = match &local.pat {
+            syn::Pat::Ident(pattern) => pattern.ident == routes,
+            syn::Pat::Tuple(tuple) => tuple.elems.iter().any(
+                |pattern| matches!(pattern, syn::Pat::Ident(pattern) if pattern.ident == routes),
+            ),
+            _ => false,
+        };
+        if !binds_routes {
+            continue;
+        }
+        route_bindings += 1;
+        let Some(initializer) = &local.init else {
+            return None;
+        };
+        route_source = root_receiver_ident(&initializer.expr);
+    }
+    if route_bindings != 1 {
+        return None;
+    }
+    let finalized = route_source?;
+    let finalized_initializer = unique_direct_initializer(block, &finalized)?;
+    let Expr::MethodCall(expect) = peel_expr(finalized_initializer) else {
+        return None;
+    };
+    if expect.method != "expect" || expect.args.len() != 1 || expect.turbofish.is_some() {
+        return None;
+    }
+    let Expr::MethodCall(finalize) = peel_expr(&expect.receiver) else {
+        return None;
+    };
+    if finalize.method != "finalize_routes"
+        || !finalize.args.is_empty()
+        || finalize.turbofish.is_some()
+    {
+        return None;
+    }
+    let registry = simple_ident(&finalize.receiver)?;
+    let registry_initializer = unique_direct_initializer(block, &registry)?;
+    let Expr::MethodCall(expect) = peel_expr(registry_initializer) else {
+        return None;
+    };
+    if expect.method != "expect" || expect.args.len() != 1 || expect.turbofish.is_some() {
+        return None;
+    }
+    let Expr::Call(compose) = peel_expr(&expect.receiver) else {
+        return None;
+    };
+    if !relative_call_path_is(&compose.func, &["bootstrap", "compose"]) || compose.args.len() != 1 {
+        return None;
+    }
+    let Expr::Reference(reference) = compose.args.first()? else {
+        return None;
+    };
+    if reference.mutability.is_some() {
+        return None;
+    }
+    let Expr::Array(domains) = peel_expr(&reference.expr) else {
+        return None;
+    };
+    if domains.elems.len() != 1 {
+        return None;
+    }
+    let domain = referenced_ident(domains.elems.first()?)?;
+    unique_direct_initializer(block, &domain)?;
+    Some(RegistryLineage {
+        domain,
+        registry,
+        finalized,
+    })
+}
+
+fn mounted_constructor_parameters(
+    block: &syn::Block,
+    parameters: &[String],
+    composed_domain: &str,
+    proof_state: Option<&str>,
+    domain_certificates: &BTreeMap<String, DomainProviderCertificate>,
+) -> BTreeSet<String> {
+    let mut constructed_domains = BTreeMap::<String, BTreeSet<String>>::new();
+    for statement in &block.stmts {
+        let syn::Stmt::Local(local) = statement else {
+            continue;
+        };
+        let syn::Pat::Ident(binding) = &local.pat else {
+            continue;
+        };
+        let Some(initializer) = &local.init else {
+            continue;
+        };
+        let Expr::Call(call) = peel_expr(&initializer.expr) else {
+            continue;
+        };
+        let Expr::Path(function) = peel_expr(&call.func) else {
+            continue;
+        };
+        let segments = function.path.segments.iter().collect::<Vec<_>>();
+        if segments.len() < 2
+            || segments.last().is_none_or(|segment| segment.ident != "new")
+            || segments.get(segments.len() - 2).is_none_or(|segment| {
+                let owner = segment.ident.to_string();
+                !owner.ends_with("Domain") && !owner.ends_with("State")
+            })
+        {
+            continue;
+        }
+        let domain_type = segments[segments.len() - 2].ident.to_string();
+        let mut referenced = BTreeSet::new();
+        for parameter in parameters {
+            for (index, argument) in call.args.iter().enumerate() {
+                if !expression_references_ident(argument, parameter) {
+                    continue;
+                }
+                let closes_state = proof_state.is_none_or(|state| {
+                    domain_certificates
+                        .get(&domain_type)
+                        .is_some_and(|certificate| certificate.parameter_closes_state(index, state))
+                });
+                if closes_state {
+                    referenced.insert(parameter.clone());
+                }
+            }
+        }
+        constructed_domains.insert(binding.ident.to_string(), referenced);
+    }
+    constructed_domains
+        .remove(composed_domain)
+        .unwrap_or_default()
+}
+
+fn mounted_constructor_repo_fields(
+    block: &syn::Block,
+    parameters: &[String],
+    composed_domain: &str,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let Some(initializer) = unique_direct_initializer(block, composed_domain) else {
+        return BTreeMap::new();
+    };
+    let Expr::Call(constructor) = peel_expr(initializer) else {
+        return BTreeMap::new();
+    };
+    let mut fields = BTreeMap::<String, BTreeSet<String>>::new();
+    for argument in &constructor.args {
+        let Expr::Field(field) = peel_expr(argument) else {
+            continue;
+        };
+        let syn::Member::Named(member) = &field.member else {
+            continue;
+        };
+        let Some(provider) = simple_ident(&field.base) else {
+            continue;
+        };
+        if parameters.contains(&provider) {
+            fields
+                .entry(provider)
+                .or_default()
+                .insert(member.to_string());
+        }
+    }
+    fields
+}
+
+fn expression_references_ident(expression: &Expr, expected: &str) -> bool {
+    struct References<'name> {
+        expected: &'name str,
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for References<'_> {
+        fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+            self.found |= node.path.is_ident(self.expected);
+            visit::visit_expr_path(self, node);
+        }
+    }
+    let mut references = References {
+        expected,
+        found: false,
+    };
+    references.visit_expr(expression);
+    references.found
+}
+
+fn canonical_test_repo_provider(expression: &Expr) -> Option<String> {
+    let Expr::MethodCall(call) = peel_expr(expression) else {
+        return None;
+    };
+    if call.method != "test_repo" || !call.args.is_empty() || call.turbofish.is_some() {
+        return None;
+    }
+    simple_ident(&call.receiver)
+}
+
+fn block_reassigns_any(block: &syn::Block, names: &[&str]) -> bool {
+    struct Assignments<'name> {
+        names: &'name [&'name str],
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for Assignments<'_> {
+        fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+            if self
+                .names
+                .iter()
+                .any(|name| expression_references_ident(&node.left, name))
+            {
+                self.found = true;
+            }
+            visit::visit_expr_assign(self, node);
+        }
+
+        fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+            if matches!(
+                node.op,
+                syn::BinOp::AddAssign(_)
+                    | syn::BinOp::SubAssign(_)
+                    | syn::BinOp::MulAssign(_)
+                    | syn::BinOp::DivAssign(_)
+                    | syn::BinOp::RemAssign(_)
+                    | syn::BinOp::BitXorAssign(_)
+                    | syn::BinOp::BitAndAssign(_)
+                    | syn::BinOp::BitOrAssign(_)
+                    | syn::BinOp::ShlAssign(_)
+                    | syn::BinOp::ShrAssign(_)
+            ) && self
+                .names
+                .iter()
+                .any(|name| expression_references_ident(&node.left, name))
+            {
+                self.found = true;
+            }
+            visit::visit_expr_binary(self, node);
+        }
+
+        fn visit_expr_reference(&mut self, node: &'ast syn::ExprReference) {
+            if node.mutability.is_some()
+                && self
+                    .names
+                    .iter()
+                    .any(|name| expression_references_ident(&node.expr, name))
+            {
+                self.found = true;
+            }
+            visit::visit_expr_reference(self, node);
+        }
+    }
+    let mut assignments = Assignments {
+        names,
+        found: false,
+    };
+    assignments.visit_block(block);
+    assignments.found
+}
+
+fn block_has_mutable_binding(block: &syn::Block, names: &[&str]) -> bool {
+    struct MutableBindings<'name> {
+        names: &'name [&'name str],
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for MutableBindings<'_> {
+        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+            if node.mutability.is_some() && self.names.iter().any(|name| node.ident == *name) {
+                self.found = true;
+            }
+            visit::visit_pat_ident(self, node);
+        }
+    }
+    let mut bindings = MutableBindings {
+        names,
+        found: false,
+    };
+    bindings.visit_block(block);
+    bindings.found
+}
+
+fn block_contains_return(block: &syn::Block) -> bool {
+    struct Returns(bool);
+    impl<'ast> Visit<'ast> for Returns {
+        fn visit_expr_return(&mut self, _node: &'ast syn::ExprReturn) {
+            self.0 = true;
+        }
+    }
+    let mut returns = Returns(false);
+    returns.visit_block(block);
+    returns.0
+}
+
+fn tail_expression(statement: &syn::Stmt) -> Option<&Expr> {
+    match statement {
+        syn::Stmt::Expr(expression, None) => Some(expression),
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct CertificateApiCounts {
+    receipt_calls: usize,
+    observer_initializers: usize,
+    testkit_calls: usize,
+    route_proofs: usize,
+    static_exclusions: usize,
+    runtime_handles: usize,
+}
+
+impl<'ast> Visit<'ast> for CertificateApiCounts {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if is_receipt_assertion_call(node) {
+            self.receipt_calls += 1;
+        }
+        if absolute_call_path_is(
+            &node.func,
+            &["testkit", "local_only", "LocalOnlyObservers", "new"],
+        ) {
+            self.observer_initializers += 1;
+        }
+        if absolute_call_path_is(&node.func, &["testkit", "call"]) {
+            self.testkit_calls += 1;
+        }
+        if is_current_mounted_proof_call(node) {
+            self.route_proofs += 1;
+        }
+        if absolute_call_path_is(
+            &node.func,
+            &["testkit", "local_only", "StaticExclusion", "from_governed"],
+        ) {
+            self.static_exclusions += 1;
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "handle"
+            && canonical_provider_handle(&Expr::MethodCall(node.clone())).is_some()
+        {
+            self.runtime_handles += 1;
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn certificate_api_counts(block: &syn::Block) -> CertificateApiCounts {
+    let mut counts = CertificateApiCounts::default();
+    counts.visit_block(block);
+    counts
+}
+
+fn use_tree_contains_receipt_api(tree: &syn::UseTree) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => {
+            is_receipt_api_ident(&path.ident) || use_tree_contains_receipt_api(&path.tree)
+        }
+        syn::UseTree::Name(name) => is_receipt_api_ident(&name.ident),
+        syn::UseTree::Rename(rename) => {
+            is_receipt_api_ident(&rename.ident) || is_receipt_api_ident(&rename.rename)
+        }
+        syn::UseTree::Group(group) => group.items.iter().any(use_tree_contains_receipt_api),
+        syn::UseTree::Glob(_) => false,
+    }
+}
+
+fn type_contains_receipt_api(ty: &Type) -> bool {
+    struct ReceiptType(bool);
+    impl<'ast> Visit<'ast> for ReceiptType {
+        fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+            if node
+                .path
+                .segments
+                .iter()
+                .any(|segment| is_receipt_api_ident(&segment.ident))
+            {
+                self.0 = true;
+            }
+            visit::visit_type_path(self, node);
+        }
+    }
+    let mut found = ReceiptType(false);
+    found.visit_type(ty);
+    found.0
+}
+
+fn is_receipt_api_ident(ident: &syn::Ident) -> bool {
+    matches!(
+        ident.to_string().as_str(),
+        "assert_local_only_with_receipt"
+            | "LocalOnlyConformanceReceipt"
+            | "LocalOnlyConformanceMarker"
+    )
+}
+
+fn collect_canonical_test_repo_fields(
+    items: &[Item],
+) -> BTreeMap<(Vec<String>, String), BTreeSet<String>> {
+    fn collect(
+        items: &[Item],
+        module_path: &mut Vec<String>,
+        module_cfg_valid: bool,
+        out: &mut BTreeMap<(Vec<String>, String), BTreeSet<String>>,
+    ) {
+        for item in items {
+            match item {
+                Item::Impl(item)
+                    if module_cfg_valid
+                        && item.trait_.is_none()
+                        && factory_attrs_are_canonical(&item.attrs) =>
+                {
+                    let Some(owner) = terminal_type_ident(&item.self_ty) else {
+                        continue;
+                    };
+                    if item.items.iter().any(|child| {
+                        matches!(child, ImplItem::Fn(function) if canonical_test_repo_method(function))
+                    }) && let Some(fields) = canonical_from_provider_fields(items, &owner)
+                    {
+                        out.insert((module_path.clone(), owner), fields);
+                    }
+                }
+                Item::Mod(module) => {
+                    if let Some((_, nested)) = &module.content {
+                        module_path.push(module.ident.to_string());
+                        collect(
+                            nested,
+                            module_path,
+                            module_cfg_valid && module_cfg_is_canonical(&module.attrs),
+                            out,
+                        );
+                        module_path.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    collect(items, &mut Vec::new(), true, &mut out);
+    out
+}
+
+fn canonical_from_provider_fields(items: &[Item], owner: &str) -> Option<BTreeSet<String>> {
+    let repo_type = "TestRepo";
+    let item = items.iter().find_map(|item| match item {
+        Item::Impl(item)
+            if item.trait_.is_none()
+                && outer_type_ident(&item.self_ty).as_deref() == Some(repo_type) =>
+        {
+            Some(item)
+        }
+        _ => None,
+    })?;
+    let function = item.items.iter().find_map(|child| match child {
+        ImplItem::Fn(function) if function.sig.ident == "from_provider" => Some(function),
+        _ => None,
+    })?;
+    let provider = function.sig.inputs.iter().find_map(|input| match input {
+        syn::FnArg::Typed(argument) => match &*argument.pat {
+            syn::Pat::Ident(pattern) => Some(pattern.ident.to_string()),
+            _ => None,
+        },
+        syn::FnArg::Receiver(_) => None,
+    })?;
+    if function.block.stmts.len() != 1 {
+        return None;
+    }
+    let Expr::Struct(returned) = function
+        .block
+        .stmts
+        .last()
+        .and_then(tail_expression)
+        .map(peel_expr)?
+    else {
+        return None;
+    };
+    if !returned.path.is_ident("Self") || returned.rest.is_some() {
+        return None;
+    }
+    let fields = returned
+        .fields
+        .iter()
+        .filter_map(|field| {
+            let syn::Member::Named(member) = &field.member else {
+                return None;
+            };
+            direct_provider_lineage(&field.expr, &provider).then(|| member.to_string())
+        })
+        .collect::<BTreeSet<_>>();
+    (!fields.is_empty() && owner != repo_type).then_some(fields)
+}
+
+fn direct_provider_lineage(expression: &Expr, provider: &str) -> bool {
+    match expression {
+        Expr::Path(path) => path.path.is_ident(provider),
+        Expr::Reference(reference) => {
+            reference.mutability.is_none() && direct_provider_lineage(&reference.expr, provider)
+        }
+        Expr::Paren(parenthesized) => direct_provider_lineage(&parenthesized.expr, provider),
+        Expr::Group(grouped) => direct_provider_lineage(&grouped.expr, provider),
+        Expr::Field(field) => direct_provider_lineage(&field.base, provider),
+        Expr::Call(call) => {
+            call.args.len() == 1
+                && canonical_provider_wrapper(&call.func)
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|argument| direct_provider_lineage(argument, provider))
+        }
+        Expr::MethodCall(call) => {
+            call.method == "clone"
+                && call.args.is_empty()
+                && call.turbofish.is_none()
+                && direct_provider_lineage(&call.receiver, provider)
+        }
+        _ => false,
+    }
+}
+
+fn canonical_provider_wrapper(function: &Expr) -> bool {
+    let Expr::Path(path) = peel_expr(function) else {
+        return false;
+    };
+    path.path.segments.last().is_some_and(|segment| {
+        matches!(
+            segment.ident.to_string().as_str(),
+            "consume" | "clone" | "from" | "new_box"
+        ) && matches!(segment.arguments, PathArguments::None)
+    })
+}
+
+fn canonical_test_repo_method(function: &syn::ImplItemFn) -> bool {
+    if function.sig.ident != "test_repo"
+        || function.sig.asyncness.is_some()
+        || function.sig.unsafety.is_some()
+        || !function.sig.generics.params.is_empty()
+        || function.sig.inputs.len() != 1
+        || !matches!(function.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver)) if receiver.reference.is_some() && receiver.mutability.is_none())
+        || !matches!(&function.sig.output, syn::ReturnType::Type(_, ty) if matches!(&**ty, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "TestRepo")))
+        || function.block.stmts.len() != 1
+    {
+        return false;
+    }
+    let Some(expression) = function.block.stmts.first().and_then(tail_expression) else {
+        return false;
+    };
+    let Expr::Call(from_provider) = peel_expr(expression) else {
+        return false;
+    };
+    if !relative_call_path_is(&from_provider.func, &["TestRepo", "from_provider"])
+        || from_provider.args.len() != 1
+    {
+        return false;
+    }
+    let Some(Expr::Call(arc_new)) = from_provider.args.first().map(peel_expr) else {
+        return false;
+    };
+    if !relative_call_path_is(&arc_new.func, &["Arc", "new"]) || arc_new.args.len() != 1 {
+        return false;
+    }
+    let Some(Expr::MethodCall(clone)) = arc_new.args.first().map(peel_expr) else {
+        return false;
+    };
+    clone.method == "clone"
+        && clone.args.is_empty()
+        && clone.turbofish.is_none()
+        && matches!(peel_expr(&clone.receiver), Expr::Path(path) if path.path.is_ident("self"))
+}
+
+fn collect_scoped_recorded_provider_fields(
+    items: &[Item],
+) -> BTreeMap<(Vec<String>, String), BTreeSet<String>> {
+    fn collect(
+        items: &[Item],
+        module_path: &mut Vec<String>,
+        module_cfg_valid: bool,
+        out: &mut BTreeMap<(Vec<String>, String), BTreeSet<String>>,
+    ) {
+        for item in items {
+            match item {
+                Item::Impl(item)
+                    if module_cfg_valid
+                        && item.trait_.is_some()
+                        && factory_attrs_are_canonical(&item.attrs) =>
+                {
+                    if let Some(owner) = terminal_type_ident(&item.self_ty) {
+                        let fields = directly_recorded_fields(&item.items);
+                        if !fields.is_empty() {
+                            out.entry((module_path.clone(), owner))
+                                .or_default()
+                                .extend(fields);
+                        }
+                    }
+                }
+                Item::Mod(module) => {
+                    if let Some((_, nested)) = &module.content {
+                        module_path.push(module.ident.to_string());
+                        collect(
+                            nested,
+                            module_path,
+                            module_cfg_valid && module_cfg_is_canonical(&module.attrs),
+                            out,
+                        );
+                        module_path.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    collect(items, &mut Vec::new(), true, &mut out);
+    out
 }
 
 fn directly_recorded_fields(items: &[ImplItem]) -> BTreeSet<String> {
-    struct Calls {
-        fields: BTreeSet<String>,
-    }
-    impl<'ast> Visit<'ast> for Calls {
-        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-            if node.method == "record"
-                && let Expr::Field(field) = peel_expr(&node.receiver)
-                && matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
-                && let syn::Member::Named(member) = &field.member
-            {
-                self.fields.insert(member.to_string());
+    let mut fields = BTreeSet::new();
+    for item in items {
+        let ImplItem::Fn(function) = item else {
+            continue;
+        };
+        let mut may_skip = false;
+        for statement in &function.block.stmts {
+            if !may_skip && let Some(field) = direct_recorded_field(statement) {
+                fields.insert(field);
             }
-            visit::visit_expr_method_call(self, node);
+            may_skip |= statement_may_skip_following_receipt(statement);
         }
     }
-    let mut calls = Calls {
-        fields: BTreeSet::new(),
+    fields
+}
+
+fn direct_recorded_field(statement: &syn::Stmt) -> Option<String> {
+    let syn::Stmt::Expr(expression, _) = statement else {
+        return None;
     };
-    for item in items {
-        calls.visit_impl_item(item);
+    let Expr::MethodCall(record) = peel_expr(expression) else {
+        return None;
+    };
+    if record.method != "record" || !record.args.is_empty() || record.turbofish.is_some() {
+        return None;
     }
-    calls.fields
+    let Expr::Field(field) = peel_expr(&record.receiver) else {
+        return None;
+    };
+    let syn::Member::Named(member) = &field.member else {
+        return None;
+    };
+    matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
+        .then(|| member.to_string())
 }
 
 fn provenance_findings_in_items(
     items: &[Item],
     subject: &str,
-    recorded_provider_fields: &BTreeMap<String, BTreeSet<String>>,
+    recorded_provider_fields: &BTreeMap<(Vec<String>, String), BTreeSet<String>>,
+    module_path: &mut Vec<String>,
     findings: &mut Vec<Finding>,
 ) {
     for item in items {
@@ -951,6 +3564,7 @@ fn provenance_findings_in_items(
                 function,
                 subject,
                 recorded_provider_fields,
+                module_path,
                 findings,
             ),
             Item::Impl(item) => {
@@ -972,6 +3586,7 @@ fn provenance_findings_in_items(
                             function,
                             subject,
                             recorded_provider_fields,
+                            module_path,
                             findings,
                         );
                     }
@@ -979,12 +3594,15 @@ fn provenance_findings_in_items(
             }
             Item::Mod(item) => {
                 if let Some((_, nested)) = &item.content {
+                    module_path.push(item.ident.to_string());
                     provenance_findings_in_items(
                         nested,
                         subject,
                         recorded_provider_fields,
+                        module_path,
                         findings,
                     );
+                    module_path.pop();
                 }
             }
             _ => {}
@@ -1034,25 +3652,72 @@ fn is_local_only_api_ident(ident: &syn::Ident) -> bool {
 fn provenance_findings_in_function(
     function: &syn::ItemFn,
     subject: &str,
-    recorded_provider_fields: &BTreeMap<String, BTreeSet<String>>,
+    recorded_provider_fields: &BTreeMap<(Vec<String>, String), BTreeSet<String>>,
+    module_path: &[String],
     findings: &mut Vec<Finding>,
 ) {
-    provenance_findings_in_block(&function.block, subject, recorded_provider_fields, findings);
+    provenance_findings_in_block(
+        &function.block,
+        subject,
+        recorded_provider_fields,
+        module_path,
+        &governed_proof_parameters(&function.sig.inputs),
+        findings,
+    );
 }
 
 fn provenance_findings_in_impl_function(
     function: &syn::ImplItemFn,
     subject: &str,
-    recorded_provider_fields: &BTreeMap<String, BTreeSet<String>>,
+    recorded_provider_fields: &BTreeMap<(Vec<String>, String), BTreeSet<String>>,
+    module_path: &[String],
     findings: &mut Vec<Finding>,
 ) {
-    provenance_findings_in_block(&function.block, subject, recorded_provider_fields, findings);
+    provenance_findings_in_block(
+        &function.block,
+        subject,
+        recorded_provider_fields,
+        module_path,
+        &governed_proof_parameters(&function.sig.inputs),
+        findings,
+    );
+}
+
+fn governed_proof_parameters(
+    inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::Token![,]>,
+) -> BTreeSet<String> {
+    inputs
+        .iter()
+        .filter_map(|input| {
+            let syn::FnArg::Typed(argument) = input else {
+                return None;
+            };
+            let syn::Pat::Ident(pattern) = &*argument.pat else {
+                return None;
+            };
+            let Type::Path(ty) = &*argument.ty else {
+                return None;
+            };
+            ty.path
+                .segments
+                .last()
+                .is_some_and(|segment| {
+                    matches!(
+                        segment.ident.to_string().as_str(),
+                        "LocalOnlyMountedRouteProof" | "StatelessLocalOnlyMountedRouteProof"
+                    )
+                })
+                .then(|| pattern.ident.to_string())
+        })
+        .collect()
 }
 
 fn provenance_findings_in_block(
     block: &syn::Block,
     subject: &str,
-    recorded_provider_fields: &BTreeMap<String, BTreeSet<String>>,
+    recorded_provider_fields: &BTreeMap<(Vec<String>, String), BTreeSet<String>>,
+    module_path: &[String],
+    governed_proof_parameters: &BTreeSet<String>,
     findings: &mut Vec<Finding>,
 ) {
     let bindings = direct_initializer_bindings(block);
@@ -1098,15 +3763,16 @@ fn provenance_findings_in_block(
             );
             continue;
         };
-        if bindings
-            .get(&proof)
-            .is_none_or(|initializer| !is_governed_proof_constructor(initializer))
+        if !governed_proof_parameters.contains(&proof)
+            && bindings
+                .get(&proof)
+                .is_none_or(|initializer| !is_governed_proof_constructor(initializer))
         {
             push_provenance_finding(
                 findings,
                 subject,
                 call.span().start().line,
-                "from_governed proof is not bound directly from prove_local_only_state/prove_stateless_local_only_route",
+                "from_governed proof is not bound directly from a current mounted-route proof constructor",
             );
         }
     }
@@ -1152,7 +3818,7 @@ fn provenance_findings_in_block(
             if provider_type.as_ref().is_none_or(|owner| {
                 counter_field.as_ref().is_none_or(|field| {
                     recorded_provider_fields
-                        .get(owner)
+                        .get(&(module_path.to_vec(), owner.clone()))
                         .is_none_or(|fields| !fields.contains(field))
                 })
             }) {
@@ -1179,8 +3845,13 @@ fn canonical_provider_router_bindings(
             continue;
         };
         if function.path.leading_colon.is_some()
-            || function.path.segments.len() != 1
-            || function.path.segments[0].ident != "finalized_scoped_router"
+            || !matches!(function.path.segments.len(), 1 | 2)
+            || function
+                .path
+                .segments
+                .last()
+                .is_none_or(|segment| !segment.ident.to_string().starts_with("finalized_"))
+            || (function.path.segments.len() == 2 && function.path.segments[0].ident != "self")
         {
             continue;
         }
@@ -1255,8 +3926,8 @@ impl<'ast> Visit<'ast> for ProvenanceCallScan<'ast> {
                 "LocalOnlyObservers"
                     | "StaticExclusion"
                     | "ProviderCounter"
-                    | "prove_local_only_state"
-                    | "prove_stateless_local_only_route"
+                    | "prove_local_only_mounted_route_state"
+                    | "prove_stateless_local_only_mounted_route"
             )
         }) {
             let start = node.span().start();
@@ -1285,13 +3956,14 @@ impl<'ast> Visit<'ast> for ProvenanceCallScan<'ast> {
         if absolute_call_path_is(
             &node.func,
             &["testkit", "local_only", "ProviderCounter", "write"],
-        ) || absolute_call_path_is(&node.func, &["httpserve", "prove_local_only_state"])
-            || absolute_call_path_is(
-                &node.func,
-                &["httpserve", "prove_stateless_local_only_route"],
-            )
+        ) || is_current_mounted_proof_call(node)
         {
             self.allowed_api_locations.insert(location);
+        }
+        if absolute_call_path_is(&node.func, &["testkit", "call"])
+            && let Some(router) = node.args.first().and_then(simple_ident)
+        {
+            self.oneshot_router_receivers.insert(router);
         }
         visit::visit_expr_call(self, node);
     }
@@ -1315,7 +3987,20 @@ fn direct_initializer_bindings(block: &syn::Block) -> BTreeMap<String, Expr> {
                 && let Some(initializer) = &node.init
             {
                 self.0
-                    .insert(pattern.ident.to_string(), (*initializer.expr).clone());
+                    .entry(pattern.ident.to_string())
+                    .or_insert_with(|| (*initializer.expr).clone());
+            } else if let syn::Pat::Tuple(tuple) = &node.pat
+                && let Some(initializer) = &node.init
+            {
+                for pattern in &tuple.elems {
+                    if let syn::Pat::Ident(pattern) = pattern
+                        && pattern.subpat.is_none()
+                    {
+                        self.0
+                            .entry(pattern.ident.to_string())
+                            .or_insert_with(|| (*initializer.expr).clone());
+                    }
+                }
             }
             visit::visit_local(self, node);
         }
@@ -1354,14 +4039,41 @@ fn referenced_ident(expression: &Expr) -> Option<String> {
 }
 
 fn is_governed_proof_constructor(expression: &Expr) -> bool {
+    if current_mounted_proof_call(expression).is_some() {
+        return true;
+    }
     let Expr::Call(call) = peel_expr(expression) else {
         return false;
     };
-    absolute_call_path_is(&call.func, &["httpserve", "prove_local_only_state"])
-        || absolute_call_path_is(
-            &call.func,
-            &["httpserve", "prove_stateless_local_only_route"],
-        )
+    matches!(
+        peel_expr(&call.func),
+        Expr::Path(function)
+            if function.path.leading_colon.is_none()
+                && matches!(function.path.segments.len(), 1 | 2)
+                && (function.path.segments.len() == 1
+                    || function.path.segments[0].ident == "self")
+                && function.path.segments.last().is_some_and(|segment| segment
+                    .ident
+                    .to_string()
+                    .starts_with("finalized_"))
+    )
+}
+
+fn current_mounted_proof_call(expression: &Expr) -> Option<&syn::ExprCall> {
+    let Expr::MethodCall(expect) = peel_expr(expression) else {
+        return None;
+    };
+    if expect.method != "expect" || expect.args.len() != 1 || expect.turbofish.is_some() {
+        return None;
+    }
+    let Expr::Call(call) = peel_expr(&expect.receiver) else {
+        return None;
+    };
+    is_current_mounted_proof_call(call).then_some(call)
+}
+
+fn is_current_mounted_proof_call(call: &syn::ExprCall) -> bool {
+    current_mounted_proof_kind(call).is_some()
 }
 
 fn is_from_governed_call(expression: &Expr) -> bool {
@@ -2621,6 +5333,16 @@ fn proof_status_wire(status: ProofStatus) -> &'static str {
     }
 }
 
+fn source_receipt_registration_status_wire(
+    status: SourceReceiptRegistrationStatus,
+) -> &'static str {
+    match status {
+        SourceReceiptRegistrationStatus::Registered => "registered",
+        SourceReceiptRegistrationStatus::Missing => "missing",
+        SourceReceiptRegistrationStatus::NotApplicable => "notApplicable",
+    }
+}
+
 fn mount_status_wire(status: MountStatus) -> &'static str {
     match status {
         MountStatus::Mounted => "mounted",
@@ -2773,6 +5495,9 @@ fn synthetic_report_fixture() -> ConsistencyReport {
                 effect_class: Some("ReadEffect".to_string()),
                 privilege_class: Some("LocalPrivilege".to_string()),
             },
+            source_receipt_registration: SourceReceiptRegistration::report_only(
+                SourceReceiptRegistrationStatus::Missing,
+            ),
             findings: vec![escaped.clone()],
         },
         ContractPosture {
@@ -2796,13 +5521,25 @@ fn synthetic_report_fixture() -> ConsistencyReport {
                 effect_class: None,
                 privilege_class: None,
             },
+            source_receipt_registration: SourceReceiptRegistration::report_only(
+                SourceReceiptRegistrationStatus::NotApplicable,
+            ),
             findings: vec![missing.clone()],
         },
     ];
     ConsistencyReport {
-        schema_version: 1,
+        schema_version: 2,
         status: ReportStatus::Failed,
         active_http_contract_count: contracts.len(),
+        local_only_receipt_coverage: LocalOnlyReceiptCoverage {
+            enforcement: ReceiptCoverageEnforcement::ReportOnly,
+            evidence: ReceiptCoverageEvidence::SourceRegistered,
+            status: ReceiptCoverageStatus::Partial,
+            active_count: 1,
+            registered_count: 0,
+            missing_count: 1,
+            missing_contracts: vec!["a.local".to_string()],
+        },
         findings: vec![escaped, missing],
         contracts,
     }
@@ -3015,44 +5752,1108 @@ mod tests {
 
     fn provenance_findings(source: &str) -> Result<Vec<Finding>> {
         let syntax = syn::parse_file(source)?;
-        let mut recorded_provider_fields = BTreeMap::new();
-        collect_recorded_provider_fields(&syntax.items, &mut recorded_provider_fields);
+        let recorded_provider_fields = collect_scoped_recorded_provider_fields(&syntax.items);
         let mut findings = Vec::new();
         provenance_findings_in_items(
             &syntax.items,
             "crates/demo/src/lib.rs",
             &recorded_provider_fields,
+            &mut Vec::new(),
             &mut findings,
         );
         Ok(findings)
     }
 
-    const GOVERNED_PROVENANCE: &str = r#"
-struct Repo { counter: Counter }
-impl Repo {
-    fn default() -> Self { todo!() }
-    fn test_repo(&self) -> TestRepo { todo!() }
-    fn mutate(&self) { self.counter.record(); }
+    struct ReceiptWorkspace(PathBuf);
+
+    impl std::ops::Deref for ReceiptWorkspace {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl Drop for ReceiptWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl ReceiptWorkspace {
+        fn cargo_check(&self) -> Result<std::process::Output> {
+            let target = self.0.join("target");
+            crate::cmd::cargo_cmd(
+                crate::cmd::CargoSubcommand::Check,
+                &["--offline", "--tests"],
+                &[(
+                    "CARGO_TARGET_DIR",
+                    target
+                        .to_str()
+                        .ok_or_else(|| anyhow!("fixture target path is not UTF-8"))?,
+                )],
+                Some(&self.0),
+            )
+            .arg("--manifest-path")
+            .arg(self.0.join("Cargo.toml"))
+            .output()
+            .map_err(Into::into)
+        }
+    }
+
+    fn receipt_workspace(source: &str) -> Result<ReceiptWorkspace> {
+        let root = crate::testutil::unique_tmp("local-only-receipt-source");
+        fs::create_dir_all(root.join("crates/demo/src"))?;
+        for (path, name) in [
+            ("crates/testkit", "testkit"),
+            ("crates/httpserve", "httpserve"),
+            ("generated", "generated"),
+        ] {
+            fs::create_dir_all(root.join(path).join("src"))?;
+            fs::write(
+                root.join(path).join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"),
+            )?;
+            fs::write(root.join(path).join("src/lib.rs"), "")?;
+        }
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/demo\", \"crates/testkit\", \"crates/httpserve\", \"generated\"]\nresolver = \"3\"\n",
+        )?;
+        fs::write(
+            root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\ngenerated = { path = \"../../generated\" }\nhttpserve = { path = \"../httpserve\" }\n\n[dev-dependencies]\ntokio = { version = \"1\", features = [\"macros\", \"rt\"] }\ntestkit = { path = \"../testkit\" }\n",
+        )?;
+        fs::write(root.join("crates/demo/src/lib.rs"), source)?;
+        Ok(ReceiptWorkspace(root))
+    }
+
+    fn real_api_provenance_workspace(source: &str) -> Result<ReceiptWorkspace> {
+        let fixture = crate::testutil::unique_tmp("local-only-real-proof-api");
+        fs::create_dir_all(fixture.join("src"))?;
+        let workspace = crate::workspace_root()?;
+        fs::write(
+            fixture.join("Cargo.toml"),
+            format!(
+                r#"[package]
+name = "local-only-real-proof-api"
+version = "0.0.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+axum = "0.8"
+diport = {{ path = "{}" }}
+generated = {{ path = "{}" }}
+httpserve = {{ path = "{}", features = ["test-util"] }}
+testkit = {{ path = "{}" }}
+"#,
+                workspace.join("crates/diport").display(),
+                workspace.join("generated").display(),
+                workspace.join("crates/httpserve").display(),
+                workspace.join("crates/testkit").display(),
+            ),
+        )?;
+        fs::write(fixture.join("src/lib.rs"), source)?;
+        Ok(ReceiptWorkspace(fixture))
+    }
+
+    fn receipt_target(id: &str, module: &[&str]) -> LocalOnlyReceiptTarget {
+        LocalOnlyReceiptTarget {
+            contract_id: id.to_string(),
+            module_path: module.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    fn canonical_receipt_body(module: &str) -> String {
+        let factory = format!("finalized_{}_router", module.replace("::", "_"));
+        format!(
+            r#"
+    let repo_probe = Repo::default();
+    let (router, proof) = self::{factory}(repo_probe.test_repo());
+    let observers = ::testkit::local_only::LocalOnlyObservers::new(
+        repo_probe.counter.handle(),
+        ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
+        ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
+    );
+    let (output, receipt) = ::testkit::local_only::assert_local_only_with_receipt::<
+        ::generated::http::{module}::LocalOnlyConformanceMarker,
+        _,
+        _,
+        _,
+    >(
+        ::generated::http::{module}::SPEC.route.contract_id(),
+        observers,
+        move || ::testkit::call(
+            router,
+            ::testkit::ContractRequest::get(::generated::http::{module}::SPEC.route.path()),
+        ),
+    ).await.expect("LocalOnly conformance");
+    ::core::assert_eq!(
+        receipt.contract_id(),
+        ::generated::http::{module}::SPEC.route.contract_id()
+    );
+    drop(output);
+"#,
+        )
+    }
+
+    fn canonical_receipt(module: &str) -> String {
+        let factory = format!("finalized_{}_router", module.replace("::", "_"));
+        let test_module = format!("receipt_{}", module.replace("::", "_"));
+        format!(
+            r#"
+#[cfg(test)]
+mod {test_module} {{
+struct Counter;
+impl Counter {{ fn handle(&self) {{}} fn record(&self) {{}} }}
+struct Repo {{ counter: Counter }}
+impl Repo {{
+    fn default() -> Self {{ todo!() }}
+    fn test_repo(&self) -> TestRepo {{ TestRepo::from_provider(Arc::new(self.clone())) }}
+}}
+struct TestRepo {{ read: () }}
+impl TestRepo {{ fn from_provider<T>(provider: Arc<T>) -> Self {{ Self {{ read: consume(provider) }} }} }}
+trait RecordedMutation {{ fn mutate(&self); }}
+impl RecordedMutation for Repo {{ fn mutate(&self) {{ self.counter.record(); }} }}
+struct DemoDomain {{ read_repo: () }}
+impl DemoDomain {{ fn new(read_repo: ()) -> Self {{ Self {{ read_repo }} }} }}
+impl bootstrap::Domain for DemoDomain {{
+    fn init(&self, registry: &mut bootstrap::Registry) {{
+        let scoped_repo = self.read_repo.clone();
+        let state = ReadState {{ repo: scoped_repo.clone() }};
+        mount(registry, state);
+    }}
+}}
+fn {factory}(repo: TestRepo) -> (
+    axum::Router,
+    ::httpserve::LocalOnlyMountedRouteProof<
+        ::generated::http::{module}::RouteMarker,
+        ReadState,
+    >,
+) {{
+    let domain = DemoDomain::new(repo.read);
+    let mut registry = bootstrap::compose(&[&domain]).expect("compose");
+    let finalized = registry.finalize_routes().expect("routes");
+    let (_, routes) = finalized.into_iter().next().expect("listener");
+    let proof = ::httpserve::prove_local_only_mounted_route_state::<ReadState, _>(
+        &routes,
+        &::generated::http::{module}::ROUTE,
+    ).expect("mounted proof");
+    let router = ::httpserve::finalize_auth(routes, plan)
+        .expect("finalized")
+        .into_router_for_test();
+    (router, proof)
+}}
+#[tokio::test]
+async fn conforms_{}() {{
+{}
+}}
+}}
+"#,
+            module.replace("::", "_"),
+            canonical_receipt_body(module)
+        )
+    }
+
+    const COMPILE_VALID_RECEIPT_REDS: &str = r#"
+extern crate self as generated;
+extern crate self as testkit;
+
+pub mod local_only {
+    use core::{future::Future, marker::PhantomData};
+
+    pub struct Receipt<Marker> {
+        marker: PhantomData<Marker>,
+    }
+
+    impl<Marker> Receipt<Marker> {
+        pub fn contract_id(&self) -> &'static str { "identity.profile" }
+    }
+
+    pub async fn assert_local_only_with_receipt<Marker, Operation, OperationFuture, T>(
+        _: &'static str,
+        _: (),
+        operation: Operation,
+    ) -> Result<(T, Receipt<Marker>), ()>
+    where
+        Operation: FnOnce() -> OperationFuture,
+        OperationFuture: Future<Output = T>,
+    {
+        Ok((operation().await, Receipt { marker: PhantomData }))
+    }
 }
+
+pub mod http {
+    pub struct Route;
+    impl Route { pub const fn contract_id(&self) -> &'static str { "identity.profile" } }
+    pub struct Spec { pub route: Route }
+    pub mod identity_v1 {
+        pub mod profile {
+            pub enum LocalOnlyConformanceMarker {}
+            pub const SPEC: super::super::Spec = super::super::Spec { route: super::super::Route };
+        }
+    }
+}
+
+#[tokio::test]
+async fn ignored_result_is_valid_rust() {
+    let _result = ::testkit::local_only::assert_local_only_with_receipt::<
+        ::generated::http::identity_v1::profile::LocalOnlyConformanceMarker,
+        _, _, _,
+    >(
+        ::generated::http::identity_v1::profile::SPEC.route.contract_id(),
+        (),
+        || async {},
+    ).await;
+}
+
+#[tokio::test]
+async fn branch_is_valid_rust() {
+    if true {
+        let (output, receipt) = ::testkit::local_only::assert_local_only_with_receipt::<
+            ::generated::http::identity_v1::profile::LocalOnlyConformanceMarker,
+            _, _, _,
+        >(
+            ::generated::http::identity_v1::profile::SPEC.route.contract_id(),
+            (),
+            || async {},
+        ).await.expect("receipt");
+        assert_eq!(receipt.contract_id(), "identity.profile");
+        let _ = output;
+    }
+}
+
+macro_rules! hidden_receipt {
+    () => {{
+        let (output, receipt) = ::testkit::local_only::assert_local_only_with_receipt::<
+            ::generated::http::identity_v1::profile::LocalOnlyConformanceMarker,
+            _, _, _,
+        >(
+            ::generated::http::identity_v1::profile::SPEC.route.contract_id(),
+            (),
+            || async {},
+        ).await.expect("receipt");
+        assert_eq!(receipt.contract_id(), "identity.profile");
+        let _ = output;
+    }};
+}
+
+#[tokio::test]
+async fn macro_is_valid_rust() { hidden_receipt!(); }
+
+#[tokio::test]
+async fn async_closure_spawn_are_valid_rust() {
+    async { hidden_receipt!(); }.await;
+    let proof = || async { hidden_receipt!(); };
+    proof().await;
+    tokio::spawn(async { hidden_receipt!(); }).await.expect("join");
+}
+
+#[tokio::test]
+async fn control_flow_blocks_are_valid_rust() {
+    if true { hidden_receipt!(); }
+    for _ in 0..1 { hidden_receipt!(); }
+    match 1 { 1 => hidden_receipt!(), _ => {} }
+    unsafe { hidden_receipt!(); }
+}
+
+#[tokio::test]
+async fn try_is_valid_rust() -> Result<(), ()> {
+    async { hidden_receipt!(); Ok(()) }.await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn const_factory_is_valid_rust() {
+    let proof = const { || async { hidden_receipt!(); } };
+    proof().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn ignored_test_is_valid_rust() { hidden_receipt!(); }
+
+#[cfg(any())]
+#[tokio::test]
+async fn cfg_test_is_valid_rust() { hidden_receipt!(); }
+"#;
+
+    const GOVERNED_PROVENANCE: &str = r#"
+struct Repo { counter: ::testkit::local_only::ProviderCounter<::testkit::local_only::Write> }
+impl Repo {
+    fn default() -> Self { Self { counter: ::testkit::local_only::ProviderCounter::write() } }
+    fn test_repo(&self) {}
+}
+trait RecordedMutation { fn mutate(&self); }
+impl RecordedMutation for Repo { fn mutate(&self) { self.counter.record(); } }
+#[derive(Clone)]
+struct ReadState;
+impl ::httpserve::ClassifiedRouteState for ReadState {
+    type Effect = ::diport::ReadEffect;
+    type Privilege = ::diport::LocalPrivilege;
+}
+fn finalized_scoped_router(_: ()) -> axum::Router { axum::Router::new() }
 fn conforms() {
     let repo_probe = Repo::default();
     let router = finalized_scoped_router(repo_probe.test_repo());
-    let proof = ::httpserve::prove_local_only_state::<ReadState>();
-    let outbox = ::testkit::local_only::StaticExclusion::<Outbox>::from_governed(&proof);
-    let publish = ::testkit::local_only::StaticExclusion::<Publish>::from_governed(&proof);
+    let routes = ::httpserve::UnfinalizedRoutes::empty();
+    let proof = ::httpserve::prove_local_only_mounted_route_state::<ReadState, _>(
+        &routes,
+        &::generated::http::identity_v1::profile::ROUTE,
+    ).expect("mounted proof");
+    let outbox = ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof);
+    let publish = ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof);
     let _observers = ::testkit::local_only::LocalOnlyObservers::new(repo_probe.counter.handle(), outbox, publish);
-    let _response = router.oneshot();
+    let _response = ::testkit::call(
+        router,
+        ::testkit::ContractRequest::get(
+            ::generated::http::identity_v1::profile::SPEC.route.path(),
+        ),
+    );
 }
 "#;
+
+    #[test]
+    fn router_factory_rejects_behavioral_layers() -> Result<()> {
+        for (name, source) in [
+            (
+                "short circuit",
+                "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(axum::middleware::from_fn(|_request, _next| async { axum::http::StatusCode::NO_CONTENT })).into_router_for_test()",
+            ),
+            (
+                "response replacement",
+                "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(axum::middleware::from_fn(|request, next| async move { let _response = next.run(request).await; axum::http::StatusCode::NO_CONTENT })).into_router_for_test()",
+            ),
+            (
+                "unobserved side effect",
+                "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(axum::middleware::from_fn(|request, next| async move { SIDE_EFFECT.fetch_add(1, Ordering::SeqCst); next.run(request).await })).into_router_for_test()",
+            ),
+            (
+                "relative Extension path is shadowable",
+                "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(axum::Extension(value)).into_router_for_test()",
+            ),
+        ] {
+            let expression = syn::parse_str::<Expr>(source)?;
+            assert!(
+                finalized_router_routes(&expression).is_none(),
+                "{name} layer unexpectedly certified"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn router_factory_accepts_absolute_axum_extensions() -> Result<()> {
+        let expression = syn::parse_str::<Expr>(
+            "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(::axum::Extension(first)).layer(::axum::Extension(second)).into_router_for_test()",
+        )?;
+        assert_eq!(
+            finalized_router_routes(&expression).as_deref(),
+            Some("routes")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn governed_proof_constructor_uses_current_mounted_api() -> Result<()> {
+        let current = syn::parse_str::<Expr>(
+            "::httpserve::prove_stateless_local_only_mounted_route(&routes, &::generated::http::identity_v1::profile::ROUTE).expect(\"mounted\")",
+        )?;
+        assert!(is_governed_proof_constructor(&current));
+        Ok(())
+    }
+
+    #[test]
+    fn receipt_execution_shape_reds_are_rust_compile_valid() -> Result<()> {
+        let workspace = receipt_workspace(COMPILE_VALID_RECEIPT_REDS)?;
+        let output = workspace.cargo_check()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            local_only_receipt_registration(
+                &workspace,
+                &[receipt_target(
+                    "identity.profile",
+                    &["identity_v1", "profile"]
+                )]
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_only_receipt_coverage_rejects_noncanonical_sources() -> Result<()> {
+        let canonical = canonical_receipt("identity_v1::profile");
+        let targets = [receipt_target(
+            "identity.profile",
+            &["identity_v1", "profile"],
+        )];
+        let workspace = receipt_workspace(&canonical)?;
+        let registration = local_only_receipt_registration(&workspace, &targets)?;
+        assert_eq!(
+            registration.registered_contracts,
+            BTreeSet::from(["identity.profile".to_string()])
+        );
+
+        let stateless = canonical
+            .replace(
+                "::httpserve::LocalOnlyMountedRouteProof<\n        ::generated::http::identity_v1::profile::RouteMarker,\n        ReadState,\n    >",
+                "::httpserve::StatelessLocalOnlyMountedRouteProof<\n        ::generated::http::identity_v1::profile::RouteMarker,\n    >",
+            )
+            .replace(
+                "::httpserve::prove_local_only_mounted_route_state::<ReadState, _>(\n        &routes,\n        &::generated::http::identity_v1::profile::ROUTE,\n    )",
+                "::httpserve::prove_stateless_local_only_mounted_route(\n        &routes,\n        &::generated::http::identity_v1::profile::ROUTE,\n    )",
+            )
+            .replace(
+                "repo_probe.counter.handle()",
+                "::testkit::local_only::StaticExclusion::<::testkit::local_only::Write>::from_governed(&proof)",
+            );
+        let stateless_workspace = receipt_workspace(&stateless)?;
+        let stateless_registration =
+            local_only_receipt_registration(&stateless_workspace, &targets)?;
+        assert_eq!(
+            stateless_registration.registered_contracts,
+            BTreeSet::from(["identity.profile".to_string()])
+        );
+
+        let body = canonical_receipt_body("identity_v1::profile");
+        let cases = [
+            (
+                "use alias shadows axum Extension",
+                format!(
+                    "use evil as axum;\n{}",
+                    canonical.replace(
+                        ".expect(\"finalized\")\n        .into_router_for_test()",
+                        ".expect(\"finalized\")\n        .layer(axum::Extension(value))\n        .into_router_for_test()",
+                    )
+                ),
+            ),
+            (
+                "local module shadows axum Extension",
+                format!(
+                    "mod axum {{ fn Extension<T>(value: T) -> T {{ value }} }}\n{}",
+                    canonical.replace(
+                        ".expect(\"finalized\")\n        .into_router_for_test()",
+                        ".expect(\"finalized\")\n        .layer(axum::Extension(value))\n        .into_router_for_test()",
+                    )
+                ),
+            ),
+            (
+                "extern crate alias shadows absolute axum root",
+                format!("extern crate evil as axum;\n{canonical}"),
+            ),
+            (
+                "custom assertion",
+                canonical.replace(
+                    "::testkit::local_only::assert_local_only_with_receipt",
+                    "::custom::assert_local_only_with_receipt",
+                ),
+            ),
+            (
+                "marker/spec mismatch",
+                canonical.replace(
+                    "::generated::http::identity_v1::profile::SPEC.route.contract_id()",
+                    "::generated::http::identity_v1::roles_list::SPEC.route.contract_id()",
+                ),
+            ),
+            (
+                "bare contract id",
+                canonical.replace(
+                    "::generated::http::identity_v1::profile::SPEC.route.contract_id()",
+                    "\"identity.profile\"",
+                ),
+            ),
+            (
+                "not awaited",
+                r#"
+#[tokio::test]
+async fn not_awaited() {
+    let future = ::testkit::local_only::assert_local_only_with_receipt::<
+        ::generated::http::identity_v1::profile::LocalOnlyConformanceMarker,
+        _, _, _,
+    >(
+        ::generated::http::identity_v1::profile::SPEC.route.contract_id(),
+        observers,
+        operation,
+    );
+    drop(future);
+}
+"#
+                .to_string(),
+            ),
+            (
+                "ignored Result",
+                r#"
+#[tokio::test]
+async fn ignored_result() {
+    let _result = ::testkit::local_only::assert_local_only_with_receipt::<
+        ::generated::http::identity_v1::profile::LocalOnlyConformanceMarker,
+        _, _, _,
+    >(
+        ::generated::http::identity_v1::profile::SPEC.route.contract_id(),
+        observers,
+        operation,
+    ).await;
+}
+"#
+                .to_string(),
+            ),
+            (
+                "bare await",
+                r#"
+#[tokio::test]
+async fn bare_await() {
+    ::testkit::local_only::assert_local_only_with_receipt::<
+        ::generated::http::identity_v1::profile::LocalOnlyConformanceMarker,
+        _, _, _,
+    >(
+        ::generated::http::identity_v1::profile::SPEC.route.contract_id(),
+        observers,
+        operation,
+    ).await;
+}
+"#
+                .to_string(),
+            ),
+            (
+                "receipt not asserted",
+                format!(
+                    "#[tokio::test]\nasync fn unread_receipt() {{ {} }}",
+                    body.replace(
+                        "    ::core::assert_eq!(\n        receipt.contract_id(),\n        ::generated::http::identity_v1::profile::SPEC.route.contract_id()\n    );",
+                        "    drop(receipt);",
+                    )
+                ),
+            ),
+            (
+                "receipt asserted against wrong contract",
+                canonical.replace(
+                    "receipt.contract_id(),\n        ::generated::http::identity_v1::profile::SPEC.route.contract_id()",
+                    "receipt.contract_id(),\n        ::generated::http::identity_v1::roles_list::SPEC.route.contract_id()",
+                ),
+            ),
+            (
+                "import alias",
+                format!(
+                    "use testkit::local_only::assert_local_only_with_receipt as receipt;\n{canonical}"
+                ),
+            ),
+            (
+                "function item alias",
+                r#"
+#[tokio::test]
+async fn alias_call() {
+    let receipt = ::testkit::local_only::assert_local_only_with_receipt;
+    let _result = receipt::<
+        ::generated::http::identity_v1::profile::LocalOnlyConformanceMarker,
+        _,
+        _,
+        _,
+    >(
+        ::generated::http::identity_v1::profile::SPEC.route.contract_id(),
+        observers,
+        operation,
+    ).await;
+}
+"#
+                .to_string(),
+            ),
+            (
+                "nested helper inherits no test authority",
+                r#"
+#[tokio::test]
+async fn outer() {
+    async fn helper() {
+        let _result = ::testkit::local_only::assert_local_only_with_receipt::<
+            ::generated::http::identity_v1::profile::LocalOnlyConformanceMarker,
+            _,
+            _,
+            _,
+        >(
+            ::generated::http::identity_v1::profile::SPEC.route.contract_id(),
+            observers,
+            operation,
+        ).await;
+    }
+    helper().await;
+}
+"#
+                .to_string(),
+            ),
+            (
+                "async block",
+                format!(
+                    "#[tokio::test]\nasync fn hidden_async() {{ async move {{ {body} }}.await; }}"
+                ),
+            ),
+            (
+                "closure",
+                format!(
+                    "#[tokio::test]\nasync fn hidden_closure() {{ let proof = || async {{ {body} }}; proof().await; }}"
+                ),
+            ),
+            (
+                "spawn",
+                format!(
+                    "#[tokio::test]\nasync fn hidden_spawn() {{ let task = tokio::spawn(async move {{ {body} }}); task.await.expect(\"join\"); }}"
+                ),
+            ),
+            (
+                "if branch",
+                format!("#[tokio::test]\nasync fn hidden_if() {{ if true {{ {body} }} }}"),
+            ),
+            (
+                "loop",
+                format!("#[tokio::test]\nasync fn hidden_loop() {{ for _ in 0..1 {{ {body} }} }}"),
+            ),
+            (
+                "match",
+                format!("#[tokio::test]\nasync fn hidden_match() {{ match 1 {{ 1 => {{ {body} }}, _ => {{}} }} }}"),
+            ),
+            (
+                "try operator",
+                format!(
+                    "#[tokio::test]\nasync fn hidden_try() -> Result<(), Error> {{ async move {{ {body} Ok(()) }}.await?; Ok(()) }}"
+                ),
+            ),
+            (
+                "unsafe block",
+                format!("#[tokio::test]\nasync fn hidden_unsafe() {{ unsafe {{ {body} }} }}"),
+            ),
+            (
+                "const block",
+                format!(
+                    "#[tokio::test]\nasync fn hidden_const() {{ let _proof = const {{ || async {{ {body} }} }}; }}"
+                ),
+            ),
+            (
+                "macro",
+                format!(
+                    "macro_rules! hidden_receipt {{ () => {{ {body} }} }}\n#[tokio::test]\nasync fn hidden_macro() {{ hidden_receipt!(); }}"
+                ),
+            ),
+            (
+                "cfg test",
+                canonical.replacen("#[tokio::test]", "#[cfg(any())]\n#[tokio::test]", 1),
+            ),
+            (
+                "ignored test",
+                canonical.replacen("#[tokio::test]", "#[tokio::test]\n#[ignore]", 1),
+            ),
+            (
+                "custom terminal test attribute",
+                canonical.replacen("#[tokio::test]", "#[custom::test]", 1),
+            ),
+            (
+                "wrapper",
+                canonical.replace("#[tokio::test]", "#[allow(dead_code)]"),
+            ),
+            (
+                "forged receipt",
+                format!(
+                    "fn forge(value: ::testkit::local_only::LocalOnlyConformanceReceipt<Fake>) {{ drop(value); }}\n{canonical}"
+                ),
+            ),
+            (
+                "no-op operation",
+                canonical.replace(
+                    "move || ::testkit::call(\n            router,\n            ::testkit::ContractRequest::get(::generated::http::identity_v1::profile::SPEC.route.path()),\n        )",
+                    "move || async {}",
+                ),
+            ),
+            (
+                "wrong operation path",
+                canonical.replacen(
+                    "::generated::http::identity_v1::profile::SPEC.route.path()",
+                    "::generated::http::identity_v1::roles_list::SPEC.route.path()",
+                    1,
+                ),
+            ),
+            (
+                "wrong operation method",
+                canonical.replace("::testkit::ContractRequest::get", "::testkit::ContractRequest::post"),
+            ),
+            (
+                "wrong route proof",
+                canonical.replace(
+                    "&::generated::http::identity_v1::profile::ROUTE",
+                    "&::generated::http::identity_v1::roles_list::ROUTE",
+                ),
+            ),
+            (
+                "wrong-but-finalized router",
+                canonical
+                    .replace(
+                        "let (_, routes) = finalized.into_iter().next().expect(\"listener\");",
+                        "let (_, routes) = finalized.into_iter().next().expect(\"listener\");\n    let wrong_finalized = registry.finalize_routes().expect(\"wrong routes\");\n    let (_, wrong_routes) = wrong_finalized.into_iter().next().expect(\"wrong listener\");",
+                    )
+                    .replace(
+                        "::httpserve::finalize_auth(routes, plan)",
+                        "::httpserve::finalize_auth(wrong_routes, plan)",
+                    ),
+            ),
+            (
+                "observer alias",
+                canonical
+                    .replace(
+                        "    let (output, receipt)",
+                        "    let observer_alias = observers;\n    let (output, receipt)",
+                    )
+                    .replace("        observers,\n        move ||", "        observer_alias,\n        move ||"),
+            ),
+            (
+                "observer helper",
+                canonical.replace(
+                    "::testkit::local_only::LocalOnlyObservers::new(\n        repo_probe.counter.handle(),\n        ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),\n        ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),\n    )",
+                    "make_observers()",
+                ),
+            ),
+            (
+                "observer macro",
+                canonical.replace(
+                    "::testkit::local_only::LocalOnlyObservers::new(\n        repo_probe.counter.handle(),\n        ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),\n        ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),\n    )",
+                    "make_observers!()",
+                ),
+            ),
+            (
+                "decoy observers",
+                canonical.replace(
+                    "    let (output, receipt)",
+                    "    let _decoy = ::testkit::local_only::LocalOnlyObservers::new(repo_probe.counter.handle(), ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof), ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof));\n    let (output, receipt)",
+                ),
+            ),
+            (
+                "proof alias",
+                canonical
+                    .replace(
+                        "    let observers =",
+                        "    let proof_alias = &proof;\n    let observers =",
+                    )
+                    .replace("from_governed(&proof)", "from_governed(proof_alias)"),
+            ),
+            (
+                "proof helper",
+                canonical.replace(
+                    "::httpserve::prove_local_only_mounted_route_state::<ReadState, _>(\n        &routes,\n        &::generated::http::identity_v1::profile::ROUTE,\n    )",
+                    "make_proof(&routes)",
+                ),
+            ),
+            (
+                "proof macro",
+                canonical.replace(
+                    "::httpserve::prove_local_only_mounted_route_state::<ReadState, _>(\n        &routes,\n        &::generated::http::identity_v1::profile::ROUTE,\n    )",
+                    "make_proof!(&routes)",
+                ),
+            ),
+            (
+                "decoy proof",
+                canonical.replace(
+                    "    let observers =",
+                    "    let _decoy_proof = ::httpserve::prove_local_only_mounted_route_state::<ReadState, _>(&other_routes, &::generated::http::identity_v1::profile::ROUTE).expect(\"decoy mounted proof\");\n    let observers =",
+                ),
+            ),
+            (
+                "provider router mismatch",
+                canonical.replace(
+                    "    let (router, proof) = self::finalized_identity_v1_profile_router(repo_probe.test_repo());",
+                    "    let other_probe = Repo::default();\n    let (router, proof) = self::finalized_identity_v1_profile_router(other_probe.test_repo());",
+                ),
+            ),
+            (
+                "mutable receipt router binding",
+                canonical.replace("let (router, proof) = self::", "let (mut router, proof) = self::"),
+            ),
+            (
+                "mutable receipt proof binding",
+                canonical.replace("let (router, proof) = self::", "let (router, mut proof) = self::"),
+            ),
+            (
+                "receipt router mutable reference",
+                canonical.replace(
+                    "    let observers =",
+                    "    let mut replacement_router = axum::Router::new();\n    ::core::mem::swap(&mut router, &mut replacement_router);\n    let observers =",
+                ),
+            ),
+            (
+                "bait call",
+                canonical.replace(
+                    "    let (output, receipt)",
+                    "    let _bait = ::testkit::call(router, ::testkit::ContractRequest::get(::generated::http::identity_v1::profile::SPEC.route.path()));\n    let (output, receipt)",
+                ),
+            ),
+            (
+                "non-finalized router",
+                canonical.replace(
+                    "self::finalized_identity_v1_profile_router(repo_probe.test_repo())",
+                    "self::fake_router(repo_probe.test_repo())",
+                ),
+            ),
+            (
+                "bait finalizer with fake tail",
+                canonical.replace(
+                    "::httpserve::finalize_auth(routes, plan)\n        .expect(\"finalized\")\n        .into_router_for_test()",
+                    "{ let _bait = ::httpserve::finalize_auth(routes, plan); axum::Router::new() }",
+                ),
+            ),
+            (
+                "finalizer factory early return",
+                canonical.replace(
+                    ") {\n    let domain = DemoDomain::new(repo.read);",
+                    ") {\n    if opaque() { return fallback(); }\n    let domain = DemoDomain::new(repo.read);",
+                ),
+            ),
+            (
+                "factory unknown body attribute",
+                canonical.replace(
+                    "fn finalized_identity_v1_profile_router(repo: TestRepo)",
+                    "#[erase_body]\nfn finalized_identity_v1_profile_router(repo: TestRepo)",
+                ),
+            ),
+            (
+                "mutable finalized routes binding",
+                canonical.replace(
+                    "let (_, routes) = finalized.into_iter().next().expect(\"listener\");",
+                    "let (_, mut routes) = finalized.into_iter().next().expect(\"listener\");\n    let mut replacement_routes = Vec::new();\n    ::core::mem::swap(&mut routes, &mut replacement_routes);",
+                ),
+            ),
+            (
+                "mutable mounted proof binding",
+                canonical.replace(
+                    "let proof = ::httpserve::prove_local_only_mounted_route_state",
+                    "let mut proof = ::httpserve::prove_local_only_mounted_route_state",
+                ),
+            ),
+            (
+                "non-self factory qualifier",
+                canonical.replace(
+                    "self::finalized_identity_v1_profile_router(repo_probe.test_repo())",
+                    "super::finalized_identity_v1_profile_router(repo_probe.test_repo())",
+                ),
+            ),
+            (
+                "empty routes",
+                canonical.replace(
+                    "let (_, routes) = finalized.into_iter().next().expect(\"listener\");",
+                    "let routes = Vec::new();",
+                ),
+            ),
+            (
+                "arbitrary routes",
+                canonical.replace(
+                    "let (_, routes) = finalized.into_iter().next().expect(\"listener\");",
+                    "let (_, routes) = arbitrary_routes();",
+                ),
+            ),
+            (
+                "cfg-disabled factory bait",
+                canonical.replace(
+                    "fn finalized_identity_v1_profile_router(repo: TestRepo)",
+                    "#[cfg(any())]\nfn finalized_identity_v1_profile_router(repo: TestRepo)",
+                ),
+            ),
+            (
+                "ignored parent module",
+                canonical.replacen(
+                    "#[cfg(test)]\nmod receipt_identity_v1_profile",
+                    "#[cfg(test)]\n#[ignore]\nmod receipt_identity_v1_profile",
+                    1,
+                ),
+            ),
+            (
+                "sibling factory bait",
+                canonical
+                    .replace(
+                        "fn finalized_identity_v1_profile_router(repo: TestRepo)",
+                        "mod sibling { use super::*; fn finalized_identity_v1_profile_router(repo: TestRepo)",
+                    )
+                    .replacen("\n#[tokio::test]", "\n}\n#[tokio::test]", 1),
+            ),
+            (
+                "ignored factory bait",
+                canonical.replace(
+                    "fn finalized_identity_v1_profile_router(repo: TestRepo)",
+                    "#[ignore]\nfn finalized_identity_v1_profile_router(repo: TestRepo)",
+                ),
+            ),
+            (
+                "provider ignored by Domain constructor",
+                canonical.replace(
+                    "let domain = DemoDomain::new(repo.read);",
+                    "let domain = DemoDomain::new(());",
+                ),
+            ),
+            (
+                "test_repo early return before provider bridge",
+                canonical.replace(
+                    "fn test_repo(&self) -> TestRepo { TestRepo::from_provider(Arc::new(self.clone())) }",
+                    "fn test_repo(&self) -> TestRepo { if opaque() { return unrelated_repo(); } TestRepo::from_provider(Arc::new(self.clone())) }",
+                ),
+            ),
+            (
+                "Domain constructor dead provider branch",
+                canonical.replace(
+                    "Self { read_repo }",
+                    "Self { read_repo: if false { consume(read_repo) } else { () } }",
+                ),
+            ),
+            (
+                "TestRepo dead provider reference",
+                canonical.replace(
+                    "Self { read: consume(provider) }",
+                    "Self { read: { if false { consume(provider); } unrelated_read() } }",
+                ),
+            ),
+            (
+                "decoy counter provider",
+                canonical
+                    .replace(
+                        "    let (router, proof)",
+                        "    let decoy = Repo::default();\n    let (router, proof)",
+                    )
+                    .replace("repo_probe.counter.handle()", "decoy.counter.handle()"),
+            ),
+            (
+                "sibling record impl bait",
+                canonical
+                    .replace(
+                        "impl RecordedMutation for Repo { fn mutate(&self) { self.counter.record(); } }",
+                        "impl RecordedMutation for Repo { fn mutate(&self) {} }\nmod sibling { impl super::Repo { fn bait(&self) { self.counter.record(); } } }",
+                    ),
+            ),
+            (
+                "cfg-disabled record impl bait",
+                canonical.replace(
+                    "impl RecordedMutation for Repo {",
+                    "#[cfg(any())]\nimpl RecordedMutation for Repo {",
+                ),
+            ),
+            (
+                "same-module dead inherent record helper",
+                canonical.replace("impl RecordedMutation for Repo {", "impl Repo {"),
+            ),
+            (
+                "unqualified receipt assertion",
+                canonical.replace("::core::assert_eq!(", "assert_eq!("),
+            ),
+            (
+                "shadowed observers",
+                canonical.replace(
+                    "    let (output, receipt)",
+                    "    let observers = observers;\n    let (output, receipt)",
+                ),
+            ),
+            (
+                "malformed receipt generics",
+                canonical.replacen("        _,\n        _,\n        _,", "        _,\n        _,", 1),
+            ),
+            (
+                "malformed receipt arguments",
+                canonical.replacen("        observers,", "        observers,\n        extra,", 1),
+            ),
+        ];
+        for (name, source) in cases {
+            let workspace = receipt_workspace(&source)?;
+            let Err(error) = local_only_receipt_registration(&workspace, &targets) else {
+                bail!("{name}: noncanonical receipt source unexpectedly passed");
+            };
+            assert!(!format!("{error:#}").contains(workspace.to_string_lossy().as_ref()));
+            assert!(!format!("{error:#}").is_empty(), "{name}");
+        }
+
+        for (name, source) in [
+            ("non-L0 marker", canonical_receipt("identity_v1::login")),
+            ("inactive marker", canonical_receipt("identity_v2::profile")),
+            ("stale marker", canonical_receipt("identity_v1::removed")),
+        ] {
+            let unknown = receipt_workspace(&source)?;
+            let Err(error) = local_only_receipt_registration(&unknown, &targets) else {
+                bail!("{name}: marker outside the active LocalOnly registry unexpectedly passed");
+            };
+            assert!(
+                format!("{error:#}").contains("does not name an active LocalOnly"),
+                "{name}: {error:#}"
+            );
+        }
+
+        let duplicate = receipt_workspace(&format!("{canonical}\n{canonical}"))?;
+        assert!(local_only_receipt_registration(&duplicate, &targets).is_err());
+
+        let malformed = receipt_workspace(&canonical.replace(
+            "::testkit::local_only::assert_local_only_with_receipt",
+            "::custom::assert_local_only_with_receipt",
+        ))?;
+        let mut stdout = Vec::new();
+        let result = run_report_with(
+            ReportFormat::Json,
+            || {
+                local_only_receipt_registration(&malformed, &targets)?;
+                Ok(synthetic_report_fixture())
+            },
+            &mut stdout,
+        );
+        assert!(result.is_err());
+        assert!(stdout.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn local_only_receipt_reconciliation_covers_zero_two_and_six_sites() -> Result<()> {
+        let targets = (0..6)
+            .map(|index| {
+                receipt_target(&format!("demo.route-{index}"), &[&format!("route_{index}")])
+            })
+            .collect::<Vec<_>>();
+        for registered_count in [0, 2, 6] {
+            let source = (0..registered_count)
+                .map(|index| canonical_receipt(&format!("route_{index}")))
+                .collect::<String>();
+            let workspace = receipt_workspace(&source)?;
+            let registration = local_only_receipt_registration(&workspace, &targets)?;
+            assert_eq!(registration.registered_contracts.len(), registered_count);
+            assert_eq!(registration.missing_contracts.len(), 6 - registered_count);
+            assert_eq!(
+                registration.report(6).status,
+                if registered_count == 6 {
+                    ReceiptCoverageStatus::Complete
+                } else {
+                    ReceiptCoverageStatus::Partial
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn receipt_target_module_path_preserves_flat_and_nested_codegen_modules() {
+        assert_eq!(module_path_from_mount_key("settings_v4"), ["settings_v4"]);
+        assert_eq!(
+            module_path_from_mount_key("identity_v1::profile"),
+            ["identity_v1", "profile"]
+        );
+    }
 
     #[test]
     fn governed_observation_provenance_is_accepted() -> Result<()> {
         let findings = provenance_findings(GOVERNED_PROVENANCE)?;
         assert!(findings.is_empty(), "{findings:#?}");
 
+        let workspace = real_api_provenance_workspace(GOVERNED_PROVENANCE)?;
+        let output = workspace.cargo_check()?;
+        assert!(
+            output.status.success(),
+            "green provenance fixture must compile against the real mounted proof API: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
         let stateless = GOVERNED_PROVENANCE.replace(
-            "::httpserve::prove_local_only_state::<ReadState>()",
-            "::httpserve::prove_stateless_local_only_route(&PROFILE_HTTP_ROUTE)",
+            "::httpserve::prove_local_only_mounted_route_state::<ReadState, _>(\n        &routes,\n        &::generated::http::identity_v1::profile::ROUTE,\n    )",
+            "::httpserve::prove_stateless_local_only_mounted_route(\n        &routes,\n        &::generated::http::identity_v1::profile::ROUTE,\n    )",
         );
         let findings = provenance_findings(&stateless)?;
         assert!(findings.is_empty(), "{findings:#?}");
@@ -3065,8 +6866,8 @@ fn conforms() {
             (
                 "legacy owner trait",
                 GOVERNED_PROVENANCE.replace(
-                    "struct Repo { counter: Counter }",
-                    "impl StaticExclusionOwner<Write> for Fake {}\nstruct Repo { counter: Counter }",
+                    "struct Repo { counter: ::testkit::local_only::ProviderCounter<::testkit::local_only::Write> }",
+                    "impl StaticExclusionOwner<Write> for Fake {}\nstruct Repo { counter: ::testkit::local_only::ProviderCounter<::testkit::local_only::Write> }",
                 ),
             ),
             (
@@ -3079,22 +6880,22 @@ fn conforms() {
             (
                 "inline proof",
                 GOVERNED_PROVENANCE.replace(
-                    "::testkit::local_only::StaticExclusion::<Outbox>::from_governed(&proof)",
-                    "::testkit::local_only::StaticExclusion::<Outbox>::from_governed(&::httpserve::prove_local_only_state::<ReadState>())",
+                    "::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof)",
+                    "::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&::httpserve::prove_local_only_mounted_route_state::<ReadState, _>(&routes, &::generated::http::identity_v1::profile::ROUTE).expect(\"mounted proof\"))",
                 ),
             ),
             (
                 "forged proof binding",
                 GOVERNED_PROVENANCE.replace(
-                    "let proof = ::httpserve::prove_local_only_state::<ReadState>();",
+                    "let proof = ::httpserve::prove_local_only_mounted_route_state::<ReadState, _>(\n        &routes,\n        &::generated::http::identity_v1::profile::ROUTE,\n    ).expect(\"mounted proof\");",
                     "let proof = FakeProof::new();",
                 ),
             ),
             (
                 "lookalike proof constructor",
                 GOVERNED_PROVENANCE.replace(
-                    "::httpserve::prove_local_only_state::<ReadState>()",
-                    "::lookalike::prove_local_only_state::<ReadState>()",
+                    "::httpserve::prove_local_only_mounted_route_state::<ReadState, _>",
+                    "::lookalike::prove_local_only_mounted_route_state::<ReadState, _>",
                 ),
             ),
             (
@@ -3145,8 +6946,8 @@ fn conforms() {
             (
                 "shadowed absolute-looking proof namespace",
                 GOVERNED_PROVENANCE.replace(
-                    "::httpserve::prove_local_only_state::<ReadState>()",
-                    "::evil::httpserve::prove_local_only_state::<ReadState>()",
+                    "::httpserve::prove_local_only_mounted_route_state::<ReadState, _>",
+                    "::evil::httpserve::prove_local_only_mounted_route_state::<ReadState, _>",
                 ),
             ),
             (
@@ -3159,8 +6960,8 @@ fn conforms() {
             (
                 "bait oneshot call",
                 GOVERNED_PROVENANCE.replace(
-                    "let _response = router.oneshot();",
-                    "let _response = bait_router.oneshot();",
+                    "let _response = ::testkit::call(\n        router,",
+                    "let _response = ::testkit::call(\n        bait_router,",
                 ),
             ),
         ];
@@ -3212,7 +7013,10 @@ fn conforms() {
     #[test]
     fn safe_profiles_pass_and_inactive_or_non_localonly_are_ignored() -> Result<()> {
         let (summary, findings) = check_root(&fixture("green"))?;
-        assert_eq!(summary, "1 active LocalOnly HTTP contract(s) checked");
+        assert_eq!(
+            summary,
+            "1 active LocalOnly HTTP contract(s) checked; source receipts registered 0/1; missing: demo.safe"
+        );
         assert!(findings.is_empty(), "{findings:?}");
         Ok(())
     }
@@ -3281,6 +7085,10 @@ fn conforms() {
         let mut malformed = failed;
         malformed.active_http_contract_count += 1;
         assert!(render_report(&malformed, ReportFormat::Json).is_err());
+
+        let mut legacy = synthetic_report_fixture();
+        legacy.schema_version = 1;
+        assert!(render_report(&legacy, ReportFormat::Json).is_err());
         Ok(())
     }
 
@@ -3328,6 +7136,45 @@ fn conforms() {
             assert!(first.ends_with('\n'));
             assert!(!first.contains(env!("CARGO_MANIFEST_DIR")));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn real_workspace_local_only_receipt_coverage_is_non_vacuous() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let report = collect_report(&root)?;
+        assert_eq!(generated::http::LOCAL_ONLY_SPECS.len(), 6);
+        assert_eq!(report.local_only_receipt_coverage.active_count, 6);
+        assert_eq!(report.local_only_receipt_coverage.registered_count, 2);
+        assert_eq!(report.local_only_receipt_coverage.missing_count, 4);
+        assert_eq!(
+            report.local_only_receipt_coverage.missing_contracts,
+            [
+                "identity.policies-get",
+                "identity.policies-list",
+                "identity.roles-list",
+                "settings.config-get",
+            ]
+        );
+        assert_eq!(report.status, ReportStatus::Passed);
+        assert_eq!(
+            report
+                .contracts
+                .iter()
+                .filter(|contract| {
+                    contract.source_receipt_registration.status
+                        == SourceReceiptRegistrationStatus::Registered
+                })
+                .map(|contract| contract.contract_id.as_str())
+                .collect::<Vec<_>>(),
+            ["audit.list-entries", "identity.profile"]
+        );
+        let (summary, findings) = check_root(&root)?;
+        assert!(findings.is_empty(), "{findings:#?}");
+        assert_eq!(
+            summary,
+            "6 active LocalOnly HTTP contract(s) checked; source receipts registered 2/6; missing: identity.policies-get, identity.policies-list, identity.roles-list, settings.config-get"
+        );
         Ok(())
     }
 
@@ -3384,7 +7231,10 @@ fn conforms() {
             Some(StateKind::Stateless)
         );
         let (summary, findings) = check_root(&workspace.0)?;
-        assert_eq!(summary, "1 active LocalOnly HTTP contract(s) checked");
+        assert_eq!(
+            summary,
+            "1 active LocalOnly HTTP contract(s) checked; source receipts registered 0/1; missing: demo.safe"
+        );
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
     }
@@ -3637,7 +7487,7 @@ fn conforms() {
             [format!("{source_path}:1"), format!("{source_path}:2")]
         );
 
-        let report = finalize_report(vec![missing, ambiguous])?;
+        let report = finalize_report(vec![missing, ambiguous], &BTreeSet::new())?;
         assert_eq!(report.status, ReportStatus::Failed);
         assert_eq!(report.active_http_contract_count, 2);
         assert!(report.findings.windows(2).all(|pair| pair[0] <= pair[1]));
@@ -3748,7 +7598,7 @@ fn conforms() {
         assert_eq!(classified.findings.len(), 2);
 
         rows.push(classified);
-        let report = finalize_report(rows)?;
+        let report = finalize_report(rows, &BTreeSet::new())?;
         assert_eq!(report.status, ReportStatus::Failed);
         assert_eq!(report.active_http_contract_count, 3);
         assert!(report.findings.windows(2).all(|pair| pair[0] <= pair[1]));
@@ -4020,7 +7870,10 @@ fn conforms() {
             String::from_utf8_lossy(&output.stderr)
         );
         let (summary, findings) = check_root(&workspace.0)?;
-        assert_eq!(summary, "1 active LocalOnly HTTP contract(s) checked");
+        assert_eq!(
+            summary,
+            "1 active LocalOnly HTTP contract(s) checked; source receipts registered 0/1; missing: demo.safe"
+        );
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
     }

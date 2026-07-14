@@ -234,7 +234,37 @@ impl LocalOnlySideEffects {
     }
 }
 
-/// Failure reported by [`assert_local_only`].
+/// Opaque evidence that one route operation completed its `LocalOnly` post-check.
+///
+/// The receipt retains its generic marker and only [`assert_local_only_with_receipt`] can construct
+/// it; callers cannot mint evidence independently. Because `testkit` deliberately has no workspace
+/// dependency, the cross-crate relationship between that marker, a generated active `LocalOnly`
+/// contract, and its mounted route is closed by the repository's Medium source-provenance gate.
+///
+/// ```compile_fail
+/// use std::marker::PhantomData;
+/// use testkit::local_only::LocalOnlyConformanceReceipt;
+///
+/// struct RouteMarker;
+/// let _forged = LocalOnlyConformanceReceipt::<RouteMarker> {
+///     contract_id: "example.route",
+///     marker: PhantomData,
+/// };
+/// ```
+#[must_use = "a LocalOnly conformance receipt is the evidence produced by the post-check"]
+pub struct LocalOnlyConformanceReceipt<Marker> {
+    contract_id: &'static str,
+    marker: PhantomData<fn() -> Marker>,
+}
+
+impl<Marker> LocalOnlyConformanceReceipt<Marker> {
+    /// Returns the generated contract ID bound to this receipt's canonical source site.
+    pub const fn contract_id(&self) -> &'static str {
+        self.contract_id
+    }
+}
+
+/// Failure reported by [`assert_local_only`] and [`assert_local_only_with_receipt`].
 ///
 /// Errors contain only observer names and counts. The operation output is never formatted or
 /// retained, preventing request, tenant, subject, or payload data from entering diagnostics.
@@ -283,6 +313,29 @@ where
     let after = observers.sample();
     validate_observations(before, after)?;
     Ok(output)
+}
+
+/// Runs a route operation and returns opaque evidence only after its `LocalOnly` post-check.
+///
+/// The generated route marker and generated `contract_id` are intentionally supplied separately:
+/// repository provenance checks require their canonical source forms and reject mismatches. A
+/// domain-level error remains an operation output and therefore still receives a receipt when all
+/// forbidden-effect observations remain clean.
+pub async fn assert_local_only_with_receipt<Marker, Operation, OperationFuture, T>(
+    contract_id: &'static str,
+    observers: LocalOnlyObservers,
+    operation: Operation,
+) -> Result<(T, LocalOnlyConformanceReceipt<Marker>), LocalOnlyConformanceError>
+where
+    Operation: FnOnce() -> OperationFuture,
+    OperationFuture: Future<Output = T>,
+{
+    let output = assert_local_only(observers, operation).await?;
+    let receipt = LocalOnlyConformanceReceipt {
+        contract_id,
+        marker: PhantomData,
+    };
+    Ok((output, receipt))
 }
 
 fn validate_observations(

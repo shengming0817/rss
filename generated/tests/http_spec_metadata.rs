@@ -44,6 +44,15 @@ const EXPECTED_LOCAL_TX_SPECS: &[(&str, LocalTxModel)] = &[
     ("settings.secret-publish", LocalTxModel::RepoAtomicCas),
 ];
 
+const EXPECTED_LOCAL_ONLY_SPECS: &[&str] = &[
+    "audit.list-entries",
+    "identity.policies-get",
+    "identity.policies-list",
+    "identity.profile",
+    "identity.roles-list",
+    "settings.config-get",
+];
+
 fn active_spec(contract_id: &str) -> Option<&'static http::HttpSpec> {
     http::SPECS
         .iter()
@@ -180,6 +189,46 @@ fn local_tx_registry_contains_exact_active_l1_contracts() {
             spec.route.contract_id()
         );
     }
+}
+
+#[test]
+fn local_only_registry_contains_exact_active_l0_contracts() {
+    let actual: Vec<_> = http::LOCAL_ONLY_SPECS
+        .iter()
+        .map(|spec| spec.route.contract_id())
+        .collect();
+    let from_specs: Vec<_> = http::SPECS
+        .iter()
+        .filter(|spec| spec.route.consistency_level() == HttpConsistencyLevel::LocalOnly)
+        .map(|spec| spec.route.contract_id())
+        .collect();
+
+    assert_eq!(actual, EXPECTED_LOCAL_ONLY_SPECS);
+    assert_eq!(
+        actual, from_specs,
+        "LOCAL_ONLY_SPECS must be derived from active LocalOnly HTTP specs in stable order"
+    );
+    let unique: std::collections::BTreeSet<_> = actual.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        actual.len(),
+        "LOCAL_ONLY_SPECS must not contain duplicates"
+    );
+    assert!(http::LOCAL_ONLY_SPECS.iter().all(|spec| {
+        spec.route.consistency_level() == HttpConsistencyLevel::LocalOnly && spec.local_tx.is_none()
+    }));
+}
+
+#[test]
+fn active_local_only_modules_expose_distinct_conformance_markers() {
+    fn accept_marker<T>() {}
+
+    accept_marker::<http::audit_v1::list_entries::LocalOnlyConformanceMarker>();
+    accept_marker::<http::identity_v1::policies_get::LocalOnlyConformanceMarker>();
+    accept_marker::<http::identity_v1::policies_list::LocalOnlyConformanceMarker>();
+    accept_marker::<http::identity_v1::profile::LocalOnlyConformanceMarker>();
+    accept_marker::<http::identity_v1::roles_list::LocalOnlyConformanceMarker>();
+    accept_marker::<http::settings_v4::LocalOnlyConformanceMarker>();
 }
 
 #[test]

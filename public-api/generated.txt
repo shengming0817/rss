@@ -937,6 +937,14 @@ impl core::marker::Unpin for generated::http::audit_v1::list_entries::error::Con
 impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::error::ConversionError
+pub enum generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
+impl core::marker::Send for generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
+impl core::marker::Sync for generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
 pub enum generated::http::audit_v1::list_entries::RouteMarker
 impl core::marker::Freeze for generated::http::audit_v1::list_entries::RouteMarker
 impl core::marker::Send for generated::http::audit_v1::list_entries::RouteMarker
@@ -2224,6 +2232,14 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_get::Identit
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_get::IdentityPolicyGetRuleEffect
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_get::IdentityPolicyGetRuleEffect
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_get::IdentityPolicyGetRuleEffect
+pub enum generated::http::identity_v1::policies_get::LocalOnlyConformanceMarker
+impl core::marker::Freeze for generated::http::identity_v1::policies_get::LocalOnlyConformanceMarker
+impl core::marker::Send for generated::http::identity_v1::policies_get::LocalOnlyConformanceMarker
+impl core::marker::Sync for generated::http::identity_v1::policies_get::LocalOnlyConformanceMarker
+impl core::marker::Unpin for generated::http::identity_v1::policies_get::LocalOnlyConformanceMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_get::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_get::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_get::LocalOnlyConformanceMarker
 pub enum generated::http::identity_v1::policies_get::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::policies_get::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::policies_get::RouteMarker
@@ -2543,6 +2559,14 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_list::Identi
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_list::IdentityPolicyListRuleEffect
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_list::IdentityPolicyListRuleEffect
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_list::IdentityPolicyListRuleEffect
+pub enum generated::http::identity_v1::policies_list::LocalOnlyConformanceMarker
+impl core::marker::Freeze for generated::http::identity_v1::policies_list::LocalOnlyConformanceMarker
+impl core::marker::Send for generated::http::identity_v1::policies_list::LocalOnlyConformanceMarker
+impl core::marker::Sync for generated::http::identity_v1::policies_list::LocalOnlyConformanceMarker
+impl core::marker::Unpin for generated::http::identity_v1::policies_list::LocalOnlyConformanceMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_list::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_list::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_list::LocalOnlyConformanceMarker
 pub enum generated::http::identity_v1::policies_list::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::policies_list::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::policies_list::RouteMarker
@@ -3278,6 +3302,14 @@ impl core::marker::Unpin for generated::http::identity_v1::profile::IdentityProf
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::profile::IdentityProfileDataKind
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::profile::IdentityProfileDataKind
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::profile::IdentityProfileDataKind
+pub enum generated::http::identity_v1::profile::LocalOnlyConformanceMarker
+impl core::marker::Freeze for generated::http::identity_v1::profile::LocalOnlyConformanceMarker
+impl core::marker::Send for generated::http::identity_v1::profile::LocalOnlyConformanceMarker
+impl core::marker::Sync for generated::http::identity_v1::profile::LocalOnlyConformanceMarker
+impl core::marker::Unpin for generated::http::identity_v1::profile::LocalOnlyConformanceMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::profile::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::profile::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::profile::LocalOnlyConformanceMarker
 pub enum generated::http::identity_v1::profile::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::profile::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::profile::RouteMarker
@@ -3561,6 +3593,14 @@ impl core::marker::Unpin for generated::http::identity_v1::roles_list::error::Co
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::roles_list::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::roles_list::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_list::error::ConversionError
+pub enum generated::http::identity_v1::roles_list::LocalOnlyConformanceMarker
+impl core::marker::Freeze for generated::http::identity_v1::roles_list::LocalOnlyConformanceMarker
+impl core::marker::Send for generated::http::identity_v1::roles_list::LocalOnlyConformanceMarker
+impl core::marker::Sync for generated::http::identity_v1::roles_list::LocalOnlyConformanceMarker
+impl core::marker::Unpin for generated::http::identity_v1::roles_list::LocalOnlyConformanceMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::roles_list::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::roles_list::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_list::LocalOnlyConformanceMarker
 pub enum generated::http::identity_v1::roles_list::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::roles_list::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::roles_list::RouteMarker
@@ -4068,6 +4108,14 @@ impl core::marker::Unpin for generated::http::settings_v4::error::ConversionErro
 impl core::marker::UnsafeUnpin for generated::http::settings_v4::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v4::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v4::error::ConversionError
+pub enum generated::http::settings_v4::LocalOnlyConformanceMarker
+impl core::marker::Freeze for generated::http::settings_v4::LocalOnlyConformanceMarker
+impl core::marker::Send for generated::http::settings_v4::LocalOnlyConformanceMarker
+impl core::marker::Sync for generated::http::settings_v4::LocalOnlyConformanceMarker
+impl core::marker::Unpin for generated::http::settings_v4::LocalOnlyConformanceMarker
+impl core::marker::UnsafeUnpin for generated::http::settings_v4::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v4::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v4::LocalOnlyConformanceMarker
 pub enum generated::http::settings_v4::RouteMarker
 impl core::marker::Freeze for generated::http::settings_v4::RouteMarker
 impl core::marker::Send for generated::http::settings_v4::RouteMarker
@@ -4454,6 +4502,7 @@ impl core::marker::Unpin for generated::http::LocalTxSpec
 impl core::marker::UnsafeUnpin for generated::http::LocalTxSpec
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::LocalTxSpec
 impl core::panic::unwind_safe::UnwindSafe for generated::http::LocalTxSpec
+pub const generated::http::LOCAL_ONLY_SPECS: &[generated::http::HttpSpec]
 pub const generated::http::LOCAL_TX_SPECS: &[generated::http::HttpSpec]
 pub const generated::http::SPECS: &[generated::http::HttpSpec]
 pub mod generated::saga
