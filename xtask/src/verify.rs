@@ -108,6 +108,8 @@ enum InternalCheck {
     DlxLifecycleFunnel,
     /// runtime assembly baseline 漂移门（RUNTIME-BASELINE-DRIFT-01）。
     RuntimeBaseline,
+    /// Runtime Deployment SpecKit schemas/tasks/fingerprints + synthetic-red closure（#1779）。
+    RuntimeDeploymentSpec,
     /// SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）。
     RuntimeDepsGuard,
     /// ArchRules 派生索引 + 14 行持久化 funnel matrix 文档漂移门。
@@ -331,6 +333,14 @@ fn step_runtime_baseline() -> Step {
         id: GateId::RuntimeBaseline,
         args: &[],
         kind: StepKind::Internal(InternalCheck::RuntimeBaseline),
+        env: &[],
+    }
+}
+fn step_runtime_deployment_spec() -> Step {
+    Step {
+        id: GateId::RuntimeDeploymentSpec,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::RuntimeDeploymentSpec),
         env: &[],
     }
 }
@@ -1131,6 +1141,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
             run_check(&crate::dlx_lifecycle_funnel::DlxLifecycleFunnel)
         }
         InternalCheck::RuntimeBaseline => run_check(&runtime_baseline::RuntimeBaseline),
+        InternalCheck::RuntimeDeploymentSpec => crate::runtime_deployment_spec::run_selftest_gate(),
         InternalCheck::RuntimeDepsGuard => run_check(&runtime_deps_guard::RuntimeDepsGuard),
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
@@ -1294,7 +1305,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 33);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 34);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -1378,14 +1389,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_51_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_52_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 51);
+        assert_eq!(plan.len(), 52);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 51);
+        assert_eq!(ids.len(), 52);
     }
 
     #[test]
@@ -1420,6 +1431,7 @@ mod tests {
                 "inbox-cutover-guard",
                 "dlx-lifecycle-funnel",
                 "runtime-baseline",
+                "runtime-deployment-spec",
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
@@ -1500,6 +1512,67 @@ mod tests {
         }
     }
 
+    fn validate_runtime_deployment_spec_membership(plan: &[Step]) -> anyhow::Result<()> {
+        let members = plan
+            .iter()
+            .filter(|step| step.id == GateId::RuntimeDeploymentSpec)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            members.len() == 1,
+            "aggregate plan must contain exactly one gate"
+        );
+        let step = members[0];
+        anyhow::ensure!(
+            step.label() == "runtime-deployment-spec",
+            "aggregate gate label drift"
+        );
+        anyhow::ensure!(!step.needs_compile(), "aggregate gate must be no-compile");
+        anyhow::ensure!(
+            step.carrier_file() == Some("xtask/src/runtime_deployment_spec.rs"),
+            "aggregate gate carrier drift"
+        );
+        anyhow::ensure!(
+            matches!(
+                step.kind,
+                StepKind::Internal(InternalCheck::RuntimeDeploymentSpec)
+            ),
+            "aggregate gate executor drift"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_deployment_spec_membership_predicate_green_and_synthetic_red() -> anyhow::Result<()>
+    {
+        for (name, plan) in [
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
+            validate_runtime_deployment_spec_membership(&plan)
+                .with_context(|| format!("{name} membership"))?;
+        }
+
+        let mut mutant = verify_plan(&opts(true, false));
+        mutant.retain(|step| step.id != GateId::RuntimeDeploymentSpec);
+        assert!(
+            validate_runtime_deployment_spec_membership(&mutant).is_err(),
+            "omission synthetic red must fail"
+        );
+
+        let mut mutant = verify_plan(&opts(true, false));
+        let mutant_step = mutant
+            .iter_mut()
+            .find(|step| step.id == GateId::RuntimeDeploymentSpec)
+            .context("committed fast plan lacks runtime-deployment-spec")?;
+        mutant_step.kind = StepKind::Internal(InternalCheck::RuntimeBaseline);
+        assert!(
+            validate_runtime_deployment_spec_membership(&mutant).is_err(),
+            "executor synthetic red must fail"
+        );
+        Ok(())
+    }
+
     /// `--fast` 只留无需编译的步：fmt + meta + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
@@ -1524,6 +1597,7 @@ mod tests {
                 "inbox-cutover-guard",
                 "dlx-lifecycle-funnel",
                 "runtime-baseline",
+                "runtime-deployment-spec",
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
@@ -1550,7 +1624,7 @@ mod tests {
 
     /// meta checks（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
     /// doc-contracts / consistency-fixtures / event-transport-guard / inbox-cutover-guard /
-    /// runtime-baseline / runtime-deps-guard / archrules / codegen / pdp-allow-guard / contract-binding-guard /
+    /// runtime-baseline / runtime-deployment-spec / runtime-deps-guard / archrules / codegen / pdp-allow-guard / contract-binding-guard /
     /// schema-rls / setlocal-funnel / pg-tenant-tx-guard / repo-scope-guard / tenancy-closeout / migrations-serial / command-symmetry /
     /// reconcile-outbox-command-guard / defer-gate）在两种模式恒在。
     #[test]
@@ -1581,6 +1655,7 @@ mod tests {
                     "inbox-cutover-guard",
                     "dlx-lifecycle-funnel",
                     "runtime-baseline",
+                    "runtime-deployment-spec",
                     "runtime-deps-guard",
                     "archrules",
                     "codegen-check",
@@ -2068,6 +2143,7 @@ mod tests {
                 "inbox-cutover-guard",
                 "dlx-lifecycle-funnel",
                 "runtime-baseline",
+                "runtime-deployment-spec",
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
@@ -2186,6 +2262,7 @@ mod tests {
             "inbox-cutover-guard",
             "dlx-lifecycle-funnel",
             "runtime-baseline",
+            "runtime-deployment-spec",
             "runtime-deps-guard",
             "archrules",
             "codegen-check",

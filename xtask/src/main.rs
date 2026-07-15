@@ -29,6 +29,8 @@
 //!   `cargo xtask runtime-baseline list|verify`
 //!                                      runtime assembly baseline 清单 / 漂移门（#1656，CI 门）
 //!   `cargo xtask runtime-deps guard`    SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）
+//!   `cargo xtask runtime-deployment-spec [--selftest] [--against <git-ref>]`
+//!                                      #1779 Runtime Deployment SpecKit v2 schema/DAG/fingerprint 机器门
 //!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
 //!   `cargo xtask inbox-cutover-guard`    inbox receipt cutover 旧 token 回流守卫（CI 门）
 //!   `cargo xtask dlx-lifecycle-funnel`   DLX verified WORM archive-before-purge 单漏斗守卫（CI 门）
@@ -112,6 +114,7 @@ mod publicapi;
 mod reconcile_outbox_command_guard;
 mod repo_scope_guard;
 mod runtime_baseline;
+mod runtime_deployment_spec;
 mod runtime_deps_guard;
 mod schema_rls;
 mod setlocal_funnel;
@@ -149,6 +152,7 @@ enum Command {
     ArchRulesMatrix(archrules::MatrixAction),
     RuntimeBaselineList,
     RuntimeBaselineVerify,
+    RuntimeDeploymentSpec(runtime_deployment_spec::Options),
     RuntimeDepsGuard,
     ContractBreaking {
         /// base git-ref（缺省 = `contract::breaking::DEFAULT_AGAINST`）。
@@ -248,6 +252,9 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["cdc-config", rest @ ..] => parse_cdc_config(rest),
         ["archrules", rest @ ..] => parse_archrules(rest),
         ["runtime-baseline", rest @ ..] => parse_runtime_baseline(rest),
+        ["runtime-deployment-spec", rest @ ..] => {
+            runtime_deployment_spec::parse_options(rest).map(Command::RuntimeDeploymentSpec)
+        }
         ["runtime-deps", rest @ ..] => parse_runtime_deps(rest),
         ["contract", rest @ ..] => parse_contract(rest),
         ["assembly", rest @ ..] => parse_assembly(rest),
@@ -650,6 +657,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::ArchRulesMatrix(action) => archrules::matrix(action),
         Command::RuntimeBaselineList => runtime_baseline::list(),
         Command::RuntimeBaselineVerify => diagnostic::run_check(&runtime_baseline::RuntimeBaseline),
+        Command::RuntimeDeploymentSpec(options) => runtime_deployment_spec::run(&options),
         Command::RuntimeDepsGuard => diagnostic::run_check(&runtime_deps_guard::RuntimeDepsGuard),
         Command::ContractBreaking { against } => {
             let against =
@@ -956,6 +964,47 @@ mod tests {
         assert!(parse_command(&s(&["runtime-baseline", "--list"])).is_err());
         assert!(parse_command(&s(&["runtime-baseline", "list", "extra"])).is_err());
         assert!(parse_command(&s(&["runtime-baseline", "bogus"])).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_runtime_deployment_spec_is_exact() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["runtime-deployment-spec"]))?,
+            Command::RuntimeDeploymentSpec(runtime_deployment_spec::Options {
+                selftest: false,
+                against: None,
+            })
+        );
+        assert_eq!(
+            parse_command(&s(&[
+                "runtime-deployment-spec",
+                "--selftest",
+                "--against",
+                "origin/develop",
+            ]))?,
+            Command::RuntimeDeploymentSpec(runtime_deployment_spec::Options {
+                selftest: true,
+                against: Some("origin/develop".to_string()),
+            })
+        );
+        for bad in [
+            s(&["runtime-deployment-spec", "--against"]),
+            s(&["runtime-deployment-spec", "--selftest", "--selftest"]),
+            s(&[
+                "runtime-deployment-spec",
+                "--against",
+                "HEAD",
+                "--against",
+                "HEAD",
+            ]),
+            s(&["runtime-deployment-spec", "--bogus"]),
+        ] {
+            assert!(
+                parse_command(&bad).is_err(),
+                "unexpectedly accepted {bad:?}"
+            );
+        }
         Ok(())
     }
 

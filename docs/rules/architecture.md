@@ -191,8 +191,8 @@ rss/
 存在性、active HTTP outbox producer 目标 readiness、consistency capability evidence、contract 扇出完整性、migration 只增不改、覆盖率阈值、no-op 业务理由、分层依赖残留(crate 图仅 Hard
 守已声明边的「下层依赖上层成环」；不成环的反向边 / 兄弟域互斥 / adapter·generated scope 由 `cargo xtask layer-deps`
 source-centric 补，免疫裸名×crates.io 命名冲突)。治理重心在 "crate-graph lint + clippy + 类型系统"(见
-`.claude/rules/rss/ai-robust.md`)。这里的 Medium 评级描述 gate 被调用时的机器证据，不等同于 active PR 已自动
-调度该 gate 或以其阻断合入。
+`.claude/rules/rss/ai-robust.md`)。Medium gate 必须进入稳定的 repository aggregate，并在 aggregate 执行时
+fail-closed；这仍不等同于 active PR 已自动调度该 aggregate 或以其阻断合入。
 
 这些 Medium gate 已有 **GitHub Actions typed CI** carrier：
 `.github/workflows/ci.yml` 只保留 `ci-plan`、一个从闭合 `CiJobKey` 派生的动态 matrix executor 与稳定

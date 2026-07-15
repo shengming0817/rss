@@ -525,6 +525,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            RuntimeDeploymentSpec => (step_runtime_deployment_spec, Some("xtask/src/runtime_deployment_spec.rs"),
+                gate(
+                        GateId::RuntimeDeploymentSpec,
+                        "runtime-deployment-spec",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             RuntimeDepsGuard => (step_runtime_deps_guard, Some("xtask/src/runtime_deps_guard.rs"),
                 gate(
                         GateId::RuntimeDepsGuard,

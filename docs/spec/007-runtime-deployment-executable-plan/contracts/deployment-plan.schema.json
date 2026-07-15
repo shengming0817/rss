@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://rss.local/spec/runtime-deployment/deployment-plan.schema.json",
+  "title": "DeploymentPlan target contract",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "assemblyFingerprint", "runtimePlanFingerprint", "deploymentFingerprint", "workloads", "services"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "assemblyFingerprint": { "$ref": "#/definitions/sha256" },
+    "runtimePlanFingerprint": { "$ref": "#/definitions/sha256" },
+    "deploymentFingerprint": {
+      "description": "sha256: + lowercase SHA-256 of ASCII stage tag rss-deployment-plan-v1, one NUL byte, then RFC 8785 JCS UTF-8 bytes of unsigned {schemaVersion,assemblyFingerprint,runtimePlanFingerprint,workloads,services}; this result field is excluded from its own preimage.",
+      "allOf": [{ "$ref": "#/definitions/sha256" }]
+    },
+    "workloads": { "description": "Set-like; serialize in workload name order.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/definitions/workload" } },
+    "services": { "description": "Set-like; serialize in service name order.", "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/service" } }
+  },
+  "definitions": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "immutableImage": { "type": "string", "pattern": "^[^\\s@]+@sha256:[0-9a-f]{64}$" },
+    "secretRef": { "oneOf": [{ "$ref": "#/definitions/kubernetesSecretRef" }, { "$ref": "#/definitions/vaultRef" }] },
+    "kubernetesSecretRef": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "name", "key"],
+      "properties": {
+        "kind": { "const": "kubernetesSecret" },
+        "name": { "type": "string", "maxLength": 253, "pattern": "^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$", "x-redaction": "internal" },
+        "key": { "type": "string", "maxLength": 253, "pattern": "^[A-Za-z0-9._-]+$", "x-redaction": "internal" }
+      }
+    },
+    "vaultRef": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "storeId", "refKey"],
+      "properties": {
+        "kind": { "const": "vaultRef" },
+        "storeId": { "type": "string", "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$", "x-redaction": "internal" },
+        "refKey": { "type": "string", "maxLength": 256, "pattern": "^(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[^\\s\\u0000-\\u001F\\u007F/]+(?:/[^\\s\\u0000-\\u001F\\u007F/]+)*$", "x-redaction": "internal" },
+        "refVersion": { "type": "string", "maxLength": 256, "pattern": "^[^\\s\\u0000-\\u001F\\u007F]+$", "x-redaction": "internal" }
+      }
+    },
+    "cpuQuantity": { "description": "Closed RTD v1 subset: at most 20 canonical decimal digits as a non-negative integer core count or integer millicpu value; no decimal or exponent forms.", "type": "string", "maxLength": 22, "pattern": "^(?:0|[1-9][0-9]{0,19})(?:m)?$" },
+    "memoryQuantity": { "description": "Closed RTD v1 subset: at most 20 canonical decimal digits as a non-negative integer byte value with optional K/M/G/T or Ki/Mi/Gi/Ti suffix; no decimal, exponent, or larger suffix forms.", "type": "string", "maxLength": 22, "pattern": "^(?:0|[1-9][0-9]{0,19})(?:(?:K|M|G|T)i?)?$" },
+    "resourceList": { "type": "object", "additionalProperties": false, "required": ["cpu", "memory"], "properties": { "cpu": { "$ref": "#/definitions/cpuQuantity" }, "memory": { "$ref": "#/definitions/memoryQuantity" } } },
+    "resources": {
+      "description": "Explicit Kubernetes scheduling requests and cgroup limits; both are required, and each request must be less than or equal to its matching limit.",
+      "type": "object", "additionalProperties": false, "required": ["requests", "limits"],
+      "properties": { "requests": { "$ref": "#/definitions/resourceList" }, "limits": { "$ref": "#/definitions/resourceList" } }
+    },
+    "probe": { "type": "object", "additionalProperties": false, "required": ["kind", "path", "port"], "properties": { "kind": { "type": "string", "enum": ["startup", "readiness", "liveness"] }, "path": { "type": "string", "pattern": "^/" }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 } } },
+    "identity": { "type": "object", "additionalProperties": false, "required": ["name", "serviceAccount"], "properties": { "name": { "type": "string", "minLength": 1 }, "serviceAccount": { "type": "string", "minLength": 1 } } },
+    "workload": {
+      "type": "object", "additionalProperties": false, "required": ["name", "image", "identity", "secretRefs", "resources", "probes"],
+      "properties": { "name": { "type": "string", "minLength": 1 }, "image": { "$ref": "#/definitions/immutableImage" }, "identity": { "$ref": "#/definitions/identity" }, "secretRefs": { "description": "Set-like; serialize by kind and typed coordinate.", "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/secretRef" } }, "resources": { "$ref": "#/definitions/resources" }, "probes": { "description": "Preserve declared lifecycle order; exact entries remain unique.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/definitions/probe" } } }
+    },
+    "port": { "type": "object", "additionalProperties": false, "required": ["name", "port"], "properties": { "name": { "type": "string", "minLength": 1 }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 } } },
+    "service": { "type": "object", "additionalProperties": false, "required": ["name", "workload", "ports"], "properties": { "name": { "type": "string", "minLength": 1 }, "workload": { "type": "string", "minLength": 1 }, "ports": { "description": "Set-like; serialize in port name order.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/definitions/port" } } } }
+  }
+}
