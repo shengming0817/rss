@@ -1,12 +1,13 @@
 //! Typed, fail-safe CI impact planning for GitHub Actions.
 //!
-//! INVARIANT: CI-IMPACT-PLAN-01 { level = "Hard", exec = "native-compile", source = "code", native = "validated plan construction owns the closed 14-job array and matrix derivation" }.
+//! INVARIANT: CI-IMPACT-PLAN-01 { level = "Hard", exec = "native-compile", source = "code", native = "validated plan construction owns the closed 15-job array and matrix derivation" }.
 //! INVARIANT: CI-IMPACT-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "policy_rejects_unknown_and_rename_red", anti_vacuity = "workspace_policy_catalog_is_non_vacuous" }.
+//! INVARIANT: CI-IMPACT-PROJECTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private ImpactSet construction and exhaustive local/remote projections prevent divergent path maps" }.
 
 use crate::ci_lanes::{CiJobKey, CiLane};
 use crate::cmd::{CargoSubcommand, ExternalProgram, cargo_cmd, external_cmd};
 use crate::contract::manifest::{ContractManifest, ContractOwner};
-use crate::integration_shards::{self, IntegrationShard};
+use crate::integration_shards::{self, IntegrationShard, LocalFeatureScope};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const PLAN_SCHEMA_VERSION: u8 = 1;
 const POLICY_SCHEMA_VERSION: u8 = 1;
@@ -54,6 +56,31 @@ pub(crate) struct Options {
     pub(crate) github_output: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalOptions {
+    base: String,
+}
+
+pub(crate) fn parse_local_options(args: &[&str]) -> Result<LocalOptions> {
+    let mut base = None;
+    let mut iter = args.iter().copied();
+    while let Some(flag) = iter.next() {
+        if flag != "--base" {
+            bail!("ci local 未知参数: {flag}");
+        }
+        let value = iter.next().context("ci local 参数 --base 缺少值")?;
+        if value.is_empty() || value.starts_with("--") {
+            bail!("ci local 参数 --base 必须是非空 git ref，不能是 flag");
+        }
+        if base.replace(value.to_owned()).is_some() {
+            bail!("ci local 重复参数: --base");
+        }
+    }
+    Ok(LocalOptions {
+        base: base.context("ci local 缺少 --base")?,
+    })
+}
+
 pub(crate) fn parse_options(args: &[&str]) -> Result<Options> {
     let mut event_path = None;
     let mut policy_path = None;
@@ -63,23 +90,23 @@ pub(crate) fn parse_options(args: &[&str]) -> Result<Options> {
     while let Some(flag) = iter.next() {
         let value = iter
             .next()
-            .ok_or_else(|| anyhow::anyhow!("ci-plan 参数 {flag} 缺少值"))?;
+            .ok_or_else(|| anyhow::anyhow!("ci plan 参数 {flag} 缺少值"))?;
         let slot = match flag {
             "--event-path" => &mut event_path,
             "--policy" => &mut policy_path,
             "--output" => &mut output_path,
             "--github-output" => &mut github_output,
-            _ => bail!("ci-plan 未知参数: {flag}"),
+            _ => bail!("ci plan 未知参数: {flag}"),
         };
         if slot.replace(PathBuf::from(value)).is_some() {
-            bail!("ci-plan 重复参数: {flag}");
+            bail!("ci plan 重复参数: {flag}");
         }
     }
     Ok(Options {
-        event_path: event_path.context("ci-plan 缺少 --event-path")?,
-        policy_path: policy_path.context("ci-plan 缺少 --policy")?,
-        output_path: output_path.context("ci-plan 缺少 --output")?,
-        github_output: github_output.context("ci-plan 缺少 --github-output")?,
+        event_path: event_path.context("ci plan 缺少 --event-path")?,
+        policy_path: policy_path.context("ci plan 缺少 --policy")?,
+        output_path: output_path.context("ci plan 缺少 --output")?,
+        github_output: github_output.context("ci plan 缺少 --github-output")?,
     })
 }
 
@@ -687,6 +714,238 @@ enum FullCause {
     FallbackUncertainty,
 }
 
+/// The only path-to-impact model. Its constructors stay private so callers can only consume a
+/// projection produced by this module's closed classifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImpactSet {
+    Empty,
+    Selective(SelectiveImpact),
+    Full(FullCause),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectiveImpact {
+    documentation: bool,
+    packages: BTreeMap<String, BTreeSet<PackageImpact>>,
+    reverse_closure: BTreeSet<String>,
+    integration_shards: BTreeSet<IntegrationShard>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PackageImpact {
+    Source,
+    Test,
+    Manifest,
+    ContractOwner,
+    ContractSubscriber,
+    Generated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalPackageProjection {
+    DirectTestClippy,
+}
+
+impl PackageImpact {
+    /// Every impact category must make an explicit local-execution decision. A new category that
+    /// is only wired into the remote projection cannot compile until this match is extended.
+    const fn local_projection(self) -> LocalPackageProjection {
+        match self {
+            Self::Source
+            | Self::Test
+            | Self::Manifest
+            | Self::ContractOwner
+            | Self::ContractSubscriber
+            | Self::Generated => LocalPackageProjection::DirectTestClippy,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteProjection(Recommendation);
+
+impl From<&ImpactSet> for RemoteProjection {
+    fn from(impact: &ImpactSet) -> Self {
+        let mut recommendation = Recommendation::empty();
+        match impact {
+            ImpactSet::Empty => {}
+            ImpactSet::Full(cause) => recommendation = Recommendation::Full(*cause),
+            ImpactSet::Selective(selective) => {
+                if selective.documentation {
+                    recommendation.add(CiJobKey::CiMeta, JobReason::Documentation);
+                }
+                for reasons in selective.packages.values() {
+                    for reason in reasons {
+                        match reason {
+                            PackageImpact::Source => {
+                                recommendation.add_core(true, JobReason::CoreSource);
+                            }
+                            PackageImpact::Test => {
+                                recommendation.add_core(false, JobReason::CoreTest);
+                            }
+                            PackageImpact::Manifest => {
+                                recommendation
+                                    .add(CiJobKey::CiSecurity, JobReason::DependencyManifest);
+                            }
+                            PackageImpact::ContractOwner => {
+                                recommendation.add_core(true, JobReason::ContractOwner);
+                            }
+                            PackageImpact::ContractSubscriber => {
+                                recommendation.add_core(true, JobReason::ContractSubscriber);
+                            }
+                            PackageImpact::Generated => {
+                                recommendation.add_core(true, JobReason::GeneratedSource);
+                            }
+                        }
+                    }
+                }
+                for shard in &selective.integration_shards {
+                    recommendation.add_shard(*shard);
+                }
+            }
+        }
+        Self(recommendation)
+    }
+}
+
+impl RemoteProjection {
+    fn into_recommendation(self) -> Recommendation {
+        self.0
+    }
+
+    #[cfg(test)]
+    fn selected_names(&self) -> Vec<&'static str> {
+        self.0.selected_names()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalProjection {
+    Empty,
+    FastMeta,
+    Selective {
+        check_packages: Vec<String>,
+        test_clippy_packages: Vec<String>,
+        feature_gates: Vec<crate::nextest::CoreTestScope>,
+        feature_compile_scopes: Vec<LocalFeatureScope>,
+    },
+    Full,
+}
+
+impl From<&ImpactSet> for LocalProjection {
+    fn from(impact: &ImpactSet) -> Self {
+        match impact {
+            ImpactSet::Empty => Self::Empty,
+            ImpactSet::Full(_) => Self::Full,
+            ImpactSet::Selective(selective) if selective.packages.is_empty() => Self::FastMeta,
+            ImpactSet::Selective(selective) => {
+                let test_clippy_packages = selective
+                    .packages
+                    .iter()
+                    .filter(|(_, impacts)| {
+                        impacts.iter().any(|impact| {
+                            matches!(
+                                impact.local_projection(),
+                                LocalPackageProjection::DirectTestClippy
+                            )
+                        })
+                    })
+                    .map(|(package, _)| package.clone())
+                    .collect::<Vec<_>>();
+                let feature_gates = crate::nextest::CoreTestScope::ALL
+                    .into_iter()
+                    .filter(|scope| {
+                        scope
+                            .package()
+                            .is_some_and(|package| selective.packages.contains_key(package))
+                    })
+                    .collect();
+                let impacted_packages = selective
+                    .packages
+                    .keys()
+                    .chain(selective.reverse_closure.iter())
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>();
+                let mut feature_compile_scopes = LocalFeatureScope::ALL
+                    .into_iter()
+                    .filter(|scope| impacted_packages.contains(scope.package()))
+                    .collect::<BTreeSet<_>>();
+                feature_compile_scopes.extend(
+                    selective
+                        .integration_shards
+                        .iter()
+                        .flat_map(|shard| shard.spec().local_feature_scopes.iter().copied()),
+                );
+                Self::Selective {
+                    check_packages: selective.reverse_closure.iter().cloned().collect(),
+                    test_clippy_packages,
+                    feature_gates,
+                    feature_compile_scopes: feature_compile_scopes.into_iter().collect(),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalCargoOperation {
+    Check,
+    Test,
+    Clippy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalStep {
+    FastMeta,
+    Packages {
+        operation: LocalCargoOperation,
+        packages: Vec<String>,
+    },
+    Feature(crate::nextest::CoreTestScope),
+    FeatureCompile(LocalFeatureScope),
+    FullVerify,
+}
+
+impl LocalProjection {
+    fn steps(&self) -> Vec<LocalStep> {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::FastMeta => vec![LocalStep::FastMeta],
+            Self::Full => vec![LocalStep::FullVerify],
+            Self::Selective {
+                check_packages,
+                test_clippy_packages,
+                feature_gates,
+                feature_compile_scopes,
+            } => {
+                let mut steps = vec![
+                    LocalStep::FastMeta,
+                    LocalStep::Packages {
+                        operation: LocalCargoOperation::Check,
+                        packages: check_packages.clone(),
+                    },
+                    LocalStep::Packages {
+                        operation: LocalCargoOperation::Test,
+                        packages: test_clippy_packages.clone(),
+                    },
+                    LocalStep::Packages {
+                        operation: LocalCargoOperation::Clippy,
+                        packages: test_clippy_packages.clone(),
+                    },
+                ];
+                steps.extend(feature_gates.iter().copied().map(LocalStep::Feature));
+                steps.extend(
+                    feature_compile_scopes
+                        .iter()
+                        .copied()
+                        .map(LocalStep::FeatureCompile),
+                );
+                steps
+            }
+        }
+    }
+}
+
 impl FullCause {
     const fn job_reason(self) -> JobReason {
         match self {
@@ -762,10 +1021,8 @@ impl Recommendation {
     }
 
     fn add_shard(&mut self, shard: IntegrationShard) {
-        for key in CiJobKey::ALL {
-            if key.shard() == Some(shard.as_str()) {
-                self.add(key, JobReason::IntegrationClosure);
-            }
+        for key in CiJobKey::for_shard(shard) {
+            self.add(*key, JobReason::IntegrationClosure);
         }
     }
 
@@ -1252,7 +1509,7 @@ fn pull_request_recommendation(
     let entries = read_diff(root, base, head)
         .map_err(|_| PlannerFailure::new(FallbackCode::GitDiffUnavailable, None))?;
     if let Some(cause) = immediate_full_cause(&entries, None) {
-        return Ok(Recommendation::Full(cause));
+        return Ok(RemoteProjection::from(&ImpactSet::Full(cause)).into_recommendation());
     }
     let graph = WorkspaceGraph::load(root).map_err(|_| {
         PlannerFailure::new(
@@ -1260,15 +1517,323 @@ fn pull_request_recommendation(
             Some("Cargo.toml".to_owned()),
         )
     })?;
-    classify_with_graph(root, &entries, &graph, merge_base).map_err(|_| {
-        let subject = entries
-            .iter()
-            .find(|entry| {
-                entry.path.starts_with("contracts/") || entry.path.starts_with("generated/")
-            })
-            .map(|entry| entry.path.clone());
-        PlannerFailure::new(FallbackCode::ContractUnavailable, subject)
-    })
+    impact_with_graph(root, &entries, &graph, merge_base)
+        .map(|impact| RemoteProjection::from(&impact).into_recommendation())
+        .map_err(|_| {
+            let subject = entries
+                .iter()
+                .find(|entry| {
+                    entry.path.starts_with("contracts/") || entry.path.starts_with("generated/")
+                })
+                .map(|entry| entry.path.clone());
+            PlannerFailure::new(FallbackCode::ContractUnavailable, subject)
+        })
+}
+
+pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
+    let context = LocalExecutionContext::new(root, &options.base)?;
+    let impact = context.impact_or_full();
+    let projection = LocalProjection::from(&impact);
+    let steps = projection.steps();
+    if steps.is_empty() {
+        eprintln!("ci local：<base>...HEAD 无已提交项目差异");
+        return Ok(());
+    }
+    eprintln!("ci local：{} 步", steps.len());
+    let mut index = 0;
+    execute_local_steps(&steps, |step| {
+        index += 1;
+        eprintln!("ci local：[{}/{}] {}", index, steps.len(), step.label());
+        run_local_step(&context, step)
+    })?;
+    eprintln!("ci local：全部通过");
+    Ok(())
+}
+
+fn execute_local_steps(
+    steps: &[LocalStep],
+    mut execute: impl FnMut(&LocalStep) -> Result<()>,
+) -> Result<()> {
+    for step in steps {
+        execute(step)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn local_impact(root: &Path, base: &str) -> ImpactSet {
+    LocalExecutionContext::new(root, base).map_or_else(
+        |error| {
+            eprintln!("ci local：影响分析失败，fail-safe 到完整 verify：{error:#}");
+            ImpactSet::Full(FullCause::FallbackUncertainty)
+        },
+        |context| context.impact_or_full(),
+    )
+}
+
+/// Immutable source identity shared by local impact analysis and every selected gate. The
+/// private constructor resolves all revisions before creating a detached committed checkout, so
+/// no executor can observe the caller's index, untracked files, or dirty worktree.
+struct LocalExecutionContext {
+    base: String,
+    head: String,
+    merge_base: String,
+    snapshot: CommittedSnapshot,
+}
+
+impl LocalExecutionContext {
+    fn new(repository: &Path, base: &str) -> Result<Self> {
+        let base = resolve_commit(repository, base)?;
+        let head = resolve_commit(repository, "HEAD")?;
+        let merge_base = git_stdout(repository, ["merge-base", base.as_str(), head.as_str()])?;
+        let merge_base = merge_base.trim();
+        validate_revision(merge_base, "local merge-base revision")?;
+        let snapshot = CommittedSnapshot::checkout(repository, &head)?;
+        Ok(Self {
+            base,
+            head,
+            merge_base: merge_base.to_owned(),
+            snapshot,
+        })
+    }
+
+    fn root(&self) -> &Path {
+        self.snapshot.root()
+    }
+
+    fn impact(&self) -> Result<ImpactSet> {
+        let entries = read_diff(self.root(), &self.base, &self.head)?;
+        if entries.is_empty() {
+            return Ok(ImpactSet::Empty);
+        }
+        if let Some(cause) = immediate_full_cause(&entries, None) {
+            return Ok(ImpactSet::Full(cause));
+        }
+        if entries.iter().all(|entry| documentation(&entry.path)) {
+            return Ok(impact_entries(
+                &entries,
+                None,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            ));
+        }
+        let graph = WorkspaceGraph::load(self.root())?;
+        impact_with_graph(self.root(), &entries, &graph, &self.merge_base)
+    }
+
+    fn impact_or_full(&self) -> ImpactSet {
+        self.impact().unwrap_or_else(|error| {
+            eprintln!("ci local：影响分析失败，fail-safe 到完整 verify：{error:#}");
+            ImpactSet::Full(FullCause::FallbackUncertainty)
+        })
+    }
+}
+
+static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// An isolated checkout of one committed revision. Local impact classification must not read
+/// manifests, contract metadata, generated files, or package topology from the caller's dirty
+/// working tree after the diff revisions have been resolved.
+struct CommittedSnapshot {
+    scratch: PathBuf,
+    root: PathBuf,
+}
+
+impl CommittedSnapshot {
+    fn checkout(repository: &Path, revision: &str) -> Result<Self> {
+        let repository = repository
+            .to_str()
+            .context("workspace path is not valid UTF-8")?;
+        let counter = SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let scratch = std::env::temp_dir().join(format!(
+            "rss-ci-local-snapshot-{}-{counter}",
+            std::process::id()
+        ));
+        fs::create_dir(&scratch).context("create committed CI snapshot directory")?;
+        let scratch = fs::canonicalize(scratch).context("canonicalize CI snapshot directory")?;
+        let root = scratch.join("tree");
+        let root_text = root
+            .to_str()
+            .context("snapshot path is not valid UTF-8")?
+            .to_owned();
+        let snapshot = Self { scratch, root };
+        let clone = external_cmd(
+            ExternalProgram::SystemGit,
+            &[
+                "clone",
+                "--quiet",
+                "--shared",
+                "--no-checkout",
+                "--",
+                repository,
+                &root_text,
+            ],
+            &[],
+            None,
+        )
+        .status()
+        .context("clone committed CI snapshot")?;
+        if !clone.success() {
+            bail!("clone committed CI snapshot failed");
+        }
+        let checkout = external_cmd(
+            ExternalProgram::SystemGit,
+            &["checkout", "--quiet", "--detach", revision, "--"],
+            &[],
+            Some(snapshot.root()),
+        )
+        .status()
+        .context("checkout committed CI snapshot")?;
+        if !checkout.success() {
+            bail!("checkout committed CI snapshot failed");
+        }
+        Ok(snapshot)
+    }
+
+    fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for CommittedSnapshot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.scratch);
+    }
+}
+
+fn resolve_commit(root: &Path, revision: &str) -> Result<String> {
+    let commit = format!("{revision}^{{commit}}");
+    let output = git_stdout(
+        root,
+        ["rev-parse", "--verify", "--end-of-options", commit.as_str()],
+    )?;
+    let value = output.trim();
+    if output.lines().count() != 1 {
+        bail!("git revision does not resolve to exactly one commit");
+    }
+    validate_revision(value, "local base revision")?;
+    Ok(value.to_owned())
+}
+
+impl LocalStep {
+    fn label(&self) -> String {
+        match self {
+            Self::FastMeta => "fast/meta".to_owned(),
+            Self::FullVerify => "full verify fallback".to_owned(),
+            Self::Packages {
+                operation,
+                packages,
+            } => format!("{} {}", operation.label(), packages.join(",")),
+            Self::Feature(gate) => {
+                format!(
+                    "registered deterministic test scope {}",
+                    gate.package().unwrap_or("workspace")
+                )
+            }
+            Self::FeatureCompile(scope) => {
+                format!("compile {}[{}] --no-run", scope.package(), scope.feature())
+            }
+        }
+    }
+}
+
+impl LocalCargoOperation {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Check => "check reverse closure",
+            Self::Test => "test direct packages",
+            Self::Clippy => "clippy direct packages",
+        }
+    }
+
+    const fn subcommand(self) -> CargoSubcommand {
+        match self {
+            Self::Check => CargoSubcommand::Check,
+            Self::Test => CargoSubcommand::Test,
+            Self::Clippy => CargoSubcommand::Clippy,
+        }
+    }
+}
+
+fn run_local_step(context: &LocalExecutionContext, step: &LocalStep) -> Result<()> {
+    match step {
+        LocalStep::FastMeta => run_snapshot_verify(context, true),
+        LocalStep::FullVerify => run_snapshot_verify(context, false),
+        LocalStep::Packages {
+            operation,
+            packages,
+        } => run_package_operation(context.root(), *operation, packages),
+        LocalStep::Feature(scope) => crate::nextest::NextestInvocation::for_core(
+            *scope,
+            crate::nextest::NextestLane::Verify,
+            None,
+        )
+        .run(context.root(), &[]),
+        LocalStep::FeatureCompile(scope) => run_feature_compile(context.root(), *scope),
+    }
+}
+
+fn run_snapshot_verify(context: &LocalExecutionContext, fast: bool) -> Result<()> {
+    let mut args = vec!["verify"];
+    if fast {
+        args.push("--fast");
+    }
+    args.extend(["--against", context.base.as_str()]);
+    let status = cargo_cmd(CargoSubcommand::Xtask, &args, &[], Some(context.root())).status()?;
+    if !status.success() {
+        bail!("ci local snapshot verify failed");
+    }
+    Ok(())
+}
+
+fn run_feature_compile(root: &Path, scope: LocalFeatureScope) -> Result<()> {
+    let args = [
+        "--locked",
+        "-p",
+        scope.package(),
+        "--features",
+        scope.feature(),
+        "--no-run",
+    ];
+    let status = cargo_cmd(CargoSubcommand::Test, &args, &[], Some(root)).status()?;
+    if !status.success() {
+        bail!(
+            "ci local feature compile failed for {}[{}]",
+            scope.package(),
+            scope.feature()
+        );
+    }
+    Ok(())
+}
+
+fn run_package_operation(
+    root: &Path,
+    operation: LocalCargoOperation,
+    packages: &[String],
+) -> Result<()> {
+    if packages.is_empty() {
+        bail!("ci local selective operation has an empty package set");
+    }
+    let mut owned = vec!["--locked".to_owned()];
+    if matches!(
+        operation,
+        LocalCargoOperation::Check | LocalCargoOperation::Clippy
+    ) {
+        owned.push("--all-targets".to_owned());
+    }
+    for package in packages {
+        owned.push("-p".to_owned());
+        owned.push(package.clone());
+    }
+    if operation == LocalCargoOperation::Clippy {
+        owned.extend(["--".to_owned(), "-D".to_owned(), "warnings".to_owned()]);
+    }
+    let args = owned.iter().map(String::as_str).collect::<Vec<_>>();
+    let status = cargo_cmd(operation.subcommand(), &args, &[], Some(root)).status()?;
+    if !status.success() {
+        bail!("ci local {} failed", operation.label());
+    }
+    Ok(())
 }
 
 fn read_diff(root: &Path, base: &str, head: &str) -> Result<Vec<DiffEntry>> {
@@ -1277,11 +1842,13 @@ fn read_diff(root: &Path, base: &str, head: &str) -> Result<Vec<DiffEntry>> {
         ExternalProgram::SystemGit,
         &[
             "diff",
-            range.as_str(),
             "--name-status",
             "-z",
             "--find-renames",
             "--find-copies",
+            "--find-copies-harder",
+            range.as_str(),
+            "--",
         ],
         &[],
         Some(root),
@@ -1336,59 +1903,102 @@ fn valid_similarity_status(value: &str, prefix: char) -> bool {
 
 #[cfg(test)]
 fn classify_diff(entries: &[DiffEntry]) -> Recommendation {
-    classify_entries(entries, None, &BTreeSet::new())
+    RemoteProjection::from(&impact_entries(
+        entries,
+        None,
+        &BTreeSet::new(),
+        &BTreeMap::new(),
+    ))
+    .into_recommendation()
 }
 
+#[cfg(test)]
 fn classify_with_graph(
     root: &Path,
     entries: &[DiffEntry],
     graph: &WorkspaceGraph,
     merge_base: &str,
 ) -> Result<Recommendation> {
-    let mut impacted = BTreeSet::new();
+    Ok(
+        RemoteProjection::from(&impact_with_graph(root, entries, graph, merge_base)?)
+            .into_recommendation(),
+    )
+}
+
+fn impact_with_graph(
+    root: &Path,
+    entries: &[DiffEntry],
+    graph: &WorkspaceGraph,
+    merge_base: &str,
+) -> Result<ImpactSet> {
+    let mut direct = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
     for entry in entries {
         if entry.path.starts_with("contracts/") {
-            let packages = contract_packages(root, &entry.path, entry.status, merge_base)?;
-            if packages.is_empty() || packages.iter().any(|package| !graph.contains(package)) {
+            let packages = contract_package_impacts(root, &entry.path, entry.status, merge_base)?;
+            if packages.is_empty() || packages.keys().any(|package| !graph.contains(package)) {
                 bail!("contract owner or subscriber is outside the workspace catalog");
             }
-            impacted.extend(packages);
+            for (package, reasons) in packages {
+                direct.entry(package).or_default().extend(reasons);
+            }
         } else if entry.path.starts_with("generated/src/") && !generated_entrypoint(&entry.path) {
             let domain = generated_domain(&entry.path)
                 .context("generated source path has no closed domain identity")?;
             if !graph.contains(&domain) {
                 bail!("generated domain is outside the workspace catalog");
             }
-            impacted.insert(domain);
-        } else if let Some(package) = graph.package_for_path(&entry.path) {
-            impacted.insert(package.to_owned());
+            direct
+                .entry(domain)
+                .or_default()
+                .insert(PackageImpact::Generated);
         }
     }
+    let mut impacted = direct.keys().cloned().collect::<BTreeSet<_>>();
+    impacted.extend(
+        entries
+            .iter()
+            .filter_map(|entry| graph.package_for_path(&entry.path).map(str::to_owned)),
+    );
     let closure = graph.reverse_closure(&impacted);
-    Ok(classify_entries(entries, Some(graph), &closure))
+    Ok(impact_entries(entries, Some(graph), &closure, &direct))
 }
 
-fn classify_entries(
+fn impact_entries(
     entries: &[DiffEntry],
     graph: Option<&WorkspaceGraph>,
     closure: &BTreeSet<String>,
-) -> Recommendation {
+    seeded_packages: &BTreeMap<String, BTreeSet<PackageImpact>>,
+) -> ImpactSet {
     if let Some(cause) = immediate_full_cause(entries, graph) {
-        return Recommendation::Full(cause);
+        return ImpactSet::Full(cause);
     }
-    let mut recommendation = Recommendation::empty();
+    if entries.is_empty() {
+        return ImpactSet::Empty;
+    }
+    let mut documentation_only = false;
+    let mut packages = seeded_packages.clone();
     for entry in entries {
         let path = entry.path.as_str();
         if documentation(path) {
-            recommendation.add(CiJobKey::CiMeta, JobReason::Documentation);
+            documentation_only = true;
             continue;
         }
         if path.starts_with("contracts/") {
-            recommendation.add_core(true, JobReason::ContractOwner);
+            if graph.is_none() {
+                packages
+                    .entry("contract-owner".to_owned())
+                    .or_default()
+                    .insert(PackageImpact::ContractOwner);
+            }
             continue;
         }
         if path.starts_with("generated/src/") {
-            recommendation.add_core(true, JobReason::GeneratedSource);
+            if graph.is_none() {
+                packages
+                    .entry("generated-domain".to_owned())
+                    .or_default()
+                    .insert(PackageImpact::Generated);
+            }
             continue;
         }
         let package = match graph {
@@ -1396,35 +2006,40 @@ fn classify_entries(
             None => path_package(path),
         };
         let Some(package) = package else {
-            return Recommendation::Full(FullCause::UnknownPath);
+            return ImpactSet::Full(FullCause::UnknownPath);
         };
         let is_test = path.contains("/tests/")
             || path.contains("/test/")
             || path.ends_with("_test.rs")
             || path.ends_with(".snap");
         let manifest = Path::new(path).file_name() == Some(OsStr::new("Cargo.toml"));
-        recommendation.add_core(
-            !is_test,
-            if is_test {
-                JobReason::CoreTest
-            } else {
-                JobReason::CoreSource
-            },
-        );
+        let reasons = packages.entry(package).or_default();
+        reasons.insert(if is_test {
+            PackageImpact::Test
+        } else {
+            PackageImpact::Source
+        });
         if manifest {
-            recommendation.add(CiJobKey::CiSecurity, JobReason::DependencyManifest);
+            reasons.insert(PackageImpact::Manifest);
         }
-        add_direct_integration(&mut recommendation, &package);
     }
+    let mut selected_shards = BTreeSet::new();
+    let mut integration_packages = closure.clone();
+    integration_packages.extend(packages.keys().cloned());
     for shard in IntegrationShard::ALL {
         if integration_shards::batches(*shard)
             .iter()
-            .any(|batch| closure.contains(batch.package))
+            .any(|batch| integration_packages.contains(batch.package))
         {
-            recommendation.add_shard(*shard);
+            selected_shards.insert(*shard);
         }
     }
-    recommendation
+    ImpactSet::Selective(SelectiveImpact {
+        documentation: documentation_only,
+        packages,
+        reverse_closure: closure.clone(),
+        integration_shards: selected_shards,
+    })
 }
 
 fn immediate_full_cause(
@@ -1450,17 +2065,6 @@ fn immediate_full_cause(
             .is_some_and(|package| crate::layers::BASIS_CRATES.contains(&package))
             .then_some(FullCause::GlobalImpact)
     })
-}
-
-fn add_direct_integration(recommendation: &mut Recommendation, package: &str) {
-    for shard in IntegrationShard::ALL {
-        if integration_shards::batches(*shard)
-            .iter()
-            .any(|batch| batch.package == package)
-        {
-            recommendation.add_shard(*shard);
-        }
-    }
 }
 
 fn documentation(path: &str) -> bool {
@@ -1518,18 +2122,36 @@ fn generated_domain(path: &str) -> Option<String> {
     stem.split_once("_v").map(|(domain, _)| domain.to_owned())
 }
 
+#[cfg(test)]
 fn contract_packages(
     root: &Path,
     changed_path: &str,
     status: DiffStatus,
     merge_base: &str,
 ) -> Result<BTreeSet<String>> {
+    Ok(
+        contract_package_impacts(root, changed_path, status, merge_base)?
+            .into_keys()
+            .collect(),
+    )
+}
+
+fn contract_package_impacts(
+    root: &Path,
+    changed_path: &str,
+    status: DiffStatus,
+    merge_base: &str,
+) -> Result<BTreeMap<String, BTreeSet<PackageImpact>>> {
     let manifest_path =
         contract_manifest_path(changed_path).context("contract path has no manifest")?;
     let absolute = root.join(&manifest_path);
-    let mut packages = BTreeSet::new();
+    let mut packages = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
     let mut extend = |source: &str, origin: &str| -> Result<()> {
-        packages.extend(contract_manifest_packages(source).with_context(|| origin.to_owned())?);
+        for (package, reasons) in
+            contract_manifest_impacts(source).with_context(|| origin.to_owned())?
+        {
+            packages.entry(package).or_default().extend(reasons);
+        }
         Ok(())
     };
     let read_current = || {
@@ -1559,16 +2181,24 @@ fn contract_packages(
     Ok(packages)
 }
 
-fn contract_manifest_packages(source: &str) -> Result<BTreeSet<String>> {
+fn contract_manifest_impacts(source: &str) -> Result<BTreeMap<String, BTreeSet<PackageImpact>>> {
     let manifest = ContractManifest::from_toml_str(source).context("parse impacted contract")?;
-    let mut packages = BTreeSet::new();
+    let mut packages = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
     match manifest.owner {
         ContractOwner::Domain(owner) => {
-            packages.insert(owner);
+            packages
+                .entry(owner)
+                .or_default()
+                .insert(PackageImpact::ContractOwner);
         }
         ContractOwner::Framework => bail!("framework-owned contract has no workspace owner"),
     }
-    packages.extend(manifest.subscriptions.into_iter().map(|item| item.consumer));
+    for subscription in manifest.subscriptions {
+        packages
+            .entry(subscription.consumer)
+            .or_default()
+            .insert(PackageImpact::ContractSubscriber);
+    }
     Ok(packages)
 }
 
@@ -2163,6 +2793,277 @@ mod tests {
     }
 
     #[test]
+    fn local_options_are_closed_and_fail_closed() -> Result<()> {
+        assert_eq!(
+            parse_local_options(&["--base", "origin/develop"])?,
+            LocalOptions {
+                base: "origin/develop".to_owned(),
+            }
+        );
+        for args in [
+            Vec::<&str>::new(),
+            vec!["--base"],
+            vec!["--base", "main", "--base", "develop"],
+            vec!["--base", "--working-tree"],
+            vec!["--head", "main"],
+            vec!["main"],
+        ] {
+            assert!(parse_local_options(&args).is_err(), "accepted {args:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn one_impact_set_projects_to_local_and_remote_without_path_remapping() {
+        let empty = impact_entries(&[], None, &BTreeSet::new(), &BTreeMap::new());
+        assert_eq!(LocalProjection::from(&empty), LocalProjection::Empty);
+        assert_eq!(
+            RemoteProjection::from(&empty).selected_names(),
+            vec!["ci-meta"]
+        );
+
+        let docs = impact_entries(
+            &[DiffEntry::modified("docs/ops/example.md")],
+            None,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(LocalProjection::from(&docs), LocalProjection::FastMeta);
+
+        let mut direct = BTreeMap::new();
+        direct.insert("leaf".to_owned(), BTreeSet::from([PackageImpact::Source]));
+        let selective = impact_entries(
+            &[DiffEntry::modified("crates/leaf/src/lib.rs")],
+            None,
+            &BTreeSet::from(["consumer".to_owned(), "leaf".to_owned()]),
+            &direct,
+        );
+        assert_eq!(
+            LocalProjection::from(&selective),
+            LocalProjection::Selective {
+                check_packages: vec!["consumer".to_owned(), "leaf".to_owned()],
+                test_clippy_packages: vec!["leaf".to_owned()],
+                feature_gates: Vec::new(),
+                feature_compile_scopes: Vec::new(),
+            }
+        );
+        assert!(
+            RemoteProjection::from(&selective)
+                .selected_names()
+                .contains(&"ci-core-tests/1-of-2")
+        );
+
+        let full = impact_entries(
+            &[DiffEntry::rename("crates/leaf/src/lib.rs")],
+            None,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        );
+        assert!(matches!(
+            LocalProjection::from(&full),
+            LocalProjection::Full
+        ));
+        assert_eq!(
+            RemoteProjection::from(&full).selected_names().len(),
+            CiJobKey::COUNT
+        );
+    }
+
+    #[test]
+    fn selective_local_steps_are_ordered_and_feature_gates_are_closed() {
+        let projection = LocalProjection::Selective {
+            check_packages: vec!["redis-adapter".to_owned(), "runtime".to_owned()],
+            test_clippy_packages: vec!["redis-adapter".to_owned()],
+            feature_gates: vec![crate::nextest::CoreTestScope::RedisBackend],
+            feature_compile_scopes: vec![LocalFeatureScope::RedisAdapter],
+        };
+        assert_eq!(
+            projection.steps(),
+            vec![
+                LocalStep::FastMeta,
+                LocalStep::Packages {
+                    operation: LocalCargoOperation::Check,
+                    packages: vec!["redis-adapter".to_owned(), "runtime".to_owned()],
+                },
+                LocalStep::Packages {
+                    operation: LocalCargoOperation::Test,
+                    packages: vec!["redis-adapter".to_owned()],
+                },
+                LocalStep::Packages {
+                    operation: LocalCargoOperation::Clippy,
+                    packages: vec!["redis-adapter".to_owned()],
+                },
+                LocalStep::Feature(crate::nextest::CoreTestScope::RedisBackend),
+                LocalStep::FeatureCompile(LocalFeatureScope::RedisAdapter),
+            ]
+        );
+        assert_eq!(
+            crate::nextest::CoreTestScope::RedisBackend.package(),
+            Some("redis-adapter")
+        );
+    }
+
+    #[test]
+    fn selected_integration_shards_compile_their_feature_scopes_without_running() -> Result<()> {
+        let mut direct = BTreeMap::new();
+        direct.insert("mqtt".to_owned(), BTreeSet::from([PackageImpact::Source]));
+        let impact = impact_entries(
+            &[DiffEntry::modified("adapters/mqtt/src/lib.rs")],
+            None,
+            &BTreeSet::from(["mqtt".to_owned()]),
+            &direct,
+        );
+        let ImpactSet::Selective(mut selective) = impact else {
+            bail!("mqtt source change must remain selective");
+        };
+        selective
+            .integration_shards
+            .insert(IntegrationShard::EventTransport);
+
+        let labels = LocalProjection::from(&ImpactSet::Selective(selective))
+            .steps()
+            .iter()
+            .map(LocalStep::label)
+            .collect::<Vec<_>>();
+        for package in ["amqp", "mqtt", "journeys", "runtime"] {
+            assert!(
+                labels
+                    .iter()
+                    .any(|label| label == &format!("compile {package}[integration] --no-run")),
+                "selected shard omitted {package}[integration]: {labels:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn local_executor_stops_at_the_first_failed_step() {
+        let steps = vec![
+            LocalStep::FastMeta,
+            LocalStep::Packages {
+                operation: LocalCargoOperation::Check,
+                packages: vec!["leaf".to_owned()],
+            },
+            LocalStep::Packages {
+                operation: LocalCargoOperation::Test,
+                packages: vec!["leaf".to_owned()],
+            },
+        ];
+        let mut executed = Vec::new();
+        let result = execute_local_steps(&steps, |step| {
+            executed.push(step.clone());
+            if executed.len() == 2 {
+                bail!("synthetic failure");
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(executed, steps[..2]);
+    }
+
+    #[test]
+    fn local_impact_reads_committed_base_range_only_and_fails_safe() -> Result<()> {
+        let temporary_root = crate::testutil::unique_tmp("ci-impact-local-range");
+        fs::create_dir_all(temporary_root.join("crates/leaf/src"))?;
+        let root = fs::canonicalize(temporary_root)?;
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers=['crates/leaf']\nresolver='2'\n",
+        )?;
+        fs::write(
+            root.join("crates/leaf/Cargo.toml"),
+            "[package]\nname='leaf'\nversion='0.0.0'\nedition='2024'\n",
+        )?;
+        let source_path = root.join("crates/leaf/src/lib.rs");
+        fs::write(&source_path, "pub fn value() -> u8 { 1 }\n")?;
+        git(&root, &["init"])?;
+        let status =
+            cargo_cmd(CargoSubcommand::GenerateLockfile, &[], &[], Some(&root)).status()?;
+        if !status.success() {
+            bail!("generate-lockfile fixture command failed");
+        }
+        let base = commit_all(&root, "base")?;
+
+        fs::write(&source_path, "pub fn value() -> u8 { 2 }\n")?;
+        fs::write(root.join("untracked.bin"), "not part of committed range")?;
+        assert_eq!(local_impact(&root, &base), ImpactSet::Empty);
+
+        fs::write(&source_path, "pub fn value() -> u8 { 1 }\n")?;
+        fs::remove_file(root.join("untracked.bin"))?;
+        fs::create_dir_all(root.join("docs/ops"))?;
+        fs::write(root.join("docs/ops/local.md"), "committed docs\n")?;
+        commit_all(&root, "docs")?;
+        assert_eq!(
+            LocalProjection::from(&local_impact(&root, &base)),
+            LocalProjection::FastMeta
+        );
+
+        fs::write(&source_path, "pub fn value() -> u8 { 3 }\n")?;
+        commit_all(&root, "source")?;
+        let committed_projection = LocalProjection::from(&local_impact(&root, &base));
+        assert!(matches!(
+            committed_projection,
+            LocalProjection::Selective { .. }
+        ));
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers=['dirty-untracked-member']\nresolver='2'\n",
+        )?;
+        fs::create_dir_all(root.join("dirty-untracked-member"))?;
+        fs::write(
+            root.join("dirty-untracked-member/Cargo.toml"),
+            "[package]\nname='dirty-untracked-member'\nversion='0.0.0'\nedition='2024'\n",
+        )?;
+        assert_eq!(
+            LocalProjection::from(&local_impact(&root, &base)),
+            committed_projection,
+            "dirty and untracked manifests must not affect committed impact classification"
+        );
+        assert!(matches!(
+            local_impact(&root, "refs/heads/does-not-exist"),
+            ImpactSet::Full(FullCause::FallbackUncertainty)
+        ));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn local_execution_context_binds_revisions_and_excludes_caller_dirt() -> Result<()> {
+        let temporary_root = crate::testutil::unique_tmp("ci-impact-local-context");
+        fs::create_dir_all(&temporary_root)?;
+        let root = fs::canonicalize(temporary_root)?;
+        fs::write(root.join("tracked.txt"), "base\n")?;
+        git(&root, &["init"])?;
+        let base = commit_all(&root, "base")?;
+        git(&root, &["branch", "base-ref", &base])?;
+
+        fs::write(root.join("tracked.txt"), "committed head\n")?;
+        let head = commit_all(&root, "head")?;
+        fs::write(root.join("tracked.txt"), "dirty caller\n")?;
+        git(&root, &["add", "tracked.txt"])?;
+        fs::write(root.join("untracked.txt"), "caller only\n")?;
+
+        let context = LocalExecutionContext::new(&root, "refs/heads/base-ref")?;
+        assert_eq!(context.base, base);
+        assert_eq!(context.head, head);
+        assert_eq!(context.merge_base, context.base);
+        assert_ne!(context.root(), root);
+        assert_eq!(
+            git_stdout(context.root(), ["rev-parse", "HEAD"])?.trim(),
+            context.head
+        );
+        assert_eq!(
+            fs::read_to_string(context.root().join("tracked.txt"))?,
+            "committed head\n"
+        );
+        assert!(!context.root().join("untracked.txt").exists());
+
+        drop(context);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     #[allow(clippy::cognitive_complexity)]
     fn real_git_pr_plans_preserve_shadow_adaptive_global_and_fallback_semantics() -> Result<()> {
         let temporary_root = crate::testutil::unique_tmp("ci-impact-real-pr");
@@ -2242,10 +3143,20 @@ mod tests {
         assert_eq!(rename_plan.decision_reason, DecisionReason::RenameOrCopy);
         assert!(rename_plan.full_fallback);
 
+        fs::copy(
+            root.join("crates/leaf/src/renamed.rs"),
+            root.join("crates/leaf/src/copied.rs"),
+        )?;
+        let copied = commit_all(&root, "copy unchanged source")?;
+        let copy_plan = plan_fixture_pr(&root, &renamed, &copied, PolicyMode::Adaptive)?;
+        assert_eq!(copy_plan.decision_kind, DecisionKind::FallbackFull);
+        assert_eq!(copy_plan.decision_reason, DecisionReason::RenameOrCopy);
+        assert!(copy_plan.full_fallback);
+
         fs::create_dir_all(root.join("unowned"))?;
         fs::write(root.join("unowned/input.bin"), "unknown")?;
         let unknown = commit_all(&root, "unknown")?;
-        let unknown_plan = plan_fixture_pr(&root, &renamed, &unknown, PolicyMode::Adaptive)?;
+        let unknown_plan = plan_fixture_pr(&root, &copied, &unknown, PolicyMode::Adaptive)?;
         assert_eq!(unknown_plan.decision_kind, DecisionKind::FallbackFull);
         assert_eq!(unknown_plan.decision_reason, DecisionReason::UnknownPath);
         assert!(unknown_plan.full_fallback);

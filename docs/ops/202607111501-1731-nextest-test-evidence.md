@@ -5,10 +5,11 @@ CI 的 nextest 执行统一经过 `xtask` typed 漏斗。`ci-core`、`integratio
 
 ## CI topology
 
-- Core prerequisite 固定运行一次；Core tests 固定运行 `cargo xtask ci-core-tests --partition 1/2` 与 `2/2`。
+- Core prerequisite 固定运行 `cargo xtask ci run --job ci-core-prerequisites`；Core tests 固定运行
+  `cargo xtask ci run --job ci-core-tests/1-of-2` 与 `ci-core-tests/2-of-2`。
 - `event-transport`、`runtime-http-auth` 各运行 `1/2` 与 `2/2`；单个 hash bucket 可以合法为空，
   两个 bucket 的并集才是完整验收面。
-- `postgres-domain`、`consistency-fault`、`cdc-projection-saga` 不传 partition。fault matrix 当前只有
+- `postgres-domain`、`consistency-fault`、`cdc-projection-saga`、`object-storage` 不带 partition。fault matrix 当前只有
   一个顶层测试，使用独立 600 秒 `fault-matrix` profile，不伪装成可均衡拆分。
 
 ## Evidence 与重放
@@ -39,12 +40,13 @@ v2 sidecar 仅含闭合 Core scope、Coverage 或 Integration batch `ReplaySpec`
 Docker/外部资源能力。输出日志可能来自被测程序，排障
 时不得把 secret 或生产 endpoint 复制进 issue/PR。
 
-受保护分支 required checks 应在合入窗口根据 GitHub 实际 checks 核对并原子切换到完整 context：
+受保护分支 required checks 应在合入窗口根据 GitHub 实际 checks 核对并原子切换到完整 context。下列
+`cargo xtask ...` 是 reusable workflow 的稳定显示名，不是可调用的旧 CLI 入口：
 `CI / ci-core-prerequisites / cargo xtask ci-core-prerequisites`、
 `CI / ci-core-tests / 1/2 / cargo xtask ci-core-tests` 与
 `CI / ci-core-tests / 2/2 / cargo xtask ci-core-tests`。代码不提供旧
 aggregate context 的兼容 shim；若 GitHub 展示名与预期不同，以合入窗口实际 check-run context 为准。
 
-Integration 完整 check 名按七行 matrix 展开为
+Integration 完整 check 名按八行 matrix 展开为
 `Integration Tests / integration / <shard> / <partition-label> / cargo xtask integration`；未分区行的 label 为
 `unpartitioned`，分区行只使用 filesystem-safe 的 `1-of-2` / `2-of-2`。

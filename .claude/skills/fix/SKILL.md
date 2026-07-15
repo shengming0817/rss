@@ -160,7 +160,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 
 ### 3.3 详细修复计划
 
-文件级改动清单 + 目标 crate 的 build / test / clippy 命令；涉及并发时补 `--features integration` 或 `loom`。收尾固定 `make verify-fast` + `cargo check --workspace --all-targets`，再补改动范围定向测试。
+文件级改动清单 + 能复现 finding 的最小测试；Rust crate 改动可在编辑循环中补对应 build / test，涉及并发时补 `--features integration` 或 `loom`。收尾统一运行 `make ci CI_BASE=<remote>/develop`，skill 不重复低层门。
 
 ### 3.4 执行决策
 
@@ -216,8 +216,8 @@ scope 按 crate 名（扁平 workspace，如 `consistency` / `httpserve` / `iden
 1. **TaskUpdate → in_progress**（开始处理当前任务）
 2. Read 目标文件
 3. Edit / Write 修改代码
-4. `cargo build -p <修改的 crate>` — 只编译当前 crate，快速检查
-5. `cargo test -p <修改的 crate>` — **立即运行测试**（含阶段 1.4 的复现测试）
+4. **Rust crate 改动**：对受影响 crate 运行快速 build 与阶段 1.4 的复现测试；**非 crate 改动**：直接运行对应的最小复现测试，不强制 Cargo build/test
+5. 立即检查测试结果
 6. 如果测试失败：
    - 分析失败原因
    - 如果是当前编辑引入 → 立即修正，重回步骤 3
@@ -226,7 +226,7 @@ scope 按 crate 名（扁平 workspace，如 `consistency` / `httpserve` / `iden
 
 ### 4.3 编辑循环收敛
 
-确认每条 finding 的复现测试与目标 crate Edit-Test Loop 已通过；不在此重复跑最终本地漏斗。完整 `verify-fast + workspace check + 定向 test/clippy` 统一在 4.6 **切 label 后**执行。
+确认每条 finding 的复现测试与适用的 Edit-Test Loop 已通过；不在此重复跑最终本地漏斗。canonical `make ci CI_BASE=<remote>/develop` 统一在 4.6 **切 label 后**执行。
 
 ### 4.4 测试失败处理（分层回退）
 
@@ -252,7 +252,7 @@ scope 按 crate 名（扁平 workspace，如 `consistency` / `httpserve` / `iden
 3. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 处置门判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明 `Discovered via /fix #<original>`；`pri-p0`→停 AskUserQuestion、`validate` 失败→`deferred=labels-underivable` 回退草稿。OOS 另贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
 4. **pm:fix**（`--kind=fix`，OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
 5. **切 label**：按 `PROJECT.md` §5 执行 `forge.sh pr-set-labels <PR#> --add pr-status/needs-check-fix --remove pr-status/needs-fix`。**前置不变式（artifact-before-trigger）**：全部 deferred 的 issue 已建、pm 评论已贴，方可切 label（与 ship 阶段 8 同序）。
-6. **本地验证（label 后执行）**：运行 `make verify-fast` → `cargo check --workspace --all-targets` → 按 diff 选择的 crate / feature / 行为定向 test / clippy。`verify-fast` 不执行编译，也不等价完整 GitHub CI；workspace check 在 #1752 落地前闭合反向依赖编译面。失败则回阶段 1-4，修复 push 后重新执行冲突预检、pm 评论与 label 流转，再重跑本步骤。
+6. **本地验证（label 后执行）**：运行 `make ci CI_BASE=<remote>/develop`。该 canonical 入口只分析 `<remote>/develop...HEAD` 的已提交项目差异，并由 typed 影响模型决定本地 preflight；失败则回阶段 1-4，修复并 push 后重新执行冲突预检、pm 评论与 label 流转，再重跑本步骤。
 7. **延迟启监控（必做）**：本地验证结束后延迟约 15min 启 `/pr-monitor <PR#> --mode=auto`（check-side）；外部 app 可在 `needs-check-fix` 后先行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后 **TaskUpdate → completed**。
 
 Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri-p0` 仅 incident（线上故障/数据完整性/CVE）停 AskUserQuestion。

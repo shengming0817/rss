@@ -2,6 +2,7 @@
 //!
 //! 该命令只验证 #1779 已冻结的文档、schema、任务图与指纹协议；未来运行时能力仍由各 RTD owner 落地。
 
+use crate::cmd::{ExternalProgram, external_cmd};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -10,7 +11,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const FEATURE_REL: &str = "docs/spec/007-runtime-deployment-executable-plan";
 const ARCH_REL: &str = "docs/architecture/202607142137-1779-runtime-deployment-target.md";
@@ -1126,11 +1126,14 @@ fn validate_diff(root: &Path, reference: &str) -> Result<()> {
             "generated churn is non-zero: {path}"
         );
     }
-    let status = Command::new("/usr/bin/git")
-        .current_dir(root)
-        .args(["diff", "--check", merge_base, "--"])
-        .status()
-        .context("run git diff --check")?;
+    let status = external_cmd(
+        ExternalProgram::SystemGit,
+        &["diff", "--check", merge_base, "--"],
+        &[],
+        Some(root),
+    )
+    .status()
+    .context("run git diff --check")?;
     ensure!(status.success(), "git diff --check failed");
     Ok(())
 }
@@ -1140,9 +1143,7 @@ fn diff_path_allowed(path: &str) -> bool {
 }
 
 fn git<const N: usize>(root: &Path, args: [&str; N]) -> Result<String> {
-    let output = Command::new("/usr/bin/git")
-        .current_dir(root)
-        .args(args)
+    let output = external_cmd(ExternalProgram::SystemGit, &args, &[], Some(root))
         .output()
         .context("run git")?;
     ensure!(

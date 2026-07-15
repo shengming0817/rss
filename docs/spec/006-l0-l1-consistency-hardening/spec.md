@@ -34,7 +34,7 @@ As a reviewer, I can determine from generated evidence and machine checks whethe
 
 As a domain developer or operator, I can trace every active `LocalTx` contract through generated evidence, route ownership, tests, adapter behavior, and bounded metrics; contracts admitted by the status board additionally close through the live Postgres validation journey.
 
-**Independent test**: Run `localtx-coverage` for static closure and `ci-integration --shard postgres-domain` for real Postgres matrices and the #1706 journey.
+**Independent test**: Run `localtx-coverage` for static closure and `cargo xtask ci run --job integration/postgres-domain` for real Postgres matrices and the #1706 journey.
 
 **Acceptance scenarios**:
 
@@ -101,5 +101,5 @@ As a contributor, I can select fast, full, or live validation without confusing 
 ## Assumptions
 
 - #1686–#1706 are complete and their existing machine gates are the implementation truth.
-- Azure is the active PR/Boards forge; GitHub CI is Shadow evidence and `ci-gate` is not a required check.
+- CI activation, forge, Shadow, and required-check state are maintained only in the CI operations status document.
 - Periodic yank preflight, parent dependency major-version refresh, adaptive-CI activation, and forge-state synchronization remain out of scope.

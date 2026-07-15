@@ -443,7 +443,7 @@ generated spec 与 route 装配不一致或出现未知 permission 时必须 fai
 ## Governance reverse self-check
 
 `cargo xtask tenancy-closeout` 是本规则的最终 no-compile 反向自检，并接入
-`cargo xtask verify` / `cargo xtask ci`。它不重做业务测试，而是锁以下 governance 锚点：
+`cargo xtask verify` / `cargo xtask ci full`。它不重做业务测试，而是锁以下 governance 锚点：
 
 - verify/ci plan 必须包含 tenant/RLS/AuthZ 相关门：`contract-validate`、`codegen-check`、
   `schema-rls`、`setlocal-funnel`、`pg-tenant-tx-guard`、`repo-scope-guard`、`pdp-allow-guard`、

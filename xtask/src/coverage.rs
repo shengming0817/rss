@@ -1,4 +1,4 @@
-//! `cargo xtask ci` 覆盖率门 —— 跑**一次**
+//! `cargo xtask ci full` / `cargo xtask ci run --job ci-coverage` 覆盖率门 —— 跑**一次**
 //! `cargo llvm-cov nextest --workspace --features testkit/containers`（出 export JSON，**兼作 nextest
 //! 门**：测试必须全绿，并留下 profdata）后评**两子门**（不重复跑测试）。feature 参数由
 //! [`crate::nextest::NextestInvocation::for_coverage`] 的 typed registry 单源构造，确保 feature-gated
@@ -12,7 +12,7 @@
 //!    adapters/域 crate 的大改动可零新测试照样过地板门。
 //!
 //! **不入 `cargo xtask verify`**（verify 是 stable-only 本地快门；覆盖率门慢、需 `cargo-llvm-cov` 工具 +
-//! 全 workspace 跑），只在 `cargo xtask ci`（CI 超集）内、由 GitHub Actions 调用。issue #1132 验收
+//! 全 workspace 跑），只在完整本地 CI 或 typed 远端 coverage job 内调用。issue #1132 验收
 //! 「cargo nextest run --workspace + cargo llvm-cov 阈值门（引擎/基础 ≥90%）」由本**一步**同时兑现——
 //! 单跑一次测试既是 nextest 门又出覆盖率（不重复跑）。`testkit/containers` 只显式闭合 testkit 的
 //! feature-gated conformance/fixture 代码；workspace 的 `integration` features 仍不启用 ⇒ 无需 DB/broker。

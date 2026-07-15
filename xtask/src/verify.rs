@@ -9,13 +9,13 @@
 //! 供快速迭代；冷缓存或 xtask 变更时，外层 Cargo 仍会构建 xtask 启动器。`--allow-missing-tools`
 //! 在缺外部工具时显式宽限（默认 fail-closed）。
 //!
-//! **`cargo xtask ci`（[`run_ci`]）= 本地兼容 CI 聚合**（issue #1132）：
+//! **`cargo xtask ci full`（[`run_ci`]）= 本地完整 CI 聚合**（issue #1132）：
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
 //! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api --check`（轴 A，见 `publicapi.rs`）。
-//! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci` 只供本地一次性跑全部
-//! CI 门。二者与 GitHub typed 14-job catalog 均经 [`plan_for`] 与 `CiJobKey` Hard 闭集派生，杜绝门集漂移。
+//! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci full` 只供本地一次性跑全部
+//! CI 门。二者与 GitHub typed 15-job catalog 均经 [`plan_for`] 与 `CiJobKey` Hard 闭集派生，杜绝门集漂移。
 //!
-//! **`cargo xtask audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，GitHub Actions
+//! **`cargo xtask ci run --job audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，GitHub Actions
 //! `schedule:` 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
 //! （皆 no-compile、快）。PR-triggered Shadow plan 含全量 `deny check`
 //! （advisories+licenses+bans+sources）+ cargo-audit；scheduled audit 专攻**时间维度**，捕获未改依赖的新披露
@@ -45,7 +45,6 @@
 //! INVARIANT: CI-INTEGRATION-SERVICE-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_service_lifecycle_predicate_green_and_synthetic_red", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— Integration lane 必须在 xtask 前建立 exact scope，在失败后有界取证并 always 精确清理；生命周期证据始终归档，服务日志仅失败时归档，且 workflow 禁止任何全局 Docker prune。
 //! INVARIANT: INTEGRATION-CONTAINER-OWNERSHIP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_container_source_contract_synthetic_red", anti_vacuity = "integration_container_source_contract_accepts_committed_sources" }—— testkit 只能在 owned 模块导入 AsyncRunner/调用 start，四类 fixture、四个 context env、四种 service、五个 ownership label 与精确 partition 闭集须和 shell/workflow 同步。
 
-#[cfg(test)]
 use crate::ci_lanes::CiJobKey;
 use crate::ci_lanes::{
     CiLane, CompatMembership, CompileKind, GateId, REGISTRY, StandaloneReason, ToolRequirement,
@@ -64,7 +63,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 /// verify 选项。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct VerifyOpts {
     /// Inner typed plan 只跑 `CompileKind::NoCompile` gate（fmt + meta + deny），跳过
     /// build/clippy/nextest/dylint；外层 Cargo 仍可能构建 xtask 启动器。
@@ -73,6 +72,7 @@ struct VerifyOpts {
     allow_missing_tools: bool,
     partition: Option<crate::nextest::HashPartition>,
     nextest_lane: crate::nextest::NextestLane,
+    contract_against: String,
 }
 
 /// in-process Rust 门（无外部进程 / 自管子进程）。
@@ -138,6 +138,8 @@ enum InternalCheck {
     MigrationsSerial,
     /// generated command policy 与生产 provider impl/callsite 集合守卫（COMMAND-IMPL-ALLOWLIST-01）。
     CommandSymmetry,
+    /// skill/template 的最终本地验证只能走 canonical `make ci`（CI-LOCAL-ENTRY-01）。
+    CiEntryGuard,
     /// reconcile scheduler transactional command outbox seam guard（RECONCILE-COMMAND-OUTBOX-SEAM-01）。
     ReconcileOutboxCommandGuard,
     /// governed scope（docs/rules + docs/architecture + .claude/rules + 根 config）结构化 defer 完整性 + 经典注解门
@@ -456,6 +458,14 @@ fn step_command_symmetry() -> Step {
         env: &[],
     }
 }
+fn step_ci_entry_guard() -> Step {
+    Step {
+        id: GateId::CiEntryGuard,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::CiEntryGuard),
+        env: &[],
+    }
+}
 fn step_reconcile_outbox_command_guard() -> Step {
     Step {
         id: GateId::ReconcileOutboxCommandGuard,
@@ -562,7 +572,7 @@ fn step_postgres_feature_matrix() -> Step {
 /// build/clippy/nextest 仅 workspace 默认 feature ⇒ 关键状态机测试（崩溃重投 / CAS fencing / DLX / sweep /
 /// redis 幂等 / amqp pub-sub + 跨 vhost / durable journey）默认门外、回归漏网。本步 `--no-run` 仅编译（不跑、
 /// 无需真实后端 / docker）纳入默认 verify 抓**编译漂移**；有 docker / env URL 时经
-/// `cargo xtask ci-integration --shard <name>` 按 target 实跑。ci lane 经 `--all-features --all-targets`
+/// `cargo xtask ci run --job integration/<shard>` 按 target 实跑。ci lane 经 `--all-features --all-targets`
 /// 已覆盖该编译面，故仅入
 /// `Verify` 计划、不入 `CompatibilityCi` 计划。
 fn step_integration_compile() -> Step {
@@ -842,7 +852,7 @@ macro_rules! define_step_dispatch {
 }
 crate::ci_lanes::gate_catalog!(define_step_dispatch);
 
-/// audit 精简供应链门步计划（issue #1133；统一 GitHub CI 的 typed Audit job 调 `cargo xtask audit`）。
+/// audit 精简供应链门步计划（issue #1133；统一 GitHub CI typed Audit job）。
 /// advisory-scoped deny + cargo-audit 两门，皆 no-compile、快——定时刷新只查漏洞库（捕获「未变依赖」新
 /// 披露 CVE）。**不含** licenses/bans：它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；
 /// `CompatibilityCi` 计划已用全量 `deny check` + cargo-audit 覆盖。audit 步与 ci 共享同一
@@ -1008,7 +1018,7 @@ fn run_one(
     tool_available: impl Fn(crate::cmd::CargoSubcommand) -> bool,
 ) -> Result<()> {
     let execute = || match step.kind {
-        StepKind::Internal(check) => run_internal(check),
+        StepKind::Internal(check) => run_internal(check, &opts.contract_against),
         StepKind::Nextest(scope) => {
             crate::nextest::NextestInvocation::for_core(scope, opts.nextest_lane, opts.partition)
                 .run(root, step.env)
@@ -1108,7 +1118,7 @@ fn run_tool_gated(
     }
 }
 
-fn run_internal(check: InternalCheck) -> Result<()> {
+fn run_internal(check: InternalCheck, contract_against: &str) -> Result<()> {
     match check {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
         InternalCheck::AssemblyValidate => run_check(&assembly::AssemblyValidate),
@@ -1116,10 +1126,8 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::AssemblyGraphCheck => {
             crate::graph::run(&crate::graph::Options::check_runtime())
         }
-        // against=origin/develop；active 默认 deny；固定 review rules 为 warn，但未确认 fail-closed。
-        InternalCheck::ContractBreaking => {
-            contract::breaking::run(contract::breaking::DEFAULT_AGAINST)
-        }
+        // active 默认 deny；固定 review rules 为 warn，但未确认 fail-closed。
+        InternalCheck::ContractBreaking => contract::breaking::run(contract_against),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::ShippedFeatureGuard => {
             run_check(&shipped_feature_guard::ShippedFeatureGuard)
@@ -1158,6 +1166,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::TenancyCloseout => run_check(&crate::tenancy_closeout::TenancyCloseout),
         InternalCheck::MigrationsSerial => run_check(&crate::migrations::MigrationSerialGuard),
         InternalCheck::CommandSymmetry => run_check(&crate::command_symmetry::CommandSymmetry),
+        InternalCheck::CiEntryGuard => crate::ci_entry_guard::run(),
         InternalCheck::ReconcileOutboxCommandGuard => {
             run_check(&reconcile_outbox_command_guard::ReconcileOutboxCommandGuard)
         }
@@ -1179,12 +1188,19 @@ fn run_labeled_plan(lane: &str, plan: &[Step], opts: &VerifyOpts, root: &Path) -
 }
 
 /// verify 入口：按 plan 顺序跑每步，fail-fast。
-pub(crate) fn run(fast: bool, allow_missing_tools: bool) -> Result<()> {
+pub(crate) fn run(
+    fast: bool,
+    allow_missing_tools: bool,
+    contract_against: Option<&str>,
+) -> Result<()> {
     let opts = VerifyOpts {
         fast,
         allow_missing_tools,
         partition: None,
         nextest_lane: crate::nextest::NextestLane::Verify,
+        contract_against: contract_against
+            .unwrap_or(contract::breaking::DEFAULT_AGAINST)
+            .to_owned(),
     };
     let root = workspace_root()?;
     let plan = verify_plan(&opts);
@@ -1205,6 +1221,7 @@ pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
         allow_missing_tools,
         partition: None,
         nextest_lane: crate::nextest::NextestLane::CiCore,
+        contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
     };
     let root = workspace_root()?;
     let plan = plan_for(PlanTarget::CompatibilityCi);
@@ -1227,6 +1244,7 @@ pub(crate) fn run_lane(
         allow_missing_tools,
         partition,
         nextest_lane: crate::nextest::NextestLane::CiCore,
+        contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
     };
     let root = workspace_root()?;
     let plan = if lane == CiLane::Core {
@@ -1256,6 +1274,7 @@ pub(crate) fn run_core_execution(
         allow_missing_tools,
         partition,
         nextest_lane: crate::nextest::NextestLane::CiCore,
+        contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
     };
     let root = workspace_root()?;
     let plan = plan_for(PlanTarget::Core(execution));
@@ -1267,8 +1286,95 @@ pub(crate) fn run_core_execution(
     run_labeled_plan(name, &plan, &opts, &root)
 }
 
+/// The sole executable meaning of a closed [`CiJobKey`]. Keeping this enum private prevents
+/// workflows or callers from rebuilding lane/shard/partition command strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobExecution {
+    Lane(CiLane),
+    Core {
+        execution: CoreExecution,
+        partition: Option<crate::nextest::HashPartition>,
+    },
+    Integration {
+        shard: IntegrationShard,
+        partition: Option<crate::nextest::HashPartition>,
+    },
+    Audit,
+}
+
+fn execution_for_job(job: CiJobKey) -> Result<JobExecution> {
+    let one_of_two = || crate::nextest::HashPartition::new(1, 2);
+    let two_of_two = || crate::nextest::HashPartition::new(2, 2);
+    Ok(match job {
+        CiJobKey::CiMeta => JobExecution::Lane(CiLane::Meta),
+        CiJobKey::CiCorePrerequisites => JobExecution::Core {
+            execution: CoreExecution::Prerequisites,
+            partition: None,
+        },
+        CiJobKey::CiCoreTests1Of2 => JobExecution::Core {
+            execution: CoreExecution::Tests,
+            partition: Some(one_of_two()?),
+        },
+        CiJobKey::CiCoreTests2Of2 => JobExecution::Core {
+            execution: CoreExecution::Tests,
+            partition: Some(two_of_two()?),
+        },
+        CiJobKey::CiSecurity => JobExecution::Lane(CiLane::Security),
+        CiJobKey::CiCoverage => JobExecution::Lane(CiLane::Coverage),
+        CiJobKey::IntegrationPostgresDomain => JobExecution::Integration {
+            shard: IntegrationShard::PostgresDomain,
+            partition: None,
+        },
+        CiJobKey::IntegrationEventTransport1Of2 => JobExecution::Integration {
+            shard: IntegrationShard::EventTransport,
+            partition: Some(one_of_two()?),
+        },
+        CiJobKey::IntegrationEventTransport2Of2 => JobExecution::Integration {
+            shard: IntegrationShard::EventTransport,
+            partition: Some(two_of_two()?),
+        },
+        CiJobKey::IntegrationRuntimeHttpAuth1Of2 => JobExecution::Integration {
+            shard: IntegrationShard::RuntimeHttpAuth,
+            partition: Some(one_of_two()?),
+        },
+        CiJobKey::IntegrationRuntimeHttpAuth2Of2 => JobExecution::Integration {
+            shard: IntegrationShard::RuntimeHttpAuth,
+            partition: Some(two_of_two()?),
+        },
+        CiJobKey::IntegrationConsistencyFault => JobExecution::Integration {
+            shard: IntegrationShard::ConsistencyFault,
+            partition: None,
+        },
+        CiJobKey::IntegrationCdcProjectionSaga => JobExecution::Integration {
+            shard: IntegrationShard::CdcProjectionSaga,
+            partition: None,
+        },
+        CiJobKey::IntegrationObjectStorage => JobExecution::Integration {
+            shard: IntegrationShard::ObjectStorage,
+            partition: None,
+        },
+        CiJobKey::Audit => JobExecution::Audit,
+    })
+}
+
+/// Execute exactly one typed CI job. CI is fail-closed, so this carrier intentionally has no
+/// local missing-tool allowance.
+pub(crate) fn run_job(job: CiJobKey) -> Result<()> {
+    match execution_for_job(job)? {
+        JobExecution::Lane(lane) => run_lane(lane, false, None),
+        JobExecution::Core {
+            execution,
+            partition,
+        } => run_core_execution(execution, false, partition),
+        JobExecution::Integration { shard, partition } => {
+            run_ci_integration(shard, false, partition)
+        }
+        JobExecution::Audit => run_audit(false),
+    }
+}
+
 /// audit 入口（issue #1133 供应链定时刷新 lane）：按 [`audit_plan`] 顺序跑每步，fail-fast。
-/// GitHub Actions schedule 由 typed matrix 调 `cargo xtask audit`（CI-ADAPTIVE-WORKFLOW-01）。
+/// GitHub Actions schedule 由 `ci run --job audit` 调用（CI-ADAPTIVE-WORKFLOW-01）。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺 deny/audit 工具 fail-closed。
 pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
@@ -1276,6 +1382,7 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
         allow_missing_tools,
         partition: None,
         nextest_lane: crate::nextest::NextestLane::Verify,
+        contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
     };
     let root = workspace_root()?;
     let plan = audit_plan();
@@ -1290,12 +1397,51 @@ mod tests {
     use super::*;
     use anyhow::Context as _;
 
+    #[test]
+    fn every_ci_job_has_one_typed_executor() -> anyhow::Result<()> {
+        assert_eq!(CiJobKey::ALL.len(), CiJobKey::COUNT);
+        for job in CiJobKey::ALL {
+            let execution = execution_for_job(job)?;
+            match execution {
+                JobExecution::Lane(lane) => {
+                    assert_eq!(job.lane_kind(), lane);
+                    assert!(job.shard().is_none());
+                    assert!(job.partition().is_none());
+                }
+                JobExecution::Core {
+                    execution,
+                    partition,
+                } => {
+                    let expected_lane = match execution {
+                        CoreExecution::Prerequisites => CiLane::CorePrerequisites,
+                        CoreExecution::Tests => CiLane::CoreTests,
+                        CoreExecution::Full => bail!("full core is not a matrix job"),
+                    };
+                    assert_eq!(job.lane_kind(), expected_lane);
+                    let partition = partition.map(|value| value.to_string());
+                    assert_eq!(job.partition(), partition.as_deref());
+                }
+                JobExecution::Integration { shard, partition } => {
+                    assert_eq!(job.lane_kind(), CiLane::Integration);
+                    assert_eq!(job.shard(), Some(shard.as_str()));
+                    assert_eq!(
+                        job.partition(),
+                        partition.as_ref().map(ToString::to_string).as_deref()
+                    );
+                }
+                JobExecution::Audit => assert_eq!(job, CiJobKey::Audit),
+            }
+        }
+        Ok(())
+    }
+
     fn opts(fast: bool, allow_missing_tools: bool) -> VerifyOpts {
         VerifyOpts {
             fast,
             allow_missing_tools,
             partition: None,
             nextest_lane: crate::nextest::NextestLane::Verify,
+            contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         }
     }
 
@@ -1305,7 +1451,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 34);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 35);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -1389,14 +1535,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_52_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_53_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 52);
+        assert_eq!(plan.len(), 53);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 52);
+        assert_eq!(ids.len(), 53);
     }
 
     #[test]
@@ -1446,6 +1592,7 @@ mod tests {
                 "tenancy-closeout",
                 "migrations-serial",
                 "command-symmetry",
+                "ci-entry-guard",
                 "reconcile-outbox-command-guard",
                 "defer-gate",
                 "build",
@@ -1612,6 +1759,7 @@ mod tests {
                 "tenancy-closeout",
                 "migrations-serial",
                 "command-symmetry",
+                "ci-entry-guard",
                 "reconcile-outbox-command-guard",
                 "defer-gate",
                 "deny"
@@ -1670,6 +1818,7 @@ mod tests {
                     "tenancy-closeout",
                     "migrations-serial",
                     "command-symmetry",
+                    "ci-entry-guard",
                     "reconcile-outbox-command-guard",
                     "defer-gate"
                 ],
@@ -2158,6 +2307,7 @@ mod tests {
                 "tenancy-closeout",
                 "migrations-serial",
                 "command-symmetry",
+                "ci-entry-guard",
                 "reconcile-outbox-command-guard",
                 "defer-gate",
                 "postgres-feature-matrix",
@@ -2700,6 +2850,65 @@ mod tests {
         }
     }
 
+    fn workflow_ci_executor_owners(steps: &[TypedStep]) -> Vec<(Option<&str>, String)> {
+        steps
+            .iter()
+            .flat_map(|step| {
+                step.run.iter().filter_map(|line| {
+                    let words = line
+                        .split_whitespace()
+                        .map(|word| word.trim_matches(|ch| matches!(ch, '\'' | '"' | ';')))
+                        .collect::<Vec<_>>();
+                    let mut command = None;
+                    for (index, word) in words.iter().enumerate() {
+                        if (*word == "cargo" || word.ends_with("hack/cargo.sh"))
+                            && words.get(index + 1).copied() == Some("xtask")
+                        {
+                            command = words.get(index + 2).copied();
+                            break;
+                        }
+                        if (*word == "cargo" || word.ends_with("hack/cargo.sh"))
+                            && words.get(index + 1).copied() == Some("run")
+                        {
+                            let tail = &words[index + 2..];
+                            if let Some(separator) = tail.iter().position(|word| *word == "--") {
+                                let runner = &tail[..separator];
+                                let targets_xtask = runner.windows(2).any(|window| {
+                                    window == ["-p", "xtask"]
+                                        || window == ["--package", "xtask"]
+                                        || (window[0] == "--manifest-path"
+                                            && workflow_xtask_manifest(window[1]))
+                                }) || runner.iter().any(|argument| {
+                                    matches!(*argument, "-pxtask" | "--package=xtask")
+                                        || argument
+                                            .strip_prefix("--manifest-path=")
+                                            .is_some_and(workflow_xtask_manifest)
+                                });
+                                if targets_xtask {
+                                    command = tail.get(separator + 1).copied();
+                                    break;
+                                }
+                            }
+                        }
+                        if word.ends_with("/xtask") {
+                            command = words.get(index + 1).copied();
+                            break;
+                        }
+                    }
+                    command
+                        .filter(|command| {
+                            *command == "ci" || *command == "audit" || command.starts_with("ci-")
+                        })
+                        .map(|command| (step.id.as_deref(), command.to_owned()))
+                })
+            })
+            .collect()
+    }
+
+    fn workflow_xtask_manifest(path: &str) -> bool {
+        path == "xtask/Cargo.toml" || path.ends_with("/xtask/Cargo.toml")
+    }
+
     fn typed_steps_in_lines(lines: &[(usize, &str)]) -> Vec<TypedStep> {
         let mut steps = Vec::new();
         for (steps_index, (steps_indent, text)) in lines.iter().enumerate() {
@@ -3027,7 +3236,7 @@ mod tests {
             && planner.run_exact(&[
                 "set -euo pipefail",
                 "mkdir -p target/ci-impact",
-                "cargo run --locked -p xtask -- ci-plan \\",
+                "cargo run --locked -p xtask -- ci plan \\",
                 "--event-path \"$GITHUB_EVENT_PATH\" \\",
                 "--policy .config/ci-impact.toml \\",
                 "--output target/ci-impact/ci-plan.json \\",
@@ -3060,7 +3269,7 @@ mod tests {
             && gate.if_expr.as_deref() == Some("${{ always() }}")
             && gate.run_exact(&[
                 "set -euo pipefail",
-                "cargo run --locked -p xtask -- ci-gate \\",
+                "cargo run --locked -p xtask -- ci gate \\",
                 "--plan target/ci-plan-download/ci-plan.json \\",
                 "--receipts target/ci-receipts \\",
                 "--planner-result \"${{ needs.ci-plan.result }}\" \\",
@@ -3246,7 +3455,10 @@ mod tests {
             && setup.with_exact("tool-cache-epoch", &["v4"])
             && setup.with_exact("writer-mode", &["false"])
             && setup.with_exact("evidence-enabled", &["false"])
-            && audit.run_exact(&["set -euo pipefail", "cargo run --locked -p xtask -- audit"])
+            && audit.run_exact(&[
+                "set -euo pipefail",
+                "cargo run --locked -p xtask -- ci run --job audit",
+            ])
     }
 
     /// CI caller 的结构化闭集谓词：唯一 planner → typed dynamic matrix → always aggregate gate。
@@ -3278,7 +3490,7 @@ mod tests {
             && scheduled_audit_fallback_is_closed(yaml)
             && yaml.matches("fromJSON(needs.ci-plan.outputs.matrix)").count() == 1
             && yaml.matches("uses: ./.github/workflows/rss-rust-lane.yml").count() == 1
-            && yaml.contains("cargo run --locked -p xtask -- ci-plan")
+            && yaml.contains("cargo run --locked -p xtask -- ci plan")
             && yaml.contains("--policy .config/ci-impact.toml")
             && yaml.contains("RSS_CI_FORCE_FULL: ${{ vars.RSS_CI_FORCE_FULL }}")
             && yaml.contains("ci-job-key: ${{ matrix.jobKey }}")
@@ -3289,7 +3501,7 @@ mod tests {
             && yaml.contains("partition: ${{ matrix.partition || '' }}")
             && yaml.contains("partition-label: ${{ matrix.partitionLabel }}")
             && yaml.contains("  ci-gate:\n    name: ci-gate\n    if: ${{ always() }}\n    needs: [ci-plan, execute]")
-            && yaml.contains("cargo run --locked -p xtask -- ci-gate")
+            && yaml.contains("cargo run --locked -p xtask -- ci gate")
             && yaml.contains("--planner-result \"${{ needs.ci-plan.result }}\"")
             && yaml.contains("--matrix-result \"${{ needs.execute.result }}\"")
             && yaml.contains("--metrics-output target/ci-gate-metrics.json")
@@ -3725,7 +3937,7 @@ mod tests {
             ("gate-missing-plan-path", green.replacen("            --plan target/ci-plan-download/ci-plan.json \\\n", "", 1)),
             ("gate-missing-receipts-path", green.replacen("            --receipts target/ci-receipts \\\n", "", 1)),
             ("planner-overwrites-plan", green.replacen("            --github-output \"$GITHUB_OUTPUT\"", "            --github-output \"$GITHUB_OUTPUT\"\n          : > target/ci-impact/ci-plan.json", 1)),
-            ("gate-replaces-receipts", green.replacen("          cargo run --locked -p xtask -- ci-gate \\\n", "          rm -rf target/ci-receipts\n          cargo run --locked -p xtask -- ci-gate \\\n", 1)),
+            ("gate-replaces-receipts", green.replacen("          cargo run --locked -p xtask -- ci gate \\\n", "          rm -rf target/ci-receipts\n          cargo run --locked -p xtask -- ci gate \\\n", 1)),
             ("planner-extra-step", green.replacen("      - name: Upload typed plan", "      - name: Bypass planner\n        run: true\n\n      - name: Upload typed plan", 1)),
             ("missing-audit-fallback", green.replacen("  scheduled-audit-fallback:\n", "  removed-audit-fallback:\n", 1)),
             ("audit-fallback-not-always", green.replacen("if: ${{ always() && github.event_name == 'schedule' && needs.ci-plan.result != 'success' }}", "if: ${{ github.event_name == 'schedule' && needs.ci-plan.result != 'success' }}", 1)),
@@ -3739,7 +3951,7 @@ mod tests {
             ("audit-fallback-epoch", green.replacen("          tool-cache-epoch: v4", "          tool-cache-epoch: v3", 1)),
             ("audit-fallback-writer", green.replacen("          writer-mode: false", "          writer-mode: true", 1)),
             ("audit-fallback-evidence", green.replacen("          evidence-enabled: false", "          evidence-enabled: true", 1)),
-            ("audit-fallback-command", green.replacen("          cargo run --locked -p xtask -- audit", "          cargo audit", 1)),
+            ("audit-fallback-command", green.replacen("          cargo run --locked -p xtask -- ci run --job audit", "          cargo audit", 1)),
             ("audit-fallback-step-moved-to-gate", setup_moved_to_gate),
             ("audit-fallback-extra-step", green.replacen("    steps:\n      - name: Checkout scheduled audit revision", "    steps:\n      - name: Bypass scheduled audit\n        run: true\n\n      - name: Checkout scheduled audit revision", 1)),
             (
@@ -4071,7 +4283,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         ));
     }
 
-    /// 真实 committed 文件：GitHub audit workflow 含每日定时刷新 lane，经 `cargo xtask audit` 委托
+    /// 真实 committed 文件：GitHub audit workflow 含每日定时刷新 lane，经 typed audit job 委托
     /// （issue #1133：捕获「未变依赖」新披露 CVE；门逻辑单源在 xtask，不内联）。
     #[test]
     fn github_audit_workflow_has_scheduled_audit_lane() -> anyhow::Result<()> {
@@ -5168,7 +5380,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             step.name.as_deref() == Some("Run closed xtask lane")
                 && step.timeout_minutes.as_deref() == Some("92")
                 && step.run_has_line(
-                    "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" \"${args[@]}\"",
+                    "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" ci run --job \"$RSS_CI_JOB_KEY\"",
                 )
         });
         let snapshot_ok = snapshot.is_some_and(|index| {
@@ -5431,21 +5643,6 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             step.env_exact("RSS_LANE", &["${{ inputs.lane }}"])
                 && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
                 && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
-                && step.run_contains("case \"$RSS_LANE\" in")
-                && [
-                    "ci-meta) args=(ci-meta) ;;",
-                    "ci-core-prerequisites) args=(ci-core-prerequisites) ;;",
-                    "ci-core-tests) args=(ci-core-tests --partition \"$RSS_PARTITION\") ;;",
-                    "ci-security) args=(ci-security) ;;",
-                    "ci-coverage) args=(ci-coverage) ;;",
-                    "audit) args=(audit) ;;",
-                ]
-                .iter()
-                .all(|line| step.run_has_line(line))
-                && step.run_has_line("integration)")
-                && step.run_contains("args=(ci-integration --shard \"$RSS_SHARD\")")
-                && step.run_contains("args+=(--partition \"$RSS_PARTITION\")")
-                && closed_lane_case(step) == Some(expected_reusable_lanes())
                 && step.env_exact(
                     "RSS_INTERNAL_SCCACHE_PATH",
                     &["${{ steps.setup.outputs.compiler-cache-path }}"],
@@ -5454,17 +5651,19 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     "RUSTC_WRAPPER",
                     &["${{ steps.setup.outputs.compiler-cache-path }}"],
                 )
-                && step.run_has_sequence(&[
+                && step.run_exact(&[
+                    "set -euo pipefail",
                     "cargo build --locked -p xtask",
                     "reset_outcome=success",
                     "if ! \"$RSS_INTERNAL_SCCACHE_PATH\" --zero-stats; then",
                     "reset_outcome=degraded",
                     "fi",
                     "echo \"compiler-cache-reset=$reset_outcome\" >> \"$GITHUB_OUTPUT\"",
-                    "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" \"${args[@]}\"",
+                    "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" ci run --job \"$RSS_CI_JOB_KEY\"",
                 ])
-                && step.run_has_line("*) exit 64 ;;")
         });
+        let unique_ci_executor =
+            workflow_ci_executor_owners(&steps) == [(Some("xtask"), "ci".to_owned())];
         let compiler_smoke_ok = compiler_smoke.is_some_and(|i| {
             let step = &steps[i];
             step.if_expr.as_deref() == Some("${{ inputs.lane == 'ci-core-prerequisites' }}")
@@ -5696,6 +5895,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             && download_save_ok
             && compiler_save_ok
             && xtask_ok
+            && unique_ci_executor
             && compiler_smoke_ok
             && after_build_stats_ok
             && after_save_errors_ok
@@ -6220,17 +6420,15 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             .find(|step| step.name.as_deref() == Some("Checkout"))
             .context("checkout step")?;
         assert!(checkout.with_exact("ref", &["${{ inputs.source-revision }}"]));
-        for id in ["policy", "xtask"] {
-            let step = green_steps
-                .iter()
-                .find(|step| step.id.as_deref() == Some(id))
-                .context("closed lane step")?;
-            assert_eq!(
-                closed_lane_case(step),
-                Some(expected_reusable_lanes()),
-                "{id}"
-            );
-        }
+        let policy = green_steps
+            .iter()
+            .find(|step| step.id.as_deref() == Some("policy"))
+            .context("closed lane policy step")?;
+        assert_eq!(
+            closed_lane_case(policy),
+            Some(expected_reusable_lanes()),
+            "policy"
+        );
         assert!(reusable_rust_lane_is_hardened(&green));
         assert_eq!(
             integration_policy_shards(&green),
@@ -6316,6 +6514,10 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ("anti_vacuity_failure=true", "anti_vacuity_failure=false"),
             ("[ \"$anti_vacuity_failure\" = false ]", "true"),
             (
+                "ci run --job \"$RSS_CI_JOB_KEY\"",
+                "ci run --job \"ci-meta\"",
+            ),
+            (
                 "if [ \"${{ steps.measure-compiler-cache.outcome }}\" = failure ]; then error_measure=$((error_measure + 1)); fi",
                 "true",
             ),
@@ -6331,6 +6533,50 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             );
         }
         for (label, red) in [
+            (
+                "typed-executor-omits-job",
+                green.replacen(" ci run --job \"$RSS_CI_JOB_KEY\"", " ci run", 1),
+            ),
+            (
+                "legacy-lane-case-restored",
+                green.replacen(
+                    "          cargo build --locked -p xtask",
+                    "          case \"$RSS_LANE\" in ci-meta) args=(ci-meta) ;; esac\n          cargo build --locked -p xtask",
+                    1,
+                ),
+            ),
+            (
+                "extra-executor-restored",
+                green.replacen(
+                    "          cargo build --locked -p xtask",
+                    "          cargo build --locked -p xtask\n          cargo run --locked -p xtask -- ci-meta",
+                    1,
+                ),
+            ),
+            (
+                "cross-step-extra-executor",
+                green.replacen(
+                    "          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
+                    "          cargo run --locked -p xtask -- ci run --job ci-meta\n          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
+                    1,
+                ),
+            ),
+            (
+                "cross-step-package-equals-executor",
+                green.replacen(
+                    "          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
+                    "          cargo run --package=xtask -- ci run --job ci-meta\n          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
+                    1,
+                ),
+            ),
+            (
+                "cross-step-manifest-executor",
+                green.replacen(
+                    "          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
+                    "          cargo run --manifest-path xtask/Cargo.toml -- audit\n          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
+                    1,
+                ),
+            ),
             (
                 "smoke-delete",
                 green.replacen("          \"$RSS_INTERNAL_SCCACHE_PATH\" --zero-stats\n", "", 1),
@@ -6756,8 +7002,8 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 1,
             ),
             green.replacen(
-                "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" \"${args[@]}\"",
-                "cargo run --locked -p xtask -- \"${args[@]}\"",
+                "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" ci run --job \"$RSS_CI_JOB_KEY\"",
+                "cargo run --locked -p xtask -- ci full",
                 1,
             ),
             green.replacen(
@@ -6839,7 +7085,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             "timeout-minutes: 240",
             "case \"$RSS_SHARD:$RSS_PARTITION_LABEL\" in :|*[!a-z0-9:-]*) exit 64 ;; esac",
             "id: xtask\n        timeout-minutes: 92",
-            "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" \"${args[@]}\"",
+            "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" ci run --job \"$RSS_CI_JOB_KEY\"",
             "RSS_XTASK_OUTCOME: ${{ steps.xtask.outcome }}",
             "case \"$RSS_XTASK_OUTCOME\" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac",
             "timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh collect",

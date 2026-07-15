@@ -14,7 +14,7 @@ port effect/privilege → runtime conformance。任一层缺失、重复、未�
   不包含 workspace build/test 编译门，也不运行 conformance 或连接 Postgres；冷缓存或 xtask 变更时，外层
   Cargo 仍会构建 xtask 启动器。
 - 完整 `verify` 额外执行 workspace/default conformance，并编译 integration targets，但不声称运行真实 backend。
-- `ci-integration --shard postgres-domain` 承载需要真实 Postgres 的相邻 L1 adapter/journey 验收；L0 准入本身
+- `cargo xtask ci run --job integration/postgres-domain` 承载需要真实 Postgres 的相邻 L1 adapter/journey 验收；L0 准入本身
   不能借 live 环境缺失而宽限。
 
 跨租户 capability 即使是 read 也必须携带 `CrossTenantPrivilege`，因此不满足 LocalOnly 所需的

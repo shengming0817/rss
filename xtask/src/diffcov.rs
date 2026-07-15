@@ -1,4 +1,5 @@
-//! `cargo xtask ci` per-PR-diff **增量**覆盖率门 —— 与「全 crate 绝对地板」门（[`crate::coverage`]）**共享
+//! `cargo xtask ci full` / `cargo xtask ci run --job ci-coverage` 的 per-PR-diff **增量**覆盖率门 ——
+//! 与「全 crate 绝对地板」门（[`crate::coverage`]）**共享
 //! 同一次 `cargo llvm-cov` 测试运行**（不重复跑测试）：地板门吃 export JSON，本门吃同一 profdata 出的
 //! lcov。判定 = 本 PR diff（相对 base，默认 `origin/develop`）**新增/修改的可执行行**聚合覆盖率必须
 //! ≥ [`DIFF_MIN_PERCENT`]。补 v1 地板门测不到的洞：全在 adapters/域 crate 的大改动可零新测试照样过绝对

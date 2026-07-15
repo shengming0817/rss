@@ -170,6 +170,25 @@ impl CiJobKey {
         self.descriptor().shard
     }
 
+    /// Closed projection from every integration shard to its non-empty executor set. Adding a
+    /// shard without deciding its workflow partitioning is therefore a compile error.
+    pub(crate) const fn for_shard(shard: IntegrationShard) -> &'static [Self] {
+        match shard {
+            IntegrationShard::PostgresDomain => &[Self::IntegrationPostgresDomain],
+            IntegrationShard::EventTransport => &[
+                Self::IntegrationEventTransport1Of2,
+                Self::IntegrationEventTransport2Of2,
+            ],
+            IntegrationShard::RuntimeHttpAuth => &[
+                Self::IntegrationRuntimeHttpAuth1Of2,
+                Self::IntegrationRuntimeHttpAuth2Of2,
+            ],
+            IntegrationShard::ConsistencyFault => &[Self::IntegrationConsistencyFault],
+            IntegrationShard::CdcProjectionSaga => &[Self::IntegrationCdcProjectionSaga],
+            IntegrationShard::ObjectStorage => &[Self::IntegrationObjectStorage],
+        }
+    }
+
     pub(crate) const fn partition(self) -> Option<&'static str> {
         self.descriptor().partition
     }
@@ -197,7 +216,16 @@ impl FromStr for CiJobKey {
         Self::ALL
             .into_iter()
             .find(|job| job.as_str() == value)
-            .ok_or_else(|| anyhow::anyhow!("unknown CI SLO job"))
+            .ok_or_else(|| {
+                let expected = Self::ALL
+                    .into_iter()
+                    .map(|job| job.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::anyhow!(
+                    "unknown CI job key '{value}'; expected one of: {expected}; integration jobs use integration/<shard>"
+                )
+            })
     }
 }
 
@@ -683,6 +711,17 @@ macro_rules! gate_catalog {
                 gate(
                         GateId::CommandSymmetry,
                         "command-symmetry",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
+            CiEntryGuard => (step_ci_entry_guard, Some("xtask/src/ci_entry_guard.rs"),
+                gate(
+                        GateId::CiEntryGuard,
+                        "ci-entry-guard",
                         META,
                         CompileKind::NoCompile,
                         INTERNAL,
@@ -1309,6 +1348,28 @@ mod tests {
     }
 
     #[test]
+    fn every_integration_shard_projects_to_all_and_only_its_jobs() {
+        let mut projected = Vec::new();
+        for shard in IntegrationShard::ALL {
+            let jobs = CiJobKey::for_shard(*shard);
+            assert!(!jobs.is_empty(), "shard {shard} must own an executor");
+            assert!(
+                jobs.iter().all(|job| job.shard() == Some(shard.as_str())),
+                "shard {shard} contains a foreign executor"
+            );
+            projected.extend_from_slice(jobs);
+        }
+        let catalog = CiJobKey::ALL
+            .into_iter()
+            .filter(|job| job.shard().is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            projected, catalog,
+            "shard projection must cover the catalog"
+        );
+    }
+
+    #[test]
     fn ci_lane_registry_accepts_canonical_green() {
         assert!(validate_registry(REGISTRY).is_ok());
         assert!(GateId::ALL.contains(&GateId::IdentityAuditTests));
@@ -1351,6 +1412,20 @@ mod tests {
         assert_eq!(testkit[0].evidence(), EvidenceKind::Test);
         assert!(testkit[0].belongs_to(CiLane::Core));
         assert_eq!(testkit[0].verify_membership(), VerifyMembership::Included);
+    }
+
+    #[test]
+    fn ci_job_key_diagnostic_is_generic_and_actionable() -> Result<()> {
+        let error = match "integration/not-registered".parse::<CiJobKey>() {
+            Err(error) => error.to_string(),
+            Ok(_) => anyhow::bail!("unknown job key must fail closed"),
+        };
+        assert!(error.contains("unknown CI job key"), "{error}");
+        assert!(error.contains("integration/not-registered"), "{error}");
+        assert!(error.contains("ci-meta"), "{error}");
+        assert!(error.contains("integration/<shard>"), "{error}");
+        assert!(!error.contains("SLO"), "{error}");
+        Ok(())
     }
 
     #[test]

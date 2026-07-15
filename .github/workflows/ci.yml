@@ -44,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/ci-impact
-          cargo run --locked -p xtask -- ci-plan \
+          cargo run --locked -p xtask -- ci plan \
             --event-path "$GITHUB_EVENT_PATH" \
             --policy .config/ci-impact.toml \
             --output target/ci-impact/ci-plan.json \
@@ -103,7 +103,7 @@ jobs:
       - name: Run scheduled audit fallback
         run: |
           set -euo pipefail
-          cargo run --locked -p xtask -- audit
+          cargo run --locked -p xtask -- ci run --job audit
 
   ci-gate:
     name: ci-gate
@@ -138,7 +138,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set -euo pipefail
-          cargo run --locked -p xtask -- ci-gate \
+          cargo run --locked -p xtask -- ci gate \
             --plan target/ci-plan-download/ci-plan.json \
             --receipts target/ci-receipts \
             --planner-result "${{ needs.ci-plan.result }}" \

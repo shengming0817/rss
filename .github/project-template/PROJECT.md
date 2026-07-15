@@ -164,7 +164,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 /ship <issue>
   实施 → PR 创建 → 贴 pr-status/in-progress
   → ship：内置 6 维 reviewer → IN_SCOPE Cx3/Cx4 处置门（每条 AskUserQuestion 判「当前 PR 修」or「defer」，判 defer 后自动建 issue、不二次确认）→ /fix Cx1/Cx2 → push/冲突预检 → deferred 留痕 + pm:ship
-  → 切 pr-status/needs-review-again（首审唯一使用点）→ verify-fast + workspace check + 定向测试；外部 app 可先行 review
+  → 切 pr-status/needs-review-again（首审唯一使用点）→ `make ci CI_BASE=<remote>/develop`；外部 app 可先行 review
   → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听交接（needs-fix 自动 /fix；单次跑完即止）
 
 [review 轮] codex review 或 /pr-review <PR#>
@@ -175,7 +175,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 /fix <PR#>（pr-status/needs-fix 时；可多次跑，≤3 轮自动循环）
   → bash hack/automation/pr-comments.sh latest <N> pr-review（最新 pm:pr-review findings）→ 过滤最新一轮
   → triage + IN_SCOPE Cx3/Cx4 处置门（AskUserQuestion 判修/defer，defer 后自动建 issue、不二次确认）+ Cx1/Cx2 修复 → push/冲突预检 → deferred 留痕 + pm:fix
-  → 切 pr-status/needs-check-fix + 移除 pr-status/needs-fix → verify-fast + workspace check + 定向测试
+  → 切 pr-status/needs-check-fix + 移除 pr-status/needs-fix → `make ci CI_BASE=<remote>/develop`
   → 外部 app 可在 label 后先行执行 /pr-review --check
   → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听 check 交接
 

@@ -49,34 +49,26 @@
 //!                                      封装面 baseline（包装 cargo-public-api，需 nightly rustdoc-json；无
 //!                                      --layer 时检查 basis + engine + curated extras）；
 //!                                      --check 缺 baseline 默认 fail-fast，--allow-missing 显式宽限（PR-0 自检）
-//!   `cargo xtask ci [--allow-missing-tools]`
-//!                                      CI lane **超集**聚合（issue #1132，GitHub Actions 薄壳唯一调用入口）：
-//!                                      verify 全门（build/clippy 升 `--all-features --all-targets`）+ 覆盖率门
-//!                                      （`cargo llvm-cov nextest` 替 nextest，单跑两子门：basis/engine ≥90% 绝对
-//!                                      地板 + 本 PR diff 增量 ≥80%，见 `coverage.rs`/`diffcov.rs`）+ public-api
-//!                                      --check（轴 A）+ cargo-audit（供应链漏洞，#1133）。verify 仍是本地 stable-only 快门，ci 是 CI 全工具超集。详见 `verify.rs`。
-//!   `cargo xtask ci-meta|ci-core|ci-security|ci-coverage [--allow-missing-tools]`
-//!                                      registry 派生的独立 CI lanes；参数精确匹配、缺工具默认 fail-closed。
-//!   `cargo xtask audit [--allow-missing-tools]`
-//!                                      供应链漏洞**定时刷新** lane（issue #1133，GitHub Actions `schedule:`
-//!                                      cron 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit`
-//!                                      两门（皆 no-compile、快），捕获「未变依赖」新披露 CVE。详见 `verify.rs`。
-//!   `cargo xtask ci-integration --shard <name> [--partition M/N] [--allow-missing-tools]`
-//!                                      按 capability shard 运行真集成 target；typed registry 单源派生
-//!                                      target filter、资源门与串/并行批次。
+//!   `cargo xtask ci local --base <ref>`
+//!                                      仅分析 `<ref>...HEAD` 已提交差异，经 typed ImpactSet 生成本地 preflight。
+//!   `cargo xtask ci full [--allow-missing-tools]`
+//!                                      原本地 CI lane 超集聚合（coverage/public-api/audit 等完整门集）。
+//!   `cargo xtask ci plan --event-path <json> --policy <toml> --output <json> --github-output <file>`
+//!                                      GitHub event/diff → typed 15-job impact plan 与动态 matrix。
+//!   `cargo xtask ci run --job <CiJobKey>`
+//!                                      唯一远端 typed executor；闭合 job key 穷举分派至 lane/shard/partition。
+//!   `cargo xtask ci gate --plan <json> --receipts <dir> --planner-result <result> --matrix-result <result> --metrics-output <json>`
+//!                                      稳定聚合 planner、matrix outcome 与 evidence v4 精确回执集。
 //!   `cargo xtask ci-slo evaluate --lane <lane> [--shard <shard>] [--partition M/N]
 //!      --run-id <N> --run-attempt <N> --upload-outcome <success|failure|cancelled|skipped>
 //!      [--github-summary]`
 //!                                      严格消费 staged evidence；本地输出 Markdown，GitHub 模式把 annotation
 //!                                      写 stdout、Markdown 写 runner 的 Job Summary 文件。
-//!   `cargo xtask ci-plan --event-path <json> --policy <toml> --output <json> --github-output <file>`
-//!                                      GitHub event/diff → typed 14-job impact plan 与动态 matrix。
-//!   `cargo xtask ci-gate --plan <json> --receipts <dir> --planner-result <result> --matrix-result <result> --metrics-output <json>`
-//!                                      稳定聚合 planner、matrix outcome 与 evidence v4 精确回执集。
 mod archrules;
 mod assembly;
 mod assembly_codegen;
 mod cdc_config;
+mod ci_entry_guard;
 mod ci_evidence;
 mod ci_gate;
 mod ci_impact;
@@ -172,31 +164,19 @@ enum Command {
     Verify {
         fast: bool,
         allow_missing_tools: bool,
+        against: Option<String>,
     },
     PublicApi {
         check: bool,
         allow_missing: bool,
         layer: Option<publicapi::Layer>,
     },
-    Ci {
+    CiFull {
         allow_missing_tools: bool,
     },
-    CiLane {
-        lane: ci_lanes::CiLane,
-        allow_missing_tools: bool,
-    },
-    CoreExecution {
-        execution: verify::CoreExecution,
-        allow_missing_tools: bool,
-        partition: Option<nextest::HashPartition>,
-    },
-    Audit {
-        allow_missing_tools: bool,
-    },
-    CiIntegration {
-        shard: integration_shards::IntegrationShard,
-        allow_missing_tools: bool,
-        partition: Option<nextest::HashPartition>,
+    CiLocal(ci_impact::LocalOptions),
+    CiRun {
+        job: ci_lanes::CiJobKey,
     },
     CiSloEvaluate {
         job: ci_lanes::CiJobKey,
@@ -270,19 +250,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["verify", rest @ ..] => parse_verify(rest),
         ["public-api", rest @ ..] => parse_public_api(rest),
         ["ci", rest @ ..] => parse_ci(rest),
-        ["ci-meta", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Meta, rest),
-        ["ci-core", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Core, rest),
-        ["ci-core-prerequisites", rest @ ..] => {
-            parse_core_execution(verify::CoreExecution::Prerequisites, rest)
-        }
-        ["ci-core-tests", rest @ ..] => parse_core_execution(verify::CoreExecution::Tests, rest),
-        ["ci-security", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Security, rest),
-        ["ci-coverage", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Coverage, rest),
-        ["audit", rest @ ..] => parse_audit(rest),
-        ["ci-integration", rest @ ..] => parse_ci_integration(rest),
         ["ci-slo", rest @ ..] => parse_ci_slo(rest),
-        ["ci-plan", rest @ ..] => ci_impact::parse_options(rest).map(Command::CiPlan),
-        ["ci-gate", rest @ ..] => ci_gate::parse_options(rest).map(Command::CiGate),
         ["nextest-evidence", "stage"] => Ok(Command::NextestEvidenceStage),
         ["nextest-evidence", "inspect", artifact_root] => Ok(Command::NextestEvidenceInspect {
             artifact_root: PathBuf::from(artifact_root),
@@ -302,7 +270,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法含 graph assembly | localtx-coverage | ci-core | ci-core-prerequisites | ci-core-tests --partition M/N | nextest-evidence <stage|inspect|replay>；收到 {other:?}"
+                "未知命令: {other:?}；用法含 graph assembly | localtx-coverage | ci <local|full|plan|run|gate> | nextest-evidence <stage|inspect|replay>；收到 {other:?}"
             )
         }
     }
@@ -479,135 +447,84 @@ fn parse_contract_breaking(args: &[&str]) -> Result<Command> {
 fn parse_verify(args: &[&str]) -> Result<Command> {
     let mut fast = false;
     let mut allow_missing_tools = false;
-    for &tok in args {
+    let mut against = None;
+    let mut iter = args.iter().copied();
+    while let Some(tok) = iter.next() {
         match tok {
             "--fast" => fast = true,
             "--allow-missing-tools" => allow_missing_tools = true,
+            "--against" => {
+                let value = iter.next().context("verify 参数 --against 缺少值")?;
+                if value.is_empty() || value.starts_with("--") {
+                    bail!("verify 参数 --against 必须是非空 git ref，不能是 flag");
+                }
+                if against.replace(value.to_owned()).is_some() {
+                    bail!("verify 重复参数: --against");
+                }
+            }
             other => bail!(
-                "verify 未知参数: {other}；用法: cargo xtask verify [--fast] [--allow-missing-tools]"
+                "verify 未知参数: {other}；用法: cargo xtask verify [--fast] [--allow-missing-tools] [--against <git-ref>]"
             ),
         }
     }
     Ok(Command::Verify {
         fast,
         allow_missing_tools,
+        against,
     })
 }
 
-/// 解析 `ci` 的可选 flag（fail-closed：未知 flag 即 `Err`）。`ci` 无 `--fast`——CI 超集恒全量跑。
+/// 解析闭合 CI 命令族。空命令与旧平铺入口均 fail-closed。
 fn parse_ci(args: &[&str]) -> Result<Command> {
+    let Some((subcommand, rest)) = args.split_first() else {
+        bail!("ci 缺少子命令；用法: cargo xtask ci <local|full|plan|run|gate>");
+    };
+    match *subcommand {
+        "full" => parse_ci_full(rest),
+        "local" => ci_impact::parse_local_options(rest).map(Command::CiLocal),
+        "plan" => ci_impact::parse_options(rest).map(Command::CiPlan),
+        "run" => parse_ci_run(rest),
+        "gate" => ci_gate::parse_options(rest).map(Command::CiGate),
+        other => bail!("ci 未知子命令: {other}；用法: cargo xtask ci <local|full|plan|run|gate>"),
+    }
+}
+
+fn parse_ci_full(args: &[&str]) -> Result<Command> {
     let mut allow_missing_tools = false;
     for &tok in args {
         match tok {
-            "--allow-missing-tools" => allow_missing_tools = true,
-            other => {
-                bail!("ci 未知参数: {other}；用法: cargo xtask ci [--allow-missing-tools]")
-            }
-        }
-    }
-    Ok(Command::Ci {
-        allow_missing_tools,
-    })
-}
-
-fn parse_ci_lane(lane: ci_lanes::CiLane, args: &[&str]) -> Result<Command> {
-    let mut allow_missing_tools = false;
-    for &token in args {
-        match token {
             "--allow-missing-tools" if !allow_missing_tools => allow_missing_tools = true,
             other => {
-                let command = lane.command_name();
                 bail!(
-                    "{command} 未知或重复参数: {other}；用法: cargo xtask {command} [--allow-missing-tools]"
+                    "ci full 未知或重复参数: {other}；用法: cargo xtask ci full [--allow-missing-tools]"
                 )
             }
         }
     }
-    Ok(Command::CiLane {
-        lane,
+    Ok(Command::CiFull {
         allow_missing_tools,
     })
 }
 
-fn parse_core_execution(execution: verify::CoreExecution, args: &[&str]) -> Result<Command> {
-    let mut allow_missing_tools = false;
-    let mut partition = None;
+fn parse_ci_run(args: &[&str]) -> Result<Command> {
+    let mut job = None;
     let mut iter = args.iter().copied();
     while let Some(token) = iter.next() {
         match token {
-            "--allow-missing-tools" if !allow_missing_tools => allow_missing_tools = true,
-            "--partition" if execution == verify::CoreExecution::Tests && partition.is_none() => {
-                partition = Some(
+            "--job" if job.is_none() => {
+                job = Some(
                     iter.next()
-                        .ok_or_else(|| anyhow::anyhow!("--partition 缺 M/N"))?
+                        .ok_or_else(|| anyhow::anyhow!("ci run --job 缺少 CiJobKey"))?
                         .parse()?,
-                );
-            }
-            other => bail!("core execution 未知或重复参数: {other}"),
-        }
-    }
-    if execution == verify::CoreExecution::Tests && partition.is_none() {
-        bail!("ci-core-tests 必须传 --partition M/N");
-    }
-    Ok(Command::CoreExecution {
-        execution,
-        allow_missing_tools,
-        partition,
-    })
-}
-
-/// 解析 `audit` 的可选 flag（fail-closed：未知 flag 即 `Err`）。`audit` 无 `--fast`——供应链 lane 恒全量跑。
-fn parse_audit(args: &[&str]) -> Result<Command> {
-    let mut allow_missing_tools = false;
-    for &tok in args {
-        match tok {
-            "--allow-missing-tools" => allow_missing_tools = true,
-            other => {
-                bail!("audit 未知参数: {other}；用法: cargo xtask audit [--allow-missing-tools]")
-            }
-        }
-    }
-    Ok(Command::Audit {
-        allow_missing_tools,
-    })
-}
-
-/// 解析闭合 `ci-integration --shard <name>`；未知、缺失、重复或尾参均 fail-closed。
-fn parse_ci_integration(args: &[&str]) -> Result<Command> {
-    let mut shard: Option<integration_shards::IntegrationShard> = None;
-    let mut partition = None;
-    let mut allow_missing_tools = false;
-    let mut iter = args.iter().copied();
-    while let Some(tok) = iter.next() {
-        match tok {
-            "--allow-missing-tools" if !allow_missing_tools => allow_missing_tools = true,
-            "--shard" if shard.is_none() => {
-                let raw = iter.next().ok_or_else(|| {
-                    anyhow::anyhow!("--shard 缺少值；用法: cargo xtask ci-integration --shard <name> [--partition M/N] [--allow-missing-tools]")
-                })?;
-                shard = Some(raw.parse()?);
-            }
-            "--partition" if partition.is_none() => {
-                let raw = iter
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--partition 缺少 M/N"))?;
-                partition = Some(raw.parse()?);
-            }
-            other => {
-                bail!(
-                    "ci-integration 未知或重复参数: {other}；用法: cargo xtask ci-integration --shard <name> [--partition M/N] [--allow-missing-tools]"
                 )
             }
+            other => {
+                bail!("ci run 未知或重复参数: {other}；用法: cargo xtask ci run --job <CiJobKey>")
+            }
         }
     }
-    let shard = shard.ok_or_else(|| {
-        anyhow::anyhow!("ci-integration 缺少 --shard；用法: cargo xtask ci-integration --shard <name> [--partition M/N] [--allow-missing-tools]")
-    })?;
-    shard.validate_partition(partition)?;
-    Ok(Command::CiIntegration {
-        shard,
-        allow_missing_tools,
-        partition,
+    Ok(Command::CiRun {
+        job: job.context("ci run 缺少 --job")?,
     })
 }
 
@@ -682,32 +599,18 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::Verify {
             fast,
             allow_missing_tools,
-        } => verify::run(fast, allow_missing_tools),
+            against,
+        } => verify::run(fast, allow_missing_tools, against.as_deref()),
         Command::PublicApi {
             check,
             allow_missing,
             layer,
         } => publicapi::run(check, allow_missing, layer),
-        Command::Ci {
+        Command::CiFull {
             allow_missing_tools,
         } => verify::run_ci(allow_missing_tools),
-        Command::CiLane {
-            lane,
-            allow_missing_tools,
-        } => verify::run_lane(lane, allow_missing_tools, None),
-        Command::CoreExecution {
-            execution,
-            allow_missing_tools,
-            partition,
-        } => verify::run_core_execution(execution, allow_missing_tools, partition),
-        Command::Audit {
-            allow_missing_tools,
-        } => verify::run_audit(allow_missing_tools),
-        Command::CiIntegration {
-            shard,
-            allow_missing_tools,
-            partition,
-        } => verify::run_ci_integration(shard, allow_missing_tools, partition),
+        Command::CiLocal(options) => ci_impact::run_local(&workspace_root()?, &options),
+        Command::CiRun { job } => verify::run_job(job),
         Command::CiSloEvaluate {
             job,
             run_id,
@@ -1188,7 +1091,8 @@ mod tests {
             parse_command(&s(&["verify"]))?,
             Command::Verify {
                 fast: false,
-                allow_missing_tools: false
+                allow_missing_tools: false,
+                against: None,
             }
         );
         Ok(())
@@ -1200,21 +1104,24 @@ mod tests {
             parse_command(&s(&["verify", "--fast"]))?,
             Command::Verify {
                 fast: true,
-                allow_missing_tools: false
+                allow_missing_tools: false,
+                against: None,
             }
         );
         assert_eq!(
             parse_command(&s(&["verify", "--allow-missing-tools"]))?,
             Command::Verify {
                 fast: false,
-                allow_missing_tools: true
+                allow_missing_tools: true,
+                against: None,
             }
         );
         assert_eq!(
             parse_command(&s(&["verify", "--fast", "--allow-missing-tools"]))?,
             Command::Verify {
                 fast: true,
-                allow_missing_tools: true
+                allow_missing_tools: true,
+                against: None,
             }
         );
         Ok(())
@@ -1225,6 +1132,31 @@ mod tests {
     fn parse_command_verify_rejects_unknown_flag() {
         assert!(parse_command(&s(&["verify", "--bogus"])).is_err());
         assert!(parse_command(&s(&["verify", "--fast", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_verify_accepts_one_explicit_contract_base() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&[
+                "verify",
+                "--fast",
+                "--against",
+                "0123456789abcdef0123456789abcdef01234567",
+            ]))?,
+            Command::Verify {
+                fast: true,
+                allow_missing_tools: false,
+                against: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+            }
+        );
+        for args in [
+            vec!["verify", "--against"],
+            vec!["verify", "--against", "base", "--against", "other"],
+            vec!["verify", "--against", "--fast"],
+        ] {
+            assert!(parse_command(&s(&args)).is_err(), "accepted {args:?}");
+        }
+        Ok(())
     }
 
     #[test]
@@ -1301,179 +1233,67 @@ mod tests {
     }
 
     #[test]
-    fn parse_command_ci_bare() -> anyhow::Result<()> {
+    fn parse_command_ci_is_closed_and_fail_closed() -> anyhow::Result<()> {
+        assert!(parse_command(&s(&["ci"])).is_err());
         assert_eq!(
-            parse_command(&s(&["ci"]))?,
-            Command::Ci {
+            parse_command(&s(&["ci", "full"]))?,
+            Command::CiFull {
                 allow_missing_tools: false
             }
         );
-        Ok(())
-    }
-
-    #[test]
-    fn parse_command_ci_allow_missing_tools() -> anyhow::Result<()> {
         assert_eq!(
-            parse_command(&s(&["ci", "--allow-missing-tools"]))?,
-            Command::Ci {
+            parse_command(&s(&["ci", "full", "--allow-missing-tools"]))?,
+            Command::CiFull {
                 allow_missing_tools: true
             }
         );
-        Ok(())
-    }
-
-    /// ci flag fail-closed：未知 flag / 尾参 / 误用 `--fast`（ci 无此 flag）均 `Err`。
-    #[test]
-    fn parse_command_ci_rejects_unknown_flag() {
-        assert!(parse_command(&s(&["ci", "--bogus"])).is_err());
-        assert!(parse_command(&s(&["ci", "--fast"])).is_err()); // ci 无 --fast
-        assert!(parse_command(&s(&["ci", "extra"])).is_err());
-    }
-
-    #[test]
-    fn ci_lane_commands_parse_exactly_and_fail_closed() -> anyhow::Result<()> {
-        for (name, lane) in [
-            ("ci-meta", ci_lanes::CiLane::Meta),
-            ("ci-core", ci_lanes::CiLane::Core),
-            ("ci-security", ci_lanes::CiLane::Security),
-            ("ci-coverage", ci_lanes::CiLane::Coverage),
-        ] {
-            assert_eq!(
-                parse_command(&s(&[name]))?,
-                Command::CiLane {
-                    lane,
-                    allow_missing_tools: false,
-                }
-            );
-            assert_eq!(
-                parse_command(&s(&[name, "--allow-missing-tools"]))?,
-                Command::CiLane {
-                    lane,
-                    allow_missing_tools: true,
-                }
-            );
-            for invalid in ["--bogus", "extra"] {
-                let Err(error) = parse_command(&s(&[name, invalid])) else {
-                    bail!("split lane unknown arguments must fail closed")
-                };
-                let error = error.to_string();
-                assert!(error.contains(name), "missing command in `{error}`");
-                assert!(
-                    error.contains(&format!("用法: cargo xtask {name} [--allow-missing-tools]")),
-                    "missing copyable usage in `{error}`"
-                );
+        assert!(matches!(
+            parse_command(&s(&["ci", "local", "--base", "origin/develop"]))?,
+            Command::CiLocal(_)
+        ));
+        assert_eq!(
+            parse_command(&s(&["ci", "run", "--job", "ci-meta"]))?,
+            Command::CiRun {
+                job: ci_lanes::CiJobKey::CiMeta
             }
-        }
-        assert!(parse_command(&s(&["ci-nightly"])).is_err());
-        assert!(parse_command(&s(&["ci-integration"])).is_err());
-        assert!(parse_command(&s(&["ci-core-tests", "--partition", "1/2"])).is_ok());
-        assert!(parse_command(&s(&["ci-core-prerequisites"])).is_ok());
+        );
         for args in [
-            vec!["ci-core", "--partition", "1/2"],
-            vec!["ci-core-tests"],
-            vec!["ci-core-tests", "--partition"],
-            vec!["ci-core-tests", "--partition", "hash:1/2"],
-            vec!["ci-core-tests", "--partition", "1/2", "--partition", "2/2"],
-            vec!["ci-core-prerequisites", "--partition", "1/2"],
-            vec!["ci-meta", "--partition", "1/2"],
+            vec!["ci", "--allow-missing-tools"],
+            vec![
+                "ci",
+                "full",
+                "--allow-missing-tools",
+                "--allow-missing-tools",
+            ],
+            vec!["ci", "local"],
+            vec!["ci", "local", "--base"],
+            vec!["ci", "local", "--base", "develop", "--base", "main"],
+            vec!["ci", "local", "--working-tree"],
+            vec!["ci", "run"],
+            vec!["ci", "run", "--job", "unknown"],
+            vec!["ci", "run", "--job", "ci-meta", "--job", "audit"],
+            vec!["ci", "wat"],
         ] {
-            assert!(parse_command(&s(&args)).is_err());
+            assert!(parse_command(&s(&args)).is_err(), "must reject {args:?}");
         }
-        Ok(())
-    }
-
-    #[test]
-    fn parse_command_audit_bare() -> anyhow::Result<()> {
-        assert_eq!(
-            parse_command(&s(&["audit"]))?,
-            Command::Audit {
-                allow_missing_tools: false
-            }
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn parse_command_audit_allow_missing_tools() -> anyhow::Result<()> {
-        assert_eq!(
-            parse_command(&s(&["audit", "--allow-missing-tools"]))?,
-            Command::Audit {
-                allow_missing_tools: true
-            }
-        );
-        Ok(())
-    }
-
-    /// audit flag fail-closed：未知 flag / 尾参 / 误用 `--fast`（audit 无此 flag）均 `Err`。
-    #[test]
-    fn parse_command_audit_rejects_unknown_flag() {
-        assert!(parse_command(&s(&["audit", "--bogus"])).is_err());
-        assert!(parse_command(&s(&["audit", "--fast"])).is_err());
-        assert!(parse_command(&s(&["audit", "extra"])).is_err());
-    }
-
-    #[test]
-    fn parse_command_ci_integration_shards_and_fail_closed() {
-        for shard in [
-            "postgres-domain",
-            "event-transport",
-            "runtime-http-auth",
-            "consistency-fault",
-            "cdc-projection-saga",
+        for old in [
+            "ci-meta",
+            "ci-core",
+            "ci-core-prerequisites",
+            "ci-core-tests",
+            "ci-security",
+            "ci-coverage",
+            "ci-integration",
+            "ci-plan",
+            "ci-gate",
+            "audit",
         ] {
             assert!(
-                parse_command(&s(&["ci-integration", "--shard", shard])).is_ok(),
-                "valid shard {shard} must parse"
-            );
-            assert!(
-                parse_command(&s(&[
-                    "ci-integration",
-                    "--allow-missing-tools",
-                    "--shard",
-                    shard,
-                ]))
-                .is_ok(),
-                "local missing-tool allowance must compose with {shard}"
-            );
-            let partitioned = parse_command(&s(&[
-                "ci-integration",
-                "--shard",
-                shard,
-                "--partition",
-                "1/2",
-            ]));
-            assert_eq!(
-                partitioned.is_ok(),
-                matches!(shard, "event-transport" | "runtime-http-auth")
+                parse_command(&s(&[old])).is_err(),
+                "legacy {old} must be removed"
             );
         }
-
-        assert!(parse_command(&s(&["ci-integration"])).is_err());
-        assert!(parse_command(&s(&["ci-integration", "--shard"])).is_err());
-        assert!(parse_command(&s(&["ci-integration", "--all"])).is_err());
-        assert!(
-            parse_command(&s(&[
-                "ci-integration",
-                "--shard",
-                "event-transport",
-                "--partition",
-                "hash:1/2"
-            ]))
-            .is_err()
-        );
-        assert!(parse_command(&s(&["ci-integration", "--shard", "POSTGRES-DOMAIN"])).is_err());
-        assert!(
-            parse_command(&s(&[
-                "ci-integration",
-                "--shard",
-                "postgres-domain",
-                "--shard",
-                "event-transport",
-            ]))
-            .is_err()
-        );
-        assert!(parse_command(&s(&["integration"])).is_err());
-        assert!(parse_command(&s(&["integration", "--bogus"])).is_err());
+        Ok(())
     }
 
     #[test]
@@ -1660,7 +1480,8 @@ mod tests {
     fn ci_plan_and_gate_commands_are_exact_and_fail_closed() {
         assert!(matches!(
             parse_command(&s(&[
-                "ci-plan",
+                "ci",
+                "plan",
                 "--event-path",
                 "event.json",
                 "--policy",
@@ -1674,7 +1495,8 @@ mod tests {
         ));
         assert!(matches!(
             parse_command(&s(&[
-                "ci-gate",
+                "ci",
+                "gate",
                 "--plan",
                 "plan.json",
                 "--receipts",
@@ -1689,17 +1511,19 @@ mod tests {
             Ok(Command::CiGate(_))
         ));
         for args in [
-            vec!["ci-plan"],
+            vec!["ci", "plan"],
             vec![
-                "ci-plan",
+                "ci",
+                "plan",
                 "--event-path",
                 "event.json",
                 "--event-path",
                 "other",
             ],
-            vec!["ci-gate"],
+            vec!["ci", "gate"],
             vec![
-                "ci-gate",
+                "ci",
+                "gate",
                 "--plan",
                 "plan.json",
                 "--receipts",

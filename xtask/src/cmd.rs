@@ -279,6 +279,7 @@ impl ExternalProgram {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CargoSubcommand {
+    Xtask,
     Metadata,
     Tree,
     Check,
@@ -298,6 +299,7 @@ pub(crate) enum CargoSubcommand {
 impl CargoSubcommand {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::Xtask => "xtask",
             Self::Metadata => "metadata",
             Self::Tree => "tree",
             Self::Check => "check",

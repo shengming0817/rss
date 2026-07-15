@@ -70,7 +70,7 @@ cargo xtask consistency-fixtures
 lease/CAS 与 RabbitMQ delivery/ack 行为；属于 opt-in lane，不进入默认快测：
 
 ```bash
-cargo xtask ci-integration --shard consistency-fault
+cargo xtask ci run --job integration/consistency-fault
 ```
 
 ## 证据边界

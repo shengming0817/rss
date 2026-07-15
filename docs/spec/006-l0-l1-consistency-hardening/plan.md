@@ -53,7 +53,7 @@ Rule and SpecKit documents explain those sources; they do not replace them.
 ### Documentation
 
 - Remove hard-coded gate counts and outdated required-check claims from root, architecture, and CI operations entrypoints.
-- Describe the Azure active forge, GitHub Shadow evidence, and current non-required `ci-gate` status.
+- Keep activation, forge, Shadow, and required-check state only in the CI operations status document; non-ops documents link to it generically.
 - Rewrite L0/L1 rules as implemented proof chains with adoption order, failure semantics, tenant/privilege boundaries, and the live validation boundary.
 - Mark this full SpecKit pack complete and replace baseline-only instructions with current diagnostics and acceptance commands.
 
@@ -69,7 +69,7 @@ Rule and SpecKit documents explain those sources; they do not replace them.
 1. Supply chain: deny check, all-features inverse dependency tree, AMQP/MQTT/S3 targets.
 2. Static proof: focused verify-plan tests, contract breaking, LocalTx coverage, LocalOnly effects, and JSON report `status` parsing.
 3. Drift scan: unresolved markers, unchecked T001–T023 tasks, stale blocker text, and hard-coded gate counts.
-4. Ship funnel: `make verify-fast`, workspace/all-target check, xtask clippy, and live `postgres-domain` without missing-tool relaxation.
+4. Ship funnel: canonical `make ci CI_BASE=<remote>/develop`; its typed impact model owns local preflight selection and fail-safe full verification.
 5. Review and delivery: diff-sized built-in review, in-scope Cx1/Cx2 fixes, required disposition for Cx3/Cx4, PR metadata, and delayed monitoring.
 
 ## External Benchmark

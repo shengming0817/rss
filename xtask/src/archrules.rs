@@ -925,6 +925,14 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         evidence: "diff and impact synthetic reds with workspace policy anti-vacuity",
         gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
     },
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_impact.rs",
+        id: "CI-IMPACT-PROJECTION-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "private ImpactSet and exhaustive local/remote projection matches",
+        gates: "native-compile",
+    },
 ];
 
 const CI_GATE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[InvariantCarrierBinding {
@@ -2339,6 +2347,16 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
     },
     GateDeclaration {
         path: "xtask/src/command_symmetry.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/ci_entry_guard.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/runtime_deployment_spec.rs",
         tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,
     },

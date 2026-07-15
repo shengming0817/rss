@@ -15,10 +15,10 @@ Canonical commands:
 ```bash
 make verify-fast
 ./hack/cargo.sh xtask verify
-./hack/cargo.sh xtask ci-integration --shard postgres-domain
+./hack/cargo.sh xtask ci run --job integration/postgres-domain
 ```
 
-Do not use `--allow-missing-tools` for closeout acceptance. `cargo xtask ci` is a local compatibility aggregation; it is not a claim that GitHub Shadow, Azure, or live Integration all ran locally.
+Do not use `--allow-missing-tools` for closeout acceptance. `cargo xtask ci full` is a local full aggregation; it is not a claim that GitHub Shadow, Azure, or every live Integration job ran locally.
 
 ## Adoption Order
 

@@ -33,7 +33,7 @@ pub(crate) fn parse_options(args: &[&str]) -> Result<Options> {
     while let Some(flag) = iter.next() {
         let value = iter
             .next()
-            .ok_or_else(|| anyhow::anyhow!("ci-gate 参数 {flag} 缺少值"))?;
+            .ok_or_else(|| anyhow::anyhow!("ci gate 参数 {flag} 缺少值"))?;
         match flag {
             "--plan" if plan_path.is_none() => plan_path = Some(PathBuf::from(value)),
             "--receipts" if receipts_path.is_none() => receipts_path = Some(PathBuf::from(value)),
@@ -46,15 +46,15 @@ pub(crate) fn parse_options(args: &[&str]) -> Result<Options> {
             "--metrics-output" if metrics_output.is_none() => {
                 metrics_output = Some(PathBuf::from(value));
             }
-            _ => bail!("ci-gate 未知或重复参数: {flag}"),
+            _ => bail!("ci gate 未知或重复参数: {flag}"),
         }
     }
     Ok(Options {
-        plan_path: plan_path.context("ci-gate 缺少 --plan")?,
-        receipts_path: receipts_path.context("ci-gate 缺少 --receipts")?,
-        planner_result: planner_result.context("ci-gate 缺少 --planner-result")?,
-        matrix_result: matrix_result.context("ci-gate 缺少 --matrix-result")?,
-        metrics_output: metrics_output.context("ci-gate 缺少 --metrics-output")?,
+        plan_path: plan_path.context("ci gate 缺少 --plan")?,
+        receipts_path: receipts_path.context("ci gate 缺少 --receipts")?,
+        planner_result: planner_result.context("ci gate 缺少 --planner-result")?,
+        matrix_result: matrix_result.context("ci gate 缺少 --matrix-result")?,
+        metrics_output: metrics_output.context("ci gate 缺少 --metrics-output")?,
     })
 }
 

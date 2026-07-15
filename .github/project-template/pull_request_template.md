@@ -16,8 +16,4 @@
 
 ## Test plan
 
-- [ ] `make verify-fast` 本地通过（fmt + meta + deny；不等价完整 GitHub CI）
-- [ ] `cargo check --workspace --all-targets` 本地通过（反向依赖消费者编译兜底）
-- [ ] 已列出并通过修改 crate / feature / 行为边界的定向测试命令
-- [ ] 已列出并通过修改 crate 的定向 clippy 命令（0 warnings）
-- [ ] `cargo audit` 无新增漏洞（涉及依赖变更时）
+- [ ] `make ci CI_BASE=<remote>/develop` 本地通过（只分析已提交差异；typed 影响模型选择 preflight）

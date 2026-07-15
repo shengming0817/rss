@@ -246,26 +246,13 @@ jobs:
           RUSTC_WRAPPER: ${{ steps.setup.outputs.compiler-cache-path }}
         run: |
           set -euo pipefail
-          case "$RSS_LANE" in
-            ci-meta) args=(ci-meta) ;;
-            ci-core-prerequisites) args=(ci-core-prerequisites) ;;
-            ci-core-tests) args=(ci-core-tests --partition "$RSS_PARTITION") ;;
-            ci-security) args=(ci-security) ;;
-            ci-coverage) args=(ci-coverage) ;;
-            integration)
-              args=(ci-integration --shard "$RSS_SHARD")
-              if [ -n "$RSS_PARTITION" ]; then args+=(--partition "$RSS_PARTITION"); fi
-              ;;
-            audit) args=(audit) ;;
-            *) exit 64 ;;
-          esac
           cargo build --locked -p xtask
           reset_outcome=success
           if ! "$RSS_INTERNAL_SCCACHE_PATH" --zero-stats; then
             reset_outcome=degraded
           fi
           echo "compiler-cache-reset=$reset_outcome" >> "$GITHUB_OUTPUT"
-          /usr/bin/time -f 'userSeconds=%U\nsystemSeconds=%S\npeakRssKiB=%M' -o "$RUNNER_TEMP/xtask-resource.txt" timeout --signal=TERM --kill-after=30s 90m "$CARGO_TARGET_DIR/debug/xtask" "${args[@]}"
+          /usr/bin/time -f 'userSeconds=%U\nsystemSeconds=%S\npeakRssKiB=%M' -o "$RUNNER_TEMP/xtask-resource.txt" timeout --signal=TERM --kill-after=30s 90m "$CARGO_TARGET_DIR/debug/xtask" ci run --job "$RSS_CI_JOB_KEY"
 
       - name: Finalize integration outcome and collect failure logs
         id: integration-services-collect

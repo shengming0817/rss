@@ -65,6 +65,64 @@ pub(crate) struct ExecutionUnit {
     pub(crate) scheduling: Scheduling,
 }
 
+/// Closed package/feature identities whose integration implementations must at least compile
+/// during local impact validation. Keeping the feature name behind this enum prevents the local
+/// planner from reconstructing feature strings from package names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum LocalFeatureScope {
+    Postgres,
+    RedisAdapter,
+    Amqp,
+    Mqtt,
+    Journeys,
+    Runtime,
+    Testkit,
+    JourneysFaultMatrix,
+    S3,
+}
+
+impl LocalFeatureScope {
+    pub(crate) const ALL: [Self; 9] = [
+        Self::Postgres,
+        Self::RedisAdapter,
+        Self::Amqp,
+        Self::Mqtt,
+        Self::Journeys,
+        Self::Runtime,
+        Self::Testkit,
+        Self::JourneysFaultMatrix,
+        Self::S3,
+    ];
+
+    pub(crate) const fn package(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+            Self::RedisAdapter => "redis-adapter",
+            Self::Amqp => "amqp",
+            Self::Mqtt => "mqtt",
+            Self::Journeys => "journeys",
+            Self::Runtime => "runtime",
+            Self::Testkit => "testkit",
+            Self::JourneysFaultMatrix => "journeys-fault-matrix",
+            Self::S3 => "s3",
+        }
+    }
+
+    pub(crate) const fn feature(self) -> &'static str {
+        match self {
+            Self::Postgres
+            | Self::RedisAdapter
+            | Self::Amqp
+            | Self::Mqtt
+            | Self::Journeys
+            | Self::Runtime
+            | Self::Testkit
+            | Self::JourneysFaultMatrix
+            | Self::S3 => "integration",
+        }
+    }
+}
+
 impl ExecutionUnit {
     const fn new(
         package: &'static str,
@@ -95,6 +153,7 @@ pub(crate) struct ShardSpec {
     pub(crate) shard: IntegrationShard,
     pub(crate) resources: &'static [Resource],
     pub(crate) units: &'static [ExecutionUnit],
+    pub(crate) local_feature_scopes: &'static [LocalFeatureScope],
 }
 
 macro_rules! integration_shard_catalog {
@@ -102,6 +161,7 @@ macro_rules! integration_shard_catalog {
         $variant:ident => {
             name: $name:literal,
             resources: [$($resource:ident),* $(,)?],
+            local_feature_scopes: [$($scope:ident),+ $(,)?],
             units: [$(($package:literal, $target:literal, $kind:ident, $scheduling:ident)),+ $(,)?],
         },
     )+) => {
@@ -113,6 +173,7 @@ macro_rules! integration_shard_catalog {
         const SHARD_SPECS: &[ShardSpec] = &[$(ShardSpec {
             shard: IntegrationShard::$variant,
             resources: &[$(Resource::$resource),*],
+            local_feature_scopes: &[$(LocalFeatureScope::$scope),+],
             units: &[$(ExecutionUnit::new(
                 $package,
                 $target,
@@ -153,6 +214,7 @@ integration_shard_catalog! {
     PostgresDomain => {
         name: "postgres-domain",
         resources: [Postgres],
+        local_feature_scopes: [Postgres, Journeys, Runtime],
         units: [
             ("postgres", "postgres", Lib, Serial),
             ("postgres", "feature_manifest", Test, Parallel),
@@ -169,6 +231,7 @@ integration_shard_catalog! {
     EventTransport => {
         name: "event-transport",
         resources: [Postgres, Redis, Amqp, Mqtt],
+        local_feature_scopes: [Amqp, Mqtt, Journeys, Runtime],
         units: [
             ("amqp", "amqp", Lib, Parallel),
             ("amqp", "integration", Test, Serial),
@@ -184,6 +247,7 @@ integration_shard_catalog! {
     RuntimeHttpAuth => {
         name: "runtime-http-auth",
         resources: [Postgres, Redis],
+        local_feature_scopes: [Runtime],
         units: [
             ("runtime", "runtime", Lib, Serial),
             ("runtime", "auth_e2e", Test, Parallel),
@@ -198,6 +262,7 @@ integration_shard_catalog! {
     ConsistencyFault => {
         name: "consistency-fault",
         resources: [Postgres, Redis, Amqp],
+        local_feature_scopes: [Testkit, RedisAdapter, Journeys, JourneysFaultMatrix],
         units: [
             ("testkit", "testkit", Lib, Serial),
             ("testkit", "crash_matrix", Test, Parallel),
@@ -212,6 +277,7 @@ integration_shard_catalog! {
     CdcProjectionSaga => {
         name: "cdc-projection-saga",
         resources: [Postgres],
+        local_feature_scopes: [Journeys, Runtime],
         units: [
             ("journeys", "journeys", Lib, Parallel),
             ("journeys", "saga_projection_deps_journey", Test, Parallel),
@@ -222,6 +288,7 @@ integration_shard_catalog! {
     ObjectStorage => {
         name: "object-storage",
         resources: [ObjectStorage],
+        local_feature_scopes: [S3],
         units: [
             ("s3", "s3", Lib, Parallel),
             ("s3", "dlx_archive_store", Test, Parallel),
@@ -391,6 +458,64 @@ fn expected_targets() -> Result<BTreeSet<TargetId>> {
     )
 }
 
+fn validate_local_feature_catalog(specs: &[ShardSpec]) -> Result<()> {
+    let known_by_package = LocalFeatureScope::ALL
+        .into_iter()
+        .map(|scope| (scope.package(), scope))
+        .collect::<BTreeMap<_, _>>();
+    if known_by_package.len() != LocalFeatureScope::ALL.len()
+        || known_by_package.keys().copied().collect::<BTreeSet<_>>()
+            != LEGACY_PACKAGES.iter().copied().collect::<BTreeSet<_>>()
+    {
+        bail!("local feature scopes and integration package catalog must be bijective");
+    }
+    let mut covered = BTreeSet::new();
+    for spec in specs {
+        if spec.local_feature_scopes.is_empty() {
+            bail!(
+                "integration shard `{}` has no local feature scope",
+                spec.shard
+            );
+        }
+        let declared = spec
+            .local_feature_scopes
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if declared.len() != spec.local_feature_scopes.len() {
+            bail!(
+                "integration shard `{}` repeats a local feature scope",
+                spec.shard
+            );
+        }
+        for unit in spec.units {
+            let scope = known_by_package.get(unit.package).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "integration shard `{}` package `{}` has no local feature scope",
+                    spec.shard,
+                    unit.package
+                )
+            })?;
+            if !declared.contains(scope) {
+                bail!(
+                    "integration shard `{}` omits local feature scope for package `{}`",
+                    spec.shard,
+                    unit.package
+                );
+            }
+        }
+        covered.extend(declared);
+    }
+    let missing = LocalFeatureScope::ALL
+        .into_iter()
+        .filter(|scope| !covered.contains(scope))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        bail!("local feature scope catalog is incomplete: {missing:?}");
+    }
+    Ok(())
+}
+
 fn metadata_targets(metadata: &Value) -> Result<BTreeSet<TargetId>> {
     let packages = metadata
         .get("packages")
@@ -450,6 +575,7 @@ pub(crate) fn validate_metadata(metadata: &Value) -> Result<()> {
 }
 
 pub(crate) fn validate_workspace(root: &Path) -> Result<()> {
+    validate_local_feature_catalog(SHARD_SPECS)?;
     let output = crate::cmd::cargo_cmd(
         crate::cmd::CargoSubcommand::Metadata,
         &["--locked", "--no-deps", "--format-version", "1"],
@@ -540,6 +666,33 @@ mod tests {
         }
         assert!("POSTGRES-DOMAIN".parse::<IntegrationShard>().is_err());
         assert!("unknown".parse::<IntegrationShard>().is_err());
+        validate_local_feature_catalog(SHARD_SPECS)?;
+        Ok(())
+    }
+
+    #[test]
+    fn local_feature_scope_catalog_is_non_vacuous_and_rejects_omissions() -> Result<()> {
+        assert_eq!(LocalFeatureScope::ALL.len(), LEGACY_PACKAGES.len());
+        assert!(
+            LocalFeatureScope::ALL
+                .into_iter()
+                .all(|scope| scope.feature() == "integration")
+        );
+        validate_local_feature_catalog(SHARD_SPECS)?;
+
+        let mut missing = SHARD_SPECS.to_vec();
+        missing[IntegrationShard::EventTransport as usize].local_feature_scopes = &[];
+        assert!(validate_local_feature_catalog(&missing).is_err());
+
+        const UNKNOWN_UNITS: &[ExecutionUnit] = &[ExecutionUnit::new(
+            "new-integration-package",
+            "integration",
+            TargetKind::Test,
+            Scheduling::Serial,
+        )];
+        let mut unknown = SHARD_SPECS.to_vec();
+        unknown[IntegrationShard::EventTransport as usize].units = UNKNOWN_UNITS;
+        assert!(validate_local_feature_catalog(&unknown).is_err());
         Ok(())
     }
 

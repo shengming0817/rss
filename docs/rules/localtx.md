@@ -15,7 +15,7 @@ typed backend profile/provider probes → Postgres runner settlement/telemetry �
   仍会构建 xtask 启动器。
 - 完整 `verify` 额外执行 workspace/default conformance 和 integration-target compile-only；编译成功不等于
   真实事务矩阵已执行。
-- `ci-integration --shard postgres-domain` 执行真实 SecretRepo/Identity matrices 与 active LocalTx 5/5 journey，
+- `cargo xtask ci run --job integration/postgres-domain` 执行真实 SecretRepo/Identity matrices 与 active LocalTx 5/5 journey，
   required tooling、服务启动和编译后测试 inventory 均 fail-closed，closeout 不使用 `--allow-missing-tools`。
 
 ## Contract evidence

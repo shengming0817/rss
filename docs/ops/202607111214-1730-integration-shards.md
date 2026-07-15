@@ -5,21 +5,21 @@
 
 ## 入口与闭集
 
-唯一入口是：
+唯一入口是闭合 `CiJobKey` executor：
 
 ```bash
-cargo xtask ci-integration --shard <name>
+cargo xtask ci run --job integration/<shard>[/<partition>]
 ```
 
-`event-transport` 与 `runtime-http-auth` 在 CI 中分别追加 `--partition 1/2`、`--partition 2/2`；其余
-shard 不传 partition。每次 invocation 的 JUnit/JSON、空 bucket 与重放语义见
+`event-transport` 与 `runtime-http-auth` 分别登记 `1-of-2`、`2-of-2` 两个 job；其余 shard 的 job key
+不带 partition。每次 invocation 的 JUnit/JSON、空 bucket 与重放语义见
 [`202607111501-1731-nextest-test-evidence.md`](./202607111501-1731-nextest-test-evidence.md)。
 
-`<name>` 只能是 `postgres-domain`、`event-transport`、`runtime-http-auth`、
+`<shard>` 只能是 `postgres-domain`、`event-transport`、`runtime-http-auth`、
 `consistency-fault`、`cdc-projection-saga`、`object-storage`。缺失、重复、未知 shard、额外尾参、自由 filter 和 `--all`
-均 fail-closed。旧 `cargo xtask integration` 已删除，不提供 alias 或兼容 shim。
+均 fail-closed。旧 `cargo xtask integration` 与 `cargo xtask ci-integration` 均已删除，不提供 alias 或兼容 shim。
 
-本地确需在缺少 nextest 或 Docker 时跳过，可显式追加 `--allow-missing-tools`；CI 不使用该宽限。
+`ci run` 不提供缺工具宽限；缺少 nextest、Docker 或目标 shard 资源时 fail-closed。
 
 ## Target 归属、资源与调度
 
@@ -65,17 +65,17 @@ versioning、COMPLIANCE Object Lock 与有界 lifecycle 的独立 bucket，不�
 
 ## 本地运行与故障定位
 
-精确复现 GitHub 七行 matrix：
+精确复现 GitHub 八行 matrix：
 
 ```bash
-cargo xtask ci-integration --shard postgres-domain
-cargo xtask ci-integration --shard event-transport --partition 1/2
-cargo xtask ci-integration --shard event-transport --partition 2/2
-cargo xtask ci-integration --shard runtime-http-auth --partition 1/2
-cargo xtask ci-integration --shard runtime-http-auth --partition 2/2
-cargo xtask ci-integration --shard consistency-fault
-cargo xtask ci-integration --shard cdc-projection-saga
-cargo xtask ci-integration --shard object-storage
+cargo xtask ci run --job integration/postgres-domain
+cargo xtask ci run --job integration/event-transport/1-of-2
+cargo xtask ci run --job integration/event-transport/2-of-2
+cargo xtask ci run --job integration/runtime-http-auth/1-of-2
+cargo xtask ci run --job integration/runtime-http-auth/2-of-2
+cargo xtask ci run --job integration/consistency-fault
+cargo xtask ci run --job integration/cdc-projection-saga
+cargo xtask ci run --job integration/object-storage
 ```
 
 定位顺序：
@@ -87,7 +87,7 @@ cargo xtask ci-integration --shard object-storage
 4. nextest 的 `[n/m] serial|parallel` 失败：用输出中的精确 package/binary filter 定位 target；共享状态类失败先看
    serial 批次，hermetic 失败看 parallel 批次。
 5. CI 单 shard 失败：下载名称含 shard 的 evidence，并按 [#1731 测试证据主文档](./202607111501-1731-nextest-test-evidence.md)
-   的完整 context 模板查看 `Integration Tests / integration / <shard> / <partition-label> / cargo xtask integration`；
+   的完整 context 模板查看 `Integration Tests / integration / <shard> / <partition-label> / cargo xtask ci run`；
    未分区行的 `<partition-label>` 明确为 `unpartitioned`，最终以对应 run 的实际 check-run context 为准。其它
    shard 因 matrix `fail-fast: false` 会继续运行。
 

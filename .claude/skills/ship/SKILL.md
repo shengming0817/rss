@@ -76,7 +76,7 @@ git worktree add worktrees/<type>/<issue#-short-name> -b <type>/<issue#-short-na
 
 ## 阶段 4：TDD — 先写测试
 
-在 worktree 中先写 `#[cfg(test)]` 测试（或 `tests/` 集成测试），覆盖正常/边界/错误路径（底座 crate `consistency` / `primitives` / `vocab` ≥ 90%，其余 ≥ 80%）。运行目标 crate / 测试的最小命令（如 `cargo test --manifest-path worktrees/<wt>/Cargo.toml -p <crate> <test-filter>`）确认测试先 **FAIL**，再进入实施；不为单点改动默认跑 workspace 全量测试。
+在 worktree 中先写与改动载体匹配的测试（Rust 可用 `#[cfg(test)]` / `tests/`，workflow、脚本、文档治理使用对应结构测试或 selftest），覆盖正常/边界/错误路径；Rust 底座 crate `consistency` / `primitives` / `vocab` ≥ 90%，其余 ≥ 80%。运行最小复现命令确认测试先 **FAIL**，再进入实施；仅当任务实际修改 Rust crate 时使用 `cargo test --manifest-path worktrees/<wt>/Cargo.toml -p <crate> <test-filter>`，不为单点改动默认跑 workspace 全量测试。
 
 ---
 
@@ -98,11 +98,11 @@ git worktree add worktrees/<type>/<issue#-short-name> -b <type>/<issue#-short-na
 每个 developer sub-agent prompt 必须包含：
 - worktree 路径（`worktrees/<wt>`）
 - 分配的任务列表（文件路径 + 改动描述）
-- cargo 命令格式：`cargo test --manifest-path worktrees/<wt>/Cargo.toml -p <目标 crate> [测试过滤条件]`
+- 与改动载体匹配的最小失败/回归命令；仅 Rust crate 任务附 `cargo test --manifest-path worktrees/<wt>/Cargo.toml -p <目标 crate> [测试过滤条件]`
 - CLAUDE.md 关键约束（分层规则、覆盖率要求）
 - commit 格式：`<type>(<scope>): <描述>`
 
-每个 sub-agent 在自己负责的任务上**串行**执行 Edit-Test Loop，完成后对目标 crate 跑 build / test / clippy（0 warnings 才 commit）。
+每个 sub-agent 在自己负责的任务上**串行**执行 Edit-Test Loop；Rust crate 任务完成后对目标 crate 跑 build / test / clippy（0 warnings 才 commit），非 crate 任务运行对应结构测试、lint 或 selftest。
 
 ### 5.2 主 agent 汇总（所有并行 agent 完成后）
 
@@ -156,7 +156,7 @@ RSS 六维度 = 架构合规 / 安全 / 测试 / 运维可观测 / DX / 产品�
 4. **OOS → 建 issue + pm:oos**（有 OOS 时；artifact 先于 pm:ship）：逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签校验/创建顺序并注明 `Discovered via /ship`；`pri-p0`→停 AskUserQuestion、`validate` 失败→`deferred=labels-underivable` 回退草稿；贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
 5. **pm:ship**（`--kind=ship`，OOS artifact 已存在、指针有效）：IN_SCOPE findings 无损写入（reviewer 数 / 已修 Cx1-Cx2 / Cx3 处置）；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
 6. **切 label**：按 `PROJECT.md` §5 执行 `bash hack/automation/forge.sh pr-set-labels <PR#> --add pr-status/needs-review-again --remove pr-status/in-progress`。
-7. **本地验证（label 后执行）**：运行 `make -C worktrees/<wt> verify-fast` → `cargo check --manifest-path worktrees/<wt>/Cargo.toml --workspace --all-targets` → 按 diff 选出的 crate / feature / 行为定向 test / clippy。`verify-fast` 不执行编译，也不等价完整 GitHub CI；workspace check 在 #1752 落地前闭合反向依赖编译面。失败则回实施/fix，修复 push 后重新执行冲突预检、pm 评论与 label 流转，再重跑本步骤。
+7. **本地验证（label 后执行）**：运行 `make -C worktrees/<wt> ci CI_BASE=<remote>/develop`。该 canonical 入口只分析 `<remote>/develop...HEAD` 的已提交项目差异，并由 typed 影响模型执行对应 preflight；skill 不重复低层门。失败则回实施/fix，修复并 push 后重新执行冲突预检、pm 评论与 label 流转，再重跑本步骤。
 8. **延迟启监控（必做）**：本地验证结束后延迟约 15min 启 `/pr-monitor <PR#> --mode=auto`（review-side）；外部 app 可在 `needs-review-again` 后先行 review，pr-monitor 只做一次性交接兜底。
 
 > **收尾不变式（artifact-before-summary/trigger）**：OOS issue + pm:oos（步骤 4）+ 处置门判 defer 的 IN_SCOPE Cx3/Cx4 issue（步骤 2）必须先于 pm:ship（步骤 5）落地——pm:ship 的 OOS 指针指向已存在的 pm:oos，不悬空；再切 `needs-review-again`（步骤 6），最后跑本地验证（步骤 7）。
@@ -169,7 +169,7 @@ RSS 六维度 = 架构合规 / 安全 / 测试 / 运维可观测 / DX / 产品�
 ```
 PR: #<编号> <URL>
 评论: <pm:ship 评论 URL，含 comment 定位锚点（来自 forge.sh pr-comment stdout）>
-已完成：TDD / 实施 / PR / review（实跑 reviewer 数：按 diff 1/2/3/6 自动） / Cx1-Cx2 fix / verify-fast + workspace check + 定向测试
+已完成：TDD / 实施 / PR / review（实跑 reviewer 数：按 diff 1/2/3/6 自动） / Cx1-Cx2 fix / `make ci CI_BASE=<remote>/develop`
 
 已处置问题——处置门已判修/defer，**defer 项已自动建 issue 跟踪**；本表仅摘要 + 指针；完整无损详表（证据/三维根因/三级方案种子）见 pm:ship
 评论的 `<details>`；OOS + 判 defer 的 Cx3+/RELATED 的 issue #N / 原因见本 PR 的 pm:oos / pm:ship 评论：
@@ -181,5 +181,5 @@ PR: #<编号> <URL>
 
 ## 约束
 
-- 最终收尾前目标 crate clippy 0 warnings 且 verify-fast + workspace check + 定向测试必须通过；不 `--no-verify`；不 amend 已 push commit
+- 最终收尾前 `make ci CI_BASE=<remote>/develop` 必须通过；不 `--no-verify`；不 amend 已 push commit
 - worktree merge 后提示用户手动 `git worktree remove`，不自动删除

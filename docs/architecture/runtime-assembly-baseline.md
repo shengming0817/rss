@@ -138,4 +138,4 @@ The effective shutdown drain order is the reverse: listeners first, then workers
   extracts channels in `run()`, bypasses the single merge, or registers lifecycle primitives outside the common helper
 - `DomainModuleResult::merge` is absent or stops merging a field
 
-`cargo xtask verify --fast` and `cargo xtask ci` run this gate before `archrules`, so `RUNTIME-BASELINE-DRIFT-01` is indexed by `cargo xtask archrules verify`.
+`cargo xtask verify --fast` and `cargo xtask ci full` run this gate before `archrules`, so `RUNTIME-BASELINE-DRIFT-01` is indexed by `cargo xtask archrules verify`.
