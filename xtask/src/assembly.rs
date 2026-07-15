@@ -105,6 +105,112 @@ struct DiscoveredAssembly {
     cargo_toml: toml::Value,
 }
 
+/// A normalized direct child of `assemblies/`; fields stay private so callers cannot pair an
+/// assembly name with a different repository path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AssemblyTarget {
+    name: String,
+    dir: PathBuf,
+    lock_path: PathBuf,
+    has_manifest: bool,
+    has_cargo_manifest: bool,
+}
+
+impl AssemblyTarget {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub(crate) fn cargo_path(&self) -> PathBuf {
+        self.dir.join("Cargo.toml")
+    }
+
+    pub(crate) fn lock_path(&self) -> &Path {
+        &self.lock_path
+    }
+
+    pub(crate) const fn has_manifest(&self) -> bool {
+        self.has_manifest
+    }
+
+    const fn has_cargo_manifest(&self) -> bool {
+        self.has_cargo_manifest
+    }
+}
+
+/// Discover the shared assembly target universe without following repository-controlled links.
+pub(crate) fn discover_targets(root: &Path) -> Result<Vec<AssemblyTarget>> {
+    let assemblies_root = root.join("assemblies");
+    let metadata = match std::fs::symlink_metadata(&assemblies_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("检查 {} 失败", assemblies_root.display()));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("assemblies 根必须是真实目录")
+    }
+
+    let mut entries = std::fs::read_dir(&assemblies_root)
+        .with_context(|| format!("读 assembly 目录 {} 失败", assemblies_root.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .context("遍历 assembly 目录失败")?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+
+    let mut targets = Vec::new();
+    for entry in entries {
+        let file_type = entry
+            .file_type()
+            .context("检查 assembly direct child 类型失败")?;
+        if file_type.is_symlink() {
+            bail!("assemblies direct child 禁止符号链接")
+        }
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = assembly_name(entry.file_name())?;
+        let dir = entry.path();
+        let expected = root.join("assemblies").join(&name);
+        if dir != expected {
+            bail!("assembly 目录必须是规范 direct child")
+        }
+        let lock_path = dir.join("assembly.lock.json");
+        let has_manifest = regular_file_or_missing(&dir.join("assembly.toml"))?;
+        let has_cargo_manifest = regular_file_or_missing(&dir.join("Cargo.toml"))?;
+        targets.push(AssemblyTarget {
+            name,
+            dir,
+            lock_path,
+            has_manifest,
+            has_cargo_manifest,
+        });
+    }
+    Ok(targets)
+}
+
+fn assembly_name(file_name: std::ffi::OsString) -> Result<String> {
+    file_name
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("assembly 目录名必须是 UTF-8"))
+}
+
+fn regular_file_or_missing(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("assembly input 禁止符号链接")
+        }
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => bail!("assembly input 必须是普通文件"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| "检查 assembly input 失败"),
+    }
+}
+
 pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
     let (assemblies, mut findings) = discover(root)?;
     findings.extend(validate_framework_contracts(root, &assemblies)?);
@@ -261,29 +367,18 @@ fn validate_target_domain_closure(
 }
 
 fn discover(root: &Path) -> Result<(Vec<DiscoveredAssembly>, Vec<Finding>)> {
-    let assemblies_root = root.join("assemblies");
-    if !assemblies_root.exists() {
-        return Ok((Vec::new(), Vec::new()));
-    }
-
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&assemblies_root)
-        .with_context(|| format!("读 assembly 目录 {} 失败", assemblies_root.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| "遍历 assembly 目录失败")?
-        .into_iter()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    dirs.sort();
-
     let mut assemblies = Vec::new();
     let mut findings = Vec::new();
-    for dir in dirs {
-        let manifest_path = dir.join("assembly.toml");
-        let cargo_path = dir.join("Cargo.toml");
-        if !manifest_path.exists() {
-            if cargo_path.exists() {
-                let label = dir.strip_prefix(root).unwrap_or(&dir).display().to_string();
+    for target in discover_targets(root)? {
+        let cargo_path = target.cargo_path();
+        if !target.has_manifest() {
+            if target.has_cargo_manifest() {
+                let label = target
+                    .dir()
+                    .strip_prefix(root)
+                    .unwrap_or(target.dir())
+                    .display()
+                    .to_string();
                 findings.push(finding(
                     Rule::MissingManifest,
                     &label,
@@ -296,7 +391,7 @@ fn discover(root: &Path) -> Result<(Vec<DiscoveredAssembly>, Vec<Finding>)> {
             }
             continue;
         }
-        assemblies.push(load_target(root, &dir)?);
+        assemblies.push(load_target(root, target.dir())?);
     }
     Ok((assemblies, findings))
 }
@@ -1836,6 +1931,15 @@ mod tests {
     use crate::testutil::unique_tmp;
     use std::fs;
     use std::path::Path;
+
+    #[cfg(unix)]
+    #[test]
+    fn assembly_lock_discovery_rejects_non_utf8_name() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid = std::ffi::OsString::from_vec(vec![b'n', b'a', b'm', b'e', 0xff]);
+        assert!(assembly_name(invalid).is_err());
+    }
 
     fn write(path: &Path, text: &str) -> anyhow::Result<()> {
         fs::write(path, text)?;

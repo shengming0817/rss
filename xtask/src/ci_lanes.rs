@@ -457,6 +457,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            AssemblyLockCheck => (step_assembly_lock_check, Some("xtask/src/assembly_lock.rs"),
+                gate(
+                        GateId::AssemblyLockCheck,
+                        "assembly-lock-check",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             AssemblyGraphCheck => (step_assembly_graph_check, Some("xtask/src/graph.rs"),
                 gate(
                         GateId::AssemblyGraphCheck,

@@ -778,6 +778,7 @@ fn scan_record_granular_xtask_invariants(
         "xtask/src/ci_gate.rs" => CI_GATE_INVARIANT_BINDINGS,
         "xtask/src/localtx_coverage.rs" => LOCALTX_COVERAGE_INVARIANT_BINDINGS,
         "xtask/src/localtx_evidence.rs" => LOCALTX_EVIDENCE_INVARIANT_BINDINGS,
+        "xtask/src/assembly_lock.rs" => ASSEMBLY_LOCK_INVARIANT_BINDINGS,
         _ => return Ok(false),
     };
     let found_invariants = extract_invariants(root, path)?;
@@ -1163,6 +1164,41 @@ const COMPILER_CACHE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         carrier: "xtask",
         evidence: "canonical-path/version synthetic red and enabled-policy anti-vacuity",
         gates: "manual/opt-in",
+    },
+];
+
+const ASSEMBLY_LOCK_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/assembly_lock.rs",
+        id: "ASSEMBLY-LOCK-GOLDEN-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "repository compiler golden drift with synthetic red and three real locks",
+        gates: "verify,ci,ci-meta",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/assembly_lock.rs",
+        id: "ASSEMBLY-LOCK-DIAGNOSTIC-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "closed safe diagnostic enums and private escaped repository path",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/assembly_lock.rs",
+        id: "ASSEMBLY-LOCK-LF-CHECKOUT-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "effective git attribute synthetic reds and real-lock anti-vacuity",
+        gates: "verify,ci,ci-meta",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/assembly_lock.rs",
+        id: "ASSEMBLY-LOCK-VERIFY-GATE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "typed exact-once aggregate plan synthetic reds",
+        gates: "verify,ci,ci-meta",
     },
 ];
 
@@ -2426,6 +2462,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
     GateDeclaration {
         path: "xtask/src/assembly_codegen.rs",
         tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/assembly_lock.rs",
+        tokens: "native-compile,verify,ci,ci-meta",
         role: GateDeclarationRole::PlanStep,
     },
     GateDeclaration {
@@ -4103,6 +4144,49 @@ fn unrelated_green_accepted() { assert!(true); }
         }));
 
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_lock_binding_rejects_omission_and_wrong_carrier_red() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let path = root.join("xtask/src/assembly_lock.rs");
+        let found = extract_invariants(&root, &path)?;
+
+        let omitted = ASSEMBLY_LOCK_INVARIANT_BINDINGS
+            .iter()
+            .copied()
+            .filter(|binding| binding.id != "ASSEMBLY-LOCK-VERIFY-GATE-01")
+            .collect::<Vec<_>>();
+        let mut missing = Index::default();
+        validate_closed_invariant_bindings(&mut missing, &path, &found, &omitted);
+        assert!(missing.findings.iter().any(|finding| {
+            finding.rule == Rule::MissingInvariant && finding.detail.contains("缺 carrier binding")
+        }));
+
+        let mut wrong = ASSEMBLY_LOCK_INVARIANT_BINDINGS.to_vec();
+        wrong
+            .iter_mut()
+            .find(|binding| binding.id == "ASSEMBLY-LOCK-DIAGNOSTIC-01")
+            .context("diagnostic binding missing")?
+            .carrier = "xtask";
+        let mut invalid = Index::default();
+        for binding in wrong {
+            scan_extracted_invariant_rules_filtered(
+                &root,
+                &mut invalid,
+                &found,
+                binding.carrier,
+                binding.evidence,
+                Some(binding.gates),
+                |rule| binding.matches(rule) && binding.accepts(rule),
+            )?;
+        }
+        assert!(invalid.findings.iter().any(|finding| {
+            finding.rule == Rule::CarrierBindingMismatch
+                && finding.subject.contains("assembly_lock.rs")
+                && finding.detail.contains("ASSEMBLY-LOCK-DIAGNOSTIC-01")
+        }));
         Ok(())
     }
 

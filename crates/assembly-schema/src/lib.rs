@@ -6,7 +6,8 @@ pub mod repository_contract;
 
 pub use lock::{
     AssemblyDigests, AssemblyFingerprint, AssemblyIdentity, AssemblyLock, AssemblyLockError,
-    GENERATED_MODULE_OWNERSHIP_MARKER, ParsedAssemblyLock, RepositoryVerifiedAssemblyLock,
+    AssemblyLockErrorStage, GENERATED_MODULE_OWNERSHIP_MARKER, ParsedAssemblyLock,
+    RepositoryVerifiedAssemblyLock,
 };
 
 use schemars::JsonSchema;

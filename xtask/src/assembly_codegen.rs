@@ -8,17 +8,15 @@ use assembly_schema::{
     AssemblyDomain, AssemblyListenerKind, AssemblyManifest, CanonicalAssemblyManifestV1,
     GENERATED_MODULE_OWNERSHIP_MARKER, LifecycleChannel,
 };
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 const MANIFEST_NAME: &str = "assembly.toml";
 const GENERATED_REL: &str = "src/generated/modules_gen.rs";
 const GENERATED_PATHSPEC: &str = "assemblies/*/src/generated/**";
 const GENERATED_LF_ATTRIBUTE_RULE: &str = "assemblies/*/src/generated/** text eol=lf";
 const OWNERSHIP_MARKER: &str = GENERATED_MODULE_OWNERSHIP_MARKER;
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct Target {
     path: PathBuf,
@@ -33,23 +31,20 @@ struct GenerationPlan {
 
 pub(crate) fn run(check: bool) -> Result<()> {
     let root = crate::workspace_root()?;
+    if check {
+        return check_root(&root);
+    }
     verify_generated_lf_checkout(&root)?;
-    generate_root(&root, check)
+    generate_root(&root, false)
+}
+
+/// Run the complete modules gate, including effective LF policy and owned-orphan detection.
+pub(crate) fn check_root(root: &Path) -> Result<()> {
+    verify_generated_lf_checkout(root)?;
+    generate_root(root, true)
 }
 
 fn verify_generated_lf_checkout(root: &Path) -> Result<()> {
-    let attributes_path = root.join(".gitattributes");
-    let attributes = fs::read_to_string(&attributes_path)
-        .with_context(|| format!("读取 {} 失败", attributes_path.display()))?;
-    let declarations = attributes
-        .lines()
-        .filter(|line| line.trim() == GENERATED_LF_ATTRIBUTE_RULE)
-        .count();
-    ensure!(
-        declarations == 1,
-        ".gitattributes 必须且只能声明一次 `{GENERATED_LF_ATTRIBUTE_RULE}`，实际 {declarations} 次"
-    );
-
     let listed = git_stdout(root, &["ls-files", "-z", "--", GENERATED_PATHSPEC])?;
     let paths = listed
         .split(|byte| *byte == 0)
@@ -57,33 +52,9 @@ fn verify_generated_lf_checkout(root: &Path) -> Result<()> {
         .map(|path| std::str::from_utf8(path).context("generator-owned tracked path 不是 UTF-8"))
         .collect::<Result<Vec<_>>>()?;
     ensure!(!paths.is_empty(), "generator-owned tracked path 集合为空");
-
-    let mut args = vec!["check-attr", "-z", "text", "eol", "--"];
-    args.extend(paths.iter().copied());
-    let checked = git_stdout(root, &args)?;
-    let fields = checked
-        .split(|byte| *byte == 0)
-        .filter(|field| !field.is_empty())
-        .collect::<Vec<_>>();
-    ensure!(
-        fields.len() == paths.len() * 6,
-        "git check-attr 返回记录数异常"
-    );
-    for (path, actual) in paths.iter().zip(fields.chunks_exact(6)) {
-        let expected: [&[u8]; 6] = [
-            path.as_bytes(),
-            b"text",
-            b"set",
-            path.as_bytes(),
-            b"eol",
-            b"lf",
-        ];
-        ensure!(
-            actual == expected,
-            "generator-owned path `{path}` 的 Git checkout 属性必须为 text=set,eol=lf"
-        );
-    }
-    Ok(())
+    let targets = paths.iter().map(|path| root.join(path)).collect::<Vec<_>>();
+    crate::generated_file::verify_lf_checkout(root, GENERATED_LF_ATTRIBUTE_RULE, &targets)
+        .map_err(|stage| anyhow::anyhow!("generated LF checkout failed: {stage:?}"))
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
@@ -134,7 +105,7 @@ pub(crate) fn generate_root(root: &Path, check: bool) -> Result<()> {
     for target in &plan.targets {
         if target.actual.as_deref() != Some(target.content.as_slice()) {
             ensure_output_path_has_no_symlinks(&target.path)?;
-            atomic_write(&target.path, &target.content)
+            crate::generated_file::atomic_replace(&target.path, &target.content)
                 .with_context(|| format!("原子写入 {} 失败", target.path.display()))?;
             eprintln!("  generated {}", relative_label(root, &target.path));
         }
@@ -431,42 +402,6 @@ fn relative_label(root: &Path, path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
-}
-
-fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("{} 无父目录", path.display()))?;
-    fs::create_dir_all(parent).with_context(|| format!("创建 {} 失败", parent.display()))?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("{} 无文件名", path.display()))?
-        .to_string_lossy();
-    let temp = parent.join(format!(
-        ".{file_name}.tmp-{}-{}",
-        std::process::id(),
-        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-
-    let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)
-            .with_context(|| format!("创建临时文件 {} 失败", temp.display()))?;
-        file.write_all(content)?;
-        file.flush()?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp, path)
-            .with_context(|| format!("rename {} -> {} 失败", temp.display(), path.display()))?;
-        File::open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
 }
 
 #[cfg(test)]

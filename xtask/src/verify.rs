@@ -57,9 +57,9 @@ use crate::diagnostic::run_check;
 use crate::integration_shards::{self, IntegrationShard, Scheduling};
 use crate::workspace_root;
 use crate::{
-    archrules, assembly, codegen, consistency_effects, consistency_fixtures, contract,
-    doc_contracts, layerdeps, reconcile_outbox_command_guard, repo_scope_guard, runtime_baseline,
-    runtime_deps_guard, shipped_feature_guard, wsdeps,
+    archrules, assembly, assembly_lock, codegen, consistency_effects, consistency_fixtures,
+    contract, doc_contracts, layerdeps, reconcile_outbox_command_guard, repo_scope_guard,
+    runtime_baseline, runtime_deps_guard, shipped_feature_guard, wsdeps,
 };
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -86,6 +86,8 @@ enum InternalCheck {
     AssemblyValidate,
     /// assembly.toml domains → committed modules_gen.rs 漂移门（ASSEMBLY-MODULES-CODEGEN-01）。
     AssemblyModulesCheck,
+    /// repository-verified committed assembly.lock.json raw-byte 漂移门（#1781）。
+    AssemblyLockCheck,
     /// committed runtime assembly Mermaid/JSON graph 漂移与 source closure 门。
     AssemblyGraphCheck,
     /// wire JSON-Schema/manifest 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。
@@ -234,6 +236,14 @@ fn step_assembly_modules_check() -> Step {
         id: GateId::AssemblyModulesCheck,
         args: &[],
         kind: StepKind::Internal(InternalCheck::AssemblyModulesCheck),
+        env: &[],
+    }
+}
+fn step_assembly_lock_check() -> Step {
+    Step {
+        id: GateId::AssemblyLockCheck,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::AssemblyLockCheck),
         env: &[],
     }
 }
@@ -1136,6 +1146,9 @@ fn run_internal(check: InternalCheck, contract_against: &str) -> Result<()> {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
         InternalCheck::AssemblyValidate => run_check(&assembly::AssemblyValidate),
         InternalCheck::AssemblyModulesCheck => crate::assembly_codegen::run(true),
+        InternalCheck::AssemblyLockCheck => {
+            assembly_lock::run(assembly_lock::AssemblyLockAction::Check)
+        }
         InternalCheck::AssemblyGraphCheck => {
             crate::graph::run(&crate::graph::Options::check_runtime())
         }
@@ -1797,7 +1810,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 35);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 36);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -1881,14 +1894,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_53_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_54_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 53);
+        assert_eq!(plan.len(), 54);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 53);
+        assert_eq!(ids.len(), 54);
     }
 
     #[test]
@@ -1910,6 +1923,7 @@ mod tests {
                 "contract-validate",
                 "assembly-validate",
                 "assembly-modules-check",
+                "assembly-lock-check",
                 "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
@@ -2113,6 +2127,7 @@ mod tests {
                 "contract-validate",
                 "assembly-validate",
                 "assembly-modules-check",
+                "assembly-lock-check",
                 "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
@@ -2173,6 +2188,7 @@ mod tests {
                     "contract-validate",
                     "assembly-validate",
                     "assembly-modules-check",
+                    "assembly-lock-check",
                     "assembly-graph-check",
                     "contract-breaking",
                     "layer-deps",
@@ -2331,6 +2347,81 @@ mod tests {
         Ok(())
     }
 
+    fn validate_assembly_lock_check(plan: &[Step]) -> anyhow::Result<()> {
+        let members = plan
+            .iter()
+            .filter(|step| step.id == GateId::AssemblyLockCheck)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            members.len() == 1,
+            "expected exactly one assembly lock check"
+        );
+        let lock = members[0];
+        anyhow::ensure!(!lock.needs_compile(), "lock check must be no-compile");
+        anyhow::ensure!(
+            lock.carrier_file() == Some("xtask/src/assembly_lock.rs"),
+            "lock carrier drift"
+        );
+        anyhow::ensure!(
+            matches!(
+                lock.kind,
+                StepKind::Internal(InternalCheck::AssemblyLockCheck)
+            ),
+            "lock executor drift"
+        );
+        anyhow::ensure!(
+            lock.id.spec().lanes() == [Some(CiLane::Meta), None]
+                && lock.id.spec().verify_membership() == VerifyMembership::Included
+                && lock.id.spec().compat() == CompatMembership::Included
+                && lock.id.spec().tool() == ToolRequirement::InProcess,
+            "lock typed membership drift"
+        );
+        let modules = plan
+            .iter()
+            .position(|step| step.id == GateId::AssemblyModulesCheck)
+            .context("plan lacks modules check")?;
+        let lock = plan
+            .iter()
+            .position(|step| step.id == GateId::AssemblyLockCheck)
+            .context("plan lacks lock check")?;
+        let graph = plan
+            .iter()
+            .position(|step| step.id == GateId::AssemblyGraphCheck)
+            .context("plan lacks graph check")?;
+        anyhow::ensure!(
+            lock == modules + 1 && graph == lock + 1,
+            "assembly order must be modules -> lock -> graph"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_lock_check_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()>
+    {
+        for (name, plan) in [
+            ("full", plan_for(PlanTarget::Verify)),
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
+            validate_assembly_lock_check(&plan).with_context(|| format!("{name} plan"))?;
+        }
+
+        let mut omitted = verify_plan(&opts(true, false));
+        omitted.retain(|step| step.id != GateId::AssemblyLockCheck);
+        assert!(validate_assembly_lock_check(&omitted).is_err());
+
+        let mut duplicated = verify_plan(&opts(true, false));
+        let duplicate = duplicated
+            .iter()
+            .find(|step| step.id == GateId::AssemblyLockCheck)
+            .context("committed fast plan lacks lock check")?
+            .clone();
+        duplicated.push(duplicate);
+        assert!(validate_assembly_lock_check(&duplicated).is_err());
+        Ok(())
+    }
+
     #[test]
     fn assembly_graph_is_no_compile_internal_gate_after_modules_in_all_lanes() -> anyhow::Result<()>
     {
@@ -2348,7 +2439,12 @@ mod tests {
                 .iter()
                 .position(|label| *label == "assembly-graph-check")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-graph-check"))?;
-            assert_eq!(graph, modules + 1, "{name} lane order drift");
+            let lock = labels
+                .iter()
+                .position(|label| *label == "assembly-lock-check")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-lock-check"))?;
+            assert_eq!(lock, modules + 1, "{name} lock lane order drift");
+            assert_eq!(graph, lock + 1, "{name} graph lane order drift");
             assert!(!plan[graph].needs_compile());
             assert_eq!(plan[graph].carrier_file(), Some("xtask/src/graph.rs"));
             assert!(matches!(
@@ -2662,6 +2758,7 @@ mod tests {
                 "contract-validate",
                 "assembly-validate",
                 "assembly-modules-check",
+                "assembly-lock-check",
                 "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
@@ -2782,6 +2879,7 @@ mod tests {
             "contract-validate",
             "assembly-validate",
             "assembly-modules-check",
+            "assembly-lock-check",
             "assembly-graph-check",
             "contract-breaking",
             "layer-deps",

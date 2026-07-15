@@ -261,6 +261,15 @@ impl AssemblyFingerprint {
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
 pub struct AssemblyLockError(AssemblyLockErrorKind);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssemblyLockErrorStage {
+    LockFile,
+    Manifest,
+    ContractCatalog,
+    GeneratedUniverse,
+    FileSystem,
+    Serialization,
+}
 #[derive(Debug, thiserror::Error)]
 enum AssemblyLockErrorKind {
     #[error("invalid strict AssemblyLock JSON: {0}")]
@@ -307,6 +316,19 @@ enum AssemblyLockErrorKind {
     },
 }
 impl AssemblyLockError {
+    pub const fn stage(&self) -> AssemblyLockErrorStage {
+        match &self.0 {
+            AssemblyLockErrorKind::AssemblyManifestToml { .. }
+            | AssemblyLockErrorKind::AssemblyManifestCanonicalization { .. }
+            | AssemblyLockErrorKind::Assembly(_) => AssemblyLockErrorStage::Manifest,
+            AssemblyLockErrorKind::Contract(_) => AssemblyLockErrorStage::ContractCatalog,
+            AssemblyLockErrorKind::Generated(_) => AssemblyLockErrorStage::GeneratedUniverse,
+            AssemblyLockErrorKind::Io { .. } => AssemblyLockErrorStage::FileSystem,
+            AssemblyLockErrorKind::CanonicalJson(_) => AssemblyLockErrorStage::Serialization,
+            _ => AssemblyLockErrorStage::LockFile,
+        }
+    }
+
     fn new(kind: AssemblyLockErrorKind) -> Self {
         Self(kind)
     }

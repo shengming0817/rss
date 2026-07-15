@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "identity": {
+    "name": "settingsonly",
+    "profile": "demo"
+  },
+  "digests": {
+    "manifest": "sha256:175fb3b098fdf113dfb7786df6650557f160284ea2ea7336bf9afc40a433f8c0",
+    "generated": "sha256:5dd9929e16292619028dadd1c4b23af00f2bf6e0f6efceccce2274b83687d2fa",
+    "contracts": "sha256:9ca3779a1ccf3bcc203ab0544aaab68e423acb39e315117668c78ec4e523f212"
+  },
+  "fingerprint": "sha256:13733225c162aa6b104ea702be964dedbbca3056729834cee65a3a914ec8de61"
+}

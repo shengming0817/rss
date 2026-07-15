@@ -62,6 +62,7 @@ const MACHINE_INPUT_PATHS: &[&str] = &[
 ];
 const POLICY_BEHAVIOR_SPEC: &str = include_str!("../tests/golden/ci-impact-policy.json");
 const HIGH_IMPACT_PATHS: &[&str] = &[
+    ".gitattributes",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -3159,7 +3160,7 @@ mod tests {
         );
 
         let full = impact_entries(
-            &[DiffEntry::rename("crates/leaf/src/lib.rs")],
+            &[DiffEntry::modified(".gitattributes")],
             None,
             &BTreeSet::new(),
             &BTreeMap::new(),
