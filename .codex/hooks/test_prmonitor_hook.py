@@ -72,10 +72,18 @@ class PrmonitorHookTest(unittest.TestCase):
         self.assertTrue(calls)
         args = calls[-1]
         self.assertEqual(args[:5], [
-            "message", "send", "--integration-id", "feishu-b8a9ec7f", "--conversation-id",
+            "message", "send-card", "--integration-id", "feishu-b8a9ec7f", "--conversation-id",
         ])
         self.assertEqual(args[5], "oc_42f0b43f40dc692c5d29b4b6df9f632e")
         return args[args.index("--text") + 1]
+
+    def last_card(self):
+        args = self.read_calls()[-1]
+        return {
+            "title": args[args.index("--title") + 1],
+            "template": args[args.index("--template") + 1],
+            "text": args[args.index("--text") + 1],
+        }
 
     def base_event(self, event_name):
         return {
@@ -144,6 +152,7 @@ class PrmonitorHookTest(unittest.TestCase):
         message = self.last_message()
         self.assertIn("等待操作批准", message)
         self.assertNotIn("等待计划批准", message)
+        self.assertEqual(self.last_card()["template"], "orange")
 
     def test_same_turn_permission_requests_without_call_id_are_distinct(self):
         first = self.base_event("PermissionRequest")
@@ -183,8 +192,14 @@ class PrmonitorHookTest(unittest.TestCase):
         message = self.last_message()
         for expected in ("任务已停止", "等待用户继续", "session-1", "turn-1", "实现通知 hooks", "已完成诊断"):
             self.assertIn(expected, message)
+        card = self.last_card()
+        self.assertEqual(
+            card["title"],
+            "%s · Codex 任务已停止" % HERE.parent.parent.name,
+        )
+        self.assertEqual(card["template"], "grey")
 
-    def test_content_requires_opt_in_and_route_has_no_repository_default(self):
+    def test_content_requires_opt_in(self):
         metadata_only = dict(self.env)
         metadata_only.pop("PRMONITOR_INCLUDE_CONTENT")
         self.hook.handle_hook(dict(self.base_event("UserPromptSubmit"), prompt="敏感任务"), metadata_only)
@@ -197,13 +212,149 @@ class PrmonitorHookTest(unittest.TestCase):
         self.assertNotIn("敏感原因", message)
         self.assertNotIn("敏感回复", message)
 
-        no_route = dict(metadata_only)
-        no_route.pop("PRMONITOR_INTEGRATION_ID")
-        no_route.pop("PRMONITOR_CONVERSATION_ID")
-        before = len(self.read_calls())
-        event = dict(self.base_event("PermissionRequest"), tool_name="Bash")
-        self.hook.handle_hook(event, no_route)
-        self.assertEqual(len(self.read_calls()), before)
+    def test_missing_or_partial_route_does_not_send(self):
+        cases = [
+            {},
+            {"PRMONITOR_INTEGRATION_ID": "environment-integration"},
+            {"PRMONITOR_CONVERSATION_ID": "environment-conversation"},
+        ]
+        for index, route in enumerate(cases):
+            with self.subTest(route=route):
+                env = dict(self.env)
+                env.pop("PRMONITOR_INTEGRATION_ID")
+                env.pop("PRMONITOR_CONVERSATION_ID")
+                env.update(route)
+                event = dict(
+                    self.base_event("PermissionRequest"),
+                    tool_name="Bash",
+                    call_id="missing-route-%d" % index,
+                )
+                self.hook.handle_hook(event, env)
+        self.assertEqual(self.read_calls(), [])
+
+    def test_partial_environment_route_does_not_mix_with_config(self):
+        config = self.root / "hook-config.json"
+        config.write_text(json.dumps({
+            "integration_id": "configured-integration",
+            "conversation_id": "configured-conversation",
+        }), encoding="utf-8")
+        config.chmod(0o600)
+        env = dict(self.env)
+        env["PRMONITOR_HOOK_CONFIG"] = str(config)
+        env["PRMONITOR_INTEGRATION_ID"] = "environment-integration"
+        env.pop("PRMONITOR_CONVERSATION_ID")
+
+        self.hook.handle_hook(
+            dict(self.base_event("PermissionRequest"), tool_name="Bash"), env,
+        )
+
+        self.assertEqual(self.read_calls(), [])
+
+    def test_insecure_or_partial_user_config_route_does_not_send(self):
+        for index, config_value in enumerate([
+            {"integration_id": "configured-integration"},
+            {
+                "integration_id": "configured-integration",
+                "conversation_id": "configured-conversation",
+            },
+        ]):
+            with self.subTest(config=config_value):
+                config = self.root / ("hook-config-%d.json" % index)
+                config.write_text(json.dumps(config_value), encoding="utf-8")
+                if index == 0:
+                    config.chmod(0o600)
+                else:
+                    config.chmod(0o644)
+                env = dict(self.env)
+                env["PRMONITOR_HOOK_CONFIG"] = str(config)
+                env.pop("PRMONITOR_INTEGRATION_ID")
+                env.pop("PRMONITOR_CONVERSATION_ID")
+                event = dict(
+                    self.base_event("PermissionRequest"),
+                    tool_name="Bash",
+                    call_id="invalid-config-%d" % index,
+                )
+                self.hook.handle_hook(event, env)
+        self.assertEqual(self.read_calls(), [])
+
+    def test_malformed_user_config_route_does_not_send(self):
+        config = self.root / "hook-config.json"
+        config.write_text("{broken-json", encoding="utf-8")
+        config.chmod(0o600)
+        env = dict(self.env)
+        env["PRMONITOR_HOOK_CONFIG"] = str(config)
+        env.pop("PRMONITOR_INTEGRATION_ID")
+        env.pop("PRMONITOR_CONVERSATION_ID")
+
+        self.hook.handle_hook(
+            dict(self.base_event("PermissionRequest"), tool_name="Bash"), env,
+        )
+
+        self.assertEqual(self.read_calls(), [])
+
+    def test_user_config_overrides_local_route_and_environment_overrides_config(self):
+        config = self.root / "hook-config.json"
+        config.write_text(json.dumps({
+            "integration_id": "configured-integration",
+            "conversation_id": "configured-conversation",
+            "include_content": True,
+        }), encoding="utf-8")
+        config.chmod(0o600)
+        env = dict(self.env)
+        env["PRMONITOR_HOOK_CONFIG"] = str(config)
+        env.pop("PRMONITOR_INTEGRATION_ID")
+        env.pop("PRMONITOR_CONVERSATION_ID")
+        self.hook.handle_hook(dict(self.base_event("PermissionRequest"), tool_name="Bash"), env)
+        args = self.read_calls()[-1]
+        self.assertEqual(args[args.index("--integration-id") + 1], "configured-integration")
+        self.assertEqual(args[args.index("--conversation-id") + 1], "configured-conversation")
+
+        env["PRMONITOR_INTEGRATION_ID"] = "environment-integration"
+        env["PRMONITOR_CONVERSATION_ID"] = "environment-conversation"
+        event = dict(self.base_event("PermissionRequest"), tool_name="Read")
+        event["call_id"] = "second-call"
+        self.hook.handle_hook(event, env)
+        args = self.read_calls()[-1]
+        self.assertEqual(args[args.index("--integration-id") + 1], "environment-integration")
+        self.assertEqual(args[args.index("--conversation-id") + 1], "environment-conversation")
+
+    def test_all_hook_notifications_are_cards_without_action_payloads(self):
+        self.cache_prompt()
+        cases = [
+            (dict(self.base_event("PermissionRequest"), tool_name="Bash", call_id="permission"), "orange"),
+            (dict(self.base_event("Stop"), permission_mode="plan", call_id="plan"), "orange"),
+            (dict(self.base_event("Stop"), stop_reason="done", call_id="stop"), "grey"),
+        ]
+        for event, template in cases:
+            with self.subTest(event=event["hook_event_name"], template=template):
+                self.hook.handle_hook(event, self.env)
+                args = self.read_calls()[-1]
+                self.assertEqual(args[:2], ["message", "send-card"])
+                self.assertEqual(args[args.index("--template") + 1], template)
+                self.assertNotIn("--actions", args)
+
+    def test_build_card_collects_repository_context_once(self):
+        calls = []
+        original = self.hook.repository_context
+
+        def fake_repository_context(cwd):
+            calls.append(cwd)
+            return {
+                "name": "rss",
+                "root": str(HERE.parent.parent),
+                "branch": "feature/test",
+                "commit": "0123456789ab",
+            }
+
+        self.hook.repository_context = fake_repository_context
+        try:
+            self.hook.build_card(
+                "stopped", self.base_event("Stop"), {}, "done", self.env,
+            )
+        finally:
+            self.hook.repository_context = original
+
+        self.assertEqual(calls, [str(HERE.parent.parent)])
 
     def test_extracts_all_questions_and_options(self):
         detail = self.hook.extract_question_detail({"questions": [
@@ -263,6 +414,8 @@ class PrmonitorHookTest(unittest.TestCase):
                 time.sleep(0.02)
             calls = self.read_calls()
             self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][:2], ["message", "send-card"])
+            self.assertEqual(calls[0][calls[0].index("--template") + 1], "orange")
             self.assertIn("是否实施？", calls[0][calls[0].index("--text") + 1])
         finally:
             process.terminate()

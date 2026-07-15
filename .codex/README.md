@@ -3,12 +3,13 @@
 本目录为 RSS 项目启用两条互补路径：
 
 - `hooks.json` 在 Codex 等待原生人工输入、等待权限批准、等待计划批准和任务停止时，
-  通过 prmonitor 消息基础通道发送飞书通知。
+  通过 prmonitor 消息基础通道发送无按钮信息卡片；等待类使用橙色，普通 Stop 使用灰色。
 - `config.toml` 启用全局定义的 `prmonitor_human` MCP。Codex 需要用户回答问题、
   选择方案或批准计划时，优先调用 `ask_via_feishu`；Codex 弹窗和飞书卡片中
   首个有效回答获胜。
 
-工具执行权限和沙箱批准不经过飞书，仍使用 Codex 原生审批。
+信息卡片不接收回答。工具执行权限和沙箱批准仍使用 Codex 原生审批；需要可靠双向回答时，
+使用 MCP `ask_via_feishu` 创建带按钮的交互卡片，由 Codex 弹窗与飞书 first-wins。
 
 原生 `request_user_input` 尚无独立稳定 hook 事件，因此当前 watcher 只是 best-effort
 兼容层：它通过有版本边界的 parser 读取新增 transcript 记录，未知格式与投递失败只写
@@ -70,7 +71,7 @@ approval_mode = "approve"
    入站使用官方长连接，不配置公网 Webhook 或 tunnel。
 4. 保证开发版和已安装版不会同时使用同一组飞书应用凭据。
 
-Hook 的消息路由和内容策略属于用户本机配置，不在仓库内提供默认收件人。创建
+Hook 的消息路由和内容策略优先来自用户本机配置。创建
 `~/Library/Application Support/com.ghbvf.prmonitor/codex-hooks.json`，权限设为 `0600`：
 
 ```json
@@ -81,17 +82,23 @@ Hook 的消息路由和内容策略属于用户本机配置，不在仓库内提
 }
 ```
 
-`include_content` 默认是 `false`；设为 `true` 是显式允许发送问题、任务 prompt、事件详情
-和最后回复。也可用 `PRMONITOR_HOOK_CONFIG` 指向其他用户级配置。Stop 会清除本轮 prompt
+路由优先级为完整的环境变量对、权限安全的完整用户配置对；仓库不内置接收人 fallback。
+`integration_id` 与 `conversation_id` 是不可拆分的 route，缺配、半配、配置损坏、配置不归当前用户，
+或配置文件对组/其他用户开放权限时，hook 会 fail-open 跳过通知，不会拼接不同来源。`include_content`
+默认是 `false`；设为 `true` 是显式允许发送问题、任务 prompt、事件详情和最后回复，且仅从同一安全配置文件读取。
+也可用 `PRMONITOR_HOOK_CONFIG` 指向其他用户级配置，但仍须 `chmod 600`。Stop 会清除本轮 prompt
 缓存和 MCP marker；`diagnostics.json` 只保留最近 64 条静态失败分类，不含消息正文、token
 或完整命令。
+
+Hook 依赖 prmonitor CLI 的 `message send-card` 子命令。卡片只有 header 与 markdown body，
+不携带 action/button；这避免普通状态通知伪装成可回答请求。
 
 ## 验收
 
 启动 prmonitor 后，新建 Codex 任务，依次验证：
 
-1. 普通任务停止只收到一条“任务已停止”。
-2. 原生 `request_user_input` 收到一条“等待人工输入”。
+1. 普通任务停止只收到一张灰色“任务已停止”信息卡片，无按钮。
+2. 原生 `request_user_input` 收到一张橙色“等待人工输入”信息卡片，无按钮。
 3. `ask_via_feishu` 同时显示 Codex 弹窗和飞书卡片；任一端回答后另一端关闭或失效。
 4. 计划批准只发送一张交互卡片，不再由 Stop hook 重复发送计划消息。
-5. 工具权限请求仍由 Codex 原生权限弹窗处理，hook 仅发送旁路通知。
+5. 工具权限请求仍由 Codex 原生权限弹窗处理，hook 仅发送橙色无按钮信息卡片。

@@ -13,10 +13,12 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+from typing import NamedTuple
 
 
 DEFAULT_PRMONITOR_BIN = "/Applications/prmonitor.app/Contents/MacOS/prmonitor"
@@ -31,6 +33,11 @@ QUESTION_TOOL_NAMES = {"request_user_input", "RequestUserInput", "AskUserQuestio
 MCP_TOOL_NAMES = {"ask_via_feishu", "mcp__prmonitor_human__ask_via_feishu"}
 SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 HOOK_PATH = Path(__file__).resolve()
+
+
+class Route(NamedTuple):
+    integration_id: str
+    conversation_id: str
 
 
 def merged_environment(overrides=None):
@@ -81,8 +88,20 @@ def read_json_file(path, default):
         return default
 
 
+def hook_configuration_path(env):
+    return Path(env.get("PRMONITOR_HOOK_CONFIG") or DEFAULT_HOOK_CONFIG).expanduser()
+
+
 def hook_configuration(env):
-    path = Path(env.get("PRMONITOR_HOOK_CONFIG") or DEFAULT_HOOK_CONFIG).expanduser()
+    path = hook_configuration_path(env)
+    try:
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            return {}
+        if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
+            return {}
+    except OSError:
+        return {}
     value = read_json_file(path, {})
     return value if isinstance(value, dict) else {}
 
@@ -92,6 +111,23 @@ def configuration_value(env, config, environment_key, config_key, default=""):
     if value in (None, ""):
         value = config.get(config_key)
     return str(value if value not in (None, "") else default)
+
+
+def resolve_route(env, config):
+    environment_integration = str(env.get("PRMONITOR_INTEGRATION_ID") or "").strip()
+    environment_conversation = str(env.get("PRMONITOR_CONVERSATION_ID") or "").strip()
+    if environment_integration or environment_conversation:
+        if environment_integration and environment_conversation:
+            return Route(environment_integration, environment_conversation), ""
+        return None, "recipient_incomplete"
+
+    configured_integration = str(config.get("integration_id") or "").strip()
+    configured_conversation = str(config.get("conversation_id") or "").strip()
+    if configured_integration and configured_conversation:
+        return Route(configured_integration, configured_conversation), ""
+    if configured_integration or configured_conversation:
+        return None, "recipient_incomplete"
+    return None, "recipient_missing"
 
 
 def content_enabled(env):
@@ -209,8 +245,9 @@ def truncate_utf8(text, limit=MESSAGE_LIMIT_BYTES):
     return body + marker
 
 
-def build_message(kind, event, state, detail, env):
-    repository = repository_context(value_from(event, state, "cwd"))
+def build_message(kind, event, state, detail, env, repository=None):
+    if repository is None:
+        repository = repository_context(value_from(event, state, "cwd"))
     titles = {
         "human_input": "等待人工输入",
         "plan_approval": "等待计划批准",
@@ -241,25 +278,42 @@ def build_message(kind, event, state, detail, env):
     return truncate_utf8("\n".join(lines))
 
 
-def send_message(message, directory, env):
+def build_card(kind, event, state, detail, env):
+    repository = repository_context(value_from(event, state, "cwd"))
+    titles = {
+        "human_input": "等待人工输入",
+        "plan_approval": "等待计划批准",
+        "operation_approval": "等待操作批准",
+        "stopped": "任务已停止",
+    }
+    templates = {
+        "human_input": "orange",
+        "plan_approval": "orange",
+        "operation_approval": "orange",
+        "stopped": "grey",
+    }
+    return {
+        "title": "%s · Codex %s" % (repository["name"], titles[kind]),
+        "template": templates[kind],
+        "text": build_message(kind, event, state, detail, env, repository),
+    }
+
+
+def send_card(card, directory, env):
     config = hook_configuration(env)
     executable = configuration_value(env, config, "PRMONITOR_BIN", "prmonitor_bin", DEFAULT_PRMONITOR_BIN)
     if not os.path.isfile(executable) or not os.access(executable, os.X_OK):
         record_diagnostic(directory, "transport", "send", "executable_unavailable")
         return False
-    integration_id = configuration_value(
-        env, config, "PRMONITOR_INTEGRATION_ID", "integration_id",
-    )
-    conversation_id = configuration_value(
-        env, config, "PRMONITOR_CONVERSATION_ID", "conversation_id",
-    )
-    if not integration_id or not conversation_id:
-        record_diagnostic(directory, "routing", "resolve_recipient", "recipient_missing")
+    route, failure_class = resolve_route(env, config)
+    if route is None:
+        record_diagnostic(directory, "routing", "resolve_recipient", failure_class)
         return False
     command = [
-        executable, "message", "send", "--integration-id",
-        integration_id, "--conversation-id", conversation_id,
-        "--text", message,
+        executable, "message", "send-card", "--integration-id",
+        route.integration_id, "--conversation-id", route.conversation_id,
+        "--title", card["title"], "--template", card["template"],
+        "--text", card["text"],
     ]
     try:
         result = subprocess.run(
@@ -345,7 +399,7 @@ def send_once(kind, event, state, detail, directory, env):
     key = event_key(kind, event, state, detail)
     if key in seen:
         return False
-    if send_message(build_message(kind, event, state, detail, env), directory, env):
+    if send_card(build_card(kind, event, state, detail, env), directory, env):
         atomic_write_json(seen_path, (seen + [key])[-512:])
         return True
     return False
