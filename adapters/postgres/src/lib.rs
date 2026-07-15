@@ -62,6 +62,8 @@ mod resource_attribute_repo;
 #[cfg(feature = "domain-identity")]
 mod role_binding_lifecycle;
 #[cfg(feature = "domain-identity")]
+mod role_binding_read_repo;
+#[cfg(feature = "domain-identity")]
 mod role_repo;
 mod saga;
 #[cfg(feature = "domain-settings")]
@@ -133,6 +135,8 @@ pub use refresh_token_store::PgRefreshTokenStore;
 pub use resource_attribute_repo::PgResourceAttributeRepo;
 #[cfg(feature = "domain-identity")]
 pub use role_binding_lifecycle::PgRoleBindingLifecycle;
+#[cfg(feature = "domain-identity")]
+pub use role_binding_read_repo::PgRoleBindingReadRepo;
 #[cfg(feature = "domain-identity")]
 pub use role_repo::PgRoleRepo;
 pub use saga::{PgSagaInstanceStore, PgSagaJournal};

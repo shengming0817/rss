@@ -39,9 +39,9 @@ use generated::event::settings_v1;
 use generated::http::identity_v1::login::IdentityLoginRequest;
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use identity::ports::{
-    AttributeKey, AttributeValue, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeRepo,
-    DynRoleBindingLifecycle, DynRoleReadRepo, DynSessionLifecycle, Operator,
-    POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyLifecycle,
+    AttributeKey, AttributeValue, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
+    DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleReadRepo, DynSessionLifecycle,
+    Operator, POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyLifecycle,
     PolicyObligations, PolicyRouteScope, PolicyRule, TenantId, TenantRepoScope,
 };
 use identity::{IdentityDomain, IdentityDomainDeps, LoginService};
@@ -565,19 +565,20 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(id.role_repo()));
     let roles_for_list = Arc::from(DynRoleReadRepo::new_box(id.role_repo()));
     let policies = Arc::from(DynPolicyRepo::new_box(id.policy_repo()));
-    let resource_attrs = Arc::from(DynResourceAttributeRepo::new_box(
+    let resource_attribute_reads = Arc::from(DynResourceAttributeReadRepo::new_box(
         id.resource_attribute_repo(),
     ));
     let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
         id.policy_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
     ));
     let policy_lifecycle_for_service = Arc::clone(&policy_lifecycle);
-    let bindings = Arc::from(DynRoleBindingLifecycle::new_box(
+    let binding_lifecycle = Arc::from(DynRoleBindingLifecycle::new_box(
         id.role_binding_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
     ));
+    let binding_reads = Arc::from(DynRoleBindingReadRepo::new_box(id.role_binding_read_repo()));
     let rbac_admin = Arc::new(identity::RbacAdminService::new(
         roles_for_admin,
-        Arc::clone(&bindings),
+        binding_lifecycle,
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     ));
     let policy_manage = Arc::new(identity::PolicyManageService::new(
@@ -591,9 +592,9 @@ async fn event_transport_durable_e2e() -> Result<()> {
         rbac_admin,
         policy_manage,
         roles: roles_for_list,
-        bindings,
+        binding_reads,
         policies,
-        resource_attrs,
+        resource_attribute_reads,
         clock: Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
     });
     let (settings_configs, settings_writer, settings_secrets, settings_secret_writer) = settings_pg

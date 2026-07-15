@@ -5177,7 +5177,9 @@ mod tests {
                 "runtime test binding lifecycle is read-only",
             )))
         }
+    }
 
+    impl identity::ports::RoleBindingReadRepo for StaticRoleBindings {
         async fn list_for_subject(
             &self,
             scope: IdentityTenantRepoScope,
@@ -5230,7 +5232,7 @@ mod tests {
 
     struct EmptyResourceAttributeRepo;
 
-    impl identity::ports::ResourceAttributeRepo for EmptyResourceAttributeRepo {
+    impl identity::ports::ResourceAttributeReadRepo for EmptyResourceAttributeRepo {
         async fn resolve_effective(
             &self,
             _tenant_scope: IdentityTenantRepoScope,
@@ -5242,30 +5244,6 @@ mod tests {
         {
             Ok(identity::ports::ResourceAttributeResolution::Known(
                 Vec::new(),
-            ))
-        }
-
-        async fn upsert(
-            &self,
-            _scope: IdentityTenantRepoScope,
-            _attribute: identity::ports::ResourceAttribute,
-            _expected: Option<identity::ports::ResourceAttributeVersion>,
-        ) -> Result<identity::ports::ResourceAttribute, identity::ports::IdentityError> {
-            Err(identity_storage_error(
-                "runtime test resource attribute repo must not be called",
-            ))
-        }
-
-        async fn expire(
-            &self,
-            _tenant_scope: IdentityTenantRepoScope,
-            _scope: identity::ports::PolicyRouteScope,
-            _resource_id: identity::ports::ResourceAttributeResourceId,
-            _key: identity::ports::ResourceAttributeKey,
-            _expected: identity::ports::ResourceAttributeVersion,
-        ) -> Result<bool, identity::ports::IdentityError> {
-            Err(identity_storage_error(
-                "runtime test resource attribute repo must not be called",
             ))
         }
     }
@@ -5527,12 +5505,16 @@ mod tests {
         let roles = Arc::from(identity::ports::DynRoleReadRepo::new_box(
             StaticRoleRepo::new(vec![audit_role]),
         ));
-        let bindings = Arc::from(identity::ports::DynRoleBindingLifecycle::new_box(
-            StaticRoleBindings::new(vec![(
-                tenant,
-                "11111111-2222-4333-8444-555555555555".to_string(),
-                "audit-reader".to_string(),
-            )]),
+        let binding_provider = StaticRoleBindings::new(vec![(
+            tenant,
+            "11111111-2222-4333-8444-555555555555".to_string(),
+            "audit-reader".to_string(),
+        )]);
+        let binding_lifecycle = Arc::from(identity::ports::DynRoleBindingLifecycle::new_box(
+            binding_provider.clone(),
+        ));
+        let binding_reads = Arc::from(identity::ports::DynRoleBindingReadRepo::new_box(
+            binding_provider,
         ));
         let issuer = Arc::new(
             authn::JwtIssuer::new(
@@ -5568,13 +5550,13 @@ mod tests {
         ));
         let rbac_admin = Arc::new(identity::RbacAdminService::new(
             Arc::clone(&roles),
-            Arc::clone(&bindings),
+            binding_lifecycle,
             Box::new(SystemClock),
         ));
         let policies = Arc::from(identity::ports::DynPolicyRepo::new_box(EmptyPolicyRepo));
-        let resource_attrs = Arc::from(identity::ports::DynResourceAttributeRepo::new_box(
-            EmptyResourceAttributeRepo,
-        ));
+        let resource_attribute_reads = Arc::from(
+            identity::ports::DynResourceAttributeReadRepo::new_box(EmptyResourceAttributeRepo),
+        );
         let policy_lifecycle = Arc::from(identity::ports::DynPolicyLifecycle::new_box(
             EmptyPolicyLifecycle,
         ));
@@ -5589,9 +5571,9 @@ mod tests {
             rbac_admin,
             policy_manage,
             roles,
-            bindings,
+            binding_reads,
             policies,
-            resource_attrs,
+            resource_attribute_reads,
             clock: Arc::new(SystemClock),
         })
     }

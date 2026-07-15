@@ -10,7 +10,8 @@ use identity::{
     RefreshService,
     ports::{
         DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynRefreshTokenStore,
-        DynResourceAttributeRepo, DynRoleBindingLifecycle, DynRoleReadRepo, DynSessionLifecycle,
+        DynResourceAttributeReadRepo, DynRoleBindingLifecycle, DynRoleBindingReadRepo,
+        DynRoleReadRepo, DynSessionLifecycle,
     },
 };
 use postgres::{PgDomainDeps, caps};
@@ -82,15 +83,16 @@ where
     let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(pg.role_repo()));
     let roles_for_list = Arc::from(DynRoleReadRepo::new_box(pg.role_repo()));
     let policies = Arc::from(DynPolicyRepo::new_box(pg.policy_repo()));
-    let resource_attrs = Arc::from(DynResourceAttributeRepo::new_box(
+    let resource_attribute_reads = Arc::from(DynResourceAttributeReadRepo::new_box(
         pg.resource_attribute_repo(),
     ));
     let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
         pg.policy_lifecycle(boxed_clock(&clock)),
     ));
-    let bindings = Arc::from(DynRoleBindingLifecycle::new_box(
+    let binding_lifecycle = Arc::from(DynRoleBindingLifecycle::new_box(
         pg.role_binding_lifecycle(boxed_clock(&clock)),
     ));
+    let binding_reads = Arc::from(DynRoleBindingReadRepo::new_box(pg.role_binding_read_repo()));
 
     let issuer = Arc::new(
         authn::JwtIssuer::new(signer, boxed_clock(&clock), jwt)
@@ -111,7 +113,7 @@ where
     ));
     let rbac_admin = Arc::new(RbacAdminService::new(
         roles_for_admin,
-        Arc::clone(&bindings),
+        binding_lifecycle,
         boxed_clock(&clock),
     ));
     let policy_manage = Arc::new(PolicyManageService::new(
@@ -125,9 +127,9 @@ where
         rbac_admin,
         policy_manage,
         roles: roles_for_list,
-        bindings,
+        binding_reads,
         policies,
-        resource_attrs,
+        resource_attribute_reads,
         clock,
     });
 

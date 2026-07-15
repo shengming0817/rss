@@ -6,8 +6,9 @@ use diport::{
 };
 use identity::ports::{
     DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynRefreshTokenStore,
-    DynResourceAttributeRepo, DynRoleBindingLifecycle, DynRoleReadRepo, DynRoleWriteRepo,
-    DynSessionLifecycle, IdentityPortEffect,
+    DynResourceAttributeReadRepo, DynResourceAttributeWriteRepo, DynRoleBindingLifecycle,
+    DynRoleBindingReadRepo, DynRoleReadRepo, DynRoleWriteRepo, DynSessionLifecycle,
+    IdentityPortEffect,
 };
 
 fn assert_effect<T, E, P>()
@@ -21,8 +22,10 @@ where
 fn main() {
     assert_effect::<DynPolicyRepo<'static>, AuthEffect, LocalPrivilege>();
 
-    assert_effect::<DynResourceAttributeRepo<'static>, WriteEffect, LocalPrivilege>();
+    assert_effect::<DynResourceAttributeReadRepo<'static>, AuthEffect, LocalPrivilege>();
+    assert_effect::<DynResourceAttributeWriteRepo<'static>, WriteEffect, LocalPrivilege>();
     assert_effect::<DynRoleReadRepo<'static>, ReadEffect, LocalPrivilege>();
+    assert_effect::<DynRoleBindingReadRepo<'static>, AuthEffect, LocalPrivilege>();
     assert_effect::<DynRoleWriteRepo<'static>, WriteEffect, LocalPrivilege>();
     assert_effect::<DynCredentialRepo<'static>, WriteEffect, LocalPrivilege>();
     assert_effect::<DynRefreshTokenStore<'static>, WriteEffect, LocalPrivilege>();

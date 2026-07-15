@@ -42,8 +42,9 @@ use crate::domain::{
 };
 #[cfg(test)]
 use crate::ports::{
-    PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, ResourceAttributeRepo,
-    RoleBindingLifecycle, RoleReadRepo, RoleWriteRepo,
+    PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, ResourceAttributeReadRepo,
+    ResourceAttributeWriteRepo, RoleBindingLifecycle, RoleBindingReadRepo, RoleReadRepo,
+    RoleWriteRepo,
 };
 #[cfg(test)]
 use std::collections::HashSet;
@@ -651,7 +652,7 @@ impl InMemResourceAttributeRepo {
 }
 
 #[cfg(test)]
-impl ResourceAttributeRepo for InMemResourceAttributeRepo {
+impl ResourceAttributeReadRepo for InMemResourceAttributeRepo {
     async fn resolve_effective(
         &self,
         tenant_scope: TenantRepoScope,
@@ -683,7 +684,10 @@ impl ResourceAttributeRepo for InMemResourceAttributeRepo {
         }
         Ok(ResourceAttributeResolution::Known(attrs))
     }
+}
 
+#[cfg(test)]
+impl ResourceAttributeWriteRepo for InMemResourceAttributeRepo {
     async fn upsert(
         &self,
         scope: TenantRepoScope,
@@ -980,7 +984,10 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
         }
         Ok(removed)
     }
+}
 
+#[cfg(test)]
+impl RoleBindingReadRepo for InMemRoleBindingLifecycle {
     async fn list_for_subject(
         &self,
         scope: TenantRepoScope,
@@ -1119,8 +1126,9 @@ mod tests {
         RoleBinding, RoleId, Session, SessionId,
     };
     use crate::ports::{
-        CredentialRepo, PasswordChangeMutation, PolicyLifecycle, PolicyRepo, ResourceAttributeRepo,
-        RoleBindingLifecycle, SessionLifecycle, SessionLogoutMutation, TenantRepoScope,
+        CredentialRepo, PasswordChangeMutation, PolicyLifecycle, PolicyRepo,
+        ResourceAttributeReadRepo, ResourceAttributeWriteRepo, RoleBindingLifecycle,
+        SessionLifecycle, SessionLogoutMutation, TenantRepoScope,
     };
     use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
     use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};

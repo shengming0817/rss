@@ -1955,7 +1955,13 @@ fn certify_receipt_source(
                 .constructor_repo_fields
                 .get(matching_parameters[0])
                 .is_none_or(|fields| {
-                    repo_fields.is_none_or(|provided| fields.is_disjoint(provided))
+                    repo_fields.is_none_or(|provided| {
+                        if identity_local_only_receipt_module(module) {
+                            fields != provided
+                        } else {
+                            fields.is_disjoint(provided)
+                        }
+                    })
                 })
             || factory_call
                 .args
@@ -2130,7 +2136,13 @@ fn canonical_receipt_operation(expression: &Expr) -> Option<(String, Vec<String>
     {
         return None;
     }
-    let Expr::Call(call) = peel_expr(&closure.body) else {
+    let body = match peel_expr(&closure.body) {
+        Expr::Block(block) if block.label.is_none() && block.block.stmts.len() == 1 => {
+            block.block.stmts.first().and_then(tail_expression)?
+        }
+        body => body,
+    };
+    let Expr::Call(call) = peel_expr(body) else {
         return None;
     };
     if !absolute_call_path_is(&call.func, &["testkit", "call"]) || call.args.len() != 2 {
@@ -2145,7 +2157,20 @@ fn canonical_receipt_operation(expression: &Expr) -> Option<(String, Vec<String>
     {
         return None;
     }
-    let Expr::MethodCall(path) = peel_expr(request.args.first()?) else {
+    let request_path = request.args.first()?;
+    let (request_path, replacement) = match peel_expr(request_path) {
+        Expr::MethodCall(replace)
+            if replace.method == "replace"
+                && replace.args.len() == 2
+                && replace.turbofish.is_none()
+                && string_literal_is(replace.args.first(), "{policyId}")
+                && string_literal_is(replace.args.iter().nth(1), "policy-a") =>
+        {
+            (&*replace.receiver, true)
+        }
+        other => (other, false),
+    };
+    let Expr::MethodCall(path) = peel_expr(request_path) else {
         return None;
     };
     if path.method != "path" || !path.args.is_empty() {
@@ -2160,7 +2185,21 @@ fn canonical_receipt_operation(expression: &Expr) -> Option<(String, Vec<String>
     let Expr::Path(spec) = peel_expr(&route.base) else {
         return None;
     };
-    Some((router, generated_terminal_module(&spec.path, "SPEC")?))
+    let module = generated_terminal_module(&spec.path, "SPEC")?;
+    if replacement && module != ["identity_v1", "policies_get"] {
+        return None;
+    }
+    Some((router, module))
+}
+
+fn string_literal_is(expression: Option<&Expr>, expected: &str) -> bool {
+    matches!(
+        expression.map(peel_expr),
+        Some(Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(value),
+            ..
+        })) if value.value() == expected
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -2277,10 +2316,10 @@ fn canonical_identity_router_layer(local: &syn::Local, router: &str) -> bool {
     expression_path_is(
         authenticated.args.first(),
         &["primitives", "RequiredScheme", "Jwt"],
-    ) && expression_path_is(
-        authenticated.args.iter().nth(1),
-        &["vocab", "PrincipalKind", "User"],
-    ) && authenticated
+    ) && authenticated.args.iter().nth(1).is_some_and(|principal| {
+        expression_path_is(Some(principal), &["vocab", "PrincipalKind", "User"])
+            || expression_path_is(Some(principal), &["vocab", "PrincipalKind", "Admin"])
+    }) && authenticated
         .args
         .iter()
         .nth(2)
@@ -2337,29 +2376,124 @@ fn expression_path_is(expression: Option<&Expr>, expected: &[&str]) -> bool {
 #[derive(Default)]
 struct DomainProviderCertificate {
     constructor_fields: Vec<Option<String>>,
+    aggregate_constructor: Option<AggregateConstructorCertificate>,
     field_states: BTreeMap<String, BTreeSet<String>>,
 }
 
+struct AggregateConstructorCertificate {
+    parameter_index: usize,
+    type_name: String,
+    fields: BTreeMap<String, String>,
+}
+
+const IDENTITY_LOCAL_ONLY_PROVIDER_FIELDS: [&str; 4] = [
+    "roles",
+    "binding_reads",
+    "policies",
+    "resource_attribute_reads",
+];
+
+fn identity_local_only_receipt_module(module: &[String]) -> bool {
+    matches!(
+        module,
+        [api, route]
+            if api == "identity_v1"
+                && matches!(route.as_str(), "roles_list" | "policies_get" | "policies_list")
+    )
+}
+
+fn identity_provider_fields_are_exact(value: &syn::ExprStruct, parameter: &str) -> bool {
+    let provided = value
+        .fields
+        .iter()
+        .filter_map(|field| {
+            let syn::Member::Named(aggregate_field) = &field.member else {
+                return None;
+            };
+            let field_name = aggregate_field.to_string();
+            if !IDENTITY_LOCAL_ONLY_PROVIDER_FIELDS.contains(&field_name.as_str()) {
+                return None;
+            }
+            let (provider, repo_field) = direct_provider_field(&field.expr)?;
+            (provider == parameter && repo_field == field_name).then_some(field_name)
+        })
+        .collect::<BTreeSet<_>>();
+    provided
+        == IDENTITY_LOCAL_ONLY_PROVIDER_FIELDS
+            .into_iter()
+            .map(ToString::to_string)
+            .collect()
+}
+
 impl DomainProviderCertificate {
-    fn parameter_closes_state(&self, index: usize, state: &str) -> bool {
+    fn direct_parameter_closes_state(&self, index: usize, state: &str) -> bool {
         self.constructor_fields
             .get(index)
             .and_then(Option::as_ref)
             .and_then(|field| self.field_states.get(field))
             .is_some_and(|states| states.contains(state))
     }
+
+    fn aggregate_parameter_closes_state(
+        &self,
+        index: usize,
+        argument: &Expr,
+        parameter: &str,
+        state: &str,
+    ) -> bool {
+        let Some(aggregate) = &self.aggregate_constructor else {
+            return false;
+        };
+        if aggregate.parameter_index != index {
+            return false;
+        }
+        let Expr::Struct(value) = peel_expr(argument) else {
+            return false;
+        };
+        let canonical_aggregate = if aggregate.type_name == "IdentityDomainDeps" {
+            canonical_identity_deps_path(&value.path)
+        } else {
+            value.path.leading_colon.is_none()
+                && value.path.segments.len() == 1
+                && value.path.segments[0].ident == aggregate.type_name
+        };
+        if value.rest.is_some() || !canonical_aggregate {
+            return false;
+        }
+        if aggregate.type_name == "IdentityDomainDeps"
+            && !identity_provider_fields_are_exact(value, parameter)
+        {
+            return false;
+        }
+        value.fields.iter().any(|field| {
+            let syn::Member::Named(aggregate_field) = &field.member else {
+                return false;
+            };
+            let Some((provider, repo_field)) = direct_provider_field(&field.expr) else {
+                return false;
+            };
+            if provider != parameter || *aggregate_field != repo_field {
+                return false;
+            }
+            aggregate
+                .fields
+                .get(&repo_field)
+                .and_then(|domain_field| self.field_states.get(domain_field))
+                .is_some_and(|states| states.contains(state))
+        })
+    }
 }
 
 fn collect_domain_provider_certificates(
     items: &[Item],
 ) -> BTreeMap<String, DomainProviderCertificate> {
-    fn walk<'a>(items: &'a [Item], impls: &mut Vec<&'a ItemImpl>) {
+    fn walk<'a>(items: &'a [Item], at_root: bool, impls: &mut Vec<(&'a ItemImpl, bool)>) {
         for item in items {
             match item {
-                Item::Impl(item) => impls.push(item),
+                Item::Impl(item) => impls.push((item, at_root)),
                 Item::Mod(module) => {
                     if let Some((_, nested)) = &module.content {
-                        walk(nested, impls);
+                        walk(nested, false, impls);
                     }
                 }
                 _ => {}
@@ -2367,17 +2501,29 @@ fn collect_domain_provider_certificates(
         }
     }
     let mut impls = Vec::new();
-    walk(items, &mut impls);
+    walk(items, true, &mut impls);
+    let canonical_identity_types = ["IdentityDomain", "IdentityDomainDeps"]
+        .into_iter()
+        .all(|name| root_production_struct_exists(items, name));
     let mut certificates = BTreeMap::<String, DomainProviderCertificate>::new();
-    for item in &impls {
+    for (item, at_root) in &impls {
         if item.trait_.is_some() {
             continue;
         }
         let Some(owner) = outer_type_ident(&item.self_ty) else {
             continue;
         };
+        if owner == "IdentityDomain"
+            && (!at_root || !canonical_identity_types || cfg_gated(&item.attrs))
+        {
+            continue;
+        }
         let Some(function) = item.items.iter().find_map(|child| match child {
-            ImplItem::Fn(function) if function.sig.ident == "new" => Some(function),
+            ImplItem::Fn(function)
+                if function.sig.ident == "new" && !cfg_gated(&function.attrs) =>
+            {
+                Some(function)
+            }
             _ => None,
         }) else {
             continue;
@@ -2420,9 +2566,48 @@ fn collect_domain_provider_certificates(
                 fields[index] = Some(member.to_string());
             }
         }
-        certificates.entry(owner).or_default().constructor_fields = fields;
+        let certificate = certificates.entry(owner.clone()).or_default();
+        certificate.constructor_fields = fields;
+        if owner == "IdentityDomain"
+            && parameters.len() == 1
+            && function.sig.inputs.iter().next().is_some_and(|input| {
+                matches!(
+                    input,
+                    syn::FnArg::Typed(argument)
+                        if outer_type_ident(&argument.ty).as_deref() == Some("IdentityDomainDeps")
+                )
+            })
+            && let Some(destructured) =
+                canonical_identity_deps_destructure(&function.block, &parameters[0])
+        {
+            let aggregate_fields = returned
+                .fields
+                .iter()
+                .filter_map(|field| {
+                    let syn::Member::Named(domain_field) = &field.member else {
+                        return None;
+                    };
+                    let root = direct_ident_or_field_root(&field.expr)?;
+                    destructured
+                        .get(&root)
+                        .map(|deps_field| (deps_field.clone(), domain_field.to_string()))
+                })
+                .collect::<BTreeMap<_, _>>();
+            if !aggregate_fields.is_empty()
+                && !block_reassigns_any(
+                    &function.block,
+                    &destructured.keys().map(String::as_str).collect::<Vec<_>>(),
+                )
+            {
+                certificate.aggregate_constructor = Some(AggregateConstructorCertificate {
+                    parameter_index: 0,
+                    type_name: "IdentityDomainDeps".to_string(),
+                    fields: aggregate_fields,
+                });
+            }
+        }
     }
-    for item in impls {
+    for (item, at_root) in impls {
         let Some((_, trait_path, _)) = &item.trait_ else {
             continue;
         };
@@ -2436,28 +2621,43 @@ fn collect_domain_provider_certificates(
         let Some(owner) = outer_type_ident(&item.self_ty) else {
             continue;
         };
+        if owner == "IdentityDomain"
+            && (!at_root || !canonical_identity_types || cfg_gated(&item.attrs))
+        {
+            continue;
+        }
         let Some(init) = item.items.iter().find_map(|child| match child {
-            ImplItem::Fn(function) if function.sig.ident == "init" => Some(function),
+            ImplItem::Fn(function)
+                if function.sig.ident == "init" && !cfg_gated(&function.attrs) =>
+            {
+                Some(function)
+            }
             _ => None,
         }) else {
             continue;
         };
-        let aliases = init
-            .block
-            .stmts
-            .iter()
-            .filter_map(|statement| {
-                let syn::Stmt::Local(local) = statement else {
-                    return None;
-                };
-                let syn::Pat::Ident(alias) = &local.pat else {
-                    return None;
-                };
-                let initializer = local.init.as_ref()?;
-                self_field_receiver(&initializer.expr).map(|field| (alias.ident.to_string(), field))
-            })
-            .collect::<BTreeMap<_, _>>();
+        let identity = owner == "IdentityDomain";
+        let aliases = if identity {
+            BTreeMap::new()
+        } else {
+            init.block
+                .stmts
+                .iter()
+                .filter_map(|statement| {
+                    let syn::Stmt::Local(local) = statement else {
+                        return None;
+                    };
+                    let syn::Pat::Ident(alias) = &local.pat else {
+                        return None;
+                    };
+                    let initializer = local.init.as_ref()?;
+                    self_field_receiver(&initializer.expr)
+                        .map(|field| (alias.ident.to_string(), field))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
         struct StateFields<'a> {
+            identity: bool,
             aliases: &'a BTreeMap<String, String>,
             found: BTreeMap<String, BTreeSet<String>>,
         }
@@ -2471,9 +2671,20 @@ fn collect_domain_provider_certificates(
                 else {
                     return;
                 };
-                if state.ends_with("State") {
+                if state.ends_with("State") || state == "PolicyQueryService" {
                     for field in &node.fields {
-                        if let Some(root) = root_receiver_ident(&field.expr)
+                        let direct = if self.identity {
+                            canonical_identity_state_field(&field.expr)
+                        } else {
+                            direct_self_field_lineage(&field.expr)
+                        };
+                        if let Some(domain_field) = direct {
+                            self.found
+                                .entry(domain_field)
+                                .or_default()
+                                .insert(state.clone());
+                        } else if !self.identity
+                            && let Some(root) = root_receiver_ident(&field.expr)
                             && let Some(domain_field) = self.aliases.get(&root)
                         {
                             self.found
@@ -2487,6 +2698,7 @@ fn collect_domain_provider_certificates(
             }
         }
         let mut scan = StateFields {
+            identity,
             aliases: &aliases,
             found: BTreeMap::new(),
         };
@@ -2494,6 +2706,142 @@ fn collect_domain_provider_certificates(
         certificates.entry(owner).or_default().field_states = scan.found;
     }
     certificates
+}
+
+fn cfg_gated(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attribute| {
+        path_is(attribute.path(), &["cfg"]) || path_is(attribute.path(), &["cfg_attr"])
+    })
+}
+
+fn root_production_struct_exists(items: &[Item], expected: &str) -> bool {
+    items.iter().any(|item| {
+        matches!(item, Item::Struct(item) if item.ident == expected && !cfg_gated(&item.attrs))
+    })
+}
+
+fn canonical_identity_deps_destructure(
+    block: &syn::Block,
+    parameter: &str,
+) -> Option<BTreeMap<String, String>> {
+    let mut matches = block.stmts.iter().filter_map(|statement| {
+        let syn::Stmt::Local(local) = statement else {
+            return None;
+        };
+        if !local.attrs.is_empty()
+            || local
+                .init
+                .as_ref()
+                .is_some_and(|initializer| initializer.diverge.is_some())
+        {
+            return None;
+        }
+        let syn::Pat::Struct(pattern) = &local.pat else {
+            return None;
+        };
+        if pattern.rest.is_some()
+            || pattern.path.leading_colon.is_some()
+            || pattern.path.segments.len() != 1
+            || pattern.path.segments[0].ident != "IdentityDomainDeps"
+            || local
+                .init
+                .as_ref()
+                .and_then(|init| simple_ident(&init.expr))
+                .as_deref()
+                != Some(parameter)
+        {
+            return None;
+        }
+        let fields = pattern
+            .fields
+            .iter()
+            .map(|field| {
+                let syn::Member::Named(member) = &field.member else {
+                    return None;
+                };
+                let syn::Pat::Ident(binding) = &*field.pat else {
+                    return None;
+                };
+                if !immutable_plain_binding(binding) || binding.ident != *member {
+                    return None;
+                }
+                Some((binding.ident.to_string(), member.to_string()))
+            })
+            .collect::<Option<BTreeMap<_, _>>>()?;
+        (!fields.is_empty()).then_some(fields)
+    });
+    let only = matches.next()?;
+    matches.next().is_none().then_some(only)
+}
+
+fn direct_self_field_lineage(expression: &Expr) -> Option<String> {
+    match peel_expr(expression) {
+        Expr::Field(field) => {
+            let syn::Member::Named(member) = &field.member else {
+                return None;
+            };
+            matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
+                .then(|| member.to_string())
+        }
+        Expr::Reference(reference) if reference.mutability.is_none() => {
+            direct_self_field_lineage(&reference.expr)
+        }
+        Expr::Call(call)
+            if call.args.len() == 1 && relative_call_path_is(&call.func, &["Arc", "clone"]) =>
+        {
+            call.args.first().and_then(direct_self_field_lineage)
+        }
+        _ => None,
+    }
+}
+
+fn canonical_identity_state_field(expression: &Expr) -> Option<String> {
+    let Expr::Call(clone) = peel_expr(expression) else {
+        return None;
+    };
+    if clone.args.len() != 1 || !relative_call_path_is(&clone.func, &["Arc", "clone"]) {
+        return None;
+    }
+    let Expr::Reference(reference) = clone.args.first()? else {
+        return None;
+    };
+    if reference.mutability.is_some() {
+        return None;
+    }
+    let Expr::Field(field) = peel_expr(&reference.expr) else {
+        return None;
+    };
+    let syn::Member::Named(member) = &field.member else {
+        return None;
+    };
+    if !matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self")) {
+        return None;
+    }
+    let field = member.to_string();
+    matches!(field.as_str(), "roles" | "policies").then_some(field)
+}
+
+fn canonical_identity_deps_path(path: &syn::Path) -> bool {
+    path.leading_colon.is_none()
+        && path.segments.len() == 2
+        && path.segments[0].ident == "super"
+        && path.segments[1].ident == "IdentityDomainDeps"
+        && path
+            .segments
+            .iter()
+            .all(|segment| matches!(segment.arguments, PathArguments::None))
+}
+
+fn canonical_identity_domain_constructor_path(path: &syn::Path) -> bool {
+    path.leading_colon.is_none()
+        && path.segments.len() == 3
+        && path.segments[0].ident == "super"
+        && path.segments[1].ident == "IdentityDomain"
+        && path.segments[2].ident == "new"
+        && path
+            .segments
+            .iter()
+            .all(|segment| matches!(segment.arguments, PathArguments::None))
 }
 
 fn direct_ident_or_field_root(expression: &Expr) -> Option<String> {
@@ -2999,6 +3347,11 @@ fn mounted_constructor_parameters(
             continue;
         }
         let domain_type = segments[segments.len() - 2].ident.to_string();
+        if domain_type == "IdentityDomain"
+            && !canonical_identity_domain_constructor_path(&function.path)
+        {
+            continue;
+        }
         let mut referenced = BTreeSet::new();
         for parameter in parameters {
             for (index, argument) in call.args.iter().enumerate() {
@@ -3008,7 +3361,12 @@ fn mounted_constructor_parameters(
                 let closes_state = proof_state.is_none_or(|state| {
                     domain_certificates
                         .get(&domain_type)
-                        .is_some_and(|certificate| certificate.parameter_closes_state(index, state))
+                        .is_some_and(|certificate| {
+                            certificate.direct_parameter_closes_state(index, state)
+                                || certificate.aggregate_parameter_closes_state(
+                                    index, argument, parameter, state,
+                                )
+                        })
                 });
                 if closes_state {
                     referenced.insert(parameter.clone());
@@ -3035,23 +3393,41 @@ fn mounted_constructor_repo_fields(
     };
     let mut fields = BTreeMap::<String, BTreeSet<String>>::new();
     for argument in &constructor.args {
-        let Expr::Field(field) = peel_expr(argument) else {
+        if let Some((provider, member)) = direct_provider_field(argument)
+            && parameters.contains(&provider)
+        {
+            fields.entry(provider).or_default().insert(member);
+            continue;
+        }
+        let Expr::Struct(aggregate) = peel_expr(argument) else {
             continue;
         };
-        let syn::Member::Named(member) = &field.member else {
+        if aggregate.rest.is_some() || !canonical_identity_deps_path(&aggregate.path) {
             continue;
-        };
-        let Some(provider) = simple_ident(&field.base) else {
-            continue;
-        };
-        if parameters.contains(&provider) {
-            fields
-                .entry(provider)
-                .or_default()
-                .insert(member.to_string());
+        }
+        for field in &aggregate.fields {
+            let syn::Member::Named(aggregate_field) = &field.member else {
+                continue;
+            };
+            let Some((provider, repo_field)) = direct_provider_field(&field.expr) else {
+                continue;
+            };
+            if parameters.contains(&provider) && *aggregate_field == repo_field {
+                fields.entry(provider).or_default().insert(repo_field);
+            }
         }
     }
     fields
+}
+
+fn direct_provider_field(expression: &Expr) -> Option<(String, String)> {
+    let Expr::Field(field) = peel_expr(expression) else {
+        return None;
+    };
+    let syn::Member::Named(member) = &field.member else {
+        return None;
+    };
+    Some((simple_ident(&field.base)?, member.to_string()))
 }
 
 fn expression_references_ident(expression: &Expr, expected: &str) -> bool {
@@ -3506,8 +3882,13 @@ fn directly_recorded_fields(items: &[ImplItem]) -> BTreeSet<String> {
         };
         let mut may_skip = false;
         for statement in &function.block.stmts {
-            if !may_skip && let Some(field) = direct_recorded_field(statement) {
-                fields.insert(field);
+            if !may_skip {
+                if let Some(field) = direct_recorded_field(statement) {
+                    fields.insert(field);
+                }
+                if let Some(field) = canonical_forbidden_write_record(statement) {
+                    fields.insert(field);
+                }
             }
             may_skip |= statement_may_skip_following_receipt(statement);
         }
@@ -3533,6 +3914,36 @@ fn direct_recorded_field(statement: &syn::Stmt) -> Option<String> {
     };
     matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
         .then(|| member.to_string())
+}
+
+fn canonical_forbidden_write_record(statement: &syn::Stmt) -> Option<String> {
+    let syn::Stmt::Expr(Expr::If(branch), _) = statement else {
+        return None;
+    };
+    if branch.else_branch.is_some() || branch.then_branch.stmts.len() != 1 {
+        return None;
+    }
+    let Expr::Binary(condition) = peel_expr(&branch.cond) else {
+        return None;
+    };
+    if !matches!(condition.op, syn::BinOp::Eq(_)) {
+        return None;
+    }
+    let Expr::Field(guard) = peel_expr(&condition.left) else {
+        return None;
+    };
+    if !matches!(&guard.member, syn::Member::Named(member) if member == "forbidden_write_on")
+        || !matches!(peel_expr(&guard.base), Expr::Path(path) if path.path.is_ident("self"))
+    {
+        return None;
+    }
+    let Expr::Call(some) = peel_expr(&condition.right) else {
+        return None;
+    };
+    if !relative_call_path_is(&some.func, &["Some"]) || some.args.len() != 1 {
+        return None;
+    }
+    direct_recorded_field(branch.then_branch.stmts.first()?)
 }
 
 fn provenance_findings_in_items(
@@ -3961,7 +4372,7 @@ impl<'ast> Visit<'ast> for ProvenanceCallScan<'ast> {
             self.allowed_api_locations.insert(location);
         }
         if absolute_call_path_is(&node.func, &["testkit", "call"])
-            && let Some(router) = node.args.first().and_then(simple_ident)
+            && let Some(router) = node.args.first().and_then(root_receiver_ident)
         {
             self.oneshot_router_receivers.insert(router);
         }
@@ -5957,6 +6368,175 @@ async fn conforms_{}() {{
         )
     }
 
+    fn canonical_identity_aggregate_receipt() -> String {
+        let production = "struct ContractAuthorizer;\nimpl ContractAuthorizer {\n    fn new(_: (), _: (), _: (), _: ()) -> Self { Self }\n}\nstruct IdentityDomainDeps { roles: (), binding_reads: (), policies: (), resource_attribute_reads: () }\nstruct IdentityDomain { roles: (), policies: (), authorizer: ContractAuthorizer }\nstruct RolesListHandlerState { roles: () }\nimpl IdentityDomain {\n    fn new(deps: IdentityDomainDeps) -> Self {\n        let IdentityDomainDeps { roles, binding_reads, policies, resource_attribute_reads } = deps;\n        let authorizer = ContractAuthorizer::new(roles, binding_reads, policies, resource_attribute_reads);\n        Self { roles, policies, authorizer }\n    }\n}\nimpl bootstrap::Domain for IdentityDomain {\n    fn init(&self, registry: &mut bootstrap::Registry) {\n        let roles = RolesListHandlerState { roles: Arc::clone(&self.roles) };\n        mount(registry, roles);\n    }\n}\n";
+        let receipt = canonical_receipt("identity_v1::profile")
+            .replace(
+                "struct TestRepo { read: () }\nimpl TestRepo { fn from_provider<T>(provider: Arc<T>) -> Self { Self { read: consume(provider) } } }",
+                "#[derive(Clone)]\nstruct TestRepo { roles: (), binding_reads: (), policies: (), resource_attribute_reads: () }\nimpl TestRepo { fn from_provider<T>(provider: Arc<T>) -> Self { Self { roles: consume(provider.clone()), binding_reads: consume(provider.clone()), policies: consume(provider.clone()), resource_attribute_reads: consume(provider) } } }",
+            )
+            .replace(
+                "struct DemoDomain { read_repo: () }\nimpl DemoDomain { fn new(read_repo: ()) -> Self { Self { read_repo } } }\nimpl bootstrap::Domain for DemoDomain {\n    fn init(&self, registry: &mut bootstrap::Registry) {\n        let scoped_repo = self.read_repo.clone();\n        let state = ReadState { repo: scoped_repo.clone() };\n        mount(registry, state);\n    }\n}",
+                "",
+            )
+            .replace(
+                "let domain = DemoDomain::new(repo.read);",
+                "let other = repo.clone();\n    let domain = super::IdentityDomain::new(super::IdentityDomainDeps {\n        roles: repo.roles,\n        binding_reads: repo.binding_reads,\n        policies: repo.policies,\n        resource_attribute_reads: repo.resource_attribute_reads,\n    });",
+            )
+            .replace("ReadState", "RolesListHandlerState");
+        format!("{production}{receipt}")
+    }
+
+    fn compile_valid_identity_lineage_reds() -> Vec<(&'static str, String)> {
+        let production = r#"
+use std::sync::Arc;
+#[derive(Clone)]
+struct Repo { roles: Arc<()>, policies: Arc<()> }
+struct IdentityDomainDeps { roles: Arc<()>, policies: Arc<()> }
+struct IdentityDomain { roles: Arc<()>, policies: Arc<()> }
+struct RolesListHandlerState { roles: Arc<()> }
+impl IdentityDomain {
+    fn new(deps: IdentityDomainDeps) -> Self {
+        let IdentityDomainDeps { roles, policies } = deps;
+        Self { roles, policies }
+    }
+    fn init(&self) {
+        let roles = RolesListHandlerState { roles: Arc::clone(&self.roles) };
+        let _ = roles;
+    }
+}
+"#;
+        let nested_same_name = format!(
+            r#"{production}
+mod receipt {{
+    use super::{{Repo, RolesListHandlerState}};
+    struct IdentityDomainDeps {{ roles: std::sync::Arc<()>, policies: std::sync::Arc<()> }}
+    struct IdentityDomain {{ roles: std::sync::Arc<()>, policies: std::sync::Arc<()> }}
+    impl IdentityDomain {{
+        fn new(deps: IdentityDomainDeps) -> Self {{
+            let IdentityDomainDeps {{ roles, policies }} = deps;
+            Self {{ roles, policies }}
+        }}
+        fn init(&self) {{
+            let roles = RolesListHandlerState {{ roles: self.roles.clone() }};
+            let _ = roles;
+        }}
+    }}
+    fn factory(repo: Repo) {{
+        let domain = IdentityDomain::new(IdentityDomainDeps {{ roles: repo.roles, policies: repo.policies }});
+        domain.init();
+    }}
+}}
+"#,
+        );
+        let type_alias_shadow = format!(
+            r#"{production}
+mod receipt {{
+    type IdentityDomain = super::IdentityDomain;
+    type IdentityDomainDeps = super::IdentityDomainDeps;
+    fn factory(repo: super::Repo) {{
+        let domain = IdentityDomain::new(IdentityDomainDeps {{ roles: repo.roles, policies: repo.policies }});
+        domain.init();
+    }}
+}}
+"#,
+        );
+        let init_mutable_reassigned_alias = production.replace(
+            "let roles = RolesListHandlerState { roles: Arc::clone(&self.roles) };",
+            "let mut roles_repo = self.roles.clone();\n        roles_repo = self.roles.clone();\n        let roles = RolesListHandlerState { roles: roles_repo.clone() };",
+        );
+        let init_method_wrapper = production.replace(
+            "let roles = RolesListHandlerState { roles: Arc::clone(&self.roles) };",
+            "let roles_repo = self.roles.clone();\n        let roles = RolesListHandlerState { roles: roles_repo };",
+        );
+        let mut reds = vec![
+            ("nested same-name IdentityDomain", nested_same_name),
+            ("type alias shadow", type_alias_shadow),
+            (
+                "init mutable reassigned alias",
+                init_mutable_reassigned_alias,
+            ),
+            ("init method wrapper", init_method_wrapper),
+        ];
+        let provider_swap_base = r#"
+use std::sync::Arc;
+#[derive(Clone)]
+struct Repo {
+    roles: Arc<()>,
+    binding_reads: Arc<()>,
+    policies: Arc<()>,
+    resource_attribute_reads: Arc<()>,
+}
+struct IdentityDomainDeps {
+    roles: Arc<()>,
+    binding_reads: Arc<()>,
+    policies: Arc<()>,
+    resource_attribute_reads: Arc<()>,
+}
+struct ContractAuthorizer;
+impl ContractAuthorizer {
+    fn new(_: Arc<()>, _: Arc<()>, _: Arc<()>, _: Arc<()>) -> Self { Self }
+}
+struct IdentityDomain {
+    roles: Arc<()>,
+    policies: Arc<()>,
+    authorizer: ContractAuthorizer,
+}
+impl IdentityDomain {
+    fn new(deps: IdentityDomainDeps) -> Self {
+        let IdentityDomainDeps {
+            roles,
+            binding_reads,
+            policies,
+            resource_attribute_reads,
+        } = deps;
+        let authorizer = ContractAuthorizer::new(
+            Arc::clone(&roles),
+            binding_reads,
+            Arc::clone(&policies),
+            resource_attribute_reads,
+        );
+        Self { roles, policies, authorizer }
+    }
+}
+fn factory(repo: Repo) {
+    let other = repo.clone();
+    let domain = IdentityDomain::new(IdentityDomainDeps {
+        roles: repo.roles,
+        binding_reads: repo.binding_reads,
+        policies: repo.policies,
+        resource_attribute_reads: repo.resource_attribute_reads,
+    });
+    let _ = domain;
+}
+"#;
+        for (name, canonical, swapped) in [
+            (
+                "roles provider swap",
+                "roles: repo.roles",
+                "roles: other.roles",
+            ),
+            (
+                "binding reads provider swap",
+                "binding_reads: repo.binding_reads",
+                "binding_reads: other.binding_reads",
+            ),
+            (
+                "policies provider swap",
+                "policies: repo.policies",
+                "policies: other.policies",
+            ),
+            (
+                "resource attributes provider swap",
+                "resource_attribute_reads: repo.resource_attribute_reads",
+                "resource_attribute_reads: other.resource_attribute_reads",
+            ),
+        ] {
+            reds.push((name, provider_swap_base.replace(canonical, swapped)));
+        }
+        reds
+    }
+
     const COMPILE_VALID_RECEIPT_REDS: &str = r#"
 extern crate self as generated;
 extern crate self as testkit;
@@ -6184,6 +6764,121 @@ fn conforms() {
             )
             .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn identity_aggregate_lineage_accepts_only_canonical_direct_fields() -> Result<()> {
+        let canonical = canonical_identity_aggregate_receipt();
+        let targets = [receipt_target(
+            "identity.profile",
+            &["identity_v1", "profile"],
+        )];
+        let workspace = receipt_workspace(&canonical)?;
+        let registration = local_only_receipt_registration(&workspace, &targets)?;
+        assert_eq!(
+            registration.registered_contracts,
+            BTreeSet::from(["identity.profile".to_string()])
+        );
+
+        for (name, source) in compile_valid_identity_lineage_reds() {
+            let workspace = receipt_workspace(&source)?;
+            let output = workspace.cargo_check()?;
+            assert!(
+                output.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let wrong_field = canonical
+            .replace("roles: repo.roles,", "roles: repo.policies,")
+            .replace("policies: repo.policies,", "policies: repo.roles,");
+        let provider_swap_roles = canonical.replace("roles: repo.roles,", "roles: other.roles,");
+        let provider_swap_bindings = canonical.replace(
+            "binding_reads: repo.binding_reads,",
+            "binding_reads: other.binding_reads,",
+        );
+        let provider_swap_policies =
+            canonical.replace("policies: repo.policies,", "policies: other.policies,");
+        let provider_swap_resource_attributes = canonical.replace(
+            "resource_attribute_reads: repo.resource_attribute_reads,",
+            "resource_attribute_reads: other.resource_attribute_reads,",
+        );
+        let mutable_alias = canonical.replace(
+            "let domain = super::IdentityDomain::new(super::IdentityDomainDeps {\n        roles: repo.roles,\n        binding_reads: repo.binding_reads,\n        policies: repo.policies,\n        resource_attribute_reads: repo.resource_attribute_reads,\n    });",
+            "let mut deps = IdentityDomainDeps {\n        roles: repo.roles,\n        binding_reads: repo.binding_reads,\n        policies: repo.policies,\n        resource_attribute_reads: repo.resource_attribute_reads,\n    };\n    let deps_alias = deps;\n    let domain = IdentityDomain::new(deps_alias);",
+        );
+        let test_domain = canonical
+            .replace("struct IdentityDomain {", "struct TestIdentityDomain {")
+            .replace("impl IdentityDomain {", "impl TestIdentityDomain {")
+            .replace(
+                "impl bootstrap::Domain for IdentityDomain {",
+                "impl bootstrap::Domain for TestIdentityDomain {",
+            )
+            .replace(
+                "let domain = IdentityDomain::new(IdentityDomainDeps {",
+                "let domain = TestIdentityDomain::new(IdentityDomainDeps {",
+            );
+        let nested_same_name = canonical
+            .replace(
+                "struct Counter;",
+                "struct IdentityDomainDeps { roles: (), policies: () }\nstruct IdentityDomain { roles: (), policies: () }\nimpl IdentityDomain {\n    fn new(deps: IdentityDomainDeps) -> Self {\n        let IdentityDomainDeps { roles, policies } = deps;\n        Self { roles, policies }\n    }\n}\nimpl bootstrap::Domain for IdentityDomain {\n    fn init(&self, registry: &mut bootstrap::Registry) {\n        let roles = super::RolesListHandlerState { roles: self.roles.clone() };\n        mount(registry, roles);\n    }\n}\nstruct Counter;",
+            )
+            .replace(
+                "super::IdentityDomain::new(super::IdentityDomainDeps {",
+                "IdentityDomain::new(IdentityDomainDeps {",
+            );
+        let type_alias_shadow = canonical
+            .replace(
+                "struct Counter;",
+                "type IdentityDomain = super::IdentityDomain;\ntype IdentityDomainDeps = super::IdentityDomainDeps;\nstruct Counter;",
+            )
+            .replace(
+                "super::IdentityDomain::new(super::IdentityDomainDeps {",
+                "IdentityDomain::new(IdentityDomainDeps {",
+            );
+        let init_mutable_reassigned_alias = canonical.replace(
+            "let roles = RolesListHandlerState { roles: Arc::clone(&self.roles) };",
+            "let mut roles_repo = self.roles.clone();\n        roles_repo = self.roles.clone();\n        let roles = RolesListHandlerState { roles: roles_repo.clone() };",
+        );
+        let init_method_wrapper = canonical.replace(
+            "let roles = RolesListHandlerState { roles: Arc::clone(&self.roles) };",
+            "let roles_repo = self.roles.clone();\n        let roles = RolesListHandlerState { roles: roles_repo };",
+        );
+        for (name, source) in [
+            ("wrong aggregate field", wrong_field),
+            ("mutable alias wrapper", mutable_alias),
+            ("test-only Domain", test_domain),
+            ("nested same-name IdentityDomain", nested_same_name),
+            ("type alias shadow", type_alias_shadow),
+            (
+                "init mutable reassigned alias",
+                init_mutable_reassigned_alias,
+            ),
+            ("init method wrapper", init_method_wrapper),
+        ] {
+            let workspace = receipt_workspace(&source)?;
+            assert!(
+                local_only_receipt_registration(&workspace, &targets).is_err(),
+                "{name} unexpectedly certified"
+            );
+        }
+        for (name, source) in [
+            ("roles provider swap", provider_swap_roles),
+            ("binding reads provider swap", provider_swap_bindings),
+            ("policies provider swap", provider_swap_policies),
+            (
+                "resource attributes provider swap",
+                provider_swap_resource_attributes,
+            ),
+        ] {
+            let workspace = receipt_workspace(&source)?;
+            assert!(
+                local_only_receipt_registration(&workspace, &targets).is_err(),
+                "{name} unexpectedly certified"
+            );
+        }
         Ok(())
     }
 
@@ -7145,16 +7840,11 @@ async fn outer() {
         let report = collect_report(&root)?;
         assert_eq!(generated::http::LOCAL_ONLY_SPECS.len(), 6);
         assert_eq!(report.local_only_receipt_coverage.active_count, 6);
-        assert_eq!(report.local_only_receipt_coverage.registered_count, 2);
-        assert_eq!(report.local_only_receipt_coverage.missing_count, 4);
+        assert_eq!(report.local_only_receipt_coverage.registered_count, 5);
+        assert_eq!(report.local_only_receipt_coverage.missing_count, 1);
         assert_eq!(
             report.local_only_receipt_coverage.missing_contracts,
-            [
-                "identity.policies-get",
-                "identity.policies-list",
-                "identity.roles-list",
-                "settings.config-get",
-            ]
+            ["settings.config-get"]
         );
         assert_eq!(report.status, ReportStatus::Passed);
         assert_eq!(
@@ -7167,13 +7857,19 @@ async fn outer() {
                 })
                 .map(|contract| contract.contract_id.as_str())
                 .collect::<Vec<_>>(),
-            ["audit.list-entries", "identity.profile"]
+            [
+                "audit.list-entries",
+                "identity.policies-get",
+                "identity.policies-list",
+                "identity.profile",
+                "identity.roles-list",
+            ]
         );
         let (summary, findings) = check_root(&root)?;
         assert!(findings.is_empty(), "{findings:#?}");
         assert_eq!(
             summary,
-            "6 active LocalOnly HTTP contract(s) checked; source receipts registered 2/6; missing: identity.policies-get, identity.policies-list, identity.roles-list, settings.config-get"
+            "6 active LocalOnly HTTP contract(s) checked; source receipts registered 5/6; missing: settings.config-get"
         );
         Ok(())
     }

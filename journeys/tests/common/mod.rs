@@ -20,11 +20,11 @@ use diport::{
 use eventexec::{DlxHotKeyName, TenantAuthority, TenantAuthorityBinding};
 use generated::event::identity_v1::session_created;
 use identity::ports::{
-    DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeRepo, DynRoleBindingLifecycle,
-    DynRoleReadRepo, IdentityError, Policy, PolicyId, PolicyLifecycle, PolicyListResult,
-    PolicyPage, PolicyRepo, PolicyRouteScope, PolicyVersion, ResourceAttribute,
-    ResourceAttributeKey, ResourceAttributeRepo, ResourceAttributeResolution,
-    ResourceAttributeResourceId, ResourceAttributeVersion, Role, RoleBinding, RoleBindingLifecycle,
+    DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo, DynRoleBindingLifecycle,
+    DynRoleBindingReadRepo, DynRoleReadRepo, IdentityError, Policy, PolicyId, PolicyLifecycle,
+    PolicyListResult, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyVersion,
+    ResourceAttributeKey, ResourceAttributeReadRepo, ResourceAttributeResolution,
+    ResourceAttributeResourceId, Role, RoleBinding, RoleBindingLifecycle, RoleBindingReadRepo,
     RoleId, RoleListResult, RolePage, RoleReadRepo, TenantRepoScope,
 };
 use identity::{
@@ -331,7 +331,11 @@ impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
     ) -> Result<bool, OutboxEmitError> {
         Ok(false)
     }
+}
 
+struct NoopRoleBindingReadRepo;
+
+impl RoleBindingReadRepo for NoopRoleBindingReadRepo {
     async fn list_for_subject(
         &self,
         _scope: TenantRepoScope,
@@ -375,7 +379,7 @@ impl PolicyRepo for NoopPolicyRepo {
 
 struct NoopResourceAttributeRepo;
 
-impl ResourceAttributeRepo for NoopResourceAttributeRepo {
+impl ResourceAttributeReadRepo for NoopResourceAttributeRepo {
     async fn resolve_effective(
         &self,
         _tenant_scope: TenantRepoScope,
@@ -388,28 +392,6 @@ impl ResourceAttributeRepo for NoopResourceAttributeRepo {
             return Ok(ResourceAttributeResolution::Known(Vec::new()));
         };
         Ok(ResourceAttributeResolution::Missing(key))
-    }
-
-    async fn upsert(
-        &self,
-        _scope: TenantRepoScope,
-        _attribute: ResourceAttribute,
-        _expected: Option<ResourceAttributeVersion>,
-    ) -> Result<ResourceAttribute, IdentityError> {
-        Err(IdentityError::Storage(Box::new(std::io::Error::other(
-            "noop resource attributes",
-        ))))
-    }
-
-    async fn expire(
-        &self,
-        _tenant_scope: TenantRepoScope,
-        _scope: PolicyRouteScope,
-        _resource_id: ResourceAttributeResourceId,
-        _key: ResourceAttributeKey,
-        _expected: ResourceAttributeVersion,
-    ) -> Result<bool, IdentityError> {
-        Ok(false)
     }
 }
 
@@ -458,16 +440,19 @@ where
     S: diport::Signer + Send + Sync + 'static,
 {
     let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(NoopRoleRepo));
-    let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+    let binding_lifecycle: Arc<DynRoleBindingLifecycle<'static>> =
         Arc::from(DynRoleBindingLifecycle::new_box(NoopRoleBindingLifecycle));
+    let binding_reads: Arc<DynRoleBindingReadRepo<'static>> =
+        Arc::from(DynRoleBindingReadRepo::new_box(NoopRoleBindingReadRepo));
     let policies: Arc<DynPolicyRepo<'static>> = Arc::from(DynPolicyRepo::new_box(NoopPolicyRepo));
-    let resource_attrs: Arc<DynResourceAttributeRepo<'static>> =
-        Arc::from(DynResourceAttributeRepo::new_box(NoopResourceAttributeRepo));
+    let resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>> = Arc::from(
+        DynResourceAttributeReadRepo::new_box(NoopResourceAttributeRepo),
+    );
     let policy_lifecycle: Arc<DynPolicyLifecycle<'static>> =
         Arc::from(DynPolicyLifecycle::new_box(NoopPolicyLifecycle));
     let rbac = Arc::new(RbacAdminService::new(
         roles.clone(),
-        Arc::clone(&bindings),
+        binding_lifecycle,
         Box::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
     ));
     let policy_manage = Arc::new(PolicyManageService::new(
@@ -481,9 +466,9 @@ where
         rbac_admin: rbac,
         policy_manage,
         roles,
-        bindings,
+        binding_reads,
         policies,
-        resource_attrs,
+        resource_attribute_reads,
         clock: Arc::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
     })
 }

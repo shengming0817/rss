@@ -19,16 +19,11 @@ fn assert_json_coverage(json: &serde_json::Value) {
     assert_eq!(coverage["evidence"], "sourceRegistered");
     assert_eq!(coverage["status"], "partial");
     assert_eq!(coverage["activeCount"], 6);
-    assert_eq!(coverage["registeredCount"], 2);
-    assert_eq!(coverage["missingCount"], 4);
+    assert_eq!(coverage["registeredCount"], 5);
+    assert_eq!(coverage["missingCount"], 1);
     assert_eq!(
         coverage["missingContracts"],
-        serde_json::json!([
-            "identity.policies-get",
-            "identity.policies-list",
-            "identity.roles-list",
-            "settings.config-get"
-        ])
+        serde_json::json!(["settings.config-get"])
     );
 }
 
@@ -51,7 +46,7 @@ fn assert_json_rows(json: &serde_json::Value) {
                     })
             })
             .count(),
-        2
+        5
     );
     assert!(
         json["contracts"]
@@ -78,7 +73,7 @@ fn consistency_report_cli_emits_complete_deterministic_artifacts() -> anyhow::Re
     assert!(markdown.starts_with("# Consistency / Effect Posture\n"));
     assert!(markdown.contains("Static status: **passed** · Active HTTP contracts: **20**"));
     assert!(markdown.contains(
-        "Source receipt registration (report-only; tests not executed): **2/6 registered** · Missing: **4**"
+        "Source receipt registration (report-only; tests not executed): **5/6 registered** · Missing: **1**"
     ));
     assert!(markdown.ends_with('\n'));
     Ok(())

@@ -118,15 +118,15 @@ use crate::domain::{
     ResourceAttributeResolution, ResourceAttributeResourceId, ResourcePolicyAttributeKey, RoleId,
     Session, SessionId, evaluate_policies_for_tenant,
 };
-#[cfg(test)]
-use crate::ports::RoleWriteRepo;
 use crate::ports::{
-    CredentialRepo, DynCredentialRepo, DynPolicyRepo, DynResourceAttributeRepo,
-    DynRoleBindingLifecycle, DynRoleReadRepo, DynSessionLifecycle, Operator,
-    PasswordChangeMutation, PolicyPage, PolicyRepo, RefreshRotationMutation, RefreshTokenStore,
-    ResourceAttributeRepo, RoleBindingLifecycle, RolePage, RoleReadRepo, SessionLifecycle,
-    SessionLogoutMutation, TenantRepoScope,
+    CredentialRepo, DynCredentialRepo, DynPolicyRepo, DynResourceAttributeReadRepo,
+    DynRoleBindingReadRepo, DynRoleReadRepo, DynSessionLifecycle, Operator, PasswordChangeMutation,
+    PolicyPage, PolicyRepo, RefreshRotationMutation, RefreshTokenStore, ResourceAttributeReadRepo,
+    RoleBindingReadRepo, RolePage, RoleReadRepo, SessionLifecycle, SessionLogoutMutation,
+    TenantRepoScope,
 };
+#[cfg(test)]
+use crate::ports::{DynRoleBindingLifecycle, RoleWriteRepo};
 
 /// RBAC 角色管理子域（角色分配 / 撤销 + L2 角色事件发布，#1190 US5）。私有——只经 facade re-export 暴露。
 mod rbac_admin;
@@ -1118,9 +1118,9 @@ struct AuthUserContext {
 #[derive(Clone)]
 struct ContractAuthorizer {
     roles: Arc<DynRoleReadRepo<'static>>,
-    bindings: Arc<DynRoleBindingLifecycle<'static>>,
+    binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
     policies: Arc<DynPolicyRepo<'static>>,
-    resource_attrs: Arc<DynResourceAttributeRepo<'static>>,
+    resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
     clock: Arc<dyn Clock>,
 }
 
@@ -1221,16 +1221,16 @@ fn contract_auth_policy(
 impl ContractAuthorizer {
     fn new(
         roles: Arc<DynRoleReadRepo<'static>>,
-        bindings: Arc<DynRoleBindingLifecycle<'static>>,
+        binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
         policies: Arc<DynPolicyRepo<'static>>,
-        resource_attrs: Arc<DynResourceAttributeRepo<'static>>,
+        resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             roles,
-            bindings,
+            binding_reads,
             policies,
-            resource_attrs,
+            resource_attribute_reads,
             clock,
         }
     }
@@ -1289,7 +1289,7 @@ impl ContractAuthorizer {
     ) -> Result<Vec<GrantPermission>, AuthReject> {
         let tenant_scope = tenant_repo_scope(ctx.tenant);
         let bindings = self
-            .bindings
+            .binding_reads
             .list_for_subject(tenant_scope, ctx.subject.clone())
             .await
             .map_err(|err| {
@@ -1397,7 +1397,7 @@ impl ContractAuthorizer {
         let resource_id = request_resource_attribute_id(ctx, request)?;
         let tenant_scope = tenant_repo_scope(ctx.tenant);
         let resolved = self
-            .resource_attrs
+            .resource_attribute_reads
             .resolve_effective(
                 tenant_scope,
                 scope.clone(),
@@ -1481,7 +1481,7 @@ impl ContractAuthorizer {
         let subject = auth.user_id.as_uuid().hyphenated().to_string();
         let tenant_scope = tenant_repo_scope(auth.tenant);
         let bindings = self
-            .bindings
+            .binding_reads
             .list_for_subject(tenant_scope, subject.clone())
             .await
             .map_err(|err| {
@@ -2636,9 +2636,9 @@ pub struct IdentityDomainDeps<S> {
     pub rbac_admin: Arc<RbacAdminService>,
     pub policy_manage: Arc<PolicyManageService>,
     pub roles: Arc<DynRoleReadRepo<'static>>,
-    pub bindings: Arc<DynRoleBindingLifecycle<'static>>,
+    pub binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
     pub policies: Arc<DynPolicyRepo<'static>>,
-    pub resource_attrs: Arc<DynResourceAttributeRepo<'static>>,
+    pub resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
     pub clock: Arc<dyn Clock>,
 }
 
@@ -2648,6 +2648,7 @@ pub struct IdentityDomain<S> {
     rbac_admin: Arc<RbacAdminService>,
     policy_manage: Arc<PolicyManageService>,
     roles: Arc<DynRoleReadRepo<'static>>,
+    policies: Arc<DynPolicyRepo<'static>>,
     authorizer: Arc<ContractAuthorizer>,
 }
 
@@ -2659,16 +2660,16 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
             rbac_admin,
             policy_manage,
             roles,
-            bindings,
+            binding_reads,
             policies,
-            resource_attrs,
+            resource_attribute_reads,
             clock,
         } = deps;
         let authorizer = Arc::new(ContractAuthorizer::new(
             Arc::clone(&roles),
-            bindings,
+            binding_reads,
             Arc::clone(&policies),
-            resource_attrs,
+            resource_attribute_reads,
             clock,
         ));
         Self {
@@ -2677,6 +2678,7 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
             rbac_admin,
             policy_manage,
             roles,
+            policies,
             authorizer,
         }
     }
@@ -2699,7 +2701,7 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
         let policies_update = policies_create.clone();
         let policies_deactivate = policies_create.clone();
         let policies_get = PolicyQueryService {
-            policies: Arc::clone(&self.authorizer.policies),
+            policies: Arc::clone(&self.policies),
         };
         let policies_list = policies_get.clone();
         let roles = RolesListHandlerState {
@@ -3056,6 +3058,20 @@ mod tests {
         principal_kind: vocab::PrincipalKind,
         outcome: diport::AuditOutcome,
     ) {
+        assert_route_auth_event(
+            sink,
+            PROFILE_HTTP_SPEC.route.contract_id(),
+            principal_kind,
+            outcome,
+        );
+    }
+
+    fn assert_route_auth_event(
+        sink: &RecordingAuthAuditSink,
+        contract_id: &'static str,
+        principal_kind: vocab::PrincipalKind,
+        outcome: diport::AuditOutcome,
+    ) {
         let events = sink.events();
         assert_eq!(events.len(), 1);
         let event = &events[0];
@@ -3063,7 +3079,7 @@ mod tests {
         assert_eq!(event.principal_kind, principal_kind);
         assert_eq!(event.tenant_id, Some(tid(CANON_TENANT)));
         assert_eq!(event.resource_kind, "http_route");
-        assert_eq!(event.resource_id, PROFILE_HTTP_SPEC.route.contract_id());
+        assert_eq!(event.resource_id, contract_id);
         assert_eq!(event.action, "httpserve:authz");
         assert_eq!(event.outcome, outcome);
     }
@@ -3200,17 +3216,15 @@ mod tests {
         let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let (roles_for_list, bindings): (
+        let (roles_for_list, binding_provider): (
             Arc<DynRoleReadRepo<'static>>,
-            Arc<DynRoleBindingLifecycle<'static>>,
+            crate::internal::mem::InMemRoleBindingLifecycle,
         ) = if profile_permissions.is_empty() {
             (
                 Arc::from(DynRoleReadRepo::new_box(
                     crate::internal::mem::InMemRoleRepo::new(),
                 )),
-                Arc::from(DynRoleBindingLifecycle::new_box(
-                    crate::internal::mem::InMemRoleBindingLifecycle::new(),
-                )),
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
             )
         } else {
             let profile_role = role(
@@ -3224,18 +3238,16 @@ mod tests {
                     crate::internal::mem::InMemRoleRepo::new()
                         .with_role_entity(tid(CANON_TENANT), profile_role),
                 )),
-                Arc::from(DynRoleBindingLifecycle::new_box(
-                    crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
-                        tid(CANON_TENANT),
-                        &profile_role_id,
-                        CANON_USER,
-                    ),
-                )),
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    &profile_role_id,
+                    CANON_USER,
+                ),
             )
         };
         let rbac_admin = Arc::new(RbacAdminService::new(
             roles_for_admin,
-            Arc::clone(&bindings),
+            Arc::from(DynRoleBindingLifecycle::new_box(binding_provider.clone())),
             make_clock(now_secs),
         ));
         let (policy_manage, policies) = empty_policy_manage(now_secs);
@@ -3245,9 +3257,9 @@ mod tests {
             rbac_admin,
             policy_manage,
             roles: roles_for_list,
-            bindings,
+            binding_reads: Arc::from(DynRoleBindingReadRepo::new_box(binding_provider)),
             policies,
-            resource_attrs: empty_resource_attribute_repo(),
+            resource_attribute_reads: empty_resource_attribute_repo(),
             clock: make_shared_clock(now_secs),
         })
     }
@@ -3346,6 +3358,565 @@ mod tests {
         .expect("call finalized profile route")
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum IdentityLocalOnlyRead {
+        RoleFind,
+        RoleList,
+        PolicyFind,
+        PolicyList,
+        PolicyEffective,
+        BindingList,
+        ResourceAttributes,
+    }
+
+    impl IdentityLocalOnlyRead {
+        const ALL: [Self; 7] = [
+            Self::RoleFind,
+            Self::RoleList,
+            Self::PolicyFind,
+            Self::PolicyList,
+            Self::PolicyEffective,
+            Self::BindingList,
+            Self::ResourceAttributes,
+        ];
+    }
+
+    #[derive(Clone)]
+    struct IdentityLocalOnlyReadProbe {
+        roles: crate::internal::mem::InMemRoleRepo,
+        policies: crate::internal::mem::InMemPolicyRepo,
+        bindings: crate::internal::mem::InMemRoleBindingLifecycle,
+        resource_attributes: crate::internal::mem::InMemResourceAttributeRepo,
+        calls: Arc<std::sync::Mutex<Vec<(IdentityLocalOnlyRead, vocab::TenantId)>>>,
+        write_effects: ::testkit::local_only::ProviderCounter<::testkit::local_only::Write>,
+        fail_on: Option<IdentityLocalOnlyRead>,
+        forbidden_write_on: Option<IdentityLocalOnlyRead>,
+    }
+
+    impl Default for IdentityLocalOnlyReadProbe {
+        fn default() -> Self {
+            let other_tenant = tid("00000000-0000-4000-8000-000000000abc");
+            let read_role = role(
+                "role-a",
+                "Identity reader",
+                &["identity:role:read", "identity:policy:read"],
+            );
+            let read_role_id = read_role.id().clone();
+            Self {
+                roles: crate::internal::mem::InMemRoleRepo::new()
+                    .with_role_entity(tid(CANON_TENANT), read_role)
+                    .with_role_entity(
+                        tid(CANON_TENANT),
+                        role("role-b", "Secondary role", &["identity:profile:read"]),
+                    )
+                    .with_role_entity(
+                        other_tenant,
+                        role("role-z", "Other tenant role", &["identity:role:read"]),
+                    ),
+                policies: crate::internal::mem::InMemPolicyRepo::new()
+                    .with_policy(owner_policy("policy-a"))
+                    .with_policy(owner_policy("policy-b"))
+                    .with_policy(identity_local_only_policy_for_tenant(
+                        "policy-z",
+                        other_tenant,
+                    )),
+                bindings: crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    &read_role_id,
+                    CANON_USER,
+                ),
+                resource_attributes: crate::internal::mem::InMemResourceAttributeRepo::new(),
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                write_effects: ::testkit::local_only::ProviderCounter::write(),
+                fail_on: None,
+                forbidden_write_on: None,
+            }
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn identity_local_only_policy_for_tenant(id: &str, tenant: TenantId) -> Policy {
+        Policy::build(
+            id,
+            tenant,
+            PolicyRouteScope::parse("other.contract", "identity:policy:read")
+                .expect("identity LocalOnly policy scope"),
+            SystemTime::UNIX_EPOCH,
+            None,
+            vec![PolicyRule::with_obligations(
+                PolicyCondition::new(
+                    AttributeKey::new(POLICY_ATTR_PRINCIPAL_KIND),
+                    Operator::Eq(AttributeValue::new("admin")),
+                ),
+                PolicyEffect::Allow,
+                PolicyObligations::empty(),
+            )],
+        )
+        .expect("identity LocalOnly policy")
+    }
+
+    impl IdentityLocalOnlyReadProbe {
+        fn failing(read: IdentityLocalOnlyRead) -> Self {
+            Self {
+                fail_on: Some(read),
+                ..Self::default()
+            }
+        }
+
+        fn with_forbidden_write(read: IdentityLocalOnlyRead) -> Self {
+            let mut probe = Self {
+                forbidden_write_on: Some(read),
+                ..Self::default()
+            };
+            if read == IdentityLocalOnlyRead::ResourceAttributes {
+                probe.resource_attributes = crate::internal::mem::InMemResourceAttributeRepo::new()
+                    .with_attribute(owner_resource_attribute(0, None));
+            }
+            probe
+        }
+
+        fn without_grant() -> Self {
+            Self {
+                bindings: crate::internal::mem::InMemRoleBindingLifecycle::new(),
+                ..Self::default()
+            }
+        }
+
+        fn test_repo(&self) -> TestRepo {
+            TestRepo::from_provider(Arc::new(self.clone()))
+        }
+
+        fn record(&self, read: IdentityLocalOnlyRead, scope: TenantRepoScope) {
+            self.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push((read, scope.tenant()));
+        }
+
+        fn call_count(&self, read: IdentityLocalOnlyRead) -> usize {
+            self.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .iter()
+                .filter(|(actual, _)| *actual == read)
+                .count()
+        }
+
+        fn scopes_for(&self, read: IdentityLocalOnlyRead) -> Vec<vocab::TenantId> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .iter()
+                .filter_map(|(actual, tenant)| (*actual == read).then_some(*tenant))
+                .collect()
+        }
+
+        fn read_failure() -> IdentityError {
+            IdentityError::Storage(Box::new(std::io::Error::other(
+                "identity-local-only-probe-read-failure",
+            )))
+        }
+    }
+
+    impl RoleReadRepo for IdentityLocalOnlyReadProbe {
+        async fn find(
+            &self,
+            scope: TenantRepoScope,
+            id: RoleId,
+        ) -> Result<Option<Role>, IdentityError> {
+            self.record(IdentityLocalOnlyRead::RoleFind, scope);
+            if self.forbidden_write_on == Some(IdentityLocalOnlyRead::RoleFind) {
+                self.write_effects.record();
+            }
+            if self.fail_on == Some(IdentityLocalOnlyRead::RoleFind) {
+                return Err(Self::read_failure());
+            }
+            self.roles.find(scope, id).await
+        }
+
+        async fn list(
+            &self,
+            scope: TenantRepoScope,
+            page: RolePage,
+        ) -> Result<crate::ports::RoleListResult, IdentityError> {
+            self.record(IdentityLocalOnlyRead::RoleList, scope);
+            if self.forbidden_write_on == Some(IdentityLocalOnlyRead::RoleList) {
+                self.write_effects.record();
+            }
+            if self.fail_on == Some(IdentityLocalOnlyRead::RoleList) {
+                return Err(Self::read_failure());
+            }
+            self.roles.list(scope, page).await
+        }
+    }
+
+    impl PolicyRepo for IdentityLocalOnlyReadProbe {
+        async fn find(
+            &self,
+            scope: TenantRepoScope,
+            id: PolicyId,
+        ) -> Result<Option<Policy>, IdentityError> {
+            self.record(IdentityLocalOnlyRead::PolicyFind, scope);
+            if self.forbidden_write_on == Some(IdentityLocalOnlyRead::PolicyFind) {
+                self.write_effects.record();
+            }
+            if self.fail_on == Some(IdentityLocalOnlyRead::PolicyFind) {
+                return Err(Self::read_failure());
+            }
+            self.policies.find(scope, id).await
+        }
+
+        async fn list_active(
+            &self,
+            scope: TenantRepoScope,
+            page: PolicyPage,
+        ) -> Result<crate::ports::PolicyListResult, IdentityError> {
+            self.record(IdentityLocalOnlyRead::PolicyList, scope);
+            if self.forbidden_write_on == Some(IdentityLocalOnlyRead::PolicyList) {
+                self.write_effects.record();
+            }
+            if self.fail_on == Some(IdentityLocalOnlyRead::PolicyList) {
+                return Err(Self::read_failure());
+            }
+            self.policies.list_active(scope, page).await
+        }
+
+        async fn list_effective(
+            &self,
+            tenant_scope: TenantRepoScope,
+            scope: PolicyRouteScope,
+            at: SystemTime,
+        ) -> Result<Vec<Policy>, IdentityError> {
+            self.record(IdentityLocalOnlyRead::PolicyEffective, tenant_scope);
+            if self.forbidden_write_on == Some(IdentityLocalOnlyRead::PolicyEffective) {
+                self.write_effects.record();
+            }
+            if self.fail_on == Some(IdentityLocalOnlyRead::PolicyEffective) {
+                return Err(Self::read_failure());
+            }
+            self.policies.list_effective(tenant_scope, scope, at).await
+        }
+    }
+
+    impl RoleBindingReadRepo for IdentityLocalOnlyReadProbe {
+        async fn list_for_subject(
+            &self,
+            scope: TenantRepoScope,
+            subject: String,
+        ) -> Result<Vec<crate::domain::RoleBinding>, IdentityError> {
+            self.record(IdentityLocalOnlyRead::BindingList, scope);
+            if self.forbidden_write_on == Some(IdentityLocalOnlyRead::BindingList) {
+                self.write_effects.record();
+            }
+            if self.fail_on == Some(IdentityLocalOnlyRead::BindingList) {
+                return Err(Self::read_failure());
+            }
+            self.bindings.list_for_subject(scope, subject).await
+        }
+    }
+
+    impl ResourceAttributeReadRepo for IdentityLocalOnlyReadProbe {
+        async fn resolve_effective(
+            &self,
+            tenant_scope: TenantRepoScope,
+            scope: PolicyRouteScope,
+            resource_id: ResourceAttributeResourceId,
+            required_keys: Vec<ResourceAttributeKey>,
+            at: SystemTime,
+        ) -> Result<ResourceAttributeResolution, IdentityError> {
+            self.record(IdentityLocalOnlyRead::ResourceAttributes, tenant_scope);
+            if self.forbidden_write_on == Some(IdentityLocalOnlyRead::ResourceAttributes) {
+                self.write_effects.record();
+            }
+            if self.fail_on == Some(IdentityLocalOnlyRead::ResourceAttributes) {
+                return Err(Self::read_failure());
+            }
+            self.resource_attributes
+                .resolve_effective(tenant_scope, scope, resource_id, required_keys, at)
+                .await
+        }
+    }
+
+    struct TestRepo {
+        roles: Arc<DynRoleReadRepo<'static>>,
+        policies: Arc<DynPolicyRepo<'static>>,
+        binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
+        resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
+    }
+
+    impl TestRepo {
+        fn from_provider<T>(provider: Arc<T>) -> Self
+        where
+            T: RoleReadRepo
+                + PolicyRepo
+                + RoleBindingReadRepo
+                + ResourceAttributeReadRepo
+                + 'static,
+        {
+            Self {
+                roles: Arc::from(DynRoleReadRepo::new_box(Arc::clone(&provider))),
+                policies: Arc::from(DynPolicyRepo::new_box(Arc::clone(&provider))),
+                binding_reads: Arc::from(DynRoleBindingReadRepo::new_box(Arc::clone(&provider))),
+                resource_attribute_reads: Arc::from(DynResourceAttributeReadRepo::new_box(
+                    provider,
+                )),
+            }
+        }
+    }
+
+    struct IdentityLocalOnlyAncillaryServices {
+        login: Arc<LoginService<TestSigner>>,
+        refresh: Arc<RefreshService<TestSigner>>,
+        rbac_admin: Arc<RbacAdminService>,
+        policy_manage: Arc<PolicyManageService>,
+    }
+
+    #[allow(clippy::expect_used)]
+    fn identity_local_only_ancillary_services() -> IdentityLocalOnlyAncillaryServices {
+        let refresh = Arc::new(make_refresh_svc(
+            crate::internal::mem::InMemRefreshTokenStore::new(),
+            make_clock(1_000),
+            Duration::from_secs(2_592_000),
+        ));
+        let login = Arc::new(
+            LoginService::with_seed_credential(
+                Arc::from(DynSessionLifecycle::new_box(
+                    CapturingSessionLifecycle::default(),
+                )),
+                Arc::clone(&refresh),
+                make_clock(1_000),
+                Duration::from_secs(3_600),
+                "alice",
+                uid(CANON_USER),
+                "correct-horse",
+                tid(CANON_TENANT),
+            )
+            .expect("seed identity LocalOnly login"),
+        );
+        let rbac_admin = Arc::new(RbacAdminService::new(
+            Arc::from(DynRoleReadRepo::new_box(
+                crate::internal::mem::InMemRoleRepo::new(),
+            )),
+            Arc::from(DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            )),
+            make_clock(1_000),
+        ));
+        let (policy_manage, _) = empty_policy_manage(1_000);
+        IdentityLocalOnlyAncillaryServices {
+            login,
+            refresh,
+            rbac_admin,
+            policy_manage,
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn finalized_identity_v1_roles_list_router(
+        repo: TestRepo,
+        auth_sink: RecordingAuthAuditSink,
+    ) -> (
+        axum::Router,
+        ::httpserve::LocalOnlyMountedRouteProof<
+            ::generated::http::identity_v1::roles_list::RouteMarker,
+            RolesListHandlerState,
+        >,
+    ) {
+        let IdentityLocalOnlyAncillaryServices {
+            login,
+            refresh,
+            rbac_admin,
+            policy_manage,
+        } = identity_local_only_ancillary_services();
+        let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+            login,
+            refresh,
+            rbac_admin,
+            policy_manage,
+            roles: repo.roles,
+            binding_reads: repo.binding_reads,
+            policies: repo.policies,
+            resource_attribute_reads: repo.resource_attribute_reads,
+            clock: make_shared_clock(1_000),
+        });
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let authorizer = registry
+            .take_primary_authorizer()
+            .expect("identity Primary authorizer");
+        let mut finalized = registry
+            .finalize_routes()
+            .expect("finalize identity routes");
+        let (_, routes) = finalized.pop().expect("identity Primary routes");
+        let proof = ::httpserve::prove_local_only_mounted_route_state::<RolesListHandlerState, _>(
+            &routes,
+            &::generated::http::identity_v1::roles_list::ROUTE,
+        )
+        .expect("identity roles-list LocalOnly state is mounted");
+        let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
+            .expect("Primary JWT auth plan");
+        let router = ::httpserve::finalize_primary_auth_with_audit(
+            routes,
+            plan,
+            httpserve::AuditSinkHandle::new(auth_sink),
+            make_shared_clock(1_000),
+            authorizer,
+        )
+        .expect("finalize Primary auth")
+        .into_router_for_test();
+        (router, proof)
+    }
+
+    #[allow(clippy::expect_used)]
+    fn finalized_identity_v1_policies_get_router(
+        repo: TestRepo,
+        auth_sink: RecordingAuthAuditSink,
+    ) -> (
+        axum::Router,
+        ::httpserve::LocalOnlyMountedRouteProof<
+            ::generated::http::identity_v1::policies_get::RouteMarker,
+            PolicyQueryService,
+        >,
+    ) {
+        let IdentityLocalOnlyAncillaryServices {
+            login,
+            refresh,
+            rbac_admin,
+            policy_manage,
+        } = identity_local_only_ancillary_services();
+        let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+            login,
+            refresh,
+            rbac_admin,
+            policy_manage,
+            roles: repo.roles,
+            binding_reads: repo.binding_reads,
+            policies: repo.policies,
+            resource_attribute_reads: repo.resource_attribute_reads,
+            clock: make_shared_clock(1_000),
+        });
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let authorizer = registry
+            .take_primary_authorizer()
+            .expect("identity Primary authorizer");
+        let mut finalized = registry
+            .finalize_routes()
+            .expect("finalize identity routes");
+        let (_, routes) = finalized.pop().expect("identity Primary routes");
+        let proof = ::httpserve::prove_local_only_mounted_route_state::<PolicyQueryService, _>(
+            &routes,
+            &::generated::http::identity_v1::policies_get::ROUTE,
+        )
+        .expect("identity policies-get LocalOnly state is mounted");
+        let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
+            .expect("Primary JWT auth plan");
+        let router = ::httpserve::finalize_primary_auth_with_audit(
+            routes,
+            plan,
+            httpserve::AuditSinkHandle::new(auth_sink),
+            make_shared_clock(1_000),
+            authorizer,
+        )
+        .expect("finalize Primary auth")
+        .into_router_for_test();
+        (router, proof)
+    }
+
+    #[allow(clippy::expect_used)]
+    fn finalized_identity_v1_policies_list_router(
+        repo: TestRepo,
+        auth_sink: RecordingAuthAuditSink,
+    ) -> (
+        axum::Router,
+        ::httpserve::LocalOnlyMountedRouteProof<
+            ::generated::http::identity_v1::policies_list::RouteMarker,
+            PolicyQueryService,
+        >,
+    ) {
+        let IdentityLocalOnlyAncillaryServices {
+            login,
+            refresh,
+            rbac_admin,
+            policy_manage,
+        } = identity_local_only_ancillary_services();
+        let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+            login,
+            refresh,
+            rbac_admin,
+            policy_manage,
+            roles: repo.roles,
+            binding_reads: repo.binding_reads,
+            policies: repo.policies,
+            resource_attribute_reads: repo.resource_attribute_reads,
+            clock: make_shared_clock(1_000),
+        });
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let authorizer = registry
+            .take_primary_authorizer()
+            .expect("identity Primary authorizer");
+        let mut finalized = registry
+            .finalize_routes()
+            .expect("finalize identity routes");
+        let (_, routes) = finalized.pop().expect("identity Primary routes");
+        let proof = ::httpserve::prove_local_only_mounted_route_state::<PolicyQueryService, _>(
+            &routes,
+            &::generated::http::identity_v1::policies_list::ROUTE,
+        )
+        .expect("identity policies-list LocalOnly state is mounted");
+        let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
+            .expect("Primary JWT auth plan");
+        let router = ::httpserve::finalize_primary_auth_with_audit(
+            routes,
+            plan,
+            httpserve::AuditSinkHandle::new(auth_sink),
+            make_shared_clock(1_000),
+            authorizer,
+        )
+        .expect("finalize Primary auth")
+        .into_router_for_test();
+        (router, proof)
+    }
+
+    #[allow(clippy::expect_used)]
+    fn mounted_identity_resource_authorizer(
+        repo: TestRepo,
+    ) -> (
+        Arc<ContractAuthorizer>,
+        ::httpserve::LocalOnlyMountedRouteProof<
+            ::generated::http::identity_v1::roles_list::RouteMarker,
+            RolesListHandlerState,
+        >,
+    ) {
+        let IdentityLocalOnlyAncillaryServices {
+            login,
+            refresh,
+            rbac_admin,
+            policy_manage,
+        } = identity_local_only_ancillary_services();
+        let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+            login,
+            refresh,
+            rbac_admin,
+            policy_manage,
+            roles: repo.roles,
+            binding_reads: repo.binding_reads,
+            policies: repo.policies,
+            resource_attribute_reads: repo.resource_attribute_reads,
+            clock: make_shared_clock(1_000),
+        });
+        let authorizer = Arc::clone(&domain.authorizer);
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let mut finalized = registry
+            .finalize_routes()
+            .expect("finalize identity routes");
+        let (_, routes) = finalized.pop().expect("identity Primary routes");
+        let proof = ::httpserve::prove_local_only_mounted_route_state::<RolesListHandlerState, _>(
+            &routes,
+            &::generated::http::identity_v1::roles_list::ROUTE,
+        )
+        .expect("identity roles-list LocalOnly state is mounted");
+        (authorizer, proof)
+    }
+
     fn user_evidence(subject: &str) -> AuthorizedSubject {
         AuthorizedSubject::for_test(tid(CANON_TENANT), vocab::PrincipalKind::User, subject, None)
     }
@@ -3395,19 +3966,19 @@ mod tests {
         ))
     }
 
-    fn empty_resource_attribute_repo() -> Arc<DynResourceAttributeRepo<'static>> {
+    fn empty_resource_attribute_repo() -> Arc<DynResourceAttributeReadRepo<'static>> {
         resource_attribute_repo(crate::internal::mem::InMemResourceAttributeRepo::new())
     }
 
     fn resource_attribute_repo(
         repo: crate::internal::mem::InMemResourceAttributeRepo,
-    ) -> Arc<DynResourceAttributeRepo<'static>> {
-        Arc::from(DynResourceAttributeRepo::new_box(repo))
+    ) -> Arc<DynResourceAttributeReadRepo<'static>> {
+        Arc::from(DynResourceAttributeReadRepo::new_box(repo))
     }
 
     struct IncompleteKnownResourceAttributeRepo;
 
-    impl ResourceAttributeRepo for IncompleteKnownResourceAttributeRepo {
+    impl ResourceAttributeReadRepo for IncompleteKnownResourceAttributeRepo {
         async fn resolve_effective(
             &self,
             _tenant_scope: TenantRepoScope,
@@ -3418,32 +3989,10 @@ mod tests {
         ) -> Result<ResourceAttributeResolution, IdentityError> {
             Ok(ResourceAttributeResolution::Known(Vec::new()))
         }
-
-        async fn upsert(
-            &self,
-            _scope: TenantRepoScope,
-            _attribute: crate::domain::ResourceAttribute,
-            _expected: Option<crate::domain::ResourceAttributeVersion>,
-        ) -> Result<crate::domain::ResourceAttribute, IdentityError> {
-            Err(IdentityError::Storage(Box::new(std::io::Error::other(
-                "test repo",
-            ))))
-        }
-
-        async fn expire(
-            &self,
-            _tenant_scope: TenantRepoScope,
-            _scope: PolicyRouteScope,
-            _resource_id: ResourceAttributeResourceId,
-            _key: ResourceAttributeKey,
-            _expected: crate::domain::ResourceAttributeVersion,
-        ) -> Result<bool, IdentityError> {
-            Ok(false)
-        }
     }
 
-    fn incomplete_known_resource_attribute_repo() -> Arc<DynResourceAttributeRepo<'static>> {
-        Arc::from(DynResourceAttributeRepo::new_box(
+    fn incomplete_known_resource_attribute_repo() -> Arc<DynResourceAttributeReadRepo<'static>> {
+        Arc::from(DynResourceAttributeReadRepo::new_box(
             IncompleteKnownResourceAttributeRepo,
         ))
     }
@@ -3504,8 +4053,8 @@ mod tests {
             crate::internal::mem::InMemRoleRepo::new()
                 .with_role_entity(tid(CANON_TENANT), manager_role),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
                     tid(CANON_TENANT),
                     &manager_role_id,
@@ -4616,8 +5165,8 @@ mod tests {
         .await
         .expect("save role");
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
                     tid(CANON_TENANT),
                     role("role-admin", "Admin", &[]).id(),
@@ -4650,8 +5199,8 @@ mod tests {
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let authorizer = ContractAuthorizer::new(
@@ -4699,8 +5248,8 @@ mod tests {
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let authorizer = ContractAuthorizer::new(
@@ -4748,8 +5297,8 @@ mod tests {
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let authorizer = ContractAuthorizer::new(
@@ -4779,8 +5328,8 @@ mod tests {
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
@@ -4819,8 +5368,8 @@ mod tests {
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let policies = policy_repo(
@@ -4864,8 +5413,8 @@ mod tests {
             crate::internal::mem::InMemRoleRepo::new()
                 .with_role_entity(tid(CANON_TENANT), baseline_role),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
                     tid(CANON_TENANT),
                     &baseline_role_id,
@@ -4910,8 +5459,8 @@ mod tests {
             crate::internal::mem::InMemRoleRepo::new()
                 .with_role_entity(tid(CANON_TENANT), baseline_role),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
                     tid(CANON_TENANT),
                     &baseline_role_id,
@@ -4960,8 +5509,8 @@ mod tests {
             crate::internal::mem::InMemRoleRepo::new()
                 .with_role_entity(tid(CANON_TENANT), baseline_role),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
                     tid(CANON_TENANT),
                     &baseline_role_id,
@@ -5009,8 +5558,8 @@ mod tests {
             crate::internal::mem::InMemRoleRepo::new()
                 .with_role_entity(tid(CANON_TENANT), baseline_role),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
                     tid(CANON_TENANT),
                     &baseline_role_id,
@@ -5077,8 +5626,8 @@ mod tests {
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let auth = SETTINGS_CONFIG_HTTP_SPEC.route.auth();
@@ -5122,8 +5671,8 @@ mod tests {
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let auth = SETTINGS_CONFIG_HTTP_SPEC.route.auth();
@@ -5181,8 +5730,8 @@ mod tests {
         .await
         .expect("save role");
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
                     tid(CANON_TENANT),
                     role("role-audit", "Audit", &[]).id(),
@@ -5233,8 +5782,8 @@ mod tests {
         .await
         .expect("save role");
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
                     tid(CANON_TENANT),
                     role("role-audit", "Audit", &[]).id(),
@@ -5269,8 +5818,8 @@ mod tests {
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let authorizer = ContractAuthorizer::new(
@@ -5344,8 +5893,8 @@ mod tests {
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
@@ -5396,8 +5945,8 @@ mod tests {
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
@@ -5456,8 +6005,8 @@ mod tests {
             crate::internal::mem::InMemRoleRepo::new()
                 .with_role_entity(tid(CANON_TENANT), profile_role),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
                     tid(CANON_TENANT),
                     &profile_role_id,
@@ -5498,8 +6047,8 @@ mod tests {
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
@@ -5539,8 +6088,8 @@ mod tests {
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::failing_reads());
@@ -5582,8 +6131,8 @@ mod tests {
         .await
         .expect("save role");
         let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
-        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
                     tid(CANON_TENANT),
                     role("role-admin", "Admin", &[]).id(),
@@ -6139,6 +6688,785 @@ mod tests {
         assert_eq!(deactivated["data"]["deactivated"], true);
         assert_eq!(deactivated["data"]["version"], 2);
         assert_eq!(repo.emitted().len(), 2, "deactivate 应发事件");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn roles_list_local_only_finalized_route_has_canonical_receipt() {
+        let repo_probe = IdentityLocalOnlyReadProbe::default();
+        let auth_sink = RecordingAuthAuditSink::default();
+        let (router, proof) = self::finalized_identity_v1_roles_list_router(
+            repo_probe.test_repo(),
+            auth_sink.clone(),
+        );
+        let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            vocab::PrincipalKind::Admin,
+            CANON_USER,
+            Some(tid(CANON_TENANT)),
+        )));
+        let observers = ::testkit::local_only::LocalOnlyObservers::new(
+            repo_probe.write_effects.handle(),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                &proof,
+            ),
+        );
+        let (response, receipt) = ::testkit::local_only::assert_local_only_with_receipt::<
+            ::generated::http::identity_v1::roles_list::LocalOnlyConformanceMarker,
+            _,
+            _,
+            _,
+        >(
+            ::generated::http::identity_v1::roles_list::SPEC
+                .route
+                .contract_id(),
+            observers,
+            move || {
+                ::testkit::call(
+                    router,
+                    ::testkit::ContractRequest::get(
+                        ::generated::http::identity_v1::roles_list::SPEC
+                            .route
+                            .path(),
+                    ),
+                )
+            },
+        )
+        .await
+        .expect("roles-list remains LocalOnly");
+        ::core::assert_eq!(
+            receipt.contract_id(),
+            ::generated::http::identity_v1::roles_list::SPEC
+                .route
+                .contract_id()
+        );
+        response
+            .expect("call finalized roles-list")
+            .ensure_status(StatusCode::OK)
+            .expect("roles-list 200");
+        assert_eq!(repo_probe.call_count(IdentityLocalOnlyRead::RoleList), 1);
+        assert_eq!(
+            repo_probe.scopes_for(IdentityLocalOnlyRead::RoleList),
+            vec![tid(CANON_TENANT)]
+        );
+        assert_route_auth_event(
+            &auth_sink,
+            ROLES_LIST_HTTP_SPEC.route.contract_id(),
+            vocab::PrincipalKind::Admin,
+            diport::AuditOutcome::Success,
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn policies_get_local_only_finalized_route_has_canonical_receipt() {
+        let repo_probe = IdentityLocalOnlyReadProbe::default();
+        let auth_sink = RecordingAuthAuditSink::default();
+        let (router, proof) = self::finalized_identity_v1_policies_get_router(
+            repo_probe.test_repo(),
+            auth_sink.clone(),
+        );
+        let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            vocab::PrincipalKind::Admin,
+            CANON_USER,
+            Some(tid(CANON_TENANT)),
+        )));
+        let observers = ::testkit::local_only::LocalOnlyObservers::new(
+            repo_probe.write_effects.handle(),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                &proof,
+            ),
+        );
+        let (response, receipt) = ::testkit::local_only::assert_local_only_with_receipt::<
+            ::generated::http::identity_v1::policies_get::LocalOnlyConformanceMarker,
+            _,
+            _,
+            _,
+        >(
+            ::generated::http::identity_v1::policies_get::SPEC
+                .route
+                .contract_id(),
+            observers,
+            move || {
+                ::testkit::call(
+                    router,
+                    ::testkit::ContractRequest::get(
+                        ::generated::http::identity_v1::policies_get::SPEC
+                            .route
+                            .path()
+                            .replace("{policyId}", "policy-a"),
+                    ),
+                )
+            },
+        )
+        .await
+        .expect("policies-get remains LocalOnly");
+        ::core::assert_eq!(
+            receipt.contract_id(),
+            ::generated::http::identity_v1::policies_get::SPEC
+                .route
+                .contract_id()
+        );
+        response
+            .expect("call finalized policies-get")
+            .ensure_status(StatusCode::OK)
+            .expect("policies-get 200");
+        assert_eq!(repo_probe.call_count(IdentityLocalOnlyRead::PolicyFind), 1);
+        assert_route_auth_event(
+            &auth_sink,
+            POLICIES_GET_HTTP_SPEC.route.contract_id(),
+            vocab::PrincipalKind::Admin,
+            diport::AuditOutcome::Success,
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn policies_list_local_only_finalized_route_has_canonical_receipt() {
+        let repo_probe = IdentityLocalOnlyReadProbe::default();
+        let auth_sink = RecordingAuthAuditSink::default();
+        let (router, proof) = self::finalized_identity_v1_policies_list_router(
+            repo_probe.test_repo(),
+            auth_sink.clone(),
+        );
+        let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            vocab::PrincipalKind::Admin,
+            CANON_USER,
+            Some(tid(CANON_TENANT)),
+        )));
+        let observers = ::testkit::local_only::LocalOnlyObservers::new(
+            repo_probe.write_effects.handle(),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                &proof,
+            ),
+        );
+        let (response, receipt) = ::testkit::local_only::assert_local_only_with_receipt::<
+            ::generated::http::identity_v1::policies_list::LocalOnlyConformanceMarker,
+            _,
+            _,
+            _,
+        >(
+            ::generated::http::identity_v1::policies_list::SPEC
+                .route
+                .contract_id(),
+            observers,
+            move || {
+                ::testkit::call(
+                    router,
+                    ::testkit::ContractRequest::get(
+                        ::generated::http::identity_v1::policies_list::SPEC
+                            .route
+                            .path(),
+                    ),
+                )
+            },
+        )
+        .await
+        .expect("policies-list remains LocalOnly");
+        ::core::assert_eq!(
+            receipt.contract_id(),
+            ::generated::http::identity_v1::policies_list::SPEC
+                .route
+                .contract_id()
+        );
+        response
+            .expect("call finalized policies-list")
+            .ensure_status(StatusCode::OK)
+            .expect("policies-list 200");
+        assert_eq!(repo_probe.call_count(IdentityLocalOnlyRead::PolicyList), 1);
+        assert_eq!(
+            repo_probe.scopes_for(IdentityLocalOnlyRead::PolicyList),
+            vec![tid(CANON_TENANT)]
+        );
+        assert_route_auth_event(
+            &auth_sink,
+            POLICIES_LIST_HTTP_SPEC.route.contract_id(),
+            vocab::PrincipalKind::Admin,
+            diport::AuditOutcome::Success,
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn finalized_roles_list_pages_and_validates_limit_and_cursor() {
+        let repo_probe = IdentityLocalOnlyReadProbe::default();
+        let (router, proof) = self::finalized_identity_v1_roles_list_router(
+            repo_probe.test_repo(),
+            RecordingAuthAuditSink::default(),
+        );
+        let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            vocab::PrincipalKind::Admin,
+            CANON_USER,
+            Some(tid(CANON_TENANT)),
+        )));
+        let base = ::generated::http::identity_v1::roles_list::SPEC
+            .route
+            .path();
+        let first = ::testkit::local_only::assert_local_only(
+            ::testkit::local_only::LocalOnlyObservers::new(
+                repo_probe.write_effects.handle(),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
+            ),
+            || ::testkit::call(
+                router.clone(),
+                ContractRequest::get(format!("{base}?limit=1")),
+            ),
+        )
+        .await
+        .expect("roles first page remains LocalOnly")
+        .expect("roles first page");
+        first.ensure_status(StatusCode::OK).expect("first page 200");
+        let first: IdentityRolesListResponse = first.json().expect("first page json");
+        assert_eq!(first.data.len(), 1);
+        assert_eq!(first.data[0].role_id, "role-a");
+        assert!(first.has_more);
+        let cursor = first.next_cursor.expect("first page cursor");
+        let second = ::testkit::local_only::assert_local_only(
+            ::testkit::local_only::LocalOnlyObservers::new(
+                repo_probe.write_effects.handle(),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
+            ),
+            || ::testkit::call(
+                router.clone(),
+                ContractRequest::get(format!("{base}?limit=1&cursor={cursor}")),
+            ),
+        )
+        .await
+        .expect("roles second page remains LocalOnly")
+        .expect("roles second page");
+        let second: IdentityRolesListResponse = second.json().expect("second page json");
+        assert_eq!(second.data.len(), 1);
+        assert_eq!(second.data[0].role_id, "role-b");
+        assert!(!second.has_more);
+        for bad_query in ["limit=0", "limit=501", "cursor=not-base64"] {
+            ::testkit::local_only::assert_local_only(
+                ::testkit::local_only::LocalOnlyObservers::new(
+                    repo_probe.write_effects.handle(),
+                    ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
+                    ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
+                ),
+                || ::testkit::call(
+                    router.clone(),
+                    ContractRequest::get(format!("{base}?{bad_query}")),
+                ),
+            )
+            .await
+            .expect("invalid roles query remains LocalOnly")
+            .expect("invalid roles query")
+            .ensure_status(StatusCode::BAD_REQUEST)
+            .expect("invalid roles query -> 400");
+        }
+        assert_eq!(repo_probe.call_count(IdentityLocalOnlyRead::RoleList), 2);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn finalized_policies_list_pages_and_validates_limit_and_cursor() {
+        let repo_probe = IdentityLocalOnlyReadProbe::default();
+        let (router, proof) = self::finalized_identity_v1_policies_list_router(
+            repo_probe.test_repo(),
+            RecordingAuthAuditSink::default(),
+        );
+        let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            vocab::PrincipalKind::Admin,
+            CANON_USER,
+            Some(tid(CANON_TENANT)),
+        )));
+        let base = ::generated::http::identity_v1::policies_list::SPEC
+            .route
+            .path();
+        let first = ::testkit::local_only::assert_local_only(
+            ::testkit::local_only::LocalOnlyObservers::new(
+                repo_probe.write_effects.handle(),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
+            ),
+            || ::testkit::call(
+                router.clone(),
+                ContractRequest::get(format!("{base}?limit=1")),
+            ),
+        )
+        .await
+        .expect("policies first page remains LocalOnly")
+        .expect("policies first page");
+        first.ensure_status(StatusCode::OK).expect("first page 200");
+        let first: serde_json::Value = first.json().expect("first page json");
+        assert_eq!(first["data"].as_array().map(Vec::len), Some(1));
+        assert_eq!(first["data"][0]["policyId"], "policy-a");
+        assert_eq!(first["hasMore"], true);
+        let cursor = first["nextCursor"].as_str().expect("first page cursor");
+        let second = ::testkit::local_only::assert_local_only(
+            ::testkit::local_only::LocalOnlyObservers::new(
+                repo_probe.write_effects.handle(),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
+            ),
+            || ::testkit::call(
+                router.clone(),
+                ContractRequest::get(format!("{base}?limit=1&cursor={cursor}")),
+            ),
+        )
+        .await
+        .expect("policies second page remains LocalOnly")
+        .expect("policies second page");
+        let second: serde_json::Value = second.json().expect("second page json");
+        assert_eq!(second["data"].as_array().map(Vec::len), Some(1));
+        assert_eq!(second["data"][0]["policyId"], "policy-b");
+        assert_eq!(second["hasMore"], false);
+        for bad_query in ["limit=0", "limit=501", "cursor=not-base64"] {
+            ::testkit::local_only::assert_local_only(
+                ::testkit::local_only::LocalOnlyObservers::new(
+                    repo_probe.write_effects.handle(),
+                    ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
+                    ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
+                ),
+                || ::testkit::call(
+                    router.clone(),
+                    ContractRequest::get(format!("{base}?{bad_query}")),
+                ),
+            )
+            .await
+            .expect("invalid policies query remains LocalOnly")
+            .expect("invalid policies query")
+            .ensure_status(StatusCode::BAD_REQUEST)
+            .expect("invalid policies query -> 400");
+        }
+        assert_eq!(repo_probe.call_count(IdentityLocalOnlyRead::PolicyList), 2);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn finalized_policies_get_maps_success_invalid_id_and_not_found() {
+        let repo_probe = IdentityLocalOnlyReadProbe::default();
+        let (router, proof) = self::finalized_identity_v1_policies_get_router(
+            repo_probe.test_repo(),
+            RecordingAuthAuditSink::default(),
+        );
+        let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            vocab::PrincipalKind::Admin,
+            CANON_USER,
+            Some(tid(CANON_TENANT)),
+        )));
+        let template = ::generated::http::identity_v1::policies_get::SPEC
+            .route
+            .path();
+        for (policy_id, expected) in [
+            ("policy-a", StatusCode::OK),
+            ("bad%20policy", StatusCode::BAD_REQUEST),
+            ("policy-z", StatusCode::NOT_FOUND),
+        ] {
+            ::testkit::local_only::assert_local_only(
+                ::testkit::local_only::LocalOnlyObservers::new(
+                    repo_probe.write_effects.handle(),
+                    ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
+                    ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
+                ),
+                || ::testkit::call(
+                    router.clone(),
+                    ContractRequest::get(template.replace("{policyId}", policy_id)),
+                ),
+            )
+            .await
+            .expect("policies-get remains LocalOnly")
+            .expect("policies-get call")
+            .ensure_status(expected)
+            .expect("policies-get status");
+        }
+        assert_eq!(repo_probe.call_count(IdentityLocalOnlyRead::PolicyFind), 2);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn finalized_identity_reads_reject_missing_auth_missing_permission_and_cross_tenant() {
+        let missing_auth_probe = IdentityLocalOnlyReadProbe::default();
+        let missing_auth_sink = RecordingAuthAuditSink::default();
+        let (missing_auth_router, missing_auth_proof) =
+            self::finalized_identity_v1_roles_list_router(
+                missing_auth_probe.test_repo(),
+                missing_auth_sink.clone(),
+            );
+        ::testkit::local_only::assert_local_only(
+            ::testkit::local_only::LocalOnlyObservers::new(
+                missing_auth_probe.write_effects.handle(),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&missing_auth_proof),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&missing_auth_proof),
+            ),
+            move || ::testkit::call(
+                missing_auth_router,
+                ContractRequest::get(
+                    ::generated::http::identity_v1::roles_list::SPEC
+                        .route
+                        .path(),
+                ),
+            ),
+        )
+        .await
+        .expect("missing auth remains LocalOnly")
+        .expect("missing auth call")
+        .ensure_status(StatusCode::UNAUTHORIZED)
+        .expect("missing auth -> 401");
+        assert!(missing_auth_sink.events().is_empty());
+
+        let missing_permission_probe = IdentityLocalOnlyReadProbe::without_grant();
+        let missing_permission_sink = RecordingAuthAuditSink::default();
+        let (missing_permission_router, missing_permission_proof) =
+            self::finalized_identity_v1_policies_list_router(
+                missing_permission_probe.test_repo(),
+                missing_permission_sink.clone(),
+            );
+        let missing_permission_router =
+            missing_permission_router.layer(::axum::Extension(httpserve::Authenticated::new(
+                primitives::RequiredScheme::Jwt,
+                vocab::PrincipalKind::Admin,
+                CANON_USER,
+                Some(tid(CANON_TENANT)),
+            )));
+        ::testkit::local_only::assert_local_only(
+            ::testkit::local_only::LocalOnlyObservers::new(
+                missing_permission_probe.write_effects.handle(),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&missing_permission_proof),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&missing_permission_proof),
+            ),
+            move || ::testkit::call(
+                missing_permission_router,
+                ContractRequest::get(
+                    ::generated::http::identity_v1::policies_list::SPEC
+                        .route
+                        .path(),
+                ),
+            ),
+        )
+        .await
+        .expect("missing permission remains LocalOnly")
+        .expect("missing permission call")
+        .ensure_status(StatusCode::FORBIDDEN)
+        .expect("missing permission -> 403");
+        assert_eq!(
+            missing_permission_probe.call_count(IdentityLocalOnlyRead::PolicyList),
+            0
+        );
+        assert_route_auth_event(
+            &missing_permission_sink,
+            POLICIES_LIST_HTTP_SPEC.route.contract_id(),
+            vocab::PrincipalKind::Admin,
+            diport::AuditOutcome::Failure {
+                reason: "forbidden",
+            },
+        );
+
+        let cross_tenant_probe = IdentityLocalOnlyReadProbe::default();
+        let cross_tenant_sink = RecordingAuthAuditSink::default();
+        let (cross_tenant_router, cross_tenant_proof) =
+            self::finalized_identity_v1_policies_get_router(
+                cross_tenant_probe.test_repo(),
+                cross_tenant_sink.clone(),
+            );
+        let other_tenant = tid("00000000-0000-4000-8000-000000000abc");
+        let cross_tenant_router =
+            cross_tenant_router.layer(::axum::Extension(httpserve::Authenticated::new(
+                primitives::RequiredScheme::Jwt,
+                vocab::PrincipalKind::Admin,
+                CANON_USER,
+                Some(other_tenant),
+            )));
+        ::testkit::local_only::assert_local_only(
+            ::testkit::local_only::LocalOnlyObservers::new(
+                cross_tenant_probe.write_effects.handle(),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&cross_tenant_proof),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&cross_tenant_proof),
+            ),
+            move || ::testkit::call(
+                cross_tenant_router,
+                ContractRequest::get(
+                    ::generated::http::identity_v1::policies_get::SPEC
+                        .route
+                        .path()
+                        .replace("{policyId}", "policy-a"),
+                ),
+            ),
+        )
+        .await
+        .expect("cross tenant remains LocalOnly")
+        .expect("cross tenant call")
+        .ensure_status(StatusCode::FORBIDDEN)
+        .expect("cross tenant -> 403");
+        assert_eq!(
+            cross_tenant_probe.scopes_for(IdentityLocalOnlyRead::BindingList),
+            vec![other_tenant]
+        );
+        assert_eq!(
+            cross_tenant_probe.call_count(IdentityLocalOnlyRead::PolicyFind),
+            0
+        );
+        let events = cross_tenant_sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tenant_id, Some(other_tenant));
+        assert_eq!(
+            events[0].outcome,
+            diport::AuditOutcome::Failure {
+                reason: "forbidden",
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn finalized_identity_target_read_failures_are_internal_errors_without_writes() {
+        let roles_probe = IdentityLocalOnlyReadProbe::failing(IdentityLocalOnlyRead::RoleList);
+        let (roles_router, roles_proof) = self::finalized_identity_v1_roles_list_router(
+            roles_probe.test_repo(),
+            RecordingAuthAuditSink::default(),
+        );
+        let roles_router = roles_router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            vocab::PrincipalKind::Admin,
+            CANON_USER,
+            Some(tid(CANON_TENANT)),
+        )));
+        let response = ::testkit::local_only::assert_local_only(
+            ::testkit::local_only::LocalOnlyObservers::new(
+                roles_probe.write_effects.handle(),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&roles_proof),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&roles_proof),
+            ),
+            move || ::testkit::call(roles_router, ContractRequest::get(ROLES_LIST_HTTP_SPEC.route.path())),
+        )
+        .await
+        .expect("roles failure remains side-effect free")
+        .expect("roles failure response");
+        response
+            .ensure_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .expect("roles read failure -> 500");
+
+        let get_probe = IdentityLocalOnlyReadProbe::failing(IdentityLocalOnlyRead::PolicyFind);
+        let (get_router, get_proof) = self::finalized_identity_v1_policies_get_router(
+            get_probe.test_repo(),
+            RecordingAuthAuditSink::default(),
+        );
+        let get_router = get_router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            vocab::PrincipalKind::Admin,
+            CANON_USER,
+            Some(tid(CANON_TENANT)),
+        )));
+        let response = ::testkit::local_only::assert_local_only(
+            ::testkit::local_only::LocalOnlyObservers::new(
+                get_probe.write_effects.handle(),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&get_proof),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&get_proof),
+            ),
+            move || ::testkit::call(get_router, ContractRequest::get(POLICIES_GET_HTTP_SPEC.route.path().replace("{policyId}", "policy-a"))),
+        )
+        .await
+        .expect("policy get failure remains side-effect free")
+        .expect("policy get failure response");
+        response
+            .ensure_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .expect("policy get failure -> 500");
+
+        let list_probe = IdentityLocalOnlyReadProbe::failing(IdentityLocalOnlyRead::PolicyList);
+        let (list_router, list_proof) = self::finalized_identity_v1_policies_list_router(
+            list_probe.test_repo(),
+            RecordingAuthAuditSink::default(),
+        );
+        let list_router = list_router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            vocab::PrincipalKind::Admin,
+            CANON_USER,
+            Some(tid(CANON_TENANT)),
+        )));
+        let response = ::testkit::local_only::assert_local_only(
+            ::testkit::local_only::LocalOnlyObservers::new(
+                list_probe.write_effects.handle(),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&list_proof),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&list_proof),
+            ),
+            move || ::testkit::call(list_router, ContractRequest::get(POLICIES_LIST_HTTP_SPEC.route.path())),
+        )
+        .await
+        .expect("policy list failure remains side-effect free")
+        .expect("policy list failure response");
+        response
+            .ensure_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .expect("policy list failure -> 500");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn finalized_identity_synthetic_writes_trip_each_local_only_guard() {
+        #[derive(Clone, Copy)]
+        enum RouteCase {
+            RolesList,
+            PoliciesGet(&'static str),
+            PoliciesList,
+            ResourceAuthorizer,
+        }
+
+        let cases = [
+            (IdentityLocalOnlyRead::RoleFind, RouteCase::RolesList),
+            (IdentityLocalOnlyRead::RoleList, RouteCase::RolesList),
+            (
+                IdentityLocalOnlyRead::PolicyFind,
+                RouteCase::PoliciesGet("policy-a"),
+            ),
+            (IdentityLocalOnlyRead::PolicyList, RouteCase::PoliciesList),
+            (IdentityLocalOnlyRead::PolicyEffective, RouteCase::RolesList),
+            (IdentityLocalOnlyRead::BindingList, RouteCase::RolesList),
+            (
+                IdentityLocalOnlyRead::ResourceAttributes,
+                RouteCase::ResourceAuthorizer,
+            ),
+        ];
+        assert_eq!(
+            cases.map(|(read, _)| read),
+            IdentityLocalOnlyRead::ALL,
+            "synthetic write matrix must cover every Identity read seam",
+        );
+        for (read, route_case) in cases {
+            let probe = IdentityLocalOnlyReadProbe::with_forbidden_write(read);
+            let result = match route_case {
+                RouteCase::RolesList => {
+                    let (router, proof) = self::finalized_identity_v1_roles_list_router(
+                        probe.test_repo(),
+                        RecordingAuthAuditSink::default(),
+                    );
+                    let observers = ::testkit::local_only::LocalOnlyObservers::new(
+                        probe.write_effects.handle(),
+                        ::testkit::local_only::StaticExclusion::<
+                            ::testkit::local_only::Outbox,
+                        >::from_governed(&proof),
+                        ::testkit::local_only::StaticExclusion::<
+                            ::testkit::local_only::Publish,
+                        >::from_governed(&proof),
+                    );
+                    let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+                        primitives::RequiredScheme::Jwt,
+                        vocab::PrincipalKind::Admin,
+                        CANON_USER,
+                        Some(tid(CANON_TENANT)),
+                    )));
+                    ::testkit::local_only::assert_local_only(observers, move || async move {
+                        let _response = ::testkit::call(
+                            router,
+                            ContractRequest::get(ROLES_LIST_HTTP_SPEC.route.path()),
+                        )
+                        .await;
+                    })
+                    .await
+                }
+                RouteCase::PoliciesGet(policy_id) => {
+                    let (router, proof) = self::finalized_identity_v1_policies_get_router(
+                        probe.test_repo(),
+                        RecordingAuthAuditSink::default(),
+                    );
+                    let observers = ::testkit::local_only::LocalOnlyObservers::new(
+                        probe.write_effects.handle(),
+                        ::testkit::local_only::StaticExclusion::<
+                            ::testkit::local_only::Outbox,
+                        >::from_governed(&proof),
+                        ::testkit::local_only::StaticExclusion::<
+                            ::testkit::local_only::Publish,
+                        >::from_governed(&proof),
+                    );
+                    let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+                        primitives::RequiredScheme::Jwt,
+                        vocab::PrincipalKind::Admin,
+                        CANON_USER,
+                        Some(tid(CANON_TENANT)),
+                    )));
+                    let path = POLICIES_GET_HTTP_SPEC
+                        .route
+                        .path()
+                        .replace("{policyId}", policy_id);
+                    ::testkit::local_only::assert_local_only(observers, move || async move {
+                        let _response = ::testkit::call(router, ContractRequest::get(path)).await;
+                    })
+                    .await
+                }
+                RouteCase::PoliciesList => {
+                    let (router, proof) = self::finalized_identity_v1_policies_list_router(
+                        probe.test_repo(),
+                        RecordingAuthAuditSink::default(),
+                    );
+                    let observers = ::testkit::local_only::LocalOnlyObservers::new(
+                        probe.write_effects.handle(),
+                        ::testkit::local_only::StaticExclusion::<
+                            ::testkit::local_only::Outbox,
+                        >::from_governed(&proof),
+                        ::testkit::local_only::StaticExclusion::<
+                            ::testkit::local_only::Publish,
+                        >::from_governed(&proof),
+                    );
+                    let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+                        primitives::RequiredScheme::Jwt,
+                        vocab::PrincipalKind::Admin,
+                        CANON_USER,
+                        Some(tid(CANON_TENANT)),
+                    )));
+                    ::testkit::local_only::assert_local_only(observers, move || async move {
+                        let _response = ::testkit::call(
+                            router,
+                            ContractRequest::get(POLICIES_LIST_HTTP_SPEC.route.path()),
+                        )
+                        .await;
+                    })
+                    .await
+                }
+                RouteCase::ResourceAuthorizer => {
+                    let (authorizer, proof) =
+                        self::mounted_identity_resource_authorizer(probe.test_repo());
+                    let observers = ::testkit::local_only::LocalOnlyObservers::new(
+                        probe.write_effects.handle(),
+                        ::testkit::local_only::StaticExclusion::<
+                            ::testkit::local_only::Outbox,
+                        >::from_governed(&proof),
+                        ::testkit::local_only::StaticExclusion::<
+                            ::testkit::local_only::Publish,
+                        >::from_governed(&proof),
+                    );
+                    ::testkit::local_only::assert_local_only(observers, move || async move {
+                        let _decision = authorizer
+                            .authorize(RouteAuthorizationRequest {
+                                contract_id: "other.contract",
+                                permission: vocab::RoutePermissionId::IdentityPolicyRead,
+                                tenant_id: Some(tid(CANON_TENANT)),
+                                principal_kind: vocab::PrincipalKind::Admin,
+                                principal_id: CANON_USER.to_string(),
+                                resource: Some(route_resource()),
+                            })
+                            .await;
+                    })
+                    .await
+                }
+            };
+            let error = result.expect_err("read seam must trip LocalOnly conformance");
+            assert_eq!(
+                error,
+                ::testkit::local_only::LocalOnlyConformanceError::ForbiddenEffects {
+                    writes: 1,
+                    outbox: 0,
+                    publishes: 0,
+                },
+                "{read:?} must expose its forbidden write",
+            );
+            assert_eq!(probe.call_count(read), 1, "{read:?} must be exercised once");
+        }
     }
 
     #[tokio::test]

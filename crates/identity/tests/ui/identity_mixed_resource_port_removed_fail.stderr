@@ -1,0 +1,17 @@
+error[E0432]: unresolved imports `identity::ports::DynResourceAttributeRepo`, `identity::ports::ResourceAttributeRepo`
+ --> tests/ui/identity_mixed_resource_port_removed_fail.rs:1:23
+  |
+1 | use identity::ports::{DynResourceAttributeRepo, ResourceAttributeRepo};
+  |                       ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^ no `ResourceAttributeRepo` in `ports`
+  |                       |
+  |                       no `DynResourceAttributeRepo` in `ports`
+  |
+help: a similar name exists in the module
+  |
+1 | use identity::ports::{DynResourceAttributeReadRepo, ResourceAttributeRepo};
+  |                                             ++++
+help: a similar name exists in the module
+  |
+1 - use identity::ports::{DynResourceAttributeRepo, ResourceAttributeRepo};
+1 + use identity::ports::{DynResourceAttributeRepo, ResourceAttributeKey};
+  |

@@ -22478,13 +22478,15 @@ use identity::ports::{
     AttributeKey, AttributeValue, DynRoleBindingLifecycle, DynRoleReadRepo, IdentityError,
     Operator, POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyId,
     PolicyLifecycle, PolicyObligations, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyRule,
-    PolicyVersion, ResourceAttribute, ResourceAttributeKey, ResourceAttributeRepo,
-    ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion, Role,
-    RoleBinding, RoleBindingLifecycle, RolePage, RoleReadRepo, RoleWriteRepo,
+    PolicyVersion, ResourceAttribute, ResourceAttributeKey, ResourceAttributeReadRepo,
+    ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion,
+    ResourceAttributeWriteRepo, Role, RoleBinding, RoleBindingLifecycle, RoleBindingReadRepo,
+    RolePage, RoleReadRepo, RoleWriteRepo,
 };
 
 use crate::{
-    PgPolicyLifecycle, PgPolicyRepo, PgResourceAttributeRepo, PgRoleBindingLifecycle, PgRoleRepo,
+    PgPolicyLifecycle, PgPolicyRepo, PgResourceAttributeRepo, PgRoleBindingLifecycle,
+    PgRoleBindingReadRepo, PgRoleRepo,
 };
 
 const ROLE_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -24357,6 +24359,23 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(binding_count.0, 1, "assign 写入 binding");
+    let binding_reads = PgRoleBindingReadRepo::new(&store);
+    let subject_bindings = binding_reads
+        .list_for_subject(identity_scope(tenant), "target-user".to_string())
+        .await?;
+    assert_eq!(
+        subject_bindings.len(),
+        1,
+        "窄 read repo 可读取已提交 binding"
+    );
+    assert_eq!(subject_bindings[0].role_id().as_str(), "role-admin");
+    assert!(
+        binding_reads
+            .list_for_subject(identity_scope(tenant_b), "target-user".to_string())
+            .await?
+            .is_empty(),
+        "窄 read repo 保持 tenant isolation"
+    );
     let assigned_events: (i64,) =
         sqlx::query_as("SELECT count(*) FROM outbox WHERE contract_id = $1")
             .bind("identity.role-assigned")

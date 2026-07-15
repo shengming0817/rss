@@ -153,33 +153,4 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
             )
             .await
     }
-
-    async fn list_for_subject(
-        &self,
-        scope: TenantRepoScope,
-        subject: String,
-    ) -> Result<Vec<RoleBinding>, identity::ports::IdentityError> {
-        let tenant = scope.tenant();
-        let rows: Vec<(String, String)> = self
-            .pool
-            .read(scope, move |conn| {
-                Box::pin(async move {
-                    sqlx::query_as(
-                        "SELECT role_id, subject FROM role_bindings \
-                         WHERE tenant_id = $1::uuid AND subject = $2 \
-                         ORDER BY role_id ASC",
-                    )
-                    .bind(tenant.as_uuid().to_string())
-                    .bind(&subject)
-                    .fetch_all(conn)
-                    .await
-                })
-            })
-            .await
-            .map_err(|e| identity::ports::IdentityError::Storage(Box::new(e)))?;
-
-        rows.into_iter()
-            .map(|(role_id, subject)| RoleBinding::hydrate(subject, &role_id, tenant))
-            .collect()
-    }
 }

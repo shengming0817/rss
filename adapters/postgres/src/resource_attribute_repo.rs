@@ -5,9 +5,9 @@ use std::time::SystemTime;
 
 use identity::ports::PolicyRouteScope;
 use identity::ports::{
-    AttributeValue, IdentityError, ResourceAttribute, ResourceAttributeKey, ResourceAttributeRepo,
-    ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion, TenantId,
-    TenantRepoScope,
+    AttributeValue, IdentityError, ResourceAttribute, ResourceAttributeKey,
+    ResourceAttributeReadRepo, ResourceAttributeResolution, ResourceAttributeResourceId,
+    ResourceAttributeVersion, ResourceAttributeWriteRepo, TenantId, TenantRepoScope,
 };
 use sqlx::Row;
 
@@ -85,7 +85,7 @@ fn row_is_effective(raw: &RawResourceAttribute, at_secs: i64) -> bool {
         && raw.effective_until.is_none_or(|until| at_secs < until)
 }
 
-impl ResourceAttributeRepo for PgResourceAttributeRepo {
+impl ResourceAttributeReadRepo for PgResourceAttributeRepo {
     async fn resolve_effective(
         &self,
         tenant_scope: TenantRepoScope,
@@ -161,7 +161,9 @@ impl ResourceAttributeRepo for PgResourceAttributeRepo {
         }
         Ok(ResourceAttributeResolution::Known(attrs))
     }
+}
 
+impl ResourceAttributeWriteRepo for PgResourceAttributeRepo {
     async fn upsert(
         &self,
         tenant_scope: TenantRepoScope,

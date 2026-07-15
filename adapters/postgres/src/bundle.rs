@@ -90,7 +90,8 @@ use crate::{PgAuditAdminRepo, PgAuditRepo, PgAuthAuditSink};
 #[cfg(feature = "domain-identity")]
 use crate::{
     PgCredentialRepo, PgPolicyLifecycle, PgPolicyRepo, PgRefreshTokenStore,
-    PgResourceAttributeRepo, PgRoleBindingLifecycle, PgRoleRepo, PgSessionLifecycle,
+    PgResourceAttributeRepo, PgRoleBindingLifecycle, PgRoleBindingReadRepo, PgRoleRepo,
+    PgSessionLifecycle,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -1006,6 +1007,12 @@ impl PgDomainDeps<caps::Identity> {
         PgResourceAttributeRepo::new(&self.store)
     }
 
+    /// 角色绑定只读仓储（无 clock / mutation / outbox 能力）。
+    #[must_use]
+    pub fn role_binding_read_repo(&self) -> PgRoleBindingReadRepo {
+        PgRoleBindingReadRepo::new(&self.store)
+    }
+
     /// durable ABAC policy lifecycle（policy mutation + policy-updated outbox co-tx）。
     #[must_use]
     pub fn policy_lifecycle(&self, clock: Box<dyn Clock>) -> PgPolicyLifecycle {
@@ -1554,6 +1561,7 @@ mod tests {
         let _ = i.role_repo();
         let _ = i.policy_repo();
         let _ = i.resource_attribute_repo();
+        let _ = i.role_binding_read_repo();
         let _ = i.refresh_token_store();
     }
 

@@ -81,6 +81,14 @@ port 不能因为包含读方法就降级为 `read`；需要用于 LocalOnly 的
 不能为这些 wrapper 伪造、覆盖或扩展分类，`Arc` / `Box` 只透明继承内层分类。分类绑定 port 接口而非
 provider 实现，域形 repo 仍留在所属域，避免 `diport` 反向依赖域 crate。
 
+Identity 的 finalized authorizer 进一步把权限边界固化为窄 port：`RoleBindingReadRepo` 与
+`ResourceAttributeReadRepo` 归类为 `AuthEffect + LocalPrivilege`；binding mutation/outbox 仅由
+`RoleBindingLifecycle` 暴露，resource-attribute mutation 仅由 `ResourceAttributeWriteRepo` 暴露。旧的混合
+resource port 与 lifecycle 上的授权读方法已破坏式删除，不提供 alias、shim 或双路径。`ContractAuthorizer`
+和 `IdentityDomainDeps` 只能接收两个窄读口，`IdentityDomain` 则直接保存 roles/policies 查询口并用于 production
+mount。因此 finalized identity LocalOnly state 无法在 Rust 类型层取得 binding/resource mutation 或 outbox
+capability；该 capability exclusion 为 Hard，provider 内部行为仍由 runtime conformance 观察。
+
 LocalOnly 注入面只允许 `read` 与 `auth`。`auth` 可包含限流、replay 防护等安全门控所必需的内部状态变化；
 业务持久化、撤销写、outbox、直接 publish 与 workflow 不属于该例外。跨租户 read capability 保持准确的
 `ReadEffect`，同时携带 `CrossTenantPrivilege`；LocalOnly 准入必须同时要求 `LocalPrivilege`，不能只检查
@@ -163,8 +171,8 @@ finalizer，并把同一个 router/proof 作为 tuple 返回。三维直属 obse
 的零参 move operation 必须消费这对证书；随后还必须用 `::core::assert_eq!` 断言
 `receipt.contract_id()`。decoy/bait、错 route/path/method/provider、空或 wrong-but-finalized routes、
 cfg/sibling bait、async/closure/spawn、控制流、macro、wrapper/alias 与忽略 Result 的形状均
-fail-closed，并与 active registry exact-set 对账。缺少 receipt 保持 report-only。当前基线为 2/6 registered，
-4 条 missing，详见 `docs/runbooks/202607141556-1771-local-only-proof.md`。
+fail-closed，并与 active registry exact-set 对账。缺少 receipt 保持 report-only。当前基线为 5/6 registered，
+仅 `settings.config-get` missing，详见 `docs/runbooks/202607141556-1771-local-only-proof.md`。
 
 `testkit::local_only::assert_local_only` 在完整 await 一次 HTTP operation 前后，比较调用方必须同时提供的
 `write` / `outbox` / `publish` 三维证据。存在运行时 seam 时，provider 必须持有维度化
@@ -192,6 +200,13 @@ allow/deny 结果断言事件数量与安全字段，禁止用 Noop sink 隐藏�
 - `identity.profile`：经 generated path 与带独立 auth audit sink 的 finalized Primary router 验证默认遮罩、
   显式 projection、未认证及拒绝路径；stateless LocalOnly binding 不提供 side-effect state，三类业务副作用均
   从同一 generated route proof 产生显式 static exclusion，不连接无关的 session capture。
+- `identity.roles-list`、`identity.policies-get`、`identity.policies-list`：三条 route 各自从真实
+  `IdentityDomain` compose 的同一 Primary routes 先铸 classified-state proof，再进入真实 auth finalizer。
+  同一共享 provider 经四个窄 read dyn wrapper 注入 roles、policies、binding reads 与 resource-attribute reads；
+  write observer 使用该 provider 的 typed runtime handle，outbox/publish 因 state 与 authorizer 均已在类型层
+  排除危险 capability 而从 mounted proof 产生 static exclusion。测试覆盖授权成功/拒绝、tenant scope、目标
+  read 失败、get 校验/not-found 与两页分页；三条 synthetic red 分别在真实目标 read 内记录一次 write，必须
+  精确报告 `writes=1, outbox=0, publishes=0`。
 - `audit.list-entries`：经 finalized Admin router 验证 ambient tenant scoped 成功读取、授权拒绝、认证 tenant 与
   ambient tenant 不匹配、非法 `tenantId` query，以及 repo 完整性合成失败；所有路径不写、不追加 outbox、
   不直接 publish，且 scoped route 不调用 admin repo / domain cross-tenant audit sink。finalized 生命周期产生的
@@ -203,6 +218,8 @@ allow/deny 结果断言事件数量与安全字段，禁止用 Noop sink 隐藏�
 
 独立的 `audit.list-tenant-entries` 是 LocalTx 跨租户 audited read，按设计先写 durable audit，不属于本
 LocalOnly conformance suite。
+
+ref: casbin/casbin-rs src/management_api.rs@fc425d4a2522ab1ee97e3bd8fada8b3ef45dc1a9
 
 ## Audit route split
 

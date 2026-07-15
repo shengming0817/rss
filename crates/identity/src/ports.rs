@@ -259,15 +259,15 @@ pub struct PolicyListResult {
     pub has_more: bool,
 }
 
-/// Tenant-scoped resource attribute store / resolver for route ABAC.
+/// Tenant-scoped resource attribute resolver used by route ABAC.
 ///
-/// This is the only durable PIP port used by `ContractAuthorizer`. Resolution failures are
-/// explicit (`Missing` / `Stale`) so callers cannot accidentally treat an unavailable attribute as
-/// an empty attribute bag and fall back to baseline RBAC.
-#[trait_variant::make(ResourceAttributeRepo: Send)]
-#[dynosaur(pub DynResourceAttributeRepo = dyn(box) ResourceAttributeRepo, bridge(dyn))]
+/// The read port is deliberately separate from [`ResourceAttributeWriteRepo`], so a finalized
+/// LocalOnly authorizer cannot retain resource-attribute mutation capability. Resolution failures
+/// are explicit (`Missing` / `Stale`) and always fail closed.
+#[trait_variant::make(ResourceAttributeReadRepo: Send)]
+#[dynosaur(pub DynResourceAttributeReadRepo = dyn(box) ResourceAttributeReadRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
-pub trait ResourceAttributeRepoLocal: Send + Sync {
+pub trait ResourceAttributeReadRepoLocal: Send + Sync {
     async fn resolve_effective(
         &self,
         tenant_scope: TenantRepoScope,
@@ -276,7 +276,13 @@ pub trait ResourceAttributeRepoLocal: Send + Sync {
         required_keys: Vec<ResourceAttributeKey>,
         at: SystemTime,
     ) -> Result<ResourceAttributeResolution, IdentityError>;
+}
 
+/// Tenant-scoped resource attribute mutation port.
+#[trait_variant::make(ResourceAttributeWriteRepo: Send)]
+#[dynosaur(pub DynResourceAttributeWriteRepo = dyn(box) ResourceAttributeWriteRepo, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+pub trait ResourceAttributeWriteRepoLocal: Send + Sync {
     async fn upsert(
         &self,
         scope: TenantRepoScope,
@@ -386,6 +392,19 @@ pub struct RoleListResult {
     pub has_more: bool,
 }
 
+/// 授权侧角色绑定只读 DI port。与 [`RoleBindingLifecycle`] 破坏式分离，确保 finalized LocalOnly
+/// authorizer 在类型层不具备 binding mutation/outbox 能力。
+#[trait_variant::make(RoleBindingReadRepo: Send)]
+#[dynosaur(pub DynRoleBindingReadRepo = dyn(box) RoleBindingReadRepo, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+pub trait RoleBindingReadRepoLocal: Send + Sync {
+    async fn list_for_subject(
+        &self,
+        scope: TenantRepoScope,
+        subject: String,
+    ) -> Result<Vec<RoleBinding>, IdentityError>;
+}
+
 /// 角色绑定生命周期 DI port（域形；provider 可换：prod postgres / test in-mem）——RBAC 角色分配 / 撤销的
 /// **L2 OutboxFact co-tx** 写口（#1190 US5）。
 ///
@@ -444,14 +463,6 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
         entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<bool, OutboxEmitError>;
-
-    /// **授权读（L1）**：按 `(tenant, subject)` 列出该主体的 role bindings。仅供 contract-derived
-    /// authorizer 求值；不存在返回空集，跨租经 tenant scope 天然不可见。失败由调用方 fail-closed 映射 403。
-    async fn list_for_subject(
-        &self,
-        scope: TenantRepoScope,
-        subject: String,
-    ) -> Result<Vec<RoleBinding>, IdentityError>;
 }
 
 /// 凭据仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
@@ -709,6 +720,86 @@ pub trait RefreshTokenStoreLocal: Send + Sync {
     ) -> Result<(), IdentityError>;
 }
 
+impl<T> PolicyRepo for std::sync::Arc<T>
+where
+    T: PolicyRepo + ?Sized,
+{
+    async fn find(
+        &self,
+        scope: TenantRepoScope,
+        id: PolicyId,
+    ) -> Result<Option<Policy>, IdentityError> {
+        T::find(self, scope, id).await
+    }
+
+    async fn list_active(
+        &self,
+        scope: TenantRepoScope,
+        page: PolicyPage,
+    ) -> Result<PolicyListResult, IdentityError> {
+        T::list_active(self, scope, page).await
+    }
+
+    async fn list_effective(
+        &self,
+        tenant_scope: TenantRepoScope,
+        scope: PolicyRouteScope,
+        at: SystemTime,
+    ) -> Result<Vec<Policy>, IdentityError> {
+        T::list_effective(self, tenant_scope, scope, at).await
+    }
+}
+
+impl<T> ResourceAttributeReadRepo for std::sync::Arc<T>
+where
+    T: ResourceAttributeReadRepo + ?Sized,
+{
+    async fn resolve_effective(
+        &self,
+        tenant_scope: TenantRepoScope,
+        scope: PolicyRouteScope,
+        resource_id: ResourceAttributeResourceId,
+        required_keys: Vec<ResourceAttributeKey>,
+        at: SystemTime,
+    ) -> Result<ResourceAttributeResolution, IdentityError> {
+        T::resolve_effective(self, tenant_scope, scope, resource_id, required_keys, at).await
+    }
+}
+
+impl<T> RoleReadRepo for std::sync::Arc<T>
+where
+    T: RoleReadRepo + ?Sized,
+{
+    async fn find(
+        &self,
+        scope: TenantRepoScope,
+        id: RoleId,
+    ) -> Result<Option<Role>, IdentityError> {
+        T::find(self, scope, id).await
+    }
+
+    async fn list(
+        &self,
+        scope: TenantRepoScope,
+        page: RolePage,
+    ) -> Result<RoleListResult, IdentityError> {
+        T::list(self, scope, page).await
+    }
+}
+
+impl<T> RoleBindingReadRepo for std::sync::Arc<T>
+where
+    T: RoleBindingReadRepo + ?Sized,
+{
+    async fn list_for_subject(
+        &self,
+        scope: TenantRepoScope,
+        subject: String,
+    ) -> Result<Vec<RoleBinding>, IdentityError> {
+        T::list_for_subject(self, scope, subject).await
+    }
+}
+
 mod identity_port_effect_sealed {
     pub trait Sealed {}
 }
@@ -750,7 +841,9 @@ macro_rules! classify_identity_ports {
 
 classify_identity_ports! {
     DynPolicyRepo => diport::AuthEffect,
-    DynResourceAttributeRepo => diport::WriteEffect,
+    DynResourceAttributeReadRepo => diport::AuthEffect,
+    DynResourceAttributeWriteRepo => diport::WriteEffect,
+    DynRoleBindingReadRepo => diport::AuthEffect,
     DynRoleReadRepo => diport::ReadEffect,
     DynRoleWriteRepo => diport::WriteEffect,
     DynCredentialRepo => diport::WriteEffect,

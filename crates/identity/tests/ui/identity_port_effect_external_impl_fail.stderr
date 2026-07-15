@@ -17,8 +17,8 @@ help: the trait `ports::identity_port_effect_sealed::Sealed` is not implemented 
             DynPolicyLifecycle<'a>
             DynPolicyRepo<'a>
             DynRefreshTokenStore<'a>
-            DynResourceAttributeRepo<'a>
-            DynRoleBindingLifecycle<'a>
+            DynResourceAttributeReadRepo<'a>
+            DynResourceAttributeWriteRepo<'a>
           and $N others
 note: required by a bound in `IdentityPortEffect`
  --> src/ports.rs
@@ -28,11 +28,11 @@ note: required by a bound in `IdentityPortEffect`
   = note: `IdentityPortEffect` is a "sealed trait", because to implement it you also need to implement `identity::ports::identity_port_effect_sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
   = help: the following types implement the trait:
             identity::ports::DynPolicyRepo<'a>
-            identity::ports::DynResourceAttributeRepo<'a>
+            identity::ports::DynResourceAttributeReadRepo<'a>
+            identity::ports::DynResourceAttributeWriteRepo<'a>
+            identity::ports::DynRoleBindingReadRepo<'a>
             identity::ports::DynRoleReadRepo<'a>
             identity::ports::DynRoleWriteRepo<'a>
             identity::ports::DynCredentialRepo<'a>
             identity::ports::DynRefreshTokenStore<'a>
-            identity::ports::DynPolicyLifecycle<'a>
-            identity::ports::DynRoleBindingLifecycle<'a>
           and $N others

@@ -155,9 +155,10 @@ impl Role {
 /// Debug 经 `secure::Redact` 字段级脱敏：subject 可能是 email / username 等 PII，不得原文打印到日志；
 /// role_id 和 tenant 非敏感，正常打印。
 ///
-/// 可见性（ADR-005 域形 port 签名实体）：`pub`（经 `ports` façade 暴露，供 `RoleBindingLifecycle` co-tx
-/// port 签名引用 + 独立 adapter crate 跨 crate impl 读字段）；字段私有 + 构造器 `new` 保持 `pub(crate)` funnel
-/// ——外部可命名 / 收发 / 读访问器，但**不可伪造**（fail-closed，#1190 RbacAdminService 落 binding）。
+/// 可见性（ADR-005 域形 port 签名实体）：`pub`（经 `ports` façade 暴露，供 `RoleBindingReadRepo`
+/// 返回只读授权结果、`RoleBindingLifecycle` 仅接收 mutation 输入，以及独立 adapter crate 跨 crate 读取
+/// 字段）；字段私有 + 构造器 `new` 保持 `pub(crate)` funnel——外部可命名 / 收发 / 读访问器，但**不可伪造**
+/// （fail-closed，#1190 RbacAdminService 落 binding）。
 #[derive(secure::Redact)]
 pub struct RoleBinding {
     #[redact(sensitivity = pii)]
@@ -183,7 +184,8 @@ impl RoleBinding {
         }
     }
 
-    /// 跨 crate 受控重建 funnel（postgres `PgRoleBindingLifecycle` 读 binding 给授权器）。
+    /// 跨 crate 受控重建 funnel（postgres `PgRoleBindingReadRepo` 读 binding 给授权器；
+    /// `PgRoleBindingLifecycle` 仅承担 mutation）。
     ///
     /// `role_id` 经 [`RoleId::parse`] 白名单复核；持久化损坏值归 [`IdentityError::Storage`]，授权调用方
     /// fail-closed。`subject` 允许 opaque 非 UUID（可能是外部 IdP subject），但空 subject 无授权意义，
