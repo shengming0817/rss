@@ -17,6 +17,7 @@ fn tx_capability_ui() {
     t.compile_fail("tests/ui/pg_maintenance_infra_absent_fail.rs");
     t.compile_fail("tests/ui/pg_projection_replay_fields_private_fail.rs");
     t.compile_fail("tests/ui/pg_projection_replay_capability_required_fail.rs");
+    #[cfg(feature = "domain-audit")]
     t.compile_fail("tests/ui/audit_consumer_read_erasure_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_owner_clone_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_owner_consume_twice_fail.rs");

@@ -782,31 +782,39 @@ pub enum MaintenanceAuditOutcome<'a> {
 /// clone，返回具体 repo 类型，从不返回 `PgPool`）。`D` 是 sealed marker（[`caps`]），跨域调用编译期被拒：
 ///
 /// `PgDomainDeps<caps::Settings>` 调 identity 能力 = 编译错误（PG-BUNDLE-DOMAIN-02 anti-vacuity）：
-///
-/// ```compile_fail
-/// use postgres::{PgDomainDeps, caps};
-/// fn bad(d: PgDomainDeps<caps::Settings>) {
-///     // E0599：`session_lifecycle` 不在 `PgDomainDeps<caps::Settings>` 上（仅 identity 句柄有）。
-///     let _ = d.session_lifecycle(unimplemented!());
-/// }
-/// ```
+#[cfg_attr(
+    all(feature = "domain-settings", feature = "domain-identity"),
+    doc = r#"
+```compile_fail
+use postgres::{PgDomainDeps, caps};
+fn bad(d: PgDomainDeps<caps::Settings>) {
+    // E0599：`session_lifecycle` 不在 `PgDomainDeps<caps::Settings>` 上（仅 identity 句柄有）。
+    let _ = d.session_lifecycle(unimplemented!());
+}
+```
+"#
+)]
 ///
 /// 同句柄的本域方法可用（正向）：
-///
-/// ```
-/// use postgres::{PgDomainDeps, caps};
-/// fn settings_ok(
-///     d: PgDomainDeps<caps::Settings>,
-///     clock: std::sync::Arc<dyn diport::Clock>,
-///     protections: postgres::ConfigValueProtections,
-/// ) {
-///     // Arc：单一 clock 经 settings_bundle 扇出到 read/write 两个 config 实例（见 settings_bundle）。
-///     let _ = d.settings_bundle(clock, protections);
-/// }
-/// fn identity_ok(d: PgDomainDeps<caps::Identity>, clock: Box<dyn diport::Clock>) {
-///     let _ = d.session_lifecycle(clock);
-/// }
-/// ```
+#[cfg_attr(
+    all(feature = "domain-settings", feature = "domain-identity"),
+    doc = r#"
+```
+use postgres::{PgDomainDeps, caps};
+fn settings_ok(
+    d: PgDomainDeps<caps::Settings>,
+    clock: std::sync::Arc<dyn diport::Clock>,
+    protections: postgres::ConfigValueProtections,
+) {
+    // Arc：单一 clock 经 settings_bundle 扇出到 read/write 两个 config 实例（见 settings_bundle）。
+    let _ = d.settings_bundle(clock, protections);
+}
+fn identity_ok(d: PgDomainDeps<caps::Identity>, clock: Box<dyn diport::Clock>) {
+    let _ = d.session_lifecycle(clock);
+}
+```
+"#
+)]
 pub struct PgDomainDeps<D: PgDomain> {
     store: Arc<PgStore>,
     audit_admin_store: Option<Arc<PgStore>>,

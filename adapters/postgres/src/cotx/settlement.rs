@@ -10,7 +10,12 @@
 //! INVARIANT: PG-LOCALTX-SETTLEMENT-01 { level = "Hard", exec = "native-compile", source = "code", native = "opaque sum type; pub(super) mint under cotx; run_pg_tx_retry consumes LocalTxAttempt only" }
 
 use consistency::LocalTxFinalStatus;
-#[cfg(any(test, feature = "domain-settings", feature = "domain-identity"))]
+#[cfg(any(
+    test,
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
 use consistency::TxRetryClass;
 
 /// One complete Postgres LocalTx attempt and its settlement evidence.
