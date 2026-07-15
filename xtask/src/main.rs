@@ -26,6 +26,8 @@
 //!   `cargo xtask consistency report --format json|md`
 //!                                      active HTTP consistency/effect posture 确定性报告（只读）
 //!   `cargo xtask localtx-coverage`       active LocalTx manifest/generated/route/test closure 门（CI 门）
+//!   `cargo xtask localtx report --format json|markdown`
+//!                                      active LocalTx static proof inventory（只读）
 //!   `cargo xtask runtime-baseline list|verify`
 //!                                      runtime assembly baseline 清单 / 漂移门（#1656，CI 门）
 //!   `cargo xtask runtime-deps guard`    SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）
@@ -95,6 +97,7 @@ mod integration_shards;
 mod layerdeps;
 mod layers;
 mod localtx_coverage;
+mod localtx_report;
 mod migrations;
 mod outbox_same_id_guard;
 mod pathsafe;
@@ -161,6 +164,9 @@ enum Command {
         format: ReportFormat,
     },
     LocalTxCoverage,
+    LocalTxReport {
+        format: ReportFormat,
+    },
     Verify {
         fast: bool,
         allow_missing_tools: bool,
@@ -246,6 +252,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["outbox-same-id-guard"] => Ok(Command::OutboxSameIdGuard),
         ["consistency-fixtures"] => Ok(Command::ConsistencyFixtures),
         ["consistency", rest @ ..] => parse_consistency(rest),
+        ["localtx", rest @ ..] => parse_localtx(rest),
         ["localtx-coverage"] => Ok(Command::LocalTxCoverage),
         ["verify", rest @ ..] => parse_verify(rest),
         ["public-api", rest @ ..] => parse_public_api(rest),
@@ -270,7 +277,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法含 graph assembly | localtx-coverage | ci <local|full|plan|run|gate> | nextest-evidence <stage|inspect|replay>；收到 {other:?}"
+                "未知命令: {other:?}；用法含 graph assembly | localtx-coverage | localtx report --format <json|markdown> | ci <local|full|plan|run|gate> | nextest-evidence <stage|inspect|replay>；收到 {other:?}"
             )
         }
     }
@@ -353,6 +360,21 @@ fn parse_consistency(args: &[&str]) -> Result<Command> {
         }),
         other => bail!(
             "未知 consistency 子命令: {other:?}；用法: cargo xtask consistency local-only-effects | cargo xtask consistency report --format <json|md>"
+        ),
+    }
+}
+
+/// 解析 `localtx <sub>`（fail-closed：无 alias、默认值、输出路径或尾参）。
+fn parse_localtx(args: &[&str]) -> Result<Command> {
+    match args {
+        ["report", "--format", "json"] => Ok(Command::LocalTxReport {
+            format: ReportFormat::Json,
+        }),
+        ["report", "--format", "markdown"] => Ok(Command::LocalTxReport {
+            format: ReportFormat::Markdown,
+        }),
+        other => bail!(
+            "未知 localtx 子命令: {other:?}；用法: cargo xtask localtx report --format <json|markdown>"
         ),
     }
 }
@@ -595,6 +617,7 @@ fn dispatch(args: &[String]) -> Result<()> {
             diagnostic::run_check(&consistency_effects::LocalOnlyEffects)
         }
         Command::ConsistencyReport { format } => consistency_effects::run_report(format),
+        Command::LocalTxReport { format } => localtx_report::run_report(format),
         Command::LocalTxCoverage => diagnostic::run_check(&localtx_coverage::LocalTxCoverage),
         Command::Verify {
             fast,
@@ -719,6 +742,38 @@ mod tests {
         );
         assert!(parse_command(&s(&["localtx-coverage", "--check"])).is_err());
         assert!(parse_command(&s(&["localtx_coverage"])).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_localtx_report_requires_exact_format() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["localtx", "report", "--format", "json"]))?,
+            Command::LocalTxReport {
+                format: ReportFormat::Json,
+            }
+        );
+        assert_eq!(
+            parse_command(&s(&["localtx", "report", "--format", "markdown"]))?,
+            Command::LocalTxReport {
+                format: ReportFormat::Markdown,
+            }
+        );
+        for bad in [
+            s(&["localtx", "report"]),
+            s(&["localtx", "report", "--format"]),
+            s(&["localtx", "report", "--format", "md"]),
+            s(&["localtx", "report", "--format", "json", "extra"]),
+            s(&[
+                "localtx", "report", "--format", "json", "--format", "markdown",
+            ]),
+            s(&["localtx", "report", "--output", "report.json"]),
+        ] {
+            assert!(
+                parse_command(&bad).is_err(),
+                "unexpectedly accepted {bad:?}"
+            );
+        }
         Ok(())
     }
 

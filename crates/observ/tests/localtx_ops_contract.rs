@@ -1,51 +1,78 @@
+use observ::{LocalTxMetricPurpose, localtx_operations_descriptor};
+
 const ALERT_RULES: &str = include_str!("../../../docs/ops/localtx-alerts.rules.yaml");
 const DASHBOARD: &str =
     include_str!("../../../docs/ops/202607082104-1642-consistency-dashboard-checklist.md");
 const RUNBOOK: &str =
     include_str!("../../../docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md");
-
-const DASHBOARD_QUERIES: [(&str, &str); 4] = [
-    (
-        "localtx_retry_attempts_total",
-        "sum by (domain, contract_id, boundary, retry_class) (rate(localtx_retry_attempts_total[5m]))",
-    ),
-    (
-        "localtx_final_total",
-        "sum by (domain, contract_id, boundary, final_status) (rate(localtx_final_total[5m]))",
-    ),
-    (
-        "localtx_attempts",
-        "sum by (domain, contract_id, boundary, final_status, le) (rate(localtx_attempts_bucket[5m]))",
-    ),
-    (
-        "tx_settlement_final_total",
-        "sum by (boundary, final_status) (rate(tx_settlement_final_total[5m]))",
-    ),
-];
+const LOCALTX_RULES: &str = include_str!("../../../docs/rules/localtx.md");
+const PROOF_REPORT: &str = include_str!("../../../docs/ops/localtx-proof-report.md");
+const ADOPTION_TEMPLATE: &str =
+    include_str!("../../../.specify/templates/overrides/localtx-tasks-template.md");
 
 #[test]
 fn dashboard_consumes_every_transaction_settlement_metric_with_closed_labels() {
-    for (metric, query) in DASHBOARD_QUERIES {
+    let operations = localtx_operations_descriptor();
+    assert!(operations.is_consistent());
+    assert_eq!(
+        operations.metrics().len(),
+        3,
+        "real descriptor anti-vacuity"
+    );
+    for metric in operations.metrics() {
+        let query = match metric.purpose() {
+            LocalTxMetricPurpose::RetryPressureDiagnostic => format!(
+                "sum by (domain, contract_id, boundary, retry_class) (rate({}[5m]))",
+                metric.name()
+            ),
+            LocalTxMetricPurpose::SettlementFinalStatus => format!(
+                "sum by (domain, contract_id, boundary, final_status) (rate({}[5m]))",
+                metric.name()
+            ),
+            LocalTxMetricPurpose::SettledAttemptCount => format!(
+                "sum by (domain, contract_id, boundary, final_status, le) (rate({}_bucket[5m]))",
+                metric.name()
+            ),
+        };
         assert!(
-            DASHBOARD.contains(query),
-            "dashboard omits exact query/labels for {metric}"
+            DASHBOARD.contains(&query),
+            "dashboard omits exact query/labels for {}",
+            metric.name()
         );
     }
+    assert!(
+        DASHBOARD.contains("sum by (boundary, final_status) (rate(tx_settlement_final_total[5m]))")
+    );
 }
 
 #[test]
 fn alert_rules_page_only_on_actionable_unsafe_settlements() {
-    for (alert, status) in [
-        ("LocalTxCommitUnknown", "commit_unknown"),
-        ("LocalTxRollbackFailed", "rollback_failed"),
-    ] {
+    let operations = localtx_operations_descriptor();
+    assert_eq!(operations.alerts().len(), 2, "real descriptor anti-vacuity");
+    for alert in operations.alerts() {
         let expression = format!(
-            "sum by (domain, contract_id, boundary) (increase(localtx_final_total{{final_status=\"{status}\"}}[5m])) > 0"
+            "sum by (domain, contract_id, boundary) (increase({}{{final_status=\"{}\"}}[5m])) > 0",
+            alert.metric().name(),
+            alert.final_status().as_label()
         );
-        assert!(ALERT_RULES.contains(alert), "rules omit {alert}");
+        assert!(
+            ALERT_RULES.contains(alert.name()),
+            "rules omit {}",
+            alert.name()
+        );
         assert!(
             ALERT_RULES.contains(&expression),
-            "{alert} does not preserve the closed metric/label contract"
+            "{} does not preserve the closed metric/label contract",
+            alert.name()
+        );
+        assert!(
+            ALERT_RULES.contains(&format!(
+                "{}#{}",
+                operations.runbook_path(),
+                alert.runbook_anchor()
+            )),
+            "{} does not preserve its runbook anchor",
+            alert.name()
         );
     }
     for (alert, status) in [
@@ -100,4 +127,146 @@ fn generic_unsafe_warn_uses_the_metric_routing_scope_without_localtx_duplication
             "runbook does not lock the generic metric/WARN routing contract: {token}"
         );
     }
+}
+
+#[test]
+fn proof_report_consumers_observe_status_and_static_evidence_boundaries() {
+    for token in [
+        "cargo xtask localtx report --format json",
+        "cargo xtask localtx report --format markdown",
+        "`evidenceScope = \"staticInventory\"`",
+        "`status = \"failed\"`",
+        "exit code 0",
+        "exit code non-zero",
+        "stdout is empty",
+        "byte-for-byte",
+        "同一 static inventory",
+        "atomic",
+        "malformed TOML/Rust",
+        "registry/journey",
+        "symlink/root escape",
+        "render failure",
+        "截断文件",
+        "does not run `promtool`",
+        "does not run a real backend",
+        "#1776",
+        "does not replace",
+        "JSON schema v1",
+        "unknown field",
+        "严格升序",
+        "synthetic fixture",
+        "不是当前 workspace 的 live proof",
+        "operations.validation = \"referenceOnly\"",
+        "operations.includedInReportStatus = false",
+        "CI job/artifact 状态都不参与",
+        "`ci-plan` job",
+        "localtx-proof-${run_id}-${run_attempt}",
+        "localtx-proof.json",
+        "localtx-proof.md",
+        "retention 为 30 days",
+        "proof artifact 不会发布",
+        "Azure carrier 不属于 #1777",
+        "时间戳",
+        "Git SHA",
+        "主机名",
+        "绝对路径",
+        "tenant/device 实例",
+        "secret",
+        "payload",
+        "SQL",
+        "运行时结果",
+    ] {
+        assert!(
+            PROOF_REPORT.contains(token),
+            "proof-report consumer contract omits {token}"
+        );
+    }
+
+    for unsupported in [
+        "没有默认格式",
+        "`md` alias",
+        "`--output`",
+        "live proof snapshot",
+    ] {
+        assert!(
+            PROOF_REPORT.contains(unsupported),
+            "proof-report compatibility/snapshot boundary omits {unsupported}"
+        );
+    }
+    assert!(
+        !PROOF_REPORT.contains("promtoolValidation"),
+        "proof report must not publish a synthetic promtool status field"
+    );
+}
+
+#[test]
+fn proof_report_operations_are_anchored_to_existing_operator_carriers() {
+    let operations = localtx_operations_descriptor();
+    for token in operations
+        .metrics()
+        .iter()
+        .map(|metric| metric.name())
+        .chain(operations.alerts().iter().map(|alert| alert.name()))
+        .chain([
+            operations.rules_path(),
+            operations.runbook_path(),
+            "diagnostic-only",
+            "referenceOnly",
+            "includedInReportStatus = false",
+        ])
+    {
+        assert!(
+            PROOF_REPORT.contains(token),
+            "proof report operations contract omits {token}"
+        );
+    }
+    for token in [
+        "localtx-proof-report.md",
+        "cargo xtask localtx report --format json",
+        "parse `status`",
+        "report `status` excludes",
+    ] {
+        assert!(
+            RUNBOOK.contains(token),
+            "runbook does not consume the proof-report contract: {token}"
+        );
+    }
+    for token in operations
+        .metrics()
+        .iter()
+        .map(|metric| metric.name())
+        .chain([operations.rules_path(), operations.runbook_path()])
+    {
+        assert!(
+            ADOPTION_TEMPLATE.contains(token),
+            "adoption template operations entry drifted from the typed descriptor: {token}"
+        );
+    }
+}
+
+#[test]
+fn localtx_adoption_template_is_rated_as_a_planning_entry_not_enforcement() {
+    for token in [
+        "contract evidence",
+        "generated check",
+        "typed route marker",
+        "backend profile/probes",
+        "active journey",
+        "metrics/alerts",
+        "runbook/report consumption",
+        "Hard",
+        "Medium",
+        "planning entry",
+        "not an enforcement carrier",
+    ] {
+        assert!(
+            LOCALTX_RULES.contains(token),
+            "LocalTx adoption governance omits {token}"
+        );
+    }
+    assert!(
+        LOCALTX_RULES.contains("localtx-proof-report.md")
+            && LOCALTX_RULES.contains("cargo xtask localtx report --format markdown"),
+        "LocalTx rules do not link the canonical report consumer guidance"
+    );
 }

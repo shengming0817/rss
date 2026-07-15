@@ -50,6 +50,15 @@ jobs:
             --output target/ci-impact/ci-plan.json \
             --github-output "$GITHUB_OUTPUT"
 
+      - name: Generate LocalTx proof report
+        run: |
+          set -euo pipefail
+          rm -rf target/localtx-proof target/localtx-proof.tmp
+          mkdir -p target/localtx-proof.tmp
+          cargo run --locked -p xtask -- localtx report --format json > target/localtx-proof.tmp/localtx-proof.json
+          cargo run --locked -p xtask -- localtx report --format markdown > target/localtx-proof.tmp/localtx-proof.md
+          mv target/localtx-proof.tmp target/localtx-proof
+
       - name: Upload typed plan
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -57,6 +66,15 @@ jobs:
           name: ci-impact-plan-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/ci-impact/ci-plan.json
           if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload LocalTx proof report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: localtx-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/localtx-proof
+          if-no-files-found: error
           retention-days: 30
 
   execute:

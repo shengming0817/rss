@@ -28,6 +28,8 @@ const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/ops/202607082104-1642-consistency-dashboard-checklist.md",
     "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
     "docs/runbooks/202607081921-1633-cdc-outbox.md",
+    "docs/ops/localtx-proof-report.md",
+    "docs/rules/localtx.md",
 ];
 const POLICY_BEHAVIOR_SPEC: &str = include_str!("../tests/golden/ci-impact-policy.json");
 const HIGH_IMPACT_PATHS: &[&str] = &[
@@ -3238,12 +3240,11 @@ mod tests {
 
     #[test]
     fn machine_consumed_documents_cannot_take_the_docs_only_fast_path_red() {
-        for path in [
-            "docs/ops/localtx-alerts.rules.yaml",
-            "docs/ops/202607082104-1642-consistency-dashboard-checklist.md",
-            "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
-            "docs/runbooks/202607081921-1633-cdc-outbox.md",
-        ] {
+        assert!(
+            !MACHINE_INPUT_PATHS.is_empty(),
+            "machine-input anti-vacuity"
+        );
+        for path in MACHINE_INPUT_PATHS {
             assert!(
                 matches!(
                     classify_diff(&[DiffEntry::modified(path)]),
@@ -3272,18 +3273,14 @@ mod tests {
             &golden
         ));
 
-        let mut missing = configured.clone();
-        let first = missing
-            .iter()
-            .next()
-            .cloned()
-            .context("empty machine mapping")?;
-        missing.remove(&first);
-        assert!(!machine_input_mapping_is_exact(
-            &discovered,
-            &missing,
-            &golden
-        ));
+        for path in &configured {
+            let mut missing = configured.clone();
+            assert!(missing.remove(path));
+            assert!(
+                !machine_input_mapping_is_exact(&discovered, &missing, &golden),
+                "removing machine-consumed input `{path}` must fail closed"
+            );
+        }
 
         let mut extra = configured;
         extra.insert("docs/runbooks/not-machine-consumed.md".to_owned());

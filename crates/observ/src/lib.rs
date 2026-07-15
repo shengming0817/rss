@@ -15,7 +15,10 @@
 
 mod localtx;
 
-pub use localtx::LocalTxObservation;
+pub use localtx::{
+    LocalTxActionableAlert, LocalTxMetric, LocalTxMetricPurpose, LocalTxObservation,
+    LocalTxOperationsDescriptor, LocalTxRetryPressureClassification, localtx_operations_descriptor,
+};
 
 // ─── metrics label 闭值集 ───────────────────────────────────────────────────
 

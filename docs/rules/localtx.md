@@ -296,6 +296,34 @@ scenario 的 fixture case 可省略 `commits`，其它 case 必须提供精确 a
 
 ## Failure and adoption semantics
 
+LocalTx adoption 的 planning entry 是
+`.specify/templates/overrides/localtx-tasks-template.md`。它必须恰好列出以下七项 canonical checklist，不允许缺失、
+重复、未知项或 command/path 漂移：
+
+1. contract evidence
+2. generated check
+3. typed route marker
+4. backend profile/probes
+5. active journey
+6. metrics/alerts
+7. runbook/report consumption
+
+manifest 的闭值、codegen registry 与 typed route marker 是 Hard carrier；manifest/source/test、backend/journey、
+template 和 operations 的跨文件闭合由 `localtx-coverage` 与 observ contract test 作为 Medium carrier 阻断。模板
+本身只是 planning entry，not an enforcement carrier，不能把勾选状态当作实现证据，也不修改 Spec Kit resolver、
+skills 或 hooks。七项结果仍必须分别落在对应的 typed/compiled/static gate carrier 中。
+
+静态 proof report 的 canonical 入口是：
+
+```bash
+cargo xtask localtx report --format json
+cargo xtask localtx report --format markdown
+```
+
+生成、policy/structural failure 区分、原子发布和真实 backend 边界见
+[`docs/ops/localtx-proof-report.md`](../ops/localtx-proof-report.md)。报告与 `localtx-coverage` 共享 typed static
+inventory，但 report 不是新的 enforcement carrier，也不替代 required real-backend evidence。
+
 新建或修改 LocalTx contract 时，先选择与实现一致的 `txModel` 并补齐全部闭值 evidence，再生成 registry、绑定
 唯一 owner/production route、为真实域路径补 conformance，并在需要 Postgres 事务语义时注册一对一的 typed
 backend profile/provider probes。每条 active LocalTx HTTP contract 都必须进入 active journey；metrics/traces 必须

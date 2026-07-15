@@ -12,6 +12,7 @@ assembly-schema = { path = "../crates/assembly-schema" }
 # （Layer::Root），依赖 Engine 层 consistency 合法（layers::allows(Root, Engine)）。
 consistency = { path = "../crates/consistency" }
 generated = { path = "../generated" }
+observ = { path = "../crates/observ" }
 vocab = { path = "../crates/vocab" }
 anyhow = { workspace = true }
 serde = { workspace = true }

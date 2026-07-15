@@ -40,6 +40,7 @@
 //!   restore/key/evidence/save 顺序由结构谓词、synthetic red 与 committed-file gate fail-closed 承载。
 //! INVARIANT: CI-TOOL-ADAPTER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "ci_tool_adapter_contract_green_and_synthetic_red", anti_vacuity = "github_ci_tool_adapter_contract_is_closed" }—— lane 工具集只能由机器 catalog 经 adapter 派生；workflow/action 不得复制清单或接收任意工具 input，installer immutable SHA 必须同时绑定 uses 与 cache identity，adapter 与 catalog 内容必须绑定 cache key 与 seal，fresh/cache verify 必须先于 PATH 暴露和 cache save，tool-cache epoch 必须为 v4。
 //! INVARIANT: CI-TEST-PARTITION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— Core 与 integration partition topology 必须只由 typed planner 的动态 matrix 派生。
+//! INVARIANT: LOCALTX-PROOF-CI-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— same-head planner job 必须原子生成并上传 JSON/Markdown LocalTx proof artifact。
 //! INVARIANT: CI-TEST-EVIDENCE-UPLOAD-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_guard_rejects_semantic_weakening", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— evidence 必须 always 上传、唯一命名、精确路径且只保留七天。
 //! INVARIANT: CI-SLO-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_slo_contract_rejects_semantic_weakening", anti_vacuity = "reusable_rust_lane_slo_contract_accepts_committed_workflow" }—— SLO 证据必须先 stage 再 always 上传，最后 always 评估并写入 Job Summary；四个 live disk guard 必须从固定 SLO config 读取阈值并 fail-closed。
 //! INVARIANT: CI-INTEGRATION-SERVICE-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_service_lifecycle_predicate_green_and_synthetic_red", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— Integration lane 必须在 xtask 前建立 exact scope，在失败后有界取证并 always 精确清理；生命周期证据始终归档，服务日志仅失败时归档，且 workflow 禁止任何全局 Docker prune。
@@ -3201,7 +3202,9 @@ mod tests {
             != [
                 Some("Checkout execution revision"),
                 Some("Build typed CI impact plan"),
+                Some("Generate LocalTx proof report"),
                 Some("Upload typed plan"),
+                Some("Upload LocalTx proof report"),
                 Some("Checkout scheduled audit revision"),
                 Some("Setup scheduled audit tools"),
                 Some("Run scheduled audit fallback"),
@@ -3216,12 +3219,14 @@ mod tests {
         }
         let plan_checkout = &steps[0];
         let planner = &steps[1];
-        let plan_upload = &steps[2];
-        let gate_checkout = &steps[6];
-        let plan_download = &steps[7];
-        let receipt_download = &steps[8];
-        let gate = &steps[9];
-        let metrics_upload = &steps[10];
+        let proof_generator = &steps[2];
+        let plan_upload = &steps[3];
+        let proof_upload = &steps[4];
+        let gate_checkout = &steps[8];
+        let plan_download = &steps[9];
+        let receipt_download = &steps[10];
+        let gate = &steps[11];
+        let metrics_upload = &steps[12];
 
         let checkout = |step: &TypedStep, depth: &str| {
             step.uses.as_deref() == Some("actions/checkout@v4")
@@ -3242,6 +3247,21 @@ mod tests {
                 "--output target/ci-impact/ci-plan.json \\",
                 "--github-output \"$GITHUB_OUTPUT\"",
             ])
+            && proof_generator.id.is_none()
+            && proof_generator.uses.is_none()
+            && proof_generator.if_expr.is_none()
+            && proof_generator.continue_on_error.is_none()
+            && proof_generator.timeout_minutes.is_none()
+            && proof_generator.with.is_empty()
+            && proof_generator.env.is_empty()
+            && proof_generator.run_exact(&[
+                "set -euo pipefail",
+                "rm -rf target/localtx-proof target/localtx-proof.tmp",
+                "mkdir -p target/localtx-proof.tmp",
+                "cargo run --locked -p xtask -- localtx report --format json > target/localtx-proof.tmp/localtx-proof.json",
+                "cargo run --locked -p xtask -- localtx report --format markdown > target/localtx-proof.tmp/localtx-proof.md",
+                "mv target/localtx-proof.tmp target/localtx-proof",
+            ])
             && plan_upload.if_expr.as_deref() == Some("${{ always() }}")
             && plan_upload.uses.as_deref() == Some("actions/upload-artifact@v4")
             && plan_upload.with_exact(
@@ -3251,6 +3271,21 @@ mod tests {
             && plan_upload.with_exact("path", &["target/ci-impact/ci-plan.json"])
             && plan_upload.with_exact("if-no-files-found", &["warn"])
             && plan_upload.with_exact("retention-days", &["30"])
+            && proof_upload.id.is_none()
+            && proof_upload.if_expr.as_deref() == Some("${{ always() }}")
+            && proof_upload.uses.as_deref() == Some("actions/upload-artifact@v4")
+            && proof_upload.continue_on_error.is_none()
+            && proof_upload.timeout_minutes.is_none()
+            && proof_upload.env.is_empty()
+            && proof_upload.run.is_empty()
+            && proof_upload.with.len() == 4
+            && proof_upload.with_exact(
+                "name",
+                &["localtx-proof-${{ github.run_id }}-${{ github.run_attempt }}"],
+            )
+            && proof_upload.with_exact("path", &["target/localtx-proof"])
+            && proof_upload.with_exact("if-no-files-found", &["error"])
+            && proof_upload.with_exact("retention-days", &["30"])
             && plan_download.continue_on_error.as_deref() == Some("true")
             && plan_download.uses.as_deref() == Some("actions/download-artifact@v4")
             && plan_download.with_exact(
@@ -3910,6 +3945,20 @@ mod tests {
         for (name, red) in [
             ("missing-plan", green.replacen("  ci-plan:\n", "  plan-missing:\n", 1)),
             ("extra-job", format!("{green}\n  bypass:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")),
+            ("missing-proof-generator", green.replacen("      - name: Generate LocalTx proof report", "      - name: Missing LocalTx proof report", 1)),
+            ("proof-json-format", green.replacen("-- localtx report --format json > target/localtx-proof.tmp/localtx-proof.json", "-- localtx report --format markdown > target/localtx-proof.tmp/localtx-proof.json", 1)),
+            ("proof-markdown-format", green.replacen("-- localtx report --format markdown > target/localtx-proof.tmp/localtx-proof.md", "-- localtx report --format md > target/localtx-proof.tmp/localtx-proof.md", 1)),
+            ("proof-wrong-temp-path", green.replacen("mkdir -p target/localtx-proof.tmp", "mkdir -p target/localtx-proof.stage", 1)),
+            ("proof-direct-final-write", green.replacen("target/localtx-proof.tmp/localtx-proof.json", "target/localtx-proof/localtx-proof.json", 1)),
+            ("proof-missing-clean", green.replacen("          rm -rf target/localtx-proof target/localtx-proof.tmp\n", "", 1)),
+            ("proof-missing-atomic-publish", green.replacen("          mv target/localtx-proof.tmp target/localtx-proof\n", "", 1)),
+            ("proof-wrong-final-path", green.replacen("mv target/localtx-proof.tmp target/localtx-proof", "mv target/localtx-proof.tmp target/localtx-proof-output", 1)),
+            ("proof-upload-not-always", green.replacen("      - name: Upload LocalTx proof report\n        if: ${{ always() }}", "      - name: Upload LocalTx proof report\n        if: ${{ success() }}", 1)),
+            ("proof-upload-name", green.replacen("name: localtx-proof-${{ github.run_id }}-${{ github.run_attempt }}", "name: localtx-proof-latest", 1)),
+            ("proof-upload-path", green.replacen("          path: target/localtx-proof\n          if-no-files-found: error", "          path: target/localtx-proof.tmp\n          if-no-files-found: error", 1)),
+            ("proof-upload-missing-files-policy", green.replacen("          path: target/localtx-proof\n          if-no-files-found: error\n          retention-days: 30", "          path: target/localtx-proof\n          if-no-files-found: warn\n          retention-days: 30", 1)),
+            ("proof-upload-retention", green.replacen("          name: localtx-proof-${{ github.run_id }}-${{ github.run_attempt }}\n          path: target/localtx-proof\n          if-no-files-found: error\n          retention-days: 30", "          name: localtx-proof-${{ github.run_id }}-${{ github.run_attempt }}\n          path: target/localtx-proof\n          if-no-files-found: error\n          retention-days: 7", 1)),
+            ("proof-extra-bypass-step", green.replacen("      - name: Upload LocalTx proof report", "      - name: Bypass LocalTx proof\n        run: true\n\n      - name: Upload LocalTx proof report", 1)),
             ("static-matrix", green.replacen("      matrix: ${{ fromJSON(needs.ci-plan.outputs.matrix) }}", "      matrix:\n        include:\n          - { lane: ci-meta }", 1)),
             ("untyped-lane", green.replacen("lane: ${{ matrix.lane }}", "lane: ci-meta", 1)),
             ("missing-job-key", green.replacen("      ci-job-key: ${{ matrix.jobKey }}\n", "", 1)),
@@ -3963,6 +4012,7 @@ mod tests {
         }
         for step in [
             "Build typed CI impact plan",
+            "Generate LocalTx proof report",
             "Verify plan, matrix result, and exact receipts",
         ] {
             for field in ["name", "env"] {

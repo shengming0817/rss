@@ -17,6 +17,23 @@ business key, SQL, payload, and error text are intentionally absent. Obtain any 
 from access-controlled tracing or audit storage; never add it to metric labels, WARN routing fields,
 or alert annotations.
 
+## Static proof preflight
+
+The [LocalTx static proof report](../ops/localtx-proof-report.md) inventories the contract-attributed
+routes, probes, journeys, metrics, alerts, and this runbook. Generate the machine-readable form with
+`cargo xtask localtx report --format json`, check the command exit code, fully parse the document, and
+parse `status` before using it. A policy failure is represented by `status = "failed"` even though the
+command exits successfully; structural failures exit non-zero with empty stdout. Publish only a
+complete parsed report by an atomic rename, because a stdout writer failure can leave a truncated
+redirected file.
+
+The report has `evidenceScope = "staticInventory"`: it does not execute `promtool`, a real backend, or
+the alert. It does not replace #1776 required real-backend evidence and cannot prove the outcome of the
+incident being handled. Use it only to confirm the expected static operator carriers and ownership;
+authoritative state and runtime evidence remain mandatory below.
+Its operations block is `referenceOnly` with `includedInReportStatus = false`: report `status` excludes
+operations validation, promtool, real-backend execution, and CI artifact/job state.
+
 ## First response
 
 1. Acknowledge the alert and record its available closed scope (`domain` / `contract_id` / `boundary`
@@ -65,6 +82,8 @@ observed. The transaction and underlying connection are unsafe for reuse.
 Retry exhaustion is intentionally not a page in `docs/ops/localtx-alerts.rules.yaml`. A transient
 sequence can exhaust while the last observed settlement is safely `rolled_back`; paging it separately
 would duplicate database availability/error-rate alerts and obscure the unsafe settlement signal.
+This retry-pressure signal is diagnostic-only; it does not change the meaning of
+`LocalTxCommitUnknown` or `LocalTxRollbackFailed` and must not trigger replay.
 Use these dashboard panels for diagnosis:
 
 - failed attempt rate by `domain`, `contract_id`, `boundary`, and `retry_class`;
