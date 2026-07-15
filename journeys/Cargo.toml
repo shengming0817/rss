@@ -4,14 +4,14 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
+autolib = false
 
 [lints]
 workspace = true
 
-# journeys — 验收 journey 组合根（组合根层，可依赖所有库 crate）。
+# journeys — tests-only 验收 journey 组合根（组合根层，可依赖所有库 crate）。
 # RW-G1 追踪弹的端到端 journey 在 tests/ 内组装 in-mem topology（identity + audit + memory 经
-# bootstrap/eventexec 接线）；lib 暂为 demo 占位，故被组装 crate 全部为 dev-dependencies。
-[dependencies]
+# bootstrap/eventexec 接线）；被组装 crate 全部为 dev-dependencies。
 
 [[test]]
 name = "audit_list_tenant_entries_localtx_journey"

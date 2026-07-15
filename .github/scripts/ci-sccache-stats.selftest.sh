@@ -3,12 +3,12 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PARSER="$SCRIPT_DIR/ci-sccache-stats.sh"
-TMP_ROOT=${TMPDIR:-/tmp}/ci-sccache-stats-selftest.$$
+TMP_BASE=${TMPDIR:-/tmp}
+TMP_ROOT=$(mktemp -d "${TMP_BASE%/}/ci-sccache-stats-selftest.XXXXXX")
 FAILURES=0
 
 cleanup() { rm -rf "$TMP_ROOT"; }
 trap cleanup EXIT HUP INT TERM
-mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(CDPATH='' cd -- "$TMP_ROOT" && pwd -P)
 
 pass() { printf 'ok - %s\n' "$1"; }

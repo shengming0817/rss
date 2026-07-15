@@ -1137,6 +1137,14 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         evidence: "direct-call synthetic red and production source anti-vacuity",
         gates: "verify,ci-core,integration",
     },
+    InvariantCarrierBinding {
+        path: "xtask/src/nextest.rs",
+        id: "NEXTEST-TRYBUILD-SCHEDULING-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "AST plus Cargo metadata exact-set synthetic red and workspace anti-vacuity",
+        gates: "verify,ci-core,integration",
+    },
 ];
 
 const COMPILER_CACHE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[

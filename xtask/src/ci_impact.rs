@@ -57,6 +57,8 @@ const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/runbooks/202607081921-1633-cdc-outbox.md",
     "docs/ops/localtx-proof-report.md",
     "docs/rules/localtx.md",
+    "docs/spec/007-runtime-deployment-executable-plan/contracts/assembly-lock.schema.json",
+    "docs/spec/007-runtime-deployment-executable-plan/fixtures/fingerprint-v1-vectors.json",
 ];
 const POLICY_BEHAVIOR_SPEC: &str = include_str!("../tests/golden/ci-impact-policy.json");
 const HIGH_IMPACT_PATHS: &[&str] = &[
@@ -3746,11 +3748,10 @@ mod tests {
             .machine_inputs
             .into_iter()
             .collect::<BTreeSet<_>>();
-        assert!(machine_input_mapping_is_exact(
-            &discovered,
-            &configured,
-            &golden
-        ));
+        assert!(
+            machine_input_mapping_is_exact(&discovered, &configured, &golden),
+            "machine-input exact-set drift: discovered={discovered:?}; configured={configured:?}; golden={golden:?}"
+        );
 
         for path in &configured {
             let mut missing = configured.clone();

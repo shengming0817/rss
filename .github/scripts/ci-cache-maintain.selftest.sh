@@ -4,9 +4,10 @@ set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 MAINTAIN="$SCRIPT_DIR/ci-cache-maintain.sh"
 TMP_BASE=${TMPDIR:-/tmp}
-TMP_ROOT=${TMP_BASE%/}/ci-cache-maintain-selftest.$$
+TMP_ROOT=$(mktemp -d "${TMP_BASE%/}/ci-cache-maintain-selftest.XXXXXX")
 FAILURES=0
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+TMP_ROOT=$(CDPATH='' cd -- "$TMP_ROOT" && pwd -P)
 mkdir -p "$TMP_ROOT/work space" "$TMP_ROOT/runner temp" "$TMP_ROOT/outside"
 
 pass() { printf 'ok - %s\n' "$1"; }

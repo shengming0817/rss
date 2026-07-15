@@ -6,6 +6,7 @@
 //! INVARIANT: NEXTEST-EVIDENCE-SCHEMA-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "evidence_schema_rejects_wire_drift", anti_vacuity = "evidence_schema_matches_golden" }——serde wire 形态由可失败的 committed golden 治理。
 //! INVARIANT: NEXTEST-CONFIG-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "config_policy_rejects_retry_override_and_missing_timeout", anti_vacuity = "committed_nextest_config_obeys_policy" }——CI profiles 零重试、JUnit 与 timeout fail-closed。
 //! INVARIANT: NEXTEST-EXECUTION-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "execution_funnel_rejects_private_capability_api_bypass", anti_vacuity = "real_nextest_call_sites_use_funnel|localtx_journey_serial_batch_fails_when_compiled_inventory_is_empty" }——xtask 的 nextest 子进程只能经 typed cargo capability 构造。
+//! INVARIANT: NEXTEST-TRYBUILD-SCHEDULING-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "trybuild_inventory_is_bidirectionally_closed|trybuild_inventory_rejects_non_dedicated_sources", anti_vacuity = "workspace_trybuild_inventory_is_non_vacuous_and_closed" }——任何 trybuild 语义引用只能位于专用 integration test target 入口，且与 nextest 单线程 selector 双向闭合；lib/bin/module/macro 间接 carrier 均 fail-closed。
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ const INSTALL_HINT: &str = concat!(
 );
 const EVIDENCE_SCHEMA_VERSION: u8 = 2;
 const EVIDENCE_DIR: &str = "target/nextest-evidence";
+const TRYBUILD_FILTER: &str = "binary(/(^trybuild$|_trybuild$)/)";
 
 /// nextest capability 的唯一 typed 门；调用方既不能取得 capability 名，也不能绕过安装提示策略。
 pub(crate) fn run_gated<T>(
@@ -1246,7 +1248,7 @@ fn validate_trybuild_scheduling(
             .as_table()
             .context("trybuild override 非 table")?;
         if rule.len() != 2
-            || rule.get("filter").and_then(toml::Value::as_str) != Some("test(/^ui$/)")
+            || rule.get("filter").and_then(toml::Value::as_str) != Some(TRYBUILD_FILTER)
             || rule.get("test-group").and_then(toml::Value::as_str) != Some("trybuild")
         {
             bail!("profile.{profile} trybuild override 漂移");
@@ -1307,7 +1309,9 @@ fn validate_capability_boundary_source(source: &str) -> Result<()> {
 
 pub(crate) fn validate_workspace(root: &Path) -> Result<()> {
     validate_config(&fs::read_to_string(root.join(".config/nextest.toml"))?)?;
-    validate_trybuild_harnesses(root)?;
+    let metadata = cargo_metadata(root)?;
+    let (carriers, targets) = trybuild_inventory(root, &metadata)?;
+    validate_trybuild_inventory(&carriers, &targets)?;
     let source_root = root.join("xtask/src");
     for path in rust_files_under(&source_root)? {
         if path == source_root.join("nextest.rs") || path == source_root.join("cmd.rs") {
@@ -1324,55 +1328,244 @@ pub(crate) fn validate_workspace(root: &Path) -> Result<()> {
     Ok(())
 }
 
-const TRYBUILD_UI_CARRIERS: [&str; 4] = [
-    "crates/authn/tests/trybuild.rs",
-    "crates/diport/tests/trybuild.rs",
-    "crates/httpserve/tests/funnel_ui.rs",
-    "crates/secure/tests/trybuild.rs",
-];
+fn cargo_metadata(root: &Path) -> Result<serde_json::Value> {
+    let output = crate::cmd::cargo_cmd(
+        crate::cmd::CargoSubcommand::Metadata,
+        &["--locked", "--no-deps", "--format-version", "1"],
+        &[],
+        Some(root),
+    )
+    .output()
+    .context("执行 cargo metadata 发现 trybuild target")?;
+    if !output.status.success() {
+        bail!(
+            "cargo metadata 发现 trybuild target 失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("解析 cargo metadata trybuild inventory")
+}
 
-fn validate_trybuild_harnesses(root: &Path) -> Result<()> {
-    let cargo: toml::Value = toml::from_str(&fs::read_to_string(root.join("Cargo.toml"))?)?;
-    let members = cargo
-        .get("workspace")
-        .and_then(|value| value.get("members"))
-        .and_then(toml::Value::as_array)
-        .context("workspace.members 缺失")?;
-    let mut actual = BTreeSet::new();
-    for member in members {
-        let member = member.as_str().context("workspace member 非字符串")?;
-        for path in rust_files_under(&root.join(member))? {
-            let syntax = syn::parse_file(&fs::read_to_string(&path)?)?;
-            let has_ui = syntax.items.iter().any(|item| {
-                let syn::Item::Fn(function) = item else {
-                    return false;
-                };
-                function.sig.ident == "ui"
-                    && function
-                        .attrs
-                        .iter()
-                        .any(|attr| attr.path().is_ident("test"))
-            });
-            if has_ui {
-                actual.insert(
-                    path.strip_prefix(root)
-                        .context("trybuild carrier 越出 workspace")?
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                );
+fn source_uses_trybuild(source: &str) -> Result<bool> {
+    #[derive(Default)]
+    struct TrybuildImports {
+        modules: BTreeSet<String>,
+        test_cases: BTreeSet<String>,
+    }
+
+    fn record_use(tree: &syn::UseTree, prefix: &mut Vec<String>, imports: &mut TrybuildImports) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                record_use(&path.tree, prefix, imports);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) => {
+                let mut canonical = prefix.clone();
+                canonical.push(name.ident.to_string());
+                if canonical.as_slice() == ["trybuild", "TestCases"] {
+                    imports.test_cases.insert(name.ident.to_string());
+                }
+            }
+            syn::UseTree::Rename(rename) => {
+                let mut canonical = prefix.clone();
+                if rename.ident != "self" {
+                    canonical.push(rename.ident.to_string());
+                }
+                let local = rename.rename.to_string();
+                if canonical.as_slice() == ["trybuild"] {
+                    imports.modules.insert(local);
+                } else if canonical.as_slice() == ["trybuild", "TestCases"] {
+                    imports.test_cases.insert(local);
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                if prefix.as_slice() == ["trybuild"] {
+                    imports.test_cases.insert("TestCases".to_owned());
+                }
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    record_use(item, prefix, imports);
+                }
             }
         }
     }
-    validate_trybuild_carrier_set(&actual)
+
+    #[derive(Default)]
+    struct ImportVisitor {
+        imports: TrybuildImports,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for ImportVisitor {
+        fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+            record_use(&node.tree, &mut Vec::new(), &mut self.imports);
+            syn::visit::visit_item_use(self, node);
+        }
+
+        fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+            if node.ident == "trybuild" {
+                self.imports.modules.insert(
+                    node.rename
+                        .as_ref()
+                        .map_or_else(|| node.ident.to_string(), |(_, rename)| rename.to_string()),
+                );
+            }
+            syn::visit::visit_item_extern_crate(self, node);
+        }
+    }
+
+    struct TrybuildVisitor<'a> {
+        imports: &'a TrybuildImports,
+        found: bool,
+    }
+
+    fn tokens_contain_trybuild(tokens: &proc_macro2::TokenStream) -> bool {
+        tokens.clone().into_iter().any(|token| match token {
+            proc_macro2::TokenTree::Ident(ident) => ident == "trybuild",
+            proc_macro2::TokenTree::Group(group) => tokens_contain_trybuild(&group.stream()),
+            proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => false,
+        })
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for TrybuildVisitor<'_> {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = node.func.as_ref() {
+                let segments = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>();
+                self.found |= match segments.as_slice() {
+                    [module, test_cases, new] => {
+                        self.imports.modules.contains(module)
+                            && test_cases == "TestCases"
+                            && new == "new"
+                    }
+                    [test_cases, new] => {
+                        self.imports.test_cases.contains(test_cases) && new == "new"
+                    }
+                    _ => false,
+                };
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            self.found |= tokens_contain_trybuild(&node.tokens);
+            syn::visit::visit_macro(self, node);
+        }
+    }
+
+    let syntax = syn::parse_file(source).context("解析 trybuild carrier Rust AST")?;
+    let mut import_visitor = ImportVisitor::default();
+    import_visitor.imports.modules.insert("trybuild".to_owned());
+    syn::visit::Visit::visit_file(&mut import_visitor, &syntax);
+    let mut visitor = TrybuildVisitor {
+        imports: &import_visitor.imports,
+        found: false,
+    };
+    syn::visit::Visit::visit_file(&mut visitor, &syntax);
+    Ok(visitor.found)
 }
 
-fn validate_trybuild_carrier_set(actual: &BTreeSet<String>) -> Result<()> {
-    let expected = TRYBUILD_UI_CARRIERS
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
-    if actual != &expected {
-        bail!("trybuild #[test] fn ui() carrier 闭集漂移: {actual:?}");
+fn is_trybuild_target(name: &str) -> bool {
+    name == "trybuild" || name.ends_with("_trybuild")
+}
+
+fn trybuild_inventory(
+    root: &Path,
+    metadata: &serde_json::Value,
+) -> Result<(BTreeSet<String>, BTreeMap<String, String>)> {
+    let packages = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .context("cargo metadata 缺 packages")?;
+    let mut carriers = BTreeSet::new();
+    let mut selected_targets = BTreeMap::new();
+
+    for package in packages {
+        let manifest = package
+            .get("manifest_path")
+            .and_then(serde_json::Value::as_str)
+            .context("cargo metadata package 缺 manifest_path")?;
+        let member_root = Path::new(manifest)
+            .parent()
+            .context("workspace member manifest 缺父目录")?;
+        if !member_root.starts_with(root) {
+            bail!("workspace member 越出根目录: {member_root:?}");
+        }
+        for path in rust_files_under(member_root)? {
+            if source_uses_trybuild(&fs::read_to_string(&path)?)? {
+                carriers.insert(path.to_string_lossy().into_owned());
+            }
+        }
+        let targets = package
+            .get("targets")
+            .and_then(serde_json::Value::as_array)
+            .context("cargo metadata package 缺 targets")?;
+        for target in targets {
+            let kinds = target
+                .get("kind")
+                .and_then(serde_json::Value::as_array)
+                .context("cargo metadata target 缺 kind")?;
+            let name = target
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .context("cargo metadata target 缺 name")?;
+            if !kinds.iter().any(|kind| kind.as_str() == Some("test")) {
+                continue;
+            }
+            let source = target
+                .get("src_path")
+                .and_then(serde_json::Value::as_str)
+                .context("cargo metadata target 缺 src_path")?;
+            let source_path = Path::new(source);
+            if !source_path.starts_with(member_root) || !source_path.starts_with(root) {
+                bail!("Cargo test target 越出 workspace member: {source}");
+            }
+            let source_metadata = fs::symlink_metadata(source_path)
+                .with_context(|| format!("读取 Cargo test target source 失败: {source}"))?;
+            if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
+                bail!("Cargo test target source 必须是普通文件: {source}");
+            }
+            if !is_trybuild_target(name) {
+                continue;
+            }
+            if selected_targets
+                .insert(source.to_owned(), name.to_owned())
+                .is_some()
+            {
+                bail!("多个 trybuild target 共享 source: {source}");
+            }
+        }
+    }
+    Ok((carriers, selected_targets))
+}
+
+fn validate_trybuild_inventory(
+    carriers: &BTreeSet<String>,
+    selected_targets: &BTreeMap<String, String>,
+) -> Result<()> {
+    let invalid_names = selected_targets
+        .values()
+        .filter(|name| !is_trybuild_target(name))
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_sources = selected_targets.keys().cloned().collect::<BTreeSet<_>>();
+    let unselected = carriers
+        .difference(&selected_sources)
+        .cloned()
+        .collect::<Vec<_>>();
+    let stale = selected_sources
+        .difference(carriers)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unselected.is_empty() || !stale.is_empty() || !invalid_names.is_empty() {
+        bail!(
+            "trybuild nextest selector 漂移; unselected={unselected:?}; stale={stale:?}; invalid_names={invalid_names:?}"
+        );
     }
     Ok(())
 }
@@ -1405,6 +1598,7 @@ fn rust_files_under(root: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::unique_tmp;
     use crate::workspace_root;
 
     #[test]
@@ -1445,7 +1639,7 @@ mod tests {
         .map(|(name, period, path, terminate)| format!("[profile.{name}]\nretries = 0\nflaky-result = \"fail\"\nslow-timeout = {{ period = \"{period}\", terminate-after = {terminate} }}\n[profile.{name}.junit]\npath = \"{path}\"\n"))
         .collect();
         format!(
-            "[profile.default]\nretries=0\n{profiles}\n[test-groups.trybuild]\nmax-threads=1\n[[profile.default.overrides]]\nfilter='test(/^ui$/)'\ntest-group='trybuild'\n[[profile.ci-core.overrides]]\nfilter='test(/^ui$/)'\ntest-group='trybuild'\n"
+            "[profile.default]\nretries=0\n{profiles}\n[test-groups.trybuild]\nmax-threads=1\n[[profile.default.overrides]]\nfilter='{TRYBUILD_FILTER}'\ntest-group='trybuild'\n[[profile.ci-core.overrides]]\nfilter='{TRYBUILD_FILTER}'\ntest-group='trybuild'\n"
         )
     }
 
@@ -1462,7 +1656,7 @@ mod tests {
             format!("{green}\n[profile.ci]\nretries=0\n"),
             format!("{green}\n[[profile.integration.overrides]]\nfilter='all()'\nretries=2\n"),
             green.replacen("max-threads=1", "max-threads=2", 1),
-            green.replacen("test(/^ui$/)", "test(/ui/)", 1),
+            green.replacen(TRYBUILD_FILTER, "binary(/trybuild/)", 1),
             green.replacen("test-group='trybuild'", "test-group='other'", 1),
             green.replacen("terminate-after = 2", "terminate-after = 1", 1),
             green.replacen("retries = 0", "global-timeout = \"60s\"\nretries = 0", 1),
@@ -1478,22 +1672,114 @@ mod tests {
     }
 
     #[test]
-    fn trybuild_ui_carrier_set_is_bidirectionally_closed() {
-        let green = TRYBUILD_UI_CARRIERS
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>();
-        assert!(validate_trybuild_carrier_set(&green).is_ok());
-        let mut missing = green.clone();
-        missing.remove(TRYBUILD_UI_CARRIERS[0]);
-        assert!(validate_trybuild_carrier_set(&missing).is_err());
-        let mut added = green.clone();
-        added.insert("crates/new/tests/trybuild.rs".to_owned());
-        assert!(validate_trybuild_carrier_set(&added).is_err());
-        let mut renamed = green;
-        renamed.remove(TRYBUILD_UI_CARRIERS[0]);
-        renamed.insert("crates/authn/tests/renamed.rs".to_owned());
-        assert!(validate_trybuild_carrier_set(&renamed).is_err());
+    fn trybuild_inventory_is_bidirectionally_closed() {
+        let carriers = BTreeSet::from(["/workspace/crates/demo/tests/api_trybuild.rs".into()]);
+        let targets = BTreeMap::from([(
+            "/workspace/crates/demo/tests/api_trybuild.rs".into(),
+            "api_trybuild".into(),
+        )]);
+        assert!(validate_trybuild_inventory(&carriers, &targets).is_ok());
+
+        let mut selector_only = targets.clone();
+        selector_only.insert(
+            "/workspace/crates/demo/tests/stale_trybuild.rs".into(),
+            "stale_trybuild".into(),
+        );
+        assert!(validate_trybuild_inventory(&carriers, &selector_only).is_err());
+
+        let unselected = BTreeMap::from([(
+            "/workspace/crates/demo/tests/api_trybuild.rs".into(),
+            "compile_contract".into(),
+        )]);
+        assert!(validate_trybuild_inventory(&carriers, &unselected).is_err());
+    }
+
+    #[test]
+    fn trybuild_carrier_detection_uses_rust_ast() -> Result<()> {
+        assert!(source_uses_trybuild(
+            "fn ui() { let _ = trybuild::TestCases::new(); }"
+        )?);
+        assert!(source_uses_trybuild(
+            "use trybuild::TestCases; fn ui() { let _ = TestCases::new(); }"
+        )?);
+        assert!(source_uses_trybuild(
+            "use trybuild::TestCases as Cases; fn ui() { let _ = Cases::new(); }"
+        )?);
+        assert!(source_uses_trybuild(
+            "use trybuild as tb; fn ui() { let _ = tb::TestCases::new(); }"
+        )?);
+        assert!(source_uses_trybuild(
+            "macro_rules! cases { () => { trybuild::TestCases::new() } }"
+        )?);
+        assert!(!source_uses_trybuild(
+            "fn ordinary() { let _ = \"trybuild::TestCases::new()\"; }"
+        )?);
+        assert!(!source_uses_trybuild(
+            "fn ordinary() { let _ = local::TestCases::new(); }"
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn trybuild_inventory_rejects_non_dedicated_sources() -> Result<()> {
+        let root = unique_tmp("nextest-trybuild-targets");
+        let package = root.join("crates/demo");
+        let test_source = package.join("tests/api_trybuild.rs");
+        let non_target_source = package.join("src/helper.rs");
+        fs::create_dir_all(test_source.parent().context("test source parent")?)?;
+        fs::create_dir_all(
+            non_target_source
+                .parent()
+                .context("non-target source parent")?,
+        )?;
+        fs::write(
+            &test_source,
+            "fn ui() { let _ = trybuild::TestCases::new(); }",
+        )?;
+        fs::write(
+            &non_target_source,
+            "fn helper() { let _ = trybuild::TestCases::new(); }",
+        )?;
+        let metadata = serde_json::json!({
+            "packages": [{
+                "manifest_path": package.join("Cargo.toml"),
+                "targets": [
+                    {"kind": ["lib"], "name": "demo", "src_path": non_target_source},
+                    {"kind": ["test"], "name": "api_trybuild", "src_path": test_source},
+                ],
+            }],
+        });
+
+        let (carriers, targets) = trybuild_inventory(&root, &metadata)?;
+        let expected_source = test_source.to_string_lossy().into_owned();
+        let hidden_source = non_target_source.to_string_lossy().into_owned();
+        assert_eq!(
+            carriers,
+            BTreeSet::from([expected_source.clone(), hidden_source]),
+            "trybuild references outside a dedicated integration target must be discovered"
+        );
+        assert_eq!(
+            targets,
+            BTreeMap::from([(expected_source, "api_trybuild".to_owned())])
+        );
+        assert!(
+            validate_trybuild_inventory(&carriers, &targets).is_err(),
+            "a lib/unit/module trybuild carrier must fail closed instead of escaping the selector"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_trybuild_inventory_is_non_vacuous_and_closed() -> Result<()> {
+        let root = workspace_root()?;
+        let metadata = cargo_metadata(&root)?;
+        let (carriers, targets) = trybuild_inventory(&root, &metadata)?;
+        assert!(
+            carriers.len() >= 19,
+            "real workspace must exercise the guard"
+        );
+        validate_trybuild_inventory(&carriers, &targets)
     }
 
     #[test]

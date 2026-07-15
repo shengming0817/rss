@@ -89,7 +89,7 @@ rss/
 │   ├── settings/         # settings PG/KeyProvider typed wiring + readiness 生命周期
 │   ├── identity/         # identity PG/Signer/JWT typed wiring
 │   └── audit/            # audit PG/MacVerifier typed wiring
-├── journeys/             # ★ 验收规格（*-journey.toml）+ status-board.toml；亦承载验收 journey 组合根 crate（demo 组装根 + 集成测试，RW-G1）
+├── journeys/             # ★ 验收规格（*-journey.toml）+ status-board.toml；亦承载 tests-only 验收 journey 组合根（RW-G1）
 ├── fixtures/             # ★ 测试夹具（fixture-*.toml）
 ├── examples/             # ssobff / todoorder / iotdevice / corebundlestarter
 ├── xtask/                # codegen + golden + 契约/一致性治理校验
@@ -109,7 +109,7 @@ rss/
 - **域** `identity`/`settings`/`audit`/`contractreg`/`syshealth`:依赖基础+引擎+DI-infra+服务+`generated`(contract 派生);
   **互不依赖**(跨域只经 contract);不依赖 adapters。**定义自身域形 repo/service DI port**(`pub mod ports`,签名引用域内实体,由 adapter 经 DIP 实现,ADR-005);为此可依赖 dynosaur/trait-variant(DIPORT-MACRO-CONFINE-02 白名单)。
 - **adapters/**:实现基础/引擎/DI-infra/服务定义的 trait(DI port 的 provider impl 在此);**不被域依赖**(组合根注入)。**可依赖域 crate 以 impl 其域形 repo/service port**(`adapter→域` = DIP 内向边,`allows(Adapter,Domain)=true` + deny.toml 该域 wrapper 放行 + 真实 source edge 校验,ADR-005;反向「域→adapter」仍禁,依赖反转方向保持)。通用 `Adapter→Service` 合法；#1676 仅对 provider output 边界增加精确 deny：`adapters/redis|s3|vault → bootstrap` 禁止（package 名为 `redis-adapter|s3|vault`），postgres→bootstrap 与目标 adapter→diport 不受影响（`LAYER-DEPS-PROVIDER-BOOTSTRAP-01`）。`postgres` 的域形实现由无默认值的 `domain-settings` / `domain-identity` / `domain-audit` Cargo feature 精确启用；assembly 必须显式选择，未选择的域依赖不进入目标 package 图。`adapters/memory` 是 **dev/test-only** in-mem DI port provider(测试 / demo)——**禁生产 bin(server/rss)依赖**,只准验收 journey + tooling(`xtask layers.rs` `DEV_ADAPTER_ROOTS`)依赖,机器边界由 `layer-deps` LAYER-DEPS-07(正向收窄 + 反向排除生产 bin)+ deny.toml 收窄 wrapper 守。
-- **bins/**、**xtask/**、**assemblies/**、**composition/**、**journeys/**:组合根,可依赖所有库 crate(`journeys` 为验收 journey 组合根——demo 组装根 + 端到端集成测试；`composition/*` 为多个 assembly 复用的 typed domain wiring，不含 manifest 或启动入口)。**examples/** 为收窄示例层,只准依赖基础/引擎/DI-infra/服务,不直接依赖域、adapters 或 generated。`assemblies/{name}/assembly.toml`
+- **bins/**、**xtask/**、**assemblies/**、**composition/**、**journeys/**:组合根,可依赖所有库 crate(`journeys` 为 tests-only 验收 journey 组合根；`composition/*` 为多个 assembly 复用的 typed domain wiring，不含 manifest 或启动入口)。**examples/** 为收窄示例层,只准依赖基础/引擎/DI-infra/服务,不直接依赖域、adapters 或 generated。`assemblies/{name}/assembly.toml`
   是 static assembly intent + DI provider 声明源：`name`/`profile`/`domains`/`topology`/`listeners`
   声明组合根 intent/surface，`listeners.domains` 以闭合 domain/listener enum 声明 route surface 归属；
   `[[diportProviders]]` 声明 provider 的 port / providerCrate / requiredFeatures / consumer / lifecycle /

@@ -6,7 +6,9 @@
     "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
     "docs/runbooks/202607081921-1633-cdc-outbox.md",
     "docs/ops/localtx-proof-report.md",
-    "docs/rules/localtx.md"
+    "docs/rules/localtx.md",
+    "docs/spec/007-runtime-deployment-executable-plan/contracts/assembly-lock.schema.json",
+    "docs/spec/007-runtime-deployment-executable-plan/fixtures/fingerprint-v1-vectors.json"
   ],
   "requiredEvidenceOwners": [
     {

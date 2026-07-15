@@ -5,12 +5,12 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 EVIDENCE="$SCRIPT_DIR/ci-evidence.sh"
 BUDGET="$SCRIPT_DIR/ci-disk-budget.sh"
 GOLDEN="$SCRIPT_DIR/testdata/ci-evidence-v4.golden.json"
-TMP_ROOT=${TMPDIR:-/tmp}/ci-evidence-selftest.$$
+TMP_BASE=${TMPDIR:-/tmp}
+TMP_ROOT=$(mktemp -d "${TMP_BASE%/}/ci-evidence-selftest.XXXXXX")
 FAILURES=0
 
 cleanup() { rm -rf "$TMP_ROOT"; }
 trap cleanup EXIT HUP INT TERM
-mkdir -p "$TMP_ROOT"
 
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILURES=$((FAILURES + 1)); }

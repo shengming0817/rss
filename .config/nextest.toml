@@ -47,9 +47,9 @@ path = "junit.xml"
 max-threads = 1
 
 [[profile.default.overrides]]
-filter = 'test(/^ui$/)'
+filter = 'binary(/(^trybuild$|_trybuild$)/)'
 test-group = "trybuild"
 
 [[profile.ci-core.overrides]]
-filter = 'test(/^ui$/)'
+filter = 'binary(/(^trybuild$|_trybuild$)/)'
 test-group = "trybuild"

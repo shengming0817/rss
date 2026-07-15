@@ -46,6 +46,7 @@
 //! INVARIANT: CI-SLO-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_slo_contract_rejects_semantic_weakening", anti_vacuity = "reusable_rust_lane_slo_contract_accepts_committed_workflow" }—— SLO 证据必须先 stage 再 always 上传，最后 always 评估并写入 Job Summary；四个 live disk guard 必须从固定 SLO config 读取阈值并 fail-closed。
 //! INVARIANT: CI-INTEGRATION-SERVICE-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_service_lifecycle_predicate_green_and_synthetic_red", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— Integration lane 必须在 xtask 前建立 exact scope，在失败后有界取证并 always 精确清理；生命周期证据始终归档，服务日志仅失败时归档，且 workflow 禁止任何全局 Docker prune。
 //! INVARIANT: INTEGRATION-CONTAINER-OWNERSHIP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_container_source_contract_synthetic_red", anti_vacuity = "integration_container_source_contract_accepts_committed_sources" }—— testkit 只能在 owned 模块导入 AsyncRunner/调用 start，四类 fixture、四个 context env、四种 service、五个 ownership label 与精确 partition 闭集须和 shell/workflow 同步。
+//! INVARIANT: CI-SELFTEST-TEMP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "ci_selftest_temp_root_guard_rejects_unsafe_fixtures", anti_vacuity = "committed_ci_selftest_temp_roots_are_atomic" }—— 所有 GitHub shell selftest 必须递归自动发现；可执行源码中的 PID 临时路径与非原子 TMP_ROOT 均 fail-closed，实际 TMP_ROOT 必须以带 `.XXXXXX` 模板的原子 `mktemp -d` 创建独占根目录；注释不能充当合规证据或触发误报。
 
 use crate::ci_lanes::CiJobKey;
 use crate::ci_lanes::{
@@ -1435,6 +1436,299 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
 mod tests {
     use super::*;
     use anyhow::Context as _;
+
+    fn shell_executable_prefix(line: &str) -> &str {
+        let mut single_quoted = false;
+        let mut double_quoted = false;
+        let mut escaped = false;
+        for (index, character) in line.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match character {
+                '\\' if !single_quoted => escaped = true,
+                '\'' if !double_quoted => single_quoted = !single_quoted,
+                '"' if !single_quoted => double_quoted = !double_quoted,
+                '#' if !single_quoted && !double_quoted => {
+                    let starts_shell_word = index == 0
+                        || line[..index]
+                            .chars()
+                            .next_back()
+                            .is_some_and(char::is_whitespace);
+                    if starts_shell_word {
+                        return &line[..index];
+                    }
+                }
+                _ => {}
+            }
+        }
+        line
+    }
+
+    fn ci_selftest_tmp_root_is_atomic(source: &str) -> bool {
+        let executable = source
+            .lines()
+            .map(shell_executable_prefix)
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        fn assignment(line: &str) -> Option<(&str, &str)> {
+            let line = line
+                .strip_prefix("export ")
+                .or_else(|| line.strip_prefix("readonly "))
+                .unwrap_or(line);
+            let (name, value) = line.split_once('=')?;
+            let mut chars = name.chars();
+            if !chars
+                .next()
+                .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+                || !chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+            {
+                return None;
+            }
+            Some((name, value))
+        }
+
+        fn atomic_mktemp_dir(value: &str) -> bool {
+            let Some(template) = value
+                .strip_prefix("$(mktemp -d \"")
+                .and_then(|value| value.strip_suffix("\")"))
+            else {
+                return false;
+            };
+            template.ends_with(".XXXXXX")
+                && !template.contains('"')
+                && !template.contains("$(")
+                && !template.contains('`')
+        }
+
+        let assignments = executable
+            .iter()
+            .filter_map(|line| assignment(line))
+            .collect::<Vec<_>>();
+        let uses_tmp_root = executable.iter().any(|line| line.contains("TMP_ROOT"));
+        let creators = assignments
+            .iter()
+            .filter(|(name, value)| *name == "TMP_ROOT" && atomic_mktemp_dir(value))
+            .count();
+        let unsafe_temp_assignment = assignments.iter().any(|(name, value)| {
+            let references_temp_base =
+                value.contains("/tmp") || value.contains("TMPDIR") || value.contains("TMP_BASE");
+            references_temp_base
+                && !(*name == "TMP_BASE" && *value == "${TMPDIR:-/tmp}")
+                && !(*name == "TMP_ROOT" && atomic_mktemp_dir(value))
+        });
+
+        !executable.iter().any(|line| line.contains("$$"))
+            && !unsafe_temp_assignment
+            && (!uses_tmp_root
+                || (creators == 1
+                    && assignments.iter().all(|(name, value)| {
+                        *name != "TMP_ROOT"
+                            || atomic_mktemp_dir(value)
+                            || *value == "$(CDPATH='' cd -- \"$TMP_ROOT\" && pwd -P)"
+                    })))
+    }
+
+    fn ci_selftest_uses_tmp_root(source: &str) -> bool {
+        source
+            .lines()
+            .map(shell_executable_prefix)
+            .map(str::trim)
+            .any(|line| !line.is_empty() && line.contains("TMP_ROOT"))
+    }
+
+    fn github_selftests(root: &Path) -> anyhow::Result<Vec<(String, String)>> {
+        fn collect(
+            path: &Path,
+            root: &Path,
+            discovered: &mut Vec<(String, String)>,
+        ) -> anyhow::Result<()> {
+            let metadata = std::fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() {
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".selftest.sh"))
+                {
+                    anyhow::bail!("CI selftest 不得是 symlink: {}", path.display());
+                }
+                return Ok(());
+            }
+            if metadata.is_dir() {
+                let mut entries = std::fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
+                entries.sort_by_key(std::fs::DirEntry::file_name);
+                for entry in entries {
+                    collect(&entry.path(), root, discovered)?;
+                }
+            } else if metadata.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".selftest.sh"))
+            {
+                let source = std::fs::read_to_string(path)?;
+                discovered.push((
+                    path.strip_prefix(root)?
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    source,
+                ));
+            }
+            Ok(())
+        }
+
+        let mut discovered = Vec::new();
+        collect(&root.join(".github"), root, &mut discovered)?;
+        Ok(discovered)
+    }
+
+    #[test]
+    fn ci_selftest_temp_root_guard_rejects_unsafe_fixtures() {
+        let green = "# ROOT=/tmp/comment-only.$$\n\
+                     echo safe # ROOT=/tmp/inline-comment.$$\n\
+                     TMP_ROOT=$(mktemp -d \"${TMPDIR:-/tmp}/fixture.XXXXXX\")\n\
+                     TMP_ROOT=$(CDPATH='' cd -- \"$TMP_ROOT\" && pwd -P)\n";
+        assert!(ci_selftest_tmp_root_is_atomic(green), "synthetic green");
+        for red in [
+            "TMP_ROOT=${TMPDIR:-/tmp}/fixture.$$\n",
+            "ROOT=/tmp/alternate-name.$$\n",
+            "ROOT=/tmp/fixed-root\n",
+            "TMP_ROOT=$(mktemp \"${TMPDIR:-/tmp}/fixture.XXXXXX\")\n",
+            "TMP_ROOT=$(mktemp -d \"${TMPDIR:-/tmp}/fixture\")\n",
+            "TMP_ROOT=$(mktemp -d \"${TMPDIR:-/tmp}/fixture.XXXXXX\" || printf /tmp/fixed)\n",
+            "# TMP_ROOT=$(mktemp -d \"${TMPDIR:-/tmp}/fixture.XXXXXX\")\n\
+             TMP_ROOT=${TMPDIR:-/tmp}/fixture\n",
+            "TMP_ROOT=$(mktemp -d \"${TMPDIR:-/tmp}/fixture.XXXXXX\")\n\
+             TMP_ROOT=${TMPDIR:-/tmp}/second\n",
+        ] {
+            assert!(
+                !ci_selftest_tmp_root_is_atomic(red),
+                "unsafe TMP_ROOT synthetic fixture must fail closed: {red}"
+            );
+        }
+    }
+
+    #[test]
+    fn ci_selftest_temp_root_guard_discovers_nested_alternate_variable() -> anyhow::Result<()> {
+        let fixture = crate::testutil::unique_tmp("ci-selftest-temp-guard-nested");
+        let scripts = fixture.join(".github/scripts");
+        let nested = fixture.join(".github/fixtures/nested");
+        std::fs::create_dir_all(&scripts)?;
+        std::fs::create_dir_all(&nested)?;
+        std::fs::write(
+            scripts.join("safe.selftest.sh"),
+            "TMP_ROOT=$(mktemp -d \"${TMPDIR:-/tmp}/safe.XXXXXX\")\n",
+        )?;
+        std::fs::write(
+            nested.join("unsafe.selftest.sh"),
+            "ROOT=/tmp/alternate-name.$$\n",
+        )?;
+
+        let discovered = github_selftests(&fixture);
+        std::fs::remove_dir_all(&fixture)?;
+        let discovered = discovered?;
+        assert_eq!(
+            discovered
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                ".github/fixtures/nested/unsafe.selftest.sh",
+                ".github/scripts/safe.selftest.sh",
+            ],
+            "所有嵌套 selftest 都必须自动发现，不能依赖 TMP_ROOT 变量名"
+        );
+        assert!(
+            !ci_selftest_tmp_root_is_atomic(&discovered[0].1),
+            "替代变量名的 PID 临时路径必须 fail closed"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ci_selftest_temp_root_guard_rejects_symlinks() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let fixture = crate::testutil::unique_tmp("ci-selftest-temp-guard-symlink");
+        let nested = fixture.join(".github/nested");
+        std::fs::create_dir_all(&nested)?;
+        let target = fixture.join("target.selftest.sh");
+        std::fs::write(&target, "ROOT=/tmp/unsafe.$$\n")?;
+        symlink(&target, nested.join("linked.selftest.sh"))?;
+
+        let error = match github_selftests(&fixture) {
+            Ok(_) => anyhow::bail!("selftest symlink 必须 fail closed"),
+            Err(error) => error,
+        };
+        std::fs::remove_dir_all(&fixture)?;
+        assert!(
+            error.to_string().contains("CI selftest 不得是 symlink"),
+            "unexpected symlink error: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ci_selftest_temp_root_guard_skips_unrelated_symlinks() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let fixture = crate::testutil::unique_tmp("ci-selftest-temp-guard-unrelated-link");
+        let scripts = fixture.join(".github/scripts");
+        let actions = fixture.join(".github/actions");
+        std::fs::create_dir_all(&scripts)?;
+        std::fs::create_dir_all(&actions)?;
+        std::fs::write(
+            scripts.join("safe.selftest.sh"),
+            "TMP_ROOT=$(mktemp -d \"${TMPDIR:-/tmp}/safe.XXXXXX\")\n",
+        )?;
+        let target = fixture.join("shared-action");
+        std::fs::create_dir_all(&target)?;
+        symlink(&target, actions.join("shared"))?;
+
+        let discovered = github_selftests(&fixture)?;
+        std::fs::remove_dir_all(&fixture)?;
+        assert_eq!(
+            discovered
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            [".github/scripts/safe.selftest.sh"],
+            "unrelated GitHub symlinks must be skipped without traversal"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn committed_ci_selftest_temp_roots_are_atomic() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let discovered = github_selftests(&root)?;
+        assert!(
+            !discovered.is_empty(),
+            "anti-vacuity: 必须递归自动发现 committed GitHub selftest"
+        );
+        assert!(
+            discovered
+                .iter()
+                .any(|(_, source)| ci_selftest_uses_tmp_root(source)),
+            "anti-vacuity: committed GitHub selftest 中必须存在实际 TMP_ROOT carrier"
+        );
+        let unsafe_paths = discovered
+            .iter()
+            .filter_map(|(path, source)| {
+                (!ci_selftest_tmp_root_is_atomic(source)).then_some(path.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            unsafe_paths.is_empty(),
+            "CI-SELFTEST-TEMP-01: 以下 selftest 含可执行 PID 临时路径，或未用 `TMP_ROOT=$(mktemp -d \"...XXXXXX\")` 原子建立独占根目录: {}",
+            unsafe_paths.join(", ")
+        );
+        Ok(())
+    }
 
     #[test]
     fn every_ci_job_has_one_typed_executor() -> anyhow::Result<()> {

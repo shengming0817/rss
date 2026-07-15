@@ -9,12 +9,12 @@ set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 LIFECYCLE="$SCRIPT_DIR/integration-services.sh"
 GOLDEN="$SCRIPT_DIR/testdata/integration-services-v1.golden.json"
-TMP_ROOT=${TMPDIR:-/tmp}/integration-services-selftest.$$
+TMP_BASE=${TMPDIR:-/tmp}
+TMP_ROOT=$(mktemp -d "${TMP_BASE%/}/integration-services-selftest.XXXXXX")
 FAILURES=0
 
 cleanup_tmp() { rm -rf "$TMP_ROOT"; }
 trap cleanup_tmp EXIT HUP INT TERM
-mkdir -p "$TMP_ROOT"
 
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILURES=$((FAILURES + 1)); }
@@ -44,6 +44,23 @@ assert_absent() {
 assert_present() {
   name=$1 pattern=$2 file=$3
   if grep -F -- "$pattern" "$file" >/dev/null 2>&1; then pass "$name"; else fail "$name"; fi
+}
+directory_mode() {
+  path=$1
+  if gnu_mode=$(stat -c '%a' "$path" 2>/dev/null); then
+    mode=$gnu_mode
+  elif bsd_mode=$(stat -f '%Lp' "$path" 2>/dev/null); then
+    mode=$bsd_mode
+  else
+    return 1
+  fi
+  case "$mode" in
+    [0-7][0-7][0-7]) printf '%s\n' "$mode" ;;
+    *) return 1 ;;
+  esac
+}
+directory_is_private() {
+  [ "$(directory_mode "$1")" = 700 ]
 }
 
 FAKE_BIN="$TMP_ROOT/fake-bin"
@@ -295,8 +312,26 @@ assert_jq 'prepare baseline failure remains in lifecycle evidence' "$PREPARE_FAI
 expect_success 'bootstrap creates pending lifecycle evidence' run_common bootstrap
 expect_success 'prepare creates lifecycle evidence' run_common prepare
 if [ -d "$LOG_DIR" ]; then pass 'prepare creates the service log directory'; else fail 'prepare creates the service log directory'; fi
-mode=$(stat -f '%Lp' "$LOG_DIR" 2>/dev/null || stat -c '%a' "$LOG_DIR" 2>/dev/null || true)
-if [ "$mode" = 700 ]; then pass 'service log directory is private'; else fail 'service log directory is private'; fi
+expect_success '0700 service log directory is private' directory_is_private "$LOG_DIR"
+chmod 0755 "$LOG_DIR"
+expect_failure '0755 service log directory is rejected' directory_is_private "$LOG_DIR"
+chmod 0700 "$LOG_DIR"
+POISON_STAT_BIN="$TMP_ROOT/poison-stat-bin"
+mkdir "$POISON_STAT_BIN"
+cat >"$POISON_STAT_BIN/stat" <<'POISON_STAT'
+#!/usr/bin/env bash
+case "$1" in
+  -c) printf 'poison\n'; exit 1 ;;
+  -f) printf '700\n' ;;
+  *) exit 64 ;;
+esac
+POISON_STAT
+chmod +x "$POISON_STAT_BIN/stat"
+if mode=$(PATH="$POISON_STAT_BIN:$PATH" directory_mode "$LOG_DIR") && [ "$mode" = 700 ]; then
+  pass 'failed GNU stat output cannot poison BSD fallback mode'
+else
+  fail 'failed GNU stat output cannot poison BSD fallback mode'
+fi
 assert_jq 'prepare writes a closed schema v1 document' "$EVIDENCE" '
   keys == ["cleanup","collection","context","disk","imageCleanup","preparation","schemaVersion"] and
   .schemaVersion == 1 and

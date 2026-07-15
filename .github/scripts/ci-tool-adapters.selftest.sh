@@ -5,10 +5,9 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ADAPTER="$SCRIPT_DIR/ci-tool-adapters.sh"
 FIXTURES="$SCRIPT_DIR/testdata"
 TMP_BASE=${TMPDIR:-/tmp}
-TMP_ROOT=${TMP_BASE%/}/ci-tool-adapters-selftest.$$
+TMP_ROOT=$(mktemp -d "${TMP_BASE%/}/ci-tool-adapters-selftest.XXXXXX")
 FAILURES=0
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
-mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(CDPATH='' cd -- "$TMP_ROOT" && pwd -P)
 
 pass() { printf 'ok - %s\n' "$1"; }
@@ -41,6 +40,18 @@ expect_failure_stderr_contains() {
   else
     sed 's/^/# /' "$TMP_ROOT/stderr" >&2 || true
     printf '# expected stderr to contain: %s\n' "$expected" >&2
+    fail "$name"
+  fi
+}
+expect_failure_stderr_equals() {
+  name=$1 expected=$2; shift 2
+  if "$@" >"$TMP_ROOT/stdout" 2>"$TMP_ROOT/stderr"; then
+    fail "$name"
+  elif [ ! -s "$TMP_ROOT/stdout" ] && [ "$(cat "$TMP_ROOT/stderr")" = "$expected" ]; then
+    pass "$name"
+  else
+    sed 's/^/# /' "$TMP_ROOT/stderr" >&2 || true
+    printf '# expected exact stderr: %s\n' "$expected" >&2
     fail "$name"
   fi
 }
@@ -268,8 +279,20 @@ expect_success 'ci-meta creates a compiler-cache and OCI policy seal' \
 if grep -Fq 'prom/prometheus@sha256:ddc2493835a1509976d5e4e0c94199c4f843ce1f42dd6bcfc8231ba734a93ff7' "$ROOT/.rss-tool-seal-v1"; then
   pass 'seal records the exact promtool image digest'
 else fail 'seal records the exact promtool image digest'; fi
-expect_failure 'missing docker fails the fresh promtool probe closed' \
-  env PATH=/usr/bin:/bin "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
+NO_DOCKER_BIN="$TMP_ROOT/no-docker-bin"
+mkdir -p "$NO_DOCKER_BIN"
+for command_name in bash cat cmp comm dirname find mktemp rm sort tr wc; do
+  ln -s "$(command -v "$command_name")" "$NO_DOCKER_BIN/$command_name"
+done
+expect_failure_stderr_equals 'missing docker fails for the intended promtool reason' \
+  'ci-tool-adapters: required docker runner unavailable: promtool@3.5.3' \
+  /usr/bin/env -i PATH="$NO_DOCKER_BIN" TMPDIR="$TMP_ROOT" RSS_TEST_TRACE="$TRACE" \
+    /bin/bash "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
+if [ ! -e "$ROOT/.rss-tool-seal-v1" ]; then
+  pass 'missing Docker leaves no tool seal'
+else
+  fail 'missing Docker leaves no tool seal'
+fi
 BAD_DOCKER_BIN="$TMP_ROOT/bad-docker-bin"
 mkdir -p "$BAD_DOCKER_BIN"
 make_binary "$BAD_DOCKER_BIN/docker" \

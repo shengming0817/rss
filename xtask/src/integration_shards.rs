@@ -279,7 +279,6 @@ integration_shard_catalog! {
         resources: [Postgres],
         local_feature_scopes: [Journeys, Runtime],
         units: [
-            ("journeys", "journeys", Lib, Parallel),
             ("journeys", "saga_projection_deps_journey", Test, Parallel),
             ("journeys", "settings_config_publish_journey", Test, Parallel),
             ("runtime", "settings_config_publish_durable_e2e", Test, Serial),
@@ -874,6 +873,15 @@ mod tests {
             assert_eq!(shard.spec().resources, resources);
             assert!(!shard.spec().units.is_empty());
         }
+    }
+
+    #[test]
+    fn cdc_projection_saga_contains_only_executable_tests() {
+        let spec = IntegrationShard::CdcProjectionSaga.spec();
+        assert!(
+            spec.units.iter().all(|unit| unit.kind == TargetKind::Test),
+            "cdc projection/saga must not keep an empty carrier-only lib target"
+        );
     }
 
     fn metadata_from(targets: &[ExecutionUnit]) -> Value {

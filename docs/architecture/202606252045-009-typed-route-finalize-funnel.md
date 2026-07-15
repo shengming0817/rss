@@ -108,5 +108,5 @@ auth-before-bind 结论，只在同一 generated endpoint funnel 上新增 consi
 `test-util` feature 门控测试辅助）、`crates/httpserve/Cargo.toml`（`[features] test-util` + self dev-dep）、
 `crates/bootstrap/src/registry.rs` + `Cargo.toml`（httpserve 边 + test-util dev-dep）、域 callers（identity/settings/audit
 + 各 test-util dev-dep）、`bins/{rss,server}/src/{lib.rs,auth_bridge.rs}` + `tests/auth_e2e.rs` + `Cargo.toml`（字节级同步 +
-test-util dev-dep）、`xtask/src/{layers.rs,layerdeps.rs}`、`crates/httpserve/tests/{runtime.rs,funnel_ui.rs,ui/*}`（compile-fail
+test-util dev-dep）、`xtask/src/{layers.rs,layerdeps.rs}`、`crates/httpserve/tests/{runtime.rs,funnel_trybuild.rs,ui/*}`（compile-fail
 负向证据）、本 ADR + signature-freeze spec + `runtime-api.md` §RouteGroup + 上述注释修订。

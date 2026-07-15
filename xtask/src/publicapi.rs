@@ -689,7 +689,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
         let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
         for stripped in crate::cmd::STRIPPED_ENV
             .iter()
-            .filter(|v| **v != "RUSTUP_TOOLCHAIN")
+            .filter(|v| !matches!(**v, "RUSTUP_TOOLCHAIN" | "RUSTC_WRAPPER"))
         {
             assert!(
                 envs.iter()
@@ -702,6 +702,14 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
                 .any(|(k, v)| *k == std::ffi::OsStr::new("RUSTUP_TOOLCHAIN")
                     && *v == Some(std::ffi::OsStr::new(PINNED_NIGHTLY))),
             "RUSTUP_TOOLCHAIN 在剥离后由显式 env 重设"
+        );
+        let wrapper = envs
+            .iter()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("RUSTC_WRAPPER"))
+            .and_then(|(_, value)| *value);
+        assert!(
+            wrapper.is_none_or(|value| std::path::Path::new(value).is_absolute()),
+            "RUSTC_WRAPPER 只能由 compiler-cache policy 注入绝对路径"
         );
         Ok(())
     }

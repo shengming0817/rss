@@ -24,7 +24,7 @@ cargo xtask ci run --job integration/<shard>[/<partition>]
 ## Target 归属、资源与调度
 
 `serial` 批次由 xtask 传 `--test-threads 1`；`parallel` 批次使用 nextest 默认并发。每个 shard 先跑
-serial，再跑 parallel。`.config/nextest.toml` 不承载 selector/test-group；所有调度只由 typed registry 派生。
+serial，再跑 parallel。`.config/nextest.toml` 不承载 integration shard 的 selector/test-group；集成调度只由 typed registry 派生。
 
 | Shard | 所需资源 | Serial targets | Parallel targets |
 |-------|----------|----------------|------------------|
@@ -32,7 +32,7 @@ serial，再跑 parallel。`.config/nextest.toml` 不承载 selector/test-group�
 | `event-transport` | Postgres、Redis、AMQP、MQTT | `amqp:integration`、`mqtt:integration`、`journeys:amqp_consumer_at_least_once_journey`、`journeys:identity_login_audit_durable_journey`、`runtime:event_transport_durable_e2e` | `amqp:amqp` (lib)、`mqtt:mqtt` (lib)、`journeys:eventtransport_journey`、`journeys:identity_login_audit_journey` |
 | `runtime-http-auth` | Postgres、Redis | `runtime:runtime` (lib)、`runtime:configs_ready_e2e`、`runtime:identity_login_wire_e2e`、`runtime:wire_contract_e2e` | `runtime:auth_e2e`、`runtime:infra_builders_api`、`runtime:refresh_mint_e2e`、`runtime:runtime_serve_e2e` |
 | `consistency-fault` | Postgres、Redis、AMQP | `redis-adapter:integration_claimer`、`journeys-fault-matrix:consistency_fault_matrix_journey` | `redis-adapter:redis` (lib)、`journeys:device_command_ack_timeout_journey` |
-| `cdc-projection-saga` | Postgres | `runtime:settings_config_publish_durable_e2e` | `journeys:journeys` (lib)、`journeys:saga_projection_deps_journey`、`journeys:settings_config_publish_journey` |
+| `cdc-projection-saga` | Postgres | `runtime:settings_config_publish_durable_e2e` | `journeys:saga_projection_deps_journey`、`journeys:settings_config_publish_journey` |
 | `object-storage` | MinIO / S3-compatible object storage | `s3:integration_object_store` | `s3:s3` (lib)、`s3:dlx_archive_store` |
 
 表中未标 `(lib)` 的项均为 Cargo test target。selector 只能由 typed execution unit 渲染为精确的
