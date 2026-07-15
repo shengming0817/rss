@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": ".cursor/hooks/deny-nested-subagent.py",
+        "failClosed": false
+      }
+    ],
+    "subagentStart": [
+      {
+        "command": ".cursor/hooks/deny-nested-subagent.py",
+        "failClosed": true
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": ".cursor/hooks/deny-nested-subagent.py",
+        "matcher": "Task",
+        "failClosed": true
+      }
+    ]
+  }
+}

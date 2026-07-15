@@ -52,6 +52,9 @@ worktrees/
 .claude/scheduled_tasks.lock
 .claude/agent-memory/
 
+# Cursor hooks runtime state（会话 ID、调用载荷与日志，不入库）
+/.cursor/hooks/state/
+
 # Azure CLI（仓库目录下生成的运行时缓存，不入库）
 .azconfig/
 

@@ -160,7 +160,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 
 ### 3.3 详细修复计划
 
-文件级改动清单 + 能复现 finding 的最小测试；Rust crate 改动可在编辑循环中补对应 build / test，涉及并发时补 `--features integration` 或 `loom`。收尾统一运行 10 分钟有界 `make ci CI_BASE=<remote>/develop`；workspace/feature/integration 全量重门交 nightly/develop，skill 不重复或追加低层门。
+文件级改动清单。收尾统一运行 10 分钟有界 `make ci CI_BASE=<remote>/develop`；workspace/feature/integration 全量重门交 nightly/develop，skill 不重复或追加低层门。
 
 ### 3.4 执行决策
 
