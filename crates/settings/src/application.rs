@@ -133,25 +133,46 @@ impl ConfigQueryService {
     ) -> Result<Option<ConfigEntry>, SettingsServiceError> {
         let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let key = SettingKey::parse(key)?;
-        match self.configs.head(scope, &key).await? {
+        let head = match self.configs.head(scope, &key).await {
+            Ok(head) => head,
+            Err(error) => {
+                self.cache.remove(tenant, &key);
+                return Err(error.into());
+            }
+        };
+        let active_version = match head {
             Some(ConfigHead::Active(version)) => {
                 if let Some(entry) = self.cache.find(tenant, &key)
+                    && entry.tenant() == tenant
+                    && entry.key() == &key
                     && entry.version() == version
                 {
                     return Ok(Some(entry));
                 }
+                version
             }
             Some(ConfigHead::Deleted(_)) | None => {
                 self.cache.remove(tenant, &key);
                 return Ok(None);
             }
+        };
+        let entry = match self.configs.find_version(scope, &key, active_version).await {
+            Ok(entry) => entry,
+            Err(error) => {
+                self.cache.remove(tenant, &key);
+                return Err(error.into());
+            }
+        };
+        let Some(entry) = entry else {
+            self.cache.remove(tenant, &key);
+            return Err(SettingsServiceError::ConfigReadIntegrity);
+        };
+        if entry.tenant() != tenant || entry.key() != &key || entry.version() != active_version {
+            self.cache.remove(tenant, &key);
+            return Err(SettingsServiceError::ConfigReadIntegrity);
         }
-        let entry = self.configs.find(scope, &key).await?;
-        match &entry {
-            Some(entry) => self.cache.upsert(entry.clone()),
-            None => self.cache.remove(tenant, &key),
-        }
-        Ok(entry)
+        self.cache.upsert(entry.clone());
+        Ok(Some(entry))
     }
 }
 
@@ -176,6 +197,9 @@ pub enum SettingsServiceError {
     /// 目标配置 / 版本不存在（回滚源缺失）。
     #[error("config entry not found")]
     NotFound,
+    /// 权威 active head 与读取条目的 tenant / key / version 不一致，或条目缺失。
+    #[error("config read integrity check failed")]
+    ConfigReadIntegrity,
     /// 灰度百分比超出 0..=100 范围。
     #[error("percentage out of range; must be 0..=100")]
     PercentageOutOfRange,
@@ -334,25 +358,6 @@ impl SettingsService {
         }
     }
 
-    /// 构造（必填位置参注入读仓储 + 写 co-tx UoW + clock）。`pub(crate)`：`flags` 为域内 [`FlagStore`]，不外泄；
-    /// 开发 / 测试经 `with_seed`（in-mem）构造；生产组合根经 [`Self::with_postgres`] 注入真实 postgres adapter。
-    #[cfg(any(test, feature = "seed-data"))]
-    pub(crate) fn new(
-        configs: Box<DynConfigRepo<'static>>,
-        writer: Box<DynConfigUnitOfWork<'static>>,
-        flags: Box<dyn FlagStore>,
-        clock: Box<dyn Clock>,
-    ) -> Self {
-        let configs = Arc::from(configs);
-        let cache = Arc::new(ConfigCache::default());
-        Self {
-            query: ConfigQueryService::new(configs, cache),
-            writer,
-            flags,
-            clock,
-        }
-    }
-
     /// 组合根构造：注入 outbox emitter + clock，以空 in-mem 配置 / flag 仓储初始化（追踪弹 / demo）。
     ///
     /// 门控于 `test` / `seed-data` feature（编译期边界，对标 identity seed-login）：生产组合根不启用即无
@@ -369,10 +374,10 @@ impl SettingsService {
         E: diport::OutboxEmitter + Send + Sync + 'static,
     {
         let store = new_config_store();
-        Self::new(
+        Self::with_postgres(
             DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, emitter)),
-            Box::new(InMemFlagStore::new()),
+            FlagStoreBox(Box::new(InMemFlagStore::new())),
             clock,
         )
     }
@@ -938,7 +943,8 @@ fn config_error_response(
         SettingsServiceError::VersionConflict => CoreErrorKind::VersionConflict,
         SettingsServiceError::OutboxFactConflict(_) => CoreErrorKind::OutboxFactConflict,
         SettingsServiceError::NotFound => CoreErrorKind::NotFound,
-        SettingsServiceError::PayloadEncode(_)
+        SettingsServiceError::ConfigReadIntegrity
+        | SettingsServiceError::PayloadEncode(_)
         | SettingsServiceError::EntryBuild
         | SettingsServiceError::ProtectionUnavailable(_)
         | SettingsServiceError::ProtectionAuthFailure(_)
@@ -1094,6 +1100,8 @@ impl ::bootstrap::Domain for SettingsDomain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -1163,10 +1171,10 @@ mod tests {
         // 读端口与写 UoW 共享同一 store（与 with_seed / postgres 同源一致性）；emitter 取具体
         // `CapturingEmitter`（`Arc` 底座 Sync）满足 co-tx UoW 的 Send/Sync 约束。
         let store = new_config_store();
-        SettingsService::new(
+        SettingsService::with_postgres(
             DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
-            Box::new(flags),
+            FlagStoreBox(Box::new(flags)),
             Box::new(FixedClock(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
             )),
@@ -1419,6 +1427,1207 @@ mod tests {
                 store,
             ))),
         )
+    }
+
+    #[derive(Clone)]
+    struct ConfigGetProbeResponse {
+        head: Option<ConfigHead>,
+        entry: Option<ConfigEntry>,
+    }
+
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    enum ConfigGetProbeFailure {
+        #[default]
+        None,
+        Head,
+        FindVersion,
+    }
+
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    enum ConfigGetSyntheticWrite {
+        #[default]
+        None,
+        Head,
+        FindVersion,
+    }
+
+    #[derive(Default)]
+    struct ConfigGetProbeState {
+        responses: HashMap<ConfigCacheKey, ConfigGetProbeResponse>,
+        head_calls: Vec<ConfigCacheKey>,
+        find_version_calls: Vec<(TenantId, String, u64)>,
+        failure: ConfigGetProbeFailure,
+        synthetic_write: ConfigGetSyntheticWrite,
+    }
+
+    /// Provider-side observer for the real `settings.config-get` repository seam.
+    #[derive(Clone)]
+    struct SettingsConfigGetRepoProbe {
+        state: Arc<Mutex<ConfigGetProbeState>>,
+        write_effects: ::testkit::local_only::ProviderCounter<::testkit::local_only::Write>,
+    }
+
+    impl Default for SettingsConfigGetRepoProbe {
+        fn default() -> Self {
+            Self {
+                state: Arc::new(Mutex::new(ConfigGetProbeState::default())),
+                write_effects: ::testkit::local_only::ProviderCounter::write(),
+            }
+        }
+    }
+
+    impl SettingsConfigGetRepoProbe {
+        #[allow(clippy::expect_used)]
+        fn active(tenant: TenantId, key: &str, value: &str, version: u64) -> Self {
+            let probe = Self::default();
+            probe.set_active(tenant, key, value, version);
+            probe
+        }
+
+        #[allow(clippy::expect_used)]
+        fn set_active(&self, tenant: TenantId, key: &str, value: &str, version: u64) {
+            let key = SettingKey::parse(key).expect("valid probe setting key");
+            self.set_response(
+                tenant,
+                &key,
+                Some(ConfigHead::Active(version)),
+                Some(ConfigEntry::new(
+                    key.clone(),
+                    ConfigValue::new(value),
+                    tenant,
+                    ConfigVersion::new(version),
+                )),
+            );
+        }
+
+        #[allow(clippy::expect_used)]
+        fn set_deleted(&self, tenant: TenantId, key: &str, version: u64) {
+            let key = SettingKey::parse(key).expect("valid probe setting key");
+            self.set_response(tenant, &key, Some(ConfigHead::Deleted(version)), None);
+        }
+
+        #[allow(clippy::expect_used)]
+        fn set_missing(&self, tenant: TenantId, key: &str) {
+            let key = SettingKey::parse(key).expect("valid probe setting key");
+            self.set_response(tenant, &key, None, None);
+        }
+
+        fn set_response(
+            &self,
+            tenant: TenantId,
+            key: &SettingKey,
+            head: Option<ConfigHead>,
+            entry: Option<ConfigEntry>,
+        ) {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .responses
+                .insert(
+                    (tenant, key.as_str().to_string()),
+                    ConfigGetProbeResponse { head, entry },
+                );
+        }
+
+        fn fail_at(&self, failure: ConfigGetProbeFailure) {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .failure = failure;
+        }
+
+        fn inject_write_at(&self, injection: ConfigGetSyntheticWrite) {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .synthetic_write = injection;
+        }
+
+        fn head_calls(&self) -> Vec<ConfigCacheKey> {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .head_calls
+                .clone()
+        }
+
+        fn find_version_calls(&self) -> Vec<(TenantId, String, u64)> {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .find_version_calls
+                .clone()
+        }
+
+        fn test_repo(&self) -> TestRepo {
+            TestRepo::from_provider(Arc::new(self.clone()))
+        }
+    }
+
+    impl ConfigRepo for SettingsConfigGetRepoProbe {
+        async fn find(
+            &self,
+            _scope: TenantRepoScope,
+            _key: &SettingKey,
+        ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+            Ok(None)
+        }
+
+        async fn find_version(
+            &self,
+            scope: TenantRepoScope,
+            key: &SettingKey,
+            version: u64,
+        ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+            let cache_key = (scope.tenant(), key.as_str().to_string());
+            let (failure, synthetic_write, entry) = {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                state
+                    .find_version_calls
+                    .push((cache_key.0, cache_key.1.clone(), version));
+                (
+                    state.failure,
+                    state.synthetic_write,
+                    state
+                        .responses
+                        .get(&cache_key)
+                        .and_then(|response| response.entry.clone()),
+                )
+            };
+            if synthetic_write == ConfigGetSyntheticWrite::FindVersion {
+                self.write_effects.record();
+            }
+            if failure == ConfigGetProbeFailure::FindVersion {
+                return Err(ConfigRepoError::Storage(Box::new(std::io::Error::other(
+                    "probe find-version failure",
+                ))));
+            }
+            Ok(entry)
+        }
+
+        async fn head(
+            &self,
+            scope: TenantRepoScope,
+            key: &SettingKey,
+        ) -> Result<Option<ConfigHead>, ConfigRepoError> {
+            let cache_key = (scope.tenant(), key.as_str().to_string());
+            let (failure, synthetic_write, head) = {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                state.head_calls.push(cache_key.clone());
+                (
+                    state.failure,
+                    state.synthetic_write,
+                    state
+                        .responses
+                        .get(&cache_key)
+                        .and_then(|response| response.head),
+                )
+            };
+            if synthetic_write == ConfigGetSyntheticWrite::Head {
+                self.write_effects.record();
+            }
+            if failure == ConfigGetProbeFailure::Head {
+                return Err(ConfigRepoError::Storage(Box::new(std::io::Error::other(
+                    "probe head failure",
+                ))));
+            }
+            Ok(head)
+        }
+    }
+
+    struct TestRepo {
+        configs: Box<DynConfigRepo<'static>>,
+    }
+
+    impl TestRepo {
+        fn from_provider<T>(provider: Arc<T>) -> Self
+        where
+            T: ConfigRepo + Clone + 'static,
+        {
+            Self {
+                configs: DynConfigRepo::new_box(provider.as_ref().clone()),
+            }
+        }
+    }
+
+    fn config_get_service(repo: TestRepo) -> Arc<SettingsService> {
+        let writer_store = new_config_store();
+        Arc::new(SettingsService::with_postgres(
+            repo.configs,
+            DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(
+                writer_store,
+                CapturingEmitter::default(),
+            )),
+            FlagStoreBox(Box::new(InMemFlagStore::new())),
+            Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
+        ))
+    }
+
+    #[derive(Clone)]
+    struct SettingsConfigGetAuthorizer {
+        allow: bool,
+        requests: Arc<Mutex<Vec<httpserve::RouteAuthorizationRequest>>>,
+    }
+
+    impl SettingsConfigGetAuthorizer {
+        fn allowing() -> Self {
+            Self {
+                allow: true,
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn denying() -> Self {
+            Self {
+                allow: false,
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn requests(&self) -> Vec<httpserve::RouteAuthorizationRequest> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        }
+    }
+
+    impl httpserve::RouteAuthorizer for SettingsConfigGetAuthorizer {
+        fn authorize<'a>(
+            &'a self,
+            request: httpserve::RouteAuthorizationRequest,
+        ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>>
+        {
+            let allow = self.allow
+                && request.contract_id == ::generated::http::settings_v4::SPEC.route.contract_id()
+                && request.permission == vocab::RoutePermissionId::SettingsConfigGet
+                && request.tenant_id.is_some()
+                && !matches!(request.principal_kind, PrincipalKind::Device);
+            self.requests
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(request);
+            Box::pin(async move {
+                if allow {
+                    httpserve::RouteAuthorizationDecision::Allow
+                } else {
+                    httpserve::RouteAuthorizationDecision::Deny
+                }
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingAuthAuditSink {
+        events: Arc<Mutex<Vec<diport::AuditEvent>>>,
+        fail: bool,
+    }
+
+    impl RecordingAuthAuditSink {
+        fn ok() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+                fail: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                fail: true,
+                ..Self::ok()
+            }
+        }
+
+        fn events(&self) -> Vec<diport::AuditEvent> {
+            self.events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        }
+    }
+
+    impl diport::AuditSink for RecordingAuthAuditSink {
+        async fn record(&self, event: diport::AuditEvent) -> Result<(), diport::AuditSinkError> {
+            if self.fail {
+                return Err(diport::AuditSinkError::new(std::io::Error::other(
+                    "settings auth audit failure",
+                )));
+            }
+            self.events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(event);
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), diport::AuditSinkError> {
+            Ok(())
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn finalized_config_get_router(
+        repo: TestRepo,
+        auth_sink: RecordingAuthAuditSink,
+        authorizer: Arc<dyn httpserve::RouteAuthorizer>,
+    ) -> (
+        axum::Router,
+        ::httpserve::LocalOnlyMountedRouteProof<
+            ::generated::http::settings_v4::RouteMarker,
+            ConfigQueryService,
+        >,
+    ) {
+        let (secret_repo, secret_uow) = secret_ports_arc();
+        let writer_store = new_config_store();
+        let service = Arc::new(super::SettingsService::with_postgres(
+            repo.configs,
+            DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(
+                writer_store,
+                CapturingEmitter::default(),
+            )),
+            FlagStoreBox(Box::new(InMemFlagStore::new())),
+            Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
+        ));
+        let domain = super::SettingsDomain::new(service, secret_repo, secret_uow);
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose settings domain");
+        let mut finalized = registry
+            .finalize_routes()
+            .expect("finalize settings routes");
+        assert_eq!(finalized.len(), 1, "settings owns one Primary listener");
+        let (listener, routes) = finalized.pop().expect("settings Primary routes");
+        assert_eq!(listener, ListenerKind::Primary);
+        let proof = ::httpserve::prove_local_only_mounted_route_state::<ConfigQueryService, _>(
+            &routes,
+            &::generated::http::settings_v4::ROUTE,
+        )
+        .expect("settings config-get is mounted with classified read state");
+        let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
+            .expect("Primary JWT auth plan");
+        let router = ::httpserve::finalize_primary_auth_with_audit(
+            routes,
+            plan,
+            httpserve::AuditSinkHandle::new(auth_sink),
+            Arc::new(FixedClock(SystemTime::UNIX_EPOCH)),
+            authorizer,
+        )
+        .expect("finalize Primary auth")
+        .into_router_for_test();
+        (router, proof)
+    }
+
+    fn with_config_get_auth(
+        router: axum::Router,
+        principal_kind: PrincipalKind,
+        tenant_id: Option<TenantId>,
+    ) -> axum::Router {
+        router.layer(axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            principal_kind,
+            "settings-config-get-subject",
+            tenant_id,
+        )))
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_get_integrity_rejects_active_head_without_an_exact_entry() {
+        let key = SettingKey::parse("app.k").expect("valid key");
+        let cases = [
+            ("missing entry", None),
+            (
+                "wrong tenant",
+                Some(ConfigEntry::new(
+                    key.clone(),
+                    ConfigValue::new("wrong-tenant"),
+                    tenant_b(),
+                    ConfigVersion::new(2),
+                )),
+            ),
+            (
+                "wrong key",
+                Some(ConfigEntry::new(
+                    SettingKey::parse("app.other").expect("valid alternate key"),
+                    ConfigValue::new("wrong-key"),
+                    tenant(),
+                    ConfigVersion::new(2),
+                )),
+            ),
+            (
+                "wrong version",
+                Some(ConfigEntry::new(
+                    key.clone(),
+                    ConfigValue::new("wrong-version"),
+                    tenant(),
+                    ConfigVersion::new(3),
+                )),
+            ),
+        ];
+
+        for (label, returned_entry) in cases {
+            let probe = SettingsConfigGetRepoProbe::active(tenant(), "app.k", "v1", 1);
+            let service = config_get_service(probe.test_repo());
+            let query = service.config_query_service();
+            assert_eq!(
+                query
+                    .get_config(tenant(), "app.k")
+                    .await
+                    .expect("prime valid cache")
+                    .map(|entry| entry.value().to_string()),
+                Some("v1".to_string())
+            );
+            probe.set_response(tenant(), &key, Some(ConfigHead::Active(2)), returned_entry);
+
+            let error = query.get_config(tenant(), "app.k").await.expect_err(label);
+
+            assert!(
+                matches!(error, SettingsServiceError::ConfigReadIntegrity),
+                "{label}"
+            );
+            assert_eq!(error.to_string(), "config read integrity check failed");
+            assert!(
+                query.cache.find(tenant(), &key).is_none(),
+                "{label} must evict the request cache slot"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_get_concurrent_publish_or_delete_returns_observed_head_version() {
+        #[derive(Clone, Copy, Debug)]
+        enum ConcurrentMutation {
+            Publish,
+            Delete,
+        }
+
+        struct SnapshotDriftRepo {
+            inner: InMemConfigRepo,
+            head_observed: Arc<tokio::sync::Barrier>,
+            mutation_committed: Arc<tokio::sync::Barrier>,
+        }
+
+        impl ConfigRepo for SnapshotDriftRepo {
+            async fn find(
+                &self,
+                scope: TenantRepoScope,
+                key: &SettingKey,
+            ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+                self.mutation_committed.wait().await;
+                self.inner.find(scope, key).await
+            }
+
+            async fn find_version(
+                &self,
+                scope: TenantRepoScope,
+                key: &SettingKey,
+                version: u64,
+            ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+                self.mutation_committed.wait().await;
+                self.inner.find_version(scope, key, version).await
+            }
+
+            async fn head(
+                &self,
+                scope: TenantRepoScope,
+                key: &SettingKey,
+            ) -> Result<Option<ConfigHead>, ConfigRepoError> {
+                let head = self.inner.head(scope, key).await?;
+                self.head_observed.wait().await;
+                Ok(head)
+            }
+        }
+
+        let mut reads = Vec::new();
+        for mutation in [ConcurrentMutation::Publish, ConcurrentMutation::Delete] {
+            let store = new_config_store();
+            let capture = CapturingEmitter::default();
+            let writer = SettingsService::with_postgres(
+                DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
+                DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(
+                    store.clone(),
+                    capture.clone(),
+                )),
+                FlagStoreBox(Box::new(InMemFlagStore::new())),
+                Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
+            );
+            writer
+                .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+                .await
+                .expect("seed v1");
+
+            let head_observed = Arc::new(tokio::sync::Barrier::new(2));
+            let mutation_committed = Arc::new(tokio::sync::Barrier::new(2));
+            let reader = SettingsService::with_postgres(
+                DynConfigRepo::new_box(SnapshotDriftRepo {
+                    inner: InMemConfigRepo::from_shared(store.clone()),
+                    head_observed: Arc::clone(&head_observed),
+                    mutation_committed: Arc::clone(&mutation_committed),
+                }),
+                DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
+                FlagStoreBox(Box::new(InMemFlagStore::new())),
+                Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
+            );
+            let query = reader.config_query_service();
+            let concurrent_mutation = async {
+                head_observed.wait().await;
+                match mutation {
+                    ConcurrentMutation::Publish => {
+                        writer
+                            .publish_config(tenant(), actor(), publish_req("app.k", "v2"))
+                            .await
+                            .expect("publish v2");
+                    }
+                    ConcurrentMutation::Delete => {
+                        writer
+                            .delete(tenant(), actor(), "app.k")
+                            .await
+                            .expect("delete v1");
+                    }
+                }
+                mutation_committed.wait().await;
+            };
+
+            let (read, ()) = tokio::join!(query.get_config(tenant(), "app.k"), concurrent_mutation);
+
+            reads.push((mutation, read.map(config_value)));
+        }
+
+        for (mutation, read) in reads {
+            assert_eq!(
+                read.expect("snapshot drift is a valid concurrent read"),
+                Some("v1".to_string()),
+                "{mutation:?} must linearize at the observed active head"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_get_local_only_finalized_route_has_canonical_receipt() {
+        let probe = SettingsConfigGetRepoProbe::active(tenant(), "app.k", "v1", 1);
+        let auth_sink = RecordingAuthAuditSink::ok();
+        let authorizer = SettingsConfigGetAuthorizer::allowing();
+        let (router, proof) = self::finalized_config_get_router(
+            probe.test_repo(),
+            auth_sink.clone(),
+            Arc::new(authorizer.clone()),
+        );
+        let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::Jwt,
+            vocab::PrincipalKind::Admin,
+            "settings-config-get-subject",
+            Some(tenant()),
+        )));
+        let observers = ::testkit::local_only::LocalOnlyObservers::new(
+            probe.write_effects.handle(),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                &proof,
+            ),
+        );
+
+        let (response, receipt) = ::testkit::local_only::assert_local_only_with_receipt::<
+            ::generated::http::settings_v4::LocalOnlyConformanceMarker,
+            _,
+            _,
+            _,
+        >(
+            ::generated::http::settings_v4::SPEC.route.contract_id(),
+            observers,
+            move || {
+                ::testkit::call(
+                    router,
+                    ::testkit::ContractRequest::get(
+                        ::generated::http::settings_v4::SPEC
+                            .route
+                            .path()
+                            .replace("{key}", "app.k"),
+                    ),
+                )
+            },
+        )
+        .await
+        .expect("settings config-get remains LocalOnly");
+        let response = response.expect("call finalized settings config-get route");
+        response
+            .ensure_status(StatusCode::OK)
+            .expect("config-get 200");
+        let body: SettingsConfigGetResponse = response.json().expect("config-get response body");
+        assert_eq!(body.data.key, "app.k");
+        assert_eq!(body.data.value, "v1");
+        assert_eq!(body.data.version, 1);
+        assert_eq!(probe.head_calls(), vec![(tenant(), "app.k".to_string())]);
+        assert_eq!(
+            probe.find_version_calls(),
+            vec![(tenant(), "app.k".to_string(), 1)]
+        );
+        let requests = authorizer.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].contract_id,
+            ::generated::http::settings_v4::SPEC.route.contract_id()
+        );
+        assert_eq!(
+            requests[0].permission,
+            vocab::RoutePermissionId::SettingsConfigGet
+        );
+        assert_eq!(requests[0].tenant_id, Some(tenant()));
+        assert_eq!(requests[0].principal_kind, PrincipalKind::Admin);
+        let audit_events = auth_sink.events();
+        assert_eq!(audit_events.len(), 1);
+        assert_eq!(audit_events[0].principal_kind, PrincipalKind::Admin);
+        assert_eq!(audit_events[0].tenant_id, Some(tenant()));
+        assert_eq!(audit_events[0].resource_kind, "http_route");
+        assert_eq!(
+            audit_events[0].resource_id,
+            ::generated::http::settings_v4::SPEC.route.contract_id()
+        );
+        assert_eq!(audit_events[0].action, "httpserve:authz");
+        assert_eq!(audit_events[0].outcome, diport::AuditOutcome::Success);
+        ::core::assert_eq!(
+            receipt.contract_id(),
+            ::generated::http::settings_v4::SPEC.route.contract_id()
+        );
+    }
+
+    async fn drive_config_get_local_only(
+        probe: &SettingsConfigGetRepoProbe,
+        key: &str,
+        authenticated: Option<(PrincipalKind, Option<TenantId>)>,
+        authorizer: SettingsConfigGetAuthorizer,
+        auth_sink: RecordingAuthAuditSink,
+    ) -> Result<
+        Result<::testkit::ContractResponse, ::testkit::TestkitError>,
+        ::testkit::local_only::LocalOnlyConformanceError,
+    > {
+        let (router, proof) =
+            finalized_config_get_router(probe.test_repo(), auth_sink, Arc::new(authorizer));
+        let router = authenticated.map_or(router.clone(), |(kind, tenant_id)| {
+            with_config_get_auth(router, kind, tenant_id)
+        });
+        let observers = ::testkit::local_only::LocalOnlyObservers::new(
+            probe.write_effects.handle(),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                &proof,
+            ),
+        );
+        let path = ::generated::http::settings_v4::SPEC
+            .route
+            .path()
+            .replace("{key}", key);
+        ::testkit::local_only::assert_local_only(observers, move || {
+            ::testkit::call(router, ::testkit::ContractRequest::get(path))
+        })
+        .await
+    }
+
+    #[allow(clippy::expect_used)]
+    async fn call_finalized_config_get_local_only(
+        router: &axum::Router,
+        proof: &::httpserve::LocalOnlyMountedRouteProof<
+            ::generated::http::settings_v4::RouteMarker,
+            ConfigQueryService,
+        >,
+        probe: &SettingsConfigGetRepoProbe,
+        tenant_id: TenantId,
+    ) -> Result<::testkit::ContractResponse, ::testkit::local_only::LocalOnlyConformanceError> {
+        let router = with_config_get_auth(router.clone(), PrincipalKind::Admin, Some(tenant_id));
+        let observers = ::testkit::local_only::LocalOnlyObservers::new(
+            probe.write_effects.handle(),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                proof,
+            ),
+        );
+        ::testkit::local_only::assert_local_only(observers, move || {
+            ::testkit::call(
+                router,
+                ::testkit::ContractRequest::get(
+                    ::generated::http::settings_v4::SPEC
+                        .route
+                        .path()
+                        .replace("{key}", "app.k"),
+                ),
+            )
+        })
+        .await
+        .map(|response| response.expect("call finalized config-get route"))
+    }
+
+    #[allow(clippy::expect_used)]
+    fn assert_config_get_body(response: &::testkit::ContractResponse, value: &str, version: i64) {
+        response
+            .ensure_status(StatusCode::OK)
+            .expect("config-get 200");
+        let body: SettingsConfigGetResponse = response.json().expect("config-get response body");
+        assert_eq!(body.data.key, "app.k");
+        assert_eq!(body.data.value, value);
+        assert_eq!(body.data.version, version);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_get_local_only_cache_hit_stale_refresh_and_tenant_isolation() {
+        let probe = SettingsConfigGetRepoProbe::active(tenant(), "app.k", "a-v1", 1);
+        probe.set_active(tenant_b(), "app.k", "b-v1", 1);
+        let (router, proof) = finalized_config_get_router(
+            probe.test_repo(),
+            RecordingAuthAuditSink::ok(),
+            Arc::new(SettingsConfigGetAuthorizer::allowing()),
+        );
+
+        let miss = call_finalized_config_get_local_only(&router, &proof, &probe, tenant())
+            .await
+            .expect("cache miss remains LocalOnly");
+        assert_config_get_body(&miss, "a-v1", 1);
+        assert_eq!(probe.head_calls(), vec![(tenant(), "app.k".to_string())]);
+        assert_eq!(
+            probe.find_version_calls(),
+            vec![(tenant(), "app.k".to_string(), 1)]
+        );
+
+        let hit = call_finalized_config_get_local_only(&router, &proof, &probe, tenant())
+            .await
+            .expect("cache hit remains LocalOnly");
+        assert_config_get_body(&hit, "a-v1", 1);
+        assert_eq!(
+            probe.head_calls(),
+            vec![
+                (tenant(), "app.k".to_string()),
+                (tenant(), "app.k".to_string()),
+            ]
+        );
+        assert_eq!(
+            probe.find_version_calls(),
+            vec![(tenant(), "app.k".to_string(), 1)],
+            "valid cache hit skips find_version"
+        );
+
+        probe.set_active(tenant(), "app.k", "a-v2", 2);
+        let refreshed = call_finalized_config_get_local_only(&router, &proof, &probe, tenant())
+            .await
+            .expect("stale refresh remains LocalOnly");
+        assert_config_get_body(&refreshed, "a-v2", 2);
+        assert_eq!(probe.head_calls().len(), 3);
+        assert_eq!(probe.find_version_calls().len(), 2);
+
+        let tenant_b_miss =
+            call_finalized_config_get_local_only(&router, &proof, &probe, tenant_b())
+                .await
+                .expect("tenant B miss remains LocalOnly");
+        assert_config_get_body(&tenant_b_miss, "b-v1", 1);
+        let tenant_b_hit =
+            call_finalized_config_get_local_only(&router, &proof, &probe, tenant_b())
+                .await
+                .expect("tenant B hit remains LocalOnly");
+        assert_config_get_body(&tenant_b_hit, "b-v1", 1);
+        assert_eq!(
+            probe.head_calls(),
+            vec![
+                (tenant(), "app.k".to_string()),
+                (tenant(), "app.k".to_string()),
+                (tenant(), "app.k".to_string()),
+                (tenant_b(), "app.k".to_string()),
+                (tenant_b(), "app.k".to_string()),
+            ]
+        );
+        assert_eq!(
+            probe.find_version_calls(),
+            vec![
+                (tenant(), "app.k".to_string(), 1),
+                (tenant(), "app.k".to_string(), 2),
+                (tenant_b(), "app.k".to_string(), 1),
+            ],
+            "tenant cache slots remain isolated and valid hits skip find_version"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_get_local_only_repo_errors_evict_stale_cache_on_finalized_route() {
+        let key = SettingKey::parse("app.k").expect("valid key");
+
+        let head_probe = SettingsConfigGetRepoProbe::active(tenant(), "app.k", "v1", 1);
+        let (head_router, head_proof) = finalized_config_get_router(
+            head_probe.test_repo(),
+            RecordingAuthAuditSink::ok(),
+            Arc::new(SettingsConfigGetAuthorizer::allowing()),
+        );
+        let prime =
+            call_finalized_config_get_local_only(&head_router, &head_proof, &head_probe, tenant())
+                .await
+                .expect("head cache prime remains LocalOnly");
+        assert_config_get_body(&prime, "v1", 1);
+        head_probe.fail_at(ConfigGetProbeFailure::Head);
+        let head_failure =
+            call_finalized_config_get_local_only(&head_router, &head_proof, &head_probe, tenant())
+                .await
+                .expect("head failure remains LocalOnly");
+        assert_eq!(head_failure.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(head_probe.head_calls().len(), 2);
+        assert_eq!(head_probe.find_version_calls().len(), 1);
+
+        head_probe.fail_at(ConfigGetProbeFailure::None);
+        head_probe.set_response(tenant(), &key, Some(ConfigHead::Active(1)), None);
+        let after_head_failure =
+            call_finalized_config_get_local_only(&head_router, &head_proof, &head_probe, tenant())
+                .await
+                .expect("post-head-failure integrity check remains LocalOnly");
+        assert_eq!(
+            after_head_failure.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Active+None reaches integrity failure only when the stale cache was evicted"
+        );
+        assert_eq!(head_probe.head_calls().len(), 3);
+        assert_eq!(head_probe.find_version_calls().len(), 2);
+
+        let find_version_probe = SettingsConfigGetRepoProbe::active(tenant(), "app.k", "v1", 1);
+        let (find_version_router, find_version_proof) = finalized_config_get_router(
+            find_version_probe.test_repo(),
+            RecordingAuthAuditSink::ok(),
+            Arc::new(SettingsConfigGetAuthorizer::allowing()),
+        );
+        let prime = call_finalized_config_get_local_only(
+            &find_version_router,
+            &find_version_proof,
+            &find_version_probe,
+            tenant(),
+        )
+        .await
+        .expect("find-version cache prime remains LocalOnly");
+        assert_config_get_body(&prime, "v1", 1);
+        find_version_probe.set_active(tenant(), "app.k", "v2", 2);
+        find_version_probe.fail_at(ConfigGetProbeFailure::FindVersion);
+        let find_version_failure = call_finalized_config_get_local_only(
+            &find_version_router,
+            &find_version_proof,
+            &find_version_probe,
+            tenant(),
+        )
+        .await
+        .expect("find-version failure remains LocalOnly");
+        assert_eq!(
+            find_version_failure.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(find_version_probe.head_calls().len(), 2);
+        assert_eq!(find_version_probe.find_version_calls().len(), 2);
+
+        find_version_probe.fail_at(ConfigGetProbeFailure::None);
+        find_version_probe.set_response(tenant(), &key, Some(ConfigHead::Active(1)), None);
+        let after_find_version_failure = call_finalized_config_get_local_only(
+            &find_version_router,
+            &find_version_proof,
+            &find_version_probe,
+            tenant(),
+        )
+        .await
+        .expect("post-find-version-failure integrity check remains LocalOnly");
+        assert_eq!(
+            after_find_version_failure.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "same-version Active+None reaches integrity failure only when the cache slot was evicted"
+        );
+        assert_eq!(find_version_probe.head_calls().len(), 3);
+        assert_eq!(find_version_probe.find_version_calls().len(), 3);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_get_local_only_absent_deleted_invalid_and_repo_failures_are_fail_closed() {
+        for (label, probe, expected) in [
+            (
+                "not found",
+                {
+                    let probe = SettingsConfigGetRepoProbe::default();
+                    probe.set_missing(tenant(), "app.k");
+                    probe
+                },
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "deleted",
+                {
+                    let probe = SettingsConfigGetRepoProbe::default();
+                    probe.set_deleted(tenant(), "app.k", 2);
+                    probe
+                },
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "head failure",
+                {
+                    let probe = SettingsConfigGetRepoProbe::active(tenant(), "app.k", "v1", 1);
+                    probe.fail_at(ConfigGetProbeFailure::Head);
+                    probe
+                },
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                "find-version failure",
+                {
+                    let probe = SettingsConfigGetRepoProbe::active(tenant(), "app.k", "v1", 1);
+                    probe.fail_at(ConfigGetProbeFailure::FindVersion);
+                    probe
+                },
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let response = drive_config_get_local_only(
+                &probe,
+                "app.k",
+                Some((PrincipalKind::Admin, Some(tenant()))),
+                SettingsConfigGetAuthorizer::allowing(),
+                RecordingAuthAuditSink::ok(),
+            )
+            .await
+            .expect("forbidden effects remain zero")
+            .expect("finalized route call");
+            assert_eq!(response.status(), expected, "{label}");
+            let body = String::from_utf8_lossy(response.body_bytes());
+            assert!(!body.contains("probe"), "{label} must redact provider data");
+        }
+
+        let invalid_probe = SettingsConfigGetRepoProbe::default();
+        let response = drive_config_get_local_only(
+            &invalid_probe,
+            "nodot",
+            Some((PrincipalKind::Admin, Some(tenant()))),
+            SettingsConfigGetAuthorizer::allowing(),
+            RecordingAuthAuditSink::ok(),
+        )
+        .await
+        .expect("invalid input remains LocalOnly")
+        .expect("finalized route call");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(invalid_probe.head_calls().is_empty());
+        assert!(invalid_probe.find_version_calls().is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_get_integrity_maps_active_without_entry_to_redacted_500() {
+        let probe = SettingsConfigGetRepoProbe::default();
+        let key = SettingKey::parse("app.k").expect("valid key");
+        probe.set_response(tenant(), &key, Some(ConfigHead::Active(1)), None);
+
+        let response = drive_config_get_local_only(
+            &probe,
+            "app.k",
+            Some((PrincipalKind::Admin, Some(tenant()))),
+            SettingsConfigGetAuthorizer::allowing(),
+            RecordingAuthAuditSink::ok(),
+        )
+        .await
+        .expect("integrity failure remains LocalOnly")
+        .expect("finalized route call");
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = String::from_utf8_lossy(response.body_bytes());
+        assert!(!body.contains("integrity"));
+        assert!(!body.contains("app.k"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_get_local_only_auth_boundary_rejects_without_provider_reads() {
+        let cases = [
+            (
+                "missing auth",
+                None,
+                SettingsConfigGetAuthorizer::allowing(),
+                StatusCode::UNAUTHORIZED,
+                0,
+            ),
+            (
+                "PDP deny",
+                Some((PrincipalKind::Admin, Some(tenant()))),
+                SettingsConfigGetAuthorizer::denying(),
+                StatusCode::FORBIDDEN,
+                1,
+            ),
+            (
+                "device deny",
+                Some((PrincipalKind::Device, Some(tenant()))),
+                SettingsConfigGetAuthorizer::allowing(),
+                StatusCode::FORBIDDEN,
+                1,
+            ),
+            (
+                "tenantless deny",
+                Some((PrincipalKind::Admin, None)),
+                SettingsConfigGetAuthorizer::allowing(),
+                StatusCode::FORBIDDEN,
+                1,
+            ),
+        ];
+
+        for (label, authenticated, authorizer, expected, expected_authorizer_calls) in cases {
+            let probe = SettingsConfigGetRepoProbe::active(tenant(), "app.k", "v1", 1);
+            let auth_sink = RecordingAuthAuditSink::ok();
+            let observed_authorizer = authorizer.clone();
+            let response = drive_config_get_local_only(
+                &probe,
+                "app.k",
+                authenticated,
+                authorizer,
+                auth_sink.clone(),
+            )
+            .await
+            .expect("auth rejection remains LocalOnly")
+            .expect("finalized route call");
+
+            assert_eq!(response.status(), expected, "{label}");
+            assert_eq!(
+                observed_authorizer.requests().len(),
+                expected_authorizer_calls,
+                "{label}"
+            );
+            assert!(probe.head_calls().is_empty(), "{label}");
+            assert!(probe.find_version_calls().is_empty(), "{label}");
+            let audit_events = auth_sink.events();
+            match authenticated {
+                None => assert!(audit_events.is_empty(), "{label}"),
+                Some((principal_kind, tenant_id)) => {
+                    assert_eq!(audit_events.len(), 1, "{label}");
+                    let event = &audit_events[0];
+                    assert_eq!(event.principal_kind, principal_kind, "{label}");
+                    assert_eq!(event.tenant_id, tenant_id, "{label}");
+                    assert_eq!(event.resource_kind, "http_route", "{label}");
+                    assert_eq!(
+                        event.resource_id,
+                        ::generated::http::settings_v4::SPEC.route.contract_id(),
+                        "{label}"
+                    );
+                    assert_eq!(event.action, "httpserve:authz", "{label}");
+                    assert_eq!(
+                        event.outcome,
+                        diport::AuditOutcome::Failure {
+                            reason: "forbidden"
+                        },
+                        "{label}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_get_local_only_cache_paths_trip_provider_write_probe() {
+        #[derive(Clone, Copy, Debug)]
+        enum Scenario {
+            CacheHit,
+            StaleRefresh,
+            TenantMiss,
+        }
+
+        for scenario in [
+            Scenario::CacheHit,
+            Scenario::StaleRefresh,
+            Scenario::TenantMiss,
+        ] {
+            let probe = SettingsConfigGetRepoProbe::active(tenant(), "app.k", "a-v1", 1);
+            probe.set_active(tenant_b(), "app.k", "b-v1", 1);
+            let (router, proof) = finalized_config_get_router(
+                probe.test_repo(),
+                RecordingAuthAuditSink::ok(),
+                Arc::new(SettingsConfigGetAuthorizer::allowing()),
+            );
+            let prime = call_finalized_config_get_local_only(&router, &proof, &probe, tenant())
+                .await
+                .expect("prime remains LocalOnly");
+            assert_config_get_body(&prime, "a-v1", 1);
+
+            let target_tenant = match scenario {
+                Scenario::CacheHit => {
+                    probe.inject_write_at(ConfigGetSyntheticWrite::Head);
+                    tenant()
+                }
+                Scenario::StaleRefresh => {
+                    probe.set_active(tenant(), "app.k", "a-v2", 2);
+                    probe.inject_write_at(ConfigGetSyntheticWrite::FindVersion);
+                    tenant()
+                }
+                Scenario::TenantMiss => {
+                    probe.inject_write_at(ConfigGetSyntheticWrite::Head);
+                    tenant_b()
+                }
+            };
+            let result =
+                call_finalized_config_get_local_only(&router, &proof, &probe, target_tenant).await;
+
+            assert!(
+                matches!(
+                    result,
+                    Err(
+                        ::testkit::local_only::LocalOnlyConformanceError::ForbiddenEffects {
+                            writes: 1,
+                            outbox: 0,
+                            publishes: 0,
+                        }
+                    )
+                ),
+                "{scenario:?} must observe the provider-owned write counter"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_get_local_only_auth_audit_failure_returns_500_before_provider_read() {
+        let probe = SettingsConfigGetRepoProbe::active(tenant(), "app.k", "v1", 1);
+        let response = drive_config_get_local_only(
+            &probe,
+            "app.k",
+            Some((PrincipalKind::Admin, Some(tenant()))),
+            SettingsConfigGetAuthorizer::allowing(),
+            RecordingAuthAuditSink::failing(),
+        )
+        .await
+        .expect("audit failure remains LocalOnly")
+        .expect("finalized route call");
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(probe.head_calls().is_empty());
+        assert!(probe.find_version_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn config_get_local_only_synthetic_provider_writes_trip_exact_probe() {
+        for injection in [
+            ConfigGetSyntheticWrite::Head,
+            ConfigGetSyntheticWrite::FindVersion,
+        ] {
+            let probe = SettingsConfigGetRepoProbe::active(tenant(), "app.k", "v1", 1);
+            probe.inject_write_at(injection);
+            let result = drive_config_get_local_only(
+                &probe,
+                "app.k",
+                Some((PrincipalKind::Admin, Some(tenant()))),
+                SettingsConfigGetAuthorizer::allowing(),
+                RecordingAuthAuditSink::ok(),
+            )
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(
+                    ::testkit::local_only::LocalOnlyConformanceError::ForbiddenEffects {
+                        writes: 1,
+                        outbox: 0,
+                        publishes: 0,
+                    }
+                )
+            ));
+        }
     }
 
     /// 测试用 SettingsDomain 实例（config 服务 + secret 仓储端口，均 in-mem 替身）。
@@ -2292,10 +3501,10 @@ mod tests {
 
         let store = new_config_store();
         let capture = CapturingEmitter::default();
-        let writer = SettingsService::new(
+        let writer = SettingsService::with_postgres(
             DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store.clone(), capture)),
-            Box::new(InMemFlagStore::new()),
+            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
         );
         writer
@@ -2303,10 +3512,10 @@ mod tests {
             .await
             .expect("seed v1");
 
-        let conflict_service = Arc::new(SettingsService::new(
+        let conflict_service = Arc::new(SettingsService::with_postgres(
             DynConfigRepo::new_box(InMemConfigRepo::from_shared(store)),
             DynConfigUnitOfWork::new_box(ConflictUnitOfWork),
-            Box::new(InMemFlagStore::new()),
+            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
         ));
         let tenant_b_router = config_resource_router(
@@ -2402,6 +3611,10 @@ mod tests {
                 StatusCode::CONFLICT,
             ),
             (SettingsServiceError::NotFound, StatusCode::NOT_FOUND),
+            (
+                SettingsServiceError::ConfigReadIntegrity,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
             (
                 SettingsServiceError::EntryBuild,
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2587,13 +3800,13 @@ mod tests {
         let store = new_config_store();
         let capture = CapturingEmitter::default();
         let make_service = || {
-            SettingsService::new(
+            SettingsService::with_postgres(
                 DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
                 DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(
                     store.clone(),
                     capture.clone(),
                 )),
-                Box::new(InMemFlagStore::new()),
+                FlagStoreBox(Box::new(InMemFlagStore::new())),
                 Box::new(FixedClock(
                     SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
                 )),
@@ -2641,13 +3854,13 @@ mod tests {
         let store = new_config_store();
         let capture = CapturingEmitter::default();
         let make_service = || {
-            SettingsService::new(
+            SettingsService::with_postgres(
                 DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
                 DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(
                     store.clone(),
                     capture.clone(),
                 )),
-                Box::new(InMemFlagStore::new()),
+                FlagStoreBox(Box::new(InMemFlagStore::new())),
                 Box::new(FixedClock(
                     SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
                 )),
@@ -2758,23 +3971,23 @@ mod tests {
 
         let store = new_config_store();
         let capture = CapturingEmitter::default();
-        let writer = SettingsService::new(
+        let writer = SettingsService::with_postgres(
             DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(
                 store.clone(),
                 capture.clone(),
             )),
-            Box::new(InMemFlagStore::new()),
+            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
         );
         let fail_head = Arc::new(AtomicBool::new(false));
-        let reader = SettingsService::new(
+        let reader = SettingsService::with_postgres(
             DynConfigRepo::new_box(HeadFailureRepo {
                 inner: InMemConfigRepo::from_shared(store.clone()),
                 fail_head: Arc::clone(&fail_head),
             }),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture)),
-            Box::new(InMemFlagStore::new()),
+            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
         );
 
@@ -2845,14 +4058,14 @@ mod tests {
 
         let capture = CapturingEmitter::default();
         let store = new_config_store();
-        let svc = SettingsService::new(
+        let svc = SettingsService::with_postgres(
             DynConfigRepo::new_box(DeleteBarrierConfigRepo {
                 inner: InMemConfigRepo::from_shared(store.clone()),
                 barrier: tokio::sync::Barrier::new(2),
                 head_reads: AtomicUsize::new(0),
             }),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
-            Box::new(InMemFlagStore::new()),
+            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
             )),
@@ -3007,14 +4220,14 @@ mod tests {
         // 读端口（barrier-wrapped）与写 UoW 共享同一 store：barrier 同步两 find（皆读 None）后，各自经
         // writer.commit 对共享 store CAS，制造 read-then-write 竞争（恰一胜一冲突）。
         let store = new_config_store();
-        let svc = SettingsService::new(
+        let svc = SettingsService::with_postgres(
             DynConfigRepo::new_box(BarrierConfigRepo {
                 inner: InMemConfigRepo::from_shared(store.clone()),
                 barrier: tokio::sync::Barrier::new(2),
                 version_reads: AtomicUsize::new(0),
             }),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
-            Box::new(InMemFlagStore::new()),
+            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
             )),

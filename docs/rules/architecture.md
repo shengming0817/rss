@@ -183,7 +183,7 @@ rss/
 | wire contract 版本目录(轴 B) | `xtask` | Medium(CI 门) |
 | 分层依赖残留(无 back-path 反向边 / 兄弟域互斥 / adapter·generated scope / test-support 双向 shipped confinement / wrappers⟷源一致) | `cargo xtask layer-deps`(source-centric：读各成员 Cargo.toml shipped 依赖表按 §分层矩阵及 LAYER-DEPS-08/10 校验；接入 `verify`；符号/规则/盲区见 `xtask/src/layerdeps.rs` rustdoc 的 LAYER-DEPS-01..10) | Medium(CI 门) |
 | `SharedRuntimeDeps` 字段仅基础设施 / value object（禁域 service / repo） | `cargo xtask runtime-deps guard`(syn 字段扫描 + `xtask/runtime-deps-guard.toml` 配置单源 + synthetic red；接入 `verify`) | Medium(CI 门) |
-| active LocalOnly ↔ source receipt exact-set、唯一性与逐 site marker/ID/mounted ROUTE proof/三维 observers/同一 routes finalize+tuple factory/generated GET operation 闭合 AST 证书 | `cargo xtask consistency local-only-effects`（LOCAL-ONLY-RECEIPT-COVERAGE-01；module/cfg-aware synthetic red + real 5/6 anti-vacuity；仅 `settings.config-get` missing，仍为 report-only） | Medium(CI 门) |
+| active LocalOnly ↔ source receipt exact-set、唯一性与逐 site marker/ID/mounted ROUTE proof/三维 observers/同一 routes finalize+tuple factory/generated GET operation 闭合 AST 证书 | `cargo xtask consistency local-only-effects`（LOCAL-ONLY-RECEIPT-COVERAGE-01；module/cfg-aware synthetic red + real 6/6 anti-vacuity；missing fail-closed） | Medium(CI 门) |
 | 组合根 DI 接线(SharedDeps / `module()`) | 手工 `main` + `bootstrap` crate | — |
 | outbox/saga/reconcile/projection/command_journal 引擎 + topology-gated resolver | tokio 自写(`consistency` 态机 + `eventexec` 执行 + 各 deps resolver) | — |
 

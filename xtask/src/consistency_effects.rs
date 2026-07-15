@@ -1,7 +1,7 @@
 //! Static LocalOnly route/state/port effect closure gate.
 //!
 //! INVARIANT: LOCAL-ONLY-EFFECTS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "forged_observation_provenance_is_rejected", anti_vacuity = "governed_observation_provenance_is_accepted" }.
-//! INVARIANT: LOCAL-ONLY-RECEIPT-COVERAGE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "local_only_receipt_coverage_rejects_noncanonical_sources", anti_vacuity = "real_workspace_local_only_receipt_coverage_is_non_vacuous" }.
+//! INVARIANT: LOCAL-ONLY-RECEIPT-COVERAGE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "local_only_receipt_coverage_is_blocking_and_reportable", anti_vacuity = "real_workspace_local_only_receipt_coverage_is_non_vacuous" }.
 
 use crate::ReportFormat;
 use crate::contract::DiscoveredContract;
@@ -23,6 +23,8 @@ use syn::{
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
+const CONSISTENCY_REPORT_SCHEMA_VERSION: u8 = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Rule {
     MissingRouteBinding,
@@ -31,6 +33,7 @@ pub(crate) enum Rule {
     CrossTenantPrivilege,
     OpaqueSourceScope,
     ForgedObservationEvidence,
+    MissingLocalOnlyReceipt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -83,7 +86,7 @@ enum SourceReceiptRegistrationStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum ReceiptCoverageEnforcement {
-    ReportOnly,
+    FailClosed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -108,9 +111,9 @@ struct SourceReceiptRegistration {
 }
 
 impl SourceReceiptRegistration {
-    const fn report_only(status: SourceReceiptRegistrationStatus) -> Self {
+    const fn fail_closed(status: SourceReceiptRegistrationStatus) -> Self {
         Self {
-            enforcement: ReceiptCoverageEnforcement::ReportOnly,
+            enforcement: ReceiptCoverageEnforcement::FailClosed,
             evidence: ReceiptCoverageEvidence::SourceRegistered,
             status,
         }
@@ -212,27 +215,63 @@ struct LocalOnlyReceiptTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReceiptRegistration {
+    active_contracts: BTreeSet<String>,
     registered_contracts: BTreeSet<String>,
     missing_contracts: Vec<String>,
 }
 
 impl ReceiptRegistration {
-    fn report(&self, active_count: usize) -> LocalOnlyReceiptCoverage {
+    fn reconcile(
+        active_contracts: BTreeSet<String>,
+        registered_contracts: BTreeSet<String>,
+    ) -> Result<Self> {
+        if !registered_contracts.is_subset(&active_contracts) {
+            bail!("registered LocalOnly receipt is not an active LocalOnly target");
+        }
+        let missing_contracts = active_contracts
+            .difference(&registered_contracts)
+            .cloned()
+            .collect();
+        Ok(Self {
+            active_contracts,
+            registered_contracts,
+            missing_contracts,
+        })
+    }
+
+    fn report(&self) -> LocalOnlyReceiptCoverage {
         let missing_count = self.missing_contracts.len();
         LocalOnlyReceiptCoverage {
-            enforcement: ReceiptCoverageEnforcement::ReportOnly,
+            enforcement: ReceiptCoverageEnforcement::FailClosed,
             evidence: ReceiptCoverageEvidence::SourceRegistered,
             status: if missing_count == 0 {
                 ReceiptCoverageStatus::Complete
             } else {
                 ReceiptCoverageStatus::Partial
             },
-            active_count,
+            active_count: self.active_contracts.len(),
             registered_count: self.registered_contracts.len(),
             missing_count,
             missing_contracts: self.missing_contracts.clone(),
         }
     }
+
+    fn blocking_findings(&self) -> Vec<Finding> {
+        self.missing_contracts
+            .iter()
+            .map(|contract_id| missing_receipt_finding(contract_id))
+            .collect()
+    }
+}
+
+fn missing_receipt_finding(contract_id: &str) -> Finding {
+    finding(
+        Rule::MissingLocalOnlyReceipt,
+        contract_id.to_string(),
+        format!(
+            "active LocalOnly contract `{contract_id}` has no canonical source receipt registration"
+        ),
+    )
 }
 
 fn check_root(root: &Path) -> Result<(String, Vec<Finding>)> {
@@ -245,21 +284,29 @@ fn check_root(root: &Path) -> Result<(String, Vec<Finding>)> {
             module_path: module_path_from_mount_key(&contract.key),
         })
         .collect::<Vec<_>>();
-    let mut receipt_registration = ReceiptRegistration {
-        registered_contracts: BTreeSet::new(),
-        missing_contracts: targets
-            .iter()
-            .map(|target| target.contract_id.clone())
-            .collect(),
-    };
+    let active_contracts = targets
+        .iter()
+        .map(|target| target.contract_id.clone())
+        .collect();
+    let mut receipt_registration =
+        ReceiptRegistration::reconcile(active_contracts, BTreeSet::new())?;
     // Contract-only fixtures are intentionally supported by the cross-field unit tests. A real
     // workspace always has Cargo.toml and therefore must close generated/source evidence.
     if root.join("Cargo.toml").is_file() {
         let inventory = local_only_source_inventory(root)?;
+        let generated = generated_localonly_routes(root)?;
+        verify_manifest_generated_local_only_exact_set(&contracts, &generated)?;
+        if root.canonicalize().ok() == crate::workspace_root()?.canonicalize().ok() {
+            verify_manifest_compiled_local_only_exact_set(
+                &contracts,
+                generated::http::LOCAL_ONLY_SPECS,
+            )?;
+        }
         findings.extend(source_findings(root, &contracts)?);
         findings.extend(observation_provenance_findings(&inventory));
         receipt_registration = local_only_receipt_registration_in_inventory(&inventory, &targets)?;
     }
+    findings.extend(receipt_registration.blocking_findings());
     findings
         .sort_by(|a, b| (&a.rule, &a.subject, &a.detail).cmp(&(&b.rule, &b.subject, &b.detail)));
     findings.dedup();
@@ -418,7 +465,7 @@ fn collect_report_with_specs(
             proof_sources.get(scope),
         )?);
     }
-    finalize_report(contracts, &receipt_registration.registered_contracts)
+    finalize_report(contracts, &receipt_registration)
 }
 
 fn module_path_from_mount_key(mount_key: &str) -> Vec<String> {
@@ -461,7 +508,7 @@ fn framework_serving_assembly(root: &Path, contract_id: &str) -> Result<String> 
 
 fn finalize_report(
     mut contracts: Vec<ContractPosture>,
-    registered_contracts: &BTreeSet<String>,
+    receipt_registration: &ReceiptRegistration,
 ) -> Result<ConsistencyReport> {
     contracts.sort_by(|a, b| {
         (&a.contract_id, &a.method, &a.path).cmp(&(&b.contract_id, &b.method, &b.path))
@@ -471,27 +518,31 @@ fn finalize_report(
         .filter(|contract| contract.consistency_level == "LocalOnly")
         .map(|contract| contract.contract_id.clone())
         .collect::<BTreeSet<_>>();
-    if !registered_contracts.is_subset(&active_local_only) {
-        bail!("registered LocalOnly receipt is not an active LocalOnly report row");
+    if receipt_registration.active_contracts != active_local_only {
+        bail!("LocalOnly receipt assessment does not match active LocalOnly report rows");
     }
     for contract in &mut contracts {
         contract.source_receipt_registration =
-            SourceReceiptRegistration::report_only(if contract.consistency_level != "LocalOnly" {
+            SourceReceiptRegistration::fail_closed(if contract.consistency_level != "LocalOnly" {
                 SourceReceiptRegistrationStatus::NotApplicable
-            } else if registered_contracts.contains(&contract.contract_id) {
+            } else if receipt_registration
+                .registered_contracts
+                .contains(&contract.contract_id)
+            {
                 SourceReceiptRegistrationStatus::Registered
             } else {
                 SourceReceiptRegistrationStatus::Missing
             });
+        if contract.source_receipt_registration.status == SourceReceiptRegistrationStatus::Missing {
+            contract
+                .findings
+                .push(report_finding(&missing_receipt_finding(
+                    &contract.contract_id,
+                )));
+            contract.findings.sort();
+            contract.findings.dedup();
+        }
     }
-    let missing_contracts = active_local_only
-        .difference(registered_contracts)
-        .cloned()
-        .collect::<Vec<_>>();
-    let receipt_registration = ReceiptRegistration {
-        registered_contracts: registered_contracts.clone(),
-        missing_contracts,
-    };
     let mut findings: Vec<_> = contracts
         .iter()
         .flat_map(|contract| contract.findings.iter().cloned())
@@ -499,14 +550,14 @@ fn finalize_report(
     findings.sort();
     findings.dedup();
     Ok(ConsistencyReport {
-        schema_version: 2,
+        schema_version: CONSISTENCY_REPORT_SCHEMA_VERSION,
         status: if findings.is_empty() {
             ReportStatus::Passed
         } else {
             ReportStatus::Failed
         },
         active_http_contract_count: contracts.len(),
-        local_only_receipt_coverage: receipt_registration.report(active_local_only.len()),
+        local_only_receipt_coverage: receipt_registration.report(),
         findings,
         contracts,
     })
@@ -594,7 +645,7 @@ fn build_contract_posture(
             mount_sources,
         },
         effect_proof,
-        source_receipt_registration: SourceReceiptRegistration::report_only(if local_only {
+        source_receipt_registration: SourceReceiptRegistration::fail_closed(if local_only {
             SourceReceiptRegistrationStatus::Missing
         } else {
             SourceReceiptRegistrationStatus::NotApplicable
@@ -631,7 +682,7 @@ fn render_report(report: &ConsistencyReport, format: ReportFormat) -> Result<Str
 }
 
 fn validate_report(report: &ConsistencyReport) -> Result<()> {
-    if report.schema_version != 2 {
+    if report.schema_version != CONSISTENCY_REPORT_SCHEMA_VERSION {
         bail!("unsupported consistency report schema version");
     }
     if report.active_http_contract_count != report.contracts.len() {
@@ -657,8 +708,13 @@ fn validate_report(report: &ConsistencyReport) -> Result<()> {
         .map(|contract| contract.contract_id.clone())
         .collect::<Vec<_>>();
     if report.local_only_receipt_coverage.active_count != active_local_only.len()
+        || report.local_only_receipt_coverage.enforcement != ReceiptCoverageEnforcement::FailClosed
+        || report.local_only_receipt_coverage.evidence != ReceiptCoverageEvidence::SourceRegistered
         || report.local_only_receipt_coverage.registered_count != registered
         || report.local_only_receipt_coverage.missing_count != missing_contracts.len()
+        || report.local_only_receipt_coverage.registered_count
+            + report.local_only_receipt_coverage.missing_count
+            != report.local_only_receipt_coverage.active_count
         || report.local_only_receipt_coverage.missing_contracts != missing_contracts
         || report.local_only_receipt_coverage.status
             != if missing_contracts.is_empty() {
@@ -667,28 +723,48 @@ fn validate_report(report: &ConsistencyReport) -> Result<()> {
                 ReceiptCoverageStatus::Partial
             }
         || report.contracts.iter().any(|contract| {
-            contract.consistency_level != "LocalOnly"
-                && contract.source_receipt_registration.status
-                    != SourceReceiptRegistrationStatus::NotApplicable
+            contract.source_receipt_registration.enforcement
+                != ReceiptCoverageEnforcement::FailClosed
+                || contract.source_receipt_registration.evidence
+                    != ReceiptCoverageEvidence::SourceRegistered
+                || if contract.consistency_level == "LocalOnly" {
+                    contract.source_receipt_registration.status
+                        == SourceReceiptRegistrationStatus::NotApplicable
+                } else {
+                    contract.source_receipt_registration.status
+                        != SourceReceiptRegistrationStatus::NotApplicable
+                }
         })
     {
         bail!("LocalOnly receipt coverage does not match contract rows");
     }
-    if report.status == ReportStatus::Passed
-        && (!report.findings.is_empty()
-            || report
-                .contracts
-                .iter()
-                .any(|contract| !contract.findings.is_empty()))
-    {
-        bail!("passed consistency report contains findings");
+    for contract in &active_local_only {
+        let expected = report_finding(&missing_receipt_finding(&contract.contract_id));
+        if (contract.source_receipt_registration.status == SourceReceiptRegistrationStatus::Missing)
+            != contract.findings.contains(&expected)
+        {
+            bail!("LocalOnly receipt finding does not match contract registration");
+        }
+    }
+    let mut expected_findings = report
+        .contracts
+        .iter()
+        .flat_map(|contract| contract.findings.iter().cloned())
+        .collect::<Vec<_>>();
+    expected_findings.sort();
+    expected_findings.dedup();
+    if report.findings != expected_findings {
+        bail!("top-level findings do not match contract findings");
+    }
+    if (report.status == ReportStatus::Passed) != report.findings.is_empty() {
+        bail!("consistency report status does not match findings");
     }
     Ok(())
 }
 
 fn render_markdown(report: &ConsistencyReport) -> String {
     let mut output = format!(
-        "# Consistency / Effect Posture\n\nStatic status: **{}** · Active HTTP contracts: **{}** · Findings: **{}**\n\nSource receipt registration (report-only; tests not executed): **{}/{} registered** · Missing: **{}**{}\n\n| Contract | Owner | Method | Path | Consistency | Effects | Mount | LocalOnly Proof | Source Receipt Registration | Findings |\n|---|---|---|---|---|---|---|---|---|---|\n",
+        "# Consistency / Effect Posture\n\nStatic status: **{}** · Active HTTP contracts: **{}** · Findings: **{}**\n\nSource receipt registration (fail-closed; tests not executed): **{}/{} registered** · Missing: **{}**{}\n\n| Contract | Owner | Method | Path | Consistency | Effects | Mount | LocalOnly Proof | Source Receipt Registration | Findings |\n|---|---|---|---|---|---|---|---|---|---|\n",
         match report.status {
             ReportStatus::Passed => "passed",
             ReportStatus::Failed => "failed",
@@ -1212,7 +1288,7 @@ fn validate_receipt_namespace(root: &Path, member: &Path) -> std::result::Result
 }
 
 /// Reconciles canonical source receipt sites with the generated active LocalOnly target set.
-/// Missing sites are report-only; every malformed or stale site is a structural error.
+/// Missing sites are blocking policy findings; every malformed or stale site is a structural error.
 fn local_only_receipt_registration(
     root: &Path,
     targets: &[LocalOnlyReceiptTarget],
@@ -1246,8 +1322,10 @@ fn local_only_receipt_registration_in_inventory(
     }
 
     let mut registered = BTreeMap::<String, String>::new();
+    let settings_composition = collect_settings_production_composition_certificate(inventory);
     for source in inventory {
-        let factories = verified_router_factories(&source.syntax.items);
+        let factories =
+            verified_router_factories(&source.syntax.items, settings_composition.clone());
         let sites = receipt_sites_in_file(
             &source.syntax,
             &source.subject,
@@ -1272,15 +1350,7 @@ fn local_only_receipt_registration_in_inventory(
         }
     }
 
-    let registered_contracts = registered.into_keys().collect::<BTreeSet<_>>();
-    let missing_contracts = active_ids
-        .difference(&registered_contracts)
-        .cloned()
-        .collect();
-    Ok(ReceiptRegistration {
-        registered_contracts,
-        missing_contracts,
-    })
+    ReceiptRegistration::reconcile(active_ids, registered.into_keys().collect::<BTreeSet<_>>())
 }
 
 #[derive(Debug)]
@@ -1568,11 +1638,15 @@ fn proven_receipt_statements(block: &syn::Block) -> BTreeSet<(usize, usize)> {
         {
             continue;
         }
-        if block
-            .stmts
-            .get(index + 1)
-            .is_some_and(|statement| statement_asserts_receipt(statement, &receipt))
-        {
+        let following = &block.stmts[index + 1..];
+        let assertion = following
+            .iter()
+            .position(|statement| statement_asserts_receipt(statement, &receipt));
+        if assertion.is_some_and(|assertion| {
+            !following[..assertion]
+                .iter()
+                .any(statement_may_skip_following_receipt)
+        }) {
             proven.insert(location);
         }
     }
@@ -1689,7 +1763,13 @@ fn asserted_receipt_contract_module(
         if location != call_location {
             continue;
         }
-        let statement = block.stmts.get(index + 1)?;
+        let mut assertions = block.stmts[index + 1..]
+            .iter()
+            .filter(|statement| statement_asserts_receipt(statement, &receipt));
+        let statement = assertions.next()?;
+        if assertions.next().is_some() {
+            return None;
+        }
         let mac = match statement {
             syn::Stmt::Macro(statement) => &statement.mac,
             syn::Stmt::Expr(Expr::Macro(expression), _) => &expression.mac,
@@ -1916,9 +1996,18 @@ fn certify_receipt_source(
         .factories
         .get(&(lexical_module.to_vec(), factory_name.clone()))
         .ok_or_else(|| {
-            anyhow!(
-                "{subject}: `self::{factory_name}` is not a cfg-valid mounted route factory in the receipt's lexical module"
-            )
+            if module == ["settings_v4"] {
+                if let Some(detail) = evidence.factories.settings_failure() {
+                    return anyhow!("{subject}: Settings receipt {detail}");
+                }
+                anyhow!(
+                    "{subject}: Settings receipt provider→TestRepo→service→Domain→classified-state factory failed route/proof/finalizer certification"
+                )
+            } else {
+                anyhow!(
+                    "{subject}: `self::{factory_name}` is not a cfg-valid mounted route factory in the receipt's lexical module"
+                )
+            }
         })?;
     if factory.route_module.as_slice() != module {
         bail!("{subject}: mounted factory proof names a different generated ROUTE");
@@ -1969,6 +2058,11 @@ fn certify_receipt_source(
                 .filter_map(canonical_test_repo_provider)
                 .any(|actual| actual != provider)
         {
+            if module == ["settings_v4"] {
+                bail!(
+                    "{subject}: Settings receipt provider→TestRepo→service→Domain→classified-state lineage does not match the runtime observer"
+                );
+            }
             bail!(
                 "{subject}: runtime observer provider must map through `test_repo()` to the factory parameter used by the mounted Domain/state constructor"
             );
@@ -2126,6 +2220,11 @@ fn generated_terminal_module(path: &syn::Path, terminal: &str) -> Option<Vec<Str
 }
 
 fn canonical_receipt_operation(expression: &Expr) -> Option<(String, Vec<String>)> {
+    enum PathReplacement {
+        IdentityPolicy,
+        SettingsKey,
+    }
+
     let Expr::Closure(closure) = peel_expr(expression) else {
         return None;
     };
@@ -2166,9 +2265,18 @@ fn canonical_receipt_operation(expression: &Expr) -> Option<(String, Vec<String>
                 && string_literal_is(replace.args.first(), "{policyId}")
                 && string_literal_is(replace.args.iter().nth(1), "policy-a") =>
         {
-            (&*replace.receiver, true)
+            (&*replace.receiver, Some(PathReplacement::IdentityPolicy))
         }
-        other => (other, false),
+        Expr::MethodCall(replace)
+            if replace.method == "replace"
+                && replace.args.len() == 2
+                && replace.turbofish.is_none()
+                && string_literal_is(replace.args.first(), "{key}")
+                && string_literal_is(replace.args.iter().nth(1), "app.k") =>
+        {
+            (&*replace.receiver, Some(PathReplacement::SettingsKey))
+        }
+        other => (other, None),
     };
     let Expr::MethodCall(path) = peel_expr(request_path) else {
         return None;
@@ -2186,8 +2294,13 @@ fn canonical_receipt_operation(expression: &Expr) -> Option<(String, Vec<String>
         return None;
     };
     let module = generated_terminal_module(&spec.path, "SPEC")?;
-    if replacement && module != ["identity_v1", "policies_get"] {
-        return None;
+    match replacement {
+        Some(PathReplacement::IdentityPolicy) if module != ["identity_v1", "policies_get"] => {
+            return None;
+        }
+        Some(PathReplacement::SettingsKey) if module != ["settings_v4"] => return None,
+        None if module == ["settings_v4"] => return None,
+        _ => {}
     }
     Some((router, module))
 }
@@ -2210,7 +2323,46 @@ struct VerifiedRouterFactory {
     constructor_repo_fields: BTreeMap<String, BTreeSet<String>>,
 }
 
-type VerifiedRouterFactories = BTreeMap<(Vec<String>, String), VerifiedRouterFactory>;
+#[derive(Debug)]
+struct VerifiedRouterFactories {
+    entries: BTreeMap<(Vec<String>, String), VerifiedRouterFactory>,
+    settings_provider: SettingsProviderCertification,
+    settings_composition: SettingsCompositionCertification,
+}
+
+impl VerifiedRouterFactories {
+    fn get(&self, key: &(Vec<String>, String)) -> Option<&VerifiedRouterFactory> {
+        self.entries.get(key)
+    }
+
+    fn settings_failure(&self) -> Option<String> {
+        match &self.settings_provider {
+            SettingsProviderCertification::NotApplicable => Some(format_settings_failure(
+                SettingsCertificationStage::RootTypes,
+                "root production ConfigQueryService + SettingsService + SettingsDomain",
+                "Settings provider model is not present in the receipt source",
+            )),
+            SettingsProviderCertification::Invalid {
+                stage,
+                expected,
+                actual,
+            } => Some(format_settings_failure(*stage, expected, actual)),
+            SettingsProviderCertification::Valid(_) => match &self.settings_composition {
+                SettingsCompositionCertification::NotApplicable => Some(format_settings_failure(
+                    SettingsCertificationStage::ProductionComposition,
+                    "composition/settings/src/lib.rs production wire",
+                    "production composition source is not present",
+                )),
+                SettingsCompositionCertification::Invalid {
+                    stage,
+                    expected,
+                    actual,
+                } => Some(format_settings_failure(*stage, expected, actual)),
+                SettingsCompositionCertification::Valid => None,
+            },
+        }
+    }
+}
 
 fn mounted_factory_call<'a>(
     block: &'a syn::Block,
@@ -2313,10 +2465,11 @@ fn canonical_identity_router_layer(local: &syn::Local, router: &str) -> bool {
     {
         return false;
     }
-    expression_path_is(
+    let jwt = expression_path_is(
         authenticated.args.first(),
         &["primitives", "RequiredScheme", "Jwt"],
-    ) && authenticated.args.iter().nth(1).is_some_and(|principal| {
+    );
+    let identity = authenticated.args.iter().nth(1).is_some_and(|principal| {
         expression_path_is(Some(principal), &["vocab", "PrincipalKind", "User"])
             || expression_path_is(Some(principal), &["vocab", "PrincipalKind", "Admin"])
     }) && authenticated
@@ -2328,7 +2481,18 @@ fn canonical_identity_router_layer(local: &syn::Local, router: &str) -> bool {
             .args
             .iter()
             .nth(3)
-            .is_some_and(canonical_identity_tenant)
+            .is_some_and(canonical_identity_tenant);
+    let settings = authenticated.args.iter().nth(1).is_some_and(|principal| {
+        expression_path_is(Some(principal), &["vocab", "PrincipalKind", "Admin"])
+    }) && string_literal_is(
+        authenticated.args.iter().nth(2),
+        "settings-config-get-subject",
+    ) && authenticated
+        .args
+        .iter()
+        .nth(3)
+        .is_some_and(canonical_settings_tenant);
+    jwt && (identity || settings)
 }
 
 fn canonical_identity_tenant(expression: &Expr) -> bool {
@@ -2347,6 +2511,19 @@ fn canonical_identity_tenant(expression: &Expr) -> bool {
             .args
             .first()
             .is_some_and(|argument| simple_ident(argument).as_deref() == Some("CANON_TENANT"))
+}
+
+fn canonical_settings_tenant(expression: &Expr) -> bool {
+    let Expr::Call(some) = peel_expr(expression) else {
+        return false;
+    };
+    if !relative_call_path_is(&some.func, &["Some"]) || some.args.len() != 1 {
+        return false;
+    }
+    let Some(Expr::Call(tenant)) = some.args.first().map(peel_expr) else {
+        return false;
+    };
+    relative_call_path_is(&tenant.func, &["tenant"]) && tenant.args.is_empty()
 }
 
 fn relative_call_path_is(expression: &Expr, expected: &[&str]) -> bool {
@@ -2384,6 +2561,95 @@ struct AggregateConstructorCertificate {
     parameter_index: usize,
     type_name: String,
     fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SettingsProviderCertificate;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsCertificationStage {
+    RootTypes,
+    QueryFields,
+    QueryConstructor,
+    GetConfigRead,
+    ServiceConstructor,
+    QueryGetter,
+    DomainConstructor,
+    DomainMount,
+    ProductionComposition,
+}
+
+impl SettingsCertificationStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::RootTypes => "root-types",
+            Self::QueryFields => "query-fields",
+            Self::QueryConstructor => "query-constructor",
+            Self::GetConfigRead => "get-config-read",
+            Self::ServiceConstructor => "service-constructor",
+            Self::QueryGetter => "query-getter",
+            Self::DomainConstructor => "domain-constructor",
+            Self::DomainMount => "domain-mount",
+            Self::ProductionComposition => "production-composition",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum SettingsProviderCertification {
+    NotApplicable,
+    Invalid {
+        stage: SettingsCertificationStage,
+        expected: String,
+        actual: String,
+    },
+    Valid(SettingsProviderCertificate),
+}
+
+impl SettingsProviderCertification {
+    fn invalid(
+        stage: SettingsCertificationStage,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self::Invalid {
+            stage,
+            expected: expected.into(),
+            actual: actual.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum SettingsCompositionCertification {
+    NotApplicable,
+    Invalid {
+        stage: SettingsCertificationStage,
+        expected: String,
+        actual: String,
+    },
+    Valid,
+}
+
+impl SettingsCompositionCertification {
+    fn invalid(expected: impl Into<String>, actual: impl Into<String>) -> Self {
+        Self::Invalid {
+            stage: SettingsCertificationStage::ProductionComposition,
+            expected: expected.into(),
+            actual: actual.into(),
+        }
+    }
+}
+
+fn format_settings_failure(
+    stage: SettingsCertificationStage,
+    expected: &str,
+    actual: &str,
+) -> String {
+    format!(
+        "certificate invalid at stage={}; expected={expected}; actual={actual}",
+        stage.as_str()
+    )
 }
 
 const IDENTITY_LOCAL_ONLY_PROVIDER_FIELDS: [&str; 4] = [
@@ -2708,6 +2974,469 @@ fn collect_domain_provider_certificates(
     certificates
 }
 
+fn collect_settings_provider_certificate(items: &[Item]) -> SettingsProviderCertification {
+    let root_types = ["ConfigQueryService", "SettingsService", "SettingsDomain"];
+    let present = root_types
+        .iter()
+        .filter(|name| root_production_struct_exists(items, name))
+        .copied()
+        .collect::<Vec<_>>();
+    if present.is_empty() {
+        return SettingsProviderCertification::NotApplicable;
+    }
+    if present.len() != root_types.len() {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::RootTypes,
+            root_types.join(" + "),
+            format!("production root types found: {}", present.join(", ")),
+        );
+    }
+    let expected_query_fields = BTreeSet::from(["cache".to_string(), "configs".to_string()]);
+    let actual_query_fields = root_named_struct_fields(items, "ConfigQueryService");
+    if actual_query_fields.as_ref() != Some(&expected_query_fields) {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::QueryFields,
+            format!("exact fields {expected_query_fields:?}"),
+            format!("fields {actual_query_fields:?}"),
+        );
+    }
+
+    let query_new = match settings_production_method(
+        items,
+        "ConfigQueryService",
+        None,
+        "new",
+        SettingsCertificationStage::QueryConstructor,
+    ) {
+        Ok(function) => function,
+        Err(invalid) => return invalid,
+    };
+    let query_parameters = direct_parameter_names(query_new);
+    if query_parameters.as_deref() != Some(&["configs".to_string(), "cache".to_string()])
+        || !tail_self_struct_field_is_ident(&query_new.block, "configs", "configs")
+        || !tail_self_struct_field_is_ident(&query_new.block, "cache", "cache")
+        || local_binding_count(&query_new.block, "configs") != 0
+        || block_reassigns_any(&query_new.block, &["configs", "cache"])
+    {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::QueryConstructor,
+            "ConfigQueryService::new(configs, cache) stores both direct parameters exactly once",
+            format!("parameters={query_parameters:?}; constructor body is noncanonical"),
+        );
+    }
+
+    let get_config = match settings_production_method(
+        items,
+        "ConfigQueryService",
+        None,
+        "get_config",
+        SettingsCertificationStage::GetConfigRead,
+    ) {
+        Ok(function) => function,
+        Err(invalid) => return invalid,
+    };
+    if !settings_get_config_reads_exact_providers(&get_config.block) {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::GetConfigRead,
+            "one configs.head + one configs.find_version(active_version) + one cache.find",
+            "get_config provider reads do not match the exact certified set",
+        );
+    }
+
+    let service_constructor = match settings_production_method(
+        items,
+        "SettingsService",
+        None,
+        "with_postgres",
+        SettingsCertificationStage::ServiceConstructor,
+    ) {
+        Ok(function) => function,
+        Err(invalid) => return invalid,
+    };
+    let service_parameters = direct_parameter_names(service_constructor);
+    if service_parameters.as_deref()
+        != Some(&[
+            "configs".to_string(),
+            "writer".to_string(),
+            "flags".to_string(),
+            "clock".to_string(),
+        ])
+        || !canonical_arc_from_parameter_binding(service_constructor, "configs")
+    {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::ServiceConstructor,
+            "unique production SettingsService::with_postgres(configs, writer, flags, clock)",
+            format!("parameters={service_parameters:?}; configs binding is noncanonical"),
+        );
+    }
+    let Some(query_expression) = tail_self_struct_field(&service_constructor.block, "query") else {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::ServiceConstructor,
+            "with_postgres stores query from ConfigQueryService::new(configs, cache)",
+            "query field initializer is missing or indirect",
+        );
+    };
+    let Expr::Call(query_call) = peel_expr(query_expression) else {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::ServiceConstructor,
+            "direct ConfigQueryService::new(configs, cache) call",
+            "query field is not initialized by a direct call",
+        );
+    };
+    if !relative_call_path_is(&query_call.func, &["ConfigQueryService", "new"])
+        || query_call.args.first().and_then(simple_ident).as_deref() != Some("configs")
+        || query_call.args.get(1).and_then(simple_ident).as_deref() != Some("cache")
+        || query_call.args.len() != 2
+    {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::ServiceConstructor,
+            "ConfigQueryService::new(configs, cache)",
+            "with_postgres query initializer has a different constructor or argument lineage",
+        );
+    }
+
+    let query_getter = match settings_production_method(
+        items,
+        "SettingsService",
+        None,
+        "config_query_service",
+        SettingsCertificationStage::QueryGetter,
+    ) {
+        Ok(function) => function,
+        Err(invalid) => return invalid,
+    };
+    let getter_tail = query_getter.block.stmts.last().and_then(tail_expression);
+    if getter_tail.is_none_or(|tail| !self_field_clone(tail, "query")) {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::QueryGetter,
+            "config_query_service returns self.query.clone()",
+            "getter does not directly clone the certified query field",
+        );
+    }
+
+    let domain_new = match settings_production_method(
+        items,
+        "SettingsDomain",
+        None,
+        "new",
+        SettingsCertificationStage::DomainConstructor,
+    ) {
+        Ok(function) => function,
+        Err(invalid) => return invalid,
+    };
+    let Some(config_query) = unique_direct_initializer(&domain_new.block, "config_query") else {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::DomainConstructor,
+            "one direct config_query binding from config.config_query_service()",
+            "config_query binding is missing or ambiguous",
+        );
+    };
+    let Expr::MethodCall(getter) = peel_expr(config_query) else {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::DomainConstructor,
+            "config.config_query_service()",
+            "config_query binding is not a method call",
+        );
+    };
+    if getter.method != "config_query_service"
+        || !getter.args.is_empty()
+        || getter.turbofish.is_some()
+        || simple_ident(&getter.receiver).as_deref() != Some("config")
+        || !tail_self_struct_field_is_ident(&domain_new.block, "config_query", "config_query")
+    {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::DomainConstructor,
+            "SettingsDomain stores the direct config.config_query_service() result",
+            "Domain constructor query lineage is noncanonical",
+        );
+    }
+
+    let init = match settings_production_method(
+        items,
+        "SettingsDomain",
+        Some("Domain"),
+        "init",
+        SettingsCertificationStage::DomainMount,
+    ) {
+        Ok(function) => function,
+        Err(invalid) => return invalid,
+    };
+    let Some(init_query) = unique_direct_initializer(&init.block, "config_query") else {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::DomainMount,
+            "one direct config_query clone in Domain::init",
+            "config_query mount binding is missing or ambiguous",
+        );
+    };
+    if !self_field_clone(init_query, "config_query")
+        || block_reassigns_any(&init.block, &["config_query"])
+    {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::DomainMount,
+            "immutable self.config_query.clone() mount binding",
+            "Domain::init mount binding has different lineage or is reassigned",
+        );
+    }
+    struct ClassifiedStateCount(usize);
+    impl<'ast> Visit<'ast> for ClassifiedStateCount {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if node.method == "with_classified_state"
+                && node.args.len() == 1
+                && node.args.first().and_then(simple_ident).as_deref() == Some("config_query")
+            {
+                self.0 += 1;
+            }
+            visit::visit_expr_method_call(self, node);
+        }
+    }
+    let mut mounted = ClassifiedStateCount(0);
+    mounted.visit_block(&init.block);
+    if mounted.0 != 1 {
+        return SettingsProviderCertification::invalid(
+            SettingsCertificationStage::DomainMount,
+            "exactly one with_classified_state(config_query)",
+            format!("found {} matching classified-state mounts", mounted.0),
+        );
+    }
+    SettingsProviderCertification::Valid(SettingsProviderCertificate)
+}
+
+fn root_named_struct_fields(items: &[Item], owner: &str) -> Option<BTreeSet<String>> {
+    let mut matches = items.iter().filter_map(|item| match item {
+        Item::Struct(item) if !cfg_gated(&item.attrs) && item.ident == owner => {
+            let syn::Fields::Named(fields) = &item.fields else {
+                return None;
+            };
+            fields
+                .named
+                .iter()
+                .map(|field| field.ident.as_ref().map(ToString::to_string))
+                .collect::<Option<BTreeSet<_>>>()
+        }
+        _ => None,
+    });
+    let only = matches.next()?;
+    matches.next().is_none().then_some(only)
+}
+
+fn direct_parameter_names(function: &syn::ImplItemFn) -> Option<Vec<String>> {
+    function
+        .sig
+        .inputs
+        .iter()
+        .map(|input| match input {
+            syn::FnArg::Typed(argument) => match &*argument.pat {
+                syn::Pat::Ident(pattern)
+                    if pattern.by_ref.is_none()
+                        && pattern.mutability.is_none()
+                        && pattern.subpat.is_none() =>
+                {
+                    Some(pattern.ident.to_string())
+                }
+                _ => None,
+            },
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect()
+}
+
+fn local_binding_count(block: &syn::Block, expected: &str) -> usize {
+    struct Bindings<'name> {
+        expected: &'name str,
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for Bindings<'_> {
+        fn visit_local(&mut self, node: &'ast syn::Local) {
+            if matches!(&node.pat, syn::Pat::Ident(pattern) if pattern.ident == self.expected) {
+                self.count += 1;
+            }
+            visit::visit_local(self, node);
+        }
+    }
+    let mut bindings = Bindings { expected, count: 0 };
+    bindings.visit_block(block);
+    bindings.count
+}
+
+fn canonical_arc_from_parameter_binding(function: &syn::ImplItemFn, parameter: &str) -> bool {
+    if direct_parameter_names(function)
+        .is_none_or(|parameters| parameters.iter().filter(|name| *name == parameter).count() != 1)
+    {
+        return false;
+    }
+    match local_binding_count(&function.block, parameter) {
+        0 => true,
+        1 => {
+            let Some(Expr::Call(call)) =
+                unique_direct_initializer(&function.block, parameter).map(peel_expr)
+            else {
+                return false;
+            };
+            relative_call_path_is(&call.func, &["Arc", "from"])
+                && call.args.len() == 1
+                && call.args.first().and_then(simple_ident).as_deref() == Some(parameter)
+        }
+        _ => false,
+    }
+}
+
+fn settings_get_config_reads_exact_providers(block: &syn::Block) -> bool {
+    #[derive(Default)]
+    struct Reads {
+        configs_head: usize,
+        configs_find_version: usize,
+        cache_find: usize,
+        unexpected: bool,
+    }
+    impl<'ast> Visit<'ast> for Reads {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            let method = node.method.to_string();
+            if matches!(method.as_str(), "head" | "find" | "find_version") {
+                match (
+                    self_field_receiver(&node.receiver).as_deref(),
+                    method.as_str(),
+                ) {
+                    (Some("configs"), "head") => self.configs_head += 1,
+                    (Some("configs"), "find_version")
+                        if node.args.len() == 3
+                            && node.args.get(2).and_then(simple_ident).as_deref()
+                                == Some("active_version") =>
+                    {
+                        self.configs_find_version += 1;
+                    }
+                    (Some("cache"), "find") => self.cache_find += 1,
+                    _ => self.unexpected = true,
+                }
+            }
+            visit::visit_expr_method_call(self, node);
+        }
+    }
+    let mut reads = Reads::default();
+    reads.visit_block(block);
+    !reads.unexpected
+        && reads.configs_head == 1
+        && reads.configs_find_version == 1
+        && reads.cache_find == 1
+}
+
+enum ProductionMethodSelection<'a> {
+    Missing,
+    Ambiguous(usize),
+    Unique(&'a syn::ImplItemFn),
+}
+
+impl ProductionMethodSelection<'_> {
+    fn actual(&self) -> String {
+        match self {
+            Self::Missing => "found 0 production-reachable methods".to_string(),
+            Self::Ambiguous(count) => {
+                format!("found {count} production-reachable methods (including unknown cfg)")
+            }
+            Self::Unique(_) => "found one production-reachable method".to_string(),
+        }
+    }
+}
+
+fn root_production_method<'a>(
+    items: &'a [Item],
+    owner: &str,
+    trait_name: Option<&str>,
+    method: &str,
+) -> ProductionMethodSelection<'a> {
+    let matches = items
+        .iter()
+        .filter_map(|item| {
+            let Item::Impl(item) = item else {
+                return None;
+            };
+            if !crate::localtx_coverage::attrs_may_be_production(&item.attrs)
+                || outer_type_ident(&item.self_ty).as_deref() != Some(owner)
+                || item
+                    .trait_
+                    .as_ref()
+                    .and_then(|(_, path, _)| path.segments.last())
+                    .map(|segment| segment.ident.to_string())
+                    .as_deref()
+                    != trait_name
+            {
+                return None;
+            }
+            Some(item.items.iter().filter_map(|child| match child {
+                ImplItem::Fn(function)
+                    if function.sig.ident == method
+                        && crate::localtx_coverage::attrs_may_be_production(&function.attrs) =>
+                {
+                    Some(function)
+                }
+                _ => None,
+            }))
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => ProductionMethodSelection::Missing,
+        [only] => ProductionMethodSelection::Unique(only),
+        _ => ProductionMethodSelection::Ambiguous(matches.len()),
+    }
+}
+
+fn settings_production_method<'a>(
+    items: &'a [Item],
+    owner: &str,
+    trait_name: Option<&str>,
+    method: &str,
+    stage: SettingsCertificationStage,
+) -> Result<&'a syn::ImplItemFn, SettingsProviderCertification> {
+    let selection = root_production_method(items, owner, trait_name, method);
+    match selection {
+        ProductionMethodSelection::Unique(function) => Ok(function),
+        other => Err(SettingsProviderCertification::invalid(
+            stage,
+            format!("exactly one production-reachable {owner}::{method}"),
+            other.actual(),
+        )),
+    }
+}
+
+fn tail_self_struct_field<'a>(block: &'a syn::Block, field: &str) -> Option<&'a Expr> {
+    let Expr::Struct(returned) = block
+        .stmts
+        .last()
+        .and_then(tail_expression)
+        .map(peel_expr)?
+    else {
+        return None;
+    };
+    if !returned.path.is_ident("Self") || returned.rest.is_some() {
+        return None;
+    }
+    returned.fields.iter().find_map(|candidate| {
+        matches!(&candidate.member, syn::Member::Named(member) if member == field)
+            .then_some(&candidate.expr)
+    })
+}
+
+fn tail_self_struct_field_is_ident(block: &syn::Block, field: &str, expected: &str) -> bool {
+    tail_self_struct_field(block, field)
+        .and_then(simple_ident)
+        .as_deref()
+        == Some(expected)
+}
+
+fn self_field_clone(expression: &Expr, expected: &str) -> bool {
+    let Expr::MethodCall(clone) = peel_expr(expression) else {
+        return false;
+    };
+    if clone.method != "clone" || !clone.args.is_empty() || clone.turbofish.is_some() {
+        return false;
+    }
+    let Expr::Field(field) = peel_expr(&clone.receiver) else {
+        return false;
+    };
+    matches!(&field.member, syn::Member::Named(member) if member == expected)
+        && matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
+}
+
 fn cfg_gated(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attribute| {
         path_is(attribute.path(), &["cfg"]) || path_is(attribute.path(), &["cfg_attr"])
@@ -2879,14 +3608,237 @@ fn outer_type_ident(ty: &Type) -> Option<String> {
         .map(|segment| segment.ident.to_string())
 }
 
-fn verified_router_factories(items: &[Item]) -> VerifiedRouterFactories {
+fn collect_settings_production_composition_certificate(
+    inventory: &[ParsedLocalOnlySource],
+) -> SettingsCompositionCertification {
+    let matching = inventory
+        .iter()
+        .filter(|source| source.subject == "composition/settings/src/lib.rs")
+        .collect::<Vec<_>>();
+    let [source] = matching.as_slice() else {
+        return if matching.is_empty() {
+            SettingsCompositionCertification::NotApplicable
+        } else {
+            SettingsCompositionCertification::invalid(
+                "one canonical composition/settings/src/lib.rs source",
+                format!("found {} matching sources", matching.len()),
+            )
+        };
+    };
+    certify_settings_production_composition(&source.syntax.items)
+}
+
+fn certify_settings_production_composition(items: &[Item]) -> SettingsCompositionCertification {
+    let wires = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Fn(function)
+                if function.sig.ident == "wire"
+                    && crate::localtx_coverage::attrs_may_be_production(&function.attrs) =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [wire] = wires.as_slice() else {
+        return SettingsCompositionCertification::invalid(
+            "exactly one production-reachable wire function",
+            format!("found {} production-reachable wire functions", wires.len()),
+        );
+    };
+    if !matches!(wire.vis, syn::Visibility::Public(_))
+        || wire.sig.asyncness.is_none()
+        || wire.sig.unsafety.is_some()
+        || !wire.sig.generics.params.is_empty()
+        || wire.sig.generics.where_clause.is_some()
+        || wire.sig.inputs.len() != 1
+        || !matches!(wire.sig.inputs.first(), Some(syn::FnArg::Typed(argument))
+            if matches!(&*argument.pat, syn::Pat::Ident(ident)
+                if ident.ident == "deps"
+                    && ident.by_ref.is_none()
+                    && ident.mutability.is_none()
+                    && ident.subpat.is_none()))
+        || !settings_wire_destructures_pg(&wire.block)
+        || local_binding_count(&wire.block, "pg") != 0
+        || block_reassigns_any(&wire.block, &["pg"])
+    {
+        return SettingsCompositionCertification::invalid(
+            "pub async wire(deps) with one direct SettingsModuleDeps { pg, .. } destructure",
+            "wire signature or production pg capability source is noncanonical",
+        );
+    }
+    let Some(bundle) = unique_tuple_binding_initializer(
+        &wire.block,
+        &["configs", "writer", "secrets", "secret_writer"],
+    ) else {
+        return SettingsCompositionCertification::invalid(
+            "one settings_bundle(...).into_parts() tuple binding for configs/writer/secrets/secret_writer",
+            "canonical provider tuple binding is missing or ambiguous",
+        );
+    };
+    let Expr::MethodCall(into_parts) = peel_expr(bundle) else {
+        return SettingsCompositionCertification::invalid(
+            "pg.settings_bundle(...).into_parts()",
+            "provider tuple initializer is not a method call",
+        );
+    };
+    let Expr::MethodCall(settings_bundle) = peel_expr(&into_parts.receiver) else {
+        return SettingsCompositionCertification::invalid(
+            "pg.settings_bundle(...).into_parts()",
+            "into_parts receiver is not settings_bundle",
+        );
+    };
+    if into_parts.method != "into_parts"
+        || !into_parts.args.is_empty()
+        || into_parts.turbofish.is_some()
+        || settings_bundle.method != "settings_bundle"
+        || settings_bundle.args.len() != 2
+        || settings_bundle.turbofish.is_some()
+        || simple_ident(&settings_bundle.receiver).as_deref() != Some("pg")
+    {
+        return SettingsCompositionCertification::invalid(
+            "direct pg.settings_bundle(arg, arg).into_parts() provider source",
+            "provider tuple uses a different source, method, or argument shape",
+        );
+    }
+
+    let Some(service) = unique_direct_initializer(&wire.block, "config_svc") else {
+        return SettingsCompositionCertification::invalid(
+            "one direct config_svc binding",
+            "config_svc binding is missing or ambiguous",
+        );
+    };
+    let Expr::Call(service_call) = peel_expr(service) else {
+        return SettingsCompositionCertification::invalid(
+            "SettingsService::with_postgres(configs, writer, empty_flag_store(), clock)",
+            "config_svc initializer is not a direct call",
+        );
+    };
+    let canonical_flags = service_call.args.get(2).is_some_and(|flags| {
+        matches!(peel_expr(flags), Expr::Call(call) if relative_call_path_is(&call.func, &["empty_flag_store"]) && call.args.is_empty())
+    });
+    if !relative_call_path_is(&service_call.func, &["SettingsService", "with_postgres"])
+        || service_call.args.len() != 4
+        || service_call.args.first().and_then(simple_ident).as_deref() != Some("configs")
+        || service_call.args.get(1).and_then(simple_ident).as_deref() != Some("writer")
+        || !canonical_flags
+    {
+        return SettingsCompositionCertification::invalid(
+            "SettingsService::with_postgres(configs, writer, empty_flag_store(), clock)",
+            "production service constructor or provider arguments drifted",
+        );
+    }
+
+    let Some(domain) = unique_direct_initializer(&wire.block, "domain") else {
+        return SettingsCompositionCertification::invalid(
+            "one direct SettingsDomain binding",
+            "domain binding is missing or ambiguous",
+        );
+    };
+    let Expr::Call(domain_call) = peel_expr(domain) else {
+        return SettingsCompositionCertification::invalid(
+            "SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow)",
+            "domain initializer is not a direct call",
+        );
+    };
+    let service_is_wrapped_once = domain_call.args.first().is_some_and(|argument| {
+        matches!(peel_expr(argument), Expr::Call(call)
+            if relative_call_path_is(&call.func, &["Arc", "new"])
+                && call.args.len() == 1
+                && call.args.first().and_then(simple_ident).as_deref() == Some("config_svc"))
+    });
+    if !relative_call_path_is(&domain_call.func, &["SettingsDomain", "new"])
+        || domain_call.args.len() != 3
+        || !service_is_wrapped_once
+        || domain_call.args.get(1).and_then(simple_ident).as_deref() != Some("secret_repo")
+        || domain_call.args.get(2).and_then(simple_ident).as_deref() != Some("secret_uow")
+        || block_has_mutable_binding(&wire.block, &["configs", "writer", "config_svc", "domain"])
+        || block_reassigns_any(&wire.block, &["configs", "writer", "config_svc", "domain"])
+    {
+        return SettingsCompositionCertification::invalid(
+            "immutable bundle ports → with_postgres → SettingsDomain::new lineage",
+            "production Domain construction is wrapped, mutable, reassigned, or uses different bindings",
+        );
+    }
+    SettingsCompositionCertification::Valid
+}
+
+fn settings_wire_destructures_pg(block: &syn::Block) -> bool {
+    let matching = block.stmts.iter().filter(|statement| {
+        let syn::Stmt::Local(local) = statement else {
+            return false;
+        };
+        let syn::Pat::Struct(pattern) = &local.pat else {
+            return false;
+        };
+        pattern.path.is_ident("SettingsModuleDeps")
+            && local
+                .init
+                .as_ref()
+                .and_then(|init| simple_ident(&init.expr))
+                .as_deref()
+                == Some("deps")
+            && pattern.fields.iter().any(|field| {
+                matches!(&field.member, syn::Member::Named(member) if member == "pg")
+                    && matches!(&*field.pat, syn::Pat::Ident(ident)
+                        if ident.ident == "pg"
+                            && ident.by_ref.is_none()
+                            && ident.mutability.is_none()
+                            && ident.subpat.is_none())
+            })
+    });
+    matching.count() == 1
+}
+
+fn unique_tuple_binding_initializer<'a>(
+    block: &'a syn::Block,
+    expected: &[&str],
+) -> Option<&'a Expr> {
+    let mut matching = block.stmts.iter().filter_map(|statement| {
+        let syn::Stmt::Local(local) = statement else {
+            return None;
+        };
+        let syn::Pat::Tuple(tuple) = &local.pat else {
+            return None;
+        };
+        let names = tuple
+            .elems
+            .iter()
+            .map(|pattern| match pattern {
+                syn::Pat::Ident(ident)
+                    if ident.by_ref.is_none()
+                        && ident.mutability.is_none()
+                        && ident.subpat.is_none() =>
+                {
+                    Some(ident.ident.to_string())
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (names
+            .iter()
+            .map(String::as_str)
+            .eq(expected.iter().copied()))
+        .then(|| local.init.as_ref().map(|init| &*init.expr))
+        .flatten()
+    });
+    let only = matching.next()?;
+    matching.next().is_none().then_some(only)
+}
+
+fn verified_router_factories(
+    items: &[Item],
+    settings_composition: SettingsCompositionCertification,
+) -> VerifiedRouterFactories {
     fn collect(
         items: &[Item],
         module_path: &mut Vec<String>,
         module_cfg_valid: bool,
         declarations: &mut BTreeMap<(Vec<String>, String), usize>,
-        verified: &mut VerifiedRouterFactories,
+        verified: &mut BTreeMap<(Vec<String>, String), VerifiedRouterFactory>,
         domain_certificates: &BTreeMap<String, DomainProviderCertificate>,
+        settings_certificate: Option<SettingsProviderCertificate>,
     ) {
         for item in items {
             match item {
@@ -2895,8 +3847,11 @@ fn verified_router_factories(items: &[Item]) -> VerifiedRouterFactories {
                     *declarations.entry(key.clone()).or_default() += 1;
                     if module_cfg_valid
                         && factory_attrs_are_canonical(&function.attrs)
-                        && let Some(certificate) =
-                            verify_router_factory(function, domain_certificates)
+                        && let Some(certificate) = verify_router_factory(
+                            function,
+                            domain_certificates,
+                            settings_certificate,
+                        )
                     {
                         verified.insert(key, certificate);
                     }
@@ -2911,6 +3866,7 @@ fn verified_router_factories(items: &[Item]) -> VerifiedRouterFactories {
                             declarations,
                             verified,
                             domain_certificates,
+                            settings_certificate,
                         );
                         module_path.pop();
                     }
@@ -2923,6 +3879,14 @@ fn verified_router_factories(items: &[Item]) -> VerifiedRouterFactories {
     let mut declarations = BTreeMap::new();
     let mut verified = BTreeMap::new();
     let domain_certificates = collect_domain_provider_certificates(items);
+    let settings_provider = collect_settings_provider_certificate(items);
+    let settings_certificate = match (&settings_provider, &settings_composition) {
+        (
+            SettingsProviderCertification::Valid(certificate),
+            SettingsCompositionCertification::Valid,
+        ) => Some(*certificate),
+        _ => None,
+    };
     collect(
         items,
         &mut Vec::new(),
@@ -2930,9 +3894,14 @@ fn verified_router_factories(items: &[Item]) -> VerifiedRouterFactories {
         &mut declarations,
         &mut verified,
         &domain_certificates,
+        settings_certificate,
     );
     verified.retain(|key, _| declarations.get(key) == Some(&1));
-    verified
+    VerifiedRouterFactories {
+        entries: verified,
+        settings_provider,
+        settings_composition,
+    }
 }
 
 fn module_cfg_is_canonical(attrs: &[syn::Attribute]) -> bool {
@@ -2963,6 +3932,7 @@ fn factory_attrs_are_canonical(attrs: &[syn::Attribute]) -> bool {
 fn verify_router_factory(
     function: &syn::ItemFn,
     domain_certificates: &BTreeMap<String, DomainProviderCertificate>,
+    settings_certificate: Option<SettingsProviderCertificate>,
 ) -> Option<VerifiedRouterFactory> {
     if function.sig.asyncness.is_some()
         || function.sig.unsafety.is_some()
@@ -3022,22 +3992,88 @@ fn verify_router_factory(
     ) {
         return None;
     }
+    let mut constructor_parameters = mounted_constructor_parameters(
+        &function.block,
+        &parameters,
+        &lineage.domain,
+        proof_state.as_deref(),
+        domain_certificates,
+    );
+    let mut constructor_repo_fields =
+        mounted_constructor_repo_fields(&function.block, &parameters, &lineage.domain);
+    let settings_lineage = settings_factory_lineage(
+        &function.block,
+        &parameters,
+        &lineage.domain,
+        proof_state.as_deref(),
+        settings_certificate,
+    );
+    if proof_state.as_deref() == Some("ConfigQueryService") && settings_lineage.is_none() {
+        return None;
+    }
+    if let Some((provider, field)) = settings_lineage {
+        constructor_parameters.insert(provider.clone());
+        constructor_repo_fields
+            .entry(provider)
+            .or_default()
+            .insert(field);
+    }
     Some(VerifiedRouterFactory {
         route_module: proof_module,
-        constructor_parameters: mounted_constructor_parameters(
-            &function.block,
-            &parameters,
-            &lineage.domain,
-            proof_state.as_deref(),
-            domain_certificates,
-        ),
-        constructor_repo_fields: mounted_constructor_repo_fields(
-            &function.block,
-            &parameters,
-            &lineage.domain,
-        ),
+        constructor_parameters,
+        constructor_repo_fields,
         parameters,
     })
+}
+
+fn settings_factory_lineage(
+    block: &syn::Block,
+    parameters: &[String],
+    composed_domain: &str,
+    proof_state: Option<&str>,
+    certificate: Option<SettingsProviderCertificate>,
+) -> Option<(String, String)> {
+    certificate?;
+    if proof_state != Some("ConfigQueryService") {
+        return None;
+    }
+    let domain_initializer = unique_direct_initializer(block, composed_domain)?;
+    let Expr::Call(domain_constructor) = peel_expr(domain_initializer) else {
+        return None;
+    };
+    if !relative_call_path_is(
+        &domain_constructor.func,
+        &["super", "SettingsDomain", "new"],
+    ) {
+        return None;
+    }
+    let service = domain_constructor.args.first().and_then(simple_ident)?;
+    let service_initializer = unique_direct_initializer(block, &service)?;
+    let Expr::Call(arc_new) = peel_expr(service_initializer) else {
+        return None;
+    };
+    if !relative_call_path_is(&arc_new.func, &["Arc", "new"]) || arc_new.args.len() != 1 {
+        return None;
+    }
+    let Expr::Call(service_new) = arc_new.args.first().map(peel_expr)? else {
+        return None;
+    };
+    if !relative_call_path_is(
+        &service_new.func,
+        &["super", "SettingsService", "with_postgres"],
+    ) || service_new.args.len() != 4
+    {
+        return None;
+    }
+    let (provider, field) = service_new.args.first().and_then(direct_provider_field)?;
+    if field != "configs"
+        || !parameters.contains(&provider)
+        || block_has_mutable_binding(block, &[&provider, &service])
+        || block_reassigns_any(block, &[&provider, &service])
+    {
+        return None;
+    }
+    Some((provider, field))
 }
 
 fn mounted_proof_return_module(output: &syn::ReturnType) -> Option<Vec<String>> {
@@ -3745,10 +4781,40 @@ fn canonical_from_provider_fields(items: &[Item], owner: &str) -> Option<BTreeSe
             let syn::Member::Named(member) = &field.member else {
                 return None;
             };
-            direct_provider_lineage(&field.expr, &provider).then(|| member.to_string())
+            let member = member.to_string();
+            let certified = if member == "configs" {
+                settings_config_provider_lineage(&field.expr, &provider)
+            } else {
+                direct_provider_lineage(&field.expr, &provider)
+            };
+            certified.then_some(member)
         })
         .collect::<BTreeSet<_>>();
     (!fields.is_empty() && owner != repo_type).then_some(fields)
+}
+
+fn settings_config_provider_lineage(expression: &Expr, provider: &str) -> bool {
+    let Expr::Call(new_box) = peel_expr(expression) else {
+        return false;
+    };
+    if !relative_call_path_is(&new_box.func, &["DynConfigRepo", "new_box"])
+        || new_box.args.len() != 1
+    {
+        return false;
+    }
+    let Some(Expr::MethodCall(clone)) = new_box.args.first().map(peel_expr) else {
+        return false;
+    };
+    if clone.method != "clone" || !clone.args.is_empty() || clone.turbofish.is_some() {
+        return false;
+    }
+    let Expr::MethodCall(as_ref) = peel_expr(&clone.receiver) else {
+        return false;
+    };
+    as_ref.method == "as_ref"
+        && as_ref.args.is_empty()
+        && as_ref.turbofish.is_none()
+        && matches!(peel_expr(&as_ref.receiver), Expr::Path(path) if path.path.is_ident(provider))
 }
 
 fn direct_provider_lineage(expression: &Expr, provider: &str) -> bool {
@@ -3769,7 +4835,7 @@ fn direct_provider_lineage(expression: &Expr, provider: &str) -> bool {
                     .is_some_and(|argument| direct_provider_lineage(argument, provider))
         }
         Expr::MethodCall(call) => {
-            call.method == "clone"
+            matches!(call.method.to_string().as_str(), "as_ref" | "clone")
                 && call.args.is_empty()
                 && call.turbofish.is_none()
                 && direct_provider_lineage(&call.receiver, provider)
@@ -3845,7 +4911,17 @@ fn collect_scoped_recorded_provider_fields(
                         && factory_attrs_are_canonical(&item.attrs) =>
                 {
                     if let Some(owner) = terminal_type_ident(&item.self_ty) {
-                        let fields = directly_recorded_fields(&item.items);
+                        let is_settings_config_repo = owner == "SettingsConfigGetRepoProbe"
+                            && item.trait_.as_ref().is_some_and(|(_, path, _)| {
+                                path.segments
+                                    .last()
+                                    .is_some_and(|segment| segment.ident == "ConfigRepo")
+                            });
+                        let fields = if is_settings_config_repo {
+                            settings_config_get_recorded_fields(&item.items)
+                        } else {
+                            directly_recorded_fields(&item.items)
+                        };
                         if !fields.is_empty() {
                             out.entry((module_path.clone(), owner))
                                 .or_default()
@@ -3896,6 +4972,133 @@ fn directly_recorded_fields(items: &[ImplItem]) -> BTreeSet<String> {
     fields
 }
 
+fn settings_config_get_recorded_fields(items: &[ImplItem]) -> BTreeSet<String> {
+    let field_for = |method: &str, injection: &str| {
+        let mut matches = items.iter().filter_map(|item| match item {
+            ImplItem::Fn(function) if function.sig.ident == method => Some(function),
+            _ => None,
+        });
+        let function = matches.next()?;
+        if matches.next().is_some() || !settings_synthetic_write_comes_from_state(&function.block) {
+            return None;
+        }
+        let mut field = None;
+        let mut may_skip = false;
+        for statement in &function.block.stmts {
+            if !may_skip
+                && let Some(found) = canonical_settings_forbidden_write_record(statement, injection)
+                && field.replace(found).is_some()
+            {
+                return None;
+            }
+            may_skip |= statement_may_skip_following_receipt(statement);
+        }
+        field
+    };
+    let Some(head) = field_for("head", "Head") else {
+        return BTreeSet::new();
+    };
+    let Some(find_version) = field_for("find_version", "FindVersion") else {
+        return BTreeSet::new();
+    };
+    if head == find_version {
+        BTreeSet::from([head])
+    } else {
+        BTreeSet::new()
+    }
+}
+
+fn settings_synthetic_write_comes_from_state(block: &syn::Block) -> bool {
+    block.stmts.iter().any(|statement| {
+        let syn::Stmt::Local(local) = statement else {
+            return false;
+        };
+        let syn::Pat::Tuple(tuple) = &local.pat else {
+            return false;
+        };
+        if tuple.elems.get(1).is_none_or(|pattern| {
+            !matches!(pattern, syn::Pat::Ident(ident) if ident.ident == "synthetic_write")
+        }) {
+            return false;
+        }
+        let Some(initializer) = &local.init else {
+            return false;
+        };
+        let Expr::Block(source) = peel_expr(&initializer.expr) else {
+            return false;
+        };
+        let state_from_provider = source.block.stmts.iter().any(|statement| {
+            let syn::Stmt::Local(state) = statement else {
+                return false;
+            };
+            if !matches!(&state.pat, syn::Pat::Ident(ident) if ident.ident == "state") {
+                return false;
+            }
+            state.init.as_ref().is_some_and(|initializer| {
+                expression_is_rooted_at_self_field(&initializer.expr, "state")
+            })
+        });
+        let from_state_field = source
+            .block
+            .stmts
+            .last()
+            .and_then(tail_expression)
+            .map(peel_expr)
+            .and_then(|expression| match expression {
+                Expr::Tuple(tuple) => tuple.elems.get(1),
+                _ => None,
+            })
+            .is_some_and(|expression| {
+                matches!(peel_expr(expression), Expr::Field(field)
+                    if matches!(&field.member, syn::Member::Named(member) if member == "synthetic_write")
+                        && matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("state")))
+            });
+        state_from_provider && from_state_field
+    })
+}
+
+fn expression_is_rooted_at_self_field(expression: &Expr, expected: &str) -> bool {
+    match peel_expr(expression) {
+        Expr::Field(field) => {
+            matches!(&field.member, syn::Member::Named(member) if member == expected)
+                && matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
+        }
+        Expr::MethodCall(call) => expression_is_rooted_at_self_field(&call.receiver, expected),
+        Expr::Await(awaited) => expression_is_rooted_at_self_field(&awaited.base, expected),
+        Expr::Try(tried) => expression_is_rooted_at_self_field(&tried.expr, expected),
+        Expr::Reference(reference) => {
+            reference.mutability.is_none()
+                && expression_is_rooted_at_self_field(&reference.expr, expected)
+        }
+        _ => false,
+    }
+}
+
+fn canonical_settings_forbidden_write_record(
+    statement: &syn::Stmt,
+    injection: &str,
+) -> Option<String> {
+    let syn::Stmt::Expr(Expr::If(branch), _) = statement else {
+        return None;
+    };
+    if branch.else_branch.is_some() || branch.then_branch.stmts.len() != 1 {
+        return None;
+    }
+    let Expr::Binary(condition) = peel_expr(&branch.cond) else {
+        return None;
+    };
+    let exact_guard = matches!(condition.op, syn::BinOp::Eq(_))
+        && matches!(peel_expr(&condition.left), Expr::Path(path) if path.path.is_ident("synthetic_write"))
+        && matches!(peel_expr(&condition.right), Expr::Path(path)
+            if path.path.segments.len() == 2
+                && path.path.segments[0].ident == "ConfigGetSyntheticWrite"
+                && path.path.segments[1].ident == injection);
+    exact_guard
+        .then(|| branch.then_branch.stmts.first())
+        .flatten()
+        .and_then(direct_recorded_field)
+}
+
 fn direct_recorded_field(statement: &syn::Stmt) -> Option<String> {
     let syn::Stmt::Expr(expression, _) = statement else {
         return None;
@@ -3929,21 +5132,116 @@ fn canonical_forbidden_write_record(statement: &syn::Stmt) -> Option<String> {
     if !matches!(condition.op, syn::BinOp::Eq(_)) {
         return None;
     }
-    let Expr::Field(guard) = peel_expr(&condition.left) else {
-        return None;
-    };
-    if !matches!(&guard.member, syn::Member::Named(member) if member == "forbidden_write_on")
-        || !matches!(peel_expr(&guard.base), Expr::Path(path) if path.path.is_ident("self"))
-    {
-        return None;
-    }
-    let Expr::Call(some) = peel_expr(&condition.right) else {
-        return None;
-    };
-    if !relative_call_path_is(&some.func, &["Some"]) || some.args.len() != 1 {
+    if !canonical_forbidden_write_guard(condition) {
         return None;
     }
     direct_recorded_field(branch.then_branch.stmts.first()?)
+}
+
+fn canonical_forbidden_write_guard(condition: &syn::ExprBinary) -> bool {
+    matches!(peel_expr(&condition.left), Expr::Field(field)
+        if matches!(&field.member, syn::Member::Named(member) if member == "forbidden_write_on")
+            && matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self")))
+        && matches!(peel_expr(&condition.right), Expr::Call(call)
+            if relative_call_path_is(&call.func, &["Some"]) && call.args.len() == 1)
+}
+
+fn settings_config_get_helper_calls_are_closed(items: &[Item]) -> bool {
+    const HELPER: &str = "call_finalized_config_get_local_only";
+    let helpers = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Fn(function) if function.sig.ident == HELPER => Some(function),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [helper] = helpers.as_slice() else {
+        return false;
+    };
+    let owners = parameter_type_owners(&helper.sig.inputs);
+    if owners.get("router").map(String::as_str) != Some("Router")
+        || owners.get("proof").map(String::as_str) != Some("LocalOnlyMountedRouteProof")
+        || owners.get("probe").map(String::as_str) != Some("SettingsConfigGetRepoProbe")
+        || owners.get("tenant_id").map(String::as_str) != Some("TenantId")
+        || owners.len() != 4
+    {
+        return false;
+    }
+
+    struct Calls<'ast> {
+        helper: &'static str,
+        calls: Vec<&'ast syn::ExprCall>,
+    }
+    impl<'ast> Visit<'ast> for Calls<'ast> {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if matches!(peel_expr(&node.func), Expr::Path(path)
+                if path.path.leading_colon.is_none()
+                    && path.path.segments.len() == 1
+                    && path.path.segments[0].ident == self.helper)
+            {
+                self.calls.push(node);
+            }
+            visit::visit_expr_call(self, node);
+        }
+    }
+
+    let mut count = 0;
+    for function in items.iter().filter_map(|item| match item {
+        Item::Fn(function) if function.sig.ident != HELPER => Some(function),
+        _ => None,
+    }) {
+        let bindings = direct_initializer_bindings(&function.block);
+        let mut calls = Calls {
+            helper: HELPER,
+            calls: Vec::new(),
+        };
+        calls.visit_block(&function.block);
+        for call in calls.calls {
+            count += 1;
+            if !settings_config_get_helper_call_is_paired(call, &bindings) {
+                return false;
+            }
+        }
+    }
+    count > 0
+}
+
+fn settings_config_get_helper_call_is_paired(
+    call: &syn::ExprCall,
+    bindings: &BTreeMap<String, Expr>,
+) -> bool {
+    if call.args.len() != 4 {
+        return false;
+    }
+    let Some(router) = call.args.first().and_then(referenced_ident) else {
+        return false;
+    };
+    let Some(proof) = call.args.get(1).and_then(referenced_ident) else {
+        return false;
+    };
+    let Some(probe) = call.args.get(2).and_then(referenced_ident) else {
+        return false;
+    };
+    let factory_provider = |binding: &str| {
+        let Expr::Call(factory) = bindings.get(binding).map(peel_expr)? else {
+            return None;
+        };
+        if !relative_call_path_is(&factory.func, &["finalized_config_get_router"])
+            || factory.args.is_empty()
+        {
+            return None;
+        }
+        let Expr::MethodCall(test_repo) = factory.args.first().map(peel_expr)? else {
+            return None;
+        };
+        (test_repo.method == "test_repo"
+            && test_repo.args.is_empty()
+            && test_repo.turbofish.is_none())
+        .then(|| root_receiver_ident(&test_repo.receiver))
+        .flatten()
+    };
+    factory_provider(&router).as_deref() == Some(&probe)
+        && factory_provider(&proof).as_deref() == Some(&probe)
 }
 
 fn provenance_findings_in_items(
@@ -3953,6 +5251,7 @@ fn provenance_findings_in_items(
     module_path: &mut Vec<String>,
     findings: &mut Vec<Finding>,
 ) {
+    let settings_helper_closed = settings_config_get_helper_calls_are_closed(items);
     for item in items {
         match item {
             Item::Use(item) if use_tree_contains_local_only_api(&item.tree) => {
@@ -3976,6 +5275,8 @@ fn provenance_findings_in_items(
                 subject,
                 recorded_provider_fields,
                 module_path,
+                settings_helper_closed
+                    && function.sig.ident == "call_finalized_config_get_local_only",
                 findings,
             ),
             Item::Impl(item) => {
@@ -4065,14 +5366,17 @@ fn provenance_findings_in_function(
     subject: &str,
     recorded_provider_fields: &BTreeMap<(Vec<String>, String), BTreeSet<String>>,
     module_path: &[String],
+    allow_settings_parameter_pair: bool,
     findings: &mut Vec<Finding>,
 ) {
+    let parameter_types = parameter_type_owners(&function.sig.inputs);
     provenance_findings_in_block(
         &function.block,
         subject,
         recorded_provider_fields,
         module_path,
-        &governed_proof_parameters(&function.sig.inputs),
+        &parameter_types,
+        allow_settings_parameter_pair,
         findings,
     );
 }
@@ -4084,19 +5388,21 @@ fn provenance_findings_in_impl_function(
     module_path: &[String],
     findings: &mut Vec<Finding>,
 ) {
+    let parameter_types = parameter_type_owners(&function.sig.inputs);
     provenance_findings_in_block(
         &function.block,
         subject,
         recorded_provider_fields,
         module_path,
-        &governed_proof_parameters(&function.sig.inputs),
+        &parameter_types,
+        false,
         findings,
     );
 }
 
-fn governed_proof_parameters(
+fn parameter_type_owners(
     inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::Token![,]>,
-) -> BTreeSet<String> {
+) -> BTreeMap<String, String> {
     inputs
         .iter()
         .filter_map(|input| {
@@ -4106,19 +5412,17 @@ fn governed_proof_parameters(
             let syn::Pat::Ident(pattern) = &*argument.pat else {
                 return None;
             };
-            let Type::Path(ty) = &*argument.ty else {
+            let ty = match &*argument.ty {
+                Type::Reference(reference) => &*reference.elem,
+                ty => ty,
+            };
+            let Type::Path(ty) = ty else {
                 return None;
             };
-            ty.path
-                .segments
-                .last()
-                .is_some_and(|segment| {
-                    matches!(
-                        segment.ident.to_string().as_str(),
-                        "LocalOnlyMountedRouteProof" | "StatelessLocalOnlyMountedRouteProof"
-                    )
-                })
-                .then(|| pattern.ident.to_string())
+            Some((
+                pattern.ident.to_string(),
+                ty.path.segments.last()?.ident.to_string(),
+            ))
         })
         .collect()
 }
@@ -4128,7 +5432,8 @@ fn provenance_findings_in_block(
     subject: &str,
     recorded_provider_fields: &BTreeMap<(Vec<String>, String), BTreeSet<String>>,
     module_path: &[String],
-    governed_proof_parameters: &BTreeSet<String>,
+    parameter_types: &BTreeMap<String, String>,
+    allow_settings_parameter_pair: bool,
     findings: &mut Vec<Finding>,
 ) {
     let bindings = direct_initializer_bindings(block);
@@ -4165,7 +5470,17 @@ fn provenance_findings_in_block(
             );
             continue;
         };
-        let Some(proof) = referenced_ident(argument) else {
+        let proof = referenced_ident(argument).or_else(|| {
+            simple_ident(argument).filter(|proof| {
+                parameter_types.get(proof).is_some_and(|owner| {
+                    matches!(
+                        owner.as_str(),
+                        "LocalOnlyMountedRouteProof" | "StatelessLocalOnlyMountedRouteProof"
+                    )
+                })
+            })
+        });
+        let Some(proof) = proof else {
             push_provenance_finding(
                 findings,
                 subject,
@@ -4174,7 +5489,13 @@ fn provenance_findings_in_block(
             );
             continue;
         };
-        if !governed_proof_parameters.contains(&proof)
+        let governed_parameter = parameter_types.get(&proof).is_some_and(|owner| {
+            matches!(
+                owner.as_str(),
+                "LocalOnlyMountedRouteProof" | "StatelessLocalOnlyMountedRouteProof"
+            )
+        });
+        if !governed_parameter
             && bindings
                 .get(&proof)
                 .is_none_or(|initializer| !is_governed_proof_constructor(initializer))
@@ -4212,9 +5533,16 @@ fn provenance_findings_in_block(
                 );
                 continue;
             };
-            if provider_routers
-                .get(&provider)
-                .is_none_or(|routers| routers.is_disjoint(&scan.oneshot_router_receivers))
+            let settings_parameter_pair = allow_settings_parameter_pair
+                && provider == "probe"
+                && parameter_types.get(&provider).map(String::as_str)
+                    == Some("SettingsConfigGetRepoProbe")
+                && parameter_types.get("router").map(String::as_str) == Some("Router")
+                && scan.oneshot_router_receivers.contains("router");
+            if !settings_parameter_pair
+                && provider_routers
+                    .get(&provider)
+                    .is_none_or(|routers| routers.is_disjoint(&scan.oneshot_router_receivers))
             {
                 push_provenance_finding(
                     findings,
@@ -4224,7 +5552,10 @@ fn provenance_findings_in_block(
                 );
                 continue;
             }
-            let provider_type = bindings.get(&provider).and_then(unique_constructor_owner);
+            let provider_type = bindings
+                .get(&provider)
+                .and_then(unique_constructor_owner)
+                .or_else(|| parameter_types.get(&provider).cloned());
             let counter_field = direct_receiver_field(&handle.receiver, &provider);
             if provider_type.as_ref().is_none_or(|owner| {
                 counter_field.as_ref().is_none_or(|field| {
@@ -5464,6 +6795,53 @@ fn generated_localonly_routes(root: &Path) -> Result<BTreeSet<String>> {
     Ok(routes)
 }
 
+fn verify_manifest_generated_local_only_exact_set(
+    contracts: &[Contract],
+    generated_routes: &BTreeSet<String>,
+) -> Result<()> {
+    let manifest_routes = contracts
+        .iter()
+        .map(|contract| contract.key.clone())
+        .collect::<BTreeSet<_>>();
+    if manifest_routes != *generated_routes {
+        let missing_from_generated = manifest_routes
+            .difference(generated_routes)
+            .cloned()
+            .collect::<Vec<_>>();
+        let stale_in_generated = generated_routes
+            .difference(&manifest_routes)
+            .cloned()
+            .collect::<Vec<_>>();
+        bail!(
+            "generated LocalOnly registry disagrees with active manifests: missing_from_generated={missing_from_generated:?}; stale_in_generated={stale_in_generated:?}"
+        );
+    }
+    Ok(())
+}
+
+fn verify_manifest_compiled_local_only_exact_set(
+    contracts: &[Contract],
+    specs: &[generated::http::HttpSpec],
+) -> Result<()> {
+    let manifests = contracts
+        .iter()
+        .map(|contract| (contract.id.as_str(), contract.key.as_str()))
+        .collect::<BTreeSet<_>>();
+    let compiled = specs
+        .iter()
+        .map(|spec| (spec.route.contract_id(), spec.mount_key))
+        .collect::<BTreeSet<_>>();
+    if manifests != compiled || specs.len() != compiled.len() {
+        let missing_from_compiled = manifests.difference(&compiled).copied().collect::<Vec<_>>();
+        let stale_in_compiled = compiled.difference(&manifests).copied().collect::<Vec<_>>();
+        bail!(
+            "generated::http::LOCAL_ONLY_SPECS disagrees with active LocalOnly manifests: missing_from_compiled={missing_from_compiled:?}; stale_in_compiled={stale_in_compiled:?}; compiled_duplicates={} ",
+            specs.len().saturating_sub(compiled.len())
+        );
+    }
+    Ok(())
+}
+
 fn collect_generated_routes(
     items: &[Item],
     module: &str,
@@ -5729,6 +7107,7 @@ fn report_finding(finding: &Finding) -> ReportFinding {
             Rule::CrossTenantPrivilege => "crossTenantPrivilege",
             Rule::OpaqueSourceScope => "opaqueSourceScope",
             Rule::ForgedObservationEvidence => "forgedObservationEvidence",
+            Rule::MissingLocalOnlyReceipt => "missingLocalOnlyReceipt",
         }
         .to_string(),
         subject: finding.subject.clone(),
@@ -5884,6 +7263,7 @@ fn synthetic_report_fixture() -> ConsistencyReport {
         subject: "z.remote".to_string(),
         detail: "canonical production Domain::init mount is missing".to_string(),
     };
+    let missing_receipt = report_finding(&missing_receipt_finding("a.local"));
     let contracts = vec![
         ContractPosture {
             contract_id: "a.local".to_string(),
@@ -5906,10 +7286,10 @@ fn synthetic_report_fixture() -> ConsistencyReport {
                 effect_class: Some("ReadEffect".to_string()),
                 privilege_class: Some("LocalPrivilege".to_string()),
             },
-            source_receipt_registration: SourceReceiptRegistration::report_only(
+            source_receipt_registration: SourceReceiptRegistration::fail_closed(
                 SourceReceiptRegistrationStatus::Missing,
             ),
-            findings: vec![escaped.clone()],
+            findings: vec![escaped.clone(), missing_receipt.clone()],
         },
         ContractPosture {
             contract_id: "z.remote".to_string(),
@@ -5932,18 +7312,18 @@ fn synthetic_report_fixture() -> ConsistencyReport {
                 effect_class: None,
                 privilege_class: None,
             },
-            source_receipt_registration: SourceReceiptRegistration::report_only(
+            source_receipt_registration: SourceReceiptRegistration::fail_closed(
                 SourceReceiptRegistrationStatus::NotApplicable,
             ),
             findings: vec![missing.clone()],
         },
     ];
     ConsistencyReport {
-        schema_version: 2,
+        schema_version: CONSISTENCY_REPORT_SCHEMA_VERSION,
         status: ReportStatus::Failed,
         active_http_contract_count: contracts.len(),
         local_only_receipt_coverage: LocalOnlyReceiptCoverage {
-            enforcement: ReceiptCoverageEnforcement::ReportOnly,
+            enforcement: ReceiptCoverageEnforcement::FailClosed,
             evidence: ReceiptCoverageEvidence::SourceRegistered,
             status: ReceiptCoverageStatus::Partial,
             active_count: 1,
@@ -5951,7 +7331,7 @@ fn synthetic_report_fixture() -> ConsistencyReport {
             missing_count: 1,
             missing_contracts: vec!["a.local".to_string()],
         },
-        findings: vec![escaped, missing],
+        findings: vec![escaped, missing_receipt, missing],
         contracts,
     }
 }
@@ -6385,6 +7765,94 @@ async fn conforms_{}() {{
             )
             .replace("ReadState", "RolesListHandlerState");
         format!("{production}{receipt}")
+    }
+
+    fn canonical_settings_receipt() -> String {
+        let production = r#"
+#[derive(Clone)]
+struct ConfigQueryService { configs: (), cache: () }
+impl ConfigQueryService {
+    fn new(configs: (), cache: ()) -> Self { Self { configs, cache } }
+    async fn get_config(&self) {
+        self.configs.head();
+        self.cache.find();
+        self.configs.find_version(scope, &key, active_version);
+    }
+}
+struct SettingsService { query: ConfigQueryService }
+impl SettingsService {
+    fn with_postgres(configs: (), writer: (), flags: (), clock: ()) -> Self {
+        let configs = Arc::from(configs);
+        let cache = make_cache();
+        consume((writer, flags, clock));
+        Self { query: ConfigQueryService::new(configs, cache) }
+    }
+    fn config_query_service(&self) -> ConfigQueryService { self.query.clone() }
+}
+struct SettingsDomain { config: Arc<SettingsService>, config_query: ConfigQueryService }
+impl SettingsDomain {
+    fn new(config: Arc<SettingsService>) -> Self { let config_query = config.config_query_service(); Self { config, config_query } }
+}
+impl bootstrap::Domain for SettingsDomain {
+    fn init(&self, registry: &mut bootstrap::Registry) { let config_query = self.config_query.clone(); mount(registry, config_query); endpoint.with_classified_state(config_query); }
+}
+"#;
+        let receipt = canonical_receipt("settings_v4")
+            .replace(
+                "::generated::http::settings_v4::SPEC.route.path()",
+                "::generated::http::settings_v4::SPEC.route.path().replace(\"{key}\", \"app.k\")",
+            )
+            .replace(
+                "struct TestRepo { read: () }\nimpl TestRepo { fn from_provider<T>(provider: Arc<T>) -> Self { Self { read: consume(provider) } } }",
+                "struct TestRepo { configs: () }\nimpl TestRepo { fn from_provider<T>(provider: Arc<T>) -> Self { Self { configs: DynConfigRepo::new_box(provider.as_ref().clone()) } } }",
+            )
+            .replace(
+                "struct DemoDomain { read_repo: () }\nimpl DemoDomain { fn new(read_repo: ()) -> Self { Self { read_repo } } }\nimpl bootstrap::Domain for DemoDomain {\n    fn init(&self, registry: &mut bootstrap::Registry) {\n        let scoped_repo = self.read_repo.clone();\n        let state = ReadState { repo: scoped_repo.clone() };\n        mount(registry, state);\n    }\n}",
+                "",
+            )
+            .replace(
+                "let domain = DemoDomain::new(repo.read);",
+                "let config = Arc::new(super::SettingsService::with_postgres(repo.configs, writer(), flags(), clock()));\n    let domain = super::SettingsDomain::new(config);",
+            )
+            .replace("ReadState", "ConfigQueryService");
+        format!("{production}{receipt}")
+    }
+
+    const CANONICAL_SETTINGS_COMPOSITION: &str = r#"
+pub async fn wire(deps: SettingsModuleDeps) {
+    let SettingsModuleDeps { pg, clock } = deps;
+    let service_clock = Arc::clone(&clock);
+    let (configs, writer, secrets, secret_writer) = pg
+        .settings_bundle(clock, protections)
+        .into_parts();
+    let config_svc = SettingsService::with_postgres(
+        configs,
+        writer,
+        empty_flag_store(),
+        Box::new(SharedClock(service_clock)),
+    );
+    let secret_repo = Arc::from(secrets);
+    let secret_uow = Arc::from(secret_writer);
+    let domain = SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow);
+    consume(domain);
+}
+"#;
+
+    fn settings_receipt_inventory(
+        source: &str,
+        composition: &str,
+    ) -> Result<Vec<ParsedLocalOnlySource>> {
+        let workspace = receipt_workspace(source)?;
+        let mut inventory = local_only_source_inventory(&workspace)?;
+        let syntax = syn::parse_file(composition)?;
+        inventory.push(ParsedLocalOnlySource {
+            subject: "composition/settings/src/lib.rs".to_string(),
+            scoped_recorded_provider_fields: collect_scoped_recorded_provider_fields(&syntax.items),
+            canonical_test_repo_fields: collect_canonical_test_repo_fields(&syntax.items),
+            receipt_namespace_error: None,
+            syntax,
+        });
+        Ok(inventory)
     }
 
     fn compile_valid_identity_lineage_reds() -> Vec<(&'static str, String)> {
@@ -7513,13 +8981,366 @@ async fn outer() {
             assert_eq!(registration.registered_contracts.len(), registered_count);
             assert_eq!(registration.missing_contracts.len(), 6 - registered_count);
             assert_eq!(
-                registration.report(6).status,
+                registration.report().status,
                 if registered_count == 6 {
                     ReceiptCoverageStatus::Complete
                 } else {
                     ReceiptCoverageStatus::Partial
                 }
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn local_only_receipt_coverage_is_blocking_when_any_active_target_is_missing() -> Result<()> {
+        let (_, findings) = check_root(&fixture("green"))?;
+        assert_eq!(findings.len(), 1, "missing receipt must block the gate");
+        assert_eq!(format!("{:?}", findings[0].rule), "MissingLocalOnlyReceipt");
+        assert!(findings[0].detail.contains("demo.safe"));
+        Ok(())
+    }
+
+    #[test]
+    fn missing_receipt_finding_has_one_typed_source_for_gate_and_report() -> Result<()> {
+        let registration = ReceiptRegistration::reconcile(
+            BTreeSet::from(["demo.safe".to_string()]),
+            BTreeSet::new(),
+        )?;
+        let source = missing_receipt_finding("demo.safe");
+        assert_eq!(registration.blocking_findings(), vec![source.clone()]);
+        assert_eq!(
+            report_finding(&source),
+            report_finding(&missing_receipt_finding("demo.safe"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn standalone_gate_rejects_manifest_generated_registry_drift() -> Result<()> {
+        let workspace = WorkspaceFixture::new()?;
+        let generated = workspace.0.join("generated/src/http/demo_v1.rs");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&generated)?
+            .write_all(
+                br#"
+pub mod decoy {
+    pub struct RouteMarker;
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
+        ::vocab::HttpRouteBinding::new();
+}
+"#,
+            )?;
+        let Err(error) = check_root(&workspace.0) else {
+            bail!("registry drift unexpectedly passed");
+        };
+        let detail = format!("{error:#}");
+        assert!(detail.contains("stale_in_generated"), "{detail}");
+        assert!(detail.contains("demo_v1::decoy"), "{detail}");
+        Ok(())
+    }
+
+    #[test]
+    fn settings_provider_write_observer_is_method_variant_and_state_bound() -> Result<()> {
+        let canonical = r#"
+struct SettingsConfigGetRepoProbe { state: State, write_effects: Counter }
+impl ConfigRepo for SettingsConfigGetRepoProbe {
+    fn find_version(&self) {
+        let (_, synthetic_write, _) = {
+            let mut state = self.state.lock();
+            ((), state.synthetic_write, ())
+        };
+        if synthetic_write == ConfigGetSyntheticWrite::FindVersion {
+            self.write_effects.record();
+        }
+    }
+    fn head(&self) {
+        let (_, synthetic_write, _) = {
+            let mut state = self.state.lock();
+            ((), state.synthetic_write, ())
+        };
+        if synthetic_write == ConfigGetSyntheticWrite::Head {
+            self.write_effects.record();
+        }
+    }
+}
+"#;
+        let recorded = |source: &str| -> Result<BTreeSet<String>> {
+            let syntax = syn::parse_file(source)?;
+            Ok(collect_scoped_recorded_provider_fields(&syntax.items)
+                .remove(&(Vec::new(), "SettingsConfigGetRepoProbe".to_string()))
+                .unwrap_or_default())
+        };
+        assert_eq!(
+            recorded(canonical)?,
+            BTreeSet::from(["write_effects".to_string()])
+        );
+        for (name, red) in [
+            (
+                "wrong method",
+                canonical.replacen("fn find_version(", "fn find(", 1),
+            ),
+            (
+                "local constant",
+                canonical.replace("state.synthetic_write", "ConfigGetSyntheticWrite::Head"),
+            ),
+            (
+                "wrong injection variant",
+                canonical.replacen(
+                    "ConfigGetSyntheticWrite::FindVersion",
+                    "ConfigGetSyntheticWrite::Head",
+                    1,
+                ),
+            ),
+            (
+                "dead record",
+                canonical.replace(
+                    "        if synthetic_write",
+                    "        return;\n        if synthetic_write",
+                ),
+            ),
+        ] {
+            assert!(recorded(&red)?.is_empty(), "{name} unexpectedly certified");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn settings_config_get_receipt_operation_is_narrow() -> Result<()> {
+        let canonical = syn::parse_str::<Expr>(
+            "move || ::testkit::call(router, ::testkit::ContractRequest::get(::generated::http::settings_v4::SPEC.route.path().replace(\"{key}\", \"app.k\")))",
+        )?;
+        assert_eq!(
+            canonical_receipt_operation(&canonical),
+            Some(("router".to_string(), vec!["settings_v4".to_string()]))
+        );
+        for (name, source) in [
+            (
+                "wrong placeholder",
+                "move || ::testkit::call(router, ::testkit::ContractRequest::get(::generated::http::settings_v4::SPEC.route.path().replace(\"{configKey}\", \"app.k\")))",
+            ),
+            (
+                "wrong value",
+                "move || ::testkit::call(router, ::testkit::ContractRequest::get(::generated::http::settings_v4::SPEC.route.path().replace(\"{key}\", \"other.k\")))",
+            ),
+            (
+                "wrong module",
+                "move || ::testkit::call(router, ::testkit::ContractRequest::get(::generated::http::identity_v1::profile::SPEC.route.path().replace(\"{key}\", \"app.k\")))",
+            ),
+        ] {
+            let expression = syn::parse_str::<Expr>(source)?;
+            assert!(
+                canonical_receipt_operation(&expression).is_none(),
+                "{name} unexpectedly certified"
+            );
+        }
+        Ok(())
+    }
+
+    #[rustfmt::skip]
+    const SETTINGS_LINEAGE_REDS: [(&str, &str, &str); 12] = [
+        ("fake Domain", "SettingsDomain", "FakeSettingsDomain"),
+        ("cfg-hidden production Domain", "struct SettingsDomain {", "#[cfg(any())]\nstruct SettingsDomain {"),
+        ("decoy provider field", "repo.configs", "repo.decoy"),
+        ("decoy provider wrapper", "DynConfigRepo::new_box(provider.as_ref().clone())", "Decoy::new_box(provider.as_ref().clone())"),
+        ("extra query repo field", "cache: () }", "cache: (), decoy: () }"),
+        ("wrong read receiver", "self.configs.head()", "self.decoy.head()"),
+        ("shadowed service provider", "Arc::from(configs)", "Arc::from(decoy)"),
+        ("service wrapper", "Arc::new(super::SettingsService::with_postgres(repo.configs, writer(), flags(), clock()))", "build_settings_service(repo.configs)"),
+        ("mutable alias", "let config = Arc::new(super::SettingsService::with_postgres(repo.configs, writer(), flags(), clock()));", "let mut configs = repo.configs;\n    let config = Arc::new(super::SettingsService::with_postgres(configs, writer(), flags(), clock()));"),
+        ("wrong classified state", "prove_local_only_mounted_route_state::<ConfigQueryService, _>", "prove_local_only_mounted_route_state::<ReadState, _>"),
+        ("wrong generated ROUTE", "&::generated::http::settings_v4::ROUTE", "&::generated::http::identity_v1::profile::ROUTE"),
+        ("different finalized routes", "&routes,\n        &::generated::http::settings_v4::ROUTE", "&other_routes,\n        &::generated::http::settings_v4::ROUTE"),
+    ];
+
+    #[test]
+    fn settings_config_get_receipt_accepts_only_real_service_domain_lineage() -> Result<()> {
+        let canonical = canonical_settings_receipt();
+        let targets = [receipt_target("settings.config-get", &["settings_v4"])];
+        let inventory = settings_receipt_inventory(&canonical, CANONICAL_SETTINGS_COMPOSITION)?;
+        let registration = local_only_receipt_registration_in_inventory(&inventory, &targets)?;
+        assert_eq!(
+            registration.registered_contracts,
+            BTreeSet::from(["settings.config-get".to_string()])
+        );
+
+        for (name, from, to) in SETTINGS_LINEAGE_REDS {
+            let source = canonical.replace(from, to);
+            let inventory = settings_receipt_inventory(&source, CANONICAL_SETTINGS_COMPOSITION)?;
+            let Err(error) = local_only_receipt_registration_in_inventory(&inventory, &targets)
+            else {
+                bail!("{name} unexpectedly certified");
+            };
+            let detail = format!("{error:#}");
+            assert!(detail.contains("Settings receipt"), "{name}: {detail}");
+            if name == "wrong classified state" {
+                assert!(detail.contains("classified-state"), "{name}: {detail}");
+            }
+            if name == "decoy provider field" {
+                assert!(
+                    detail.contains("provider→TestRepo→service→Domain"),
+                    "{name}: {detail}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn settings_receipt_rejects_cfg_test_method_decoy() -> Result<()> {
+        let canonical = canonical_settings_receipt();
+        let cfg_split = canonical.replace(
+            "    async fn get_config(&self) {\n        self.configs.head();\n        self.cache.find();\n        self.configs.find_version(scope, &key, active_version);\n    }",
+            "    #[cfg(test)]\n    async fn get_config(&self) {\n        self.configs.head();\n        self.cache.find();\n        self.configs.find_version(scope, &key, active_version);\n    }\n    #[cfg(not(test))]\n    async fn get_config(&self) {}",
+        );
+        assert_ne!(
+            cfg_split, canonical,
+            "cfg-split fixture mutation must apply"
+        );
+        let inventory = settings_receipt_inventory(&cfg_split, CANONICAL_SETTINGS_COMPOSITION)?;
+        let targets = [receipt_target("settings.config-get", &["settings_v4"])];
+        let Err(error) = local_only_receipt_registration_in_inventory(&inventory, &targets) else {
+            bail!("test-only canonical method masked the production implementation");
+        };
+        let detail = format!("{error:#}");
+        assert!(detail.contains("get-config-read"), "{detail}");
+        Ok(())
+    }
+
+    #[test]
+    fn settings_receipt_rejects_ambiguous_unknown_cfg_methods() -> Result<()> {
+        let canonical = canonical_settings_receipt();
+        let ambiguous = canonical.replace(
+            "    async fn get_config(&self) {\n        self.configs.head();\n        self.cache.find();\n        self.configs.find_version(scope, &key, active_version);\n    }",
+            "    #[cfg(feature = \"one\")]\n    async fn get_config(&self) {\n        self.configs.head();\n        self.cache.find();\n        self.configs.find_version(scope, &key, active_version);\n    }\n    #[cfg(feature = \"two\")]\n    async fn get_config(&self) {\n        self.configs.head();\n        self.cache.find();\n        self.configs.find_version(scope, &key, active_version);\n    }",
+        );
+        assert_ne!(ambiguous, canonical, "ambiguous cfg mutation must apply");
+        let inventory = settings_receipt_inventory(&ambiguous, CANONICAL_SETTINGS_COMPOSITION)?;
+        let targets = [receipt_target("settings.config-get", &["settings_v4"])];
+        let Err(error) = local_only_receipt_registration_in_inventory(&inventory, &targets) else {
+            bail!("unknown cfg methods did not remain production-possible and ambiguous");
+        };
+        let detail = format!("{error:#}");
+        assert!(detail.contains("get-config-read"), "{detail}");
+        assert!(detail.contains("found 2 production-reachable"), "{detail}");
+        Ok(())
+    }
+
+    #[test]
+    fn settings_receipt_rejects_test_constructor_when_production_funnel_drifts() -> Result<()> {
+        let canonical = canonical_settings_receipt();
+        let drifted = canonical.replace(
+            "    fn with_postgres(configs: (), writer: (), flags: (), clock: ()) -> Self {\n        let configs = Arc::from(configs);\n        let cache = make_cache();\n        consume((writer, flags, clock));\n        Self { query: ConfigQueryService::new(configs, cache) }\n    }",
+            "    fn with_postgres(configs: (), writer: (), flags: (), clock: ()) -> Self {\n        let configs = Arc::from(decoy);\n        let cache = make_cache();\n        consume((writer, flags, clock));\n        Self { query: ConfigQueryService::new(configs, cache) }\n    }\n    #[cfg(test)]\n    fn new(configs: ()) -> Self {\n        let configs = Arc::from(configs);\n        let cache = make_cache();\n        Self { query: ConfigQueryService::new(configs, cache) }\n    }",
+        ).replace(
+            "super::SettingsService::with_postgres(repo.configs, writer(), flags(), clock())",
+            "super::SettingsService::new(repo.configs)",
+        );
+        assert_ne!(drifted, canonical, "constructor drift mutation must apply");
+        let inventory = settings_receipt_inventory(&drifted, CANONICAL_SETTINGS_COMPOSITION)?;
+        let targets = [receipt_target("settings.config-get", &["settings_v4"])];
+        let Err(error) = local_only_receipt_registration_in_inventory(&inventory, &targets) else {
+            bail!("test constructor certified a drifted production funnel");
+        };
+        let detail = format!("{error:#}");
+        assert!(detail.contains("service-constructor"), "{detail}");
+        Ok(())
+    }
+
+    #[test]
+    fn settings_receipt_rejects_production_composition_drift() -> Result<()> {
+        let targets = [receipt_target("settings.config-get", &["settings_v4"])];
+        for (name, from, to) in [
+            (
+                "composition deps",
+                "let SettingsModuleDeps { pg, clock } = deps;",
+                "let pg = decoy; let clock = other;",
+            ),
+            (
+                "provider bundle",
+                ".settings_bundle(clock, protections)",
+                ".decoy_bundle(clock, protections)",
+            ),
+            (
+                "service constructor",
+                "SettingsService::with_postgres(",
+                "SettingsService::new(",
+            ),
+            (
+                "Domain constructor",
+                "SettingsDomain::new(",
+                "build_settings_domain(",
+            ),
+        ] {
+            let composition = CANONICAL_SETTINGS_COMPOSITION.replace(from, to);
+            assert_ne!(composition, CANONICAL_SETTINGS_COMPOSITION, "{name}");
+            let inventory =
+                settings_receipt_inventory(&canonical_settings_receipt(), &composition)?;
+            let Err(error) = local_only_receipt_registration_in_inventory(&inventory, &targets)
+            else {
+                bail!("{name}: production composition lineage drift unexpectedly passed");
+            };
+            let detail = format!("{error:#}");
+            assert!(
+                detail.contains("production-composition"),
+                "{name}: {detail}"
+            );
+            assert!(detail.contains("expected="), "{name}: {detail}");
+            assert!(detail.contains("actual="), "{name}: {detail}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn settings_certificate_reports_the_exact_invalid_stage() -> Result<()> {
+        let canonical = canonical_settings_receipt();
+        let targets = [receipt_target("settings.config-get", &["settings_v4"])];
+        for (stage, from, to) in [
+            (
+                "root-types",
+                "struct SettingsDomain {",
+                "struct MissingSettingsDomain {",
+            ),
+            ("query-fields", "cache: () }", "cache: (), decoy: () }"),
+            (
+                "query-constructor",
+                "Self { configs, cache }",
+                "Self { configs: decoy, cache }",
+            ),
+            (
+                "get-config-read",
+                "self.configs.head()",
+                "self.cache.head()",
+            ),
+            (
+                "service-constructor",
+                "Arc::from(configs)",
+                "Arc::from(decoy)",
+            ),
+            ("query-getter", "self.query.clone()", "self.decoy.clone()"),
+            (
+                "domain-constructor",
+                "config.config_query_service()",
+                "decoy.config_query_service()",
+            ),
+            (
+                "domain-mount",
+                "endpoint.with_classified_state(config_query)",
+                "endpoint.with_classified_state(decoy)",
+            ),
+        ] {
+            let source = canonical.replacen(from, to, 1);
+            assert_ne!(source, canonical, "{stage}: fixture mutation must apply");
+            let inventory = settings_receipt_inventory(&source, CANONICAL_SETTINGS_COMPOSITION)?;
+            let Err(error) = local_only_receipt_registration_in_inventory(&inventory, &targets)
+            else {
+                bail!("{stage}: invalid Settings certificate unexpectedly passed");
+            };
+            let detail = format!("{error:#}");
+            assert!(detail.contains(stage), "{stage}: {detail}");
+            assert!(detail.contains("expected="), "{stage}: {detail}");
+            assert!(detail.contains("actual="), "{stage}: {detail}");
         }
         Ok(())
     }
@@ -7712,21 +9533,25 @@ async fn outer() {
             summary,
             "1 active LocalOnly HTTP contract(s) checked; source receipts registered 0/1; missing: demo.safe"
         );
-        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(matches!(findings[0].rule, Rule::MissingLocalOnlyReceipt));
         Ok(())
     }
 
     #[test]
     fn forbidden_profiles_are_stable_and_closed() -> Result<()> {
         let (_, findings) = check_root(&fixture("all_forbidden"))?;
-        assert_eq!(findings.len(), 9);
+        assert_eq!(findings.len(), 10);
         assert!(
             findings
                 .iter()
-                .all(|finding| matches!(finding.rule, Rule::ForbiddenStateEffect))
+                .filter(|finding| matches!(finding.rule, Rule::ForbiddenStateEffect))
+                .count()
+                == 9
         );
         let details: Vec<_> = findings
             .iter()
+            .filter(|finding| matches!(finding.rule, Rule::ForbiddenStateEffect))
             .map(|finding| finding.detail.as_str())
             .collect();
         assert!(details.windows(2).all(|pair| pair[0] <= pair[1]));
@@ -7748,6 +9573,31 @@ async fn outer() {
     }
 
     #[test]
+    fn consistency_report_schema_is_v3_and_receipt_coverage_is_fail_closed() -> Result<()> {
+        let report = synthetic_report_fixture();
+        let json = serde_json::to_value(&report)?;
+        assert_eq!(json["schemaVersion"], 3);
+        assert_eq!(
+            json["localOnlyReceiptCoverage"]["enforcement"],
+            "failClosed"
+        );
+        assert_eq!(json["status"], "failed");
+        assert!(json["findings"].as_array().is_some_and(|findings| {
+            findings.iter().any(|finding| {
+                finding["rule"] == "missingLocalOnlyReceipt" && finding["subject"] == "a.local"
+            })
+        }));
+        assert!(
+            json["contracts"][0]["findings"]
+                .as_array()
+                .is_some_and(|findings| findings
+                    .iter()
+                    .any(|finding| finding["rule"] == "missingLocalOnlyReceipt"))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn report_canonicalizes_rows_findings_effects_and_markdown_cells() -> Result<()> {
         let report = synthetic_report_fixture();
         assert_eq!(report.status, ReportStatus::Failed);
@@ -7757,7 +9607,7 @@ async fn outer() {
             vec!["read".to_string(), "cross-tenant-audit".to_string()]
         );
         let markdown = render_report(&report, ReportFormat::Markdown)?;
-        assert!(markdown.contains("<code>forbiddenStateEffect @ crates/demo/src/lib.rs:7: escaped &#124; cell&#92;path<br>line &#91;link&#93;&#40;https://example.invalid&#41; &#33;&#91;img&#93;&#40;x&#41; &lt;em&gt;raw&lt;/em&gt; &#96;tick&#96; &#42;strong&#42; &amp; amp</code>"));
+        assert!(markdown.contains("forbiddenStateEffect @ crates/demo/src/lib.rs:7: escaped &#124; cell&#92;path<br>line &#91;link&#93;&#40;https://example.invalid&#41; &#33;&#91;img&#93;&#40;x&#41; &lt;em&gt;raw&lt;/em&gt; &#96;tick&#96; &#42;strong&#42; &amp; amp"));
         assert!(markdown.ends_with('\n'));
         assert!(!markdown.ends_with("\n\n"));
         for forbidden in [
@@ -7781,8 +9631,32 @@ async fn outer() {
         malformed.active_http_contract_count += 1;
         assert!(render_report(&malformed, ReportFormat::Json).is_err());
 
+        let mut invalid_receipt_partition = synthetic_report_fixture();
+        invalid_receipt_partition.contracts[0]
+            .source_receipt_registration
+            .status = SourceReceiptRegistrationStatus::NotApplicable;
+        invalid_receipt_partition.contracts[0]
+            .findings
+            .retain(|finding| finding.rule != "missingLocalOnlyReceipt");
+        invalid_receipt_partition
+            .findings
+            .retain(|finding| finding.rule != "missingLocalOnlyReceipt");
+        invalid_receipt_partition
+            .local_only_receipt_coverage
+            .registered_count = 0;
+        invalid_receipt_partition
+            .local_only_receipt_coverage
+            .missing_count = 0;
+        invalid_receipt_partition
+            .local_only_receipt_coverage
+            .missing_contracts
+            .clear();
+        invalid_receipt_partition.local_only_receipt_coverage.status =
+            ReceiptCoverageStatus::Complete;
+        assert!(render_report(&invalid_receipt_partition, ReportFormat::Json).is_err());
+
         let mut legacy = synthetic_report_fixture();
-        legacy.schema_version = 1;
+        legacy.schema_version = 2;
         assert!(render_report(&legacy, ReportFormat::Json).is_err());
         Ok(())
     }
@@ -7840,11 +9714,13 @@ async fn outer() {
         let report = collect_report(&root)?;
         assert_eq!(generated::http::LOCAL_ONLY_SPECS.len(), 6);
         assert_eq!(report.local_only_receipt_coverage.active_count, 6);
-        assert_eq!(report.local_only_receipt_coverage.registered_count, 5);
-        assert_eq!(report.local_only_receipt_coverage.missing_count, 1);
-        assert_eq!(
-            report.local_only_receipt_coverage.missing_contracts,
-            ["settings.config-get"]
+        assert_eq!(report.local_only_receipt_coverage.registered_count, 6);
+        assert_eq!(report.local_only_receipt_coverage.missing_count, 0);
+        assert!(
+            report
+                .local_only_receipt_coverage
+                .missing_contracts
+                .is_empty()
         );
         assert_eq!(report.status, ReportStatus::Passed);
         assert_eq!(
@@ -7863,13 +9739,14 @@ async fn outer() {
                 "identity.policies-list",
                 "identity.profile",
                 "identity.roles-list",
+                "settings.config-get",
             ]
         );
         let (summary, findings) = check_root(&root)?;
         assert!(findings.is_empty(), "{findings:#?}");
         assert_eq!(
             summary,
-            "6 active LocalOnly HTTP contract(s) checked; source receipts registered 5/6; missing: settings.config-get"
+            "6 active LocalOnly HTTP contract(s) checked; source receipts registered 6/6; missing: none"
         );
         Ok(())
     }
@@ -7920,7 +9797,8 @@ async fn outer() {
         )];
 
         let report = collect_report_with_specs(&workspace.0, &specs)?;
-        assert_eq!(report.status, ReportStatus::Passed);
+        assert_eq!(report.status, ReportStatus::Failed);
+        assert_eq!(report.contracts[0].effect_proof.status, ProofStatus::Passed);
         assert_eq!(report.contracts[0].owner, "_framework");
         assert_eq!(
             report.contracts[0].effect_proof.state_kind,
@@ -7931,7 +9809,11 @@ async fn outer() {
             summary,
             "1 active LocalOnly HTTP contract(s) checked; source receipts registered 0/1; missing: demo.safe"
         );
-        assert!(findings.is_empty(), "{findings:#?}");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| matches!(finding.rule, Rule::MissingLocalOnlyReceipt))
+        );
         Ok(())
     }
 
@@ -7955,7 +9837,8 @@ async fn outer() {
         )];
 
         let report = collect_report_with_specs(&workspace.0, &specs)?;
-        assert_eq!(report.status, ReportStatus::Passed);
+        assert_eq!(report.status, ReportStatus::Failed);
+        assert_eq!(report.contracts[0].effect_proof.status, ProofStatus::Passed);
         assert_eq!(
             report.contracts[0].effect_proof.state_kind,
             Some(StateKind::Classified)
@@ -7964,7 +9847,12 @@ async fn outer() {
             report.contracts[0].effect_proof.effect_class.as_deref(),
             Some("ReadEffect")
         );
-        assert!(check_root(&workspace.0)?.1.is_empty());
+        assert!(
+            check_root(&workspace.0)?
+                .1
+                .iter()
+                .all(|finding| { matches!(finding.rule, Rule::MissingLocalOnlyReceipt) })
+        );
         Ok(())
     }
 
@@ -8183,7 +10071,11 @@ async fn outer() {
             [format!("{source_path}:1"), format!("{source_path}:2")]
         );
 
-        let report = finalize_report(vec![missing, ambiguous], &BTreeSet::new())?;
+        let receipt_registration = ReceiptRegistration::reconcile(
+            BTreeSet::from(["seed.missing".to_string(), "seed.ambiguous".to_string()]),
+            BTreeSet::new(),
+        )?;
+        let report = finalize_report(vec![missing, ambiguous], &receipt_registration)?;
         assert_eq!(report.status, ReportStatus::Failed);
         assert_eq!(report.active_http_contract_count, 2);
         assert!(report.findings.windows(2).all(|pair| pair[0] <= pair[1]));
@@ -8294,7 +10186,15 @@ async fn outer() {
         assert_eq!(classified.findings.len(), 2);
 
         rows.push(classified);
-        let report = finalize_report(rows, &BTreeSet::new())?;
+        let receipt_registration = ReceiptRegistration::reconcile(
+            BTreeSet::from([
+                "seed.ordinary".to_string(),
+                "seed.opaque".to_string(),
+                "seed.classified".to_string(),
+            ]),
+            BTreeSet::new(),
+        )?;
+        let report = finalize_report(rows, &receipt_registration)?;
         assert_eq!(report.status, ReportStatus::Failed);
         assert_eq!(report.active_http_contract_count, 3);
         assert!(report.findings.windows(2).all(|pair| pair[0] <= pair[1]));
@@ -8570,7 +10470,11 @@ async fn outer() {
             summary,
             "1 active LocalOnly HTTP contract(s) checked; source receipts registered 0/1; missing: demo.safe"
         );
-        assert!(findings.is_empty(), "{findings:#?}");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| matches!(finding.rule, Rule::MissingLocalOnlyReceipt))
+        );
         Ok(())
     }
 
@@ -8777,7 +10681,12 @@ async fn outer() {
             if cfg != "all(not(test), any())" {
                 assert!(!findings.is_empty(), "cfg({cfg}) unexpectedly hid a writer");
             } else {
-                assert!(findings.is_empty(), "cfg({cfg}) is constantly false");
+                assert!(
+                    findings
+                        .iter()
+                        .all(|finding| matches!(finding.rule, Rule::MissingLocalOnlyReceipt)),
+                    "cfg({cfg}) is constantly false"
+                );
             }
         }
         Ok(())
@@ -8813,7 +10722,7 @@ async fn outer() {
         let workspace = WorkspaceFixture::new()?;
         let generated = workspace.0.join("generated/src/http/demo_v1.rs");
         workspace.replace(&generated, "http::LocalOnly", "http::LocalTx")?;
-        assert!(!check_root(&workspace.0)?.1.is_empty());
+        assert!(check_root(&workspace.0).is_err());
         Ok(())
     }
 
@@ -8832,7 +10741,10 @@ async fn outer() {
 struct Demo;"#,
         )?;
         assert!(
-            check_root(&dead.0)?.1.is_empty(),
+            check_root(&dead.0)?
+                .1
+                .iter()
+                .all(|finding| { matches!(finding.rule, Rule::MissingLocalOnlyReceipt) }),
             "dead helper polluted mount evidence"
         );
 

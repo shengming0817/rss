@@ -15,20 +15,17 @@ fn assert_successful_pair(first: &Output, second: &Output) {
 
 fn assert_json_coverage(json: &serde_json::Value) {
     let coverage = &json["localOnlyReceiptCoverage"];
-    assert_eq!(coverage["enforcement"], "reportOnly");
+    assert_eq!(coverage["enforcement"], "failClosed");
     assert_eq!(coverage["evidence"], "sourceRegistered");
-    assert_eq!(coverage["status"], "partial");
+    assert_eq!(coverage["status"], "complete");
     assert_eq!(coverage["activeCount"], 6);
-    assert_eq!(coverage["registeredCount"], 5);
-    assert_eq!(coverage["missingCount"], 1);
-    assert_eq!(
-        coverage["missingContracts"],
-        serde_json::json!(["settings.config-get"])
-    );
+    assert_eq!(coverage["registeredCount"], 6);
+    assert_eq!(coverage["missingCount"], 0);
+    assert_eq!(coverage["missingContracts"], serde_json::json!([]));
 }
 
 fn assert_json_rows(json: &serde_json::Value) {
-    assert_eq!(json["schemaVersion"], 2);
+    assert_eq!(json["schemaVersion"], 3);
     assert_eq!(json["status"], "passed");
     assert_eq!(json["activeHttpContractCount"], 20);
     assert_eq!(json["contracts"].as_array().map(Vec::len), Some(20));
@@ -40,13 +37,13 @@ fn assert_json_rows(json: &serde_json::Value) {
             .filter(|contract| {
                 contract["sourceReceiptRegistration"]
                     == serde_json::json!({
-                        "enforcement": "reportOnly",
+                        "enforcement": "failClosed",
                         "evidence": "sourceRegistered",
                         "status": "registered"
                     })
             })
             .count(),
-        5
+        6
     );
     assert!(
         json["contracts"]
@@ -73,7 +70,7 @@ fn consistency_report_cli_emits_complete_deterministic_artifacts() -> anyhow::Re
     assert!(markdown.starts_with("# Consistency / Effect Posture\n"));
     assert!(markdown.contains("Static status: **passed** · Active HTTP contracts: **20**"));
     assert!(markdown.contains(
-        "Source receipt registration (report-only; tests not executed): **5/6 registered** · Missing: **1**"
+        "Source receipt registration (fail-closed; tests not executed): **6/6 registered** · Missing: **0**"
     ));
     assert!(markdown.ends_with('\n'));
     Ok(())

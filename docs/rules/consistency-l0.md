@@ -106,15 +106,15 @@ production mount 和 effect proof。route owner 直接来自 generated `HttpRout
 assembly `frameworkContracts` 声明定位，并扫描同一个 `bootstrap::FrameworkRoutes::register` funnel。
 两种 owner 经闭合 `ServingScope::Domain | Framework` 进入同一个 LocalOnly proof evaluator；assembly 名不得
 作为 domain owner 或 owner-sealed macro namespace 使用。无状态 route 不要求无关的 port proof；classified
-Framework state 只允许 `diport` 全局 sealed capability，不能借用任意 domain-private 分类。JSON v2
+Framework state 只允许 `diport` 全局 sealed capability，不能借用任意 domain-private 分类。JSON v3
 面向 CI/PR artifact，Markdown 面向人工 review；两者由同一 typed
 model 渲染、稳定排序，且不包含时间、主机、Git SHA、绝对路径或运行态 tenant/device 数据。
 
-v2 同时输出独立的 `localOnlyReceiptCoverage` 与 per-contract `sourceReceiptRegistration`。后者显式携带
-`evidence=sourceRegistered`、`enforcement=reportOnly` 和 `status=registered|missing|notApplicable`；顶层
-`status` 仍只表示静态 posture finding，receipt registration status 不与静态 `ProofStatus` 复用。
-`registered` 只表示 canonical source receipt site 可发现，不声称本次 report 命令执行过测试。v1 不再输出或
-接受，不提供 alias 或双 schema。
+v3 同时输出独立的 `localOnlyReceiptCoverage` 与 per-contract `sourceReceiptRegistration`。后者显式携带
+`evidence=sourceRegistered`、`enforcement=failClosed` 和 `status=registered|missing|notApplicable`；missing
+产生 contract/top-level `missingLocalOnlyReceipt` finding 并令顶层 `status=failed`。
+`registered` 只表示 canonical source receipt site 可发现，不声称本次 report 命令执行过测试。v2 及更早版本
+不再输出或接受，不提供 alias 或双 schema。
 
 报告与 gate 的职责不同：posture finding 会令报告内 `status = "failed"`，但命令仍成功并输出完整 artifact；
 采集、结构或序列化失败在 stdout 写入前非零退出；stdout 写入失败本身可能留下截断文件，消费方必须检查退出码
@@ -171,8 +171,8 @@ finalizer，并把同一个 router/proof 作为 tuple 返回。三维直属 obse
 的零参 move operation 必须消费这对证书；随后还必须用 `::core::assert_eq!` 断言
 `receipt.contract_id()`。decoy/bait、错 route/path/method/provider、空或 wrong-but-finalized routes、
 cfg/sibling bait、async/closure/spawn、控制流、macro、wrapper/alias 与忽略 Result 的形状均
-fail-closed，并与 active registry exact-set 对账。缺少 receipt 保持 report-only。当前基线为 5/6 registered，
-仅 `settings.config-get` missing，详见 `docs/runbooks/202607141556-1771-local-only-proof.md`。
+fail-closed，并与 manifest / generated active registry exact-set 对账；缺少 receipt 同样阻断。当前基线为
+6/6 registered、missing none，详见 `docs/runbooks/202607141556-1771-local-only-proof.md`。
 
 `testkit::local_only::assert_local_only` 在完整 await 一次 HTTP operation 前后，比较调用方必须同时提供的
 `write` / `outbox` / `publish` 三维证据。存在运行时 seam 时，provider 必须持有维度化
