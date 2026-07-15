@@ -1,6 +1,6 @@
 //! Canonical local-CI entry guard for agent skills and project templates.
 //!
-//! INVARIANT: CI-LOCAL-ENTRY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::missing_canonical_entry_is_rejected|tests::legacy_workspace_closeout_is_rejected|tests::makefile_canonical_targets_are_closed|tests::empty_carrier_set_is_rejected", anti_vacuity = "tests::canonical_carrier_set_is_accepted|tests::workspace_controlled_carriers_use_canonical_entry" } -- the six controlled agent/template carriers must funnel final local validation through `make ci CI_BASE=<ref>`; the Make targets must be unique exact recipes and flattened or bare CI executors must not return.
+//! INVARIANT: CI-LOCAL-ENTRY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::missing_canonical_entry_is_rejected|tests::unbounded_or_local_full_semantics_are_rejected|tests::legacy_workspace_closeout_is_rejected|tests::makefile_canonical_targets_are_closed|tests::empty_carrier_set_is_rejected", anti_vacuity = "tests::canonical_carrier_set_is_accepted|tests::workspace_controlled_carriers_use_canonical_entry" } -- the six controlled agent/template carriers must funnel final local validation through a 10-minute bounded `make ci CI_BASE=<ref>` and defer heavy gates to nightly; the Make targets must be unique exact recipes and flattened or bare CI executors must not return.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -35,11 +35,11 @@ const CLOSEOUT_MARKERS: &[(&str, &[&str])] = &[
     ),
     (
         ".github/project-template/pr-comment.md",
-        &["ship/fix 默认执行本地 canonical"],
+        &["ship/fix 默认执行 10 分钟有界本地 canonical"],
     ),
     (
         ".github/project-template/pull_request_template.md",
-        &["本地通过（只分析已提交差异"],
+        &["10 分钟有界本地通过"],
     ),
 ];
 
@@ -49,6 +49,7 @@ pub(crate) enum Rule {
     EmptyCarrier,
     DuplicateCarrier,
     MissingCanonicalEntry,
+    MissingBoundedSemantics,
     LegacyWorkspaceCloseout,
     LegacyFlatCommand,
     MakefileContract,
@@ -138,6 +139,16 @@ fn findings_for_contents(files: &[(&str, &str)]) -> Vec<Finding<Rule>> {
                 Rule::MissingCanonicalEntry,
                 *path,
                 "必须包含 `make ci CI_BASE=<ref>`；worktree 形式仅允许在 make 与 ci 之间增加 `-C worktrees/...`",
+            ));
+        }
+        if !content.contains("10 分钟")
+            || !content.contains("nightly")
+            || content.contains("make ci-full` 必须")
+        {
+            findings.push(finding(
+                Rule::MissingBoundedSemantics,
+                *path,
+                "本地 canonical CI 必须声明 10 分钟预算、重型门交 nightly，且不得把 make ci-full 设为必跑",
             ));
         }
         if has_legacy_workspace_closeout(content) {
@@ -322,6 +333,7 @@ fn cargo_like_invocations<'a>(words: &'a [&'a str]) -> impl Iterator<Item = (usi
 }
 
 fn findings_for_makefile(content: &str) -> Vec<Finding<Rule>> {
+    const CI_RECIPE: &str = "/usr/bin/python3 hack/ci-local-supervisor.py --repo-root \"$(CURDIR)\" --budget-seconds 600 -- $(RSS_CARGO) xtask ci local --base \"$(CI_BASE)\"";
     let base_count = content
         .lines()
         .filter(|line| line.trim() == "CI_BASE ?= origin/develop")
@@ -336,7 +348,7 @@ fn findings_for_makefile(content: &str) -> Vec<Finding<Rule>> {
         && base_assignments == 1
         && make_target_declarations(content, "ci") == 1
         && make_target_declarations(content, "ci-full") == 1
-        && ci == [vec!["$(RSS_CARGO) xtask ci local --base \"$(CI_BASE)\""]]
+        && ci == [vec![CI_RECIPE]]
         && full == [vec!["$(RSS_CARGO) xtask ci full"]]
     {
         Vec::new()
@@ -344,7 +356,7 @@ fn findings_for_makefile(content: &str) -> Vec<Finding<Rule>> {
         vec![finding(
             Rule::MakefileContract,
             "Makefile",
-            "`ci` 必须精确委托 `ci local --base $(CI_BASE)`，`ci-full` 必须精确委托 `ci full`，默认 base 为 origin/develop",
+            "`ci` 必须在 Cargo bootstrap 外由 600 秒 supervisor 精确委托 `ci local --base $(CI_BASE)`，`ci-full` 必须精确委托 `ci full`，默认 base 为 origin/develop",
         )]
     }
 }
@@ -413,27 +425,27 @@ mod tests {
         vec![
             (
                 "CLAUDE.md",
-                "收尾统一运行 `make ci CI_BASE=<remote>/develop`",
+                "收尾统一运行 10 分钟 `make ci CI_BASE=<remote>/develop`，重型门交 nightly",
             ),
             (
                 ".claude/skills/ship/SKILL.md",
-                "**本地验证（label 后执行）**：运行 `make ci CI_BASE=<remote>/develop`",
+                "**本地验证（label 后执行）**：运行 10 分钟 `make ci CI_BASE=<remote>/develop`，重型门交 nightly",
             ),
             (
                 ".claude/skills/fix/SKILL.md",
-                "**本地验证（label 后执行）**：run make ci CI_BASE=origin/develop",
+                "**本地验证（label 后执行）**：10 分钟 run make ci CI_BASE=origin/develop，重型门交 nightly",
             ),
             (
                 ".github/project-template/PROJECT.md",
-                "pr-status/needs-review-again → make ci CI_BASE=upstream/develop\npr-status/needs-check-fix → make ci CI_BASE=upstream/develop",
+                "10 分钟；重型门交 nightly\npr-status/needs-review-again → make ci CI_BASE=upstream/develop\npr-status/needs-check-fix → make ci CI_BASE=upstream/develop",
             ),
             (
                 ".github/project-template/pr-comment.md",
-                "ship/fix 默认执行本地 canonical `make ci CI_BASE=<remote>/develop`",
+                "ship/fix 默认执行 10 分钟有界本地 canonical `make ci CI_BASE=<remote>/develop`，重型门交 nightly",
             ),
             (
                 ".github/project-template/pull_request_template.md",
-                "- [ ] `make ci CI_BASE=origin/develop` 本地通过（只分析已提交差异；typed）",
+                "- [ ] `make ci CI_BASE=origin/develop` 10 分钟有界本地通过；重型门交 nightly",
             ),
         ]
     }
@@ -448,6 +460,17 @@ mod tests {
         assert!(
             findings.is_empty(),
             "canonical fixture must pass: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn unbounded_or_local_full_semantics_are_rejected() {
+        let mut fixture = canonical_fixture();
+        fixture[0].1 = "收尾统一运行 `make ci CI_BASE=origin/develop`";
+        let findings = findings_for_contents(&fixture);
+        assert!(
+            has_rule(&findings, Rule::MissingBoundedSemantics),
+            "{findings:?}"
         );
     }
 
@@ -529,7 +552,7 @@ mod tests {
             );
         }
 
-        fixture[3].1 = "pr-status/needs-review-again → make ci CI_BASE=origin/develop\npr-status/needs-check-fix → make ci CI_BASE=origin/develop\ncargo xtask ci plan --event-path event.json";
+        fixture[3].1 = "10 分钟；重型门交 nightly\npr-status/needs-review-again → make ci CI_BASE=origin/develop\npr-status/needs-check-fix → make ci CI_BASE=origin/develop\ncargo xtask ci plan --event-path event.json";
         let findings = findings_for_contents(&fixture);
         assert!(
             findings.is_empty(),
@@ -563,7 +586,7 @@ mod tests {
 
     #[test]
     fn makefile_canonical_targets_are_closed() {
-        let green = "CI_BASE ?= origin/develop\nci:\n\t$(RSS_CARGO) xtask ci local --base \"$(CI_BASE)\"\nci-full:\n\t$(RSS_CARGO) xtask ci full\n";
+        let green = "CI_BASE ?= origin/develop\nci:\n\t/usr/bin/python3 hack/ci-local-supervisor.py --repo-root \"$(CURDIR)\" --budget-seconds 600 -- $(RSS_CARGO) xtask ci local --base \"$(CI_BASE)\"\nci-full:\n\t$(RSS_CARGO) xtask ci full\n";
         assert!(findings_for_makefile(green).is_empty());
         for red in [
             green.replace("ci local --base \"$(CI_BASE)\"", "ci full"),
@@ -573,8 +596,13 @@ mod tests {
                 "ci-full:\n\t@true",
             ),
             green.replace(
-                "ci:\n\t$(RSS_CARGO) xtask ci local --base \"$(CI_BASE)\"",
-                "ci:\n\t$(RSS_CARGO) xtask ci local --base \"$(CI_BASE)\"\n\t$(RSS_CARGO) check --workspace",
+                "ci local --base \"$(CI_BASE)\"",
+                "ci local --base \"$(CI_BASE)\"\n\t$(RSS_CARGO) check --workspace",
+            ),
+            green.replace("--budget-seconds 600", "--budget-seconds 601"),
+            green.replace(
+                "/usr/bin/python3 hack/ci-local-supervisor.py --repo-root \"$(CURDIR)\" --budget-seconds 600 -- ",
+                "",
             ),
             format!("{green}ci:\n\t$(RSS_CARGO) xtask ci local --base \"$(CI_BASE)\"\n"),
             format!("{green}ci: legacy-check\n"),

@@ -14,6 +14,9 @@ REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/rss-cargo-selftest.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
 
+(CDPATH='' cd -- "$REPO_ROOT" && \
+    /usr/bin/python3 -m unittest discover -s hack/tests -p 'test_ci_local_supervisor.py')
+
 fail() {
     printf 'cargo selftest: %s\n' "$*" >&2
     exit 1
@@ -94,6 +97,7 @@ set -eu
     printf 'RSS_INTERNAL_SCCACHE_PATH=%s\n' "${RSS_INTERNAL_SCCACHE_PATH-<unset>}"
     printf 'CARGO_INCREMENTAL=%s\n' "${CARGO_INCREMENTAL-<unset>}"
     printf 'SCCACHE_IGNORE_SERVER_IO_ERROR=%s\n' "${SCCACHE_IGNORE_SERVER_IO_ERROR-<unset>}"
+    printf 'CARGO_TARGET_DIR=%s\n' "${CARGO_TARGET_DIR-<unset>}"
 } >"$RSS_CAPTURE"
 EOF
     chmod +x "$destination"
@@ -191,6 +195,7 @@ auto_capture="$TMP_ROOT/auto.capture"
     RSS_INTERNAL_SCCACHE_PATH=/ambient/sccache CARGO_INCREMENTAL=1 \
     SCCACHE_IGNORE_SERVER_IO_ERROR=0 ./hack/cargo.sh probe >/dev/null 2>&1)
 assert_capture "$auto_capture" \
+    "CARGO_TARGET_DIR=$main_target" \
     "RUSTC_WRAPPER=$policy_root/exact/sccache" \
     'RUSTC_WORKSPACE_WRAPPER=<unset>' \
     'CARGO_BUILD_RUSTC_WRAPPER=<unset>' \

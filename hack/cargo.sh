@@ -42,6 +42,8 @@ else
     target_source=config-default
     resolved_target="$repo_root/.cache/cargo-target"
 fi
+CARGO_TARGET_DIR=$resolved_target
+export CARGO_TARGET_DIR
 
 if [ "${CARGO_BUILD_JOBS+x}" = x ]; then
     jobs_source=env-override

@@ -258,6 +258,8 @@ fn cargo_clean_cmd(args: &[&str], env: &[(&str, &str)], cwd: Option<&Path>) -> C
 pub(crate) enum ExternalProgram {
     Rustfmt,
     Docker,
+    SystemPython,
+    SystemShell,
     #[cfg(test)]
     Bash,
     Git,
@@ -269,6 +271,8 @@ impl ExternalProgram {
         match self {
             Self::Rustfmt => "rustfmt",
             Self::Docker => "docker",
+            Self::SystemPython => "/usr/bin/python3",
+            Self::SystemShell => "/bin/sh",
             #[cfg(test)]
             Self::Bash => "bash",
             Self::Git => "git",

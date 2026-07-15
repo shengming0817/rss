@@ -27,9 +27,10 @@ Make 通过 `hack/cargo.sh` 启动 xtask，是本地治理门的受控 bootstrap
 不会获得 wrapper 的 build-jobs 默认值、ambient rustc-wrapper 清洗或 sccache 自动策略，因此不是等价入口。
 
 `ci local` 只读取 `<base>...HEAD` 的已提交项目差异，不扫描 untracked、本地工具或额外工作区文件。
-无差异直接成功；docs-only 只运行 fast/meta；Rust、contract 与 generated 影响运行反向依赖 check、直接
-影响包 test/clippy 和已登记 feature gates；未知路径、rename/copy 或解析失败 fail-safe 到完整 `verify`。
-本地 preflight 不运行 coverage、audit 或真实后端 integration；需要无条件全量本地门时使用 `make ci-full`。
+无差异直接成功；docs-only 只运行 fast/meta；Rust、contract 与 generated 影响运行反向依赖 check 和直接
+影响包 test/clippy。未知路径本地忽略并留痕，但不会抹掉同一 diff 中已知包的定向测试；rename/copy 运行
+fast/meta，影响分析失败直接报错。本地 preflight 的 worker 进程组受 600 秒 wall-clock deadline 约束，且不运行
+coverage、audit 或真实后端 integration；需要人工诊断无条件全量门时使用 `make ci-full`。
 L0/L1 的采用与故障语义分别见
 [`docs/rules/consistency-l0.md`](docs/rules/consistency-l0.md) 与
 [`docs/rules/localtx.md`](docs/rules/localtx.md)；精确 gate 成员与顺序只以 typed registry 和

@@ -1224,8 +1224,9 @@ pub(crate) fn run(
     Ok(())
 }
 
-/// ci 本地兼容聚合入口（issue #1132）：按 [`plan_for`] 的兼容计划顺序跑每步，
-/// fail-fast。GitHub Actions 不调此聚合，而是分别调用四条 [`CiLane`]；本地全工具机器可 `make ci`。
+/// `ci full` 本地兼容聚合入口（issue #1132）：按 [`plan_for`] 的兼容计划顺序跑每步，
+/// fail-fast。GitHub Actions 不调此聚合，而是分别调用四条 [`CiLane`]。本地完整
+/// canonical 入口是 `make ci-full`；`make ci` 仅执行 10 分钟有界 adaptive preflight，不调用本聚合。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺工具 fail-closed。
 pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {

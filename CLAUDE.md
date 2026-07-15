@@ -82,7 +82,7 @@ feature 模块是域 crate 内的子单元；`adapters/`、`contracts/`、`bins/
 ## 修改代码前
 
 1. 先 `Read` 目标文件，`Grep` 搜索已有实现
-2. 编辑循环按改动类型运行最小复现测试；收尾统一运行 `make ci CI_BASE=<remote>/develop`，由 typed 影响模型选择反向依赖 check、直接影响包 test/clippy 与已登记 feature gates
+2. 编辑循环按改动类型运行最小复现测试；收尾统一运行 `make ci CI_BASE=<remote>/develop`，它是 10 分钟有界 affected preflight，只选择反向依赖 check、直接影响包 test/clippy 与定向治理测试；feature/integration/workspace 全量重门延后到 nightly/develop。`make ci-full` 仅供人工诊断，不是 PR 默认完成条件
 3. 只改需要改的
 
 ## AI-robust 治理章程

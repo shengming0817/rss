@@ -18,13 +18,38 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 const PLAN_SCHEMA_VERSION: u8 = 1;
 const POLICY_SCHEMA_VERSION: u8 = 1;
 const UNKNOWN_REVISION: &str = "unknown";
 const DOCUMENTATION_PATHS: &[&str] = &["README.md"];
-const DOCUMENTATION_PREFIXES: &[&str] = &["docs/"];
-const DOCUMENTATION_GOVERNED_PREFIXES: &[&str] = &["docs/rules/", "docs/architecture/"];
+const DOCUMENTATION_PREFIXES: &[&str] =
+    &["docs/", ".github/", ".codex/", ".claude/rules/", "hack/"];
+const LOCAL_SNAPSHOT_TARGET_SUFFIX: &str = "ci-local-snapshot";
+
+trait LocalClock {
+    type Tick: Copy;
+
+    fn now(&self) -> Self::Tick;
+    fn elapsed(&self, start: Self::Tick, end: Self::Tick) -> Duration;
+}
+
+struct SystemLocalClock;
+
+impl LocalClock for SystemLocalClock {
+    type Tick = Instant;
+
+    #[allow(clippy::disallowed_methods)] // system clock adapter boundary for local CLI timing
+    fn now(&self) -> Self::Tick {
+        Instant::now()
+    }
+
+    #[allow(clippy::disallowed_methods)] // system clock adapter boundary for local CLI timing
+    fn elapsed(&self, start: Self::Tick, end: Self::Tick) -> Duration {
+        end.duration_since(start)
+    }
+}
 const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/ops/localtx-alerts.rules.yaml",
     "docs/ops/202607082104-1642-consistency-dashboard-checklist.md",
@@ -40,18 +65,8 @@ const HIGH_IMPACT_PATHS: &[&str] = &[
     "rust-toolchain.toml",
     "deny.toml",
     "clippy.toml",
-    "Makefile",
-    "CLAUDE.md",
 ];
-const HIGH_IMPACT_PREFIXES: &[&str] = &[
-    ".github/",
-    ".claude/rules/",
-    ".config/ci-impact",
-    "hack/",
-    "xtask/",
-    "docs/rules/",
-    "docs/architecture/",
-];
+const HIGH_IMPACT_PREFIXES: &[&str] = &[".config/ci-impact"];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Options {
     pub(crate) event_path: PathBuf,
@@ -750,6 +765,8 @@ struct SelectiveImpact {
     packages: BTreeMap<String, BTreeSet<PackageImpact>>,
     reverse_closure: BTreeSet<String>,
     integration_shards: BTreeSet<IntegrationShard>,
+    governance: BTreeSet<GovernanceImpact>,
+    unknown_paths: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -760,6 +777,12 @@ enum PackageImpact {
     ContractOwner,
     ContractSubscriber,
     Generated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum GovernanceImpact {
+    PythonHooks,
+    CargoWrapper,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -792,6 +815,9 @@ impl From<&ImpactSet> for RemoteProjection {
             ImpactSet::Empty => {}
             ImpactSet::Full(cause) => recommendation = Recommendation::Full(*cause),
             ImpactSet::Selective(selective) => {
+                if !selective.unknown_paths.is_empty() {
+                    return Self(Recommendation::Full(FullCause::UnknownPath));
+                }
                 if selective.documentation {
                     recommendation.add(CiJobKey::CiMeta, JobReason::Documentation);
                 }
@@ -847,18 +873,25 @@ enum LocalProjection {
     Selective {
         check_packages: Vec<String>,
         test_clippy_packages: Vec<String>,
-        feature_gates: Vec<crate::nextest::CoreTestScope>,
-        feature_compile_scopes: Vec<LocalFeatureScope>,
+        governance: BTreeSet<GovernanceImpact>,
     },
-    Full,
 }
 
 impl From<&ImpactSet> for LocalProjection {
     fn from(impact: &ImpactSet) -> Self {
         match impact {
             ImpactSet::Empty => Self::Empty,
-            ImpactSet::Full(_) => Self::Full,
-            ImpactSet::Selective(selective) if selective.packages.is_empty() => Self::FastMeta,
+            ImpactSet::Full(FullCause::UnknownPath) => Self::Empty,
+            ImpactSet::Full(_) => Self::FastMeta,
+            ImpactSet::Selective(selective)
+                if selective.packages.is_empty() && selective.governance.is_empty() =>
+            {
+                if selective.documentation {
+                    Self::FastMeta
+                } else {
+                    Self::Empty
+                }
+            }
             ImpactSet::Selective(selective) => {
                 let test_clippy_packages = selective
                     .packages
@@ -873,35 +906,10 @@ impl From<&ImpactSet> for LocalProjection {
                     })
                     .map(|(package, _)| package.clone())
                     .collect::<Vec<_>>();
-                let feature_gates = crate::nextest::CoreTestScope::ALL
-                    .into_iter()
-                    .filter(|scope| {
-                        scope
-                            .package()
-                            .is_some_and(|package| selective.packages.contains_key(package))
-                    })
-                    .collect();
-                let impacted_packages = selective
-                    .packages
-                    .keys()
-                    .chain(selective.reverse_closure.iter())
-                    .map(String::as_str)
-                    .collect::<BTreeSet<_>>();
-                let mut feature_compile_scopes = LocalFeatureScope::ALL
-                    .into_iter()
-                    .filter(|scope| impacted_packages.contains(scope.package()))
-                    .collect::<BTreeSet<_>>();
-                feature_compile_scopes.extend(
-                    selective
-                        .integration_shards
-                        .iter()
-                        .flat_map(|shard| shard.spec().local_feature_scopes.iter().copied()),
-                );
                 Self::Selective {
                     check_packages: selective.reverse_closure.iter().cloned().collect(),
                     test_clippy_packages,
-                    feature_gates,
-                    feature_compile_scopes: feature_compile_scopes.into_iter().collect(),
+                    governance: selective.governance.clone(),
                 }
             }
         }
@@ -918,13 +926,12 @@ enum LocalCargoOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LocalStep {
     FastMeta,
+    PythonHooks,
+    CargoWrapperSelftest,
     Packages {
         operation: LocalCargoOperation,
         packages: Vec<String>,
     },
-    Feature(crate::nextest::CoreTestScope),
-    FeatureCompile(LocalFeatureScope),
-    FullVerify,
 }
 
 impl LocalProjection {
@@ -932,39 +939,102 @@ impl LocalProjection {
         match self {
             Self::Empty => Vec::new(),
             Self::FastMeta => vec![LocalStep::FastMeta],
-            Self::Full => vec![LocalStep::FullVerify],
             Self::Selective {
                 check_packages,
                 test_clippy_packages,
-                feature_gates,
-                feature_compile_scopes,
+                governance,
             } => {
-                let mut steps = vec![
-                    LocalStep::FastMeta,
-                    LocalStep::Packages {
+                let mut steps = vec![LocalStep::FastMeta];
+                if !check_packages.is_empty() {
+                    steps.push(LocalStep::Packages {
                         operation: LocalCargoOperation::Check,
                         packages: check_packages.clone(),
-                    },
-                    LocalStep::Packages {
+                    });
+                }
+                if !test_clippy_packages.is_empty() {
+                    steps.push(LocalStep::Packages {
                         operation: LocalCargoOperation::Test,
                         packages: test_clippy_packages.clone(),
-                    },
-                    LocalStep::Packages {
+                    });
+                    steps.push(LocalStep::Packages {
                         operation: LocalCargoOperation::Clippy,
                         packages: test_clippy_packages.clone(),
-                    },
-                ];
-                steps.extend(feature_gates.iter().copied().map(LocalStep::Feature));
-                steps.extend(
-                    feature_compile_scopes
-                        .iter()
-                        .copied()
-                        .map(LocalStep::FeatureCompile),
-                );
+                    });
+                }
+                steps.extend(governance.iter().map(|impact| match impact {
+                    GovernanceImpact::PythonHooks => LocalStep::PythonHooks,
+                    GovernanceImpact::CargoWrapper => LocalStep::CargoWrapperSelftest,
+                }));
                 steps
             }
         }
     }
+}
+
+const LOCAL_DEFERRED_FULL_CATALOG: &[&str] = &[
+    "workspace build/clippy/default-nextest",
+    "all feature matrices and integration shards",
+    "coverage and public-api",
+    "dylint and full dependency policy",
+    "audit and container scenarios",
+];
+
+fn local_deferred(impact: &ImpactSet) -> Vec<String> {
+    match impact {
+        ImpactSet::Empty => Vec::new(),
+        ImpactSet::Full(FullCause::UnknownPath) => {
+            vec!["unclassified paths (ignored locally; covered by nightly/develop)".to_owned()]
+        }
+        ImpactSet::Full(_) => LOCAL_DEFERRED_FULL_CATALOG
+            .iter()
+            .map(|item| (*item).to_owned())
+            .collect(),
+        ImpactSet::Selective(selective) => {
+            let impacted = selective
+                .packages
+                .keys()
+                .chain(selective.reverse_closure.iter())
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            let mut deferred = LOCAL_DEFERRED_FULL_CATALOG
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect::<Vec<_>>();
+            deferred.extend(
+                crate::nextest::CoreTestScope::ALL
+                    .into_iter()
+                    .filter_map(|scope| scope.package())
+                    .filter(|package| selective.packages.contains_key(*package))
+                    .map(|package| format!("feature test scope {package}")),
+            );
+            deferred.extend(
+                LocalFeatureScope::ALL
+                    .into_iter()
+                    .filter(|scope| impacted.contains(scope.package()))
+                    .map(|scope| {
+                        format!("feature compile {}[{}]", scope.package(), scope.feature())
+                    }),
+            );
+            if !selective.unknown_paths.is_empty() {
+                deferred.push(format!(
+                    "unclassified paths (ignored locally; covered by nightly/develop): {}",
+                    selective
+                        .unknown_paths
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ));
+            }
+            deferred.sort();
+            deferred.dedup();
+            deferred
+        }
+    }
+}
+
+fn local_steps(impact: &ImpactSet) -> Vec<LocalStep> {
+    LocalProjection::from(impact).steps()
 }
 
 impl FullCause {
@@ -1559,22 +1629,58 @@ fn pull_request_recommendation(
 }
 
 pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
+    let clock = SystemLocalClock;
+    let run_started = clock.now();
     let context = LocalExecutionContext::new(root, &options.base)?;
-    let impact = context.impact_or_full();
-    let projection = LocalProjection::from(&impact);
-    let steps = projection.steps();
+    let entries = context.diff_entries()?;
+    let impact = context
+        .impact_entries(&entries)
+        .context("ci local 影响分析失败；未自动执行 full，请修复分析输入或显式运行 make ci-full")?;
+    let steps = local_steps(&impact);
+    for deferred in local_deferred(&impact) {
+        eprintln!("ci local：DEFERRED {deferred}");
+    }
     if steps.is_empty() {
-        eprintln!("ci local：<base>...HEAD 无已提交项目差异");
+        eprintln!("ci local：<base>...HEAD 无需执行本地步骤");
         return Ok(());
     }
-    eprintln!("ci local：{} 步", steps.len());
+    eprintln!(
+        "ci local：{} 步，由外层 supervisor 约束 wall-clock 预算",
+        steps.len()
+    );
     let mut index = 0;
     execute_local_steps(&steps, |step| {
         index += 1;
         eprintln!("ci local：[{}/{}] {}", index, steps.len(), step.label());
-        run_local_step(&context, step)
+        let step_started = clock.now();
+        let result = run_local_step(&context, step);
+        let step_elapsed = clock.elapsed(step_started, clock.now()).as_secs_f64();
+        match result {
+            Ok(()) => {
+                eprintln!(
+                    "ci local：[{}/{}] 通过，耗时 {:.1} 秒",
+                    index,
+                    steps.len(),
+                    step_elapsed
+                );
+                Ok(())
+            }
+            Err(error) => {
+                eprintln!(
+                    "ci local：[{}/{}] 失败，步骤耗时 {:.1} 秒，总耗时 {:.1} 秒",
+                    index,
+                    steps.len(),
+                    step_elapsed,
+                    clock.elapsed(run_started, clock.now()).as_secs_f64()
+                );
+                Err(error)
+            }
+        }
     })?;
-    eprintln!("ci local：全部通过");
+    eprintln!(
+        "ci local：全部通过，总耗时 {:.1} 秒",
+        clock.elapsed(run_started, clock.now()).as_secs_f64()
+    );
     Ok(())
 }
 
@@ -1606,6 +1712,7 @@ struct LocalExecutionContext {
     base: String,
     head: String,
     merge_base: String,
+    cargo_target: PathBuf,
     snapshot: CommittedSnapshot,
 }
 
@@ -1616,11 +1723,15 @@ impl LocalExecutionContext {
         let merge_base = git_stdout(repository, ["merge-base", base.as_str(), head.as_str()])?;
         let merge_base = merge_base.trim();
         validate_revision(merge_base, "local merge-base revision")?;
-        let snapshot = CommittedSnapshot::checkout(repository, &head)?;
+        let cargo_target =
+            snapshot_target_dir(repository, std::env::var_os("CARGO_TARGET_DIR").as_deref())?;
+        let snapshot_cache = snapshot_cache_dir(repository, &cargo_target)?;
+        let snapshot = CommittedSnapshot::checkout(repository, &head, &snapshot_cache)?;
         Ok(Self {
             base,
             head,
             merge_base: merge_base.to_owned(),
+            cargo_target,
             snapshot,
         })
     }
@@ -1629,32 +1740,96 @@ impl LocalExecutionContext {
         self.snapshot.root()
     }
 
+    fn cargo_target_text(&self) -> Result<&str> {
+        self.cargo_target
+            .to_str()
+            .context("local snapshot Cargo target path is not valid UTF-8")
+    }
+
+    fn diff_entries(&self) -> Result<Vec<DiffEntry>> {
+        read_diff(self.root(), &self.base, &self.head)
+    }
+
+    #[cfg(test)]
     fn impact(&self) -> Result<ImpactSet> {
-        let entries = read_diff(self.root(), &self.base, &self.head)?;
+        let entries = self.diff_entries()?;
+        self.impact_entries(&entries)
+    }
+
+    fn impact_entries(&self, entries: &[DiffEntry]) -> Result<ImpactSet> {
         if entries.is_empty() {
             return Ok(ImpactSet::Empty);
         }
-        if let Some(cause) = immediate_full_cause(&entries, None) {
+        if let Some(cause) = immediate_full_cause(entries, None) {
             return Ok(ImpactSet::Full(cause));
         }
         if entries.iter().all(|entry| documentation(&entry.path)) {
             return Ok(impact_entries(
-                &entries,
+                entries,
                 None,
                 &BTreeSet::new(),
                 &BTreeMap::new(),
             ));
         }
         let graph = WorkspaceGraph::load(self.root())?;
-        impact_with_graph(self.root(), &entries, &graph, &self.merge_base)
+        impact_with_graph(self.root(), entries, &graph, &self.merge_base)
     }
 
+    #[cfg(test)]
     fn impact_or_full(&self) -> ImpactSet {
         self.impact().unwrap_or_else(|error| {
             eprintln!("ci local：影响分析失败，fail-safe 到完整 verify：{error:#}");
             ImpactSet::Full(FullCause::FallbackUncertainty)
         })
     }
+}
+
+fn snapshot_target_dir(repository: &Path, ambient: Option<&OsStr>) -> Result<PathBuf> {
+    let base = if let Some(ambient) = ambient {
+        let ambient = PathBuf::from(ambient);
+        if ambient.is_absolute() {
+            ambient
+        } else {
+            repository.join(ambient)
+        }
+    } else {
+        let repository_text = repository
+            .to_str()
+            .context("workspace path is not valid UTF-8")?;
+        std::env::temp_dir()
+            .join("rss-ci-local-targets")
+            .join(sha256(repository_text.as_bytes()))
+    };
+    Ok(base.join(LOCAL_SNAPSHOT_TARGET_SUFFIX))
+}
+
+fn snapshot_cache_dir(repository: &Path, cargo_target: &Path) -> Result<PathBuf> {
+    let repository_text = repository
+        .to_str()
+        .context("workspace path is not valid UTF-8")?;
+    let target_root = cargo_target
+        .parent()
+        .context("local snapshot Cargo target has no parent directory")?;
+    Ok(target_root
+        .join("ci-local-sources")
+        .join(sha256(repository_text.as_bytes())))
+}
+
+fn ensure_private_cache_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).context("create committed CI snapshot cache")?;
+    let metadata = fs::symlink_metadata(path).context("inspect committed CI snapshot cache")?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("committed CI snapshot cache must be a real directory");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions)
+            .context("set committed CI snapshot cache permissions")?;
+    }
+    Ok(())
 }
 
 static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1665,26 +1840,34 @@ static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 struct CommittedSnapshot {
     scratch: PathBuf,
     root: PathBuf,
+    persistent: bool,
 }
 
 impl CommittedSnapshot {
-    fn checkout(repository: &Path, revision: &str) -> Result<Self> {
-        let repository = repository
+    fn checkout(repository: &Path, revision: &str, cache_root: &Path) -> Result<Self> {
+        let repository_text = repository
             .to_str()
             .context("workspace path is not valid UTF-8")?;
+        ensure_private_cache_dir(cache_root)?;
+        let scratch = cache_root.join(revision);
+        if scratch.exists() {
+            return Self::open_cached(scratch, revision);
+        }
+
         let counter = SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let scratch = std::env::temp_dir().join(format!(
-            "rss-ci-local-snapshot-{}-{counter}",
-            std::process::id()
-        ));
-        fs::create_dir(&scratch).context("create committed CI snapshot directory")?;
-        let scratch = fs::canonicalize(scratch).context("canonicalize CI snapshot directory")?;
-        let root = scratch.join("tree");
+        let temporary =
+            cache_root.join(format!(".{revision}.tmp-{}-{counter}", std::process::id()));
+        fs::create_dir(&temporary).context("create committed CI snapshot staging directory")?;
+        let root = temporary.join("tree");
         let root_text = root
             .to_str()
             .context("snapshot path is not valid UTF-8")?
             .to_owned();
-        let snapshot = Self { scratch, root };
+        let snapshot = Self {
+            scratch: temporary,
+            root,
+            persistent: false,
+        };
         let clone = external_cmd(
             ExternalProgram::SystemGit,
             &[
@@ -1693,7 +1876,7 @@ impl CommittedSnapshot {
                 "--shared",
                 "--no-checkout",
                 "--",
-                repository,
+                repository_text,
                 &root_text,
             ],
             &[],
@@ -1715,7 +1898,44 @@ impl CommittedSnapshot {
         if !checkout.success() {
             bail!("checkout committed CI snapshot failed");
         }
-        Ok(snapshot)
+        match fs::rename(&snapshot.scratch, &scratch) {
+            Ok(()) => Self::open_cached(scratch, revision),
+            Err(_) if scratch.exists() => Self::open_cached(scratch, revision),
+            Err(error) => Err(error).context("publish committed CI snapshot cache"),
+        }
+    }
+
+    fn open_cached(scratch: PathBuf, revision: &str) -> Result<Self> {
+        let scratch_metadata = fs::symlink_metadata(&scratch)
+            .context("inspect committed CI snapshot revision cache")?;
+        if scratch_metadata.file_type().is_symlink() || !scratch_metadata.is_dir() {
+            bail!("committed CI snapshot revision cache must be a real directory");
+        }
+        let root = scratch.join("tree");
+        let root_metadata =
+            fs::symlink_metadata(&root).context("inspect committed CI snapshot checkout")?;
+        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+            bail!("committed CI snapshot checkout must be a real directory");
+        }
+        let observed = git_stdout(&root, ["rev-parse", "--verify", "HEAD"])?;
+        if observed.trim() != revision {
+            bail!(
+                "committed CI snapshot cache revision mismatch; remove the local Cargo snapshot cache and retry"
+            );
+        }
+        git_stdout(&root, ["clean", "-ffdx", "--"])?;
+        let dirty = git_stdout(&root, ["status", "--porcelain", "--untracked-files=all"])?;
+        if !dirty.is_empty() {
+            bail!(
+                "committed CI snapshot cache is dirty; remove the local Cargo snapshot cache and retry"
+            );
+        }
+        let root = fs::canonicalize(root).context("canonicalize committed CI snapshot root")?;
+        Ok(Self {
+            scratch,
+            root,
+            persistent: true,
+        })
     }
 
     fn root(&self) -> &Path {
@@ -1725,7 +1945,9 @@ impl CommittedSnapshot {
 
 impl Drop for CommittedSnapshot {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.scratch);
+        if !self.persistent {
+            let _ = fs::remove_dir_all(&self.scratch);
+        }
     }
 }
 
@@ -1747,20 +1969,12 @@ impl LocalStep {
     fn label(&self) -> String {
         match self {
             Self::FastMeta => "fast/meta".to_owned(),
-            Self::FullVerify => "full verify fallback".to_owned(),
+            Self::PythonHooks => "python hook tests".to_owned(),
+            Self::CargoWrapperSelftest => "cargo wrapper selftest".to_owned(),
             Self::Packages {
                 operation,
                 packages,
             } => format!("{} {}", operation.label(), packages.join(",")),
-            Self::Feature(gate) => {
-                format!(
-                    "registered deterministic test scope {}",
-                    gate.package().unwrap_or("workspace")
-                )
-            }
-            Self::FeatureCompile(scope) => {
-                format!("compile {}[{}] --no-run", scope.package(), scope.feature())
-            }
         }
     }
 }
@@ -1786,18 +2000,50 @@ impl LocalCargoOperation {
 fn run_local_step(context: &LocalExecutionContext, step: &LocalStep) -> Result<()> {
     match step {
         LocalStep::FastMeta => run_snapshot_verify(context, true),
-        LocalStep::FullVerify => run_snapshot_verify(context, false),
+        LocalStep::PythonHooks => {
+            let status = external_cmd(
+                ExternalProgram::SystemPython,
+                &[
+                    "-B",
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    ".codex/hooks",
+                    "-p",
+                    "test_*.py",
+                ],
+                &[],
+                Some(context.root()),
+            )
+            .status()?;
+            if !status.success() {
+                bail!("ci local python hook tests failed");
+            }
+            Ok(())
+        }
+        LocalStep::CargoWrapperSelftest => {
+            let status = external_cmd(
+                ExternalProgram::SystemShell,
+                &["hack/cargo.selftest.sh"],
+                &[],
+                Some(context.root()),
+            )
+            .status()?;
+            if !status.success() {
+                bail!("ci local cargo wrapper selftest failed");
+            }
+            Ok(())
+        }
         LocalStep::Packages {
             operation,
             packages,
-        } => run_package_operation(context.root(), *operation, packages),
-        LocalStep::Feature(scope) => crate::nextest::NextestInvocation::for_core(
-            *scope,
-            crate::nextest::NextestLane::Verify,
-            None,
-        )
-        .run(context.root(), &[]),
-        LocalStep::FeatureCompile(scope) => run_feature_compile(context.root(), *scope),
+        } => run_package_operation(
+            context.root(),
+            context.cargo_target_text()?,
+            *operation,
+            packages,
+        ),
     }
 }
 
@@ -1807,35 +2053,23 @@ fn run_snapshot_verify(context: &LocalExecutionContext, fast: bool) -> Result<()
         args.push("--fast");
     }
     args.extend(["--against", context.base.as_str()]);
-    let status = cargo_cmd(CargoSubcommand::Xtask, &args, &[], Some(context.root())).status()?;
+    let target = context.cargo_target_text()?;
+    let status = cargo_cmd(
+        CargoSubcommand::Xtask,
+        &args,
+        &[("CARGO_TARGET_DIR", target)],
+        Some(context.root()),
+    )
+    .status()?;
     if !status.success() {
         bail!("ci local snapshot verify failed");
     }
     Ok(())
 }
 
-fn run_feature_compile(root: &Path, scope: LocalFeatureScope) -> Result<()> {
-    let args = [
-        "--locked",
-        "-p",
-        scope.package(),
-        "--features",
-        scope.feature(),
-        "--no-run",
-    ];
-    let status = cargo_cmd(CargoSubcommand::Test, &args, &[], Some(root)).status()?;
-    if !status.success() {
-        bail!(
-            "ci local feature compile failed for {}[{}]",
-            scope.package(),
-            scope.feature()
-        );
-    }
-    Ok(())
-}
-
 fn run_package_operation(
     root: &Path,
+    cargo_target: &str,
     operation: LocalCargoOperation,
     packages: &[String],
 ) -> Result<()> {
@@ -1857,7 +2091,13 @@ fn run_package_operation(
         owned.extend(["--".to_owned(), "-D".to_owned(), "warnings".to_owned()]);
     }
     let args = owned.iter().map(String::as_str).collect::<Vec<_>>();
-    let status = cargo_cmd(operation.subcommand(), &args, &[], Some(root)).status()?;
+    let status = cargo_cmd(
+        operation.subcommand(),
+        &args,
+        &[("CARGO_TARGET_DIR", cargo_target)],
+        Some(root),
+    )
+    .status()?;
     if !status.success() {
         bail!("ci local {} failed", operation.label());
     }
@@ -2005,8 +2245,15 @@ fn impact_entries(
     }
     let mut documentation_only = false;
     let mut packages = seeded_packages.clone();
+    let mut governance = BTreeSet::new();
+    let mut unknown_paths = BTreeSet::new();
     for entry in entries {
         let path = entry.path.as_str();
+        if let Some(impact) = governance_impact(path) {
+            documentation_only = true;
+            governance.insert(impact);
+            continue;
+        }
         if documentation(path) {
             documentation_only = true;
             continue;
@@ -2034,7 +2281,8 @@ fn impact_entries(
             None => path_package(path),
         };
         let Some(package) = package else {
-            return ImpactSet::Full(FullCause::UnknownPath);
+            unknown_paths.insert(path.to_owned());
+            continue;
         };
         let is_test = path.contains("/tests/")
             || path.contains("/test/")
@@ -2067,7 +2315,26 @@ fn impact_entries(
         packages,
         reverse_closure: closure.clone(),
         integration_shards: selected_shards,
+        governance,
+        unknown_paths,
     })
+}
+
+fn governance_impact(path: &str) -> Option<GovernanceImpact> {
+    if path.starts_with(".codex/hooks/") {
+        Some(GovernanceImpact::PythonHooks)
+    } else if matches!(
+        path,
+        ".cargo/config.toml"
+            | "hack/cargo.sh"
+            | "hack/cargo.selftest.sh"
+            | "hack/ci-local-supervisor.py"
+            | "hack/tests/test_ci_local_supervisor.py"
+    ) {
+        Some(GovernanceImpact::CargoWrapper)
+    } else {
+        None
+    }
 }
 
 fn immediate_full_cause(
@@ -2096,13 +2363,12 @@ fn immediate_full_cause(
 }
 
 fn documentation(path: &str) -> bool {
-    (DOCUMENTATION_PATHS.contains(&path)
+    crate::ci_entry_guard::CONTROLLED_PATHS.contains(&path)
+        || DOCUMENTATION_PATHS.contains(&path)
         || DOCUMENTATION_PREFIXES
             .iter()
-            .any(|prefix| path.starts_with(prefix)))
-        && !DOCUMENTATION_GOVERNED_PREFIXES
-            .iter()
             .any(|prefix| path.starts_with(prefix))
+        || matches!(path, "Makefile" | "CLAUDE.md")
 }
 
 fn machine_input(path: &str) -> bool {
@@ -2136,6 +2402,7 @@ fn path_package(path: &str) -> Option<String> {
         } else {
             (*name).to_owned()
         }),
+        ["xtask", ..] => Some("xtask".to_owned()),
         ["journeys", ..] => Some("journeys".to_owned()),
         [name, ..] if name.starts_with("journeys-") => Some((*name).to_owned()),
         _ => None,
@@ -2427,11 +2694,6 @@ fn policy_semantic_catalog_with_behavior(behavior_spec: &str) -> Vec<String> {
         DOCUMENTATION_PREFIXES
             .iter()
             .map(|path| format!("documentation-prefix={path}")),
-    );
-    catalog.extend(
-        DOCUMENTATION_GOVERNED_PREFIXES
-            .iter()
-            .map(|path| format!("documentation-governed-prefix={path}")),
     );
     catalog.extend(
         MACHINE_INPUT_PATHS
@@ -2885,8 +3147,7 @@ mod tests {
             LocalProjection::Selective {
                 check_packages: vec!["consumer".to_owned(), "leaf".to_owned()],
                 test_clippy_packages: vec!["leaf".to_owned()],
-                feature_gates: Vec::new(),
-                feature_compile_scopes: Vec::new(),
+                governance: BTreeSet::new(),
             }
         );
         assert!(
@@ -2901,10 +3162,7 @@ mod tests {
             &BTreeSet::new(),
             &BTreeMap::new(),
         );
-        assert!(matches!(
-            LocalProjection::from(&full),
-            LocalProjection::Full
-        ));
+        assert_eq!(LocalProjection::from(&full), LocalProjection::FastMeta);
         assert_eq!(
             RemoteProjection::from(&full).selected_names().len(),
             CiJobKey::COUNT
@@ -2912,12 +3170,131 @@ mod tests {
     }
 
     #[test]
-    fn selective_local_steps_are_ordered_and_feature_gates_are_closed() {
+    fn local_unknown_paths_are_ignored_and_governance_paths_are_metadata_only() {
+        let unknown = impact_entries(
+            &[DiffEntry::modified("unowned/input.bin")],
+            None,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(LocalProjection::from(&unknown), LocalProjection::Empty);
+
+        let mixed = impact_entries(
+            &[
+                DiffEntry::modified("crates/leaf/src/lib.rs"),
+                DiffEntry::modified("unowned/input.bin"),
+            ],
+            None,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            local_steps(&mixed)
+                .iter()
+                .map(LocalStep::label)
+                .collect::<Vec<_>>(),
+            vec![
+                "fast/meta",
+                "test direct packages leaf",
+                "clippy direct packages leaf",
+            ],
+            "unknown paths must not erase known package checks"
+        );
+        assert_eq!(
+            RemoteProjection::from(&mixed).selected_names().len(),
+            CiJobKey::COUNT,
+            "remote unknown handling remains fail-safe full"
+        );
+
+        for path in [
+            ".github/workflows/ci.yml",
+            "hack/automation/forge.sh",
+            "docs/rules/architecture.md",
+            "docs/architecture/README.md",
+            ".claude/rules/rust.md",
+            "Makefile",
+            "CLAUDE.md",
+        ] {
+            let impact = impact_entries(
+                &[DiffEntry::modified(path)],
+                None,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            );
+            assert_eq!(
+                LocalProjection::from(&impact),
+                LocalProjection::FastMeta,
+                "{path} must not trigger local full CI"
+            );
+        }
+
+        let xtask_entries = [DiffEntry::modified("xtask/src/ci_impact.rs")];
+        let xtask_impact = impact_entries(&xtask_entries, None, &BTreeSet::new(), &BTreeMap::new());
+        assert_eq!(
+            local_steps(&xtask_impact)
+                .iter()
+                .map(LocalStep::label)
+                .collect::<Vec<_>>(),
+            vec![
+                "fast/meta",
+                "test direct packages xtask",
+                "clippy direct packages xtask",
+            ]
+        );
+
+        for (path, expected) in [
+            (
+                ".codex/hooks/test_guard.py",
+                vec!["fast/meta", "python hook tests"],
+            ),
+            ("hack/cargo.sh", vec!["fast/meta", "cargo wrapper selftest"]),
+            (
+                "hack/ci-local-supervisor.py",
+                vec!["fast/meta", "cargo wrapper selftest"],
+            ),
+            (
+                "hack/tests/test_ci_local_supervisor.py",
+                vec!["fast/meta", "cargo wrapper selftest"],
+            ),
+        ] {
+            let entries = [DiffEntry::modified(path)];
+            let impact = impact_entries(&entries, None, &BTreeSet::new(), &BTreeMap::new());
+            assert_eq!(
+                local_steps(&impact)
+                    .iter()
+                    .map(LocalStep::label)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn every_controlled_ci_carrier_takes_the_fast_meta_path() {
+        for path in crate::ci_entry_guard::CONTROLLED_PATHS {
+            let impact = impact_entries(
+                &[DiffEntry::modified(path)],
+                None,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            );
+            assert_eq!(
+                local_steps(&impact)
+                    .iter()
+                    .map(LocalStep::label)
+                    .collect::<Vec<_>>(),
+                vec!["fast/meta"],
+                "controlled carrier {path} must run fast/meta"
+            );
+        }
+    }
+
+    #[test]
+    fn selective_local_steps_are_bounded_to_affected_package_operations() {
         let projection = LocalProjection::Selective {
             check_packages: vec!["redis-adapter".to_owned(), "runtime".to_owned()],
             test_clippy_packages: vec!["redis-adapter".to_owned()],
-            feature_gates: vec![crate::nextest::CoreTestScope::RedisBackend],
-            feature_compile_scopes: vec![LocalFeatureScope::RedisAdapter],
+            governance: BTreeSet::new(),
         };
         assert_eq!(
             projection.steps(),
@@ -2935,18 +3312,12 @@ mod tests {
                     operation: LocalCargoOperation::Clippy,
                     packages: vec!["redis-adapter".to_owned()],
                 },
-                LocalStep::Feature(crate::nextest::CoreTestScope::RedisBackend),
-                LocalStep::FeatureCompile(LocalFeatureScope::RedisAdapter),
             ]
-        );
-        assert_eq!(
-            crate::nextest::CoreTestScope::RedisBackend.package(),
-            Some("redis-adapter")
         );
     }
 
     #[test]
-    fn selected_integration_shards_compile_their_feature_scopes_without_running() -> Result<()> {
+    fn selected_integration_shards_are_deferred_from_local_preflight() -> Result<()> {
         let mut direct = BTreeMap::new();
         direct.insert("mqtt".to_owned(), BTreeSet::from([PackageImpact::Source]));
         let impact = impact_entries(
@@ -2967,14 +3338,10 @@ mod tests {
             .iter()
             .map(LocalStep::label)
             .collect::<Vec<_>>();
-        for package in ["amqp", "mqtt", "journeys", "runtime"] {
-            assert!(
-                labels
-                    .iter()
-                    .any(|label| label == &format!("compile {package}[integration] --no-run")),
-                "selected shard omitted {package}[integration]: {labels:?}"
-            );
-        }
+        assert!(
+            labels.iter().all(|label| !label.contains("integration")),
+            "integration compile belongs to nightly/develop, not local preflight: {labels:?}"
+        );
         Ok(())
     }
 
@@ -3100,7 +3467,60 @@ mod tests {
         );
         assert!(!context.root().join("untracked.txt").exists());
 
+        let snapshot_root = context.root().to_path_buf();
+        fs::write(
+            snapshot_root.join("test_injected.py"),
+            "raise SystemExit(1)\n",
+        )?;
         drop(context);
+        let cached = LocalExecutionContext::new(&root, "refs/heads/base-ref")?;
+        assert_eq!(
+            cached.root(),
+            snapshot_root,
+            "the same worktree and HEAD must reuse one stable snapshot path"
+        );
+        assert!(
+            !cached.root().join("test_injected.py").exists(),
+            "reused snapshots must remove untracked executable pollution"
+        );
+        assert!(
+            snapshot_root
+                .components()
+                .any(|component| component.as_os_str() == "ci-local-sources"),
+            "snapshot cache must stay under the local Cargo cache namespace: {}",
+            snapshot_root.display()
+        );
+        drop(cached);
+        if let Some(snapshot_revision_root) = snapshot_root.parent() {
+            fs::remove_dir_all(snapshot_revision_root)?;
+        }
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn local_snapshot_target_is_stable_and_isolated_from_the_launcher() -> Result<()> {
+        let temporary_root = crate::testutil::unique_tmp("ci-impact-local-target");
+        fs::create_dir_all(&temporary_root)?;
+        let root = fs::canonicalize(temporary_root)?;
+        let launcher_target = root.join("caller-target");
+
+        let isolated = snapshot_target_dir(&root, Some(launcher_target.as_os_str()))?;
+        assert_eq!(isolated, launcher_target.join(LOCAL_SNAPSHOT_TARGET_SUFFIX));
+        assert_ne!(isolated, launcher_target);
+        assert_eq!(
+            snapshot_target_dir(&root, Some(launcher_target.as_os_str()))?,
+            isolated,
+            "the same launcher target must map to one stable snapshot target"
+        );
+
+        let fallback = snapshot_target_dir(&root, None)?;
+        assert!(
+            fallback
+                .components()
+                .any(|component| component.as_os_str() == "rss-ci-local-targets")
+        );
+        assert!(fallback.ends_with(LOCAL_SNAPSHOT_TARGET_SUFFIX));
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -3159,7 +3579,10 @@ mod tests {
         );
         assert_ne!(adaptive.plan_digest, shadow.plan_digest);
 
-        fs::write(root.join("Makefile"), "all:\n\t@echo global\n")?;
+        fs::write(
+            root.join("clippy.toml"),
+            "avoid-breaking-exported-api = false\n",
+        )?;
         let global = commit_all(&root, "global")?;
         let global_plan = plan_fixture_pr(&root, &ordinary, &global, PolicyMode::Shadow)?;
         assert_eq!(global_plan.decision_kind, DecisionKind::MandatoryFull);

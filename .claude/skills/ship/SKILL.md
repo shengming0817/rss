@@ -106,7 +106,7 @@ git worktree add worktrees/<type>/<issue#-short-name> -b <type>/<issue#-short-na
 
 ### 5.2 主 agent 汇总（所有并行 agent 完成后）
 
-汇总各 agent 的 commit / 目标测试结果，检查文件归属与批次依赖是否完整，不在此重复跑最终本地验证。完整漏斗统一在阶段 8 **切 label 后**执行。
+汇总各 agent 的 commit / 目标测试结果，检查文件归属与批次依赖是否完整，不在此重复跑最终本地验证。10 分钟有界 affected preflight 统一在阶段 8 **切 label 后**执行；workspace/feature/integration 等重型全量门由 nightly/develop 承接。
 
 ---
 
@@ -156,7 +156,7 @@ RSS 六维度 = 架构合规 / 安全 / 测试 / 运维可观测 / DX / 产品�
 4. **OOS → 建 issue + pm:oos**（有 OOS 时；artifact 先于 pm:ship）：逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签校验/创建顺序并注明 `Discovered via /ship`；`pri-p0`→停 AskUserQuestion、`validate` 失败→`deferred=labels-underivable` 回退草稿；贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
 5. **pm:ship**（`--kind=ship`，OOS artifact 已存在、指针有效）：IN_SCOPE findings 无损写入（reviewer 数 / 已修 Cx1-Cx2 / Cx3 处置）；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
 6. **切 label**：按 `PROJECT.md` §5 执行 `bash hack/automation/forge.sh pr-set-labels <PR#> --add pr-status/needs-review-again --remove pr-status/in-progress`。
-7. **本地验证（label 后执行）**：运行 `make -C worktrees/<wt> ci CI_BASE=<remote>/develop`。该 canonical 入口只分析 `<remote>/develop...HEAD` 的已提交项目差异，并由 typed 影响模型执行对应 preflight；skill 不重复低层门。失败则回实施/fix，修复并 push 后重新执行冲突预检、pm 评论与 label 流转，再重跑本步骤。
+7. **本地验证（label 后执行）**：运行 `make -C worktrees/<wt> ci CI_BASE=<remote>/develop`。该 canonical 入口是 10 分钟有界 affected preflight，只分析 `<remote>/develop...HEAD` 的已提交项目差异；unknown 本地忽略并留痕，重型门显示 `DEFERRED` 后交 nightly/develop。skill 不得追加 `make ci-full`、workspace/feature/integration 全量门。失败则回实施/fix，修复并 push 后重新执行冲突预检、pm 评论与 label 流转，再重跑本步骤。
 8. **延迟启监控（必做）**：本地验证结束后延迟约 15min 启 `/pr-monitor <PR#> --mode=auto`（review-side）；外部 app 可在 `needs-review-again` 后先行 review，pr-monitor 只做一次性交接兜底。
 
 > **收尾不变式（artifact-before-summary/trigger）**：OOS issue + pm:oos（步骤 4）+ 处置门判 defer 的 IN_SCOPE Cx3/Cx4 issue（步骤 2）必须先于 pm:ship（步骤 5）落地——pm:ship 的 OOS 指针指向已存在的 pm:oos，不悬空；再切 `needs-review-again`（步骤 6），最后跑本地验证（步骤 7）。
@@ -181,5 +181,5 @@ PR: #<编号> <URL>
 
 ## 约束
 
-- 最终收尾前 `make ci CI_BASE=<remote>/develop` 必须通过；不 `--no-verify`；不 amend 已 push commit
+- 最终收尾前 10 分钟有界 `make ci CI_BASE=<remote>/develop` 必须通过；不得追加 `make ci-full` 或重型全量门；不 `--no-verify`；不 amend 已 push commit
 - worktree merge 后提示用户手动 `git worktree remove`，不自动删除

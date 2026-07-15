@@ -203,8 +203,9 @@ matrix、always gate、只读权限和唯一 reusable 委托，不允许 workflo
 Rust 编译期证明（Hard），YAML carrier 边界由 xtask/CI 守卫证明（Medium）。workflow 存在性不得外推成
 active PR 的 Medium enforcement；运行时激活状态、required-check 状态与升级条件只在 CI 运维文档维护，
 避免规则文档复制易漂移的运维事实。
-本地差异 preflight 统一使用 `make ci CI_BASE=<remote>/develop`；显式全量使用 `cargo xtask ci full`。
-门集包含 `verify` 全门（build/clippy 升 `--all-features --all-targets`）、覆盖率门
+本地差异 preflight 统一使用 `make ci CI_BASE=<remote>/develop`：10 分钟有界、unknown 默认本地忽略并留痕，
+只跑受影响 package 与定向治理测试；显式全量 `cargo xtask ci full` 仅供人工诊断，不是 PR 完成条件。
+nightly/develop 重型门集包含 `verify` 全门（build/clippy 升 `--all-features --all-targets`）、覆盖率门
 (`cargo llvm-cov`,引擎-基础 ≥90%、无 ratchet 例外)、`public-api --check`
 (轴 A;`cargo-semver-checks` 因全 crate `publish=false` 空转、本轮 deferred) 与 cargo-audit(供应链漏洞,#1133)。
 **供应链门**(#1133):`cargo deny check`(advisories/RustSec+licenses+bans+sources)+ cargo-audit 通过 typed
