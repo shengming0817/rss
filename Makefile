@@ -24,15 +24,18 @@
 # `ci-gate` 尚非 required check。现状见 docs/ops/202607130824-1765-diff-adaptive-ci.md；门集 / --fast /
 # 缺工具策略见 xtask/src/verify.rs。
 
-.PHONY: verify verify-fast ci cargo-selftest audit docker-build docker-smoke
+.PHONY: verify verify-fast verify-hooks ci cargo-selftest audit docker-build docker-smoke
 
 RSS_CARGO ?= ./hack/cargo.sh
 
 verify:
 	$(RSS_CARGO) xtask verify
 
-verify-fast:
+verify-fast: verify-hooks
 	$(RSS_CARGO) xtask verify --fast
+
+verify-hooks:
+	/usr/bin/python3 -m unittest discover -s .codex/hooks -p 'test_*.py'
 
 ci:
 	$(RSS_CARGO) xtask ci

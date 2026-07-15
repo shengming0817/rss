@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || exit 0; PY=\"$ROOT/.venv/bin/python\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || exit 0; exec \"$PY\" \"$ROOT/.codex/hooks/prmonitor_hook.py\"",
+            "timeout": 10,
+            "statusMessage": "准备 prmonitor 会话通知"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || exit 0; PY=\"$ROOT/.venv/bin/python\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || exit 0; exec \"$PY\" \"$ROOT/.codex/hooks/prmonitor_hook.py\"",
+            "timeout": 30,
+            "statusMessage": "通过 prmonitor 发送操作批准消息"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || exit 0; PY=\"$ROOT/.venv/bin/python\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || exit 0; exec \"$PY\" \"$ROOT/.codex/hooks/prmonitor_hook.py\"",
+            "timeout": 30,
+            "statusMessage": "通过 prmonitor 发送任务状态消息"
+          }
+        ]
+      }
+    ]
+  }
+}
