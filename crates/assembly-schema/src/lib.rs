@@ -1,4 +1,16 @@
-use serde::Deserialize;
+#[doc(hidden)]
+pub mod contract_manifest;
+mod lock;
+#[doc(hidden)]
+pub mod repository_contract;
+
+pub use lock::{
+    AssemblyDigests, AssemblyFingerprint, AssemblyIdentity, AssemblyLock, AssemblyLockError,
+    GENERATED_MODULE_OWNERSHIP_MARKER, ParsedAssemblyLock, RepositoryVerifiedAssemblyLock,
+};
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -19,7 +31,7 @@ const OBJECT_STORE_PORT: &str = "diport::ObjectStore";
 const DLX_LIFECYCLE_REPOSITORY_PORT: &str = "diport::DlxLifecycleRepository";
 const DLX_ARCHIVE_STORE_PORT: &str = "diport::DlxArchiveStore";
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssemblyManifest {
     pub name: String,
@@ -82,6 +94,11 @@ impl AssemblyManifest {
             for feature in &provider.required_features {
                 ensure_non_empty_string(feature, "diportProviders.requiredFeatures", &mut errors);
             }
+            ensure_unique(
+                provider.required_features.iter().map(String::as_str),
+                "diportProviders.requiredFeatures",
+                &mut errors,
+            );
         }
 
         errors
@@ -125,6 +142,129 @@ impl AssemblyManifest {
             Err(GraphEvidenceValidationErrors { errors })
         }
     }
+
+    /// Validate and compile this manifest into the sole v1 semantic view.
+    ///
+    /// Code generation and manifest identity both consume this type, so set-like
+    /// declarations cannot drift between their rendered and fingerprinted forms.
+    pub fn canonicalize_v1(
+        self,
+    ) -> Result<CanonicalAssemblyManifestV1, AssemblyManifestCanonicalizationError> {
+        self.validate_basic().map_err(|source| {
+            AssemblyManifestCanonicalizationError(AssemblyManifestCanonicalizationErrorKind::Basic(
+                source,
+            ))
+        })?;
+        self.validate_graph_evidence().map_err(|source| {
+            AssemblyManifestCanonicalizationError(AssemblyManifestCanonicalizationErrorKind::Graph(
+                source,
+            ))
+        })?;
+
+        // Intentionally exhaustive: a future source field must fail compilation until its
+        // sequence/set semantics are reviewed for both codegen and fingerprinting.
+        let AssemblyManifest {
+            name,
+            profile,
+            domains,
+            topology,
+            framework_contracts,
+            listeners,
+            mut diport_providers,
+        } = self;
+
+        for provider in &mut diport_providers {
+            provider.required_features.sort();
+            provider.outputs.sort();
+        }
+        diport_providers.sort_by(|left, right| provider_key(left).cmp(&provider_key(right)));
+
+        let value = CanonicalAssemblyManifestV1Value {
+            name,
+            profile,
+            domains,
+            topology,
+            framework_contracts,
+            listeners,
+            diport_providers,
+        };
+        let manifest_digest = lock::canonical_manifest_digest(&value).map_err(|source| {
+            AssemblyManifestCanonicalizationError(
+                AssemblyManifestCanonicalizationErrorKind::Digest(source),
+            )
+        })?;
+        Ok(CanonicalAssemblyManifestV1 {
+            value,
+            manifest_digest,
+        })
+    }
+}
+
+/// Read-only v1 semantic manifest shared by code generation and AssemblyLock identity.
+pub struct CanonicalAssemblyManifestV1 {
+    value: CanonicalAssemblyManifestV1Value,
+    manifest_digest: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalAssemblyManifestV1Value {
+    name: String,
+    profile: AssemblyProfile,
+    domains: Vec<AssemblyDomain>,
+    topology: AssemblyTopology,
+    framework_contracts: Vec<String>,
+    listeners: Vec<AssemblyListener>,
+    diport_providers: Vec<DiportProvider>,
+}
+
+impl CanonicalAssemblyManifestV1 {
+    pub fn name(&self) -> &str {
+        &self.value.name
+    }
+
+    pub const fn profile(&self) -> AssemblyProfile {
+        self.value.profile
+    }
+
+    pub fn domains(&self) -> &[AssemblyDomain] {
+        &self.value.domains
+    }
+
+    pub const fn topology(&self) -> AssemblyTopology {
+        self.value.topology
+    }
+
+    pub fn framework_contracts(&self) -> &[String] {
+        &self.value.framework_contracts
+    }
+
+    pub fn listeners(&self) -> &[AssemblyListener] {
+        &self.value.listeners
+    }
+
+    pub fn diport_providers(&self) -> &[DiportProvider] {
+        &self.value.diport_providers
+    }
+
+    pub fn manifest_digest(&self) -> &str {
+        &self.manifest_digest
+    }
+}
+
+/// Closed error returned while compiling an AssemblyManifest into its v1 semantic form.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct AssemblyManifestCanonicalizationError(AssemblyManifestCanonicalizationErrorKind);
+
+#[derive(Debug, thiserror::Error)]
+enum AssemblyManifestCanonicalizationErrorKind {
+    #[error("invalid assembly declarations: {0}")]
+    Basic(#[source] ManifestValidationErrors),
+    #[error("invalid assembly graph evidence: {0}")]
+    Graph(#[source] GraphEvidenceValidationErrors),
+    #[error("canonical manifest digest failed: {0}")]
+    Digest(#[source] AssemblyLockError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,27 +280,25 @@ impl GraphEvidenceValidationErrors {
 
 impl fmt::Display for GraphEvidenceValidationErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} assembly graph evidence error(s)", self.errors.len())
+        write_error_list(f, &self.errors)
     }
 }
 
 impl std::error::Error for GraphEvidenceValidationErrors {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GraphEvidenceValidationError {
-    UnknownDomain {
-        domain: AssemblyDomain,
-    },
-    UnboundDomain {
-        domain: AssemblyDomain,
-    },
+    #[error("listener references undeclared domain `{domain}`")]
+    UnknownDomain { domain: AssemblyDomain },
+    #[error("declared domain `{domain}` has no listener")]
+    UnboundDomain { domain: AssemblyDomain },
+    #[error("duplicate domain/listener binding `{domain}/{listener}`")]
     DuplicateDomainListener {
         domain: AssemblyDomain,
         listener: AssemblyListenerKind,
     },
-    DuplicateProviderOutput {
-        channel: LifecycleChannel,
-    },
+    #[error("duplicate provider output `{channel}`")]
+    DuplicateProviderOutput { channel: LifecycleChannel },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,23 +318,41 @@ impl ManifestValidationErrors {
 
 impl fmt::Display for ManifestValidationErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} assembly manifest validation error(s)",
-            self.errors.len()
-        )
+        write_error_list(f, &self.errors)
     }
 }
 
 impl std::error::Error for ManifestValidationErrors {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ManifestValidationError {
+    #[error("field={field} empty declaration")]
     Empty { field: &'static str },
+    #[error("field={field} duplicate declaration")]
     Duplicate { field: &'static str },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+fn write_error_list<T: fmt::Display>(f: &mut fmt::Formatter<'_>, errors: &[T]) -> fmt::Result {
+    for (index, error) in errors.iter().enumerate() {
+        if index > 0 {
+            f.write_str("; ")?;
+        }
+        write!(f, "{error}")?;
+    }
+    Ok(())
+}
+
+macro_rules! display_as_str {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+    )+};
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum AssemblyProfile {
     Production,
@@ -214,7 +370,7 @@ impl AssemblyProfile {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AssemblyDomain {
     Identity,
@@ -236,7 +392,7 @@ impl AssemblyDomain {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AssemblyTopology {
     Demo,
@@ -254,14 +410,14 @@ impl AssemblyTopology {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssemblyListener {
     pub kind: AssemblyListenerKind,
     pub domains: Vec<AssemblyDomain>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AssemblyListenerKind {
     Primary,
@@ -281,7 +437,7 @@ impl AssemblyListenerKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiportProvider {
     pub port: DiportPort,
@@ -297,7 +453,7 @@ pub struct DiportProvider {
     pub outputs: Vec<LifecycleChannel>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LifecycleChannel {
     Probes,
@@ -315,7 +471,9 @@ impl LifecycleChannel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+display_as_str!(AssemblyDomain, AssemblyListenerKind, LifecycleChannel);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub enum DiportPort {
     #[serde(rename = "diport::RevocationStore")]
     RevocationStore,
@@ -371,7 +529,7 @@ impl fmt::Display for DiportPort {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderLifecycle {
     Draft,
@@ -395,7 +553,7 @@ impl fmt::Display for ProviderLifecycle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderDurability {
     EphemeralMemory,
@@ -472,6 +630,15 @@ fn ensure_unique_provider_keys(
             return;
         }
     }
+}
+
+fn provider_key(provider: &DiportProvider) -> (&str, &str, &str, &str) {
+    (
+        provider.port.as_str(),
+        provider.provider.as_str(),
+        provider.provider_crate.as_str(),
+        provider.consumer.as_str(),
+    )
 }
 
 #[cfg(test)]

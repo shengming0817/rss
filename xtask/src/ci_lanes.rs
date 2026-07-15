@@ -798,6 +798,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            AssemblyLockProtocolTests => (step_assembly_lock_protocol_tests, None,
+                gate(
+                        GateId::AssemblyLockProtocolTests,
+                        "assembly-lock-protocol-tests",
+                        CORE,
+                        CompileKind::Workspace,
+                        ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test),
+                        EvidenceKind::Test,
+                        VERIFY_ONLY,
+                    )
+            ),
             BuildWorkspace => (step_build_workspace, None,
                 gate(
                         GateId::BuildWorkspace,

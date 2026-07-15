@@ -1,0 +1,9 @@
+error[E0451]: fields `name` and `profile` of struct `AssemblyIdentity` are private
+ --> tests/ui/assembly_identity_private.rs:5:9
+  |
+4 |     let _ = AssemblyIdentity {
+  |             ---------------- in this type
+5 |         name: "runtime".to_owned(),
+  |         ^^^^ private field
+6 |         profile: AssemblyProfile::Production,
+  |         ^^^^^^^ private field

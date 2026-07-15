@@ -1,0 +1,11 @@
+error[E0451]: fields `manifest`, `generated` and `contracts` of struct `AssemblyDigests` are private
+ --> tests/ui/assembly_digests_private.rs:5:9
+  |
+4 |     let _ = AssemblyDigests {
+  |             --------------- in this type
+5 |         manifest: String::new(),
+  |         ^^^^^^^^ private field
+6 |         generated: String::new(),
+  |         ^^^^^^^^^ private field
+7 |         contracts: String::new(),
+  |         ^^^^^^^^^ private field

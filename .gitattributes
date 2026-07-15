@@ -4,3 +4,5 @@
 # 精确匹配 → UI 测试红。故对这些工具产物豁免 git 空白检查（`git diff --check` / `git apply
 # --whitespace` 的 blank-at-eof / trailing-space），对齐 rust-lang/rust 对 `.stderr` 的处理。
 *.stderr -whitespace
+# AssemblyLock hashes raw bytes; assembly-modules-check verifies this effective checkout policy.
+assemblies/*/src/generated/** text eol=lf

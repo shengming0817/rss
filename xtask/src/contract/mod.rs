@@ -1,134 +1,26 @@
 //! 契约声明源（`contracts/`）的发现 / 解析 / 校验。
 pub(crate) mod breaking;
-pub(crate) mod manifest;
+pub(crate) mod manifest {
+    pub(crate) use assembly_schema::contract_manifest::*;
+}
 pub(crate) mod protection;
 pub(crate) mod redaction;
 pub(crate) mod validate;
 
-use anyhow::{Context, Result, bail};
-use std::path::{Path, PathBuf};
+use anyhow::Result;
+pub(crate) use assembly_schema::repository_contract::DiscoveredContract;
+#[cfg(test)]
+use assembly_schema::repository_contract::path_segments;
+use std::path::Path;
 
-use manifest::ContractManifest;
+pub(crate) fn discover(contracts_root: &Path) -> Result<Vec<DiscoveredContract>> {
+    Ok(assembly_schema::repository_contract::discover_contracts(
+        contracts_root,
+    )?)
+}
 
 pub(crate) const TENANT_SCOPE_SOURCE_RULE: &str =
     "认证上下文、声明式 populate-only header 或 service-token MAC 绑定 header";
-
-/// 一个已发现并解析的契约：目录 + 元数据 + 磁盘路径派生的 kind/domain/version 段。
-#[derive(Debug, Clone)]
-pub(crate) struct DiscoveredContract {
-    /// 契约目录（含 `contract.toml`）。
-    pub(crate) dir: PathBuf,
-    /// 磁盘段 `{kind}/{domain}/{version}`（相对 `contracts/` 根），供 R3 路径↔字段一致校验。
-    pub(crate) path_kind: String,
-    pub(crate) path_domain: String,
-    pub(crate) path_version: String,
-    /// 端点 slug 段（多契约嵌套形态 `{kind}/{domain}/{version}/{slug}/contract.toml` 的第 4 段）；
-    /// 扁平单契约形态（`{kind}/{domain}/{version}/contract.toml`）为 `None`。slug 经 kebab→snake 作
-    /// generated 子模块名（`pub mod <slug_ident>`），供同 `{domain}_{version}` 模块下多端点命名空间隔离。
-    pub(crate) slug: Option<String>,
-    pub(crate) manifest: ContractManifest,
-}
-
-/// 递归发现 `contracts_root` 下全部 `contract.toml`，解析为 `DiscoveredContract`，按目录排序（确定性）。
-pub(crate) fn discover(contracts_root: &Path) -> Result<Vec<DiscoveredContract>> {
-    let mut toml_paths = Vec::new();
-    collect_contract_tomls(contracts_root, &mut toml_paths)?;
-    toml_paths.sort();
-    let mut out = Vec::with_capacity(toml_paths.len());
-    for manifest_path in toml_paths {
-        out.push(load_contract(contracts_root, &manifest_path)?);
-    }
-    Ok(out)
-}
-
-fn load_contract(contracts_root: &Path, manifest_path: &Path) -> Result<DiscoveredContract> {
-    let dir = manifest_path
-        .parent()
-        .context("contract.toml 无父目录")?
-        .to_path_buf();
-    let text = std::fs::read_to_string(manifest_path)
-        .with_context(|| format!("读取 {}", manifest_path.display()))?;
-    let manifest = ContractManifest::from_toml_str(&text)
-        .with_context(|| format!("解析 {}", manifest_path.display()))?;
-    let (path_kind, path_domain, path_version, slug) = path_segments(contracts_root, &dir)
-        .with_context(|| {
-            format!(
-                "契约目录层级须为 contracts/{{kind}}/{{domain}}/{{version}}/[<slug>/]: {}",
-                dir.display()
-            )
-        })?;
-    Ok(DiscoveredContract {
-        dir,
-        path_kind,
-        path_domain,
-        path_version,
-        slug,
-        manifest,
-    })
-}
-
-fn collect_contract_tomls(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    let metadata = match std::fs::symlink_metadata(dir) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error).with_context(|| format!("读取 {} 元数据", dir.display())),
-    };
-    if metadata.file_type().is_symlink() {
-        bail!("contract discovery 禁止符号链接目录：{}", dir.display());
-    }
-    if !metadata.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir).with_context(|| format!("读目录 {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("读取 {} 类型", path.display()))?;
-        if file_type.is_symlink() {
-            bail!("contract discovery 禁止符号链接：{}", path.display());
-        }
-        if file_type.is_dir() {
-            collect_contract_tomls(&path, out)?;
-        } else if file_type.is_file()
-            && path.file_name().and_then(|n| n.to_str()) == Some("contract.toml")
-        {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// 取 dir 相对 contracts_root 的段。两种合法形态：
-/// - **扁平**（单契约）`{kind}/{domain}/{version}` → slug `None`；
-/// - **嵌套**（同 `{domain}/{version}` 多端点 / 多事件）`{kind}/{domain}/{version}/{slug}` → slug `Some`。
-///
-/// 其它段数（≤2 / ≥5）返回 `None`（层级非法）。slug 语法 / 扁平嵌套不可混用由 validate R20/R21 守。
-pub(crate) fn path_segments(
-    contracts_root: &Path,
-    dir: &Path,
-) -> Option<(String, String, String, Option<String>)> {
-    let rel = dir.strip_prefix(contracts_root).ok()?;
-    let segs: Vec<&str> = rel
-        .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect();
-    match segs.as_slice() {
-        [kind, domain, version] => Some((
-            kind.to_string(),
-            domain.to_string(),
-            version.to_string(),
-            None,
-        )),
-        [kind, domain, version, slug] => Some((
-            kind.to_string(),
-            domain.to_string(),
-            version.to_string(),
-            Some(slug.to_string()),
-        )),
-        _ => None,
-    }
-}
 
 /// JSON Schema 文档是否在任意 object schema 的 `properties` 中声明指定字段。
 ///

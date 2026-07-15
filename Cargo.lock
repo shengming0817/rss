@@ -205,8 +205,15 @@ dependencies = [
 name = "assembly-schema"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
+ "schemars 0.8.22",
  "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2 0.10.9",
+ "thiserror",
  "toml 0.8.23",
+ "trybuild",
 ]
 
 [[package]]

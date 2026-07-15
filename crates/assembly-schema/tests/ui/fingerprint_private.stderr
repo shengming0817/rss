@@ -1,0 +1,11 @@
+error[E0532]: cannot match against a tuple struct which contains private fields
+ --> tests/ui/fingerprint_private.rs:4:9
+  |
+4 |     let AssemblyFingerprint(_) = loop {};
+  |         ^^^^^^^^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> tests/ui/fingerprint_private.rs:4:29
+  |
+4 |     let AssemblyFingerprint(_) = loop {};
+  |                             ^ private field

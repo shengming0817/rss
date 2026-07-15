@@ -27,6 +27,7 @@
 //!
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
+//! INVARIANT: ASSEMBLY-LOCK-FAST-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_lock_fast_gate_is_typed_and_fail_closed", anti_vacuity = "lock::tests::shared_child_vectors_freeze_bytes_universes_and_final_fingerprint" }—— `verify --fast` executes the complete AssemblyLock protocol crate test carrier.
 //! INVARIANT: CI-ADAPTIVE-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— GitHub CI workflow
 //!   精确委托闭合 xtask job，Meta/Security 并行，Core tests 仅依赖单次 prerequisites；门归属由
 //!   Hard registry 闭集与穷举 dispatch 强制，YAML 拓扑、权限和 literal 委托由 Medium 结构化守卫
@@ -561,6 +562,14 @@ fn step_build_workspace() -> Step {
         env: &[],
     }
 }
+fn step_assembly_lock_protocol_tests() -> Step {
+    Step {
+        id: GateId::AssemblyLockProtocolTests,
+        args: &["test", "-p", "assembly-schema"],
+        kind: StepKind::Cargo,
+        env: &[],
+    }
+}
 fn step_postgres_feature_matrix() -> Step {
     Step {
         id: GateId::PostgresFeatureMatrix,
@@ -960,11 +969,13 @@ pub(crate) fn run_nextest_replay(
         .run(&root, INTEGRATION_ENV)
 }
 
-/// 纯函数：按 opts 产出有序门步计划。`--fast` 裁掉 `needs_compile` 步（fmt+meta+deny 保留）。
+/// 纯函数：`--fast` 仅为 AssemblyLock 协议保留一个有界 compile 例外。
 fn verify_plan(opts: &VerifyOpts) -> Vec<Step> {
     let plan = plan_for(PlanTarget::Verify);
     if opts.fast {
-        plan.into_iter().filter(|s| !s.needs_compile()).collect()
+        plan.into_iter()
+            .filter(|step| !step.needs_compile() || step.id == GateId::AssemblyLockProtocolTests)
+            .collect()
     } else {
         plan
     }
@@ -1635,6 +1646,7 @@ mod tests {
                 "ci-entry-guard",
                 "reconcile-outbox-command-guard",
                 "defer-gate",
+                "assembly-lock-protocol-tests",
                 "build",
                 "postgres-feature-matrix",
                 "integration-compile",
@@ -1760,7 +1772,42 @@ mod tests {
         Ok(())
     }
 
-    /// `--fast` 只留无需编译的步：fmt + meta + deny；裁掉 build/clippy/nextest/dylint。
+    fn validate_assembly_lock_fast_gate(plan: &[Step]) -> anyhow::Result<()> {
+        let gates = plan
+            .iter()
+            .filter(|step| step.id == GateId::AssemblyLockProtocolTests)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(gates.len() == 1, "expected exactly one AssemblyLock gate");
+        let gate = gates[0];
+        anyhow::ensure!(gate.needs_compile(), "gate must retain compile semantics");
+        anyhow::ensure!(matches!(gate.kind, StepKind::Cargo));
+        anyhow::ensure!(gate.args == ["test", "-p", "assembly-schema"]);
+        anyhow::ensure!(gate.id.spec().compile_kind() == CompileKind::Workspace);
+        anyhow::ensure!(matches!(
+            gate.id.spec().tool(),
+            ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_lock_fast_gate_is_typed_and_fail_closed() -> anyhow::Result<()> {
+        let plan = verify_plan(&opts(true, false));
+        validate_assembly_lock_fast_gate(&plan)?;
+        let mut omitted = plan.clone();
+        omitted.retain(|step| step.id != GateId::AssemblyLockProtocolTests);
+        assert!(validate_assembly_lock_fast_gate(&omitted).is_err());
+        let mut weakened = plan;
+        weakened
+            .iter_mut()
+            .find(|step| step.id == GateId::AssemblyLockProtocolTests)
+            .context("AssemblyLock gate")?
+            .args = &["check", "-p", "assembly-schema"];
+        assert!(validate_assembly_lock_fast_gate(&weakened).is_err());
+        Ok(())
+    }
+
+    /// `--fast` 保留 no-compile 步与唯一 AssemblyLock 协议测试例外。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
         let plan = verify_plan(&opts(true, false));
@@ -1802,6 +1849,7 @@ mod tests {
                 "ci-entry-guard",
                 "reconcile-outbox-command-guard",
                 "defer-gate",
+                "assembly-lock-protocol-tests",
                 "deny"
             ]
         );

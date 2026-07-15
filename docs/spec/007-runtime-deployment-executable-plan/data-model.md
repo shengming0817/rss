@@ -24,7 +24,7 @@ Required fields:
 - `digests`: canonical manifest, generated-module, and contract digests.
 - `fingerprint`: the `rss-assembly-lock-v1` stage fingerprint of `{schemaVersion, identity, digests}`; the result field is absent from its own preimage. #1780 owns changed-input, exact-input-universe, and self-field-exclusion red tests.
 
-#1780 will own the closed Rust type, schema/codegen, and golden. #1781 will own deterministic generate/check drift behavior.
+#1780 owns the closed Rust type, shared typed contract discovery, schema/codegen, and golden. #1781 owns deterministic generate/check drift behavior and composes the existing R1–R24 business-validation gate before writing a lock.
 
 ### RuntimeConfigSnapshot
 
@@ -80,9 +80,9 @@ Every stage fingerprint is `sha256:` plus lowercase hex of `SHA-256(ASCII(stageT
 
 AssemblyLock closes its three child digest universes with the same tag/NUL/RFC-8785 framing:
 
-- `manifest`: tag `rss-assembly-manifest-v1`; the unsigned value is the validated typed AssemblyManifest, so TOML key/table layout is irrelevant while semantic array order is retained.
+- `manifest`: tag `rss-assembly-manifest-v1`; the unsigned value is `CanonicalAssemblyManifestV1`. TOML key/table layout is irrelevant; `domains`, `listeners`, each listener's `domains`, and `frameworkContracts` retain semantic declaration order, while `diportProviders` sort by `(port,provider,providerCrate,consumer)` and provider `requiredFeatures`/`outputs` sort as duplicate-free sets. Codegen consumes this same read-only value and records its digest as `Source-Manifest-Digest`.
 - `generated`: tag `rss-assembly-generated-v1`; the value is the non-empty path-sorted array of `{path,digest}` for every generator-owned regular file recursively below the discovered assembly's `src/generated/`. Paths are repository-relative UTF-8 with `/`; symlinks, traversal, duplicate paths, unowned files, and non-files fail closed; each child digest hashes its raw bytes.
-- `contracts`: tag `rss-assembly-contracts-v1`; the value is the tuple-sorted array of `{domain,id,version,schemaHash}` for every repository-discovered contract whose domain is declared by the assembly, plus the exact IDs in `frameworkContracts`. Duplicate/missing bindings fail closed; `schemaHash` reuses the existing declared-schema-file digest contract.
+- `contracts`: tag `rss-assembly-contracts-v1`; the value is the tuple-sorted array of `{domain,id,version,schemaHash,semanticsHash}` for every repository-discovered contract whose domain is declared by the assembly, plus the exact IDs in `frameworkContracts`. `schemaHash` reuses the existing declared-schema-file digest contract. `semanticsHash` uses `rss-contract-runtime-semantics-v1 || NUL || RFC8785(typed projection)` and binds every `ContractManifest` runtime field; set-like effect, subscription, projection, and outbox emission declarations are sorted with duplicate identities rejected, while saga steps remain ordered. #1780 owns the single typed parser/discovery/catalog funnel and separates `ParsedAssemblyLock` from `RepositoryVerifiedAssemblyLock`; no raw binding or digest constructor is public. The verified compiler accepts only a repository root and an exact repository-relative `assemblies/<name>` directory, reads that directory's `assembly.toml`, and requires its canonical name to equal the directory name, so a caller cannot pair one manifest with another assembly's generated files. “Repository verified” proves deterministic input-universe completeness, not R1–R24 business validity; #1781 composes that existing validator and drives generate/check.
 
 JSON objects are closed recursively and version 1 is the only accepted version. Set-like arrays are sorted by their documented stable identity before RFC 8785 and reject duplicate identities; RFC 8785 itself never reorders arrays. Domain and lifecycle arrays preserve declaration order because it determines construction, readiness, and shutdown behavior.
 

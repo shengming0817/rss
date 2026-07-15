@@ -5,7 +5,7 @@
   "type": "object", "additionalProperties": false,
   "required": ["schemaVersion", "identity", "digests", "fingerprint"],
   "properties": {
-    "schemaVersion": { "type": "integer", "const": 1 },
+    "schemaVersion": { "description": "Closed AssemblyLock wire version; readers accept v1 only.", "type": "integer", "const": 1 },
     "identity": { "$ref": "#/definitions/identity" },
     "digests": { "$ref": "#/definitions/digests" },
     "fingerprint": {
@@ -17,11 +17,15 @@
     "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "identity": {
       "type": "object", "additionalProperties": false, "required": ["name", "profile"],
-      "properties": { "name": { "type": "string", "minLength": 1 }, "profile": { "type": "string", "enum": ["production", "demo", "test"] } }
+      "properties": { "name": { "type": "string", "minLength": 1, "pattern": "^.*\\S.*$" }, "profile": { "type": "string", "enum": ["production", "demo", "test"] } }
     },
     "digests": {
       "type": "object", "additionalProperties": false, "required": ["manifest", "generated", "contracts"],
-      "properties": { "manifest": { "$ref": "#/definitions/sha256" }, "generated": { "$ref": "#/definitions/sha256" }, "contracts": { "$ref": "#/definitions/sha256" } }
+      "properties": {
+        "manifest": { "description": "rss-assembly-manifest-v1 + NUL + RFC8785(CanonicalAssemblyManifestV1).", "$ref": "#/definitions/sha256" },
+        "generated": { "description": "rss-assembly-generated-v1 over the non-empty path-sorted generator-owned src/generated file universe; each entry binds repository-relative path to raw-byte SHA-256.", "$ref": "#/definitions/sha256" },
+        "contracts": { "description": "rss-assembly-contracts-v1 over tuple-sorted {domain,id,version,schemaHash,semanticsHash} bindings selected from complete repository discovery; semanticsHash binds the canonical typed runtime semantics of contract.toml.", "$ref": "#/definitions/sha256" }
+      }
     }
   }
 }

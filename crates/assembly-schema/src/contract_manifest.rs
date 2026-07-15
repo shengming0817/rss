@@ -1,4 +1,4 @@
-//! 契约元数据声明（`contract.toml`）的冻结类型。
+//! 契约元数据声明（`contract.toml`）的共享冻结类型。
 //!
 //! INVARIANT: CONTRACT-FREEZE-01 { level = "Medium", exec = "verify", source = "code" }— `ContractManifest` 字段集 + 枚举即 `contract.toml` 格式的
 //! 单一事实源（Hard，类型层）：`#[serde(deny_unknown_fields)]` + 非 `Option` 枚举字段使「坏格式」
@@ -14,97 +14,97 @@
 //! 由 codegen 派生订阅注册 glue（`SUBSCRIPTIONS` 常量数组），供 bootstrap 接线消费（EVENT-ACTIVE-SUB-01 守）。
 //! `#[serde(default)]` 将未声明 subscriptions 精确表达为空集合；active 非空约束由 validate R14 承担。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// event 订阅声明字段名常量（#1120）——DRY 于 validate R14 + codegen 订阅 glue（消除裸串重复）。
-pub(crate) const FIELD_SUBSCRIPTIONS: &str = "[[subscriptions]]";
+pub const FIELD_SUBSCRIPTIONS: &str = "[[subscriptions]]";
 
 /// schema 键名常量——DRY 于 validate + codegen 双处引用（消除裸串重复）。
-pub(crate) const SCHEMA_KEY_REQUEST: &str = "request";
-pub(crate) const SCHEMA_KEY_RESPONSE: &str = "response";
-pub(crate) const SCHEMA_KEY_PAYLOAD: &str = "payload";
+pub const SCHEMA_KEY_REQUEST: &str = "request";
+pub const SCHEMA_KEY_RESPONSE: &str = "response";
+pub const SCHEMA_KEY_PAYLOAD: &str = "payload";
 
 /// per-kind / governance block 字段名常量（#1035）——DRY 于 validate R8/R9/R22 + finding 文案（对齐
 /// SCHEMA_KEY_* 范式，防裸串拼写漂移）。`FIELD_*` block 常量用 TOML 表形态指代，与文案一致。
-pub(crate) const FIELD_PATH: &str = "path";
-pub(crate) const FIELD_METHOD: &str = "method";
-pub(crate) const FIELD_TOPIC: &str = "topic";
-pub(crate) const FIELD_DELIVERY: &str = "delivery";
-pub(crate) const FIELD_SAGA: &str = "[saga]";
-pub(crate) const FIELD_COMMAND: &str = "[command]";
-pub(crate) const FIELD_RECONCILE: &str = "[reconcile]";
-pub(crate) const FIELD_EFFECT_PROFILE: &str = "[effectProfile]";
-pub(crate) const FIELD_ENDPOINTS_HTTP_AUTH: &str = "[endpoints.http.auth]";
-pub(crate) const FIELD_ENDPOINTS_HTTP_HEADERS: &str = "[endpoints.http.headers]";
-pub(crate) const FIELD_ENDPOINTS_HTTP_PROJECTION: &str = "[endpoints.http.projection]";
-pub(crate) const FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING: &str = "[endpoints.http.resourceSharing]";
+pub const FIELD_PATH: &str = "path";
+pub const FIELD_METHOD: &str = "method";
+pub const FIELD_TOPIC: &str = "topic";
+pub const FIELD_DELIVERY: &str = "delivery";
+pub const FIELD_SAGA: &str = "[saga]";
+pub const FIELD_COMMAND: &str = "[command]";
+pub const FIELD_RECONCILE: &str = "[reconcile]";
+pub const FIELD_EFFECT_PROFILE: &str = "[effectProfile]";
+pub const FIELD_ENDPOINTS_HTTP_AUTH: &str = "[endpoints.http.auth]";
+pub const FIELD_ENDPOINTS_HTTP_HEADERS: &str = "[endpoints.http.headers]";
+pub const FIELD_ENDPOINTS_HTTP_PROJECTION: &str = "[endpoints.http.projection]";
+pub const FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING: &str = "[endpoints.http.resourceSharing]";
 
 /// `contract.toml` 的解析目标。字段集冻结——见模块 INVARIANT。
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ContractManifest {
-    pub(crate) id: String,
-    pub(crate) kind: ContractKind,
-    pub(crate) domain: String,
-    pub(crate) version: String,
-    pub(crate) owner: ContractOwner,
+pub struct ContractManifest {
+    pub id: String,
+    pub kind: ContractKind,
+    pub domain: String,
+    pub version: String,
+    pub owner: ContractOwner,
     #[serde(rename = "consistencyLevel")]
-    pub(crate) consistency_level: ConsistencyLevel,
-    pub(crate) lifecycle: Lifecycle,
+    pub consistency_level: ConsistencyLevel,
+    pub lifecycle: Lifecycle,
     #[serde(default)]
-    pub(crate) schemas: Schemas,
+    pub schemas: Schemas,
     /// HTTP serving metadata. The only accepted nested shape is:
     /// `[endpoints.http.auth]` + `[endpoints.http.headers]`; nested structs use
     /// `deny_unknown_fields`, so typos fail at parse time instead of becoming
     /// silently ignored governance holes.
     #[serde(default)]
-    pub(crate) endpoints: Option<Endpoints>,
+    pub endpoints: Option<Endpoints>,
     /// http per-kind：业务路径（`/api/v{N}/{domain}/…` 约定）。active http 必填（R8）。
     #[serde(default)]
-    pub(crate) path: Option<String>,
+    pub path: Option<String>,
     /// http per-kind：HTTP 方法。active http 必填（R8）；非法值解析即 `Err`（Hard）。
     #[serde(default)]
-    pub(crate) method: Option<HttpMethod>,
+    pub method: Option<HttpMethod>,
     /// event per-kind：稳定 dotted topic 名。active event 必填（R8）。
     #[serde(default)]
-    pub(crate) topic: Option<String>,
+    pub topic: Option<String>,
     /// event per-kind：投递语义。active event 必填（R8）；非法值解析即 `Err`（Hard）。
     #[serde(default)]
-    pub(crate) delivery: Option<Delivery>,
+    pub delivery: Option<Delivery>,
     /// saga per-kind：`[saga]` 专属 block。active saga 必填（R8）；内部良构由 R10 守。
     #[serde(default)]
-    pub(crate) saga: Option<SagaBlock>,
+    pub saga: Option<SagaBlock>,
     /// command 专属持久化策略。command 必须声明，其他 kind 禁止（validate R24）。
     #[serde(default)]
-    pub(crate) command: Option<CommandBlock>,
+    pub command: Option<CommandBlock>,
     /// L4 reconcile 结构语义：`[reconcile]` 顶层 block。DeviceLatent 必填（R22）；字段闭值由类型层守。
     #[serde(default)]
-    pub(crate) reconcile: Option<ReconcileBlock>,
+    pub reconcile: Option<ReconcileBlock>,
     /// HTTP route effect vocabulary. This is a declarative carrier for codegen
     /// and later L0/L1 gates; R22 ensures every HTTP contract declares it.
     #[serde(default, rename = "effectProfile")]
-    pub(crate) effect_profile: Option<EffectProfile>,
+    pub effect_profile: Option<EffectProfile>,
     /// event 订阅声明（#1120）：`[[subscriptions]]` 数组，每项声明一个消费者域 + consumer group。
     /// `#[serde(default)]` ⇒ 未声明 subscriptions 时为空集合；draft/deprecated 可合法为空。
     /// active event 必须非空（EVENT-ACTIVE-SUB-01，R14）；draft/deprecated 豁免。
     #[serde(default)]
-    pub(crate) subscriptions: Vec<Subscription>,
+    pub subscriptions: Vec<Subscription>,
     /// L0-L4 consistency capability evidence. `consistencyLevel` names the intended
     /// semantics; this typed block provides the machine-checkable proof surface.
     #[serde(default)]
-    pub(crate) capabilities: Capabilities,
+    pub capabilities: Capabilities,
 }
 
 impl ContractManifest {
     /// 解析 `contract.toml` 文本。坏枚举 / 未知字段 / 缺字段即 `Err`（CONTRACT-FREEZE-01）。
-    pub(crate) fn from_toml_str(text: &str) -> Result<Self, toml::de::Error> {
+    pub fn from_toml_str(text: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(text)
     }
 
     /// 全部已声明的 schema 文件名 = `[schemas]` 声明 ∪ 各 saga step `outputSchema`
     /// （DRY 单源：R5 存在性 + R6 防逃逸统一消费 schema 文件完整性，含 saga step 引用）。
-    pub(crate) fn declared_schema_files(&self) -> Vec<&str> {
+    pub fn declared_schema_files(&self) -> Vec<&str> {
         let mut files = self.schemas.declared_files();
         if let Some(saga) = &self.saga {
             files.extend(saga.steps.iter().map(|s| s.output_schema.as_str()));
@@ -114,9 +114,9 @@ impl ContractManifest {
 }
 
 /// 契约种类。`kind` 决定 wire 形态与 codegen 走向；磁盘段 `contracts/{kind}/...` 与之同源。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum ContractKind {
+pub enum ContractKind {
     Http,
     Event,
     Command,
@@ -124,22 +124,22 @@ pub(crate) enum ContractKind {
 }
 
 /// command authoring 的闭值策略；无默认值，缺 block 由 validate fail-closed。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CommandBlock {
-    pub(crate) journal: CommandJournalPolicy,
+pub struct CommandBlock {
+    pub journal: CommandJournalPolicy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum CommandJournalPolicy {
+pub enum CommandJournalPolicy {
     Required,
     None,
 }
 
 impl ContractKind {
     /// 磁盘目录段（与 `contracts/{kind}/...` 路径一致）。
-    pub(crate) fn as_dir(self) -> &'static str {
+    pub fn as_dir(self) -> &'static str {
         match self {
             ContractKind::Http => "http",
             ContractKind::Event => "event",
@@ -150,8 +150,8 @@ impl ContractKind {
 }
 
 /// L0–L4 一致性等级（与 wire 语义同源，决策 #1）。拼写大小写敏感。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub(crate) enum ConsistencyLevel {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum ConsistencyLevel {
     LocalOnly,
     LocalTx,
     OutboxFact,
@@ -164,62 +164,62 @@ pub(crate) enum ConsistencyLevel {
 /// Blocks are optional at parse time so diagnostics can be emitted as governance
 /// findings with contract ids. Unknown fields and unknown enum values still fail
 /// at parse time via `deny_unknown_fields` and closed enums.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct Capabilities {
+pub struct Capabilities {
     #[serde(default)]
-    pub(crate) local_tx: Option<LocalTxCapability>,
+    pub local_tx: Option<LocalTxCapability>,
     #[serde(default)]
-    pub(crate) outbox: Option<OutboxCapability>,
+    pub outbox: Option<OutboxCapability>,
     #[serde(default)]
-    pub(crate) workflow: Option<WorkflowCapability>,
+    pub workflow: Option<WorkflowCapability>,
     #[serde(default)]
-    pub(crate) device_latent: Option<DeviceLatentCapability>,
+    pub device_latent: Option<DeviceLatentCapability>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct LocalTxCapability {
-    pub(crate) boundary: LocalTxBoundary,
-    pub(crate) tx_model: LocalTxModel,
-    pub(crate) retry: LocalTxRetry,
-    pub(crate) commit_unknown: LocalTxCommitUnknown,
+pub struct LocalTxCapability {
+    pub boundary: LocalTxBoundary,
+    pub tx_model: LocalTxModel,
+    pub retry: LocalTxRetry,
+    pub commit_unknown: LocalTxCommitUnknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum LocalTxBoundary {
+pub enum LocalTxBoundary {
     SingleDomain,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum LocalTxModel {
+pub enum LocalTxModel {
     TenantScopedUow,
     RepoAtomicCas,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum LocalTxRetry {
+pub enum LocalTxRetry {
     BoundedTransient,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum LocalTxCommitUnknown {
+pub enum LocalTxCommitUnknown {
     NotRetryable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct EffectProfile {
-    pub(crate) effects: Vec<EffectKind>,
+pub struct EffectProfile {
+    pub effects: Vec<EffectKind>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum EffectKind {
+pub enum EffectKind {
     Read,
     Auth,
     Projection,
@@ -236,7 +236,7 @@ pub(crate) enum EffectKind {
 
 impl EffectKind {
     /// Stable `contract.toml` wire name shared by every effect governance consumer.
-    pub(crate) fn as_wire(self) -> &'static str {
+    pub fn as_wire(self) -> &'static str {
         match self {
             Self::Read => "read",
             Self::Auth => "auth",
@@ -254,99 +254,99 @@ impl EffectKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct OutboxCapability {
-    pub(crate) role: OutboxRole,
+pub struct OutboxCapability {
+    pub role: OutboxRole,
     #[serde(default)]
-    pub(crate) atomicity: Option<OutboxAtomicity>,
+    pub atomicity: Option<OutboxAtomicity>,
     #[serde(default)]
-    pub(crate) emits: Vec<String>,
+    pub emits: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum OutboxRole {
+pub enum OutboxRole {
     Producer,
     Fact,
     Command,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum OutboxAtomicity {
+pub enum OutboxAtomicity {
     SameTransaction,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct WorkflowCapability {
-    pub(crate) mode: WorkflowMode,
+pub struct WorkflowCapability {
+    pub mode: WorkflowMode,
     #[serde(default)]
-    pub(crate) inputs: Vec<String>,
+    pub inputs: Vec<String>,
     #[serde(default)]
-    pub(crate) ordering: Option<WorkflowOrdering>,
+    pub ordering: Option<WorkflowOrdering>,
     #[serde(default)]
-    pub(crate) checkpoint: Option<WorkflowRequirement>,
+    pub checkpoint: Option<WorkflowRequirement>,
     #[serde(default)]
-    pub(crate) replay: Option<WorkflowRequirement>,
+    pub replay: Option<WorkflowRequirement>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum WorkflowMode {
+pub enum WorkflowMode {
     Saga,
     Projection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum WorkflowOrdering {
+pub enum WorkflowOrdering {
     SerialInOrder,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum WorkflowRequirement {
+pub enum WorkflowRequirement {
     Required,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct DeviceLatentCapability {
+pub struct DeviceLatentCapability {
     #[serde(rename = "loop")]
-    pub(crate) loop_kind: DeviceLatentLoop,
+    pub loop_kind: DeviceLatentLoop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum DeviceLatentLoop {
+pub enum DeviceLatentLoop {
     Reconcile,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum DeviceLatentTenancy {
+pub enum DeviceLatentTenancy {
     SingleTenant,
     TenantScoped,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum DeviceLatentTrigger {
+pub enum DeviceLatentTrigger {
     Interval,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum DeviceLatentFencing {
+pub enum DeviceLatentFencing {
     Required,
     SingleProcess,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum DeviceLatentLateMessagePolicy {
+pub enum DeviceLatentLateMessagePolicy {
     Idempotent,
 }
 
@@ -355,19 +355,19 @@ pub(crate) enum DeviceLatentLateMessagePolicy {
 /// 与 `[capabilities.deviceLatent]` 分工：capability block 证明 `DeviceLatent` 使用 reconcile loop；本 block
 /// 声明该 loop 的 tenancy / trigger / fencing / late-message policy。字段全为闭枚举且非 `Option`，缺字段、
 /// 未知字段或坏值均解析即拒（Hard）。
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct ReconcileBlock {
-    pub(crate) tenancy: DeviceLatentTenancy,
-    pub(crate) trigger: DeviceLatentTrigger,
-    pub(crate) fencing: DeviceLatentFencing,
-    pub(crate) late_message_policy: DeviceLatentLateMessagePolicy,
+pub struct ReconcileBlock {
+    pub tenancy: DeviceLatentTenancy,
+    pub trigger: DeviceLatentTrigger,
+    pub fencing: DeviceLatentFencing,
+    pub late_message_policy: DeviceLatentLateMessagePolicy,
 }
 
 /// 契约生命周期。`active` 才需 assembly 接线（见 contract-fanout.md §契约归属）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Lifecycle {
+pub enum Lifecycle {
     Draft,
     Active,
     Deprecated,
@@ -380,7 +380,7 @@ pub(crate) enum Lifecycle {
 /// 解析 enum 与 `vocab::ContractOwner` 的双类型消重收口到 contract-registry 行为 PR，已登记 issue #1091
 /// 跟踪（见 .claude/rules/rss/contract-fanout.md §契约归属）；本单元不预置未用 API。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ContractOwner {
+pub enum ContractOwner {
     Domain(String),
     Framework,
 }
@@ -396,21 +396,30 @@ impl<'de> Deserialize<'de> for ContractOwner {
     }
 }
 
+impl Serialize for ContractOwner {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::Domain(domain) => domain,
+            Self::Framework => "_framework",
+        })
+    }
+}
+
 /// 契约声明的 schema 文件名（按 kind 取用子集；缺省全 `None`，由 validate R4 报形态错）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Schemas {
+pub struct Schemas {
     #[serde(default)]
-    pub(crate) request: Option<String>,
+    pub request: Option<String>,
     #[serde(default)]
-    pub(crate) response: Option<String>,
+    pub response: Option<String>,
     #[serde(default)]
-    pub(crate) payload: Option<String>,
+    pub payload: Option<String>,
 }
 
 impl Schemas {
     /// 已声明的 schema 文件名，顺序 request → response → payload（DRY 单源，供 codegen + validate 复用）。
-    pub(crate) fn declared_files(&self) -> Vec<&str> {
+    pub fn declared_files(&self) -> Vec<&str> {
         [
             self.request.as_deref(),
             self.response.as_deref(),
@@ -424,9 +433,9 @@ impl Schemas {
 
 /// HTTP 方法（http 契约 per-kind 字段）。闭值集 = rust-standards §API 动词集；
 /// 非法值（如 `"FETCH"`）解析即 `Err`（Hard，类型层），无需运行期规则。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
-pub(crate) enum HttpMethod {
+pub enum HttpMethod {
     Get,
     Post,
     Put,
@@ -435,7 +444,7 @@ pub(crate) enum HttpMethod {
 }
 
 impl HttpMethod {
-    pub(crate) fn as_wire(self) -> &'static str {
+    pub fn as_wire(self) -> &'static str {
         match self {
             HttpMethod::Get => "GET",
             HttpMethod::Post => "POST",
@@ -446,68 +455,68 @@ impl HttpMethod {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Endpoints {
+pub struct Endpoints {
     #[serde(default)]
-    pub(crate) http: Option<HttpEndpoint>,
+    pub http: Option<HttpEndpoint>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct HttpEndpoint {
+pub struct HttpEndpoint {
     #[serde(rename = "successStatus")]
-    pub(crate) success_status: u16,
-    pub(crate) idempotency: HttpIdempotency,
+    pub success_status: u16,
+    pub idempotency: HttpIdempotency,
     #[serde(default)]
-    pub(crate) auth: Option<HttpAuth>,
+    pub auth: Option<HttpAuth>,
     #[serde(default)]
-    pub(crate) resource: Option<String>,
+    pub resource: Option<String>,
     #[serde(default, rename = "selfScoped")]
-    pub(crate) self_scoped: bool,
+    pub self_scoped: bool,
     #[serde(default, rename = "resourceSharing")]
-    pub(crate) resource_sharing: Option<HttpResourceSharing>,
+    pub resource_sharing: Option<HttpResourceSharing>,
     #[serde(default)]
-    pub(crate) headers: BTreeMap<String, HttpHeaderMode>,
+    pub headers: BTreeMap<String, HttpHeaderMode>,
     #[serde(default)]
-    pub(crate) projection: Option<HttpProjection>,
+    pub projection: Option<HttpProjection>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum HttpIdempotency {
+pub enum HttpIdempotency {
     Idempotent,
     NonIdempotent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct HttpResourceSharing {
-    pub(crate) mode: HttpResourceSharingMode,
+pub struct HttpResourceSharing {
+    pub mode: HttpResourceSharingMode,
     #[serde(default)]
-    pub(crate) reason: Option<String>,
+    pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum HttpResourceSharingMode {
+pub enum HttpResourceSharingMode {
     TenantScoped,
     Global,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct HttpAuth {
-    pub(crate) mode: HttpAuthMode,
+pub struct HttpAuth {
+    pub mode: HttpAuthMode,
     #[serde(default)]
-    pub(crate) reason: Option<String>,
+    pub reason: Option<String>,
     #[serde(default)]
-    pub(crate) permission: Option<String>,
+    pub permission: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum HttpAuthMode {
+pub enum HttpAuthMode {
     Permission,
     Public,
     Bootstrap,
@@ -516,7 +525,7 @@ pub(crate) enum HttpAuthMode {
 }
 
 impl HttpAuthMode {
-    pub(crate) fn as_wire(self) -> &'static str {
+    pub fn as_wire(self) -> &'static str {
         match self {
             HttpAuthMode::Permission => "permission",
             HttpAuthMode::Public => "public",
@@ -527,32 +536,32 @@ impl HttpAuthMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum HttpHeaderMode {
+pub enum HttpHeaderMode {
     PopulateOnly,
     ServiceTokenTenantBound,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct HttpProjection {
+pub struct HttpProjection {
     #[serde(default)]
-    pub(crate) fields: Vec<HttpProjectionField>,
+    pub fields: Vec<HttpProjectionField>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct HttpProjectionField {
-    pub(crate) field: HttpProjectionFieldName,
-    pub(crate) permission: String,
-    pub(crate) obligation_key: String,
-    pub(crate) response_path: String,
+pub struct HttpProjectionField {
+    pub field: HttpProjectionFieldName,
+    pub permission: String,
+    pub obligation_key: String,
+    pub response_path: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum HttpProjectionFieldName {
+pub enum HttpProjectionFieldName {
     AuditActor,
     AuditTenantId,
     AuditResourceId,
@@ -561,12 +570,12 @@ pub(crate) enum HttpProjectionFieldName {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HttpProjectionFieldSpec {
-    pub(crate) wire: &'static str,
-    pub(crate) vocab_variant: &'static str,
-    pub(crate) permission: &'static str,
-    pub(crate) obligation_key: &'static str,
-    pub(crate) response_path: &'static str,
+pub struct HttpProjectionFieldSpec {
+    pub wire: &'static str,
+    pub vocab_variant: &'static str,
+    pub permission: &'static str,
+    pub obligation_key: &'static str,
+    pub response_path: &'static str,
 }
 
 const HTTP_PROJECTION_FIELD_SPECS: &[HttpProjectionFieldSpec] = &[
@@ -608,7 +617,7 @@ const HTTP_PROJECTION_FIELD_SPECS: &[HttpProjectionFieldSpec] = &[
 ];
 
 impl HttpProjectionFieldName {
-    pub(crate) fn spec(self) -> &'static HttpProjectionFieldSpec {
+    pub fn spec(self) -> &'static HttpProjectionFieldSpec {
         match self {
             Self::AuditActor => &HTTP_PROJECTION_FIELD_SPECS[0],
             Self::AuditTenantId => &HTTP_PROJECTION_FIELD_SPECS[1],
@@ -618,23 +627,23 @@ impl HttpProjectionFieldName {
         }
     }
 
-    pub(crate) fn as_wire(self) -> &'static str {
+    pub fn as_wire(self) -> &'static str {
         self.spec().wire
     }
 
-    pub(crate) fn as_vocab_variant(self) -> &'static str {
+    pub fn as_vocab_variant(self) -> &'static str {
         self.spec().vocab_variant
     }
 
-    pub(crate) fn canonical_permission(self) -> &'static str {
+    pub fn canonical_permission(self) -> &'static str {
         self.spec().permission
     }
 
-    pub(crate) fn canonical_obligation_key(self) -> &'static str {
+    pub fn canonical_obligation_key(self) -> &'static str {
         self.spec().obligation_key
     }
 
-    pub(crate) fn canonical_response_path(self) -> &'static str {
+    pub fn canonical_response_path(self) -> &'static str {
         self.spec().response_path
     }
 }
@@ -650,9 +659,9 @@ impl HttpProjectionFieldName {
 // stock 风格 lint、非 RSS 自定义治理的 item-level carve-out（error-handling.md §Carve-out）。carve-out 登记：
 // 项目 ADR registry 尚未建立（同 crates/bootstrap/src/shutdown.rs 既有先例），暂记于此，待 registry 落地迁入。
 #[allow(clippy::enum_variant_names)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Delivery {
+pub enum Delivery {
     AtLeastOnce,
     AtMostOnce,
     ExactlyOnce,
@@ -660,7 +669,7 @@ pub(crate) enum Delivery {
 
 impl Delivery {
     /// wire 值（kebab-case，与 `contract.toml` / serde rename 同源）——供 validate 文案与 contract.toml 对齐。
-    pub(crate) fn as_wire(self) -> &'static str {
+    pub fn as_wire(self) -> &'static str {
         match self {
             Delivery::AtLeastOnce => "at-least-once",
             Delivery::AtMostOnce => "at-most-once",
@@ -670,9 +679,9 @@ impl Delivery {
 }
 
 /// saga 补偿顺序——仅 `reverse`（saga.md governance）。单 variant ⇒ 取值类型层固定（Hard）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum CompensationOrder {
+pub enum CompensationOrder {
     Reverse,
 }
 
@@ -682,21 +691,21 @@ pub(crate) enum CompensationOrder {
 /// 用单 variant 枚举 ⇒ 仅 `reverse`（Hard）。内部良构（≥1 step、step name 合法唯一、outputSchema 非空）
 /// 由 validate R10 守（运行期，Medium）；step `outputSchema` 文件完整性经 [`ContractManifest::declared_schema_files`]
 /// 复用 R5/R6。
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct SagaBlock {
-    pub(crate) steps: Vec<SagaStep>,
-    pub(crate) compensation_order: CompensationOrder,
-    pub(crate) retry_millis: u64,
-    pub(crate) timeout_millis: u64,
+pub struct SagaBlock {
+    pub steps: Vec<SagaStep>,
+    pub compensation_order: CompensationOrder,
+    pub retry_millis: u64,
+    pub timeout_millis: u64,
 }
 
 /// saga 单步：`name`（可生成唯一 Rust 标识符，R10 守）+ `outputSchema`（输出 schema 文件名）。
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct SagaStep {
-    pub(crate) name: String,
-    pub(crate) output_schema: String,
+pub struct SagaStep {
+    pub name: String,
+    pub output_schema: String,
 }
 
 /// event 订阅声明（#1120/#1438）——TOML `[[subscriptions]]` 数组元素。
@@ -707,55 +716,55 @@ pub(crate) struct SagaStep {
 ///
 /// 供 codegen 派生订阅注册 glue（`SUBSCRIPTIONS: &[SubscriptionSpec]`）；bootstrap 消费 glue 接线。
 /// EVENT-ACTIVE-SUB-01（R12）：active event 必须 `!subscriptions.is_empty()`。
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Subscription {
+pub struct Subscription {
     /// 消费者域 DomainId（如 `audit`、`devicestate`）。
-    pub(crate) consumer: String,
+    pub consumer: String,
     /// 稳定 consumer group 名（如 `audit.session-created`）——broker 用此键唯一标识消费位点。
-    pub(crate) group: String,
+    pub group: String,
     /// handler 执行边界。必填闭值，runtime 不得再按 consumer 推断行为。
-    pub(crate) execution: SubscriptionExecution,
+    pub execution: SubscriptionExecution,
     /// domain effect 标识；与 `execution` 的出现关系由 validate fail-closed。
     #[serde(default)]
-    pub(crate) effect: Option<SubscriptionEffect>,
+    pub effect: Option<SubscriptionEffect>,
     /// L2 topology gate：partition key 策略 + subscriber readiness 要求。
-    pub(crate) topology: SubscriptionTopology,
+    pub topology: SubscriptionTopology,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum SubscriptionExecution {
+pub enum SubscriptionExecution {
     AdapterNative,
     DomainEffect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum SubscriptionEffect {
+pub enum SubscriptionEffect {
     SettingsConfigVersionRefresh,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct SubscriptionTopology {
+pub struct SubscriptionTopology {
     /// producer 是否必须提供 partition key。`aggregate` 表示应用层用 tenant-scoped aggregate key
     /// 调 `OutboxEnvelopeParts::with_partition_key`，`none` 表示无序并行。
-    pub(crate) partition_key: PartitionKeyStrategy,
+    pub partition_key: PartitionKeyStrategy,
     /// active subscriber/provisioning readiness 要求。当前闭值集仅 `required`，表示组合根必须 fail-closed。
-    pub(crate) readiness: SubscriberReadiness,
+    pub readiness: SubscriberReadiness,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum PartitionKeyStrategy {
+pub enum PartitionKeyStrategy {
     None,
     Aggregate,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum SubscriberReadiness {
+pub enum SubscriberReadiness {
     Required,
 }
 

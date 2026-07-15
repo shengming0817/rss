@@ -10,8 +10,17 @@ name = "assembly_schema"
 path = "src/lib.rs"
 
 [dependencies]
+schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
+sha2 = { workspace = true }
 toml = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+anyhow = { workspace = true }
+trybuild = { workspace = true }

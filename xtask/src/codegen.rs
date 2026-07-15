@@ -36,6 +36,7 @@ use crate::contract::{
     DiscoveredContract, TENANT_SCOPE_SOURCE_RULE, discover, schema_declares_property,
 };
 use crate::pathsafe;
+use assembly_schema::repository_contract::{schema_hash, validate_schema_filename};
 
 /// 入口：生成（`check=false`）或校验漂移（`check=true`）真实仓的 committed 派生码。
 pub(crate) fn run(check: bool) -> Result<()> {
@@ -215,48 +216,6 @@ fn render_module_file(group: &[&DiscoveredContract]) -> Result<String> {
         ));
     }
     Ok(out)
-}
-
-fn schema_hash(c: &DiscoveredContract) -> Result<String> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"rss-schema-hash-v1\0");
-    for file in c.manifest.declared_schema_files() {
-        validate_schema_filename(file)?;
-        let path = c.dir.join(file);
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("读 schema {}", path.display()))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .with_context(|| format!("解析 schema {}", path.display()))?;
-        let canonical = serde_json::to_vec(&canonical_json(value))
-            .with_context(|| format!("canonicalize schema {}", path.display()))?;
-        hasher.update(file.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(canonical.len().to_string().as_bytes());
-        hasher.update(b"\0");
-        hasher.update(&canonical);
-        hasher.update(b"\0");
-    }
-    Ok(format!("sha256:{}", lower_hex(&hasher.finalize())))
-}
-
-fn canonical_json(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.into_iter().map(canonical_json).collect())
-        }
-        serde_json::Value::Object(map) => {
-            let sorted: BTreeMap<String, serde_json::Value> = map
-                .into_iter()
-                .map(|(k, v)| (k, canonical_json(v)))
-                .collect();
-            let mut out = serde_json::Map::new();
-            for (k, v) in sorted {
-                out.insert(k, v);
-            }
-            serde_json::Value::Object(out)
-        }
-        other => other,
-    }
 }
 
 fn lower_hex(bytes: &[u8]) -> String {
@@ -1535,14 +1494,6 @@ fn allow_unwrap_in_defaults_mod(file: &mut syn::File) {
             }
         }
     }
-}
-
-/// 校验 schema 文件名为纯文件名（无路径分量）。防逃逸单源见 `crate::pathsafe`。
-fn validate_schema_filename(file: &str) -> Result<()> {
-    if pathsafe::is_unsafe_segment(file) {
-        bail!("schema 文件名含路径分量（防逃逸）: {file}");
-    }
-    Ok(())
 }
 
 /// 文件头：`@generated` 标记。派生码经 typify→prettyplease→rustfmt 三段成形（见模块 doc），勿手改。
