@@ -1,8 +1,9 @@
 //! LocalTx static coverage closure gate.
 //!
 //! INVARIANT: LOCALTX-COVERAGE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "missing_route_and_duplicate_marker_are_rejected", anti_vacuity = "green_fixture_closes_every_active_localtx_contract" }.
-//! INVARIANT: LOCALTX-BACKEND-PROFILE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "active_contract_without_backend_profile_is_rejected|backend_profile_missing_required_probe_is_rejected|unawaited_backend_probe_does_not_count|tenant_contract_cannot_enroll_repo_atomic_probe_set|multiple_backend_profiles_in_one_test_function_are_rejected|backend_profile_shadow_constructor_is_rejected|backend_profile_nested_constructor_bait_is_rejected|backend_profile_synthetic_action_is_rejected|backend_profile_observer_binding_does_not_count|backend_profile_bare_provider_reference_is_rejected|backend_profile_free_function_provider_argument_is_rejected|backend_profile_discarded_provider_call_is_rejected|backend_profile_discarded_call_cannot_launder_result|backend_profile_tuple_projection_cannot_launder_result|backend_profile_struct_projection_cannot_launder_result|backend_profile_direct_projection_cannot_launder_result|backend_profile_tail_block_cannot_launder_discarded_call|backend_profile_unpolled_provider_future_is_rejected", anti_vacuity = "single_backend_profile_in_test_function_is_accepted|actual_workspace_has_non_empty_complete_localtx_closure" }.
+//! INVARIANT: LOCALTX-BACKEND-PROFILE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "active_contract_without_backend_profile_is_rejected|backend_profile_missing_required_probe_is_rejected|unawaited_backend_probe_does_not_count|tenant_contract_cannot_enroll_repo_atomic_probe_set|multiple_backend_profiles_in_one_test_function_are_rejected|backend_profile_non_executable_test_attributes_are_rejected|backend_profile_shadow_constructor_is_rejected|backend_profile_nested_constructor_bait_is_rejected|backend_profile_synthetic_action_is_rejected|backend_profile_observer_binding_does_not_count|backend_profile_bare_provider_reference_is_rejected|backend_profile_free_function_provider_argument_is_rejected|backend_profile_discarded_provider_call_is_rejected|backend_profile_discarded_call_cannot_launder_result|backend_profile_tuple_projection_cannot_launder_result|backend_profile_struct_projection_cannot_launder_result|backend_profile_direct_projection_cannot_launder_result|backend_profile_tail_block_cannot_launder_discarded_call|backend_profile_unpolled_provider_future_is_rejected", anti_vacuity = "single_backend_profile_in_test_function_is_accepted|actual_workspace_has_non_empty_complete_localtx_closure" }.
 //! INVARIANT: LOCALTX-JOURNEY-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "fixture_mutation_requires_exactly_one_match|journey_missing_entry_is_rejected|journey_extra_entry_is_rejected|journey_duplicate_entry_is_rejected|journey_legacy_scope_is_rejected|journey_wrong_tx_model_is_rejected|journey_missing_scenario_is_rejected|journey_non_commit_unknown_case_requires_commits|journey_fake_logout_conflict_is_rejected|journey_missing_board_is_rejected|journey_unknown_board_field_is_rejected|journey_unknown_spec_field_is_rejected|journey_unknown_fixture_field_is_rejected|journey_dangling_spec_is_rejected|journey_spec_metadata_drift_identifies_field_and_values|journey_fixture_metadata_drift_identifies_field_and_values|journey_missing_typed_marker_is_rejected|journey_marker_without_test_attribute_is_rejected|journey_marker_in_unused_closure_is_rejected|journey_ignored_test_is_rejected|journey_cfg_disabled_test_is_rejected|journey_cfg_disabled_ancestor_is_rejected|journey_should_panic_test_is_rejected|journey_return_expression_is_rejected|journey_wrong_route_marker_is_rejected|journey_missing_case_consumption_is_rejected|journey_duplicate_case_consumption_is_rejected|journey_dynamic_case_consumption_is_rejected|journey_case_consumption_in_unused_helper_is_rejected|journey_case_consumption_in_another_test_is_rejected|journey_case_consumption_in_noncanonical_flow_is_rejected|journey_unobserved_case_values_are_rejected|journey_target_must_require_integration|journey_runner_extra_marker_is_rejected|journey_runner_duplicate_marker_is_rejected", anti_vacuity = "journey_green_fixture_closes_active_matrix|journey_markers_may_span_real_tests|journey_entries_may_use_distinct_runners|journey_commit_unknown_case_may_omit_commits|actual_workspace_closes_active_localtx_journeys" }.
+//! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-COUNTS-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "required_evidence_counts_reject_wrong_carrier_and_distinct_profile_gap|required_evidence_backend_profiles_reject_noncanonical_execution_carriers", anti_vacuity = "actual_workspace_has_verified_localtx_evidence_counts" }.
 //! INVARIANT: LOCALTX-ADOPTION-TEMPLATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "adoption_template_missing_duplicate_unknown_and_drift_are_rejected", anti_vacuity = "actual_adoption_template_has_exact_canonical_checklist" }.
 
 use crate::contract::manifest::{
@@ -128,6 +129,39 @@ pub(crate) struct LocalTxProofInventory {
     unexpected_backend_profiles: Vec<BackendEnrollmentOccurrence>,
     unexpected_generated: Vec<String>,
     adoption_template_violations: Vec<String>,
+    cargo_targets: Vec<BackendCarrierIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VerifiedLocalTxCounts {
+    active_count: usize,
+    journey_count: usize,
+    backend_profile_count: usize,
+}
+
+impl VerifiedLocalTxCounts {
+    pub(crate) const EXPECTED: usize = 5;
+
+    #[cfg(test)]
+    pub(crate) const fn for_test() -> Self {
+        Self {
+            active_count: Self::EXPECTED,
+            journey_count: Self::EXPECTED,
+            backend_profile_count: Self::EXPECTED,
+        }
+    }
+
+    pub(crate) const fn active_count(self) -> usize {
+        self.active_count
+    }
+
+    pub(crate) const fn journey_count(self) -> usize {
+        self.journey_count
+    }
+
+    pub(crate) const fn backend_profile_count(self) -> usize {
+        self.backend_profile_count
+    }
 }
 
 impl LocalTxProofInventory {
@@ -138,6 +172,7 @@ impl LocalTxProofInventory {
         unexpected_test_markers: Vec<MarkerOccurrence>,
         unexpected_backend_profiles: Vec<BackendEnrollmentOccurrence>,
         unexpected_generated: Vec<String>,
+        cargo_targets: Vec<BackendCarrierIdentity>,
     ) -> Self {
         Self {
             summary,
@@ -147,6 +182,7 @@ impl LocalTxProofInventory {
             unexpected_backend_profiles,
             unexpected_generated,
             adoption_template_violations: Vec::new(),
+            cargo_targets,
         }
     }
 
@@ -266,6 +302,7 @@ pub(crate) struct LocalTxProofBackendProfile {
     required_probes: Vec<(BackendProbe, usize)>,
     observed_probes: Vec<(BackendProbe, usize)>,
     missing_probes: Vec<(BackendProbe, usize, usize)>,
+    carrier: Option<BackendCarrierIdentity>,
 }
 
 impl LocalTxProofBackendProfile {
@@ -366,8 +403,35 @@ struct WorkspaceCrate {
 
 #[derive(Debug, Clone)]
 struct CargoTarget {
+    name: String,
     path: PathBuf,
-    integration_test: bool,
+    kind: CargoTargetKind,
+    required_features: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CargoTargetKind {
+    Lib,
+    Test,
+    Other,
+}
+
+impl CargoTargetKind {
+    const fn matches(self, expected: crate::integration_shards::TargetKind) -> bool {
+        matches!(
+            (self, expected),
+            (Self::Lib, crate::integration_shards::TargetKind::Lib)
+                | (Self::Test, crate::integration_shards::TargetKind::Test)
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct BackendCarrierIdentity {
+    package: String,
+    target: String,
+    kind: CargoTargetKind,
+    target_root: String,
     required_features: BTreeSet<String>,
 }
 
@@ -396,6 +460,7 @@ struct MetadataPackage {
 
 #[derive(Deserialize)]
 struct MetadataTarget {
+    name: String,
     src_path: PathBuf,
     kind: Vec<String>,
     #[serde(default, rename = "required-features")]
@@ -452,6 +517,7 @@ struct BackendEnrollmentOccurrence {
     provider_fixture: String,
     path: String,
     probes: BTreeMap<BackendProbe, usize>,
+    carrier: Option<BackendCarrierIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -647,6 +713,126 @@ pub(crate) fn collect_workspace_inventory(root: &Path) -> Result<LocalTxProofInv
     Ok(inventory)
 }
 
+#[derive(Debug)]
+struct RequiredEvidenceContractSets {
+    active: BTreeSet<String>,
+    journeys: BTreeSet<String>,
+    backend_profiles: BTreeSet<String>,
+}
+
+fn required_evidence_contract_sets(
+    inventory: &LocalTxProofInventory,
+    backend_execution: &crate::integration_shards::ExecutionUnit,
+) -> Result<RequiredEvidenceContractSets> {
+    let matching_targets = inventory
+        .cargo_targets
+        .iter()
+        .filter(|target| {
+            target.package == backend_execution.package
+                && target.target == backend_execution.target
+                && target.kind.matches(backend_execution.kind)
+        })
+        .collect::<Vec<_>>();
+    let [backend_carrier] = matching_targets.as_slice() else {
+        bail!(
+            "LocalTx backend execution unit must resolve to exactly one Cargo target; package={} target={} kind={:?}; found {}",
+            backend_execution.package,
+            backend_execution.target,
+            backend_execution.kind,
+            matching_targets.len()
+        );
+    };
+    if backend_execution.scheduling != crate::integration_shards::Scheduling::Serial {
+        bail!("LocalTx backend execution carrier must remain Serial");
+    }
+    if !backend_carrier.required_features.is_empty() {
+        bail!(
+            "LocalTx backend execution carrier `{}` has target-level required-features {:?}; the typed shard does not model target feature activation",
+            backend_carrier.target_root,
+            backend_carrier.required_features
+        );
+    }
+    let mut sets = RequiredEvidenceContractSets {
+        active: BTreeSet::new(),
+        journeys: BTreeSet::new(),
+        backend_profiles: BTreeSet::new(),
+    };
+    for contract in &inventory.contracts {
+        sets.active.insert(contract.contract_id.clone());
+        if !contract.journey.spec.is_empty()
+            && !contract.journey.fixture.is_empty()
+            && !contract.journey.runner.is_empty()
+        {
+            sets.journeys.insert(contract.contract_id.clone());
+        }
+        for profile in &contract.backend_profiles {
+            if profile.provider != backend_carrier.package
+                || profile.carrier.as_ref() != Some(*backend_carrier)
+            {
+                bail!(
+                    "LocalTx contract `{}` backend profile carrier is provider=`{}` target={:?}; expected typed postgres-domain carrier {:?}",
+                    contract.contract_id,
+                    profile.provider,
+                    profile.carrier,
+                    backend_carrier,
+                );
+            }
+        }
+        if contract
+            .backend_profiles
+            .iter()
+            .any(LocalTxProofBackendProfile::complete)
+        {
+            sets.backend_profiles.insert(contract.contract_id.clone());
+        }
+    }
+    Ok(sets)
+}
+
+fn verify_required_evidence_inventory(
+    inventory: &LocalTxProofInventory,
+    backend_execution: &crate::integration_shards::ExecutionUnit,
+) -> Result<VerifiedLocalTxCounts> {
+    let sets = required_evidence_contract_sets(inventory, backend_execution)?;
+    let counts = VerifiedLocalTxCounts {
+        active_count: sets.active.len(),
+        journey_count: sets.journeys.len(),
+        backend_profile_count: sets.backend_profiles.len(),
+    };
+    if counts.active_count != VerifiedLocalTxCounts::EXPECTED
+        || counts.journey_count != VerifiedLocalTxCounts::EXPECTED
+        || counts.backend_profile_count != VerifiedLocalTxCounts::EXPECTED
+    {
+        bail!(
+            "LocalTx required evidence must close exactly {} distinct contracts; active={} {:?}; journeys={} {:?}; backend_profiles={} {:?}",
+            VerifiedLocalTxCounts::EXPECTED,
+            counts.active_count,
+            sets.active,
+            counts.journey_count,
+            sets.journeys,
+            counts.backend_profile_count,
+            sets.backend_profiles,
+        );
+    }
+    Ok(counts)
+}
+
+pub(crate) fn verify_required_evidence_counts(root: &Path) -> Result<VerifiedLocalTxCounts> {
+    let inventory = collect_workspace_inventory(root)?;
+    let findings = inventory.findings();
+    if let Some(first) = findings.first() {
+        bail!(
+            "LocalTx required evidence inventory has {} finding(s); first={} {}: {}",
+            findings.len(),
+            first.rule.report_wire(),
+            first.subject,
+            first.detail
+        );
+    }
+    let carrier = crate::integration_shards::localtx_backend_execution_unit()?;
+    verify_required_evidence_inventory(&inventory, &carrier)
+}
+
 const ADOPTION_TEMPLATE_PATH: &str = ".specify/templates/overrides/localtx-tasks-template.md";
 const CANONICAL_ADOPTION_TEMPLATE: &str =
     include_str!("../tests/golden/localtx-adoption-template.md");
@@ -695,6 +881,15 @@ fn collect_inventory_inner(root: &Path) -> Result<LocalTxProofInventory> {
     let generated = parse_generated_specs(root, &generated_root)?;
     let workspace_crates = load_workspace_crates(root)?;
     validate_journey_cargo_targets(root, &workspace_crates, &journey_closure.runners)?;
+    let cargo_targets = workspace_crates
+        .iter()
+        .flat_map(|member| {
+            member
+                .targets
+                .iter()
+                .map(move |target| backend_carrier_identity(root, member, target))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let expected_packages: BTreeMap<_, _> = workspace_crates
         .iter()
         .map(|member| (member.name.clone(), member.root.clone()))
@@ -762,6 +957,7 @@ fn collect_inventory_inner(root: &Path) -> Result<LocalTxProofInventory> {
         unexpected_test_markers,
         unexpected_backend_profiles,
         unexpected_generated,
+        cargo_targets,
     ))
 }
 
@@ -1085,7 +1281,10 @@ fn normalize_backend_profiles(
     enrollments: &[BackendEnrollmentOccurrence],
     adapter_providers: &BTreeSet<String>,
 ) -> Vec<LocalTxProofBackendProfile> {
-    let mut grouped = BTreeMap::<(String, String), Vec<&BackendEnrollmentOccurrence>>::new();
+    let mut grouped = BTreeMap::<
+        (String, String, Option<BackendCarrierIdentity>),
+        Vec<&BackendEnrollmentOccurrence>,
+    >::new();
     for enrollment in enrollments
         .iter()
         .filter(|enrollment| enrollment.key == contract.key)
@@ -1094,6 +1293,7 @@ fn normalize_backend_profiles(
             .entry((
                 enrollment.provider.clone(),
                 enrollment.provider_fixture.clone(),
+                enrollment.carrier.clone(),
             ))
             .or_default()
             .push(enrollment);
@@ -1101,7 +1301,7 @@ fn normalize_backend_profiles(
     let required = required_backend_probes(contract.tx_model);
     grouped
         .into_iter()
-        .map(|((provider, fixture), enrollments)| {
+        .map(|((provider, fixture, carrier), enrollments)| {
             let mut observed = BTreeMap::<BackendProbe, usize>::new();
             let mut sources = Vec::new();
             for enrollment in enrollments {
@@ -1127,6 +1327,7 @@ fn normalize_backend_profiles(
                 required_probes: required.clone(),
                 observed_probes: observed.into_iter().collect(),
                 missing_probes,
+                carrier,
             }
         })
         .collect()
@@ -1315,7 +1516,7 @@ fn validate_journey_cargo_targets(
         let [target] = matching.as_slice() else {
             bail!("{runner}: must be registered as exactly one Cargo target");
         };
-        if !target.integration_test
+        if target.kind != CargoTargetKind::Test
             || target.required_features != BTreeSet::from(["integration".to_string()])
         {
             bail!(
@@ -2245,23 +2446,29 @@ fn load_workspace_crates(root: &Path) -> Result<Vec<WorkspaceCrate>> {
             .to_path_buf();
         let mut targets = Vec::new();
         for target in package.targets {
-            if target.kind.iter().any(|kind| kind == "test") {
-                targets.push(CargoTarget {
-                    path: target.src_path,
-                    integration_test: true,
-                    required_features: target.required_features.into_iter().collect(),
-                });
+            let kind = if target.kind.iter().any(|kind| kind == "test") {
+                CargoTargetKind::Test
             } else if target.kind.iter().any(|kind| {
                 matches!(
                     kind.as_str(),
-                    "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro" | "bin"
+                    "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro"
                 )
             }) {
-                targets.push(normal_target(target.src_path));
-            }
+                CargoTargetKind::Lib
+            } else if target.kind.iter().any(|kind| kind == "bin") {
+                CargoTargetKind::Other
+            } else {
+                continue;
+            };
+            targets.push(CargoTarget {
+                name: target.name,
+                path: target.src_path,
+                kind,
+                required_features: target.required_features.into_iter().collect(),
+            });
         }
-        targets.sort_by(|a, b| (&a.path, a.integration_test).cmp(&(&b.path, b.integration_test)));
-        targets.dedup_by(|a, b| a.path == b.path && a.integration_test == b.integration_test);
+        targets.sort_by(|a, b| (&a.name, a.kind, &a.path).cmp(&(&b.name, b.kind, &b.path)));
+        targets.dedup_by(|a, b| a.name == b.name && a.kind == b.kind && a.path == b.path);
         let mut normal_dependencies = BTreeMap::new();
         let mut dev_dependencies = BTreeMap::new();
         let mut normal_test_dependencies = BTreeMap::new();
@@ -2309,14 +2516,6 @@ fn load_workspace_crates(root: &Path) -> Result<Vec<WorkspaceCrate>> {
     }
     out.sort_by(|a, b| a.relative.cmp(&b.relative));
     Ok(out)
-}
-
-fn normal_target(path: PathBuf) -> CargoTarget {
-    CargoTarget {
-        path,
-        integration_test: false,
-        required_features: BTreeSet::new(),
-    }
 }
 
 fn discover(root: &Path) -> Result<Vec<Contract>> {
@@ -2589,6 +2788,7 @@ struct FileUnit {
     syntax: File,
     resolvers: BTreeMap<String, Resolver>,
     reachability: Reachability,
+    backend_profile_rejection: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2700,6 +2900,20 @@ const MAX_LOGICAL_UNITS: usize = 1024;
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
+fn backend_carrier_identity(
+    root: &Path,
+    member: &WorkspaceCrate,
+    target: &CargoTarget,
+) -> Result<BackendCarrierIdentity> {
+    Ok(BackendCarrierIdentity {
+        package: member.name.clone(),
+        target: target.name.clone(),
+        kind: target.kind,
+        target_root: relative(root, &target.path)?,
+        required_features: target.required_features.clone(),
+    })
+}
+
 #[derive(Default)]
 struct ModuleBudget {
     canonical_files: BTreeSet<PathBuf>,
@@ -2747,7 +2961,7 @@ fn scan_owner(
 ) -> Result<OwnerEvidence> {
     let mut evidence = OwnerEvidence::default();
     for target in &member.targets {
-        let initial = if target.integration_test {
+        let initial = if target.kind == CargoTargetKind::Test {
             Reachability::TEST_ONLY
         } else {
             Reachability::BOTH
@@ -2757,6 +2971,10 @@ fn scan_owner(
             .with_context(|| format!("load Cargo target `{target_label}`"))?;
         let mut target_evidence = OwnerEvidence::default();
         scan_units(&member.name, &units, &mut target_evidence)?;
+        let carrier = backend_carrier_identity(root, member, target)?;
+        for enrollment in &mut target_evidence.backend_enrollments {
+            enrollment.carrier = Some(carrier.clone());
+        }
         validate_evidence_dependencies(member, &target_evidence, expected_packages)?;
         evidence.routes.extend(target_evidence.routes);
         for (key, mounts) in target_evidence.canonical_mounts {
@@ -2896,6 +3114,7 @@ fn load_target_units(
         target,
         Vec::new(),
         reachability,
+        None,
         Resolver::default(),
         &mut visited,
         &mut active,
@@ -2912,6 +3131,7 @@ fn load_module_file(
     file: &Path,
     module: Vec<String>,
     reachability: Reachability,
+    backend_profile_rejection: Option<String>,
     inherited_resolver: Resolver,
     visited: &mut BTreeSet<(PathBuf, Vec<String>)>,
     active: &mut BTreeSet<PathBuf>,
@@ -2947,6 +3167,7 @@ fn load_module_file(
         &module_dir,
         &module,
         reachability,
+        backend_profile_rejection.clone(),
         &resolvers,
         visited,
         active,
@@ -2959,6 +3180,7 @@ fn load_module_file(
         syntax,
         resolvers,
         reachability,
+        backend_profile_rejection,
     });
     active.remove(&canonical);
     Ok(())
@@ -2988,6 +3210,7 @@ fn load_external_modules(
     module_dir: &Path,
     module: &[String],
     inherited_reachability: Reachability,
+    inherited_backend_profile_rejection: Option<String>,
     resolvers: &BTreeMap<String, Resolver>,
     visited: &mut BTreeSet<(PathBuf, Vec<String>)>,
     active: &mut BTreeSet<PathBuf>,
@@ -3001,6 +3224,9 @@ fn load_external_modules(
         let mut child_module = module.to_vec();
         child_module.push(item.ident.to_string());
         let child_reachability = inherited_reachability.with_attrs(&item.attrs);
+        let child_backend_profile_rejection = inherited_backend_profile_rejection
+            .clone()
+            .or_else(|| forbidden_backend_profile_attribute(&item.attrs));
         if !child_reachability.prod && !child_reachability.test && !child_reachability.unknown {
             continue;
         }
@@ -3014,6 +3240,7 @@ fn load_external_modules(
                 &module_dir.join(item.ident.to_string()),
                 &child_module,
                 child_reachability,
+                child_backend_profile_rejection,
                 resolvers,
                 visited,
                 active,
@@ -3043,6 +3270,7 @@ fn load_external_modules(
             &child_file,
             child_module,
             child_reachability,
+            child_backend_profile_rejection,
             resolver_for(resolvers, module)
                 .map(Resolver::inherited_risks)
                 .unwrap_or_default(),
@@ -3112,6 +3340,7 @@ fn scan_units(owner: &str, units: &[FileUnit], evidence: &mut OwnerEvidence) -> 
             in_test_function: false,
             marker_ordinal: 0,
             attribute_safe: true,
+            backend_profile_rejection: unit.backend_profile_rejection.clone(),
             test_macro: None,
             canonical_domain_impl: None,
             domain_init_router: None,
@@ -3721,6 +3950,7 @@ struct SourceScanner<'a> {
     in_test_function: bool,
     marker_ordinal: usize,
     attribute_safe: bool,
+    backend_profile_rejection: Option<String>,
     test_macro: Option<&'static str>,
     canonical_domain_impl: Option<CanonicalServingImpl>,
     domain_init_router: Option<String>,
@@ -3729,6 +3959,11 @@ struct SourceScanner<'a> {
 
 impl<'ast> Visit<'ast> for SourceScanner<'_> {
     fn visit_item(&mut self, node: &'ast Item) {
+        let old_backend_profile_rejection = self.backend_profile_rejection.clone();
+        if self.backend_profile_rejection.is_none() {
+            self.backend_profile_rejection =
+                forbidden_backend_profile_attribute(item_attributes(node));
+        }
         if let Some(resolver) = self.resolver_stack.last() {
             for attr in item_attributes(node) {
                 let mut trusted = BTreeSet::new();
@@ -3741,6 +3976,7 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
             }
         }
         visit::visit_item(self, node);
+        self.backend_profile_rejection = old_backend_profile_rejection;
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
@@ -3862,12 +4098,13 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
             && self.attribute_safe
             && let Some(resolver) = resolver
         {
-            let backend_evidence = backend_enrollments_in_test(
+            let backend_evidence = backend_enrollments_in_test_in_scope(
                 &node.block,
                 resolver,
                 self.owner,
                 self.source,
                 &node.sig.ident.to_string(),
+                self.backend_profile_rejection.as_deref(),
             );
             if !backend_evidence.enrollments.is_empty() || backend_evidence.violation.is_some() {
                 if let Some(test_macro) = self.test_macro {
@@ -4466,6 +4703,22 @@ fn attrs_safe_for_evidence(attrs: &[Attribute]) -> bool {
     trusted_scope_attributes(attrs).is_some()
 }
 
+fn forbidden_backend_profile_attribute(attrs: &[Attribute]) -> Option<String> {
+    attrs.iter().find_map(|attribute| {
+        let segments = raw_segments(attribute.path());
+        matches!(
+            segments.as_slice(),
+            [name] if matches!(name.as_str(), "ignore" | "should_panic")
+        )
+        .then(|| {
+            format!(
+                "#[{}] is forbidden for backend profile evidence",
+                segments[0]
+            )
+        })
+    })
+}
+
 fn strict_test_marker_key(item: &ItemConst, resolver: &Resolver) -> Option<String> {
     if item.ident != "_" {
         return None;
@@ -4528,12 +4781,24 @@ fn strict_test_marker_key(item: &ItemConst, resolver: &Resolver) -> Option<Strin
     (key_from_segments(&route_segments, "ROUTE").as_deref() == Some(&key)).then_some(key)
 }
 
+#[cfg(test)]
 fn backend_enrollments_in_test(
     block: &syn::Block,
     resolver: &Resolver,
     provider: &str,
     source: &str,
     function: &str,
+) -> BackendTestEvidence {
+    backend_enrollments_in_test_in_scope(block, resolver, provider, source, function, None)
+}
+
+fn backend_enrollments_in_test_in_scope(
+    block: &syn::Block,
+    resolver: &Resolver,
+    provider: &str,
+    source: &str,
+    function: &str,
+    scope_rejection: Option<&str>,
 ) -> BackendTestEvidence {
     let markers: Vec<_> = block
         .stmts
@@ -4548,6 +4813,20 @@ fn backend_enrollments_in_test(
             _ => None,
         })
         .collect();
+    if !markers.is_empty()
+        && let Some(detail) = scope_rejection
+    {
+        return BackendTestEvidence {
+            enrollments: Vec::new(),
+            violation: Some(BackendProfileViolation {
+                rule: Rule::ForbiddenBackendProfileEvidence,
+                provider: provider.to_string(),
+                path: source.to_string(),
+                function: function.to_string(),
+                detail: detail.to_string(),
+            }),
+        };
+    }
     if markers.len() > 1 {
         let rendered = markers
             .iter()
@@ -4684,6 +4963,7 @@ fn backend_enrollments_in_test(
             provider_fixture: binding.provider_path.join("::"),
             path: source.to_string(),
             probes: probes.clone(),
+            carrier: None,
         })
         .collect();
     BackendTestEvidence {
@@ -6830,6 +7110,62 @@ mod tests {
     }
 
     #[test]
+    fn backend_profile_non_executable_test_attributes_are_rejected() -> anyhow::Result<()> {
+        let cases = [
+            (
+                "ignored-test",
+                "    #[tokio::test]\n    async fn tenant_scoped_uow_profile",
+                "    #[ignore]\n    #[tokio::test]\n    async fn tenant_scoped_uow_profile",
+                "#[ignore]",
+            ),
+            (
+                "should-panic-test",
+                "    #[tokio::test]\n    async fn tenant_scoped_uow_profile",
+                "    #[should_panic]\n    #[tokio::test]\n    async fn tenant_scoped_uow_profile",
+                "#[should_panic]",
+            ),
+            (
+                "ignored-ancestor",
+                "#[cfg(test)]\nmod tests {",
+                "#[cfg(test)]\n#[ignore]\nmod tests {",
+                "#[ignore]",
+            ),
+            (
+                "should-panic-ancestor",
+                "#[cfg(test)]\nmod tests {",
+                "#[cfg(test)]\n#[should_panic]\nmod tests {",
+                "#[should_panic]",
+            ),
+        ];
+        let mut missing_rejections = Vec::new();
+
+        for (name, needle, replacement, expected_detail) in cases {
+            let temp = FixtureCopy::new(&format!("localtx-backend-profile-{name}"))?;
+            let profile = temp.path.join("adapters/pg/src/lib.rs");
+            let source = fs::read_to_string(&profile)?;
+            fs::write(
+                &profile,
+                replace_exact_once(&source, needle, replacement, name)?,
+            )?;
+
+            let (_, findings) = check_root(&temp.path)?;
+            if !findings.iter().any(|finding| {
+                finding.rule == Rule::ForbiddenBackendProfileEvidence
+                    && finding.detail.contains(expected_detail)
+            }) {
+                missing_rejections.push(format!("{name}: {findings:#?}"));
+            }
+        }
+
+        assert!(
+            missing_rejections.is_empty(),
+            "non-executable backend profile evidence must fail closed:\n{}",
+            missing_rejections.join("\n")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn active_contract_without_backend_profile_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-missing-backend-profile")?;
         fs::write(temp.path.join("adapters/pg/src/lib.rs"), "")?;
@@ -7084,6 +7420,7 @@ mod tests {
                     (BackendProbe::Rollback, 1),
                     (BackendProbe::RejectedNoWrite, 1),
                 ]),
+                carrier: None,
             },
             BackendEnrollmentOccurrence {
                 key: contract.key.clone(),
@@ -7097,6 +7434,7 @@ mod tests {
                     (BackendProbe::CommitUnknownNoReplay, 1),
                     (BackendProbe::RollbackFailedNoReplay, 1),
                 ]),
+                carrier: None,
             },
         ];
         let providers = BTreeSet::from(["pg".to_string()]);
@@ -8067,6 +8405,124 @@ impl ::bootstrap::Domain for Demo {
         let (summary, findings) = check_root(&root)?;
         assert!(!summary.starts_with("0 active"), "anti-vacuity: {summary}");
         assert!(findings.is_empty(), "{findings:#?}");
+        Ok(())
+    }
+
+    #[test]
+    fn actual_workspace_has_verified_localtx_evidence_counts() -> anyhow::Result<()> {
+        let counts = verify_required_evidence_counts(&crate::workspace_root()?)?;
+        assert_eq!(counts.active_count(), VerifiedLocalTxCounts::EXPECTED);
+        assert_eq!(counts.journey_count(), VerifiedLocalTxCounts::EXPECTED);
+        assert_eq!(
+            counts.backend_profile_count(),
+            VerifiedLocalTxCounts::EXPECTED
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn required_evidence_counts_reject_wrong_carrier_and_distinct_profile_gap() -> anyhow::Result<()>
+    {
+        fn clone_profile(profile: &LocalTxProofBackendProfile) -> LocalTxProofBackendProfile {
+            LocalTxProofBackendProfile {
+                provider: profile.provider.clone(),
+                fixture: profile.fixture.clone(),
+                valid_provider: profile.valid_provider,
+                sources: profile.sources.clone(),
+                required_probes: profile.required_probes.clone(),
+                observed_probes: profile.observed_probes.clone(),
+                missing_probes: profile.missing_probes.clone(),
+                carrier: profile.carrier.clone(),
+            }
+        }
+
+        let root = crate::workspace_root()?;
+        let carrier = crate::integration_shards::localtx_backend_execution_unit()?;
+
+        let mut wrong_carrier = collect_workspace_inventory(&root)?;
+        wrong_carrier.contracts[0].backend_profiles[0].provider = "wrong-carrier".to_string();
+        let Err(error) = required_evidence_contract_sets(&wrong_carrier, &carrier) else {
+            bail!("a profile outside the typed execution carrier must fail closed");
+        };
+        assert!(format!("{error:#}").contains("wrong-carrier"));
+
+        let mut profile_gap = collect_workspace_inventory(&root)?;
+        let duplicate = clone_profile(&profile_gap.contracts[0].backend_profiles[0]);
+        profile_gap.contracts[0].backend_profiles.push(duplicate);
+        profile_gap.contracts[1].backend_profiles.clear();
+        let raw_complete_profiles = profile_gap
+            .contracts
+            .iter()
+            .flat_map(|contract| &contract.backend_profiles)
+            .filter(|profile| profile.complete())
+            .count();
+        assert_eq!(
+            raw_complete_profiles,
+            VerifiedLocalTxCounts::EXPECTED,
+            "synthetic fixture must preserve a misleading raw profile count"
+        );
+        let sets = required_evidence_contract_sets(&profile_gap, &carrier)?;
+        assert_eq!(sets.backend_profiles.len(), 4);
+        assert!(verify_required_evidence_inventory(&profile_gap, &carrier).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn required_evidence_backend_profiles_reject_noncanonical_execution_carriers()
+    -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let carrier = crate::integration_shards::localtx_backend_execution_unit()?;
+        let mut inventory = collect_workspace_inventory(&root)?;
+        let canonical = inventory.contracts[0].backend_profiles[0]
+            .carrier
+            .clone()
+            .context("workspace backend profile carrier")?;
+
+        let mut cases = Vec::new();
+
+        let mut unregistered_target = canonical.clone();
+        unregistered_target.target = "unregistered-localtx-profile".to_string();
+        cases.push(("same-package unregistered target", unregistered_target));
+
+        let mut wrong_kind = canonical.clone();
+        wrong_kind.kind = CargoTargetKind::Test;
+        cases.push(("wrong target kind", wrong_kind));
+
+        let mut wrong_required_feature = canonical.clone();
+        wrong_required_feature
+            .required_features
+            .insert("never-enabled-by-postgres-domain".to_string());
+        cases.push(("wrong required feature", wrong_required_feature));
+
+        let mut wrong_target_root = canonical.clone();
+        wrong_target_root.target_root =
+            "adapters/postgres/tests/unregistered_localtx_profile.rs".to_string();
+        cases.push(("wrong target root", wrong_target_root));
+
+        for (name, forged) in cases {
+            inventory.contracts[0].backend_profiles[0].carrier = Some(forged);
+            assert!(
+                required_evidence_contract_sets(&inventory, &carrier).is_err(),
+                "{name} must not close required LocalTx backend evidence"
+            );
+            inventory.contracts[0].backend_profiles[0].carrier = Some(canonical.clone());
+        }
+
+        let target_index = inventory
+            .cargo_targets
+            .iter()
+            .position(|target| target == &canonical)
+            .context("canonical backend Cargo target")?;
+        let mut unmodeled_feature = canonical.clone();
+        unmodeled_feature
+            .required_features
+            .insert("never-enabled-by-postgres-domain".to_string());
+        inventory.cargo_targets[target_index] = unmodeled_feature.clone();
+        inventory.contracts[0].backend_profiles[0].carrier = Some(unmodeled_feature);
+        let Err(error) = required_evidence_contract_sets(&inventory, &carrier) else {
+            bail!("unmodeled target feature activation must fail closed");
+        };
+        assert!(format!("{error:#}").contains("does not model target feature activation"));
         Ok(())
     }
 

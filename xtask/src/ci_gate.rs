@@ -1,10 +1,14 @@
 //! Stable aggregate gate for a typed CI impact plan.
 //!
 //! INVARIANT: CI-GATE-RECEIPT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "gate_rejects_missing_duplicate_and_mismatched_receipts_red", anti_vacuity = "gate_accepts_exact_receipt_set_green" }.
+//! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "gate_rejects_complete_generic_receipts_without_localtx_required_evidence_red|localtx_required_evidence_disk_red_matrix", anti_vacuity = "gate_accepts_exact_receipt_set_green|successful_run_persists_the_existing_resource_metrics_in_the_envelope" }.
 
 use crate::ci_evidence::{MAX_JSON_INTEGER, ValidatedEvidence};
+use crate::ci_identity::CiIdentityKey;
 use crate::ci_impact::{CiImpactPlan, DecisionKind, DecisionReason, PolicyMode};
 use crate::ci_lanes::CiJobKey;
+use crate::localtx_evidence::ValidatedLocalTxReceipt;
+use crate::localtx_evidence::{FILE_NAME as LOCALTX_FILE_NAME, OWNER as LOCALTX_OWNER};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -89,10 +93,11 @@ struct RuntimeIdentity {
 impl RuntimeIdentity {
     fn from_environment() -> Self {
         Self {
-            run_id: std::env::var("GITHUB_RUN_ID").ok(),
-            run_attempt: std::env::var("GITHUB_RUN_ATTEMPT").ok(),
-            execution_revision: std::env::var("GITHUB_SHA").ok(),
-            summary_path: std::env::var_os("GITHUB_STEP_SUMMARY").map(PathBuf::from),
+            run_id: std::env::var(CiIdentityKey::RunId.env_name()).ok(),
+            run_attempt: std::env::var(CiIdentityKey::RunAttempt.env_name()).ok(),
+            execution_revision: std::env::var(CiIdentityKey::HeadRevision.env_name()).ok(),
+            summary_path: std::env::var_os(CiIdentityKey::StepSummary.env_name())
+                .map(PathBuf::from),
         }
     }
 }
@@ -126,6 +131,12 @@ struct ReceiptIdentity {
     disk_low_water_bytes: u64,
     compiler_cache_requests: u64,
     compiler_cache_hits: u64,
+}
+
+#[derive(Debug)]
+struct LocalTxReceiptIdentity {
+    artifact: String,
+    receipt: ValidatedLocalTxReceipt,
 }
 
 #[derive(Debug, Serialize)]
@@ -179,6 +190,7 @@ enum GateFailureClass {
     RunIdentity,
     ExecutionRevision,
     ReceiptValidation,
+    LocaltxEvidence,
     MetricsBuild,
 }
 
@@ -193,6 +205,7 @@ impl GateFailureClass {
             Self::RunIdentity => "run-identity",
             Self::ExecutionRevision => "execution-revision",
             Self::ReceiptValidation => "receipt-validation",
+            Self::LocaltxEvidence => "localtx-evidence",
             Self::MetricsBuild => "metrics-build",
         }
     }
@@ -214,7 +227,17 @@ struct GateEnvelope {
     full_fallback: Option<bool>,
     observed_receipt_count: usize,
     observed_receipt_keys: Vec<CiJobKey>,
+    localtx_active_count: Option<usize>,
+    localtx_journey_count: Option<usize>,
+    localtx_backend_profile_count: Option<usize>,
     success_metrics: Option<GateMetrics>,
+}
+
+struct GateSuccess {
+    metrics: GateMetrics,
+    localtx_active_count: usize,
+    localtx_journey_count: usize,
+    localtx_backend_profile_count: usize,
 }
 
 #[derive(Debug)]
@@ -242,6 +265,20 @@ struct ReceiptObservation {
     failure: Option<GateFailure>,
 }
 
+struct LocalTxReceiptObservation {
+    receipts: Vec<LocalTxReceiptIdentity>,
+    failure: Option<GateFailure>,
+}
+
+struct GateObservations<'a> {
+    plan: Option<&'a CiImpactPlan>,
+    receipts: &'a [ReceiptIdentity],
+    localtx_receipts: &'a [LocalTxReceiptIdentity],
+    plan_failure: Option<GateFailure>,
+    receipt_failure: Option<GateFailure>,
+    localtx_failure: Option<GateFailure>,
+}
+
 pub(crate) fn run(options: &Options) -> Result<()> {
     run_with_runtime(options, &RuntimeIdentity::from_environment())
 }
@@ -255,30 +292,51 @@ fn run_with_runtime(options: &Options, runtime: &RuntimeIdentity) -> Result<()> 
         receipts,
         failure: receipt_failure,
     } = observe_receipts(&options.receipts_path);
+    let LocalTxReceiptObservation {
+        receipts: localtx_receipts,
+        failure: localtx_failure,
+    } = observe_localtx_receipts(&options.receipts_path);
 
     let gate_result = evaluate_observations(
         options,
         runtime,
-        plan.as_ref(),
-        &receipts,
-        plan_failure,
-        receipt_failure,
+        GateObservations {
+            plan: plan.as_ref(),
+            receipts: &receipts,
+            localtx_receipts: &localtx_receipts,
+            plan_failure,
+            receipt_failure,
+            localtx_failure,
+        },
     );
-    let (verdict, failure_class, error_summary, success_metrics, failure) = match gate_result {
-        Ok(metrics) => (GateVerdict::Success, None, None, Some(metrics), None),
-        Err(failure) => {
-            let summary = stable_error_summary(&failure.error);
-            (
-                GateVerdict::Failure,
-                Some(failure.class),
-                Some(summary),
+    let (verdict, failure_class, error_summary, success_metrics, localtx_counts, failure) =
+        match gate_result {
+            Ok(success) => (
+                GateVerdict::Success,
                 None,
-                Some(failure),
-            )
-        }
-    };
+                None,
+                Some(success.metrics),
+                Some((
+                    success.localtx_active_count,
+                    success.localtx_journey_count,
+                    success.localtx_backend_profile_count,
+                )),
+                None,
+            ),
+            Err(failure) => {
+                let summary = stable_error_summary(&failure.error);
+                (
+                    GateVerdict::Failure,
+                    Some(failure.class),
+                    Some(summary),
+                    None,
+                    None,
+                    Some(failure),
+                )
+            }
+        };
     let envelope = GateEnvelope {
-        schema_version: 1,
+        schema_version: 2,
         verdict,
         failure_class,
         planner_result: options.planner_result,
@@ -291,6 +349,9 @@ fn run_with_runtime(options: &Options, runtime: &RuntimeIdentity) -> Result<()> 
         full_fallback: plan.as_ref().map(CiImpactPlan::full_fallback),
         observed_receipt_count: receipts.len(),
         observed_receipt_keys: receipts.iter().map(|receipt| receipt.job_key).collect(),
+        localtx_active_count: localtx_counts.map(|counts| counts.0),
+        localtx_journey_count: localtx_counts.map(|counts| counts.1),
+        localtx_backend_profile_count: localtx_counts.map(|counts| counts.2),
         success_metrics,
     };
     persist_envelope(options, runtime, &envelope)?;
@@ -352,14 +413,46 @@ fn observe_receipts(root: &Path) -> ReceiptObservation {
     }
 }
 
+fn observe_localtx_receipts(root: &Path) -> LocalTxReceiptObservation {
+    let mut evidence_files = Vec::new();
+    if let Err(error) = collect_named_evidence(root, LOCALTX_FILE_NAME, &mut evidence_files) {
+        return LocalTxReceiptObservation {
+            receipts: Vec::new(),
+            failure: Some(GateFailure::new(GateFailureClass::LocaltxEvidence, error)),
+        };
+    }
+    evidence_files.sort();
+    let mut receipts = Vec::with_capacity(evidence_files.len());
+    for path in evidence_files {
+        match load_localtx_receipt(&path, root) {
+            Ok(receipt) => receipts.push(receipt),
+            Err(error) => {
+                return LocalTxReceiptObservation {
+                    receipts,
+                    failure: Some(GateFailure::new(GateFailureClass::LocaltxEvidence, error)),
+                };
+            }
+        }
+    }
+    LocalTxReceiptObservation {
+        receipts,
+        failure: None,
+    }
+}
+
 fn evaluate_observations(
     options: &Options,
     runtime: &RuntimeIdentity,
-    plan: Option<&CiImpactPlan>,
-    receipts: &[ReceiptIdentity],
-    plan_failure: Option<GateFailure>,
-    receipt_failure: Option<GateFailure>,
-) -> std::result::Result<GateMetrics, GateFailure> {
+    observations: GateObservations<'_>,
+) -> std::result::Result<GateSuccess, GateFailure> {
+    let GateObservations {
+        plan,
+        receipts,
+        localtx_receipts,
+        plan_failure,
+        receipt_failure,
+        localtx_failure,
+    } = observations;
     if options.planner_result != JobResult::Success {
         return Err(GateFailure::new(
             GateFailureClass::PlannerResult,
@@ -384,6 +477,9 @@ fn evaluate_observations(
             anyhow::anyhow!("validated CI impact plan is unavailable"),
         )
     })?;
+    if let Some(failure) = localtx_failure {
+        return Err(failure);
+    }
     if let Some(failure) = receipt_failure {
         return Err(failure);
     }
@@ -422,8 +518,17 @@ fn evaluate_observations(
         run_attempt,
     )
     .map_err(|error| GateFailure::new(GateFailureClass::ReceiptValidation, error))?;
-    build_metrics(plan, receipts)
-        .map_err(|error| GateFailure::new(GateFailureClass::MetricsBuild, error))
+    let localtx =
+        evaluate_localtx_required_evidence(plan, receipts, localtx_receipts, run_id, run_attempt)
+            .map_err(|error| GateFailure::new(GateFailureClass::LocaltxEvidence, error))?;
+    let metrics = build_metrics(plan, receipts)
+        .map_err(|error| GateFailure::new(GateFailureClass::MetricsBuild, error))?;
+    Ok(GateSuccess {
+        metrics,
+        localtx_active_count: localtx.active_count(),
+        localtx_journey_count: localtx.journey_count(),
+        localtx_backend_profile_count: localtx.backend_profile_count(),
+    })
 }
 
 fn persist_envelope(
@@ -541,6 +646,15 @@ fn render_summary(envelope: &GateEnvelope) -> String {
     }
     if let Some(plan_digest) = &envelope.plan_digest {
         summary.push_str(&format!("- Plan digest: `{plan_digest}`\n"));
+    }
+    if let (Some(active), Some(journey), Some(backend)) = (
+        envelope.localtx_active_count,
+        envelope.localtx_journey_count,
+        envelope.localtx_backend_profile_count,
+    ) {
+        summary.push_str(&format!(
+            "- LocalTx required evidence: `{active}/{journey}/{backend}`\n"
+        ));
     }
     if let (Some(mode), Some(kind), Some(reason), Some(fallback)) = (
         envelope.policy_mode,
@@ -720,6 +834,94 @@ fn collect_evidence(path: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+fn collect_named_evidence(path: &Path, file_name: &str, output: &mut Vec<PathBuf>) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        if path.file_name().and_then(|name| name.to_str()) == Some(file_name) {
+            bail!("ci-gate refuses symlink: {}", path.display());
+        }
+        return Ok(());
+    }
+    if metadata.is_file() {
+        if path.file_name().and_then(|name| name.to_str()) == Some(file_name) {
+            output.push(path.to_path_buf());
+        }
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).with_context(|| format!("读目录 {}", path.display()))? {
+        collect_named_evidence(&entry?.path(), file_name, output)?;
+    }
+    Ok(())
+}
+
+fn load_localtx_receipt(path: &Path, root: &Path) -> Result<LocalTxReceiptIdentity> {
+    let artifact = artifact_parent(path, root)?;
+    let canonical = root
+        .join(&artifact)
+        .join("integration")
+        .join(LOCALTX_FILE_NAME);
+    if path != canonical {
+        bail!(
+            "LocalTx evidence is not at its canonical artifact path: {}",
+            path.display()
+        );
+    }
+    let receipt = ValidatedLocalTxReceipt::load(path)?;
+    Ok(LocalTxReceiptIdentity { artifact, receipt })
+}
+
+fn evaluate_localtx_required_evidence<'a>(
+    plan: &CiImpactPlan,
+    generic_receipts: &[ReceiptIdentity],
+    localtx_receipts: &'a [LocalTxReceiptIdentity],
+    run_id: &str,
+    run_attempt: &str,
+) -> Result<&'a ValidatedLocalTxReceipt> {
+    let [observed] = localtx_receipts else {
+        bail!(
+            "expected exactly one LocalTx required evidence receipt, observed {}",
+            localtx_receipts.len()
+        );
+    };
+    let owner_decision = plan
+        .jobs()
+        .iter()
+        .find(|job| job.key() == LOCALTX_OWNER)
+        .context("CI impact plan is missing the LocalTx evidence owner")?;
+    if !owner_decision.execute() {
+        bail!("CI impact plan did not execute the LocalTx evidence owner");
+    }
+    let expected_artifact = LOCALTX_OWNER.expected_artifact(run_id, run_attempt);
+    if owner_decision.expected_artifact() != expected_artifact {
+        bail!("CI impact plan LocalTx owner artifact identity mismatch");
+    }
+    let generic_owner = generic_receipts
+        .iter()
+        .find(|receipt| receipt.job_key == LOCALTX_OWNER)
+        .context("LocalTx owner generic evidence receipt is missing")?;
+    if observed.artifact != expected_artifact || observed.artifact != generic_owner.artifact {
+        bail!("LocalTx evidence is not paired with its owner generic artifact");
+    }
+    let receipt = &observed.receipt;
+    if receipt.job_key() != LOCALTX_OWNER {
+        bail!("LocalTx evidence owner mismatch");
+    }
+    if receipt.source_revision() != plan.execution_revision() {
+        bail!("LocalTx evidence source revision mismatch");
+    }
+    if receipt.plan_digest() != plan.plan_digest() {
+        bail!("LocalTx evidence plan digest mismatch");
+    }
+    if receipt.run_id() != run_id || receipt.run_attempt() != run_attempt {
+        bail!("LocalTx evidence run identity mismatch");
+    }
+    Ok(receipt)
+}
+
 fn artifact_parent(path: &Path, root: &Path) -> Result<String> {
     let relative = path
         .strip_prefix(root)
@@ -812,6 +1014,7 @@ fn evaluate(
 struct GateFixture {
     plan: CiImpactPlan,
     receipts: Vec<ReceiptIdentity>,
+    localtx_receipts: Vec<LocalTxReceiptIdentity>,
 }
 
 #[cfg(test)]
@@ -838,7 +1041,12 @@ impl GateFixture {
                 compiler_cache_hits: 2,
             })
             .collect();
-        Ok(Self { plan, receipts })
+        let localtx_receipts = vec![test_localtx_identity(&plan)?];
+        Ok(Self {
+            plan,
+            receipts,
+            localtx_receipts,
+        })
     }
 
     fn evaluate(&self) -> Result<()> {
@@ -849,7 +1057,28 @@ impl GateFixture {
             JobResult::Success,
             "42",
             "3",
-        )
+        )?;
+        evaluate_localtx_required_evidence(
+            &self.plan,
+            &self.receipts,
+            &self.localtx_receipts,
+            "42",
+            "3",
+        )?;
+        Ok(())
+    }
+
+    fn evaluate_without_localtx_required_evidence(&self) -> Result<()> {
+        evaluate(
+            &self.plan,
+            &self.receipts,
+            JobResult::Success,
+            JobResult::Success,
+            "42",
+            "3",
+        )?;
+        evaluate_localtx_required_evidence(&self.plan, &self.receipts, &[], "42", "3")?;
+        Ok(())
     }
 
     fn evaluate_without_first(&self) -> Result<()> {
@@ -916,6 +1145,33 @@ impl GateFixture {
 }
 
 #[cfg(test)]
+fn localtx_receipt_value(plan: &CiImpactPlan) -> serde_json::Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "evidenceKind": "localtx-required",
+        "jobKey": LOCALTX_OWNER,
+        "sourceRevision": plan.execution_revision(),
+        "planDigest": plan.plan_digest(),
+        "runId": "42",
+        "runAttempt": "3",
+        "outcome": "success",
+        "localtxActiveCount": 5,
+        "localtxJourneyCount": 5,
+        "localtxBackendProfileCount": 5,
+    })
+}
+
+#[cfg(test)]
+fn test_localtx_identity(plan: &CiImpactPlan) -> Result<LocalTxReceiptIdentity> {
+    Ok(LocalTxReceiptIdentity {
+        artifact: LOCALTX_OWNER.expected_artifact("42", "3"),
+        receipt: ValidatedLocalTxReceipt::parse(&serde_json::to_string(&localtx_receipt_value(
+            plan,
+        ))?)?,
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -948,6 +1204,62 @@ mod tests {
         for job in plan.jobs().iter().filter(|job| job.execute()) {
             write_receipt(root, plan, job.key(), job.expected_artifact(), "ci", |_| {})?;
         }
+        write_localtx_receipt(
+            root,
+            plan,
+            LOCALTX_OWNER.expected_artifact("42", "3"),
+            |_| {},
+        )?;
+        Ok(())
+    }
+
+    fn write_localtx_receipt(
+        root: &Path,
+        plan: &CiImpactPlan,
+        artifact: String,
+        mutate: impl FnOnce(&mut serde_json::Value),
+    ) -> Result<()> {
+        let mut receipt = localtx_receipt_value(plan);
+        mutate(&mut receipt);
+        let directory = root.join(artifact).join("integration");
+        fs::create_dir_all(&directory)?;
+        fs::write(
+            directory.join(LOCALTX_FILE_NAME),
+            serde_json::to_vec_pretty(&receipt)?,
+        )?;
+        Ok(())
+    }
+
+    fn localtx_path(root: &Path) -> PathBuf {
+        root.join(LOCALTX_OWNER.expected_artifact("42", "3"))
+            .join("integration")
+            .join(LOCALTX_FILE_NAME)
+    }
+
+    fn evaluate_disk_fixture(root: &Path, fixture: &GateFixture) -> Result<()> {
+        let generic = observe_receipts(root);
+        if let Some(failure) = generic.failure {
+            return Err(failure.error);
+        }
+        let localtx = observe_localtx_receipts(root);
+        if let Some(failure) = localtx.failure {
+            return Err(failure.error);
+        }
+        evaluate(
+            &fixture.plan,
+            &generic.receipts,
+            JobResult::Success,
+            JobResult::Success,
+            "42",
+            "3",
+        )?;
+        evaluate_localtx_required_evidence(
+            &fixture.plan,
+            &generic.receipts,
+            &localtx.receipts,
+            "42",
+            "3",
+        )?;
         Ok(())
     }
 
@@ -967,15 +1279,45 @@ mod tests {
     }
 
     #[test]
+    fn gate_rejects_complete_generic_receipts_without_localtx_required_evidence_red() -> Result<()>
+    {
+        let fixture = GateFixture::new()?;
+        assert_eq!(
+            fixture.receipts.len(),
+            fixture
+                .plan
+                .jobs()
+                .iter()
+                .filter(|job| job.execute())
+                .count(),
+            "fixture must remain anti-vacuous: every executed job has generic CI evidence"
+        );
+        assert!(
+            fixture
+                .receipts
+                .iter()
+                .any(|receipt| receipt.job_key == CiJobKey::IntegrationPostgresDomain),
+            "fixture must include the LocalTx evidence owner's generic receipt"
+        );
+        assert!(
+            fixture
+                .evaluate_without_localtx_required_evidence()
+                .is_err(),
+            "ci-gate must reject planner/matrix success when LocalTx required evidence is absent"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn gate_accepts_exact_receipt_set_green() -> Result<()> {
         let fixture = GateFixture::new()?;
         fixture.evaluate()?;
         let metrics = build_metrics(&fixture.plan, &fixture.receipts)?;
-        assert_eq!(metrics.recommended_jobs, 1);
+        assert_eq!(metrics.recommended_jobs, 2);
         assert_eq!(metrics.executed_jobs, CiJobKey::COUNT);
-        assert_eq!(metrics.skipped_runner_jobs, CiJobKey::COUNT - 1);
+        assert_eq!(metrics.skipped_runner_jobs, CiJobKey::COUNT - 2);
         assert_eq!(metrics.cpu_time_ms, 15_000);
-        assert_eq!(metrics.projected_saved_cpu_time_ms, 14_000);
+        assert_eq!(metrics.projected_saved_cpu_time_ms, 13_000);
         Ok(())
     }
 
@@ -1152,6 +1494,124 @@ mod tests {
     }
 
     #[test]
+    fn localtx_required_evidence_disk_red_matrix() -> Result<()> {
+        let fixture = GateFixture::new()?;
+        let green = crate::testutil::unique_tmp("ci-gate-localtx-green");
+        write_exact_receipts(&green, &fixture.plan)?;
+        evaluate_disk_fixture(&green, &fixture)?;
+        fs::remove_dir_all(green)?;
+
+        let missing = crate::testutil::unique_tmp("ci-gate-localtx-missing");
+        write_exact_receipts(&missing, &fixture.plan)?;
+        fs::remove_file(localtx_path(&missing))?;
+        assert!(evaluate_disk_fixture(&missing, &fixture).is_err());
+        fs::remove_dir_all(missing)?;
+
+        let duplicate = crate::testutil::unique_tmp("ci-gate-localtx-duplicate");
+        write_exact_receipts(&duplicate, &fixture.plan)?;
+        let nested = localtx_path(&duplicate)
+            .parent()
+            .context("LocalTx fixture parent")?
+            .join("nested")
+            .join(LOCALTX_FILE_NAME);
+        fs::create_dir_all(nested.parent().context("nested fixture parent")?)?;
+        fs::copy(localtx_path(&duplicate), nested)?;
+        assert!(evaluate_disk_fixture(&duplicate, &fixture).is_err());
+        fs::remove_dir_all(duplicate)?;
+
+        let wrong_artifact = crate::testutil::unique_tmp("ci-gate-localtx-wrong-artifact");
+        write_exact_receipts(&wrong_artifact, &fixture.plan)?;
+        let wrong_path = wrong_artifact
+            .join(CiJobKey::CiMeta.expected_artifact("42", "3"))
+            .join("integration")
+            .join(LOCALTX_FILE_NAME);
+        fs::create_dir_all(wrong_path.parent().context("wrong artifact parent")?)?;
+        fs::rename(localtx_path(&wrong_artifact), wrong_path)?;
+        assert!(evaluate_disk_fixture(&wrong_artifact, &fixture).is_err());
+        fs::remove_dir_all(wrong_artifact)?;
+
+        for (label, field, value) in [
+            ("schema", "schemaVersion", serde_json::json!(0)),
+            ("outcome", "outcome", serde_json::json!("failure")),
+            ("active-four", "localtxActiveCount", serde_json::json!(4)),
+            ("active-six", "localtxActiveCount", serde_json::json!(6)),
+            ("journey-four", "localtxJourneyCount", serde_json::json!(4)),
+            ("journey-six", "localtxJourneyCount", serde_json::json!(6)),
+            (
+                "backend-four",
+                "localtxBackendProfileCount",
+                serde_json::json!(4),
+            ),
+            (
+                "backend-six",
+                "localtxBackendProfileCount",
+                serde_json::json!(6),
+            ),
+            (
+                "stale-source",
+                "sourceRevision",
+                serde_json::json!("f".repeat(40)),
+            ),
+            (
+                "stale-plan",
+                "planDigest",
+                serde_json::json!("f".repeat(64)),
+            ),
+            ("stale-run", "runAttempt", serde_json::json!("4")),
+        ] {
+            let root = crate::testutil::unique_tmp(&format!("ci-gate-localtx-{label}"));
+            write_exact_receipts(&root, &fixture.plan)?;
+            let path = localtx_path(&root);
+            let mut receipt: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+            receipt[field] = value;
+            fs::write(path, serde_json::to_vec_pretty(&receipt)?)?;
+            assert!(evaluate_disk_fixture(&root, &fixture).is_err(), "{label}");
+            fs::remove_dir_all(root)?;
+        }
+
+        let unknown = crate::testutil::unique_tmp("ci-gate-localtx-unknown");
+        write_exact_receipts(&unknown, &fixture.plan)?;
+        let path = localtx_path(&unknown);
+        let mut receipt: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        receipt["staticProofInventory"] = serde_json::json!({"active": 5});
+        fs::write(path, serde_json::to_vec_pretty(&receipt)?)?;
+        assert!(evaluate_disk_fixture(&unknown, &fixture).is_err());
+        fs::remove_dir_all(unknown)?;
+
+        let static_bait = crate::testutil::unique_tmp("ci-gate-localtx-static-bait");
+        write_exact_receipts(&static_bait, &fixture.plan)?;
+        fs::write(
+            localtx_path(&static_bait),
+            r#"{"schemaVersion":1,"activeContracts":5,"journeys":5,"backendProfiles":5}"#,
+        )?;
+        assert!(evaluate_disk_fixture(&static_bait, &fixture).is_err());
+        fs::remove_dir_all(static_bait)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn localtx_required_evidence_symlink_is_classified_fail_closed() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let fixture = GateFixture::new()?;
+        let root = crate::testutil::unique_tmp("ci-gate-localtx-symlink");
+        write_exact_receipts(&root, &fixture.plan)?;
+        let path = localtx_path(&root);
+        let target = path.with_file_name("target.json");
+        fs::rename(&path, &target)?;
+        symlink(&target, &path)?;
+        let observation = observe_localtx_receipts(&root);
+        assert!(observation.failure.is_some());
+        assert_eq!(
+            observation.failure.context("missing failure")?.class,
+            GateFailureClass::LocaltxEvidence
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn gate_failure_paths_persist_closed_envelope_and_safe_summary() -> Result<()> {
         let root = crate::testutil::unique_tmp("ci-gate-failure-envelope");
         fs::create_dir_all(&root)?;
@@ -1169,13 +1629,22 @@ mod tests {
             summary_path: Some(root.join("summary.md")),
         };
         assert!(run_with_runtime(&options, &runtime).is_err());
-        let metrics: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&options.metrics_output)?)?;
+        let serialized = fs::read_to_string(&options.metrics_output)?;
+        assert_eq!(
+            format!("{serialized}\n"),
+            include_str!("../tests/golden/ci-gate-envelope-v2-failure.json"),
+            "failure envelope v2 wire drifted"
+        );
+        let metrics: serde_json::Value = serde_json::from_str(&serialized)?;
+        assert_eq!(metrics["schemaVersion"], 2);
         assert_eq!(metrics["verdict"], "failure");
         assert_eq!(metrics["failureClass"], "planner-result");
         assert_eq!(metrics["plannerResult"], "failure");
         assert_eq!(metrics["matrixResult"], "skipped");
         assert_eq!(metrics["observedReceiptCount"], 0);
+        assert!(metrics["localtxActiveCount"].is_null());
+        assert!(metrics["localtxJourneyCount"].is_null());
+        assert!(metrics["localtxBackendProfileCount"].is_null());
         let summary = fs::read_to_string(
             runtime
                 .summary_path
@@ -1384,11 +1853,20 @@ mod tests {
             summary_path: Some(root.join("summary.md")),
         };
         run_with_runtime(&options, &runtime)?;
-        let envelope: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&options.metrics_output)?)?;
+        let serialized = fs::read_to_string(&options.metrics_output)?;
+        assert_eq!(
+            format!("{serialized}\n"),
+            include_str!("../tests/golden/ci-gate-envelope-v2-success.json"),
+            "success envelope v2 wire drifted"
+        );
+        let envelope: serde_json::Value = serde_json::from_str(&serialized)?;
+        assert_eq!(envelope["schemaVersion"], 2);
         assert_eq!(envelope["verdict"], "success");
         assert!(envelope["failureClass"].is_null());
         assert_eq!(envelope["observedReceiptCount"], CiJobKey::COUNT);
+        assert_eq!(envelope["localtxActiveCount"], 5);
+        assert_eq!(envelope["localtxJourneyCount"], 5);
+        assert_eq!(envelope["localtxBackendProfileCount"], 5);
         assert_eq!(envelope["successMetrics"]["executedJobs"], CiJobKey::COUNT);
         assert_eq!(
             envelope["successMetrics"]["recommendedJobs"],
@@ -1399,15 +1877,14 @@ mod tests {
                 .filter(|job| job.recommended())
                 .count()
         );
-        assert!(
-            fs::read_to_string(
-                runtime
-                    .summary_path
-                    .as_ref()
-                    .context("success fixture summary path is missing")?,
-            )?
-            .contains("Result: `success`")
-        );
+        let summary = fs::read_to_string(
+            runtime
+                .summary_path
+                .as_ref()
+                .context("success fixture summary path is missing")?,
+        )?;
+        assert!(summary.contains("Result: `success`"));
+        assert!(summary.contains("LocalTx required evidence: `5/5/5`"));
         fs::remove_dir_all(root)?;
         Ok(())
     }

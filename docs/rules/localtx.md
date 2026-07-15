@@ -17,6 +17,10 @@ typed backend profile/provider probes → Postgres runner settlement/telemetry �
   真实事务矩阵已执行。
 - `cargo xtask ci run --job integration/postgres-domain` 执行真实 SecretRepo/Identity matrices 与 active LocalTx 5/5 journey，
   required tooling、服务启动和编译后测试 inventory 均 fail-closed，closeout 不使用 `--allow-missing-tools`。
+- CI 为该唯一 owner 显式传 `--required-evidence-output`；只有 typed batches 全部成功且 canonical inventory
+  得到 active/journey/backend-profile = 5/5/5 时，私有成功令牌与计数令牌才能铸造 v1 receipt。`ci-gate`
+  对 receipt 的 artifact、HEAD、plan digest、run/attempt 做 exact match；缺失、重复、失败、旧 schema、错
+  identity 或任一 4/6 漂移均 fail-closed。静态 proof/report 不进入该真实后端证据槽位。
 
 ## Contract evidence
 
@@ -264,7 +268,9 @@ const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
 
 该 marker 必须是 `LOCALTX_BACKEND_PROFILE_*` 具名 const、处于真实 test function，并由同一 adapter provider 的
 typed shards 合计提供 manifest-derived required probes；provider binding 名必须与 profile suffix 一致，route marker
-必须一致。每个 probe 的 provider action 都必须把一个以 canonical `Provider::new(...)` 为 initializer dataflow root
+必须一致。profile test 自身及所有祖先 scope 都不得带 `#[ignore]` 或 `#[should_panic]`；required receipt 只统计
+绑定到 `postgres-domain` typed `postgres:postgres` lib execution unit 的完整 profile，并按不同 contract id
+计数，重复 profile 不能掩盖缺失 contract。每个 probe 的 provider action 都必须把一个以 canonical `Provider::new(...)` 为 initializer dataflow root
 的绑定直接传入 method receiver/实参，并让该 method call 经 `?`、显式 `return` 或 action 尾表达式决定结果；普通
 free function、裸引用、丢弃 call 结果、aggregate result binding/projection、同名 shadow constructor、
 block/tuple/dead-branch bait、observer-only 引用和 `.synthetic()` outcome 都不计。若需先观测数据库状态再返回 provider

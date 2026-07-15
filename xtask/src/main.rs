@@ -73,6 +73,7 @@ mod cdc_config;
 mod ci_entry_guard;
 mod ci_evidence;
 mod ci_gate;
+mod ci_identity;
 mod ci_impact;
 mod ci_lanes;
 mod ci_slo;
@@ -97,6 +98,7 @@ mod integration_shards;
 mod layerdeps;
 mod layers;
 mod localtx_coverage;
+mod localtx_evidence;
 mod localtx_report;
 mod migrations;
 mod outbox_same_id_guard;
@@ -183,6 +185,7 @@ enum Command {
     CiLocal(ci_impact::LocalOptions),
     CiRun {
         job: ci_lanes::CiJobKey,
+        required_evidence_output: Option<PathBuf>,
     },
     CiSloEvaluate {
         job: ci_lanes::CiJobKey,
@@ -530,6 +533,7 @@ fn parse_ci_full(args: &[&str]) -> Result<Command> {
 
 fn parse_ci_run(args: &[&str]) -> Result<Command> {
     let mut job = None;
+    let mut required_evidence_output = None;
     let mut iter = args.iter().copied();
     while let Some(token) = iter.next() {
         match token {
@@ -540,13 +544,28 @@ fn parse_ci_run(args: &[&str]) -> Result<Command> {
                         .parse()?,
                 )
             }
+            "--required-evidence-output" if required_evidence_output.is_none() => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("ci run --required-evidence-output 缺少路径"))?;
+                let path = PathBuf::from(value);
+                if value.is_empty() || value.starts_with("--") || path.file_name().is_none() {
+                    bail!(
+                        "ci run --required-evidence-output 必须是含文件名的非空路径，不能是 flag"
+                    );
+                }
+                required_evidence_output = Some(path);
+            }
             other => {
-                bail!("ci run 未知或重复参数: {other}；用法: cargo xtask ci run --job <CiJobKey>")
+                bail!(
+                    "ci run 未知或重复参数: {other}；用法: cargo xtask ci run --job <CiJobKey> [--required-evidence-output <path>]"
+                )
             }
         }
     }
     Ok(Command::CiRun {
         job: job.context("ci run 缺少 --job")?,
+        required_evidence_output,
     })
 }
 
@@ -633,7 +652,10 @@ fn dispatch(args: &[String]) -> Result<()> {
             allow_missing_tools,
         } => verify::run_ci(allow_missing_tools),
         Command::CiLocal(options) => ci_impact::run_local(&workspace_root()?, &options),
-        Command::CiRun { job } => verify::run_job(job),
+        Command::CiRun {
+            job,
+            required_evidence_output,
+        } => verify::run_job(job, required_evidence_output.as_deref()),
         Command::CiSloEvaluate {
             job,
             run_id,
@@ -1309,7 +1331,8 @@ mod tests {
         assert_eq!(
             parse_command(&s(&["ci", "run", "--job", "ci-meta"]))?,
             Command::CiRun {
-                job: ci_lanes::CiJobKey::CiMeta
+                job: ci_lanes::CiJobKey::CiMeta,
+                required_evidence_output: None,
             }
         );
         for args in [
@@ -1347,6 +1370,70 @@ mod tests {
                 parse_command(&s(&[old])).is_err(),
                 "legacy {old} must be removed"
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_ci_run_accepts_explicit_localtx_required_evidence_output_red() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&[
+                "ci",
+                "run",
+                "--job",
+                "integration/postgres-domain",
+                "--required-evidence-output",
+                "/tmp/localtx-required.json",
+            ]))?,
+            Command::CiRun {
+                job: ci_lanes::CiJobKey::IntegrationPostgresDomain,
+                required_evidence_output: Some(PathBuf::from("/tmp/localtx-required.json")),
+            }
+        );
+        for args in [
+            vec![
+                "ci",
+                "run",
+                "--job",
+                "integration/postgres-domain",
+                "--required-evidence-output",
+            ],
+            vec![
+                "ci",
+                "run",
+                "--job",
+                "integration/postgres-domain",
+                "--required-evidence-output",
+                "a",
+                "--required-evidence-output",
+                "b",
+            ],
+            vec![
+                "ci",
+                "run",
+                "--job",
+                "integration/postgres-domain",
+                "--required-evidence-output",
+                "",
+            ],
+            vec![
+                "ci",
+                "run",
+                "--job",
+                "integration/postgres-domain",
+                "--required-evidence-output",
+                "--not-a-path",
+            ],
+            vec![
+                "ci",
+                "run",
+                "--job",
+                "integration/postgres-domain",
+                "--required-evidence-output",
+                "/",
+            ],
+        ] {
+            assert!(parse_command(&s(&args)).is_err(), "must reject {args:?}");
         }
         Ok(())
     }

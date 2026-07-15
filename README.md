@@ -45,6 +45,12 @@ CI 子命令不保留旧的平铺 lane 入口；空的 `ci` 也会报错。plann
 ./hack/cargo.sh xtask ci gate <gate-options>
 ```
 
+`integration/postgres-domain` 是 LocalTx required-evidence 的唯一 typed owner。CI 只在该 job 的全部真实
+Postgres batch 成功后生成 `integration/localtx-required.json`；`ci gate` 要求它与计划、HEAD、run/attempt
+完全一致且 active/journey/backend-profile 三项均为 5。`verify --fast` 与 `localtx report` 只证明静态闭包，
+不能替代这份真实后端 receipt。当前 required-check 激活边界及人工验证清单见
+[`docs/ops/202607150329-1776-localtx-required-evidence.md`](docs/ops/202607150329-1776-localtx-required-evidence.md)。
+
 以下是常用开发检查，并非 `verify` 内部 typed step 的逐条公开命令；完整本地治理门运行
 `make ci-full`，差异感知的 PR 收尾运行 `make ci CI_BASE=<remote>/develop`：
 

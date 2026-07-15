@@ -69,6 +69,7 @@ lint 拦下、强制采纳上游 Hard 类型。
 |------|------|
 | `redacted_bytes::RedactedBytes` | 脱敏 newtype 自身（受控持有点），内层 `Vec<u8>` 即实现载体（按 `DefId` 路径豁免，防 crate-root 同名假类型绕过） |
 | `CertSerial`（`revocation_store.rs`） | RFC5280 证书序列号是公开 CRL 字段，`derive(Debug)` **有意可见原值**（非机密，与密码学物料相反） |
+| `ArchiveChecksum`（`dlx_lifecycle.rs`） | SHA-256 完整性值固定为 32 字节；保留 `[u8; 32]` 静态锁定长度并提供 `Copy`，手写 `Debug` 固定脱敏，原值仅经显式 `as_bytes` / `as_hex` 暴露 |
 | `SecretMaterial`（`secret_resolver.rs`） | 已 `#[derive(secure::Redact)]` `#[redact(sensitivity = secret)]`——完整 Wire + 日志策略由 `secure` 承载（`RedactedBytes` 仅覆盖 `Debug`/`Display`、不含 Wire 范围），故保留 derive(Redact) + 裸 `Vec<u8>` |
 
 **为何用 in-lint 名单而非生产 `#[allow]`**（error-handling.md §Carve-out）：dylint lint 未加载时（普通 `cargo clippy`），
@@ -78,7 +79,8 @@ lint 拦下、强制采纳上游 Hard 类型。
 
 **名匹配 vs DefId 路径——有意不对称**（#1155 review 复核）：`is_canonical_redacted_bytes` 按 DefId **路径**精确认 canonical
 `RedactedBytes`（且前缀须无中间 module，防嵌套 `mod ...::redacted_bytes::RedactedBytes` 假类型冒充豁免）——因为它是 lint
-守护要**采纳**的「正确实现」，须防伪造。`is_structural_carve_out` 则按 **末段名**（`CertSerial` / `SecretMaterial`）——它们只是
+守护要**采纳**的「正确实现」，须防伪造。`is_structural_carve_out` 则按 **末段名**（`ArchiveChecksum` / `CertSerial` /
+`SecretMaterial`）——它们只是
 **按身份豁免**，`LOCAL_CRATE=="diport"` 内名字唯一无碰撞，且 rename 即失配再触发（上句自救），无需路径精度。守护对象不同 ⇒ 载体不同。
 
 ## 5. 范围边界

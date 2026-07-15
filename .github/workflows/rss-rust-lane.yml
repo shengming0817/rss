@@ -252,7 +252,11 @@ jobs:
             reset_outcome=degraded
           fi
           echo "compiler-cache-reset=$reset_outcome" >> "$GITHUB_OUTPUT"
-          /usr/bin/time -f 'userSeconds=%U\nsystemSeconds=%S\npeakRssKiB=%M' -o "$RUNNER_TEMP/xtask-resource.txt" timeout --signal=TERM --kill-after=30s 90m "$CARGO_TARGET_DIR/debug/xtask" ci run --job "$RSS_CI_JOB_KEY"
+          required_evidence_args=()
+          if [ "$RSS_CI_JOB_KEY" = integration/postgres-domain ]; then
+            required_evidence_args+=(--required-evidence-output "$RUNNER_TEMP/localtx-required.json")
+          fi
+          /usr/bin/time -f 'userSeconds=%U\nsystemSeconds=%S\npeakRssKiB=%M' -o "$RUNNER_TEMP/xtask-resource.txt" timeout --signal=TERM --kill-after=30s 90m "$CARGO_TARGET_DIR/debug/xtask" ci run --job "$RSS_CI_JOB_KEY" "${required_evidence_args[@]}"
 
       - name: Finalize integration outcome and collect failure logs
         id: integration-services-collect
@@ -434,6 +438,16 @@ jobs:
             cp "$RUNNER_TEMP/integration-lifecycle.json" target/job-evidence/integration/lifecycle.json
             if [ -f "$RUNNER_TEMP/integration-service-logs.tar.gz" ]; then
               cp "$RUNNER_TEMP/integration-service-logs.tar.gz" target/job-evidence/integration/service-logs.tar.gz
+            fi
+            localtx_receipt_source="$RUNNER_TEMP/localtx-required.json"
+            localtx_receipt_target=target/job-evidence/integration/localtx-required.json
+            if [ "$RSS_CI_JOB_KEY" = integration/postgres-domain ]; then
+              if [ -L "$localtx_receipt_source" ] || [ ! -f "$localtx_receipt_source" ]; then exit 1; fi
+              if [ -e "$localtx_receipt_target" ] || [ -L "$localtx_receipt_target" ]; then exit 1; fi
+              cp --no-dereference --remove-destination -- "$localtx_receipt_source" "$localtx_receipt_target"
+              if [ -L "$localtx_receipt_target" ] || [ ! -f "$localtx_receipt_target" ]; then exit 1; fi
+            else
+              if [ -e "$localtx_receipt_source" ] || [ -L "$localtx_receipt_source" ] || [ -e "$localtx_receipt_target" ] || [ -L "$localtx_receipt_target" ]; then exit 1; fi
             fi
           fi
           cargo run --locked -p xtask -- nextest-evidence stage

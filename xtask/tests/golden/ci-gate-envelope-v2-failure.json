@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 2,
+  "verdict": "failure",
+  "failureClass": "planner-result",
+  "plannerResult": "failure",
+  "matrixResult": "skipped",
+  "errorSummary": "planner job did not succeed: Failure",
+  "planDigest": null,
+  "policyMode": null,
+  "decisionKind": null,
+  "decisionReason": null,
+  "fullFallback": null,
+  "observedReceiptCount": 0,
+  "observedReceiptKeys": [],
+  "localtxActiveCount": null,
+  "localtxJourneyCount": null,
+  "localtxBackendProfileCount": null,
+  "successMetrics": null
+}

@@ -33,7 +33,8 @@
 //! fail-closed）拦，azure 无 CI ⇒ verify 是唯一实际 gate；② `#[cfg(test)]` 子树默认不被扫（test-only
 //! 字节 field 放行）；③ 守护范围限 `diport`，其它 crate 合法裸持 `Vec<u8>` 不误报；④ 不检测
 //! `#[redact]` derive helper attr（late pass 可能已被消除）——已用 `secure::Redact` 治理的 `SecretMaterial`
-//! 与公开 `CertSerial` 由 `is_structural_carve_out` 名单豁免（非生产 `#[allow]`，避免 `unknown_lints` 噪声）。
+//! 与公开 / 结构性字节类型 `CertSerial`、`ArchiveChecksum` 由 `is_structural_carve_out` 名单豁免
+//! （非生产 `#[allow]`，避免 `unknown_lints` 噪声）。
 //! anti-vacuity（守卫非恒真 / 恒假，两向 UI golden 锁）：红向由 `ui/diport.rs` 的
 //! `Vec<u8>` / `[u8;N]` / `Box<[u8]>` / `Option<Vec<u8>>` struct **必报** + golden 非空锁；
 //! 绿向由 `ui/not_diport.rs`（crate 名不在守护范围）同形字段 **不报** + 空 golden 锁（验
@@ -67,7 +68,8 @@ dylint_linting::declare_late_lint! {
     /// 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；`#[cfg(test)]`
     /// 子树默认不被扫（test-only 字节字段放行）。守护范围限 `diport` crate；其它 crate 的同形字段不命中。
     /// 不检测 `#[redact]` derive helper attr（late pass 中可能已被消除）——已 `derive(secure::Redact)`
-    /// 治理的字段（`SecretMaterial`）与公开字节（`CertSerial`）由 `is_structural_carve_out` 名单豁免，
+    /// 治理的字段（`SecretMaterial`）与公开 / 结构性字节（`CertSerial`、`ArchiveChecksum`）由
+    /// `is_structural_carve_out` 名单豁免，
     /// **非**生产 `#[allow]`（dylint 未加载时 `#[allow(rss_*)]` 触发 `unknown_lints`、`-D warnings` 红）。
     ///
     /// canonical `diport::redacted_bytes::RedactedBytes` 自身（脱敏 newtype 的受控持有点）经**结构性豁免**——
@@ -113,7 +115,7 @@ impl<'tcx> LateLintPass<'tcx> for RssDiportDtoDebugRedacted {
         // 结构性 carve-out（公开 / secure-governed 字节，刻意保留裸 `Vec<u8>`）。用 in-lint 名单而非生产
         // `#[allow]`——dylint 未加载时（`cargo clippy`）`#[allow(rss_*)]` 触发 `unknown_lints`、`-D warnings` 红
         // （工作区无 `unknown_lints=allow`）。carve-out 须同步 ADR-013 registry（error-handling.md §Carve-out）。
-        if is_structural_carve_out(cx.tcx.item_name(parent_did).as_str()) {
+        if is_structural_carve_out(cx, parent_did) {
             return;
         }
         let field_ty = cx.tcx.type_of(field.def_id).instantiate_identity();
@@ -209,21 +211,31 @@ fn is_canonical_redacted_bytes(cx: &LateContext<'_>, did: DefId) -> bool {
     !prefix.contains("::")
 }
 
-/// 公开 / secure-governed 字节字段的结构性 carve-out（按 enclosing struct 末段名判定，已限 `LOCAL_CRATE=="diport"`
-/// ⇒ 名字唯一、无跨 crate 碰撞）。这些类型的裸 `Vec<u8>` 是设计本意、不采纳 `RedactedBytes`：
+/// 公开 / secure-governed 字节字段的结构性 carve-out。每项按 enclosing struct 的完整 `DefId`
+/// canonical path 判定；同 crate 内根级、兄弟或嵌套模块的同名类型均不命中。
+/// 这些类型的裸 `Vec<u8>` 是设计本意、不采纳 `RedactedBytes`：
 /// - `CertSerial`：RFC5280 证书序列号是公开 CRL 字段，`derive(Debug)` 有意可见原值（非机密，与密码学物料相反）。
+/// - `ArchiveChecksum`：SHA-256 完整性值固定为 32 字节；保留 `[u8; 32]` 才能静态锁定长度并提供 `Copy`，
+///   且其手写 `Debug` 固定脱敏，原值只经显式 `as_bytes` / `as_hex` 暴露。
 /// - `SecretMaterial`：已 `#[derive(secure::Redact)]` `#[redact(sensitivity = secret)]`——完整 Wire + 日志策略由 `secure` 承载
 ///   （`RedactedBytes` 仅覆盖 `Debug`/`Display`、不含 Wire 范围），故保留 derive(Redact) + 裸 `Vec<u8>`。
 ///
 /// 刻意窄名单（非启发式）。新增 carve-out 须同步本函数 + ADR-013 §4 carve-out registry + `ui/diport.rs` 绿例
 /// （error-handling.md §Carve-out）；重命名这些类型会使豁免失配 → lint 对其内层裸字节误报红（UI golden 漂移）即自救。
 ///
-/// **名匹配 vs `is_canonical_redacted_bytes` 的 DefId 路径匹配——有意不对称**（#1155 review 复核）：
-/// `RedactedBytes` 是本 lint 守护要**采纳**的「正确实现」，须防 crate-root 同名假类型冒充豁免（故按路径精确认 canonical）；
-/// 而 `CertSerial`/`SecretMaterial` 只是**按身份豁免**——`LOCAL_CRATE=="diport"` 内名字唯一、无碰撞，且 rename 即失配再触发
-/// （上句自救），无需路径精度。两者守的东西不同，故载体不同。
-fn is_structural_carve_out(struct_name: &str) -> bool {
-    matches!(struct_name, "CertSerial" | "SecretMaterial")
+const STRUCTURAL_CARVE_OUT_PATHS: [&[&str]; 3] = [
+    &["diport", "dlx_lifecycle", "ArchiveChecksum"],
+    &["diport", "revocation_store", "CertSerial"],
+    &["diport", "secret_resolver", "SecretMaterial"],
+];
+
+fn is_structural_carve_out(cx: &LateContext<'_>, did: DefId) -> bool {
+    let path = cx.get_def_path(did);
+    STRUCTURAL_CARVE_OUT_PATHS.iter().any(|expected| {
+        path.iter()
+            .map(|part| part.as_str())
+            .eq(expected.iter().copied())
+    })
 }
 
 #[test]
@@ -238,4 +250,16 @@ fn ui_not_diport_green() {
     // example target 名 `not_diport`（LOCAL_CRATE=="not_diport" 不在守护范围）→ 同形字段不触发；
     // golden ui/not_diport.stderr 为空（anti-vacuity：验 LOCAL_CRATE 分支非恒报）。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "not_diport");
+}
+
+#[test]
+fn structural_carve_out_paths_are_canonical_golden() {
+    assert_eq!(
+        STRUCTURAL_CARVE_OUT_PATHS,
+        [
+            &["diport", "dlx_lifecycle", "ArchiveChecksum"][..],
+            &["diport", "revocation_store", "CertSerial"][..],
+            &["diport", "secret_resolver", "SecretMaterial"][..],
+        ]
+    );
 }

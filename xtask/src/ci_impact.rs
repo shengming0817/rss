@@ -3,7 +3,9 @@
 //! INVARIANT: CI-IMPACT-PLAN-01 { level = "Hard", exec = "native-compile", source = "code", native = "validated plan construction owns the closed 15-job array and matrix derivation" }.
 //! INVARIANT: CI-IMPACT-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "policy_rejects_unknown_and_rename_red", anti_vacuity = "workspace_policy_catalog_is_non_vacuous" }.
 //! INVARIANT: CI-IMPACT-PROJECTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private ImpactSet construction and exhaustive local/remote projections prevent divergent path maps" }.
+//! INVARIANT: CI-IMPACT-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "adaptive_plan_json_cannot_disable_localtx_evidence_owner_red", anti_vacuity = "adaptive_plan_requires_localtx_evidence_owner_red" } —— serialized plans cannot bypass the catalog-owned required-evidence executor.
 
+use crate::ci_identity::CiIdentityKey;
 use crate::ci_lanes::{CiJobKey, CiLane};
 use crate::cmd::{CargoSubcommand, ExternalProgram, cargo_cmd, external_cmd};
 use crate::contract::manifest::{ContractManifest, ContractOwner};
@@ -315,6 +317,7 @@ impl FallbackContext {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum JobReason {
     MetaAlways,
+    RequiredEvidence,
     Documentation,
     CoreSource,
     CoreTest,
@@ -493,6 +496,7 @@ impl CiImpactPlan {
                 CiJobKey::COUNT
             );
         }
+        let recommends_full_catalog = self.jobs.iter().all(|job| job.recommended);
         if !legal_decision(self.policy_mode, self.decision_kind, self.decision_reason) {
             bail!("CI impact plan policy mode, decision kind, and reason are inconsistent");
         }
@@ -524,6 +528,22 @@ impl CiImpactPlan {
                 }
             } else if decision.reasons != [JobReason::NotImpacted] {
                 bail!("non-recommended CI job must have the not-impacted reason");
+            }
+        }
+        for decision in &self.jobs {
+            if decision.key.required_evidence().is_some() {
+                if !decision.recommended || !decision.execute {
+                    bail!("required-evidence CI owner must be recommended and executed");
+                }
+                // Full-catalog reasons are already canonical and stronger; selective and Shadow
+                // recommendations must retain the explicit required-evidence provenance.
+                if !recommends_full_catalog
+                    && !decision.reasons.contains(&JobReason::RequiredEvidence)
+                {
+                    bail!("required-evidence CI owner is missing its typed reason");
+                }
+            } else if decision.reasons.contains(&JobReason::RequiredEvidence) {
+                bail!("non-owner CI job cannot claim the required-evidence reason");
             }
         }
         if !self
@@ -561,7 +581,6 @@ impl CiImpactPlan {
             (None, _) => {}
             (Some(_), _) => bail!("non-fallback CI impact plan cannot contain fallback context"),
         }
-        let recommends_full_catalog = self.jobs.iter().all(|job| job.recommended);
         if (matches!(self.decision_kind, DecisionKind::Adaptive)
             || self.decision_reason == DecisionReason::Shadow)
             && recommends_full_catalog
@@ -983,6 +1002,11 @@ impl Recommendation {
     fn empty() -> Self {
         let mut selected = BTreeMap::new();
         selected.insert(CiJobKey::CiMeta, BTreeSet::from([JobReason::MetaAlways]));
+        for key in CiJobKey::ALL {
+            if key.required_evidence().is_some() {
+                selected.insert(key, BTreeSet::from([JobReason::RequiredEvidence]));
+            }
+        }
         Self::Selective(selected)
     }
 
@@ -1094,12 +1118,14 @@ pub(crate) fn run(root: &Path, options: &Options) -> Result<()> {
     let policy = std::str::from_utf8(&policy_source)
         .map_err(anyhow::Error::from)
         .and_then(|source| toml::from_str::<PolicyWire>(source).map_err(anyhow::Error::from));
-    let event_name = std::env::var("GITHUB_EVENT_NAME").unwrap_or_default();
-    let execution_revision =
-        std::env::var("GITHUB_SHA").unwrap_or_else(|_| UNKNOWN_REVISION.to_owned());
+    let event_name = std::env::var(CiIdentityKey::EventName.env_name()).unwrap_or_default();
+    let execution_revision = std::env::var(CiIdentityKey::HeadRevision.env_name())
+        .unwrap_or_else(|_| UNKNOWN_REVISION.to_owned());
     validate_revision(&execution_revision, "execution revision")?;
-    let run_id = std::env::var("GITHUB_RUN_ID").unwrap_or_else(|_| "local".to_owned());
-    let run_attempt = std::env::var("GITHUB_RUN_ATTEMPT").unwrap_or_else(|_| "1".to_owned());
+    let run_id =
+        std::env::var(CiIdentityKey::RunId.env_name()).unwrap_or_else(|_| "local".to_owned());
+    let run_attempt =
+        std::env::var(CiIdentityKey::RunAttempt.env_name()).unwrap_or_else(|_| "1".to_owned());
     let event_source = fs::read_to_string(&options.event_path)
         .with_context(|| format!("读取 {}", options.event_path.display()));
 
@@ -2427,6 +2453,12 @@ fn policy_semantic_catalog_with_behavior(behavior_spec: &str) -> Vec<String> {
         catalog.push(format!("job-lane={}", key.lane_kind().workflow_name()));
         catalog.push(format!("job-shard={}", key.shard().unwrap_or("")));
         catalog.push(format!("job-partition={}", key.partition().unwrap_or("")));
+        catalog.push(format!(
+            "job-required-evidence={}:{}",
+            key.as_str(),
+            key.required_evidence()
+                .map_or("", |evidence| evidence.as_str())
+        ));
     }
     for shard in IntegrationShard::ALL {
         catalog.push(format!("integration-shard={}", shard.as_str()));
@@ -2571,8 +2603,16 @@ mod tests {
     struct PolicyGolden {
         schema_version: u8,
         machine_inputs: Vec<String>,
+        required_evidence_owners: Vec<RequiredEvidenceOwnerGolden>,
         path_cases: Vec<PathCaseGolden>,
         shadow_matrix: serde_json::Value,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct RequiredEvidenceOwnerGolden {
+        job_key: String,
+        evidence_kind: String,
     }
 
     #[derive(Debug, Deserialize)]
@@ -2821,7 +2861,7 @@ mod tests {
         assert_eq!(LocalProjection::from(&empty), LocalProjection::Empty);
         assert_eq!(
             RemoteProjection::from(&empty).selected_names(),
-            vec!["ci-meta"]
+            vec!["ci-meta", "integration/postgres-domain"]
         );
 
         let docs = impact_entries(
@@ -3171,7 +3211,10 @@ mod tests {
     #[test]
     fn policy_selects_docs_core_and_integration_green() {
         let docs = classify_diff(&[DiffEntry::modified("docs/ops/example.md")]);
-        assert_eq!(docs.selected_names(), vec!["ci-meta"]);
+        assert_eq!(
+            docs.selected_names(),
+            vec!["ci-meta", "integration/postgres-domain"]
+        );
 
         let core = classify_diff(&[DiffEntry::modified("crates/identity/src/service.rs")]);
         assert!(core.selected_names().contains(&"ci-core-tests/1-of-2"));
@@ -3193,6 +3236,19 @@ mod tests {
             MACHINE_INPUT_PATHS
                 .iter()
                 .map(|path| (*path).to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            golden.required_evidence_owners,
+            CiJobKey::ALL
+                .into_iter()
+                .filter_map(|job| {
+                    job.required_evidence()
+                        .map(|evidence| RequiredEvidenceOwnerGolden {
+                            job_key: job.as_str().to_owned(),
+                            evidence_kind: evidence.as_str().to_owned(),
+                        })
+                })
                 .collect::<Vec<_>>()
         );
         for case in golden.path_cases {
@@ -3333,6 +3389,56 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_plan_requires_localtx_evidence_owner_red() -> Result<()> {
+        let plan = test_adaptive_plan()?;
+        let owner = plan
+            .jobs()
+            .iter()
+            .find(|job| job.key() == CiJobKey::IntegrationPostgresDomain)
+            .context("adaptive plan must contain the LocalTx evidence owner")?;
+
+        assert!(
+            owner.recommended() && owner.execute(),
+            "adaptive plans must recommend and execute the postgres-domain LocalTx evidence owner"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn adaptive_plan_json_cannot_disable_localtx_evidence_owner_red() -> Result<()> {
+        let mut forged = test_adaptive_plan()?;
+        let owner = forged
+            .jobs
+            .iter_mut()
+            .find(|job| job.key == CiJobKey::IntegrationPostgresDomain)
+            .context("adaptive plan must contain the LocalTx evidence owner")?;
+        owner.recommended = false;
+        owner.execute = false;
+        owner.reasons = vec![JobReason::NotImpacted];
+        forged.plan_digest = forged.compute_digest()?;
+
+        let forged_json = forged.to_json()?;
+        assert!(
+            CiImpactPlan::from_json(&forged_json).is_err(),
+            "a digest-consistent plan that disables the LocalTx evidence owner must be rejected"
+        );
+
+        let mut forged_reason = test_adaptive_plan()?;
+        let owner = forged_reason
+            .jobs
+            .iter_mut()
+            .find(|job| job.key == CiJobKey::IntegrationPostgresDomain)
+            .context("adaptive plan must contain the LocalTx evidence owner")?;
+        owner.reasons = vec![JobReason::IntegrationClosure];
+        forged_reason.plan_digest = forged_reason.compute_digest()?;
+        assert!(
+            CiImpactPlan::from_json(&forged_reason.to_json()?).is_err(),
+            "a digest-consistent plan that strips the required-evidence reason must be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn nul_diff_parser_rejects_unknown_and_non_utf8() -> Result<()> {
         assert!(parse_diff(b"X\0path\0").is_err());
         assert!(parse_diff(b"M100\0path\0").is_err());
@@ -3377,7 +3483,7 @@ mod tests {
             DecisionKind::Adaptive,
             Recommendation::empty(),
         ))?;
-        assert_eq!(adaptive.jobs.iter().filter(|job| job.execute).count(), 1);
+        assert_eq!(adaptive.jobs.iter().filter(|job| job.execute).count(), 2);
         assert!(!adaptive.full_fallback);
 
         let mandatory = CiImpactPlan::new(input(
@@ -3675,6 +3781,15 @@ mod tests {
             policy_version(b"schemaVersion=1\nmode='adaptive'\n")
         );
         let catalog = policy_semantic_catalog();
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|field| field.ends_with(":localtx"))
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["job-required-evidence=integration/postgres-domain:localtx"],
+            "required-evidence mapping must be non-vacuous policy semantics"
+        );
         let mut changed_catalog = catalog.clone();
         changed_catalog.push("impact-rule=new-semantic-rule".to_owned());
         assert_ne!(

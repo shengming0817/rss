@@ -8,6 +8,7 @@
 //! compatibility plans are derived from this registry and guarded by non-vacuous red/green tests.
 //! INVARIANT: CI-SLO-JOB-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "CiJobKey is a closed enum whose ALL catalog and exhaustive mappings admit exactly the reusable workflow job matrix" }.
 //! INVARIANT: CI-IMPACT-CATALOG-01 { level = "Hard", exec = "native-compile", source = "code", native = "ci_job_catalog generates CiJobKey, ALL, workflow identity, artifact identity, and planner matrix fields from one descriptor" }.
+//! INVARIANT: CI-REQUIRED-EVIDENCE-OWNER-01 { level = "Hard", exec = "native-compile", source = "code", native = "the closed CI job descriptor catalog makes every job choose a RequiredEvidenceKind and a const identity proof admits exactly one LocalTx owner: integration/postgres-domain" }.
 
 use anyhow::Result;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -17,6 +18,19 @@ use std::str::FromStr;
 use crate::integration_shards::IntegrationShard;
 use crate::nextest::HashPartition;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequiredEvidenceKind {
+    LocalTx,
+}
+
+impl RequiredEvidenceKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalTx => "localtx",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct CiJobDescriptor {
     key: CiJobKey,
@@ -24,10 +38,11 @@ struct CiJobDescriptor {
     lane: CiLane,
     shard: Option<&'static str>,
     partition: Option<&'static str>,
+    required_evidence: Option<RequiredEvidenceKind>,
 }
 
 macro_rules! ci_job_catalog {
-    ($( $variant:ident => ($name:literal, $lane:ident, $shard:expr, $partition:expr) ),+ $(,)?) => {
+    ($( $variant:ident => ($name:literal, $lane:ident, $shard:expr, $partition:expr, $required_evidence:expr) ),+ $(,)?) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub(crate) enum CiJobKey {
             $( $variant, )+
@@ -40,6 +55,7 @@ macro_rules! ci_job_catalog {
                 lane: CiLane::$lane,
                 shard: $shard,
                 partition: $partition,
+                required_evidence: $required_evidence,
             },)+
         ];
 
@@ -55,67 +71,98 @@ macro_rules! ci_job_catalog {
             pub(crate) const fn as_str(self) -> &'static str {
                 self.descriptor().name
             }
+
+            pub(crate) const fn required_evidence(self) -> Option<RequiredEvidenceKind> {
+                self.descriptor().required_evidence
+            }
         }
     };
 }
 
 ci_job_catalog! {
-    CiMeta => ("ci-meta", Meta, None, None),
-    CiCorePrerequisites => ("ci-core-prerequisites", CorePrerequisites, None, None),
-    CiCoreTests1Of2 => ("ci-core-tests/1-of-2", CoreTests, None, Some("1/2")),
-    CiCoreTests2Of2 => ("ci-core-tests/2-of-2", CoreTests, None, Some("2/2")),
-    CiSecurity => ("ci-security", Security, None, None),
-    CiCoverage => ("ci-coverage", Coverage, None, None),
+    CiMeta => ("ci-meta", Meta, None, None, None),
+    CiCorePrerequisites => ("ci-core-prerequisites", CorePrerequisites, None, None, None),
+    CiCoreTests1Of2 => ("ci-core-tests/1-of-2", CoreTests, None, Some("1/2"), None),
+    CiCoreTests2Of2 => ("ci-core-tests/2-of-2", CoreTests, None, Some("2/2"), None),
+    CiSecurity => ("ci-security", Security, None, None, None),
+    CiCoverage => ("ci-coverage", Coverage, None, None, None),
     IntegrationPostgresDomain => (
         "integration/postgres-domain",
         Integration,
         Some("postgres-domain"),
-        None
+        None,
+        Some(RequiredEvidenceKind::LocalTx)
     ),
     IntegrationEventTransport1Of2 => (
         "integration/event-transport/1-of-2",
         Integration,
         Some("event-transport"),
-        Some("1/2")
+        Some("1/2"),
+        None
     ),
     IntegrationEventTransport2Of2 => (
         "integration/event-transport/2-of-2",
         Integration,
         Some("event-transport"),
-        Some("2/2")
+        Some("2/2"),
+        None
     ),
     IntegrationRuntimeHttpAuth1Of2 => (
         "integration/runtime-http-auth/1-of-2",
         Integration,
         Some("runtime-http-auth"),
-        Some("1/2")
+        Some("1/2"),
+        None
     ),
     IntegrationRuntimeHttpAuth2Of2 => (
         "integration/runtime-http-auth/2-of-2",
         Integration,
         Some("runtime-http-auth"),
-        Some("2/2")
+        Some("2/2"),
+        None
     ),
     IntegrationConsistencyFault => (
         "integration/consistency-fault",
         Integration,
         Some("consistency-fault"),
+        None,
         None
     ),
     IntegrationCdcProjectionSaga => (
         "integration/cdc-projection-saga",
         Integration,
         Some("cdc-projection-saga"),
+        None,
         None
     ),
     IntegrationObjectStorage => (
         "integration/object-storage",
         Integration,
         Some("object-storage"),
+        None,
         None
     ),
-    Audit => ("audit", Nightly, None, None),
+    Audit => ("audit", Nightly, None, None, None),
 }
+
+const _: () = {
+    let mut index = 0;
+    let mut localtx_owners = 0;
+    while index < CI_JOB_DESCRIPTORS.len() {
+        if matches!(
+            CI_JOB_DESCRIPTORS[index].required_evidence,
+            Some(RequiredEvidenceKind::LocalTx)
+        ) {
+            localtx_owners += 1;
+        }
+        index += 1;
+    }
+    assert!(localtx_owners == 1);
+    assert!(matches!(
+        CiJobKey::IntegrationPostgresDomain.required_evidence(),
+        Some(RequiredEvidenceKind::LocalTx)
+    ));
+};
 
 impl CiJobKey {
     pub(crate) const COUNT: usize = Self::ALL.len();
@@ -1345,6 +1392,16 @@ mod tests {
         );
         assert!("unknown".parse::<CiJobKey>().is_err());
         Ok(())
+    }
+
+    #[test]
+    fn required_evidence_catalog_has_exactly_one_localtx_owner() {
+        let owners = CiJobKey::ALL
+            .into_iter()
+            .filter(|job| job.required_evidence() == Some(RequiredEvidenceKind::LocalTx))
+            .collect::<Vec<_>>();
+        assert!(!owners.is_empty(), "required-evidence owner anti-vacuity");
+        assert_eq!(owners, [CiJobKey::IntegrationPostgresDomain]);
     }
 
     #[test]

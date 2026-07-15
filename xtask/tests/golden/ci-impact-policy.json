@@ -8,12 +8,18 @@
     "docs/ops/localtx-proof-report.md",
     "docs/rules/localtx.md"
   ],
+  "requiredEvidenceOwners": [
+    {
+      "jobKey": "integration/postgres-domain",
+      "evidenceKind": "localtx"
+    }
+  ],
   "pathCases": [
     {
       "status": "modified",
       "path": "docs/guide.md",
       "fullCause": null,
-      "recommended": ["ci-meta"]
+      "recommended": ["ci-meta", "integration/postgres-domain"]
     },
     {
       "status": "modified",
@@ -55,37 +61,37 @@
       "status": "modified",
       "path": "crates/observ/tests/localtx_ops_contract.rs",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "crates/identity/src/lib.rs",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "crates/identity/tests/contract.rs",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "crates/identity/Cargo.toml",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "contracts/event/identity/v1/policy-updated/payload.schema.json",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "generated/src/http/identity_v1.rs",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "integration/postgres-domain"]
     },
     {
       "status": "modified",

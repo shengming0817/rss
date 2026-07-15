@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "evidenceKind": "localtx-required",
+  "jobKey": "integration/postgres-domain",
+  "sourceRevision": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "planDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "runId": "42",
+  "runAttempt": "3",
+  "outcome": "success",
+  "localtxActiveCount": 5,
+  "localtxJourneyCount": 5,
+  "localtxBackendProfileCount": 5
+}

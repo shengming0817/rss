@@ -3,7 +3,7 @@
 //! INVARIANT: INTEGRATION-SHARD-REGISTRY-01 { level = "Hard", exec = "native-compile", source = "code", native = "catalog macro generates the closed enum, ALL, lookup, resources, and execution units" }.
 //! INVARIANT: INTEGRATION-SHARD-SELECTOR-01 { level = "Hard", exec = "native-compile", source = "code", native = "filtersets render only from typed package/binary/kind execution units" }.
 //! INVARIANT: INTEGRATION-SHARD-COVERAGE-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "metadata_coverage_rejects_missing_duplicate_and_unknown_targets", anti_vacuity = "workspace_metadata_covers_legacy_integration_targets" }.
-//! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journeys_form_one_unpartitioned_serial_batch" }.
+//! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism|localtx_backend_execution_unit_rejects_missing_duplicate_and_drift", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journeys_form_one_unpartitioned_serial_batch|localtx_backend_execution_unit_is_unique" }.
 
 #[cfg(test)]
 use crate::workspace_root;
@@ -421,6 +421,36 @@ pub(crate) fn localtx_journey_execution_batch() -> Result<ShardBatch> {
     Ok(batch.clone())
 }
 
+fn localtx_backend_execution_unit_from(units: &[ExecutionUnit]) -> Result<ExecutionUnit> {
+    let package = LocalFeatureScope::Postgres.package();
+    let matches = units
+        .iter()
+        .copied()
+        .filter(|unit| {
+            unit.package == package
+                && unit.target == package
+                && unit.kind == TargetKind::Lib
+                && unit.scheduling == Scheduling::Serial
+        })
+        .collect::<Vec<_>>();
+    let [unit] = matches.as_slice() else {
+        bail!(
+            "LocalTx backend evidence must have exactly one postgres-domain Serial library execution unit for the typed Postgres package; found {}",
+            matches.len()
+        );
+    };
+    Ok(*unit)
+}
+
+/// Resolve the one real-backend carrier executed by the LocalTx required-evidence owner.
+pub(crate) fn localtx_backend_execution_unit() -> Result<ExecutionUnit> {
+    let shard = IntegrationShard::PostgresDomain;
+    if shard.partition_policy() != PartitionPolicy::Unpartitioned {
+        bail!("LocalTx backend evidence shard must remain unpartitioned");
+    }
+    localtx_backend_execution_unit_from(shard.spec().units)
+}
+
 const LEGACY_PACKAGES: &[&str] = &[
     "postgres",
     "redis-adapter",
@@ -751,6 +781,42 @@ mod tests {
         assert_eq!(batch.kind, TargetKind::Test);
         assert_eq!(batch.package, "journeys");
         assert_eq!(batch.targets, LOCALTX_JOURNEY_TARGETS);
+        Ok(())
+    }
+
+    #[test]
+    fn localtx_backend_execution_unit_is_unique() -> Result<()> {
+        let unit = localtx_backend_execution_unit()?;
+        assert_eq!(unit.package, LocalFeatureScope::Postgres.package());
+        assert_eq!(unit.target, unit.package);
+        assert_eq!(unit.kind, TargetKind::Lib);
+        assert_eq!(unit.scheduling, Scheduling::Serial);
+        Ok(())
+    }
+
+    #[test]
+    fn localtx_backend_execution_unit_rejects_missing_duplicate_and_drift() -> Result<()> {
+        let expected = localtx_backend_execution_unit()?;
+        let units = IntegrationShard::PostgresDomain.spec().units;
+
+        let missing = units
+            .iter()
+            .copied()
+            .filter(|unit| *unit != expected)
+            .collect::<Vec<_>>();
+        assert!(localtx_backend_execution_unit_from(&missing).is_err());
+
+        let mut duplicate = units.to_vec();
+        duplicate.push(expected);
+        assert!(localtx_backend_execution_unit_from(&duplicate).is_err());
+
+        let mut drift = units.to_vec();
+        let carrier = drift
+            .iter_mut()
+            .find(|unit| **unit == expected)
+            .context("typed LocalTx backend carrier")?;
+        carrier.target = "postgres-drift";
+        assert!(localtx_backend_execution_unit_from(&drift).is_err());
         Ok(())
     }
 

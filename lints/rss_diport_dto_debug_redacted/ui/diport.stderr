@@ -39,5 +39,29 @@ LL |             pub f: Vec<u8>,
    |
    = help: 把字段类型换成 `RedactedBytes`（`crates/diport/src/redacted_bytes.rs`，`Debug`/`Display` 脱敏、经 `as_bytes()`/`into_bytes()` 访问字节）；极少数公开字节（如 CRL 序列号）或已 `derive(secure::Redact)` 治理的字段，三步同步：加 `is_structural_carve_out` 名单 + ADR-013 §4 carve-out registry + `ui/diport.rs` 照 G5/G6 加绿例（生产代码不用 `#[allow]`——dylint 未加载时触发 `unknown_lints`、`-D warnings` 红）
 
-warning: 5 warnings emitted
+warning: diport DTO 字段不得持裸字节缓冲（Vec<u8> / [u8;N] / Box<[u8]> 或其 Option 包装）：改用 `RedactedBytes` newtype（Debug/Display 脱敏）
+  --> $DIR/diport.rs:78:31
+   |
+LL |     pub struct CertSerial(pub Vec<u8>);
+   |                               ^^^^^^^
+   |
+   = help: 把字段类型换成 `RedactedBytes`（`crates/diport/src/redacted_bytes.rs`，`Debug`/`Display` 脱敏、经 `as_bytes()`/`into_bytes()` 访问字节）；极少数公开字节（如 CRL 序列号）或已 `derive(secure::Redact)` 治理的字段，三步同步：加 `is_structural_carve_out` 名单 + ADR-013 §4 carve-out registry + `ui/diport.rs` 照 G5/G6 加绿例（生产代码不用 `#[allow]`——dylint 未加载时触发 `unknown_lints`、`-D warnings` 红）
+
+warning: diport DTO 字段不得持裸字节缓冲（Vec<u8> / [u8;N] / Box<[u8]> 或其 Option 包装）：改用 `RedactedBytes` newtype（Debug/Display 脱敏）
+  --> $DIR/diport.rs:79:35
+   |
+LL |     pub struct SecretMaterial(pub Vec<u8>);
+   |                                   ^^^^^^^
+   |
+   = help: 把字段类型换成 `RedactedBytes`（`crates/diport/src/redacted_bytes.rs`，`Debug`/`Display` 脱敏、经 `as_bytes()`/`into_bytes()` 访问字节）；极少数公开字节（如 CRL 序列号）或已 `derive(secure::Redact)` 治理的字段，三步同步：加 `is_structural_carve_out` 名单 + ADR-013 §4 carve-out registry + `ui/diport.rs` 照 G5/G6 加绿例（生产代码不用 `#[allow]`——dylint 未加载时触发 `unknown_lints`、`-D warnings` 红）
+
+warning: diport DTO 字段不得持裸字节缓冲（Vec<u8> / [u8;N] / Box<[u8]> 或其 Option 包装）：改用 `RedactedBytes` newtype（Debug/Display 脱敏）
+  --> $DIR/diport.rs:80:36
+   |
+LL |     pub struct ArchiveChecksum(pub [u8; 32]);
+   |                                    ^^^^^^^^
+   |
+   = help: 把字段类型换成 `RedactedBytes`（`crates/diport/src/redacted_bytes.rs`，`Debug`/`Display` 脱敏、经 `as_bytes()`/`into_bytes()` 访问字节）；极少数公开字节（如 CRL 序列号）或已 `derive(secure::Redact)` 治理的字段，三步同步：加 `is_structural_carve_out` 名单 + ADR-013 §4 carve-out registry + `ui/diport.rs` 照 G5/G6 加绿例（生产代码不用 `#[allow]`——dylint 未加载时触发 `unknown_lints`、`-D warnings` 红）
+
+warning: 8 warnings emitted
 

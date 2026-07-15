@@ -441,13 +441,34 @@ mod tests {
     fn compiler_cache_validates_canonical_absolute_exact_version() -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
-        let unique = crate::testutil::unique_tmp("compiler-cache-policy");
-        let fixture_name = unique
+        fn relative_to_current_dir(target: &Path) -> anyhow::Result<PathBuf> {
+            let current = std::fs::canonicalize(std::env::current_dir()?)?;
+            let target = std::fs::canonicalize(target)?;
+            let current = current.components().collect::<Vec<_>>();
+            let target = target.components().collect::<Vec<_>>();
+            let common = current
+                .iter()
+                .zip(&target)
+                .take_while(|(left, right)| left == right)
+                .count();
+            anyhow::ensure!(common > 0, "temporary fixture must share a filesystem root");
+            let mut relative = PathBuf::new();
+            for _ in common..current.len() {
+                relative.push("..");
+            }
+            for component in &target[common..] {
+                relative.push(component.as_os_str());
+            }
+            Ok(relative)
+        }
+
+        let root = crate::testutil::unique_tmp("compiler-cache-policy");
+        std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(root)?;
+        let fixture_name = root
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("临时 sccache fixture 缺少目录名"))?;
-        let relative_root = PathBuf::from(".cache").join(fixture_name);
-        std::fs::create_dir_all(&relative_root)?;
-        let root = std::fs::canonicalize(&relative_root)?;
+        let relative_root = relative_to_current_dir(&root)?;
         let exact = root.join("sccache");
         std::fs::write(&exact, "#!/bin/sh\nprintf 'sccache 0.15.0\\n'\n")?;
         let mut permissions = std::fs::metadata(&exact)?.permissions();

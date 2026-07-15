@@ -62,16 +62,22 @@ struct G {
     f: Vec<u8>,
 }
 
-// G5（结构性 carve-out，CertSerial）：enclosing struct 名 `CertSerial` → `is_structural_carve_out` 豁免、不触发。
-// 对应生产 `diport::CertSerial`（RFC5280 公开序列号，derive(Debug) 有意可见原值，非机密）。
-struct CertSerial {
-    serial: Vec<u8>,
+// G5-G7：只有三个 canonical DefId path 获得结构性 carve-out。
+mod revocation_store {
+    pub struct CertSerial(pub Vec<u8>);
+}
+mod secret_resolver {
+    pub struct SecretMaterial(pub Vec<u8>);
+}
+mod dlx_lifecycle {
+    pub struct ArchiveChecksum(pub [u8; 32]);
 }
 
-// G6（结构性 carve-out，SecretMaterial）：enclosing struct 名 `SecretMaterial` → 豁免、不触发。
-// 对应生产 `diport::SecretMaterial`（已 derive(secure::Redact) #[redact(sensitivity = secret)]，完整 Wire+日志策略由 secure 承载）。
-struct SecretMaterial {
-    bytes: Vec<u8>,
+// R6-R8（同名伪造红例）：兄弟模块中的相同短名不能继承 canonical carve-out。
+mod sibling {
+    pub struct CertSerial(pub Vec<u8>);
+    pub struct SecretMaterial(pub Vec<u8>);
+    pub struct ArchiveChecksum(pub [u8; 32]);
 }
 
 fn main() {}

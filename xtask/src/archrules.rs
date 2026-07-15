@@ -776,6 +776,8 @@ fn scan_record_granular_xtask_invariants(
         "xtask/src/ci_slo.rs" => CI_SLO_INVARIANT_BINDINGS,
         "xtask/src/ci_impact.rs" => CI_IMPACT_INVARIANT_BINDINGS,
         "xtask/src/ci_gate.rs" => CI_GATE_INVARIANT_BINDINGS,
+        "xtask/src/localtx_coverage.rs" => LOCALTX_COVERAGE_INVARIANT_BINDINGS,
+        "xtask/src/localtx_evidence.rs" => LOCALTX_EVIDENCE_INVARIANT_BINDINGS,
         _ => return Ok(false),
     };
     let found_invariants = extract_invariants(root, path)?;
@@ -906,6 +908,14 @@ const CI_LANE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         evidence: "ci_job_catalog generated closed enum, matrix identity, and artifact identity",
         gates: "native-compile",
     },
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_lanes.rs",
+        id: "CI-REQUIRED-EVIDENCE-OWNER-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "closed required-evidence kind and exact-one-owner const proof",
+        gates: "native-compile",
+    },
 ];
 
 const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
@@ -933,16 +943,96 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         evidence: "private ImpactSet and exhaustive local/remote projection matches",
         gates: "native-compile",
     },
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_impact.rs",
+        id: "CI-IMPACT-REQUIRED-EVIDENCE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "adaptive-plan owner synthetic reds with required-owner anti-vacuity",
+        gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+    },
 ];
 
-const CI_GATE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[InvariantCarrierBinding {
-    path: "xtask/src/ci_gate.rs",
-    id: "CI-GATE-RECEIPT-01",
-    facet: None,
-    carrier: "xtask",
-    evidence: "receipt identity synthetic reds with exact-set anti-vacuity",
-    gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
-}];
+const CI_GATE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_gate.rs",
+        id: "CI-GATE-RECEIPT-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "receipt identity synthetic reds with exact-set anti-vacuity",
+        gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_gate.rs",
+        id: "LOCALTX-REQUIRED-EVIDENCE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "LocalTx receipt disk-matrix synthetic reds with exact-set anti-vacuity",
+        gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+    },
+];
+
+const LOCALTX_COVERAGE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/localtx_coverage.rs",
+        id: "LOCALTX-COVERAGE-CLOSURE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "workspace inventory synthetic reds with non-empty closure anti-vacuity",
+        gates: "verify,ci,ci-meta",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/localtx_coverage.rs",
+        id: "LOCALTX-BACKEND-PROFILE-CLOSURE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "backend profile AST synthetic reds with real-workspace anti-vacuity",
+        gates: "verify,ci,ci-meta",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/localtx_coverage.rs",
+        id: "LOCALTX-JOURNEY-CLOSURE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "journey inventory synthetic reds with real-workspace anti-vacuity",
+        gates: "verify,ci,ci-meta",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/localtx_coverage.rs",
+        id: "LOCALTX-REQUIRED-EVIDENCE-COUNTS-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "carrier/count synthetic reds with canonical workspace anti-vacuity",
+        gates: "integration",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/localtx_coverage.rs",
+        id: "LOCALTX-ADOPTION-TEMPLATE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "adoption template exact-set synthetic reds with canonical anti-vacuity",
+        gates: "verify,ci,ci-meta",
+    },
+];
+
+const LOCALTX_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/localtx_evidence.rs",
+        id: "LOCALTX-REQUIRED-EVIDENCE-FUNNEL-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "private success capabilities and sole receipt publication constructor",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/localtx_evidence.rs",
+        id: "LOCALTX-REQUIRED-EVIDENCE-WIRE-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "closed private receipt DTO and typed fixed wire values",
+        gates: "native-compile",
+    },
+];
 
 const CI_SLO_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     InvariantCarrierBinding {
