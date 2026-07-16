@@ -36,7 +36,10 @@ use generated::event::settings_v1::{
     self, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
 };
 use generated::http::settings_v1::SettingsConfigPublishRequest;
-use postgres::{ConfigValueProtections, DlxPayloadProtector, PgConfig, PgPassword, PgRuntimeDeps};
+use postgres::{
+    ConfigValueProtections, DlxPayloadProtector, PgConfig, PgPassword, PgRuntimeDeps,
+    PgTenantReadConfig,
+};
 use postgres::{PgSslMode, caps};
 use primitives::healthz::{HealthCheck, ProbeName};
 use secure::{DerivedAad, Plaintext};
@@ -52,6 +55,8 @@ const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const NOW_SECS: u64 = 1_700_000_000;
 const TEST_APP_ROLE: &str = "rss_app";
 const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
+const TEST_READ_ROLE: &str = "rss_app_read";
+const TEST_READ_PASSWORD: &str = "rss_app_read_test_pw";
 const SETTINGS_RELAY_PROBE: &str = "outbox_relay_settings";
 
 /// Deterministic test clock for settings event payload and outbox metadata.
@@ -328,10 +333,13 @@ async fn connect_pg() -> Result<(testkit::PgFixture, PgRuntimeDeps)> {
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    provision_rss_app_login(p).await?;
+    provision_runtime_logins(p).await?;
+    let tenant_read_config =
+        PgTenantReadConfig::new(pg_config(p, TEST_READ_ROLE, TEST_READ_PASSWORD));
     let deps = PgRuntimeDeps::setup(
         &owner_config,
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        &tenant_read_config,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )
@@ -351,7 +359,7 @@ fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgCon
     .with_acquire_timeout(Duration::from_secs(5))
 }
 
-async fn provision_rss_app_login(p: &testkit::PgConnParams) -> Result<()> {
+async fn provision_runtime_logins(p: &testkit::PgConnParams) -> Result<()> {
     let options = PgConnectOptions::new()
         .host(&p.host)
         .port(p.port)
@@ -369,10 +377,20 @@ async fn provision_rss_app_login(p: &testkit::PgConnParams) -> Result<()> {
         DO $$
         BEGIN
             PERFORM pg_advisory_xact_lock(hashtext('{TEST_APP_ROLE}'));
+            PERFORM pg_advisory_xact_lock(hashtext('{TEST_READ_ROLE}'));
             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_APP_ROLE}') THEN
-                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             ELSE
-                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_READ_ROLE}') THEN
+                CREATE ROLE {TEST_READ_ROLE} LOGIN PASSWORD '{TEST_READ_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            ELSE
+                ALTER ROLE {TEST_READ_ROLE} LOGIN PASSWORD '{TEST_READ_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             END IF;
         END
         $$;

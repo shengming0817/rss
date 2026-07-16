@@ -7,19 +7,20 @@
 //!   [`PgRuntimeDeps::handle`] 投影，生命周期只经 [`PgRuntimeDeps::into_runtime_parts`] 按值交接。
 //! - [`PgRuntimeHandle`]：可克隆的运行期能力句柄，派发 [`PgRuntimeHandle::for_domain`] /
 //!   [`PgRuntimeHandle::infra`] 与 readiness/RLS probe handle，不拥有生命周期出口。
-//! - [`PgDomainDeps<D>`]：per-domain 受控句柄（`Clone`，私有持 `Arc<PgStore>`），只暴露该域的 repo
+//! - [`PgDomainDeps<D>`]：per-domain 受控句柄（`Clone`，私有持 `Arc<PgRuntimeStores>`），只暴露该域的 repo
 //!   构造方法。类型参数 `D: PgDomain`（sealed marker）使「settings 的 deps 拿去建 identity repo」=
 //!   编译错误 E0599（类型层不可表达）。
 //! - [`PgInfraDeps`]：framework/global（provider-agnostic、非单域）基建能力句柄——emitter / inbox /
 //!   dead_letter / checkpoint / saga / projection，不绑 `caps::*` 域。
-//! - [`PgSettingsBundle`]：settings 域 durable 接线包，经 [`PgDomainDeps::settings_bundle`] 单次构造（同
-//!   store + 单 clock 扇出），内部预包装 config/secret 各自的 read repo + write UoW 域形 DynX port；组合根经
+//! - [`PgSettingsBundle`]：settings 域 durable 接线包，经 [`PgDomainDeps::settings_bundle`] 单次构造（同一
+//!   verified reader/writer capability pair + 单 clock 扇出），内部预包装 config/secret 各自的 read repo + write UoW 域形 DynX port；组合根经
 //!   [`PgSettingsBundle::into_parts`] 单次解包注入，不再散装构造 / 手工配对（PERSIST-003）。
 //!
 //! ## INVARIANT
 //!
-//! - **PG-BUNDLE-FUNNEL-01**（Hard，可见性封装）：公开 store 构造路径只允许两个受控 funnel：
-//!   [`PgRuntimeDeps::setup`]（serving runtime）与 [`PgRuntimeDeps::connect_maintenance`]（离线维护）。二者之外
+//! - **PG-BUNDLE-FUNNEL-01**（Hard，可见性封装）：公开 store 构造路径只允许三个受控 funnel：
+//!   [`PgRuntimeDeps::setup`]（serving runtime）、[`PgRuntimeDeps::migrate_reader_lane_only`]（0067 one-shot）
+//!   与 [`PgRuntimeDeps::connect_maintenance`]（离线维护）。三者之外
 //!   `PgStore::connect` / `run_migrations` 已降 `pub(crate)`，外部无法 mint `PgStore`、也拿不到 `&PgStore`；
 //!   且**所有** `&PgStore`-taking repo 构造器（含 credential/role/refresh_token/emitter + dead_letter/
 //!   checkpoint/saga/projection）均 `pub(crate)`——serving repo 只能经 `PgDomainDeps` / `PgInfraDeps` 构造，
@@ -31,12 +32,12 @@
 //! - **PG-BUNDLE-SETTINGS-04**（Hard，可见性 + sealed funnel + typed function choice）：settings 四件套
 //!   （config read/write + secret read/write）只能经 [`PgDomainDeps::settings_bundle`] 单次构造（funnel，
 //!   私有字段 + 唯一公开构造 ⇒ 外部 crate 无法 mint），经 [`PgSettingsBundle::into_parts`] 解包；一次
-//!   `into_parts` 产出的四元同源（同一 store + 同一注入 clock，clock 经 `Arc` 扇出到两个 `PgConfigRepo`）。
+//!   `into_parts` 产出的四元同源（同一 verified reader/writer capability pair + 同一注入 clock，clock 经 `Arc` 扇出到两个 `PgConfigRepo`）。
 //!   四件为互不可换的域形 dyn 类型（`DynConfigRepo`/`DynConfigUnitOfWork`/`DynSecretRepo`/
 //!   `DynSecretUnitOfWork`）⇒ 注入 service 时 read/write **角色无法错插**（typed function choice）。
 //!   散装 `config_repo()` / `secret_repo()`
 //!   accessor 已删除（不留兼容路径）。**强制边界**：funnel 守上游构造 + 角色槽位；`into_parts` 后四件为
-//!   owned 值，类型层不阻止把不同 bundle 实例的 box 跨实例重组（单一 `PgRuntimeDeps` ⇒ 同 store，跨 bundle
+//!   owned 值，类型层不阻止把不同 bundle 实例的 box 跨实例重组（单一 `PgRuntimeDeps` ⇒ 同一 capability pair，跨 bundle
 //!   重组为 contrived），故不声称该项。anti-vacuity = [`PgSettingsBundle`] 私有字段 `compile_fail` doctest
 //!   （须经 `into_parts` 唯一出口，不可旁路直读单字段）。
 //!
@@ -44,7 +45,7 @@
 //!
 //! - `ref: oxidecomputer/omicron nexus/db-queries/src/db/datastore/mod.rs@main` —— 两层私有
 //!   （`Pool.inner` → `DataStore.pool: Arc<Pool>`）+ `pool_connection_authorized` `pub(super)`；构造器集中 +
-//!   schema 门控。本模块对应：`connect`/`run_migrations` `pub(crate)` + `PgRuntimeDeps` 私有持 `Arc<PgStore>`。
+//!   schema 门控。本模块对应：`connect`/`run_migrations` `pub(crate)` + `PgRuntimeDeps` 私有持 `Arc<PgRuntimeStores>`。
 //! - `ref: risingwavelabs/risingwave src/meta/src/manager/env.rs@main` —— `MetaSrvEnv`（`meta_store_impl`
 //!   私有）`#[derive(Clone)]` 能力包 + accessor，各 manager 接 `env.clone()`。对应：`PgDomainDeps` Clone 句柄。
 //! - `ref: kube-rs/kube kube-runtime/src/controller/mod.rs@main` —— `Controller::run(.., Arc<Ctx>)` 注入
@@ -72,6 +73,7 @@ use crate::PgOutbox;
 #[cfg(feature = "domain-audit")]
 use crate::consumer_tx::PgAuditConsumerTx;
 use crate::delivery_policy::EventDeliveryPolicy;
+use crate::pool::{PgRuntimeStores, VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore};
 use crate::projection_events::ProjectionWriteRegistry;
 #[cfg(feature = "domain-settings")]
 use crate::{
@@ -83,7 +85,7 @@ use crate::{
     PgConfig, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore,
     PgInboxSweeper, PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionControl,
     PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgSagaInstanceStore, PgSagaJournal,
-    PgServiceTokenReplayGuard, PgSessionSweeper, PgStore, PgStoreGuard,
+    PgServiceTokenReplayGuard, PgSessionSweeper, PgStore, PgStoreGuard, PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo, PgAuthAuditSink};
@@ -168,8 +170,8 @@ pub struct PgRuntimeDeps {
 /// 不会形成第二份数据源。不提供 pool guard、sampler factory 或 lifecycle output API。
 #[derive(Clone)]
 pub struct PgRuntimeHandle {
-    store: Arc<PgStore>,
-    audit_admin_store: Option<Arc<PgStore>>,
+    stores: Arc<PgRuntimeStores>,
+    audit_admin_store: Option<VerifiedPgAuditAdminStore>,
     delivery_policy: EventDeliveryPolicy,
     projection_registry: ProjectionWriteRegistry,
     readiness: Arc<PgDbReadiness>,
@@ -180,7 +182,8 @@ pub struct PgRuntimeHandle {
 ///
 /// `spawn(self, token)` 消费工厂；同一 owner 产生的 factory 无法启动第二个 sampler。
 pub struct PgReadinessSamplerFactory {
-    store: Arc<PgStore>,
+    writer_store: Arc<PgStore>,
+    reader_store: Arc<PgStore>,
     readiness: Arc<PgDbReadiness>,
     period: Duration,
 }
@@ -190,7 +193,8 @@ impl PgReadinessSamplerFactory {
     #[must_use]
     pub fn spawn(self, token: CancellationToken) -> PgReadinessSampler {
         let handle = tokio::spawn(crate::readiness::pg_readiness_sampling_loop(
-            self.store,
+            self.writer_store,
+            self.reader_store,
             self.period,
             token.clone(),
             Arc::clone(&self.readiness),
@@ -204,8 +208,8 @@ impl PgReadinessSamplerFactory {
 /// 只用 migrator/owner 连接执行 schema migration 与全库维护扫描；不构造 serving pool、不跑 RLS 能力门、不跑
 /// legacy plaintext deny 门，否则 backfill 命令会在最需要运行时被 scheme=0 启动门挡住。
 pub struct PgMaintenanceDeps {
-    store: Arc<PgStore>,
-    audit_admin_store: Option<Arc<PgStore>>,
+    store: VerifiedPgMaintenanceStore,
+    audit_admin_store: Option<VerifiedPgAuditAdminStore>,
     _delivery_policy: EventDeliveryPolicy,
     clock: Arc<dyn Clock>,
 }
@@ -250,6 +254,18 @@ impl Clock for PgMaintenanceSystemClock {
 }
 
 impl PgRuntimeDeps {
+    /// Release-only SQLx migration runner for the exact 0066 → 0067 LocalOnly reader cutover.
+    ///
+    /// This entry does not construct writer/reader serving pools. The adapter verifies both the
+    /// embedded migration universe and `_sqlx_migrations` ledger before applying anything, so it
+    /// cannot silently become a generic migration bypass when a later migration is added.
+    pub async fn migrate_reader_lane_only(migrator_config: &PgConfig) -> Result<(), PgError> {
+        let migrator = PgStore::connect_migrator(migrator_config).await?;
+        let result = migrator.run_reader_lane_migration_only().await;
+        let _ = migrator.shutdown().await;
+        result
+    }
+
     /// 唯一公开构造路径：migrator 连接跑迁移，serving 连接建长期 pool 并跑 RLS 能力门。
     ///
     /// `migrator_config` 必须是短生命周期 DDL 角色；`serving_config` 必须是长期最小权限
@@ -259,12 +275,14 @@ impl PgRuntimeDeps {
     pub async fn setup(
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
+        tenant_read_config: &PgTenantReadConfig,
         projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> Result<Self, PgError> {
         Self::setup_with_audit_admin_config(
             migrator_config,
             serving_config,
+            tenant_read_config,
             None,
             LegacyConfigPlaintextPolicy::Deny,
             projection_generation,
@@ -278,6 +296,7 @@ impl PgRuntimeDeps {
     pub async fn setup_with_legacy_config_policy(
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
+        tenant_read_config: &PgTenantReadConfig,
         legacy_config_plaintext_policy: LegacyConfigPlaintextPolicy,
         projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
@@ -285,6 +304,7 @@ impl PgRuntimeDeps {
         Self::setup_with_audit_admin_config(
             migrator_config,
             serving_config,
+            tenant_read_config,
             None,
             legacy_config_plaintext_policy,
             projection_generation,
@@ -298,12 +318,13 @@ impl PgRuntimeDeps {
     pub async fn setup_with_audit_admin_config(
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
+        tenant_read_config: &PgTenantReadConfig,
         audit_admin_config: Option<&PgConfig>,
         legacy_config_plaintext_policy: LegacyConfigPlaintextPolicy,
         projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> Result<Self, PgError> {
-        let migrator = PgStore::connect(migrator_config).await?;
+        let migrator = PgStore::connect_migrator(migrator_config).await?;
         migrator.run_migrations().await?;
         let delivery_policy = migrator.load_event_delivery_policy().await?;
         migrator
@@ -315,20 +336,16 @@ impl PgRuntimeDeps {
             .map_err(PgError::ProjectionBindings)?;
         migrator.shutdown().await.ok();
 
-        let store = Arc::new(PgStore::connect(serving_config).await?);
-        // durable RLS 能力门（fail-fast）：tenant 表须 FORCE RLS + policy 且 GUC roundtrip 通过，否则拒绝启动。
-        store.verify_rls_capability().await?;
+        let writer = PgStore::connect_verified_writer(serving_config).await?;
+        let reader = PgStore::connect_verified_read(tenant_read_config).await?;
+        let stores = Arc::new(PgRuntimeStores::new(writer, reader));
         let audit_admin_store = match audit_admin_config {
-            Some(config) => {
-                let store = Arc::new(PgStore::connect(config).await?);
-                store.verify_audit_admin_capability().await?;
-                Some(store)
-            }
+            Some(config) => Some(PgStore::connect_verified_audit_admin(config).await?),
             None => None,
         };
         Ok(Self {
             handle: PgRuntimeHandle {
-                store,
+                stores,
                 audit_admin_store,
                 delivery_policy,
                 projection_registry: ProjectionWriteRegistry::from_generated(projection_inputs),
@@ -345,8 +362,9 @@ impl PgRuntimeDeps {
     pub async fn connect_maintenance(
         migrator_config: &PgConfig,
     ) -> Result<PgMaintenanceDeps, PgError> {
-        let store = Arc::new(PgStore::connect(migrator_config).await?);
-        let delivery_policy = store.load_event_delivery_policy().await?;
+        let raw_store = Arc::new(PgStore::connect(migrator_config).await?);
+        let delivery_policy = raw_store.load_event_delivery_policy().await?;
+        let store = VerifiedPgMaintenanceStore::from_maintenance_store(raw_store);
         Ok(PgMaintenanceDeps {
             store,
             audit_admin_store: None,
@@ -363,10 +381,10 @@ impl PgRuntimeDeps {
         migrator_config: &PgConfig,
         audit_admin_config: &PgConfig,
     ) -> Result<PgMaintenanceDeps, PgError> {
-        let store = Arc::new(PgStore::connect(migrator_config).await?);
-        let delivery_policy = store.load_event_delivery_policy().await?;
-        let audit_admin_store = Arc::new(PgStore::connect(audit_admin_config).await?);
-        audit_admin_store.verify_audit_admin_capability().await?;
+        let raw_store = Arc::new(PgStore::connect(migrator_config).await?);
+        let delivery_policy = raw_store.load_event_delivery_policy().await?;
+        let store = VerifiedPgMaintenanceStore::from_maintenance_store(raw_store);
+        let audit_admin_store = PgStore::connect_verified_audit_admin(audit_admin_config).await?;
         Ok(PgMaintenanceDeps {
             store,
             audit_admin_store: Some(audit_admin_store),
@@ -383,8 +401,8 @@ impl PgRuntimeDeps {
 
     /// 按值交接全部 runtime 生命周期资源。
     ///
-    /// resource 注册顺序固定为 primary pool → optional audit-admin pool；LIFO shutdown 时 sampler 先停，
-    /// 随后 audit-admin、primary 依次关池。sampler factory 也不可克隆并由调用方单次启动。
+    /// resource 注册顺序固定为 writer → reader → optional audit-admin pool；LIFO shutdown 时 sampler
+    /// 先停，随后 audit-admin、reader、writer 依次关池。
     #[must_use]
     pub fn into_runtime_parts(
         self,
@@ -394,26 +412,33 @@ impl PgRuntimeDeps {
         PgReadinessSamplerFactory,
     ) {
         let PgRuntimeHandle {
-            store,
+            stores,
             audit_admin_store,
             delivery_policy: _,
             projection_registry: _,
             readiness,
             rls_ready: _,
         } = self.handle;
+        let writer_store = stores.writer_store_arc();
+        let reader_store = stores.reader_store_arc();
         let mut resources = vec![DynManagedResource::new_box(PgStoreGuard::new(Arc::clone(
-            &store,
+            &writer_store,
         )))];
+        resources.push(DynManagedResource::new_box(PgStoreGuard::new_named(
+            Arc::clone(&reader_store),
+            "postgres-tenant-reader",
+        )));
         if let Some(audit_admin_store) = audit_admin_store {
             resources.push(DynManagedResource::new_box(PgStoreGuard::new_named(
-                audit_admin_store,
+                audit_admin_store.store_arc(),
                 "postgres-audit-admin",
             )));
         }
         (
             resources,
             PgReadinessSamplerFactory {
-                store,
+                writer_store,
+                reader_store,
                 readiness,
                 period,
             },
@@ -429,14 +454,14 @@ impl PgRuntimeHandle {
         self.delivery_policy.validate_relay_budget(budget)
     }
 
-    /// 派发 per-domain 受控句柄（`Arc<PgStore>` clone + `PhantomData<D>`）。
+    /// 派发 per-domain 受控句柄（`Arc<PgRuntimeStores>` clone + `PhantomData<D>`）。
     ///
     /// 对标 kube-rs `Controller::run(.., Arc<Ctx>)` 注入 shared context。
     #[must_use]
     pub fn for_domain<D: PgDomain>(&self) -> PgDomainDeps<D> {
         PgDomainDeps {
-            store: Arc::clone(&self.store),
-            audit_admin_store: self.audit_admin_store.as_ref().map(Arc::clone),
+            stores: Arc::clone(&self.stores),
+            audit_admin_store: self.audit_admin_store.clone(),
             projection_registry: self.projection_registry,
             _marker: PhantomData,
         }
@@ -447,7 +472,7 @@ impl PgRuntimeHandle {
     #[must_use]
     pub fn infra(&self) -> PgInfraDeps {
         PgInfraDeps {
-            store: Arc::clone(&self.store),
+            stores: Arc::clone(&self.stores),
             projection_registry: self.projection_registry,
             delivery_policy: self.delivery_policy,
         }
@@ -482,11 +507,17 @@ impl PgRuntimeHandle {
             .database("rss_module_test")
             .username("rss_module_test")
             .password("not-a-secret");
-        let pool = PgPoolOptions::new()
+        let writer_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(options.clone());
+        let reader_pool = PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy_with(options);
         Self {
-            store: Arc::new(PgStore { pool }),
+            stores: Arc::new(PgRuntimeStores::from_unverified_for_test(
+                Arc::new(PgStore { pool: writer_pool }),
+                Arc::new(PgStore { pool: reader_pool }),
+            )),
             audit_admin_store: None,
             delivery_policy: EventDeliveryPolicy::release(),
             projection_registry: ProjectionWriteRegistry::empty(),
@@ -505,10 +536,23 @@ impl PgRuntimeHandle {
 impl PgRuntimeDeps {
     /// 测试构造：从 lazy store 构造唯一 owner，可选注入 audit-admin store。
     fn from_stores_for_test(store: Arc<PgStore>, audit_admin_store: Option<Arc<PgStore>>) -> Self {
+        Self::from_all_stores_for_test(Arc::clone(&store), store, audit_admin_store)
+    }
+
+    /// 测试构造：显式注入互异 writer/reader，以验证双 pool 生命周期。
+    fn from_all_stores_for_test(
+        writer_store: Arc<PgStore>,
+        reader_store: Arc<PgStore>,
+        audit_admin_store: Option<Arc<PgStore>>,
+    ) -> Self {
         Self {
             handle: PgRuntimeHandle {
-                store,
-                audit_admin_store,
+                stores: Arc::new(PgRuntimeStores::from_unverified_for_test(
+                    writer_store,
+                    reader_store,
+                )),
+                audit_admin_store: audit_admin_store
+                    .map(VerifiedPgAuditAdminStore::from_unverified_for_test),
                 delivery_policy: EventDeliveryPolicy::release(),
                 projection_registry: ProjectionWriteRegistry::empty(),
                 readiness: Arc::new(PgDbReadiness::new()),
@@ -528,7 +572,10 @@ impl PgRuntimeHandle {
     /// 从既有 lazy store 构造 crate 内测试 capability handle，不铸造 lifecycle owner。
     pub(crate) fn from_store_for_test(store: Arc<PgStore>) -> Self {
         Self {
-            store,
+            stores: Arc::new(PgRuntimeStores::from_unverified_for_test(
+                Arc::clone(&store),
+                store,
+            )),
             audit_admin_store: None,
             delivery_policy: EventDeliveryPolicy::release(),
             projection_registry: ProjectionWriteRegistry::empty(),
@@ -542,7 +589,7 @@ impl PgMaintenanceDeps {
     /// Durable replay guard for one-shot maintenance operator service tokens.
     #[must_use]
     pub fn service_token_replay_guard(&self) -> Arc<dyn diport::ServiceTokenReplayGuard> {
-        Arc::new(PgServiceTokenReplayGuard::new(Arc::clone(&self.store)))
+        Arc::new(PgServiceTokenReplayGuard::new(self.store.store_arc()))
     }
 
     /// settings `ConfigValue` 存量 backfill/rewrap 执行器。
@@ -553,7 +600,7 @@ impl PgMaintenanceDeps {
         protection: ConfigValueProtection,
         capability: ConfigValueMaintenanceCapability,
     ) -> PgConfigValueMaintenance {
-        PgConfigValueMaintenance::new(Arc::clone(&self.store), protection, capability)
+        PgConfigValueMaintenance::new(self.store.store_arc(), protection, capability)
     }
 
     async fn record_maintenance_audit(
@@ -592,7 +639,7 @@ impl PgMaintenanceDeps {
         .bind(action)
         .bind(outcome)
         .bind(failure_reason)
-        .execute(&self.store.pool)
+        .execute(&self.store.store_arc().pool)
         .await
         .map_err(PgError::MaintenanceAudit)?;
         Ok(())
@@ -673,7 +720,7 @@ impl PgMaintenanceDeps {
     /// Tenant-scoped reconcile target operator store.
     #[must_use]
     pub fn reconcile_store(&self) -> PgReconcileStore {
-        self.store.reconcile()
+        PgReconcileStore::new_maintenance(&self.store)
     }
 
     /// Durable audit record for per-tenant audit ledger verification jobs.
@@ -715,7 +762,7 @@ impl PgMaintenanceDeps {
         &self,
         receipt: &'a ProjectionMaintenanceReceipt,
     ) -> PgProjectionControl<'a> {
-        PgStore::projection_control(Arc::clone(&self.store), receipt)
+        PgStore::projection_control(self.store.store_arc(), receipt)
     }
 
     /// Projection replay 所需的精确 capability bundle。
@@ -731,9 +778,9 @@ impl PgMaintenanceDeps {
             selector,
         )?;
         Ok(PgProjectionReplayStores {
-            events: self.store.projection_events(),
-            checkpoint: self.store.checkpoint(),
-            dead_letter: self.store.dead_letter(payload_protector),
+            events: self.store.store_arc().projection_events(),
+            checkpoint: self.store.store_arc().checkpoint(),
+            dead_letter: PgDeadLetterStore::new_maintenance(&self.store, payload_protector),
             receipt,
             tenant: selector.tenant(),
             projection: selector.projection().as_str().into(),
@@ -747,7 +794,8 @@ impl PgMaintenanceDeps {
         payload_protector: DlxPayloadProtector,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> PgDlqStore {
-        self.store.dlq_with_projection_registry(
+        PgDlqStore::with_projection_registry_maintenance(
+            &self.store,
             payload_protector,
             ProjectionWriteRegistry::from_generated(projection_inputs),
         )
@@ -756,16 +804,16 @@ impl PgMaintenanceDeps {
     /// 不允许 consumer payload replay 的 inspection/outbox-redrive store。
     #[must_use]
     pub fn dlq_store_without_payload_replay(&self) -> PgDlqStore {
-        self.store.dlq_without_payload_replay()
+        PgDlqStore::without_payload_replay_maintenance(&self.store)
     }
 
     /// 关闭维护连接池。
     pub async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
         let audit_admin_result = match self.audit_admin_store.as_ref() {
-            Some(store) => store.shutdown().await,
+            Some(store) => store.store_arc().shutdown().await,
             None => Ok(()),
         };
-        let primary_result = self.store.shutdown().await;
+        let primary_result = self.store.store_arc().shutdown().await;
         audit_admin_result?;
         primary_result
     }
@@ -778,7 +826,7 @@ pub enum MaintenanceAuditOutcome<'a> {
 
 /// per-domain 受控 durable 能力句柄（`Clone`，内部 `Arc` 廉价 clone）。
 ///
-/// 私有持 `Arc<PgStore>`，只暴露**所属域 `D`** 的 repo 构造方法（方法体在 crate 内走 `pub(crate) pool`
+/// 私有持 `Arc<PgRuntimeStores>`，只暴露**所属域 `D`** 的 repo 构造方法（方法体在 crate 内投影已验证 capability
 /// clone，返回具体 repo 类型，从不返回 `PgPool`）。`D` 是 sealed marker（[`caps`]），跨域调用编译期被拒：
 ///
 /// `PgDomainDeps<caps::Settings>` 调 identity 能力 = 编译错误（PG-BUNDLE-DOMAIN-02 anti-vacuity）：
@@ -816,8 +864,8 @@ fn identity_ok(d: PgDomainDeps<caps::Identity>, clock: Box<dyn diport::Clock>) {
 "#
 )]
 pub struct PgDomainDeps<D: PgDomain> {
-    store: Arc<PgStore>,
-    audit_admin_store: Option<Arc<PgStore>>,
+    stores: Arc<PgRuntimeStores>,
+    audit_admin_store: Option<VerifiedPgAuditAdminStore>,
     projection_registry: ProjectionWriteRegistry,
     _marker: PhantomData<D>,
 }
@@ -826,8 +874,8 @@ pub struct PgDomainDeps<D: PgDomain> {
 impl<D: PgDomain> Clone for PgDomainDeps<D> {
     fn clone(&self) -> Self {
         Self {
-            store: Arc::clone(&self.store),
-            audit_admin_store: self.audit_admin_store.as_ref().map(Arc::clone),
+            stores: Arc::clone(&self.stores),
+            audit_admin_store: self.audit_admin_store.clone(),
             projection_registry: self.projection_registry,
             _marker: PhantomData,
         }
@@ -855,19 +903,23 @@ impl PgDomainDeps<caps::Settings> {
         let (config_read_protection, config_write_protection) = protections.into_parts();
         PgSettingsBundle {
             config_repo: DynConfigRepo::new_box(PgConfigRepo::new_with_projection_registry(
-                &self.store,
+                self.stores.reader_capability(),
+                self.stores.writer_capability(),
                 Arc::clone(&clock),
                 config_read_protection,
                 self.projection_registry,
             )),
             config_uow: DynConfigUnitOfWork::new_box(PgConfigRepo::new_with_projection_registry(
-                &self.store,
+                self.stores.reader_capability(),
+                self.stores.writer_capability(),
                 clock,
                 config_write_protection,
                 self.projection_registry,
             )),
-            secret_repo: DynSecretRepo::new_box(PgSecretRepo::new(&self.store)),
-            secret_uow: DynSecretUnitOfWork::new_box(PgSecretUnitOfWork::new(&self.store)),
+            secret_repo: DynSecretRepo::new_box(PgSecretRepo::new(self.stores.reader_capability())),
+            secret_uow: DynSecretUnitOfWork::new_box(PgSecretUnitOfWork::new(
+                self.stores.writer_capability(),
+            )),
         }
     }
 
@@ -883,7 +935,7 @@ impl PgDomainDeps<caps::Settings> {
         payload_protector: DlxPayloadProtector,
     ) -> PgOutbox {
         PgOutbox::new(
-            &self.store,
+            self.stores.writer_capability(),
             bound_domain::<caps::Settings>(),
             publisher,
             relay_budget,
@@ -898,21 +950,21 @@ impl PgDomainDeps<caps::Settings> {
         &self,
         effect: bootstrap::SubscriberEffect,
     ) -> PgSettingsConsumerTx {
-        PgSettingsConsumerTx::config_version_changed(&self.store, effect)
+        PgSettingsConsumerTx::config_version_changed(self.stores.writer_capability(), effect)
     }
 }
 
 /// settings 域 durable 接线包（PERSIST-003 / #1424）：config 与 secret 各自的 read repo + write UoW，全部
-/// 源自同一 `(store, clock)`、预包装为 settings 域 dyn DI port。
+/// 源自同一 `(verified reader/writer capability pair, clock)`、预包装为 settings 域 dyn DI port。
 ///
 /// 字段私有 + 唯一构造经 [`PgDomainDeps::settings_bundle`] + 唯一解包经 [`PgSettingsBundle::into_parts`]
 /// （PG-BUNDLE-SETTINGS-04，Hard）。**实际强制**（仅声明类型层真成立的）：
 /// - 外部 crate 无法 mint（私有字段 + 唯一公开构造 funnel）；
-/// - 一次 `into_parts` 产出的四元同源（同一 store + 同一注入 clock）；
+/// - 一次 `into_parts` 产出的四元同源（同一 verified reader/writer capability pair + 同一注入 clock）；
 /// - 四件为互不可换的域形 dyn 类型 ⇒ config/secret 的 read/write 角色无法错插（typed function choice）。
 ///
 /// **不声称**：`into_parts` 后四件为 owned 值，类型层不阻止把不同 bundle 实例的 box 跨实例重组（funnel 守
-/// 上游构造 + 角色槽位，不守下游跨 bundle 重组；单一 `PgRuntimeDeps` ⇒ 同 store，跨 bundle 重组为 contrived）。
+/// 上游构造 + 角色槽位，不守下游跨 bundle 重组；单一 `PgRuntimeDeps` ⇒ 同一 capability pair，跨 bundle 重组为 contrived）。
 /// 对标 GoCell `accesspg.Bundle` / `WithPGBundle`（单次解包注入聚合）。
 ///
 /// anti-vacuity（私有字段须经 `into_parts` 唯一出口，不可旁路直读单字段）：
@@ -966,7 +1018,8 @@ impl PgDomainDeps<caps::Identity> {
     #[must_use]
     pub fn session_lifecycle(&self, clock: Box<dyn Clock>) -> PgSessionLifecycle {
         PgSessionLifecycle::new_with_projection_registry(
-            &self.store,
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
             clock,
             self.projection_registry,
         )
@@ -982,7 +1035,7 @@ impl PgDomainDeps<caps::Identity> {
         payload_protector: DlxPayloadProtector,
     ) -> PgOutbox {
         PgOutbox::new(
-            &self.store,
+            self.stores.writer_capability(),
             bound_domain::<caps::Identity>(),
             publisher,
             relay_budget,
@@ -994,38 +1047,47 @@ impl PgDomainDeps<caps::Identity> {
     /// 凭据仓储（credentials 表 + 折叠锁定态 + 行锁原子 RMW）。
     #[must_use]
     pub fn credential_repo(&self) -> PgCredentialRepo {
-        PgCredentialRepo::new(&self.store)
+        PgCredentialRepo::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+        )
     }
 
     /// 角色仓储（roles 表 + tenant scope）。
     #[must_use]
     pub fn role_repo(&self) -> PgRoleRepo {
-        PgRoleRepo::new(&self.store)
+        PgRoleRepo::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+        )
     }
 
     /// durable ABAC policy store（abac_policies 表 + tenant scope）。
     #[must_use]
     pub fn policy_repo(&self) -> PgPolicyRepo {
-        PgPolicyRepo::new(&self.store)
+        PgPolicyRepo::new(self.stores.reader_capability())
     }
 
     /// durable resource attribute store / resolver（resource_attributes 表 + tenant scope）。
     #[must_use]
     pub fn resource_attribute_repo(&self) -> PgResourceAttributeRepo {
-        PgResourceAttributeRepo::new(&self.store)
+        PgResourceAttributeRepo::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+        )
     }
 
     /// 角色绑定只读仓储（无 clock / mutation / outbox 能力）。
     #[must_use]
     pub fn role_binding_read_repo(&self) -> PgRoleBindingReadRepo {
-        PgRoleBindingReadRepo::new(&self.store)
+        PgRoleBindingReadRepo::new(self.stores.reader_capability())
     }
 
     /// durable ABAC policy lifecycle（policy mutation + policy-updated outbox co-tx）。
     #[must_use]
     pub fn policy_lifecycle(&self, clock: Box<dyn Clock>) -> PgPolicyLifecycle {
         PgPolicyLifecycle::new_with_projection_registry(
-            &self.store,
+            self.stores.writer_capability(),
             clock,
             self.projection_registry,
         )
@@ -1035,7 +1097,7 @@ impl PgDomainDeps<caps::Identity> {
     #[must_use]
     pub fn role_binding_lifecycle(&self, clock: Box<dyn Clock>) -> PgRoleBindingLifecycle {
         PgRoleBindingLifecycle::new_with_projection_registry(
-            &self.store,
+            self.stores.writer_capability(),
             clock,
             self.projection_registry,
         )
@@ -1044,7 +1106,10 @@ impl PgDomainDeps<caps::Identity> {
     /// refresh token store（哈希存储 + CAS rotation + 谱系级联撤销 + RLS）。
     #[must_use]
     pub fn refresh_token_store(&self) -> PgRefreshTokenStore {
-        PgRefreshTokenStore::new(&self.store)
+        PgRefreshTokenStore::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+        )
     }
 
     /// Journey-only refresh store that loses the commit acknowledgement for one named token
@@ -1058,7 +1123,11 @@ impl PgDomainDeps<caps::Identity> {
         &self,
         old_id: &str,
     ) -> PgRefreshTokenStore {
-        PgRefreshTokenStore::new(&self.store).with_rotation_fault(
+        PgRefreshTokenStore::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+        )
+        .with_rotation_fault(
             old_id,
             crate::refresh_token_store::RefreshRotationFault::CommitUnknown,
             1,
@@ -1076,7 +1145,11 @@ impl PgDomainDeps<caps::Audit> {
     where
         M: primitives::MacVerifier + Send + Sync,
     {
-        PgAuditRepo::new(&self.store, hasher)
+        PgAuditRepo::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+            hasher,
+        )
     }
 
     /// audit 审计链跨租户只读 admin repo。未配置 `rss_audit_admin` pool 时返回 `None`。
@@ -1099,7 +1172,7 @@ impl PgDomainDeps<caps::Audit> {
     /// are generic subjects, not only `ids::UserId`.
     #[must_use]
     pub fn auth_audit_sink(&self) -> PgAuthAuditSink {
-        PgAuthAuditSink::new(&self.store)
+        PgAuthAuditSink::new(self.stores.writer_capability())
     }
 
     /// ConsumerTx handler for `identity.session-created` consumed by audit.
@@ -1111,7 +1184,7 @@ impl PgDomainDeps<caps::Audit> {
     where
         M: primitives::MacVerifier + Send + Sync + 'static,
     {
-        PgAuditConsumerTx::session_created(&self.store, hasher)
+        PgAuditConsumerTx::session_created(self.stores.writer_capability(), hasher)
     }
 
     /// ConsumerTx handler for `identity.role-assigned` consumed by audit.
@@ -1123,7 +1196,7 @@ impl PgDomainDeps<caps::Audit> {
     where
         M: primitives::MacVerifier + Send + Sync + 'static,
     {
-        PgAuditConsumerTx::role_assigned(&self.store, hasher)
+        PgAuditConsumerTx::role_assigned(self.stores.writer_capability(), hasher)
     }
 
     /// ConsumerTx handler for `identity.role-revoked` consumed by audit.
@@ -1135,7 +1208,7 @@ impl PgDomainDeps<caps::Audit> {
     where
         M: primitives::MacVerifier + Send + Sync + 'static,
     {
-        PgAuditConsumerTx::role_revoked(&self.store, hasher)
+        PgAuditConsumerTx::role_revoked(self.stores.writer_capability(), hasher)
     }
 
     /// ConsumerTx handler for `identity.policy-updated` consumed by audit.
@@ -1147,13 +1220,13 @@ impl PgDomainDeps<caps::Audit> {
     where
         M: primitives::MacVerifier + Send + Sync + 'static,
     {
-        PgAuditConsumerTx::policy_updated(&self.store, hasher)
+        PgAuditConsumerTx::policy_updated(self.stores.writer_capability(), hasher)
     }
 }
 
 /// framework/global postgres 基建能力句柄（`Clone`，provider-agnostic、非单域）。
 ///
-/// 私有持 `Arc<PgStore>`，经 [`PgRuntimeHandle::infra`] 派发；只暴露 emitter / dead_letter / checkpoint /
+/// 私有持 `Arc<PgRuntimeStores>`，经 [`PgRuntimeHandle::infra`] 派发；只暴露 emitter / dead_letter / checkpoint /
 /// saga_journal / projection_events / cas_store / session_sweeper——这些是跨域基建（非绑某个 `caps::*` 域），
 /// 故独立于 [`PgDomainDeps`]。
 /// 与 `PgDomainDeps` 一样不返回 `&PgStore` / `PgPool`（PG-BUNDLE-POOL-03）。
@@ -1179,7 +1252,7 @@ impl PgDomainDeps<caps::Audit> {
 /// ```
 #[derive(Clone)]
 pub struct PgInfraDeps {
-    store: Arc<PgStore>,
+    stores: Arc<PgRuntimeStores>,
     projection_registry: ProjectionWriteRegistry,
     delivery_policy: EventDeliveryPolicy,
 }
@@ -1188,7 +1261,11 @@ impl PgInfraDeps {
     /// outbox emitter（envelope `occurred_at` 时间源经 `clock` 注入，构造器位置参）。
     #[must_use]
     pub fn emitter(&self, clock: Box<dyn Clock>) -> PgEmitter {
-        PgEmitter::new_with_projection_registry(&self.store, clock, self.projection_registry)
+        PgEmitter::new_with_projection_registry(
+            self.stores.writer_capability(),
+            clock,
+            self.projection_registry,
+        )
     }
 
     /// CDC-facing append-only outbox emitter.
@@ -1197,7 +1274,7 @@ impl PgInfraDeps {
     /// `outbox` status machine.
     #[must_use]
     pub fn cdc_emitter(&self, clock: Box<dyn Clock>) -> PgOutboxCdcEmitter {
-        PgOutboxCdcEmitter::new_with_store(&self.store, clock)
+        PgOutboxCdcEmitter::new_with_store(self.stores.writer_capability(), clock)
     }
 
     /// outbox backlog/sweeper maintenance 能力（不持 publisher）。
@@ -1206,7 +1283,7 @@ impl PgInfraDeps {
     /// framework/global infra 句柄，避免为 maintenance worker 注入可发布能力（#1429）。
     #[must_use]
     pub fn outbox_maintenance(&self) -> PgOutboxMaintenance {
-        PgOutboxMaintenance::new(&self.store)
+        PgOutboxMaintenance::new(&self.stores.writer_store_arc())
     }
 
     /// consumer inbox 幂等去重 store（runtime consumer resource bundle 使用）。
@@ -1215,14 +1292,17 @@ impl PgInfraDeps {
     /// framework/global infra 句柄，避免组合根为通用 consumer 借用某个业务域句柄。
     #[must_use]
     pub fn inbox(&self) -> PgInboxStore {
-        self.store.inbox()
+        PgInboxStore::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+        )
     }
 
     /// Tenant-scoped HOT dead-letter writer. Archive/purge is intentionally absent from this
     /// serving capability and lives in the independent [`crate::PgDlxLifecycleRuntime`].
     #[must_use]
     pub fn dead_letter(&self, payload_protector: DlxPayloadProtector) -> PgDeadLetterStore {
-        self.store.dead_letter(payload_protector)
+        PgDeadLetterStore::new(self.stores.writer_capability(), payload_protector)
     }
 
     /// inbox_receipts 保留期清理 sweeper（**全域**，跨 consumer_group / 域，#1210）。
@@ -1231,7 +1311,9 @@ impl PgInfraDeps {
     /// 去重记录。全域语义 ⇒ 归 framework/global infra 句柄（非 per-domain `PgDomainDeps`）。
     #[must_use]
     pub fn inbox_sweeper(&self) -> PgInboxSweeper {
-        self.store.inbox_sweeper(self.delivery_policy)
+        self.stores
+            .writer_store_arc()
+            .inbox_sweeper(self.delivery_policy)
     }
 
     /// sessions 过期行维护清理器（全域，固定 `expires_at <= now()` 谓词，#1233）。
@@ -1240,13 +1322,13 @@ impl PgInfraDeps {
     /// `sweep_expired()`。
     #[must_use]
     pub fn session_sweeper(&self) -> PgSessionSweeper {
-        self.store.session_sweeper()
+        self.stores.writer_store_arc().session_sweeper()
     }
 
     /// owner checkpoint store（reconcile/saga 进度）。
     #[must_use]
     pub fn checkpoint(&self) -> PgCheckpointStore {
-        self.store.checkpoint()
+        self.stores.writer_store_arc().checkpoint()
     }
 
     /// reconcile durable target/lease/attempt/action store（schema-level capability，#1629）。
@@ -1254,7 +1336,10 @@ impl PgInfraDeps {
     /// 本 accessor 只暴露最小 PG schema API，不启动 reconcile runtime worker，也不新增 engine/domain trait。
     #[must_use]
     pub fn reconcile(&self) -> PgReconcileStore {
-        self.store.reconcile()
+        PgReconcileStore::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+        )
     }
 
     /// command journal foundation store（schema-level capability，#1441）。
@@ -1264,31 +1349,37 @@ impl PgInfraDeps {
     /// injected producer clock, matching [`PgInfraDeps::emitter`].
     #[must_use]
     pub fn command_journal(&self, clock: Box<dyn Clock>) -> PgCommandJournal {
-        self.store.command_journal(clock)
+        PgCommandJournal::new(self.stores.writer_capability(), clock)
     }
 
     /// saga instance/lease store（L3 saga claim/fencing）。
     #[must_use]
     pub fn saga_instance_store(&self) -> PgSagaInstanceStore {
-        self.store.saga_instance_store()
+        PgSagaInstanceStore::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+        )
     }
 
     /// saga journal（L3 saga 状态）。
     #[must_use]
     pub fn saga_journal(&self) -> PgSagaJournal {
-        self.store.saga_journal()
+        PgSagaJournal::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+        )
     }
 
     /// projection events 读路径（全局 projection journal）。
     #[must_use]
     pub fn projection_events(&self) -> PgProjectionEvents {
-        self.store.projection_events()
+        self.stores.writer_store_arc().projection_events()
     }
 
     /// distributed state CAS store（全局 per-key revision token）。
     #[must_use]
     pub fn cas_store(&self) -> Box<DynCasStore<'static>> {
-        DynCasStore::new_box(self.store.cas_store())
+        DynCasStore::new_box(self.stores.writer_store_arc().cas_store())
     }
 }
 
@@ -1453,8 +1544,8 @@ mod tests {
         let s: PgDomainDeps<caps::Settings> = handle.for_domain();
         // owner 只包 handle；权限分离不复制数据源，所有 capability 投影共享同一 Arc。
         assert!(
-            Arc::ptr_eq(&s.store, &d.handle.store),
-            "for_domain clone 共享 store Arc"
+            Arc::ptr_eq(&s.stores, &d.handle.stores),
+            "for_domain clone 共享 runtime stores Arc"
         );
     }
 
@@ -1463,8 +1554,8 @@ mod tests {
         let s: PgDomainDeps<caps::Settings> = deps().handle().for_domain();
         let c = s.clone();
         assert!(
-            Arc::ptr_eq(&s.store, &c.store),
-            "clone 廉价共享 store Arc（非深拷贝）"
+            Arc::ptr_eq(&s.stores, &c.stores),
+            "clone 廉价共享 runtime stores Arc（非深拷贝）"
         );
     }
 
@@ -1482,13 +1573,15 @@ mod tests {
         let owner = PgRuntimeDeps::from_stores_for_test(lazy_store(), Some(lazy_store()));
         let first = owner.handle();
         let second = first.clone();
-        assert!(Arc::ptr_eq(&first.store, &second.store));
+        assert!(Arc::ptr_eq(&first.stores, &second.stores));
         assert!(
             first
                 .audit_admin_store
                 .as_ref()
                 .zip(second.audit_admin_store.as_ref())
-                .is_some_and(|(first, second)| Arc::ptr_eq(first, second)),
+                .is_some_and(|(first, second)| {
+                    Arc::ptr_eq(&first.store_arc(), &second.store_arc())
+                }),
             "audit-admin capability must remain present and Arc-identical"
         );
         assert!(Arc::ptr_eq(&first.readiness, &second.readiness));
@@ -1505,29 +1598,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_parts_without_audit_have_only_primary_guard() {
+    async fn runtime_parts_without_audit_have_writer_and_reader_guards() {
         let (resources, _factory) = deps().into_runtime_parts(Duration::from_secs(1));
         let names: Vec<_> = resources.iter().map(|resource| resource.name()).collect();
-        assert_eq!(names, ["postgres"]);
+        assert_eq!(names, ["postgres", "postgres-tenant-reader"]);
     }
 
     #[tokio::test]
     async fn runtime_parts_with_audit_preserve_registration_order_and_close_pools() {
         let primary = lazy_store();
+        let reader = lazy_store();
         let audit_admin = lazy_store();
-        let owner = PgRuntimeDeps::from_stores_for_test(
+        let owner = PgRuntimeDeps::from_all_stores_for_test(
             Arc::clone(&primary),
+            Arc::clone(&reader),
             Some(Arc::clone(&audit_admin)),
         );
         let (resources, _factory) = owner.into_runtime_parts(Duration::from_secs(1));
         let names: Vec<_> = resources.iter().map(|resource| resource.name()).collect();
-        assert_eq!(names, ["postgres", "postgres-audit-admin"]);
+        assert_eq!(
+            names,
+            ["postgres", "postgres-tenant-reader", "postgres-audit-admin"]
+        );
 
         for resource in resources.into_iter().rev() {
             let result = resource.shutdown().await;
             assert!(result.is_ok(), "lazy pool closes cleanly: {result:?}");
         }
         assert!(primary.pool.is_closed(), "primary pool must close");
+        assert!(reader.pool.is_closed(), "tenant reader pool must close");
         assert!(audit_admin.pool.is_closed(), "audit-admin pool must close");
     }
 
@@ -1602,8 +1701,10 @@ mod tests {
         let primary = lazy_store();
         let audit_admin = lazy_store();
         let deps = PgMaintenanceDeps {
-            store: Arc::clone(&primary),
-            audit_admin_store: Some(Arc::clone(&audit_admin)),
+            store: VerifiedPgMaintenanceStore::from_maintenance_store(Arc::clone(&primary)),
+            audit_admin_store: Some(VerifiedPgAuditAdminStore::from_unverified_for_test(
+                Arc::clone(&audit_admin),
+            )),
             _delivery_policy: EventDeliveryPolicy::release(),
             clock: Arc::new(EpochClock),
         };
@@ -1628,7 +1729,7 @@ mod tests {
     async fn maintenance_capabilities_construct_without_general_infra_escape()
     -> Result<(), Box<dyn std::error::Error>> {
         let deps = PgMaintenanceDeps {
-            store: lazy_store(),
+            store: VerifiedPgMaintenanceStore::from_maintenance_store(lazy_store()),
             audit_admin_store: None,
             _delivery_policy: EventDeliveryPolicy::release(),
             clock: Arc::new(EpochClock),
@@ -1669,8 +1770,8 @@ mod tests {
         let infra = deps().handle().infra();
         let c = infra.clone();
         assert!(
-            Arc::ptr_eq(&infra.store, &c.store),
-            "PgInfraDeps clone 廉价共享 store Arc"
+            Arc::ptr_eq(&infra.stores, &c.stores),
+            "PgInfraDeps clone 廉价共享 runtime stores Arc"
         );
     }
 

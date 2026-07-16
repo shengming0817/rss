@@ -5,11 +5,14 @@
 
 use std::time::Duration;
 
+use crate::pool::PgTenantReadConfig;
 use crate::{PgConfig, PgPassword, PgSslMode, PgStore};
 use testkit::PgFixture;
 
 const RSS_APP_ROLE: &str = "rss_app";
 const RSS_APP_PASSWORD: &str = "rss_app_test_pw";
+const RSS_APP_READ_ROLE: &str = "rss_app_read";
+const RSS_APP_READ_PASSWORD: &str = "rss_app_read_test_pw";
 const RSS_AUDIT_ADMIN_ROLE: &str = "rss_audit_admin";
 const RSS_AUDIT_ADMIN_PASSWORD: &str = "rss_audit_admin_test_pw";
 
@@ -105,6 +108,41 @@ pub(crate) async fn connect_pg_rss_app_role_with_limits(
     .with_max_connections(max_connections)
     .with_acquire_timeout(acquire_timeout);
     Ok(PgStore::connect(&config).await?)
+}
+
+/// Configure the migration-provisioned tenant reader with a test-only password and return its
+/// strongly typed runtime configuration.
+pub(crate) async fn rss_app_read_config(
+    fixture: &PgFixture,
+    store: &PgStore,
+) -> Result<PgTenantReadConfig, Box<dyn std::error::Error + Send + Sync>> {
+    sqlx::query(&format!(
+        "ALTER ROLE {RSS_APP_READ_ROLE} PASSWORD '{RSS_APP_READ_PASSWORD}'"
+    ))
+    .execute(&store.pool)
+    .await?;
+    let p = fixture.params();
+    Ok(PgTenantReadConfig::new(
+        PgConfig::new(
+            p.host.clone(),
+            p.port,
+            p.database.clone(),
+            RSS_APP_READ_ROLE.to_string(),
+            PgPassword::new(RSS_APP_READ_PASSWORD.to_string()),
+        )
+        .with_ssl_mode(PgSslMode::Prefer)
+        .with_acquire_timeout(Duration::from_secs(5)),
+    ))
+}
+
+/// Connect a raw test store as `rss_app_read` for catalog/ACL negative-path assertions.
+/// Production code cannot obtain this seam; it must use `PgStore::connect_verified_read`.
+pub(crate) async fn connect_pg_rss_app_read_role(
+    fixture: &PgFixture,
+    store: &PgStore,
+) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
+    let config = rss_app_read_config(fixture, store).await?;
+    Ok(PgStore::connect(config.as_pg_config()).await?)
 }
 
 /// 将迁移 provision 的 `rss_audit_admin` 设置测试密码，并以真实 audit-admin role 建连接。

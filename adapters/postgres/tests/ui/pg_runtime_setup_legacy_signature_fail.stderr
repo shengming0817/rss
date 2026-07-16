@@ -1,0 +1,22 @@
+error[E0061]: this function takes 5 arguments but 4 arguments were supplied
+  --> tests/ui/pg_runtime_setup_legacy_signature_fail.rs:9:18
+   |
+ 9 |     let _setup = PgRuntimeDeps::setup(
+   |                  ^^^^^^^^^^^^^^^^^^^^
+...
+12 |         projection_generation,
+   |         --------------------- argument #3 of type `&PgTenantReadConfig` is missing
+   |
+note: associated function defined here
+  --> src/bundle.rs
+   |
+   |     pub async fn setup(
+   |                  ^^^^^
+help: provide the argument
+   |
+ 9 |     let _setup = PgRuntimeDeps::setup(
+10 |         migrator_config,
+11 |         serving_config,
+12 ~         /* &PgTenantReadConfig */,
+13 ~         projection_generation,
+   |

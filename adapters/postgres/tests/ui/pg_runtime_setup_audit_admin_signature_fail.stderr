@@ -1,0 +1,22 @@
+error[E0061]: this function takes 7 arguments but 6 arguments were supplied
+  --> tests/ui/pg_runtime_setup_audit_admin_signature_fail.rs:10:18
+   |
+10 |     let _setup = PgRuntimeDeps::setup_with_audit_admin_config(
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+13 |         audit_admin_config,
+   |         ------------------ argument #3 of type `&PgTenantReadConfig` is missing
+   |
+note: associated function defined here
+  --> src/bundle.rs
+   |
+   |     pub async fn setup_with_audit_admin_config(
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: provide the argument
+   |
+10 |     let _setup = PgRuntimeDeps::setup_with_audit_admin_config(
+11 |         migrator_config,
+12 |         serving_config,
+13 ~         /* &PgTenantReadConfig */,
+14 ~         audit_admin_config,
+   |

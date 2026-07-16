@@ -3,11 +3,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use postgres::{LegacyConfigPlaintextPolicy, PgConfig, PgPassword, PgSslMode};
+use postgres::{LegacyConfigPlaintextPolicy, PgConfig, PgPassword, PgSslMode, PgTenantReadConfig};
 
 // ── postgres 配置 wiring ─────────────────────────────────────────────────────────────────────
 
 pub(crate) const PG_SSL_ROOT_CERT_PATH_ENV: &str = "RSS_PG_SSL_ROOT_CERT_PATH";
+pub(crate) const PG_WRITER_MAX_CONNECTIONS_ENV: &str = "RSS_PG_MAX_CONNECTIONS";
+pub(crate) const PG_READER_MAX_CONNECTIONS_ENV: &str = "RSS_PG_READ_MAX_CONNECTIONS";
+const DEFAULT_SERVING_LANE_MAX_CONNECTIONS: u32 = 5;
+const MAX_SERVING_LANE_MAX_CONNECTIONS: u32 = 100;
 pub(crate) const SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV: &str =
     "RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES";
 
@@ -27,7 +31,26 @@ pub(crate) const SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV: &str =
 pub(crate) fn build_pg_config_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<PgConfig> {
-    build_pg_config_with_user_env(&get, "RSS_PG_USERNAME", "RSS_PG_PASSWORD")
+    let config = build_pg_config_with_user_env(&get, "RSS_PG_USERNAME", "RSS_PG_PASSWORD")?;
+    apply_serving_lane_pool_limit(config, &get, PG_WRITER_MAX_CONNECTIONS_ENV)
+}
+
+fn apply_serving_lane_pool_limit(
+    config: PgConfig,
+    get: &impl Fn(&str) -> Option<String>,
+    env: &'static str,
+) -> anyhow::Result<PgConfig> {
+    let max = match get(env) {
+        Some(raw) => raw.trim().parse::<u32>().with_context(|| {
+            format!("{env} must be an integer in 1..={MAX_SERVING_LANE_MAX_CONNECTIONS}")
+        })?,
+        None => DEFAULT_SERVING_LANE_MAX_CONNECTIONS,
+    };
+    anyhow::ensure!(
+        (1..=MAX_SERVING_LANE_MAX_CONNECTIONS).contains(&max),
+        "{env} must be in 1..={MAX_SERVING_LANE_MAX_CONNECTIONS}"
+    );
+    Ok(config.with_max_connections(max))
 }
 
 fn build_pg_config_with_user_env(
@@ -117,6 +140,25 @@ pub(crate) fn parse_pg_ssl_mode(raw: Option<String>) -> PgSslMode {
 /// 从 `std::env` 构造 `PgConfig`。
 pub fn build_pg_config() -> anyhow::Result<PgConfig> {
     build_pg_config_from(|name| std::env::var(name).ok())
+}
+
+/// 从注入的配置读取器构造 tenant read-only postgres 配置。
+///
+/// Host / port / database / TLS / pool tuning 与 serving 连接遵循同一配置面；身份必须来自
+/// `RSS_PG_READ_USERNAME` / `RSS_PG_READ_PASSWORD`。两个 reader 凭据均为必填，不回退到 writer
+/// 的 `RSS_PG_USERNAME` / `RSS_PG_PASSWORD`。
+pub(crate) fn build_pg_read_config_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<PgTenantReadConfig> {
+    let config =
+        build_pg_config_with_user_env(&get, "RSS_PG_READ_USERNAME", "RSS_PG_READ_PASSWORD")?;
+    apply_serving_lane_pool_limit(config, &get, PG_READER_MAX_CONNECTIONS_ENV)
+        .map(PgTenantReadConfig::new)
+}
+
+/// 从 `std::env` 构造强类型 tenant read-only postgres 配置。
+pub fn build_pg_read_config() -> anyhow::Result<PgTenantReadConfig> {
+    build_pg_read_config_from(|name| std::env::var(name).ok())
 }
 
 pub(crate) fn build_pg_audit_admin_config_from(
@@ -334,6 +376,115 @@ mod tests {
         let debug = format!("{cfg:?}");
         assert!(debug.contains("postgres"));
         assert!(!debug.contains("rss_app"));
+    }
+
+    #[allow(clippy::panic)]
+    #[test]
+    fn pg_read_config_requires_dedicated_credential_pair_without_writer_fallback() {
+        let missing_username = build_pg_read_config_from(full_pg_get);
+        match missing_username {
+            Ok(_) => panic!("writer credentials must not satisfy the tenant reader"),
+            Err(err) => assert!(err.to_string().contains("RSS_PG_READ_USERNAME")),
+        }
+
+        let missing_password = build_pg_read_config_from(|name| match name {
+            "RSS_PG_READ_USERNAME" => Some("rss_app_read".to_string()),
+            _ => full_pg_get(name),
+        });
+        match missing_password {
+            Ok(_) => panic!("reader username without reader password must fail"),
+            Err(err) => assert!(err.to_string().contains("RSS_PG_READ_PASSWORD")),
+        }
+    }
+
+    #[allow(clippy::panic)]
+    #[test]
+    fn pg_read_config_uses_dedicated_credentials() {
+        let cfg = build_pg_read_config_from(|name| match name {
+            "RSS_PG_READ_USERNAME" => Some("rss_app_read".to_string()),
+            "RSS_PG_READ_PASSWORD" => Some("read_pw".to_string()),
+            _ => full_pg_get(name),
+        })
+        .unwrap_or_else(|err| panic!("tenant reader config: {err}"));
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("rss_app_read"));
+        assert!(!debug.contains("username: \"rss_app\""));
+        assert!(!debug.contains("read_pw"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn serving_pool_budget_is_split_by_default_and_independently_configurable() {
+        let writer = build_pg_config_from(full_pg_get).expect("writer config");
+        let reader = build_pg_read_config_from(|name| match name {
+            "RSS_PG_READ_USERNAME" => Some("rss_app_read".to_string()),
+            "RSS_PG_READ_PASSWORD" => Some("read_pw".to_string()),
+            _ => full_pg_get(name),
+        })
+        .expect("reader config");
+        assert!(format!("{writer:?}").contains("max_connections: 5"));
+        assert!(format!("{reader:?}").contains("max_connections: 5"));
+
+        let writer = build_pg_config_from(|name| match name {
+            PG_WRITER_MAX_CONNECTIONS_ENV => Some("7".to_string()),
+            _ => full_pg_get(name),
+        })
+        .expect("custom writer pool");
+        let reader = build_pg_read_config_from(|name| match name {
+            "RSS_PG_READ_USERNAME" => Some("rss_app_read".to_string()),
+            "RSS_PG_READ_PASSWORD" => Some("read_pw".to_string()),
+            PG_READER_MAX_CONNECTIONS_ENV => Some("3".to_string()),
+            _ => full_pg_get(name),
+        })
+        .expect("custom reader pool");
+        assert!(format!("{writer:?}").contains("max_connections: 7"));
+        assert!(format!("{reader:?}").contains("max_connections: 3"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn serving_pool_limits_reject_zero_overflow_and_non_numeric_values() {
+        for (env, value, reader) in [
+            (PG_WRITER_MAX_CONNECTIONS_ENV, "0", false),
+            (PG_WRITER_MAX_CONNECTIONS_ENV, "101", false),
+            (PG_READER_MAX_CONNECTIONS_ENV, "many", true),
+        ] {
+            let result = if reader {
+                build_pg_read_config_from(|name| match name {
+                    "RSS_PG_READ_USERNAME" => Some("rss_app_read".to_string()),
+                    "RSS_PG_READ_PASSWORD" => Some("read_pw".to_string()),
+                    name if name == env => Some(value.to_string()),
+                    _ => full_pg_get(name),
+                })
+                .map(|_| ())
+            } else {
+                build_pg_config_from(|name| {
+                    (name == env)
+                        .then(|| value.to_string())
+                        .or_else(|| full_pg_get(name))
+                })
+                .map(|_| ())
+            };
+            let error = result.expect_err("invalid serving pool limit must fail");
+            assert!(error.to_string().contains(env), "{error:#}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn pg_read_config_shares_tls_configuration() {
+        let ca = write_temp_file("pg-reader-root-ca.pem", b"test ca");
+        let cfg = build_pg_read_config_from(|name| match name {
+            "RSS_PG_READ_USERNAME" => Some("rss_app_read".to_string()),
+            "RSS_PG_READ_PASSWORD" => Some("read_pw".to_string()),
+            "RSS_PG_SSL_MODE" => Some("verify-ca".to_string()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(ca.display().to_string()),
+            _ => full_pg_get(name),
+        })
+        .expect("reader must share serving TLS configuration");
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("VerifyCa"));
+        assert!(debug.contains("pg-reader-root-ca.pem"));
     }
 
     #[allow(clippy::panic)]

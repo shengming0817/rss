@@ -45,7 +45,7 @@ use identity::ports::{
     PolicyObligations, PolicyRouteScope, PolicyRule, TenantId, TenantRepoScope,
 };
 use identity::{IdentityDomain, IdentityDomainDeps, LoginService};
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tokio_util::sync::CancellationToken;
@@ -72,6 +72,8 @@ const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
 const TEST_APP_ROLE: &str = "rss_app";
 const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
+const TEST_READ_ROLE: &str = "rss_app_read";
+const TEST_READ_PASSWORD: &str = "rss_app_read_test_pw";
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -281,10 +283,13 @@ async fn connect_pg() -> Result<(testkit::PgFixture, PgRuntimeDeps)> {
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    provision_rss_app_login(p).await?;
+    provision_runtime_logins(p).await?;
+    let tenant_read_config =
+        PgTenantReadConfig::new(pg_config(p, TEST_READ_ROLE, TEST_READ_PASSWORD));
     let deps = PgRuntimeDeps::setup(
         &owner_config,
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        &tenant_read_config,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )
@@ -304,7 +309,7 @@ fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgCon
     .with_acquire_timeout(Duration::from_secs(5))
 }
 
-async fn provision_rss_app_login(p: &testkit::PgConnParams) -> Result<()> {
+async fn provision_runtime_logins(p: &testkit::PgConnParams) -> Result<()> {
     let options = PgConnectOptions::new()
         .host(&p.host)
         .port(p.port)
@@ -322,10 +327,20 @@ async fn provision_rss_app_login(p: &testkit::PgConnParams) -> Result<()> {
         DO $$
         BEGIN
             PERFORM pg_advisory_xact_lock(hashtext('{TEST_APP_ROLE}'));
+            PERFORM pg_advisory_xact_lock(hashtext('{TEST_READ_ROLE}'));
             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_APP_ROLE}') THEN
-                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             ELSE
-                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_READ_ROLE}') THEN
+                CREATE ROLE {TEST_READ_ROLE} LOGIN PASSWORD '{TEST_READ_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            ELSE
+                ALTER ROLE {TEST_READ_ROLE} LOGIN PASSWORD '{TEST_READ_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             END IF;
         END
         $$;

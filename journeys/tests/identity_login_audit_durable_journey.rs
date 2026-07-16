@@ -53,7 +53,7 @@ use generated::http::identity_v1::login::IdentityLoginRequest;
 use identity::LoginService;
 use identity::ports::DynSessionLifecycle;
 use memory::{FixedClock, MemBus};
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
 use primitives::MacKey;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tokio_util::sync::CancellationToken;
@@ -62,6 +62,8 @@ use vocab::TenantId;
 const IDENTITY_DOMAIN: &str = "identity";
 const RSS_APP_ROLE: &str = "rss_app";
 const RSS_APP_PASSWORD: &str = "rss_app_test_pw";
+const RSS_APP_READ_ROLE: &str = "rss_app_read";
+const RSS_APP_READ_PASSWORD: &str = "rss_app_read_test_pw";
 /// #1160：注入的 correlation——经 diagctx ambient → PgSessionLifecycle emit → outbox.metadata 列 → relay
 /// hydrate → MemBus → consumer `Message.metadata` 端到端保真断言（白名单字符，CorrelationId::parse 必通）。
 const JOURNEY_CORR: &str = "journey-corr-1160";
@@ -144,7 +146,7 @@ fn pg_config_for(p: &testkit::PgConnParams, username: &str, password: &str) -> P
     .with_acquire_timeout(Duration::from_secs(5))
 }
 
-async fn provision_rss_app_login(p: &testkit::PgConnParams) -> Result<()> {
+async fn provision_runtime_logins(p: &testkit::PgConnParams) -> Result<()> {
     let options = PgConnectOptions::new()
         .host(&p.host)
         .port(p.port)
@@ -157,20 +159,30 @@ async fn provision_rss_app_login(p: &testkit::PgConnParams) -> Result<()> {
         .acquire_timeout(Duration::from_secs(5))
         .connect_with(options)
         .await?;
-    sqlx::query(
+    sqlx::query(&format!(
         r#"
         DO $$
         BEGIN
-            PERFORM pg_advisory_xact_lock(hashtext('rss_app'));
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app') THEN
-                CREATE ROLE rss_app LOGIN PASSWORD 'rss_app_test_pw' NOBYPASSRLS;
+            PERFORM pg_advisory_xact_lock(hashtext('{RSS_APP_ROLE}'));
+            PERFORM pg_advisory_xact_lock(hashtext('{RSS_APP_READ_ROLE}'));
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{RSS_APP_ROLE}') THEN
+                CREATE ROLE {RSS_APP_ROLE} LOGIN PASSWORD '{RSS_APP_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             ELSE
-                ALTER ROLE rss_app LOGIN PASSWORD 'rss_app_test_pw' NOBYPASSRLS;
+                ALTER ROLE {RSS_APP_ROLE} LOGIN PASSWORD '{RSS_APP_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{RSS_APP_READ_ROLE}') THEN
+                CREATE ROLE {RSS_APP_READ_ROLE} LOGIN PASSWORD '{RSS_APP_READ_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            ELSE
+                ALTER ROLE {RSS_APP_READ_ROLE} LOGIN PASSWORD '{RSS_APP_READ_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             END IF;
         END
         $$;
         "#,
-    )
+    ))
     .execute(&pool)
     .await?;
     pool.close().await;
@@ -278,14 +290,20 @@ async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn login_audit_durable_topology() -> Result<()> {
     let pg = testkit::env_or_postgres().await?;
-    provision_rss_app_login(pg.params()).await?;
+    provision_runtime_logins(pg.params()).await?;
     let authority_epoch = database_now_epoch(pg.params()).await?;
     let owner_config = pg_config(pg.params())?;
     let app_config = pg_config_for(pg.params(), RSS_APP_ROLE, RSS_APP_PASSWORD);
+    let tenant_read_config = PgTenantReadConfig::new(pg_config_for(
+        pg.params(),
+        RSS_APP_READ_ROLE,
+        RSS_APP_READ_PASSWORD,
+    ));
     // postgres capability bundle（#1423）：`setup` 含 connect + run_migrations；identity 域受控句柄派发 repo。
     let deps = PgRuntimeDeps::setup(
         &owner_config,
         &app_config,
+        &tenant_read_config,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )

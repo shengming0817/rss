@@ -43,11 +43,14 @@ use secure::Plaintext;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use sqlx::{PgPool, Row};
 
-use crate::{DlxPayloadProtector, PgConfig, PgPassword, PgRuntimeDeps, PgSslMode};
+use crate::{
+    DlxPayloadProtector, PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig,
+};
 
 mod saga_fixture;
 
 const RSS_APP_ROLE: &str = "rss_app";
+const RSS_APP_READ_ROLE: &str = "rss_app_read";
 const SCHEMA_HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// Error returned by the fault-matrix harness.
@@ -238,7 +241,8 @@ impl PgFaultMatrixHarness {
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> FaultMatrixResult<Self> {
         let serving_password = format!("rss_app_{}", uuid::Uuid::new_v4().simple());
-        provision_rss_app_login(&config, &serving_password).await?;
+        let reader_password = format!("rss_app_read_{}", uuid::Uuid::new_v4().simple());
+        provision_runtime_logins(&config, &serving_password, &reader_password).await?;
         let migrator = pg_config(
             &config.host,
             config.port,
@@ -253,9 +257,17 @@ impl PgFaultMatrixHarness {
             RSS_APP_ROLE,
             &serving_password,
         );
+        let tenant_read = PgTenantReadConfig::new(pg_config(
+            &config.host,
+            config.port,
+            &config.database,
+            RSS_APP_READ_ROLE,
+            &reader_password,
+        ));
         let deps = PgRuntimeDeps::setup(
             &migrator,
             &serving,
+            &tenant_read,
             projection_generation,
             projection_inputs,
         )
@@ -876,15 +888,18 @@ async fn owner_pool(config: &PgFaultMatrixConfig) -> FaultMatrixResult<PgPool> {
         .await?)
 }
 
-async fn provision_rss_app_login(
+async fn provision_runtime_logins(
     config: &PgFaultMatrixConfig,
-    password: &str,
+    serving_password: &str,
+    reader_password: &str,
 ) -> FaultMatrixResult<()> {
-    if !password
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        bail!("generated rss_app password contains an unsafe SQL literal byte");
+    for password in [serving_password, reader_password] {
+        if !password
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            bail!("generated postgres role password contains an unsafe SQL literal byte");
+        }
     }
     let pool = owner_pool(config).await?;
     sqlx::query(
@@ -892,10 +907,16 @@ async fn provision_rss_app_login(
         DO $$
         BEGIN
             PERFORM pg_advisory_xact_lock(hashtext('rss_app'));
+            PERFORM pg_advisory_xact_lock(hashtext('rss_app_read'));
             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app') THEN
-                CREATE ROLE rss_app LOGIN NOBYPASSRLS;
+                CREATE ROLE rss_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             ELSE
-                ALTER ROLE rss_app LOGIN NOBYPASSRLS;
+                ALTER ROLE rss_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app_read') THEN
+                CREATE ROLE rss_app_read LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            ELSE
+                ALTER ROLE rss_app_read LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             END IF;
         END
         $$;
@@ -904,7 +925,12 @@ async fn provision_rss_app_login(
     .execute(&pool)
     .await?;
     sqlx::query(&format!(
-        "ALTER ROLE {RSS_APP_ROLE} LOGIN PASSWORD '{password}' NOBYPASSRLS"
+        "ALTER ROLE {RSS_APP_ROLE} LOGIN PASSWORD '{serving_password}' NOBYPASSRLS"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "ALTER ROLE {RSS_APP_READ_ROLE} LOGIN PASSWORD '{reader_password}' NOBYPASSRLS"
     ))
     .execute(&pool)
     .await?;

@@ -2,7 +2,7 @@
 //!
 //! 归属 postgres adapter（**不**进 diport，#1116 决策 1）——签名暴露 crate-private [`TxCapability`]，
 //! 放 provider-agnostic 的 `diport` 会迫使其依赖 sqlx、破坏不变式。tenant 表不可使用本入口；必须经
-//! `PgTenantPool` scoped methods 注入 `SET LOCAL rss.tenant_id`。
+//! `PgTenantReadPool` / `PgTenantWritePool` scoped methods 注入 `SET LOCAL rss.tenant_id`。
 //!
 //! `ref: sqlx examples/postgres/transaction/src/main.rs@v0.8.6` ·
 //! `ref: sqlx sqlx-core/src/transaction.rs@v0.8.6`。
@@ -21,7 +21,7 @@ impl PgStore {
     ///
     /// **`pub(crate)`，非公开 API（fail-closed，#1116 review F2）**：本入口暴露**未做 tenant scope**的事务
     /// capability。它只允许用于无 `tenant_id` RLS 语义的 global infra 表；tenant 表生产路径必须
-    /// 使用 `PgTenantPool::{read,write,co_tx_with_outbox}`。`cargo xtask pg-tenant-tx-guard` 会拒绝 tenant
+    /// 使用 typed read/write pool methods。`cargo xtask pg-tenant-tx-guard` 会拒绝 tenant
     /// 表 SQL 经本入口执行。
     // reason(dead_code): 基座事务原语，生产消费方（eventexec repo impl）落在 P4+；现仅 crate 内集成测试
     // 行使。保持 pub(crate)（不公开裸事务）优先于消除 dead_code——故 item-level allow + 业务理由。

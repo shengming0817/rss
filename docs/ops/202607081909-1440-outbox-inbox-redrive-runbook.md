@@ -326,7 +326,7 @@ FROM pg_stat_activity AS activity
 JOIN pg_locks AS held_lock ON held_lock.pid = activity.pid
 WHERE activity.datname = current_database()
   AND activity.usename = current_user
-  AND activity.application_name = 'rss-postgres'
+  AND activity.application_name = 'rss-postgres-migrator'
   AND held_lock.locktype = 'advisory'
   AND held_lock.mode = 'ExclusiveLock'
   AND held_lock.granted;

@@ -45,7 +45,7 @@ use identity::{LoginService, RefreshService, SeedSigner};
 use memory::{FixedClock, MemBus, MemEmitter};
 use postgres::{
     ConfigValueProtections, PgAuditAdminRepo, PgConfig, PgCredentialRepo, PgPassword,
-    PgRefreshTokenStore, PgRuntimeDeps, PgSslMode, caps,
+    PgRefreshTokenStore, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps,
 };
 use primitives::{AuthPlan, AuthScheme, ListenerKind, MacKey, RequiredScheme};
 use serde::Deserialize;
@@ -71,6 +71,8 @@ const TENANT_B_USER: &str = "11111111-2222-4333-8444-555555555555";
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
 static RSS_APP_LOGIN: TestPgCredential = TestPgCredential::new("rss_app", "rss_app_test_pw");
+static RSS_APP_READ_LOGIN: TestPgCredential =
+    TestPgCredential::new("rss_app_read", "rss_app_read_test_pw");
 static RSS_AUDIT_ADMIN_LOGIN: TestPgCredential =
     TestPgCredential::new("rss_audit_admin", "rss_audit_admin_test_pw");
 const CURRENT_PASSWORD: &str = "journey-current-password-sentinel";
@@ -940,8 +942,8 @@ async fn provision_test_login(
         r#"
         SELECT CASE
             WHEN EXISTS (SELECT FROM pg_roles WHERE rolname = $1)
-                THEN format('ALTER ROLE %I LOGIN PASSWORD %L NOBYPASSRLS', $1, $2)
-            ELSE format('CREATE ROLE %I LOGIN PASSWORD %L NOBYPASSRLS', $1, $2)
+                THEN format('ALTER ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', $1, $2)
+            ELSE format('CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', $1, $2)
         END
         "#,
     )
@@ -955,7 +957,11 @@ async fn provision_test_login(
 
 async fn provision_test_logins(
     params: &testkit::PgConnParams,
-) -> Result<(ProvisionedTestPgCredential, ProvisionedTestPgCredential)> {
+) -> Result<(
+    ProvisionedTestPgCredential,
+    ProvisionedTestPgCredential,
+    ProvisionedTestPgCredential,
+)> {
     let options = PgConnectOptions::new()
         .host(&params.host)
         .port(params.port)
@@ -970,12 +976,17 @@ async fn provision_test_logins(
         .await?;
     let mut tx = pool.begin().await?;
     provision_test_login(&mut tx, &RSS_APP_LOGIN).await?;
+    provision_test_login(&mut tx, &RSS_APP_READ_LOGIN).await?;
     provision_test_login(&mut tx, &RSS_AUDIT_ADMIN_LOGIN).await?;
     tx.commit().await?;
     pool.close().await;
     Ok((
         ProvisionedTestPgCredential {
             credential: &RSS_APP_LOGIN,
+            _seal: (),
+        },
+        ProvisionedTestPgCredential {
+            credential: &RSS_APP_READ_LOGIN,
             _seal: (),
         },
         ProvisionedTestPgCredential {
@@ -3086,13 +3097,16 @@ struct LocalTxJourneyRuntime {
 impl LocalTxJourneyRuntime {
     async fn setup() -> Result<Self> {
         let pg = testkit::env_or_postgres().await?;
-        let (app_login, audit_admin_login) = provision_test_logins(pg.params()).await?;
+        let (app_login, tenant_read_login, audit_admin_login) =
+            provision_test_logins(pg.params()).await?;
         let owner = pg_config(pg.params());
         let app = app_login.config(pg.params());
+        let tenant_read = PgTenantReadConfig::new(tenant_read_login.config(pg.params()));
         let audit_admin = audit_admin_login.config(pg.params());
         let deps = PgRuntimeDeps::setup_with_audit_admin_config(
             &owner,
             &app,
+            &tenant_read,
             Some(&audit_admin),
             postgres::LegacyConfigPlaintextPolicy::Deny,
             generated::event::PROJECTION_INPUT_GENERATION,

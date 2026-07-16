@@ -21,16 +21,16 @@ use eventexec::{ConsumerTxHandlerFn, ConsumerTxOutcome};
 #[cfg(feature = "domain-audit")]
 use primitives::MacVerifier;
 
-use crate::PgStore;
 #[cfg(feature = "domain-audit")]
 use crate::audit_repo::{advisory_lock_key, append_in_tx, tenant_str};
-use crate::cotx::{PgTenantPool, infra_tenant_scope};
+use crate::cotx::{PgTenantWritePool, infra_tenant_scope};
 use crate::inbox::commit_in_tx;
+use crate::pool::VerifiedPgWriteStore;
 
 #[cfg(feature = "domain-audit")]
 /// Postgres-backed ConsumerTx audit handler.
 pub struct PgAuditConsumerTx<M: MacVerifier> {
-    pool: PgTenantPool,
+    pool: PgTenantWritePool,
     hasher: Arc<AuditChainHasher<M>>,
     kind: AuditEventKind,
 }
@@ -63,25 +63,35 @@ impl<M> PgAuditConsumerTx<M>
 where
     M: MacVerifier + Send + Sync + 'static,
 {
-    pub(crate) fn session_created(store: &PgStore, hasher: AuditChainHasher<M>) -> Self {
+    pub(crate) fn session_created(
+        store: &VerifiedPgWriteStore,
+        hasher: AuditChainHasher<M>,
+    ) -> Self {
         Self::new(store, hasher, AuditEventKind::SessionCreated)
     }
 
-    pub(crate) fn role_assigned(store: &PgStore, hasher: AuditChainHasher<M>) -> Self {
+    pub(crate) fn role_assigned(store: &VerifiedPgWriteStore, hasher: AuditChainHasher<M>) -> Self {
         Self::new(store, hasher, AuditEventKind::RoleAssigned)
     }
 
-    pub(crate) fn role_revoked(store: &PgStore, hasher: AuditChainHasher<M>) -> Self {
+    pub(crate) fn role_revoked(store: &VerifiedPgWriteStore, hasher: AuditChainHasher<M>) -> Self {
         Self::new(store, hasher, AuditEventKind::RoleRevoked)
     }
 
-    pub(crate) fn policy_updated(store: &PgStore, hasher: AuditChainHasher<M>) -> Self {
+    pub(crate) fn policy_updated(
+        store: &VerifiedPgWriteStore,
+        hasher: AuditChainHasher<M>,
+    ) -> Self {
         Self::new(store, hasher, AuditEventKind::PolicyUpdated)
     }
 
-    fn new(store: &PgStore, hasher: AuditChainHasher<M>, kind: AuditEventKind) -> Self {
+    fn new(
+        store: &VerifiedPgWriteStore,
+        hasher: AuditChainHasher<M>,
+        kind: AuditEventKind,
+    ) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            pool: PgTenantWritePool::new(store),
             hasher: Arc::new(hasher),
             kind,
         }
@@ -186,15 +196,18 @@ where
 #[cfg(feature = "domain-settings")]
 /// Postgres-backed ConsumerTx handler for settings config-version-changed.
 pub struct PgSettingsConsumerTx {
-    pool: PgTenantPool,
+    pool: PgTenantWritePool,
     effect: SubscriberEffect,
 }
 
 #[cfg(feature = "domain-settings")]
 impl PgSettingsConsumerTx {
-    pub(crate) fn config_version_changed(store: &PgStore, effect: SubscriberEffect) -> Self {
+    pub(crate) fn config_version_changed(
+        store: &VerifiedPgWriteStore,
+        effect: SubscriberEffect,
+    ) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            pool: PgTenantWritePool::new(store),
             effect,
         }
     }

@@ -16,7 +16,7 @@
 //! ⇒ 无 key/clock 不可构造（编译期守）。
 //!
 //! INVARIANT: BINS-AUTH-SYNC-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }(Hard, #1309) — `bins/server` 是 serving-only thin entry；`bins/rss` 先
-//! dispatch 显式 operator CLI（audit ledger verify、settings ConfigValue maintenance、projection/DLQ/
+//! dispatch 显式 operator CLI（0067 reader-lane migration、audit ledger verify、settings ConfigValue maintenance、projection/DLQ/
 //! reconcile-target maintenance），未知参数 fail-closed，未命中 CLI 时再调用同一份 `runtime::run()` serving 组合根。auth wiring
 //! 一致性由「单一 `run()` 源」编译期保证，原
 //! xtask Medium 守卫 `bins_auth_sync.rs` 退役（双写消除、无第二副本可漂移）。
@@ -43,7 +43,9 @@ pub mod saga_runtime;
 pub use distributed_runtime::{DistributedRuntimeDeps, wire_distributed};
 pub use domains::settings::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
 pub use infra::oidc::{build_provider, provider_from_b64};
-pub use infra::pg::{build_pg_audit_admin_config, build_pg_config, build_pg_migrator_config};
+pub use infra::pg::{
+    build_pg_audit_admin_config, build_pg_config, build_pg_migrator_config, build_pg_read_config,
+};
 pub use infra::redis::build_redis_runtime_deps;
 pub use infra::s3::build_s3_runtime_deps_from;
 pub use infra::vault::{
@@ -592,6 +594,24 @@ pub(crate) fn build_session_sweeper_interval_from(
 
 fn build_session_sweeper_interval() -> Duration {
     build_session_sweeper_interval_from(|name| std::env::var(name).ok())
+}
+
+/// `rss` binary 是否请求 PostgreSQL operator namespace；具体 subcommand 由 runner 精确校验。
+#[must_use]
+pub fn is_postgres_command(args: &[String]) -> bool {
+    matches!(args, [namespace, ..] if namespace == "postgres")
+}
+
+/// Run the release-only reader-lane migration without constructing serving pools or requiring
+/// reader credentials. The postgres adapter independently verifies the exact embedded/ledger edge.
+pub async fn run_postgres_reader_migration_command(args: &[String]) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(args, [namespace, command] if namespace == "postgres" && command == "migrate-reader-lane"),
+        "usage: rss postgres migrate-reader-lane"
+    );
+    PgRuntimeDeps::migrate_reader_lane_only(&build_pg_migrator_config()?)
+        .await
+        .context("apply exact postgres 0066 to 0067 reader-lane migration")
 }
 
 /// `rss` binary 是否请求 settings ConfigValue 维护命令。
@@ -4310,6 +4330,7 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
                 build_pg_audit_admin_config().context("build audit admin postgres config")?;
             let migrator_config = build_pg_migrator_config()?;
             let app_pg_config = build_pg_config()?;
+            let tenant_read_pg_config = build_pg_read_config()?;
             let plaintext_policy = legacy_config_plaintext_policy()?;
             let vault = build_vault_runtime_deps(config_value).context("setup vault deps")?;
             let settings_config_value_key_name =
@@ -4404,6 +4425,7 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
                         let pg_owner = PgRuntimeDeps::setup_with_audit_admin_config(
                             &migrator_config,
                             &app_pg_config,
+                            &tenant_read_pg_config,
                             audit_admin_config.as_ref(),
                             plaintext_policy,
                             generated::event::PROJECTION_INPUT_GENERATION,
@@ -5728,6 +5750,22 @@ mod tests {
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| (*part).to_string()).collect()
+    }
+
+    #[test]
+    fn postgres_reader_migration_command_is_exact_and_has_no_legacy_shape() {
+        assert!(is_postgres_command(&args(&[
+            "postgres",
+            "migrate-reader-lane"
+        ])));
+        for dispatched_but_rejected_by_runner in [
+            args(&["postgres"]),
+            args(&["postgres", "migrate"]),
+            args(&["postgres", "migrate-reader-lane", "--all"]),
+        ] {
+            assert!(is_postgres_command(&dispatched_but_rejected_by_runner));
+        }
+        assert!(!is_postgres_command(&args(&["migrate-reader-lane"])));
     }
 
     static PROJECTION_REGISTRY_FIXTURE_INPUTS: &[vocab::ProjectionInputBinding] =

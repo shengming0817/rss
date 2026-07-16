@@ -8,18 +8,20 @@ use consistency::{EventEntry, OutboxAppendOutcome, OutboxFactFingerprint};
 use diport::{Clock, EnvelopeSubjectId, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 use futures::future::BoxFuture;
 
+#[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantPool, TxCapability, infra_tenant_scope};
+use crate::cotx::{PgTenantWritePool, TxCapability, infra_tenant_scope};
 use crate::outbox::{
     AppendFingerprintObservation, CanonicalOutboxFact, OutboxAppendError, OutboxEnvelope,
     classify_append_fingerprint, metadata_with_ambient, unix_secs,
 };
+use crate::pool::VerifiedPgWriteStore;
 
 /// PostgreSQL CDC outbox emitter.
 ///
 /// This adapter is explicit opt-in and does not write to the relay `outbox` table.
 pub struct PgOutboxCdcEmitter {
-    pool: PgTenantPool,
+    pool: PgTenantWritePool,
     clock: Box<dyn Clock>,
 }
 
@@ -27,12 +29,15 @@ impl PgOutboxCdcEmitter {
     /// Construct the CDC emitter from the sealed store funnel.
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
-        Self::new_with_store(store, clock)
+        Self {
+            pool: PgTenantWritePool::from_unverified_for_test(store),
+            clock,
+        }
     }
 
-    pub(crate) fn new_with_store(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+    pub(crate) fn new_with_store(store: &VerifiedPgWriteStore, clock: Box<dyn Clock>) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            pool: PgTenantWritePool::new(store),
             clock,
         }
     }

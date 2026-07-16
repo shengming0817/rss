@@ -33,17 +33,18 @@ use std::collections::HashMap;
 #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
 use std::sync::{Arc, Mutex};
 
-use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
 use crate::outbox::unix_secs;
+use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::tx_retry::{classify_identity_error, run_pg_localtx_retry};
 
 /// refresh token 持久化 PostgreSQL adapter（impl [`RefreshTokenStore`]，#1325）。
 ///
-/// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，同 [`crate::PgRoleRepo`]）clone 构造。
+/// 仅由已验证 reader/writer capability 构造（同 [`crate::PgRoleRepo`]）。
 /// **Clock 不注入**：issued_at/expires_at 来自 record，由 `RefreshService` 的 Clock 派生，adapter 只透传落库。
 pub struct PgRefreshTokenStore {
-    pool: PgTenantPool,
+    read_pool: PgTenantReadPool,
+    write_pool: PgTenantWritePool,
     #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
     rotation_faults: Arc<Mutex<RefreshRotationFaultState>>,
 }
@@ -98,13 +99,23 @@ impl RefreshRotationAttemptProbe {
 }
 
 impl PgRefreshTokenStore {
-    /// 由 [`PgStore`] 构造（clone 其 `pool`）。Clock 不注入（issued_at/expires_at 来自 record）。
+    /// 由已验证 reader/writer capability 构造。Clock 不注入（issued_at/expires_at 来自 record）。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::refresh_token_store` 收口。
-    pub(crate) fn new(store: &PgStore) -> Self {
+    pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            read_pool: PgTenantReadPool::new(reader),
+            write_pool: PgTenantWritePool::new(writer),
             #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+            rotation_faults: Arc::new(Mutex::new(RefreshRotationFaultState::default())),
+        }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
+        Self {
+            read_pool: PgTenantReadPool::from_unverified_for_test(store),
+            write_pool: PgTenantWritePool::from_unverified_for_test(store),
             rotation_faults: Arc::new(Mutex::new(RefreshRotationFaultState::default())),
         }
     }
@@ -248,7 +259,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                 "refresh insert tenant scope mismatch",
             ))));
         }
-        self.pool
+        self.write_pool
             .write(
                 scope,
                 move |conn| {
@@ -273,7 +284,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
         let hash_bytes = *hash.as_bytes();
 
         let raw = self
-            .pool
+            .read_pool
             .read(scope, move |conn| {
                 Box::pin(async move {
                     let row = sqlx::query(
@@ -392,7 +403,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                 #[cfg(all(test, feature = "integration"))]
                 record_rotation_attempt(&rotation_faults, &old_id_key);
                 async move {
-                    self.pool
+                    self.write_pool
                         .retry_write(
                             scope,
                             move |tx| {
@@ -497,7 +508,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
     ) -> Result<(), IdentityError> {
         let tenant = scope.tenant();
         let tenant_uuid = tenant.as_uuid().to_string();
-        self.pool
+        self.write_pool
             .write(
                 scope,
                 move |conn| {

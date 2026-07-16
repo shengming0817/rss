@@ -116,6 +116,10 @@ fn runtime_config_catalog_deduplicates_static_dynamic_keys_and_excludes_maintena
     assert_eq!(unique.len(), reads.len(), "catalog keys must be read once");
     for expected in [
         "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS",
+        "RSS_PG_READ_USERNAME",
+        "RSS_PG_READ_PASSWORD",
+        "RSS_PG_MAX_CONNECTIONS",
+        "RSS_PG_READ_MAX_CONNECTIONS",
         "RSS_IDENTITY_DOMAIN_TRANSPORT_URL",
         "RSS_IDENTITY_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET",
         "RSS_AUDIT_DOMAIN_TRANSPORT_URL",

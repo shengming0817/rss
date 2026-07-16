@@ -97,26 +97,43 @@ service-token principal 自身同样无 tenant；只有验签通过的 service-t
 ## RLS 与 PG scope
 
 PG tenant scope 使用 `SET LOCAL` 注入当前事务。tenant-scoped repository 不持有 raw
-`sqlx::PgPool`，只持有 opaque `PgTenantPool`；普通 repo 入口只能接收各域本地
+`sqlx::PgPool` / `PgStore`，只持有所需的 opaque `PgTenantReadPool` / `PgTenantWritePool`；普通 repo 入口只能接收各域本地
 `TenantRepoScope` / `RowRepoScope`，不能接收裸 `TenantId`、`RowVisibility`、`RowScope` 或
-`ScopedTenant`。`PgTenantPool::{read, read_map, write, retry_write, co_tx_with_outbox,
-retry_co_tx_with_outbox}` 同样只接收 sealed scope handle，并且只在 `cotx` 内 lower 成
-`TenantId` 后执行 `SET LOCAL`。`PgTenantPool` 不暴露 `begin`、`acquire`、raw `PgPool` 或
-`Executor`，因此 tenant 表路径在类型层先被收口到 scoped transaction funnel。绕过该类型入口直接借连接或
+`ScopedTenant`。独立查询只经 `PgTenantReadPool::{read, read_map}`；mutation、deadline、retry 和 co-tx
+只经 `PgTenantWritePool`。两类 capability 均只接收 sealed scope handle，并且只在 `cotx` 内 lower 成
+`TenantId` 后执行 `SET LOCAL`。reader 以 SQLx transaction options 原子发送 `BEGIN READ ONLY`，随后
+`SET LOCAL rss.tenant_id`；writer 使用普通 read-write transaction，写事务内部为 CAS/锁定/一致性判断所需的
+SELECT 仍属同一 writer transaction。两类 capability 均不暴露 `begin`、`acquire`、raw `PgPool` / `PgStore`
+或 `Executor`，因此 tenant 表路径在类型层先被收口到 scoped transaction funnel。绕过该类型入口直接借连接或
 走 global transaction 必须 fail-fast。
 
 `cargo xtask schema-rls`（INVARIANT `TENANCY-RLS-FORCE-01`，接入 `cargo xtask verify` / `ci`，
 Medium）机器强制：含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SECURITY` +
 `FORCE ROW LEVEL SECURITY` + tenant-isolation policy（目标态 `USING/WITH CHECK (tenant_id =
 NULLIF(current_setting('rss.tenant_id', true), '')::uuid)`，旧迁移可经前向迁移升级）；缺失即门红。
+同一命令的 `TENANCY-PG-READER-ACL-01` 还要求 `0067` 动态 backfill 精确覆盖当时已有的 public tenant
+relations；此后的 tenant relation 必须在建表/tenant 化的同一 migration 显式
+`GRANT SELECT ... TO rss_app_read`。reader DML 与 `ALTER DEFAULT PRIVILEGES` 一律门红，避免未来表被未分类授权。
 
-app-serving role `rss_app` 已 provision 为非 owner、NOBYPASSRLS，并按各 tenant 表最小授权 DML
+writer role `rss_app` 已 provision 为非 owner、NOBYPASSRLS，并按各 tenant 表最小授权 DML
 （sessions / config_entries / roles / credentials / refresh_tokens / abac_policies /
 resource_attributes / inbox_receipts；audit_entries 仅 SELECT+INSERT；dead_letter 仅 SELECT+INSERT；outbox 仅 SELECT+INSERT，relay settlement/retention
 不得直接授 UPDATE/DELETE）；`FORCE ROW LEVEL SECURITY` 使 owner 连接亦受 policy 约束。durable
-bootstrap 使用 dual-pool：migrator pool 只用于迁移与启动前检查，长期 serving pool 必须以 `rss_app`
-连接；启动期 RLS 能力门会拒绝 owner/superuser、BYPASSRLS 角色以及任何非 `rss_app` serving role。
-注：superuser 连接永远绕过 RLS（含 FORCE）；serving role rss_app 为非 superuser 故受 policy 约束；
+bootstrap 使用三个独立连接面：migrator pool 只用于迁移与启动前检查，writer serving pool 必须以
+`rss_app` 连接，reader serving pool 必须由必填 `RSS_PG_READ_USERNAME/PASSWORD` 以 `rss_app_read` 直连。
+reader 不从 writer 凭据 fallback，也不通过 `SET ROLE` 复用连接。`rss_app_read` 固定为 LOGIN、非 owner、
+NOSUPERUSER、NOBYPASSRLS、NOCREATEDB、NOCREATEROLE、NOREPLICATION、无 membership，且
+`default_transaction_read_only=on`、`search_path=pg_catalog, public`，启动门还要求
+`lo_compat_privileges=off` 并拒绝 permissive policy 的非 pinned operator/function dependency；它只具
+CONNECT、public schema USAGE 与 tenant relations SELECT，
+不具 DML/TRUNCATE、sequence、schema CREATE、function EXECUTE 或非 tenant relation 权限。
+
+writer 与 reader pool 分别受 `RSS_PG_MAX_CONNECTIONS` / `RSS_PG_READ_MAX_CONNECTIONS` 约束（范围
+`1..=100`、缺省各 `5`，LocalOnly serving 默认总 ceiling 仍为 `10`）；部署连接预算必须按
+`migrator（启动期） + writer（常驻） + reader（常驻） + 命名 maintenance pools` 求和，而不能沿用单 serving
+pool 的预算。启动能力门分别核验两个 serving role；readiness 同时采样 writer/reader，以较差状态作为 PG
+readyz，任一 pool 未验证或不可用均返回 503。两池分别注册稳定、无凭据的 shutdown resource 名并被完整关闭。
+注：superuser 连接永远绕过 RLS（含 FORCE）；serving roles 为非 superuser 故受 policy 约束；
 生产 owner 须为非 superuser。
 
 `secret_refs` 是版本历史 append-only 表：`rss_app` 仅有 `SELECT, INSERT`，数据库 `CHECK (version > 0)`
@@ -145,7 +162,7 @@ saga_instances / saga_journal 是 tenant-scoped saga durable 表：`saga_instanc
 lease token/epoch，`saga_journal` 主键为 `(tenant_id, saga_id, seq)` 且通过 composite FK 指回 instance。
 两表均受 `ENABLE/FORCE ROW LEVEL SECURITY` + `tenant_isolation` policy 约束；journal 是 append-only，
 `rss_app` 仅有 `SELECT, INSERT`，不得直接 `UPDATE/DELETE`。claim/extend/release/status mark 和 journal
-append 必须经 `PgTenantPool` 注入 `SET LOCAL rss.tenant_id`，并由 DB `WHERE tenant_id + saga_id +
+append 必须经 `PgTenantWritePool` 注入 `SET LOCAL rss.tenant_id`，并由 DB `WHERE tenant_id + saga_id +
 lease_token + epoch + expires_at` CAS fence，不能依赖调用方约定。
 
 projection_events 仍是无 `tenant_id` 列的全局表，不在 `schema-rls` 检查范围。`projection_events`
@@ -164,7 +181,7 @@ partition liveness 语义。
 
 **作用域来源**：`TenantId`（`vocab`，fail-closed 解析，空值 / nil / 非 canonical UUID 非法）
 从声明过的认证/预认证通道（JWT tenant claim 或 `X-Tenant-ID` populate-only header，见 §Tenant source）
-流入；域内从已认证/授权证据派生本地 `TenantRepoScope`，repo / `PgTenantPool` 只接收该 sealed handle。
+流入；域内从已认证/授权证据派生本地 `TenantRepoScope`，repo / tenant read/write capability 只接收该 sealed handle。
 `adapters/postgres/src/cotx/mod.rs` 是唯一 lower 点：从 scope handle 取 `TenantId`，经
 `set_local_tenant` / `tenant_scoped_read` / `co_tx_with_outbox` 注入当前 PG 事务；永不从 HTTP request body 读取。
 
@@ -177,17 +194,20 @@ partition liveness 语义。
 helper 进行；`INVARIANT TENANCY-SETLOCAL-FUNNEL-01`（`cargo xtask setlocal-funnel`，Medium
 内容扫描）机器强制：字面量 `set_config('rss.tenant_id'` 仅允许出现在
 `adapters/postgres/src/cotx/mod.rs`（测试代码豁免）。tenant repository 的 Hard 载体是
-各域 `TenantRepoScope` / `RowRepoScope` + `PgTenantPool`：外部代码不能从裸 `TenantId` 构造 scope，
-普通 repo / `PgTenantPool` 也不能用裸 tenant 或 row visibility 调用；tenant repo 无法直接调用 raw pool
+各域 `TenantRepoScope` / `RowRepoScope` + `PgTenantReadPool` / `PgTenantWritePool`：外部代码不能从裸
+`TenantId` 构造 scope，普通 repo / typed pool 也不能用裸 tenant 或 row visibility 调用；tenant repo 无法直接调用 raw pool
 transaction / connection API。
 
 **raw-pool / TxManager bypass 守卫**：`INVARIANT TENANCY-PG-TX-FUNNEL-01` 由两层承载。
-Hard 层是 `PgTenantPool`，tenant 表 adapter（sessions / config / roles / secret_refs /
-credentials / refresh_tokens / audit_entries / tenant dead_letter/DLQ 路径）只存该 wrapper。
+Hard 层是互不可换的 `PgTenantReadPool` / `PgTenantWritePool`，tenant 表 adapter（sessions / config / roles /
+secret_refs / credentials / refresh_tokens / audit_entries / tenant dead_letter/DLQ 路径）按行为只存所需 capability，
+混合 repo 显式存两者；已删除的混合 tenant pool 不保留 alias 或兼容构造器。
 Medium backstop 是 `cargo xtask pg-tenant-tx-guard`（接入 `verify` / `ci`）：从迁移派生
 tenant 表集合，扫描生产 Rust SQL site，禁止 tenant 表 SQL 通过 raw `pool.begin` /
 `pool.acquire` / `&self.pool` executor / `run_global_transaction` 访问，并带 anti-vacuity 与 stale
-allowlist 测试；同一 guard 还把 `SecretRepo` 限定为 read-only，精确限制 HTTP LocalTx retry 到
+allowlist 测试；`TENANCY-PG-READ-LANE-01` 同时拒绝旧 mixed pool、reader/write API 交叉和 tenant repo
+持有 raw pool/store，并证明 reader/writer 两种 production site 均存在。写事务内 SELECT 由 writer capability
+所有，不被误判为独立读。同一 guard 还把 `SecretRepo` 限定为 read-only，精确限制 HTTP LocalTx retry 到
 `PgSecretUnitOfWork::publish`，并证明 publish/internal/republish 共享唯一 `LockedSecretKey` CAS funnel、delete
 只经同一 key lock 追加 tombstone。
 raw `PgPool` 只允许在 `PgStore` setup、migration、readiness/RLS capability probe、
@@ -218,12 +238,15 @@ NOBYPASSRLS、无任何表级 DML/DDL，且 `rss_app` 对 lifecycle 函数全部
 repository 内部按方法路由 pool，且不暴露 raw pool。outbox relay 将 publish 失败写入 `dead_letter`
 前必须从 outbox metadata 取 tenant，并在同一事务内经 `set_local_tenant` 注入 tenant scope 后写入。
 
-**启动期 RLS 能力门控**：`PgRuntimeDeps::setup` 在迁移完成后调用
-`PgStore::verify_rls_capability()`，动态派生含 `tenant_id` 列的表集合，断言每张表满足
+**启动期 serving 能力门控**：`PgRuntimeDeps::setup` 在迁移完成后分别验证 writer 与 reader 直连池。
+两者都动态派生含 `tenant_id` 列的表集合，断言每张表满足
 `relrowsecurity AND relforcerowsecurity`、至少一条 tenant isolation policy，且
-`rss.tenant_id` GUC 可正确 round-trip；任一断言失败则 durable 模式**启动 fail-fast**（数据库
-RLS 状态无法在编译期校验，载体为 Medium 运行期门）。`RlsReadyProbe` 是对应的 readyz
-backstop probe：启动验证通过后标记 `Healthy`（→ 200）；未通过标记 `Unhealthy`（→ 503）。
+`rss.tenant_id` GUC 可正确 round-trip。writer 的 `verify_rls_capability()` 另核验 current role 精确为
+`rss_app`、非 owner/superuser/BYPASSRLS；reader 的 `verify_tenant_read_capability()` 另核验 current role
+精确为 `rss_app_read`、role flags、默认 transaction read-only 与
+有效 ACL 精确集合。任一断言失败则 durable 模式**启动 fail-fast**（数据库状态无法在编译期校验，载体为
+Medium 运行期门）。readyz sampler 同时探测两池并取最差结果：全部 `Healthy` 才返回 200，任一
+`Unhealthy` 返回 503。
 
 **解锁器边界说明（#1437 是 PERSIST-016 解锁器）**：本 issue 落地统一的 typed cotx funnel
 （Hard）与 xtask setlocal-funnel / pg-tenant-tx-guard 守卫（Medium）及启动能力门控（Medium），
@@ -235,8 +258,8 @@ backstop probe：启动验证通过后标记 `Healthy`（→ 200）；未通过�
 - **#1582**：tenant repo conformance 已纳入真实 postgres repos（config seed + role / audit / dead_letter 等），完整 CAS / rollback / co-tx 扩展仍按后续 conformance 范围推进。
 - **#1436 / #1580**：PG tx funnel / raw-pool guard（`TxManager` 旁路保护）。
 
-dual-pool（`rss_app` serving 非 superuser 角色）接线见上文 §RLS 与 PG scope；`rss_app
-NOBYPASSRLS` 已 provision，bootstrap serving pool 已由启动期 RLS 能力门强制。
+migrator + writer `rss_app` + reader `rss_app_read` 三连接面接线见上文 §RLS 与 PG scope；两种 serving
+role 均为 NOBYPASSRLS，并由启动期精确能力门强制，无单 pool 兼容路径。
 
 ## ABAC authz 接线（permission-based）
 
@@ -450,7 +473,7 @@ generated spec 与 route 装配不一致或出现未知 permission 时必须 fai
   `tenancy-closeout`，以及实际可用时的 `dylint`。
 - RLS 静态与运行期纵深必须同时可见：迁移 DDL 由 `schema-rls` 守，SET LOCAL 注入由
   `setlocal-funnel` 守，tenant 表 raw-pool / `TxManager` bypass 由 `pg-tenant-tx-guard` 守，
-  repo port 签名由 `repo-scope-guard` 守，durable startup 由 `verify_rls_capability()` 守。
+  repo port 签名由 `repo-scope-guard` 守，durable startup 由 writer/reader serving capability gates 守。
 - AuthZ 路由 gate 必须经 `RouteAuthorizer`，handler 只消费 `AuthorizedSubject`，不回退到
   handler-local role/self 分支。
 - 字段级数据权限必须从 contract projection fields + `responsePath` 派生到 generated spec，经

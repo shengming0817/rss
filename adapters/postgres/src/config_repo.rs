@@ -36,8 +36,9 @@ use settings::ports::{
 use sqlx::{Executor, Postgres, Row};
 
 use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
 use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
+use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
 use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, classify_config_repo_error, run_pg_tx_retry};
 
@@ -54,15 +55,16 @@ static CONFIG_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
 
 /// settings 配置仓储 + co-tx UoW 的 PostgreSQL adapter。
 ///
-/// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，同 [`crate::PgSessionLifecycle`]）clone 构造；
-/// 读端口与 co-tx 写共用同一 `pool`（保证读得到已提交写）。
+/// 独立读端口使用 verified reader；co-tx 写使用 verified writer。两者共享同一数据库 schema，但
+/// capability 类型互斥，避免 LocalOnly 读静默落回可写连接。
 ///
 /// `clock` 是注入的 [`Clock`]（必填构造器位置参，`Arc<dyn Clock>`）：co-tx outbox envelope `occurred_at`
 /// 时间源（#1129/#262 F1——settings 的 `settings.config-version-changed` 生产 outbox 路径，本是第三条漏接
 /// occurred_at 的构造点）。用 `Arc`（非 `Box`，区别于 [`crate::PgEmitter`] / [`crate::PgSessionLifecycle`]）：
 /// settings bundle 以**单一**注入 clock 经 `Arc::clone` 扇出到 read/write 两个实例（PERSIST-003，#1424）。
 pub struct PgConfigRepo {
-    pool: PgTenantPool,
+    read_pool: PgTenantReadPool,
+    write_pool: PgTenantWritePool,
     clock: Arc<dyn Clock>,
     protection: ConfigValueProtection,
 }
@@ -319,7 +321,7 @@ impl PgConfigValueMaintenance {
 }
 
 impl PgConfigRepo {
-    /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
+    /// integration-only 裸 store 测试 seam + 注入 [`Clock`]（envelope `occurred_at` 时间源）。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Settings>::settings_bundle` 收口。
     #[cfg(all(test, feature = "integration"))]
@@ -328,22 +330,24 @@ impl PgConfigRepo {
         clock: Arc<dyn Clock>,
         protection: ConfigValueProtection,
     ) -> Self {
-        Self::new_with_projection_registry(
-            store,
+        Self {
+            read_pool: PgTenantReadPool::from_unverified_for_test(store),
+            write_pool: PgTenantWritePool::from_unverified_for_test(store),
             clock,
             protection,
-            ProjectionWriteRegistry::empty(),
-        )
+        }
     }
 
     pub(crate) fn new_with_projection_registry(
-        store: &PgStore,
+        reader: &VerifiedPgReadStore,
+        writer: &VerifiedPgWriteStore,
         clock: Arc<dyn Clock>,
         protection: ConfigValueProtection,
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
-            pool: PgTenantPool::with_projection_registry(store, projection_registry),
+            read_pool: PgTenantReadPool::new(reader),
+            write_pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
             clock,
             protection,
         }
@@ -1169,7 +1173,7 @@ impl ConfigRepo for PgConfigRepo {
         let tenant_uuid_q = tenant_uuid.clone();
 
         let row = self
-            .pool
+            .read_pool
             .read(scope, move |conn| {
                 Box::pin(async move {
                     sqlx::query(
@@ -1207,7 +1211,7 @@ impl ConfigRepo for PgConfigRepo {
         let version_i = version_param(version);
 
         let row = self
-            .pool
+            .read_pool
             .read(scope, move |conn| {
                 Box::pin(async move {
                     sqlx::query(
@@ -1244,7 +1248,7 @@ impl ConfigRepo for PgConfigRepo {
         let tenant_uuid_q = tenant_uuid.clone();
 
         let row: Option<(i64, bool)> = self
-            .pool
+            .read_pool
             .read(scope, move |conn| {
                 Box::pin(async move {
                     sqlx::query_as(
@@ -1320,7 +1324,7 @@ impl ConfigUnitOfWork for PgConfigRepo {
                 #[cfg(all(test, feature = "integration"))]
                 record_config_retry_attempt(mutation.key());
                 async move {
-                    self.pool
+                    self.write_pool
                         .retry_co_tx_with_outbox(
                             scope,
                             &outbox_entry,

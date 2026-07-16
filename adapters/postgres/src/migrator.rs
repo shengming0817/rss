@@ -5,6 +5,9 @@
 use crate::PgStore;
 use crate::pool::{LegacyConfigPlaintextPolicy, PgError};
 
+const READER_LANE_MIGRATION_VERSION: i64 = 67;
+const READER_LANE_REQUIRED_PREDECESSOR: i64 = 66;
+
 impl PgStore {
     /// 应用 `adapters/postgres/migrations/` 下全部迁移（`migrate!` 编译期 `include_str!` 内嵌，不依赖运行时文件系统）。
     ///
@@ -27,6 +30,81 @@ impl PgStore {
             .map_err(PgError::Migrate)?;
         // reason: 迁移是启动生命周期事件，成功须 info! 记账（observability.md §日志级别）。
         tracing::info!(target: "postgres", "postgres migrations applied");
+        Ok(())
+    }
+
+    /// Apply only the reviewed 0066 → 0067 release edge while preserving SQLx lock/checksum/ledger
+    /// semantics. The embedded migration universe and database ledger are both exact: a binary
+    /// containing 0068+ or a database not already at 0066/0067 is rejected instead of becoming a
+    /// generic out-of-band migration runner.
+    pub(crate) async fn run_reader_lane_migration_only(&self) -> Result<(), PgError> {
+        let migrator = sqlx::migrate!("./migrations");
+        let embedded_versions: Vec<i64> = migrator.iter().map(|item| item.version).collect();
+        let expected_embedded: Vec<i64> = (1..=READER_LANE_MIGRATION_VERSION).collect();
+        if embedded_versions != expected_embedded {
+            return Err(reader_lane_precondition_error(
+                "binary must embed exactly migrations 0001 through 0067",
+                embedded_versions.last().copied(),
+                None,
+                0,
+                embedded_versions
+                    .iter()
+                    .zip(&expected_embedded)
+                    .find_map(|(actual, expected)| (actual != expected).then_some(*actual)),
+            ));
+        }
+
+        let applied: Vec<(i64, bool)> =
+            sqlx::query_as("SELECT version, success FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(PgError::ReaderLaneMigrationLedgerProbe)?;
+        let Some(last) = applied.last().map(|(version, _)| *version) else {
+            return Err(reader_lane_precondition_error(
+                "database migration ledger must not be empty",
+                embedded_versions.last().copied(),
+                None,
+                0,
+                None,
+            ));
+        };
+        let first_invalid = applied
+            .iter()
+            .enumerate()
+            .find_map(|(index, (version, success))| {
+                (*version != index as i64 + 1 || !success).then_some(*version)
+            });
+        if !matches!(
+            last,
+            READER_LANE_REQUIRED_PREDECESSOR | READER_LANE_MIGRATION_VERSION
+        ) || applied.len() != last as usize
+            || first_invalid.is_some()
+        {
+            return Err(reader_lane_precondition_error(
+                "database ledger must be contiguous and end at successful 0066 or 0067",
+                embedded_versions.last().copied(),
+                Some(last),
+                applied.len(),
+                first_invalid,
+            ));
+        }
+
+        migrator
+            .run(&self.pool)
+            .await
+            .inspect_err(|error| {
+                tracing::error!(
+                    target: "postgres",
+                    error = %secure::redact_error(error),
+                    "postgres reader-lane migration failed"
+                );
+            })
+            .map_err(PgError::Migrate)?;
+        tracing::info!(
+            target: "postgres",
+            migration_version = READER_LANE_MIGRATION_VERSION,
+            "postgres reader-lane migration applied"
+        );
         Ok(())
     }
 
@@ -54,6 +132,31 @@ impl PgStore {
         .fetch_one(&self.pool)
         .await
         .map_err(PgError::LegacyConfigPlaintextProbe)
+    }
+}
+
+fn reader_lane_precondition_error(
+    reason: &'static str,
+    embedded_max: Option<i64>,
+    ledger_last: Option<i64>,
+    ledger_entries: usize,
+    first_invalid: Option<i64>,
+) -> PgError {
+    tracing::error!(
+        target: "postgres",
+        reason,
+        embedded_max,
+        ledger_last,
+        ledger_entries,
+        first_invalid,
+        "postgres reader-lane migration precondition failed"
+    );
+    PgError::ReaderLaneMigrationPrecondition {
+        reason,
+        embedded_max,
+        ledger_last,
+        ledger_entries,
+        first_invalid,
     }
 }
 

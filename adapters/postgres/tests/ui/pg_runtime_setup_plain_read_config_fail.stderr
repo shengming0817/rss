@@ -1,0 +1,16 @@
+error[E0308]: mismatched types
+  --> tests/ui/pg_runtime_setup_plain_read_config_fail.rs:12:9
+   |
+ 9 |     let _setup = PgRuntimeDeps::setup(
+   |                  -------------------- arguments to this function are incorrect
+...
+12 |         serving_config,
+   |         ^^^^^^^^^^^^^^ expected `&PgTenantReadConfig`, found `&PgConfig`
+   |
+   = note: expected reference `&PgTenantReadConfig`
+              found reference `&PgConfig`
+note: associated function defined here
+  --> src/bundle.rs
+   |
+   |     pub async fn setup(
+   |                  ^^^^^

@@ -7,34 +7,39 @@ use consistency::EventEntry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
 use identity::ports::{RoleBinding, RoleBindingLifecycle, RoleId, TenantId, TenantRepoScope};
 
+#[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::PgTenantWritePool;
 use crate::outbox::{
     OutboxAppendError, OutboxEnvelope, append_outbox_with_projection, metadata_with_ambient,
     unix_secs,
 };
+use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::ProjectionWriteRegistry;
 
 /// PostgreSQL 角色绑定生命周期 adapter。
 pub struct PgRoleBindingLifecycle {
-    pool: PgTenantPool,
+    pool: PgTenantWritePool,
     clock: Box<dyn Clock>,
 }
 
 impl PgRoleBindingLifecycle {
-    /// 由 [`PgStore`] 构造（clone 其 scoped pool）+ 注入 envelope 时间源。
+    /// integration-only 裸 store 测试 seam + 注入 envelope 时间源。
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
-        Self::new_with_projection_registry(store, clock, ProjectionWriteRegistry::empty())
+        Self {
+            pool: PgTenantWritePool::from_unverified_for_test(store),
+            clock,
+        }
     }
 
     pub(crate) fn new_with_projection_registry(
-        store: &PgStore,
+        writer: &VerifiedPgWriteStore,
         clock: Box<dyn Clock>,
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
-            pool: PgTenantPool::with_projection_registry(store, projection_registry),
+            pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
             clock,
         }
     }

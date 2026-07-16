@@ -14,7 +14,7 @@
 //! seq → INSERT 在单事务锁保护下，消除 seq 竞争 / 重复；`(tenant_id, seq)` PK 作兜底 unique 拦截。
 //! list / verify_tail 是只读路径（begin + typed tenant scope + SELECT + commit），增量 verify_window（窗口+1前驱）。
 //!
-//! 租户隔离：写 / 读路径均经 `PgTenantPool` typed scope funnel 注入租户 GUC + 显式
+//! 租户隔离：写 / 读路径分别经 typed write/read scope funnel 注入租户 GUC + 显式
 //! `WHERE tenant_id = $1::uuid`（双重隔离，跨租 → 0 行 → fail-closed）。
 //!
 //! ref: adapters/postgres/src/credential_repo.rs（pool 注入 / tenant scope / storage 收口 / hydrate 范本）
@@ -34,8 +34,8 @@ use base64::Engine as _;
 use primitives::MacVerifier;
 use sqlx::{PgConnection, Row};
 
-use crate::PgStore;
-use crate::cotx::{PgTenantPool, infra_tenant_scope};
+use crate::cotx::{PgAuditAdminReadPool, PgTenantReadPool, PgTenantWritePool, infra_tenant_scope};
+use crate::pool::{VerifiedPgAuditAdminStore, VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::tx_retry::{AUDIT_APPEND_BOUNDARY, classify_audit_error, run_pg_tx_retry};
 
 // ---------------------------------------------------------------------------
@@ -56,37 +56,66 @@ const TABLE: &str = "audit_entries";
 
 /// audit 审计链仓储的 PostgreSQL adapter（impl read/write ports，#1230）。
 ///
-/// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，同 [`crate::PgRoleRepo`]）clone 构造。
+/// 仅由已验证 reader/writer capability 构造（同 [`crate::PgRoleRepo`]）。
 /// `hasher` 持 keyed HMAC verifier + key（构造器必填，无 key 不可造 hasher，防篡改属性类型层成立）。
 pub struct PgAuditRepo<M: primitives::MacVerifier> {
-    pool: PgTenantPool,
+    read_pool: PgTenantReadPool,
+    write_pool: PgTenantWritePool,
     hasher: Arc<AuditChainHasher<M>>,
 }
 
 /// audit 审计链的跨租户只读 admin adapter。
 ///
-/// 使用专用 `rss_audit_admin` pool，但仍通过 [`PgTenantPool`] 注入 target tenant scope，
+/// 使用专用 `rss_audit_admin` pool，但仍通过 [`PgAuditAdminReadPool`] 注入 target tenant scope，
 /// 复用 `audit_entries` 现有 FORCE RLS tenant policy；本类型不实现 append/write 能力。
 pub struct PgAuditAdminRepo<M: primitives::MacVerifier> {
-    pool: PgTenantPool,
+    pool: PgAuditAdminReadPool,
     hasher: Arc<AuditChainHasher<M>>,
 }
 
 impl<M: MacVerifier + Send + Sync> PgAuditRepo<M> {
-    /// 由 [`PgStore`] + `hasher` 构造（clone pool；hasher 持注入 verifier + key）。
-    pub(crate) fn new(store: &PgStore, hasher: AuditChainHasher<M>) -> Self {
+    /// 由已验证 reader/writer capability + `hasher` 构造。
+    pub(crate) fn new(
+        reader: &VerifiedPgReadStore,
+        writer: &VerifiedPgWriteStore,
+        hasher: AuditChainHasher<M>,
+    ) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            read_pool: PgTenantReadPool::new(reader),
+            write_pool: PgTenantWritePool::new(writer),
+            hasher: Arc::new(hasher),
+        }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_unverified_for_test(
+        store: &crate::PgStore,
+        hasher: AuditChainHasher<M>,
+    ) -> Self {
+        Self {
+            read_pool: PgTenantReadPool::from_unverified_for_test(store),
+            write_pool: PgTenantWritePool::from_unverified_for_test(store),
             hasher: Arc::new(hasher),
         }
     }
 }
 
 impl<M: MacVerifier + Send + Sync> PgAuditAdminRepo<M> {
-    /// 由专用 admin [`PgStore`] + `hasher` 构造（clone pool；不暴露裸 pool）。
-    pub(crate) fn new(store: &PgStore, hasher: AuditChainHasher<M>) -> Self {
+    /// 由专用已验证 audit-admin capability + `hasher` 构造（不暴露裸 pool）。
+    pub(crate) fn new(store: &VerifiedPgAuditAdminStore, hasher: AuditChainHasher<M>) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            pool: PgAuditAdminReadPool::new_admin(store),
+            hasher: Arc::new(hasher),
+        }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_unverified_for_test(
+        store: &crate::PgStore,
+        hasher: AuditChainHasher<M>,
+    ) -> Self {
+        Self {
+            pool: PgAuditAdminReadPool::from_unverified_for_test(store),
             hasher: Arc::new(hasher),
         }
     }
@@ -533,7 +562,7 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditWriteRepo for PgAuditRepo<M> {
                 let record = Arc::clone(&record);
                 let hasher = Arc::clone(&self.hasher);
                 async move {
-                    self.pool
+                    self.write_pool
                         .retry_write(
                             scope,
                             move |tx| {
@@ -575,7 +604,7 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditReadRepo for PgAuditRepo<M> {
         };
         let limit = usize::from(page.limit.get());
         let hasher = Arc::clone(&self.hasher);
-        self.pool
+        self.read_pool
             .read_map(
                 scope,
                 move |conn| {
@@ -593,7 +622,7 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditReadRepo for PgAuditRepo<M> {
         let tenant = scope.tenant();
         let tenant_uuid = tenant_str(tenant);
         let hasher = Arc::clone(&self.hasher);
-        self.pool
+        self.read_pool
             .read_map(
                 scope,
                 move |conn| {

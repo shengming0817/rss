@@ -1,30 +1,38 @@
-//! `schema-rls` —— schema RLS 守卫（AI-robust **Medium** 内容扫描门）。
+//! `schema-rls` —— schema RLS + LocalOnly reader ACL 守卫（AI-robust **Medium** 内容扫描门）。
 //!
 //! 扫 `adapters/postgres/migrations/*.sql`，禁止 tenant 表（含 `tenant_id` 列的 `CREATE TABLE`，或后续
 //! `ALTER TABLE ... ADD COLUMN tenant_id`）缺 RLS 三件套：`ENABLE ROW LEVEL SECURITY` +
 //! `FORCE ROW LEVEL SECURITY` + 该表的 `CREATE POLICY`。
-//! 同时校验 policy 体文本（normalize：小写 + 折叠空白）须含规范等值谓词
-//! `tenant_id = current_setting('rss.tenant_id', true)::uuid`（或空 GUC fail-closed 的 NULLIF 形态）
-//! 且无明显 ` OR true` 重言旁路；
+//! 同时校验每条 permissive policy 的 USING/WITH CHECK 最终态均为规范 NULLIF 等值谓词
+//! `tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid`；额外收窄必须使用
+//! restrictive policy，不能用另一条 permissive policy 拼接。
 //! 仅有形同 allow-all 的 policy 亦报错（`PolicyWeak`）。把 `docs/rules/tenancy.md` §RLS
 //! 「RLS policy shape 由 schema guard 检查」从规划落成机器门。
 //!
 //! INVARIANT: TENANCY-RLS-FORCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_all_bare_three_findings", anti_vacuity = "tests::green_all_rls_present" }—— tenant 表（含 tenant_id 列）必须同时具备：
 //!   ① `ALTER TABLE <t> ENABLE ROW LEVEL SECURITY`
 //!   ② `ALTER TABLE <t> FORCE ROW LEVEL SECURITY`
-//!   ③ 至少一条 `CREATE POLICY ... ON <t>`，且 policy 体 normalize 后含规范等值谓词
-//!      `tenant_id = current_setting('rss.tenant_id', true)::uuid`（或 NULLIF 形态）且无明显 OR true 重言旁路
+//!   ③ 至少一条 `CREATE POLICY ... ON <t>`，且每条 permissive policy 的 USING/WITH CHECK
+//!      均精确匹配 canonical NULLIF 等值谓词
+//!
+//! INVARIANT: TENANCY-PG-READER-ACL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_tenant_relation_without_reader_select_grant", anti_vacuity = "tests::green_tenant_relation_exact_reader_select_grant" }——
+//! migration `0067` may dynamically backfill SELECT on the complete pre-existing public tenant
+//! relation set. The backfill evidence must bind the catalog query and an executed GRANT format
+//! call inside the same dollar-quoted DO block and FOR loop. Every later migration that creates a
+//! public tenant relation must grant exact table SELECT to `rss_app_read` in that same file; reader
+//! DML and default privileges are always forbidden.
+//! Policy name resolution is a two-layer closure: this static guard rejects migration-defined
+//! operators or `current_setting` shadows, while the runtime PostgreSQL gate proves every
+//! permissive tenant policy has only pinned built-ins plus its own table/column dependencies.
 //!
 //! **评级**：Medium（内容扫描门，接入 `cargo xtask verify`，no-compile meta 步）。
 //!
 //! **盲区**（文本级扫描，非 SQL AST；故意不引重型 SQL parser，匹配 xtask 轻量设计）：
-//!   - 不处理 dollar-quoted 字符串（`$$...$$`）；PL/pgSQL 块内的关键词若误触匹配属静默误判。
+//!   - reader backfill understands dollar-quoted `DO $tag$...$tag$` and one-level `FOR ... LOOP`
+//!     structure, but is not a general PL/pgSQL parser; nested/generated control flow fails closed.
 //!   - CREATE TABLE 体内含 `)` 的字符串字面量会使 `parens_body` 提前截断（漏判 tenant_id）。
-//!   - policy 体经文本 normalize（小写 + 折叠空白）后校验含规范等值谓词
-//!     `tenant_id = current_setting('rss.tenant_id', true)::uuid`（或 NULLIF 形态）且无明显 ` OR true` 重言；
-//!     **不解析完整 SQL 语义**——任意等价重言 / 列别名 / 函数包裹变形超出文本扫描载体边界
-//!     （残留盲区，需 review 兜底）。
-//!   - 以上场景在现有 migrations 实际不存在；引入新 migration 前须人工复核。
+//!   - policy 体使用轻量 statement parser + normalize，不解析完整 PostgreSQL 表达式语义；语义等价但
+//!     非 canonical 的变体会 fail closed。runtime gate 另以 catalog/dependency 证据封闭实际数据库状态。
 //!
 //! `ref: xtask/src/layerdeps.rs`（内容扫描守卫范式）
 //! `ref: postgres ddl-rowsecurity`（FORCE RLS 语义：owner 亦受 policy 约束）
@@ -52,6 +60,17 @@ pub(crate) enum Rule {
     PolicyWeak,
     /// 同表存在额外 permissive policy，其最终态可放宽 canonical tenant policy。
     PolicyWidening,
+    /// Tenant relation is not covered by the reader backfill or an exact same-migration SELECT.
+    ReaderSelectAbsent,
+    /// `rss_app_read` was granted DML/ALL privileges on a relation.
+    ReaderDmlGrant,
+    /// `rss_app_read` may delegate a privilege to another role.
+    ReaderGrantOption,
+    /// Default privileges would grant future/unclassified relations to the reader implicitly.
+    ReaderDefaultPrivileges,
+    /// A migration defines an operator or shadows `current_setting`, making policy text
+    /// insufficient to prove the referenced PostgreSQL semantics.
+    PolicyDependencyShadowing,
 }
 
 /// 搜索关键词（已小写，配合 `to_lowercase()` 后的内容匹配）。
@@ -63,11 +82,6 @@ const FORCE_RLS: &str = "force row level security";
 /// `ALTER POLICY` 升级为本形态，否则 schema-rls 判 `PolicyWeak`（只新增旧谓词不 harden 即门红）。
 const POLICY_PREDICATE_NULLIF: &str =
     "tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid";
-/// 明显重言旁路 — OR true（normalize 后子串；含此则 policy 体视为 PolicyWeak 无效）。
-const TAUTOLOGY_OR_TRUE: &str = " or true";
-/// 明显重言旁路 — OR (true)（normalize 后子串；含此则 policy 体视为 PolicyWeak 无效）。
-const TAUTOLOGY_OR_TRUE_PAREN: &str = " or (true)";
-
 pub(crate) struct SchemaRlsGuard;
 
 impl GovernanceCheck for SchemaRlsGuard {
@@ -83,7 +97,7 @@ impl GovernanceCheck for SchemaRlsGuard {
         let files = load_sql_files(&dir)?;
         let (tenant_count, findings) = scan_rls(&files);
         let summary = format!(
-            "{tenant_count} tenant 表全部具 RLS 三件套（扫 {} 个迁移文件）",
+            "{tenant_count} tenant 表全部具 RLS 三件套与 rss_app_read SELECT 边界（扫 {} 个迁移文件）",
             files.len()
         );
         Ok((summary, findings))
@@ -136,8 +150,39 @@ pub(crate) fn scan_rls(files: &[(String, String)]) -> (usize, Vec<Finding>) {
     let enables = collect_alter_rls(&stripped, ENABLE_RLS);
     let forces = collect_alter_rls(&stripped, FORCE_RLS);
     let policies = collect_policy_tables(&stripped);
-    let findings = build_findings(&tenant_tables, &enables, &forces, &policies);
+    let mut findings = build_findings(&tenant_tables, &enables, &forces, &policies);
+    findings.extend(policy_dependency_shadowing_findings(&stripped));
+    findings.extend(reader_acl_findings(&stripped, &tenant_tables));
     (tenant_count, findings)
+}
+
+fn policy_dependency_shadowing_findings(files: &[(String, String)]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (file, content) in files {
+        let normalized = normalize_whitespace(content);
+        let defines_operator = normalized.contains("create operator ");
+        let shadows_current_setting = ["create function ", "create or replace function "]
+            .into_iter()
+            .any(|prefix| {
+                normalized.match_indices(prefix).any(|(position, _)| {
+                    let signature = normalized[position + prefix.len()..].trim_start();
+                    signature
+                        .split_once('(')
+                        .map(|(name, _)| name.trim().rsplit('.').next() == Some("current_setting"))
+                        .unwrap_or(false)
+                })
+            });
+        if defines_operator || shadows_current_setting {
+            findings.push(finding(
+                Rule::PolicyDependencyShadowing,
+                file,
+                format!(
+                    "{file}: migrations must not define operators or shadow current_setting; tenant policy semantics are pinned to pg_catalog built-ins"
+                ),
+            ));
+        }
+    }
+    findings
 }
 
 /// 对所有文件剥注释并转小写（保留原文件名，仅内容处理）。
@@ -198,6 +243,362 @@ fn build_findings(
         }
     }
     findings
+}
+
+#[derive(Debug)]
+struct ReaderGrant {
+    privileges: String,
+    tables: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ReaderSelectEvent {
+    file: String,
+    granted: bool,
+}
+
+fn reader_acl_findings(
+    files: &[(String, String)],
+    tenant_tables: &BTreeMap<String, String>,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let dynamic_backfill = files
+        .iter()
+        .filter(|(_, content)| is_reader_dynamic_backfill(content))
+        .map(|(file, _)| file.clone())
+        .max();
+    let mut select_events: BTreeMap<String, ReaderSelectEvent> = BTreeMap::new();
+    let mut select_grant_sites: BTreeSet<(String, String)> = BTreeSet::new();
+
+    for (file, content) in files {
+        let normalized = normalize_whitespace(content);
+        if normalized.contains("alter default privileges") && normalized.contains("rss_app_read") {
+            findings.push(finding(
+                Rule::ReaderDefaultPrivileges,
+                file,
+                "rss_app_read must not receive ALTER DEFAULT PRIVILEGES; tenant relations require explicit classified SELECT",
+            ));
+        }
+
+        for statement in content.split(';').map(normalize_whitespace) {
+            let statement = statement.trim();
+            if statement.contains("grant ")
+                && statement.contains(" to rss_app_read")
+                && statement.contains(" with grant option")
+            {
+                findings.push(finding(
+                    Rule::ReaderGrantOption,
+                    file,
+                    format!(
+                        "{file}: rss_app_read must never receive WITH GRANT OPTION, including dynamic SQL"
+                    ),
+                ));
+            }
+            if let Some(grant) = parse_reader_table_grant(statement) {
+                let forbidden = forbidden_reader_privileges(&grant.privileges);
+                for table in &grant.tables {
+                    if !forbidden.is_empty() {
+                        findings.push(finding(
+                            Rule::ReaderDmlGrant,
+                            table,
+                            format!(
+                                "{file}: rss_app_read must not receive DML/ALL privileges: {}",
+                                forbidden.join(", ")
+                            ),
+                        ));
+                    }
+                    if grant.privileges == "select" {
+                        select_grant_sites.insert((table.clone(), file.clone()));
+                        select_events.insert(
+                            table.clone(),
+                            ReaderSelectEvent {
+                                file: file.clone(),
+                                granted: true,
+                            },
+                        );
+                    }
+                }
+            }
+            if !statement.starts_with("grant ") {
+                let forbidden = embedded_reader_forbidden_privileges(statement);
+                if !forbidden.is_empty() {
+                    findings.push(finding(
+                        Rule::ReaderDmlGrant,
+                        file,
+                        format!(
+                            "{file}: dynamic rss_app_read grant must not contain DML/ALL privileges: {}",
+                            forbidden.join(", ")
+                        ),
+                    ));
+                }
+            }
+            if let Some(tables) = parse_reader_select_revoke(statement) {
+                for table in tables {
+                    select_events.insert(
+                        table,
+                        ReaderSelectEvent {
+                            file: file.clone(),
+                            granted: false,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    for (relation, created_in) in tenant_tables {
+        let Some(table) = public_table_name(relation) else {
+            continue;
+        };
+        let event = select_events.get(table);
+        let covered_by_same_migration = event.is_some_and(|event| event.granted)
+            && select_grant_sites.contains(&(table.to_owned(), created_in.clone()));
+        let covered_by_backfill = dynamic_backfill.as_ref().is_some_and(|backfill| {
+            created_in <= backfill
+                && event.is_none_or(|event| event.file <= *backfill || event.granted)
+        });
+        if !covered_by_same_migration && !covered_by_backfill {
+            findings.push(finding(
+                Rule::ReaderSelectAbsent,
+                table,
+                format!(
+                    "{created_in}: rss_app_read requires exact SELECT in the tenant relation's migration (or the pre-existing relation backfill)"
+                ),
+            ));
+        }
+    }
+    findings
+}
+
+fn is_reader_dynamic_backfill(content: &str) -> bool {
+    dollar_quoted_do_bodies(content).into_iter().any(|body| {
+        reader_backfill_for_loops(body)
+            .into_iter()
+            .any(|(binding, query, loop_body)| {
+                is_reader_relation_catalog_query(&query)
+                    && has_executed_reader_grant(&loop_body, &binding)
+            })
+    })
+}
+
+fn dollar_quoted_do_bodies(content: &str) -> Vec<&str> {
+    let mut bodies = Vec::new();
+    let mut rest = content;
+    while let Some(do_offset) = rest.find("do $") {
+        let after_do = &rest[do_offset + "do ".len()..];
+        let Some(tag_end) = after_do[1..].find('$').map(|offset| offset + 1) else {
+            break;
+        };
+        let delimiter = &after_do[..=tag_end];
+        let body_start = delimiter.len();
+        let Some(body_end) = after_do[body_start..].find(delimiter) else {
+            break;
+        };
+        bodies.push(&after_do[body_start..body_start + body_end]);
+        rest = &after_do[body_start + body_end + delimiter.len()..];
+    }
+    bodies
+}
+
+fn reader_backfill_for_loops(body: &str) -> Vec<(String, String, String)> {
+    let normalized = normalize_whitespace(body);
+    let mut loops = Vec::new();
+    let mut rest = normalized.as_str();
+    while let Some(for_offset) = code_mask(rest).find("for ") {
+        let after_for = &rest[for_offset + "for ".len()..];
+        let Some((binding, after_binding)) = after_for.split_once(" in ") else {
+            break;
+        };
+        let Some(loop_offset) = code_mask(after_binding).find(" loop ") else {
+            break;
+        };
+        let query = &after_binding[..loop_offset];
+        let loop_body_start = loop_offset + " loop ".len();
+        let after_loop = &after_binding[loop_body_start..];
+        let Some(end_offset) = code_mask(after_loop).find(" end loop") else {
+            break;
+        };
+        loops.push((
+            binding.trim().to_owned(),
+            query.to_owned(),
+            after_loop[..end_offset].to_owned(),
+        ));
+        rest = &after_loop[end_offset + " end loop".len()..];
+    }
+    loops
+}
+
+fn is_reader_relation_catalog_query(query: &str) -> bool {
+    let query = normalize_whitespace(query);
+    let code = code_mask(&query);
+    [
+        "from pg_class",
+        "pg_namespace",
+        "nspname =",
+        "relkind in",
+        "pg_attribute",
+        "attname =",
+        "n.nspname as schema_name",
+        "c.relname as relation_name",
+    ]
+    .into_iter()
+    .all(|required| code.contains(required))
+        && query.contains("nspname = 'public'")
+        && query.contains("attname = 'tenant_id'")
+        && query.contains("('r', 'p')")
+}
+
+fn has_executed_reader_grant(loop_body: &str, binding: &str) -> bool {
+    let normalized = normalize_whitespace(loop_body);
+    let code = code_mask(&normalized);
+    let mut search_from = 0;
+    while let Some(offset) = code[search_from..].find("execute format") {
+        let execute = search_from + offset;
+        let after_execute = execute + "execute format".len();
+        let Some(paren_offset) = code[after_execute..].find('(') else {
+            return false;
+        };
+        let open = after_execute + paren_offset;
+        if !code[after_execute..open].trim().is_empty() {
+            search_from = after_execute;
+            continue;
+        }
+        let Some(call) = parens_body(&normalized[open + 1..]) else {
+            return false;
+        };
+        if call.contains("'grant select on table %i.%i to rss_app_read'")
+            && call.contains(&format!("{binding}.schema_name"))
+            && call.contains(&format!("{binding}.relation_name"))
+        {
+            return true;
+        }
+        search_from = open + 1;
+    }
+    false
+}
+
+/// Mask single-quoted literal contents while preserving byte offsets and code punctuation.
+fn code_mask(input: &str) -> String {
+    let mut masked = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_literal = false;
+    while let Some(character) = chars.next() {
+        if character == '\'' {
+            masked.push(' ');
+            if in_literal && chars.peek() == Some(&'\'') {
+                masked.push(' ');
+                chars.next();
+            } else {
+                in_literal = !in_literal;
+            }
+        } else if in_literal {
+            masked.extend(std::iter::repeat_n(' ', character.len_utf8()));
+        } else {
+            masked.push(character);
+        }
+    }
+    masked
+}
+
+fn parse_reader_table_grant(statement: &str) -> Option<ReaderGrant> {
+    let statement = statement.strip_prefix("grant ")?;
+    let (privileges, rest) = statement.split_once(" on ")?;
+    let rest = rest.strip_prefix("table ").unwrap_or(rest);
+    let (relations, roles) = rest.split_once(" to ")?;
+    if !role_list_contains(roles, "rss_app_read") {
+        return None;
+    }
+    let tables = relations
+        .split(',')
+        .filter_map(|relation| public_table_name(relation.trim()).map(str::to_owned))
+        .collect::<Vec<_>>();
+    (!tables.is_empty()).then(|| ReaderGrant {
+        privileges: normalize_privileges(privileges),
+        tables,
+    })
+}
+
+fn parse_reader_select_revoke(statement: &str) -> Option<Vec<String>> {
+    let statement = statement.strip_prefix("revoke ")?;
+    let (privileges, rest) = statement.split_once(" on ")?;
+    if normalize_privileges(privileges) != "select" {
+        return None;
+    }
+    let rest = rest.strip_prefix("table ").unwrap_or(rest);
+    let (relations, roles) = rest.split_once(" from ")?;
+    if !role_list_contains(roles, "rss_app_read") {
+        return None;
+    }
+    Some(
+        relations
+            .split(',')
+            .filter_map(|relation| public_table_name(relation.trim()).map(str::to_owned))
+            .collect(),
+    )
+}
+
+fn role_list_contains(roles: &str, role: &str) -> bool {
+    roles
+        .split([',', ' '])
+        .map(str::trim)
+        .any(|candidate| candidate == role)
+}
+
+fn normalize_privileges(privileges: &str) -> String {
+    privileges
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn forbidden_reader_privileges(privileges: &str) -> Vec<&'static str> {
+    let mut forbidden = Vec::new();
+    for (needle, label) in [
+        ("insert", "INSERT"),
+        ("update", "UPDATE"),
+        ("delete", "DELETE"),
+        ("truncate", "TRUNCATE"),
+        ("all", "ALL"),
+    ] {
+        if privileges
+            .split(',')
+            .any(|privilege| privilege == needle || privilege.starts_with(&format!("{needle} (")))
+        {
+            forbidden.push(label);
+        }
+    }
+    forbidden
+}
+
+fn embedded_reader_forbidden_privileges(statement: &str) -> Vec<&'static str> {
+    let mut forbidden = BTreeSet::new();
+    for (grant_pos, _) in statement.match_indices("grant ") {
+        let after_grant = &statement[grant_pos + "grant ".len()..];
+        let Some(on_pos) = after_grant.find(" on ") else {
+            continue;
+        };
+        let Some(role_pos) = after_grant.find(" to rss_app_read") else {
+            continue;
+        };
+        if role_pos <= on_pos {
+            continue;
+        }
+        let privileges = normalize_privileges(
+            after_grant[..on_pos].trim_matches(|character| matches!(character, '\'' | '"' | '(')),
+        );
+        forbidden.extend(forbidden_reader_privileges(&privileges));
+    }
+    forbidden.into_iter().collect()
+}
+
+fn public_table_name(relation: &str) -> Option<&str> {
+    let relation = relation.trim().trim_matches('"');
+    match relation.split_once('.') {
+        None => Some(relation),
+        Some(("public", table)) => Some(table.trim_matches('"')),
+        Some(_) => None,
+    }
 }
 
 /// 剥去 `--` 行注释与 `/* */` 块注释（保留 `\n` 以维持行结构；保留字符串字面量内容）。
@@ -387,19 +788,40 @@ fn normalize_whitespace(s: &str) -> String {
     out
 }
 
-/// policy 谓词体**最终态**合规判定（#332 F6）：必须含 [`POLICY_PREDICATE_NULLIF`] 规范谓词且无 `OR true`
-/// 重言旁路。旧裸谓词不再被接受为最终态——只新增旧谓词而不经 forward-only `ALTER POLICY` 升级即 `PolicyWeak`。
+/// policy 谓词体**最终态**合规判定（#332 F6）：每条 permissive policy 的 USING / WITH CHECK
+/// 必须精确等于 [`POLICY_PREDICATE_NULLIF`]。额外收窄只能放进独立 `AS RESTRICTIVE` policy；这样
+/// `NOT (canonical)`、`canonical = false`、`canonical AND ...` 等易被词法包含门误收的形态全部 fail-closed。
 fn policy_body_is_valid(norm_body: &str) -> bool {
-    extract_policy_clause(norm_body, "using").is_some_and(|clause| {
-        clause.contains(POLICY_PREDICATE_NULLIF)
-            && !clause.contains(TAUTOLOGY_OR_TRUE)
-            && !clause.contains(TAUTOLOGY_OR_TRUE_PAREN)
-    }) && extract_policy_clause(norm_body, "with check").is_some_and(|clause| {
-        clause.contains(POLICY_PREDICATE_NULLIF)
-            && !clause.contains(TAUTOLOGY_OR_TRUE)
-            && !clause.contains(TAUTOLOGY_OR_TRUE_PAREN)
-    }) && !norm_body.contains(TAUTOLOGY_OR_TRUE)
-        && !norm_body.contains(TAUTOLOGY_OR_TRUE_PAREN)
+    extract_policy_clause(norm_body, "using").is_some_and(policy_clause_is_canonical)
+        && extract_policy_clause(norm_body, "with check").is_some_and(policy_clause_is_canonical)
+}
+
+fn policy_clause_is_canonical(clause: &str) -> bool {
+    strip_balanced_outer_parens(clause.trim()) == POLICY_PREDICATE_NULLIF
+}
+
+fn strip_balanced_outer_parens(mut clause: &str) -> &str {
+    loop {
+        let Some(inner) = clause
+            .strip_prefix('(')
+            .and_then(|value| value.strip_suffix(')'))
+        else {
+            return clause;
+        };
+        let mut depth = 0_i32;
+        let wraps_whole_clause = clause.char_indices().all(|(index, ch)| {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            depth >= 0 && (depth != 0 || index == clause.len() - 1)
+        });
+        if !wraps_whole_clause || depth != 0 {
+            return clause;
+        }
+        clause = inner.trim();
+    }
 }
 
 fn extract_policy_clause<'a>(body: &'a str, keyword: &str) -> Option<&'a str> {
@@ -506,15 +928,51 @@ fn replace_policy_clause(body: &mut String, keyword: &str, clause: &str) {
 mod tests {
     use super::*;
 
+    const EXISTING_READER_GRANTS: &str = r#"
+GRANT SELECT ON TABLE sessions TO rss_app_read;
+GRANT SELECT ON TABLE dead_letter TO rss_app_read;
+GRANT SELECT ON TABLE inbox_receipts TO rss_app_read;
+GRANT SELECT ON TABLE dead_letter_archive_receipts TO rss_app_read;
+"#;
+
     fn files(content: &str) -> Vec<(String, String)> {
-        vec![("test.sql".to_string(), content.to_string())]
+        vec![(
+            "test.sql".to_string(),
+            format!("{content}\n{EXISTING_READER_GRANTS}"),
+        )]
     }
 
     fn two_files(c1: &str, c2: &str) -> Vec<(String, String)> {
         vec![
-            ("file1.sql".to_string(), c1.to_string()),
-            ("file2.sql".to_string(), c2.to_string()),
+            (
+                "file1.sql".to_string(),
+                format!("{c1}\n{EXISTING_READER_GRANTS}"),
+            ),
+            (
+                "file2.sql".to_string(),
+                format!("{c2}\n{EXISTING_READER_GRANTS}"),
+            ),
         ]
+    }
+
+    fn reader_acl_files(grant: &str) -> Vec<(String, String)> {
+        vec![(
+            "0068_reader_fixture.sql".to_string(),
+            format!(
+                r#"
+CREATE TABLE tenant_reader_fixture (
+    tenant_id uuid NOT NULL,
+    id uuid NOT NULL
+);
+ALTER TABLE tenant_reader_fixture ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_reader_fixture FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON tenant_reader_fixture
+    USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
+{grant}
+"#
+            ),
+        )]
     }
 
     // ---- green：三件套齐备 → 0 findings ----
@@ -538,6 +996,363 @@ CREATE POLICY tenant_isolation ON sessions
             findings.is_empty(),
             "三件套齐备不应有 findings: {findings:?}"
         );
+    }
+
+    #[test]
+    fn red_tenant_relation_without_reader_select_grant() {
+        let (count, findings) = scan_rls(&reader_acl_files(""));
+        assert_eq!(count, 1);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.subject == "tenant_reader_fixture"
+                    && finding.detail.contains("rss_app_read")
+                    && finding.detail.contains("SELECT")
+            }),
+            "new tenant relation must grant exact SELECT to rss_app_read in its migration: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_tenant_relation_reader_dml_grant() {
+        let (count, findings) = scan_rls(&reader_acl_files(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE tenant_reader_fixture TO rss_app_read;",
+        ));
+        assert_eq!(count, 1);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.subject == "tenant_reader_fixture"
+                    && finding.detail.contains("rss_app_read")
+                    && ["INSERT", "UPDATE", "DELETE"]
+                        .iter()
+                        .any(|privilege| finding.detail.contains(privilege))
+            }),
+            "reader ACL must reject every DML privilege, even when SELECT is present: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn green_tenant_relation_exact_reader_select_grant() {
+        let (count, findings) = scan_rls(&reader_acl_files(
+            "GRANT SELECT ON TABLE tenant_reader_fixture TO rss_app_read;",
+        ));
+        assert_eq!(count, 1);
+        assert!(
+            findings.is_empty(),
+            "exact tenant-table SELECT grant is the only accepted reader ACL: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn green_dynamic_reader_backfill_covers_preexisting_tenant_relations() {
+        let files = vec![
+            (
+                "0066_existing.sql".to_string(),
+                reader_acl_files("")[0].1.clone(),
+            ),
+            (
+                "0067_reader.sql".to_string(),
+                r#"
+DO $$
+DECLARE relation record;
+BEGIN
+    FOR relation IN
+        SELECT n.nspname AS schema_name, c.relname AS relation_name
+        FROM pg_class AS c
+        JOIN pg_namespace AS n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p')
+          AND EXISTS (
+              SELECT 1 FROM pg_attribute AS a
+              WHERE a.attrelid = c.oid AND a.attname = 'tenant_id'
+          )
+    LOOP
+        EXECUTE format(
+            'GRANT SELECT ON TABLE %I.%I TO rss_app_read',
+            relation.schema_name,
+            relation.relation_name
+        );
+    END LOOP;
+END
+$$;
+"#
+                .to_string(),
+            ),
+        ];
+        let (count, findings) = scan_rls(&files);
+        assert_eq!(count, 1);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn red_relation_after_dynamic_backfill_requires_same_migration_grant() {
+        let files = vec![
+            (
+                "0067_reader.sql".to_string(),
+                r#"
+DO $$
+DECLARE relation record;
+BEGIN
+    FOR relation IN
+        SELECT n.nspname AS schema_name, c.relname AS relation_name
+        FROM pg_class AS c
+        JOIN pg_namespace AS n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p')
+          AND EXISTS (
+              SELECT 1 FROM pg_attribute AS a
+              WHERE a.attrelid = c.oid AND a.attname = 'tenant_id'
+          )
+    LOOP
+        EXECUTE format(
+            'GRANT SELECT ON TABLE %I.%I TO rss_app_read',
+            relation.schema_name,
+            relation.relation_name
+        );
+    END LOOP;
+END
+$$;
+"#
+                .to_string(),
+            ),
+            (
+                "0068_future.sql".to_string(),
+                reader_acl_files("")[0].1.clone(),
+            ),
+        ];
+        let (_, findings) = scan_rls(&files);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ReaderSelectAbsent
+                    && finding.subject == "tenant_reader_fixture"
+            }),
+            "dynamic backfill must not become implicit future-table authorization: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_nonexecuted_format_is_not_a_reader_backfill() {
+        let files = vec![
+            (
+                "0066_existing.sql".to_string(),
+                reader_acl_files("")[0].1.clone(),
+            ),
+            (
+                "0067_bait.sql".to_string(),
+                "SELECT c.relname FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 JOIN pg_attribute a ON a.attrelid = c.oid \
+                 WHERE n.nspname = 'public' AND c.relkind = 'r' AND a.attname = 'tenant_id'; \
+                 SELECT format('GRANT SELECT ON TABLE %I.%I TO rss_app_read', 'public', 'bait');"
+                    .to_string(),
+            ),
+        ];
+        let (_, findings) = scan_rls(&files);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ReaderSelectAbsent
+                    && finding.subject == "tenant_reader_fixture"
+            }),
+            "catalog/format string bait without EXECUTE must not satisfy the backfill: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_dynamic_backfill_rejects_unrelated_execute_block() {
+        let files = vec![
+            (
+                "0066_existing.sql".to_string(),
+                reader_acl_files("")[0].1.clone(),
+            ),
+            (
+                "0067_bait.sql".to_string(),
+                r#"
+DO $$
+BEGIN
+    FOR relation IN
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p')
+          AND EXISTS (
+              SELECT 1 FROM pg_attribute a
+              WHERE a.attrelid = c.oid AND a.attname = 'tenant_id'
+          )
+    LOOP
+        NULL;
+    END LOOP;
+END
+$$;
+DO $grant$
+BEGIN
+    EXECUTE format(
+        'GRANT SELECT ON TABLE %I.%I TO rss_app_read',
+        'public',
+        'bait'
+    );
+END
+$grant$;
+"#
+                .to_string(),
+            ),
+        ];
+
+        let (_, findings) = scan_rls(&files);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ReaderSelectAbsent
+                    && finding.subject == "tenant_reader_fixture"
+            }),
+            "catalog FOR and EXECUTE GRANT in unrelated DO blocks must not compose: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_dynamic_backfill_rejects_unexecuted_grant_literal() {
+        let files = vec![
+            (
+                "0066_existing.sql".to_string(),
+                reader_acl_files("")[0].1.clone(),
+            ),
+            (
+                "0067_bait.sql".to_string(),
+                r#"
+DO $body$
+BEGIN
+    FOR relation IN
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p')
+          AND EXISTS (
+              SELECT 1 FROM pg_attribute a
+              WHERE a.attrelid = c.oid AND a.attname = 'tenant_id'
+          )
+    LOOP
+        RAISE NOTICE 'EXECUTE format';
+        PERFORM format(
+            'GRANT SELECT ON TABLE %I.%I TO rss_app_read',
+            'public',
+            relation.relname
+        );
+    END LOOP;
+END
+$body$;
+"#
+                .to_string(),
+            ),
+        ];
+
+        let (_, findings) = scan_rls(&files);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ReaderSelectAbsent
+                    && finding.subject == "tenant_reader_fixture"
+            }),
+            "an unexecuted GRANT literal and EXECUTE text bait must not satisfy backfill: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_dynamic_backfill_rejects_catalog_query_outside_for_source() {
+        let files = vec![
+            (
+                "0066_existing.sql".to_string(),
+                reader_acl_files("")[0].1.clone(),
+            ),
+            (
+                "0067_bait.sql".to_string(),
+                r#"
+DO $$
+BEGIN
+    PERFORM c.relname
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relkind IN ('r', 'p')
+      AND EXISTS (
+          SELECT 1 FROM pg_attribute a
+          WHERE a.attrelid = c.oid AND a.attname = 'tenant_id'
+      );
+
+    FOR relation IN SELECT 1 AS relname
+    LOOP
+        EXECUTE format(
+            'GRANT SELECT ON TABLE %I.%I TO rss_app_read',
+            'public',
+            relation.relname
+        );
+    END LOOP;
+END
+$$;
+"#
+                .to_string(),
+            ),
+        ];
+
+        let (_, findings) = scan_rls(&files);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ReaderSelectAbsent
+                    && finding.subject == "tenant_reader_fixture"
+            }),
+            "catalog bait outside the FOR source must not authorize its loop body: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_reader_default_privileges_are_forbidden() {
+        let mut files =
+            reader_acl_files("GRANT SELECT ON TABLE tenant_reader_fixture TO rss_app_read;");
+        files[0].1.push_str(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA public \
+             GRANT SELECT ON TABLES TO rss_app_read;",
+        );
+        let (_, findings) = scan_rls(&files);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ReaderDefaultPrivileges),
+            "default privileges would silently authorize unclassified future tables: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_dynamic_reader_dml_grant_is_forbidden() {
+        let mut files =
+            reader_acl_files("GRANT SELECT ON TABLE tenant_reader_fixture TO rss_app_read;");
+        files[0].1.push_str(
+            "DO $$ BEGIN EXECUTE format( \
+             'GRANT UPDATE ON TABLE %I.%I TO rss_app_read', 'public', 'tenant_reader_fixture'); \
+             END $$;",
+        );
+        let (_, findings) = scan_rls(&files);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ReaderDmlGrant && finding.detail.contains("UPDATE")
+            }),
+            "dynamic SQL must not bypass the reader DML prohibition: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_reader_grant_option_is_forbidden() {
+        for grant in [
+            "GRANT SELECT ON TABLE tenant_reader_fixture TO rss_app_read WITH GRANT OPTION;",
+            "GRANT SELECT ON TABLE tenant_reader_fixture TO rss_app_read; \
+             DO $$ BEGIN EXECUTE format( \
+             'GRANT SELECT ON TABLE %I.%I TO rss_app_read WITH GRANT OPTION', \
+             'public', 'tenant_reader_fixture'); END $$;",
+        ] {
+            let (_, findings) = scan_rls(&reader_acl_files(grant));
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ReaderGrantOption),
+                "WITH GRANT OPTION must never satisfy the exact reader ACL: {findings:?}"
+            );
+        }
     }
 
     #[test]
@@ -823,6 +1638,48 @@ CREATE POLICY deny_all ON sessions AS RESTRICTIVE USING (false) WITH CHECK (fals
             findings.is_empty(),
             "restrictive policy cannot widen access: {findings:?}"
         );
+    }
+
+    #[test]
+    fn red_permissive_policy_cannot_negate_or_compare_canonical_predicate() {
+        for predicate in [
+            "NOT (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)",
+            "(tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid) = false",
+        ] {
+            let sql = format!(
+                "CREATE TABLE sessions (tenant_id uuid NOT NULL);\n\
+                 ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;\n\
+                 ALTER TABLE sessions FORCE ROW LEVEL SECURITY;\n\
+                 CREATE POLICY p ON sessions USING ({predicate}) WITH CHECK ({predicate});"
+            );
+            let (_, findings) = scan_rls(&files(&sql));
+            assert_eq!(findings.len(), 1, "predicate must fail closed: {predicate}");
+            assert_eq!(findings[0].rule, Rule::PolicyWeak);
+        }
+    }
+
+    #[test]
+    fn red_policy_dependency_shadowing_is_rejected() {
+        let tenant_policy = r#"
+CREATE TABLE sessions (tenant_id uuid NOT NULL);
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON sessions
+    USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
+"#;
+        for shadow in [
+            "CREATE OPERATOR tenant_shadow.= (LEFTARG = uuid, RIGHTARG = uuid, FUNCTION = tenant_shadow.always_true);",
+            "CREATE OR REPLACE FUNCTION tenant_shadow.current_setting(text, boolean) RETURNS text LANGUAGE sql AS 'SELECT ''''';",
+        ] {
+            let (_, findings) = scan_rls(&files(&format!("{tenant_policy}\n{shadow}")));
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::PolicyDependencyShadowing),
+                "migration-defined policy dependency shadow must fail closed: {shadow}; {findings:?}"
+            );
+        }
     }
 
     #[test]

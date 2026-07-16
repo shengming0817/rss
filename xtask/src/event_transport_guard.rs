@@ -2216,7 +2216,7 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                     "published",
                     &[
                         "deadline_or_expired(claimed, relay_budget",
-                        "execute_scalar(tenant_pool, claimed, relay_budget, deadline",
+                        "execute_published(tenant_pool, claimed, relay_budget, deadline",
                     ][..],
                 ),
                 (
@@ -2224,7 +2224,7 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                     "retry",
                     &[
                         "deadline_or_expired(claimed, relay_budget",
-                        "execute_scalar(tenant_pool, claimed, relay_budget, deadline",
+                        "execute_retry(tenant_pool, claimed, relay_budget, deadline",
                     ][..],
                 ),
                 (
@@ -2249,10 +2249,18 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                 ),
                 (
                     None,
-                    "execute_scalar",
+                    "execute_published",
                     &[
                         "tenant_pool.deadline_write(infra_tenant_scope(tenant), deadline",
-                        "map_outer_timeout(phase, relay_budget)",
+                        "map_outer_timeout(PHASE, relay_budget)",
+                    ][..],
+                ),
+                (
+                    None,
+                    "execute_retry",
+                    &[
+                        "tenant_pool.deadline_write(infra_tenant_scope(tenant), deadline",
+                        "map_outer_timeout(PHASE, relay_budget)",
                     ][..],
                 ),
                 (
@@ -2278,14 +2286,14 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                     Some("PgDomainDeps<caps::Settings>"),
                     "outbox",
                     &[
-                        "PgOutbox::new(&self.store, bound_domain::<caps::Settings>(), publisher, relay_budget,",
+                        "PgOutbox::new(self.stores.writer_capability(), bound_domain::<caps::Settings>(), publisher, relay_budget,",
                     ][..],
                 ),
                 (
                     Some("PgDomainDeps<caps::Identity>"),
                     "outbox",
                     &[
-                        "PgOutbox::new(&self.store, bound_domain::<caps::Identity>(), publisher, relay_budget,",
+                        "PgOutbox::new(self.stores.writer_capability(), bound_domain::<caps::Identity>(), publisher, relay_budget,",
                     ][..],
                 ),
             ],
@@ -6871,10 +6879,16 @@ $do$;
                 "adapters/postgres/src/outbox/settlement.rs",
                 "tenant_pool\n            .deadline_write(",
                 "pool\n            .deadline_global_transaction(",
-                &[(
-                    "adapters/postgres/src/outbox/settlement.rs",
-                    "OUTBOX-RELAY-BUDGET-01 live seam `execute_scalar` 未消费 canonical typed budget/deadline: [\"tenant_pool.deadline_write(infra_tenant_scope(tenant),deadline\"]",
-                )],
+                &[
+                    (
+                        "adapters/postgres/src/outbox/settlement.rs",
+                        "OUTBOX-RELAY-BUDGET-01 live seam `execute_published` 未消费 canonical typed budget/deadline: [\"tenant_pool.deadline_write(infra_tenant_scope(tenant),deadline\"]",
+                    ),
+                    (
+                        "adapters/postgres/src/outbox/settlement.rs",
+                        "OUTBOX-RELAY-BUDGET-01 live seam `execute_retry` 未消费 canonical typed budget/deadline: [\"tenant_pool.deadline_write(infra_tenant_scope(tenant),deadline\"]",
+                    ),
+                ],
             ),
             RelayBudgetRedCase::replace(
                 "postgres DLX settlement deadline carrier",

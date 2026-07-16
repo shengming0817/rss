@@ -22,6 +22,11 @@ fn tx_capability_ui() {
     t.compile_fail("tests/ui/pg_runtime_owner_clone_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_owner_consume_twice_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_owner_legacy_api_fail.rs");
+    t.compile_fail("tests/ui/pg_runtime_setup_legacy_signature_fail.rs");
+    t.compile_fail("tests/ui/pg_runtime_setup_legacy_policy_signature_fail.rs");
+    t.compile_fail("tests/ui/pg_runtime_setup_audit_admin_signature_fail.rs");
+    t.compile_fail("tests/ui/pg_runtime_setup_plain_read_config_fail.rs");
+    t.compile_fail("tests/ui/pg_runtime_capabilities_private_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_handle_lifecycle_fail.rs");
     t.compile_fail("tests/ui/pg_readiness_sampler_factory_clone_fail.rs");
     t.compile_fail("tests/ui/pg_readiness_sampler_factory_consume_twice_fail.rs");

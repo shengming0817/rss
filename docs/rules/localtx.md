@@ -173,7 +173,7 @@ ref: sqlx sqlx-core/src/transaction.rs@bab1b022bd56a64f9a08b46b36b97c5cff19d77e
 Postgres runner 以 `cotx::settlement` 私有模块持有的 crate-private `LocalTxAttempt<T, E>` opaque 和式
 状态承载 `Committed` / `Unsettled` / `RolledBack` / `RollbackFailed` / `CommitUnknown`，非法的
 result/status 组合在类型层不可表达（Hard）。生产 mint 构造器为 `pub(super)`，仅 `cotx` settlement
-funnel 可铸造；兄弟模块与 `tx_retry` 只能消费。`PgTenantPool` 仍是 tenant scope 与 transaction
+funnel 可铸造；兄弟模块与 `tx_retry` 只能消费。`PgTenantWritePool` 是 tenant scope 与 write transaction
 capability 的唯一入口；`cotx` 在每次 attempt 内重新 begin、注入 `SET LOCAL`，并经单一 settlement
 funnel commit 或显式 rollback。显式 rollback 失败时经 `map_storage` 收口为独立 Storage settlement
 错误（保留 primary+rollback 因果链），不再把领域冲突（如 `VersionConflict`）误分类为 transient retry。

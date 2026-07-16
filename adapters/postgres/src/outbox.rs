@@ -5,7 +5,7 @@
 //!
 //! **`append_outbox`**（`pub(crate)` free fn，收 `&mut TxCapability`）是 L1 原子性的编译期硬约束：
 //! 只能在已有事务内调用，不能脱离事务双写；tenant-scoped 业务写经
-//! `PgTenantPool::co_tx_with_outbox` 注入租户事务后传入能力令牌，全局 outbox-only infra
+//! `PgTenantWritePool::co_tx_with_outbox` 注入租户事务后传入能力令牌，全局 outbox-only infra
 //! 路径也必须先显式打开事务并由 postgres adapter 铸造令牌——类型系统天然阻止无事务直接调用。
 //!
 //! **CAS fencing**：`claim_batch` 在数据库内原子选择并铸造 token/deadline；settle 同时精确匹配二者且
@@ -39,11 +39,16 @@ use sqlx::Row;
 
 use crate::PgStore;
 use crate::cotx::{
-    PgTenantPool, TxCapability, deadline_global_transaction, infra_tenant_scope, io_deadline_after,
+    PgTenantWritePool, TxCapability, deadline_global_transaction, infra_tenant_scope,
+    io_deadline_after,
 };
 use crate::dead_letter_payload::{
     DLX_REPLAY_CAPSULE_ENCODING, DlxPayloadContext, DlxPayloadProtector, SensitiveJson,
 };
+#[cfg(feature = "fault-matrix-test-support")]
+use crate::pool::PgRuntimeStores;
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::{
     ProjectionWriteRegistry, append_projection_event_if_bound,
     append_replayed_projection_event_if_bound,
@@ -897,7 +902,7 @@ pub(crate) struct ReplayedOutboxAppend {
 ///
 /// # INVARIANT: OUTBOX-ATOMIC-IDEM-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
-/// outbox 双写必须在业务事务内原子执行——tenant-scoped caller 须经 `PgTenantPool::co_tx_with_outbox`
+/// outbox 双写必须在业务事务内原子执行——tenant-scoped caller 须经 `PgTenantWritePool::co_tx_with_outbox`
 /// 或同等 postgres 事务 funnel 传入 `TxCapability`；裸 `PgPool::acquire()` / `PgConnection` 无法调用（Hard）。
 // 生产 caller：`PgEmitter::emit`（impl `diport::OutboxEmitter`）在事务内调用——域 crate 不直接 import 本
 // adapter（域→adapter 反向依赖被 deny.toml 禁），域侧只经 `OutboxEmitter` port 触发该 durable 写路径（T008/#1100）。
@@ -1223,7 +1228,7 @@ pub(crate) fn classify_append_fingerprint(
 /// rust-standards `Clock` 构造器位置参规则的有意例外（clippy `disallowed_methods` 不覆盖 SQL `now()`）。
 pub struct PgOutbox {
     pool: sqlx::PgPool,
-    tenant_pool: PgTenantPool,
+    tenant_pool: PgTenantWritePool,
     provider: Arc<OutboxProviderIdentity>,
     publisher: Box<DynPublisher<'static>>,
     relay_budget: RelayBudget,
@@ -1232,15 +1237,9 @@ pub struct PgOutbox {
 }
 
 impl PgOutbox {
-    /// 由 [`PgStore`]、typed domain、`Box<DynPublisher>`、`Arc<TenantAuthority>` 与
-    /// [`DlxPayloadProtector`] 构造；domain 与 publisher 共同绑定 provider identity，其余依次提供
-    /// 持久化、broker 发布、租户权威签名和 DLX payload 保护能力。
-    /// pool 从 `PgStore.pool`（`pub(crate)`，同 crate 可取）clone；DynPublisher 转移所有权。
-    ///
-    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::outbox` 收口。
-    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-    pub(crate) fn new(
-        store: &PgStore,
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_unverified_for_test(
+        store: &crate::PgStore,
         domain: vocab::DomainName,
         publisher: Box<DynPublisher<'static>>,
         relay_budget: RelayBudget,
@@ -1249,7 +1248,33 @@ impl PgOutbox {
     ) -> Self {
         Self {
             pool: store.pool.clone(),
-            tenant_pool: PgTenantPool::new(store),
+            tenant_pool: PgTenantWritePool::from_unverified_for_test(store),
+            provider: Arc::new(OutboxProviderIdentity { domain }),
+            publisher,
+            relay_budget,
+            tenant_authority,
+            payload_protector,
+        }
+    }
+
+    /// 由 [`PgStore`]、typed domain、`Box<DynPublisher>`、`Arc<TenantAuthority>` 与
+    /// [`DlxPayloadProtector`] 构造；domain 与 publisher 共同绑定 provider identity，其余依次提供
+    /// 持久化、broker 发布、租户权威签名和 DLX payload 保护能力。
+    /// pool 从 `PgStore.pool`（`pub(crate)`，同 crate 可取）clone；DynPublisher 转移所有权。
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::outbox` 收口。
+    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+    pub(crate) fn new(
+        store: &VerifiedPgWriteStore,
+        domain: vocab::DomainName,
+        publisher: Box<DynPublisher<'static>>,
+        relay_budget: RelayBudget,
+        tenant_authority: Arc<TenantAuthority>,
+        payload_protector: DlxPayloadProtector,
+    ) -> Self {
+        Self {
+            pool: store.pool().clone(),
+            tenant_pool: PgTenantWritePool::new(store),
             provider: Arc::new(OutboxProviderIdentity { domain }),
             publisher,
             relay_budget,
@@ -1278,11 +1303,12 @@ pub(crate) async fn fault_matrix_publish_before_settle(
     domain: &str,
     event_id: &str,
 ) -> Result<(), EngineError> {
-    let store = PgStore { pool: pool.clone() };
+    let store = Arc::new(PgStore { pool: pool.clone() });
+    let stores = PgRuntimeStores::from_unverified_for_test(Arc::clone(&store), store);
     let domain = vocab::DomainName::parse(domain)
         .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
     let relay = PgOutbox::new(
-        &store,
+        stores.writer_capability(),
         domain,
         publisher,
         relay_budget,

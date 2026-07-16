@@ -17,24 +17,26 @@
 use consistency::EventEntry;
 use diport::{Clock, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 
+#[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantPool, infra_tenant_scope};
+use crate::cotx::{PgTenantWritePool, infra_tenant_scope};
 use crate::outbox::{
     OutboxAppendError, OutboxEnvelope, append_outbox_with_projection, metadata_with_ambient,
     unix_secs,
 };
+use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::ProjectionWriteRegistry;
 
 /// PostgreSQL outbox 发射 adapter（impl [`OutboxEmitter`]）。
 ///
-/// 经 [`PgTenantPool`] 持有 tenant-scoped write funnel；不暴露裸 pool / begin 出口。
+/// 经 [`PgTenantWritePool`] 持有 tenant-scoped write funnel；不暴露裸 pool / begin 出口。
 ///
 /// **时间源**：`clock` 是注入的 [`Clock`]（必填构造器位置参，缺失即编译错误——rust-standards §工程护栏），
 /// 仅用于 envelope `occurred_at`。与 [`crate::PgOutbox`] 刻意用 SQL `now()` 的 lease/retry 谓词（多实例需单一、
 /// 无跨进程偏移的时间源）**不同**：那是 relay 端时间，本 emitter 的 `occurred_at` 是 producer 端事件发生时刻，
 /// 故注入 `Clock`（#1129）。
 pub struct PgEmitter {
-    pool: PgTenantPool,
+    pool: PgTenantWritePool,
     clock: Box<dyn Clock>,
 }
 
@@ -46,16 +48,19 @@ impl PgEmitter {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::emitter`] 收口（provider-agnostic 基建，非单域）。
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
-        Self::new_with_projection_registry(store, clock, ProjectionWriteRegistry::empty())
+        Self {
+            pool: PgTenantWritePool::from_unverified_for_test(store),
+            clock,
+        }
     }
 
     pub(crate) fn new_with_projection_registry(
-        store: &PgStore,
+        store: &VerifiedPgWriteStore,
         clock: Box<dyn Clock>,
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
-            pool: PgTenantPool::with_projection_registry(store, projection_registry),
+            pool: PgTenantWritePool::with_projection_registry(store, projection_registry),
             clock,
         }
     }
@@ -84,7 +89,7 @@ impl OutboxEmitter for PgEmitter {
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
-        // durable 写入事务内执行；事务打开、SET LOCAL、commit_unknown 与 rollback 统一由 PgTenantPool::write 承载。
+        // durable 写入事务内执行；事务打开、SET LOCAL、commit_unknown 与 rollback 统一由 PgTenantWritePool::write 承载。
         let projection_registry = self.pool.projection_registry();
         self.pool
             .write(

@@ -3,6 +3,7 @@
 //! `ref: sqlx sqlx-core/src/pool/options.rs@v0.8.6`（`PgPoolOptions` builder + `connect_with`）。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
@@ -21,8 +22,12 @@ pub(crate) const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 /// 私有 CA 经 [`PgConfig::with_ssl_root_cert`] 注入根证书；本地无 TLS 开发经 [`PgConfig::with_ssl_mode`]
 /// 显式降级——不静默。
 pub(crate) const DEFAULT_SSL_MODE: PgSslMode = PgSslMode::VerifyFull;
-/// 连接 `application_name`（对应 pg_stat_activity.application_name，便于运维归因）。
-const APPLICATION_NAME: &str = "rss-postgres";
+/// Default `application_name` for explicit maintenance/test connections.
+const APPLICATION_NAME: &str = "rss-postgres-maintenance";
+const WRITER_APPLICATION_NAME: &str = "rss-postgres-writer";
+const READER_APPLICATION_NAME: &str = "rss-postgres-reader";
+const AUDIT_ADMIN_APPLICATION_NAME: &str = "rss-postgres-audit-admin";
+const MIGRATOR_APPLICATION_NAME: &str = "rss-postgres-migrator";
 
 /// postgres adapter 错误（adapter-内部 `thiserror`；**不**映射 HTTP 状态码——域 / handler 才映射）。
 ///
@@ -51,11 +56,27 @@ pub enum PgError {
     #[error("postgres config: max_connections must be >= 1")]
     ZeroMaxConnections,
     /// 建池 / 连接失败。
-    #[error("postgres connection failed")]
-    Connect(#[source] sqlx::Error),
+    #[error("postgres {lane} connection failed")]
+    Connect {
+        lane: &'static str,
+        #[source]
+        source: sqlx::Error,
+    },
     /// 迁移应用失败。
     #[error("postgres migration failed")]
     Migrate(#[source] sqlx::migrate::MigrateError),
+    /// 0067 one-shot migration 命令的 embedded/ledger 前置状态不精确。
+    #[error("postgres reader-lane migration precondition failed: {reason}")]
+    ReaderLaneMigrationPrecondition {
+        reason: &'static str,
+        embedded_max: Option<i64>,
+        ledger_last: Option<i64>,
+        ledger_entries: usize,
+        first_invalid: Option<i64>,
+    },
+    /// 0067 one-shot migration 命令无法读取 SQLx ledger。
+    #[error("postgres reader-lane migration ledger probe failed")]
+    ReaderLaneMigrationLedgerProbe(#[source] sqlx::Error),
     /// RLS 能力自检的探测 SQL 失败（acquire / set_config / catalog 查询）。
     #[error("postgres rls capability probe failed")]
     RlsCapability(#[source] sqlx::Error),
@@ -77,6 +98,56 @@ pub enum PgError {
     /// 也不得作为生产 serving pool，避免测试替身 / owner-like 角色漂进 bootstrap。
     #[error("postgres rls capability: serving role must be rss_app")]
     RlsUnexpectedServingRole,
+    /// tenant reader 能力门 catalog / GUC / ACL 探测失败。
+    #[error("postgres tenant reader capability probe failed")]
+    TenantReadCapability(#[source] sqlx::Error),
+    /// tenant reader 必须直连固定 `rss_app_read` 角色。
+    #[error("postgres tenant reader capability: role must be rss_app_read")]
+    TenantReadUnexpectedRole,
+    /// tenant reader 的 LOGIN / NOINHERIT / 非管理属性不满足精确集合。
+    #[error("postgres tenant reader capability: role attributes are not exact")]
+    TenantReadRoleAttributes,
+    /// tenant reader 必须由 role config 默认开启只读事务，且当前事务必须已经只读。
+    #[error("postgres tenant reader capability: default transaction read only is not enforced")]
+    TenantReadDefaultTransaction,
+    /// tenant reader 必须把 name resolution 固定到 `pg_catalog, public`。
+    #[error("postgres tenant reader capability: search path is not exact")]
+    TenantReadSearchPath,
+    /// tenant reader 不得作为任何角色的成员，也不得拥有成员角色。
+    #[error("postgres tenant reader capability: role membership is not empty")]
+    TenantReadMembership,
+    /// tenant reader 不得拥有数据库对象。
+    #[error("postgres tenant reader capability: role owns database objects")]
+    TenantReadOwnership,
+    /// tenant reader 在当前数据库只能 CONNECT，不得 CREATE 或 TEMPORARY。
+    #[error("postgres tenant reader capability: database privileges are not exact")]
+    TenantReadDatabasePrivileges,
+    /// tenant reader 必须且只能 SELECT 全部 tenant relations。
+    #[error("postgres tenant reader capability: relation privileges are not exact")]
+    TenantReadRelationPrivileges,
+    /// tenant reader 不得拥有 sequence 权限。
+    #[error("postgres tenant reader capability: sequence privileges are not empty")]
+    TenantReadSequencePrivileges,
+    /// tenant reader 只能拥有 public schema USAGE，不得 CREATE 或访问其它业务 schema。
+    #[error("postgres tenant reader capability: schema privileges are not exact")]
+    TenantReadSchemaPrivileges,
+    /// tenant reader 不得执行 public schema functions。
+    #[error("postgres tenant reader capability: function privileges are not empty")]
+    TenantReadFunctionPrivileges,
+    /// tenant reader 不得执行任何会创建、写入、截断或删除 large object 的 pg_catalog 函数。
+    #[error(
+        "postgres tenant reader capability: large object mutator execute privileges are not empty"
+    )]
+    TenantReadLargeObjectMutatorPrivileges,
+    /// tenant reader 不得读取任何 PostgreSQL large object。
+    #[error("postgres tenant reader capability: large object privileges are not empty")]
+    TenantReadLargeObjectPrivileges,
+    /// `lo_compat_privileges` 必须关闭，否则 large object read 会绕过 ACL。
+    #[error("postgres tenant reader capability: large object compatibility privileges are enabled")]
+    TenantReadLargeObjectCompatibility,
+    /// tenant reader 不得 SET / ALTER SYSTEM server parameters。
+    #[error("postgres tenant reader capability: parameter privileges are not empty")]
+    TenantReadParameterPrivileges,
     /// audit admin 能力门：必须直连固定 `rss_audit_admin` 角色。
     #[error("postgres audit admin capability: role must be rss_audit_admin")]
     AuditAdminUnexpectedRole,
@@ -258,7 +329,12 @@ impl PgConfig {
     }
 
     /// 映射为 sqlx 连接描述（密码经 [`PgPassword::expose`] 仅在此传入 sqlx，不外泄；TLS 模式显式注入）。
+    #[cfg(test)]
     pub(crate) fn connect_options(&self) -> PgConnectOptions {
+        self.connect_options_for(APPLICATION_NAME)
+    }
+
+    fn connect_options_for(&self, application_name: &'static str) -> PgConnectOptions {
         let mut opts = PgConnectOptions::new()
             .host(&self.host)
             .port(self.port)
@@ -266,7 +342,7 @@ impl PgConfig {
             .username(&self.username)
             .password(self.password.expose())
             .ssl_mode(self.ssl_mode)
-            .application_name(APPLICATION_NAME);
+            .application_name(application_name);
         if let Some(ref cert) = self.ssl_root_cert {
             opts = opts.ssl_root_cert(cert);
         }
@@ -274,13 +350,145 @@ impl PgConfig {
     }
 }
 
-/// per-probe 超时（单次 `SELECT 1` 最长等待；限制 pool acquire_timeout=30s 期间阻塞 → sampler 关停响应 ≤ 此值）。
+/// Opaque configuration for the dedicated tenant read lane.
+///
+/// A distinct public type makes the mandatory reader argument impossible to swap accidentally
+/// with the writer [`PgConfig`] at runtime assembly call sites. The contained password keeps the
+/// same redacted [`Debug`](std::fmt::Debug) behavior as [`PgConfig`].
+#[derive(Clone)]
+pub struct PgTenantReadConfig(PgConfig);
+
+impl PgTenantReadConfig {
+    /// Explicitly classify a PostgreSQL connection configuration as the tenant reader lane.
+    #[must_use]
+    pub fn new(config: PgConfig) -> Self {
+        Self(config)
+    }
+
+    pub(crate) fn as_pg_config(&self) -> &PgConfig {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PgTenantReadConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PgTenantReadConfig").field(&self.0).finish()
+    }
+}
+
+/// A writer store that has passed the exact serving-role and tenant-RLS startup gate.
+#[derive(Clone)]
+pub(crate) struct VerifiedPgWriteStore(Arc<PgStore>);
+
+/// A reader store that has passed the exact role, ACL, default-read-only and tenant-RLS gate.
+#[derive(Clone)]
+pub(crate) struct VerifiedPgReadStore(Arc<PgStore>);
+
+/// An audit-admin store that has passed its independent exact-role and ACL gate.
+#[derive(Clone)]
+pub(crate) struct VerifiedPgAuditAdminStore(Arc<PgStore>);
+
+/// Explicit capability for migrator/operator maintenance paths that intentionally require both
+/// tenant reads and writes without impersonating either serving lane.
+#[derive(Clone)]
+pub(crate) struct VerifiedPgMaintenanceStore(Arc<PgStore>);
+
+/// Required pair of verified writer and tenant-reader stores used by the durable runtime.
+#[derive(Clone)]
+pub(crate) struct PgRuntimeStores {
+    writer: VerifiedPgWriteStore,
+    reader: VerifiedPgReadStore,
+}
+
+impl PgRuntimeStores {
+    pub(crate) fn new(writer: VerifiedPgWriteStore, reader: VerifiedPgReadStore) -> Self {
+        Self { writer, reader }
+    }
+
+    pub(crate) fn writer_store_arc(&self) -> Arc<PgStore> {
+        Arc::clone(&self.writer.0)
+    }
+
+    pub(crate) fn reader_store_arc(&self) -> Arc<PgStore> {
+        Arc::clone(&self.reader.0)
+    }
+
+    pub(crate) fn writer_capability(&self) -> &VerifiedPgWriteStore {
+        &self.writer
+    }
+
+    pub(crate) fn reader_capability(&self) -> &VerifiedPgReadStore {
+        &self.reader
+    }
+
+    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    #[allow(dead_code)]
+    pub(crate) fn from_unverified_for_test(writer: Arc<PgStore>, reader: Arc<PgStore>) -> Self {
+        Self {
+            writer: VerifiedPgWriteStore(writer),
+            reader: VerifiedPgReadStore(reader),
+        }
+    }
+}
+
+impl VerifiedPgReadStore {
+    pub(crate) fn pool(&self) -> &sqlx::PgPool {
+        &self.0.pool
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn store_arc(&self) -> Arc<PgStore> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl VerifiedPgWriteStore {
+    pub(crate) fn pool(&self) -> &sqlx::PgPool {
+        &self.0.pool
+    }
+}
+
+impl VerifiedPgAuditAdminStore {
+    #[allow(dead_code)]
+    pub(crate) fn pool(&self) -> &sqlx::PgPool {
+        &self.0.pool
+    }
+
+    pub(crate) fn store_arc(&self) -> Arc<PgStore> {
+        Arc::clone(&self.0)
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn from_unverified_for_test(store: Arc<PgStore>) -> Self {
+        Self(store)
+    }
+}
+
+impl VerifiedPgMaintenanceStore {
+    /// Wrap a store only after the maintenance setup path has completed its own connection and
+    /// migration/policy verification sequence.
+    pub(crate) fn from_maintenance_store(store: Arc<PgStore>) -> Self {
+        Self(store)
+    }
+
+    pub(crate) fn store_arc(&self) -> Arc<PgStore> {
+        Arc::clone(&self.0)
+    }
+
+    pub(crate) fn pool(&self) -> &sqlx::PgPool {
+        &self.0.pool
+    }
+}
+
+/// Independent acquire/query deadline. Pool pressure is classified before query liveness so a
+/// 30-second configured acquire timeout cannot turn an ordinary full pool into a 2-second Down.
 const PROBE_READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// DB liveness 采样结果三态（#1309 F4 重引 `Saturated`，区分池饱和与 DB 不可达）。
 ///
 /// - `Ready`：`probe_db_liveness` 成功（`SELECT 1` 返回，HTTP 200 Healthy）。
-/// - `Saturated`：池 acquire 超时（容量压力，DB 多半正常；HTTP 200 Degraded，编排器不摘流）。
+/// - `Saturated`：全部已建连接忙（容量压力；HTTP 200 Degraded，编排器不摘流）。
 /// - `Down`：池已关闭、DB 不可达或 `SELECT 1` 失败（HTTP 503 Unhealthy）。
 ///
 /// `#[non_exhaustive]`：未来变体不破坏外部 match 调用方（`_ =>` fallback）。
@@ -290,43 +498,34 @@ const PROBE_READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 pub enum PoolReadiness {
     /// `probe_db_liveness` 成功（`SELECT 1` 返回）。
     Ready,
-    /// 池 acquire 超时（容量压力，DB 多半正常）：降级可服务，编排器不应摘流（HTTP 200）。
+    /// 全部已建连接忙（容量压力）：降级可服务，编排器不应摘流（HTTP 200）。
     Saturated,
     /// 池已关闭、DB 不可达或 `SELECT 1` 失败：不可服务（HTTP 503）。
     Down,
 }
 
-/// acquire + `SELECT 1` 的纯 I/O 部分（抽出降低 probe_db_liveness 认知复杂度）。
-///
-/// acquire 失败或 query 失败均经 `?` 返 `Err`；成功返 `Ok(())`。
-async fn db_select_one(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-    let mut conn = pool.acquire().await?;
-    sqlx::query("SELECT 1")
-        .execute(&mut *conn)
-        .await
-        .map(|_| ())
+async fn db_probe_query(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    query: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(query).execute(&mut **conn).await.map(|_| ())
 }
 
-/// `sqlx::Error` 分类为 `PoolReadiness`（仅 acquire/query 失败臂使用）。
-///
-/// - `PoolTimedOut`：池 acquire 排队超时 = 容量压力，DB 多半正常 → `Saturated`（降级可服务）。
-/// - 其余（`PoolClosed` / IO 错误 / 查询错误）→ `Down`（不可服务）。
-fn classify_probe_error(e: &sqlx::Error) -> PoolReadiness {
-    match e {
-        sqlx::Error::PoolTimedOut => PoolReadiness::Saturated,
-        // reason: PoolClosed / 连接拒绝 / 查询错误均视为 DB 不可达，fail-closed → Down。
-        _ => PoolReadiness::Down,
+fn pool_is_saturated(pool: &sqlx::PgPool) -> bool {
+    pool.num_idle() == 0 && pool.size() >= pool.options().get_max_connections()
+}
+
+fn unavailable_pool_readiness(pool: &sqlx::PgPool) -> PoolReadiness {
+    if pool_is_saturated(pool) {
+        PoolReadiness::Saturated
+    } else {
+        PoolReadiness::Down
     }
 }
 
-/// 超时结果 → `PoolReadiness`（抽出降低 `probe_db_liveness` 认知复杂度）。
-///
-/// - `Ok(Ok(()))` → `Ready`
-/// - `Ok(Err(e))` → [`classify_probe_error`]（`PoolTimedOut`→`Saturated`，其余→`Down`）
-/// - `Err(_elapsed)` → `Saturated`（外层超时多为 acquire 排队，fail-open 倾向降级不摘流）
-// reason: tracing::debug! 宏展开后 clippy cognitive_complexity 计数偏高（实际 3 分支）——item-level carve-out。
+// reason: tracing macro expansion inflates the lint score; the real control flow is three result arms.
 #[allow(clippy::cognitive_complexity)]
-fn probe_timeout_result(
+fn probe_query_result(
     result: Result<Result<(), sqlx::Error>, tokio::time::error::Elapsed>,
 ) -> PoolReadiness {
     match result {
@@ -337,29 +536,96 @@ fn probe_timeout_result(
                 error = %secure::redact_error(&e),
                 "postgres readiness sample failed"
             );
-            classify_probe_error(&e)
+            PoolReadiness::Down
         }
         Err(_elapsed) => {
-            // reason: 外层 2s timeout 多为 acquire 排队（池饱和），非 DB 不可达
-            // （DB down 多走连接拒绝 → Ok(Err) 分支 → classify_probe_error → Down）；
-            // fail-open 倾向 Saturated 避免误摘流量。
             tracing::debug!(
                 target: "postgres",
                 timeout_secs = PROBE_READINESS_TIMEOUT.as_secs(),
-                "postgres readiness probe timed out — treating as pool saturated"
+                "postgres readiness query timed out — treating database lane as down"
             );
-            PoolReadiness::Saturated
+            PoolReadiness::Down
         }
     }
 }
 
+async fn acquire_probe_connection(
+    pool: &sqlx::PgPool,
+) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, PoolReadiness> {
+    if let Some(connection) = pool.try_acquire() {
+        return Ok(connection);
+    }
+    if pool_is_saturated(pool) {
+        return Err(PoolReadiness::Saturated);
+    }
+
+    let result = tokio::time::timeout(PROBE_READINESS_TIMEOUT, pool.acquire()).await;
+    classify_acquire_result(pool, result)
+}
+
+fn classify_acquire_result(
+    pool: &sqlx::PgPool,
+    result: Result<
+        Result<sqlx::pool::PoolConnection<sqlx::Postgres>, sqlx::Error>,
+        tokio::time::error::Elapsed,
+    >,
+) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, PoolReadiness> {
+    match result {
+        Ok(Ok(connection)) => Ok(connection),
+        Ok(Err(error)) => classify_acquire_error(pool, &error),
+        Err(_elapsed) => classify_acquire_timeout(pool),
+    }
+}
+
+fn classify_acquire_error(
+    pool: &sqlx::PgPool,
+    error: &sqlx::Error,
+) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, PoolReadiness> {
+    tracing::debug!(
+        target: "postgres",
+        error = %secure::redact_error(error),
+        "postgres readiness connection acquire failed"
+    );
+    Err(unavailable_pool_readiness(pool))
+}
+
+fn classify_acquire_timeout(
+    pool: &sqlx::PgPool,
+) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, PoolReadiness> {
+    let readiness = unavailable_pool_readiness(pool);
+    tracing::debug!(
+        target: "postgres",
+        ?readiness,
+        timeout_secs = PROBE_READINESS_TIMEOUT.as_secs(),
+        "postgres readiness connection acquire timed out"
+    );
+    Err(readiness)
+}
+
 impl PgStore {
-    /// DB liveness 探针（async）：acquire 连接后执行 `SELECT 1`（超时 [`PROBE_READINESS_TIMEOUT`]）。
+    async fn probe_db_liveness_query(&self, query: &str) -> PoolReadiness {
+        if self.pool.is_closed() {
+            return PoolReadiness::Down;
+        }
+        let mut connection = match acquire_probe_connection(&self.pool).await {
+            Ok(connection) => connection,
+            Err(readiness) => return readiness,
+        };
+        let result = tokio::time::timeout(
+            PROBE_READINESS_TIMEOUT,
+            db_probe_query(&mut connection, query),
+        )
+        .await;
+        probe_query_result(result)
+    }
+
+    /// DB liveness probe with separate capacity and query-liveness stages.
     ///
     /// - `pool.is_closed()` → `PoolReadiness::Down`（快路径，不 acquire）。
-    /// - 成功 → `PoolReadiness::Ready`。
-    /// - `Ok(Err(e))`（acquire/query 失败）→ [`classify_probe_error`]：`PoolTimedOut`→`Saturated`；其余→`Down`。
-    /// - 外层超时（`Err(_elapsed)` > [`PROBE_READINESS_TIMEOUT`]）→ `Saturated`（acquire 排队 = 容量压力）。
+    /// - no idle connection and `size == max_connections` → `Saturated` without waiting;
+    /// - unused capacity that cannot establish a connection → `Down`;
+    /// - an acquired connection whose `SELECT 1` fails or times out → `Down`;
+    /// - successful `SELECT 1` → `Ready`.
     ///
     /// 第三方 `sqlx::Error` 经 [`secure::redact_error`] 脱敏后落 `tracing::debug!`，杜绝连接串 / 凭据泄漏。
     /// DB 持续不可达时**不每 tick warn！**——状态转移日志由 [`crate::readiness::pg_readiness_sampling_loop`] 负责。
@@ -368,11 +634,12 @@ impl PgStore {
     /// [`crate::readiness::PgDbReadiness::snapshot`]——不阻塞 reactor。
     #[must_use]
     pub async fn probe_db_liveness(&self) -> PoolReadiness {
-        if self.pool.is_closed() {
-            return PoolReadiness::Down;
-        }
-        let result = tokio::time::timeout(PROBE_READINESS_TIMEOUT, db_select_one(&self.pool)).await;
-        probe_timeout_result(result)
+        self.probe_db_liveness_query("SELECT 1").await
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) async fn probe_db_liveness_query_for_test(&self, query: &str) -> PoolReadiness {
+        self.probe_db_liveness_query(query).await
     }
 }
 
@@ -380,23 +647,28 @@ impl PgStore {
 const RLS_PROBE_TENANT: &str = "00000000-0000-0000-0000-000000000001";
 /// durable serving pool 唯一允许的 PostgreSQL role。
 const EXPECTED_SERVING_ROLE: &str = "rss_app";
+/// tenant read lane 唯一允许的 PostgreSQL role。
+const EXPECTED_TENANT_READ_ROLE: &str = "rss_app_read";
 /// audit admin read pool 唯一允许的 PostgreSQL role。
 const EXPECTED_AUDIT_ADMIN_ROLE: &str = "rss_audit_admin";
 
 /// 不达标 tenant 表查询：动态派生（含 `tenant_id` 列的 public 表）后逐表判不达标——
 /// (a) 缺 `relrowsecurity AND relforcerowsecurity`（ENABLE+FORCE）；或
 /// (b) 无 permissive policy；或
-/// (c) 任一 permissive policy 的 `qual` / `with_check` 未同时绑定
-///     `tenant_id … current_setting … rss.tenant_id`，或任一表达式含 OR widening。PostgreSQL 会把 permissive
-///     policies 以 OR 合并，因此不是“至少一个正确”即可，而是每条 permissive policy 都必须不放宽。
-/// 返回不达标表名。不硬编码表清单。每条 permissive policy 的 USING / WITH CHECK 都必须含
+/// (c) 任一 permissive policy 的 `qual` / `with_check` 不精确等于 canonical tenant predicate。
+///     PostgreSQL 会把 permissive policies 以 OR 合并，因此不是“至少一个正确”即可，而是每条 permissive
+///     policy 都必须精确绑定 tenant；额外收窄须使用独立 `AS RESTRICTIVE` policy。
+/// (d) permissive policy 依赖任何非本表 catalog 对象。内建 `pg_catalog` operator/function 是 pinned
+///     dependency，不产生 `pg_depend` 行；同形异义的用户自定义 operator/function 会产生非 `pg_class`
+///     dependency，必须 fail-closed，避免 `pg_policies` deparse 文本相同但语义已被 search_path 劫持。
+/// 返回不达标表名。不硬编码表清单。每条 permissive policy 的 USING / WITH CHECK 都必须精确等于
 /// `tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid` 等值绑定；仅把三个 token 塞进
-/// `IS NOT NULL` 等表达式不能通过。额外 AND 限制允许，任何 OR 仍 fail-closed。
+/// `IS NOT NULL`、`NOT (canonical)` 或 `canonical = false` 等表达式不能通过。
 const OFFENDING_TENANT_TABLES_SQL: &str = r#"
 SELECT c.relname
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = 'public' AND c.relkind = 'r'
+WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
   AND EXISTS (SELECT 1 FROM pg_attribute a
               WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped)
   AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity
@@ -406,10 +678,16 @@ WHERE n.nspname = 'public' AND c.relkind = 'r'
        OR EXISTS (SELECT 1 FROM pg_policies p
                   WHERE p.schemaname = 'public' AND p.tablename = c.relname
                     AND p.permissive = 'PERMISSIVE'
-                    AND (coalesce(p.qual, '') !~* 'tenant_id[[:space:]]*=[[:space:]]*\(*[[:space:]]*nullif[[:space:]]*\([[:space:]]*current_setting[[:space:]]*\([[:space:]]*''rss[.]tenant_id''(::text)?[[:space:]]*,[[:space:]]*true[[:space:]]*\)[[:space:]]*,[[:space:]]*''''(::text)?[[:space:]]*\)[[:space:]]*\)*[[:space:]]*::uuid'
-                         OR coalesce(p.with_check, '') !~* 'tenant_id[[:space:]]*=[[:space:]]*\(*[[:space:]]*nullif[[:space:]]*\([[:space:]]*current_setting[[:space:]]*\([[:space:]]*''rss[.]tenant_id''(::text)?[[:space:]]*,[[:space:]]*true[[:space:]]*\)[[:space:]]*,[[:space:]]*''''(::text)?[[:space:]]*\)[[:space:]]*\)*[[:space:]]*::uuid'
-                         OR coalesce(p.qual, '') ~* '\mOR\M'
-                         OR coalesce(p.with_check, '') ~* '\mOR\M')))
+                    AND (coalesce(p.qual, '') !~* '^[[:space:]]*\(*[[:space:]]*tenant_id[[:space:]]*=[[:space:]]*\(*[[:space:]]*nullif[[:space:]]*\([[:space:]]*current_setting[[:space:]]*\([[:space:]]*''rss[.]tenant_id''(::text)?[[:space:]]*,[[:space:]]*true[[:space:]]*\)[[:space:]]*,[[:space:]]*''''(::text)?[[:space:]]*\)[[:space:]]*\)*[[:space:]]*::uuid[[:space:]]*\)*[[:space:]]*$'
+                         OR coalesce(p.with_check, '') !~* '^[[:space:]]*\(*[[:space:]]*tenant_id[[:space:]]*=[[:space:]]*\(*[[:space:]]*nullif[[:space:]]*\([[:space:]]*current_setting[[:space:]]*\([[:space:]]*''rss[.]tenant_id''(::text)?[[:space:]]*,[[:space:]]*true[[:space:]]*\)[[:space:]]*,[[:space:]]*''''(::text)?[[:space:]]*\)[[:space:]]*\)*[[:space:]]*::uuid[[:space:]]*\)*[[:space:]]*$'))
+       OR EXISTS (SELECT 1
+                  FROM pg_policy policy
+                  JOIN pg_depend dependency
+                    ON dependency.classid = 'pg_policy'::regclass
+                   AND dependency.objid = policy.oid
+                  WHERE policy.polrelid = c.oid
+                    AND policy.polpermissive
+                    AND dependency.refclassid <> 'pg_class'::regclass))
 "#;
 
 /// 当前连接角色及其 RLS 绕过属性。serving pool 必须直连固定 `rss_app`，且不得 superuser/BYPASSRLS。
@@ -438,6 +716,319 @@ SELECT COALESCE(bool_or(relation_name = 'audit_entries' AND privilege = 'SELECT'
 FROM effective
 "#;
 
+const TENANT_READ_ROLE_SQL: &str = r#"
+SELECT session_user,
+       current_user,
+       r.rolcanlogin AS can_login,
+       r.rolsuper AS superuser,
+       r.rolbypassrls AS bypass_rls,
+       r.rolcreatedb AS create_db,
+       r.rolcreaterole AS create_role,
+       r.rolreplication AS replication,
+       r.rolinherit AS inherit,
+       COALESCE(cardinality(r.rolconfig), 0) = 2
+           AND r.rolconfig @> ARRAY['default_transaction_read_only=on']::text[]
+           AND EXISTS (
+               SELECT 1 FROM unnest(r.rolconfig) AS setting
+               WHERE setting LIKE 'search_path=%'
+           ) AS exact_role_config,
+       COALESCE(
+           r.rolconfig @> ARRAY['search_path=pg_catalog, public']::text[],
+           false
+       )
+           AS exact_search_path_config,
+       current_setting('search_path') AS current_search_path,
+       current_setting('transaction_read_only') = 'on' AS transaction_read_only,
+       current_setting('lo_compat_privileges') = 'off' AS lo_compat_privileges_off
+FROM pg_roles AS r
+WHERE r.rolname = current_user
+"#;
+
+const TENANT_READ_MEMBERSHIP_SQL: &str = r#"
+SELECT count(*)::bigint
+FROM pg_auth_members AS membership
+JOIN pg_roles AS reader
+  ON reader.oid = membership.roleid OR reader.oid = membership.member
+WHERE reader.rolname = current_user
+"#;
+
+const TENANT_READ_OWNERSHIP_SQL: &str = r#"
+SELECT count(*)::bigint
+FROM pg_shdepend AS dependency
+JOIN pg_roles AS reader ON reader.oid = dependency.refobjid
+WHERE reader.rolname = current_user
+  AND dependency.refclassid = 'pg_authid'::regclass
+  AND dependency.deptype = 'o'
+"#;
+
+const TENANT_READ_RELATION_PRIVILEGES_SQL: &str = r#"
+WITH reader AS (
+    SELECT oid FROM pg_roles WHERE rolname = current_user
+), relations AS (
+    SELECT c.oid,
+           n.nspname AS schema_name,
+           c.relname,
+           n.nspname = 'public'
+               AND c.relkind IN ('r', 'p')
+               AND EXISTS (
+                   SELECT 1
+                   FROM pg_attribute AS a
+                   WHERE a.attrelid = c.oid
+                     AND a.attname = 'tenant_id'
+                     AND NOT a.attisdropped
+               ) AS tenant_relation
+    FROM pg_class AS c
+    JOIN pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname <> 'information_schema'
+      AND n.nspname !~ '^pg_'
+      AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+), effective AS (
+    SELECT relation.schema_name,
+           relation.relname,
+           relation.tenant_relation,
+           privilege.name AS privilege
+    FROM relations AS relation
+    CROSS JOIN (
+        VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'),
+               ('REFERENCES'), ('TRIGGER')
+    ) AS privilege(name)
+    WHERE has_table_privilege(current_user, relation.oid, privilege.name)
+), explicit_column_acl AS (
+    SELECT relation.schema_name || '.' || relation.relname || '.' || attribute.attname
+               || ':COLUMN_' || upper(acl.privilege_type)
+               || CASE WHEN acl.is_grantable THEN '_WITH_GRANT_OPTION' ELSE '' END AS privilege
+    FROM relations AS relation
+    JOIN pg_attribute AS attribute
+      ON attribute.attrelid = relation.oid
+     AND attribute.attnum > 0
+     AND NOT attribute.attisdropped
+    CROSS JOIN LATERAL aclexplode(attribute.attacl) AS acl
+    CROSS JOIN reader
+    WHERE acl.grantee IN (0::oid, reader.oid)
+), relation_grant_options AS (
+    SELECT relation.schema_name || '.' || relation.relname || ':'
+               || upper(acl.privilege_type) || '_WITH_GRANT_OPTION' AS privilege
+    FROM relations AS relation
+    JOIN pg_class AS relation_acl ON relation_acl.oid = relation.oid
+    CROSS JOIN LATERAL aclexplode(relation_acl.relacl) AS acl
+    CROSS JOIN reader
+    WHERE acl.grantee IN (0::oid, reader.oid)
+      AND acl.is_grantable
+), extras AS (
+    SELECT effective.schema_name || '.' || effective.relname || ':'
+               || effective.privilege AS privilege
+    FROM effective
+    WHERE NOT (effective.tenant_relation AND effective.privilege = 'SELECT')
+    UNION
+    SELECT privilege FROM explicit_column_acl
+    UNION
+    SELECT privilege FROM relation_grant_options
+)
+SELECT COALESCE(
+           (
+               SELECT string_agg(
+                   relation.schema_name || '.' || relation.relname,
+                   ',' ORDER BY relation.schema_name, relation.relname
+               )
+               FROM relations AS relation
+               WHERE relation.tenant_relation
+                 AND NOT has_table_privilege(current_user, relation.oid, 'SELECT')
+           ),
+           ''
+       ) AS missing_select,
+       COALESCE(
+           (
+               SELECT string_agg(extras.privilege, ',' ORDER BY extras.privilege)
+               FROM extras
+           ),
+           ''
+       ) AS extra_privileges
+"#;
+
+const TENANT_READ_DATABASE_PRIVILEGES_SQL: &str = r#"
+SELECT has_database_privilege(current_user, current_database(), 'CONNECT'),
+       has_database_privilege(current_user, current_database(), 'CREATE'),
+       has_database_privilege(current_user, current_database(), 'TEMPORARY'),
+       EXISTS (
+           SELECT 1
+           FROM pg_database AS database
+           JOIN pg_roles AS reader ON reader.rolname = current_user
+           CROSS JOIN LATERAL aclexplode(
+               COALESCE(database.datacl, acldefault('d', database.datdba))
+           ) AS acl
+           WHERE database.datname = current_database()
+             AND acl.grantee IN (0::oid, reader.oid)
+             AND acl.privilege_type = 'CONNECT'
+             AND acl.is_grantable
+       )
+"#;
+
+const TENANT_READ_SEQUENCE_PRIVILEGES_SQL: &str = r#"
+SELECT COALESCE(
+           string_agg(
+               c.relname || ':' || privilege.name,
+               ',' ORDER BY c.relname, privilege.name
+           ),
+           ''
+       )
+FROM pg_class AS c
+JOIN pg_namespace AS n ON n.oid = c.relnamespace
+CROSS JOIN (VALUES ('USAGE'), ('SELECT'), ('UPDATE')) AS privilege(name)
+WHERE n.nspname <> 'information_schema'
+  AND n.nspname !~ '^pg_'
+  AND c.relkind = 'S'
+  AND has_sequence_privilege(current_user, c.oid, privilege.name)
+"#;
+
+const TENANT_READ_SCHEMA_PRIVILEGES_SQL: &str = r#"
+WITH reader AS (
+    SELECT oid FROM pg_roles WHERE rolname = current_user
+), effective AS (
+    SELECT n.nspname,
+           privilege.name AS privilege
+    FROM pg_namespace AS n
+    CROSS JOIN (VALUES ('USAGE'), ('CREATE')) AS privilege(name)
+    WHERE n.nspname <> 'information_schema'
+      AND n.nspname !~ '^pg_'
+      AND has_schema_privilege(current_user, n.oid, privilege.name)
+), grant_options AS (
+    SELECT n.nspname,
+           upper(acl.privilege_type) || '_WITH_GRANT_OPTION' AS privilege
+    FROM pg_namespace AS n
+    CROSS JOIN LATERAL aclexplode(
+        COALESCE(n.nspacl, acldefault('n', n.nspowner))
+    ) AS acl
+    CROSS JOIN reader
+    WHERE n.nspname <> 'information_schema'
+      AND n.nspname !~ '^pg_'
+      AND acl.grantee IN (0::oid, reader.oid)
+      AND acl.is_grantable
+), extras AS (
+    SELECT nspname, privilege
+    FROM effective
+    WHERE NOT (nspname = 'public' AND privilege = 'USAGE')
+    UNION
+    SELECT nspname, privilege FROM grant_options
+)
+SELECT COALESCE(
+           (SELECT bool_or(nspname = 'public' AND privilege = 'USAGE') FROM effective),
+           false
+       ),
+       COALESCE(
+           (
+               SELECT string_agg(
+                   nspname || ':' || privilege,
+                   ',' ORDER BY nspname, privilege
+               )
+               FROM extras
+           ),
+           ''
+       )
+"#;
+
+const TENANT_READ_FUNCTION_PRIVILEGES_SQL: &str = r#"
+SELECT COALESCE(
+           string_agg(p.oid::regprocedure::text, ',' ORDER BY p.oid::regprocedure::text),
+           ''
+       )
+FROM pg_proc AS p
+JOIN pg_namespace AS n ON n.oid = p.pronamespace
+WHERE n.nspname <> 'information_schema'
+  AND n.nspname !~ '^pg_'
+  AND has_function_privilege(current_user, p.oid, 'EXECUTE')
+"#;
+
+/// Fixed PostgreSQL 16 large-object mutator universe. These pg_catalog functions are outside the
+/// application-function ACL scan; most are PUBLIC EXECUTE by default and can persist state after a
+/// caller explicitly starts READ WRITE. Missing signatures also fail closed instead of silently
+/// weakening the gate on an unsupported catalog shape.
+const TENANT_READ_LARGE_OBJECT_MUTATOR_PRIVILEGES_SQL: &str = r#"
+WITH expected(signature) AS (
+    VALUES
+        ('pg_catalog.lo_creat(integer)'),
+        ('pg_catalog.lo_create(oid)'),
+        ('pg_catalog.lo_from_bytea(oid,bytea)'),
+        ('pg_catalog.lo_put(oid,bigint,bytea)'),
+        ('pg_catalog.lo_truncate(integer,integer)'),
+        ('pg_catalog.lo_truncate64(integer,bigint)'),
+        ('pg_catalog.lo_unlink(oid)'),
+        ('pg_catalog.lowrite(integer,bytea)'),
+        ('pg_catalog.lo_import(text)'),
+        ('pg_catalog.lo_import(text,oid)')
+), resolved AS (
+    SELECT expected.signature,
+           to_regprocedure(expected.signature) AS function_oid
+    FROM expected
+)
+SELECT COALESCE(
+           string_agg(
+               resolved.signature
+                   || CASE WHEN resolved.function_oid IS NULL THEN ':MISSING' ELSE ':EXECUTE' END,
+               ',' ORDER BY resolved.signature
+           ),
+           ''
+       )
+FROM resolved
+WHERE resolved.function_oid IS NULL
+   OR has_function_privilege(current_user, resolved.function_oid, 'EXECUTE')
+"#;
+
+const TENANT_READ_LARGE_OBJECT_PRIVILEGES_SQL: &str = r#"
+WITH reader AS (
+    SELECT oid FROM pg_roles WHERE rolname = current_user
+)
+SELECT COALESCE(
+           string_agg(
+               object.oid::text || ':' || upper(acl.privilege_type)
+                   || CASE WHEN acl.is_grantable THEN '_WITH_GRANT_OPTION' ELSE '' END,
+               ',' ORDER BY object.oid, acl.privilege_type, acl.is_grantable
+           ),
+           ''
+       )
+FROM pg_largeobject_metadata AS object
+CROSS JOIN LATERAL aclexplode(
+    COALESCE(object.lomacl, acldefault('L', object.lomowner))
+) AS acl
+CROSS JOIN reader
+WHERE acl.grantee IN (0::oid, reader.oid)
+"#;
+
+const TENANT_READ_PARAMETER_PRIVILEGES_SQL: &str = r#"
+WITH reader AS (
+    SELECT oid FROM pg_roles WHERE rolname = current_user
+)
+SELECT COALESCE(
+           string_agg(
+               parameter.parname || ':' || upper(acl.privilege_type)
+                   || CASE WHEN acl.is_grantable THEN '_WITH_GRANT_OPTION' ELSE '' END,
+               ',' ORDER BY parameter.parname, acl.privilege_type, acl.is_grantable
+           ),
+           ''
+       )
+FROM pg_parameter_acl AS parameter
+CROSS JOIN LATERAL aclexplode(parameter.paracl) AS acl
+CROSS JOIN reader
+WHERE acl.grantee IN (0::oid, reader.oid)
+"#;
+
+#[derive(sqlx::FromRow)]
+struct TenantReadRole {
+    session_user: String,
+    current_user: String,
+    can_login: bool,
+    superuser: bool,
+    bypass_rls: bool,
+    create_db: bool,
+    create_role: bool,
+    replication: bool,
+    inherit: bool,
+    exact_role_config: bool,
+    exact_search_path_config: bool,
+    current_search_path: String,
+    transaction_read_only: bool,
+    lo_compat_privileges_off: bool,
+}
+
 struct ServingRole {
     session_user: String,
     current_user: String,
@@ -451,7 +1042,7 @@ struct ServingRole {
 const TENANT_TABLE_COUNT_SQL: &str = "\
 SELECT count(*) FROM pg_class c \
 JOIN pg_namespace n ON n.oid = c.relnamespace \
-WHERE n.nspname = 'public' AND c.relkind = 'r' \
+WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') \
   AND EXISTS (SELECT 1 FROM pg_attribute a \
               WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped)";
 
@@ -474,10 +1065,36 @@ impl PgStore {
         // 直线编排：四段校验各为低复杂度 helper（任一 Err 经 `?` 冒泡，tx drop 即 rollback 自检事务）。
         let mut tx = self.pool.begin().await.map_err(PgError::RlsCapability)?;
         ensure_serving_role(&mut tx).await?; // 0. 连接角色必须为 rss_app 且不绕过 RLS（最先 fail-fast）
-        verify_tenant_guc_roundtrip(&mut tx).await?; // 1. GUC roundtrip
-        ensure_tenant_tables_present(&mut tx).await?; // 2. anti-vacuity
-        let offenders = offending_tenant_tables(&mut tx).await?; // 3. 逐表 FORCE RLS + 规范 policy + 无 widening
+        verify_tenant_guc_roundtrip(&mut tx, PgError::RlsCapability).await?; // 1. GUC roundtrip
+        ensure_tenant_tables_present(&mut tx, PgError::RlsCapability).await?; // 2. anti-vacuity
+        let offenders = offending_tenant_tables(&mut tx, PgError::RlsCapability).await?; // 3. 逐表 FORCE RLS + 规范 policy + 无 widening
         // 只读 + SET LOCAL 自检事务无副作用，显式 rollback 释放（失败不覆盖判定，仅 best-effort）。
+        let _ = tx.rollback().await;
+        ensure_no_offenders(offenders)
+    }
+
+    /// Dedicated tenant-reader capability gate.
+    ///
+    /// The gate verifies the direct role and immutable role attributes first, then proves the
+    /// external PostgreSQL capability surface is exact: no memberships/ownership, only tenant
+    /// relation SELECT, no sequence/function/schema-create privileges, default read-only enabled,
+    /// and the same tenant GUC/FORCE-RLS policy closure used by the writer lane.
+    pub(crate) async fn verify_tenant_read_capability(&self) -> Result<(), PgError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(PgError::TenantReadCapability)?;
+        let role = load_tenant_read_role(&mut tx).await?;
+        ensure_tenant_read_direct_role(&role)?;
+        ensure_tenant_read_role_attributes(&role)?;
+        ensure_tenant_read_default_transaction(&role)?;
+        ensure_tenant_read_search_path(&role)?;
+        ensure_tenant_read_large_object_compatibility(&role)?;
+        ensure_tenant_read_exact_external_capabilities(&mut tx).await?;
+        verify_tenant_guc_roundtrip(&mut tx, PgError::TenantReadCapability).await?;
+        ensure_tenant_tables_present(&mut tx, PgError::TenantReadCapability).await?;
+        let offenders = offending_tenant_tables(&mut tx, PgError::TenantReadCapability).await?;
         let _ = tx.rollback().await;
         ensure_no_offenders(offenders)
     }
@@ -486,11 +1103,26 @@ impl PgStore {
     pub(crate) async fn verify_audit_admin_capability(&self) -> Result<(), PgError> {
         let mut tx = self.pool.begin().await.map_err(PgError::RlsCapability)?;
         ensure_audit_admin_role(&mut tx).await?;
-        verify_tenant_guc_roundtrip(&mut tx).await?;
+        verify_tenant_guc_roundtrip(&mut tx, PgError::RlsCapability).await?;
         ensure_audit_admin_read_only(&mut tx).await?;
         let _ = tx.rollback().await;
         Ok(())
     }
+}
+
+async fn ensure_tenant_read_exact_external_capabilities(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    ensure_tenant_read_no_membership(tx).await?;
+    ensure_tenant_read_no_ownership(tx).await?;
+    ensure_tenant_read_database_privileges(tx).await?;
+    ensure_tenant_read_relation_privileges(tx).await?;
+    ensure_tenant_read_no_sequence_privileges(tx).await?;
+    ensure_tenant_read_schema_privileges(tx).await?;
+    ensure_tenant_read_no_function_privileges(tx).await?;
+    ensure_tenant_read_no_large_object_mutator_privileges(tx).await?;
+    ensure_tenant_read_no_large_object_privileges(tx).await?;
+    ensure_tenant_read_no_parameter_privileges(tx).await
 }
 
 /// 0. serving 连接必须直连固定 `rss_app`，且不得绕过 RLS（superuser/BYPASSRLS）→ fail-fast。
@@ -557,6 +1189,282 @@ fn log_serving_role_bypass(role: &ServingRole) {
         "rls capability gate: connection role is superuser or BYPASSRLS — RLS not enforceable; \
          serving connection must use rss_app as a non-superuser NOBYPASSRLS role (tenancy.md §RLS 与 PG scope)"
     );
+}
+
+async fn load_tenant_read_role(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<TenantReadRole, PgError> {
+    sqlx::query_as(TENANT_READ_ROLE_SQL)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(PgError::TenantReadCapability)
+}
+
+fn ensure_tenant_read_direct_role(role: &TenantReadRole) -> Result<(), PgError> {
+    if role.session_user == EXPECTED_TENANT_READ_ROLE
+        && role.current_user == EXPECTED_TENANT_READ_ROLE
+    {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        session_user = %role.session_user,
+        current_user = %role.current_user,
+        expected_user = EXPECTED_TENANT_READ_ROLE,
+        "tenant reader capability gate: connection must log in directly as rss_app_read"
+    );
+    Err(PgError::TenantReadUnexpectedRole)
+}
+
+fn ensure_tenant_read_role_attributes(role: &TenantReadRole) -> Result<(), PgError> {
+    if role.can_login
+        && !role.superuser
+        && !role.bypass_rls
+        && !role.create_db
+        && !role.create_role
+        && !role.replication
+        && !role.inherit
+    {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        can_login = role.can_login,
+        superuser = role.superuser,
+        bypass_rls = role.bypass_rls,
+        create_db = role.create_db,
+        create_role = role.create_role,
+        replication = role.replication,
+        inherit = role.inherit,
+        "tenant reader capability gate: role attributes are not exact"
+    );
+    Err(PgError::TenantReadRoleAttributes)
+}
+
+fn ensure_tenant_read_default_transaction(role: &TenantReadRole) -> Result<(), PgError> {
+    if role.exact_role_config && role.transaction_read_only {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        exact_role_config = role.exact_role_config,
+        transaction_read_only = role.transaction_read_only,
+        "tenant reader capability gate: default transaction read-only is not exact"
+    );
+    Err(PgError::TenantReadDefaultTransaction)
+}
+
+fn ensure_tenant_read_search_path(role: &TenantReadRole) -> Result<(), PgError> {
+    if role.exact_search_path_config && role.current_search_path == "pg_catalog, public" {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        exact_search_path_config = role.exact_search_path_config,
+        current_search_path = %role.current_search_path,
+        expected_search_path = "pg_catalog, public",
+        "tenant reader capability gate: search path is not exact"
+    );
+    Err(PgError::TenantReadSearchPath)
+}
+
+fn ensure_tenant_read_large_object_compatibility(role: &TenantReadRole) -> Result<(), PgError> {
+    if role.lo_compat_privileges_off {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        "tenant reader capability gate: lo_compat_privileges must be off"
+    );
+    Err(PgError::TenantReadLargeObjectCompatibility)
+}
+
+async fn ensure_tenant_read_no_membership(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let membership_count: i64 = sqlx::query_scalar(TENANT_READ_MEMBERSHIP_SQL)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(PgError::TenantReadCapability)?;
+    if membership_count == 0 {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        membership_count,
+        "tenant reader capability gate: role membership must be empty"
+    );
+    Err(PgError::TenantReadMembership)
+}
+
+async fn ensure_tenant_read_no_ownership(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let ownership_count: i64 = sqlx::query_scalar(TENANT_READ_OWNERSHIP_SQL)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(PgError::TenantReadCapability)?;
+    if ownership_count == 0 {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        ownership_count,
+        "tenant reader capability gate: role must not own database objects"
+    );
+    Err(PgError::TenantReadOwnership)
+}
+
+async fn ensure_tenant_read_relation_privileges(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let (missing_select, extra_privileges): (String, String) =
+        sqlx::query_as(TENANT_READ_RELATION_PRIVILEGES_SQL)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(PgError::TenantReadCapability)?;
+    if missing_select.is_empty() && extra_privileges.is_empty() {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        missing_select = %missing_select,
+        extra_privileges = %extra_privileges,
+        "tenant reader capability gate: relation privileges are not exact"
+    );
+    Err(PgError::TenantReadRelationPrivileges)
+}
+
+async fn ensure_tenant_read_database_privileges(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let (can_connect, can_create, can_temporary, connect_grant_option): (bool, bool, bool, bool) =
+        sqlx::query_as(TENANT_READ_DATABASE_PRIVILEGES_SQL)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(PgError::TenantReadCapability)?;
+    if can_connect && !can_create && !can_temporary && !connect_grant_option {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        can_connect,
+        can_create,
+        can_temporary,
+        connect_grant_option,
+        "tenant reader capability gate: database privileges are not exact"
+    );
+    Err(PgError::TenantReadDatabasePrivileges)
+}
+
+async fn ensure_tenant_read_no_sequence_privileges(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let privileges: String = sqlx::query_scalar(TENANT_READ_SEQUENCE_PRIVILEGES_SQL)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(PgError::TenantReadCapability)?;
+    if privileges.is_empty() {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        privileges = %privileges,
+        "tenant reader capability gate: sequence privileges must be empty"
+    );
+    Err(PgError::TenantReadSequencePrivileges)
+}
+
+async fn ensure_tenant_read_schema_privileges(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let (has_public_usage, extra_privileges): (bool, String) =
+        sqlx::query_as(TENANT_READ_SCHEMA_PRIVILEGES_SQL)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(PgError::TenantReadCapability)?;
+    if has_public_usage && extra_privileges.is_empty() {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        has_public_usage,
+        extra_privileges = %extra_privileges,
+        "tenant reader capability gate: schema privileges are not exact"
+    );
+    Err(PgError::TenantReadSchemaPrivileges)
+}
+
+async fn ensure_tenant_read_no_function_privileges(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let privileges: String = sqlx::query_scalar(TENANT_READ_FUNCTION_PRIVILEGES_SQL)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(PgError::TenantReadCapability)?;
+    if privileges.is_empty() {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        privileges = %privileges,
+        "tenant reader capability gate: public function privileges must be empty"
+    );
+    Err(PgError::TenantReadFunctionPrivileges)
+}
+
+async fn ensure_tenant_read_no_large_object_mutator_privileges(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let privileges: String = sqlx::query_scalar(TENANT_READ_LARGE_OBJECT_MUTATOR_PRIVILEGES_SQL)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(PgError::TenantReadCapability)?;
+    if privileges.is_empty() {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        privileges = %privileges,
+        "tenant reader capability gate: pg_catalog large-object mutator EXECUTE must be empty"
+    );
+    Err(PgError::TenantReadLargeObjectMutatorPrivileges)
+}
+
+async fn ensure_tenant_read_no_large_object_privileges(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let privileges: String = sqlx::query_scalar(TENANT_READ_LARGE_OBJECT_PRIVILEGES_SQL)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(PgError::TenantReadCapability)?;
+    if privileges.is_empty() {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        privileges = %privileges,
+        "tenant reader capability gate: large object privileges must be empty"
+    );
+    Err(PgError::TenantReadLargeObjectPrivileges)
+}
+
+async fn ensure_tenant_read_no_parameter_privileges(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let privileges: String = sqlx::query_scalar(TENANT_READ_PARAMETER_PRIVILEGES_SQL)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(PgError::TenantReadCapability)?;
+    if privileges.is_empty() {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        privileges = %privileges,
+        "tenant reader capability gate: parameter privileges must be empty"
+    );
+    Err(PgError::TenantReadParameterPrivileges)
 }
 
 async fn ensure_audit_admin_role(
@@ -632,11 +1540,12 @@ async fn ensure_audit_admin_read_only(
 /// 2. anti-vacuity：至少存在一张含 `tenant_id` 列的 tenant 表（否则 schema 未迁移 / 库不符预期）。
 async fn ensure_tenant_tables_present(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    map_probe: fn(sqlx::Error) -> PgError,
 ) -> Result<(), PgError> {
     let (n,): (i64,) = sqlx::query_as(TENANT_TABLE_COUNT_SQL)
         .fetch_one(&mut **tx)
         .await
-        .map_err(PgError::RlsCapability)?;
+        .map_err(map_probe)?;
     if n == 0 {
         return Err(PgError::RlsNoTenantTables);
     }
@@ -659,16 +1568,15 @@ fn ensure_no_offenders(offenders: Vec<String>) -> Result<(), PgError> {
 /// GUC roundtrip 自检：经 funnel 注入探测租户 → `current_setting` 回显比对（不等 → `RlsGucRoundtrip`）。
 async fn verify_tenant_guc_roundtrip(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    map_probe: fn(sqlx::Error) -> PgError,
 ) -> Result<(), PgError> {
     let probe = TenantId::parse(RLS_PROBE_TENANT).map_err(|_| PgError::RlsGucRoundtrip)?;
-    set_local_tenant(tx, probe)
-        .await
-        .map_err(PgError::RlsCapability)?;
+    set_local_tenant(tx, probe).await.map_err(map_probe)?;
     let (echoed,): (Option<String>,) =
         sqlx::query_as("SELECT current_setting('rss.tenant_id', true)")
             .fetch_one(&mut **tx)
             .await
-            .map_err(PgError::RlsCapability)?;
+            .map_err(map_probe)?;
     if echoed.as_deref() == Some(RLS_PROBE_TENANT) {
         Ok(())
     } else {
@@ -679,15 +1587,55 @@ async fn verify_tenant_guc_roundtrip(
 /// 不达标（缺 FORCE RLS / 规范 policy 或存在 allow-all permissive widening）的 tenant 表名列表。
 async fn offending_tenant_tables(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    map_probe: fn(sqlx::Error) -> PgError,
 ) -> Result<Vec<String>, PgError> {
     let rows: Vec<(String,)> = sqlx::query_as(OFFENDING_TENANT_TABLES_SQL)
         .fetch_all(&mut **tx)
         .await
-        .map_err(PgError::RlsCapability)?;
+        .map_err(map_probe)?;
     Ok(rows.into_iter().map(|(t,)| t).collect())
 }
 
 impl PgStore {
+    /// Connect and mint the writer capability only after the exact serving/RLS gate succeeds.
+    pub(crate) async fn connect_verified_writer(
+        config: &PgConfig,
+    ) -> Result<VerifiedPgWriteStore, PgError> {
+        let store = Arc::new(Self::connect_for(config, "writer", WRITER_APPLICATION_NAME).await?);
+        if let Err(error) = store.verify_rls_capability().await {
+            store.pool.close().await;
+            return Err(error);
+        }
+        Ok(VerifiedPgWriteStore(store))
+    }
+
+    /// Connect and mint the tenant-reader capability only after its complete exact gate succeeds.
+    pub(crate) async fn connect_verified_read(
+        config: &PgTenantReadConfig,
+    ) -> Result<VerifiedPgReadStore, PgError> {
+        let store = Arc::new(
+            Self::connect_for(config.as_pg_config(), "reader", READER_APPLICATION_NAME).await?,
+        );
+        if let Err(error) = store.verify_tenant_read_capability().await {
+            store.pool.close().await;
+            return Err(error);
+        }
+        Ok(VerifiedPgReadStore(store))
+    }
+
+    /// Connect and mint the independent audit-admin capability after its exact gate succeeds.
+    pub(crate) async fn connect_verified_audit_admin(
+        config: &PgConfig,
+    ) -> Result<VerifiedPgAuditAdminStore, PgError> {
+        let store =
+            Arc::new(Self::connect_for(config, "audit-admin", AUDIT_ADMIN_APPLICATION_NAME).await?);
+        if let Err(error) = store.verify_audit_admin_capability().await {
+            store.pool.close().await;
+            return Err(error);
+        }
+        Ok(VerifiedPgAuditAdminStore(store))
+    }
+
     /// 建池并连接 postgres：先 fail-fast 校验配置，再 `PgPoolOptions::connect_with`。
     ///
     /// `ref: sqlx sqlx-core/src/pool/options.rs@v0.8.6`。
@@ -695,11 +1643,23 @@ impl PgStore {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：唯一公开构造路径是 [`crate::PgRuntimeDeps::setup`]，
     /// 外部不能直接 mint `PgStore`、故拿不到 `&PgStore` 散装构造 repo。
     pub(crate) async fn connect(config: &PgConfig) -> Result<Self, PgError> {
+        Self::connect_for(config, "maintenance", APPLICATION_NAME).await
+    }
+
+    pub(crate) async fn connect_migrator(config: &PgConfig) -> Result<Self, PgError> {
+        Self::connect_for(config, "migrator", MIGRATOR_APPLICATION_NAME).await
+    }
+
+    async fn connect_for(
+        config: &PgConfig,
+        lane: &'static str,
+        application_name: &'static str,
+    ) -> Result<Self, PgError> {
         config.validate()?;
         let pool = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .acquire_timeout(config.acquire_timeout)
-            .connect_with(config.connect_options())
+            .connect_with(config.connect_options_for(application_name))
             .await
             .inspect_err(|err| {
                 // reason: 连接（持久化）失败在 adapter 边界记 error!，避免仅 `?` 冒泡时日志链断点（observability.md §日志级别）；
@@ -709,16 +1669,18 @@ impl PgStore {
                     error = %secure::redact_error(err),
                     host = %config.host,
                     database = %config.database,
+                    lane,
                     "postgres pool connect failed"
                 );
             })
-            .map_err(PgError::Connect)?;
+            .map_err(|source| PgError::Connect { lane, source })?;
         // reason: host/database 是中性运维标识（非租户敏感）。若未来 database 名引入租户标识，须先经
         // secure redaction 清洗再记录——勿在此直接落库名（防漂移护栏）。
         tracing::info!(
             target: "postgres",
             host = %config.host,
             database = %config.database,
+            lane,
             "postgres pool connected"
         );
         Ok(Self { pool })
@@ -737,6 +1699,25 @@ mod tests {
             "rss_app",
             PgPassword::new("s3cr3t-value"),
         )
+    }
+
+    fn tenant_reader_role() -> TenantReadRole {
+        TenantReadRole {
+            session_user: EXPECTED_TENANT_READ_ROLE.to_string(),
+            current_user: EXPECTED_TENANT_READ_ROLE.to_string(),
+            can_login: true,
+            superuser: false,
+            bypass_rls: false,
+            create_db: false,
+            create_role: false,
+            replication: false,
+            inherit: false,
+            exact_role_config: true,
+            exact_search_path_config: true,
+            current_search_path: "pg_catalog, public".to_string(),
+            transaction_read_only: true,
+            lo_compat_privileges_off: true,
+        }
     }
 
     #[test]
@@ -795,6 +1776,97 @@ mod tests {
     }
 
     #[test]
+    fn tenant_read_config_debug_does_not_leak_password() {
+        let rendered = format!("{:?}", PgTenantReadConfig::new(sample()));
+        assert!(rendered.contains("PgTenantReadConfig"));
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("s3cr3t-value"));
+    }
+
+    #[test]
+    fn exact_tenant_reader_role_is_accepted() {
+        let role = tenant_reader_role();
+        assert!(ensure_tenant_read_direct_role(&role).is_ok());
+        assert!(ensure_tenant_read_role_attributes(&role).is_ok());
+        assert!(ensure_tenant_read_default_transaction(&role).is_ok());
+        assert!(ensure_tenant_read_search_path(&role).is_ok());
+    }
+
+    #[test]
+    fn tenant_reader_role_rejects_each_attribute_drift() {
+        let mut cases: Vec<(&str, TenantReadRole)> = Vec::new();
+        let mut superuser = tenant_reader_role();
+        superuser.superuser = true;
+        cases.push(("superuser", superuser));
+        let mut bypass_rls = tenant_reader_role();
+        bypass_rls.bypass_rls = true;
+        cases.push(("bypass_rls", bypass_rls));
+        let mut create_db = tenant_reader_role();
+        create_db.create_db = true;
+        cases.push(("create_db", create_db));
+        let mut create_role = tenant_reader_role();
+        create_role.create_role = true;
+        cases.push(("create_role", create_role));
+        let mut replication = tenant_reader_role();
+        replication.replication = true;
+        cases.push(("replication", replication));
+        let mut inherit = tenant_reader_role();
+        inherit.inherit = true;
+        cases.push(("inherit", inherit));
+        let mut no_login = tenant_reader_role();
+        no_login.can_login = false;
+        cases.push(("no_login", no_login));
+
+        for (label, role) in cases {
+            assert!(
+                matches!(
+                    ensure_tenant_read_role_attributes(&role),
+                    Err(PgError::TenantReadRoleAttributes)
+                ),
+                "attribute drift must fail closed: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn tenant_reader_role_rejects_identity_and_default_drift() {
+        let mut identity = tenant_reader_role();
+        identity.current_user = EXPECTED_SERVING_ROLE.to_string();
+        assert!(matches!(
+            ensure_tenant_read_direct_role(&identity),
+            Err(PgError::TenantReadUnexpectedRole)
+        ));
+
+        let mut role_config = tenant_reader_role();
+        role_config.exact_role_config = false;
+        assert!(matches!(
+            ensure_tenant_read_default_transaction(&role_config),
+            Err(PgError::TenantReadDefaultTransaction)
+        ));
+
+        let mut active_transaction = tenant_reader_role();
+        active_transaction.transaction_read_only = false;
+        assert!(matches!(
+            ensure_tenant_read_default_transaction(&active_transaction),
+            Err(PgError::TenantReadDefaultTransaction)
+        ));
+
+        let mut role_search_path = tenant_reader_role();
+        role_search_path.exact_search_path_config = false;
+        assert!(matches!(
+            ensure_tenant_read_search_path(&role_search_path),
+            Err(PgError::TenantReadSearchPath)
+        ));
+
+        let mut active_search_path = tenant_reader_role();
+        active_search_path.current_search_path = "public".to_string();
+        assert!(matches!(
+            ensure_tenant_read_search_path(&active_search_path),
+            Err(PgError::TenantReadSearchPath)
+        ));
+    }
+
+    #[test]
     fn connect_options_maps_connection_fields() {
         let opts = sample().connect_options();
         assert_eq!(opts.get_host(), "db.internal");
@@ -839,6 +1911,15 @@ mod tests {
         assert!(matches!(DEFAULT_SSL_MODE, PgSslMode::VerifyFull));
     }
 
+    #[test]
+    fn connection_error_identifies_lane_without_credentials() {
+        let error = PgError::Connect {
+            lane: "reader",
+            source: sqlx::Error::PoolClosed,
+        };
+        assert_eq!(error.to_string(), "postgres reader connection failed");
+    }
+
     // ---------------------------------------------------------------------------
     // PoolReadiness 单元测试（#1309 F4：三态 Ready/Saturated/Down）
     // ---------------------------------------------------------------------------
@@ -859,37 +1940,45 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // classify_probe_error 单元测试（#1309 F4：三态分类）
+    // acquired-connection query classification（capacity pressure is handled before this stage）
     // ---------------------------------------------------------------------------
 
-    /// `PoolTimedOut` → `Saturated`（池饱和，DB 多半正常，降级可服务）。
+    /// Once a connection has been acquired, every query error is liveness failure, not saturation.
     #[test]
-    fn classify_probe_error_pool_timed_out_is_saturated() {
+    fn acquired_query_error_is_down() {
         assert_eq!(
-            super::classify_probe_error(&sqlx::Error::PoolTimedOut),
-            PoolReadiness::Saturated,
-            "PoolTimedOut → Saturated（池饱和，不摘流）"
+            super::probe_query_result(Ok(Err(sqlx::Error::PoolTimedOut))),
+            PoolReadiness::Down
         );
     }
 
-    /// `PoolClosed` → `Down`（池已关闭，不可服务）。
+    /// `PoolClosed` during the acquired query stage is Down.
     #[test]
-    fn classify_probe_error_pool_closed_is_down() {
+    fn acquired_query_pool_closed_is_down() {
         assert_eq!(
-            super::classify_probe_error(&sqlx::Error::PoolClosed),
-            PoolReadiness::Down,
-            "PoolClosed → Down"
+            super::probe_query_result(Ok(Err(sqlx::Error::PoolClosed))),
+            PoolReadiness::Down
         );
     }
 
     /// 查询 / 协议错误 → `Down`（非池状态错误，视为 DB 不可服务）。
     #[test]
-    fn classify_probe_error_query_error_is_down() {
+    fn acquired_query_protocol_error_is_down() {
         assert_eq!(
-            super::classify_probe_error(&sqlx::Error::Protocol("test error".to_string())),
-            PoolReadiness::Down,
-            "Protocol 错误 → Down"
+            super::probe_query_result(Ok(Err(sqlx::Error::Protocol("test error".to_string())))),
+            PoolReadiness::Down
         );
+    }
+
+    /// A query hang after acquiring a connection must fail readiness.
+    #[tokio::test]
+    async fn probe_outer_timeout_is_down() {
+        let timed_out = tokio::time::timeout(
+            Duration::ZERO,
+            std::future::pending::<Result<(), sqlx::Error>>(),
+        )
+        .await;
+        assert_eq!(super::probe_query_result(timed_out), PoolReadiness::Down);
     }
 
     // ---------------------------------------------------------------------------
@@ -899,8 +1988,7 @@ mod tests {
     /// `probe_db_liveness` 已关闭 pool 快路径：`is_closed()=true` → `Down`（快路径，不 acquire）。
     ///
     /// 覆盖 `probe_db_liveness` 中的 `is_closed()` 快路径 Down（跨平台可靠）。
-    /// 不可达端口路径在 macOS 下被 pf 过滤（无 RST），acquire 超时 → `PoolTimedOut` → `Saturated`；
-    /// Down 的 `classify_probe_error` 路径已由 `classify_probe_error_pool_closed_is_down` 直接覆盖。
+    /// Down query/error branches are covered above without relying on platform network behavior.
     #[tokio::test]
     async fn probe_unreachable_pool_returns_down() {
         use sqlx::postgres::{PgConnectOptions, PgPoolOptions};

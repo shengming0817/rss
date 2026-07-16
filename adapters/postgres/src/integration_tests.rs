@@ -41,10 +41,13 @@ type TestResult = Result<(), TestError>;
 
 const TEST_APP_ROLE: &str = "rss_app";
 const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
+const TEST_READ_ROLE: &str = "rss_app_read";
+const TEST_READ_PASSWORD: &str = "rss_app_read_test_pw";
 
 use crate::test_pg::{
-    connect_pg, connect_pg_audit_admin_role, connect_pg_nobypass_role, connect_pg_rss_app_role,
-    connect_pg_rss_app_role_with_limits,
+    connect_pg, connect_pg_audit_admin_role, connect_pg_nobypass_role,
+    connect_pg_rss_app_read_role, connect_pg_rss_app_role, connect_pg_rss_app_role_with_limits,
+    rss_app_read_config,
 };
 
 #[allow(clippy::unwrap_used)]
@@ -286,7 +289,7 @@ fn runtime_pg_config(p: &testkit::PgConnParams, username: &str, password: &str) 
     .with_acquire_timeout(std::time::Duration::from_secs(5))
 }
 
-async fn provision_runtime_rss_app_login(p: &testkit::PgConnParams) -> TestResult {
+async fn provision_runtime_logins(p: &testkit::PgConnParams) -> TestResult {
     let options = sqlx::postgres::PgConnectOptions::new()
         .host(&p.host)
         .port(p.port)
@@ -314,6 +317,23 @@ async fn provision_runtime_rss_app_login(p: &testkit::PgConnParams) -> TestResul
     )
     .execute(&pool)
     .await?;
+    sqlx::query(
+        r#"
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app_read') THEN
+                CREATE ROLE rss_app_read
+                    LOGIN PASSWORD 'rss_app_read_test_pw'
+                    NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT;
+            ELSE
+                ALTER ROLE rss_app_read PASSWORD 'rss_app_read_test_pw';
+            END IF;
+        END
+        $$;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
     pool.close().await;
     Ok(())
 }
@@ -324,11 +344,17 @@ async fn setup_runtime_deps_with_projection_inputs(
 ) -> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
-    provision_runtime_rss_app_login(p).await?;
+    provision_runtime_logins(p).await?;
     let owner_config = runtime_pg_config(p, &p.username, &p.password);
+    let tenant_read_config = crate::pool::PgTenantReadConfig::new(runtime_pg_config(
+        p,
+        TEST_READ_ROLE,
+        TEST_READ_PASSWORD,
+    ));
     let deps = PgRuntimeDeps::setup(
         &owner_config,
         &runtime_pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        &tenant_read_config,
         projection_input_generation,
         projection_inputs,
     )
@@ -363,6 +389,23 @@ fn isolated_database_config(p: &testkit::PgConnParams, database: &str) -> PgConf
     )
     .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(std::time::Duration::from_secs(5))
+}
+
+fn isolated_tenant_read_config(
+    p: &testkit::PgConnParams,
+    database: &str,
+) -> crate::pool::PgTenantReadConfig {
+    crate::pool::PgTenantReadConfig::new(
+        PgConfig::new(
+            p.host.clone(),
+            p.port,
+            database.to_string(),
+            TEST_READ_ROLE,
+            PgPassword::new(TEST_READ_PASSWORD),
+        )
+        .with_ssl_mode(PgSslMode::Prefer)
+        .with_acquire_timeout(std::time::Duration::from_secs(5)),
+    )
 }
 
 async fn create_isolated_database(store: &PgStore, prefix: &str) -> Result<String, sqlx::Error> {
@@ -424,8 +467,15 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
             .await?;
         mutator.shutdown().await?;
 
-        let runtime_missing =
-            PgRuntimeDeps::setup(&config, &config, EMPTY_PROJECTION_INPUT_GENERATION, &[]).await;
+        let tenant_read_config = crate::pool::PgTenantReadConfig::new(config.clone());
+        let runtime_missing = PgRuntimeDeps::setup(
+            &config,
+            &config,
+            &tenant_read_config,
+            EMPTY_PROJECTION_INPUT_GENERATION,
+            &[],
+        )
+        .await;
         assert!(matches!(
             runtime_missing,
             Err(crate::PgError::EventDeliveryPolicyMismatch)
@@ -454,8 +504,14 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
         .await?;
         mutator.shutdown().await?;
 
-        let runtime_drift =
-            PgRuntimeDeps::setup(&config, &config, EMPTY_PROJECTION_INPUT_GENERATION, &[]).await;
+        let runtime_drift = PgRuntimeDeps::setup(
+            &config,
+            &config,
+            &tenant_read_config,
+            EMPTY_PROJECTION_INPUT_GENERATION,
+            &[],
+        )
+        .await;
         assert!(matches!(
             runtime_drift,
             Err(crate::PgError::EventDeliveryPolicyMismatch)
@@ -860,6 +916,855 @@ async fn rss_app_serving_pool_enforces_tenant_ab_isolation() -> TestResult {
     Ok(())
 }
 
+/// Tenant-scoped read transactions must be physically read-only, even when the underlying
+/// fixture connection is an owner that could otherwise mutate the tenant relation.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_scoped_read_enforces_read_only() -> TestResult {
+    const ORIGINAL_SUBJECT: &str = "tenant-read-original";
+    const ATTEMPTED_SUBJECT: &str = "tenant-read-mutated";
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = test_tenant();
+    let tenant_id = tenant.to_string();
+    let session_id = unique_event_id("tenant-read-only");
+    sqlx::query(
+        "INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at) \
+         VALUES ($1, $2, $3::uuid, now() + interval '1 hour', now())",
+    )
+    .bind(&session_id)
+    .bind(ORIGINAL_SUBJECT)
+    .bind(&tenant_id)
+    .execute(&store.pool)
+    .await?;
+
+    let tenant_pool = crate::cotx::PgTenantReadPool::from_unverified_for_test(&store);
+    let scope = crate::cotx::infra_tenant_scope(tenant);
+    let transaction_read_only: String = tenant_pool
+        .read(scope, |connection| {
+            Box::pin(async move {
+                sqlx::query_scalar("SHOW transaction_read_only")
+                    .fetch_one(connection)
+                    .await
+            })
+        })
+        .await?;
+
+    let update_session_id = session_id.clone();
+    let update_tenant_id = tenant_id.clone();
+    let update_result = tenant_pool
+        .read(scope, move |connection| {
+            Box::pin(async move {
+                sqlx::query(
+                    "UPDATE sessions SET subject = $1 \
+                     WHERE session_id = $2 AND tenant_id = $3::uuid",
+                )
+                .bind(ATTEMPTED_SUBJECT)
+                .bind(&update_session_id)
+                .bind(&update_tenant_id)
+                .execute(connection)
+                .await
+            })
+        })
+        .await;
+    let update_sqlstate = match &update_result {
+        Err(sqlx::Error::Database(error)) => error.code().map(|code| code.into_owned()),
+        _ => None,
+    };
+
+    let mapped_transaction_read_only: String = tenant_pool
+        .read_map(
+            scope,
+            |connection| {
+                Box::pin(async move {
+                    sqlx::query_scalar("SHOW transaction_read_only")
+                        .fetch_one(connection)
+                        .await
+                })
+            },
+            |error| error,
+        )
+        .await?;
+    let mapped_session_id = session_id.clone();
+    let mapped_tenant_id = tenant_id.clone();
+    let mapped_update_result = tenant_pool
+        .read_map(
+            scope,
+            move |connection| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE sessions SET subject = $1 \
+                         WHERE session_id = $2 AND tenant_id = $3::uuid",
+                    )
+                    .bind(ATTEMPTED_SUBJECT)
+                    .bind(&mapped_session_id)
+                    .bind(&mapped_tenant_id)
+                    .execute(connection)
+                    .await
+                })
+            },
+            |error| error,
+        )
+        .await;
+    let mapped_update_sqlstate = match &mapped_update_result {
+        Err(sqlx::Error::Database(error)) => error.code().map(|code| code.into_owned()),
+        _ => None,
+    };
+
+    let persisted_subject: String =
+        sqlx::query_scalar("SELECT subject FROM sessions WHERE session_id = $1")
+            .bind(&session_id)
+            .fetch_one(&store.pool)
+            .await?;
+
+    assert_eq!(
+        (
+            transaction_read_only.as_str(),
+            update_sqlstate.as_deref(),
+            mapped_transaction_read_only.as_str(),
+            mapped_update_sqlstate.as_deref(),
+            persisted_subject.as_str(),
+        ),
+        ("on", Some("25006"), "on", Some("25006"), ORIGINAL_SUBJECT,),
+        "tenant read/read_map must report read-only, reject valid UPDATEs, and leave owner-visible data unchanged"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// The dedicated reader must pass the exact startup gate, retain tenant RLS isolation, and still
+/// reject DML by ACL when a caller explicitly overrides the role's default with `BEGIN READ WRITE`.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_reader_role_is_exact_and_forced_read_write_is_denied() -> TestResult {
+    const ORIGINAL_SUBJECT: &str = "reader-role-original";
+    const ATTEMPTED_SUBJECT: &str = "reader-role-mutated";
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let tenant_a = test_tenant();
+    let tenant_b = vocab::TenantId::parse("00000000-0000-4000-8000-000000000abc")?;
+    let tenant_a_id = tenant_a.to_string();
+    let session_id = unique_event_id("tenant-reader-role");
+    sqlx::query(
+        "INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at) \
+         VALUES ($1, $2, $3::uuid, now() + interval '1 hour', now())",
+    )
+    .bind(&session_id)
+    .bind(ORIGINAL_SUBJECT)
+    .bind(&tenant_a_id)
+    .execute(&owner.pool)
+    .await?;
+
+    let reader_config = rss_app_read_config(&pg, &owner).await?;
+    let verified_reader = PgStore::connect_verified_read(&reader_config).await?;
+    let reader_store = verified_reader.store_arc();
+    let read_pool = crate::cotx::PgTenantReadPool::new(&verified_reader);
+    let writer_keeps_temporary: bool = sqlx::query_scalar(
+        "SELECT has_database_privilege('rss_app', current_database(), 'TEMPORARY')",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(
+        writer_keeps_temporary,
+        "removing PUBLIC TEMPORARY must not remove the existing writer capability"
+    );
+
+    let reader_session = session_id.clone();
+    let tenant_a_count: i64 = read_pool
+        .read(
+            crate::cotx::infra_tenant_scope(tenant_a),
+            move |connection| {
+                Box::pin(async move {
+                    sqlx::query_scalar("SELECT count(*) FROM sessions WHERE session_id = $1")
+                        .bind(&reader_session)
+                        .fetch_one(connection)
+                        .await
+                })
+            },
+        )
+        .await?;
+    let reader_session = session_id.clone();
+    let tenant_b_count: i64 = read_pool
+        .read(
+            crate::cotx::infra_tenant_scope(tenant_b),
+            move |connection| {
+                Box::pin(async move {
+                    sqlx::query_scalar("SELECT count(*) FROM sessions WHERE session_id = $1")
+                        .bind(&reader_session)
+                        .fetch_one(connection)
+                        .await
+                })
+            },
+        )
+        .await?;
+    assert_eq!(tenant_a_count, 1, "reader must see its own tenant row");
+    assert_eq!(tenant_b_count, 0, "reader RLS must hide another tenant row");
+
+    let leaked_tenant: Option<String> =
+        sqlx::query_scalar("SELECT current_setting('rss.tenant_id', true)")
+            .fetch_one(&reader_store.pool)
+            .await?;
+    assert!(
+        leaked_tenant.is_none_or(|value| value.is_empty()),
+        "committed reader transactions must not leak tenant GUC into a reused connection"
+    );
+
+    let mut forced_read_write = reader_store.pool.begin_with("BEGIN READ WRITE").await?;
+    crate::cotx::set_local_tenant(&mut forced_read_write, tenant_a).await?;
+    let denied = sqlx::query(
+        "UPDATE sessions SET subject = $1 \
+         WHERE session_id = $2 AND tenant_id = $3::uuid",
+    )
+    .bind(ATTEMPTED_SUBJECT)
+    .bind(&session_id)
+    .bind(&tenant_a_id)
+    .execute(&mut *forced_read_write)
+    .await;
+    assert!(
+        matches!(
+            denied,
+            Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")
+        ),
+        "forced READ WRITE must still be denied by reader ACL: {denied:?}"
+    );
+    forced_read_write.rollback().await?;
+
+    let persisted_subject: String =
+        sqlx::query_scalar("SELECT subject FROM sessions WHERE session_id = $1")
+            .bind(&session_id)
+            .fetch_one(&owner.pool)
+            .await?;
+    assert_eq!(persisted_subject, ORIGINAL_SUBJECT);
+
+    reader_store.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+/// `default_transaction_read_only` is only a default: a caller can explicitly start READ WRITE.
+/// The reader role must therefore lack EXECUTE on pg_catalog large-object mutators, otherwise it
+/// can create persistent database state without touching any application relation ACL.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_reader_forced_read_write_cannot_persist_large_objects() -> TestResult {
+    let (fixture, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let reader_config = rss_app_read_config(&fixture, &owner).await?;
+    let reader = PgStore::connect_verified_read(&reader_config).await?;
+    let reader_store = reader.store_arc();
+    let protected_oid: i64 = sqlx::query_scalar(
+        "SELECT lo_from_bytea(0, decode('6f776e65722d6279746573', 'hex'))::bigint",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_largeobject_metadata")
+        .fetch_one(&owner.pool)
+        .await?;
+
+    let mut tx = reader_store.pool.begin_with("BEGIN READ WRITE").await?;
+    let create: Result<i64, sqlx::Error> = sqlx::query_scalar(
+        "SELECT lo_from_bytea(0, decode('7265616465722d7772697465', 'hex'))::bigint",
+    )
+    .fetch_one(&mut *tx)
+    .await;
+    let created_oid = create.as_ref().ok().copied();
+    if created_oid.is_some() {
+        tx.commit().await?;
+    } else {
+        tx.rollback().await?;
+    }
+
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_largeobject_metadata")
+        .fetch_one(&owner.pool)
+        .await?;
+    if let Some(oid) = created_oid {
+        sqlx::query(&format!("SELECT lo_unlink({oid}::oid)"))
+            .execute(&owner.pool)
+            .await?;
+    }
+
+    let mut write_tx = reader_store.pool.begin_with("BEGIN READ WRITE").await?;
+    let write = sqlx::query(&format!(
+        "SELECT lo_put({protected_oid}::oid, 0, decode('7265616465722d6f7665727772697465', 'hex'))"
+    ))
+    .execute(&mut *write_tx)
+    .await;
+    if write.is_ok() {
+        write_tx.commit().await?;
+    } else {
+        write_tx.rollback().await?;
+    }
+
+    let mut unlink_tx = reader_store.pool.begin_with("BEGIN READ WRITE").await?;
+    let unlink = sqlx::query(&format!("SELECT lo_unlink({protected_oid}::oid)"))
+        .execute(&mut *unlink_tx)
+        .await;
+    if unlink.is_ok() {
+        unlink_tx.commit().await?;
+    } else {
+        unlink_tx.rollback().await?;
+    }
+
+    let protected_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_largeobject_metadata WHERE oid = $1::oid)",
+    )
+    .bind(protected_oid)
+    .fetch_one(&owner.pool)
+    .await?;
+    let protected_bytes = if protected_exists {
+        Some(
+            sqlx::query_scalar::<_, Vec<u8>>(&format!("SELECT lo_get({protected_oid}::oid)"))
+                .fetch_one(&owner.pool)
+                .await?,
+        )
+    } else {
+        None
+    };
+    if protected_exists {
+        sqlx::query(&format!("SELECT lo_unlink({protected_oid}::oid)"))
+            .execute(&owner.pool)
+            .await?;
+    }
+
+    assert!(
+        matches!(
+            create,
+            Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")
+        ),
+        "forced READ WRITE reader must not execute lo_from_bytea: {create:?}"
+    );
+    assert_eq!(
+        after, before,
+        "denied reader LO creation must leave pg_largeobject_metadata unchanged"
+    );
+    for (operation, result) in [("lo_put", write), ("lo_unlink", unlink)] {
+        assert!(
+            matches!(
+                result,
+                Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")
+            ),
+            "forced READ WRITE reader must not execute {operation}: {result:?}"
+        );
+    }
+    assert!(
+        protected_exists,
+        "reader must not unlink the owner large object"
+    );
+    assert_eq!(
+        protected_bytes.as_deref(),
+        Some(b"owner-bytes".as_slice()),
+        "reader must not overwrite owner large-object bytes"
+    );
+
+    reader_store.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+/// Effective relation ACL drift is rejected even when the role itself and all tenant grants are
+/// otherwise valid.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_reader_gate_rejects_non_tenant_relation_select() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    sqlx::query("CREATE TABLE _tenant_reader_acl_drift (id integer PRIMARY KEY)")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query("GRANT SELECT ON _tenant_reader_acl_drift TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+
+    let verdict = reader.verify_tenant_read_capability().await;
+
+    assert!(
+        matches!(verdict, Err(crate::PgError::TenantReadRelationPrivileges)),
+        "non-tenant relation SELECT must fail the exact ACL gate: {verdict:?}"
+    );
+    reader.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+/// Partitioned tenant relations are part of both the ACL inventory and the FORCE-RLS/policy gate;
+/// granting the required reader SELECT must not hide a missing RLS policy on relkind `p`.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_reader_gate_rejects_partitioned_tenant_relation_without_rls() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    sqlx::query(
+        "CREATE TABLE tenant_reader_partitioned_without_rls \
+         (tenant_id uuid NOT NULL, bucket integer NOT NULL) PARTITION BY LIST (bucket)",
+    )
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query("GRANT SELECT ON tenant_reader_partitioned_without_rls TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+
+    let verdict = reader.verify_tenant_read_capability().await;
+
+    assert!(
+        matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+        "partitioned tenant relation without FORCE RLS/policy must fail closed: {verdict:?}"
+    );
+    reader.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+async fn tenant_reader_gate_verdict(
+    fixture: &testkit::PgFixture,
+    owner: &PgStore,
+) -> Result<Result<(), crate::PgError>, TestError> {
+    let reader = connect_pg_rss_app_read_role(fixture, owner).await?;
+    let verdict = reader.verify_tenant_read_capability().await;
+    reader.shutdown().await?;
+    Ok(verdict)
+}
+
+/// The reader gate is a direct-login gate, not merely a check that the connected role happens to
+/// have a safe-looking effective privilege set.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_reader_gate_rejects_wrong_direct_role() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let writer = connect_pg_rss_app_role(&pg, &owner).await?;
+
+    let verdict = writer.verify_tenant_read_capability().await;
+
+    assert!(
+        matches!(verdict, Err(crate::PgError::TenantReadUnexpectedRole)),
+        "rss_app must not pass the dedicated reader direct-role gate: {verdict:?}"
+    );
+    writer.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+/// Relation and column ACL drift are independent escalation surfaces. Restore each mutation before
+/// asserting its verdict so a failed assertion cannot contaminate later integration tests that
+/// reuse an externally supplied PostgreSQL database.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_reader_gate_rejects_tenant_dml_and_column_acl_drift() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let tenant = test_tenant();
+    let tenant_id = tenant.to_string();
+    let session_id = unique_event_id("tenant-reader-column-acl-drift");
+    sqlx::query(
+        "INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at) \
+         VALUES ($1, 'before', $2::uuid, now() + interval '1 hour', now())",
+    )
+    .bind(&session_id)
+    .bind(&tenant_id)
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::query("GRANT UPDATE ON sessions TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    let table_dml_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    sqlx::query("REVOKE UPDATE ON sessions FROM rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(
+        matches!(
+            table_dml_verdict,
+            Err(crate::PgError::TenantReadRelationPrivileges)
+        ),
+        "tenant table-level UPDATE must fail the exact reader ACL gate: {table_dml_verdict:?}"
+    );
+
+    sqlx::query("GRANT UPDATE (subject) ON sessions TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let mut forced_read_write = reader.pool.begin_with("BEGIN READ WRITE").await?;
+    crate::cotx::set_local_tenant(&mut forced_read_write, tenant).await?;
+    let escalated = sqlx::query(
+        "UPDATE sessions SET subject = 'column-acl-bypass' \
+         WHERE session_id = $1 AND tenant_id = $2::uuid",
+    )
+    .bind(&session_id)
+    .bind(&tenant_id)
+    .execute(&mut *forced_read_write)
+    .await?;
+    assert_eq!(
+        escalated.rows_affected(),
+        1,
+        "synthetic drift must be a real write escalation, not a vacuous catalog case"
+    );
+    forced_read_write.rollback().await?;
+    reader.shutdown().await?;
+    let column_update_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    sqlx::query("REVOKE UPDATE (subject) ON sessions FROM rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(
+        matches!(
+            column_update_verdict,
+            Err(crate::PgError::TenantReadRelationPrivileges)
+        ),
+        "column-level UPDATE must fail the exact reader ACL gate: {column_update_verdict:?}"
+    );
+
+    sqlx::query("GRANT SELECT (subject) ON sessions TO rss_app_read WITH GRANT OPTION")
+        .execute(&owner.pool)
+        .await?;
+    let column_grant_option_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    sqlx::query("REVOKE SELECT (subject) ON sessions FROM rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(
+        matches!(
+            column_grant_option_verdict,
+            Err(crate::PgError::TenantReadRelationPrivileges)
+        ),
+        "column SELECT WITH GRANT OPTION must fail the exact reader ACL gate: \
+         {column_grant_option_verdict:?}"
+    );
+
+    sqlx::query("GRANT SELECT ON sessions TO rss_app_read WITH GRANT OPTION")
+        .execute(&owner.pool)
+        .await?;
+    let relation_grant_option_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    sqlx::query("REVOKE GRANT OPTION FOR SELECT ON sessions FROM rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(
+        matches!(
+            relation_grant_option_verdict,
+            Err(crate::PgError::TenantReadRelationPrivileges)
+        ),
+        "table SELECT WITH GRANT OPTION must fail the exact reader ACL gate: \
+         {relation_grant_option_verdict:?}"
+    );
+
+    owner.shutdown().await?;
+    Ok(())
+}
+
+/// Every non-relation reader capability is checked as an independent fail-fast stage. Each drift
+/// is restored before the next probe so no earlier failure can mask a later gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+
+    sqlx::query("ALTER ROLE rss_app_read SET default_transaction_read_only = 'off'")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        tenant_reader_gate_verdict(&pg, &owner).await?,
+        Err(crate::PgError::TenantReadDefaultTransaction)
+    ));
+    sqlx::query("ALTER ROLE rss_app_read SET default_transaction_read_only = 'on'")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("ALTER ROLE rss_app_read SET search_path = public")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        tenant_reader_gate_verdict(&pg, &owner).await?,
+        Err(crate::PgError::TenantReadSearchPath)
+    ));
+    sqlx::query("ALTER ROLE rss_app_read SET search_path = pg_catalog, public")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("ALTER ROLE rss_app_read INHERIT")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        tenant_reader_gate_verdict(&pg, &owner).await?,
+        Err(crate::PgError::TenantReadRoleAttributes)
+    ));
+    sqlx::query("ALTER ROLE rss_app_read NOINHERIT")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("CREATE ROLE tenant_reader_forbidden_parent NOLOGIN")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query("GRANT tenant_reader_forbidden_parent TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        tenant_reader_gate_verdict(&pg, &owner).await?,
+        Err(crate::PgError::TenantReadMembership)
+    ));
+    sqlx::query("REVOKE tenant_reader_forbidden_parent FROM rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query("DROP ROLE tenant_reader_forbidden_parent")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("CREATE TABLE tenant_reader_forbidden_owned (id integer PRIMARY KEY)")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query("ALTER TABLE tenant_reader_forbidden_owned OWNER TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        tenant_reader_gate_verdict(&pg, &owner).await?,
+        Err(crate::PgError::TenantReadOwnership)
+    ));
+    sqlx::query("DROP TABLE tenant_reader_forbidden_owned")
+        .execute(&owner.pool)
+        .await?;
+
+    let grant_temporary = format!(
+        "GRANT TEMPORARY ON DATABASE \"{}\" TO rss_app_read",
+        pg.params().database.replace('"', "\"\"")
+    );
+    sqlx::query(&grant_temporary).execute(&owner.pool).await?;
+    assert!(matches!(
+        tenant_reader_gate_verdict(&pg, &owner).await?,
+        Err(crate::PgError::TenantReadDatabasePrivileges)
+    ));
+    let revoke_temporary = format!(
+        "REVOKE TEMPORARY ON DATABASE \"{}\" FROM rss_app_read",
+        pg.params().database.replace('"', "\"\"")
+    );
+    sqlx::query(&revoke_temporary).execute(&owner.pool).await?;
+
+    let grant_connect_option = format!(
+        "GRANT CONNECT ON DATABASE \"{}\" TO rss_app_read WITH GRANT OPTION",
+        pg.params().database.replace('"', "\"\"")
+    );
+    sqlx::query(&grant_connect_option)
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        tenant_reader_gate_verdict(&pg, &owner).await?,
+        Err(crate::PgError::TenantReadDatabasePrivileges)
+    ));
+    let revoke_connect_option = format!(
+        "REVOKE GRANT OPTION FOR CONNECT ON DATABASE \"{}\" FROM rss_app_read",
+        pg.params().database.replace('"', "\"\"")
+    );
+    sqlx::query(&revoke_connect_option)
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("GRANT USAGE ON SEQUENCE auth_audit_events_id_seq TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        tenant_reader_gate_verdict(&pg, &owner).await?,
+        Err(crate::PgError::TenantReadSequencePrivileges)
+    ));
+    sqlx::query("REVOKE ALL ON SEQUENCE auth_audit_events_id_seq FROM rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("CREATE SCHEMA tenant_reader_forbidden_schema")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query("GRANT USAGE ON SCHEMA tenant_reader_forbidden_schema TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        tenant_reader_gate_verdict(&pg, &owner).await?,
+        Err(crate::PgError::TenantReadSchemaPrivileges)
+    ));
+    sqlx::query("DROP SCHEMA tenant_reader_forbidden_schema")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("GRANT USAGE ON SCHEMA public TO rss_app_read WITH GRANT OPTION")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        tenant_reader_gate_verdict(&pg, &owner).await?,
+        Err(crate::PgError::TenantReadSchemaPrivileges)
+    ));
+    sqlx::query("REVOKE GRANT OPTION FOR USAGE ON SCHEMA public FROM rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query(
+        "CREATE FUNCTION tenant_reader_forbidden_function() RETURNS integer \
+         LANGUAGE sql IMMUTABLE AS 'SELECT 1'",
+    )
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query("REVOKE ALL ON FUNCTION tenant_reader_forbidden_function() FROM PUBLIC")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query("GRANT EXECUTE ON FUNCTION tenant_reader_forbidden_function() TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        tenant_reader_gate_verdict(&pg, &owner).await?,
+        Err(crate::PgError::TenantReadFunctionPrivileges)
+    ));
+    sqlx::query("DROP FUNCTION tenant_reader_forbidden_function()")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("GRANT EXECUTE ON FUNCTION pg_catalog.lo_create(oid) TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    let lo_mutator_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    sqlx::query("REVOKE EXECUTE ON FUNCTION pg_catalog.lo_create(oid) FROM rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        lo_mutator_verdict,
+        Err(crate::PgError::TenantReadLargeObjectMutatorPrivileges)
+    ));
+
+    let large_object_oid: i64 =
+        sqlx::query_scalar("SELECT lo_from_bytea(0, decode('726561646572', 'hex'))::bigint")
+            .fetch_one(&owner.pool)
+            .await?;
+    sqlx::query(&format!(
+        "GRANT SELECT ON LARGE OBJECT {large_object_oid} TO rss_app_read"
+    ))
+    .execute(&owner.pool)
+    .await?;
+    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let large_object_bytes: Vec<u8> =
+        sqlx::query_scalar(&format!("SELECT lo_get({large_object_oid}::oid)"))
+            .fetch_one(&reader.pool)
+            .await?;
+    assert_eq!(large_object_bytes, b"reader");
+    reader.shutdown().await?;
+    let large_object_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    sqlx::query(&format!(
+        "REVOKE ALL PRIVILEGES ON LARGE OBJECT {large_object_oid} FROM rss_app_read"
+    ))
+    .execute(&owner.pool)
+    .await?;
+    assert!(matches!(
+        large_object_verdict,
+        Err(crate::PgError::TenantReadLargeObjectPrivileges)
+    ));
+
+    sqlx::query(&format!(
+        "GRANT SELECT ON LARGE OBJECT {large_object_oid} TO PUBLIC"
+    ))
+    .execute(&owner.pool)
+    .await?;
+    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let public_large_object_bytes: Vec<u8> =
+        sqlx::query_scalar(&format!("SELECT lo_get({large_object_oid}::oid)"))
+            .fetch_one(&reader.pool)
+            .await?;
+    assert_eq!(public_large_object_bytes, b"reader");
+    reader.shutdown().await?;
+    let public_large_object_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    sqlx::query(&format!(
+        "REVOKE ALL PRIVILEGES ON LARGE OBJECT {large_object_oid} FROM PUBLIC"
+    ))
+    .execute(&owner.pool)
+    .await?;
+    assert!(matches!(
+        public_large_object_verdict,
+        Err(crate::PgError::TenantReadLargeObjectPrivileges)
+    ));
+
+    sqlx::query(&format!(
+        "GRANT SELECT ON LARGE OBJECT {large_object_oid} TO rss_app_read WITH GRANT OPTION"
+    ))
+    .execute(&owner.pool)
+    .await?;
+    let large_object_grantable: bool = sqlx::query_scalar(&format!(
+        "SELECT bool_or(acl.is_grantable) FROM pg_largeobject_metadata object \
+         CROSS JOIN LATERAL aclexplode(object.lomacl) acl \
+         WHERE object.oid = {large_object_oid}::oid \
+           AND acl.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'rss_app_read')"
+    ))
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(large_object_grantable);
+    let large_object_grant_option_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    sqlx::query(&format!(
+        "REVOKE ALL PRIVILEGES ON LARGE OBJECT {large_object_oid} FROM rss_app_read"
+    ))
+    .execute(&owner.pool)
+    .await?;
+    assert!(matches!(
+        large_object_grant_option_verdict,
+        Err(crate::PgError::TenantReadLargeObjectPrivileges)
+    ));
+    sqlx::query(&format!("SELECT lo_unlink({large_object_oid}::oid)"))
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("GRANT ALTER SYSTEM ON PARAMETER work_mem TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let can_alter_system: bool = sqlx::query_scalar(
+        "SELECT has_parameter_privilege(current_user, 'work_mem', 'ALTER SYSTEM')",
+    )
+    .fetch_one(&reader.pool)
+    .await?;
+    assert!(
+        can_alter_system,
+        "synthetic parameter ACL drift must be effective"
+    );
+    reader.shutdown().await?;
+    let parameter_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    sqlx::query("REVOKE ALL PRIVILEGES ON PARAMETER work_mem FROM rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        parameter_verdict,
+        Err(crate::PgError::TenantReadParameterPrivileges)
+    ));
+
+    sqlx::query("GRANT SET ON PARAMETER work_mem TO PUBLIC")
+        .execute(&owner.pool)
+        .await?;
+    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let public_can_set: bool =
+        sqlx::query_scalar("SELECT has_parameter_privilege(current_user, 'work_mem', 'SET')")
+            .fetch_one(&reader.pool)
+            .await?;
+    assert!(public_can_set, "PUBLIC parameter drift must be effective");
+    reader.shutdown().await?;
+    let public_parameter_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    sqlx::query("REVOKE ALL PRIVILEGES ON PARAMETER work_mem FROM PUBLIC")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        public_parameter_verdict,
+        Err(crate::PgError::TenantReadParameterPrivileges)
+    ));
+
+    sqlx::query("GRANT ALTER SYSTEM ON PARAMETER work_mem TO rss_app_read WITH GRANT OPTION")
+        .execute(&owner.pool)
+        .await?;
+    let parameter_grantable: bool = sqlx::query_scalar(
+        "SELECT bool_or(acl.is_grantable) FROM pg_parameter_acl parameter \
+         CROSS JOIN LATERAL aclexplode(parameter.paracl) acl \
+         WHERE parameter.parname = 'work_mem' \
+           AND acl.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'rss_app_read')",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(parameter_grantable);
+    let parameter_grant_option_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    sqlx::query("REVOKE ALL PRIVILEGES ON PARAMETER work_mem FROM rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        parameter_grant_option_verdict,
+        Err(crate::PgError::TenantReadParameterPrivileges)
+    ));
+
+    owner.shutdown().await?;
+    Ok(())
+}
+
 /// RLS 能力门反例（fail-closed）：存在含 `tenant_id` 列却**无** RLS 的表 → `Err(RlsNotEnforced)`。
 /// throwaway 表经 owner 建，能力门经**非绕过角色**判定（pg_catalog 不受权限过滤、仍可见该表）；DROP 还原。
 #[tokio::test(flavor = "multi_thread")]
@@ -912,6 +1817,204 @@ async fn verify_rls_capability_rejects_permissive_policy() -> TestResult {
     app.shutdown().await?;
     store.shutdown().await?;
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_reader_gate_rejects_semantically_inverted_canonical_policies() -> TestResult {
+    let (fixture, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    for (table, predicate) in [
+        (
+            "_rls_probe_not_canonical",
+            "NOT (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)",
+        ),
+        (
+            "_rls_probe_false_canonical",
+            "(tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid) = false",
+        ),
+    ] {
+        sqlx::query(&format!(
+            "CREATE TABLE {table} (tenant_id uuid NOT NULL, x integer)"
+        ))
+        .execute(&owner.pool)
+        .await?;
+        sqlx::raw_sql(&format!(
+            "ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; \
+             ALTER TABLE {table} FORCE ROW LEVEL SECURITY; \
+             CREATE POLICY tenant_isolation ON {table} USING ({predicate}) WITH CHECK ({predicate}); \
+             GRANT SELECT ON {table} TO rss_app_read"
+        ))
+        .execute(&owner.pool)
+        .await?;
+
+        let verdict = tenant_reader_gate_verdict(&fixture, &owner).await?;
+        sqlx::query(&format!("DROP TABLE {table}"))
+            .execute(&owner.pool)
+            .await?;
+        assert!(
+            matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+            "semantically inverted canonical predicate must fail closed: {predicate}; {verdict:?}"
+        );
+    }
+    owner.shutdown().await?;
+    Ok(())
+}
+
+/// A policy created under a hostile search_path can deparse to the canonical text while retaining
+/// a user-defined `=` operator OID. Prove the exploit reads both tenants, then prove the catalog
+/// dependency gate rejects it even after the function EXECUTE ACL is removed from the reader.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_reader_gate_rejects_same_text_custom_operator_policy() -> TestResult {
+    let (fixture, admin) = connect_pg().await?;
+    let database = create_isolated_database(&admin, "tenant_reader_operator_shadow").await?;
+    let owner_config = isolated_database_config(fixture.params(), &database);
+    let reader_config = isolated_tenant_read_config(fixture.params(), &database);
+
+    let verdict: TestResult = async {
+        let owner = PgStore::connect(&owner_config).await?;
+        owner.run_migrations().await?;
+        sqlx::query(&format!(
+            "ALTER ROLE {TEST_READ_ROLE} PASSWORD '{TEST_READ_PASSWORD}'"
+        ))
+        .execute(&owner.pool)
+        .await?;
+        sqlx::raw_sql(
+            r#"
+            CREATE FUNCTION public.tenant_reader_always_true(uuid, uuid)
+                RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT true';
+            CREATE OPERATOR public.= (
+                LEFTARG = uuid,
+                RIGHTARG = uuid,
+                FUNCTION = public.tenant_reader_always_true
+            );
+            SET search_path = public, pg_catalog;
+            CREATE TABLE public._tenant_reader_operator_shadow (
+                tenant_id uuid NOT NULL,
+                value text NOT NULL
+            );
+            ALTER TABLE public._tenant_reader_operator_shadow ENABLE ROW LEVEL SECURITY;
+            ALTER TABLE public._tenant_reader_operator_shadow FORCE ROW LEVEL SECURITY;
+            CREATE POLICY tenant_isolation ON public._tenant_reader_operator_shadow
+                USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)
+                WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
+            RESET search_path;
+            GRANT SELECT ON public._tenant_reader_operator_shadow TO rss_app_read;
+            INSERT INTO public._tenant_reader_operator_shadow (tenant_id, value) VALUES
+                ('00000000-0000-4000-8000-000000000001', 'tenant-a'),
+                ('00000000-0000-4000-8000-000000000002', 'tenant-b');
+            "#,
+        )
+        .execute(&owner.pool)
+        .await?;
+
+        let reader = PgStore::connect(reader_config.as_pg_config()).await?;
+        let mut read_tx = reader.pool.begin_with("BEGIN READ ONLY").await?;
+        crate::cotx::set_local_tenant(
+            &mut read_tx,
+            vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?,
+        )
+        .await?;
+        let visible: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM public._tenant_reader_operator_shadow")
+                .fetch_one(&mut *read_tx)
+                .await?;
+        read_tx.rollback().await?;
+        assert_eq!(
+            visible, 2,
+            "the custom operator must be a real cross-tenant bypass, not catalog-only drift"
+        );
+
+        sqlx::query(
+            "REVOKE EXECUTE ON FUNCTION public.tenant_reader_always_true(uuid, uuid) FROM PUBLIC",
+        )
+        .execute(&owner.pool)
+        .await?;
+        let gate = reader.verify_tenant_read_capability().await;
+        assert!(
+            matches!(gate, Err(crate::PgError::RlsNotEnforced)),
+            "non-pinned policy dependencies must fail the RLS gate: {gate:?}"
+        );
+        reader.shutdown().await?;
+
+        sqlx::raw_sql(
+            "DROP TABLE public._tenant_reader_operator_shadow; \
+             DROP OPERATOR public.= (uuid, uuid); \
+             DROP FUNCTION public.tenant_reader_always_true(uuid, uuid)",
+        )
+        .execute(&owner.pool)
+        .await?;
+        owner.shutdown().await?;
+        Ok(())
+    }
+    .await;
+
+    let cleanup = drop_isolated_database(&admin, &database).await;
+    admin.shutdown().await?;
+    cleanup?;
+    verdict
+}
+
+/// PostgreSQL's compatibility mode intentionally bypasses LO ACL checks for reads. The reader
+/// startup gate must therefore reject the setting itself, even when no reader/PUBLIC LO ACL exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_reader_gate_rejects_large_object_compatibility_mode() -> TestResult {
+    let (fixture, admin) = connect_pg().await?;
+    let database = create_isolated_database(&admin, "tenant_reader_lo_compat").await?;
+    let owner_config = isolated_database_config(fixture.params(), &database);
+    let reader_config = isolated_tenant_read_config(fixture.params(), &database);
+
+    let verdict: TestResult = async {
+        let owner = PgStore::connect(&owner_config).await?;
+        owner.run_migrations().await?;
+        sqlx::query(&format!(
+            "ALTER ROLE {TEST_READ_ROLE} PASSWORD '{TEST_READ_PASSWORD}'"
+        ))
+        .execute(&owner.pool)
+        .await?;
+        let large_object_oid: i64 =
+            sqlx::query_scalar("SELECT lo_from_bytea(0, decode('636f6d706174', 'hex'))::bigint")
+                .fetch_one(&owner.pool)
+                .await?;
+        sqlx::raw_sql(&format!(
+            "REVOKE ALL PRIVILEGES ON LARGE OBJECT {large_object_oid} FROM PUBLIC; \
+             REVOKE ALL PRIVILEGES ON LARGE OBJECT {large_object_oid} FROM rss_app_read; \
+             ALTER DATABASE \"{database}\" SET lo_compat_privileges = 'on'"
+        ))
+        .execute(&owner.pool)
+        .await?;
+
+        let reader = PgStore::connect(reader_config.as_pg_config()).await?;
+        let bytes: Vec<u8> = sqlx::query_scalar(&format!("SELECT lo_get({large_object_oid}::oid)"))
+            .fetch_one(&reader.pool)
+            .await?;
+        assert_eq!(
+            bytes, b"compat",
+            "lo_compat_privileges=on must demonstrably bypass an empty reader ACL"
+        );
+        let gate = reader.verify_tenant_read_capability().await;
+        assert!(matches!(
+            gate,
+            Err(crate::PgError::TenantReadLargeObjectCompatibility)
+        ));
+        reader.shutdown().await?;
+
+        sqlx::query(&format!(
+            "ALTER DATABASE \"{database}\" RESET lo_compat_privileges"
+        ))
+        .execute(&owner.pool)
+        .await?;
+        sqlx::query(&format!("SELECT lo_unlink({large_object_oid}::oid)"))
+            .execute(&owner.pool)
+            .await?;
+        owner.shutdown().await?;
+        Ok(())
+    }
+    .await;
+
+    let cleanup = drop_isolated_database(&admin, &database).await;
+    admin.shutdown().await?;
+    cleanup?;
+    verdict
 }
 
 /// 写侧缺 WITH CHECK 必须被运行时 capability gate 拒绝。
@@ -1162,7 +2265,7 @@ async fn localtx_audit_backend_profile_commit_and_rollback() -> TestResult {
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let commit_sink = crate::PgAuthAuditSink::new(&app);
+    let commit_sink = crate::PgAuthAuditSink::from_unverified_for_test(&app);
     let _typed_provider = LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES;
     let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
 
@@ -1193,7 +2296,7 @@ async fn localtx_audit_backend_profile_commit_and_rollback() -> TestResult {
     .await?;
 
     let rollback_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let rollback_sink = crate::PgAuthAuditSink::new(&app).with_append_fault(
+    let rollback_sink = crate::PgAuthAuditSink::from_unverified_for_test(&app).with_append_fault(
         rollback_tenant,
         crate::auth_audit_sink::AuthAuditAppendFault::Permanent,
         1,
@@ -1241,7 +2344,7 @@ async fn localtx_audit_backend_profile_tenant_isolation() -> TestResult {
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let sink = crate::PgAuthAuditSink::new(&app);
+    let sink = crate::PgAuthAuditSink::from_unverified_for_test(&app);
     let _typed_provider = LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES;
     let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
@@ -1299,17 +2402,17 @@ async fn localtx_audit_backend_profile_retry_policy() -> TestResult {
     let success_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let permanent_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let exhaustion_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let success_sink = crate::PgAuthAuditSink::new(&app).with_append_fault(
+    let success_sink = crate::PgAuthAuditSink::from_unverified_for_test(&app).with_append_fault(
         success_tenant,
         crate::auth_audit_sink::AuthAuditAppendFault::Transient,
         1,
     );
-    let permanent_sink = crate::PgAuthAuditSink::new(&app).with_append_fault(
+    let permanent_sink = crate::PgAuthAuditSink::from_unverified_for_test(&app).with_append_fault(
         permanent_tenant,
         crate::auth_audit_sink::AuthAuditAppendFault::Permanent,
         1,
     );
-    let exhaustion_sink = crate::PgAuthAuditSink::new(&app).with_append_fault(
+    let exhaustion_sink = crate::PgAuthAuditSink::from_unverified_for_test(&app).with_append_fault(
         exhaustion_tenant,
         crate::auth_audit_sink::AuthAuditAppendFault::TransientBeforeWrite,
         3,
@@ -1389,18 +2492,19 @@ async fn localtx_audit_backend_profile_unsafe_settlements() -> TestResult {
     let _typed_provider = LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES;
 
     let unknown_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let unknown_sink = crate::PgAuthAuditSink::new(&app).with_append_fault(
+    let unknown_sink = crate::PgAuthAuditSink::from_unverified_for_test(&app).with_append_fault(
         unknown_tenant,
         crate::auth_audit_sink::AuthAuditAppendFault::CommitUnknown,
         1,
     );
     let unknown_probe = unknown_sink.append_attempt_probe();
     let rollback_failed_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let rollback_failed_sink = crate::PgAuthAuditSink::new(&app).with_append_fault(
-        rollback_failed_tenant,
-        crate::auth_audit_sink::AuthAuditAppendFault::RollbackFailed,
-        1,
-    );
+    let rollback_failed_sink = crate::PgAuthAuditSink::from_unverified_for_test(&app)
+        .with_append_fault(
+            rollback_failed_tenant,
+            crate::auth_audit_sink::AuthAuditAppendFault::RollbackFailed,
+            1,
+        );
     let rollback_failed_probe = rollback_failed_sink.append_attempt_probe();
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
@@ -1527,7 +2631,7 @@ impl RefreshLocalTxCase {
     }
 
     async fn seed(&self, app: &PgStore) -> Result<(), identity::ports::IdentityError> {
-        crate::PgRefreshTokenStore::new(app)
+        crate::PgRefreshTokenStore::from_unverified_for_test(app)
             .insert(identity_scope(self.tenant), self.old.clone())
             .await
     }
@@ -1601,7 +2705,7 @@ async fn localtx_identity_refresh_backend_profile_commit_and_rollback() -> TestR
 
     let commit = RefreshLocalTxCase::new(tenant_a);
     commit.seed(&app).await?;
-    let commit_repo = crate::PgRefreshTokenStore::new(&app);
+    let commit_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app);
     let commit_writes = AtomicUsize::new(0);
     ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
         || async {
@@ -1625,11 +2729,12 @@ async fn localtx_identity_refresh_backend_profile_commit_and_rollback() -> TestR
 
     let rollback = RefreshLocalTxCase::new(tenant_a);
     rollback.seed(&app).await?;
-    let rollback_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
-        rollback.old_id(),
-        crate::refresh_token_store::RefreshRotationFault::Permanent,
-        1,
-    );
+    let rollback_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
+        .with_rotation_fault(
+            rollback.old_id(),
+            crate::refresh_token_store::RefreshRotationFault::Permanent,
+            1,
+        );
     ::testkit::localtx::assert_rollback(::testkit::localtx::RollbackCase::new(
         || async {
             rollback
@@ -1676,7 +2781,7 @@ async fn localtx_identity_refresh_backend_profile_tenant_isolation() -> TestResu
     let tenant_case_b = RefreshLocalTxCase::new(tenant_b);
     tenant_case_a.seed(&app).await?;
     tenant_case_b.seed(&app).await?;
-    let tenant_repo = crate::PgRefreshTokenStore::new(&app);
+    let tenant_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app);
     ::testkit::tenant_conformance::assert_tenant_isolation(
         tenant_a,
         tenant_b,
@@ -1737,26 +2842,30 @@ async fn localtx_identity_refresh_backend_profile_retry_policy() -> TestResult {
     ] {
         case.seed(&app).await?;
     }
-    let success_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
-        retry_success.old_id(),
-        crate::refresh_token_store::RefreshRotationFault::Transient,
-        1,
-    );
-    let conflict_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
-        retry_conflict.old_id(),
-        crate::refresh_token_store::RefreshRotationFault::Conflict,
-        1,
-    );
-    let permanent_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
-        retry_permanent.old_id(),
-        crate::refresh_token_store::RefreshRotationFault::Permanent,
-        1,
-    );
-    let exhaustion_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
-        retry_exhaustion.old_id(),
-        crate::refresh_token_store::RefreshRotationFault::TransientBeforeWrite,
-        3,
-    );
+    let success_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
+        .with_rotation_fault(
+            retry_success.old_id(),
+            crate::refresh_token_store::RefreshRotationFault::Transient,
+            1,
+        );
+    let conflict_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
+        .with_rotation_fault(
+            retry_conflict.old_id(),
+            crate::refresh_token_store::RefreshRotationFault::Conflict,
+            1,
+        );
+    let permanent_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
+        .with_rotation_fault(
+            retry_permanent.old_id(),
+            crate::refresh_token_store::RefreshRotationFault::Permanent,
+            1,
+        );
+    let exhaustion_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
+        .with_rotation_fault(
+            retry_exhaustion.old_id(),
+            crate::refresh_token_store::RefreshRotationFault::TransientBeforeWrite,
+            3,
+        );
     let success_probe = success_repo.rotation_attempt_probe();
     let conflict_probe = conflict_repo.rotation_attempt_probe();
     let permanent_probe = permanent_repo.rotation_attempt_probe();
@@ -1815,11 +2924,12 @@ async fn localtx_identity_refresh_backend_profile_unsafe_settlements() -> TestRe
 
     let unknown = RefreshLocalTxCase::new(tenant_a);
     unknown.seed(&app).await?;
-    let unknown_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
-        unknown.old_id(),
-        crate::refresh_token_store::RefreshRotationFault::CommitUnknown,
-        1,
-    );
+    let unknown_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
+        .with_rotation_fault(
+            unknown.old_id(),
+            crate::refresh_token_store::RefreshRotationFault::CommitUnknown,
+            1,
+        );
     let unknown_probe = unknown_repo.rotation_attempt_probe();
     ::testkit::localtx::assert_commit_unknown_no_replay(
         ::testkit::localtx::CommitUnknownCase::new(
@@ -1838,11 +2948,12 @@ async fn localtx_identity_refresh_backend_profile_unsafe_settlements() -> TestRe
     .await?;
     let rollback_failed = RefreshLocalTxCase::new(tenant_a);
     rollback_failed.seed(&app).await?;
-    let rollback_failed_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
-        rollback_failed.old_id(),
-        crate::refresh_token_store::RefreshRotationFault::RollbackFailed,
-        1,
-    );
+    let rollback_failed_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
+        .with_rotation_fault(
+            rollback_failed.old_id(),
+            crate::refresh_token_store::RefreshRotationFault::RollbackFailed,
+            1,
+        );
     let rollback_failed_probe = rollback_failed_repo.rotation_attempt_probe();
     ::testkit::localtx::assert_rollback_failed_no_replay(
         ::testkit::localtx::RollbackFailedCase::new(
@@ -6461,7 +7572,7 @@ fn make_pg_outbox_for_domain_with_budget(
     publisher: impl Publisher + Sync + 'static,
     relay_budget: RelayBudget,
 ) -> PgOutbox {
-    PgOutbox::new(
+    PgOutbox::from_unverified_for_test(
         store,
         vocab::DomainName::parse(domain).expect("valid test outbox domain"),
         DynPublisher::new_box(publisher),
@@ -16195,6 +17306,207 @@ fn migrations_through(max_version: i64) -> sqlx::migrate::Migrator {
     }
 }
 
+/// Predecessor-only half of `deploy/postgres-upgrade/smoke-retained-volume.sh`.
+///
+/// This is ignored in the ordinary suite because it intentionally leaves an external, strictly
+/// named test database at 0066 for the release binary to upgrade. The shell harness supplies a
+/// fresh container and invokes this exact test with `--ignored --exact`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "retained-volume smoke predecessor harness"]
+async fn bootstrap_reader_upgrade_smoke_predecessor() -> TestResult {
+    let (_fixture, store) = connect_pg().await?;
+    let ledger_absent: bool = sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NULL")
+        .fetch_one(&store.pool)
+        .await?;
+    assert!(
+        ledger_absent,
+        "predecessor harness requires the smoke's fresh PostgreSQL database"
+    );
+
+    migrations_through(66).run(&store.pool).await?;
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE upgrade_reader_smoke_marker(value text PRIMARY KEY);
+        INSERT INTO upgrade_reader_smoke_marker VALUES ('retained');
+        CREATE ROLE rss_app_read
+            LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT;
+        GRANT UPDATE (subject) ON sessions TO rss_app_read;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+
+    let ledger: (i64, bool, i32, i64) = sqlx::query_as(
+        "SELECT max(version), bool_and(success), min(octet_length(checksum))::int, count(*) \
+         FROM _sqlx_migrations",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(ledger, (66, true, 48, 66));
+    let marker: String = sqlx::query_scalar("SELECT value FROM upgrade_reader_smoke_marker")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(marker, "retained");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reader_lane_migration_command_applies_only_0067_and_is_idempotent() -> TestResult {
+    let (fixture, store) = connect_pg().await?;
+    migrations_through(66).run(&store.pool).await?;
+    sqlx::raw_sql(
+        r#"
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rss_app_read') THEN
+                CREATE ROLE rss_app_read LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE
+                    NOREPLICATION NOINHERIT;
+            END IF;
+        END
+        $$;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+    let public_large_object: i64 =
+        sqlx::query_scalar("SELECT lo_from_bytea(0, decode('7075626c6963', 'hex'))::bigint")
+            .fetch_one(&store.pool)
+            .await?;
+    let grantable_large_object: i64 =
+        sqlx::query_scalar("SELECT lo_from_bytea(0, decode('6772616e7461626c65', 'hex'))::bigint")
+            .fetch_one(&store.pool)
+            .await?;
+    sqlx::raw_sql(&format!(
+        "GRANT SELECT ON LARGE OBJECT {public_large_object} TO PUBLIC; \
+         GRANT SELECT ON LARGE OBJECT {grantable_large_object} TO rss_app_read WITH GRANT OPTION; \
+         GRANT SET ON PARAMETER work_mem TO PUBLIC; \
+         GRANT ALTER SYSTEM ON PARAMETER maintenance_work_mem TO rss_app_read WITH GRANT OPTION; \
+         GRANT EXECUTE ON FUNCTION pg_catalog.lo_create(oid) TO rss_app_read"
+    ))
+    .execute(&store.pool)
+    .await?;
+    let config = isolated_database_config(fixture.params(), &fixture.params().database);
+
+    PgRuntimeDeps::migrate_reader_lane_only(&config).await?;
+    PgRuntimeDeps::migrate_reader_lane_only(&config).await?;
+
+    let applied: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT version, success FROM _sqlx_migrations WHERE version >= 66 ORDER BY version",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(applied, vec![(66, true), (67, true)]);
+    let reader_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rss_app_read')")
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(reader_exists);
+    let residual_large_object_acl: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_largeobject_metadata object \
+         CROSS JOIN LATERAL aclexplode(object.lomacl) acl \
+         WHERE object.oid IN ($1::oid, $2::oid) \
+           AND acl.grantee IN (0::oid, (SELECT oid FROM pg_roles WHERE rolname = 'rss_app_read'))",
+    )
+    .bind(public_large_object)
+    .bind(grantable_large_object)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        residual_large_object_acl, 0,
+        "0067 must converge direct/PUBLIC and grantable large-object ACL drift"
+    );
+    let residual_parameter_acl: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_parameter_acl parameter \
+         CROSS JOIN LATERAL aclexplode(parameter.paracl) acl \
+         WHERE parameter.parname IN ('work_mem', 'maintenance_work_mem') \
+           AND acl.grantee IN (0::oid, (SELECT oid FROM pg_roles WHERE rolname = 'rss_app_read'))",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        residual_parameter_acl, 0,
+        "0067 must converge direct/PUBLIC and grantable parameter ACL drift"
+    );
+    let reader_mutator_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM unnest(ARRAY[
+            'pg_catalog.lo_creat(integer)'::regprocedure,
+            'pg_catalog.lo_create(oid)'::regprocedure,
+            'pg_catalog.lo_from_bytea(oid,bytea)'::regprocedure,
+            'pg_catalog.lo_put(oid,bigint,bytea)'::regprocedure,
+            'pg_catalog.lo_truncate(integer,integer)'::regprocedure,
+            'pg_catalog.lo_truncate64(integer,bigint)'::regprocedure,
+            'pg_catalog.lo_unlink(oid)'::regprocedure,
+            'pg_catalog.lowrite(integer,bytea)'::regprocedure,
+            'pg_catalog.lo_import(text)'::regprocedure,
+            'pg_catalog.lo_import(text,oid)'::regprocedure
+        ]) AS mutator(oid)
+        WHERE has_function_privilege('rss_app_read', mutator.oid, 'EXECUTE')
+        "#,
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        reader_mutator_count, 0,
+        "0067 must remove every effective reader large-object mutator EXECUTE path"
+    );
+    let writer_missing_mutator_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM unnest(ARRAY[
+            'pg_catalog.lo_creat(integer)'::regprocedure,
+            'pg_catalog.lo_create(oid)'::regprocedure,
+            'pg_catalog.lo_from_bytea(oid,bytea)'::regprocedure,
+            'pg_catalog.lo_put(oid,bigint,bytea)'::regprocedure,
+            'pg_catalog.lo_truncate(integer,integer)'::regprocedure,
+            'pg_catalog.lo_truncate64(integer,bigint)'::regprocedure,
+            'pg_catalog.lo_unlink(oid)'::regprocedure,
+            'pg_catalog.lowrite(integer,bytea)'::regprocedure
+        ]) AS mutator(oid)
+        WHERE NOT has_function_privilege('rss_app', mutator.oid, 'EXECUTE')
+        "#,
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        writer_missing_mutator_count, 0,
+        "0067 must preserve the existing writer large-object behavior explicitly"
+    );
+    sqlx::query(&format!(
+        "SELECT lo_unlink(object_oid::oid) FROM unnest(ARRAY[{public_large_object}, {grantable_large_object}]::bigint[]) object_oid"
+    ))
+    .execute(&store.pool)
+    .await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reader_lane_migration_command_rejects_non_0066_ledger_without_advancing() -> TestResult {
+    let (fixture, store) = connect_pg().await?;
+    migrations_through(65).run(&store.pool).await?;
+    let config = isolated_database_config(fixture.params(), &fixture.params().database);
+
+    let verdict = PgRuntimeDeps::migrate_reader_lane_only(&config).await;
+
+    assert!(matches!(
+        verdict,
+        Err(crate::PgError::ReaderLaneMigrationPrecondition { .. })
+    ));
+    let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        latest, 65,
+        "failed precondition must not apply 0066 or 0067"
+    );
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// 0066 is a non-rolling return-contract cutover: upgrading the real 0065 ledger preserves rows,
 /// removes the legacy result shapes, and makes the new typed settlement usable atomically.
 #[tokio::test(flavor = "multi_thread")]
@@ -18849,7 +20161,7 @@ use settings::ports::{
 use crate::config_repo::{
     arm_config_retry_failpoint, arm_config_retry_permanent_failpoint, config_retry_attempts,
 };
-use crate::cotx::PgTenantPool;
+use crate::cotx::PgTenantWritePool;
 use crate::tx_retry::{classify_config_repo_error, classify_identity_error};
 use crate::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
@@ -20624,7 +21936,7 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
         OutboxMetadata::new(0, test_tenant(), test_contract())
             .with_subject_id(subject_id("app.rollback")),
     );
-    let tenant_pool = PgTenantPool::new(&store);
+    let tenant_pool = PgTenantWritePool::from_unverified_for_test(&store);
 
     // 业务写：真插一行 config（成功）后强制 Err（模拟「配置写后、后续步骤失败」= emit/commit 失败等价物）。
     let result = tenant_pool
@@ -20772,7 +22084,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
     let ok_event = unique_event_id("cfg-tc7b-ok");
     let rollback_event = unique_event_id("cfg-tc7b-rollback");
     let conflict_event = unique_event_id("cfg-tc7b-conflict");
-    let tenant_pool = PgTenantPool::new(&store);
+    let tenant_pool = PgTenantWritePool::from_unverified_for_test(&store);
 
     repo.test_put(
         settings_scope(tenant),
@@ -21281,7 +22593,7 @@ use settings::ports::{
     SecretRepoError, SecretRepublishCommand, SecretUnitOfWork, StoreId,
 };
 
-use crate::{PgSecretRepo, PgSecretUnitOfWork};
+use crate::PgSecretUnitOfWork;
 
 /// secret 测试用 canonical 租户 UUID（复用 co-tx 段 [`COTX_TENANT_A`] 同值）。
 const SECRET_TENANT_A: &str = COTX_TENANT_A;
@@ -21354,8 +22666,8 @@ async fn secret_ref_row_count(
 async fn ts1b_secret_save_find_ref_version_null() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_secret(&store).await?;
-    let repo = PgSecretRepo::new(&store);
-    let writer = PgSecretUnitOfWork::new(&store);
+    let repo = store.secret_repo();
+    let writer = PgSecretUnitOfWork::from_unverified_for_test(&store);
     let tenant = secret_tenant_a();
 
     writer
@@ -21395,8 +22707,8 @@ async fn ts1b_secret_save_find_ref_version_null() -> TestResult {
 async fn ts2_secret_find_version_history() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_secret(&store).await?;
-    let repo = PgSecretRepo::new(&store);
-    let writer = PgSecretUnitOfWork::new(&store);
+    let repo = store.secret_repo();
+    let writer = PgSecretUnitOfWork::from_unverified_for_test(&store);
     let tenant = secret_tenant_a();
     let key = SecretKey::parse("myapp.db-pass").unwrap();
 
@@ -21466,7 +22778,7 @@ async fn ts2_secret_find_version_history() -> TestResult {
 async fn ts5_secret_find_maps_storage_error() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_secret(&store).await?;
-    let repo = PgSecretRepo::new(&store);
+    let repo = store.secret_repo();
     let tenant = secret_tenant_a();
     let key = SecretKey::parse("myapp.k").unwrap();
 
@@ -21545,8 +22857,8 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
     // independently confirms the physical row.
     let commit_key_raw = format!("commit.{}", uuid::Uuid::new_v4().simple());
     let commit_key = SecretKey::parse(&commit_key_raw).unwrap();
-    let repo = PgSecretRepo::new(&app);
-    let writer = PgSecretUnitOfWork::new(&app);
+    let repo = app.secret_repo();
+    let writer = PgSecretUnitOfWork::from_unverified_for_test(&app);
     let commit_writes = AtomicUsize::new(0);
     ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
         || async {
@@ -21645,8 +22957,8 @@ async fn ts9_secret_repo_real_rss_app_tenant_profile() -> TestResult {
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let repo = PgSecretRepo::new(&app);
-    let writer = PgSecretUnitOfWork::new(&app);
+    let repo = app.secret_repo();
+    let writer = PgSecretUnitOfWork::from_unverified_for_test(&app);
 
     // Tenant isolation: the same key has independent version spaces and values. The typed helper
     // proves round-trip, cross-tenant invisibility before tenant B writes, and no interference.
@@ -21839,7 +23151,7 @@ async fn ts9_secret_repo_real_rss_app_validation_profile() -> TestResult {
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let writer = PgSecretUnitOfWork::new(&app);
+    let writer = PgSecretUnitOfWork::from_unverified_for_test(&app);
 
     let invalid_scope_key_raw = format!("scope-mismatch.{}", uuid::Uuid::new_v4().simple());
     let invalid_scope_key = SecretKey::parse(&invalid_scope_key_raw).unwrap();
@@ -21897,8 +23209,8 @@ async fn ts9_secret_repo_concurrency_and_lifecycle() -> TestResult {
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let repo = PgSecretRepo::new(&app);
-    let writer = PgSecretUnitOfWork::new(&app);
+    let repo = app.secret_repo();
+    let writer = PgSecretUnitOfWork::from_unverified_for_test(&app);
     let commit_key_raw = format!("lifecycle.{}", uuid::Uuid::new_v4().simple());
     writer
         .publish_internal(
@@ -21980,8 +23292,8 @@ async fn ts9_secret_repo_concurrency_and_lifecycle() -> TestResult {
             )),
         )
         .await?;
-    let writer_a = PgSecretUnitOfWork::new(&app);
-    let writer_b = PgSecretUnitOfWork::new(&app);
+    let writer_a = PgSecretUnitOfWork::from_unverified_for_test(&app);
+    let writer_b = PgSecretUnitOfWork::from_unverified_for_test(&app);
     let entry_a = make_secret_entry(
         &concurrent_key_raw,
         "vault",
@@ -22014,8 +23326,8 @@ async fn ts9_secret_repo_concurrency_and_lifecycle() -> TestResult {
     );
 
     // Concurrent delete/delete appends one tombstone; save/delete has only serialized outcomes.
-    let delete_a = PgSecretUnitOfWork::new(&app);
-    let delete_b = PgSecretUnitOfWork::new(&app);
+    let delete_a = PgSecretUnitOfWork::from_unverified_for_test(&app);
+    let delete_b = PgSecretUnitOfWork::from_unverified_for_test(&app);
     crate::secret_repo::rendezvous_secret_key_lock_attempts(&concurrent_key, 2);
     let (deleted_a, deleted_b) = tokio::join!(
         delete_a.delete(settings_scope(tenant_a), &concurrent_key),
@@ -22098,8 +23410,8 @@ async fn ts9_secret_repo_concurrency_and_lifecycle() -> TestResult {
             )),
         )
         .await?;
-    let race_writer = PgSecretUnitOfWork::new(&app);
-    let race_deleter = PgSecretUnitOfWork::new(&app);
+    let race_writer = PgSecretUnitOfWork::from_unverified_for_test(&app);
+    let race_deleter = PgSecretUnitOfWork::from_unverified_for_test(&app);
     crate::secret_repo::rendezvous_secret_key_lock_attempts(&race_key, 2);
     let (race_save, race_delete) = tokio::join!(
         race_writer.publish_internal(
@@ -22225,7 +23537,7 @@ async fn ts9_secret_repo_real_rss_app_retry_profile() -> TestResult {
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let writer = PgSecretUnitOfWork::new(&app);
+    let writer = PgSecretUnitOfWork::from_unverified_for_test(&app);
 
     // The profile helpers below execute the real PgSecretRepo + retry_write + settlement funnel.
     let retry_success_key_raw = format!("retry-success.{}", uuid::Uuid::new_v4().simple());
@@ -22347,7 +23659,7 @@ async fn ts9_secret_repo_real_rss_app_commit_unknown_profile() -> TestResult {
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let writer = PgSecretUnitOfWork::new(&app);
+    let writer = PgSecretUnitOfWork::from_unverified_for_test(&app);
 
     let unknown_key_raw = format!("commit-unknown.{}", uuid::Uuid::new_v4().simple());
     let unknown_key = SecretKey::parse(&unknown_key_raw).unwrap();
@@ -22768,7 +24080,7 @@ async fn policy_outbox_exists(store: &PgStore, event_id: &str) -> Result<bool, I
 async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgRoleRepo::new(&store);
+    let repo = PgRoleRepo::from_unverified_for_test(&store);
     let tenant = role_tenant(ROLE_TENANT_A)?;
 
     // 未保存 → None（fail-closed，anti-vacuity 的负例基线）。
@@ -22834,7 +24146,7 @@ async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
 async fn role_repo_tenant_row_isolation() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgRoleRepo::new(&store);
+    let repo = PgRoleRepo::from_unverified_for_test(&store);
     let tenant_a = role_tenant(ROLE_TENANT_A)?;
     let tenant_b = role_tenant(ROLE_TENANT_B)?;
 
@@ -22871,7 +24183,7 @@ async fn role_repo_tenant_row_isolation() -> TestResult {
 async fn role_repo_tenant_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgRoleRepo::new(&store);
+    let repo = PgRoleRepo::from_unverified_for_test(&store);
     let tenant_a = role_tenant(ROLE_TENANT_A)?;
     let tenant_b = role_tenant(ROLE_TENANT_B)?;
     let role_id = Role::hydrate("tenant-conf-role", "seed", &[])?.id().clone();
@@ -22915,7 +24227,7 @@ async fn role_repo_tenant_conformance() -> TestResult {
 async fn policy_repo_lifecycle_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgPolicyRepo::new(&store);
+    let repo = PgPolicyRepo::from_unverified_for_test(&store);
     let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant = role_tenant(ROLE_TENANT_A)?;
     let created = policy_fixture(
@@ -22996,7 +24308,7 @@ async fn policy_repo_lifecycle_conformance() -> TestResult {
 async fn policy_repo_delete_leaves_tombstone_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgPolicyRepo::new(&store);
+    let repo = PgPolicyRepo::from_unverified_for_test(&store);
     let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant = role_tenant(ROLE_TENANT_A)?;
     let created = policy_fixture(
@@ -23072,7 +24384,7 @@ async fn policy_repo_delete_leaves_tombstone_conformance() -> TestResult {
 async fn policy_repo_tenant_isolation_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgPolicyRepo::new(&store);
+    let repo = PgPolicyRepo::from_unverified_for_test(&store);
     let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant_a = role_tenant(ROLE_TENANT_A)?;
     let tenant_b = role_tenant(ROLE_TENANT_B)?;
@@ -23310,7 +24622,7 @@ async fn policy_repo_cotx_rolls_back_policy_and_outbox() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let tenant = role_tenant(ROLE_TENANT_A)?;
-    let tenant_pool = PgTenantPool::new(&store);
+    let tenant_pool = PgTenantWritePool::from_unverified_for_test(&store);
     let event_id = unique_event_id("policy-cotx-rollback");
     let (entry, _) = policy_lifecycle_event_with_id(
         tenant,
@@ -23421,7 +24733,7 @@ async fn policy_fact_conflict_rolls_back_policy_create() -> TestResult {
 async fn policy_repo_list_active_paginates_and_hides_deactivated() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgPolicyRepo::new(&store);
+    let repo = PgPolicyRepo::from_unverified_for_test(&store);
     let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant = role_tenant(ROLE_TENANT_A)?;
 
@@ -23527,7 +24839,7 @@ async fn policy_repo_list_active_paginates_and_hides_deactivated() -> TestResult
 async fn policy_repo_active_window_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgPolicyRepo::new(&store);
+    let repo = PgPolicyRepo::from_unverified_for_test(&store);
     let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant = role_tenant(ROLE_TENANT_A)?;
     let expired = policy_fixture(
@@ -23605,7 +24917,7 @@ async fn policy_repo_active_window_conformance() -> TestResult {
 async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgResourceAttributeRepo::new(&store);
+    let repo = PgResourceAttributeRepo::from_unverified_for_test(&store);
     let tenant = role_tenant(ROLE_TENANT_A)?;
 
     let created = repo
@@ -23928,7 +25240,7 @@ async fn insert_raw_policy_and_load(
 async fn policy_repo_rejects_malformed_persisted_json() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgPolicyRepo::new(&store);
+    let repo = PgPolicyRepo::from_unverified_for_test(&store);
 
     testkit::policy_conformance::assert_policy_rejects_malformed(
         (
@@ -23959,7 +25271,7 @@ async fn policy_repo_rejects_malformed_persisted_json() -> TestResult {
 async fn policy_repo_obligation_round_trip_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgPolicyRepo::new(&store);
+    let repo = PgPolicyRepo::from_unverified_for_test(&store);
     let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant = role_tenant(ROLE_TENANT_A)?;
     let obligations = PolicyObligations::new(
@@ -24172,7 +25484,7 @@ async fn role_repo_concurrent_save_converges() -> TestResult {
 
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = Arc::new(PgRoleRepo::new(&store));
+    let repo = Arc::new(PgRoleRepo::from_unverified_for_test(&store));
     let tenant = role_tenant(ROLE_TENANT_A)?;
 
     // 同 id 并发 upsert：8 个 task 竞写同一 (tenant,id)。
@@ -24240,7 +25552,7 @@ async fn role_repo_concurrent_save_converges() -> TestResult {
 async fn role_repo_list_paginates_and_is_tenant_scoped() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgRoleRepo::new(&store);
+    let repo = PgRoleRepo::from_unverified_for_test(&store);
     let tenant_a = role_tenant(ROLE_TENANT_A)?;
     let tenant_b = role_tenant(ROLE_TENANT_B)?;
 
@@ -24329,12 +25641,14 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
     let tenant_b = role_tenant(ROLE_TENANT_B)?;
     let role = Role::hydrate("role-admin", "Admin", &["identity:role:assign".to_string()])?;
     let role_id = role.id().clone();
-    let repo = PgRoleRepo::new(&store);
+    let repo = PgRoleRepo::from_unverified_for_test(&store);
     repo.save(identity_scope(tenant), role.clone()).await?;
     repo.save(identity_scope(tenant_b), role).await?;
 
     let svc = identity::RbacAdminService::new(
-        Arc::from(DynRoleReadRepo::new_box(PgRoleRepo::new(&store))),
+        Arc::from(DynRoleReadRepo::new_box(
+            PgRoleRepo::from_unverified_for_test(&store),
+        )),
         Arc::from(DynRoleBindingLifecycle::new_box(
             PgRoleBindingLifecycle::new(&store, fixed_clock()),
         )),
@@ -24359,7 +25673,7 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(binding_count.0, 1, "assign 写入 binding");
-    let binding_reads = PgRoleBindingReadRepo::new(&store);
+    let binding_reads = PgRoleBindingReadRepo::from_unverified_for_test(&store);
     let subject_bindings = binding_reads
         .list_for_subject(identity_scope(tenant), "target-user".to_string())
         .await?;
@@ -24470,7 +25784,7 @@ async fn role_binding_lifecycle_persists_nonempty_causation_id() -> TestResult {
         "Causation",
         &["identity:role:assign".to_string()],
     )?;
-    PgRoleRepo::new(&store)
+    PgRoleRepo::from_unverified_for_test(&store)
         .save(identity_scope(tenant), role)
         .await?;
 
@@ -24526,7 +25840,7 @@ async fn role_binding_fact_conflict_rolls_back_assignment() -> TestResult {
     let tenant = role_tenant(ROLE_TENANT_A)?;
     let role_name = format!("role-fact-conflict-{}", uuid_like());
     let subject = format!("subject-fact-conflict-{}", uuid_like());
-    PgRoleRepo::new(&store)
+    PgRoleRepo::from_unverified_for_test(&store)
         .save(
             identity_scope(tenant),
             Role::hydrate(
@@ -25222,7 +26536,7 @@ async fn rt1_insert_then_find_by_hash_roundtrip() -> TestResult {
     // RefreshTokenHash::new は pub(crate)——hydrate した record から clone して取り出す（外部 crate 直接构造不可）。
     let hash_to_find = record.token_hash().clone();
 
-    let rt_store = PgRefreshTokenStore::new(&store);
+    let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
     rt_store.insert(identity_scope(tenant), record).await?;
 
     let found = rt_store
@@ -25301,7 +26615,7 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
     let hash_old_typed = old_record.token_hash().clone();
     // sealed command: clone 源 record 供 begin_rotation（移动前保留引用，rotate 不再接受裸 id/record）。
     let old_for_rotate = old_record.clone();
-    let rt_store = PgRefreshTokenStore::new(&store);
+    let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
     rt_store.insert(identity_scope(tenant), old_record).await?;
 
     // 构造 new record（rotation 子节点），clone hash 供后续 find 使用。
@@ -25416,7 +26730,7 @@ async fn rt3_revoke_lineage_revokes_all_and_is_idempotent() -> TestResult {
     let lineage_str = uuid::Uuid::new_v4().to_string();
     let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_200_000);
     let expires = issued + Duration::from_secs(3_600);
-    let rt_store = PgRefreshTokenStore::new(&store);
+    let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
 
     // 插入同一 lineage 的两条记录（root + child）——clone 类型值供后续 revoke/find 使用。
     // RefreshTokenId::new / RefreshTokenHash::new 是 pub(crate)，从 hydrate 后的 record clone 取出。
@@ -25525,7 +26839,7 @@ async fn rt4_cross_tenant_isolation() -> TestResult {
     );
     let hash_a_typed = record_a.token_hash().clone();
 
-    let rt_store = PgRefreshTokenStore::new(&store);
+    let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
     rt_store.insert(identity_scope(tenant_a), record_a).await?;
 
     // tenant A 查自己 hash → 可以找到（anti-vacuity：record 确实存在）。
@@ -25602,7 +26916,7 @@ async fn rt5_rotate_nonexistent_old_id_returns_false() -> TestResult {
         issued + Duration::from_secs(1),
         expires + Duration::from_secs(1),
     );
-    let rt_store = PgRefreshTokenStore::new(&store);
+    let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
     let result = rt_store
         .rotate(
             identity_scope(tenant),
@@ -25662,7 +26976,7 @@ async fn rt6_revoke_lineage_cross_tenant_noop() -> TestResult {
     let hash_a_typed = record_a.token_hash().clone();
     let lineage_id_typed = record_a.lineage_id().clone();
 
-    let rt_store = PgRefreshTokenStore::new(&store);
+    let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
     rt_store.insert(identity_scope(tenant_a), record_a).await?;
 
     // tenant B 用 tenant A 的 lineage_id 调 revoke_lineage → WHERE tenant_id = B 不匹配 → no-op（0 行）
@@ -25714,7 +27028,7 @@ async fn rt6b_refresh_token_store_tenant_noop_conformance() -> TestResult {
     );
     let hash_a = record_a.token_hash().clone();
     let lineage_a = record_a.lineage_id().clone();
-    let rt_store = PgRefreshTokenStore::new(&store);
+    let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
 
     testkit::repo_conformance::assert_cross_tenant_noop(
         || async {
@@ -25798,7 +27112,7 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
     // sealed command: clone 源 record 供 begin_rotation（两次并发各构造独立 RefreshRotation）。
     let old_for_rotate = old_record.clone();
 
-    let rt_store1 = PgRefreshTokenStore::new(&store);
+    let rt_store1 = PgRefreshTokenStore::from_unverified_for_test(&store);
     rt_store1.insert(identity_scope(tenant), old_record).await?;
 
     // 两个不同 new record（不同 id + hash 避免 PK / unique 冲突；只有 CAS 命中的会被写入）
@@ -25845,7 +27159,7 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
     );
 
     // 共享 pool 的两个独立 store 实例：并发 rotate 同一 old_id
-    let rt_store2 = PgRefreshTokenStore::new(&store);
+    let rt_store2 = PgRefreshTokenStore::from_unverified_for_test(&store);
     let (r1, r2) = tokio::join!(
         rt_store1.rotate(
             identity_scope(tenant),
@@ -25951,7 +27265,7 @@ async fn rt8_refresh_token_rotate_rollback_conformance() -> TestResult {
         overflow_expires,
     );
 
-    let rt_store = PgRefreshTokenStore::new(&store);
+    let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
     rt_store.insert(identity_scope(tenant), old_record).await?;
 
     let result = rt_store
@@ -26007,7 +27321,7 @@ async fn rt9_refresh_token_store_storage_error_conformance() -> TestResult {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_903_600),
     );
     let hash = record.token_hash().clone();
-    let rt_store = PgRefreshTokenStore::new(&store);
+    let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
 
     testkit::repo_conformance::assert_storage_error_mapping(
         || async { store.shutdown().await },
@@ -26047,6 +27361,89 @@ async fn probe_db_liveness_returns_ready_with_live_db() -> TestResult {
     Ok(())
 }
 
+/// A reader whose only established connection is in use is capacity pressure, not evidence that
+/// PostgreSQL is down. Readiness must stay HTTP-servable through the Saturated state.
+#[tokio::test(flavor = "multi_thread")]
+async fn probe_db_liveness_marks_full_reader_saturated() -> TestResult {
+    use std::time::Duration;
+
+    use crate::pool::{PgTenantReadConfig, PoolReadiness};
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let base_config = rss_app_read_config(&pg, &owner).await?;
+    let constrained_config = PgTenantReadConfig::new(
+        base_config
+            .as_pg_config()
+            .clone()
+            .with_max_connections(1)
+            .with_acquire_timeout(Duration::from_secs(30)),
+    );
+    let reader = PgStore::connect_verified_read(&constrained_config)
+        .await?
+        .store_arc();
+
+    let only_connection = reader.pool.acquire().await?;
+
+    assert_eq!(
+        reader.probe_db_liveness().await,
+        PoolReadiness::Saturated,
+        "a fully occupied reader pool must remain degraded-but-ready"
+    );
+
+    drop(only_connection);
+    reader.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+/// Once the probe owns an idle connection, a backend/query hang is liveness failure rather than
+/// capacity pressure. The production path uses `SELECT 1`; this test-only query exercises the same
+/// acquired-connection deadline against a real PostgreSQL backend.
+#[tokio::test(flavor = "multi_thread")]
+async fn probe_db_liveness_marks_hung_idle_backend_down() -> TestResult {
+    use std::time::Duration;
+
+    use crate::pool::{PgTenantReadConfig, PoolReadiness};
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let base_config = rss_app_read_config(&pg, &owner).await?;
+    let constrained_config = PgTenantReadConfig::new(
+        base_config
+            .as_pg_config()
+            .clone()
+            .with_max_connections(1)
+            .with_acquire_timeout(Duration::from_secs(30)),
+    );
+    let reader = PgStore::connect_verified_read(&constrained_config)
+        .await?
+        .store_arc();
+    for _ in 0..20 {
+        if reader.pool.num_idle() > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        reader.pool.num_idle(),
+        1,
+        "test precondition: the probe must begin with one idle backend"
+    );
+
+    assert_eq!(
+        reader
+            .probe_db_liveness_query_for_test("SELECT pg_sleep(4)")
+            .await,
+        PoolReadiness::Down,
+        "a query hang after acquiring an idle backend must fail closed"
+    );
+
+    reader.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
 /// t51：起 sampling loop 推进一 tick → health 反映 Ready。
 ///
 /// 验证：`pg_readiness_sampling_loop` 在真实 DB 下一轮 tick 后
@@ -26071,6 +27468,7 @@ async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
     // 短 period 确保首 tick 快速到来（集成测试真实时间，不 pause）。
     let handle = tokio::spawn(pg_readiness_sampling_loop(
         Arc::clone(&store),
+        Arc::clone(&store),
         Duration::from_millis(50),
         token.clone(),
         Arc::clone(&health),
@@ -26090,6 +27488,50 @@ async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
 
     // reason: Arc<PgStore> 在此作用域末尾 drop；pool 关闭由 Arc drop 时触发，
     // 集成测试无需显式 shutdown Arc<PgStore>（与 Arc 所有权语义一致）。
+    Ok(())
+}
+
+/// A failed dedicated reader must degrade aggregate PostgreSQL readiness even while the writer
+/// remains reachable.
+#[tokio::test(flavor = "multi_thread")]
+async fn sampling_loop_marks_down_when_reader_pool_is_closed() -> TestResult {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio_util::sync::CancellationToken;
+
+    use crate::pool::PoolReadiness;
+    use crate::readiness::{PgDbReadiness, pg_readiness_sampling_loop};
+
+    let (pg, writer) = connect_pg().await?;
+    writer.run_migrations().await?;
+    let reader_config = rss_app_read_config(&pg, &writer).await?;
+    let reader = PgStore::connect_verified_read(&reader_config)
+        .await?
+        .store_arc();
+    reader.shutdown().await?;
+
+    let writer = Arc::new(writer);
+    let health = Arc::new(PgDbReadiness::new());
+    let token = CancellationToken::new();
+    let handle = tokio::spawn(pg_readiness_sampling_loop(
+        Arc::clone(&writer),
+        reader,
+        Duration::from_millis(50),
+        token.clone(),
+        Arc::clone(&health),
+    ));
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        health.snapshot(),
+        PoolReadiness::Down,
+        "closed reader must dominate a healthy writer"
+    );
+
+    token.cancel();
+    assert!(handle.await.is_ok(), "sampling loop should stop cleanly");
+    writer.shutdown().await?;
     Ok(())
 }
 
@@ -26212,7 +27654,7 @@ async fn db_locked_until(
 async fn credential_repo_save_find_roundtrip_and_upsert() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgCredentialRepo::new(&store);
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let tenant = cred_tenant(CRED_TENANT_A)?;
 
     // 未保存 → None（fail-closed 基线，anti-vacuity 负例）。
@@ -26279,7 +27721,7 @@ async fn credential_repo_save_find_roundtrip_and_upsert() -> TestResult {
 async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgCredentialRepo::new(&store);
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let tenant = cred_tenant(CRED_TENANT_A)?;
     repo.save(
         identity_scope(tenant),
@@ -26331,7 +27773,7 @@ async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
 async fn credential_repo_unknown_subject_creates_no_row() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgCredentialRepo::new(&store);
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let tenant = cred_tenant(CRED_TENANT_A)?;
     repo.save(
         identity_scope(tenant),
@@ -26369,7 +27811,7 @@ async fn credential_repo_unknown_subject_creates_no_row() -> TestResult {
 async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgCredentialRepo::new(&store);
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
     let b = cred_tenant(CRED_TENANT_B)?;
     repo.save(
@@ -26436,7 +27878,7 @@ async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
 async fn credential_repo_tenant_noop_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgCredentialRepo::new(&store);
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
     let b = cred_tenant(CRED_TENANT_B)?;
     let alice_uid = cred_uid(CRED_USER_ALICE)?;
@@ -26496,7 +27938,7 @@ async fn credential_repo_tenant_noop_conformance() -> TestResult {
 async fn credential_repo_accumulate_failures_then_locks() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgCredentialRepo::new(&store);
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
     repo.save(
         identity_scope(a),
@@ -26559,7 +28001,7 @@ async fn credential_repo_accumulate_failures_then_locks() -> TestResult {
 async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgCredentialRepo::new(&store);
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
     repo.save(
         identity_scope(a),
@@ -26632,7 +28074,7 @@ async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
 async fn credential_repo_authenticate_success_clears_lockout() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgCredentialRepo::new(&store);
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
     repo.save(
         identity_scope(a),
@@ -26682,7 +28124,7 @@ async fn credential_repo_authenticate_success_clears_lockout() -> TestResult {
 async fn credential_repo_apply_password_change_cas() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgCredentialRepo::new(&store);
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
     let b = cred_tenant(CRED_TENANT_B)?;
     repo.save(
@@ -26780,7 +28222,7 @@ async fn credential_repo_password_change_concurrent_writers_one_wins() -> TestRe
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let setup_repo = PgCredentialRepo::new(&app);
+    let setup_repo = PgCredentialRepo::from_unverified_for_test(&app);
     let tenant = cred_tenant(CRED_TENANT_A)?;
     setup_repo
         .save(
@@ -26792,8 +28234,8 @@ async fn credential_repo_password_change_concurrent_writers_one_wins() -> TestRe
     let left = make_cred("alice", CRED_USER_ALICE, "pw-left", 2, tenant)?;
     let right = make_cred("alice", CRED_USER_ALICE, "pw-right", 2, tenant)?;
     let gate = crate::credential_repo::PasswordChangeCasPauseGate::new();
-    let left_repo =
-        PgCredentialRepo::new(&app).with_password_change_post_update_pause(gate.clone());
+    let left_repo = PgCredentialRepo::from_unverified_for_test(&app)
+        .with_password_change_post_update_pause(gate.clone());
     let left_task = tokio::spawn(async move {
         left_repo
             .apply_password_change(identity_scope(tenant), password_change(1, left))
@@ -26803,7 +28245,7 @@ async fn credential_repo_password_change_concurrent_writers_one_wins() -> TestRe
         .await
         .map_err(|_| "first CAS writer did not reach the post-update pause gate")?;
 
-    let right_repo = PgCredentialRepo::new(&app);
+    let right_repo = PgCredentialRepo::from_unverified_for_test(&app);
     let mut right_task = tokio::spawn(async move {
         right_repo
             .apply_password_change(identity_scope(tenant), password_change(1, right))
@@ -26869,7 +28311,7 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
     store.run_migrations().await?;
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics_handle = recorder.handle();
-    let repo = PgCredentialRepo::new(&store);
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let tenant = cred_tenant(CRED_TENANT_A)?;
     let retry_uid = cred_uid(CRED_USER_RETRY)?;
     let bob_uid = cred_uid(CRED_USER_BOB)?;
@@ -26882,18 +28324,12 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
         make_cred("retry-alice", CRED_USER_RETRY, "pw1", 1, tenant)?,
     )
     .await?;
-    let transient_repo = PgCredentialRepo::new(&store).with_password_change_fault(
-        "retry-alice",
-        CredentialMutationFault::Transient,
-        1,
-    );
-    let conflict_repo = PgCredentialRepo::new(&store);
-    let permanent_repo = PgCredentialRepo::new(&store);
-    let exhaustion_repo = PgCredentialRepo::new(&store).with_password_change_fault(
-        "retry-alice",
-        CredentialMutationFault::Transient,
-        3,
-    );
+    let transient_repo = PgCredentialRepo::from_unverified_for_test(&store)
+        .with_password_change_fault("retry-alice", CredentialMutationFault::Transient, 1);
+    let conflict_repo = PgCredentialRepo::from_unverified_for_test(&store);
+    let permanent_repo = PgCredentialRepo::from_unverified_for_test(&store);
+    let exhaustion_repo = PgCredentialRepo::from_unverified_for_test(&store)
+        .with_password_change_fault("retry-alice", CredentialMutationFault::Transient, 3);
 
     metrics::with_local_recorder(&recorder, || {
         tokio::task::block_in_place(|| {
@@ -27041,7 +28477,7 @@ async fn identity_password_change_real_rss_app_localtx_matrix() -> TestResult {
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::new(&app);
+    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
 
     let commit_login = format!("pc-commit-{}", uuid::Uuid::new_v4().simple());
     let commit_user = uuid::Uuid::new_v4().to_string();
@@ -27051,7 +28487,7 @@ async fn identity_password_change_real_rss_app_localtx_matrix() -> TestResult {
             make_cred(&commit_login, &commit_user, "pw-v1", 1, tenant_a)?,
         )
         .await?;
-    let commit_repo = PgCredentialRepo::new(&app);
+    let commit_repo = PgCredentialRepo::from_unverified_for_test(&app);
     let commit_writes = AtomicUsize::new(0);
     ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
         || async {
@@ -27100,7 +28536,7 @@ async fn identity_password_change_real_rss_app_localtx_matrix() -> TestResult {
 
     let missing_login = format!("pc-missing-{}", uuid::Uuid::new_v4().simple());
     let missing_user = uuid::Uuid::new_v4().to_string();
-    let missing_repo = PgCredentialRepo::new(&app);
+    let missing_repo = PgCredentialRepo::from_unverified_for_test(&app);
     assert!(matches!(
         missing_repo
             .apply_password_change(
@@ -27145,7 +28581,7 @@ async fn identity_password_change_real_rss_app_validation_profile() -> TestResul
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::new(&app);
+    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
 
     let validation_login = format!("pc-validation-{}", uuid::Uuid::new_v4().simple());
     let validation_user = uuid::Uuid::new_v4().to_string();
@@ -27155,7 +28591,7 @@ async fn identity_password_change_real_rss_app_validation_profile() -> TestResul
             make_cred(&validation_login, &validation_user, "pw-v1", 1, tenant_a)?,
         )
         .await?;
-    let validation_repo = PgCredentialRepo::new(&app);
+    let validation_repo = PgCredentialRepo::from_unverified_for_test(&app);
     let validation_baseline = owner_credential_snapshot(&owner, tenant_a, &validation_login)
         .await?
         .ok_or("validation credential baseline missing")?;
@@ -27245,7 +28681,7 @@ async fn identity_password_change_real_rss_app_authorization_profile() -> TestRe
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::new(&app);
+    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
 
     let authorization_login = format!("pc-authorization-{}", uuid::Uuid::new_v4().simple());
     let authorization_user = uuid::Uuid::new_v4().to_string();
@@ -27261,7 +28697,7 @@ async fn identity_password_change_real_rss_app_authorization_profile() -> TestRe
             )?,
         )
         .await?;
-    let authorization_repo = PgCredentialRepo::new(&app);
+    let authorization_repo = PgCredentialRepo::from_unverified_for_test(&app);
     let authorization_baseline = owner_credential_snapshot(&owner, tenant_a, &authorization_login)
         .await?
         .ok_or("authorization credential baseline missing")?;
@@ -27349,7 +28785,7 @@ async fn identity_password_change_real_rss_app_tenant_profile() -> TestResult {
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::new(&app);
+    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
 
     let tenant_login = format!("pc-tenant-{}", uuid::Uuid::new_v4().simple());
     let tenant_a_user = uuid::Uuid::new_v4().to_string();
@@ -27366,7 +28802,7 @@ async fn identity_password_change_real_rss_app_tenant_profile() -> TestResult {
             make_cred(&tenant_login, &tenant_b_user, "pw-b1", 1, tenant_b)?,
         )
         .await?;
-    let tenant_repo = PgCredentialRepo::new(&app);
+    let tenant_repo = PgCredentialRepo::from_unverified_for_test(&app);
     ::testkit::tenant_conformance::assert_tenant_isolation(
         tenant_a,
         tenant_b,
@@ -27424,7 +28860,7 @@ async fn identity_password_change_real_rss_app_transient_stage_profile() -> Test
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::new(&app);
+    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
 
     let before_begin_login = format!("pc-before-begin-{}", uuid::Uuid::new_v4().simple());
     let before_begin_user = uuid::Uuid::new_v4().to_string();
@@ -27444,7 +28880,7 @@ async fn identity_password_change_real_rss_app_transient_stage_profile() -> Test
         connect_pg_rss_app_role_with_limits(&pg, &owner, 1, std::time::Duration::from_millis(100))
             .await?;
     let held_connection = begin_app.pool.acquire().await?;
-    let before_begin = std::sync::Arc::new(PgCredentialRepo::new(&begin_app));
+    let before_begin = std::sync::Arc::new(PgCredentialRepo::from_unverified_for_test(&begin_app));
     let before_begin_task = {
         let before_begin = std::sync::Arc::clone(&before_begin);
         let login = before_begin_login.clone();
@@ -27501,7 +28937,7 @@ async fn identity_password_change_real_rss_app_transient_stage_profile() -> Test
             )?,
         )
         .await?;
-    let before_write = PgCredentialRepo::new(&app).with_password_change_fault(
+    let before_write = PgCredentialRepo::from_unverified_for_test(&app).with_password_change_fault(
         &before_write_login,
         CredentialMutationFault::TransientBeforeWrite,
         1,
@@ -27558,7 +28994,7 @@ async fn identity_password_change_real_rss_app_retry_profile() -> TestResult {
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::new(&app);
+    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
 
     let retry_login = format!("pc-retry-{}", uuid::Uuid::new_v4().simple());
     let retry_user = uuid::Uuid::new_v4().to_string();
@@ -27568,22 +29004,13 @@ async fn identity_password_change_real_rss_app_retry_profile() -> TestResult {
             make_cred(&retry_login, &retry_user, "pw-r1", 1, tenant_a)?,
         )
         .await?;
-    let transient_repo = PgCredentialRepo::new(&app).with_password_change_fault(
-        &retry_login,
-        CredentialMutationFault::Transient,
-        1,
-    );
-    let conflict_repo = PgCredentialRepo::new(&app);
-    let permanent_repo = PgCredentialRepo::new(&app).with_password_change_fault(
-        &retry_login,
-        CredentialMutationFault::Permanent,
-        1,
-    );
-    let exhaustion_repo = PgCredentialRepo::new(&app).with_password_change_fault(
-        &retry_login,
-        CredentialMutationFault::Transient,
-        3,
-    );
+    let transient_repo = PgCredentialRepo::from_unverified_for_test(&app)
+        .with_password_change_fault(&retry_login, CredentialMutationFault::Transient, 1);
+    let conflict_repo = PgCredentialRepo::from_unverified_for_test(&app);
+    let permanent_repo = PgCredentialRepo::from_unverified_for_test(&app)
+        .with_password_change_fault(&retry_login, CredentialMutationFault::Permanent, 1);
+    let exhaustion_repo = PgCredentialRepo::from_unverified_for_test(&app)
+        .with_password_change_fault(&retry_login, CredentialMutationFault::Transient, 3);
     let retry_baseline = std::sync::OnceLock::new();
     ::testkit::repo_conformance::assert_retry_boundary_policy(
         ::testkit::repo_conformance::RetryBoundaryCase::new(
@@ -27727,7 +29154,7 @@ async fn identity_password_change_real_rss_app_commit_unknown_profile() -> TestR
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::new(&app);
+    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
 
     let unknown_login = format!("pc-unknown-{}", uuid::Uuid::new_v4().simple());
     let unknown_user = uuid::Uuid::new_v4().to_string();
@@ -27737,7 +29164,7 @@ async fn identity_password_change_real_rss_app_commit_unknown_profile() -> TestR
             make_cred(&unknown_login, &unknown_user, "pw-u1", 1, tenant_a)?,
         )
         .await?;
-    let unknown_repo = PgCredentialRepo::new(&app).with_password_change_fault(
+    let unknown_repo = PgCredentialRepo::from_unverified_for_test(&app).with_password_change_fault(
         &unknown_login,
         CredentialMutationFault::CommitUnknown,
         1,
@@ -27835,7 +29262,7 @@ async fn ts_credentials_no_plaintext_password_column() -> TestResult {
 async fn credential_repo_authenticate_correct_clears_active_lock() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgCredentialRepo::new(&store);
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
     repo.save(
         identity_scope(a),
@@ -28080,7 +29507,7 @@ async fn credential_repo_concurrent_failures_no_lost_update() -> TestResult {
 
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = Arc::new(PgCredentialRepo::new(&store));
+    let repo = Arc::new(PgCredentialRepo::from_unverified_for_test(&store));
     let a = cred_tenant(CRED_TENANT_A)?;
     repo.save(
         identity_scope(a),
@@ -28311,14 +29738,20 @@ use base64::Engine as _;
 fn make_audit_repo(
     store: &PgStore,
 ) -> crate::PgAuditRepo<crate::audit_repo::test_support::TestVerifier> {
-    crate::PgAuditRepo::new(store, crate::audit_repo::test_support::test_hasher(0x5a))
+    crate::PgAuditRepo::from_unverified_for_test(
+        store,
+        crate::audit_repo::test_support::test_hasher(0x5a),
+    )
 }
 
 /// 构造 audit admin 只读仓储（固定 0x5a key hasher）。
 fn make_audit_admin_repo(
     store: &PgStore,
 ) -> crate::PgAuditAdminRepo<crate::audit_repo::test_support::TestVerifier> {
-    crate::PgAuditAdminRepo::new(store, crate::audit_repo::test_support::test_hasher(0x5a))
+    crate::PgAuditAdminRepo::from_unverified_for_test(
+        store,
+        crate::audit_repo::test_support::test_hasher(0x5a),
+    )
 }
 
 /// 构造审计记录（nanos 可变，其余字段固定；actor UUID 硬编码确定性 ID）。

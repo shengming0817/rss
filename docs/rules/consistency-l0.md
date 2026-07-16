@@ -54,7 +54,9 @@ HTTP effect vocabulary 仅使用 `business-write` / `business-transaction`；Loc
 port marker 是 `BusinessWriteEffect`，runtime observer 使用 `BusinessWrite` / `business_writes`。
 LocalOnly 证明的是业务持久化、outbox、publish 为零；operational state 与 provider read-path transaction 各走专门治理。
 LocalOnly 允许 provider-owned read-path transaction，用于在同一连接上建立 tenant-scoped read context。
-`tenant_scoped_read*` 不承诺 PostgreSQL `READ ONLY` 或稳定 snapshot；当前 helper 仍是 begin / `SET LOCAL` / read / commit 的 provider 实现细节。
+PostgreSQL `tenant_scoped_read*` 必须以 `BEGIN READ ONLY` 原子开启事务，再执行 `SET LOCAL rss.tenant_id`、
+query、commit/rollback；不得 fallback 到 writer pool 或先 `BEGIN` 后补 `SET TRANSACTION READ ONLY`。
+`tenant_scoped_read*` 保证 PostgreSQL `READ ONLY`，但不承诺稳定 snapshot；隔离级别仍使用 PostgreSQL 默认值。
 correctness cache、metrics/trace、auth security audit 不计入 business effect，但仍受各自的安全、可观测性和测试约束。
 跨租户 durable audit 仍声明 `business-write + business-transaction + cross-tenant-audit` 并保持 LocalTx。
 

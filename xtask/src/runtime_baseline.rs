@@ -719,6 +719,11 @@ impl<'ast> Visit<'ast> for BinaryRuntimeWiring {
 const RSS_COMMAND_FAMILIES: &[(&str, Option<&str>, Option<&str>)] = &[
     ("Serving", None, None),
     (
+        "Postgres",
+        Some("is_postgres_command"),
+        Some("run_postgres_reader_migration_command"),
+    ),
+    (
         "Projection",
         Some("is_projection_command"),
         Some("run_projection_control_command"),
@@ -8556,6 +8561,7 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
         r#"
 enum CommandFamily {
     Serving,
+    Postgres,
     Projection,
     AuditLedgerVerify,
     Dlq,
@@ -8565,6 +8571,9 @@ enum CommandFamily {
 }
 
 fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
+    if runtime::is_postgres_command(args) {
+        return Ok(CommandFamily::Postgres);
+    }
     if runtime::is_projection_command(args) {
         return Ok(CommandFamily::Projection);
     }
@@ -8594,6 +8603,7 @@ async fn main() -> anyhow::Result<()> {
     let runtime_inputs = runtime::prepare_runtime()?;
     let operator_result = match command {
         CommandFamily::Serving => return runtime::run(runtime_inputs).await,
+        CommandFamily::Postgres => runtime::run_postgres_reader_migration_command(&args).await,
         CommandFamily::Projection => runtime::run_projection_control_command(&args).await,
         CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args).await,
         CommandFamily::Dlq => runtime::run_dlq_control_command(&args).await,

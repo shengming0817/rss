@@ -85,22 +85,45 @@ impl Default for PgDbReadiness {
 
 // ── pg_readiness_sampling_loop ─────────────────────────────────────────────────
 
-/// DB liveness 状态转移时记 warn!/info!（`Down`/`Saturated` 转入 / `Ready` 恢复）；状态未变或首次成功则静默。
+/// DB liveness 二元状态转移时记 warn!/info!（`Down`/`Saturated` 转入 / `Ready` 恢复）；
+/// writer/reader 状态对未变或首次双 Ready 则静默。
 // reason: tracing::warn!/info! 宏展开后 clippy cognitive_complexity 计数偏高（实际 4 分支）——item-level carve-out。
 #[allow(clippy::cognitive_complexity)]
-fn log_readiness_transition(cur: PoolReadiness, last: Option<PoolReadiness>) {
-    // reason: 早返回比 else 分支更清晰；状态未变（last==cur）不重复记日志。
-    if last == Some(cur) {
-        return;
+fn log_readiness_transition(
+    writer: PoolReadiness,
+    reader: PoolReadiness,
+    last: Option<(PoolReadiness, PoolReadiness)>,
+) -> bool {
+    let current = (writer, reader);
+    // reason: 以二元状态对去重；即使 worst-of 未变，任一 lane 变化也必须留下诊断证据。
+    if last == Some(current) {
+        return false;
     }
+    let cur = worst_readiness(writer, reader);
     if cur == PoolReadiness::Down {
-        tracing::warn!(target: "postgres", "postgres readiness degraded: db unreachable");
+        tracing::warn!(
+            target: "postgres",
+            ?writer,
+            ?reader,
+            "postgres readiness degraded: db unreachable"
+        );
     } else if cur == PoolReadiness::Saturated {
-        tracing::warn!(target: "postgres", "postgres pool saturated — degraded, still serving");
+        tracing::warn!(
+            target: "postgres",
+            ?writer,
+            ?reader,
+            "postgres pool saturated — degraded, still serving"
+        );
     } else if last.is_some() {
         // reason: cur == Ready && last.is_some() = 从 Down/Saturated 恢复；last.is_none() = 首次成功，静默。
-        tracing::info!(target: "postgres", "postgres readiness recovered");
+        tracing::info!(
+            target: "postgres",
+            ?writer,
+            ?reader,
+            "postgres readiness recovered"
+        );
     }
+    true
 }
 
 /// 后台周期 DB liveness 采样 loop（裸 loop，**不 spawn**；spawn 在组合根 call-site）。
@@ -116,24 +139,39 @@ fn log_readiness_transition(cur: PoolReadiness, last: Option<PoolReadiness>) {
 /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：spawn 仪式收口进
 /// [`crate::PgReadinessSamplerFactory::spawn`]。
 pub(crate) async fn pg_readiness_sampling_loop(
-    store: Arc<PgStore>,
+    writer_store: Arc<PgStore>,
+    reader_store: Arc<PgStore>,
     period: Duration,
     token: CancellationToken,
     health: Arc<PgDbReadiness>,
 ) {
     let mut ticker = tokio::time::interval(period);
-    let mut last: Option<PoolReadiness> = None;
+    let mut last: Option<(PoolReadiness, PoolReadiness)> = None;
     loop {
         tokio::select! {
             biased;
             () = token.cancelled() => break,
             _ = ticker.tick() => {
-                let cur = store.probe_db_liveness().await;
-                log_readiness_transition(cur, last);
-                last = Some(cur);
+                let (writer, reader) = tokio::join!(
+                    writer_store.probe_db_liveness(),
+                    reader_store.probe_db_liveness(),
+                );
+                let cur = worst_readiness(writer, reader);
+                log_readiness_transition(writer, reader, last);
+                last = Some((writer, reader));
                 health.mark(cur);
             }
         }
+    }
+}
+
+fn worst_readiness(writer: PoolReadiness, reader: PoolReadiness) -> PoolReadiness {
+    if writer == PoolReadiness::Down || reader == PoolReadiness::Down {
+        PoolReadiness::Down
+    } else if writer == PoolReadiness::Saturated || reader == PoolReadiness::Saturated {
+        PoolReadiness::Saturated
+    } else {
+        PoolReadiness::Ready
     }
 }
 
@@ -280,6 +318,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dual_pool_readiness_uses_worst_state() {
+        assert_eq!(
+            super::worst_readiness(PoolReadiness::Ready, PoolReadiness::Down),
+            PoolReadiness::Down
+        );
+        assert_eq!(
+            super::worst_readiness(PoolReadiness::Saturated, PoolReadiness::Ready),
+            PoolReadiness::Saturated
+        );
+        assert_eq!(
+            super::worst_readiness(PoolReadiness::Ready, PoolReadiness::Ready),
+            PoolReadiness::Ready
+        );
+    }
+
+    #[test]
+    fn readiness_transition_deduplicates_the_lane_pair_not_only_worst_state() {
+        let saturated_writer = (PoolReadiness::Saturated, PoolReadiness::Ready);
+        assert!(
+            super::log_readiness_transition(saturated_writer.0, saturated_writer.1, None,),
+            "first degraded pair must be logged"
+        );
+        assert!(
+            !super::log_readiness_transition(
+                saturated_writer.0,
+                saturated_writer.1,
+                Some(saturated_writer),
+            ),
+            "an unchanged writer/reader pair must be deduplicated"
+        );
+
+        let both_saturated = (PoolReadiness::Saturated, PoolReadiness::Saturated);
+        assert_eq!(
+            super::worst_readiness(saturated_writer.0, saturated_writer.1),
+            super::worst_readiness(both_saturated.0, both_saturated.1),
+            "the aggregate intentionally remains saturated"
+        );
+        assert!(
+            super::log_readiness_transition(
+                both_saturated.0,
+                both_saturated.1,
+                Some(saturated_writer),
+            ),
+            "a reader transition must be logged even when the worst state is unchanged"
+        );
+    }
+
     // ── probe_db_liveness（无 DB）────────────────────────────────────────────
 
     #[tokio::test]
@@ -301,6 +387,7 @@ mod tests {
         let token = CancellationToken::new();
 
         let handle = tokio::spawn(pg_readiness_sampling_loop(
+            Arc::clone(&store),
             Arc::clone(&store),
             Duration::from_millis(100),
             token.clone(),
@@ -328,6 +415,7 @@ mod tests {
 
         let handle = tokio::spawn(pg_readiness_sampling_loop(
             Arc::clone(&store),
+            Arc::clone(&store),
             Duration::from_secs(3600), // 长 period，不会自然 tick（测取消路径）
             token.clone(),
             Arc::clone(&health),
@@ -347,6 +435,7 @@ mod tests {
         let token = CancellationToken::new();
 
         let handle = tokio::spawn(pg_readiness_sampling_loop(
+            Arc::clone(&store),
             Arc::clone(&store),
             Duration::from_secs(3600),
             token.clone(),
@@ -369,6 +458,7 @@ mod tests {
         token.cancel();
 
         let handle = tokio::spawn(pg_readiness_sampling_loop(
+            Arc::clone(&store),
             Arc::clone(&store),
             Duration::from_secs(3600),
             token.clone(),

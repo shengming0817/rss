@@ -13,7 +13,7 @@ use crate::dead_letter_payload::ProtectedDlxCapsule;
 
 use super::{
     DLX_REPLAY_CAPSULE_ENCODING, DeadLetterSource, DlxPayloadContext, DlxPayloadProtector,
-    PgClaimedOutboxEntry, PgTenantPool, RelayPublishFailure, SameIdDeliveryPhase,
+    PgClaimedOutboxEntry, PgTenantWritePool, RelayPublishFailure, SameIdDeliveryPhase,
     infra_tenant_scope, metadata_json_with_relay_failure, parse_tenant_id,
 };
 
@@ -265,7 +265,7 @@ fn select_deadline(
 }
 
 pub(super) async fn published(
-    tenant_pool: &PgTenantPool,
+    tenant_pool: &PgTenantWritePool,
     claimed: &PgClaimedOutboxEntry,
     relay_budget: RelayBudget,
 ) -> Result<Settlement<()>, EngineError> {
@@ -277,20 +277,13 @@ pub(super) async fn published(
             return SettlementAttempt::outcome(Settlement::expired()).finalize(scope, operation);
         }
     };
-    execute_scalar(
-        tenant_pool,
-        claimed,
-        relay_budget,
-        deadline,
-        "settle_published",
-        "SELECT rss_outbox_settle_published($1, $2::uuid, $3)::text",
-    )
-    .await
-    .finalize(scope, operation)
+    execute_published(tenant_pool, claimed, relay_budget, deadline)
+        .await
+        .finalize(scope, operation)
 }
 
 pub(super) async fn retry(
-    tenant_pool: &PgTenantPool,
+    tenant_pool: &PgTenantWritePool,
     claimed: &PgClaimedOutboxEntry,
     relay_budget: RelayBudget,
 ) -> Result<Settlement<()>, EngineError> {
@@ -302,26 +295,18 @@ pub(super) async fn retry(
             return SettlementAttempt::outcome(Settlement::expired()).finalize(scope, operation);
         }
     };
-    execute_scalar(
-        tenant_pool,
-        claimed,
-        relay_budget,
-        deadline,
-        "settle_retry",
-        "SELECT rss_outbox_settle_retry($1, $2::uuid, $3)::text",
-    )
-    .await
-    .finalize(scope, operation)
+    execute_retry(tenant_pool, claimed, relay_budget, deadline)
+        .await
+        .finalize(scope, operation)
 }
 
-async fn execute_scalar(
-    tenant_pool: &PgTenantPool,
+async fn execute_published(
+    tenant_pool: &PgTenantWritePool,
     claimed: &PgClaimedOutboxEntry,
     relay_budget: RelayBudget,
     deadline: tokio::time::Instant,
-    phase: &'static str,
-    sql: &'static str,
 ) -> SettlementAttempt<()> {
+    const PHASE: &str = "settle_published";
     let event_id = claimed.idem_key().as_str().to_owned();
     let tenant = claimed.subject().tenant_id();
     let lease_token = claimed.lease_token().to_owned();
@@ -333,25 +318,64 @@ async fn execute_scalar(
                 deadline,
                 move |connection| {
                     Box::pin(async move {
-                        let raw: String = sqlx::query_scalar(sql)
-                            .bind(event_id)
-                            .bind(lease_token)
-                            .bind(lease_deadline_epoch_micros)
-                            .fetch_one(connection)
-                            .await
-                            .map_err(|error| map_storage_error(error, phase))?;
+                        let raw: String = sqlx::query_scalar(
+                            "SELECT rss_outbox_settle_published($1, $2::uuid, $3)::text",
+                        )
+                        .bind(event_id)
+                        .bind(lease_token)
+                        .bind(lease_deadline_epoch_micros)
+                        .fetch_one(connection)
+                        .await
+                        .map_err(|error| map_storage_error(error, PHASE))?;
                         parse_outcome(&raw)
                     })
                 },
-                move |error| map_storage_error(error, phase),
-                move || map_outer_timeout(phase, relay_budget),
+                move |error| map_storage_error(error, PHASE),
+                move || map_outer_timeout(PHASE, relay_budget),
+            )
+            .await,
+    )
+}
+
+async fn execute_retry(
+    tenant_pool: &PgTenantWritePool,
+    claimed: &PgClaimedOutboxEntry,
+    relay_budget: RelayBudget,
+    deadline: tokio::time::Instant,
+) -> SettlementAttempt<()> {
+    const PHASE: &str = "settle_retry";
+    let event_id = claimed.idem_key().as_str().to_owned();
+    let tenant = claimed.subject().tenant_id();
+    let lease_token = claimed.lease_token().to_owned();
+    let lease_deadline_epoch_micros = claimed.lease_deadline_epoch_micros();
+    SettlementAttempt::from_result(
+        tenant_pool
+            .deadline_write(
+                infra_tenant_scope(tenant),
+                deadline,
+                move |connection| {
+                    Box::pin(async move {
+                        let raw: String = sqlx::query_scalar(
+                            "SELECT rss_outbox_settle_retry($1, $2::uuid, $3)::text",
+                        )
+                        .bind(event_id)
+                        .bind(lease_token)
+                        .bind(lease_deadline_epoch_micros)
+                        .fetch_one(connection)
+                        .await
+                        .map_err(|error| map_storage_error(error, PHASE))?;
+                        parse_outcome(&raw)
+                    })
+                },
+                move |error| map_storage_error(error, PHASE),
+                move || map_outer_timeout(PHASE, relay_budget),
             )
             .await,
     )
 }
 
 pub(super) async fn ordinary_dlx(
-    tenant_pool: &PgTenantPool,
+    tenant_pool: &PgTenantWritePool,
     payload_protector: &DlxPayloadProtector,
     tenant: vocab::TenantId,
     claimed: &PgClaimedOutboxEntry,
@@ -377,7 +401,7 @@ pub(super) async fn ordinary_dlx(
 }
 
 pub(super) async fn same_id_expiry_dlx(
-    tenant_pool: &PgTenantPool,
+    tenant_pool: &PgTenantWritePool,
     payload_protector: &DlxPayloadProtector,
     tenant: vocab::TenantId,
     claimed: &PgClaimedOutboxEntry,
@@ -423,7 +447,7 @@ type MarkDlxRow = (
 );
 
 async fn execute_dlx(
-    tenant_pool: &PgTenantPool,
+    tenant_pool: &PgTenantWritePool,
     payload_protector: &DlxPayloadProtector,
     input: DlxInput<'_>,
     relay_budget: RelayBudget,
@@ -781,7 +805,7 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn lazy_tenant_pool() -> crate::cotx::PgTenantPool {
+    fn lazy_tenant_pool() -> crate::cotx::PgTenantWritePool {
         let options = sqlx::postgres::PgConnectOptions::new()
             .host("127.0.0.1")
             .port(1)
@@ -792,10 +816,10 @@ mod tests {
             .max_connections(1)
             .acquire_timeout(Duration::from_millis(1))
             .connect_lazy_with(options);
-        crate::cotx::PgTenantPool::new(&crate::PgStore { pool })
+        crate::cotx::PgTenantWritePool::from_unverified_for_test(&crate::PgStore { pool })
     }
 
-    async fn closed_tenant_pool() -> crate::cotx::PgTenantPool {
+    async fn closed_tenant_pool() -> crate::cotx::PgTenantWritePool {
         let options = sqlx::postgres::PgConnectOptions::new()
             .host("127.0.0.1")
             .port(1)
@@ -805,7 +829,10 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy_with(options);
-        let tenant_pool = crate::cotx::PgTenantPool::new(&crate::PgStore { pool: pool.clone() });
+        let tenant_pool =
+            crate::cotx::PgTenantWritePool::from_unverified_for_test(&crate::PgStore {
+                pool: pool.clone(),
+            });
         pool.close().await;
         tenant_pool
     }

@@ -14,8 +14,10 @@ use std::sync::{Arc, Mutex};
 use audit::ports::{AuditListTenantAppend, AuditListTenantAppender, actor_kind_to_db};
 use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError};
 
+#[cfg(test)]
 use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::PgTenantWritePool;
+use crate::pool::VerifiedPgWriteStore;
 use crate::tx_retry::{classify_sqlx_error, run_pg_localtx_retry};
 
 const INSERT_AUTH_AUDIT_EVENT: &str = "INSERT INTO auth_audit_events \
@@ -28,7 +30,7 @@ const INSERT_AUTH_AUDIT_EVENT: &str = "INSERT INTO auth_audit_events \
 /// Constructed through the postgres capability bundle; stores only the structured audit DTO supplied by httpserve.
 pub struct PgAuthAuditSink {
     global_pool: sqlx::PgPool,
-    pool: PgTenantPool,
+    pool: PgTenantWritePool,
     #[cfg(all(test, feature = "integration"))]
     append_faults: Arc<Mutex<AuthAuditAppendFaultState>>,
 }
@@ -76,10 +78,20 @@ impl AuthAuditAppendAttemptProbe {
 }
 
 impl PgAuthAuditSink {
-    pub(crate) fn new(store: &PgStore) -> Self {
+    pub(crate) fn new(store: &VerifiedPgWriteStore) -> Self {
+        Self {
+            global_pool: store.pool().clone(),
+            pool: PgTenantWritePool::new(store),
+            #[cfg(all(test, feature = "integration"))]
+            append_faults: Arc::new(Mutex::new(AuthAuditAppendFaultState::default())),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_unverified_for_test(store: &PgStore) -> Self {
         Self {
             global_pool: store.pool.clone(),
-            pool: PgTenantPool::new(store),
+            pool: PgTenantWritePool::from_unverified_for_test(store),
             #[cfg(all(test, feature = "integration"))]
             append_faults: Arc::new(Mutex::new(AuthAuditAppendFaultState::default())),
         }

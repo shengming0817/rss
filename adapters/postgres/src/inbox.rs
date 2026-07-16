@@ -32,8 +32,9 @@ use consistency::{
 use sqlx::{PgPool, Row};
 
 use crate::PgStore;
-use crate::cotx::{PgTenantPool, TxCapability, infra_tenant_scope};
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool, TxCapability, infra_tenant_scope};
 use crate::delivery_policy::EventDeliveryPolicy;
+use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 
 /// inbox 租约过期阈值（秒）；claimed 行超此阈值未续租即可被 TTL 重捞（镜 outbox `LEASE_TTL_SECONDS`，#1213）。
 ///
@@ -42,23 +43,33 @@ pub const INBOX_LEASE_TTL_SECONDS: i64 = 60;
 
 /// postgres inbox_receipts 幂等去重 store（claim-or-reclaim-or-skip + 租约 CAS + TTL 重捞，#1213）。
 ///
-/// 私有字段仅持 [`PgTenantPool`]；tenant 表访问必须经 typed tenant scope funnel。
+/// 私有字段分别持 typed read/write capability；tenant 表访问必须经对应 scope funnel。
 pub struct PgInboxStore {
-    pool: PgTenantPool,
+    read_pool: PgTenantReadPool,
+    write_pool: PgTenantWritePool,
 }
 
+#[cfg(all(test, feature = "integration"))]
 impl PgStore {
     /// 构造 [`PgInboxStore`]。tenant/group scope 来自每次调用的 [`InboxReceiptContext`]。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::inbox` 收口。
     pub(crate) fn inbox(&self) -> PgInboxStore {
         PgInboxStore {
-            pool: PgTenantPool::new(self),
+            read_pool: PgTenantReadPool::from_unverified_for_test(self),
+            write_pool: PgTenantWritePool::from_unverified_for_test(self),
         }
     }
 }
 
 impl PgInboxStore {
+    pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
+        Self {
+            read_pool: PgTenantReadPool::new(reader),
+            write_pool: PgTenantWritePool::new(writer),
+        }
+    }
+
     /// 供组合根派生 `eventexec::LeaseConfig::from_ttl(store.lease_ttl())`，使续租间隔与后端 claim TTL
     /// 同源（杜绝 mismatch footgun，#1213 review #3）。
     pub fn lease_ttl(&self) -> std::time::Duration {
@@ -72,12 +83,12 @@ impl InboxBacklog for PgInboxStore {
         &self,
         scope: &InboxBacklogScope,
     ) -> Result<BacklogSample, EngineError> {
-        sample_inbox_backlog(&self.pool, scope).await
+        sample_inbox_backlog(&self.read_pool, scope).await
     }
 }
 
 async fn sample_inbox_backlog(
-    pool: &PgTenantPool,
+    pool: &PgTenantReadPool,
     scope: &InboxBacklogScope,
 ) -> Result<BacklogSample, EngineError> {
     let tenant = scope.tenant_id();
@@ -289,7 +300,7 @@ impl InboxStore for PgInboxStore {
         let fields = ReceiptFields::from_context(ctx);
         let key = key.as_str().to_string();
         let lease = lease.as_str().to_string();
-        self.pool
+        self.write_pool
             .write(
                 infra_tenant_scope(fields.tenant),
                 move |tx| {
@@ -389,7 +400,7 @@ impl InboxStore for PgInboxStore {
         let fields = ReceiptFields::from_context(ctx);
         let key = key.as_str().to_string();
         let lease = lease.as_str().to_string();
-        self.pool
+        self.write_pool
             .write(
                 infra_tenant_scope(fields.tenant),
                 move |tx| {
@@ -443,7 +454,7 @@ impl InboxStore for PgInboxStore {
         let fields = ReceiptFields::from_context(ctx);
         let key = key.as_str().to_string();
         let lease = lease.as_str().to_string();
-        self.pool
+        self.write_pool
             .write(
                 infra_tenant_scope(fields.tenant),
                 move |tx| {
@@ -474,7 +485,7 @@ impl InboxStore for PgInboxStore {
         let fields = ReceiptFields::from_context(ctx);
         let key = key.as_str().to_string();
         let lease = lease.as_str().to_string();
-        self.pool
+        self.write_pool
             .write(
                 infra_tenant_scope(fields.tenant),
                 move |tx| {

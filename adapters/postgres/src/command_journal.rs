@@ -14,16 +14,19 @@ use eventexec::command::{
 };
 use futures::future::BoxFuture;
 
+#[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantPool, TxCapability, infra_tenant_scope};
+use crate::cotx::{PgTenantWritePool, TxCapability, infra_tenant_scope};
 use crate::outbox::{
     OutboxAppendError, OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs,
 };
+use crate::pool::VerifiedPgWriteStore;
 
+#[cfg(all(test, feature = "integration"))]
 impl PgStore {
     pub(crate) fn command_journal(&self, clock: Box<dyn Clock>) -> PgCommandJournal {
         PgCommandJournal {
-            pool: PgTenantPool::new(self),
+            pool: PgTenantWritePool::from_unverified_for_test(self),
             clock,
         }
     }
@@ -31,7 +34,7 @@ impl PgStore {
 
 /// Postgres command journal and direct-dispatch store.
 pub struct PgCommandJournal {
-    pool: PgTenantPool,
+    pool: PgTenantWritePool,
     clock: Box<dyn Clock>,
 }
 
@@ -41,6 +44,13 @@ pub(crate) struct PreparedCommand {
 }
 
 impl PgCommandJournal {
+    pub(crate) fn new(store: &VerifiedPgWriteStore, clock: Box<dyn Clock>) -> Self {
+        Self {
+            pool: PgTenantWritePool::new(store),
+            clock,
+        }
+    }
+
     pub(crate) async fn record_command_with_business_write<F>(
         &self,
         command: ReviewedCommandJournal,

@@ -1,6 +1,6 @@
 //! PostgreSQL saga instance store + tenant-scoped journal adapter (#1632).
 //!
-//! All tenant-table access goes through [`PgTenantPool`]. Journal writes are fenced by the
+//! All tenant-table access goes through distinct read/write capabilities. Journal writes are fenced by the
 //! instance lease token+epoch and return typed idempotency/conflict outcomes.
 //!
 //! ref: oxidecomputer/steno src/store.rs@5b0d1be32fb3e3047ff4e4f972b59dc52f9c89ba
@@ -19,35 +19,62 @@ use diport::{
     SagaJournalError, SagaRunnableInstance, SagaTenantSource, SagaWorkerIdentity,
 };
 
+#[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantPool, infra_tenant_scope};
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool, infra_tenant_scope};
+use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
+use crate::saga_candidates::PgSagaCandidateSource;
 
 const HOLDER_ID_MAX_BYTES: usize = 256;
 
 /// PostgreSQL saga instance store.
 pub struct PgSagaInstanceStore {
-    pool: PgTenantPool,
-    raw_pool: sqlx::PgPool,
+    read_pool: PgTenantReadPool,
+    write_pool: PgTenantWritePool,
+    candidate_source: PgSagaCandidateSource,
 }
 
 /// PostgreSQL saga journal adapter.
 pub struct PgSagaJournal {
-    pool: PgTenantPool,
+    read_pool: PgTenantReadPool,
+    write_pool: PgTenantWritePool,
 }
 
+#[cfg(all(test, feature = "integration"))]
 impl PgStore {
     /// Construct the tenant-scoped saga instance store.
     pub(crate) fn saga_instance_store(&self) -> PgSagaInstanceStore {
         PgSagaInstanceStore {
-            pool: PgTenantPool::new(self),
-            raw_pool: self.pool.clone(),
+            read_pool: PgTenantReadPool::from_unverified_for_test(self),
+            write_pool: PgTenantWritePool::from_unverified_for_test(self),
+            candidate_source: PgSagaCandidateSource::from_unverified_for_test(self),
         }
     }
 
     /// Construct the tenant-scoped saga journal.
     pub(crate) fn saga_journal(&self) -> PgSagaJournal {
         PgSagaJournal {
-            pool: PgTenantPool::new(self),
+            read_pool: PgTenantReadPool::from_unverified_for_test(self),
+            write_pool: PgTenantWritePool::from_unverified_for_test(self),
+        }
+    }
+}
+
+impl PgSagaInstanceStore {
+    pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
+        Self {
+            read_pool: PgTenantReadPool::new(reader),
+            write_pool: PgTenantWritePool::new(writer),
+            candidate_source: PgSagaCandidateSource::new(writer),
+        }
+    }
+}
+
+impl PgSagaJournal {
+    pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
+        Self {
+            read_pool: PgTenantReadPool::new(reader),
+            write_pool: PgTenantWritePool::new(writer),
         }
     }
 }
@@ -58,7 +85,7 @@ impl SagaInstanceStore for PgSagaInstanceStore {
         registration: SagaInstanceRegistration,
     ) -> Result<SagaInstanceRecord, SagaInstanceStoreError> {
         let fields = RegistrationFields::from(registration);
-        self.pool
+        self.write_pool
             .write(
                 infra_tenant_scope(fields.instance.tenant()),
                 move |tx| {
@@ -107,7 +134,7 @@ impl SagaInstanceStore for PgSagaInstanceStore {
         instance: &SagaInstanceRef,
     ) -> Result<Option<SagaInstanceRecord>, SagaInstanceStoreError> {
         let fields = InstanceFields::from(*instance);
-        self.pool
+        self.read_pool
             .read_map(
                 infra_tenant_scope(fields.instance.tenant()),
                 move |conn| {
@@ -147,7 +174,7 @@ impl SagaInstanceStore for PgSagaInstanceStore {
         let fields = InstanceFields::from(*instance);
         let holder_id = holder_id.to_string();
         let ttl_secs = duration_secs(ttl).map_err(SagaInstanceStoreError::new)?;
-        self.pool
+        self.write_pool
             .write(
                 infra_tenant_scope(fields.instance.tenant()),
                 move |tx| {
@@ -225,7 +252,7 @@ impl SagaInstanceStore for PgSagaInstanceStore {
         let owner = identity.owner().to_string();
         let contract_id = identity.contract_id().as_str().to_string();
         let limit = i64::try_from(limit.get()).map_err(SagaInstanceStoreError::new)?;
-        self.pool
+        self.read_pool
             .read_map(
                 infra_tenant_scope(tenant),
                 move |conn| {
@@ -274,22 +301,7 @@ impl SagaTenantSource for PgSagaInstanceStore {
         identity: &SagaWorkerIdentity,
         limit: NonZeroUsize,
     ) -> Result<Vec<vocab::TenantId>, SagaInstanceStoreError> {
-        let limit = i64::try_from(limit.get()).map_err(SagaInstanceStoreError::new)?;
-        let rows: Vec<(String,)> = sqlx::query_as(
-            r#"
-            SELECT tenant_id::text
-            FROM rss_saga_candidate_tenants($1, $2, $3)
-            "#,
-        )
-        .bind(identity.owner())
-        .bind(identity.contract_id().as_str())
-        .bind(limit)
-        .fetch_all(&self.raw_pool)
-        .await
-        .map_err(SagaInstanceStoreError::new)?;
-        rows.into_iter()
-            .map(|(tenant,)| vocab::TenantId::parse(&tenant).map_err(SagaInstanceStoreError::new))
-            .collect()
+        self.candidate_source.list(identity, limit).await
     }
 }
 
@@ -301,7 +313,7 @@ impl PgSagaInstanceStore {
         mark_status: Option<&'static str>,
     ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
         let fields = LeaseFields::from(lease).map_err(SagaInstanceStoreError::new)?;
-        self.pool
+        self.write_pool
             .write(
                 infra_tenant_scope(fields.instance.tenant()),
                 move |tx| {
@@ -393,7 +405,7 @@ impl SagaJournal for PgSagaJournal {
     ) -> Result<SagaJournalAppendOutcome, SagaJournalError> {
         let fields = LeaseFields::from(lease).map_err(SagaJournalError::new)?;
         let entry_fields = JournalEntryFields::from(entry)?;
-        self.pool
+        self.write_pool
             .write(
                 infra_tenant_scope(fields.instance.tenant()),
                 move |tx| {
@@ -491,7 +503,7 @@ impl SagaJournal for PgSagaJournal {
         instance: &SagaInstanceRef,
     ) -> Result<Vec<SagaJournalRecord>, SagaJournalError> {
         let fields = InstanceFields::from(*instance);
-        self.pool
+        self.read_pool
             .read_map(
                 infra_tenant_scope(fields.instance.tenant()),
                 move |conn| {

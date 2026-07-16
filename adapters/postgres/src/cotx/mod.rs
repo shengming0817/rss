@@ -26,9 +26,12 @@ use sqlx::{Acquire, PgConnection, PgPool, Postgres, Transaction};
 use tokio::time::Instant;
 use vocab::TenantId;
 
-use crate::PgStore;
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use crate::outbox::{OutboxAppendError, OutboxEnvelope, append_outbox_with_projection};
+use crate::pool::{
+    VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore, VerifiedPgReadStore,
+    VerifiedPgWriteStore,
+};
 use crate::projection_events::ProjectionWriteRegistry;
 
 mod settlement;
@@ -176,48 +179,78 @@ impl<'tx> TxCapability<'tx> {
     }
 }
 
-/// tenant-scoped Postgres pool wrapper.
+/// Tenant-scoped PostgreSQL read capability.
 ///
-/// This is the typed production entry for RLS tenant-table access. It is cloneable for repo
-/// structs, but it does not expose raw [`PgPool`], `begin`, `acquire`, or `Executor`; callers can
-/// only run scoped read/write/co-tx closures after this module has injected `SET LOCAL
-/// rss.tenant_id`.
+/// The capability exposes only `read`/`read_map`; durable mutation methods are absent. Production
+/// construction requires a verified reader store, while the raw-store source exists only under
+/// `cfg(test)` for database integration tests.
 ///
 /// # INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
-/// Tenant-table adapters hold `PgTenantPool`, not `sqlx::PgPool`; direct raw-pool tenant-table
-/// access is therefore not expressible through their fields. `cargo xtask pg-tenant-tx-guard`
-/// is the Medium backstop that catches drift and explicit raw global exceptions.
+/// `cargo xtask pg-tenant-tx-guard` is the Medium backstop for raw-pool and lane crossover drift.
 #[derive(Clone)]
-pub(crate) struct PgTenantPool {
+pub(crate) struct PgReadPool<L> {
     pool: PgPool,
-    projection_registry: ProjectionWriteRegistry,
+    _lane: std::marker::PhantomData<fn() -> L>,
 }
 
-impl PgTenantPool {
-    /// Build the scoped wrapper from the crate-private store. The raw pool remains owned by
-    /// [`PgStore`] and is not exposed through this wrapper.
-    pub(crate) fn new(store: &PgStore) -> Self {
+pub(crate) enum ServingReadLane {}
+#[allow(dead_code)]
+pub(crate) enum AuditAdminReadLane {}
+pub(crate) enum MaintenanceReadLane {}
+
+pub(crate) type PgTenantReadPool = PgReadPool<ServingReadLane>;
+#[allow(dead_code)]
+pub(crate) type PgAuditAdminReadPool = PgReadPool<AuditAdminReadLane>;
+pub(crate) type PgMaintenanceReadPool = PgReadPool<MaintenanceReadLane>;
+
+impl PgReadPool<ServingReadLane> {
+    pub(crate) fn new(store: &VerifiedPgReadStore) -> Self {
         Self {
-            pool: store.pool.clone(),
-            projection_registry: ProjectionWriteRegistry::empty(),
+            pool: store.pool().clone(),
+            _lane: std::marker::PhantomData,
         }
     }
 
-    pub(crate) fn with_projection_registry(
-        store: &PgStore,
-        projection_registry: ProjectionWriteRegistry,
-    ) -> Self {
+    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    #[allow(dead_code)]
+    pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
             pool: store.pool.clone(),
-            projection_registry,
+            _lane: std::marker::PhantomData,
+        }
+    }
+}
+
+impl PgReadPool<AuditAdminReadLane> {
+    #[allow(dead_code)]
+    pub(crate) fn new_admin(store: &VerifiedPgAuditAdminStore) -> Self {
+        Self {
+            pool: store.pool().clone(),
+            _lane: std::marker::PhantomData,
         }
     }
 
-    pub(crate) fn projection_registry(&self) -> ProjectionWriteRegistry {
-        self.projection_registry
+    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    #[allow(dead_code)]
+    pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
+        Self {
+            pool: store.pool.clone(),
+            _lane: std::marker::PhantomData,
+        }
     }
+}
 
+impl PgReadPool<MaintenanceReadLane> {
+    pub(crate) fn new_maintenance(store: &VerifiedPgMaintenanceStore) -> Self {
+        Self {
+            pool: store.pool().clone(),
+            _lane: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<L> PgReadPool<L> {
     /// Run a tenant-scoped read transaction.
     pub(crate) async fn read<S, T, F>(&self, scope: S, read: F) -> Result<T, sqlx::Error>
     where
@@ -244,6 +277,71 @@ impl PgTenantPool {
     {
         let tenant = scope.tenant();
         tenant_scoped_read_map(&self.pool, tenant, read, map_storage).await
+    }
+}
+
+/// Tenant-scoped PostgreSQL write capability.
+///
+/// Read helpers are deliberately absent: independent reads must be wired through
+/// [`PgTenantReadPool`]. SELECT statements required inside a write/CAS/co-transaction remain
+/// available through the transaction capability supplied to the write closure.
+#[derive(Clone)]
+pub(crate) struct PgWritePool<L> {
+    pool: PgPool,
+    projection_registry: ProjectionWriteRegistry,
+    _lane: std::marker::PhantomData<fn() -> L>,
+}
+
+pub(crate) enum ServingWriteLane {}
+pub(crate) enum MaintenanceWriteLane {}
+
+pub(crate) type PgTenantWritePool = PgWritePool<ServingWriteLane>;
+pub(crate) type PgMaintenanceWritePool = PgWritePool<MaintenanceWriteLane>;
+
+impl PgWritePool<ServingWriteLane> {
+    pub(crate) fn new(store: &VerifiedPgWriteStore) -> Self {
+        Self {
+            pool: store.pool().clone(),
+            projection_registry: ProjectionWriteRegistry::empty(),
+            _lane: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn with_projection_registry(
+        store: &VerifiedPgWriteStore,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> Self {
+        Self {
+            pool: store.pool().clone(),
+            projection_registry,
+            _lane: std::marker::PhantomData,
+        }
+    }
+
+    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    #[allow(dead_code)]
+    pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
+        Self {
+            pool: store.pool.clone(),
+            projection_registry: ProjectionWriteRegistry::empty(),
+            _lane: std::marker::PhantomData,
+        }
+    }
+}
+
+impl PgWritePool<MaintenanceWriteLane> {
+    pub(crate) fn new_maintenance(store: &VerifiedPgMaintenanceStore) -> Self {
+        Self {
+            pool: store.pool().clone(),
+            projection_registry: ProjectionWriteRegistry::empty(),
+            _lane: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<L> PgWritePool<L> {
+    pub(crate) fn projection_registry(&self) -> ProjectionWriteRegistry {
+        self.projection_registry
     }
 
     /// Run a tenant-scoped write transaction.
@@ -487,7 +585,7 @@ async fn set_local_deadline_timeouts(
     Ok(())
 }
 
-/// tenant-scoped 只读事务：begin → SET LOCAL `rss.tenant_id` → 读闭包 → commit。
+/// tenant-scoped 只读事务：`BEGIN READ ONLY` → SET LOCAL `rss.tenant_id` → 读闭包 → commit。
 ///
 /// 与写侧 [`co_tx_with_outbox`]（co-tx + outbox）对称，是读路径的 RLS policy
 /// `current_setting('rss.tenant_id', true)` 锚点（#1298）。读闭包仅做 SQL fetch 返回 owned 原始值
@@ -500,10 +598,8 @@ async fn set_local_deadline_timeouts(
 ///
 /// # INVARIANT: RLS-TENANT-SCOPE-READ-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
-/// sessions / config_entries / roles 三表所有读路径（`find` / `find_version` / `latest_version`）
-/// 经此 helper 注入 SET LOCAL，与 0009 迁移的 RLS policy `current_setting` 对齐；当前业务池可能以
-/// owner/superuser 连接（superuser 绕过 RLS）；`tenant_scoped_read` 已就位 SET LOCAL 锚点，业务池切
-/// rss_app（dual-pool follow-up）后 DB 层 RLS 方强制生效；t20–t22 验证 rss_app 角色下的强制力。
+/// 所有独立 tenant relation 读取经此 helper 注入 SET LOCAL，并由显式事务属性拒绝 durable DML。
+/// 生产连接同时使用 `rss_app_read` 的默认只读与精确 SELECT ACL；三层防线彼此独立。
 pub(crate) async fn tenant_scoped_read<T, F>(
     pool: &PgPool,
     tenant: TenantId,
@@ -513,9 +609,7 @@ where
     F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, sqlx::Error>> + Send,
     T: Send,
 {
-    let mut tx = pool.begin().await?;
-    // SET LOCAL 注入 tenant scope（事务内有效，commit/rollback 自动失效；与写侧 set_local_tenant 共享锚点）。
-    set_local_tenant(&mut tx, tenant).await?;
+    let mut tx = begin_tenant_read(pool, tenant).await?;
     let result = read(&mut tx).await;
     // 读事务：成功 commit（RLS fail-closed 时 `read` 已 Err）；失败 rollback（warn 定位，不覆盖原错误）。
     match result {
@@ -550,8 +644,7 @@ where
     E: Send,
     T: Send,
 {
-    let mut tx = pool.begin().await.map_err(&map_storage)?;
-    set_local_tenant(&mut tx, tenant)
+    let mut tx = begin_tenant_read(pool, tenant)
         .await
         .map_err(&map_storage)?;
     match read(&mut tx).await {
@@ -581,8 +674,22 @@ where
     }
 }
 
+/// Open the shared read-lane transaction skeleton atomically as PostgreSQL `READ ONLY` before
+/// executing the first tenant-scoped statement.
+///
+/// `ref: sqlx sqlx-core/src/pool/mod.rs@v0.8.6` — `Pool::begin_with` owns the acquired connection
+/// and sends the custom top-level `BEGIN` through SQLx's transaction manager.
+async fn begin_tenant_read(
+    pool: &PgPool,
+    tenant: TenantId,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN READ ONLY").await?;
+    set_local_tenant(&mut tx, tenant).await?;
+    Ok(tx)
+}
+
 /// 在事务内注入 tenant scope（SET LOCAL `rss.tenant_id`，参数化绑定防注入；tenancy.md §RLS 与 PG scope）。
-/// co-tx 写（[`PgTenantPool::co_tx_with_outbox`]）与 plain 写（`config_repo` 的 tenant-scoped save/delete，#1249 F3）
+/// co-tx 写（[`PgTenantWritePool::co_tx_with_outbox`]）与 plain 写（`config_repo` 的 tenant-scoped save/delete，#1249 F3）
 /// 共享，保证所有 postgres 写路径经统一 SET LOCAL 收口（未来 RLS policy 的 current_setting 锚点，不留绕过面）。
 ///
 /// # INVARIANT: TENANCY-SETLOCAL-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
@@ -656,7 +763,7 @@ where
 /// ```ignore
 /// // 调用方在 `business_write` 闭包内执行业务写（HRTB + BoxFuture 绕过异步闭包借用规则）；
 /// // sqlx 错误经 `map_storage` 收口为域错误 E（绕开 `E: From<sqlx::Error>` 跨 crate 约束）。
-/// PgTenantPool::new(&store)
+/// PgTenantWritePool::new(&store)
 ///     .co_tx_with_outbox(
 ///         tenant,
 ///         &outbox_entry,
@@ -1135,19 +1242,15 @@ mod tx_capability_tests {
         use settings::ports::ConfigRepoError;
         use sqlx::postgres::PgPoolOptions;
 
-        use super::PgTenantPool;
+        use super::PgTenantWritePool;
         use crate::outbox::{OutboxEnvelope, OutboxMetadata};
-        use crate::projection_events::ProjectionWriteRegistry;
-
         let tenant = tenant()?;
         let pool = PgPoolOptions::new()
             .acquire_timeout(core::time::Duration::from_millis(10))
             .connect_lazy("postgres://127.0.0.1:1/rss")
             .map_err(|error| error.to_string())?;
-        let scoped = PgTenantPool {
-            pool,
-            projection_registry: ProjectionWriteRegistry::empty(),
-        };
+        let store = crate::PgStore { pool };
+        let scoped = PgTenantWritePool::from_unverified_for_test(&store);
         let map_storage = |error: sqlx::Error| ConfigRepoError::Storage(Box::new(error));
 
         let plain = scoped

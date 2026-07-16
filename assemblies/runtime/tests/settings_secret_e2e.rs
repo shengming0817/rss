@@ -27,7 +27,10 @@ use diport::{
     KeyProviderError, KeyRef, KeyVersion, RedactedBytes, SecretCoordinate, SecretMaterial,
     SecretResolverError,
 };
-use postgres::{ConfigValueProtections, PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
+use postgres::{
+    ConfigValueProtections, PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig,
+    caps,
+};
 use settings::SecretService;
 use settings::ports::{SecretKey, SecretRef, StoreId, TenantId};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -38,6 +41,8 @@ const TENANT_STR: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const STORE_ID: &str = "mem-vault";
 const TEST_APP_ROLE: &str = "rss_app";
 const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
+const TEST_READ_ROLE: &str = "rss_app_read";
+const TEST_READ_PASSWORD: &str = "rss_app_read_test_pw";
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // ── inline MemResolver（deny.toml 禁 rss→memory，故在本文件内直接实现）──────────
@@ -175,10 +180,13 @@ async fn connect_pg_and_setup()
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    provision_rss_app_login(p).await?;
+    provision_runtime_logins(p).await?;
+    let tenant_read_config =
+        PgTenantReadConfig::new(pg_config(p, TEST_READ_ROLE, TEST_READ_PASSWORD));
     let deps = PgRuntimeDeps::setup(
         &owner_config,
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        &tenant_read_config,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )
@@ -198,7 +206,7 @@ fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgCon
     .with_acquire_timeout(Duration::from_secs(5))
 }
 
-async fn provision_rss_app_login(
+async fn provision_runtime_logins(
     p: &testkit::PgConnParams,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let options = PgConnectOptions::new()
@@ -218,10 +226,20 @@ async fn provision_rss_app_login(
         DO $$
         BEGIN
             PERFORM pg_advisory_xact_lock(hashtext('{TEST_APP_ROLE}'));
+            PERFORM pg_advisory_xact_lock(hashtext('{TEST_READ_ROLE}'));
             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_APP_ROLE}') THEN
-                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             ELSE
-                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_READ_ROLE}') THEN
+                CREATE ROLE {TEST_READ_ROLE} LOGIN PASSWORD '{TEST_READ_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            ELSE
+                ALTER ROLE {TEST_READ_ROLE} LOGIN PASSWORD '{TEST_READ_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             END IF;
         END
         $$;

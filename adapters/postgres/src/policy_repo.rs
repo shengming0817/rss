@@ -12,44 +12,56 @@ use identity::ports::{
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
+#[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
 use crate::outbox::{
     OutboxAppendError, OutboxEnvelope, append_outbox_with_projection, epoch_secs_to_time,
     metadata_with_ambient, unix_secs,
 };
+use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
 
 pub struct PgPolicyRepo {
-    pool: PgTenantPool,
+    pool: PgTenantReadPool,
 }
 
 impl PgPolicyRepo {
-    pub(crate) fn new(store: &PgStore) -> Self {
+    pub(crate) fn new(reader: &VerifiedPgReadStore) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            pool: PgTenantReadPool::new(reader),
+        }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_unverified_for_test(store: &PgStore) -> Self {
+        Self {
+            pool: PgTenantReadPool::from_unverified_for_test(store),
         }
     }
 }
 
 pub struct PgPolicyLifecycle {
-    pool: PgTenantPool,
+    pool: PgTenantWritePool,
     clock: Box<dyn Clock>,
 }
 
 impl PgPolicyLifecycle {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
-        Self::new_with_projection_registry(store, clock, ProjectionWriteRegistry::empty())
+        Self {
+            pool: PgTenantWritePool::from_unverified_for_test(store),
+            clock,
+        }
     }
 
     pub(crate) fn new_with_projection_registry(
-        store: &PgStore,
+        writer: &VerifiedPgWriteStore,
         clock: Box<dyn Clock>,
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
-            pool: PgTenantPool::with_projection_registry(store, projection_registry),
+            pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
             clock,
         }
     }
@@ -560,10 +572,9 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         }
         let tenant_uuid = tenant_param(tenant);
         let rules_json = encode_rules(&policy)?;
-        let id = policy.id().clone();
         let expected_version = version_param(expected)?;
         let projection_registry = self.pool.projection_registry();
-        let raw: Option<RawPolicy> = self
+        let (raw, exists): (Option<RawPolicy>, bool) = self
             .pool
             .write(
                 tenant_scope,
@@ -610,7 +621,19 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                             .await
                             .map_err(append_storage)?;
                         }
-                        row.map(row_to_raw).transpose().map_err(storage)
+                        let exists = if row.is_none() {
+                            sqlx::query_scalar::<_, bool>(
+                                "SELECT EXISTS (SELECT 1 FROM abac_policies WHERE tenant_id = $1::uuid AND id = $2 AND deleted_at IS NULL)",
+                            )
+                            .bind(&tenant_uuid)
+                            .bind(policy.id().as_str())
+                            .fetch_one(conn.conn())
+                            .await
+                            .map_err(storage)?
+                        } else {
+                            false
+                        };
+                        Ok((row.map(row_to_raw).transpose().map_err(storage)?, exists))
                     })
                 },
                 storage,
@@ -620,13 +643,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         match raw {
             Some(raw) => hydrate_policy(tenant, raw),
             None => {
-                if (PgPolicyRepo {
-                    pool: self.pool.clone(),
-                })
-                .find(tenant_scope, id)
-                .await?
-                .is_some()
-                {
+                if exists {
                     Err(IdentityError::VersionConflict)
                 } else {
                     Err(IdentityError::PolicyNotFound)
@@ -652,7 +669,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         let id_str = id.as_str().to_string();
         let expected_version = version_param(expected)?;
         let projection_registry = self.pool.projection_registry();
-        let deleted = self
+        let (deleted, exists) = self
             .pool
             .write(
                 tenant_scope,
@@ -687,7 +704,19 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                             .await
                             .map_err(append_storage)?;
                         }
-                        Ok(rows)
+                        let exists = if rows == 0 {
+                            sqlx::query_scalar::<_, bool>(
+                                "SELECT EXISTS (SELECT 1 FROM abac_policies WHERE tenant_id = $1::uuid AND id = $2 AND deleted_at IS NULL)",
+                            )
+                            .bind(&tenant_uuid)
+                            .bind(&id_str)
+                            .fetch_one(conn.conn())
+                            .await
+                            .map_err(storage)?
+                        } else {
+                            false
+                        };
+                        Ok((rows, exists))
                     })
                 },
                 storage,
@@ -696,13 +725,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         if deleted > 0 {
             return Ok(true);
         }
-        if (PgPolicyRepo {
-            pool: self.pool.clone(),
-        })
-        .find(tenant_scope, id)
-        .await?
-        .is_some()
-        {
+        if exists {
             Err(IdentityError::VersionConflict)
         } else {
             Ok(false)

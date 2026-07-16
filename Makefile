@@ -22,7 +22,7 @@
 # CI 架构与运维状态见 docs/ops/202606231530-001-ci-lane.md；精确门集与缺工具策略见
 # xtask/src/verify.rs。
 
-.PHONY: verify verify-fast verify-hooks ci ci-full cargo-selftest audit docker-build docker-smoke
+.PHONY: verify verify-fast verify-hooks ci ci-full cargo-selftest audit docker-build docker-smoke postgres-reader-upgrade-smoke
 
 RSS_CARGO ?= ./hack/cargo.sh
 CI_BASE ?= origin/develop
@@ -53,3 +53,6 @@ docker-build:
 
 docker-smoke:
 	./deploy/smoke.sh
+
+postgres-reader-upgrade-smoke:
+	./deploy/postgres-upgrade/smoke-retained-volume.sh

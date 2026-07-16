@@ -10,23 +10,75 @@
 use diport::{
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, EnvelopeMetadata, KEY_TENANT_AUTHORITY,
 };
+use futures::future::BoxFuture;
 
+#[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantPool, infra_tenant_scope};
+use crate::cotx::{
+    InfraTenantScope, PgMaintenanceWritePool, PgTenantWritePool, TxCapability, infra_tenant_scope,
+};
 use crate::dead_letter_payload::{
     DLX_REPLAY_CAPSULE_ENCODING, DlxPayloadContext, DlxPayloadProtector,
 };
+use crate::pool::{VerifiedPgMaintenanceStore, VerifiedPgWriteStore};
 
 /// Tenant-scoped HOT dead-letter writer.
 pub struct PgDeadLetterStore {
-    tenant_pool: PgTenantPool,
+    lane: DeadLetterLane,
     payload_protector: DlxPayloadProtector,
 }
 
+enum DeadLetterLane {
+    Serving(PgTenantWritePool),
+    Maintenance(PgMaintenanceWritePool),
+}
+
+impl DeadLetterLane {
+    async fn write<T, F, E>(
+        &self,
+        scope: InfraTenantScope,
+        write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> Result<T, E>
+    where
+        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        T: Send,
+    {
+        match self {
+            Self::Serving(pool) => pool.write(scope, write, map_storage).await,
+            Self::Maintenance(pool) => pool.write(scope, write, map_storage).await,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
 impl PgStore {
     pub(crate) fn dead_letter(&self, payload_protector: DlxPayloadProtector) -> PgDeadLetterStore {
         PgDeadLetterStore {
-            tenant_pool: PgTenantPool::new(self),
+            lane: DeadLetterLane::Serving(PgTenantWritePool::from_unverified_for_test(self)),
+            payload_protector,
+        }
+    }
+}
+
+impl PgDeadLetterStore {
+    pub(crate) fn new(
+        writer: &VerifiedPgWriteStore,
+        payload_protector: DlxPayloadProtector,
+    ) -> Self {
+        Self {
+            lane: DeadLetterLane::Serving(PgTenantWritePool::new(writer)),
+            payload_protector,
+        }
+    }
+
+    pub(crate) fn new_maintenance(
+        store: &VerifiedPgMaintenanceStore,
+        payload_protector: DlxPayloadProtector,
+    ) -> Self {
+        Self {
+            lane: DeadLetterLane::Maintenance(PgMaintenanceWritePool::new_maintenance(store)),
             payload_protector,
         }
     }
@@ -58,7 +110,7 @@ impl DeadLetterStore for PgDeadLetterStore {
             .await
             .map_err(DeadLetterStoreError::new)?;
 
-        self.tenant_pool
+        self.lane
             .write(
                 infra_tenant_scope(record.tenant()),
                 move |conn| {

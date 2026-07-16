@@ -1,10 +1,16 @@
 //! `pg-tenant-tx-guard` —— Postgres tenant-table raw-pool / TxManager bypass guard.
 //!
-//! INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_core_file_exception_does_not_mask_raw_tenant_access", anti_vacuity = "tests::green_scoped_tenant_and_global_tables_pass" } —
+//! INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_core_file_exception_does_not_mask_raw_tenant_access", anti_vacuity = "tests::green_distinct_read_and_write_lanes_accept_their_owned_sql" } —
 //! tenant-table production paths must go through
-//! `PgTenantPool::{read,write,co_tx_with_outbox}` or the lower-level `cotx` funnel. Raw
-//! `sqlx::PgPool` / direct connection / global transaction paths are allowed only for explicitly
-//! named global infrastructure or maintenance exceptions.
+//! `PgTenantReadPool::{read,read_map}` for independent reads or `PgTenantWritePool` for mutation
+//! transactions. Raw `sqlx::PgPool` / `PgStore` / direct connection / global transaction paths are
+//! allowed only for explicitly named global infrastructure or maintenance exceptions.
+//!
+//! INVARIANT: TENANCY-PG-READ-LANE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_tenant_lane_crossovers_are_rejected", anti_vacuity = "tests::anti_vacuity_missing_typed_read_and_write_lane_sites_is_reported" } —
+//! the removed mixed `PgTenantPool` must have zero production occurrences; read helpers exist only
+//! on the typed reader lane, while write/deadline/retry/co-tx helpers exist only on the typed writer
+//! lane. SELECT statements inside a writer transaction remain valid because the enclosing typed
+//! write capability owns that transaction.
 //!
 //! This guard is a Medium backstop for the Hard typed wrapper in `adapters/postgres/src/cotx/`
 //! and the canonical fact funnels in `outbox.rs` / `outbox_cdc.rs`.
@@ -36,6 +42,7 @@
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use syn::spanned::Spanned as _;
 
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use crate::dlx_lifecycle_funnel::FIXED_FUNCTIONS as DLX_FIXED_FUNCTIONS;
@@ -46,6 +53,10 @@ pub(crate) type Finding = diagnostic::Finding<Rule>;
 pub(crate) enum Rule {
     RawTenantTableAccess,
     RawTenantPoolField,
+    /// Removed mixed pool, typed lane crossover, or another read/write capability mismatch.
+    TenantLaneViolation,
+    /// Exact typed reader/writer production sites are missing (anti-vacuity).
+    TenantLaneSitesAbsent,
     RawOutboxInsert,
     OutboxAppendBypass,
     TxCapabilityMintOutsideFunnel,
@@ -345,10 +356,38 @@ pub(crate) fn scan_guard(
     }
 
     let mut state = ScanState::default();
+    let writer_sql_helpers = workspace_writer_sql_helpers(files);
     findings.extend(fault_matrix_exception_staleness(files));
 
     for (rel, content) in files {
-        findings.extend(scan_source_file(rel, content, &tenant_tables, &mut state));
+        findings.extend(scan_source_file(
+            rel,
+            content,
+            &tenant_tables,
+            writer_sql_helpers.get(rel),
+            &mut state,
+        ));
+    }
+
+    for (sites, required, detail) in [
+        (
+            state.tenant_read_lane_sites,
+            "PgTenantReadPool::read",
+            "typed reader lane has no production read/read_map site",
+        ),
+        (
+            state.tenant_write_lane_sites,
+            "PgTenantWritePool::write",
+            "typed writer lane has no production write/deadline/retry/co-tx site",
+        ),
+    ] {
+        if sites == 0 {
+            findings.push(finding(
+                Rule::TenantLaneSitesAbsent,
+                required,
+                format!("{detail}; required capability {required} disappeared"),
+            ));
+        }
     }
 
     for expected in [
@@ -396,10 +435,12 @@ pub(crate) fn scan_guard(
     ));
 
     let summary = format!(
-        "{} tenant 表；{} 个生产文件；{} 个 tenant SQL 文件；{} 个 raw pattern",
+        "{} tenant 表；{} 个生产文件；{} 个 tenant SQL 文件；{} reader lane sites；{} writer lane sites；{} 个 raw pattern",
         tenant_tables.len(),
         files.len(),
         state.tenant_sql_sites,
+        state.tenant_read_lane_sites,
+        state.tenant_write_lane_sites,
         state.raw_sites
     );
     (summary, findings)
@@ -470,6 +511,8 @@ fn required_secret_ref_site_findings(
 struct ScanState {
     tenant_sql_sites: usize,
     raw_sites: usize,
+    tenant_read_lane_sites: usize,
+    tenant_write_lane_sites: usize,
     allowed_exceptions: BTreeSet<&'static str>,
     retry_sites: BTreeSet<&'static str>,
     outbox_insert_sites: BTreeMap<&'static str, usize>,
@@ -480,11 +523,16 @@ fn scan_source_file(
     rel: &str,
     content: &str,
     tenant_tables: &BTreeSet<String>,
+    writer_sql_helpers: Option<&BTreeMap<String, WriterSqlAssessment>>,
     state: &mut ScanState,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let stripped = strip_rust_comment_lines(&strip_cfg_test_modules(content));
     let expanded = expand_simple_table_consts(&stripped).to_lowercase();
+    let lane_scan = tenant_lane_scan(rel, &stripped, writer_sql_helpers);
+    state.tenant_read_lane_sites += lane_scan.read_sites;
+    state.tenant_write_lane_sites += lane_scan.write_sites;
+    findings.extend(lane_scan.findings);
     findings.extend(retry_placement_findings(
         rel,
         &stripped,
@@ -509,7 +557,7 @@ fn scan_source_file(
     for site in outbox_insert_sites {
         *state.outbox_insert_sites.entry(site).or_default() += 1;
     }
-    let raw_pool_field_hits = raw_tenant_pool_fields(&expanded);
+    let raw_pool_field_hits = raw_tenant_pool_fields(&stripped);
     let raw_pool_field_exception = raw_pool_field_exception(rel, &expanded);
     note_raw_pool_field_exception(
         &mut state.allowed_exceptions,
@@ -534,7 +582,7 @@ fn scan_source_file(
             Rule::OutboxAppendBypass,
             site_subject(rel, hit.line),
             format!(
-                "outbox producer opens a raw transaction near {:?}; use PgTenantPool write/co-tx funnel",
+                "outbox producer opens a raw transaction near {:?}; use PgTenantWritePool write/co-tx funnel",
                 hit.pattern
             ),
         )
@@ -557,7 +605,7 @@ fn scan_source_file(
             Rule::RawTenantTableAccess,
             site_subject(rel, hit.line),
             format!(
-                "tenant tables {:?} touched through raw pattern {:?}; use PgTenantPool scoped methods",
+                "tenant tables {:?} touched through raw pattern {:?}; use PgTenantReadPool/PgTenantWritePool scoped methods",
                 hit.tables, hit.pattern
             ),
         )
@@ -2133,7 +2181,8 @@ fn is_self_pool(expr: &syn::Expr) -> bool {
     let syn::Member::Named(member) = &pool.member else {
         return false;
     };
-    member == "pool" && exact_expr_path(&pool.base).as_deref() == Some("self")
+    (member == "pool" || member == "write_pool")
+        && exact_expr_path(&pool.base).as_deref() == Some("self")
 }
 
 fn tenant_tables_from_migrations(files: &[(String, String)]) -> BTreeSet<String> {
@@ -2194,6 +2243,1749 @@ fn tenant_table_hits(content: &str, tenant_tables: &BTreeSet<String>) -> Vec<Str
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TenantLane {
+    Read,
+    Write,
+}
+
+impl TenantLane {
+    fn type_name(self) -> &'static str {
+        match self {
+            Self::Read => "PgTenantReadPool",
+            Self::Write => "PgTenantWritePool",
+        }
+    }
+}
+
+#[derive(Default)]
+struct TenantLaneScan {
+    read_sites: usize,
+    write_sites: usize,
+    findings: Vec<Finding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TenantLaneCall {
+    line: usize,
+    lane: TenantLane,
+    field: String,
+    method: String,
+    direct_select_only: bool,
+    unclassified_writer_sql: bool,
+}
+
+fn tenant_lane_scan(
+    rel: &str,
+    content: &str,
+    workspace_helpers: Option<&BTreeMap<String, WriterSqlAssessment>>,
+) -> TenantLaneScan {
+    let mut scan = TenantLaneScan::default();
+    for (removed, replacement) in [
+        ("PgTenantPool", "PgTenantReadPool/PgTenantWritePool"),
+        ("PgTenantReadStoreSource", "VerifiedPgReadStore"),
+        ("PgTenantWriteStoreSource", "VerifiedPgWriteStore"),
+    ] {
+        for (idx, _) in content.match_indices(removed) {
+            scan.findings.push(finding(
+                Rule::TenantLaneViolation,
+                site_subject(rel, line_number(content, idx)),
+                format!("removed {removed} is forbidden; use {replacement}"),
+            ));
+        }
+    }
+
+    let Ok(syntax) = syn::parse_file(content) else {
+        return scan;
+    };
+    let structs = tenant_lane_struct_fields(&syntax);
+    let sqlx_query_aliases = sqlx_query_aliases(&syntax);
+    let sql_string_constants = sql_string_constants(&syntax);
+    let local_writer_sql_helpers;
+    let writer_sql_helpers = if let Some(helpers) = workspace_helpers {
+        helpers
+    } else {
+        local_writer_sql_helpers = writer_sql_helper_assessments(
+            &syntax,
+            &sqlx_query_aliases,
+            &sql_string_constants,
+            &BTreeMap::new(),
+        );
+        &local_writer_sql_helpers
+    };
+    let mut calls = BTreeSet::new();
+    let empty_fields = BTreeMap::new();
+
+    for item in &syntax.items {
+        let syn::Item::Impl(item_impl) = item else {
+            continue;
+        };
+        let Some(owner) = type_last_ident(&item_impl.self_ty) else {
+            continue;
+        };
+        let fields = structs.get(&owner).unwrap_or(&empty_fields);
+        let mut visitor = TenantLaneCallVisitor {
+            fields,
+            owner: Some(&owner),
+            skip_impls: false,
+            parameter_bindings: BTreeMap::new(),
+            capability_callables: BTreeSet::new(),
+            sqlx_query_aliases: &sqlx_query_aliases,
+            sql_string_constants: &sql_string_constants,
+            writer_sql_helpers,
+            calls: &mut calls,
+        };
+        syn::visit::Visit::visit_item_impl(&mut visitor, item_impl);
+    }
+
+    // Synthetic fixtures and constructor helpers may contain `self.<field>` outside an impl item.
+    // Only use a global fallback when a field name maps to exactly one lane across the file, so two
+    // repository structs both named `pool` cannot contaminate each other's method ownership.
+    let mut candidates: BTreeMap<String, BTreeSet<TenantLane>> = BTreeMap::new();
+    for fields in structs.values() {
+        for (field, lane) in fields {
+            candidates.entry(field.clone()).or_default().insert(*lane);
+        }
+    }
+    let unique_fields = candidates
+        .into_iter()
+        .filter_map(|(field, lanes)| {
+            if lanes.len() != 1 {
+                return None;
+            }
+            lanes.into_iter().next().map(|lane| (field, lane))
+        })
+        .collect();
+    let mut visitor = TenantLaneCallVisitor {
+        fields: &unique_fields,
+        owner: None,
+        skip_impls: true,
+        parameter_bindings: BTreeMap::new(),
+        capability_callables: BTreeSet::new(),
+        sqlx_query_aliases: &sqlx_query_aliases,
+        sql_string_constants: &sql_string_constants,
+        writer_sql_helpers,
+        calls: &mut calls,
+    };
+    syn::visit::Visit::visit_file(&mut visitor, &syntax);
+
+    for call in calls {
+        let is_read = matches!(call.method.as_str(), "read" | "read_map");
+        let is_write = matches!(
+            call.method.as_str(),
+            "write"
+                | "deadline_write"
+                | "lock_bounded_write"
+                | "retry_write"
+                | "co_tx_with_outbox"
+                | "retry_co_tx_with_outbox"
+        );
+        scan.read_sites += usize::from(call.lane == TenantLane::Read && is_read);
+        scan.write_sites += usize::from(call.lane == TenantLane::Write && is_write);
+
+        if (call.lane == TenantLane::Read && is_write)
+            || (call.lane == TenantLane::Write && is_read)
+        {
+            let api = format!("{}::{}", call.lane.type_name(), call.method);
+            scan.findings.push(finding(
+                Rule::TenantLaneViolation,
+                site_subject(rel, call.line),
+                format!("{api} is forbidden by the typed tenant read/write lane boundary"),
+            ));
+        }
+        if call.lane == TenantLane::Write && is_write && call.direct_select_only {
+            scan.findings.push(finding(
+                Rule::TenantLaneViolation,
+                site_subject(rel, call.line),
+                "SELECT-only writer transaction is forbidden; independent tenant reads must use PgTenantReadPool and writer SELECTs require mutation/lock/co-tx evidence",
+            ));
+        }
+        if call.lane == TenantLane::Write && is_write && call.unclassified_writer_sql {
+            scan.findings.push(finding(
+                Rule::TenantLaneViolation,
+                site_subject(rel, call.line),
+                "writer transaction contains dynamic, indirect, multi-statement, or otherwise unclassified SQL; writer SQL must provide statically verified mutation/lock/co-tx evidence",
+            ));
+        }
+    }
+    scan
+}
+
+fn tenant_lane_struct_fields(syntax: &syn::File) -> BTreeMap<String, BTreeMap<String, TenantLane>> {
+    let mut structs = BTreeMap::new();
+    for item in &syntax.items {
+        let syn::Item::Struct(item_struct) = item else {
+            continue;
+        };
+        let mut fields = BTreeMap::new();
+        for field in &item_struct.fields {
+            let (Some(name), Some(lane)) = (&field.ident, tenant_lane_type(&field.ty)) else {
+                continue;
+            };
+            fields.insert(name.to_string(), lane);
+        }
+        if !fields.is_empty() {
+            structs.insert(item_struct.ident.to_string(), fields);
+        }
+    }
+    structs
+}
+
+fn tenant_lane_type(ty: &syn::Type) -> Option<TenantLane> {
+    match type_last_ident(ty).as_deref() {
+        Some("PgTenantReadPool") => Some(TenantLane::Read),
+        Some("PgTenantWritePool") => Some(TenantLane::Write),
+        _ => nested_type(ty).and_then(tenant_lane_type),
+    }
+}
+
+fn type_last_ident(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string()),
+        syn::Type::Reference(reference) => type_last_ident(&reference.elem),
+        syn::Type::Paren(paren) => type_last_ident(&paren.elem),
+        syn::Type::Group(group) => type_last_ident(&group.elem),
+        _ => None,
+    }
+}
+
+fn nested_type(ty: &syn::Type) -> Option<&syn::Type> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    arguments.args.iter().find_map(|argument| match argument {
+        syn::GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    })
+}
+
+fn tenant_lane_parameter_bindings(signature: &syn::Signature) -> BTreeMap<String, TenantLane> {
+    let mut bindings = BTreeMap::new();
+    for input in &signature.inputs {
+        let syn::FnArg::Typed(typed) = input else {
+            continue;
+        };
+        collect_tenant_lane_pattern_bindings(&typed.pat, &typed.ty, &mut bindings);
+    }
+    bindings
+}
+
+fn collect_tenant_lane_pattern_bindings(
+    pattern: &syn::Pat,
+    ty: &syn::Type,
+    bindings: &mut BTreeMap<String, TenantLane>,
+) {
+    match pattern {
+        syn::Pat::Ident(ident) => {
+            if let Some(lane) = tenant_lane_type(ty) {
+                bindings.insert(ident.ident.to_string(), lane);
+            }
+            if let Some((_, subpattern)) = &ident.subpat {
+                collect_tenant_lane_pattern_bindings(subpattern, ty, bindings);
+            }
+        }
+        syn::Pat::Reference(reference) => {
+            let inner = match ty {
+                syn::Type::Reference(reference) => reference.elem.as_ref(),
+                _ => ty,
+            };
+            collect_tenant_lane_pattern_bindings(&reference.pat, inner, bindings);
+        }
+        syn::Pat::Paren(paren) => {
+            let inner = match ty {
+                syn::Type::Paren(paren) => paren.elem.as_ref(),
+                syn::Type::Group(group) => group.elem.as_ref(),
+                _ => ty,
+            };
+            collect_tenant_lane_pattern_bindings(&paren.pat, inner, bindings);
+        }
+        syn::Pat::Type(typed) => {
+            collect_tenant_lane_pattern_bindings(&typed.pat, &typed.ty, bindings);
+        }
+        syn::Pat::Tuple(tuple) => {
+            if let syn::Type::Tuple(types) = ty {
+                for (element, element_ty) in tuple.elems.iter().zip(&types.elems) {
+                    collect_tenant_lane_pattern_bindings(element, element_ty, bindings);
+                }
+            }
+        }
+        syn::Pat::TupleStruct(tuple) => {
+            if let Some(types) = nested_type_arguments(ty)
+                && types.len() == tuple.elems.len()
+            {
+                for (element, element_ty) in tuple.elems.iter().zip(types) {
+                    collect_tenant_lane_pattern_bindings(element, element_ty, bindings);
+                }
+            }
+        }
+        syn::Pat::Slice(slice) => {
+            let element_ty = match ty {
+                syn::Type::Array(array) => Some(array.elem.as_ref()),
+                syn::Type::Slice(slice) => Some(slice.elem.as_ref()),
+                _ => None,
+            };
+            if let Some(element_ty) = element_ty {
+                for element in &slice.elems {
+                    collect_tenant_lane_pattern_bindings(element, element_ty, bindings);
+                }
+            }
+        }
+        syn::Pat::Or(or) => {
+            for case in &or.cases {
+                collect_tenant_lane_pattern_bindings(case, ty, bindings);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn nested_type_arguments(ty: &syn::Type) -> Option<Vec<&syn::Type>> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    Some(
+        arguments
+            .args
+            .iter()
+            .filter_map(|argument| match argument {
+                syn::GenericArgument::Type(ty) => Some(ty),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+fn tenant_lane_parameter_receiver(expr: &syn::Expr) -> Option<String> {
+    match transparent_expr(expr) {
+        syn::Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => path
+            .path
+            .segments
+            .first()
+            .map(|segment| segment.ident.to_string()),
+        syn::Expr::Reference(reference) => tenant_lane_parameter_receiver(&reference.expr),
+        syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+            tenant_lane_parameter_receiver(&unary.expr)
+        }
+        _ => None,
+    }
+}
+
+struct TenantLaneCallVisitor<'a> {
+    fields: &'a BTreeMap<String, TenantLane>,
+    owner: Option<&'a str>,
+    skip_impls: bool,
+    parameter_bindings: BTreeMap<String, TenantLane>,
+    capability_callables: BTreeSet<String>,
+    sqlx_query_aliases: &'a BTreeSet<String>,
+    sql_string_constants: &'a BTreeMap<String, String>,
+    writer_sql_helpers: &'a BTreeMap<String, WriterSqlAssessment>,
+    calls: &'a mut BTreeSet<TenantLaneCall>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for TenantLaneCallVisitor<'_> {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let receiver = self_field_name(&node.receiver)
+            .and_then(|field| self.fields.get(&field).copied().map(|lane| (field, lane)))
+            .or_else(|| {
+                tenant_lane_parameter_receiver(&node.receiver).and_then(|binding| {
+                    self.parameter_bindings
+                        .get(&binding)
+                        .copied()
+                        .map(|lane| (binding, lane))
+                })
+            });
+        if let Some((field, lane)) = receiver {
+            let (direct_select_only, unclassified_writer_sql) = writer_call_sql_assessment(
+                node,
+                self.owner,
+                &self.capability_callables,
+                self.sqlx_query_aliases,
+                self.sql_string_constants,
+                self.writer_sql_helpers,
+            );
+            self.calls.insert(TenantLaneCall {
+                line: node.method.span().start().line,
+                lane,
+                field,
+                method: node.method.to_string(),
+                direct_select_only,
+                unclassified_writer_sql,
+            });
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if !self.skip_impls {
+            syn::visit::visit_item_impl(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+        let previous_parameters = std::mem::replace(
+            &mut self.parameter_bindings,
+            tenant_lane_parameter_bindings(&function.sig),
+        );
+        let previous_callables = std::mem::replace(
+            &mut self.capability_callables,
+            capability_callback_bindings(&function.sig),
+        );
+        syn::visit::visit_impl_item_fn(self, function);
+        self.capability_callables = previous_callables;
+        self.parameter_bindings = previous_parameters;
+    }
+
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        let previous_parameters = std::mem::replace(
+            &mut self.parameter_bindings,
+            tenant_lane_parameter_bindings(&function.sig),
+        );
+        let previous_callables = std::mem::replace(
+            &mut self.capability_callables,
+            capability_callback_bindings(&function.sig),
+        );
+        syn::visit::visit_item_fn(self, function);
+        self.capability_callables = previous_callables;
+        self.parameter_bindings = previous_parameters;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SqlQuerySite {
+    line: usize,
+    column: usize,
+    sql: Option<String>,
+}
+
+struct WriterSqlEvidenceVisitor<'a> {
+    aliases: &'a BTreeSet<String>,
+    constants: &'a BTreeMap<String, String>,
+    capability_bindings: BTreeSet<String>,
+    capability_callables: BTreeSet<String>,
+    call_owner: Option<String>,
+    call_module: Option<String>,
+    queries: BTreeSet<SqlQuerySite>,
+    executed: BTreeSet<SqlQuerySite>,
+    helper_calls: BTreeSet<String>,
+    executed_helper_calls: BTreeSet<String>,
+    capability_helper_calls: BTreeSet<String>,
+    unresolved_capability_call: bool,
+    unclassified_sql_provenance: bool,
+    conditional_depth: usize,
+    awaited_execution_depth: usize,
+}
+
+impl<'a> WriterSqlEvidenceVisitor<'a> {
+    fn new(
+        aliases: &'a BTreeSet<String>,
+        constants: &'a BTreeMap<String, String>,
+        capability_bindings: BTreeSet<String>,
+        capability_callables: BTreeSet<String>,
+        call_owner: Option<String>,
+        call_module: Option<String>,
+    ) -> Self {
+        Self {
+            aliases,
+            constants,
+            capability_bindings,
+            capability_callables,
+            call_owner,
+            call_module,
+            queries: BTreeSet::new(),
+            executed: BTreeSet::new(),
+            helper_calls: BTreeSet::new(),
+            executed_helper_calls: BTreeSet::new(),
+            capability_helper_calls: BTreeSet::new(),
+            unresolved_capability_call: false,
+            unclassified_sql_provenance: false,
+            conditional_depth: 0,
+            awaited_execution_depth: 0,
+        }
+    }
+
+    fn in_conditional_scope(&mut self, visit: impl FnOnce(&mut Self)) {
+        self.conditional_depth += 1;
+        visit(self);
+        self.conditional_depth -= 1;
+    }
+
+    fn expression_is_capability_value(&self, expression: &syn::Expr) -> bool {
+        expression_is_capability_value(expression, &self.capability_bindings)
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for WriterSqlEvidenceVisitor<'_> {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let Some(site) = sqlx_query_call_site(call, self.aliases, self.constants) {
+            self.queries.insert(site);
+        } else if let syn::Expr::Path(function) = call.func.as_ref()
+            && let Some(name) = function.path.segments.last()
+        {
+            let name = name.ident.to_string();
+            let passes_capability = call
+                .args
+                .iter()
+                .any(|argument| self.expression_is_capability_value(argument));
+            let is_typed_capability_callback = self.capability_callables.contains(&name);
+            if let Some(callable) = callable_identity(
+                &function.path,
+                self.call_owner.as_deref(),
+                self.call_module.as_deref(),
+            ) {
+                self.helper_calls.insert(callable.clone());
+                if self.conditional_depth == 0 && self.awaited_execution_depth > 0 {
+                    self.executed_helper_calls.insert(callable.clone());
+                }
+                if passes_capability && !is_typed_capability_callback {
+                    self.capability_helper_calls.insert(callable);
+                }
+            } else if passes_capability && !is_typed_capability_callback {
+                self.unresolved_capability_call = true;
+            }
+            if sqlx_query_name(&name) && function.path.segments.len() > 1 {
+                self.unclassified_sql_provenance = true;
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_macro(&mut self, expression: &'ast syn::ExprMacro) {
+        if let Some(site) = sqlx_query_macro_site(expression, self.aliases, self.constants) {
+            self.queries.insert(site);
+        }
+        syn::visit::visit_expr_macro(self, expression);
+    }
+
+    fn visit_expr_method_call(&mut self, method: &'ast syn::ExprMethodCall) {
+        if matches!(
+            method.method.to_string().as_str(),
+            "execute" | "fetch" | "fetch_all" | "fetch_one" | "fetch_optional" | "fetch_many"
+        ) && let Some(site) =
+            sqlx_query_site_in_receiver(&method.receiver, self.aliases, self.constants)
+        {
+            if self.conditional_depth == 0 && self.awaited_execution_depth > 0 {
+                self.executed.insert(site);
+            }
+        } else if let Some(owner) = self.call_owner.as_deref()
+            && expression_is_self(&method.receiver)
+        {
+            let callable = format!("{owner}::{}", method.method);
+            self.helper_calls.insert(callable.clone());
+            if self.conditional_depth == 0 && self.awaited_execution_depth > 0 {
+                self.executed_helper_calls.insert(callable.clone());
+            }
+            if method
+                .args
+                .iter()
+                .any(|argument| self.expression_is_capability_value(argument))
+            {
+                self.capability_helper_calls.insert(callable);
+            }
+        } else if !matches!(
+            method.method.to_string().as_str(),
+            "execute"
+                | "fetch"
+                | "fetch_all"
+                | "fetch_one"
+                | "fetch_optional"
+                | "fetch_many"
+                | "conn"
+        ) && (self.expression_is_capability_value(&method.receiver)
+            || method
+                .args
+                .iter()
+                .any(|argument| self.expression_is_capability_value(argument)))
+        {
+            self.unresolved_capability_call = true;
+        }
+        syn::visit::visit_expr_method_call(self, method);
+    }
+
+    fn visit_stmt(&mut self, statement: &'ast syn::Stmt) {
+        let test_only = match statement {
+            syn::Stmt::Local(local) => attributes_are_test_only(&local.attrs),
+            syn::Stmt::Macro(statement_macro) => attributes_are_test_only(&statement_macro.attrs),
+            syn::Stmt::Expr(syn::Expr::If(expression), _) => {
+                attributes_are_test_only(&expression.attrs)
+            }
+            _ => false,
+        };
+        if !test_only {
+            syn::visit::visit_stmt(self, statement);
+        }
+    }
+
+    fn visit_expr_await(&mut self, expression: &'ast syn::ExprAwait) {
+        if let syn::Expr::Async(async_expression) = expression.base.as_ref() {
+            syn::visit::Visit::visit_block(self, &async_expression.block);
+            return;
+        }
+        self.awaited_execution_depth += 1;
+        syn::visit::Visit::visit_expr(self, &expression.base);
+        self.awaited_execution_depth -= 1;
+    }
+
+    fn visit_expr_async(&mut self, expression: &'ast syn::ExprAsync) {
+        self.in_conditional_scope(|visitor| {
+            syn::visit::Visit::visit_block(visitor, &expression.block);
+        });
+    }
+
+    fn visit_expr_if(&mut self, expression: &'ast syn::ExprIf) {
+        if attributes_are_test_only(&expression.attrs) {
+            return;
+        }
+        syn::visit::Visit::visit_expr(self, &expression.cond);
+        self.in_conditional_scope(|visitor| {
+            syn::visit::Visit::visit_block(visitor, &expression.then_branch);
+            if let Some((_, otherwise)) = &expression.else_branch {
+                syn::visit::Visit::visit_expr(visitor, otherwise);
+            }
+        });
+    }
+
+    fn visit_expr_match(&mut self, expression: &'ast syn::ExprMatch) {
+        syn::visit::Visit::visit_expr(self, &expression.expr);
+        self.in_conditional_scope(|visitor| {
+            for arm in &expression.arms {
+                if let Some((_, guard)) = &arm.guard {
+                    syn::visit::Visit::visit_expr(visitor, guard);
+                }
+                syn::visit::Visit::visit_expr(visitor, &arm.body);
+            }
+        });
+    }
+
+    fn visit_expr_loop(&mut self, expression: &'ast syn::ExprLoop) {
+        self.in_conditional_scope(|visitor| {
+            syn::visit::Visit::visit_block(visitor, &expression.body);
+        });
+    }
+
+    fn visit_expr_while(&mut self, expression: &'ast syn::ExprWhile) {
+        syn::visit::Visit::visit_expr(self, &expression.cond);
+        self.in_conditional_scope(|visitor| {
+            syn::visit::Visit::visit_block(visitor, &expression.body);
+        });
+    }
+
+    fn visit_expr_for_loop(&mut self, expression: &'ast syn::ExprForLoop) {
+        syn::visit::Visit::visit_expr(self, &expression.expr);
+        self.in_conditional_scope(|visitor| {
+            syn::visit::Visit::visit_block(visitor, &expression.body);
+        });
+    }
+}
+
+fn writer_call_sql_assessment(
+    node: &syn::ExprMethodCall,
+    owner: Option<&str>,
+    capability_callables: &BTreeSet<String>,
+    aliases: &BTreeSet<String>,
+    constants: &BTreeMap<String, String>,
+    helpers: &BTreeMap<String, WriterSqlAssessment>,
+) -> (bool, bool) {
+    if matches!(
+        node.method.to_string().as_str(),
+        "co_tx_with_outbox" | "retry_co_tx_with_outbox"
+    ) {
+        return (false, false);
+    }
+    let mut evidence = WriterSqlEvidenceVisitor::new(
+        aliases,
+        constants,
+        BTreeSet::new(),
+        capability_callables.clone(),
+        owner.map(str::to_owned),
+        None,
+    );
+    for argument in &node.args {
+        if let Some((body, bindings)) = closure_body_and_bindings(argument) {
+            evidence.capability_bindings.extend(bindings);
+            visit_transaction_future_root(&mut evidence, body);
+        }
+    }
+    let mut assessment = writer_sql_evidence_assessment(&evidence);
+    for helper in &evidence.executed_helper_calls {
+        if let Some(helper_assessment) = helpers.get(helper) {
+            assessment.merge(*helper_assessment);
+        }
+    }
+    if evidence.unresolved_capability_call
+        || evidence.unclassified_sql_provenance
+        || evidence
+            .capability_helper_calls
+            .iter()
+            .any(|helper| !helpers.contains_key(helper))
+    {
+        assessment.unclassified = true;
+    }
+    (
+        assessment.has_plain_read && !assessment.has_write_or_lock,
+        assessment.unclassified,
+    )
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WriterSqlAssessment {
+    has_plain_read: bool,
+    has_write_or_lock: bool,
+    unclassified: bool,
+}
+
+impl WriterSqlAssessment {
+    fn merge(&mut self, other: Self) {
+        self.has_plain_read |= other.has_plain_read;
+        self.has_write_or_lock |= other.has_write_or_lock;
+        self.unclassified |= other.unclassified;
+    }
+}
+
+fn writer_sql_evidence_assessment(evidence: &WriterSqlEvidenceVisitor<'_>) -> WriterSqlAssessment {
+    let mut assessment = WriterSqlAssessment {
+        unclassified: evidence.unresolved_capability_call || evidence.unclassified_sql_provenance,
+        ..WriterSqlAssessment::default()
+    };
+    for query in &evidence.queries {
+        let Some(sql) = query.sql.as_deref() else {
+            assessment.unclassified = true;
+            continue;
+        };
+        match classify_writer_sql(sql) {
+            WriterSqlKind::PlainRead => assessment.has_plain_read = true,
+            WriterSqlKind::Mutation | WriterSqlKind::LockingRead => {
+                assessment.has_write_or_lock |= evidence.executed.contains(query);
+            }
+            WriterSqlKind::Unclassified => assessment.unclassified = true,
+        }
+    }
+    assessment
+}
+
+#[derive(Default)]
+struct WriterSqlHelperEvidence {
+    direct: WriterSqlAssessment,
+    calls: BTreeSet<String>,
+    capability_calls: BTreeSet<String>,
+}
+
+fn writer_sql_helper_assessments(
+    syntax: &syn::File,
+    aliases: &BTreeSet<String>,
+    constants: &BTreeMap<String, String>,
+    external: &BTreeMap<String, WriterSqlAssessment>,
+) -> BTreeMap<String, WriterSqlAssessment> {
+    fn record(
+        helpers: &mut BTreeMap<String, WriterSqlHelperEvidence>,
+        name: String,
+        block: &syn::Block,
+        signature: &syn::Signature,
+        identity_context: (Option<&str>, Option<&str>),
+        aliases: &BTreeSet<String>,
+        constants: &BTreeMap<String, String>,
+    ) {
+        let (owner, module) = identity_context;
+        let qualified_owner = owner.map(|owner| qualify_rust_identity(module, owner));
+        let mut visitor = WriterSqlEvidenceVisitor::new(
+            aliases,
+            constants,
+            signature_capability_bindings(signature),
+            capability_callback_bindings(signature),
+            qualified_owner.clone(),
+            module.map(str::to_owned),
+        );
+        syn::visit::Visit::visit_block(&mut visitor, block);
+        let identity = qualified_owner.map_or_else(
+            || qualify_rust_identity(module, &name),
+            |owner| format!("{owner}::{name}"),
+        );
+        let entry = helpers.entry(identity).or_default();
+        entry.direct.merge(writer_sql_evidence_assessment(&visitor));
+        entry.calls.extend(visitor.executed_helper_calls);
+        entry
+            .capability_calls
+            .extend(visitor.capability_helper_calls);
+    }
+
+    fn record_items(
+        helpers: &mut BTreeMap<String, WriterSqlHelperEvidence>,
+        items: &[syn::Item],
+        module: &mut Vec<String>,
+        aliases: &BTreeSet<String>,
+        constants: &BTreeMap<String, String>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Fn(function) => record(
+                    helpers,
+                    function.sig.ident.to_string(),
+                    &function.block,
+                    &function.sig,
+                    (
+                        None,
+                        (!module.is_empty()).then(|| module.join("::")).as_deref(),
+                    ),
+                    aliases,
+                    constants,
+                ),
+                syn::Item::Impl(item_impl) => {
+                    let Some(owner) = type_last_ident(&item_impl.self_ty) else {
+                        continue;
+                    };
+                    for item in &item_impl.items {
+                        if let syn::ImplItem::Fn(function) = item {
+                            record(
+                                helpers,
+                                function.sig.ident.to_string(),
+                                &function.block,
+                                &function.sig,
+                                (
+                                    Some(&owner),
+                                    (!module.is_empty()).then(|| module.join("::")).as_deref(),
+                                ),
+                                aliases,
+                                constants,
+                            );
+                        }
+                    }
+                }
+                syn::Item::Mod(item_module) => {
+                    if let Some((_, items)) = &item_module.content {
+                        let module_name = item_module.ident.to_string();
+                        module.push(module_name);
+                        record_items(helpers, items, module, aliases, constants);
+                        module.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut helpers = BTreeMap::new();
+    record_items(
+        &mut helpers,
+        &syntax.items,
+        &mut Vec::new(),
+        aliases,
+        constants,
+    );
+    let local_aliases = writer_sql_local_aliases(syntax, helpers.keys());
+
+    let helper_names = helpers
+        .keys()
+        .chain(external.keys())
+        .chain(local_aliases.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for helper in helpers.values_mut() {
+        if helper
+            .capability_calls
+            .iter()
+            .any(|callee| !helper_names.contains(callee))
+        {
+            helper.direct.unclassified = true;
+        }
+    }
+
+    let mut resolved = external.clone();
+    resolved.extend(
+        helpers
+            .iter()
+            .map(|(name, helper)| (name.clone(), helper.direct)),
+    );
+    for _ in 0..helpers.len() + local_aliases.len() {
+        let mut changed = false;
+        for (local, target) in &local_aliases {
+            if let Some(assessment) = resolved.get(target).copied()
+                && resolved.get(local) != Some(&assessment)
+            {
+                resolved.insert(local.clone(), assessment);
+                changed = true;
+            }
+        }
+        for (name, helper) in &helpers {
+            let mut next = helper.direct;
+            for callee in &helper.calls {
+                if let Some(assessment) = resolved.get(callee) {
+                    next.merge(*assessment);
+                }
+            }
+            if resolved.get(name) != Some(&next) {
+                resolved.insert(name.clone(), next);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    resolved
+}
+
+fn writer_sql_local_aliases<'a>(
+    syntax: &syn::File,
+    helper_names: impl Iterator<Item = &'a String>,
+) -> BTreeMap<String, String> {
+    fn collect(tree: &syn::UseTree, prefix: &mut Vec<String>, imports: &mut Vec<WriterSqlImport>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                collect(&path.tree, prefix, imports);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) => imports.push(WriterSqlImport {
+                module: prefix.join("::"),
+                item: name.ident.to_string(),
+                local: name.ident.to_string(),
+            }),
+            syn::UseTree::Rename(rename) => imports.push(WriterSqlImport {
+                module: prefix.join("::"),
+                item: rename.ident.to_string(),
+                local: rename.rename.to_string(),
+            }),
+            syn::UseTree::Group(group) => {
+                for tree in &group.items {
+                    collect(tree, prefix, imports);
+                }
+            }
+            syn::UseTree::Glob(_) => {}
+        }
+    }
+
+    let helper_names = helper_names.cloned().collect::<Vec<_>>();
+    let mut imports = Vec::new();
+    for item in &syntax.items {
+        if let syn::Item::Use(item_use) = item {
+            collect(&item_use.tree, &mut Vec::new(), &mut imports);
+        }
+    }
+    let mut aliases = BTreeMap::new();
+    for import in imports {
+        if matches!(
+            import.module.split("::").next(),
+            Some("crate" | "self" | "super")
+        ) {
+            continue;
+        }
+        let target = if import.module.is_empty() {
+            import.item
+        } else {
+            format!("{}::{}", import.module, import.item)
+        };
+        for helper in &helper_names {
+            if helper == &target {
+                aliases.insert(import.local.clone(), target.clone());
+            } else if let Some(suffix) = helper.strip_prefix(&format!("{target}::")) {
+                aliases.insert(format!("{}::{suffix}", import.local), helper.clone());
+            }
+        }
+    }
+    aliases
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WriterSqlImport {
+    module: String,
+    item: String,
+    local: String,
+}
+
+fn workspace_writer_sql_helpers(
+    files: &[(String, String)],
+) -> BTreeMap<String, BTreeMap<String, WriterSqlAssessment>> {
+    struct FileContext {
+        syntax: syn::File,
+        aliases: BTreeSet<String>,
+        constants: BTreeMap<String, String>,
+        imports: Vec<WriterSqlImport>,
+    }
+
+    let contexts = files
+        .iter()
+        .filter_map(|(rel, content)| {
+            let stripped = strip_rust_comment_lines(&strip_cfg_test_modules(content));
+            let syntax = syn::parse_file(&stripped).ok()?;
+            let aliases = sqlx_query_aliases(&syntax);
+            let constants = sql_string_constants(&syntax);
+            let imports = writer_sql_imports(&syntax);
+            Some((
+                rel.clone(),
+                FileContext {
+                    syntax,
+                    aliases,
+                    constants,
+                    imports,
+                },
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let modules = contexts
+        .keys()
+        .map(|rel| (rust_module_path(rel), rel.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut resolved: BTreeMap<String, BTreeMap<String, WriterSqlAssessment>> = BTreeMap::new();
+
+    for _ in 0..=contexts.len() {
+        let mut next = BTreeMap::new();
+        for (rel, context) in &contexts {
+            let mut external = BTreeMap::new();
+            for import in &context.imports {
+                let Some(target_rel) = modules.get(&import.module) else {
+                    continue;
+                };
+                let Some(targets) = resolved.get(target_rel) else {
+                    continue;
+                };
+                if let Some(assessment) = targets.get(&import.item) {
+                    external.insert(import.local.clone(), *assessment);
+                }
+                let prefix = format!("{}::", import.item);
+                for (target, assessment) in targets {
+                    if let Some(suffix) = target.strip_prefix(&prefix) {
+                        external.insert(format!("{}::{suffix}", import.local), *assessment);
+                    }
+                }
+            }
+            next.insert(
+                rel.clone(),
+                writer_sql_helper_assessments(
+                    &context.syntax,
+                    &context.aliases,
+                    &context.constants,
+                    &external,
+                ),
+            );
+        }
+        if next == resolved {
+            return next;
+        }
+        resolved = next;
+    }
+    resolved
+}
+
+fn rust_module_path(rel: &str) -> String {
+    let without_suffix = rel.strip_suffix(".rs").unwrap_or(rel);
+    without_suffix
+        .strip_suffix("/mod")
+        .unwrap_or(without_suffix)
+        .replace('/', "::")
+}
+
+fn writer_sql_imports(syntax: &syn::File) -> Vec<WriterSqlImport> {
+    fn collect(tree: &syn::UseTree, prefix: &mut Vec<String>, imports: &mut Vec<WriterSqlImport>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                collect(&path.tree, prefix, imports);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) => {
+                record_import(
+                    prefix,
+                    name.ident.to_string(),
+                    name.ident.to_string(),
+                    imports,
+                );
+            }
+            syn::UseTree::Rename(rename) => {
+                record_import(
+                    prefix,
+                    rename.ident.to_string(),
+                    rename.rename.to_string(),
+                    imports,
+                );
+            }
+            syn::UseTree::Group(group) => {
+                for tree in &group.items {
+                    collect(tree, prefix, imports);
+                }
+            }
+            syn::UseTree::Glob(_) => {}
+        }
+    }
+
+    fn record_import(
+        prefix: &[String],
+        item: String,
+        local: String,
+        imports: &mut Vec<WriterSqlImport>,
+    ) {
+        if prefix.first().is_none_or(|root| root != "crate") || prefix.len() < 2 {
+            return;
+        }
+        imports.push(WriterSqlImport {
+            module: prefix[1..].join("::"),
+            item,
+            local,
+        });
+    }
+
+    let mut imports = Vec::new();
+    for item in &syntax.items {
+        if let syn::Item::Use(item_use) = item {
+            collect(&item_use.tree, &mut Vec::new(), &mut imports);
+        }
+    }
+    imports
+}
+
+fn closure_body_and_bindings(expression: &syn::Expr) -> Option<(&syn::Expr, BTreeSet<String>)> {
+    match expression {
+        syn::Expr::Closure(closure) => {
+            let mut bindings = BTreeSet::new();
+            for input in &closure.inputs {
+                collect_pattern_bindings(input, &mut bindings);
+            }
+            Some((&closure.body, bindings))
+        }
+        syn::Expr::Paren(paren) => closure_body_and_bindings(&paren.expr),
+        syn::Expr::Group(group) => closure_body_and_bindings(&group.expr),
+        _ => None,
+    }
+}
+
+fn visit_transaction_future_root(
+    visitor: &mut WriterSqlEvidenceVisitor<'_>,
+    expression: &syn::Expr,
+) {
+    if let syn::Expr::Block(block) = expression {
+        if let Some((tail, prefix)) = block.block.stmts.split_last() {
+            for statement in prefix {
+                syn::visit::Visit::visit_stmt(visitor, statement);
+            }
+            if let syn::Stmt::Expr(tail, _) = tail {
+                visit_transaction_future_root(visitor, tail);
+            } else {
+                syn::visit::Visit::visit_stmt(visitor, tail);
+            }
+        }
+    } else if let syn::Expr::Cast(cast) = expression {
+        visit_transaction_future_root(visitor, &cast.expr);
+    } else if let syn::Expr::Paren(paren) = expression {
+        visit_transaction_future_root(visitor, &paren.expr);
+    } else if let syn::Expr::Group(group) = expression {
+        visit_transaction_future_root(visitor, &group.expr);
+    } else if let syn::Expr::Call(call) = expression
+        && matches!(call.func.as_ref(), syn::Expr::Path(path) if path.path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>() == ["Box", "pin"])
+        && let Some(future) = call.args.first()
+    {
+        visit_transaction_future_root(visitor, future);
+    } else if let syn::Expr::Async(async_expression) = expression {
+        syn::visit::Visit::visit_block(visitor, &async_expression.block);
+    } else {
+        syn::visit::Visit::visit_expr(visitor, expression);
+    }
+}
+
+fn attributes_are_test_only(attributes: &[syn::Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        attribute.path().is_ident("cfg") && compact_tokens(&attribute.meta).contains("test")
+    })
+}
+
+fn collect_pattern_bindings(pattern: &syn::Pat, bindings: &mut BTreeSet<String>) {
+    match pattern {
+        syn::Pat::Ident(ident) => {
+            bindings.insert(ident.ident.to_string());
+        }
+        syn::Pat::Type(typed) => collect_pattern_bindings(&typed.pat, bindings),
+        syn::Pat::Reference(reference) => collect_pattern_bindings(&reference.pat, bindings),
+        syn::Pat::Paren(paren) => collect_pattern_bindings(&paren.pat, bindings),
+        syn::Pat::Tuple(tuple) => {
+            for element in &tuple.elems {
+                collect_pattern_bindings(element, bindings);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn signature_capability_bindings(signature: &syn::Signature) -> BTreeSet<String> {
+    signature
+        .inputs
+        .iter()
+        .filter_map(|argument| {
+            let syn::FnArg::Typed(typed) = argument else {
+                return None;
+            };
+            if !is_postgres_transaction_capability_type(&typed.ty) {
+                return None;
+            }
+            let syn::Pat::Ident(ident) = typed.pat.as_ref() else {
+                return None;
+            };
+            Some(ident.ident.to_string())
+        })
+        .collect()
+}
+
+fn capability_callback_bindings(signature: &syn::Signature) -> BTreeSet<String> {
+    fn is_capability_callback_bound(
+        bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>,
+    ) -> bool {
+        bounds.iter().any(|bound| {
+            let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                return false;
+            };
+            trait_bound
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "FnOnce")
+                && compact_tokens(bound).contains("TxCapability")
+        })
+    }
+
+    let mut callback_types = signature
+        .generics
+        .params
+        .iter()
+        .filter_map(|parameter| {
+            let syn::GenericParam::Type(parameter) = parameter else {
+                return None;
+            };
+            is_capability_callback_bound(&parameter.bounds).then(|| parameter.ident.to_string())
+        })
+        .collect::<BTreeSet<_>>();
+    if let Some(where_clause) = &signature.generics.where_clause {
+        for predicate in &where_clause.predicates {
+            let syn::WherePredicate::Type(predicate) = predicate else {
+                continue;
+            };
+            let syn::Type::Path(bounded) = &predicate.bounded_ty else {
+                continue;
+            };
+            if bounded.path.segments.len() == 1
+                && is_capability_callback_bound(&predicate.bounds)
+                && let Some(segment) = bounded.path.segments.last()
+            {
+                callback_types.insert(segment.ident.to_string());
+            }
+        }
+    }
+
+    signature
+        .inputs
+        .iter()
+        .filter_map(|argument| {
+            let syn::FnArg::Typed(argument) = argument else {
+                return None;
+            };
+            let syn::Pat::Ident(binding) = argument.pat.as_ref() else {
+                return None;
+            };
+            let direct = compact_tokens(&argument.ty).contains("FnOnce")
+                && compact_tokens(&argument.ty).contains("TxCapability");
+            let generic = matches!(argument.ty.as_ref(), syn::Type::Path(path) if path.path.segments.len() == 1 && path.path.segments.last().is_some_and(|segment| callback_types.contains(&segment.ident.to_string())));
+            (direct || generic).then(|| binding.ident.to_string())
+        })
+        .collect()
+}
+
+fn is_postgres_transaction_capability_type(ty: &syn::Type) -> bool {
+    matches!(
+        type_last_ident(ty).as_deref(),
+        Some("PgConnection" | "Transaction" | "TxCapability" | "PgWriteTx")
+    )
+}
+
+fn expression_is_capability_value(expression: &syn::Expr, bindings: &BTreeSet<String>) -> bool {
+    match expression {
+        syn::Expr::Path(path) if path.path.segments.len() == 1 => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| bindings.contains(&segment.ident.to_string())),
+        syn::Expr::Reference(reference) => {
+            expression_is_capability_value(&reference.expr, bindings)
+        }
+        syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+            expression_is_capability_value(&unary.expr, bindings)
+        }
+        syn::Expr::Cast(cast) => expression_is_capability_value(&cast.expr, bindings),
+        syn::Expr::Paren(paren) => expression_is_capability_value(&paren.expr, bindings),
+        syn::Expr::Group(group) => expression_is_capability_value(&group.expr, bindings),
+        syn::Expr::MethodCall(method) if method.method == "conn" => {
+            expression_is_capability_value(&method.receiver, bindings)
+        }
+        _ => false,
+    }
+}
+
+fn expression_is_self(expression: &syn::Expr) -> bool {
+    matches!(expression, syn::Expr::Path(path) if path.path.is_ident("self"))
+}
+
+fn qualify_rust_identity(module: Option<&str>, identity: &str) -> String {
+    module.map_or_else(
+        || identity.to_string(),
+        |module| format!("{module}::{identity}"),
+    )
+}
+
+fn callable_identity(
+    path: &syn::Path,
+    owner: Option<&str>,
+    module: Option<&str>,
+) -> Option<String> {
+    let segments = path.segments.iter().collect::<Vec<_>>();
+    match segments.as_slice() {
+        [name] => Some(qualify_rust_identity(module, &name.ident.to_string())),
+        [qualifier, name] if qualifier.ident == "Self" => {
+            owner.map(|owner| format!("{owner}::{}", name.ident))
+        }
+        [qualifier, name] => Some(qualify_rust_identity(
+            module,
+            &format!("{}::{}", qualifier.ident, name.ident),
+        )),
+        _ => None,
+    }
+}
+
+fn sql_string_constants(syntax: &syn::File) -> BTreeMap<String, String> {
+    syntax
+        .items
+        .iter()
+        .filter_map(|item| {
+            let syn::Item::Const(item_const) = item else {
+                return None;
+            };
+            let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(literal),
+                ..
+            }) = item_const.expr.as_ref()
+            else {
+                return None;
+            };
+            Some((item_const.ident.to_string(), literal.value()))
+        })
+        .collect()
+}
+
+fn resolve_static_sql_expr(
+    expression: &syn::Expr,
+    constants: &BTreeMap<String, String>,
+) -> Option<String> {
+    match expression {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(literal),
+            ..
+        }) => Some(literal.value()),
+        syn::Expr::Path(path) if path.path.segments.len() == 1 => path
+            .path
+            .segments
+            .last()
+            .and_then(|segment| constants.get(&segment.ident.to_string()))
+            .cloned(),
+        syn::Expr::Macro(expression)
+            if expression
+                .mac
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "format") =>
+        {
+            use syn::parse::Parser as _;
+
+            let arguments =
+                syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                    .parse2(expression.mac.tokens.clone())
+                    .ok()?;
+            if arguments.len() != 1 {
+                return None;
+            }
+            let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(template),
+                ..
+            }) = arguments.first()?
+            else {
+                return None;
+            };
+            expand_static_format_captures(&template.value(), constants)
+        }
+        syn::Expr::Reference(reference) => resolve_static_sql_expr(&reference.expr, constants),
+        syn::Expr::Paren(paren) => resolve_static_sql_expr(&paren.expr, constants),
+        syn::Expr::Group(group) => resolve_static_sql_expr(&group.expr, constants),
+        _ => None,
+    }
+}
+
+fn expand_static_format_captures(
+    template: &str,
+    constants: &BTreeMap<String, String>,
+) -> Option<String> {
+    let characters = template.chars().collect::<Vec<_>>();
+    let mut expanded = String::with_capacity(template.len());
+    let mut index = 0;
+    while index < characters.len() {
+        match characters[index] {
+            '{' if characters.get(index + 1) == Some(&'{') => {
+                expanded.push('{');
+                index += 2;
+            }
+            '{' => {
+                let close = characters[index + 1..]
+                    .iter()
+                    .position(|item| *item == '}')?
+                    + index
+                    + 1;
+                let name = characters[index + 1..close].iter().collect::<String>();
+                if name.is_empty()
+                    || !name
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+                {
+                    return None;
+                }
+                expanded.push_str(constants.get(&name)?);
+                index = close + 1;
+            }
+            '}' if characters.get(index + 1) == Some(&'}') => {
+                expanded.push('}');
+                index += 2;
+            }
+            '}' => return None,
+            character => {
+                expanded.push(character);
+                index += 1;
+            }
+        }
+    }
+    Some(expanded)
+}
+
+fn sqlx_query_aliases(syntax: &syn::File) -> BTreeSet<String> {
+    fn collect(tree: &syn::UseTree, prefix: &mut Vec<String>, aliases: &mut BTreeSet<String>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                collect(&path.tree, prefix, aliases);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name)
+                if prefix.as_slice() == ["sqlx"] && sqlx_query_name(&name.ident.to_string()) =>
+            {
+                aliases.insert(name.ident.to_string());
+            }
+            syn::UseTree::Rename(rename)
+                if prefix.as_slice() == ["sqlx"] && sqlx_query_name(&rename.ident.to_string()) =>
+            {
+                aliases.insert(rename.rename.to_string());
+            }
+            syn::UseTree::Rename(rename) if prefix.is_empty() && rename.ident == "sqlx" => {
+                aliases.insert(format!("@crate:{}", rename.rename));
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    collect(item, prefix, aliases);
+                }
+            }
+            syn::UseTree::Glob(_) if prefix.as_slice() == ["sqlx"] => {
+                aliases.extend(
+                    ["query", "query_as", "query_scalar", "raw_sql"]
+                        .into_iter()
+                        .map(str::to_string),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let mut aliases = BTreeSet::new();
+    for item in &syntax.items {
+        if let syn::Item::Use(item_use) = item {
+            collect(&item_use.tree, &mut Vec::new(), &mut aliases);
+        } else if let syn::Item::ExternCrate(extern_crate) = item
+            && extern_crate.ident == "sqlx"
+            && let Some((_, rename)) = &extern_crate.rename
+        {
+            aliases.insert(format!("@crate:{rename}"));
+        }
+    }
+    aliases
+}
+
+fn sqlx_query_name(name: &str) -> bool {
+    matches!(name, "query" | "query_as" | "query_scalar" | "raw_sql")
+}
+
+fn is_sqlx_query_path(path: &syn::Path, aliases: &BTreeSet<String>) -> bool {
+    let segments = path.segments.iter().collect::<Vec<_>>();
+    matches!(segments.as_slice(), [root, query] if (root.ident == "sqlx" || aliases.contains(&format!("@crate:{}", root.ident))) && sqlx_query_name(&query.ident.to_string()))
+        || matches!(segments.as_slice(), [query] if aliases.contains(&query.ident.to_string()))
+}
+
+fn sqlx_query_call_site(
+    call: &syn::ExprCall,
+    aliases: &BTreeSet<String>,
+    constants: &BTreeMap<String, String>,
+) -> Option<SqlQuerySite> {
+    let syn::Expr::Path(function) = call.func.as_ref() else {
+        return None;
+    };
+    if !is_sqlx_query_path(&function.path, aliases) {
+        return None;
+    }
+    let start = function.path.span().start();
+    let sql = call
+        .args
+        .first()
+        .and_then(|argument| resolve_static_sql_expr(argument, constants));
+    Some(SqlQuerySite {
+        line: start.line,
+        column: start.column,
+        sql,
+    })
+}
+
+fn sqlx_query_macro_site(
+    expression: &syn::ExprMacro,
+    aliases: &BTreeSet<String>,
+    constants: &BTreeMap<String, String>,
+) -> Option<SqlQuerySite> {
+    use syn::parse::Parser as _;
+
+    if !is_sqlx_query_path(&expression.mac.path, aliases) {
+        return None;
+    }
+    let start = expression.mac.path.span().start();
+    let sql = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+        .parse2(expression.mac.tokens.clone())
+        .ok()
+        .and_then(|arguments| {
+            arguments
+                .first()
+                .and_then(|argument| resolve_static_sql_expr(argument, constants))
+        });
+    Some(SqlQuerySite {
+        line: start.line,
+        column: start.column,
+        sql,
+    })
+}
+
+fn sqlx_query_site_in_receiver(
+    expression: &syn::Expr,
+    aliases: &BTreeSet<String>,
+    constants: &BTreeMap<String, String>,
+) -> Option<SqlQuerySite> {
+    match expression {
+        syn::Expr::Call(call) => sqlx_query_call_site(call, aliases, constants),
+        syn::Expr::Macro(expression) => sqlx_query_macro_site(expression, aliases, constants),
+        syn::Expr::MethodCall(method) => {
+            sqlx_query_site_in_receiver(&method.receiver, aliases, constants)
+        }
+        syn::Expr::Await(awaited) => sqlx_query_site_in_receiver(&awaited.base, aliases, constants),
+        syn::Expr::Try(tried) => sqlx_query_site_in_receiver(&tried.expr, aliases, constants),
+        syn::Expr::Paren(paren) => sqlx_query_site_in_receiver(&paren.expr, aliases, constants),
+        syn::Expr::Group(group) => sqlx_query_site_in_receiver(&group.expr, aliases, constants),
+        syn::Expr::Reference(reference) => {
+            sqlx_query_site_in_receiver(&reference.expr, aliases, constants)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriterSqlKind {
+    PlainRead,
+    LockingRead,
+    Mutation,
+    Unclassified,
+}
+
+fn classify_writer_sql(sql: &str) -> WriterSqlKind {
+    let Some(mut tokens) = sql_tokens(sql) else {
+        return WriterSqlKind::Unclassified;
+    };
+    while tokens.last().is_some_and(|token| token == ";") {
+        tokens.pop();
+    }
+    if tokens.is_empty() || tokens.iter().any(|token| token == ";") {
+        return WriterSqlKind::Unclassified;
+    }
+    let main = if tokens[0] == "WITH" {
+        with_main_statement(&tokens)
+    } else {
+        Some(tokens[0].as_str())
+    };
+    match main {
+        Some("INSERT" | "UPDATE" | "DELETE" | "TRUNCATE" | "MERGE") => WriterSqlKind::Mutation,
+        Some("SELECT") if sql_has_mutating_function_evidence(&tokens) => WriterSqlKind::Mutation,
+        Some("SELECT") if sql_has_lock_evidence(&tokens) => WriterSqlKind::LockingRead,
+        Some("SELECT") => WriterSqlKind::PlainRead,
+        _ => WriterSqlKind::Unclassified,
+    }
+}
+
+fn sql_has_mutating_function_evidence(tokens: &[String]) -> bool {
+    const FUNCTIONS: &[&str] = &[
+        "RSS_OUTBOX_MARK_DLX",
+        "RSS_OUTBOX_SETTLE_PUBLISHED",
+        "RSS_OUTBOX_SETTLE_RETRY",
+    ];
+    tokens.windows(2).any(|pair| {
+        matches!(pair, [function, open] if FUNCTIONS.contains(&function.as_str()) && open == "(")
+    })
+}
+
+fn with_main_statement(tokens: &[String]) -> Option<&str> {
+    let mut depth = 0_i32;
+    for token in &tokens[1..] {
+        match token.as_str() {
+            "(" => depth += 1,
+            ")" => depth -= 1,
+            "SELECT" | "INSERT" | "UPDATE" | "DELETE" | "MERGE" if depth == 0 => {
+                return Some(token);
+            }
+            _ => {}
+        }
+        if depth < 0 {
+            return None;
+        }
+    }
+    None
+}
+
+fn sql_has_lock_evidence(tokens: &[String]) -> bool {
+    tokens.windows(2).any(|pair| {
+        matches!(pair, [function, open] if matches!(function.as_str(), "PG_ADVISORY_LOCK" | "PG_ADVISORY_XACT_LOCK") && open == "(")
+    }) || tokens.windows(2).any(|pair| {
+        matches!(pair, [first, second] if first == "FOR" && matches!(second.as_str(), "UPDATE" | "SHARE"))
+    }) || tokens.windows(4).any(|parts| {
+        matches!(parts, [for_kw, no, key, update] if for_kw == "FOR" && no == "NO" && key == "KEY" && update == "UPDATE")
+    }) || tokens.windows(3).any(|parts| {
+        matches!(parts, [for_kw, key, share] if for_kw == "FOR" && key == "KEY" && share == "SHARE")
+    })
+}
+
+fn skip_nested_sql_comment(bytes: &[u8], mut index: usize) -> Option<usize> {
+    index += 2;
+    let mut depth = 1_usize;
+    while index < bytes.len() && depth > 0 {
+        if bytes.get(index..index + 2) == Some(b"/*") {
+            depth += 1;
+            index += 2;
+        } else if bytes.get(index..index + 2) == Some(b"*/") {
+            depth -= 1;
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    (depth == 0).then_some(index)
+}
+
+fn skip_sql_quoted(bytes: &[u8], mut index: usize, quote: u8) -> Option<usize> {
+    index += 1;
+    loop {
+        let byte = *bytes.get(index)?;
+        index += 1;
+        if byte == quote {
+            if bytes.get(index) == Some(&quote) {
+                index += 1;
+            } else {
+                return Some(index);
+            }
+        }
+    }
+}
+
+fn skip_sql_dollar_quote(sql: &str, index: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let tag_end = bytes[index + 1..]
+        .iter()
+        .position(|byte| *byte == b'$')
+        .map(|offset| index + offset + 1);
+    let Some(tag_end) = tag_end.filter(|tag_end| {
+        bytes[index + 1..*tag_end]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    }) else {
+        return Some(index + 1);
+    };
+    let delimiter = &sql[index..=tag_end];
+    let body_start = tag_end + 1;
+    let close = sql[body_start..].find(delimiter)?;
+    Some(body_start + close + delimiter.len())
+}
+
+fn sql_tokens(sql: &str) -> Option<Vec<String>> {
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            byte if byte.is_ascii_whitespace() => index += 1,
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = skip_nested_sql_comment(bytes, index)?;
+            }
+            b'\'' => {
+                index = skip_sql_quoted(bytes, index, b'\'')?;
+            }
+            b'"' => {
+                index = skip_sql_quoted(bytes, index, b'"')?;
+            }
+            b'$' => {
+                index = skip_sql_dollar_quote(sql, index)?;
+            }
+            b'(' | b')' | b',' | b';' => {
+                tokens.push((bytes[index] as char).to_string());
+                index += 1;
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric()
+                        || matches!(bytes[index], b'_' | b'$' | b'.'))
+                {
+                    index += 1;
+                }
+                tokens.push(sql[start..index].to_ascii_uppercase());
+            }
+            _ => index += 1,
+        }
+    }
+    Some(tokens)
+}
+
+fn self_field_name(expr: &syn::Expr) -> Option<String> {
+    let syn::Expr::Field(field) = expr else {
+        return None;
+    };
+    let syn::Expr::Path(base) = field.base.as_ref() else {
+        return None;
+    };
+    if !base.path.is_ident("self") {
+        return None;
+    }
+    match &field.member {
+        syn::Member::Named(name) => Some(name.to_string()),
+        syn::Member::Unnamed(_) => None,
+    }
+}
+
 #[derive(Debug)]
 struct RawTenantAccess {
     tables: Vec<String>,
@@ -2203,8 +3995,9 @@ struct RawTenantAccess {
 
 #[derive(Debug)]
 struct RawPoolFieldAccess {
-    pattern: &'static str,
+    pattern: String,
     line: usize,
+    owner: Option<String>,
 }
 
 #[derive(Debug)]
@@ -2530,19 +4323,35 @@ fn local_raw_transaction_vars(content: &str) -> BTreeSet<String> {
 
 fn raw_tenant_pool_fields(content: &str) -> Vec<RawPoolFieldAccess> {
     let mut out = Vec::new();
-    for (line_idx, line) in content.lines().enumerate() {
-        let line = line.trim_start();
-        let is_pool_field = line.starts_with("pool:")
-            || line.starts_with("pub pool:")
-            || line.starts_with("pub(crate) pool:");
-        if is_pool_field && (line.contains("pgpool") || line.contains("pg_pool")) {
+    let Ok(syntax) = syn::parse_file(content) else {
+        return out;
+    };
+    for item in &syntax.items {
+        let syn::Item::Struct(item_struct) = item else {
+            continue;
+        };
+        for field in &item_struct.fields {
+            use syn::spanned::Spanned as _;
+
+            let Some(raw_type) = raw_store_type(&field.ty) else {
+                continue;
+            };
             out.push(RawPoolFieldAccess {
-                pattern: "pool: PgPool",
-                line: line_idx + 1,
+                pattern: raw_type.to_owned(),
+                line: field.span().start().line,
+                owner: Some(item_struct.ident.to_string()),
             });
         }
     }
     out
+}
+
+fn raw_store_type(ty: &syn::Type) -> Option<&'static str> {
+    match type_last_ident(ty).as_deref() {
+        Some("PgPool") => Some("PgPool"),
+        Some("PgStore") => Some("PgStore"),
+        _ => nested_type(ty).and_then(raw_store_type),
+    }
 }
 
 fn allowed_site_exception(
@@ -2685,16 +4494,21 @@ fn raw_pool_field_findings(
     hits: &[RawPoolFieldAccess],
     is_exception: bool,
 ) -> Vec<Finding> {
-    if tenant_hits.is_empty() || hits.is_empty() || is_exception {
+    if tenant_hits.is_empty() || hits.is_empty() || is_exception || is_cotx_funnel(rel) {
         return Vec::new();
     }
     hits.iter()
+        .filter(|hit| {
+            !(rel == "config_repo.rs"
+                && hit.pattern == "PgStore"
+                && hit.owner.as_deref() == Some("PgConfigValueMaintenance"))
+        })
         .map(|hit| {
             finding(
                 Rule::RawTenantPoolField,
                 site_subject(rel, hit.line),
                 format!(
-                    "tenant tables {:?} share a file with raw pool field {:?}; tenant repositories must store PgTenantPool",
+                    "tenant tables {:?} share a file with raw capability field {:?}; tenant repositories must store PgTenantReadPool/PgTenantWritePool",
                     tenant_hits, hit.pattern
                 ),
             )
@@ -2712,7 +4526,11 @@ fn raw_pool_field_exception(rel: &str, content: &str) -> bool {
 fn is_raw_pool_field_exception(rel: &str) -> bool {
     matches!(
         rel,
-        "auth_audit_sink.rs"
+        "bundle.rs"
+            | "pool.rs"
+            | "readiness.rs"
+            | "migrator.rs"
+            | "auth_audit_sink.rs"
             | "cas_store.rs"
             | "checkpoint.rs"
             | "dead_letter.rs"
@@ -2847,7 +4665,7 @@ fn simple_table_consts(src: &str) -> BTreeMap<String, String> {
 
 fn strip_cfg_test_modules(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
-    let mut pending_cfg_test = false;
+    let mut pending_attributes = Vec::new();
     let mut skipping = false;
     let mut depth = 0isize;
     for line in src.lines() {
@@ -2861,20 +4679,35 @@ fn strip_cfg_test_modules(src: &str) -> String {
             out.push('\n');
             continue;
         }
-        if trimmed.starts_with("#[cfg(") && trimmed.contains("test") {
-            pending_cfg_test = true;
-            out.push('\n');
+        if !pending_attributes.is_empty() && trimmed.starts_with("#[") {
+            pending_attributes.push(line);
             continue;
         }
-        if pending_cfg_test && trimmed.starts_with("mod ") {
+        if !pending_attributes.is_empty()
+            && matches!(trimmed.split_whitespace().next(), Some("mod" | "pub"))
+            && (trimmed.starts_with("mod ") || trimmed.starts_with("pub mod "))
+        {
+            for _ in pending_attributes.drain(..) {
+                out.push('\n');
+            }
             depth = brace_delta(line);
             skipping = depth > 0;
-            pending_cfg_test = false;
             out.push('\n');
             continue;
         }
-        pending_cfg_test = false;
+        for attribute in pending_attributes.drain(..) {
+            out.push_str(attribute);
+            out.push('\n');
+        }
+        if trimmed.starts_with("#[cfg(") && trimmed.contains("test") {
+            pending_attributes.push(line);
+            continue;
+        }
         out.push_str(line);
+        out.push('\n');
+    }
+    for attribute in pending_attributes {
+        out.push_str(attribute);
         out.push('\n');
     }
     out
@@ -3770,11 +5603,11 @@ pub mod fault_matrix;
             &files(&[
                 (
                     "role_repo.rs",
-                    "struct R { pool: PgTenantPool } async fn f(){ self.pool.read(tenant, |conn| Box::pin(async move { sqlx::query(\"SELECT * FROM roles\").fetch_optional(&mut *conn).await })); }",
+                    "struct R { pool: PgTenantReadPool } async fn f(){ self.pool.read(tenant, |conn| Box::pin(async move { sqlx::query(\"SELECT * FROM roles\").fetch_optional(&mut *conn).await })); }",
                 ),
                 (
                     "config_repo.rs",
-                    "async fn f(){ self.pool.write(tenant, |conn| Box::pin(async move { sqlx::query(\"UPDATE credentials SET id=id\").execute(&mut *conn).await.map_err(storage) }), storage); }",
+                    "struct R { pool: PgTenantWritePool } async fn f(){ self.pool.write(tenant, |conn| Box::pin(async move { sqlx::query(\"UPDATE credentials SET id=id\").execute(&mut *conn).await.map_err(storage) }), storage); }",
                 ),
                 (
                     "migrator.rs",
@@ -3803,6 +5636,600 @@ pub mod fault_matrix;
             ]),
         );
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn red_removed_pg_tenant_pool_is_rejected_even_inside_cotx_funnel() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                ("cotx/mod.rs", "struct PgTenantPool { store: PgStore }"),
+                (
+                    "role_repo.rs",
+                    "struct R { pool: PgTenantReadPool } async fn f(){ self.pool.read(tenant, |conn| Box::pin(async move { sqlx::query(\"SELECT * FROM roles\").fetch_optional(&mut *conn).await })); }",
+                ),
+            ]),
+        );
+
+        assert!(
+            findings.iter().any(|finding| {
+                finding.subject.starts_with("cotx/mod.rs")
+                    && finding.detail.contains("PgTenantPool")
+            }),
+            "removed PgTenantPool must not survive as a stale funnel allowlist: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_generic_store_source_traits_cannot_erase_verified_lane_types() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "trait PgTenantReadStoreSource {} trait PgTenantWriteStoreSource {}",
+            )]),
+        );
+        for removed in ["PgTenantReadStoreSource", "PgTenantWriteStoreSource"] {
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.detail.contains(removed)),
+                "generic source trait {removed} must never return: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn red_tenant_lane_crossovers_are_rejected() {
+        let cases = [
+            (
+                "writer-read",
+                "struct R { pool: PgTenantWritePool } async fn f(){ self.pool.read(tenant, |conn| Box::pin(async move { sqlx::query(\"SELECT * FROM roles\").fetch_optional(&mut *conn).await })); }",
+                "PgTenantWritePool::read",
+            ),
+            (
+                "writer-read-map",
+                "struct R { pool: PgTenantWritePool } async fn f(){ self.pool.read_map(tenant, |conn| Box::pin(async move { sqlx::query(\"SELECT * FROM roles\").fetch_optional(&mut *conn).await }), storage); }",
+                "PgTenantWritePool::read_map",
+            ),
+            (
+                "reader-write",
+                "struct R { pool: PgTenantReadPool } async fn f(){ self.pool.write(tenant, |conn| Box::pin(async move { sqlx::query(\"UPDATE roles SET id = id\").execute(&mut *conn).await }), storage); }",
+                "PgTenantReadPool::write",
+            ),
+            (
+                "reader-co-tx",
+                "struct R { pool: PgTenantReadPool } async fn f(){ self.pool.co_tx_with_outbox(tenant, |tx| Box::pin(async move { sqlx::query(\"UPDATE roles SET id = id\").execute(tx.conn()).await })); }",
+                "PgTenantReadPool::co_tx_with_outbox",
+            ),
+        ];
+
+        for (case, source, forbidden_api) in cases {
+            let (_, findings) = scan_guard(&migrations(), &files(&[("role_repo.rs", source)]));
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.subject.starts_with("role_repo.rs")
+                        && finding.detail.contains(forbidden_api)
+                }),
+                "{case} must be rejected through the typed lane API, not review convention: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn red_typed_pool_parameters_cannot_bypass_lane_checks() {
+        let cases = [
+            (
+                "free-function-nested-reference",
+                "async fn load(reader: &&PgTenantReadPool) { \
+                 reader.write(tenant, |conn| Box::pin(async move { \
+                 sqlx::query(\"UPDATE roles SET id = id\").execute(&mut *conn).await \
+                 }), storage); }",
+                "PgTenantReadPool::write",
+            ),
+            (
+                "impl-method-nested-type-and-pattern",
+                "struct Repo; impl Repo { async fn load( \
+                 &self, (writer, _marker): (Arc<PgTenantWritePool>, usize)) { \
+                 writer.read(tenant, |conn| Box::pin(async move { \
+                 sqlx::query(\"SELECT * FROM roles\").fetch_all(&mut *conn).await \
+                 })); } }",
+                "PgTenantWritePool::read",
+            ),
+        ];
+
+        for (case, source, forbidden_api) in cases {
+            let (_, findings) = scan_guard(&migrations(), &files(&[("role_repo.rs", source)]));
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.rule == Rule::TenantLaneViolation
+                        && finding.detail.contains(forbidden_api)
+                }),
+                "{case} must retain the typed lane carried by its parameter binding: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn red_writer_transaction_cannot_hide_an_independent_select() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "mod decoy { fn query(_: &str) {} } \
+                 struct R { writer: PgTenantWritePool } async fn load(&self){ \
+                 let _outside = sqlx::query(\"UPDATE roles SET id = id\"); \
+                 self.writer.write(tenant, |conn| Box::pin(async move { \
+                 decoy::query(\"UPDATE roles SET id = id\"); \
+                 sqlx::query(\"SELECT * FROM roles\").fetch_all(&mut *conn).await \
+                 }), storage); }",
+            )]),
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("SELECT-only writer transaction")),
+            "writer.write must not become an untyped reader escape hatch: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_writer_sql_classifier_fails_closed_on_indirect_or_plain_reads() {
+        let cases = [
+            (
+                "cte-select",
+                "sqlx::query(\"WITH candidate AS (SELECT * FROM roles) SELECT * FROM candidate\").fetch_all(&mut *conn).await",
+                "SELECT-only writer transaction",
+            ),
+            (
+                "dynamic-sql",
+                "let sql = \"SELECT * FROM roles\"; sqlx::query(sql).fetch_all(&mut *conn).await",
+                "unclassified SQL",
+            ),
+            (
+                "lock-string-bait",
+                "sqlx::query(\"SELECT 'FOR UPDATE' FROM roles\").fetch_all(&mut *conn).await",
+                "SELECT-only writer transaction",
+            ),
+            (
+                "multi-statement",
+                "sqlx::raw_sql(\"UPDATE roles SET id = id; SELECT * FROM roles\").execute(&mut *conn).await",
+                "unclassified SQL",
+            ),
+        ];
+        for (case, body, expected) in cases {
+            let source = format!(
+                "struct R {{ writer: PgTenantWritePool }} async fn f(&self){{ \
+                 self.writer.write(tenant, |conn| Box::pin(async move {{ {body} }}), storage); }}"
+            );
+            let (_, findings) = scan_guard(&migrations(), &files(&[("role_repo.rs", &source)]));
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.rule == Rule::TenantLaneViolation && finding.detail.contains(expected)
+                }),
+                "{case} must fail closed through the writer SQL classifier: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn green_exact_sqlx_alias_provides_executed_mutation_evidence() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "use sqlx::query as pg_query; \
+                 struct R { writer: PgTenantWritePool } async fn f(&self){ \
+                 self.writer.write(tenant, |conn| Box::pin(async move { \
+                 pg_query(\"SELECT * FROM roles\").fetch_all(&mut *conn).await?; \
+                 pg_query(\"UPDATE roles SET id = id\").execute(&mut *conn).await \
+                 }), storage); }",
+            )]),
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule != Rule::TenantLaneViolation),
+            "a resolved sqlx alias with executed mutation evidence must pass: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_writer_helper_sql_is_resolved_into_lane_assessment() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "async fn helper(conn: &mut sqlx::PgConnection) { \
+                 sqlx::query(\"SELECT * FROM roles\").fetch_all(conn).await; } \
+                 struct R { writer: PgTenantWritePool } async fn f(&self){ \
+                 self.writer.write(tenant, |conn| Box::pin(async move { helper(conn).await }), storage); }",
+            )]),
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::TenantLaneViolation
+                    && finding.detail.contains("SELECT-only writer transaction")
+            }),
+            "moving plain tenant SQL behind a helper must still fail closed: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn writer_helper_graph_is_cross_file_and_owner_qualified() {
+        let (_, green) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "role_repo.rs",
+                    "use crate::write_helper::mutate; struct R { writer: PgTenantWritePool } \
+                     impl R { async fn f(&self){ self.writer.write(tenant, |tx| Box::pin(async move { \
+                     mutate(tx).await }), storage); } }",
+                ),
+                (
+                    "write_helper.rs",
+                    "async fn mutate(tx: &mut TxCapability<'_>) { \
+                     sqlx::query(\"UPDATE roles SET id = id\").execute(tx.conn()).await; }",
+                ),
+            ]),
+        );
+        assert!(
+            green
+                .iter()
+                .all(|finding| finding.rule != Rule::TenantLaneViolation),
+            "an exact crate import must inherit the target helper evidence: {green:?}"
+        );
+
+        let (_, unknown) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "use crate::missing::mutate; struct R { writer: PgTenantWritePool } \
+                 impl R { async fn f(&self){ self.writer.write(tenant, |tx| Box::pin(async move { \
+                 mutate(tx).await }), storage); } }",
+            )]),
+        );
+        assert!(
+            unknown.iter().any(|finding| {
+                finding.rule == Rule::TenantLaneViolation
+                    && finding.detail.contains("unclassified SQL")
+            }),
+            "an unresolved capability helper must fail closed: {unknown:?}"
+        );
+
+        let (_, owner_bait) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "async fn helper(tx: &mut TxCapability<'_>) { \
+                 sqlx::query(\"SELECT * FROM roles\").fetch_all(tx.conn()).await; } \
+                 struct Decoy; impl Decoy { async fn helper(tx: &mut TxCapability<'_>) { \
+                 sqlx::query(\"UPDATE roles SET id = id\").execute(tx.conn()).await; } } \
+                 struct R { writer: PgTenantWritePool } impl R { async fn f(&self){ \
+                 self.writer.write(tenant, |tx| Box::pin(async move { helper(tx).await }), storage); } }",
+            )]),
+        );
+        assert!(
+            owner_bait.iter().any(|finding| {
+                finding.rule == Rule::TenantLaneViolation
+                    && finding.detail.contains("SELECT-only writer transaction")
+            }),
+            "an impl method with the same name must not satisfy a free helper call: {owner_bait:?}"
+        );
+
+        let (_, sibling_bait) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "mod reads { async fn helper(tx: &mut TxCapability<'_>) { \
+                 sqlx::query(\"SELECT * FROM roles\").fetch_all(tx.conn()).await; } } \
+                 mod decoy { async fn helper(tx: &mut TxCapability<'_>) { \
+                 sqlx::query(\"UPDATE roles SET id = id\").execute(tx.conn()).await; } } \
+                 struct R { writer: PgTenantWritePool } impl R { async fn f(&self){ \
+                 self.writer.write(tenant, |tx| Box::pin(async move { \
+                 reads::helper(tx).await }), storage); } }",
+            )]),
+        );
+        assert!(
+            sibling_bait.iter().any(|finding| {
+                finding.rule == Rule::TenantLaneViolation
+                    && finding.detail.contains("SELECT-only writer transaction")
+            }),
+            "sibling inline modules must retain distinct helper identities: {sibling_bait:?}"
+        );
+    }
+
+    #[test]
+    fn sqlx_crate_alias_is_exact_and_decoys_are_not_evidence() {
+        let (_, green) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "use sqlx as db; struct R { writer: PgTenantWritePool } impl R { async fn f(&self){ \
+                 self.writer.write(tenant, |tx| Box::pin(async move { \
+                 db::query(\"UPDATE roles SET id = id\").execute(tx.conn()).await }), storage); } }",
+            )]),
+        );
+        assert!(
+            green
+                .iter()
+                .all(|finding| finding.rule != Rule::TenantLaneViolation),
+            "a real sqlx crate alias must preserve query provenance: {green:?}"
+        );
+
+        let (_, decoy) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "mod decoy { fn query(_: &str) {} } struct R { writer: PgTenantWritePool } \
+                 impl R { async fn f(&self){ self.writer.write(tenant, |tx| Box::pin(async move { \
+                 decoy::query(\"UPDATE roles SET id = id\"); \
+                 sqlx::query(\"SELECT * FROM roles\").fetch_all(tx.conn()).await }), storage); } }",
+            )]),
+        );
+        assert!(
+            decoy.iter().any(|finding| {
+                finding.rule == Rule::TenantLaneViolation
+                    && finding.detail.contains("SELECT-only writer transaction")
+            }),
+            "a same-named decoy query function must not mint SQL evidence: {decoy:?}"
+        );
+
+        for (fake_import, bait) in [
+            (
+                "use fake::sqlx::query as q;",
+                "q(\"UPDATE roles SET id = id\").execute(tx.conn()).await?;",
+            ),
+            (
+                "use fake::sqlx as db;",
+                "db::query(\"UPDATE roles SET id = id\").execute(tx.conn()).await?;",
+            ),
+        ] {
+            let source = format!(
+                "{fake_import} struct R {{ writer: PgTenantWritePool }} impl R {{ async fn f(&self){{ \
+                 self.writer.write(tenant, |tx| Box::pin(async move {{ {bait} \
+                 sqlx::query(\"SELECT * FROM roles\").fetch_all(tx.conn()).await }}), storage); }} }}"
+            );
+            let (_, findings) =
+                scan_guard(&migrations(), &files(&[("role_repo.rs", source.as_str())]));
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::TenantLaneViolation),
+                "nested fake::sqlx imports must never mint trusted provenance: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dead_or_unawaited_mutations_are_not_writer_evidence() {
+        for (case, bait) in [
+            (
+                "dead-branch",
+                "if false { sqlx::query(\"UPDATE roles SET id = id\").execute(tx.conn()).await; }",
+            ),
+            (
+                "unawaited-async",
+                "let _unused = async { sqlx::query(\"UPDATE roles SET id = id\").execute(tx.conn()).await; };",
+            ),
+        ] {
+            let source = format!(
+                "struct R {{ writer: PgTenantWritePool }} impl R {{ async fn f(&self){{ \
+                 self.writer.write(tenant, |tx| Box::pin(async move {{ {bait} \
+                 sqlx::query(\"SELECT * FROM roles\").fetch_all(tx.conn()).await }}), storage); }} }}"
+            );
+            let (_, findings) =
+                scan_guard(&migrations(), &files(&[("role_repo.rs", source.as_str())]));
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.rule == Rule::TenantLaneViolation
+                        && finding.detail.contains("SELECT-only writer transaction")
+                }),
+                "{case} mutation bait must not satisfy the writer lane: {findings:?}"
+            );
+        }
+
+        for (case, bait) in [
+            ("dead-helper", "if false { mutate(tx).await; }"),
+            ("unawaited-helper", "let _unused = mutate(tx);"),
+        ] {
+            let source = format!(
+                "async fn mutate(tx: &mut TxCapability<'_>) {{ \
+                 sqlx::query(\"UPDATE roles SET id = id\").execute(tx.conn()).await; }} \
+                 struct R {{ writer: PgTenantWritePool }} impl R {{ async fn f(&self){{ \
+                 self.writer.write(tenant, |tx| Box::pin(async move {{ {bait} \
+                 sqlx::query(\"SELECT * FROM roles\").fetch_all(tx.conn()).await }}), storage); }} }}"
+            );
+            let (_, findings) =
+                scan_guard(&migrations(), &files(&[("role_repo.rs", source.as_str())]));
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.rule == Rule::TenantLaneViolation
+                        && finding.detail.contains("SELECT-only writer transaction")
+                }),
+                "{case} must not merge helper mutation evidence: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn advisory_lock_evidence_requires_an_actual_function_call() {
+        for bait in [
+            "SELECT pg_advisory_xact_lock AS bait FROM roles",
+            "SELECT role_id AS pg_advisory_xact_lock FROM roles",
+        ] {
+            let source = format!(
+                "struct R {{ writer: PgTenantWritePool }} impl R {{ async fn f(&self){{ \
+                 self.writer.write(tenant, |tx| Box::pin(async move {{ \
+                 sqlx::query(\"{bait}\").fetch_all(tx.conn()).await }}), storage); }} }}"
+            );
+            let (_, findings) =
+                scan_guard(&migrations(), &files(&[("role_repo.rs", source.as_str())]));
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.rule == Rule::TenantLaneViolation
+                        && finding.detail.contains("SELECT-only writer transaction")
+                }),
+                "advisory-lock identifier bait must fail closed: {findings:?}"
+            );
+        }
+
+        let (_, green) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "struct R { writer: PgTenantWritePool } impl R { async fn f(&self){ \
+                 self.writer.write(tenant, |tx| Box::pin(async move { \
+                 sqlx::query(\"SELECT pg_advisory_xact_lock($1)\").execute(tx.conn()).await }), storage); } }",
+            )]),
+        );
+        assert!(
+            green
+                .iter()
+                .all(|finding| finding.rule != Rule::TenantLaneViolation),
+            "a real advisory lock call is valid locking evidence: {green:?}"
+        );
+    }
+
+    #[test]
+    fn green_writer_selects_with_lock_or_mutation_evidence_pass() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "struct R { writer: PgTenantWritePool } \
+                 async fn locked(&self){ self.writer.write(tenant, |conn| Box::pin(async move { \
+                     sqlx::query(\"SELECT * FROM roles FOR UPDATE\").fetch_optional(&mut *conn).await \
+                 }), storage); } \
+                 async fn mutated(&self){ self.writer.write(tenant, |conn| Box::pin(async move { \
+                     sqlx::query(\"SELECT * FROM roles\").fetch_optional(&mut *conn).await?; \
+                     sqlx::query(\"UPDATE roles SET id = id\").execute(&mut *conn).await \
+                 }), storage); }",
+            )]),
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule != Rule::TenantLaneViolation),
+            "write evidence must remain valid: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn outbox_settlement_function_calls_are_exact_mutation_evidence() {
+        for function in [
+            "rss_outbox_settle_published",
+            "rss_outbox_settle_retry",
+            "rss_outbox_mark_dlx",
+        ] {
+            let source = format!(
+                "struct R {{ writer: PgTenantWritePool }} impl R {{ async fn settle(&self) {{ \
+                 self.writer.write(tenant, |conn| Box::pin(async move {{ \
+                 sqlx::query(\"SELECT {function}($1, $2, $3)\").execute(&mut *conn).await \
+                 }}), storage); }} }}"
+            );
+            let (_, findings) =
+                scan_guard(&migrations(), &files(&[("settlement.rs", source.as_str())]));
+            assert!(
+                findings
+                    .iter()
+                    .all(|finding| finding.rule != Rule::TenantLaneViolation),
+                "exact settlement function call must be mutation evidence: {findings:?}"
+            );
+        }
+
+        for bait in [
+            "SELECT rss_outbox_settle_published FROM roles",
+            "SELECT rss_outbox_settle_published_broken($1, $2, $3)",
+        ] {
+            let source = format!(
+                "struct R {{ writer: PgTenantWritePool }} impl R {{ async fn settle(&self) {{ \
+                 self.writer.write(tenant, |conn| Box::pin(async move {{ \
+                 sqlx::query(\"{bait}\").execute(&mut *conn).await \
+                 }}), storage); }} }}"
+            );
+            let (_, findings) =
+                scan_guard(&migrations(), &files(&[("settlement.rs", source.as_str())]));
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.rule == Rule::TenantLaneViolation
+                        && finding.detail.contains("SELECT-only writer transaction")
+                }),
+                "settlement function name bait must fail closed: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn red_tenant_repository_cannot_store_raw_pool_or_store() {
+        let cases = [
+            (
+                "raw-pool",
+                "struct Repo { database: sqlx::PgPool } fn sql_site(){ sqlx::query(\"SELECT * FROM roles\"); }",
+                "PgPool",
+            ),
+            (
+                "raw-store",
+                "struct Repo { store: PgStore } fn sql_site(){ sqlx::query(\"SELECT * FROM roles\"); }",
+                "PgStore",
+            ),
+        ];
+
+        for (case, source, forbidden_type) in cases {
+            let (_, findings) = scan_guard(&migrations(), &files(&[("role_repo.rs", source)]));
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.subject.starts_with("role_repo.rs")
+                        && finding.detail.contains(forbidden_type)
+                }),
+                "{case} must not let a tenant repository retain a raw connection capability: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn green_distinct_read_and_write_lanes_accept_their_owned_sql() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "struct R { reader: PgTenantReadPool, writer: PgTenantWritePool } \
+                 async fn load(&self){ self.reader.read(tenant, |conn| Box::pin(async move { \
+                     sqlx::query(\"SELECT * FROM roles\").fetch_optional(&mut *conn).await \
+                 })); } \
+                 async fn mutate(&self){ self.writer.write(tenant, |conn| Box::pin(async move { \
+                     sqlx::query(\"SELECT * FROM roles\").fetch_optional(&mut *conn).await?; \
+                     sqlx::query(\"UPDATE roles SET id = id\").execute(&mut *conn).await \
+                 }), storage); }",
+            )]),
+        );
+
+        assert!(
+            findings
+                .iter()
+                .all(|finding| !finding.subject.starts_with("role_repo.rs")),
+            "independent SELECT belongs to the reader; SELECT inside a write transaction remains valid: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn anti_vacuity_missing_typed_read_and_write_lane_sites_is_reported() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[(
+                "role_repo.rs",
+                "fn sql_site(){ sqlx::query(\"SELECT * FROM roles\"); }",
+            )]),
+        );
+
+        for required in ["PgTenantReadPool::read", "PgTenantWritePool::write"] {
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.detail.contains(required)),
+                "typed lane guard must fail closed when required production site `{required}` disappears: {findings:?}"
+            );
+        }
     }
 
     #[test]

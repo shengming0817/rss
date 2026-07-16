@@ -1,0 +1,41 @@
+error[E0603]: module `pool` is private
+ --> tests/ui/pg_runtime_capabilities_private_fail.rs:2:29
+  |
+2 |     let _: Option<postgres::pool::VerifiedPgReadStore> = None;
+  |                             ^^^^  ------------------- struct `VerifiedPgReadStore` is not publicly re-exported
+  |                             |
+  |                             private module
+  |
+note: the module `pool` is defined here
+ --> src/lib.rs
+  |
+  | mod pool;
+  | ^^^^^^^^
+
+error[E0603]: module `pool` is private
+ --> tests/ui/pg_runtime_capabilities_private_fail.rs:3:29
+  |
+3 |     let _: Option<postgres::pool::VerifiedPgWriteStore> = None;
+  |                             ^^^^  -------------------- struct `VerifiedPgWriteStore` is not publicly re-exported
+  |                             |
+  |                             private module
+  |
+note: the module `pool` is defined here
+ --> src/lib.rs
+  |
+  | mod pool;
+  | ^^^^^^^^
+
+error[E0603]: module `pool` is private
+ --> tests/ui/pg_runtime_capabilities_private_fail.rs:4:29
+  |
+4 |     let _: Option<postgres::pool::PgRuntimeStores> = None;
+  |                             ^^^^  --------------- struct `PgRuntimeStores` is not publicly re-exported
+  |                             |
+  |                             private module
+  |
+note: the module `pool` is defined here
+ --> src/lib.rs
+  |
+  | mod pool;
+  | ^^^^^^^^

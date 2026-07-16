@@ -13,13 +13,20 @@ use eventexec::{
     record_dlq_mutation_error, record_dlq_outbox_redrive, record_dlq_replay,
     record_outbox_expired_resolution,
 };
+use futures::future::BoxFuture;
+use sqlx::PgConnection;
 
+#[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantPool, infra_tenant_scope};
+use crate::cotx::{
+    InfraTenantScope, PgMaintenanceReadPool, PgMaintenanceWritePool, PgTenantReadPool,
+    PgTenantWritePool, TxCapability, infra_tenant_scope,
+};
 use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector, SensitiveJson};
 use crate::outbox::{
     OutboxAppendError, ReplayedOutboxAppend, STATUS_DLX, append_replayed_outbox_with_projection,
 };
+use crate::pool::{VerifiedPgMaintenanceStore, VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
 
 const OUTBOX_RELAY_DLX_FALLBACK_SUMMARY: &str = "outbox relay dlx";
@@ -64,8 +71,69 @@ const LIST_DEAD_LETTER_SQL: &str = r#"
 
 /// PostgreSQL implementation of [`DlqStore`].
 pub struct PgDlqStore {
-    tenant_pool: PgTenantPool,
+    lane: DlqLane,
     replay: DlqReplayCapability,
+}
+
+// The serving lane is an explicit capability boundary even though the current composition root
+// only exposes operator DLQ access through `PgMaintenanceDeps`; unit tests exercise both lanes.
+#[allow(dead_code)]
+enum DlqLane {
+    Serving {
+        read: PgTenantReadPool,
+        write: PgTenantWritePool,
+    },
+    Maintenance {
+        read: PgMaintenanceReadPool,
+        write: PgMaintenanceWritePool,
+    },
+}
+
+impl DlqLane {
+    async fn read<T, F>(&self, scope: InfraTenantScope, read: F) -> Result<T, sqlx::Error>
+    where
+        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, sqlx::Error>> + Send,
+        T: Send,
+    {
+        match self {
+            Self::Serving { read: pool, .. } => pool.read(scope, read).await,
+            Self::Maintenance { read: pool, .. } => pool.read(scope, read).await,
+        }
+    }
+
+    async fn read_map<T, F, E>(
+        &self,
+        scope: InfraTenantScope,
+        read: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> Result<T, E>
+    where
+        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: Send,
+        T: Send,
+    {
+        match self {
+            Self::Serving { read: pool, .. } => pool.read_map(scope, read, map_storage).await,
+            Self::Maintenance { read: pool, .. } => pool.read_map(scope, read, map_storage).await,
+        }
+    }
+
+    async fn write<T, F, E>(
+        &self,
+        scope: InfraTenantScope,
+        write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> Result<T, E>
+    where
+        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        T: Send,
+    {
+        match self {
+            Self::Serving { write: pool, .. } => pool.write(scope, write, map_storage).await,
+            Self::Maintenance { write: pool, .. } => pool.write(scope, write, map_storage).await,
+        }
+    }
 }
 
 enum DlqReplayCapability {
@@ -76,6 +144,7 @@ enum DlqReplayCapability {
     Disabled,
 }
 
+#[cfg(all(test, feature = "integration"))]
 impl PgStore {
     pub(crate) fn dlq_with_projection_registry(
         &self,
@@ -83,7 +152,10 @@ impl PgStore {
         projection_registry: ProjectionWriteRegistry,
     ) -> PgDlqStore {
         PgDlqStore {
-            tenant_pool: PgTenantPool::new(self),
+            lane: DlqLane::Serving {
+                read: PgTenantReadPool::from_unverified_for_test(self),
+                write: PgTenantWritePool::from_unverified_for_test(self),
+            },
             replay: DlqReplayCapability::Enabled {
                 payload_protector,
                 projection_registry,
@@ -93,7 +165,72 @@ impl PgStore {
 
     pub(crate) fn dlq_without_payload_replay(&self) -> PgDlqStore {
         PgDlqStore {
-            tenant_pool: PgTenantPool::new(self),
+            lane: DlqLane::Serving {
+                read: PgTenantReadPool::from_unverified_for_test(self),
+                write: PgTenantWritePool::from_unverified_for_test(self),
+            },
+            replay: DlqReplayCapability::Disabled,
+        }
+    }
+}
+
+impl PgDlqStore {
+    #[allow(dead_code)]
+    pub(crate) fn with_projection_registry(
+        reader: &VerifiedPgReadStore,
+        writer: &VerifiedPgWriteStore,
+        payload_protector: DlxPayloadProtector,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> Self {
+        Self {
+            lane: DlqLane::Serving {
+                read: PgTenantReadPool::new(reader),
+                write: PgTenantWritePool::new(writer),
+            },
+            replay: DlqReplayCapability::Enabled {
+                payload_protector,
+                projection_registry,
+            },
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn without_payload_replay(
+        reader: &VerifiedPgReadStore,
+        writer: &VerifiedPgWriteStore,
+    ) -> Self {
+        Self {
+            lane: DlqLane::Serving {
+                read: PgTenantReadPool::new(reader),
+                write: PgTenantWritePool::new(writer),
+            },
+            replay: DlqReplayCapability::Disabled,
+        }
+    }
+
+    pub(crate) fn with_projection_registry_maintenance(
+        store: &VerifiedPgMaintenanceStore,
+        payload_protector: DlxPayloadProtector,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> Self {
+        Self {
+            lane: DlqLane::Maintenance {
+                read: PgMaintenanceReadPool::new_maintenance(store),
+                write: PgMaintenanceWritePool::new_maintenance(store),
+            },
+            replay: DlqReplayCapability::Enabled {
+                payload_protector,
+                projection_registry,
+            },
+        }
+    }
+
+    pub(crate) fn without_payload_replay_maintenance(store: &VerifiedPgMaintenanceStore) -> Self {
+        Self {
+            lane: DlqLane::Maintenance {
+                read: PgMaintenanceReadPool::new_maintenance(store),
+                write: PgMaintenanceWritePool::new_maintenance(store),
+            },
             replay: DlqReplayCapability::Disabled,
         }
     }
@@ -136,7 +273,7 @@ impl DlqStore for PgDlqStore {
             }
         };
         let result = self
-            .tenant_pool
+            .lane
             .write(
                 infra_tenant_scope(request.tenant()),
                 move |conn| {
@@ -263,7 +400,7 @@ impl DlqStore for PgDlqStore {
         let event_id = request.event_id().as_str().to_string();
         let tenant = request.tenant();
         let result = self
-            .tenant_pool
+            .lane
             .write(
                 infra_tenant_scope(tenant),
                 move |conn| {
@@ -315,7 +452,7 @@ impl DlqStore for PgDlqStore {
         let change_ticket = request.change_ticket().as_str().to_owned();
         let operator_subject = request.operator_subject().as_str().to_owned();
         let result = self
-            .tenant_pool
+            .lane
             .write(
                 infra_tenant_scope(tenant),
                 move |conn| {
@@ -369,7 +506,7 @@ impl PgDlqStore {
     ) -> Result<DlqEntrySummary, DlqError> {
         let id = id.to_string();
         let row: Option<DeadLetterRow> = self
-            .tenant_pool
+            .lane
             .read(infra_tenant_scope(tenant), move |conn| {
                 Box::pin(async move {
                     sqlx::query_as(
@@ -412,7 +549,7 @@ impl PgDlqStore {
     ) -> Result<DlqEntrySummary, DlqError> {
         let event_id = event_id.to_string();
         let row: Option<OutboxRow> = self
-            .tenant_pool
+            .lane
             .read_map(
                 infra_tenant_scope(tenant),
                 move |conn| {
@@ -481,7 +618,7 @@ impl PgDlqStore {
             .map(|cursor| cursor.last_kind().cursor_part().to_string());
         let cursor_id = query.cursor().map(|cursor| cursor.last_id().to_string());
         let rows: Vec<DeadLetterRow> = self
-            .tenant_pool
+            .lane
             .read(infra_tenant_scope(tenant), move |conn| {
                 Box::pin(async move {
                     sqlx::query_as(LIST_DEAD_LETTER_SQL)
@@ -531,7 +668,7 @@ impl PgDlqStore {
         let cursor_id = query.cursor().map(|cursor| cursor.last_id().to_string());
         let limit = i64::from(query.fetch_limit());
         let rows: Vec<OutboxRow> = self
-            .tenant_pool
+            .lane
             .read_map(
                 infra_tenant_scope(tenant),
                 move |conn| {

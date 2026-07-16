@@ -89,7 +89,7 @@ API 位于 `eventexec::reconcile`（`ReconcileSchedulerBuilder` / `ReconcileWork
   `reconcile_attempt_results`，`reconcile_actions` 只记录真实 `ConvergeAction`（`action_kind` 保持 NOT NULL，
   `result_label` 固定为 action-local `recorded`）。
 - 五表都是 tenant 表，必须同迁移落 `ENABLE ROW LEVEL SECURITY`、`FORCE ROW LEVEL SECURITY` 与标准
-  `tenant_isolation` policy。普通租户内 CAS 走 `PgTenantPool` 注入 `SET LOCAL rss.tenant_id`，不使用
+`tenant_isolation` policy。普通租户内 CAS 走 `PgTenantWritePool` 注入 `SET LOCAL rss.tenant_id`，不使用
   `SECURITY DEFINER`。
 
 ## Durable command outbox seam

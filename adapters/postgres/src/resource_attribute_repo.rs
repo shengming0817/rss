@@ -11,18 +11,28 @@ use identity::ports::{
 };
 use sqlx::Row;
 
-use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
 use crate::outbox::{epoch_secs_to_time, unix_secs};
+use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 
 pub struct PgResourceAttributeRepo {
-    pool: PgTenantPool,
+    read_pool: PgTenantReadPool,
+    write_pool: PgTenantWritePool,
 }
 
 impl PgResourceAttributeRepo {
-    pub(crate) fn new(store: &PgStore) -> Self {
+    pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            read_pool: PgTenantReadPool::new(reader),
+            write_pool: PgTenantWritePool::new(writer),
+        }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
+        Self {
+            read_pool: PgTenantReadPool::from_unverified_for_test(store),
+            write_pool: PgTenantWritePool::from_unverified_for_test(store),
         }
     }
 }
@@ -107,7 +117,7 @@ impl ResourceAttributeReadRepo for PgResourceAttributeRepo {
             .map(|key| key.as_str().to_string())
             .collect::<Vec<_>>();
         let rows: Vec<RawResourceAttribute> = self
-            .pool
+            .read_pool
             .read(tenant_scope, move |conn| {
                 Box::pin(async move {
                     let rows = sqlx::query(
@@ -188,7 +198,7 @@ impl ResourceAttributeWriteRepo for PgResourceAttributeRepo {
                     return Err(IdentityError::InvalidPolicy);
                 }
                 let version = version_param(ResourceAttributeVersion::first())?;
-                self.pool
+                self.write_pool
                     .write(
                         tenant_scope,
                         move |conn| {
@@ -232,7 +242,7 @@ impl ResourceAttributeWriteRepo for PgResourceAttributeRepo {
             }
             Some(expected) => {
                 let expected_version = version_param(expected)?;
-                self.pool
+                self.write_pool
                     .write(
                         tenant_scope,
                         move |conn| {
@@ -304,7 +314,7 @@ impl ResourceAttributeWriteRepo for PgResourceAttributeRepo {
         let key_str = key.as_str().to_string();
         let expected_version = version_param(expected)?;
         let outcome = self
-            .pool
+            .write_pool
             .write(
                 tenant_scope,
                 move |conn| {

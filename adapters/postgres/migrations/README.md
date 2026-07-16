@@ -87,6 +87,22 @@ Medium）扫描 schema 快照，缺三件套即门红。
 非 BYPASSRLS、无其它 public relation 权限，并在只读事务内 `SET LOCAL rss.tenant_id = targetTenant` 复用现有
 tenant-isolation policy。
 
+`0067` 新增 LocalOnly tenant read lane 固定角色 `rss_app_read`。它是 `LOGIN NOINHERIT`，无 superuser、
+`BYPASSRLS`、建库、建角色、replication、membership 或 object ownership 能力；role config 精确固定
+`default_transaction_read_only=on` 且 `search_path=pg_catalog, public`。迁移先清空该角色在当前数据库的 relation/column/sequence/function/schema、
+large-object 与 parameter ACL（同时收敛会影响 reader 的 PUBLIC LO/parameter ACL），再动态只给当前 `public`
+下含 `tenant_id` 的 base/partition relations 授 SELECT；不使用
+`ALTER DEFAULT PRIVILEGES`，后续 tenant relation 必须在自己的迁移中显式授 reader SELECT。密码继续由部署
+out-of-band 注入。runtime 还会用显式 `BEGIN READ ONLY`，并在 mint reader capability 前核验角色、有效 ACL、
+`lo_compat_privileges=off`、tenant GUC 与全部 tenant relation 的 FORCE RLS/policy 真实 catalog dependency，
+任一漂移均拒绝启动。
+由于 PostgreSQL 没有针对单一角色的 ACL DENY，`0067` 同时撤销当前数据库的 PUBLIC TEMPORARY，并把该权限
+显式回授既有 writer `rss_app`；reader 只获 CONNECT，因此不改变 writer 行为，也不让 PUBLIC TEMP 绕过 reader
+的精确数据库权限门。
+存量库必须用待发布镜像的 `rss postgres migrate-reader-lane` 先执行精确 0066→0067 migration job，再 provision
+reader 密码并启动新 binary。该命令只用 migrator 凭据，保留 SQLx lock/checksum/ledger，并在数据库不是
+0066/0067 或镜像含 0068+ 时无写入拒绝，不能退化为通用迁移入口。
+
 `0034` 新增 `abac_policies` tenant 表并授予 `rss_app` SELECT/INSERT/UPDATE；policy delete 经 versioned
 tombstone UPDATE，不授表级 DELETE，防止同 id 删除后重建把 CAS version 水位重置。
 

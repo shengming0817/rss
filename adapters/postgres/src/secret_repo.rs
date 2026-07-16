@@ -34,8 +34,8 @@ use std::collections::HashMap;
 #[cfg(all(test, feature = "integration"))]
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::PgStore;
-use crate::cotx::{PgTenantPool, TxCapability};
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool, TxCapability};
+use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::tx_retry::{
     SETTINGS_SECRET_BOUNDARY, classify_secret_repo_error, run_pg_localtx_retry, run_pg_tx_retry,
 };
@@ -44,18 +44,27 @@ use crate::tx_retry::{
 ///
 /// !! **只存引用坐标，绝无 secret 材料** !!
 ///
-/// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入）clone 构造；本类型不暴露写能力。
+/// 仅由已验证 reader capability 构造；本类型不暴露写能力。
 pub struct PgSecretRepo {
-    pool: PgTenantPool,
+    pool: PgTenantReadPool,
 }
 
 impl PgSecretRepo {
-    /// 由 [`PgStore`] 构造（clone 其 `pool`）。
+    /// 由已验证 reader capability 构造。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Settings>::secret_repo` 收口。
-    pub(crate) fn new(store: &PgStore) -> Self {
+    pub(crate) fn new(reader: &VerifiedPgReadStore) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            pool: PgTenantReadPool::new(reader),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+impl crate::PgStore {
+    pub(crate) fn secret_repo(&self) -> PgSecretRepo {
+        PgSecretRepo {
+            pool: PgTenantReadPool::from_unverified_for_test(self),
         }
     }
 }
@@ -65,16 +74,23 @@ impl PgSecretRepo {
 /// HTTP publish 必须携带 settings 域铸造的 typed LocalTx observation；内部 publish / republish
 /// 使用 generic repository retry，不冒充 HTTP contract。三个 active-row 写入口共享同一个私有 CAS body。
 pub struct PgSecretUnitOfWork {
-    pool: PgTenantPool,
+    pool: PgTenantWritePool,
 }
 
 impl PgSecretUnitOfWork {
-    /// 由 [`PgStore`] 构造（clone 其 `pool`）。
+    /// 由已验证 writer capability 构造。
     ///
     /// `pub(crate)`：仅经 [`crate::PgDomainDeps`]`<caps::Settings>::settings_bundle` 收口。
-    pub(crate) fn new(store: &PgStore) -> Self {
+    pub(crate) fn new(writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            pool: PgTenantWritePool::new(writer),
+        }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
+        Self {
+            pool: PgTenantWritePool::from_unverified_for_test(store),
         }
     }
 

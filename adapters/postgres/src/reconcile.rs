@@ -2,7 +2,7 @@
 //!
 //! This module intentionally exposes only a narrow target/lease/attempt/action store. It does not
 //! wire a runtime worker or define a new engine/domain trait. All tenant-table access goes through
-//! [`PgTenantPool`], so `SET LOCAL rss.tenant_id` remains the single RLS funnel.
+//! distinct typed read/write pools, so `SET LOCAL rss.tenant_id` remains the single RLS funnel.
 //!
 //! ref: kube-rs/kube kube-runtime/src/controller/mod.rs@ae49cce192b85db3d734d290a6031aa2d9ac60e0
 //! ref: apalis-postgres migrations/20220530084123_jobs_workers.sql@5a930218b6b4128fc4c9e191cecc7cd0e1cbbbed
@@ -19,12 +19,19 @@ use eventexec::reconcile::{
     ReconcileTargetSummary, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
     ScheduleLeaseOutcome,
 };
+use futures::future::BoxFuture;
+use sqlx::PgConnection;
 
+#[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantPool, TxCapability, infra_tenant_scope};
+use crate::cotx::{
+    InfraTenantScope, PgMaintenanceReadPool, PgMaintenanceWritePool, PgTenantReadPool,
+    PgTenantWritePool, TxCapability, infra_tenant_scope,
+};
 use crate::outbox::{
     OutboxAppendError, OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs,
 };
+use crate::pool::{VerifiedPgMaintenanceStore, VerifiedPgReadStore, VerifiedPgWriteStore};
 
 /// Reconcile target identity under one tenant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,8 +240,49 @@ impl ReconcileLedgerId {
 /// Private field is the tenant-scoped pool wrapper; callers cannot bypass RLS setup through this
 /// store.
 pub struct PgReconcileStore {
-    pool: PgTenantPool,
+    lane: ReconcileLane,
     clock: Arc<dyn Clock>,
+}
+
+enum ReconcileLane {
+    Serving {
+        read: PgTenantReadPool,
+        write: PgTenantWritePool,
+    },
+    Maintenance {
+        read: PgMaintenanceReadPool,
+        write: PgMaintenanceWritePool,
+    },
+}
+
+impl ReconcileLane {
+    async fn read<T, F>(&self, scope: InfraTenantScope, read: F) -> Result<T, sqlx::Error>
+    where
+        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, sqlx::Error>> + Send,
+        T: Send,
+    {
+        match self {
+            Self::Serving { read: pool, .. } => pool.read(scope, read).await,
+            Self::Maintenance { read: pool, .. } => pool.read(scope, read).await,
+        }
+    }
+
+    async fn write<T, F, E>(
+        &self,
+        scope: InfraTenantScope,
+        write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> Result<T, E>
+    where
+        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        T: Send,
+    {
+        match self {
+            Self::Serving { write: pool, .. } => pool.write(scope, write, map_storage).await,
+            Self::Maintenance { write: pool, .. } => pool.write(scope, write, map_storage).await,
+        }
+    }
 }
 
 struct PgReconcileSystemClock;
@@ -247,17 +295,41 @@ impl Clock for PgReconcileSystemClock {
     }
 }
 
+#[cfg(all(test, feature = "integration"))]
 impl PgStore {
     /// Construct the reconcile store from the shared pool.
     pub(crate) fn reconcile(&self) -> PgReconcileStore {
         PgReconcileStore {
-            pool: PgTenantPool::new(self),
+            lane: ReconcileLane::Serving {
+                read: PgTenantReadPool::from_unverified_for_test(self),
+                write: PgTenantWritePool::from_unverified_for_test(self),
+            },
             clock: Arc::new(PgReconcileSystemClock),
         }
     }
 }
 
 impl PgReconcileStore {
+    pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
+        Self {
+            lane: ReconcileLane::Serving {
+                read: PgTenantReadPool::new(reader),
+                write: PgTenantWritePool::new(writer),
+            },
+            clock: Arc::new(PgReconcileSystemClock),
+        }
+    }
+
+    pub(crate) fn new_maintenance(store: &VerifiedPgMaintenanceStore) -> Self {
+        Self {
+            lane: ReconcileLane::Maintenance {
+                read: PgMaintenanceReadPool::new_maintenance(store),
+                write: PgMaintenanceWritePool::new_maintenance(store),
+            },
+            clock: Arc::new(PgReconcileSystemClock),
+        }
+    }
+
     /// Upsert a target and ensure its lease row exists.
     pub async fn upsert_target(
         &self,
@@ -265,7 +337,7 @@ impl PgReconcileStore {
         key: &ReconcileTargetKey,
     ) -> Result<ReconcileTarget, ReconcileStoreError> {
         let fields = TargetFields::from_key(tenant, key);
-        self.pool
+        self.lane
             .write(
                 infra_tenant_scope(tenant),
                 move |tx| {
@@ -326,7 +398,7 @@ impl PgReconcileStore {
         let target_id = target_id.to_string();
         let holder_id = holder_id.to_string();
 
-        self.pool
+        self.lane
             .write(
                 infra_tenant_scope(tenant),
                 move |tx| {
@@ -430,7 +502,7 @@ impl PgReconcileStore {
         let holder_id = attempt.holder_id.to_string();
         let trigger = attempt.trigger.as_label();
 
-        self.pool
+        self.lane
             .write(
                 infra_tenant_scope(tenant),
                 move |tx| {
@@ -487,7 +559,7 @@ impl PgReconcileStore {
         let result_label = result.result.as_label();
         let error_kind = result.error_kind.map(ReconcileActionErrorKind::as_label);
 
-        self.pool
+        self.lane
             .write(
                 infra_tenant_scope(tenant),
                 move |tx| {
@@ -548,7 +620,7 @@ impl PgReconcileStore {
         let tenant_id = tenant.to_string();
         let target_id = request.target_id.to_string();
         let lease_token = request.lease_token.to_string();
-        self.pool
+        self.lane
             .write(
                 infra_tenant_scope(tenant),
                 move |tx| {
@@ -623,7 +695,7 @@ impl PgReconcileStore {
         tenant: vocab::TenantId,
         target_id: &str,
     ) -> Result<(), ReconcileStoreError> {
-        update_target_status(&self.pool, tenant, target_id, "disabled", None, false).await
+        update_target_status(&self.lane, tenant, target_id, "disabled", None, false).await
     }
 
     /// Resume a target and make it immediately due.
@@ -632,7 +704,7 @@ impl PgReconcileStore {
         tenant: vocab::TenantId,
         target_id: &str,
     ) -> Result<(), ReconcileStoreError> {
-        update_target_status(&self.pool, tenant, target_id, "active", None, true).await
+        update_target_status(&self.lane, tenant, target_id, "active", None, true).await
     }
 }
 
@@ -643,7 +715,7 @@ impl ReconcileOperatorStore for PgReconcileStore {
         target_id: &str,
         _capability: OperatorReconcileCapability,
     ) -> Result<ReconcileTargetSummary, ReconcileScheduleError> {
-        inspect_target(&self.pool, tenant, target_id)
+        inspect_target(&self.lane, tenant, target_id)
             .await
             .map_err(ReconcileScheduleError::new)
     }
@@ -654,10 +726,10 @@ impl ReconcileOperatorStore for PgReconcileStore {
         target_id: &str,
         _capability: OperatorReconcileCapability,
     ) -> Result<ReconcileTargetSummary, ReconcileScheduleError> {
-        update_target_status(&self.pool, tenant, target_id, "active", None, true)
+        update_target_status(&self.lane, tenant, target_id, "active", None, true)
             .await
             .map_err(ReconcileScheduleError::new)?;
-        inspect_target(&self.pool, tenant, target_id)
+        inspect_target(&self.lane, tenant, target_id)
             .await
             .map_err(ReconcileScheduleError::new)
     }
@@ -681,7 +753,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
         let reconciler_id = reconciler_id.to_string();
         let holder_id = holder_id.to_string();
         let limit = i64::from(limit.max(1));
-        self.pool
+        self.lane
             .write(
                 infra_tenant_scope(tenant),
                 move |tx| {
@@ -864,7 +936,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
         let epoch = epoch_to_db(attempt.target().epoch()).map_err(ReconcileScheduleError::new)?;
         let action_kind = action.as_label();
         let committed = self
-            .pool
+            .lane
             .write(
                 infra_tenant_scope(tenant),
                 move |tx| {
@@ -1204,7 +1276,7 @@ async fn lock_held_lease(
 }
 
 async fn update_target_status(
-    pool: &PgTenantPool,
+    pool: &ReconcileLane,
     tenant: vocab::TenantId,
     target_id: &str,
     status: &'static str,
@@ -1253,7 +1325,7 @@ async fn update_target_status(
 }
 
 async fn inspect_target(
-    pool: &PgTenantPool,
+    pool: &ReconcileLane,
     tenant: vocab::TenantId,
     target_id: &str,
 ) -> Result<ReconcileTargetSummary, ReconcileStoreError> {

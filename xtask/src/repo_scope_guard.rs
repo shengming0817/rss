@@ -225,9 +225,22 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ("adapters/postgres/src/inbox.rs", "release"),
     ("adapters/postgres/src/inbox.rs", "sample_inbox_backlog"),
     ("adapters/postgres/src/inbox.rs", "try_claim"),
+    // Direct infrastructure-lane probes; exact test names prevent a file-wide bypass.
+    (
+        "adapters/postgres/src/integration_tests.rs",
+        "tenant_reader_role_is_exact_and_forced_read_write_is_denied",
+    ),
+    (
+        "adapters/postgres/src/integration_tests.rs",
+        "tenant_scoped_read_enforces_read_only",
+    ),
     (
         "adapters/postgres/src/outbox/settlement.rs",
-        "execute_scalar",
+        "execute_published",
+    ),
+    (
+        "adapters/postgres/src/outbox/settlement.rs",
+        "execute_retry",
     ),
     ("adapters/postgres/src/outbox/settlement.rs", "execute_dlx"),
     ("adapters/postgres/src/outbox_cdc.rs", "emit"),
@@ -709,7 +722,8 @@ mod tests {
         let files = vec![
             (
                 "adapters/postgres/src/outbox/settlement.rs".to_string(),
-                "async fn execute_scalar() { infra_tenant_scope(tenant); }\n\
+                "async fn execute_published() { infra_tenant_scope(tenant); }\n\
+                 async fn execute_retry() { infra_tenant_scope(tenant); }\n\
                  async fn execute_dlx() { infra_tenant_scope(tenant); }"
                     .to_string(),
             ),
@@ -734,6 +748,36 @@ mod tests {
         ];
         let (_, findings) = scan_infra_tenant_scope(&files);
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn green_infra_tenant_scope_allowed_for_reader_boundary_tests() {
+        let files = vec![(
+            "adapters/postgres/src/integration_tests.rs".to_string(),
+            "async fn tenant_scoped_read_enforces_read_only() { infra_tenant_scope(tenant); }\n\
+             async fn tenant_reader_role_is_exact_and_forced_read_write_is_denied() {\n\
+                 infra_tenant_scope(tenant);\n\
+                 infra_tenant_scope(other_tenant);\n\
+             }"
+            .to_string(),
+        )];
+        let (_, findings) = scan_infra_tenant_scope(&files);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn red_infra_tenant_scope_rejected_in_unregistered_integration_test() {
+        let files = vec![(
+            "adapters/postgres/src/integration_tests.rs".to_string(),
+            "async fn normal_repository_test() { infra_tenant_scope(tenant); }".to_string(),
+        )];
+        let (_, findings) = scan_infra_tenant_scope(&files);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::InfraTenantScopeCallsiteNotAllowed),
+            "{findings:?}"
+        );
     }
 
     #[test]

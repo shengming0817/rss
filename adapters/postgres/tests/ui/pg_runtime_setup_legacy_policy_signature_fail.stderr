@@ -1,0 +1,22 @@
+error[E0061]: this function takes 6 arguments but 5 arguments were supplied
+  --> tests/ui/pg_runtime_setup_legacy_policy_signature_fail.rs:9:18
+   |
+ 9 |     let _setup = PgRuntimeDeps::setup_with_legacy_config_policy(
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+12 |         LegacyConfigPlaintextPolicy::Deny,
+   |         --------------------------------- argument #3 of type `&PgTenantReadConfig` is missing
+   |
+note: associated function defined here
+  --> src/bundle.rs
+   |
+   |     pub async fn setup_with_legacy_config_policy(
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: provide the argument
+   |
+ 9 |     let _setup = PgRuntimeDeps::setup_with_legacy_config_policy(
+10 |         migrator_config,
+11 |         serving_config,
+12 ~         /* &PgTenantReadConfig */,
+13 ~         LegacyConfigPlaintextPolicy::Deny,
+   |

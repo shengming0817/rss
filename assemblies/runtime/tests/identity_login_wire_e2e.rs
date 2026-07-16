@@ -29,7 +29,7 @@ use generated::http::settings_v1::SPEC as SETTINGS_CONFIG_SPEC;
 use identity::ports::{Credential, CredentialRepo as _, DynRoleBindingLifecycle, DynRoleReadRepo};
 use identity::ports::{Role, RoleWriteRepo as _, TenantId, TenantRepoScope};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
 use primitives::ListenerKind;
 use runtime::test_support::{wire_identity_with, wire_settings};
 use runtime::{SharedRuntimeDeps, SystemClock, TracingAuthAuditSink};
@@ -48,6 +48,8 @@ const LOGIN_USERNAME: &str = "alice";
 const PASSWORD: &str = "correct-horse";
 const TEST_APP_ROLE: &str = "rss_app";
 const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
+const TEST_READ_ROLE: &str = "rss_app_read";
+const TEST_READ_PASSWORD: &str = "rss_app_read_test_pw";
 const ADMIN_ROLE: &str = "tenant-admin";
 const OPERATOR_ROLE: &str = "operator";
 const TARGET_SUBJECT: &str = "bob@example.test";
@@ -210,10 +212,13 @@ async fn connect_pg()
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    provision_rss_app_login(p).await?;
+    provision_runtime_logins(p).await?;
+    let tenant_read_config =
+        PgTenantReadConfig::new(pg_config(p, TEST_READ_ROLE, TEST_READ_PASSWORD));
     let deps = PgRuntimeDeps::setup(
         &owner_config,
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        &tenant_read_config,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )
@@ -233,7 +238,7 @@ fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgCon
     .with_acquire_timeout(Duration::from_secs(5))
 }
 
-async fn provision_rss_app_login(
+async fn provision_runtime_logins(
     p: &testkit::PgConnParams,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let options = pg_connect_options(p, &p.username, &p.password);
@@ -242,19 +247,30 @@ async fn provision_rss_app_login(
         .acquire_timeout(Duration::from_secs(5))
         .connect_with(options)
         .await?;
-    sqlx::query(
+    sqlx::query(&format!(
         r#"
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app') THEN
-                CREATE ROLE rss_app LOGIN PASSWORD 'rss_app_test_pw' NOBYPASSRLS;
+            PERFORM pg_advisory_xact_lock(hashtext('{TEST_APP_ROLE}'));
+            PERFORM pg_advisory_xact_lock(hashtext('{TEST_READ_ROLE}'));
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_APP_ROLE}') THEN
+                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             ELSE
-                ALTER ROLE rss_app LOGIN PASSWORD 'rss_app_test_pw' NOBYPASSRLS;
+                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_READ_ROLE}') THEN
+                CREATE ROLE {TEST_READ_ROLE} LOGIN PASSWORD '{TEST_READ_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            ELSE
+                ALTER ROLE {TEST_READ_ROLE} LOGIN PASSWORD '{TEST_READ_PASSWORD}'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             END IF;
         END
         $$;
         "#,
-    )
+    ))
     .execute(&pool)
     .await?;
     pool.close().await;

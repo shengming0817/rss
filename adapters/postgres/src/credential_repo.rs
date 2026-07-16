@@ -39,18 +39,19 @@ use identity::ports::{
 };
 use sqlx::{PgConnection, Row};
 
-use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
 use crate::outbox::{epoch_secs_to_time, unix_secs};
+use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::tx_retry::{classify_identity_error, run_pg_localtx_retry};
 
 /// identity 凭据仓储的 PostgreSQL adapter。
 ///
-/// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，同 [`crate::PgRoleRepo`]）clone 构造。
+/// 仅由已验证 reader/writer capability 构造（同 [`crate::PgRoleRepo`]）。
 /// 不持 `Clock`：authenticate / lockout_status 的 `now` 由调用方（`LoginService`，经注入 `Clock`）传入
 /// （域类型不持 clock，rust-standards §工程护栏；时间判定全经入参 `now`）。
 pub struct PgCredentialRepo {
-    pool: PgTenantPool,
+    read_pool: PgTenantReadPool,
+    write_pool: PgTenantWritePool,
     #[cfg(all(test, feature = "integration"))]
     password_change_post_update_gate: Option<Arc<PasswordChangeCasPauseGate>>,
     #[cfg(all(test, feature = "integration"))]
@@ -111,15 +112,26 @@ impl PasswordChangeCasPauseGate {
 }
 
 impl PgCredentialRepo {
-    /// 由 [`PgStore`] 构造（clone 其 `pool`）。
+    /// 由已验证 reader/writer capability 构造。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::credential_repo` 收口。
-    pub(crate) fn new(store: &PgStore) -> Self {
+    pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            read_pool: PgTenantReadPool::new(reader),
+            write_pool: PgTenantWritePool::new(writer),
             #[cfg(all(test, feature = "integration"))]
             password_change_post_update_gate: None,
             #[cfg(all(test, feature = "integration"))]
+            password_change_faults: Arc::new(Mutex::new(CredentialFaultState::default())),
+        }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
+        Self {
+            read_pool: PgTenantReadPool::from_unverified_for_test(store),
+            write_pool: PgTenantWritePool::from_unverified_for_test(store),
+            password_change_post_update_gate: None,
             password_change_faults: Arc::new(Mutex::new(CredentialFaultState::default())),
         }
     }
@@ -274,7 +286,7 @@ impl CredentialRepo for PgCredentialRepo {
         // 经 tenant_scoped_read 注入 SET LOCAL（与 0009 RLS policy current_setting 锚点对齐）；读闭包仅 fetch +
         // try_get 返回 owned 原始值，hydrate（PHC 复核 / Credential 重建）在 tx 外（域错误不依赖 sqlx）。
         let raw = self
-            .pool
+            .read_pool
             .read(scope, move |conn| {
                 Box::pin(async move {
                     let row = sqlx::query(
@@ -331,7 +343,7 @@ impl CredentialRepo for PgCredentialRepo {
         let tenant = scope.tenant();
         let tenant_uuid = tenant_param(tenant);
         let login_str = login.as_str().to_owned();
-        self.pool
+        self.write_pool
             .write(
                 scope,
                 move |conn| {
@@ -357,7 +369,7 @@ impl CredentialRepo for PgCredentialRepo {
             ))));
         }
         let tenant_uuid = tenant_param(tenant);
-        self.pool
+        self.write_pool
             .write(
                 scope,
                 move |conn| {
@@ -401,7 +413,7 @@ impl CredentialRepo for PgCredentialRepo {
                 #[cfg(all(test, feature = "integration"))]
                 record_password_change_attempt(&password_change_faults, &login_str);
                 async move {
-                    self.pool
+                    self.write_pool
                         .retry_write(
                             scope,
                             move |tx| {
@@ -489,7 +501,7 @@ impl CredentialRepo for PgCredentialRepo {
         let tenant = scope.tenant();
         let tenant_uuid = tenant_param(tenant);
         let login_str = login.as_str().to_owned();
-        self.pool
+        self.write_pool
             .write(
                 scope,
                 move |conn| {

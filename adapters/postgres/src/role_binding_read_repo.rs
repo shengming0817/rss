@@ -5,18 +5,25 @@
 
 use identity::ports::{IdentityError, RoleBinding, RoleBindingReadRepo, TenantRepoScope};
 
-use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::PgTenantReadPool;
+use crate::pool::VerifiedPgReadStore;
 
 /// PostgreSQL 角色绑定只读仓储。
 pub struct PgRoleBindingReadRepo {
-    pool: PgTenantPool,
+    pool: PgTenantReadPool,
 }
 
 impl PgRoleBindingReadRepo {
-    pub(crate) fn new(store: &PgStore) -> Self {
+    pub(crate) fn new(reader: &VerifiedPgReadStore) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            pool: PgTenantReadPool::new(reader),
+        }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
+        Self {
+            pool: PgTenantReadPool::from_unverified_for_test(store),
         }
     }
 }

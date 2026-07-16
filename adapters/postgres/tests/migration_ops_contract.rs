@@ -3,6 +3,131 @@ const SECRET_REFS_HARDENING: &str =
 const MIGRATION_README: &str = include_str!("../migrations/README.md");
 const DLX_CUTOVER: &str = include_str!("../migrations/0062_prepare_dead_letter_cutover.sql");
 const DLX_LIFECYCLE: &str = include_str!("../migrations/0063_dead_letter_lifecycle.sql");
+const LOCALONLY_READ_ROLE: &str = include_str!("../migrations/0067_localonly_read_role.sql");
+const READER_PROVISIONING: &str =
+    include_str!("../../../deploy/postgres-upgrade/provision-reader-role.sh");
+const READER_UPGRADE_SMOKE: &str =
+    include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
+
+#[test]
+fn reader_provisioning_disables_inherited_xtrace_before_secret_expansion() {
+    assert!(
+        matches!(
+            (
+                READER_PROVISIONING.find("set +x"),
+                READER_PROVISIONING.find("${RSS_PG_")
+            ),
+            (Some(disable_xtrace), Some(first_secret_expansion))
+                if disable_xtrace < first_secret_expansion
+        ),
+        "set +x must exist and execute before any credential-bearing shell expansion"
+    );
+    assert!(!READER_PROVISIONING.contains("set -x"));
+    for required in [
+        "ALTER ROLE rss_app_read SET default_transaction_read_only = 'on'",
+        "ALTER ROLE rss_app_read SET search_path = pg_catalog, public",
+        "current_setting('lo_compat_privileges')",
+        "rss_app_read:on:pg_catalog, public:off",
+    ] {
+        assert!(
+            READER_PROVISIONING.contains(required),
+            "reader credential provisioning must preserve the startup-gate role settings: {required}"
+        );
+    }
+}
+
+#[test]
+fn localonly_reader_migration_is_exact_and_has_no_future_grant_fallback() {
+    for required in [
+        "CREATE ROLE rss_app_read",
+        "LOGIN",
+        "NOSUPERUSER",
+        "NOBYPASSRLS",
+        "NOCREATEDB",
+        "NOCREATEROLE",
+        "NOREPLICATION",
+        "NOINHERIT",
+        "default_transaction_read_only = 'on'",
+        "search_path = pg_catalog, public",
+        "refuse implicit normalization",
+        "REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC",
+        "GRANT TEMPORARY ON DATABASE %I TO rss_app",
+        "GRANT CONNECT ON DATABASE %I TO rss_app_read",
+        "FOR application_schema IN",
+        "n.nspname <> 'information_schema'",
+        "n.nspname !~ '^pg_'",
+        "REVOKE ALL PRIVILEGES ON SCHEMA %I FROM rss_app_read",
+        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM rss_app_read",
+        "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM rss_app_read",
+        "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA %I FROM rss_app_read",
+        "a.attacl IS NOT NULL",
+        "REVOKE ALL PRIVILEGES (%I) ON TABLE %I.%I FROM rss_app_read",
+        "pg_largeobject_metadata",
+        "REVOKE ALL PRIVILEGES ON LARGE OBJECT %s FROM %s",
+        "pg_parameter_acl",
+        "REVOKE ALL PRIVILEGES ON PARAMETER %I FROM %s",
+        "acl.grantee IN (0::oid, reader.oid)",
+        "pg_catalog.lo_from_bytea(oid, bytea)",
+        "pg_catalog.lo_put(oid, bigint, bytea)",
+        "pg_catalog.lo_unlink(oid)",
+        "FROM PUBLIC, rss_app_read",
+        "TO rss_app",
+        "CREATE POLICY saga_worker_tenant_index_tenant_isolation",
+        "AS RESTRICTIVE",
+        "USING (false)",
+        "GRANT SELECT ON TABLE %I.%I TO rss_app_read",
+        "a.attname = 'tenant_id'",
+        "c.relkind IN ('r', 'p')",
+    ] {
+        assert!(
+            LOCALONLY_READ_ROLE.contains(required),
+            "0067 omits the exact tenant-reader contract: {required}"
+        );
+    }
+    for forbidden in [
+        "ALTER DEFAULT PRIVILEGES",
+        "GRANT INSERT",
+        "GRANT UPDATE",
+        "GRANT DELETE",
+        "GRANT TRUNCATE",
+        "GRANT USAGE ON ALL SEQUENCES",
+        "GRANT TEMPORARY ON DATABASE %I TO rss_app_read",
+        "PASSWORD",
+    ] {
+        assert!(
+            !LOCALONLY_READ_ROLE.contains(forbidden),
+            "0067 exposes a forbidden reader capability or fallback: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn reader_upgrade_smoke_uses_real_sqlx_ledger_and_release_cli_with_bounded_startup() {
+    for required in [
+        "RSS_TEST_ALLOW_EXTERNAL_POSTGRES=1",
+        "integration_tests::bootstrap_reader_upgrade_smoke_predecessor",
+        "postgres migrate-reader-lane",
+        "FROM _sqlx_migrations WHERE version = 67",
+        "docker inspect",
+        "deadline=",
+    ] {
+        assert!(
+            READER_UPGRADE_SMOKE.contains(required),
+            "retained-volume smoke omits release-path evidence: {required}"
+        );
+    }
+    for forbidden in [
+        "sed -n",
+        "0067_localonly_read_role.sql",
+        "for migration in",
+        "until owner_psql",
+    ] {
+        assert!(
+            !READER_UPGRADE_SMOKE.contains(forbidden),
+            "retained-volume smoke must not replay migration SQL or wait forever: {forbidden}"
+        );
+    }
+}
 
 #[test]
 fn secret_refs_repair_must_finish_before_sqlx_reaches_0058() {

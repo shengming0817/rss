@@ -66,6 +66,7 @@ mod role_binding_read_repo;
 #[cfg(feature = "domain-identity")]
 mod role_repo;
 mod saga;
+mod saga_candidates;
 #[cfg(feature = "domain-settings")]
 mod secret_repo;
 mod service_token_replay;
@@ -154,7 +155,9 @@ mod integration_tests;
 mod test_pg;
 
 pub use inbox::{PgInboxStore, PgInboxSweeper};
-pub use pool::{LegacyConfigPlaintextPolicy, PgConfig, PgError, PgPassword, PoolReadiness};
+pub use pool::{
+    LegacyConfigPlaintextPolicy, PgConfig, PgError, PgPassword, PgTenantReadConfig, PoolReadiness,
+};
 // `pg_readiness_sampling_loop` 保持 `pub(crate)`，仅经 consuming `PgReadinessSamplerFactory::spawn` 收口；
 // 类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / runtime lifecycle output 返回类型）。
 pub use readiness::{PgDbReadiness, PgReadinessSampler};
@@ -228,7 +231,9 @@ impl ManagedResource for PgStoreGuard {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.store.shutdown().await
+        self.store.pool.close().await;
+        tracing::info!(target: "postgres", name = self.name, "postgres pool closed");
+        Ok(())
     }
 }
 

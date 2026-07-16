@@ -25,8 +25,12 @@ const CONTENT_ROOTS: &[(&str, &str)] = &[
     ("contracts", "toml"),
     ("journeys", "toml"),
 ];
-const SEMANTIC_DOC_FILES: &[&str] =
-    &["docs/architecture/202607111257-1673-l2-outbox-crash-matrix.md"];
+const POSTGRES_MIGRATION_WATCHDOG_FILE: &str =
+    "docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md";
+const SEMANTIC_DOC_FILES: &[&str] = &[
+    "docs/architecture/202607111257-1673-l2-outbox-crash-matrix.md",
+    POSTGRES_MIGRATION_WATCHDOG_FILE,
+];
 const LOCALONLY_SEMANTIC_DOC_FILES: &[&str] = &[
     "docs/rules/consistency-l0.md",
     "docs/runbooks/202607141556-1771-local-only-proof.md",
@@ -84,7 +88,7 @@ const LOCALONLY_CANONICAL_FACETS: &[(&str, &str)] = &[
     ),
     (
         "postgres-non-guarantees",
-        "`tenant_scoped_read*` 不承诺 PostgreSQL `READ ONLY` 或稳定 snapshot",
+        "`tenant_scoped_read*` 保证 PostgreSQL `READ ONLY`，但不承诺稳定 snapshot",
     ),
     (
         "operational-exclusions",
@@ -155,11 +159,10 @@ const CODE_FOLLOWUPS: &[CodeFollowup] = &[
         }),
     },
     CodeFollowup {
+        // Historical source atom retained for the frozen migration carry-over ledger. #1579 is
+        // complete, so it intentionally has no live-code follow-up anchor.
         id: "current:cotx.rs:#1579",
-        anchor: Some(SourceAnchor {
-            path: "adapters/postgres/src/cotx/mod.rs",
-            needle: "rss_app（dual-pool follow-up）后 DB 层 RLS 方强制生效",
-        }),
+        anchor: None,
     },
     CodeFollowup {
         id: "current:module.rs:#1541",
@@ -803,6 +806,7 @@ pub(crate) enum Rule {
     SagaTenantScope,
     OutboxDeliverySemantics,
     LocalOnlyBusinessEffects,
+    PostgresMigrationWatchdog,
     MigrationCarryover,
 }
 
@@ -892,6 +896,9 @@ fn scan_docs(root: &Path) -> Result<(usize, usize, usize, String, Vec<Finding>)>
         }
         if rel == Path::new(LOCALONLY_CANONICAL_FILE) {
             findings.extend(scan_localonly_canonical_semantics(&content));
+        }
+        if rel == Path::new(POSTGRES_MIGRATION_WATCHDOG_FILE) {
+            findings.extend(scan_postgres_migration_watchdog(&content));
         }
     }
     let mut extra_localonly_files = 0;
@@ -2833,6 +2840,19 @@ fn scan_content(path: &Path, content: &str) -> Vec<Finding> {
     findings
 }
 
+fn scan_postgres_migration_watchdog(content: &str) -> Vec<Finding> {
+    let exact = "AND activity.application_name = 'rss-postgres-migrator'";
+    let exact_line_present = content.lines().any(|line| line.trim() == exact);
+    if exact_line_present && content.matches("activity.application_name").count() == 1 {
+        return Vec::new();
+    }
+    vec![finding(
+        Rule::PostgresMigrationWatchdog,
+        POSTGRES_MIGRATION_WATCHDOG_FILE,
+        "migration watchdog must select the exact rss-postgres-migrator application_name",
+    )]
+}
+
 fn scan_localonly_business_effect_semantics(path: &Path, content: &str) -> Vec<Finding> {
     let prose_lines = if path.extension().is_some_and(|extension| extension == "rs") {
         rustdoc_prose_lines(content)
@@ -4508,7 +4528,7 @@ fn never_ignored_test() {}
         let source = "\
 HTTP effect vocabulary 仅使用 `business-write` / `business-transaction`；LocalOnly 准入仍只允许 `auth` / `read` / `projection`，port 使用 `BusinessWriteEffect` 分类危险能力。
 observer 使用 `BusinessWrite` / `business_writes`，证明业务持久化、outbox、publish 为零。
-LocalOnly 允许 provider-owned read-path transaction；`tenant_scoped_read*` 不承诺 PostgreSQL `READ ONLY` 或稳定 snapshot。
+LocalOnly 允许 provider-owned read-path transaction；`tenant_scoped_read*` 保证 PostgreSQL `READ ONLY`，但不承诺稳定 snapshot。
 correctness cache、metrics/trace、auth security audit 不计入 business effect。
 跨租户 durable audit 仍是 `business-write + business-transaction + cross-tenant-audit` 且保持 LocalTx。
 ";
@@ -4623,6 +4643,25 @@ correctness cache、metrics/trace、auth security audit 不计入 business effec
         assert!(summary.contains("canonical 完整性"));
         assert!(summary.contains("production rustdoc files=87"));
         assert!(summary.ends_with("carry-over ledger ok"));
+    }
+
+    #[test]
+    fn postgres_migration_watchdog_tracks_the_migrator_lane_exactly() {
+        assert!(
+            scan_postgres_migration_watchdog(
+                "AND activity.application_name = 'rss-postgres-migrator'"
+            )
+            .is_empty()
+        );
+        for stale in [
+            "activity.application_name IN ('rss-postgres-writer', 'rss-postgres-reader')",
+            "activity.application_name = 'rss-postgres-writer'",
+            "no application filter",
+        ] {
+            let findings = scan_postgres_migration_watchdog(stale);
+            assert_eq!(findings.len(), 1, "stale watchdog must fail: {stale}");
+            assert_eq!(findings[0].rule, Rule::PostgresMigrationWatchdog);
+        }
     }
 
     #[test]

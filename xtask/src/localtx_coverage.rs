@@ -4904,7 +4904,8 @@ fn backend_enrollments_in_test_in_scope(
                 path: source.to_string(),
                 function: function.to_string(),
                 detail: format!(
-                    "typed provider `{}` is not constructed through its canonical `{}::new(...)` path in the enrolled test; observed constructors: {:?}",
+                    "typed provider `{}` is not constructed through its canonical `{}::new(...)` or test-only `{}::from_unverified_for_test(...)` path in the enrolled test; observed constructors: {:?}",
+                    binding.provider_path.join("::"),
                     binding.provider_path.join("::"),
                     binding.provider_path.join("::"),
                     construction.observed
@@ -5218,7 +5219,9 @@ impl<'ast> Visit<'ast> for ProviderConstructorVisitor<'_> {
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         if let Expr::Path(function) = peel_expr(&node.func) {
             let raw = raw_segments(&function.path);
-            if raw.last().is_some_and(|segment| segment == "new") {
+            if raw.last().is_some_and(|segment| {
+                matches!(segment.as_str(), "new" | "from_unverified_for_test")
+            }) {
                 let mut identity =
                     canonical_provider_identity(&function.path, self.resolver).unwrap_or(raw);
                 identity.pop();
@@ -5248,7 +5251,9 @@ fn provider_initializer_matches(
             let Some(mut identity) = canonical_provider_identity(&function.path, resolver) else {
                 return false;
             };
-            if identity.last().is_some_and(|segment| segment == "new") {
+            if identity.last().is_some_and(|segment| {
+                matches!(segment.as_str(), "new" | "from_unverified_for_test")
+            }) {
                 identity.pop();
                 if identity == provider_path {
                     return true;
@@ -7469,7 +7474,7 @@ mod tests {
                     ::generated::http::demo_v1::write::RouteMarker,
                     DemoProviderFixture,
                 )> = ::std::marker::PhantomData;
-                let fixture = DemoProviderFixture::new();
+                let fixture = DemoProviderFixture::from_unverified_for_test(&store);
                 ::testkit::localtx::assert_commit(
                     ::testkit::localtx::CommitCase::new(|| async {
                         let result = fixture.execute().await;
@@ -7883,7 +7888,7 @@ mod tests {
                     ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
                     crate::PgAuthAuditSink,
                 )> = ::std::marker::PhantomData;
-                let sink = fake::PgAuthAuditSink::new();
+                let sink = fake::PgAuthAuditSink::from_unverified_for_test(&store);
                 ::testkit::localtx::assert_commit(
                     ::testkit::localtx::CommitCase::new(|| async { sink.append().await })
                 ).await?;

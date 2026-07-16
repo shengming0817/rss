@@ -1,10 +1,11 @@
 //! rss — RSS 组合根 binary（薄 entry）。serving 运行时编排在 `runtime::run`（#1309 抽 assemblies/runtime 去 bins 双写）。
 //!
-//! `rss` 先 dispatch 显式 operator CLI（audit ledger verify、settings ConfigValue maintenance、
-//! projection replay/shadow-swap、reconcile target inspect/resume），未知参数 fail-closed；未命中 CLI 时才委托同一份 `runtime::run()` serving
+//! `rss` 先 dispatch 显式 operator CLI（0067 reader-lane migration、audit ledger verify、settings
+//! ConfigValue maintenance、projection replay/shadow-swap、reconcile target inspect/resume），未知参数 fail-closed；未命中 CLI 时才委托同一份 `runtime::run()` serving
 //! 组合根。`server` 保持 serving-only entry。
 enum CommandFamily {
     Serving,
+    Postgres,
     Projection,
     AuditLedgerVerify,
     Dlq,
@@ -14,6 +15,9 @@ enum CommandFamily {
 }
 
 fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
+    if runtime::is_postgres_command(args) {
+        return Ok(CommandFamily::Postgres);
+    }
     if runtime::is_projection_command(args) {
         return Ok(CommandFamily::Projection);
     }
@@ -43,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let runtime_inputs = runtime::prepare_runtime()?;
     let operator_result = match command {
         CommandFamily::Serving => return runtime::run(runtime_inputs).await,
+        CommandFamily::Postgres => runtime::run_postgres_reader_migration_command(&args).await,
         CommandFamily::Projection => runtime::run_projection_control_command(&args).await,
         CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args).await,
         CommandFamily::Dlq => runtime::run_dlq_control_command(&args).await,

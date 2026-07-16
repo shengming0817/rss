@@ -43,21 +43,23 @@ use std::collections::HashMap;
 #[cfg(all(test, feature = "integration"))]
 use std::sync::{Arc, Mutex};
 
+#[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
 use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_with_ambient, unix_secs};
+use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
 use crate::tx_retry::{classify_identity_error, run_pg_localtx_retry};
 
 /// PostgreSQL 会话生命周期 adapter（impl [`SessionLifecycle`]：创建 co-tx + durable find/logout 均已交付，#1278）。
 ///
-/// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，与 [`crate::PgEmitter`] 同形）clone 构造；
-/// 不持 `PgStore`（避免 ManagedResource 所有权耦合）。
+/// 经已验证 reader/writer capability 构造，不持裸 `PgStore`（避免 ManagedResource 所有权耦合）。
 ///
 /// `clock` 是注入的 [`Clock`]（必填构造器位置参，`Box<dyn Clock>`，同 [`crate::PgEmitter`] 与全项目约定）：
 /// envelope `occurred_at` 时间源（#1129）。
 pub struct PgSessionLifecycle {
-    pool: PgTenantPool,
+    read_pool: PgTenantReadPool,
+    write_pool: PgTenantWritePool,
     clock: Box<dyn Clock>,
     #[cfg(all(test, feature = "integration"))]
     logout_faults: Arc<Mutex<SessionLogoutFaultState>>,
@@ -89,21 +91,28 @@ struct SessionLogoutFaultState {
 }
 
 impl PgSessionLifecycle {
-    /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
+    /// integration-only 裸 store 测试 seam + 注入 [`Clock`]（envelope `occurred_at` 时间源）。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::session_lifecycle` 收口。
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
-        Self::new_with_projection_registry(store, clock, ProjectionWriteRegistry::empty())
+        Self {
+            read_pool: PgTenantReadPool::from_unverified_for_test(store),
+            write_pool: PgTenantWritePool::from_unverified_for_test(store),
+            clock,
+            logout_faults: Arc::new(Mutex::new(SessionLogoutFaultState::default())),
+        }
     }
 
     pub(crate) fn new_with_projection_registry(
-        store: &PgStore,
+        reader: &VerifiedPgReadStore,
+        writer: &VerifiedPgWriteStore,
         clock: Box<dyn Clock>,
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
-            pool: PgTenantPool::with_projection_registry(store, projection_registry),
+            read_pool: PgTenantReadPool::new(reader),
+            write_pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
             clock,
             #[cfg(all(test, feature = "integration"))]
             logout_faults: Arc::new(Mutex::new(SessionLogoutFaultState::default())),
@@ -204,7 +213,7 @@ impl SessionLifecycle for PgSessionLifecycle {
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
-        self.pool
+        self.write_pool
             .co_tx_with_outbox(
                 scope,
                 &entry,
@@ -237,7 +246,7 @@ impl SessionLifecycle for PgSessionLifecycle {
         let tenant_uuid = tenant.as_uuid().to_string();
         let session_id_q = session_id.as_str().to_owned();
         let raw = self
-            .pool
+            .read_pool
             .read(scope, move |conn| {
                 Box::pin(async move {
                     let row = sqlx::query(
@@ -303,7 +312,7 @@ impl SessionLifecycle for PgSessionLifecycle {
                 #[cfg(all(test, feature = "integration"))]
                 record_logout_attempt(&logout_faults, &session_id);
                 async move {
-                    self.pool
+                    self.write_pool
                         .retry_write(
                             scope,
                             move |tx| {
@@ -386,7 +395,7 @@ fn storage(e: sqlx::Error) -> IdentityError {
     IdentityError::Storage(Box::new(e))
 }
 
-/// 同一 tenant-scoped 事务内写 session；outbox append 由 [`PgTenantPool::co_tx_with_outbox`] 接续执行。
+/// 同一 tenant-scoped 事务内写 session；outbox append 由 [`PgTenantWritePool::co_tx_with_outbox`] 接续执行。
 async fn write_session(
     conn: &mut sqlx::PgConnection,
     session: &Session,

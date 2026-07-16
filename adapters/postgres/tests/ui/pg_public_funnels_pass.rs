@@ -1,4 +1,7 @@
-use postgres::{DlxPayloadProtector, PgMaintenanceDeps, PgRuntimeDeps, PgRuntimeHandle};
+use postgres::{
+    DlxPayloadProtector, PgConfig, PgMaintenanceDeps, PgRuntimeDeps, PgRuntimeHandle,
+    PgTenantReadConfig,
+};
 use std::time::Duration;
 
 fn runtime_capabilities_are_available(handle: &PgRuntimeHandle) {
@@ -13,6 +16,10 @@ fn runtime_owner_has_one_lifecycle_exit(deps: PgRuntimeDeps) {
     runtime_capabilities_are_available(&handle);
     let (_resources, factory) = deps.into_runtime_parts(Duration::from_secs(1));
     let _ = factory.spawn(tokio_util::sync::CancellationToken::new());
+}
+
+fn tenant_reader_config_is_an_explicit_public_type(config: PgConfig) -> PgTenantReadConfig {
+    PgTenantReadConfig::new(config)
 }
 
 fn maintenance_is_purpose_specific(

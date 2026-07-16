@@ -192,7 +192,7 @@ tenant-scoped append-only `SagaJournal` + `OwnerCheckpointStore` + `DeadLetterSt
 
 - demo/memory → paired `MemSagaInstanceStore` / `MemSagaJournal`（共享 lease state）+
   `MemCheckpointStore` + `MemDeadLetterStore` + `MemLockStore`。
-- postgres → `PgSagaInstanceStore` / `PgSagaJournal`，两者只经 `PgTenantPool` 访问 tenant 表；
+- postgres → `PgSagaInstanceStore` / `PgSagaJournal`，两者按操作只经 `PgTenantReadPool` / `PgTenantWritePool` 访问 tenant 表；
   `saga_instances` 承载 register/claim/extend/release/status CAS，`saga_journal` 承载 durable append-only
   step facts；runtime lock provider 必须来自 Redis，作为 `run` / `resume` 进入 Postgres lease 前的 multi-pod
   外层 gate。
@@ -530,7 +530,7 @@ durable command（调用方需要幂等 claim、稳定结果回放、业务写�
 review tenant/topic/contract/fingerprint/payload 并携 keyed alias probes；request fingerprint 明确排除 raw key。
 Postgres `PgCommandJournal` 在同一事务 claim aliases、生成 canonical id，并持久化 journal 与 outbox。public
 `CommandJournalStore::record_command` 只表示 foundation 级 “journal + outbox enqueue” seam；需要本地业务写
-共提交时，必须由 Postgres/domain-shaped UoW 在 crate 内经 `PgTenantPool` + crate-private `TxCapability`
+共提交时，必须由 Postgres/domain-shaped UoW 在 crate 内经 `PgTenantWritePool` + crate-private `TxCapability`
 封装业务写、journal claim、`append_outbox` 和终态更新，外部 handler/domain 不得拿 raw
 `PgPool`/`PgConnection` 自行拼事务。重复同 fingerprint 只回放
 `CommandJournalOutcome::AlreadyCompleted/AlreadyFailed` 等稳定 summary，不重执行业务写；同 key 不同
@@ -559,7 +559,7 @@ production `generated::command::CommandEmit` bridge，也不新增真实 active 
 
 守卫：`RECONCILE-COMMAND-OUTBOX-SEAM-01` / `cargo xtask reconcile-outbox-command-guard` 禁止
 `eventexec::reconcile` direct publisher/emitter/broker/裸 outbox append，并限制 postgres reconcile adapter 的
-`append_outbox` 只能出现在 `record_action_and_enqueue_command` seam 的同一个 `PgTenantPool::write` transaction
+`append_outbox` 只能出现在 `record_action_and_enqueue_command` seam 的同一个 `PgTenantWritePool::write` transaction
 closure 内，且顺序为 lease CAS → action insert → outbox append。
 
 ## Projection

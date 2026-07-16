@@ -21,23 +21,33 @@ use identity::ports::{
 };
 use sqlx::Row;
 
-use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
+use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 
 /// identity 角色仓储的 PostgreSQL adapter。
 ///
-/// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，同 [`crate::PgConfigRepo`]）clone 构造。
+/// 仅由已验证 reader/writer capability 构造（同 [`crate::PgConfigRepo`]）。
 pub struct PgRoleRepo {
-    pool: PgTenantPool,
+    read_pool: PgTenantReadPool,
+    write_pool: PgTenantWritePool,
 }
 
 impl PgRoleRepo {
-    /// 由 [`PgStore`] 构造（clone 其 `pool`）。
+    /// 由已验证 reader/writer capability 构造。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::role_repo` 收口。
-    pub(crate) fn new(store: &PgStore) -> Self {
+    pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            read_pool: PgTenantReadPool::new(reader),
+            write_pool: PgTenantWritePool::new(writer),
+        }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
+        Self {
+            read_pool: PgTenantReadPool::from_unverified_for_test(store),
+            write_pool: PgTenantWritePool::from_unverified_for_test(store),
         }
     }
 }
@@ -69,7 +79,7 @@ impl RoleReadRepo for PgRoleRepo {
         let id_str_q = id_str.clone();
 
         let raw = self
-            .pool
+            .read_pool
             .read(scope, move |conn| {
                 Box::pin(async move {
                     let row = sqlx::query(
@@ -116,7 +126,7 @@ impl RoleReadRepo for PgRoleRepo {
         let after = page.after.as_ref().map(|id| id.as_str().to_owned());
         let limit = i64::from(page.limit.get()) + 1;
         let raw = self
-            .pool
+            .read_pool
             .read(scope, move |conn| {
                 Box::pin(async move {
                     let rows = sqlx::query(
@@ -163,7 +173,7 @@ impl RoleWriteRepo for PgRoleRepo {
     async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError> {
         let tenant_uuid = tenant_param(scope.tenant());
         let permissions: Vec<String> = role.permission_ids().collect();
-        self.pool
+        self.write_pool
             .write(
                 scope,
                 move |conn| {
