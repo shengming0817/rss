@@ -8,11 +8,20 @@ description: Git Worktree 项目约定（编号、基准分支、权限兼容、
 ## 约束
 
 - 目录：`worktrees/<type>/<issue#-short-name>`（有关联 issue）/ `worktrees/<type>/<short-name>`（无 issue）；分支名镜像该 path（如 `feature/1234-short-name`）
-- 基准：创建前 `git fetch "$(bash hack/automation/forge.sh remote)"`，基于 `$(bash hack/automation/forge.sh remote)/develop`
+- 基准：激活 forge remote 的 `develop`
 - 禁止 `cd worktrees/xxx && ...`，替代方案：
-  - git: `git -C worktrees/xxx ...`
-  - go: `go -C worktrees/xxx build/test ...`（Go 1.21+）
-- 用完即删 `git worktree remove`
+  - git: `/usr/bin/git -C worktrees/xxx ...`
+- 用完即删 `/usr/bin/git worktree remove`
+
+## 创建
+
+```bash
+REMOTE="$(bash hack/automation/forge.sh remote)"
+/usr/bin/git fetch "$REMOTE"
+/usr/bin/git worktree add "worktrees/<type>/<name>" -b "<type>/<name>" "$REMOTE/develop"
+```
+
+创建后记录 worktree 的绝对路径；后续命令必须通过工作目录参数或绝对路径绑定该 worktree，不依赖 `cd`。
 
 ## 删除安全
 
@@ -21,7 +30,7 @@ description: Git Worktree 项目约定（编号、基准分支、权限兼容、
 正确顺序：
 1. 在 worktree 内完成工作、提交、推送
 2. **先退出 worktree 中的 Claude Code 会话**
-3. **回到主仓库目录**，再执行 `git worktree remove worktrees/<type>/<name>`
+3. **回到主仓库目录**，再执行 `/usr/bin/git worktree remove worktrees/<type>/<name>`
 
 ## 编号与类型
 

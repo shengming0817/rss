@@ -132,6 +132,18 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 
 > Cx 由 `cx-1`..`cx-4` label 承载（§2.6）。Cx5+ 必须拆为多 item / 多 wave。
 
+### 3.3 Finding 范围归属（IN_SCOPE / RELATED / OUT_OF_SCOPE）
+
+Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归属，再按 §3.1/§3.2 评级。需求证据优先于文件位置：明确属于当前任务、issue、PR 描述或验收标准的 finding，即使落在尚未修改的文件中，也不能判为范围外。
+
+| 归属 | 判定条件 | 执行结果 |
+|------|----------|----------|
+| **IN_SCOPE** | finding 文件在当前分支 diff 中；或 finding 由当前改动直接引入/暴露；或当前任务、issue、PR 描述、验收标准明确包含该 finding（含可对应的 finding ID） | 在当前 PR 处理；Cx1/Cx2 按流程直接修，Cx3/Cx4 进入 §5 的单次批量处置门 |
+| **RELATED** | 不满足 IN_SCOPE，但位于同一 package/crate、子系统或调用链，属于可搭车处理的既有问题 | 明确标注“搭车”；改动可控时建议当前 PR 修，改动较大、存在前置依赖或会扩大交付风险时 defer，并按 §5 落 issue artifact |
+| **OUT_OF_SCOPE** | 既不属于当前需求/验收，也不在当前 diff 或其直接影响链上，且位于不同 package/crate、模块或子系统 | 不在当前 PR 修；按 §5 自动创建 backlog issue，并在 pm:oos 中无损留痕（`pri-p0` / 标签判不定例外按该节处理） |
+
+判定必须给出需求证据和文件/调用链证据；不能仅因 finding 文件未出现在 diff 中就判 OUT_OF_SCOPE。输出至少包含归属、理由和对应执行结果。
+
 ---
 
 ## 4. 激活 forge 看板字段
@@ -163,7 +175,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 ```
 /ship <issue>
   实施 → PR 创建 → 贴 pr-status/in-progress
-  → ship：内置 6 维 reviewer → IN_SCOPE Cx3/Cx4 处置门（每条 AskUserQuestion 判「当前 PR 修」or「defer」，判 defer 后自动建 issue、不二次确认）→ /fix Cx1/Cx2 → push/冲突预检 → deferred 留痕 + pm:ship
+  → ship：内置 6 维 reviewer → IN_SCOPE Cx3/Cx4 单次批量处置（先逐项给建议+理由，再一次确认；defer 后自动建 issue、不二次确认）→ 内置修复 Cx1/Cx2 → push/冲突预检 → deferred 留痕 + pm:ship
   → 切 pr-status/needs-review-again（首审唯一使用点）→ 10 分钟有界 `make ci CI_BASE=<remote>/develop`（重型门交 nightly/develop）；外部 app 可先行 review
   → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听交接（needs-fix 自动 /fix；单次跑完即止）
 
@@ -174,7 +186,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 
 /fix <PR#>（pr-status/needs-fix 时；可多次跑，≤3 轮自动循环）
   → bash hack/automation/pr-comments.sh latest <N> pr-review（最新 pm:pr-review findings）→ 过滤最新一轮
-  → triage + IN_SCOPE Cx3/Cx4 处置门（AskUserQuestion 判修/defer，defer 后自动建 issue、不二次确认）+ Cx1/Cx2 修复 → push/冲突预检 → deferred 留痕 + pm:fix
+  → triage + IN_SCOPE Cx3/Cx4 单次批量处置（先逐项给建议+理由，再一次确认；defer 后自动建 issue、不二次确认）+ Cx1/Cx2 修复 → push/冲突预检 → deferred 留痕 + pm:fix
   → 切 pr-status/needs-check-fix + 移除 pr-status/needs-fix → 10 分钟有界 `make ci CI_BASE=<remote>/develop`（不追加 `make ci-full`）
   → 外部 app 可在 label 后先行执行 /pr-review --check
   → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听 check 交接
@@ -189,7 +201,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 > 不变式：PR 始终恰好一个 `pr-status/*`、pr-review 轴 `approved` XOR `changes-requested`（切换时同步移除同轴对侧）；每阶段结束都贴评论留痕（约定，无 CI 机器门），标记按来源不编 round 号。`needs-review-again` 只在 ship 首次交接后出现一次；所有后续 review→changes-requested 均切 `needs-fix`（5-state 不变式）。
 > `/fix` 不能直接到 `ready`——必过 `/pr-review --check` 独立验证（fix 不能自证完成）。
 > 本地 canonical `make ci` 只承担 10 分钟有界 affected preflight；unknown 本地忽略并留痕，workspace/feature/integration/coverage/public-api/dylint/audit/container 等重型全量门由 nightly/develop 承接。`make ci-full` 仅人工诊断，任何 skill/template 不得把它追加为 PR 默认完成条件。
-> **IN_SCOPE Cx3 处置门**：ship/fix 切触发 label 前，每条 IN_SCOPE Cx3（及 Cx4）经处置门 AskUserQuestion 判「当前 PR 修（带措施）」or「defer（带原因）」；**判 defer 后自动建 issue 跟踪（机器可判定 artifact，不再二次确认）**，与 OOS artifact-before-trigger 同序；全部 deferred issue 已建方可切 label。
+> **IN_SCOPE Cx3/Cx4 批量处置门**：ship/fix 切触发 label 前，先为全部 IN_SCOPE Cx3/Cx4 生成「当前 PR 修」or「defer」的建议及理由：属于原验收范围且是正确性、安全性或构建必需的 Cx3 建议当前 PR 修，其他 Cx3/Cx4 建议 defer。如果存在这类 finding，**只发起一次批量处置请求**，用户可全盘采纳建议，或按 finding ID 覆盖个别项；没有 IN_SCOPE Cx3/Cx4 时不发起沟通。**判 defer 后自动建 issue 跟踪（机器可判定 artifact，不再二次确认）**，与 OOS artifact-before-trigger 同序；全部 deferred issue 已建方可切 label。
 > **输出纪律**（ship/review/fix/check 各阶段共用单源）：每阶段**窗口完整打印是主输出、PR 评论是无损留痕，两者都做缺一不可**——评论是 `/fix` 与再审（codex / `/pr-review`）提取 findings 的唯一来源（每条带 `file:line`、无损详表入 `<details>`，无损约定见 `pr-comment.md`）。skill 不重述此纪律，引用本条。
 > 评论格式模板单源 = `.github/project-template/pr-comment.md`。
 

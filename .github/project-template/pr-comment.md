@@ -7,7 +7,7 @@
 > **评论即 review 结果，无损（关键约定）**：评论是 `/fix <PR#>` 提取 findings 的**唯一来源**。
 > 每条 Finding **必带 `file:line`**（fix 据此定位，不重新 review），根因 + 证据 + 建议 + 三级方案种子写进 `<details>`（人看摘要、fix 读详表，两不丢）。
 > **OUT_OF_SCOPE finding 同享无损区，不准降级成计数 `OUT_OF_SCOPE <k>`**：每条 OOS 带 file:line + 证据 + 三维根因（代码/架构/历史）+ 三级方案种子 + Files 列表 + **处置（自动建的 issue #N 或 `deferred` 原因）**，由 ship/fix **自动 `bash hack/automation/forge.sh issue-create`**（body 按 `backlog.md` 字段映射：现状←证据+根因+影响 / 修复方向←方案种子 / Files←file:line 全集 / Source←`PR #<N> finding <Fk>`）无损成文，详记入独立 pm:oos 评论。
-> **IN_SCOPE Cx3/Cx4 必带处置，不准停留在 `遗留`**：每条 IN_SCOPE Cx3（及 Cx4）在切触发 label 之前经处置门（ship 阶段 8 步骤 2 / fix 3.4）AskUserQuestion 判「当前 PR 修」or「defer」，评论里必标 `✅ 已修（人工确认）` 或 `⏸ defer：已建 #N（<原因>）`（判 defer 后自动建 issue、不二次确认）——`⏸ 遗留（需人工决策）` 这类**未决态不得带过切 label**。
+> **IN_SCOPE Cx3/Cx4 必带批量处置结果，不准停留在 `遗留`**：ship/fix 先为全部 IN_SCOPE Cx3/Cx4 生成建议及理由，再发起一次批量处置请求；用户可全盘采纳建议，或按 finding ID 覆盖个别项。没有 IN_SCOPE Cx3/Cx4 时不发起沟通。评论里每项必标 `✅ 已修（批量处置确认）` 或 `⏸ defer：已建 #N（<原因>）`（判 defer 后自动建 issue、不二次确认）——`⏸ 遗留（需人工决策）` 这类**未决态不得带过切 label**。
 > **禁止有损浓缩**——只写计数 / 模糊一句话会让 fix 与后续建 issue 丢失定位与根因，违背本约定。
 
 ## 机器块（`rss-pr-meta:v1`，隐藏，自动化执行器消费）
@@ -33,7 +33,7 @@
 **reviewer** <数> · **Findings** <总数>（已修 Cx1/Cx2 <n> · Cx3/Cx4 处置 <m>（修/defer）· OUT_OF_SCOPE <k>）
 
 - **F1** [P1·Cx2·安全] `path/to/file.rs:120` — <一句话> → ✅ 已修
-- **F2** [P2·Cx3·DX] `path/to/x.rs:88` — <一句话> → ⏸ defer：已建 #N（<原因>）（或 ✅ 已修（人工确认））
+- **F2** [P2·Cx3·DX] `path/to/x.rs:88` — <一句话> → ⏸ defer：已建 #N（<原因>）（或 ✅ 已修（批量处置确认））
 - **F3** [P2·Cx2·运维] `other/pkg/z.rs:64` — <一句话> → 🚦 OUT_OF_SCOPE（详见本 PR 的 pm:oos 评论）
 
 <details><summary>完整详表（根因 + 证据 + 建议 + 方案种子，/fix 读此）</summary>
@@ -46,7 +46,7 @@
 **F2** [P2·Cx3·DX] `path/to/x.rs:88`（IN_SCOPE）
 - 证据：`<code 片段>`
 - 三级方案种子：最小 <…> / 彻底 <…> / 重构 <…>
-- 处置（处置门判修/defer，非未决）：⏸ defer（已建 #N，原因：<…>）｜或 ✅ 已修（人工确认：<措施>，commit <sha>）
+- 处置（批量处置门判修/defer，非未决）：⏸ defer（已建 #N，原因：<…>）｜或 ✅ 已修（批量处置确认：<措施>，commit <sha>）
 </details>
 
 **下一步**：切 `pr-status/needs-review-again`（待再审：codex / `/pr-review`）。
@@ -65,7 +65,7 @@
 **Findings** <总数>（已修 Cx1/Cx2 <n> · Cx3/Cx4 处置 <m>（修/defer）· OUT_OF_SCOPE <k>）
 
 - **F1** [P1·Cx2·安全] `path/to/file.rs:120` — <一句话> → ✅ 已修
-- **F2** [P2·Cx3·DX] `path/to/x.rs:88` — <一句话> → ⏸ defer：已建 #N（<原因>）（或 ✅ 已修（人工确认））
+- **F2** [P2·Cx3·DX] `path/to/x.rs:88` — <一句话> → ⏸ defer：已建 #N（<原因>）（或 ✅ 已修（批量处置确认））
 - **F3** [P2·Cx2·运维] `other/pkg/z.rs:64` — <一句话> → 🚦 OUT_OF_SCOPE（详见本 PR 的 pm:oos 评论）
 
 <details><summary>完整详表（triage 依据 + 证据 + 建议，下次 fix 读此）</summary>
@@ -74,9 +74,9 @@
 - 证据：`<code 片段>`
 - 修复：<做了什么> → ✅ commit <sha>
 
-**F2** [P2·Cx3·DX] `path/to/x.rs:88`（IN_SCOPE，处置门）
+**F2** [P2·Cx3·DX] `path/to/x.rs:88`（IN_SCOPE，批量处置门）
 - 三级方案种子：最小 <…> / 彻底 <…> / 重构 <…>
-- 处置（处置门判修/defer，非未决）：⏸ defer（已建 #N，原因 + 升级窗口：<…>）｜或 ✅ 已修（人工确认：<措施>，commit <sha>）
+- 处置（批量处置门判修/defer，非未决）：⏸ defer（已建 #N，原因 + 升级窗口：<…>）｜或 ✅ 已修（批量处置确认：<措施>，commit <sha>）
 </details>
 
 **下一步**：切 `pr-status/needs-check-fix`（待 `/pr-review --check` 验证；fix 不直接到 ready）。
