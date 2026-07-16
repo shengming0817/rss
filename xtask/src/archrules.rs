@@ -1394,14 +1394,7 @@ fn scan_source_invariants(root: &Path, index: &mut Index) -> Result<()> {
             if path_str.contains("/tests/ui/") || path_str.contains("/tests/trybuild") {
                 continue;
             }
-            let gate = if path_str == "assemblies/runtime/src/module.rs" {
-                // Carries both native no-handoff and runtime-deps verify invariants.
-                Some("verify,ci,manual/opt-in,native-compile")
-            } else if path_str.contains("/tests/") {
-                Some("verify,ci")
-            } else {
-                Some("manual/opt-in,native-compile")
-            };
+            let gate = source_file_gate(&path_str);
             scan_source_invariant_file(
                 root,
                 index,
@@ -1413,6 +1406,26 @@ fn scan_source_invariants(root: &Path, index: &mut Index) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Gate tokens for workspace `src` / `tests` invariant carriers.
+///
+/// Most `src/**` carriers stay `manual/opt-in`（路径启发式）。例外：已证明由默认
+/// verify/nextest 执行的 Medium 门（如 AMQP CRED-REDACT），以及 runtime module
+/// 上同时持有 verify + native 的 wiring invariants。系统性「plan→registry」单真源
+/// 见 #1818；此处仅为 #1720/#543 F1 最小精确绑定。
+fn source_file_gate(path_str: &str) -> Option<&'static str> {
+    if path_str == "assemblies/runtime/src/module.rs"
+        || path_str == "adapters/amqp/src/conn_events.rs"
+    {
+        // module.rs: native no-handoff + runtime-deps verify。
+        // conn_events.rs: EVENTTRANSPORT-CRED-REDACT-01 默认 lib test 进 verify nextest。
+        Some("verify,ci,manual/opt-in,native-compile")
+    } else if path_str.contains("/tests/") {
+        Some("verify,ci")
+    } else {
+        Some("manual/opt-in,native-compile")
+    }
 }
 
 fn scan_config(
@@ -3476,6 +3489,88 @@ members = ["rss_demo", "rss_orphan"]
             xtask_gate(root, &root.join("xtask/src/contract/breaking.rs")),
             Some("verify,ci,ci-meta")
         );
+    }
+
+    #[test]
+    fn amqp_cred_redact_carrier_gate_includes_verify() {
+        let gate = source_file_gate("adapters/amqp/src/conn_events.rs").unwrap_or("missing");
+        assert!(
+            gate.split(',').any(|tok| tok.trim() == "verify"),
+            "CRED-REDACT carrier must bind verify: {gate}"
+        );
+        assert_eq!(
+            source_file_gate("adapters/amqp/src/conn.rs"),
+            Some("manual/opt-in,native-compile"),
+            "ordinary amqp src stays manual/opt-in"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    // reason: 测试 fixture 路径构造；parent 恒存在。
+    fn amqp_cred_redact_verify_exec_binds_on_special_gate() -> Result<()> {
+        let root = unique_tmp("archrules-amqp-cred-verify-green");
+        let file = root.join("adapters/amqp/src/conn_events.rs");
+        fs::create_dir_all(file.parent().unwrap())?;
+        write(
+            &file,
+            "//! INVARIANT: EVENTTRANSPORT-CRED-REDACT-01 { level = \"Medium\", exec = \"verify\", source = \"code\", synthetic_red = \"cred_redact_tests::n1_ok_and_fail_redact_userinfo\", anti_vacuity = \"cred_redact_tests::b1_no_userinfo_preserves_endpoint\" } —— green\n",
+        )?;
+        let mut index = Index::default();
+        scan_source_invariant_file(
+            &root,
+            &mut index,
+            &file,
+            "native-hard",
+            "source invariant",
+            source_file_gate("adapters/amqp/src/conn_events.rs"),
+        )?;
+        assert!(
+            index.findings.is_empty(),
+            "verify exec must bind on special gate: {:?}",
+            index.findings
+        );
+        assert!(
+            index.records.iter().any(
+                |r| r.id == "EVENTTRANSPORT-CRED-REDACT-01" && r.exec == ExecutionLevel::Verify
+            ),
+            "{:?}",
+            index.records
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    // reason: 测试 fixture 路径构造；parent 恒存在。
+    fn amqp_cred_redact_verify_exec_rejects_default_src_gate() -> Result<()> {
+        let root = unique_tmp("archrules-amqp-cred-verify-red");
+        let file = root.join("adapters/amqp/src/conn_events.rs");
+        fs::create_dir_all(file.parent().unwrap())?;
+        write(
+            &file,
+            "//! INVARIANT: EVENTTRANSPORT-CRED-REDACT-01 { level = \"Medium\", exec = \"verify\", source = \"code\", synthetic_red = \"cred_redact_tests::n1_ok_and_fail_redact_userinfo\", anti_vacuity = \"cred_redact_tests::b1_no_userinfo_preserves_endpoint\" } —— red\n",
+        )?;
+        let mut index = Index::default();
+        scan_source_invariant_file(
+            &root,
+            &mut index,
+            &file,
+            "native-hard",
+            "source invariant",
+            Some("manual/opt-in,native-compile"),
+        )?;
+        assert!(
+            index
+                .findings
+                .iter()
+                .any(|f| f.rule == Rule::CarrierBindingMismatch),
+            "verify exec must reject default src gate: {:?}",
+            index.findings
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

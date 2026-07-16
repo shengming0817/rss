@@ -10,7 +10,7 @@
 //! adapter 从**单个已验证 per-domain AMQP endpoint**（生产 `amqps://user:pass@host/vhost`）连接——隔离经 broker
 //! 侧的 **vhost + credential**（operator 为每个域 provision 独立 vhost/user），**不**经 exchange/queue
 //! 命名前缀（命名前缀会把域身份泄进 wire 且可绕过）。URL 由组合根经 `bootstrap::eventtransport` 决策
-//! 注入。凭据 non-leak：连接失败日志只经 `secure::redact_url_credentials` / `secure::redact_error`。
+//! 注入。凭据 non-leak：连接日志经 `conn_events`（`AmqpEndpoint` Display + `secure::redact_error`）。
 //! 明文 `amqp://` 只允许 testcontainer / dev loopback fixture 显式 opt-in，非 loopback 明文不可表达。
 //!
 //! # P7 传输边界（manual-ack，at-least-once）
@@ -41,6 +41,11 @@
 // 纯默认 lib build（无 test / 无 backend）无生产消费方 ⇒ 不编译，免 dead_code。
 #[cfg(any(test, feature = "backend"))]
 mod settle;
+
+// feature-agnostic：connect 成功/失败 tracing emit（无 lapin）。Hard 入参 `&AmqpEndpoint`；
+// Medium EVENTTRANSPORT-CRED-REDACT-01 负向门默认 `cargo test` 可跑（同 settle）。
+#[cfg(any(test, feature = "backend"))]
+mod conn_events;
 
 #[cfg(feature = "backend")]
 mod bundle;

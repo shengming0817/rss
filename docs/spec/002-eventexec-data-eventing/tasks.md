@@ -72,7 +72,7 @@
 - [ ] T006.2 [US4] lapin `impl Publisher`/`impl Subscriber`（per-domain vhost/credential，redaction）+ `impl ManagedResource`（替换 todo!()）
 - [ ] T006.3 [US4] `bootstrap/eventtransport.rs` sealed resolver（demo MemBus / durable amqp；fail-closed）
 - [ ] T006.4 [US4] 集成测试 feature 门控（该 crate `Cargo.toml` 定义 package-scoped `[features] integration = []`）；向 `docker/dev-stack.yml` 补 redis/rabbitmq 服务；clippy/fmt 绿；`cargo xtask` 凭据 redaction 核查
-- [ ] T006.5 [US4] **单测**（非 integration feature 门控）synthetic redaction 断言：mock tracing subscriber 验证 amqp URI 密码 part（`://<user>:<pass>@` userinfo）不出现在任何 span field（EVENTTRANSPORT-CRED-REDACT-01，Medium）
+- [x] T006.5 [US4] **单测**（非 integration feature 门控）synthetic redaction 断言：mock tracing subscriber 验证 amqp URI 密码 part（`://<user>:<pass>@` userinfo）不出现在任何 span field（EVENTTRANSPORT-CRED-REDACT-01，Medium）——落地 `adapters/amqp/src/conn_events.rs` `cred_redact_tests`（Hard emit 入参 `&AmqpEndpoint` + CaptureLayer 负向门）
 
 ---
 

@@ -5,6 +5,8 @@ use std::sync::Arc;
 use lapin::options::ConfirmSelectOptions;
 use lapin::{Channel, Connection, ConnectionProperties};
 
+use crate::conn_events::{emit_connect_failed, emit_connected};
+
 /// AMQP `channel.close` / `connection.close` 的成功 reply code（AMQP `REPLY_SUCCESS` = 200）。
 pub(crate) const REPLY_SUCCESS: u16 = 200;
 
@@ -13,8 +15,8 @@ pub(crate) const REPLY_SUCCESS: u16 = 200;
 /// **PII 边界**（同 `diport::PublisherError` 范式）：`Display` 仅安全摘要常量 `"amqp connect failed"`，
 /// **绝不含 URL / 凭据**；原始 lapin error 仅作 [`std::error::Error::source`] 内部保留，不进默认日志。
 /// `Debug` 手写（不 derive）——隐藏 `source`：lapin error 的 `Debug` 可能含 host/连接上下文，故 `{:?}`
-/// 也只输出安全摘要（与 `AmqpUrl` 同范式）。连接诊断经 [`connect`] 内 `tracing::warn!` 以
-/// `secure::redact_url_credentials`（抹 userinfo）+ `secure::redact_error`（顶层 Display）记录。
+/// 也只输出安全摘要（与 `AmqpUrl` 同范式）。连接诊断经 `crate::conn_events`：`AmqpEndpoint` Display
+/// （Hard）+ `secure::redact_error`（顶层 Display）。
 #[derive(thiserror::Error)]
 #[error("amqp connect failed")]
 pub struct AmqpConnectError {
@@ -52,23 +54,18 @@ pub(crate) async fn connect(
     let conn = Arc::new(
         Connection::connect(url, ConnectionProperties::default())
             .await
-            .map_err(|source| connect_err(source, url, name))?,
+            .map_err(|source| connect_err(source, endpoint, name))?,
     );
     let channel = if confirm {
         confirmed_channel(conn.as_ref())
             .await
-            .map_err(|source| connect_err(source, url, name))?
+            .map_err(|source| connect_err(source, endpoint, name))?
     } else {
         conn.create_channel()
             .await
-            .map_err(|source| connect_err(source, url, name))?
+            .map_err(|source| connect_err(source, endpoint, name))?
     };
-    tracing::info!(
-        target: "amqp",
-        resource = name,
-        endpoint = %secure::redact_url_credentials(url),
-        "amqp connected",
-    );
+    emit_connected(name, endpoint);
     Ok((conn, channel))
 }
 
@@ -84,16 +81,12 @@ pub(crate) async fn confirmed_channel(conn: &Connection) -> lapin::Result<Channe
     Ok(channel)
 }
 
-fn connect_err(source: lapin::Error, url: &str, name: &str) -> AmqpConnectError {
-    tracing::warn!(
-        target: "amqp",
-        resource = name,
-        // user:pass -> <redacted>；保留 scheme/host/port/vhost 供诊断。
-        endpoint = %secure::redact_url_credentials(url),
-        // 顶层 Display，不展开 source 链（杜绝第三方 error 链泄 PII）。
-        error = %secure::redact_error(&source),
-        "amqp connect failed",
-    );
+fn connect_err(
+    source: lapin::Error,
+    endpoint: &secure::AmqpEndpoint,
+    name: &str,
+) -> AmqpConnectError {
+    emit_connect_failed(name, endpoint, &source);
     AmqpConnectError {
         source: source.into(),
     }
