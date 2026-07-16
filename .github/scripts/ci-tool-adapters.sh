@@ -61,7 +61,7 @@ catalog() {
 
 valid_lane() {
   case "$1" in
-    all|ci-meta|ci-core-prerequisites|ci-core-tests|ci-security|ci-coverage|integration|audit) return 0 ;;
+    all|ci-meta|ci-core-prerequisites|ci-core-tests|ci-local-only|ci-security|ci-coverage|integration|audit) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -73,7 +73,7 @@ lane_has_tool() {
     *:sccache | \
     ci-meta:promtool | \
     ci-core-prerequisites:cargo-dylint | ci-core-prerequisites:dylint-link | \
-    ci-core-tests:cargo-nextest | \
+    ci-core-tests:cargo-nextest | ci-local-only:cargo-nextest | \
     ci-security:cargo-deny | ci-security:cargo-audit | \
     ci-coverage:cargo-nextest | ci-coverage:cargo-llvm-cov | ci-coverage:cargo-public-api | \
     integration:cargo-nextest | \

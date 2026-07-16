@@ -190,6 +190,15 @@ cfg/sibling bait、async/closure/spawn、控制流、macro、wrapper/alias 与�
 fail-closed，并与 manifest / generated active registry exact-set 对账；缺少 receipt 同样阻断。当前基线为
 6/6 registered、missing none，详见 `docs/runbooks/202607141556-1771-local-only-proof.md`。
 
+源码登记与本次执行证据严格分离。`verify --fast` 只运行上述静态 source receipt 门，不产生运行证据；完整
+`verify` 与始终计划、无分片的 `ci-local-only` 复用同一个 runner。runner 从静态 typed inventory 单源派生
+contract、package、library test target 与 exact non-empty filter；只有 nextest 全部成功且
+active/source/executed 三个 contract ID 集合完全相等，私有 report publisher 才能原子写出 strict schema v1
+报告。marker 必须来自 post-check 成功路径与 runner-owned 私有目录；missing、extra、duplicate、malformed、
+symlink、stale、wrong job/revision 与 equal-count-wrong-set 均拒绝。报告不接受旧版本、别名、JUnit 或
+count-only fallback。跨进程 marker 和执行事实仍属于带 synthetic red/anti-vacuity 的 Medium 证明，不虚称
+syscall sandbox 或 Hard 端到端 attestation。
+
 `testkit::local_only::assert_local_only` 在完整 await 一次 HTTP operation 前后，比较调用方必须同时提供的
 `BusinessWrite` / `Outbox` / `Publish` 三维证据。存在运行时 seam 时，provider 必须持有维度化
 `ProviderCounter<Dimension>`，conformance 只消费其共享只读 handle；任意 `FnMut() -> u64` 入口已删除，三个

@@ -5,7 +5,7 @@
 //! INVARIANT: NEXTEST-EVIDENCE-DTO-01 { level = "Hard", exec = "native-compile", source = "code", native = "Evidence construction requires the closed typed DTO and Outcome enum" }——证据内部状态只能由闭合类型构造。
 //! INVARIANT: NEXTEST-EVIDENCE-SCHEMA-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "evidence_schema_rejects_wire_drift", anti_vacuity = "evidence_schema_matches_golden" }——serde wire 形态由可失败的 committed golden 治理。
 //! INVARIANT: NEXTEST-CONFIG-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "config_policy_rejects_retry_override_and_missing_timeout", anti_vacuity = "committed_nextest_config_obeys_policy" }——CI profiles 零重试、JUnit 与 timeout fail-closed。
-//! INVARIANT: NEXTEST-EXECUTION-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "execution_funnel_rejects_private_capability_api_bypass", anti_vacuity = "real_nextest_call_sites_use_funnel|localtx_journey_serial_batch_fails_when_compiled_inventory_is_empty" }——xtask 的 nextest 子进程只能经 typed cargo capability 构造。
+//! INVARIANT: NEXTEST-EXECUTION-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "execution_funnel_rejects_private_capability_api_bypass|local_only_command_rejects_real_nonzero_exit_status", anti_vacuity = "real_nextest_call_sites_use_funnel|localtx_journey_serial_batch_fails_when_compiled_inventory_is_empty" }——xtask 的 nextest 子进程只能经 typed cargo capability 构造，且非零退出码不能生成成功能力。
 //! INVARIANT: NEXTEST-TRYBUILD-SCHEDULING-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "trybuild_inventory_is_bidirectionally_closed|trybuild_inventory_rejects_non_dedicated_sources", anti_vacuity = "workspace_trybuild_inventory_is_non_vacuous_and_closed" }——任何 trybuild 语义引用只能位于专用 integration test target 入口，且与 nextest 单线程 selector 双向闭合；lib/bin/module/macro 间接 carrier 均 fail-closed。
 
 use anyhow::{Context, Result, bail};
@@ -16,7 +16,7 @@ use std::fmt;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
+use std::process::{Command, ExitStatus};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -60,6 +60,87 @@ pub(crate) fn run_gated_with_probe<T>(
         return Ok(None);
     }
     bail!("{lane}: 缺少 {TOOL_NAME}，无法执行 {label}；安装：{INSTALL_HINT}")
+}
+
+/// Execute the exact canonical LocalOnly conformance tests selected by the source-receipt AST
+/// inventory. The caller owns reconciliation of the emitted runtime markers; this function only
+/// returns after nextest reports that every selected test passed.
+pub(crate) fn run_local_only_exact(
+    root: &Path,
+    packages: &[String],
+    tests: &[String],
+    marker_dir: &Path,
+) -> Result<()> {
+    let args = local_only_args(packages, tests)?;
+    let marker_dir = marker_dir
+        .to_str()
+        .context("LocalOnly execution marker directory must be UTF-8")?;
+    run_gated(
+        "ci-local-only",
+        false,
+        "LocalOnly exact conformance",
+        || {
+            let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+            let command = super::nextest_cmd(
+                super::NextestCapability,
+                super::NextestMode::Direct,
+                &borrowed,
+                &[("RSS_LOCAL_ONLY_EXECUTION_DIR", marker_dir)],
+                Some(root),
+            );
+            execute_local_only_command(command)
+        },
+    )?
+    .context("LocalOnly nextest execution unexpectedly skipped")
+}
+
+fn execute_local_only_command(mut command: Command) -> Result<()> {
+    let status = command
+        .status()
+        .context("启动 LocalOnly cargo-nextest 失败")?;
+    if !status.success() {
+        bail!("LocalOnly canonical conformance tests failed: exit={status}");
+    }
+    Ok(())
+}
+
+fn local_only_args(packages: &[String], tests: &[String]) -> Result<Vec<String>> {
+    if packages.is_empty() || tests.is_empty() {
+        bail!("LocalOnly exact conformance inventory must be non-empty");
+    }
+    if packages.windows(2).any(|pair| pair[0] >= pair[1])
+        || tests.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        bail!("LocalOnly packages and tests must be uniquely sorted");
+    }
+    if packages.iter().any(|package| {
+        package.is_empty()
+            || !package.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            })
+    }) || tests.iter().any(|test| {
+        test.is_empty()
+            || !test
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
+            || test.contains(":::")
+    }) {
+        bail!("LocalOnly package or test identity is invalid");
+    }
+    let mut args = vec![
+        "--profile".to_owned(),
+        NextestProfile::CiCore.as_str().to_owned(),
+        "--locked".to_owned(),
+        "--no-tests=fail".to_owned(),
+        "--lib".to_owned(),
+    ];
+    for package in packages {
+        args.extend(["-p".to_owned(), package.clone()]);
+    }
+    args.push("--".to_owned());
+    args.extend(tests.iter().cloned());
+    args.push("--exact".to_owned());
+    Ok(args)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1600,6 +1681,56 @@ mod tests {
     use super::*;
     use crate::testutil::unique_tmp;
     use crate::workspace_root;
+
+    #[test]
+    fn local_only_invocation_is_exact_non_empty_and_inventory_derived() -> Result<()> {
+        let packages = vec!["audit".to_owned(), "identity".to_owned()];
+        let tests = vec![
+            "application::tests::audit_receipt".to_owned(),
+            "application::tests::identity_receipt".to_owned(),
+        ];
+        let args = local_only_args(&packages, &tests)?;
+        assert_eq!(
+            args,
+            [
+                "--profile",
+                "ci-core",
+                "--locked",
+                "--no-tests=fail",
+                "--lib",
+                "-p",
+                "audit",
+                "-p",
+                "identity",
+                "--",
+                "application::tests::audit_receipt",
+                "application::tests::identity_receipt",
+                "--exact",
+            ]
+        );
+        assert!(local_only_args(&[], &tests).is_err());
+        assert!(local_only_args(&packages, &[]).is_err());
+        assert!(local_only_args(&["identity".into(), "audit".into()], &tests).is_err());
+        assert!(local_only_args(&packages, &["bad/name".into()]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn local_only_command_rejects_real_nonzero_exit_status() -> Result<()> {
+        #[cfg(unix)]
+        let command = super::super::clean_cmd("sh", &["-c", "exit 23"], &[], None);
+        #[cfg(windows)]
+        let command = super::super::clean_cmd("cmd", &["/C", "exit 23"], &[], None);
+
+        let error = execute_local_only_command(command)
+            .err()
+            .context("exit 23 must fail closed")?;
+        assert!(
+            error.to_string().contains("23"),
+            "helper must observe the real child exit status: {error:#}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn hash_partition_accepts_only_closed_m_over_n() -> Result<()> {

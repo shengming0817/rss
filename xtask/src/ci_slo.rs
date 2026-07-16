@@ -844,12 +844,13 @@ mod tests {
     #[test]
     fn ci_slo_config_is_complete_and_has_expected_limits() -> Result<()> {
         let config = Config::parse(CONFIG)?;
-        assert_eq!(config.duration_budget_count(), 15);
+        assert_eq!(config.duration_budget_count(), CiJobKey::COUNT);
         assert_eq!(config.limits_gib(), [5, 6, 8, 2, 1]);
         assert_eq!(config.duration_seconds(CiJobKey::CiMeta), 90);
         assert_eq!(config.duration_seconds(CiJobKey::CiCorePrerequisites), 600);
         assert_eq!(config.duration_seconds(CiJobKey::CiSecurity), 300);
         assert_eq!(config.duration_seconds(CiJobKey::CiCoverage), 480);
+        assert_eq!(config.duration_seconds(CiJobKey::CiLocalOnly), 600);
         assert_eq!(
             config.duration_seconds(CiJobKey::IntegrationPostgresDomain),
             900

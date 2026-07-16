@@ -92,6 +92,7 @@ jobs:
       shard: ${{ matrix.shard || '' }}
       partition: ${{ matrix.partition || '' }}
       partition-label: ${{ matrix.partitionLabel }}
+      required-evidence-target: ${{ matrix.requiredEvidenceTarget || '' }}
 
   scheduled-audit-fallback:
     name: scheduled-audit-fallback

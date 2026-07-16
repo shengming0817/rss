@@ -778,6 +778,7 @@ fn scan_record_granular_xtask_invariants(
         "xtask/src/ci_gate.rs" => CI_GATE_INVARIANT_BINDINGS,
         "xtask/src/localtx_coverage.rs" => LOCALTX_COVERAGE_INVARIANT_BINDINGS,
         "xtask/src/localtx_evidence.rs" => LOCALTX_EVIDENCE_INVARIANT_BINDINGS,
+        "xtask/src/localonly_evidence.rs" => LOCALONLY_EVIDENCE_INVARIANT_BINDINGS,
         "xtask/src/assembly_lock.rs" => ASSEMBLY_LOCK_INVARIANT_BINDINGS,
         _ => return Ok(false),
     };
@@ -971,6 +972,14 @@ const CI_GATE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         evidence: "LocalTx receipt disk-matrix synthetic reds with exact-set anti-vacuity",
         gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
     },
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_gate.rs",
+        id: "LOCAL-ONLY-REQUIRED-EVIDENCE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "LocalOnly report disk-matrix synthetic reds with exact-set anti-vacuity",
+        gates: "verify,ci,ci-meta,ci-core,ci-local-only,ci-security,ci-coverage,audit,integration",
+    },
 ];
 
 const LOCALTX_COVERAGE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
@@ -1031,6 +1040,33 @@ const LOCALTX_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "closed private receipt DTO and typed fixed wire values",
+        gates: "native-compile",
+    },
+];
+
+const LOCALONLY_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/localonly_evidence.rs",
+        id: "LOCAL-ONLY-EXECUTION-FUNNEL-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "private suite and exact-set capabilities gate the sole report publisher",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/localonly_evidence.rs",
+        id: "LOCAL-ONLY-EXECUTION-EXACTSET-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "marker and set synthetic reds with real 6/6 workspace anti-vacuity",
+        gates: "verify,ci-local-only",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/localonly_evidence.rs",
+        id: "LOCAL-ONLY-EXECUTION-WIRE-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "private deny-unknown-fields v1 DTO and closed typed owner",
         gates: "native-compile",
     },
 ];
@@ -2431,7 +2467,7 @@ const COVERAGE_TOKENS: &str = "ci,ci-coverage";
 const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
     GateDeclaration {
         path: "xtask/src/ci_lanes.rs",
-        tokens: "native-compile,verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+        tokens: "native-compile,verify,ci,ci-meta,ci-core,ci-local-only,ci-security,ci-coverage,audit,integration",
         role: GateDeclarationRole::Orchestrator(OrchestratorReason::RegistryAndPlanDerivation),
     },
     GateDeclaration {
@@ -2441,12 +2477,12 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
     },
     GateDeclaration {
         path: "xtask/src/nextest.rs",
-        tokens: "native-compile,verify,ci-core,integration",
+        tokens: "native-compile,verify,ci-core,ci-local-only,integration",
         role: GateDeclarationRole::Orchestrator(OrchestratorReason::PlanExecution),
     },
     GateDeclaration {
         path: "xtask/src/verify.rs",
-        tokens: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+        tokens: "verify,ci,ci-meta,ci-core,ci-local-only,ci-security,ci-coverage,audit,integration",
         role: GateDeclarationRole::Orchestrator(OrchestratorReason::PlanExecution),
     },
     GateDeclaration {
@@ -2502,6 +2538,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
     GateDeclaration {
         path: "xtask/src/consistency_effects.rs",
         tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/localonly_evidence.rs",
+        tokens: "native-compile,verify,ci-local-only",
         role: GateDeclarationRole::PlanStep,
     },
     GateDeclaration {
@@ -3557,6 +3598,12 @@ members = ["rss_demo", "rss_orphan"]
                     crate::ci_lanes::CiLane::Security,
                 )),
                 "ci-security",
+            ),
+            (
+                crate::verify::plan_for(crate::verify::PlanTarget::Lane(
+                    crate::ci_lanes::CiLane::LocalOnly,
+                )),
+                "ci-local-only",
             ),
         ];
         let mut nonempty_lanes = 0usize;

@@ -88,7 +88,10 @@ printf 'finding body line1\nline2\n' > "${ibody}"
 seen="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-seen.XXXXXX")"
 patched="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-patched.XXXXXX")"
 mdcap="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-mdcap.XXXXXX")"
-trap 'rm -f "${body}" "${ibody}" "${seen}" "${patched}" "${mdcap}"' EXIT
+policy_body="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-policy-body.XXXXXX")"
+policy_cap="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-policy-cap.XXXXXX")"
+policy_put_seen="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-policy-put.XXXXXX")"
+trap 'rm -f "${body}" "${ibody}" "${seen}" "${patched}" "${mdcap}" "${policy_body}" "${policy_cap}" "${policy_put_seen}"' EXIT
 
 # Case I1: dry-run shape -> work-item create (with --type) + REST patch, never
 # `az devops invoke`.
@@ -221,6 +224,365 @@ check "issue-close dry empty: no comment step" "clean" "$(has "$out" 'comments?f
 # shellcheck source=/dev/null
 ( . "${HERE}/../forge.conf" >/dev/null 2>&1; [ -n "${AZURE_WI_TYPE_BACKLOG}" ] && [ "${AZURE_WI_TYPE_BACKLOG}" != "Issue" ] ); cfgrc=$?
 check "forge.conf backlog type valid"      "zero"  "$(zero "$cfgrc")"
+
+# Case PCFG: exact policy updates use Azure's Policy Configurations PUT API.
+# The body stays in a file and therefore preserves JSON zero/false values; the
+# Authorization value must stay out of curl argv.
+jq -nc '{isEnabled:true,isBlocking:true,type:{id:"0609b952-1397-4640-95ec-e00a01b2c241"},settings:{queueOnSourceUpdateOnly:false,validDuration:0}}' > "${policy_body}"
+: > "${policy_cap}"
+_az_auth_header() { printf 'Authorization: Bearer policy-secret'; }
+curl() { printf '%s\n' "$*" > "${policy_cap}"; printf '{"id":33}\n'; }
+out="$(_az_policy_configuration_put 33 "${policy_body}")"; rc=$?
+check "policy PUT helper: zero exit"        "zero"  "$(zero "$rc")"
+check "policy PUT helper: response retained" '{"id":33}' "${out}"
+check "policy PUT helper: exact endpoint"    "match" \
+    "$(grep -q -- '-X PUT https://dev.azure.com/acme/proj/_apis/policy/configurations/33?api-version=7.1' "${policy_cap}" && echo match || echo nomatch)"
+check "policy PUT helper: body file"         "match" \
+    "$(grep -q -- "--data-binary @${policy_body}" "${policy_cap}" && echo match || echo nomatch)"
+check "policy PUT helper: JSON content type"  "match" \
+    "$(grep -q -- '-H Content-Type: application/json' "${policy_cap}" && echo match || echo nomatch)"
+check "policy PUT helper: auth off argv"     "clean" "$(has "$(cat "${policy_cap}")" 'policy-secret')"
+out="$(_az_policy_configuration_put not-an-id "${policy_body}" 2>/dev/null)"; rc=$?
+check "policy PUT helper: invalid id rejected" "nonzero" "$(nonzero "$rc")"
+out="$(_az_policy_configuration_put 33 "${policy_body}.missing" 2>/dev/null)"; rc=$?
+check "policy PUT helper: missing body rejected" "nonzero" "$(nonzero "$rc")"
+unset -f curl _az_auth_header
+
+# ---- LocalOnly Azure carrier -------------------------------------------------
+# Pipeline registration is idempotent but fail-closed: an existing definition
+# must point at exactly the requested repo/branch/YAML. Policy registration may
+# upsert the named policy, then MUST read the persisted object back and validate
+# every blocking/scope/queue/cache field.
+ADO_REPO="rss"
+build_policy_type_id='0609b952-1397-4640-95ec-e00a01b2c241'
+pipeline_exact='{"id":17,"name":"rss-local-only","repository":{"id":"repo-id","name":"rss","type":"TfsGit","defaultBranch":"refs/heads/develop"},"process":{"yamlFilename":"/azure-pipelines.yml"}}'
+policy_exact='{"id":33,"type":{"id":"0609b952-1397-4640-95ec-e00a01b2c241","displayName":"Build"},"isBlocking":true,"isEnabled":true,"settings":{"buildDefinitionId":17,"displayName":"RSS LocalOnly Execution","manualQueueOnly":false,"queueOnSourceUpdateOnly":false,"validDuration":0,"filenamePatterns":[],"scope":[{"repositoryId":"repo-id","refName":"refs/heads/develop","matchKind":"Exact"}]}}'
+policy_filename_patterns_absent="${policy_exact/,\"filenamePatterns\":[]/}"
+policy_filename_patterns_null="${policy_exact/\"filenamePatterns\":[]/\"filenamePatterns\":null}"
+for unfiltered in absent null empty; do
+    case "${unfiltered}" in
+        absent) policy_unfiltered="${policy_filename_patterns_absent}" ;;
+        null) policy_unfiltered="${policy_filename_patterns_null}" ;;
+        empty) policy_unfiltered="${policy_exact}" ;;
+    esac
+    if _azure_pipeline_policy_matches "${policy_unfiltered}" 33 17 repo-id develop "RSS LocalOnly Execution"; then
+        unfiltered_rc=0
+    else
+        unfiltered_rc=$?
+    fi
+    check "policy filenamePatterns ${unfiltered}: accepted" "zero" "$(zero "${unfiltered_rc}")"
+done
+
+# Case P1: an exact existing pipeline is verified without a create side effect.
+: > "${seen}"
+az() {
+    printf '%s\n' "$*" >> "${seen}"
+    case "$*" in
+        *"repos show"*) printf 'repo-id\n' ;;
+        *"pipelines list"*) printf '[{"id":17,"name":"rss-local-only"}]\n' ;;
+        *"pipelines show"*) printf '%s\n' "${pipeline_exact}" ;;
+        *"pipelines create"*) printf '%s\n' "${pipeline_exact}" ;;
+        *) printf '{}\n' ;;
+    esac
+}
+out="$(_azure_pipeline_create rss-local-only rss develop azure-pipelines.yml)"; rc=$?
+check "pipeline exact: zero exit"           "zero"  "$(zero "$rc")"
+check "pipeline exact: no create"           "clean" "$(has "$(cat "${seen}")" 'pipelines create')"
+check "pipeline exact: persisted read-back" "match" \
+    "$(grep -q 'pipelines show' "${seen}" && echo match || echo nomatch)"
+
+# Case P2: an existing pipeline with a different YAML path fails closed; it is
+# never silently replaced or accepted.
+: > "${seen}"
+pipeline_drift="${pipeline_exact/\/azure-pipelines.yml/\/other.yml}"
+az() {
+    printf '%s\n' "$*" >> "${seen}"
+    case "$*" in
+        *"repos show"*) printf 'repo-id\n' ;;
+        *"pipelines list"*) printf '[{"id":17,"name":"rss-local-only"}]\n' ;;
+        *"pipelines show"*) printf '%s\n' "${pipeline_drift}" ;;
+        *"pipelines create"*) printf '%s\n' "${pipeline_exact}" ;;
+        *) printf '{}\n' ;;
+    esac
+}
+out="$(_azure_pipeline_create rss-local-only rss develop azure-pipelines.yml 2>/dev/null)"; rc=$?
+check "pipeline drift: non-zero"             "nonzero" "$(nonzero "$rc")"
+check "pipeline drift: no replacement"       "clean"   "$(has "$(cat "${seen}")" 'pipelines create')"
+
+# Case P3: a missing pipeline is created exactly once and then read back.
+: > "${seen}"
+az() {
+    printf '%s\n' "$*" >> "${seen}"
+    case "$*" in
+        *"repos show"*) printf 'repo-id\n' ;;
+        *"pipelines list"*) printf '[]\n' ;;
+        *"pipelines create"*) printf '{"id":17}\n' ;;
+        *"pipelines show"*) printf '%s\n' "${pipeline_exact}" ;;
+        *) printf '{}\n' ;;
+    esac
+}
+out="$(_azure_pipeline_create rss-local-only rss develop azure-pipelines.yml)"; rc=$?
+check "pipeline missing: zero exit"          "zero"  "$(zero "$rc")"
+check "pipeline missing: create once"        "1"     "$(grep -c 'pipelines create' "${seen}" || true)"
+check "pipeline missing: read-back once"     "1"     "$(grep -c 'pipelines show' "${seen}" || true)"
+
+# Case P4: name/repo-name/branch/YAML equality is insufficient. The persisted
+# definition id, repository id, and Azure repository type are trust-bound too.
+for drift in definition-id repository-id repository-type; do
+    : > "${seen}"
+    case "${drift}" in
+        definition-id) pipeline_identity_drift="${pipeline_exact/\"id\":17/\"id\":18}" ;;
+        repository-id) pipeline_identity_drift="${pipeline_exact/\"id\":\"repo-id\"/\"id\":\"other-repo\"}" ;;
+        repository-type) pipeline_identity_drift="${pipeline_exact/\"type\":\"TfsGit\"/\"type\":\"GitHub\"}" ;;
+    esac
+    az() {
+        printf '%s\n' "$*" >> "${seen}"
+        case "$*" in
+            *"pipelines list"*) printf '[{"id":17,"name":"rss-local-only"}]\n' ;;
+            *"pipelines show"*) printf '%s\n' "${pipeline_identity_drift}" ;;
+            *"repos show"*) printf 'repo-id\n' ;;
+            *) printf '{}\n' ;;
+        esac
+    }
+    out="$(_azure_pipeline_create rss-local-only rss develop azure-pipelines.yml 2>/dev/null)"; rc=$?
+    check "pipeline ${drift} drift: non-zero" "nonzero" "$(nonzero "$rc")"
+    check "pipeline ${drift} drift: no replacement" "clean" \
+        "$(has "$(cat "${seen}")" 'pipelines create')"
+done
+
+# Case BP1: an exact existing blocking policy is verified without mutation.
+: > "${seen}"
+az() {
+    printf '%s\n' "$*" >> "${seen}"
+    case "$*" in
+        *"pipelines list"*) printf '[{"id":17,"name":"rss-local-only"}]\n' ;;
+        *"pipelines show"*) printf '%s\n' "${pipeline_exact}" ;;
+        *"repos show"*) printf 'repo-id\n' ;;
+        *"repos policy list"*) printf '[%s]\n' "${policy_exact}" ;;
+        *"repos policy show"*) printf '%s\n' "${policy_exact}" ;;
+        *) printf '{}\n' ;;
+    esac
+}
+out="$(_azure_pipeline_policy rss-local-only rss develop "RSS LocalOnly Execution")"; rc=$?
+check "policy exact: zero exit"              "zero"  "$(zero "$rc")"
+check "policy exact: no create/update"       "clean" \
+    "$(cat "${seen}" | grep -Eq 'policy build (create|update)' && echo dirty || echo clean)"
+check "policy exact: persisted read-back"    "match" \
+    "$(grep -q 'repos policy show' "${seen}" && echo match || echo nomatch)"
+
+# Case BP2: the unique named policy may be repaired through update, but the
+# persisted result is read back and all exact blocking fields are enforced.
+: > "${seen}"
+policy_drift='{"id":33,"type":{"id":"0609b952-1397-4640-95ec-e00a01b2c241","displayName":"Build"},"isBlocking":false,"isEnabled":true,"settings":{"buildDefinitionId":17,"displayName":"RSS LocalOnly Execution","manualQueueOnly":true,"queueOnSourceUpdateOnly":true,"validDuration":30,"scope":[{"repositoryId":"repo-id","refName":"refs/heads/develop","matchKind":"Exact"}]}}'
+: > "${policy_put_seen}"
+_az_policy_configuration_put() {
+    printf '%s\n' "$1" > "${policy_put_seen}"
+    cp "$2" "${policy_cap}"
+    printf '%s\n' "${policy_exact}"
+}
+az() {
+    printf '%s\n' "$*" >> "${seen}"
+    case "$*" in
+        *"pipelines list"*) printf '[{"id":17,"name":"rss-local-only"}]\n' ;;
+        *"pipelines show"*) printf '%s\n' "${pipeline_exact}" ;;
+        *"repos show"*) printf 'repo-id\n' ;;
+        *"repos policy list"*) printf '[%s]\n' "${policy_drift}" ;;
+        *"repos policy show"*)
+            if [ ! -s "${policy_put_seen}" ]; then
+                printf '%s\n' "${policy_drift}"
+            else
+                printf '%s\n' "${policy_exact}"
+            fi
+            ;;
+        *) printf '{}\n' ;;
+    esac
+}
+out="$(_azure_pipeline_policy rss-local-only rss develop "RSS LocalOnly Execution")"; rc=$?
+check "policy drift: zero after repair"       "zero"  "$(zero "$rc")"
+check "policy drift: exact PUT used"           "33"    "$(cat "${policy_put_seen}")"
+check "policy drift: no lossy CLI update"      "clean" \
+    "$(has "$(cat "${seen}")" 'repos policy build update')"
+check "policy drift: exact false/zero body"    "match" \
+    "$(jq -e '.isBlocking == true and .isEnabled == true and .settings.manualQueueOnly == false and .settings.queueOnSourceUpdateOnly == false and .settings.validDuration == 0' "${policy_cap}" >/dev/null && echo match || echo nomatch)"
+
+# Case BP3: a lying/lagging server read-back still fails closed after update.
+: > "${seen}"
+policy_bad_readback='{"id":33,"type":{"id":"0609b952-1397-4640-95ec-e00a01b2c241","displayName":"Build"},"isBlocking":true,"isEnabled":true,"settings":{"buildDefinitionId":17,"displayName":"RSS LocalOnly Execution","manualQueueOnly":false,"queueOnSourceUpdateOnly":false,"validDuration":30,"scope":[{"repositoryId":"repo-id","refName":"refs/heads/develop","matchKind":"Exact"}]}}'
+: > "${policy_put_seen}"
+_az_policy_configuration_put() {
+    printf '%s\n' "$1" > "${policy_put_seen}"
+    cp "$2" "${policy_cap}"
+    printf '%s\n' "${policy_exact}"
+}
+az() {
+    printf '%s\n' "$*" >> "${seen}"
+    case "$*" in
+        *"pipelines list"*) printf '[{"id":17,"name":"rss-local-only"}]\n' ;;
+        *"pipelines show"*) printf '%s\n' "${pipeline_exact}" ;;
+        *"repos show"*) printf 'repo-id\n' ;;
+        *"repos policy list"*) printf '[%s]\n' "${policy_drift}" ;;
+        *"repos policy show"*)
+            if [ ! -s "${policy_put_seen}" ]; then
+                printf '%s\n' "${policy_drift}"
+            else
+                printf '%s\n' "${policy_bad_readback}"
+            fi
+            ;;
+        *) printf '{}\n' ;;
+    esac
+}
+out="$(_azure_pipeline_policy rss-local-only rss develop "RSS LocalOnly Execution" 2>/dev/null)"; rc=$?
+check "policy bad read-back: non-zero"        "nonzero" "$(nonzero "$rc")"
+check "policy bad read-back: exact PUT used"  "33"      "$(cat "${policy_put_seen}")"
+
+# Case BP4: no named policy creates one and still reads persisted state back.
+: > "${seen}"
+az() {
+    printf '%s\n' "$*" >> "${seen}"
+    case "$*" in
+        *"pipelines list"*) printf '[{"id":17,"name":"rss-local-only"}]\n' ;;
+        *"pipelines show"*) printf '%s\n' "${pipeline_exact}" ;;
+        *"repos show"*) printf 'repo-id\n' ;;
+        *"repos policy list"*) printf '[]\n' ;;
+        *"repos policy build create"*) printf '{"id":33}\n' ;;
+        *"repos policy show"*) printf '%s\n' "${policy_exact}" ;;
+        *) printf '{}\n' ;;
+    esac
+}
+out="$(_azure_pipeline_policy rss-local-only rss develop "RSS LocalOnly Execution")"; rc=$?
+check "policy missing: zero exit"             "zero"  "$(zero "$rc")"
+check "policy missing: create once"           "1"     "$(grep -c 'repos policy build create' "${seen}" || true)"
+check "policy missing: read-back once"        "1"     "$(grep -c 'repos policy show' "${seen}" || true)"
+check "policy missing: exact false/zero create" "match" \
+    "$(grep 'repos policy build create' "${seen}" | grep -q -- '--queue-on-source-update-only false .*--valid-duration 0' && echo match || echo nomatch)"
+
+# Case BP5: policy registration must re-verify the complete pipeline definition,
+# not trust a name-only `--query id` lookup that can bind a drifted definition.
+: > "${seen}"
+pipeline_wrong_repo="${pipeline_exact/\"id\":\"repo-id\"/\"id\":\"other-repo\"}"
+az() {
+    printf '%s\n' "$*" >> "${seen}"
+    case "$*" in
+        *"pipelines list"*) printf '[{"id":17,"name":"rss-local-only"}]\n' ;;
+        *"pipelines show"*"--query id"*) printf '17\n' ;;
+        *"pipelines show"*) printf '%s\n' "${pipeline_wrong_repo}" ;;
+        *"repos show"*) printf 'repo-id\n' ;;
+        *"repos policy list"*) printf '[%s]\n' "${policy_exact}" ;;
+        *"repos policy show"*) printf '%s\n' "${policy_exact}" ;;
+        *) printf '{}\n' ;;
+    esac
+}
+out="$(_azure_pipeline_policy rss-local-only rss develop "RSS LocalOnly Execution" 2>/dev/null)"; rc=$?
+check "policy registration: drifted definition rejected" "nonzero" "$(nonzero "$rc")"
+check "policy registration: no mutation after definition drift" "clean" \
+    "$(cat "${seen}" | grep -Eq 'policy build (create|update)' && echo dirty || echo clean)"
+
+# Case BP6: the named object must be Azure's build-validation policy type. A
+# different policy kind with the same display name is rejected before mutation.
+: > "${seen}"
+policy_wrong_type="${policy_exact/${build_policy_type_id}/11111111-1111-1111-1111-111111111111}"
+az() {
+    printf '%s\n' "$*" >> "${seen}"
+    case "$*" in
+        *"pipelines list"*) printf '[{"id":17,"name":"rss-local-only"}]\n' ;;
+        *"pipelines show"*"--query id"*) printf '17\n' ;;
+        *"pipelines show"*) printf '%s\n' "${pipeline_exact}" ;;
+        *"repos show"*) printf 'repo-id\n' ;;
+        *"repos policy list"*) printf '[%s]\n' "${policy_wrong_type}" ;;
+        *"repos policy build update"*) printf '{}\n' ;;
+        *"repos policy show"*) printf '%s\n' "${policy_wrong_type}" ;;
+        *) printf '{}\n' ;;
+    esac
+}
+out="$(_azure_pipeline_policy rss-local-only rss develop "RSS LocalOnly Execution" 2>/dev/null)"; rc=$?
+check "policy wrong type: non-zero"           "nonzero" "$(nonzero "$rc")"
+check "policy wrong type: no update"          "clean" \
+    "$(has "$(cat "${seen}")" 'policy build update')"
+
+# Case BP7: path-filtered build validation is not equivalent to every-source-
+# update validation. Exact PUT clears the drift instead of depending on the
+# Azure CLI's lossy optional-value merge.
+: > "${seen}"
+: > "${policy_put_seen}"
+policy_filtered="${policy_exact/\"filenamePatterns\":[]/\"filenamePatterns\":[\"\/crates\/identity\/*\"]}"
+_az_policy_configuration_put() {
+    printf '%s\n' "$1" > "${policy_put_seen}"
+    cp "$2" "${policy_cap}"
+    printf '%s\n' "${policy_exact}"
+}
+az() {
+    printf '%s\n' "$*" >> "${seen}"
+    case "$*" in
+        *"pipelines list"*) printf '[{"id":17,"name":"rss-local-only"}]\n' ;;
+        *"pipelines show"*) printf '%s\n' "${pipeline_exact}" ;;
+        *"repos show"*) printf 'repo-id\n' ;;
+        *"repos policy list"*) printf '[%s]\n' "${policy_filtered}" ;;
+        *"repos policy show"*)
+            if [ ! -s "${policy_put_seen}" ]; then
+                printf '%s\n' "${policy_filtered}"
+            else
+                printf '%s\n' "${policy_exact}"
+            fi
+            ;;
+        *) printf '{}\n' ;;
+    esac
+}
+out="$(_azure_pipeline_policy rss-local-only rss develop "RSS LocalOnly Execution")"; rc=$?
+check "policy path filter: repaired"          "zero" "$(zero "$rc")"
+check "policy path filter: inspected persisted object" "match" \
+    "$(grep -q 'repos policy show' "${seen}" && echo match || echo nomatch)"
+check "policy path filter: exact PUT used"     "33" "$(cat "${policy_put_seen}")"
+check "policy path filter: cleared in body"   "match" \
+    "$(jq -e '.settings.filenamePatterns == []' "${policy_cap}" >/dev/null && echo match || echo nomatch)"
+
+# Case PI: pipeline-policy is the #1815 canonical interface, not a generic
+# policy editor. Drifted or extra argv is rejected even in dry-run mode.
+DRY_RUN=1
+for drift in name repo branch display extra; do
+    case "${drift}" in
+        name) args=(other rss develop "RSS LocalOnly Execution") ;;
+        repo) args=(rss-local-only other develop "RSS LocalOnly Execution") ;;
+        branch) args=(rss-local-only rss main "RSS LocalOnly Execution") ;;
+        display) args=(rss-local-only rss develop "Other Policy") ;;
+        extra) args=(rss-local-only rss develop "RSS LocalOnly Execution" extra) ;;
+    esac
+    out="$(_azure_pipeline_policy "${args[@]}" 2>&1)"; rc=$?
+    check "policy interface ${drift}: non-zero" "nonzero" "$(nonzero "$rc")"
+    check "policy interface ${drift}: canonical hint" "match" \
+        "$(printf '%s' "${out}" | grep -q 'pipeline-policy rss-local-only rss develop "RSS LocalOnly Execution"' && echo match || echo nomatch)"
+done
+out="$(_azure_pipeline_policy rss-local-only rss develop "RSS LocalOnly Execution")"; rc=$?
+check "policy interface canonical dry-run: zero" "zero" "$(zero "$rc")"
+DRY_RUN=0
+check "forge usage: policy is canonical"        "match" \
+    "$(grep -q 'pipeline-policy rss-local-only <configured-repo> develop "RSS LocalOnly Execution"' "${HERE}/../forge.sh" && echo match || echo nomatch)"
+
+# Case YAML: the checked-in pipeline is only a typed LocalOnly carrier. No
+# contract ids, test names, or alternate cargo test/JUnit path may live here.
+pipeline_yaml="${HERE}/../../../azure-pipelines.yml"
+check "pipeline yaml: checked in"             "zero" \
+    "$(if [ -f "${pipeline_yaml}" ]; then echo zero; else echo nonzero; fi)"
+check "pipeline yaml: trigger none"           "match" \
+    "$(grep -Eq '^trigger:[[:space:]]+none$' "${pipeline_yaml}" 2>/dev/null && echo match || echo nomatch)"
+check "pipeline yaml: pr none"                "match" \
+    "$(grep -Eq '^pr:[[:space:]]+none$' "${pipeline_yaml}" 2>/dev/null && echo match || echo nomatch)"
+check "pipeline yaml: ubuntu pool"             "match" \
+    "$(grep -Eq '^[[:space:]]+vmImage:[[:space:]]+ubuntu-latest$' "${pipeline_yaml}" 2>/dev/null && echo match || echo nomatch)"
+check "pipeline yaml: full checkout"           "match" \
+    "$(grep -Eq '^[[:space:]]+fetchDepth:[[:space:]]+0$' "${pipeline_yaml}" 2>/dev/null && echo match || echo nomatch)"
+check "pipeline yaml: nextest pinned"         "match" \
+    "$(grep -q 'cargo install --locked --version 0.9.137 cargo-nextest' "${pipeline_yaml}" 2>/dev/null && echo match || echo nomatch)"
+check "pipeline yaml: one typed command"      "1" \
+    "$(grep -c 'cargo run --locked -p xtask -- ci run --job ci-local-only --required-evidence-output' "${pipeline_yaml}" 2>/dev/null || true)"
+check "pipeline yaml: no copied test plan"     "clean" \
+    "$(grep -Eq 'cargo (test|nextest)|--filter-expr|LOCAL_ONLY_SPECS|contractIds' "${pipeline_yaml}" 2>/dev/null && echo dirty || echo clean)"
+check "pipeline yaml: publish on success"      "match" \
+    "$(grep -A5 'PublishPipelineArtifact@1' "${pipeline_yaml}" 2>/dev/null | grep -q 'condition: succeeded()' && echo match || echo nomatch)"
+
+# The narrow validation is not the full observable ship CI lane.
+# shellcheck source=/dev/null
+( . "${HERE}/../forge.conf" >/dev/null 2>&1; [ "${AZURE_HAS_CI}" = "false" ] ); narrow_cfg_rc=$?
+check "forge.conf: narrow carrier is not full CI" "zero" "$(zero "${narrow_cfg_rc}")"
 
 if [ "${fail}" -eq 0 ]; then
     echo "PASS azure.selftest.sh"

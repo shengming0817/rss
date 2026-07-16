@@ -13,7 +13,7 @@
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
 //! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api --check`（轴 A，见 `publicapi.rs`）。
 //! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci full` 只供本地一次性跑全部
-//! CI 门。二者与 GitHub typed 15-job catalog 均经 [`plan_for`] 与 `CiJobKey` Hard 闭集派生，杜绝门集漂移。
+//! CI 门。二者与 GitHub typed 16-job catalog 均经 [`plan_for`] 与 `CiJobKey` Hard 闭集派生，杜绝门集漂移。
 //!
 //! **`cargo xtask ci run --job audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，GitHub Actions
 //! `schedule:` 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
@@ -61,7 +61,7 @@ use crate::{
     contract, doc_contracts, layerdeps, reconcile_outbox_command_guard, repo_scope_guard,
     runtime_baseline, runtime_deps_guard, shipped_feature_guard, wsdeps,
 };
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::Stdio;
 
@@ -162,6 +162,7 @@ enum InternalCheck {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StepKind {
     Internal(InternalCheck),
+    LocalOnlyExecution,
     Cargo,
     Nextest(crate::nextest::CoreTestScope),
 }
@@ -396,6 +397,14 @@ fn step_local_only_effects() -> Step {
         id: GateId::LocalOnlyEffects,
         args: &[],
         kind: StepKind::Internal(InternalCheck::LocalOnlyEffects),
+        env: &[],
+    }
+}
+fn step_local_only_execution() -> Step {
+    Step {
+        id: GateId::LocalOnlyExecution,
+        args: &[],
+        kind: StepKind::LocalOnlyExecution,
         env: &[],
     }
 }
@@ -1042,6 +1051,15 @@ fn run_one(
 ) -> Result<()> {
     let execute = || match step.kind {
         StepKind::Internal(check) => run_internal(check, &opts.contract_against),
+        StepKind::LocalOnlyExecution => {
+            let request = crate::localonly_evidence::prepare_request(
+                crate::localonly_evidence::OWNER,
+                None,
+                root,
+            )?
+            .context("verify must prepare LocalOnly execution evidence")?;
+            crate::localonly_evidence::execute(root, request).map(|_| ())
+        }
         StepKind::Nextest(scope) => {
             crate::nextest::NextestInvocation::for_core(scope, opts.nextest_lane, opts.partition)
                 .run(root, step.env)
@@ -1063,10 +1081,14 @@ fn run_one(
     };
     match step.id.spec().tool() {
         ToolRequirement::InProcess | ToolRequirement::CargoBuiltin(_) => execute(),
-        ToolRequirement::Nextest => {
-            crate::nextest::run_gated(lane, opts.allow_missing_tools, step.label(), execute)
-                .map(|_| ())
-        }
+        ToolRequirement::Nextest => run_nextest_step_gated(
+            lane,
+            step,
+            opts.allow_missing_tools,
+            crate::nextest::is_available,
+            execute,
+        )
+        .map(|_| ()),
         ToolRequirement::CoverageTools => run_coverage_tools_gated(
             lane,
             opts.allow_missing_tools,
@@ -1085,6 +1107,25 @@ fn run_one(
             execute,
         ),
     }
+}
+
+/// LocalOnly runtime evidence is a required full-verify claim, so the generic
+/// `--allow-missing-tools` developer convenience must never turn it into a skip.
+fn run_nextest_step_gated<T>(
+    lane: &str,
+    step: &Step,
+    allow_missing_tools: bool,
+    nextest_available: impl FnOnce() -> bool,
+    execute: impl FnOnce() -> Result<T>,
+) -> Result<Option<T>> {
+    let allow_missing = allow_missing_tools && !matches!(&step.kind, StepKind::LocalOnlyExecution);
+    crate::nextest::run_gated_with_probe(
+        lane,
+        allow_missing,
+        step.label(),
+        nextest_available,
+        execute,
+    )
 }
 
 fn run_coverage_tools_gated(
@@ -1327,6 +1368,7 @@ enum JobExecution {
         partition: Option<crate::nextest::HashPartition>,
     },
     LocalTxRequired,
+    LocalOnlyRequired,
     Audit,
 }
 
@@ -1366,6 +1408,7 @@ fn execution_for_job(job: CiJobKey) -> Result<JobExecution> {
         },
         CiJobKey::CiSecurity => JobExecution::Lane(CiLane::Security),
         CiJobKey::CiCoverage => JobExecution::Lane(CiLane::Coverage),
+        CiJobKey::CiLocalOnly => JobExecution::LocalOnlyRequired,
         CiJobKey::IntegrationPostgresDomain => JobExecution::LocalTxRequired,
         CiJobKey::IntegrationEventTransport1Of2 => JobExecution::Integration {
             shard: IntegrationShard::EventTransport,
@@ -1401,9 +1444,32 @@ fn execution_for_job(job: CiJobKey) -> Result<JobExecution> {
 
 /// Execute exactly one typed CI job. CI is fail-closed, so this carrier intentionally has no
 /// local missing-tool allowance.
+fn required_evidence_request_kind(
+    job: CiJobKey,
+    output: Option<&Path>,
+) -> Result<Option<crate::ci_lanes::RequiredEvidenceKind>> {
+    match (job.required_evidence(), output) {
+        (None, Some(_)) => {
+            bail!("non-owner CI job {job} may not request --required-evidence-output")
+        }
+        (required, _) => Ok(required),
+    }
+}
+
 pub(crate) fn run_job(job: CiJobKey, required_evidence_output: Option<&Path>) -> Result<()> {
-    let required_evidence =
-        crate::localtx_evidence::prepare_request(job, required_evidence_output)?;
+    let root = workspace_root()?;
+    let required_evidence = required_evidence_request_kind(job, required_evidence_output)?;
+    let (localtx_evidence, localonly_evidence) = match required_evidence {
+        None => (None, None),
+        Some(crate::ci_lanes::RequiredEvidenceKind::LocalTx) => (
+            crate::localtx_evidence::prepare_request(job, required_evidence_output)?,
+            None,
+        ),
+        Some(crate::ci_lanes::RequiredEvidenceKind::LocalOnly) => (
+            None,
+            crate::localonly_evidence::prepare_request(job, required_evidence_output, &root)?,
+        ),
+    };
     match execution_for_job(job)? {
         JobExecution::Lane(lane) => run_lane(lane, false, None),
         JobExecution::Core {
@@ -1415,11 +1481,16 @@ pub(crate) fn run_job(job: CiJobKey, required_evidence_output: Option<&Path>) ->
         }
         JobExecution::LocalTxRequired => {
             let passed = run_required_postgres_domain()?;
-            if let Some(request) = required_evidence {
-                let counts =
-                    crate::localtx_coverage::verify_required_evidence_counts(&workspace_root()?)?;
+            if let Some(request) = localtx_evidence {
+                let counts = crate::localtx_coverage::verify_required_evidence_counts(&root)?;
                 request.publish(passed, counts)?;
             }
+            Ok(())
+        }
+        JobExecution::LocalOnlyRequired => {
+            let request = localonly_evidence
+                .context("ci-local-only must prepare its required execution evidence")?;
+            crate::localonly_evidence::execute(&root, request)?;
             Ok(())
         }
         JobExecution::Audit => run_audit(false),
@@ -1448,7 +1519,6 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Context as _;
 
     fn shell_executable_prefix(line: &str) -> &str {
         let mut single_quoted = false;
@@ -1752,38 +1822,85 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn required_evidence_output_is_validated_before_job_dispatch_red() -> anyhow::Result<()> {
+        let output = Path::new("target/required-evidence.json");
+        for job in CiJobKey::ALL {
+            let actual = required_evidence_request_kind(job, Some(output));
+            match job.required_evidence() {
+                Some(expected) => assert_eq!(actual?, Some(expected), "{job}"),
+                None => assert!(
+                    actual.is_err(),
+                    "non-owner {job} must reject --required-evidence-output"
+                ),
+            }
+        }
+        assert_eq!(
+            required_evidence_request_kind(CiJobKey::CiMeta, None)?,
+            None
+        );
+        Ok(())
+    }
+
     fn assert_executor_matches_job(job: CiJobKey, execution: JobExecution) -> anyhow::Result<()> {
         match execution {
-            JobExecution::Lane(lane) => {
-                assert_eq!(job.lane_kind(), lane);
-                assert!(job.shard().is_none());
-                assert!(job.partition().is_none());
-            }
+            JobExecution::Lane(lane) => assert_lane_executor(job, lane),
             JobExecution::Core {
                 execution,
                 partition,
-            } => {
-                assert_eq!(job.lane_kind(), expected_core_lane(execution)?);
-                let partition = partition.map(|value| value.to_string());
-                assert_eq!(job.partition(), partition.as_deref());
-            }
+            } => assert_core_executor(job, execution, partition)?,
             JobExecution::Integration { shard, partition } => {
-                assert_eq!(job.lane_kind(), CiLane::Integration);
-                assert_eq!(job.shard(), Some(shard.as_str()));
-                assert_eq!(
-                    job.partition(),
-                    partition.as_ref().map(ToString::to_string).as_deref()
-                );
+                assert_integration_executor(job, shard, partition);
             }
-            JobExecution::LocalTxRequired => {
-                assert_eq!(job, CiJobKey::IntegrationPostgresDomain);
-                assert_eq!(job.lane_kind(), CiLane::Integration);
-                assert_eq!(job.shard(), Some("postgres-domain"));
-                assert!(job.partition().is_none());
-            }
+            JobExecution::LocalTxRequired => assert_localtx_executor(job),
+            JobExecution::LocalOnlyRequired => assert_localonly_executor(job),
             JobExecution::Audit => assert_eq!(job, CiJobKey::Audit),
         }
         Ok(())
+    }
+
+    fn assert_lane_executor(job: CiJobKey, lane: CiLane) {
+        assert_eq!(job.lane_kind(), lane);
+        assert!(job.shard().is_none());
+        assert!(job.partition().is_none());
+    }
+
+    fn assert_core_executor(
+        job: CiJobKey,
+        execution: CoreExecution,
+        partition: Option<crate::nextest::HashPartition>,
+    ) -> anyhow::Result<()> {
+        assert_eq!(job.lane_kind(), expected_core_lane(execution)?);
+        let partition = partition.map(|value| value.to_string());
+        assert_eq!(job.partition(), partition.as_deref());
+        Ok(())
+    }
+
+    fn assert_integration_executor(
+        job: CiJobKey,
+        shard: IntegrationShard,
+        partition: Option<crate::nextest::HashPartition>,
+    ) {
+        assert_eq!(job.lane_kind(), CiLane::Integration);
+        assert_eq!(job.shard(), Some(shard.as_str()));
+        assert_eq!(
+            job.partition(),
+            partition.as_ref().map(ToString::to_string).as_deref()
+        );
+    }
+
+    fn assert_localtx_executor(job: CiJobKey) {
+        assert_eq!(job, CiJobKey::IntegrationPostgresDomain);
+        assert_eq!(job.lane_kind(), CiLane::Integration);
+        assert_eq!(job.shard(), Some("postgres-domain"));
+        assert!(job.partition().is_none());
+    }
+
+    fn assert_localonly_executor(job: CiJobKey) {
+        assert_eq!(job, CiJobKey::CiLocalOnly);
+        assert_eq!(job.lane_kind(), CiLane::LocalOnly);
+        assert!(job.shard().is_none());
+        assert!(job.partition().is_none());
     }
 
     fn expected_core_lane(execution: CoreExecution) -> anyhow::Result<CiLane> {
@@ -1943,6 +2060,7 @@ mod tests {
                 "codegen-check",
                 "localtx-coverage",
                 "local-only-effects",
+                "local-only-execution",
                 "pdp-allow-guard",
                 "contract-binding-guard",
                 "schema-rls",
@@ -1974,6 +2092,62 @@ mod tests {
                 "deny",
                 "dylint",
             ]
+        );
+    }
+
+    #[test]
+    fn localonly_execution_uses_one_full_verify_gate_and_fast_stays_static() {
+        let full = verify_plan(&opts(false, false));
+        let gates = full
+            .iter()
+            .filter(|step| step.id == GateId::LocalOnlyExecution)
+            .collect::<Vec<_>>();
+        assert_eq!(gates.len(), 1);
+        let gate = gates[0];
+        assert!(gate.needs_compile());
+        assert_eq!(gate.id.spec().lanes(), [Some(CiLane::LocalOnly), None]);
+        assert_eq!(gate.id.spec().tool(), ToolRequirement::Nextest);
+        assert_eq!(
+            gate.id.spec().compat(),
+            CompatMembership::Standalone(StandaloneReason::VerifyOnly)
+        );
+        assert!(matches!(gate.kind, StepKind::LocalOnlyExecution));
+        assert!(
+            !verify_plan(&opts(true, false))
+                .iter()
+                .any(|step| step.id == GateId::LocalOnlyExecution),
+            "verify --fast must not claim runtime LocalOnly evidence"
+        );
+    }
+
+    #[test]
+    fn localonly_full_verify_missing_nextest_is_fail_closed_without_report() {
+        let root = crate::testutil::unique_tmp("verify-localonly-missing-nextest");
+        let report = root
+            .join("target")
+            .join("localonly-execution")
+            .join(crate::localonly_evidence::FILE_NAME);
+        let step = step_local_only_execution();
+
+        let result = run_nextest_step_gated(
+            "verify",
+            &step,
+            true,
+            || false,
+            || {
+                std::fs::create_dir_all(report.parent().context("report parent")?)?;
+                std::fs::write(&report, b"must not be published")?;
+                Ok(())
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "required runtime evidence must fail closed"
+        );
+        assert!(
+            !report.exists(),
+            "missing nextest must not publish a report"
         );
     }
 
@@ -2565,7 +2739,13 @@ mod tests {
         for spec in REGISTRY {
             let step = step_for_id(spec.id());
             assert!(
-                binding_is_valid(spec.tool(), matches!(step.kind, StepKind::Nextest(_))),
+                binding_is_valid(
+                    spec.tool(),
+                    matches!(
+                        step.kind,
+                        StepKind::Nextest(_) | StepKind::LocalOnlyExecution
+                    )
+                ),
                 "gate {} nextest probe/StepKind 漂移",
                 step.label()
             );
@@ -3274,18 +3454,32 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct TypedStep {
+        fields: Vec<String>,
         id: Option<String>,
         name: Option<String>,
+        display_name: Option<String>,
         uses: Option<String>,
+        checkout: Option<String>,
+        task: Option<String>,
         if_expr: Option<String>,
+        condition: Option<String>,
+        fetch_depth: Option<String>,
         continue_on_error: Option<String>,
         timeout_minutes: Option<String>,
         with: Vec<(String, Vec<String>)>,
         env: Vec<(String, Vec<String>)>,
+        inputs: Vec<(String, Vec<String>)>,
         run: Vec<String>,
     }
 
     impl TypedStep {
+        fn fields_exact(&self, expected: &[&str]) -> bool {
+            self.fields
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied())
+        }
+
         fn with_exact(&self, key: &str, values: &[&str]) -> bool {
             let matches = self
                 .with
@@ -3304,6 +3498,19 @@ mod tests {
                 .collect::<Vec<_>>();
             matches.len() == 1
                 && matches[0].1.iter().map(String::as_str).collect::<Vec<_>>() == values
+        }
+
+        fn inputs_exact(&self, expected: &[(&str, &str)]) -> bool {
+            self.inputs
+                .iter()
+                .filter_map(|(key, values)| {
+                    let [value] = values.as_slice() else {
+                        return None;
+                    };
+                    Some((key.as_str(), value.as_str()))
+                })
+                .eq(expected.iter().copied())
+                && self.inputs.len() == expected.len()
         }
 
         fn run_contains(&self, needle: &str) -> bool {
@@ -3393,7 +3600,7 @@ mod tests {
     fn typed_steps_in_lines(lines: &[(usize, &str)]) -> Vec<TypedStep> {
         let mut steps = Vec::new();
         for (steps_index, (steps_indent, text)) in lines.iter().enumerate() {
-            if *text != "steps:" || !matches!(*steps_indent, 2 | 4) {
+            if *text != "steps:" || !matches!(*steps_indent, 0 | 2 | 4) {
                 continue;
             }
             let item_indent = steps_indent + 2;
@@ -3443,14 +3650,20 @@ mod tests {
                 continue;
             };
             let value = value.trim();
+            step.fields.push(key.to_owned());
             match key {
                 "id" => step.id = Some(value.to_owned()),
                 "name" => step.name = Some(value.to_owned()),
+                "displayName" => step.display_name = Some(value.to_owned()),
                 "uses" => step.uses = Some(value.to_owned()),
+                "checkout" => step.checkout = Some(value.to_owned()),
+                "task" => step.task = Some(value.to_owned()),
                 "if" => step.if_expr = Some(value.to_owned()),
+                "condition" => step.condition = Some(value.to_owned()),
+                "fetchDepth" => step.fetch_depth = Some(value.to_owned()),
                 "continue-on-error" => step.continue_on_error = Some(value.to_owned()),
                 "timeout-minutes" => step.timeout_minutes = Some(value.to_owned()),
-                "run" => {
+                "run" | "bash" => {
                     if is_yaml_block_scalar_marker(value) {
                         let mut body = index + 1;
                         while body < lines.len() && lines[body].0 > field_indent {
@@ -3462,11 +3675,12 @@ mod tests {
                     }
                     step.run.push(value.to_owned());
                 }
-                "with" | "env" => {
-                    let target = if key == "with" {
-                        &mut step.with
-                    } else {
-                        &mut step.env
+                "with" | "env" | "inputs" => {
+                    let target = match key {
+                        "with" => &mut step.with,
+                        "env" => &mut step.env,
+                        "inputs" => &mut step.inputs,
+                        _ => unreachable!("closed mapping key"),
                     };
                     let mapping_indent = field_indent + 2;
                     let mut child = index + 1;
@@ -3502,6 +3716,133 @@ mod tests {
             index += 1;
         }
         step
+    }
+
+    fn azure_top_level_scalar_exact(yaml: &str, key: &str, expected: &str) -> bool {
+        let matches = yaml_indented_code_lines(yaml)
+            .into_iter()
+            .filter_map(|(indent, text)| {
+                if indent != 0 {
+                    return None;
+                }
+                let (candidate, value) = text.split_once(':')?;
+                (candidate == key).then_some(value.trim())
+            })
+            .collect::<Vec<_>>();
+        matches.len() == 1 && yaml_scalar_eq(matches[0], expected)
+    }
+
+    fn azure_localonly_pipeline_is_hardened(yaml: &str) -> bool {
+        const OUTPUT: &str = "$(Agent.TempDirectory)/localonly-execution.json";
+        const TYPED_COMMAND: &str = "cargo run --locked -p xtask -- ci run --job ci-local-only --required-evidence-output \"$(Agent.TempDirectory)/localonly-execution.json\"";
+
+        let top_level_steps = yaml_indented_code_lines(yaml)
+            .into_iter()
+            .filter(|(indent, text)| *indent == 0 && *text == "steps:")
+            .count();
+        if top_level_steps != 1
+            || !azure_top_level_scalar_exact(yaml, "trigger", "none")
+            || !azure_top_level_scalar_exact(yaml, "pr", "none")
+        {
+            return false;
+        }
+        let steps = yaml_typed_steps(yaml);
+        let [checkout, install, execute, publish] = steps.as_slice() else {
+            return false;
+        };
+
+        checkout.fields_exact(&["checkout", "fetchDepth"])
+            && checkout.checkout.as_deref() == Some("self")
+            && checkout.fetch_depth.as_deref() == Some("0")
+            && install.fields_exact(&["bash", "displayName"])
+            && install.run_exact(&[
+                "set -euo pipefail",
+                "cargo install --locked --version 0.9.137 cargo-nextest",
+            ])
+            && install.display_name.as_deref() == Some("Install pinned test runner")
+            && execute.fields_exact(&["bash", "displayName"])
+            && execute.run_exact(&["set -euo pipefail", TYPED_COMMAND])
+            && execute.display_name.as_deref() == Some("Run typed LocalOnly evidence job")
+            && publish.fields_exact(&["task", "displayName", "condition", "inputs"])
+            && publish.task.as_deref() == Some("PublishPipelineArtifact@1")
+            && publish.display_name.as_deref() == Some("Publish LocalOnly execution report")
+            && publish.condition.as_deref() == Some("succeeded()")
+            && publish.inputs_exact(&[("targetPath", OUTPUT), ("artifact", "localonly-execution")])
+    }
+
+    #[test]
+    fn azure_localonly_pipeline_committed_guard_rejects_structural_camouflage() -> anyhow::Result<()>
+    {
+        const COMMAND: &str = "cargo run --locked -p xtask -- ci run --job ci-local-only --required-evidence-output \"$(Agent.TempDirectory)/localonly-execution.json\"";
+        let green = std::fs::read_to_string(workspace_root()?.join("azure-pipelines.yml"))?;
+        assert!(
+            azure_localonly_pipeline_is_hardened(&green),
+            "committed Azure validation must preserve the typed LocalOnly topology"
+        );
+
+        let no_execute = green.replacen(COMMAND, "true", 1);
+        let display_name_camouflage = no_execute.replacen(
+            "displayName: Run typed LocalOnly evidence job",
+            &format!("displayName: {COMMAND}"),
+            1,
+        );
+        let env_camouflage = green.replacen(
+            COMMAND,
+            &format!("true\n    env:\n      CAMOUFLAGE: {COMMAND}"),
+            1,
+        );
+        let comment_camouflage = green.replacen(COMMAND, &format!("# {COMMAND}\n      true"), 1);
+        let reds = [
+            (
+                "trigger",
+                green.replacen("trigger: none", "trigger: develop", 1),
+            ),
+            ("pr", green.replacen("pr: none", "pr: develop", 1)),
+            (
+                "nextest pin",
+                green.replacen("--version 0.9.137", "--version 0.9.138", 1),
+            ),
+            ("typed command missing", no_execute),
+            ("comment camouflage", comment_camouflage),
+            ("env camouflage", env_camouflage),
+            ("displayName camouflage", display_name_camouflage),
+            (
+                "wrong typed owner",
+                green.replacen("--job ci-local-only", "--job ci-meta", 1),
+            ),
+            (
+                "wrong evidence output",
+                green.replacen("localonly-execution.json", "other.json", 1),
+            ),
+            (
+                "non-success publication",
+                green.replacen("condition: succeeded()", "condition: always()", 1),
+            ),
+            (
+                "wrong publication target",
+                green.replacen(
+                    "targetPath: $(Agent.TempDirectory)",
+                    "targetPath: target",
+                    1,
+                ),
+            ),
+            (
+                "extra executable step",
+                format!("{green}\n  - bash: |\n      true\n    displayName: Extra executable\n"),
+            ),
+            ("duplicate steps root", format!("{green}\nsteps:\n")),
+        ];
+        for (label, red) in reds {
+            assert_ne!(
+                red, green,
+                "synthetic red `{label}` must mutate the fixture"
+            );
+            assert!(
+                !azure_localonly_pipeline_is_hardened(&red),
+                "Azure structural guard accepted `{label}`"
+            );
+        }
+        Ok(())
     }
 
     fn workflow_has_exact_read_permissions(yaml: &str) -> bool {
@@ -3849,6 +4190,7 @@ mod tests {
                     "shard: ${{ matrix.shard || '' }}",
                     "partition: ${{ matrix.partition || '' }}",
                     "partition-label: ${{ matrix.partitionLabel }}",
+                    "required-evidence-target: ${{ matrix.requiredEvidenceTarget || '' }}",
                 ]
     }
 
@@ -4015,6 +4357,7 @@ mod tests {
             && yaml.contains("shard: ${{ matrix.shard || '' }}")
             && yaml.contains("partition: ${{ matrix.partition || '' }}")
             && yaml.contains("partition-label: ${{ matrix.partitionLabel }}")
+            && yaml.contains("required-evidence-target: ${{ matrix.requiredEvidenceTarget || '' }}")
             && yaml.contains("  ci-gate:\n    name: ci-gate\n    if: ${{ always() }}\n    needs: [ci-plan, execute]")
             && yaml.contains("cargo run --locked -p xtask -- ci gate")
             && yaml.contains("--planner-result \"${{ needs.ci-plan.result }}\"")
@@ -4444,6 +4787,7 @@ mod tests {
             ("missing-job-key", green.replacen("      ci-job-key: ${{ matrix.jobKey }}\n", "", 1)),
             ("missing-plan-digest", green.replacen("      plan-digest: ${{ matrix.planDigest }}\n", "", 1)),
             ("missing-source", green.replacen("      source-revision: ${{ matrix.sourceRevision }}\n", "", 1)),
+            ("missing-required-evidence-target", green.replacen("      required-evidence-target: ${{ matrix.requiredEvidenceTarget || '' }}\n", "", 1)),
             ("gate-not-always", green.replacen("  ci-gate:\n    name: ci-gate\n    if: ${{ always() }}", "  ci-gate:\n    name: ci-gate\n    if: ${{ success() }}", 1)),
             ("gate-missing-matrix-result", green.replacen("            --matrix-result \"${{ needs.execute.result }}\"", "", 1)),
             ("permission", green.replacen("contents: read", "contents: write", 1)),
@@ -5236,10 +5580,10 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     )
                     && step.env_exact("RSS_JOB_TARGET", &["${{ runner.temp }}/rss-cargo-target"])
                     && step.run_has_line(
-                        "case \"$RSS_LANE\" in ci-meta|ci-core-prerequisites|ci-core-tests|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
+                        "case \"$RSS_LANE\" in ci-meta|ci-core-prerequisites|ci-core-tests|ci-local-only|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
                     )
                     && step.run_has_line(
-                        "case \"$RSS_PROFILE\" in ci-meta|ci-core-prerequisites|ci-core-tests|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
+                        "case \"$RSS_PROFILE\" in ci-meta|ci-core-prerequisites|ci-core-tests|ci-local-only|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
                     )
                     && step.run_contains("[ \"$RSS_PROFILE\" = \"$RSS_LANE\" ]")
             })
@@ -5838,16 +6182,24 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             && partition_contract_is_closed
     }
 
-    const LOCALTX_RECEIPT_REQUEST: &str = "required_evidence_args+=(--required-evidence-output \"$RUNNER_TEMP/localtx-required.json\")";
-    const LOCALTX_RECEIPT_SOURCE_BINDING: &str =
-        "localtx_receipt_source=\"$RUNNER_TEMP/localtx-required.json\"";
-    const LOCALTX_RECEIPT_TARGET_BINDING: &str =
-        "localtx_receipt_target=target/job-evidence/integration/localtx-required.json";
-    const LOCALTX_OWNER_SOURCE_GUARD: &str = "if [ -L \"$localtx_receipt_source\" ] || [ ! -f \"$localtx_receipt_source\" ]; then exit 1; fi";
-    const LOCALTX_OWNER_TARGET_ABSENCE_GUARD: &str = "if [ -e \"$localtx_receipt_target\" ] || [ -L \"$localtx_receipt_target\" ]; then exit 1; fi";
-    const LOCALTX_RECEIPT_STAGE: &str = "cp --no-dereference --remove-destination -- \"$localtx_receipt_source\" \"$localtx_receipt_target\"";
-    const LOCALTX_OWNER_TARGET_GUARD: &str = "if [ -L \"$localtx_receipt_target\" ] || [ ! -f \"$localtx_receipt_target\" ]; then exit 1; fi";
-    const LOCALTX_NON_OWNER_GUARD: &str = "if [ -e \"$localtx_receipt_source\" ] || [ -L \"$localtx_receipt_source\" ] || [ -e \"$localtx_receipt_target\" ] || [ -L \"$localtx_receipt_target\" ]; then exit 1; fi";
+    const REQUIRED_EVIDENCE_ARGS_BINDING: &str = "required_evidence_args=()";
+    const REQUIRED_EVIDENCE_OUTPUT_BINDING: &str =
+        "required_evidence_output=\"$RUNNER_TEMP/required-evidence.json\"";
+    const REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD: &str = "if [ -e \"$required_evidence_output\" ] || [ -L \"$required_evidence_output\" ]; then exit 1; fi";
+    const REQUIRED_EVIDENCE_ARGS_REQUEST: &str =
+        "required_evidence_args=(--required-evidence-output \"$required_evidence_output\")";
+    const REQUIRED_EVIDENCE_INVOCATION: &str = "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" ci run --job \"$RSS_CI_JOB_KEY\" \"${required_evidence_args[@]}\"";
+    const REQUIRED_EVIDENCE_SOURCE_BINDING: &str =
+        "required_evidence_source=\"$RUNNER_TEMP/required-evidence.json\"";
+    const REQUIRED_EVIDENCE_SOURCE_GUARD: &str = "if [ -L \"$required_evidence_source\" ] || [ ! -f \"$required_evidence_source\" ]; then exit 1; fi";
+    const REQUIRED_EVIDENCE_TARGET_ABSENCE_GUARD: &str = "if [ -e \"$required_evidence_target\" ] || [ -L \"$required_evidence_target\" ]; then exit 1; fi";
+    const REQUIRED_EVIDENCE_STAGE: &str = "cp --no-dereference --remove-destination -- \"$required_evidence_source\" \"$required_evidence_target\"";
+    const REQUIRED_EVIDENCE_TARGET_GUARD: &str = "if [ -L \"$required_evidence_target\" ] || [ ! -f \"$required_evidence_target\" ]; then exit 1; fi";
+    const REQUIRED_EVIDENCE_TARGET_PATH_GUARD: &str =
+        "case \"$RSS_CI_REQUIRED_EVIDENCE_TARGET\" in target/job-evidence/*) ;; *) exit 64 ;; esac";
+    const REQUIRED_EVIDENCE_TYPED_STAGE: &str =
+        "stage_required_evidence \"$RSS_CI_REQUIRED_EVIDENCE_TARGET\"";
+    const REQUIRED_EVIDENCE_NON_OWNER_GUARD: &str = "if [ -e \"$required_evidence_source\" ] || [ -L \"$required_evidence_source\" ]; then exit 1; fi";
 
     fn workflow_run_line_count(steps: &[TypedStep], expected: &str) -> usize {
         steps
@@ -5937,11 +6289,13 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             step.name.as_deref() == Some("Run closed xtask lane")
                 && step.timeout_minutes.as_deref() == Some("92")
                 && step.run_has_sequence(&[
-                    "required_evidence_args=()",
-                    "if [ \"$RSS_CI_JOB_KEY\" = integration/postgres-domain ]; then",
-                    LOCALTX_RECEIPT_REQUEST,
+                    REQUIRED_EVIDENCE_ARGS_BINDING,
+                    "if [ -n \"$RSS_CI_REQUIRED_EVIDENCE_TARGET\" ]; then",
+                    REQUIRED_EVIDENCE_OUTPUT_BINDING,
+                    REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD,
+                    REQUIRED_EVIDENCE_ARGS_REQUEST,
                     "fi",
-                    "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" ci run --job \"$RSS_CI_JOB_KEY\" \"${required_evidence_args[@]}\"",
+                    REQUIRED_EVIDENCE_INVOCATION,
                 ])
         });
         let snapshot_ok = snapshot.is_some_and(|index| {
@@ -5998,17 +6352,27 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     "cp \"$RUNNER_TEMP/integration-service-logs.tar.gz\" target/job-evidence/integration/service-logs.tar.gz",
                 )
                 && step.run_has_sequence(&[
-                    LOCALTX_RECEIPT_SOURCE_BINDING,
-                    LOCALTX_RECEIPT_TARGET_BINDING,
-                    "if [ \"$RSS_CI_JOB_KEY\" = integration/postgres-domain ]; then",
-                    LOCALTX_OWNER_SOURCE_GUARD,
-                    LOCALTX_OWNER_TARGET_ABSENCE_GUARD,
-                    LOCALTX_RECEIPT_STAGE,
-                    LOCALTX_OWNER_TARGET_GUARD,
+                    REQUIRED_EVIDENCE_SOURCE_BINDING,
+                    "stage_required_evidence() {",
+                    "required_evidence_target=$1",
+                    REQUIRED_EVIDENCE_SOURCE_GUARD,
+                    "mkdir -p \"${required_evidence_target%/*}\"",
+                    REQUIRED_EVIDENCE_TARGET_ABSENCE_GUARD,
+                    REQUIRED_EVIDENCE_STAGE,
+                    REQUIRED_EVIDENCE_TARGET_GUARD,
+                    "}",
+                    "if [ -n \"$RSS_CI_REQUIRED_EVIDENCE_TARGET\" ]; then",
+                    REQUIRED_EVIDENCE_TARGET_PATH_GUARD,
+                    REQUIRED_EVIDENCE_TYPED_STAGE,
                     "else",
-                    LOCALTX_NON_OWNER_GUARD,
+                    REQUIRED_EVIDENCE_NON_OWNER_GUARD,
                     "fi",
                 ])
+                && !step.run.iter().any(|line| {
+                    line.contains("RSS_CI_JOB_KEY")
+                        || line.contains("localtx-required.json")
+                        || line.contains("localonly-execution.json")
+                })
         });
         let no_global_prune = steps.iter().flat_map(|step| &step.run).all(|line| {
             ![
@@ -6044,23 +6408,31 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             && snapshot_ok
             && cleanup_ok
             && stage_ok
+            && yaml.matches("required-evidence-target:").count() == 1
+            && yaml
+                .matches("RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}")
+                .count()
+                == 1
             && [
-                LOCALTX_RECEIPT_REQUEST,
-                LOCALTX_RECEIPT_SOURCE_BINDING,
-                LOCALTX_RECEIPT_TARGET_BINDING,
-                LOCALTX_OWNER_SOURCE_GUARD,
-                LOCALTX_OWNER_TARGET_ABSENCE_GUARD,
-                LOCALTX_RECEIPT_STAGE,
-                LOCALTX_OWNER_TARGET_GUARD,
-                LOCALTX_NON_OWNER_GUARD,
+                REQUIRED_EVIDENCE_ARGS_BINDING,
+                REQUIRED_EVIDENCE_OUTPUT_BINDING,
+                REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD,
+                REQUIRED_EVIDENCE_ARGS_REQUEST,
+                REQUIRED_EVIDENCE_INVOCATION,
+                REQUIRED_EVIDENCE_SOURCE_BINDING,
+                REQUIRED_EVIDENCE_SOURCE_GUARD,
+                REQUIRED_EVIDENCE_TARGET_ABSENCE_GUARD,
+                REQUIRED_EVIDENCE_STAGE,
+                REQUIRED_EVIDENCE_TARGET_GUARD,
+                REQUIRED_EVIDENCE_TARGET_PATH_GUARD,
+                REQUIRED_EVIDENCE_TYPED_STAGE,
+                REQUIRED_EVIDENCE_NON_OWNER_GUARD,
             ]
             .into_iter()
             .all(|line| workflow_run_line_count(&steps, line) == 1)
             && workflow_run_fragment_count(&steps, "--required-evidence-output") == 1
-            && workflow_run_fragment_count(
-                &steps,
-                "target/job-evidence/integration/localtx-required.json",
-            ) == 1
+            && workflow_run_fragment_count(&steps, "localtx-required.json") == 0
+            && workflow_run_fragment_count(&steps, "localonly-execution.json") == 0
             && no_global_prune
             && lifecycle_command_owners
                 == [
@@ -6077,7 +6449,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
     }
 
     fn reusable_rust_lane_is_hardened(yaml: &str) -> bool {
-        const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || (inputs.lane == 'integration' && inputs.shard == 'postgres-domain' && inputs.partition == '')) && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
+        const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-local-only' || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || (inputs.lane == 'integration' && inputs.shard == 'postgres-domain' && inputs.partition == '')) && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
         let lines = yaml_indented_code_lines(yaml);
         let steps = yaml_typed_steps(yaml);
         let index = |id: &str| {
@@ -6213,6 +6585,13 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     ]
                     .as_slice(),
                     [
+                        "ci-local-only)",
+                        "echo 'profile=ci-local-only'",
+                        "echo 'nightly='",
+                        ";;",
+                    ]
+                    .as_slice(),
+                    [
                         "ci-coverage)",
                         "echo 'profile=ci-coverage'",
                         "echo \"nightly=$RSS_NIGHTLY_PINNED\"",
@@ -6222,7 +6601,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 ]
                 .iter()
                 .all(|branch| step.run_has_sequence(branch))
-                && step.run.iter().filter(|line| line.ends_with(')')).count() == 7
+                && step.run.iter().filter(|line| line.ends_with(')')).count() == 8
                 && step.run_has_line("integration)")
                 && step.run_has_line("audit)")
                 && step.run_has_line("*) exit 64 ;;")
@@ -6249,11 +6628,13 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     "reset_outcome=degraded",
                     "fi",
                     "echo \"compiler-cache-reset=$reset_outcome\" >> \"$GITHUB_OUTPUT\"",
-                    "required_evidence_args=()",
-                    "if [ \"$RSS_CI_JOB_KEY\" = integration/postgres-domain ]; then",
-                    LOCALTX_RECEIPT_REQUEST,
+                    REQUIRED_EVIDENCE_ARGS_BINDING,
+                    "if [ -n \"$RSS_CI_REQUIRED_EVIDENCE_TARGET\" ]; then",
+                    REQUIRED_EVIDENCE_OUTPUT_BINDING,
+                    REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD,
+                    REQUIRED_EVIDENCE_ARGS_REQUEST,
                     "fi",
-                    "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" ci run --job \"$RSS_CI_JOB_KEY\" \"${required_evidence_args[@]}\"",
+                    REQUIRED_EVIDENCE_INVOCATION,
                 ])
         });
         let unique_ci_executor =
@@ -6450,12 +6831,12 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 .iter()
                 .filter(|(indent, line)| *indent == 8 && *line == "required: false")
                 .count()
-                == 3
+                == 4
             && lines
                 .iter()
                 .filter(|(indent, line)| *indent == 8 && *line == "type: string")
                 .count()
-                == 7
+                == 8
             && lines
                 .iter()
                 .any(|(indent, line)| *indent == 2 && *line == "contents: read")
@@ -6472,6 +6853,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     "RSS_CI_JOB_KEY: ${{ inputs.ci-job-key }}",
                     "RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}",
                     "RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}",
+                    "RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}",
                 ],
             )
             && start.is_some_and(|i| {
@@ -6760,7 +7142,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
     }
 
     #[test]
-    fn reusable_rust_lane_stages_localtx_required_receipt_red() -> anyhow::Result<()> {
+    fn reusable_rust_lane_stages_typed_required_evidence_red() -> anyhow::Result<()> {
         let green =
             std::fs::read_to_string(workspace_root()?.join(".github/workflows/rss-rust-lane.yml"))?;
         assert!(integration_service_lifecycle_is_hardened(&green));
@@ -6773,47 +7155,56 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         };
         let reds = [
             (
-                "missing request",
-                green.replacen(LOCALTX_RECEIPT_REQUEST, "true", 1),
+                "missing output binding",
+                green.replacen(REQUIRED_EVIDENCE_OUTPUT_BINDING, "true", 1),
             ),
             (
-                "duplicate request",
-                duplicate_line(LOCALTX_RECEIPT_REQUEST)?,
+                "duplicate output binding",
+                duplicate_line(REQUIRED_EVIDENCE_OUTPUT_BINDING)?,
             ),
             (
                 "duplicate temporary source binding",
-                duplicate_line(LOCALTX_RECEIPT_SOURCE_BINDING)?,
+                duplicate_line(REQUIRED_EVIDENCE_SOURCE_BINDING)?,
             ),
             (
-                "duplicate canonical target binding",
-                duplicate_line(LOCALTX_RECEIPT_TARGET_BINDING)?,
+                "owner switch resurrected",
+                green.replacen(
+                    REQUIRED_EVIDENCE_TYPED_STAGE,
+                    &format!(
+                        "case \"$RSS_CI_JOB_KEY\" in\nci-local-only) {REQUIRED_EVIDENCE_TYPED_STAGE} ;;\n*) exit 64 ;;\nesac"
+                    ),
+                    1,
+                ),
             ),
-            ("duplicate staging", duplicate_line(LOCALTX_RECEIPT_STAGE)?),
+            (
+                "duplicate staging",
+                duplicate_line(REQUIRED_EVIDENCE_STAGE)?,
+            ),
             (
                 "owner symlink laundering",
                 green.replacen(
-                    LOCALTX_RECEIPT_STAGE,
-                    "cp \"$localtx_receipt_source\" \"$localtx_receipt_target\"",
+                    REQUIRED_EVIDENCE_STAGE,
+                    "cp \"$required_evidence_source\" \"$required_evidence_target\"",
                     1,
                 ),
             ),
             (
                 "owner source symlink accepted",
                 green.replacen(
-                    LOCALTX_OWNER_SOURCE_GUARD,
-                    "test -f \"$localtx_receipt_source\"",
+                    REQUIRED_EVIDENCE_SOURCE_GUARD,
+                    "test -f \"$required_evidence_source\"",
                     1,
                 ),
             ),
             (
                 "owner target type unchecked",
-                green.replacen(LOCALTX_OWNER_TARGET_GUARD, "true", 1),
+                green.replacen(REQUIRED_EVIDENCE_TARGET_GUARD, "true", 1),
             ),
             (
                 "non-owner dangling symlink accepted",
                 green.replacen(
-                    LOCALTX_NON_OWNER_GUARD,
-                    "test ! -e \"$localtx_receipt_source\"",
+                    REQUIRED_EVIDENCE_NON_OWNER_GUARD,
+                    "test ! -e \"$required_evidence_source\"",
                     1,
                 ),
             ),
@@ -6852,7 +7243,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             );
         }
         assert!(slo.contains(&format!("{} 个 typed job", CiJobKey::COUNT)));
-        assert!(!slo.contains("14 个 typed job"));
+        assert!(!slo.contains("15 个 typed job"));
         for required in [
             "requiredContext",
             "appId",
@@ -7120,6 +7511,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "RSS_CI_JOB_KEY: ${{ inputs.ci-job-key }}",
                 "RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}",
                 "RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}",
+                "RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}",
             ],
         ));
         let green_steps = yaml_typed_steps(&green);
@@ -7709,34 +8101,30 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 1,
             ),
             green.replacen(
-                "if [ \"$RSS_CI_JOB_KEY\" = integration/postgres-domain ]; then",
-                "if [ \"$RSS_CI_JOB_KEY\" = integration/event-transport/1-of-2 ]; then",
+                "      required-evidence-target:",
+                "      required-evidence-destination:",
+                1,
+            ),
+            green.replacen(REQUIRED_EVIDENCE_OUTPUT_BINDING, "true", 1),
+            green.replacen(REQUIRED_EVIDENCE_SOURCE_GUARD, "true", 1),
+            green.replacen(
+                REQUIRED_EVIDENCE_STAGE,
+                "cp \"$required_evidence_source\" \"$required_evidence_target\"",
                 1,
             ),
             green.replacen(
-                LOCALTX_RECEIPT_REQUEST,
-                "true",
+                "RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}",
+                "RSS_CI_REQUIRED_EVIDENCE_TARGET: target/job-evidence/forged.json",
                 1,
             ),
-            green.replacen(LOCALTX_OWNER_SOURCE_GUARD, "true", 1),
-            green.replacen(
-                LOCALTX_RECEIPT_STAGE,
-                "cp \"$localtx_receipt_source\" \"$localtx_receipt_target\"",
-                1,
-            ),
-            green.replacen(
-                "target/job-evidence/integration/localtx-required.json",
-                "target/job-evidence/ci/localtx-required.json",
-                1,
-            ),
-            green.replacen(LOCALTX_NON_OWNER_GUARD, "true", 1),
+            green.replacen(REQUIRED_EVIDENCE_NON_OWNER_GUARD, "true", 1),
             green.replacen(
                 "case \"$RSS_XTASK_OUTCOME\" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac",
                 "case \"$RSS_XTASK_OUTCOME\" in success|failure) ;; *) exit 64 ;; esac",
                 1,
             ),
             green.replacen(
-                "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" ci run --job \"$RSS_CI_JOB_KEY\" \"${required_evidence_args[@]}\"",
+                REQUIRED_EVIDENCE_INVOCATION,
                 "cargo run --locked -p xtask -- ci full",
                 1,
             ),
@@ -7819,22 +8207,26 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             "timeout-minutes: 240",
             "case \"$RSS_SHARD:$RSS_PARTITION_LABEL\" in :|*[!a-z0-9:-]*) exit 64 ;; esac",
             "id: xtask\n        timeout-minutes: 92",
-            "required_evidence_args=()",
-            "if [ \"$RSS_CI_JOB_KEY\" = integration/postgres-domain ]; then",
-            LOCALTX_RECEIPT_REQUEST,
-            "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" ci run --job \"$RSS_CI_JOB_KEY\" \"${required_evidence_args[@]}\"",
+            "RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}",
+            REQUIRED_EVIDENCE_ARGS_BINDING,
+            REQUIRED_EVIDENCE_OUTPUT_BINDING,
+            REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD,
+            REQUIRED_EVIDENCE_ARGS_REQUEST,
+            REQUIRED_EVIDENCE_INVOCATION,
             "RSS_XTASK_OUTCOME: ${{ steps.xtask.outcome }}",
             "case \"$RSS_XTASK_OUTCOME\" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac",
             "timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh collect",
             "timeout --signal=TERM --kill-after=5s 30s .github/scripts/integration-services.sh snapshot",
             "timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh cleanup",
             "jq -e '.collection.outcome == \"success\" or .collection.outcome == \"failure\" or .collection.outcome == \"cancelled\" or .collection.outcome == \"skipped\"'",
-            LOCALTX_RECEIPT_SOURCE_BINDING,
-            LOCALTX_RECEIPT_TARGET_BINDING,
-            LOCALTX_OWNER_SOURCE_GUARD,
-            LOCALTX_RECEIPT_STAGE,
-            LOCALTX_OWNER_TARGET_GUARD,
-            LOCALTX_NON_OWNER_GUARD,
+            REQUIRED_EVIDENCE_SOURCE_BINDING,
+            REQUIRED_EVIDENCE_SOURCE_GUARD,
+            REQUIRED_EVIDENCE_TARGET_ABSENCE_GUARD,
+            REQUIRED_EVIDENCE_STAGE,
+            REQUIRED_EVIDENCE_TARGET_GUARD,
+            REQUIRED_EVIDENCE_TARGET_PATH_GUARD,
+            REQUIRED_EVIDENCE_TYPED_STAGE,
+            REQUIRED_EVIDENCE_NON_OWNER_GUARD,
         ] {
             assert!(
                 workflow.contains(contract),
@@ -8005,7 +8397,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "printf '%s'",
             ),
             (
-                "ci-meta|ci-core-prerequisites|ci-core-tests|ci-security|ci-coverage|integration|audit",
+                "ci-meta|ci-core-prerequisites|ci-core-tests|ci-local-only|ci-security|ci-coverage|integration|audit",
                 "ci|integration|audit",
             ),
         ] {

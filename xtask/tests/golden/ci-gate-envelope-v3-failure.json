@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "verdict": "failure",
   "failureClass": "planner-result",
   "plannerResult": "failure",
@@ -15,5 +15,6 @@
   "localtxActiveCount": null,
   "localtxJourneyCount": null,
   "localtxBackendProfileCount": null,
+  "localonlyContractCount": null,
   "successMetrics": null
 }

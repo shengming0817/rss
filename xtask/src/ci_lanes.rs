@@ -8,7 +8,7 @@
 //! compatibility plans are derived from this registry and guarded by non-vacuous red/green tests.
 //! INVARIANT: CI-SLO-JOB-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "CiJobKey is a closed enum whose ALL catalog and exhaustive mappings admit exactly the reusable workflow job matrix" }.
 //! INVARIANT: CI-IMPACT-CATALOG-01 { level = "Hard", exec = "native-compile", source = "code", native = "ci_job_catalog generates CiJobKey, ALL, workflow identity, artifact identity, and planner matrix fields from one descriptor" }.
-//! INVARIANT: CI-REQUIRED-EVIDENCE-OWNER-01 { level = "Hard", exec = "native-compile", source = "code", native = "the closed CI job descriptor catalog makes every job choose a RequiredEvidenceKind and a const identity proof admits exactly one LocalTx owner: integration/postgres-domain" }.
+//! INVARIANT: CI-REQUIRED-EVIDENCE-OWNER-01 { level = "Hard", exec = "native-compile", source = "code", native = "the closed CI job descriptor catalog makes every job choose a RequiredEvidenceKind and const identity proofs admit exactly one LocalTx owner plus exactly one LocalOnly owner" }.
 
 use anyhow::Result;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -21,12 +21,23 @@ use crate::nextest::HashPartition;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequiredEvidenceKind {
     LocalTx,
+    LocalOnly,
 }
 
 impl RequiredEvidenceKind {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::LocalTx => "localtx",
+            Self::LocalOnly => "localonly",
+        }
+    }
+
+    /// Canonical upload location consumed by `ci-gate`. Workflow staging is projected from this
+    /// closed kind through the typed planner matrix; it must not rebuild the owner catalog.
+    pub(crate) const fn staged_artifact_path(self) -> &'static str {
+        match self {
+            Self::LocalTx => "target/job-evidence/integration/localtx-required.json",
+            Self::LocalOnly => "target/job-evidence/local-only/localonly-execution.json",
         }
     }
 }
@@ -48,7 +59,7 @@ macro_rules! ci_job_catalog {
             $( $variant, )+
         }
 
-        const CI_JOB_DESCRIPTORS: [CiJobDescriptor; 15] = [
+        const CI_JOB_DESCRIPTORS: [CiJobDescriptor; 16] = [
             $(CiJobDescriptor {
                 key: CiJobKey::$variant,
                 name: $name,
@@ -60,7 +71,7 @@ macro_rules! ci_job_catalog {
         ];
 
         impl CiJobKey {
-            pub(crate) const ALL: [Self; 15] = [$(Self::$variant),+];
+            pub(crate) const ALL: [Self; 16] = [$(Self::$variant),+];
 
             const fn descriptor(self) -> &'static CiJobDescriptor {
                 match self {
@@ -75,6 +86,13 @@ macro_rules! ci_job_catalog {
             pub(crate) const fn required_evidence(self) -> Option<RequiredEvidenceKind> {
                 self.descriptor().required_evidence
             }
+
+            pub(crate) const fn required_evidence_staged_artifact_path(self) -> Option<&'static str> {
+                match self.required_evidence() {
+                    Some(kind) => Some(kind.staged_artifact_path()),
+                    None => None,
+                }
+            }
         }
     };
 }
@@ -86,6 +104,13 @@ ci_job_catalog! {
     CiCoreTests2Of2 => ("ci-core-tests/2-of-2", CoreTests, None, Some("2/2"), None),
     CiSecurity => ("ci-security", Security, None, None, None),
     CiCoverage => ("ci-coverage", Coverage, None, None, None),
+    CiLocalOnly => (
+        "ci-local-only",
+        LocalOnly,
+        None,
+        None,
+        Some(RequiredEvidenceKind::LocalOnly)
+    ),
     IntegrationPostgresDomain => (
         "integration/postgres-domain",
         Integration,
@@ -148,6 +173,7 @@ ci_job_catalog! {
 const _: () = {
     let mut index = 0;
     let mut localtx_owners = 0;
+    let mut localonly_owners = 0;
     while index < CI_JOB_DESCRIPTORS.len() {
         if matches!(
             CI_JOB_DESCRIPTORS[index].required_evidence,
@@ -155,12 +181,23 @@ const _: () = {
         ) {
             localtx_owners += 1;
         }
+        if matches!(
+            CI_JOB_DESCRIPTORS[index].required_evidence,
+            Some(RequiredEvidenceKind::LocalOnly)
+        ) {
+            localonly_owners += 1;
+        }
         index += 1;
     }
     assert!(localtx_owners == 1);
+    assert!(localonly_owners == 1);
     assert!(matches!(
         CiJobKey::IntegrationPostgresDomain.required_evidence(),
         Some(RequiredEvidenceKind::LocalTx)
+    ));
+    assert!(matches!(
+        CiJobKey::CiLocalOnly.required_evidence(),
+        Some(RequiredEvidenceKind::LocalOnly)
     ));
 };
 
@@ -298,6 +335,7 @@ pub(crate) enum CiLane {
     CoreTests,
     Security,
     Coverage,
+    LocalOnly,
     Integration,
     Nightly,
 }
@@ -311,6 +349,7 @@ impl CiLane {
             Self::CoreTests => "ci-core-tests",
             Self::Security => "ci-security",
             Self::Coverage => "ci-coverage",
+            Self::LocalOnly => "ci-local-only",
             Self::Integration => "integration",
             Self::Nightly => "audit",
         }
@@ -324,6 +363,7 @@ impl CiLane {
             Self::CoreTests => "ci-core-tests",
             Self::Security => "ci-security",
             Self::Coverage => "ci-coverage",
+            Self::LocalOnly => "ci-local-only",
             Self::Integration => "ci-integration",
             Self::Nightly => "audit",
         }
@@ -675,6 +715,17 @@ macro_rules! gate_catalog {
                         INTERNAL,
                         SOURCE,
                         BOTH_INCLUDED,
+                    )
+            ),
+            LocalOnlyExecution => (step_local_only_execution, Some("xtask/src/localonly_evidence.rs"),
+                gate(
+                        GateId::LocalOnlyExecution,
+                        "local-only-execution",
+                        LOCALONLY,
+                        CompileKind::Workspace,
+                        ToolRequirement::Nextest,
+                        EvidenceKind::Test,
+                        VERIFY_ONLY,
                     )
             ),
             PdpAllowGuard => (step_pdp_allow_guard, Some("xtask/src/pdpallow.rs"),
@@ -1251,6 +1302,7 @@ const fn expensive_gate(
 
 const META: CiLane = CiLane::Meta;
 const CORE: CiLane = CiLane::Core;
+const LOCALONLY: CiLane = CiLane::LocalOnly;
 const BOTH_INCLUDED: GateMembership = GateMembership {
     verify: VerifyMembership::Included,
     compat: CompatMembership::Included,
@@ -1424,6 +1476,44 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!owners.is_empty(), "required-evidence owner anti-vacuity");
         assert_eq!(owners, [CiJobKey::IntegrationPostgresDomain]);
+    }
+
+    #[test]
+    fn required_evidence_catalog_has_exactly_one_localonly_owner() {
+        let owners = CiJobKey::ALL
+            .into_iter()
+            .filter(|job| job.required_evidence() == Some(RequiredEvidenceKind::LocalOnly))
+            .collect::<Vec<_>>();
+        assert!(
+            !owners.is_empty(),
+            "LocalOnly required-evidence owner anti-vacuity"
+        );
+        assert_eq!(owners, [CiJobKey::CiLocalOnly]);
+        assert_eq!(CiJobKey::CiLocalOnly.as_str(), "ci-local-only");
+        assert_eq!(
+            CiJobKey::CiLocalOnly.artifact_parts(),
+            ("ci-local-only", "workspace", "unpartitioned")
+        );
+    }
+
+    #[test]
+    fn required_evidence_staging_paths_are_derived_from_the_closed_kind() {
+        assert_eq!(
+            RequiredEvidenceKind::LocalTx.staged_artifact_path(),
+            "target/job-evidence/integration/localtx-required.json"
+        );
+        assert_eq!(
+            RequiredEvidenceKind::LocalOnly.staged_artifact_path(),
+            "target/job-evidence/local-only/localonly-execution.json"
+        );
+        for job in CiJobKey::ALL {
+            assert_eq!(
+                job.required_evidence_staged_artifact_path(),
+                job.required_evidence()
+                    .map(RequiredEvidenceKind::staged_artifact_path),
+                "{job}"
+            );
+        }
     }
 
     #[test]

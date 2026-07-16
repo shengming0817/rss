@@ -32,6 +32,10 @@ job = "ci-coverage"
 max_duration_seconds = 480
 
 [[duration_budgets]]
+job = "ci-local-only"
+max_duration_seconds = 600
+
+[[duration_budgets]]
 job = "integration/postgres-domain"
 max_duration_seconds = 900
 

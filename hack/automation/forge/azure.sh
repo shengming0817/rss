@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # forge/azure.sh — Azure DevOps (`az repos` / `az boards` / `az devops invoke`)
-# backend for forge.sh. Fallback backend, NOT active for this repo (rss defaults
-# to the GitHub origin); retained as a behaviour-equivalence reference.
+# backend for forge.sh. This is the active PR/Boards forge for rss. Its narrow
+# LocalOnly build-validation carrier is managed explicitly by pipeline-* verbs;
+# AZURE_HAS_CI remains false until the complete, observable ship CI exists.
 #
 # Command syntax verified against learn.microsoft.com (az CLI 2.x + azure-devops
 # extension, REST api-version 7.1). One of the three sanctioned homes for raw
@@ -22,7 +23,7 @@
 #     local git against the active remote's branches.
 #   - author trust: no author_association -> AZURE_TRUSTED_AUTHORS allowlist.
 #   - ci-*: gated off in forge.sh (AZURE_HAS_CI=false); pipeline-* verbs below
-#     manage Azure Pipelines explicitly for the local-CI mirror.
+#     manage explicit Azure Pipelines such as the narrow LocalOnly validation.
 #   - issue-edit-labels (System.Tags): read-modify-write via REST op=replace
 #     (`az boards --fields` only ADDS tags, never removes; `az devops invoke`
 #     PATCH errors); NOT atomic (backlog).
@@ -40,7 +41,8 @@
 _az_pr_url_base() { printf '%s/%s/_git/%s' "${ADO_ORG}" "${ADO_PROJECT}" "${ADO_REPO}"; }
 
 # Azure REST auth header for direct curl calls — used only where the az CLI is
-# broken (every work-item field write: `az devops invoke --resource workitems`
+# lossy or broken (Policy build update folds integer 0 into the persisted value;
+# every work-item field write through `az devops invoke --resource workitems`
 # PATCH-by-id resolves a route template carrying a `${type}` placeholder it can't
 # fill -> `KeyError: 'type'`; and `az boards --fields` is add-only for tags).
 # Prefers the devops PAT (same credential the rest of this backend uses); else a
@@ -58,9 +60,10 @@ _az_auth_header() {
 
 # _az_auth_hdr_file: write the ADO auth header to a fresh 0600 temp file and echo
 # its path (caller rm's it). SINGLE source for the PAT-off-argv discipline shared
-# by every direct REST curl call (_az_wit_patch / _az_wit_comment): the token goes
-# via `curl -H @file`, NEVER `-H "<token>"` — an argv-visible Authorization header
-# leaks the PAT/Bearer token to `ps`.
+# by every direct REST curl call (_az_wit_patch / _az_wit_comment /
+# _az_policy_configuration_put): the token goes via `curl -H @file`, NEVER
+# `-H "<token>"` — an argv-visible Authorization header leaks the PAT/Bearer
+# token to `ps`.
 _az_auth_hdr_file() {
     local auth hdr
     auth="$(_az_auth_header)" \
@@ -101,6 +104,32 @@ _az_wit_comment() {
         "${ADO_ORG}/${ADO_PROJECT}/_apis/wit/workItems/${id}/comments?format=markdown&api-version=7.1-preview.4" \
         -H @"${hdr}" -H "Content-Type: application/json" --data-binary @"${tmp}" >/dev/null; then rc=0; else rc=$?; fi
     rm -f "${hdr}" "${tmp}"
+    return "${rc}"
+}
+
+# _az_policy_configuration_put <id> <json-file>: replace one Azure policy
+# configuration through the official 7.1 PUT endpoint. `az repos policy build
+# update --valid-duration 0` cannot express the canonical zero value because the
+# Azure DevOps CLI merges it as `valid_duration or current`; a file-backed JSON
+# body preserves both integer zero and boolean false exactly.
+_az_policy_configuration_put() {
+    local id="$1" body_file="$2" hdr rc
+    case "${id}" in
+        ''|*[!0-9]*)
+            echo "forge azure: policy configuration id must be numeric" >&2
+            return 64
+            ;;
+    esac
+    if [ ! -f "${body_file}" ]; then
+        echo "forge azure: policy configuration body file is missing" >&2
+        return 64
+    fi
+    hdr="$(_az_auth_hdr_file)" || return 1
+    if curl -fsS -X PUT \
+        "${ADO_ORG}/${ADO_PROJECT}/_apis/policy/configurations/${id}?api-version=7.1" \
+        -H @"${hdr}" -H "Content-Type: application/json" \
+        --data-binary @"${body_file}"; then rc=0; else rc=$?; fi
+    rm -f "${hdr}"
     return "${rc}"
 }
 
@@ -287,22 +316,125 @@ _azure_pr_mergeable() { # <pr> -> MERGEABLE|CONFLICTING|UNKNOWN
 
 _azure_pr_web_url() { printf '%s/pullrequest/%s\n' "$(_az_pr_url_base)" "$1"; }
 
-# --- Azure Pipelines (local-CI mirror) ---------------------------------------
+# --- Azure Pipelines ----------------------------------------------------------
+# These registration functions are intentionally read-after-write. CLI success
+# is not proof that the persisted definition/policy has the requested scope, so
+# every create/update funnels through a strict jq predicate before returning.
+_AZURE_TFSGIT_REPOSITORY_TYPE="TfsGit"
+_AZURE_BUILD_VALIDATION_POLICY_TYPE_ID="0609b952-1397-4640-95ec-e00a01b2c241"
+_AZURE_LOCAL_ONLY_PIPELINE_NAME="rss-local-only"
+_AZURE_LOCAL_ONLY_BRANCH="develop"
+_AZURE_LOCAL_ONLY_POLICY_DISPLAY_NAME="RSS LocalOnly Execution"
+_AZURE_LOCAL_ONLY_PIPELINE_YAML="azure-pipelines.yml"
+
+_azure_repository_id() { # <repo>
+    local repository_id
+    repository_id="$(az repos show --repository "$1" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --query id -o tsv)" \
+        || return 1
+    if [ -z "${repository_id}" ]; then
+        echo "forge azure: repository id read-back was empty" >&2
+        return 1
+    fi
+    printf '%s\n' "${repository_id}"
+}
+
+_azure_pipeline_definition_matches() { # <json> <definition-id> <repository-id> <name> <repo> <branch> <yaml>
+    local definition="$1" definition_id="$2" repository_id="$3" name="$4" repo="$5" branch="$6" yaml_path="$7"
+    local ref="${branch}"
+    case "${ref}" in refs/heads/*) ;; *) ref="refs/heads/${ref}" ;; esac
+    printf '%s' "${definition}" | jq -e \
+        --arg definition_id "${definition_id}" --arg repository_id "${repository_id}" \
+        --arg repository_type "${_AZURE_TFSGIT_REPOSITORY_TYPE}" \
+        --arg name "${name}" --arg repo "${repo}" --arg ref "${ref}" --arg yaml "${yaml_path}" '
+        ((.id | tostring) == $definition_id)
+        and (.name == $name)
+        and ((.repository.id | tostring) == $repository_id)
+        and (.repository.name == $repo)
+        and (.repository.type == $repository_type)
+        and (.repository.defaultBranch == $ref)
+        and ((.process.yamlFilename | sub("^/"; "")) == ($yaml | sub("^/"; "")))
+    ' >/dev/null
+}
+
+_azure_pipeline_definition_verify() { # <json> <definition-id> <repository-id> <name> <repo> <branch> <yaml>
+    _azure_pipeline_definition_matches "$@" && return 0
+    echo "forge azure: pipeline definition drift (expected exact id/name/repository-id/repository-type/branch/yaml)" >&2
+    return 1
+}
+
+_azure_pipeline_existing_verified_id() { # <name> <repo> <repository-id> <branch> <yaml>
+    local name="$1" repo="$2" repository_id="$3" branch="$4" yaml_path="$5"
+    local listed exact count pipeline_id readback
+    listed="$(az pipelines list --name "${name}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)" \
+        || return 1
+    exact="$(printf '%s' "${listed}" | jq -ce --arg name "${name}" \
+        '[.[] | select(.name == $name)]')" || return 1
+    count="$(printf '%s' "${exact}" | jq -er 'length')" || return 1
+    if [ "${count}" -ne 1 ]; then
+        echo "forge azure: expected exactly one pipeline named ${name}, found ${count}" >&2
+        return 1
+    fi
+    pipeline_id="$(printf '%s' "${exact}" | jq -er '.[0].id')" || return 1
+    readback="$(az pipelines show --id "${pipeline_id}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)" \
+        || return 1
+    _azure_pipeline_definition_verify "${readback}" "${pipeline_id}" "${repository_id}" \
+        "${name}" "${repo}" "${branch}" "${yaml_path}" || return 1
+    printf '%s\n' "${pipeline_id}"
+}
+
 _azure_pipeline_create() { # <name> <repo> <branch> <yaml> [queue-id]
     local name="$1" repo="$2" branch="$3" yaml_path="$4" queue_id="${5:-}"
-    local -a cmd=(az pipelines create
-        --name "${name}"
-        --repository "${repo}"
-        --repository-type tfsgit
-        --branch "${branch}"
-        --yml-path "${yaml_path}")
-    [ -n "${queue_id}" ] && cmd+=(--queue-id "${queue_id}")
-    cmd+=(
-        --skip-first-run true
-        --org "${ADO_ORG}"
-        --project "${ADO_PROJECT}")
-    _dry "${cmd[@]}" && return 0
-    "${cmd[@]}"
+    if [ "${DRY_RUN}" = "1" ]; then
+        printf 'az repos show --repository %s ; az pipelines list --name %s ; create-if-missing repo=%s branch=%s yaml=%s ; az pipelines show --id <id> ; verify exact id/name/repository-id/repository-type/branch/yaml\n' \
+            "${repo}" \
+            "${name}" "${repo}" "${branch}" "${yaml_path}"
+        return 0
+    fi
+
+    local repository_id listed exact count pipeline_id created readback
+    repository_id="$(_azure_repository_id "${repo}")" || return 1
+    listed="$(az pipelines list --name "${name}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)" \
+        || return 1
+    # `az pipelines list --name` is a prefix match unless the caller adds `*`;
+    # select the closed exact-name set ourselves before deciding create/verify.
+    exact="$(printf '%s' "${listed}" | jq -ce --arg name "${name}" \
+        '[.[] | select(.name == $name)]')" || return 1
+    count="$(printf '%s' "${exact}" | jq -er 'length')" || return 1
+    case "${count}" in
+        0) ;;
+        1)
+            pipeline_id="$(printf '%s' "${exact}" | jq -er '.[0].id')" || return 1
+            ;;
+        *)
+            echo "forge azure: multiple pipelines named ${name}; refusing ambiguous registration" >&2
+            return 1
+            ;;
+    esac
+
+    if [ "${count}" -eq 0 ]; then
+        local -a cmd=(az pipelines create
+            --name "${name}"
+            --repository "${repo}"
+            --repository-type tfsgit
+            --branch "${branch}"
+            --yml-path "${yaml_path}")
+        [ -n "${queue_id}" ] && cmd+=(--queue-id "${queue_id}")
+        cmd+=(
+            --skip-first-run true
+            --org "${ADO_ORG}"
+            --project "${ADO_PROJECT}")
+        created="$("${cmd[@]}")" || return 1
+        pipeline_id="$(printf '%s' "${created}" | jq -er '.id')" || {
+            echo "forge azure: created pipeline response has no id" >&2
+            return 1
+        }
+    fi
+
+    readback="$(az pipelines show --id "${pipeline_id}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)" \
+        || return 1
+    _azure_pipeline_definition_verify "${readback}" "${pipeline_id}" "${repository_id}" \
+        "${name}" "${repo}" "${branch}" "${yaml_path}" || return 1
+    printf '%s\n' "${readback}"
 }
 
 _azure_pipeline_run() { # <name> <branch> <phase> <lint-mode> <base-ref> <with-nightly> <docker-wrapper> <agent-pool> [open]
@@ -340,28 +472,178 @@ _azure_pipeline_list() { # <name>
         -o table
 }
 
+_azure_pipeline_policy_is_build_validation() { # <json>
+    printf '%s' "$1" | jq -e \
+        --arg type_id "${_AZURE_BUILD_VALIDATION_POLICY_TYPE_ID}" '
+        (((.type.id // "") | ascii_downcase) == ($type_id | ascii_downcase))
+    ' >/dev/null
+}
+
+_azure_pipeline_policy_matches() { # <json> <policy-id> <pipeline-id> <repo-id> <branch> <display-name>
+    local policy="$1" policy_id="$2" pipeline_id="$3" repository_id="$4" branch="$5" display_name="$6"
+    local ref="${branch}"
+    case "${ref}" in refs/heads/*) ;; *) ref="refs/heads/${ref}" ;; esac
+    printf '%s' "${policy}" | jq -e \
+        --arg policy_id "${policy_id}" --arg policy_type_id "${_AZURE_BUILD_VALIDATION_POLICY_TYPE_ID}" \
+        --arg pipeline_id "${pipeline_id}" --arg repository_id "${repository_id}" \
+        --arg ref "${ref}" --arg display_name "${display_name}" '
+        ((.id | tostring) == $policy_id)
+        and (((.type.id // "") | ascii_downcase) == ($policy_type_id | ascii_downcase))
+        and (.isBlocking == true)
+        and (.isEnabled == true)
+        and ((.settings.buildDefinitionId | tostring) == $pipeline_id)
+        and (.settings.displayName == $display_name)
+        and (.settings.manualQueueOnly == false)
+        and (.settings.queueOnSourceUpdateOnly == false)
+        and (.settings.validDuration == 0)
+        and ((.settings.filenamePatterns? == null) or (.settings.filenamePatterns == []))
+        and ((.settings.scope // []) | length == 1)
+        and ((.settings.scope[0].repositoryId | tostring) == $repository_id)
+        and (.settings.scope[0].refName == $ref)
+        and ((.settings.scope[0].matchKind | ascii_downcase) == "exact")
+    ' >/dev/null
+}
+
+_azure_pipeline_policy_verify() { # <json> <policy-id> <pipeline-id> <repo-id> <branch> <display-name>
+    _azure_pipeline_policy_matches "$@" && return 0
+    echo "forge azure: build-validation policy drift after read-back" >&2
+    return 1
+}
+
+_azure_pipeline_policy_put_exact() { # <policy-id> <pipeline-id> <repo-id> <branch> <display-name>
+    local policy_id="$1" pipeline_id="$2" repository_id="$3" branch="$4" display_name="$5"
+    local ref="${branch}" body changed rc
+    case "${ref}" in refs/heads/*) ;; *) ref="refs/heads/${ref}" ;; esac
+    body="$(mktemp "${TMPDIR:-/tmp}/forge-azpolicy.XXXXXX")" || return 1
+    chmod 0600 "${body}"
+    jq -n \
+        --arg policy_type_id "${_AZURE_BUILD_VALIDATION_POLICY_TYPE_ID}" \
+        --arg pipeline_id "${pipeline_id}" --arg repository_id "${repository_id}" \
+        --arg ref "${ref}" --arg display_name "${display_name}" '
+        {
+          isEnabled: true,
+          isBlocking: true,
+          type: {id: $policy_type_id},
+          settings: {
+            buildDefinitionId: ($pipeline_id | tonumber),
+            queueOnSourceUpdateOnly: false,
+            manualQueueOnly: false,
+            displayName: $display_name,
+            validDuration: 0,
+            filenamePatterns: [],
+            scope: [{
+              repositoryId: $repository_id,
+              refName: $ref,
+              matchKind: "Exact"
+            }]
+          }
+        }
+    ' > "${body}" || {
+        rc=$?
+        rm -f "${body}"
+        return "${rc}"
+    }
+    changed="$(_az_policy_configuration_put "${policy_id}" "${body}")" || rc=$?
+    rm -f "${body}"
+    [ "${rc:-0}" -eq 0 ] || return "${rc}"
+    _azure_pipeline_policy_verify "${changed}" "${policy_id}" "${pipeline_id}" \
+        "${repository_id}" "${branch}" "${display_name}" || return 1
+    printf '%s\n' "${changed}"
+}
+
+_azure_local_only_policy_interface_verify() { # <name> <repo> <branch> <display-name>
+    if [ "$#" -ne 4 ]; then
+        printf 'forge azure: canonical usage: bash hack/automation/forge.sh pipeline-policy %s %s %s "%s"\n' \
+            "${_AZURE_LOCAL_ONLY_PIPELINE_NAME}" "${ADO_REPO}" "${_AZURE_LOCAL_ONLY_BRANCH}" \
+            "${_AZURE_LOCAL_ONLY_POLICY_DISPLAY_NAME}" >&2
+        return 64
+    fi
+    local name="$1" repo="$2" branch="$3" display_name="$4"
+    if [ "${name}" != "${_AZURE_LOCAL_ONLY_PIPELINE_NAME}" ] \
+        || [ "${repo}" != "${ADO_REPO}" ] \
+        || [ "${branch}" != "${_AZURE_LOCAL_ONLY_BRANCH}" ] \
+        || [ "${display_name}" != "${_AZURE_LOCAL_ONLY_POLICY_DISPLAY_NAME}" ]; then
+        printf 'forge azure: canonical usage: bash hack/automation/forge.sh pipeline-policy %s %s %s "%s"\n' \
+            "${_AZURE_LOCAL_ONLY_PIPELINE_NAME}" "${ADO_REPO}" "${_AZURE_LOCAL_ONLY_BRANCH}" \
+            "${_AZURE_LOCAL_ONLY_POLICY_DISPLAY_NAME}" >&2
+        return 64
+    fi
+}
+
 _azure_pipeline_policy() { # <name> <repo> <branch> <display-name>
+    _azure_local_only_policy_interface_verify "$@" || return 64
     local name="$1" repo="$2" branch="$3" display_name="$4"
     if [ "${DRY_RUN}" = "1" ]; then
-        printf 'az pipelines show --name %s ; az repos show --repository %s ; az repos policy build create --branch %s --display-name %s\n' "${name}" "${repo}" "${branch}" "${display_name}"
+        printf 'az repos show --repository %s ; az pipelines list --name %s ; az pipelines show --id <id> ; verify exact pipeline identity/type/branch/yaml ; create canonical build-validation policy if missing, otherwise exact Policy Configurations PUT for %s on branch %s ; az repos policy show --id <id> ; verify policy type/blocking/enabled/queue/cache/scope/no-path-filters\n' \
+            "${repo}" \
+            "${name}" "${display_name}" "${branch}"
         return 0
     fi
-    local pipeline_id repository_id
-    pipeline_id="$(az pipelines show --name "${name}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --query id -o tsv)"
-    repository_id="$(az repos show --repository "${repo}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --query id -o tsv)"
-    az repos policy build create \
-        --blocking true \
-        --enabled true \
-        --manual-queue-only false \
-        --queue-on-source-update-only true \
-        --valid-duration 0 \
-        --display-name "${display_name}" \
-        --build-definition-id "${pipeline_id}" \
-        --repository-id "${repository_id}" \
-        --branch "${branch}" \
-        --branch-match-type exact \
-        --org "${ADO_ORG}" \
-        --project "${ADO_PROJECT}"
+    local pipeline_id repository_id listed matches count policy_id current changed readback
+    repository_id="$(_azure_repository_id "${repo}")" || return 1
+    pipeline_id="$(_azure_pipeline_existing_verified_id \
+        "${name}" "${repo}" "${repository_id}" "${branch}" "${_AZURE_LOCAL_ONLY_PIPELINE_YAML}")" || return 1
+
+    # Search project-wide by the fixed display name so a policy whose scope
+    # drifted off this repo/branch is repaired rather than hidden by filters.
+    listed="$(az repos policy list \
+        --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)" || return 1
+    matches="$(printf '%s' "${listed}" | jq -ce --arg display_name "${display_name}" \
+        '[.[] | select(.settings.displayName == $display_name)]')" || return 1
+    count="$(printf '%s' "${matches}" | jq -er 'length')" || return 1
+    if [ "${count}" -gt 1 ]; then
+        echo "forge azure: multiple build policies named ${display_name}; refusing ambiguous update" >&2
+        return 1
+    fi
+
+    if [ "${count}" -eq 1 ]; then
+        policy_id="$(printf '%s' "${matches}" | jq -er '.[0].id')" || return 1
+        current="$(az repos policy show --id "${policy_id}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)" \
+            || return 1
+        if ! printf '%s' "${current}" | jq -e --arg policy_id "${policy_id}" \
+            '((.id | tostring) == $policy_id)' >/dev/null; then
+            echo "forge azure: persisted policy id differs from the selected policy" >&2
+            return 1
+        fi
+        if ! _azure_pipeline_policy_is_build_validation "${current}"; then
+            echo "forge azure: policy named ${display_name} is not Azure build validation; refusing mutation" >&2
+            return 1
+        fi
+        if ! _azure_pipeline_policy_matches "${current}" "${policy_id}" \
+            "${pipeline_id}" "${repository_id}" "${branch}" "${display_name}"; then
+            changed="$(_azure_pipeline_policy_put_exact "${policy_id}" "${pipeline_id}" \
+                "${repository_id}" "${branch}" "${display_name}")" || return 1
+            : "${changed}"
+            readback="$(az repos policy show --id "${policy_id}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)" \
+                || return 1
+        else
+            readback="${current}"
+        fi
+    else
+        changed="$(az repos policy build create \
+            --blocking true \
+            --enabled true \
+            --manual-queue-only false \
+            --queue-on-source-update-only false \
+            --valid-duration 0 \
+            --display-name "${display_name}" \
+            --build-definition-id "${pipeline_id}" \
+            --repository-id "${repository_id}" \
+            --branch "${branch}" \
+            --branch-match-type exact \
+            --org "${ADO_ORG}" \
+            --project "${ADO_PROJECT}" --output json)" || return 1
+        policy_id="$(printf '%s' "${changed}" | jq -er '.id')" || {
+            echo "forge azure: created build policy response has no id" >&2
+            return 1
+        }
+        readback="$(az repos policy show --id "${policy_id}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)" \
+            || return 1
+    fi
+
+    _azure_pipeline_policy_verify "${readback}" "${policy_id}" "${pipeline_id}" \
+        "${repository_id}" "${branch}" "${display_name}" || return 1
+    printf '%s\n' "${readback}"
 }
 
 # --- Work Items (issue-* verbs map to Azure Boards) --------------------------

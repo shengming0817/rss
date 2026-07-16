@@ -69,6 +69,9 @@ expect_output 'prerequisites use only binstall tools' \
   "$ADAPTER" specs --lane ci-core-prerequisites --backend binstall
 expect_output 'core tests use nextest and sccache' 'cargo-nextest@0.9.137,sccache@0.15.0' \
   "$ADAPTER" specs --lane ci-core-tests --backend install-action
+expect_output 'LocalOnly execution uses only pinned nextest plus the compiler cache' \
+  'cargo-nextest@0.9.137,sccache@0.15.0' \
+  "$ADAPTER" specs --lane ci-local-only --backend install-action
 expect_output 'security tools have one closed set' \
   'cargo-deny@0.19.9,cargo-audit@0.22.2,sccache@0.15.0' \
   "$ADAPTER" specs --lane ci-security --backend install-action
@@ -151,7 +154,7 @@ expect_failure 'standalone sccache verification rejects a symlink' \
 expect_failure 'standalone sccache verification rejects a relative path' \
   "$ADAPTER" verify-sccache --candidate .install-action/bin/sccache
 expect_success 'prerelease and build SemVer passes a literal fresh nextest probe' \
-  "$LEGAL" verify --mode fresh --lane ci-core-tests --root "$ROOT"
+  "$LEGAL" verify --mode fresh --lane ci-local-only --root "$ROOT"
 rm -f "$ROOT/.rss-tool-seal-v1"
 make_binary "$ROOT/.install-action/bin/sccache" \
   "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache v0.15.0'"

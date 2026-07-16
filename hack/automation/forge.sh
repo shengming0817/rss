@@ -108,7 +108,7 @@ usage: forge.sh [--dry-run] <verb> [args...]
          pipeline-create <name> <repo> <branch> <yaml> [queue-id]
          pipeline-run <name> <branch> <phase> <lint-mode> <base-ref> <with-nightly> <docker-wrapper> <agent-pool> [open]
          pipeline-list <name>
-         pipeline-policy <name> <repo> <branch> <display-name>
+         pipeline-policy rss-local-only <configured-repo> develop "RSS LocalOnly Execution"  (#1815 only)
   issue: issue-create <title> <body-file> <label-csv> [type]
          issue-view <n> | issue-edit-labels <n> --add a,b --remove c,d
          issue-close <n> <reason> <comment> | issue-list <search> <state>

@@ -11,11 +11,22 @@
 //! ref: tokio-rs/axum examples/testing/src/main.rs@c59208c86fded335cd85e388030ad59347b0e5ae
 //! (RSS keeps axum's complete `Router::oneshot` await lifecycle and samples observable effects
 //! before and after that lifecycle.)
+//! INVARIANT: LOCAL-ONLY-CONFORMANCE-RECEIPT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "private receipt fields plus the sole post-check constructor make downstream receipt forgery fail to compile" }.
+//! The optional execution-marker filesystem carrier is separately rated Medium by
+//! `LOCAL-ONLY-EXECUTION-MARKER-01`; it never weakens the downstream opaque receipt boundary.
 
+use std::env;
+use std::fs::{self, OpenOptions};
 use std::future::Future;
+use std::io::Write as _;
 use std::marker::PhantomData;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+const LOCAL_ONLY_EXECUTION_DIR_ENV: &str = "RSS_LOCAL_ONLY_EXECUTION_DIR";
+const EXECUTION_MARKER_SCHEMA_VERSION: u8 = 1;
+const MAX_EXECUTION_CONTRACT_ID_BYTES: usize = 128;
 
 /// Business-write effect observer dimension.
 pub enum BusinessWrite {}
@@ -294,6 +305,23 @@ pub enum LocalOnlyConformanceError {
         /// Publish count increase.
         publishes: u64,
     },
+    /// The execution carrier was enabled with a non-canonical contract ID.
+    #[error("LocalOnly execution marker contract id is invalid")]
+    InvalidExecutionContractId,
+    /// The same contract attempted to publish more than one execution marker.
+    #[error("LocalOnly execution marker already exists")]
+    DuplicateExecutionMarker,
+    /// The execution marker could not be encoded using its closed schema.
+    #[error("LocalOnly execution marker encoding failed")]
+    ExecutionMarkerEncoding,
+    /// The execution marker carrier failed without exposing its filesystem path.
+    #[error("LocalOnly execution marker {operation} failed with {kind:?}")]
+    ExecutionMarkerIo {
+        /// Stable carrier operation, never a filesystem path.
+        operation: &'static str,
+        /// Non-sensitive platform error classification.
+        kind: std::io::ErrorKind,
+    },
 }
 
 /// Runs an operation and rejects observable business-write, outbox, or publish effects.
@@ -332,11 +360,94 @@ where
     OperationFuture: Future<Output = T>,
 {
     let output = assert_local_only(observers, operation).await?;
+    write_execution_marker(contract_id)?;
     let receipt = LocalOnlyConformanceReceipt {
         contract_id,
         marker: PhantomData,
     };
     Ok((output, receipt))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalOnlyExecutionMarker<'a> {
+    schema_version: u8,
+    contract_id: &'a str,
+}
+
+fn write_execution_marker(contract_id: &str) -> Result<(), LocalOnlyConformanceError> {
+    let Some(directory) = env::var_os(LOCAL_ONLY_EXECUTION_DIR_ENV) else {
+        return Ok(());
+    };
+    if !is_safe_execution_contract_id(contract_id) {
+        return Err(LocalOnlyConformanceError::InvalidExecutionContractId);
+    }
+
+    let marker = LocalOnlyExecutionMarker {
+        schema_version: EXECUTION_MARKER_SCHEMA_VERSION,
+        contract_id,
+    };
+    let encoded = serde_json::to_vec(&marker)
+        .map_err(|_| LocalOnlyConformanceError::ExecutionMarkerEncoding)?;
+    let path = PathBuf::from(directory).join(format!("{contract_id}.json"));
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(LocalOnlyConformanceError::DuplicateExecutionMarker);
+        }
+        Err(error) => return Err(marker_io_error("create", &error)),
+    };
+    if let Err(error) = file.write_all(&encoded) {
+        let _ = fs::remove_file(&path);
+        return Err(marker_io_error("write", &error));
+    }
+    Ok(())
+}
+
+fn marker_io_error(operation: &'static str, error: &std::io::Error) -> LocalOnlyConformanceError {
+    LocalOnlyConformanceError::ExecutionMarkerIo {
+        operation,
+        kind: error.kind(),
+    }
+}
+
+fn is_safe_execution_contract_id(contract_id: &str) -> bool {
+    if contract_id.is_empty() || contract_id.len() > MAX_EXECUTION_CONTRACT_ID_BYTES {
+        return false;
+    }
+
+    let mut segments = contract_id.split('.');
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    let Some(second) = segments.next() else {
+        return false;
+    };
+    is_safe_contract_segment(first)
+        && is_safe_contract_segment(second)
+        && segments.all(is_safe_contract_segment)
+}
+
+fn is_safe_contract_segment(segment: &str) -> bool {
+    let mut bytes = segment.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return false;
+    }
+
+    let mut previous = first;
+    for byte in bytes {
+        if !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && byte != b'-' {
+            return false;
+        }
+        if previous == b'-' && byte == b'-' {
+            return false;
+        }
+        previous = byte;
+    }
+    previous != b'-'
 }
 
 fn validate_observations(

@@ -41,6 +41,7 @@ CI 子命令不保留旧的平铺 lane 入口；空的 `ci` 也会报错。plann
 ```bash
 ./hack/cargo.sh xtask ci plan <planner-options>
 ./hack/cargo.sh xtask ci run --job ci-meta
+./hack/cargo.sh xtask ci run --job ci-local-only --required-evidence-output <report-path>
 ./hack/cargo.sh xtask ci run --job integration/postgres-domain
 ./hack/cargo.sh xtask ci run --job audit
 ./hack/cargo.sh xtask ci gate <gate-options>
@@ -51,6 +52,13 @@ Postgres batch 成功后生成 `integration/localtx-required.json`；`ci gate` �
 完全一致且 active/journey/backend-profile 三项均为 5。`verify --fast` 与 `localtx report` 只证明静态闭包，
 不能替代这份真实后端 receipt。当前 required-check 激活边界及人工验证清单见
 [`docs/ops/202607150329-1776-localtx-required-evidence.md`](docs/ops/202607150329-1776-localtx-required-evidence.md)。
+
+`ci-local-only` 是 LocalOnly required-evidence 的唯一 typed owner。它从 static source receipt 的 typed
+inventory 单源派生 package、library test target 与 exact filter；全部 nextest 测试成功且
+active/source/executed 三集合完全相等后，才原子发布唯一 schema v1 报告。当前 anti-vacuity 基线为 6/6/6。
+`verify --fast` 只证明静态 source receipt，不产生或声称产生运行证据；完整 `verify` 与 `ci-local-only`
+复用同一个 runner。Azure 窄 build validation 的激活与同一 policy RED/GREEN 验收见
+[`docs/ops/202607151200-1815-localonly-execution-evidence.md`](docs/ops/202607151200-1815-localonly-execution-evidence.md)。
 
 以下是常用开发检查，并非 `verify` 内部 typed step 的逐条公开命令；完整本地治理门运行
 `make ci-full`，差异感知的 PR 收尾运行 `make ci CI_BASE=<remote>/develop`：

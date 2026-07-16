@@ -34,6 +34,11 @@ on:
         required: false
         default: unpartitioned
         type: string
+      required-evidence-target:
+        description: Canonical staging target derived from the typed CiJobKey descriptor.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -47,7 +52,8 @@ env:
   RSS_CI_JOB_KEY: ${{ inputs.ci-job-key }}
   RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}
   RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}
-  RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || (inputs.lane == 'integration' && inputs.shard == 'postgres-domain' && inputs.partition == '')) && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
+  RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}
+  RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-local-only' || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || (inputs.lane == 'integration' && inputs.shard == 'postgres-domain' && inputs.partition == '')) && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
 
 jobs:
   lane:
@@ -126,6 +132,10 @@ jobs:
             ci-coverage)
               echo 'profile=ci-coverage'
               echo "nightly=$RSS_NIGHTLY_PINNED"
+              ;;
+            ci-local-only)
+              echo 'profile=ci-local-only'
+              echo 'nightly='
               ;;
             integration)
               echo 'profile=integration'
@@ -253,8 +263,10 @@ jobs:
           fi
           echo "compiler-cache-reset=$reset_outcome" >> "$GITHUB_OUTPUT"
           required_evidence_args=()
-          if [ "$RSS_CI_JOB_KEY" = integration/postgres-domain ]; then
-            required_evidence_args+=(--required-evidence-output "$RUNNER_TEMP/localtx-required.json")
+          if [ -n "$RSS_CI_REQUIRED_EVIDENCE_TARGET" ]; then
+            required_evidence_output="$RUNNER_TEMP/required-evidence.json"
+            if [ -e "$required_evidence_output" ] || [ -L "$required_evidence_output" ]; then exit 1; fi
+            required_evidence_args=(--required-evidence-output "$required_evidence_output")
           fi
           /usr/bin/time -f 'userSeconds=%U\nsystemSeconds=%S\npeakRssKiB=%M' -o "$RUNNER_TEMP/xtask-resource.txt" timeout --signal=TERM --kill-after=30s 90m "$CARGO_TARGET_DIR/debug/xtask" ci run --job "$RSS_CI_JOB_KEY" "${required_evidence_args[@]}"
 
@@ -439,16 +451,21 @@ jobs:
             if [ -f "$RUNNER_TEMP/integration-service-logs.tar.gz" ]; then
               cp "$RUNNER_TEMP/integration-service-logs.tar.gz" target/job-evidence/integration/service-logs.tar.gz
             fi
-            localtx_receipt_source="$RUNNER_TEMP/localtx-required.json"
-            localtx_receipt_target=target/job-evidence/integration/localtx-required.json
-            if [ "$RSS_CI_JOB_KEY" = integration/postgres-domain ]; then
-              if [ -L "$localtx_receipt_source" ] || [ ! -f "$localtx_receipt_source" ]; then exit 1; fi
-              if [ -e "$localtx_receipt_target" ] || [ -L "$localtx_receipt_target" ]; then exit 1; fi
-              cp --no-dereference --remove-destination -- "$localtx_receipt_source" "$localtx_receipt_target"
-              if [ -L "$localtx_receipt_target" ] || [ ! -f "$localtx_receipt_target" ]; then exit 1; fi
-            else
-              if [ -e "$localtx_receipt_source" ] || [ -L "$localtx_receipt_source" ] || [ -e "$localtx_receipt_target" ] || [ -L "$localtx_receipt_target" ]; then exit 1; fi
-            fi
+          fi
+          required_evidence_source="$RUNNER_TEMP/required-evidence.json"
+          stage_required_evidence() {
+            required_evidence_target=$1
+            if [ -L "$required_evidence_source" ] || [ ! -f "$required_evidence_source" ]; then exit 1; fi
+            mkdir -p "${required_evidence_target%/*}"
+            if [ -e "$required_evidence_target" ] || [ -L "$required_evidence_target" ]; then exit 1; fi
+            cp --no-dereference --remove-destination -- "$required_evidence_source" "$required_evidence_target"
+            if [ -L "$required_evidence_target" ] || [ ! -f "$required_evidence_target" ]; then exit 1; fi
+          }
+          if [ -n "$RSS_CI_REQUIRED_EVIDENCE_TARGET" ]; then
+            case "$RSS_CI_REQUIRED_EVIDENCE_TARGET" in target/job-evidence/*) ;; *) exit 64 ;; esac
+            stage_required_evidence "$RSS_CI_REQUIRED_EVIDENCE_TARGET"
+          else
+            if [ -e "$required_evidence_source" ] || [ -L "$required_evidence_source" ]; then exit 1; fi
           fi
           cargo run --locked -p xtask -- nextest-evidence stage
 

@@ -12,6 +12,10 @@
   ],
   "requiredEvidenceOwners": [
     {
+      "jobKey": "ci-local-only",
+      "evidenceKind": "localonly"
+    },
+    {
       "jobKey": "integration/postgres-domain",
       "evidenceKind": "localtx"
     }
@@ -21,109 +25,109 @@
       "status": "modified",
       "path": "docs/guide.md",
       "fullCause": null,
-      "recommended": ["ci-meta", "integration/postgres-domain"]
+      "recommended": ["ci-meta", "ci-local-only", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "docs/ops/localtx-alerts.rules.yaml",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "docs/ops/202607082104-1642-consistency-dashboard-checklist.md",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "docs/runbooks/202607081921-1633-cdc-outbox.md",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "docs/ops/localtx-proof-report.md",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "docs/rules/localtx.md",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "crates/observ/tests/localtx_ops_contract.rs",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "integration/postgres-domain"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-local-only", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "crates/identity/src/lib.rs",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "integration/postgres-domain"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "crates/identity/tests/contract.rs",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "integration/postgres-domain"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-local-only", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "crates/identity/Cargo.toml",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "contracts/event/identity/v1/policy-updated/payload.schema.json",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "integration/postgres-domain"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "generated/src/http/identity_v1.rs",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "integration/postgres-domain"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "adapters/postgres/src/lib.rs",
       "fullCause": null,
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "integration/postgres-domain"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
     },
     {
       "status": "modified",
       "path": "Cargo.lock",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "generated/src/http/mod.rs",
       "fullCause": "global-impact",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "modified",
       "path": "unowned/input.bin",
       "fullCause": "unknown-path",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     },
     {
       "status": "renamed",
       "path": "crates/identity/src/renamed.rs",
       "fullCause": "rename-or-copy",
-      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
+      "recommended": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/consistency-fault", "integration/cdc-projection-saga", "integration/object-storage", "audit"]
     }
   ],
   "shadowMatrix": {
@@ -134,7 +138,8 @@
       {"jobKey":"ci-core-tests/2-of-2","displayName":"ci-core-tests/2-of-2","lane":"ci-core-tests","partition":"2/2","partitionLabel":"2-of-2","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},
       {"jobKey":"ci-security","displayName":"ci-security","lane":"ci-security","partitionLabel":"unpartitioned","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},
       {"jobKey":"ci-coverage","displayName":"ci-coverage","lane":"ci-coverage","partitionLabel":"unpartitioned","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},
-      {"jobKey":"integration/postgres-domain","displayName":"integration/postgres-domain","lane":"integration","shard":"postgres-domain","partitionLabel":"unpartitioned","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},
+      {"jobKey":"ci-local-only","displayName":"ci-local-only","lane":"ci-local-only","partitionLabel":"unpartitioned","requiredEvidenceTarget":"target/job-evidence/local-only/localonly-execution.json","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},
+      {"jobKey":"integration/postgres-domain","displayName":"integration/postgres-domain","lane":"integration","shard":"postgres-domain","partitionLabel":"unpartitioned","requiredEvidenceTarget":"target/job-evidence/integration/localtx-required.json","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},
       {"jobKey":"integration/event-transport/1-of-2","displayName":"integration/event-transport/1-of-2","lane":"integration","shard":"event-transport","partition":"1/2","partitionLabel":"1-of-2","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},
       {"jobKey":"integration/event-transport/2-of-2","displayName":"integration/event-transport/2-of-2","lane":"integration","shard":"event-transport","partition":"2/2","partitionLabel":"2-of-2","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},
       {"jobKey":"integration/runtime-http-auth/1-of-2","displayName":"integration/runtime-http-auth/1-of-2","lane":"integration","shard":"runtime-http-auth","partition":"1/2","partitionLabel":"1-of-2","planDigest":"<plan-digest>","sourceRevision":"<source-revision>"},

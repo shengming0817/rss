@@ -58,7 +58,7 @@
 //!   `cargo xtask ci full [--allow-missing-tools]`
 //!                                      原本地 CI lane 超集聚合（coverage/public-api/audit 等完整门集）。
 //!   `cargo xtask ci plan --event-path <json> --policy <toml> --output <json> --github-output <file>`
-//!                                      GitHub event/diff → typed 15-job impact plan 与动态 matrix。
+//!                                      GitHub event/diff → typed 16-job impact plan 与动态 matrix。
 //!   `cargo xtask ci run --job <CiJobKey>`
 //!                                      唯一远端 typed executor；闭合 job key 穷举分派至 lane/shard/partition。
 //!   `cargo xtask ci gate --plan <json> --receipts <dir> --planner-result <result> --matrix-result <result> --metrics-output <json>`
@@ -101,6 +101,7 @@ mod inbox_cutover_guard;
 mod integration_shards;
 mod layerdeps;
 mod layers;
+mod localonly_evidence;
 mod localtx_coverage;
 mod localtx_evidence;
 mod localtx_report;

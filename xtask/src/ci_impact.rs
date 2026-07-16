@@ -1,9 +1,9 @@
 //! Typed, fail-safe CI impact planning for GitHub Actions.
 //!
-//! INVARIANT: CI-IMPACT-PLAN-01 { level = "Hard", exec = "native-compile", source = "code", native = "validated plan construction owns the closed 15-job array and matrix derivation" }.
+//! INVARIANT: CI-IMPACT-PLAN-01 { level = "Hard", exec = "native-compile", source = "code", native = "validated plan construction owns the closed typed job array and matrix derivation" }.
 //! INVARIANT: CI-IMPACT-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "policy_rejects_unknown_and_rename_red", anti_vacuity = "workspace_policy_catalog_is_non_vacuous" }.
 //! INVARIANT: CI-IMPACT-PROJECTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private ImpactSet construction and exhaustive local/remote projections prevent divergent path maps" }.
-//! INVARIANT: CI-IMPACT-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "adaptive_plan_json_cannot_disable_localtx_evidence_owner_red", anti_vacuity = "adaptive_plan_requires_localtx_evidence_owner_red" } —— serialized plans cannot bypass the catalog-owned required-evidence executor.
+//! INVARIANT: CI-IMPACT-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "adaptive_plan_json_cannot_disable_required_evidence_owners_red", anti_vacuity = "adaptive_plan_requires_every_required_evidence_owner" } —— serialized plans cannot bypass any catalog-owned required-evidence executor.
 
 use crate::ci_identity::CiIdentityKey;
 use crate::ci_lanes::{CiJobKey, CiLane};
@@ -419,6 +419,8 @@ struct MatrixRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     partition: Option<&'static str>,
     partition_label: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_evidence_target: Option<&'static str>,
     plan_digest: String,
     source_revision: String,
 }
@@ -647,6 +649,7 @@ impl CiImpactPlan {
                     shard: job.key.shard(),
                     partition: job.key.partition(),
                     partition_label: job.key.partition_label(),
+                    required_evidence_target: job.key.required_evidence_staged_artifact_path(),
                     plan_digest: self.plan_digest.clone(),
                     source_revision: self.revisions.execution_revision.clone(),
                 })
@@ -3126,7 +3129,7 @@ mod tests {
         assert_eq!(LocalProjection::from(&empty), LocalProjection::Empty);
         assert_eq!(
             RemoteProjection::from(&empty).selected_names(),
-            vec!["ci-meta", "integration/postgres-domain"]
+            vec!["ci-meta", "ci-local-only", "integration/postgres-domain"]
         );
 
         let docs = impact_entries(
@@ -3639,7 +3642,7 @@ mod tests {
         let docs = classify_diff(&[DiffEntry::modified("docs/ops/example.md")]);
         assert_eq!(
             docs.selected_names(),
-            vec!["ci-meta", "integration/postgres-domain"]
+            vec!["ci-meta", "ci-local-only", "integration/postgres-domain"]
         );
 
         let core = classify_diff(&[DiffEntry::modified("crates/identity/src/service.rs")]);
@@ -3814,52 +3817,61 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_plan_requires_localtx_evidence_owner_red() -> Result<()> {
+    fn adaptive_plan_requires_every_required_evidence_owner() -> Result<()> {
         let plan = test_adaptive_plan()?;
-        let owner = plan
-            .jobs()
-            .iter()
-            .find(|job| job.key() == CiJobKey::IntegrationPostgresDomain)
-            .context("adaptive plan must contain the LocalTx evidence owner")?;
-
-        assert!(
-            owner.recommended() && owner.execute(),
-            "adaptive plans must recommend and execute the postgres-domain LocalTx evidence owner"
-        );
+        let owners = CiJobKey::ALL
+            .into_iter()
+            .filter(|job| job.required_evidence().is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(owners.len(), 2, "required-evidence anti-vacuity");
+        for owner in owners {
+            let decision = plan
+                .jobs()
+                .iter()
+                .find(|job| job.key() == owner)
+                .context("adaptive plan must contain every required-evidence owner")?;
+            assert!(
+                decision.recommended() && decision.execute(),
+                "adaptive plan must recommend and execute {owner}"
+            );
+        }
         Ok(())
     }
 
     #[test]
-    fn adaptive_plan_json_cannot_disable_localtx_evidence_owner_red() -> Result<()> {
-        let mut forged = test_adaptive_plan()?;
-        let owner = forged
-            .jobs
-            .iter_mut()
-            .find(|job| job.key == CiJobKey::IntegrationPostgresDomain)
-            .context("adaptive plan must contain the LocalTx evidence owner")?;
-        owner.recommended = false;
-        owner.execute = false;
-        owner.reasons = vec![JobReason::NotImpacted];
-        forged.plan_digest = forged.compute_digest()?;
+    fn adaptive_plan_json_cannot_disable_required_evidence_owners_red() -> Result<()> {
+        for owner_key in CiJobKey::ALL
+            .into_iter()
+            .filter(|job| job.required_evidence().is_some())
+        {
+            let mut forged = test_adaptive_plan()?;
+            let owner = forged
+                .jobs
+                .iter_mut()
+                .find(|job| job.key == owner_key)
+                .context("adaptive plan must contain every required-evidence owner")?;
+            owner.recommended = false;
+            owner.execute = false;
+            owner.reasons = vec![JobReason::NotImpacted];
+            forged.plan_digest = forged.compute_digest()?;
+            assert!(
+                CiImpactPlan::from_json(&forged.to_json()?).is_err(),
+                "a digest-consistent plan that disables {owner_key} must be rejected"
+            );
 
-        let forged_json = forged.to_json()?;
-        assert!(
-            CiImpactPlan::from_json(&forged_json).is_err(),
-            "a digest-consistent plan that disables the LocalTx evidence owner must be rejected"
-        );
-
-        let mut forged_reason = test_adaptive_plan()?;
-        let owner = forged_reason
-            .jobs
-            .iter_mut()
-            .find(|job| job.key == CiJobKey::IntegrationPostgresDomain)
-            .context("adaptive plan must contain the LocalTx evidence owner")?;
-        owner.reasons = vec![JobReason::IntegrationClosure];
-        forged_reason.plan_digest = forged_reason.compute_digest()?;
-        assert!(
-            CiImpactPlan::from_json(&forged_reason.to_json()?).is_err(),
-            "a digest-consistent plan that strips the required-evidence reason must be rejected"
-        );
+            let mut forged_reason = test_adaptive_plan()?;
+            let owner = forged_reason
+                .jobs
+                .iter_mut()
+                .find(|job| job.key == owner_key)
+                .context("adaptive plan must contain every required-evidence owner")?;
+            owner.reasons = vec![JobReason::IntegrationClosure];
+            forged_reason.plan_digest = forged_reason.compute_digest()?;
+            assert!(
+                CiImpactPlan::from_json(&forged_reason.to_json()?).is_err(),
+                "a digest-consistent plan that strips {owner_key}'s evidence reason must be rejected"
+            );
+        }
         Ok(())
     }
 
@@ -3908,7 +3920,7 @@ mod tests {
             DecisionKind::Adaptive,
             Recommendation::empty(),
         ))?;
-        assert_eq!(adaptive.jobs.iter().filter(|job| job.execute).count(), 2);
+        assert_eq!(adaptive.jobs.iter().filter(|job| job.execute).count(), 3);
         assert!(!adaptive.full_fallback);
 
         let mandatory = CiImpactPlan::new(input(
@@ -4209,11 +4221,16 @@ mod tests {
         assert_eq!(
             catalog
                 .iter()
-                .filter(|field| field.ends_with(":localtx"))
+                .filter(|field| {
+                    field.starts_with("job-required-evidence=") && !field.ends_with(':')
+                })
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["job-required-evidence=integration/postgres-domain:localtx"],
-            "required-evidence mapping must be non-vacuous policy semantics"
+            [
+                "job-required-evidence=ci-local-only:localonly",
+                "job-required-evidence=integration/postgres-domain:localtx",
+            ],
+            "required-evidence mapping must be a complete policy semantic"
         );
         let mut changed_catalog = catalog.clone();
         changed_catalog.push("impact-rule=new-semantic-rule".to_owned());

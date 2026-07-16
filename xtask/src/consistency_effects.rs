@@ -220,6 +220,23 @@ struct ReceiptRegistration {
     missing_contracts: Vec<String>,
 }
 
+/// Canonical executable identity derived from the same AST site that satisfies the static
+/// LocalOnly source-receipt gate. No caller-maintained test list exists outside this inventory.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct LocalOnlyExecutionTest {
+    pub(crate) contract_id: String,
+    pub(crate) package: String,
+    pub(crate) test_target: String,
+    pub(crate) test_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalOnlyExecutionInventory {
+    pub(crate) active_contract_ids: BTreeSet<String>,
+    pub(crate) source_receipt_contract_ids: BTreeSet<String>,
+    pub(crate) tests: Vec<LocalOnlyExecutionTest>,
+}
+
 impl ReceiptRegistration {
     fn reconcile(
         active_contracts: BTreeSet<String>,
@@ -1112,6 +1129,8 @@ fn mount_requires_source(
 /// aliases that the scanner cannot prove are rejected instead of guessed through.
 struct ParsedLocalOnlySource {
     subject: String,
+    package: String,
+    test_module_prefix: Option<Vec<String>>,
     syntax: syn::File,
     scoped_recorded_provider_fields: BTreeMap<(Vec<String>, String), BTreeSet<String>>,
     canonical_test_repo_fields: BTreeMap<(Vec<String>, String), BTreeSet<String>>,
@@ -1142,6 +1161,8 @@ fn local_only_source_inventory(root: &Path) -> Result<Vec<ParsedLocalOnlySource>
     let mut parsed = Vec::new();
     for (member, file) in files {
         let subject = relative(root, &file)?;
+        let package = workspace_package_name(root, &member)?;
+        let test_module_prefix = library_test_module_prefix(root, &member, &file)?;
         let syntax = syn::parse_file(
             &std::fs::read_to_string(&file).with_context(|| format!("read `{subject}`"))?,
         )
@@ -1152,6 +1173,8 @@ fn local_only_source_inventory(root: &Path) -> Result<Vec<ParsedLocalOnlySource>
         let receipt_namespace_error = validate_receipt_namespace(root, &member).err();
         parsed.push(ParsedLocalOnlySource {
             subject,
+            package,
+            test_module_prefix,
             syntax,
             scoped_recorded_provider_fields,
             canonical_test_repo_fields,
@@ -1159,6 +1182,53 @@ fn local_only_source_inventory(root: &Path) -> Result<Vec<ParsedLocalOnlySource>
         });
     }
     Ok(parsed)
+}
+
+fn workspace_package_name(root: &Path, member: &Path) -> Result<String> {
+    let manifest = root.join(member).join("Cargo.toml");
+    let value: toml::Value = toml::from_str(
+        &std::fs::read_to_string(&manifest)
+            .with_context(|| format!("read workspace member manifest `{}`", manifest.display()))?,
+    )
+    .with_context(|| format!("parse workspace member manifest `{}`", manifest.display()))?;
+    value
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
+        .map(ToOwned::to_owned)
+        .context("workspace member package.name must be a string")
+}
+
+fn library_test_module_prefix(
+    root: &Path,
+    member: &Path,
+    file: &Path,
+) -> Result<Option<Vec<String>>> {
+    let src = root.join(member).join("src");
+    let Ok(relative) = file.strip_prefix(&src) else {
+        return Ok(None);
+    };
+    let mut components = relative
+        .components()
+        .map(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .map(ToOwned::to_owned)
+                .context("LocalOnly source module path must be UTF-8")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let file_name = components.pop().context("LocalOnly source path is empty")?;
+    match file_name.as_str() {
+        "lib.rs" => {}
+        "mod.rs" => {}
+        "main.rs" => return Ok(None),
+        _ if file_name.ends_with(".rs") => {
+            components.push(file_name.trim_end_matches(".rs").to_owned());
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(components))
 }
 
 fn observation_provenance_findings(inventory: &[ParsedLocalOnlySource]) -> Vec<Finding> {
@@ -1301,6 +1371,13 @@ fn local_only_receipt_registration_in_inventory(
     inventory: &[ParsedLocalOnlySource],
     targets: &[LocalOnlyReceiptTarget],
 ) -> Result<ReceiptRegistration> {
+    collect_local_only_receipt_inventory(inventory, targets).map(|(registration, _)| registration)
+}
+
+fn collect_local_only_receipt_inventory(
+    inventory: &[ParsedLocalOnlySource],
+    targets: &[LocalOnlyReceiptTarget],
+) -> Result<(ReceiptRegistration, Vec<LocalOnlyExecutionTest>)> {
     let mut by_module = BTreeMap::new();
     let mut active_ids = BTreeSet::new();
     for target in targets {
@@ -1322,6 +1399,7 @@ fn local_only_receipt_registration_in_inventory(
     }
 
     let mut registered = BTreeMap::<String, String>::new();
+    let mut tests = Vec::new();
     let settings_composition = collect_settings_production_composition_certificate(inventory);
     for source in inventory {
         let factories =
@@ -1347,15 +1425,69 @@ fn local_only_receipt_registration_in_inventory(
                     site.subject
                 );
             }
+            let mut test_name = source.test_module_prefix.clone().ok_or_else(|| {
+                anyhow!(
+                    "{}: canonical LocalOnly execution receipt must live in a library unit test",
+                    site.subject
+                )
+            })?;
+            test_name.extend(site.test_name);
+            if test_name.is_empty() {
+                bail!(
+                    "{}: canonical LocalOnly execution test name is empty",
+                    site.subject
+                );
+            }
+            tests.push(LocalOnlyExecutionTest {
+                contract_id: contract_id.clone(),
+                package: source.package.clone(),
+                test_target: "lib".to_owned(),
+                test_name: test_name.join("::"),
+            });
         }
     }
 
-    ReceiptRegistration::reconcile(active_ids, registered.into_keys().collect::<BTreeSet<_>>())
+    tests.sort();
+    let registration =
+        ReceiptRegistration::reconcile(active_ids, registered.into_keys().collect())?;
+    Ok((registration, tests))
+}
+
+/// Returns the executable LocalOnly receipt inventory for the current generated active registry.
+pub(crate) fn local_only_execution_inventory(root: &Path) -> Result<LocalOnlyExecutionInventory> {
+    let targets = generated::http::LOCAL_ONLY_SPECS
+        .iter()
+        .map(|spec| LocalOnlyReceiptTarget {
+            contract_id: spec.route.contract_id().to_owned(),
+            module_path: module_path_from_mount_key(spec.mount_key),
+        })
+        .collect::<Vec<_>>();
+    let parsed = local_only_source_inventory(root)?;
+    let (registration, tests) = collect_local_only_receipt_inventory(&parsed, &targets)?;
+    if !registration.missing_contracts.is_empty() {
+        bail!("active LocalOnly execution inventory has missing source receipts");
+    }
+    if tests.len() != registration.active_contracts.len() || tests.is_empty() {
+        bail!("LocalOnly execution inventory must contain one non-empty test per active contract");
+    }
+    let source_receipt_contract_ids = tests
+        .iter()
+        .map(|test| test.contract_id.clone())
+        .collect::<BTreeSet<_>>();
+    if source_receipt_contract_ids != registration.registered_contracts {
+        bail!("LocalOnly execution tests disagree with canonical source receipts");
+    }
+    Ok(LocalOnlyExecutionInventory {
+        active_contract_ids: registration.active_contracts,
+        source_receipt_contract_ids,
+        tests,
+    })
 }
 
 #[derive(Debug)]
 struct CanonicalReceiptSite {
     module_path: Vec<String>,
+    test_name: Vec<String>,
     subject: String,
 }
 
@@ -1365,6 +1497,7 @@ struct ReceiptCallScan<'ast> {
     proven_statement_calls: BTreeSet<(usize, usize)>,
     canonical_call_blocks: BTreeMap<(usize, usize), &'ast syn::Block>,
     canonical_call_modules: BTreeMap<(usize, usize), Vec<String>>,
+    canonical_call_test_names: BTreeMap<(usize, usize), Vec<String>>,
     assertion_path_locations: BTreeSet<(usize, usize)>,
     called_assertion_locations: BTreeSet<(usize, usize)>,
     forbidden_locations: Vec<(usize, &'static str)>,
@@ -1414,6 +1547,9 @@ impl<'ast> Visit<'ast> for ReceiptCallScan<'ast> {
                 self.canonical_call_blocks.insert(location, &node.block);
                 self.canonical_call_modules
                     .insert(location, self.module_path.clone());
+                let mut test_name = self.module_path.clone();
+                test_name.push(node.sig.ident.to_string());
+                self.canonical_call_test_names.insert(location, test_name);
             }
         }
         self.function_depth += 1;
@@ -1550,6 +1686,11 @@ fn receipt_sites_in_file(
         let lexical_module = scan.canonical_call_modules.get(&location).ok_or_else(|| {
             anyhow!("{call_subject}: receipt assertion has no lexical module certificate")
         })?;
+        let test_name = scan
+            .canonical_call_test_names
+            .get(&location)
+            .cloned()
+            .ok_or_else(|| anyhow!("{call_subject}: receipt assertion has no test identity"))?;
         certify_receipt_source(
             call,
             block,
@@ -1564,6 +1705,7 @@ fn receipt_sites_in_file(
         )?;
         sites.push(CanonicalReceiptSite {
             module_path: marker_module,
+            test_name,
             subject: call_subject,
         });
     }
@@ -7847,6 +7989,8 @@ pub async fn wire(deps: SettingsModuleDeps) {
         let syntax = syn::parse_file(composition)?;
         inventory.push(ParsedLocalOnlySource {
             subject: "composition/settings/src/lib.rs".to_string(),
+            package: "settings-composition-fixture".to_string(),
+            test_module_prefix: None,
             scoped_recorded_provider_fields: collect_scoped_recorded_provider_fields(&syntax.items),
             canonical_test_repo_fields: collect_canonical_test_repo_fields(&syntax.items),
             receipt_namespace_error: None,

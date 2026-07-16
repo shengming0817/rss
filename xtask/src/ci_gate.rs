@@ -2,11 +2,14 @@
 //!
 //! INVARIANT: CI-GATE-RECEIPT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "gate_rejects_missing_duplicate_and_mismatched_receipts_red", anti_vacuity = "gate_accepts_exact_receipt_set_green" }.
 //! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "gate_rejects_complete_generic_receipts_without_localtx_required_evidence_red|localtx_required_evidence_disk_red_matrix", anti_vacuity = "gate_accepts_exact_receipt_set_green|successful_run_persists_the_existing_resource_metrics_in_the_envelope" }.
+//! INVARIANT: LOCAL-ONLY-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "gate_rejects_complete_generic_receipts_without_localonly_required_evidence_red|localonly_required_evidence_disk_red_matrix", anti_vacuity = "gate_accepts_exact_receipt_set_green|real_workspace_execution_inventory_is_exact_and_non_empty" }.
 
 use crate::ci_evidence::{MAX_JSON_INTEGER, ValidatedEvidence};
 use crate::ci_identity::CiIdentityKey;
 use crate::ci_impact::{CiImpactPlan, DecisionKind, DecisionReason, PolicyMode};
 use crate::ci_lanes::CiJobKey;
+use crate::localonly_evidence::{FILE_NAME as LOCALONLY_FILE_NAME, OWNER as LOCALONLY_OWNER};
+use crate::localonly_evidence::{ValidatedLocalOnlyReport, exact_set_difference_summary};
 use crate::localtx_evidence::ValidatedLocalTxReceipt;
 use crate::localtx_evidence::{FILE_NAME as LOCALTX_FILE_NAME, OWNER as LOCALTX_OWNER};
 use anyhow::{Context, Result, bail};
@@ -139,6 +142,12 @@ struct LocalTxReceiptIdentity {
     receipt: ValidatedLocalTxReceipt,
 }
 
+#[derive(Debug)]
+struct LocalOnlyReportIdentity {
+    artifact: String,
+    report: ValidatedLocalOnlyReport,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GateMetrics {
@@ -191,6 +200,7 @@ enum GateFailureClass {
     ExecutionRevision,
     ReceiptValidation,
     LocaltxEvidence,
+    LocalonlyEvidence,
     MetricsBuild,
 }
 
@@ -206,6 +216,7 @@ impl GateFailureClass {
             Self::ExecutionRevision => "execution-revision",
             Self::ReceiptValidation => "receipt-validation",
             Self::LocaltxEvidence => "localtx-evidence",
+            Self::LocalonlyEvidence => "localonly-evidence",
             Self::MetricsBuild => "metrics-build",
         }
     }
@@ -230,6 +241,7 @@ struct GateEnvelope {
     localtx_active_count: Option<usize>,
     localtx_journey_count: Option<usize>,
     localtx_backend_profile_count: Option<usize>,
+    localonly_contract_count: Option<usize>,
     success_metrics: Option<GateMetrics>,
 }
 
@@ -238,6 +250,7 @@ struct GateSuccess {
     localtx_active_count: usize,
     localtx_journey_count: usize,
     localtx_backend_profile_count: usize,
+    localonly_contract_count: usize,
 }
 
 #[derive(Debug)]
@@ -270,13 +283,20 @@ struct LocalTxReceiptObservation {
     failure: Option<GateFailure>,
 }
 
+struct LocalOnlyReportObservation {
+    reports: Vec<LocalOnlyReportIdentity>,
+    failure: Option<GateFailure>,
+}
+
 struct GateObservations<'a> {
     plan: Option<&'a CiImpactPlan>,
     receipts: &'a [ReceiptIdentity],
     localtx_receipts: &'a [LocalTxReceiptIdentity],
+    localonly_reports: &'a [LocalOnlyReportIdentity],
     plan_failure: Option<GateFailure>,
     receipt_failure: Option<GateFailure>,
     localtx_failure: Option<GateFailure>,
+    localonly_failure: Option<GateFailure>,
 }
 
 pub(crate) fn run(options: &Options) -> Result<()> {
@@ -296,6 +316,10 @@ fn run_with_runtime(options: &Options, runtime: &RuntimeIdentity) -> Result<()> 
         receipts: localtx_receipts,
         failure: localtx_failure,
     } = observe_localtx_receipts(&options.receipts_path);
+    let LocalOnlyReportObservation {
+        reports: localonly_reports,
+        failure: localonly_failure,
+    } = observe_localonly_reports(&options.receipts_path);
 
     let gate_result = evaluate_observations(
         options,
@@ -304,12 +328,14 @@ fn run_with_runtime(options: &Options, runtime: &RuntimeIdentity) -> Result<()> 
             plan: plan.as_ref(),
             receipts: &receipts,
             localtx_receipts: &localtx_receipts,
+            localonly_reports: &localonly_reports,
             plan_failure,
             receipt_failure,
             localtx_failure,
+            localonly_failure,
         },
     );
-    let (verdict, failure_class, error_summary, success_metrics, localtx_counts, failure) =
+    let (verdict, failure_class, error_summary, success_metrics, evidence_counts, failure) =
         match gate_result {
             Ok(success) => (
                 GateVerdict::Success,
@@ -320,6 +346,7 @@ fn run_with_runtime(options: &Options, runtime: &RuntimeIdentity) -> Result<()> 
                     success.localtx_active_count,
                     success.localtx_journey_count,
                     success.localtx_backend_profile_count,
+                    success.localonly_contract_count,
                 )),
                 None,
             ),
@@ -336,7 +363,7 @@ fn run_with_runtime(options: &Options, runtime: &RuntimeIdentity) -> Result<()> 
             }
         };
     let envelope = GateEnvelope {
-        schema_version: 2,
+        schema_version: 3,
         verdict,
         failure_class,
         planner_result: options.planner_result,
@@ -349,12 +376,18 @@ fn run_with_runtime(options: &Options, runtime: &RuntimeIdentity) -> Result<()> 
         full_fallback: plan.as_ref().map(CiImpactPlan::full_fallback),
         observed_receipt_count: receipts.len(),
         observed_receipt_keys: receipts.iter().map(|receipt| receipt.job_key).collect(),
-        localtx_active_count: localtx_counts.map(|counts| counts.0),
-        localtx_journey_count: localtx_counts.map(|counts| counts.1),
-        localtx_backend_profile_count: localtx_counts.map(|counts| counts.2),
+        localtx_active_count: evidence_counts.map(|counts| counts.0),
+        localtx_journey_count: evidence_counts.map(|counts| counts.1),
+        localtx_backend_profile_count: evidence_counts.map(|counts| counts.2),
+        localonly_contract_count: evidence_counts.map(|counts| counts.3),
         success_metrics,
     };
-    persist_envelope(options, runtime, &envelope)?;
+    persist_envelope(
+        options,
+        runtime,
+        &envelope,
+        plan.as_ref().map(|value| value.execution_revision()),
+    )?;
     if let Some(failure) = failure {
         return Err(failure.error);
     }
@@ -440,6 +473,33 @@ fn observe_localtx_receipts(root: &Path) -> LocalTxReceiptObservation {
     }
 }
 
+fn observe_localonly_reports(root: &Path) -> LocalOnlyReportObservation {
+    let mut evidence_files = Vec::new();
+    if let Err(error) = collect_named_evidence(root, LOCALONLY_FILE_NAME, &mut evidence_files) {
+        return LocalOnlyReportObservation {
+            reports: Vec::new(),
+            failure: Some(GateFailure::new(GateFailureClass::LocalonlyEvidence, error)),
+        };
+    }
+    evidence_files.sort();
+    let mut reports = Vec::with_capacity(evidence_files.len());
+    for path in evidence_files {
+        match load_localonly_report(&path, root) {
+            Ok(report) => reports.push(report),
+            Err(error) => {
+                return LocalOnlyReportObservation {
+                    reports,
+                    failure: Some(GateFailure::new(GateFailureClass::LocalonlyEvidence, error)),
+                };
+            }
+        }
+    }
+    LocalOnlyReportObservation {
+        reports,
+        failure: None,
+    }
+}
+
 fn evaluate_observations(
     options: &Options,
     runtime: &RuntimeIdentity,
@@ -449,9 +509,11 @@ fn evaluate_observations(
         plan,
         receipts,
         localtx_receipts,
+        localonly_reports,
         plan_failure,
         receipt_failure,
         localtx_failure,
+        localonly_failure,
     } = observations;
     if options.planner_result != JobResult::Success {
         return Err(GateFailure::new(
@@ -478,6 +540,9 @@ fn evaluate_observations(
         )
     })?;
     if let Some(failure) = localtx_failure {
+        return Err(failure);
+    }
+    if let Some(failure) = localonly_failure {
         return Err(failure);
     }
     if let Some(failure) = receipt_failure {
@@ -521,6 +586,14 @@ fn evaluate_observations(
     let localtx =
         evaluate_localtx_required_evidence(plan, receipts, localtx_receipts, run_id, run_attempt)
             .map_err(|error| GateFailure::new(GateFailureClass::LocaltxEvidence, error))?;
+    let localonly = evaluate_localonly_required_evidence(
+        plan,
+        receipts,
+        localonly_reports,
+        run_id,
+        run_attempt,
+    )
+    .map_err(|error| GateFailure::new(GateFailureClass::LocalonlyEvidence, error))?;
     let metrics = build_metrics(plan, receipts)
         .map_err(|error| GateFailure::new(GateFailureClass::MetricsBuild, error))?;
     Ok(GateSuccess {
@@ -528,6 +601,7 @@ fn evaluate_observations(
         localtx_active_count: localtx.active_count(),
         localtx_journey_count: localtx.journey_count(),
         localtx_backend_profile_count: localtx.backend_profile_count(),
+        localonly_contract_count: localonly.active_contract_ids().len(),
     })
 }
 
@@ -535,11 +609,16 @@ fn persist_envelope(
     options: &Options,
     runtime: &RuntimeIdentity,
     envelope: &GateEnvelope,
+    execution_revision: Option<&str>,
 ) -> Result<()> {
     let metrics = serde_json::to_vec_pretty(envelope).context("serialize CI gate envelope")?;
     atomic_write(&options.metrics_output, &metrics).context("write CI gate metrics envelope")?;
     if let Some(path) = &runtime.summary_path {
-        atomic_write(path, render_summary(envelope).as_bytes()).context("write CI gate summary")?;
+        atomic_write(
+            path,
+            render_summary(envelope, execution_revision).as_bytes(),
+        )
+        .context("write CI gate summary")?;
     }
     Ok(())
 }
@@ -623,7 +702,7 @@ fn markdown_code(value: &str) -> String {
         .collect()
 }
 
-fn render_summary(envelope: &GateEnvelope) -> String {
+fn render_summary(envelope: &GateEnvelope, execution_revision: Option<&str>) -> String {
     let observed = envelope
         .observed_receipt_keys
         .iter()
@@ -654,6 +733,11 @@ fn render_summary(envelope: &GateEnvelope) -> String {
     ) {
         summary.push_str(&format!(
             "- LocalTx required evidence: `{active}/{journey}/{backend}`\n"
+        ));
+    }
+    if let (Some(count), Some(revision)) = (envelope.localonly_contract_count, execution_revision) {
+        summary.push_str(&format!(
+            "- LocalOnly required evidence: exact-set active/source/executed = `{count}/{count}/{count}` @ `{revision}`\n"
         ));
     }
     if let (Some(mode), Some(kind), Some(reason), Some(fallback)) = (
@@ -874,6 +958,22 @@ fn load_localtx_receipt(path: &Path, root: &Path) -> Result<LocalTxReceiptIdenti
     Ok(LocalTxReceiptIdentity { artifact, receipt })
 }
 
+fn load_localonly_report(path: &Path, root: &Path) -> Result<LocalOnlyReportIdentity> {
+    let artifact = artifact_parent(path, root)?;
+    let canonical = root
+        .join(&artifact)
+        .join("local-only")
+        .join(LOCALONLY_FILE_NAME);
+    if path != canonical {
+        bail!(
+            "LocalOnly evidence is not at its canonical artifact path: {}",
+            path.display()
+        );
+    }
+    let report = ValidatedLocalOnlyReport::load(path)?;
+    Ok(LocalOnlyReportIdentity { artifact, report })
+}
+
 fn evaluate_localtx_required_evidence<'a>(
     plan: &CiImpactPlan,
     generic_receipts: &[ReceiptIdentity],
@@ -920,6 +1020,70 @@ fn evaluate_localtx_required_evidence<'a>(
         bail!("LocalTx evidence run identity mismatch");
     }
     Ok(receipt)
+}
+
+fn evaluate_localonly_required_evidence<'a>(
+    plan: &CiImpactPlan,
+    generic_receipts: &[ReceiptIdentity],
+    localonly_reports: &'a [LocalOnlyReportIdentity],
+    run_id: &str,
+    run_attempt: &str,
+) -> Result<&'a ValidatedLocalOnlyReport> {
+    if localonly_reports.is_empty() {
+        bail!("missing LocalOnly execution report");
+    }
+    let [observed] = localonly_reports else {
+        bail!(
+            "expected exactly one LocalOnly execution report, observed {}",
+            localonly_reports.len()
+        );
+    };
+    let owner_decision = plan
+        .jobs()
+        .iter()
+        .find(|job| job.key() == LOCALONLY_OWNER)
+        .context("CI impact plan is missing the LocalOnly evidence owner")?;
+    if !owner_decision.execute() {
+        bail!("CI impact plan did not execute the LocalOnly evidence owner");
+    }
+    let expected_artifact = LOCALONLY_OWNER.expected_artifact(run_id, run_attempt);
+    if owner_decision.expected_artifact() != expected_artifact {
+        bail!("CI impact plan LocalOnly owner artifact identity mismatch");
+    }
+    let generic_owner = generic_receipts
+        .iter()
+        .find(|receipt| receipt.job_key == LOCALONLY_OWNER)
+        .context("LocalOnly owner generic evidence receipt is missing")?;
+    if observed.artifact != expected_artifact || observed.artifact != generic_owner.artifact {
+        bail!("LocalOnly evidence is not paired with its owner generic artifact");
+    }
+    let report = &observed.report;
+    if report.job_key() != LOCALONLY_OWNER {
+        bail!("LocalOnly evidence owner mismatch");
+    }
+    if report.source_revision() != plan.execution_revision() {
+        bail!("LocalOnly evidence source revision mismatch");
+    }
+    let inventory =
+        crate::consistency_effects::local_only_execution_inventory(&crate::workspace_root()?)?;
+    let active = inventory
+        .active_contract_ids
+        .into_iter()
+        .collect::<Vec<_>>();
+    let source = inventory
+        .source_receipt_contract_ids
+        .into_iter()
+        .collect::<Vec<_>>();
+    if report.active_contract_ids() != active
+        || report.source_receipt_contract_ids() != source
+        || report.executed_contract_ids() != active
+    {
+        bail!(
+            "LocalOnly evidence does not match the current active/source inventory: {}",
+            exact_set_difference_summary(&active, &source, report.executed_contract_ids())
+        );
+    }
+    Ok(report)
 }
 
 fn artifact_parent(path: &Path, root: &Path) -> Result<String> {
@@ -1015,6 +1179,7 @@ struct GateFixture {
     plan: CiImpactPlan,
     receipts: Vec<ReceiptIdentity>,
     localtx_receipts: Vec<LocalTxReceiptIdentity>,
+    localonly_reports: Vec<LocalOnlyReportIdentity>,
 }
 
 #[cfg(test)]
@@ -1042,10 +1207,12 @@ impl GateFixture {
             })
             .collect();
         let localtx_receipts = vec![test_localtx_identity(&plan)?];
+        let localonly_reports = vec![test_localonly_identity(&plan)?];
         Ok(Self {
             plan,
             receipts,
             localtx_receipts,
+            localonly_reports,
         })
     }
 
@@ -1065,6 +1232,13 @@ impl GateFixture {
             "42",
             "3",
         )?;
+        evaluate_localonly_required_evidence(
+            &self.plan,
+            &self.receipts,
+            &self.localonly_reports,
+            "42",
+            "3",
+        )?;
         Ok(())
     }
 
@@ -1078,6 +1252,19 @@ impl GateFixture {
             "3",
         )?;
         evaluate_localtx_required_evidence(&self.plan, &self.receipts, &[], "42", "3")?;
+        Ok(())
+    }
+
+    fn evaluate_without_localonly_required_evidence(&self) -> Result<()> {
+        evaluate(
+            &self.plan,
+            &self.receipts,
+            JobResult::Success,
+            JobResult::Success,
+            "42",
+            "3",
+        )?;
+        evaluate_localonly_required_evidence(&self.plan, &self.receipts, &[], "42", "3")?;
         Ok(())
     }
 
@@ -1172,6 +1359,38 @@ fn test_localtx_identity(plan: &CiImpactPlan) -> Result<LocalTxReceiptIdentity> 
 }
 
 #[cfg(test)]
+fn localonly_report_value(plan: &CiImpactPlan) -> Result<serde_json::Value> {
+    let root = crate::workspace_root()?;
+    let inventory = crate::consistency_effects::local_only_execution_inventory(&root)?;
+    let active = inventory
+        .active_contract_ids
+        .into_iter()
+        .collect::<Vec<_>>();
+    let source = inventory
+        .source_receipt_contract_ids
+        .into_iter()
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "schemaVersion": 1,
+        "jobKey": LOCALONLY_OWNER,
+        "sourceRevision": plan.execution_revision(),
+        "activeContractIds": active.clone(),
+        "sourceReceiptContractIds": source,
+        "executedContractIds": active,
+    }))
+}
+
+#[cfg(test)]
+fn test_localonly_identity(plan: &CiImpactPlan) -> Result<LocalOnlyReportIdentity> {
+    Ok(LocalOnlyReportIdentity {
+        artifact: LOCALONLY_OWNER.expected_artifact("42", "3"),
+        report: ValidatedLocalOnlyReport::parse(&serde_json::to_string(&localonly_report_value(
+            plan,
+        )?)?)?,
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1210,6 +1429,12 @@ mod tests {
             LOCALTX_OWNER.expected_artifact("42", "3"),
             |_| {},
         )?;
+        write_localonly_report(
+            root,
+            plan,
+            LOCALONLY_OWNER.expected_artifact("42", "3"),
+            |_| {},
+        )?;
         Ok(())
     }
 
@@ -1236,6 +1461,29 @@ mod tests {
             .join(LOCALTX_FILE_NAME)
     }
 
+    fn write_localonly_report(
+        root: &Path,
+        plan: &CiImpactPlan,
+        artifact: String,
+        mutate: impl FnOnce(&mut serde_json::Value),
+    ) -> Result<()> {
+        let mut report = localonly_report_value(plan)?;
+        mutate(&mut report);
+        let directory = root.join(artifact).join("local-only");
+        fs::create_dir_all(&directory)?;
+        fs::write(
+            directory.join(LOCALONLY_FILE_NAME),
+            serde_json::to_vec_pretty(&report)?,
+        )?;
+        Ok(())
+    }
+
+    fn localonly_path(root: &Path) -> PathBuf {
+        root.join(LOCALONLY_OWNER.expected_artifact("42", "3"))
+            .join("local-only")
+            .join(LOCALONLY_FILE_NAME)
+    }
+
     fn evaluate_disk_fixture(root: &Path, fixture: &GateFixture) -> Result<()> {
         let generic = observe_receipts(root);
         if let Some(failure) = generic.failure {
@@ -1243,6 +1491,10 @@ mod tests {
         }
         let localtx = observe_localtx_receipts(root);
         if let Some(failure) = localtx.failure {
+            return Err(failure.error);
+        }
+        let localonly = observe_localonly_reports(root);
+        if let Some(failure) = localonly.failure {
             return Err(failure.error);
         }
         evaluate(
@@ -1257,6 +1509,13 @@ mod tests {
             &fixture.plan,
             &generic.receipts,
             &localtx.receipts,
+            "42",
+            "3",
+        )?;
+        evaluate_localonly_required_evidence(
+            &fixture.plan,
+            &generic.receipts,
+            &localonly.reports,
             "42",
             "3",
         )?;
@@ -1309,14 +1568,70 @@ mod tests {
     }
 
     #[test]
+    fn gate_rejects_complete_generic_receipts_without_localonly_required_evidence_red() -> Result<()>
+    {
+        let fixture = GateFixture::new()?;
+        assert!(
+            fixture
+                .receipts
+                .iter()
+                .any(|receipt| { receipt.job_key == LOCALONLY_OWNER })
+        );
+        assert!(
+            fixture
+                .evaluate_without_localonly_required_evidence()
+                .is_err(),
+            "ci-gate must reject generic success when LocalOnly execution evidence is absent"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_localonly_report_is_explicit_in_the_human_summary_red() -> Result<()> {
+        let fixture = GateFixture::new()?;
+        let root = crate::testutil::unique_tmp("ci-gate-localonly-summary-missing");
+        let plan_path = root.join("plan.json");
+        let receipts_path = root.join("receipts");
+        fs::create_dir_all(&root)?;
+        fs::write(&plan_path, fixture.plan.to_json()?)?;
+        write_exact_receipts(&receipts_path, &fixture.plan)?;
+        fs::remove_file(localonly_path(&receipts_path))?;
+        let options = Options {
+            plan_path,
+            receipts_path,
+            planner_result: JobResult::Success,
+            matrix_result: JobResult::Success,
+            metrics_output: root.join("metrics.json"),
+        };
+        let runtime = RuntimeIdentity {
+            run_id: Some("42".to_owned()),
+            run_attempt: Some("3".to_owned()),
+            execution_revision: Some("e".repeat(40)),
+            summary_path: Some(root.join("summary.md")),
+        };
+
+        assert!(run_with_runtime(&options, &runtime).is_err());
+        let summary = fs::read_to_string(
+            runtime
+                .summary_path
+                .as_ref()
+                .context("missing LocalOnly summary path")?,
+        )?;
+        assert!(summary.contains("Failure class: `localonly-evidence`"));
+        assert!(summary.contains("missing LocalOnly execution report"));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn gate_accepts_exact_receipt_set_green() -> Result<()> {
         let fixture = GateFixture::new()?;
         fixture.evaluate()?;
         let metrics = build_metrics(&fixture.plan, &fixture.receipts)?;
-        assert_eq!(metrics.recommended_jobs, 2);
+        assert_eq!(metrics.recommended_jobs, 3);
         assert_eq!(metrics.executed_jobs, CiJobKey::COUNT);
-        assert_eq!(metrics.skipped_runner_jobs, CiJobKey::COUNT - 2);
-        assert_eq!(metrics.cpu_time_ms, 15_000);
+        assert_eq!(metrics.skipped_runner_jobs, CiJobKey::COUNT - 3);
+        assert_eq!(metrics.cpu_time_ms, 16_000);
         assert_eq!(metrics.projected_saved_cpu_time_ms, 13_000);
         Ok(())
     }
@@ -1589,6 +1904,137 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn localonly_required_evidence_disk_red_matrix() -> Result<()> {
+        let fixture = GateFixture::new()?;
+        let green = crate::testutil::unique_tmp("ci-gate-localonly-green");
+        write_exact_receipts(&green, &fixture.plan)?;
+        evaluate_disk_fixture(&green, &fixture)?;
+        fs::remove_dir_all(green)?;
+
+        let missing = crate::testutil::unique_tmp("ci-gate-localonly-missing");
+        write_exact_receipts(&missing, &fixture.plan)?;
+        fs::remove_file(localonly_path(&missing))?;
+        assert!(evaluate_disk_fixture(&missing, &fixture).is_err());
+        fs::remove_dir_all(missing)?;
+
+        let duplicate = crate::testutil::unique_tmp("ci-gate-localonly-duplicate");
+        write_exact_receipts(&duplicate, &fixture.plan)?;
+        let nested = localonly_path(&duplicate)
+            .parent()
+            .context("LocalOnly fixture parent")?
+            .join("nested")
+            .join(LOCALONLY_FILE_NAME);
+        fs::create_dir_all(nested.parent().context("nested fixture parent")?)?;
+        fs::copy(localonly_path(&duplicate), nested)?;
+        assert!(evaluate_disk_fixture(&duplicate, &fixture).is_err());
+        fs::remove_dir_all(duplicate)?;
+
+        let wrong_artifact = crate::testutil::unique_tmp("ci-gate-localonly-wrong-artifact");
+        write_exact_receipts(&wrong_artifact, &fixture.plan)?;
+        let wrong_path = wrong_artifact
+            .join(CiJobKey::CiMeta.expected_artifact("42", "3"))
+            .join("local-only")
+            .join(LOCALONLY_FILE_NAME);
+        fs::create_dir_all(wrong_path.parent().context("wrong artifact parent")?)?;
+        fs::rename(localonly_path(&wrong_artifact), wrong_path)?;
+        assert!(evaluate_disk_fixture(&wrong_artifact, &fixture).is_err());
+        fs::remove_dir_all(wrong_artifact)?;
+
+        for (label, mutate) in [
+            ("schema", ("schemaVersion", serde_json::json!(0))),
+            ("owner", ("jobKey", serde_json::json!("ci-meta"))),
+            (
+                "source",
+                ("sourceRevision", serde_json::json!("f".repeat(40))),
+            ),
+            (
+                "equal-count-wrong-set",
+                (
+                    "allSets",
+                    serde_json::json!([
+                        "audit.list-entries",
+                        "identity.policies-get",
+                        "identity.policies-list",
+                        "identity.profile",
+                        "identity.roles-list",
+                        "settings.config-list"
+                    ]),
+                ),
+            ),
+        ] {
+            let root = crate::testutil::unique_tmp(&format!("ci-gate-localonly-{label}"));
+            write_exact_receipts(&root, &fixture.plan)?;
+            let path = localonly_path(&root);
+            let mut report: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+            if mutate.0 == "allSets" {
+                for field in [
+                    "activeContractIds",
+                    "sourceReceiptContractIds",
+                    "executedContractIds",
+                ] {
+                    report[field] = mutate.1.clone();
+                }
+            } else {
+                report[mutate.0] = mutate.1;
+            }
+            fs::write(&path, serde_json::to_vec_pretty(&report)?)?;
+            if label == "equal-count-wrong-set" {
+                let parsed = ValidatedLocalOnlyReport::load(&path)?;
+                assert_eq!(parsed.active_contract_ids().len(), 6);
+                assert_eq!(parsed.source_receipt_contract_ids().len(), 6);
+                assert_eq!(parsed.executed_contract_ids().len(), 6);
+            }
+            let result = evaluate_disk_fixture(&root, &fixture);
+            if label == "equal-count-wrong-set" {
+                let Err(error) = result else {
+                    bail!("wrong LocalOnly set must fail at the gate");
+                };
+                assert!(
+                    error.to_string().contains(
+                        "missing_from_source=[] extra_in_source=[] missing_from_executed=[\"settings.config-get\"] extra_in_executed=[\"settings.config-list\"]"
+                    ),
+                    "{error:#}"
+                );
+            } else {
+                assert!(result.is_err(), "{label}");
+            }
+            fs::remove_dir_all(root)?;
+        }
+
+        let unknown = crate::testutil::unique_tmp("ci-gate-localonly-unknown");
+        write_exact_receipts(&unknown, &fixture.plan)?;
+        let path = localonly_path(&unknown);
+        let mut report: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        report["legacyCount"] = 6.into();
+        fs::write(path, serde_json::to_vec_pretty(&report)?)?;
+        assert!(evaluate_disk_fixture(&unknown, &fixture).is_err());
+        fs::remove_dir_all(unknown)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn localonly_required_evidence_symlink_is_classified_fail_closed() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let fixture = GateFixture::new()?;
+        let root = crate::testutil::unique_tmp("ci-gate-localonly-symlink");
+        write_exact_receipts(&root, &fixture.plan)?;
+        let path = localonly_path(&root);
+        let target = path.with_file_name("target.json");
+        fs::rename(&path, &target)?;
+        symlink(&target, &path)?;
+        let observation = observe_localonly_reports(&root);
+        assert!(observation.failure.is_some());
+        assert_eq!(
+            observation.failure.context("missing failure")?.class,
+            GateFailureClass::LocalonlyEvidence
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn localtx_required_evidence_symlink_is_classified_fail_closed() -> Result<()> {
@@ -1632,11 +2078,11 @@ mod tests {
         let serialized = fs::read_to_string(&options.metrics_output)?;
         assert_eq!(
             format!("{serialized}\n"),
-            include_str!("../tests/golden/ci-gate-envelope-v2-failure.json"),
-            "failure envelope v2 wire drifted"
+            include_str!("../tests/golden/ci-gate-envelope-v3-failure.json"),
+            "failure envelope v3 wire drifted"
         );
         let metrics: serde_json::Value = serde_json::from_str(&serialized)?;
-        assert_eq!(metrics["schemaVersion"], 2);
+        assert_eq!(metrics["schemaVersion"], 3);
         assert_eq!(metrics["verdict"], "failure");
         assert_eq!(metrics["failureClass"], "planner-result");
         assert_eq!(metrics["plannerResult"], "failure");
@@ -1645,6 +2091,7 @@ mod tests {
         assert!(metrics["localtxActiveCount"].is_null());
         assert!(metrics["localtxJourneyCount"].is_null());
         assert!(metrics["localtxBackendProfileCount"].is_null());
+        assert!(metrics["localonlyContractCount"].is_null());
         let summary = fs::read_to_string(
             runtime
                 .summary_path
@@ -1856,17 +2303,18 @@ mod tests {
         let serialized = fs::read_to_string(&options.metrics_output)?;
         assert_eq!(
             format!("{serialized}\n"),
-            include_str!("../tests/golden/ci-gate-envelope-v2-success.json"),
-            "success envelope v2 wire drifted"
+            include_str!("../tests/golden/ci-gate-envelope-v3-success.json"),
+            "success envelope v3 wire drifted"
         );
         let envelope: serde_json::Value = serde_json::from_str(&serialized)?;
-        assert_eq!(envelope["schemaVersion"], 2);
+        assert_eq!(envelope["schemaVersion"], 3);
         assert_eq!(envelope["verdict"], "success");
         assert!(envelope["failureClass"].is_null());
         assert_eq!(envelope["observedReceiptCount"], CiJobKey::COUNT);
         assert_eq!(envelope["localtxActiveCount"], 5);
         assert_eq!(envelope["localtxJourneyCount"], 5);
         assert_eq!(envelope["localtxBackendProfileCount"], 5);
+        assert_eq!(envelope["localonlyContractCount"], 6);
         assert_eq!(envelope["successMetrics"]["executedJobs"], CiJobKey::COUNT);
         assert_eq!(
             envelope["successMetrics"]["recommendedJobs"],
@@ -1885,6 +2333,10 @@ mod tests {
         )?;
         assert!(summary.contains("Result: `success`"));
         assert!(summary.contains("LocalTx required evidence: `5/5/5`"));
+        assert!(summary.contains(&format!(
+            "LocalOnly required evidence: exact-set active/source/executed = `6/6/6` @ `{}`",
+            "e".repeat(40)
+        )));
         fs::remove_dir_all(root)?;
         Ok(())
     }
