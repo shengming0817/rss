@@ -22,6 +22,9 @@
 //! xtask Medium 守卫 `bins_auth_sync.rs` 退役（双写消除、无第二副本可漂移）。
 
 pub mod auth_bridge;
+mod config;
+#[cfg(test)]
+mod config_tests;
 pub mod distributed_runtime;
 mod domains;
 pub mod event_transport;
@@ -102,6 +105,13 @@ use infra::s3::{build_s3_canary_config_from, build_s3_dlx_archive_store_from, wi
 use infra::vault::build_vault_key_provider_from;
 use phase::{RuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
 
+#[cfg(test)]
+use config::DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV;
+use config::{
+    EnvConfigSource, RuntimeConfigSnapshot, domain_transport_mtls_allow_set_env,
+    domain_transport_required_domains_from, domain_transport_url_env,
+};
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -137,23 +147,15 @@ use tokio_util::sync::CancellationToken;
 
 /// SPIFFE Workload API endpoint env var consumed by the upstream `spiffe` source.
 const SPIFFE_ENDPOINT_SOCKET_ENV: &str = "SPIFFE_ENDPOINT_SOCKET";
-/// Comma-separated remote domains that must have outbound domain transport configured.
-const DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV: &str = "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS";
 /// Shared remote domain transport endpoint fallback (`durable-shared` only).
 const DOMAIN_TRANSPORT_SHARED_URL_ENV: &str = "RSS_DOMAIN_TRANSPORT_URL";
 /// Local workload SPIFFE ID expected from the outbound SPIRE source.
 const DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV: &str = "RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID";
-const DOMAIN_TRANSPORT_URL_ENV_SUFFIX: &str = "DOMAIN_TRANSPORT_URL";
-const DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET_ENV_SUFFIX: &str =
-    "DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET";
 
-/// Composition-root owner for a secret read from the process environment. The original `String`
-/// allocation is moved into this wrapper immediately, comparisons only borrow it, and every
-/// non-selected credential is wiped on drop. Selected credentials transfer the same allocation to
-/// the provider's own zeroize-on-drop token/credential owner.
-pub(crate) struct EnvSecret {
-    bytes: Vec<u8>,
-}
+/// Composition-root validation wrapper around the shared zeroizing secret carrier. Selected
+/// credentials transfer the same `String` allocation to the provider's own secret owner.
+#[derive(secure::Redact)]
+pub(crate) struct EnvSecret(#[redact(sensitivity = secret)] secure::SecretText);
 
 impl EnvSecret {
     pub(crate) fn required(
@@ -166,9 +168,7 @@ impl EnvSecret {
             value.trim() == value,
             "{name} must not have leading or trailing whitespace"
         );
-        Ok(Self {
-            bytes: value.into_bytes(),
-        })
+        Ok(Self(secure::SecretText::from_string(value)))
     }
 
     pub(crate) fn optional(
@@ -182,41 +182,18 @@ impl EnvSecret {
                     value.trim() == value,
                     "{name} must not have leading or trailing whitespace"
                 );
-                Ok(Self {
-                    bytes: value.into_bytes(),
-                })
+                Ok(Self(secure::SecretText::from_string(value)))
             })
             .transpose()
     }
 
-    #[allow(clippy::expect_used)]
-    // reason: construction moves bytes from a valid Rust String and no method mutates them.
     pub(crate) fn expose(&self) -> &str {
-        std::str::from_utf8(&self.bytes).expect("EnvSecret preserves String UTF-8")
+        self.0.expose()
     }
 
-    #[allow(clippy::expect_used)]
-    // reason: construction moves bytes from a valid Rust String and no method mutates them.
-    pub(crate) fn into_string(mut self) -> String {
-        let bytes = std::mem::take(&mut self.bytes);
-        String::from_utf8(bytes).expect("EnvSecret preserves String UTF-8")
+    pub(crate) fn transfer_secret_allocation(self) -> String {
+        self.0.into_string()
     }
-}
-
-impl std::fmt::Debug for EnvSecret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("EnvSecret(<redacted>)")
-    }
-}
-
-impl Drop for EnvSecret {
-    fn drop(&mut self) {
-        wipe_env_secret(&mut self.bytes);
-    }
-}
-
-fn wipe_env_secret(bytes: &mut [u8]) {
-    bytes.fill(0);
 }
 /// 生产系统时钟（组合根注入 `OidcProvider`）。
 ///
@@ -410,50 +387,6 @@ fn topology_label(topology: bootstrap::Topology) -> &'static str {
         bootstrap::Topology::DurableIsolated => "durable-isolated",
         _ => "unknown",
     }
-}
-
-fn domain_transport_required_domains_from(
-    get: &impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<Vec<String>> {
-    let raw = get(DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV).ok_or_else(|| {
-        anyhow::anyhow!("missing required env var: {DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV}")
-    })?;
-    let mut domains = Vec::new();
-    for part in raw.split(',') {
-        let domain = part.trim();
-        anyhow::ensure!(
-            !domain.is_empty(),
-            "{DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV} must not contain empty entries"
-        );
-        anyhow::ensure!(
-            !domain.chars().any(char::is_control) && !domain.chars().any(char::is_whitespace),
-            "{DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV} entries must not contain whitespace or control characters"
-        );
-        domains.push(domain.to_uppercase());
-    }
-    anyhow::ensure!(
-        !domains.is_empty(),
-        "{DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV} must list at least one domain"
-    );
-    domains.sort();
-    domains.dedup();
-    Ok(domains)
-}
-
-fn domain_transport_url_env(domain: &str) -> String {
-    format!(
-        "RSS_{}_{}",
-        domain.to_ascii_uppercase(),
-        DOMAIN_TRANSPORT_URL_ENV_SUFFIX
-    )
-}
-
-fn domain_transport_mtls_allow_set_env(domain: &str) -> String {
-    format!(
-        "RSS_{}_{}",
-        domain.to_ascii_uppercase(),
-        DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET_ENV_SUFFIX
-    )
 }
 
 fn domain_transport_config_from(
@@ -4303,7 +4236,9 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     );
     drop(runtime_plan);
 
-    let runtime_inputs = RuntimeInputs::new(trace_export);
+    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource)
+        .context("capture process runtime configuration")?;
+    let mut runtime_inputs = RuntimeInputs::new(runtime_config, trace_export);
 
     // BuildProvider phase: production credential verifier provider.
     let runtime_oidc = phase_result(
@@ -4325,6 +4260,12 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     ) = phase_result(
         RuntimePhase::BuildInfra,
         async {
+            let config_value = |name: &str| {
+                runtime_inputs
+                    .config()
+                    .get(name)
+                    .map(|value| value.expose().to_owned())
+            };
             // Phase A parses every configuration and proves all external DLX capabilities before
             // the forward-only 0062 migration can commit. A bad credential or WORM/key capability
             // therefore cannot strand the deployment between incompatible schema generations.
@@ -4333,18 +4274,16 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             let migrator_config = build_pg_migrator_config()?;
             let app_pg_config = build_pg_config()?;
             let plaintext_policy = legacy_config_plaintext_policy()?;
-            let vault = build_vault_runtime_deps(|name| std::env::var(name).ok())
-                .context("setup vault deps")?;
+            let vault = build_vault_runtime_deps(config_value).context("setup vault deps")?;
             let settings_config_value_key_name =
-                build_settings_config_value_key_name_from(|name| std::env::var(name).ok())
+                build_settings_config_value_key_name_from(config_value)
                     .context("settings config value key name")?;
-            let redis = build_redis_runtime_deps(|name| std::env::var(name).ok())
+            let redis = build_redis_runtime_deps(config_value)
                 .await
                 .context("setup redis deps")?;
-            let s3 = build_s3_runtime_deps_from(|name| std::env::var(name).ok())
-                .context("setup s3 deps")?;
-            let s3_canary_config = build_s3_canary_config_from(|name| std::env::var(name).ok())
-                .context("s3 canary config")?;
+            let s3 = build_s3_runtime_deps_from(config_value).context("setup s3 deps")?;
+            let s3_canary_config =
+                build_s3_canary_config_from(config_value).context("s3 canary config")?;
             let event_cfg = build_event_transport_config().context("event transport config")?;
             tracing::info!(
                 runtime.event_topology = topology_label(event_cfg.topology),
@@ -4361,11 +4300,9 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                      use durable-shared or durable-isolated"
                 );
             }
-            let dlx_bootstrap = build_dlx_lifecycle_bootstrap_config_from(
-                |name| std::env::var(name).ok(),
-                Arc::new(SystemClock),
-            )
-            .await?;
+            let dlx_bootstrap =
+                build_dlx_lifecycle_bootstrap_config_from(config_value, Arc::new(SystemClock))
+                    .await?;
             let DlxLifecycleBootstrapConfig {
                 archiver_pg: dlx_archiver_pg_config,
                 verifier_pg: dlx_verifier_pg_config,
@@ -4461,13 +4398,11 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                 archive_vault_provider,
                 archive_key,
             );
-            let domain_transport =
-                wire_domain_transport_from(event_cfg.topology, |name| std::env::var(name).ok())
-                    .await
-                    .context("wire outbound domain transport")?;
-            let command_idempotency_keyring =
-                build_command_idempotency_keyring_from(|name| std::env::var(name).ok())
-                    .context("build command idempotency keyring")?;
+            let domain_transport = wire_domain_transport_from(event_cfg.topology, config_value)
+                .await
+                .context("wire outbound domain transport")?;
+            let command_idempotency_keyring = build_command_idempotency_keyring_from(config_value)
+                .context("build command idempotency keyring")?;
 
             // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
             let deps = SharedRuntimeDeps {
@@ -4651,7 +4586,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         })(),
     )?;
 
-    let trace_export = runtime_inputs.into_trace_export();
+    let trace_export = runtime_inputs.take_trace_export();
     // Launch phase: listener serving plus LIFO shutdown resource registration.
     let trace_exporter = trace_export.map(DynManagedResource::new_box);
     let pg_runtime_module =
@@ -4702,7 +4637,7 @@ mod tests {
     }
 
     #[test]
-    fn env_secret_is_redacted_borrow_compared_and_wiped_by_the_shared_funnel() {
+    fn env_secret_is_redacted_borrow_compared_and_owned_by_the_shared_funnel() {
         let first = EnvSecret::required(
             &|name| (name == "SECRET").then(|| "secret-value".to_owned()),
             "SECRET",
@@ -4715,10 +4650,7 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         assert_eq!(first.expose(), second.expose());
         assert_eq!(format!("{first:?}"), "EnvSecret(<redacted>)");
-
-        let mut bytes = *b"secret-value";
-        wipe_env_secret(&mut bytes);
-        assert!(bytes.iter().all(|byte| *byte == 0));
+        assert_eq!(second.expose(), "secret-value");
     }
 
     fn full_dlx_bootstrap_env(name: &str) -> Option<String> {

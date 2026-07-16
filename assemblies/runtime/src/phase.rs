@@ -35,20 +35,37 @@ impl RuntimePhase {
     }
 }
 
+use crate::config::RuntimeConfigSnapshot;
+
 /// Inputs owned by the runtime phase orchestrator.
-pub struct RuntimeInputs {
+///
+/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- the crate-private constructor requires an owned, non-optional snapshot, so phases cannot be assembled without one.
+pub(crate) struct RuntimeInputs {
+    config: RuntimeConfigSnapshot,
     trace_export: Option<otel::OtelExporter>,
 }
 
 impl RuntimeInputs {
-    /// Construct runtime inputs without inspecting optional exporter internals.
-    pub fn new(trace_export: Option<otel::OtelExporter>) -> Self {
-        Self { trace_export }
+    /// Construct the complete process-lifetime runtime inputs.
+    pub(crate) fn new(
+        config: RuntimeConfigSnapshot,
+        trace_export: Option<otel::OtelExporter>,
+    ) -> Self {
+        Self {
+            config,
+            trace_export,
+        }
     }
 
-    /// Move the optional trace exporter into the launch phase.
-    pub fn into_trace_export(self) -> Option<otel::OtelExporter> {
-        self.trace_export
+    /// Borrow the process snapshot owned by the phase orchestrator.
+    pub(crate) fn config(&self) -> &RuntimeConfigSnapshot {
+        &self.config
+    }
+
+    /// Move the optional trace exporter into the launch phase while retaining the process snapshot
+    /// until `run()` exits.
+    pub(crate) fn take_trace_export(&mut self) -> Option<otel::OtelExporter> {
+        self.trace_export.take()
     }
 }
 
@@ -102,6 +119,30 @@ mod tests {
     use tracing_subscriber::layer::{Context as LayerContext, Layer};
     use tracing_subscriber::prelude::*;
 
+    struct MissingConfigSource;
+
+    impl crate::config::RuntimeConfigSource for MissingConfigSource {
+        fn read(
+            &mut self,
+            _key: &crate::config::RuntimeConfigKey,
+        ) -> crate::config::CapturedConfigValue {
+            crate::config::CapturedConfigValue::Missing
+        }
+    }
+
+    struct BaitConfigSource;
+
+    impl crate::config::RuntimeConfigSource for BaitConfigSource {
+        fn read(
+            &mut self,
+            _key: &crate::config::RuntimeConfigKey,
+        ) -> crate::config::CapturedConfigValue {
+            crate::config::CapturedConfigValue::Present(secure::SecretText::from_string(
+                "postgres://user:dsn-password@db/vault-token.jwt-hmac.PEM".to_owned(),
+            ))
+        }
+    }
+
     #[test]
     fn runtime_phase_labels_are_closed_and_ordered() {
         let labels: Vec<_> = RuntimePhase::ALL
@@ -150,9 +191,37 @@ mod tests {
     }
 
     #[test]
-    fn runtime_inputs_owns_trace_export_without_inspecting_it() {
-        let inputs = RuntimeInputs::new(None);
-        assert!(inputs.into_trace_export().is_none());
+    fn runtime_config_inputs_own_snapshot_and_trace_export_without_fallback() {
+        let snapshot = RuntimeConfigSnapshot::capture(MissingConfigSource)
+            .expect("closed catalog capture succeeds");
+        let mut inputs = RuntimeInputs::new(snapshot, None);
+        assert!(inputs.config().get("RSS_VAULT_TOKEN").is_none());
+        assert!(inputs.take_trace_export().is_none());
+        assert!(inputs.config().get("RSS_VAULT_TOKEN").is_none());
+    }
+
+    #[test]
+    fn runtime_config_anyhow_chain_and_phase_log_remain_opaque() {
+        let snapshot = RuntimeConfigSnapshot::capture(BaitConfigSource)
+            .expect("closed catalog capture succeeds");
+        let error = anyhow::anyhow!("{snapshot:?}");
+        let chain = format!("{error:#}");
+        let recorder = EventRecorder::default();
+        let subscriber = tracing_subscriber::registry().with(recorder.clone());
+
+        let result = tracing::subscriber::with_default(subscriber, || {
+            phase_result::<()>(RuntimePhase::BuildInfra, Err(error))
+        });
+        assert!(result.is_err());
+
+        let events = recorder.events();
+        let phase_error = events[0].error.as_deref().unwrap_or_default();
+        assert_eq!(chain, "RuntimeConfigSnapshot(<redacted>)");
+        assert_eq!(phase_error, "RuntimeConfigSnapshot(<redacted>)");
+        for fragment in ["dsn-password", "vault-token", "jwt-hmac", "PEM"] {
+            assert!(!chain.contains(fragment));
+            assert!(!phase_error.contains(fragment));
+        }
     }
 
     #[test]

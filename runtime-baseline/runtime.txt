@@ -102,34 +102,35 @@ mergeExtends = probes,resources,workers
 
 [runtime.run.orderedAnchors]
 01 | run.plan.load | assemblies/runtime/src/lib.rs | plan::RuntimePlan::bundled().context( | status=ok
-02 | run.provider.oidc | assemblies/runtime/src/lib.rs | build_runtime_oidc_provider().context( | status=ok
-03 | run.provider.vault | assemblies/runtime/src/lib.rs | build_vault_runtime_deps(|name| std::env::var(name).ok()) | status=ok
-04 | run.provider.redis | assemblies/runtime/src/lib.rs | build_redis_runtime_deps(|name| std::env::var(name).ok()) | status=ok
-05 | run.provider.s3 | assemblies/runtime/src/lib.rs | build_s3_runtime_deps_from(|name| std::env::var(name).ok()) | status=ok
-06 | run.provider.pg | assemblies/runtime/src/lib.rs | PgRuntimeDeps::setup_with_audit_admin_config | status=ok
-07 | run.shared-deps | assemblies/runtime/src/lib.rs | let deps = SharedRuntimeDeps { | status=ok
-08 | run.wire.generated-domains | assemblies/runtime/src/lib.rs | modules_gen::wire_domains(&deps) | status=ok
-09 | run.module.input.domains | assemblies/runtime/src/lib.rs | let (mut registry, domains_module) = | status=ok
-10 | run.compose.generated-domains | assemblies/runtime/src/lib.rs | bootstrap::compose_bindings(&mut domain_bindings) | status=ok
-11 | run.module.input.session-sweeper | assemblies/runtime/src/lib.rs | let session_sweeper_module = | status=ok
-12 | run.module.input.s3-canary | assemblies/runtime/src/lib.rs | let s3_canary_module = | status=ok
-13 | run.provider-output.module | assemblies/runtime/src/lib.rs | let provider_module = crate::provider_output::build_provider_module(&deps) | status=ok
-14 | run.resources.oidc | assemblies/runtime/src/lib.rs | let oidc_resource = runtime_oidc.managed_resource() | status=ok
-15 | run.probe.oidc-jwks | assemblies/runtime/src/lib.rs | Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness())) | status=ok
-16 | run.module.input.domain-transport | assemblies/runtime/src/lib.rs | let domain_transport_module = domain_transport | status=ok
-17 | run.wire.distributed | assemblies/runtime/src/lib.rs | wire_distributed(&deps) | status=ok
-18 | run.event.bridge | assemblies/runtime/src/lib.rs | event_transport::bridge_generated_subscriptions(registry.drain_subscribers()) | status=ok
-19 | run.event.transport | assemblies/runtime/src/lib.rs | event_transport::wire_event_transport( | status=ok
-20 | run.module.assemble | assemblies/runtime/src/lib.rs | crate::assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs | status=ok
-21 | run.probe.drain | assemblies/runtime/src/lib.rs | for (name, probe) in std::mem::take(&mut module.probes) | status=ok
-22 | run.auth.routers | assemblies/runtime/src/lib.rs | assemble_authed_routers( | status=ok
-23 | run.health.listener | assemblies/runtime/src/lib.rs | health_listener(reporter, metrics_exporter) | status=ok
-24 | run.provider-output.pg | assemblies/runtime/src/lib.rs | crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period) | status=ok
-25 | run.launch | assemblies/runtime/src/lib.rs | launch::launch(launch_plan) | status=ok
-26 | launch.shutdown.trace | assemblies/runtime/src/launch.rs | if let Some(exporter) = trace_exporter | status=ok
-27 | launch.shutdown.pg-output | assemblies/runtime/src/launch.rs | Self::register_module_output(stack, pg_runtime_module)?; | status=ok
-28 | launch.shutdown.domain-output | assemblies/runtime/src/launch.rs | Self::register_module_output(stack, domain_module)?; | status=ok
-29 | launch.shutdown.resources | assemblies/runtime/src/launch.rs | for resource in output.resources | status=ok
-30 | launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in output.workers | status=ok
-31 | launch.register-plan | assemblies/runtime/src/launch.rs | let listeners = plan.register(&mut stack)?; | status=ok
-32 | launch.listeners | assemblies/runtime/src/launch.rs | bind_and_register(&mut stack, listener, &addr_resolver).await?; | status=ok
+02 | run.config.snapshot | assemblies/runtime/src/lib.rs | RuntimeConfigSnapshot::capture(EnvConfigSource) | status=ok
+03 | run.provider.oidc | assemblies/runtime/src/lib.rs | build_runtime_oidc_provider().context( | status=ok
+04 | run.provider.vault | assemblies/runtime/src/lib.rs | build_vault_runtime_deps(config_value) | status=ok
+05 | run.provider.redis | assemblies/runtime/src/lib.rs | build_redis_runtime_deps(config_value) | status=ok
+06 | run.provider.s3 | assemblies/runtime/src/lib.rs | build_s3_runtime_deps_from(config_value) | status=ok
+07 | run.provider.pg | assemblies/runtime/src/lib.rs | PgRuntimeDeps::setup_with_audit_admin_config | status=ok
+08 | run.shared-deps | assemblies/runtime/src/lib.rs | let deps = SharedRuntimeDeps { | status=ok
+09 | run.wire.generated-domains | assemblies/runtime/src/lib.rs | modules_gen::wire_domains(&deps) | status=ok
+10 | run.module.input.domains | assemblies/runtime/src/lib.rs | let (mut registry, domains_module) = | status=ok
+11 | run.compose.generated-domains | assemblies/runtime/src/lib.rs | bootstrap::compose_bindings(&mut domain_bindings) | status=ok
+12 | run.module.input.session-sweeper | assemblies/runtime/src/lib.rs | let session_sweeper_module = | status=ok
+13 | run.module.input.s3-canary | assemblies/runtime/src/lib.rs | let s3_canary_module = | status=ok
+14 | run.provider-output.module | assemblies/runtime/src/lib.rs | let provider_module = crate::provider_output::build_provider_module(&deps) | status=ok
+15 | run.resources.oidc | assemblies/runtime/src/lib.rs | let oidc_resource = runtime_oidc.managed_resource() | status=ok
+16 | run.probe.oidc-jwks | assemblies/runtime/src/lib.rs | Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness())) | status=ok
+17 | run.module.input.domain-transport | assemblies/runtime/src/lib.rs | let domain_transport_module = domain_transport | status=ok
+18 | run.wire.distributed | assemblies/runtime/src/lib.rs | wire_distributed(&deps) | status=ok
+19 | run.event.bridge | assemblies/runtime/src/lib.rs | event_transport::bridge_generated_subscriptions(registry.drain_subscribers()) | status=ok
+20 | run.event.transport | assemblies/runtime/src/lib.rs | event_transport::wire_event_transport( | status=ok
+21 | run.module.assemble | assemblies/runtime/src/lib.rs | crate::assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs | status=ok
+22 | run.probe.drain | assemblies/runtime/src/lib.rs | for (name, probe) in std::mem::take(&mut module.probes) | status=ok
+23 | run.auth.routers | assemblies/runtime/src/lib.rs | assemble_authed_routers( | status=ok
+24 | run.health.listener | assemblies/runtime/src/lib.rs | health_listener(reporter, metrics_exporter) | status=ok
+25 | run.provider-output.pg | assemblies/runtime/src/lib.rs | crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period) | status=ok
+26 | run.launch | assemblies/runtime/src/lib.rs | launch::launch(launch_plan) | status=ok
+27 | launch.shutdown.trace | assemblies/runtime/src/launch.rs | if let Some(exporter) = trace_exporter | status=ok
+28 | launch.shutdown.pg-output | assemblies/runtime/src/launch.rs | Self::register_module_output(stack, pg_runtime_module)?; | status=ok
+29 | launch.shutdown.domain-output | assemblies/runtime/src/launch.rs | Self::register_module_output(stack, domain_module)?; | status=ok
+30 | launch.shutdown.resources | assemblies/runtime/src/launch.rs | for resource in output.resources | status=ok
+31 | launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in output.workers | status=ok
+32 | launch.register-plan | assemblies/runtime/src/launch.rs | let listeners = plan.register(&mut stack)?; | status=ok
+33 | launch.listeners | assemblies/runtime/src/launch.rs | bind_and_register(&mut stack, listener, &addr_resolver).await?; | status=ok

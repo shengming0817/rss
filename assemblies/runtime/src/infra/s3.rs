@@ -174,8 +174,8 @@ fn build_s3_client_from(
     } = credentials;
     let credentials = aws_sdk_s3::config::Credentials::new(
         access_key_id,
-        secret_access_key.into_string(),
-        session_token.map(EnvSecret::into_string),
+        secret_access_key.transfer_secret_allocation(),
+        session_token.map(EnvSecret::transfer_secret_allocation),
         None,
         credential_source,
     );

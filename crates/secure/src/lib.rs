@@ -15,6 +15,9 @@ pub mod pathsafe;
 pub mod protection;
 pub mod redaction;
 pub mod refresh;
+mod secret_text;
+#[cfg(test)]
+mod secret_text_tests;
 pub mod transport_endpoint;
 
 pub use aead::{Aead, AeadError, Plaintext};
@@ -41,6 +44,7 @@ pub use redaction::{
     redact_field, redact_hash, redact_struct, redact_url_credentials, safe,
 };
 pub use refresh::{OpaqueToken, digest};
+pub use secret_text::SecretText;
 pub use securederive::Redact;
 pub use transport_endpoint::{
     AmqpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, S3Endpoint, TransportEndpointError,

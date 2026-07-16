@@ -12,6 +12,10 @@
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must consume the committed generated domain list through `compose_bindings`, must merge its output, and must not restore per-domain handwritten wiring.
 //!
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_config_snapshot_rejects_ambient_provider_readers", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must capture the process configuration exactly once after loading the plan and before constructing any provider; the same capture binding must flow into `RuntimeInputs`, whose unique snapshot-backed `config_value` reader must feed the unique Vault, Redis, and S3 calls without ambient, discarded-generation, or bait side paths.
+//!
+//! INVARIANT: SECRET-TEXT-TRANSFER-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff", anti_vacuity = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff" } -- runtime raw secret allocation transfer is a unique named funnel whose four production handoffs are closed and bait-resistant.
+//!
 //! INVARIANT: RUNTIME-PROVIDER-OUTPUTS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_provider_outputs_reject_missing_reordered_legacy_and_bait", anti_vacuity = "tests::runtime_provider_outputs_accept_unified_live_path" } -- the sole runtime-local constructor must merge Redis, S3, and Vault in order; postgres must remain outside that trait and cross the launch boundary exactly once as an owned `DomainModuleResult`, without lifecycle primitive bypasses or a parallel output type.
 //!
 //! INVARIANT: EVENT-TRANSPORT-OUTPUT-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::event_transport_output_funnel_rejects_legacy_and_bypasses", anti_vacuity = "tests::event_transport_output_funnel_accepts_unified_live_path" } -- event transport must return one crate-private `DomainModuleResult`, merge it once into runtime assembly, and register AMQP resources plus workers only through the common lifecycle funnel.
@@ -36,8 +40,28 @@ const RUNTIME_LIB_PATH: &str = "assemblies/runtime/src/lib.rs";
 const RUNTIME_SRC_PATH: &str = "assemblies/runtime/src";
 const PROVIDER_OUTPUT_PATH: &str = "assemblies/runtime/src/provider_output.rs";
 const PROVIDER_OUTPUT_FIXTURE_MARKER: &str = ".runtime-provider-output-fixture";
+const RUNTIME_CONFIG_FIXTURE_MARKER: &str = ".runtime-config-snapshot-fixture";
 const GENERATED_MODULES_PATH: &str = "assemblies/runtime/src/generated/modules_gen.rs";
 const RUNTIME_LAUNCH_PATH: &str = "assemblies/runtime/src/launch.rs";
+const RUNTIME_EVENT_PATH: &str = "assemblies/runtime/src/event_transport.rs";
+const RUNTIME_S3_PATH: &str = "assemblies/runtime/src/infra/s3.rs";
+const SECRET_TRANSFER_TOKEN: &str = "transfer_secret_allocation";
+const SECRET_TRANSFER_ALLOWLIST: &[(&str, &str)] = &[
+    (RUNTIME_LIB_PATH, "fn transfer_secret_allocation"),
+    (RUNTIME_EVENT_PATH, "hot_token.transfer_secret_allocation()"),
+    (
+        RUNTIME_EVENT_PATH,
+        "archive_token.transfer_secret_allocation()",
+    ),
+    (
+        RUNTIME_S3_PATH,
+        "secret_access_key.transfer_secret_allocation()",
+    ),
+    (
+        RUNTIME_S3_PATH,
+        "session_token.map(EnvSecret::transfer_secret_allocation)",
+    ),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -189,6 +213,8 @@ fn collect_report(root: &Path) -> Result<Report> {
             ));
         }
     }
+    findings.extend(runtime_config_snapshot_live_findings(root)?);
+    findings.extend(runtime_secret_transfer_live_findings(root)?);
     findings.extend(generated_domains_live_findings(root)?);
     findings.extend(provider_outputs_live_findings(root)?);
     findings.extend(event_transport_output_findings(root)?);
@@ -209,6 +235,358 @@ fn collect_report(root: &Path) -> Result<Report> {
         anchors: anchors.len(),
         findings,
     })
+}
+
+#[derive(Default)]
+struct RuntimeConfigWiring {
+    snapshot_calls: usize,
+    canonical_snapshot_calls: usize,
+    snapshot_binding: Option<syn::Ident>,
+    runtime_inputs_calls: usize,
+    canonical_runtime_inputs_bindings: usize,
+    runtime_inputs_binding: Option<syn::Ident>,
+    config_value_bindings: usize,
+    canonical_config_value_bindings: usize,
+    vault_calls: usize,
+    canonical_vault_calls: usize,
+    redis_calls: usize,
+    canonical_redis_calls: usize,
+    s3_calls: usize,
+    canonical_s3_calls: usize,
+}
+
+impl RuntimeConfigWiring {
+    fn is_canonical(&self) -> bool {
+        self.snapshot_calls == 1
+            && self.canonical_snapshot_calls == 1
+            && self.snapshot_binding.is_some()
+            && self.runtime_inputs_calls == 1
+            && self.canonical_runtime_inputs_bindings == 1
+            && self.runtime_inputs_binding.is_some()
+            && self.config_value_bindings == 1
+            && self.canonical_config_value_bindings == 1
+            && self.vault_calls == 1
+            && self.canonical_vault_calls == 1
+            && self.redis_calls == 1
+            && self.canonical_redis_calls == 1
+            && self.s3_calls == 1
+            && self.canonical_s3_calls == 1
+    }
+}
+
+impl<'ast> Visit<'ast> for RuntimeConfigWiring {
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        let binding = pat_ident(&local.pat);
+        let initializer = local.init.as_ref().map(|init| init.expr.as_ref());
+
+        if let (Some(binding), Some(initializer)) = (binding, initializer) {
+            if is_env_snapshot_initializer(initializer) && self.snapshot_binding.is_none() {
+                self.snapshot_binding = Some(binding.clone());
+            }
+
+            if is_runtime_inputs_initializer(initializer, self.snapshot_binding.as_ref()) {
+                self.canonical_runtime_inputs_bindings += 1;
+                if self.runtime_inputs_binding.is_none() {
+                    self.runtime_inputs_binding = Some(binding.clone());
+                }
+            }
+        }
+
+        if binding.is_some_and(|binding| binding == "config_value") {
+            self.config_value_bindings += 1;
+            if initializer.is_some_and(|initializer| {
+                self.runtime_inputs_binding
+                    .as_ref()
+                    .is_some_and(|runtime_inputs| {
+                        is_snapshot_config_value_closure(initializer, runtime_inputs)
+                    })
+            }) {
+                self.canonical_config_value_bindings += 1;
+            }
+        }
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if path_ends_with(&call.func, &["RuntimeConfigSnapshot", "capture"]) {
+            self.snapshot_calls += 1;
+            if call.args.len() == 1
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|arg| is_exact_path(arg, &["EnvConfigSource"]))
+            {
+                self.canonical_snapshot_calls += 1;
+            }
+        }
+        if path_ends_with(&call.func, &["RuntimeInputs", "new"]) {
+            self.runtime_inputs_calls += 1;
+        }
+        let canonical_reader = call.args.len() == 1
+            && call
+                .args
+                .first()
+                .is_some_and(|arg| is_exact_path(arg, &["config_value"]));
+        match expr_path_last(&call.func)
+            .map(ToString::to_string)
+            .as_deref()
+        {
+            Some("build_vault_runtime_deps") => {
+                self.vault_calls += 1;
+                self.canonical_vault_calls += usize::from(canonical_reader);
+            }
+            Some("build_redis_runtime_deps") => {
+                self.redis_calls += 1;
+                self.canonical_redis_calls += usize::from(canonical_reader);
+            }
+            Some("build_s3_runtime_deps_from") => {
+                self.s3_calls += 1;
+                self.canonical_s3_calls += usize::from(canonical_reader);
+            }
+            _ => {}
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    if !root.join("Cargo.toml").exists() && !root.join(RUNTIME_CONFIG_FIXTURE_MARKER).exists() {
+        return Ok(Vec::new());
+    }
+    let path = root.join(RUNTIME_LIB_PATH);
+    let source =
+        fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
+    let file = match syn::parse_file(&source) {
+        Ok(file) => file,
+        Err(error) => {
+            return Ok(vec![finding(
+                Rule::ForbiddenWiring,
+                RUNTIME_LIB_PATH,
+                format!("runtime configuration snapshot gate 无法解析生产 Rust: {error}"),
+            )]);
+        }
+    };
+    Ok(runtime_config_snapshot_findings_for_file(&file))
+}
+
+fn runtime_config_snapshot_findings_for_file(file: &syn::File) -> Vec<Finding<Rule>> {
+    let runs = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "run" && item.sig.asyncness.is_some() => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if runs.len() != 1 {
+        return vec![finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_LIB_PATH,
+            "runtime configuration snapshot gate requires exactly one async run()",
+        )];
+    }
+    let mut wiring = RuntimeConfigWiring::default();
+    wiring.visit_block(&runs[0].block);
+    if wiring.is_canonical() {
+        Vec::new()
+    } else {
+        vec![finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_LIB_PATH,
+            "run() configuration snapshot funnel must bind one EnvConfigSource capture into one RuntimeInputs value, define one config_value closure backed by that input's config().get(), and call Vault/Redis/S3 exactly once with that reader",
+        )]
+    }
+}
+
+fn runtime_secret_transfer_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let require_complete = root.join("Cargo.toml").exists();
+    if !require_complete && !root.join(RUNTIME_CONFIG_FIXTURE_MARKER).exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    collect_rust_sources(&root.join(RUNTIME_SRC_PATH), &mut paths)?;
+    let mut sources = BTreeMap::new();
+    for path in paths {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        sources.insert(
+            relative,
+            mask_comments_and_strings(&fs::read_to_string(path)?),
+        );
+    }
+    let observed = sources
+        .values()
+        .map(|source| source.matches(SECRET_TRANSFER_TOKEN).count())
+        .sum::<usize>();
+    let mut allowed = 0;
+    let mut findings = Vec::new();
+    for (path, pattern) in SECRET_TRANSFER_ALLOWLIST {
+        let count = sources
+            .get(*path)
+            .map_or(0, |source| source.matches(pattern).count());
+        allowed += count;
+        if count > 1 || (require_complete && count != 1) {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                *path,
+                format!("secret transfer allowlist requires exactly one `{pattern}`"),
+            ));
+        }
+    }
+    if observed != allowed {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_SRC_PATH,
+            "secret transfer allowlist rejects an unregistered raw allocation handoff",
+        ));
+    }
+    Ok(findings)
+}
+
+fn path_ends_with(expr: &syn::Expr, expected: &[&str]) -> bool {
+    let syn::Expr::Path(path) = expr else {
+        return false;
+    };
+    path.qself.is_none()
+        && path.path.segments.len() >= expected.len()
+        && path
+            .path
+            .segments
+            .iter()
+            .rev()
+            .zip(expected.iter().rev())
+            .all(|(segment, expected)| segment.ident == *expected)
+}
+
+fn transparent_expr(mut expr: &syn::Expr) -> &syn::Expr {
+    loop {
+        match expr {
+            syn::Expr::Block(block) if block.block.stmts.len() == 1 => {
+                let syn::Stmt::Expr(inner, None) = &block.block.stmts[0] else {
+                    return expr;
+                };
+                expr = inner;
+            }
+            syn::Expr::Group(group) => expr = &group.expr,
+            syn::Expr::Paren(paren) => expr = &paren.expr,
+            _ => return expr,
+        }
+    }
+}
+
+fn pat_ident(pat: &syn::Pat) -> Option<&syn::Ident> {
+    match pat {
+        syn::Pat::Ident(pat) if pat.by_ref.is_none() => Some(&pat.ident),
+        syn::Pat::Type(pat) => pat_ident(&pat.pat),
+        _ => None,
+    }
+}
+
+fn call_behind_result_context(expr: &syn::Expr) -> Option<&syn::ExprCall> {
+    match transparent_expr(expr) {
+        syn::Expr::Call(call) => Some(call),
+        syn::Expr::Try(expr) => call_behind_result_context(&expr.expr),
+        syn::Expr::MethodCall(call)
+            if matches!(call.method.to_string().as_str(), "context" | "with_context") =>
+        {
+            call_behind_result_context(&call.receiver)
+        }
+        _ => None,
+    }
+}
+
+fn is_env_snapshot_initializer(expr: &syn::Expr) -> bool {
+    call_behind_result_context(expr).is_some_and(|call| {
+        path_ends_with(&call.func, &["RuntimeConfigSnapshot", "capture"])
+            && call.args.len() == 1
+            && call
+                .args
+                .first()
+                .is_some_and(|arg| is_exact_path(arg, &["EnvConfigSource"]))
+    })
+}
+
+fn is_exact_ident_path(expr: &syn::Expr, expected: &syn::Ident) -> bool {
+    let syn::Expr::Path(path) = transparent_expr(expr) else {
+        return false;
+    };
+    path.qself.is_none()
+        && path.path.segments.len() == 1
+        && path
+            .path
+            .segments
+            .first()
+            .is_some_and(|segment| segment.ident == *expected)
+}
+
+fn is_runtime_inputs_initializer(expr: &syn::Expr, snapshot_binding: Option<&syn::Ident>) -> bool {
+    let Some(snapshot_binding) = snapshot_binding else {
+        return false;
+    };
+    call_behind_result_context(expr).is_some_and(|call| {
+        path_ends_with(&call.func, &["RuntimeInputs", "new"])
+            && call.args.len() == 2
+            && call
+                .args
+                .first()
+                .is_some_and(|arg| is_exact_ident_path(arg, snapshot_binding))
+    })
+}
+
+fn is_snapshot_config_value_closure(expr: &syn::Expr, runtime_inputs_binding: &syn::Ident) -> bool {
+    let syn::Expr::Closure(outer) = transparent_expr(expr) else {
+        return false;
+    };
+    let Some(name) = outer.inputs.first().and_then(pat_ident) else {
+        return false;
+    };
+    if outer.inputs.len() != 1 {
+        return false;
+    }
+    let syn::Expr::MethodCall(map) = transparent_expr(&outer.body) else {
+        return false;
+    };
+    let syn::Expr::MethodCall(get) = transparent_expr(&map.receiver) else {
+        return false;
+    };
+    let syn::Expr::MethodCall(config) = transparent_expr(&get.receiver) else {
+        return false;
+    };
+    let Some(syn::Expr::Closure(expose_closure)) = map.args.first().map(transparent_expr) else {
+        return false;
+    };
+    let Some(value) = expose_closure.inputs.first().and_then(pat_ident) else {
+        return false;
+    };
+    let syn::Expr::MethodCall(to_owned) = transparent_expr(&expose_closure.body) else {
+        return false;
+    };
+    let syn::Expr::MethodCall(expose) = transparent_expr(&to_owned.receiver) else {
+        return false;
+    };
+
+    map.method == "map"
+        && map.args.len() == 1
+        && get.method == "get"
+        && get.args.len() == 1
+        && get
+            .args
+            .first()
+            .is_some_and(|arg| expr_path_last(arg).is_some_and(|ident| ident == name))
+        && config.method == "config"
+        && config.args.is_empty()
+        && is_exact_ident_path(&config.receiver, runtime_inputs_binding)
+        && expose_closure.inputs.len() == 1
+        && to_owned.method == "to_owned"
+        && to_owned.args.is_empty()
+        && expose.method == "expose"
+        && expose.args.is_empty()
+        && expr_path_last(&expose.receiver).is_some_and(|ident| ident == value)
 }
 
 fn generated_domains_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
@@ -3256,6 +3634,11 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "plan::RuntimePlan::bundled().context(",
     },
     AnchorSpec {
+        id: "run.config.snapshot",
+        path: RUNTIME_LIB_PATH,
+        pattern: "RuntimeConfigSnapshot::capture(EnvConfigSource)",
+    },
+    AnchorSpec {
         id: "run.provider.oidc",
         path: RUNTIME_LIB_PATH,
         pattern: "build_runtime_oidc_provider().context(",
@@ -3263,17 +3646,17 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.provider.vault",
         path: RUNTIME_LIB_PATH,
-        pattern: "build_vault_runtime_deps(|name| std::env::var(name).ok())",
+        pattern: "build_vault_runtime_deps(config_value)",
     },
     AnchorSpec {
         id: "run.provider.redis",
         path: RUNTIME_LIB_PATH,
-        pattern: "build_redis_runtime_deps(|name| std::env::var(name).ok())",
+        pattern: "build_redis_runtime_deps(config_value)",
     },
     AnchorSpec {
         id: "run.provider.s3",
         path: RUNTIME_LIB_PATH,
-        pattern: "build_s3_runtime_deps_from(|name| std::env::var(name).ok())",
+        pattern: "build_s3_runtime_deps_from(config_value)",
     },
     AnchorSpec {
         id: "run.provider.pg",
@@ -4128,8 +4511,11 @@ serde = workspace=true; features=[derive]
                 .rendered
                 .contains("mergeExtends = probes,resources,workers")
         );
-        assert!(report.rendered.contains("31 | launch.register-plan"));
-        assert!(report.rendered.contains("32 | launch.listeners"));
+        assert!(report.rendered.contains(
+            "02 | run.config.snapshot | assemblies/runtime/src/lib.rs | RuntimeConfigSnapshot::capture(EnvConfigSource)"
+        ));
+        assert!(report.rendered.contains("32 | launch.register-plan"));
+        assert!(report.rendered.contains("33 | launch.listeners"));
         Ok(())
     }
 
@@ -5356,6 +5742,202 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
             }),
             "plan load anchor must precede provider construction"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_requires_config_snapshot_before_provider_construction() -> Result<()> {
+        let root = fixture_root("runtime-baseline-config-snapshot-before-provider")?;
+        let mut lines = Vec::new();
+        let snapshot = RUNTIME_ANCHORS
+            .iter()
+            .find(|anchor| anchor.id == "run.config.snapshot")
+            .context("config snapshot anchor")?;
+        let oidc = RUNTIME_ANCHORS
+            .iter()
+            .find(|anchor| anchor.id == "run.provider.oidc")
+            .context("oidc anchor")?;
+        lines.push(oidc.pattern);
+        lines.push(snapshot.pattern);
+        for anchor in RUNTIME_ANCHORS
+            .iter()
+            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH)
+        {
+            if matches!(anchor.id, "run.config.snapshot" | "run.provider.oidc") {
+                continue;
+            }
+            lines.push(anchor.pattern);
+            if anchor.id == "run.shared-deps" {
+                lines.push("}");
+            }
+        }
+        write(
+            &root.join(RUNTIME_LIB_PATH),
+            &format!("pub async fn run() {{\n{}\n}}\n", lines.join("\n")),
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.rule == Rule::MissingAnchor && finding.detail.contains("run.provider.oidc")
+            }),
+            "configuration snapshot must precede provider construction"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_config_snapshot_rejects_ambient_provider_readers() -> Result<()> {
+        let root = fixture_root("runtime-config-snapshot-rejects-ambient-readers")?;
+        write(&root.join(RUNTIME_CONFIG_FIXTURE_MARKER), "enabled\n")?;
+        let runtime_path = root.join(RUNTIME_LIB_PATH);
+        let mut runtime = fs::read_to_string(&runtime_path)?;
+        for (snapshot_reader, ambient_reader) in [
+            (
+                "build_vault_runtime_deps(config_value)",
+                "build_vault_runtime_deps(|name| std::env::var(name).ok())",
+            ),
+            (
+                "build_redis_runtime_deps(config_value)",
+                "build_redis_runtime_deps(|name| std::env::var(name).ok())",
+            ),
+            (
+                "build_s3_runtime_deps_from(config_value)",
+                "build_s3_runtime_deps_from(|name| std::env::var(name).ok())",
+            ),
+        ] {
+            assert!(
+                runtime.contains(snapshot_reader),
+                "fixture missing {snapshot_reader}"
+            );
+            runtime = runtime.replace(snapshot_reader, ambient_reader);
+        }
+        write(&runtime_path, &runtime)?;
+
+        let report = collect_report(&root)?;
+        for anchor_id in [
+            "run.provider.vault",
+            "run.provider.redis",
+            "run.provider.s3",
+        ] {
+            assert!(
+                report.findings.iter().any(|finding| {
+                    finding.rule == Rule::MissingAnchor && finding.detail.contains(anchor_id)
+                }),
+                "restoring ambient reader must fail {anchor_id}"
+            );
+        }
+
+        let canonical = r#"
+pub async fn run() {
+    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource);
+    let runtime_inputs = RuntimeInputs::new(runtime_config, None);
+    let config_value = |name: &str| {
+        runtime_inputs
+            .config()
+            .get(name)
+            .map(|value| value.expose().to_owned())
+    };
+    let vault = build_vault_runtime_deps(config_value);
+    let redis = build_redis_runtime_deps(config_value);
+    let s3 = build_s3_runtime_deps_from(config_value);
+}
+"#;
+        let canonical_file = syn::parse_file(canonical)?;
+        assert!(
+            runtime_config_snapshot_findings_for_file(&canonical_file).is_empty(),
+            "canonical snapshot funnel must pass"
+        );
+        write(&runtime_path, canonical)?;
+        let report = collect_report(&root)?;
+        let is_config_finding = |finding: &Finding<Rule>| {
+            finding.rule == Rule::ForbiddenWiring
+                && finding.subject == RUNTIME_LIB_PATH
+                && finding.detail.contains("configuration snapshot")
+        };
+        assert!(
+            !report.findings.iter().any(is_config_finding),
+            "canonical fixture must pass the live collect_report entry"
+        );
+
+        let ambient_closure = canonical.replace(
+            "runtime_inputs\n            .config()\n            .get(name)\n            .map(|value| value.expose().to_owned())",
+            "std::env::var(name).ok()",
+        );
+        write(&runtime_path, &ambient_closure)?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(is_config_finding),
+            "live collect_report entry must reject ambient origin without changing provider anchors"
+        );
+        for (label, mutated) in [
+            ("ambient config_value origin", ambient_closure),
+            (
+                "duplicate snapshot capture",
+                canonical.replace(
+                    "let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource);",
+                    "let _snapshot_bait = RuntimeConfigSnapshot::capture(EnvConfigSource);\n    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource);",
+                ),
+            ),
+            (
+                "vault ambient call beside compliant bait",
+                canonical.replace(
+                    "let vault = build_vault_runtime_deps(config_value);",
+                    "let _vault_bait = build_vault_runtime_deps(config_value);\n    let vault = build_vault_runtime_deps(|name| std::env::var(name).ok());",
+                ),
+            ),
+            (
+                "redis ambient call beside compliant bait",
+                canonical.replace(
+                    "let redis = build_redis_runtime_deps(config_value);",
+                    "let _redis_bait = build_redis_runtime_deps(config_value);\n    let redis = build_redis_runtime_deps(|name| std::env::var(name).ok());",
+                ),
+            ),
+            (
+                "s3 ambient call beside compliant bait",
+                canonical.replace(
+                    "let s3 = build_s3_runtime_deps_from(config_value);",
+                    "let _s3_bait = build_s3_runtime_deps_from(config_value);\n    let s3 = build_s3_runtime_deps_from(|name| std::env::var(name).ok());",
+                ),
+            ),
+            (
+                "captured snapshot discarded before RuntimeInputs",
+                canonical.replace(
+                    "let runtime_inputs = RuntimeInputs::new(runtime_config, None);",
+                    "let _discarded = runtime_config;\n    let runtime_inputs = RuntimeInputs::new(snapshot_from_helper(), None);",
+                ),
+            ),
+        ] {
+            let file = syn::parse_file(&mutated)?;
+            assert!(
+                runtime_config_snapshot_findings_for_file(&file)
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ForbiddenWiring),
+                "snapshot funnel must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_secret_transfer_allowlist_rejects_extra_handoff() -> Result<()> {
+        let root = fixture_root("runtime-secret-transfer-allowlist")?;
+        write(&root.join(RUNTIME_CONFIG_FIXTURE_MARKER), "enabled\n")?;
+        let path = root.join("assemblies/runtime/src/event_transport.rs");
+        let canonical =
+            "fn build_dlx_vault_key_providers_from() { hot_token.transfer_secret_allocation(); }\n";
+        write(&path, canonical)?;
+        let has_transfer_finding = |report: &Report| {
+            report.findings.iter().any(|finding| {
+                finding.rule == Rule::ForbiddenWiring
+                    && finding.detail.contains("secret transfer allowlist")
+            })
+        };
+        assert!(!has_transfer_finding(&collect_report(&root)?));
+        write(
+            &path,
+            &(canonical.to_owned() + "fn leak() { copied_secret.transfer_secret_allocation(); }\n"),
+        )?;
+        assert!(has_transfer_finding(&collect_report(&root)?));
         Ok(())
     }
 

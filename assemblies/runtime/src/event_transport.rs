@@ -1847,7 +1847,7 @@ pub(crate) fn build_dlx_vault_key_providers_from(
     let hot = VaultKeyProvider::new(
         build_vault_tls_client_from(get)?,
         addr.clone(),
-        hot_token.into_string(),
+        hot_token.transfer_secret_allocation(),
         mount.clone(),
         DEFAULT_VAULT_TIMEOUT,
     )
@@ -1855,7 +1855,7 @@ pub(crate) fn build_dlx_vault_key_providers_from(
     let archive = VaultKeyProvider::new(
         build_vault_tls_client_from(get)?,
         addr,
-        archive_token.into_string(),
+        archive_token.transfer_secret_allocation(),
         mount,
         DEFAULT_VAULT_TIMEOUT,
     )
