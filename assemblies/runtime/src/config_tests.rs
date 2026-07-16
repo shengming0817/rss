@@ -102,6 +102,80 @@ fn runtime_config_snapshot_reads_source_once_and_replays_stable_values() {
 }
 
 #[test]
+fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_mapping() {
+    const PG_REDIS_KEYS: [&str; 26] = [
+        "RSS_PG_HOST",
+        "RSS_PG_PORT",
+        "RSS_PG_DATABASE",
+        "RSS_PG_SSL_MODE",
+        "RSS_PG_SSL_ROOT_CERT_PATH",
+        "RSS_PG_USERNAME",
+        "RSS_PG_PASSWORD",
+        "RSS_PG_MAX_CONNECTIONS",
+        "RSS_PG_READ_USERNAME",
+        "RSS_PG_READ_PASSWORD",
+        "RSS_PG_READ_MAX_CONNECTIONS",
+        "RSS_PG_MIGRATOR_USERNAME",
+        "RSS_PG_MIGRATOR_PASSWORD",
+        "RSS_PG_AUDIT_ADMIN_USERNAME",
+        "RSS_PG_AUDIT_ADMIN_PASSWORD",
+        "RSS_PG_DLX_ARCHIVER_USERNAME",
+        "RSS_PG_DLX_ARCHIVER_PASSWORD",
+        "RSS_PG_DLX_VERIFIER_USERNAME",
+        "RSS_PG_DLX_VERIFIER_PASSWORD",
+        "RSS_PG_DLX_PURGER_USERNAME",
+        "RSS_PG_DLX_PURGER_PASSWORD",
+        "RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES",
+        "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS",
+        "RSS_REDIS_URL",
+        "RSS_REDIS_ALLOW_PLAINTEXT",
+        "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS",
+    ];
+
+    let source = FakeSource::new(PG_REDIS_KEYS.iter().filter_map(|key| {
+        let value = match *key {
+            "RSS_PG_SSL_ROOT_CERT_PATH"
+            | "RSS_PG_AUDIT_ADMIN_USERNAME"
+            | "RSS_PG_AUDIT_ADMIN_PASSWORD" => return None,
+            "RSS_PG_HOST" => "pg.generation-one",
+            "RSS_PG_PORT" => "5432",
+            "RSS_PG_DATABASE" => "rss",
+            "RSS_PG_SSL_MODE" => "verify-full",
+            "RSS_REDIS_URL" => "rediss://cache.generation-one:6380/0",
+            "RSS_PG_MAX_CONNECTIONS" | "RSS_PG_READ_MAX_CONNECTIONS" => "5",
+            "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS"
+            | "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS" => "7",
+            "RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES" | "RSS_REDIS_ALLOW_PLAINTEXT" => {
+                "false"
+            }
+            key if key.ends_with("USERNAME") => "role",
+            key if key.ends_with("PASSWORD") => "secret",
+            _ => return None,
+        };
+        Some((*key, FakeValue::Present(value.to_owned())))
+    }));
+    let reads = read_log(&source);
+    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+
+    for _ in 0..2 {
+        let pg = crate::infra::pg::PgRuntimeConfig::from_snapshot(snapshot.view())
+            .expect("PG typed mapping succeeds");
+        let redis = crate::infra::redis::RedisRuntimeConfig::from_snapshot(snapshot.view())
+            .expect("Redis typed mapping succeeds");
+        drop((pg, redis));
+    }
+
+    let reads = reads.lock().expect("read log mutex");
+    for key in PG_REDIS_KEYS {
+        assert_eq!(
+            reads.iter().filter(|read| read.as_str() == key).count(),
+            1,
+            "{key} must be read once by snapshot capture and never by typed mapping"
+        );
+    }
+}
+
+#[test]
 fn runtime_config_catalog_deduplicates_static_dynamic_keys_and_excludes_maintenance() {
     let source = FakeSource::new([(
         "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS",

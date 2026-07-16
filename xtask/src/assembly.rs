@@ -1552,7 +1552,7 @@ impl SecurityCloseoutProgram {
             ..SecurityCloseoutEvidence::default()
         };
         let mut seen = BTreeSet::new();
-        let mut stack = vec!["run".to_string()];
+        let mut stack = vec!["free::run".to_string()];
         while let Some(name) = stack.pop() {
             if !seen.insert(name.clone()) {
                 continue;
@@ -1591,6 +1591,7 @@ fn file_security_closeout_program(file: &syn::File) -> SecurityCloseoutProgram {
 struct SecurityCloseoutVisitor {
     program: SecurityCloseoutProgram,
     function_stack: Vec<String>,
+    impl_stack: Vec<String>,
 }
 
 impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
@@ -1605,16 +1606,40 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         if has_cfg_test(&node.attrs) {
             return;
         }
-        self.function_stack.push(node.sig.ident.to_string());
+        self.function_stack
+            .push(format!("free::{}", node.sig.ident));
         syn::visit::visit_item_fn(self, node);
         self.function_stack.pop();
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        if has_cfg_test(&node.attrs) {
+            return;
+        }
+        let owner = match node.self_ty.as_ref() {
+            syn::Type::Path(path) => path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string()),
+            _ => None,
+        };
+        if let Some(owner) = owner {
+            self.impl_stack.push(owner);
+            syn::visit::visit_item_impl(self, node);
+            self.impl_stack.pop();
+        }
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
         if has_cfg_test(&node.attrs) {
             return;
         }
-        self.function_stack.push(node.sig.ident.to_string());
+        let Some(owner) = self.impl_stack.last() else {
+            return;
+        };
+        self.function_stack
+            .push(format!("{owner}::{}", node.sig.ident));
         syn::visit::visit_impl_item_fn(self, node);
         self.function_stack.pop();
     }
@@ -1631,7 +1656,9 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
 
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         if let Some(call) = call_path_last_segment(node.func.as_ref()) {
-            self.record_call(&call);
+            if let Some(identity) = self.path_call_identity(node.func.as_ref()) {
+                self.record_call(&identity);
+            }
             if call == "build_runtime_oidc_provider" {
                 self.record_evidence(|e| e.runtime_oidc_provider_build = true);
             }
@@ -1661,7 +1688,9 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let method = node.method.to_string();
-        self.record_call(&method);
+        if let Some(owner) = self.method_receiver_owner(&node.receiver) {
+            self.record_call(&format!("{owner}::{method}"));
+        }
         if node.method == "keys_jwks" {
             self.record_evidence(|e| e.jwks_keys_jwks = true);
         }
@@ -1709,6 +1738,54 @@ impl SecurityCloseoutVisitor {
     fn record_evidence(&mut self, f: impl FnOnce(&mut SecurityCloseoutEvidence)) {
         if let Some(info) = self.current_info_mut() {
             f(&mut info.evidence);
+        }
+    }
+
+    fn method_receiver_owner(&self, receiver: &syn::Expr) -> Option<String> {
+        let receiver = match receiver {
+            syn::Expr::Paren(paren) => paren.expr.as_ref(),
+            syn::Expr::Group(group) => group.expr.as_ref(),
+            _ => receiver,
+        };
+        if matches!(receiver, syn::Expr::Path(path) if path.path.is_ident("self")) {
+            return self.impl_stack.last().cloned();
+        }
+        let syn::Expr::Call(call) = receiver else {
+            return None;
+        };
+        let syn::Expr::Path(path) = call.func.as_ref() else {
+            return None;
+        };
+        let segments = path.path.segments.iter().collect::<Vec<_>>();
+        (segments.len() >= 2).then(|| segments[segments.len() - 2].ident.to_string())
+    }
+
+    fn path_call_identity(&self, function: &syn::Expr) -> Option<String> {
+        let syn::Expr::Path(path) = function else {
+            return None;
+        };
+        let segments = path.path.segments.iter().collect::<Vec<_>>();
+        let method = segments.last()?.ident.to_string();
+        let Some(owner) = segments
+            .iter()
+            .rev()
+            .nth(1)
+            .map(|segment| segment.ident.to_string())
+        else {
+            return Some(format!("free::{method}"));
+        };
+        if owner == "Self" {
+            return self
+                .impl_stack
+                .last()
+                .map(|owner| format!("{owner}::{method}"));
+        }
+        if owner.chars().next().is_some_and(char::is_uppercase) {
+            Some(format!("{owner}::{method}"))
+        } else {
+            // Module-qualified free functions retain their free-function identity. This is
+            // conservative across source files while preventing Type::method name collisions.
+            Some(format!("free::{method}"))
         }
     }
 }
@@ -2954,7 +3031,7 @@ fn wire_domain_transport_from() {
     transport
 }
 
-fn run() {
+fn run_startup() {
     let runtime_oidc = build_runtime_oidc_provider();
     let provider = runtime_oidc.provider();
     module.resources.push(runtime_oidc.managed_resource());
@@ -2971,6 +3048,10 @@ fn run() {
     let distributed = wire_distributed(deps);
     let _ = wire_event_transport(&pg, distributed, subscribers, cfg);
     let _ = assemble_authed_routers(provider);
+}
+
+fn run() {
+    run_startup();
 }
 "#;
 
@@ -2994,7 +3075,7 @@ fn wire_domain_transport_from() {
     transport
 }
 
-fn run() {
+fn run_startup() {
     let runtime_oidc = build_runtime_oidc_provider();
     let provider = runtime_oidc.provider();
     module.resources.push(runtime_oidc.managed_resource());
@@ -3012,7 +3093,45 @@ fn run() {
     let _ = assemble_authed_routers(provider);
     launch();
 }
+
+fn run() {
+    run_startup();
+}
 "#;
+
+    fn security_closeout_lifecycle_owner_source() -> String {
+        SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+            "fn run() {\n    run_startup();\n}",
+            r#"struct RuntimeLifecycleOwner;
+
+impl RuntimeLifecycleOwner {
+    fn new() -> Self { Self }
+
+    async fn run(self) {
+        run_startup();
+    }
+}
+
+pub async fn run() {
+    RuntimeLifecycleOwner::new().run().await;
+}"#,
+        )
+    }
+
+    fn security_closeout_disconnected_free_run_source() -> String {
+        SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+            "fn run() {\n    run_startup();\n}",
+            r#"struct DeadOwner;
+
+impl DeadOwner {
+    fn run(self) {
+        run_startup();
+    }
+}
+
+pub fn run() {}"#,
+        )
+    }
 
     const SECURITY_CLOSEOUT_LAUNCH_SOURCE: &str = r#"
 fn launch() {
@@ -3944,6 +4063,70 @@ mod tests {
 
         let (_count, findings) = validate_root(&root)?;
         assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_follows_qualified_lifecycle_owner_run() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-lifecycle-owner-green");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        write_runtime_src(&root, "lib.rs", &security_closeout_lifecycle_owner_source())?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_disconnected_free_run() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-disconnected-free-run");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        write_runtime_src(
+            &root,
+            "lib.rs",
+            &security_closeout_disconnected_free_run_source(),
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProductionSecurityJwksCloseout),
+            "disconnected impl method named run must not lend JWKS evidence to free run: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProductionSecuritySpiffeCloseout),
+            "disconnected impl method named run must not lend SPIFFE evidence to free run: {findings:?}"
+        );
+
+        let associated_call_bait = security_closeout_disconnected_free_run_source()
+            .replace("fn run_startup()", "fn decoy()")
+            .replace("        run_startup();\n", "")
+            .replace("pub fn run() {}", "pub fn run() { DeadOwner::decoy(); }");
+        write_runtime_src(&root, "lib.rs", &associated_call_bait)?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProductionSecurityJwksCloseout),
+            "Type::method must not resolve to an evidence-bearing free function with the same name: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProductionSecuritySpiffeCloseout),
+            "associated/free function identities must remain disjoint for SPIFFE evidence: {findings:?}"
+        );
         Ok(())
     }
 

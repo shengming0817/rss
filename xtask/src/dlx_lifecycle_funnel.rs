@@ -503,34 +503,252 @@ fn required_runtime_source_findings(path: &Path, content: &str) -> Vec<Finding<R
 }
 
 fn required_pg_shapes(file: &syn::File) -> Vec<String> {
-    [
+    const ROLES: [(&str, &str, &str, &str, &str, &str); 3] = [
         (
-            "build_pg_dlx_archiver_config_from",
+            "dlx_archiver",
+            "PG_DLX_ARCHIVER_ROLE_KEYS",
+            "PG_DLX_ARCHIVER_USERNAME_ENV",
             "RSS_PG_DLX_ARCHIVER_USERNAME",
+            "PG_DLX_ARCHIVER_PASSWORD_ENV",
             "RSS_PG_DLX_ARCHIVER_PASSWORD",
         ),
         (
-            "build_pg_dlx_verifier_config_from",
+            "dlx_verifier",
+            "PG_DLX_VERIFIER_ROLE_KEYS",
+            "PG_DLX_VERIFIER_USERNAME_ENV",
             "RSS_PG_DLX_VERIFIER_USERNAME",
+            "PG_DLX_VERIFIER_PASSWORD_ENV",
             "RSS_PG_DLX_VERIFIER_PASSWORD",
         ),
         (
-            "build_pg_dlx_purger_config_from",
+            "dlx_purger",
+            "PG_DLX_PURGER_ROLE_KEYS",
+            "PG_DLX_PURGER_USERNAME_ENV",
             "RSS_PG_DLX_PURGER_USERNAME",
+            "PG_DLX_PURGER_PASSWORD_ENV",
             "RSS_PG_DLX_PURGER_PASSWORD",
         ),
-    ]
-    .into_iter()
-    .filter(|(function, username, password)| {
-        !function_ends_with_string_config_call(
-            file,
-            function,
-            "build_pg_config_with_user_env",
-            &[username, password],
-        )
-    })
-    .map(|(function, _, _)| format!("structured `{function}` PG env builder"))
-    .collect()
+    ];
+    let fields = file.items.iter().find_map(|item| match item {
+        syn::Item::Struct(item) if item.ident == "PgRuntimeConfig" => match &item.fields {
+            syn::Fields::Named(fields) => Some(fields),
+            _ => None,
+        },
+        _ => None,
+    });
+    let constructor = file.items.iter().find_map(|item| match item {
+        syn::Item::Impl(item)
+            if item.trait_.is_none()
+                && item.self_ty.to_token_stream().to_string() == "PgRuntimeConfig" =>
+        {
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == "from_snapshot" => Some(method),
+                _ => None,
+            })
+        }
+        _ => None,
+    });
+    let valid = fields.is_some_and(|fields| {
+        ROLES.iter().all(|(binding, _, _, _, _, _)| {
+            fields
+                .named
+                .iter()
+                .filter(|field| field.ident.as_ref().is_some_and(|ident| ident == *binding))
+                .count()
+                == 1
+        })
+    }) && ROLES.iter().all(
+        |(_, descriptor, username_const, username, password_const, password)| {
+            const_string_value(file, username_const).as_deref() == Some(*username)
+                && const_string_value(file, password_const).as_deref() == Some(*password)
+                && exact_pg_role_descriptor(file, descriptor, username_const, password_const)
+        },
+    ) && constructor
+        .is_some_and(|constructor| exact_pg_dlx_role_mapping(constructor, &ROLES));
+    (!valid)
+        .then(|| "typed `PgRuntimeConfig::from_snapshot` DLX role mapping".to_owned())
+        .into_iter()
+        .collect()
+}
+
+fn exact_pg_dlx_role_mapping(
+    method: &syn::ImplItemFn,
+    roles: &[(&str, &str, &str, &str, &str, &str)],
+) -> bool {
+    let snapshot_argument_is_exact = method.sig.inputs.iter().any(|argument| {
+        let syn::FnArg::Typed(argument) = argument else {
+            return false;
+        };
+        let syn::Pat::Ident(binding) = argument.pat.as_ref() else {
+            return false;
+        };
+        binding.ident == "config" && type_path_is_exact(argument.ty.as_ref(), "SnapshotConfig")
+    });
+    if !snapshot_argument_is_exact {
+        return false;
+    }
+
+    let mut calls = DlxRoleConfigCallCount::default();
+    syn::visit::Visit::visit_block(&mut calls, &method.block);
+    calls.0 == roles.len()
+        && roles.iter().all(|(binding, descriptor, _, _, _, _)| {
+            exact_role_local(method, binding, descriptor)
+                && returned_self_field_is_exact(&method.block, binding)
+        })
+}
+
+fn exact_pg_role_descriptor(
+    file: &syn::File,
+    descriptor: &str,
+    username_const: &str,
+    password_const: &str,
+) -> bool {
+    let descriptors = file.items.iter().filter_map(|item| match item {
+        syn::Item::Const(item) if item.ident == descriptor => Some(item),
+        _ => None,
+    });
+    let mut descriptors = descriptors.collect::<Vec<_>>();
+    let Some(item) = (descriptors.len() == 1).then(|| descriptors.remove(0)) else {
+        return false;
+    };
+    if !matches!(item.vis, syn::Visibility::Inherited)
+        || !type_path_is_exact(&item.ty, "PgRoleKeys")
+    {
+        return false;
+    }
+    let syn::Expr::Struct(value) = item.expr.as_ref() else {
+        return false;
+    };
+    if !path_is_ident(&value.path, "PgRoleKeys") || value.rest.is_some() || value.fields.len() != 2
+    {
+        return false;
+    }
+    let field_is = |name: &str, expected: &str| {
+        value
+            .fields
+            .iter()
+            .filter(|field| {
+                matches!(&field.member, syn::Member::Named(member) if member == name)
+                    && expression_is_ident(&field.expr, expected)
+            })
+            .count()
+            == 1
+    };
+    field_is("username", username_const) && field_is("password", password_const)
+}
+
+fn type_path_is_exact(ty: &syn::Type, expected: &str) -> bool {
+    let syn::Type::Path(path) = ty else {
+        return false;
+    };
+    path.qself.is_none()
+        && path.path.segments.len() == 1
+        && path
+            .path
+            .segments
+            .first()
+            .is_some_and(|segment| segment.ident == expected)
+}
+
+fn exact_role_local(method: &syn::ImplItemFn, binding: &str, descriptor: &str) -> bool {
+    let mut locals = method.block.stmts.iter().filter_map(|statement| {
+        let syn::Stmt::Local(local) = statement else {
+            return None;
+        };
+        let syn::Pat::Ident(local_binding) = &local.pat else {
+            return None;
+        };
+        if local_binding.ident != binding
+            || local_binding.by_ref.is_some()
+            || local_binding.mutability.is_some()
+            || local_binding.subpat.is_some()
+        {
+            return None;
+        }
+        Some(local.init.as_ref()?.expr.as_ref())
+    });
+    let Some(expression) = locals.next() else {
+        return false;
+    };
+    if locals.next().is_some() {
+        return false;
+    }
+    let syn::Expr::Try(expression) = expression else {
+        return false;
+    };
+    let syn::Expr::MethodCall(call) = expression.expr.as_ref() else {
+        return false;
+    };
+    call.method == "role_config"
+        && call.turbofish.is_none()
+        && expression_is_ident(call.receiver.as_ref(), "shared")
+        && call.args.len() == 2
+        && expression_is_ident(&call.args[0], "config")
+        && expression_is_ident(&call.args[1], descriptor)
+}
+
+fn expression_is_ident(expression: &syn::Expr, expected: &str) -> bool {
+    let syn::Expr::Path(path) = expression else {
+        return false;
+    };
+    path.qself.is_none()
+        && path.path.segments.len() == 1
+        && path
+            .path
+            .segments
+            .first()
+            .is_some_and(|segment| segment.ident == expected)
+}
+
+fn returned_self_field_is_exact(block: &syn::Block, binding: &str) -> bool {
+    let Some(syn::Stmt::Expr(syn::Expr::Call(ok), None)) = block.stmts.last() else {
+        return false;
+    };
+    if !expression_is_ident(ok.func.as_ref(), "Ok") || ok.args.len() != 1 {
+        return false;
+    }
+    let syn::Expr::Struct(returned) = &ok.args[0] else {
+        return false;
+    };
+    if returned.rest.is_some() || !path_is_ident(&returned.path, "Self") {
+        return false;
+    }
+    let mut fields = returned
+        .fields
+        .iter()
+        .filter(|field| matches!(&field.member, syn::Member::Named(member) if member == binding));
+    fields
+        .next()
+        .is_some_and(|field| expression_is_ident(&field.expr, binding))
+        && fields.next().is_none()
+}
+
+fn path_is_ident(path: &syn::Path, expected: &str) -> bool {
+    path.segments.len() == 1
+        && path
+            .segments
+            .first()
+            .is_some_and(|segment| segment.ident == expected)
+}
+
+#[derive(Default)]
+struct DlxRoleConfigCallCount(usize);
+
+impl<'ast> syn::visit::Visit<'ast> for DlxRoleConfigCallCount {
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "role_config"
+            && call.args.iter().any(|argument| {
+                matches!(argument, syn::Expr::Path(path)
+                if path.path.segments.last().is_some_and(|segment| {
+                    segment.ident.to_string().starts_with("PG_DLX_")
+                        && segment.ident.to_string().ends_with("_ROLE_KEYS")
+                }))
+            })
+        {
+            self.0 += 1;
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
 }
 
 fn required_s3_shapes(file: &syn::File) -> Vec<String> {
@@ -647,6 +865,7 @@ fn const_string_value(file: &syn::File, name: &str) -> Option<String> {
     })
 }
 
+#[cfg(test)]
 fn function_ends_with_string_config_call(
     file: &syn::File,
     function: &str,
@@ -784,7 +1003,61 @@ fn has_provider_output_binding(file: &syn::File, port: &str, provider: &str) -> 
 mod tests {
     use super::*;
 
+    fn canonical_pg_runtime_config_fixture() -> &'static str {
+        r#"
+            use crate::config::SnapshotConfig;
+
+            const PG_DLX_ARCHIVER_USERNAME_ENV: &str = "RSS_PG_DLX_ARCHIVER_USERNAME";
+            const PG_DLX_ARCHIVER_PASSWORD_ENV: &str = "RSS_PG_DLX_ARCHIVER_PASSWORD";
+            const PG_DLX_VERIFIER_USERNAME_ENV: &str = "RSS_PG_DLX_VERIFIER_USERNAME";
+            const PG_DLX_VERIFIER_PASSWORD_ENV: &str = "RSS_PG_DLX_VERIFIER_PASSWORD";
+            const PG_DLX_PURGER_USERNAME_ENV: &str = "RSS_PG_DLX_PURGER_USERNAME";
+            const PG_DLX_PURGER_PASSWORD_ENV: &str = "RSS_PG_DLX_PURGER_PASSWORD";
+
+            struct PgRoleKeys {
+                username: &'static str,
+                password: &'static str,
+            }
+
+            const PG_DLX_ARCHIVER_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
+                username: PG_DLX_ARCHIVER_USERNAME_ENV,
+                password: PG_DLX_ARCHIVER_PASSWORD_ENV,
+            };
+            const PG_DLX_VERIFIER_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
+                username: PG_DLX_VERIFIER_USERNAME_ENV,
+                password: PG_DLX_VERIFIER_PASSWORD_ENV,
+            };
+            const PG_DLX_PURGER_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
+                username: PG_DLX_PURGER_USERNAME_ENV,
+                password: PG_DLX_PURGER_PASSWORD_ENV,
+            };
+
+            pub(crate) struct PgRuntimeConfig {
+                dlx_archiver: PgConfig,
+                dlx_verifier: PgConfig,
+                dlx_purger: PgConfig,
+            }
+
+            impl PgRuntimeConfig {
+                pub(crate) fn from_snapshot(config: SnapshotConfig<'_>) -> Result<Self, ()> {
+                    let shared = PgSharedValues::from_snapshot(config)?;
+                    let dlx_archiver =
+                        shared.role_config(config, PG_DLX_ARCHIVER_ROLE_KEYS)?;
+                    let dlx_verifier =
+                        shared.role_config(config, PG_DLX_VERIFIER_ROLE_KEYS)?;
+                    let dlx_purger = shared.role_config(config, PG_DLX_PURGER_ROLE_KEYS)?;
+                    Ok(Self {
+                        dlx_archiver,
+                        dlx_verifier,
+                        dlx_purger,
+                    })
+                }
+            }
+        "#
+    }
+
     #[test]
+    #[allow(clippy::cognitive_complexity)]
     fn synthetic_red_rejects_every_bypass_class() {
         let retired = scan_content(
             Path::new("assemblies/runtime/src/event_transport.rs"),
@@ -827,6 +1100,113 @@ mod tests {
             "pub(crate) fn unrelated() {}",
         );
         assert_eq!(missing[0].rule, Rule::MissingRuntimeProvider);
+        let canonical = canonical_pg_runtime_config_fixture();
+        let wrong_role = canonical.replace(
+            "RSS_PG_DLX_ARCHIVER_USERNAME",
+            "RSS_PG_DLX_VERIFIER_USERNAME",
+        );
+        assert_ne!(wrong_role, canonical);
+        assert!(
+            !required_runtime_source_findings(
+                Path::new("assemblies/runtime/src/infra/pg.rs"),
+                &wrong_role,
+            )
+            .is_empty()
+        );
+
+        let crossed_credentials = canonical
+            .replace("RSS_PG_DLX_ARCHIVER_USERNAME", "SWAPPED_USERNAME")
+            .replace(
+                "RSS_PG_DLX_VERIFIER_USERNAME",
+                "RSS_PG_DLX_ARCHIVER_USERNAME",
+            )
+            .replace("SWAPPED_USERNAME", "RSS_PG_DLX_VERIFIER_USERNAME")
+            .replace("RSS_PG_DLX_ARCHIVER_PASSWORD", "SWAPPED_PASSWORD")
+            .replace(
+                "RSS_PG_DLX_VERIFIER_PASSWORD",
+                "RSS_PG_DLX_ARCHIVER_PASSWORD",
+            )
+            .replace("SWAPPED_PASSWORD", "RSS_PG_DLX_VERIFIER_PASSWORD");
+        assert!(
+            !required_runtime_source_findings(
+                Path::new("assemblies/runtime/src/infra/pg.rs"),
+                &crossed_credentials,
+            )
+            .is_empty(),
+            "username/password must not be permuted across DLX roles",
+        );
+
+        let crossed_descriptors = canonical
+            .replace("PG_DLX_ARCHIVER_ROLE_KEYS)?", "SWAPPED_ROLE_KEYS)?")
+            .replace("PG_DLX_VERIFIER_ROLE_KEYS)?", "PG_DLX_ARCHIVER_ROLE_KEYS)?")
+            .replace("SWAPPED_ROLE_KEYS)?", "PG_DLX_VERIFIER_ROLE_KEYS)?");
+        assert_ne!(crossed_descriptors, canonical);
+        assert!(
+            !required_runtime_source_findings(
+                Path::new("assemblies/runtime/src/infra/pg.rs"),
+                &crossed_descriptors,
+            )
+            .is_empty(),
+            "role locals must consume their exact descriptor rather than a transposed descriptor",
+        );
+
+        let crossed_descriptor_fields = canonical.replacen(
+            "username: PG_DLX_ARCHIVER_USERNAME_ENV,\n                password: PG_DLX_ARCHIVER_PASSWORD_ENV,",
+            "username: PG_DLX_ARCHIVER_PASSWORD_ENV,\n                password: PG_DLX_ARCHIVER_USERNAME_ENV,",
+            1,
+        );
+        assert_ne!(crossed_descriptor_fields, canonical);
+        assert!(
+            !required_runtime_source_findings(
+                Path::new("assemblies/runtime/src/infra/pg.rs"),
+                &crossed_descriptor_fields,
+            )
+            .is_empty(),
+            "descriptor username/password fields must not be transposed",
+        );
+
+        let transposed_fields = canonical.replace(
+            "Ok(Self {\n                        dlx_archiver,\n                        dlx_verifier,",
+            "Ok(Self {\n                        dlx_archiver: dlx_verifier,\n                        dlx_verifier: dlx_archiver,",
+        );
+        assert_ne!(transposed_fields, canonical);
+        assert!(
+            !required_runtime_source_findings(
+                Path::new("assemblies/runtime/src/infra/pg.rs"),
+                &transposed_fields,
+            )
+            .is_empty(),
+            "Self fields must be filled from their same-name role bindings",
+        );
+
+        let duplicate_bait = canonical.replace(
+            "let dlx_archiver =\n                        shared.role_config(",
+            "let _compliant_bait =\n                        shared.role_config(config, PG_DLX_ARCHIVER_ROLE_KEYS)?;\n\
+                    let dlx_archiver =\n                        shared.role_config(",
+        );
+        assert_ne!(duplicate_bait, canonical);
+        assert!(
+            !required_runtime_source_findings(
+                Path::new("assemblies/runtime/src/infra/pg.rs"),
+                &duplicate_bait,
+            )
+            .is_empty(),
+            "an unused compliant call must not bait the typed mapping guard",
+        );
+
+        let wrapper_bait = duplicate_bait.replacen(
+            "let dlx_archiver =\n                        shared.role_config(",
+            "let dlx_archiver =\n                        wrapper_role_config(",
+            1,
+        );
+        assert!(
+            !required_runtime_source_findings(
+                Path::new("assemblies/runtime/src/infra/pg.rs"),
+                &wrapper_bait,
+            )
+            .is_empty(),
+            "a wrapper plus compliant bait must not satisfy the direct mapping",
+        );
     }
 
     #[test]
@@ -843,35 +1223,7 @@ mod tests {
         assert!(
             required_runtime_source_findings(
                 Path::new("assemblies/runtime/src/infra/pg.rs"),
-                r#"
-                    pub(crate) fn build_pg_dlx_archiver_config_from(
-                        get: impl Fn(&str) -> Option<String>,
-                    ) -> Result<(), ()> {
-                        build_pg_config_with_user_env(
-                            &get,
-                            "RSS_PG_DLX_ARCHIVER_USERNAME",
-                            "RSS_PG_DLX_ARCHIVER_PASSWORD",
-                        )
-                    }
-                    pub(crate) fn build_pg_dlx_verifier_config_from(
-                        get: impl Fn(&str) -> Option<String>,
-                    ) -> Result<(), ()> {
-                        build_pg_config_with_user_env(
-                            &get,
-                            "RSS_PG_DLX_VERIFIER_USERNAME",
-                            "RSS_PG_DLX_VERIFIER_PASSWORD",
-                        )
-                    }
-                    pub(crate) fn build_pg_dlx_purger_config_from(
-                        get: impl Fn(&str) -> Option<String>,
-                    ) -> Result<(), ()> {
-                        build_pg_config_with_user_env(
-                            &get,
-                            "RSS_PG_DLX_PURGER_USERNAME",
-                            "RSS_PG_DLX_PURGER_PASSWORD",
-                        )
-                    }
-                "#,
+                canonical_pg_runtime_config_fixture(),
             )
             .is_empty(),
         );
@@ -900,8 +1252,8 @@ mod tests {
             required_runtime_source_findings(Path::new("assemblies/runtime/src/infra/pg.rs"), bait);
         assert_eq!(
             missing.len(),
-            3,
-            "comments and unrelated literals are not providers"
+            1,
+            "comments and unrelated literals are not a typed PG role bundle"
         );
 
         let s3_bait = r#"

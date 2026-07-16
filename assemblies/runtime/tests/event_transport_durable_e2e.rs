@@ -51,11 +51,8 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode
 use tokio_util::sync::CancellationToken;
 
 use runtime::event_transport::{bridge_generated_subscriptions, build_event_transport_config_from};
-use runtime::test_support::wire_event_transport;
-use runtime::{
-    SharedRuntimeDeps, SystemClock, build_redis_runtime_deps, build_vault_runtime_deps,
-    wire_distributed,
-};
+use runtime::test_support::{build_redis_runtime_deps_from_values, wire_event_transport};
+use runtime::{SharedRuntimeDeps, SystemClock, build_vault_runtime_deps, wire_distributed};
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 
 const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
@@ -738,12 +735,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // ── 步骤 6：wire_event_transport → DomainModuleResult（relay OS 线程 + consumer worker 启动）────
 
     let redis_fixture = testkit::env_or_redis().await?;
-    let redis = build_redis_runtime_deps(|name| match name {
-        "RSS_REDIS_URL" => Some(redis_fixture.url().to_string()),
-        "RSS_REDIS_ALLOW_PLAINTEXT" => Some("true".to_string()),
-        _ => None,
-    })
-    .await?;
+    let redis =
+        build_redis_runtime_deps_from_values(redis_fixture.url().to_string(), Some("true")).await?;
     let s3 = runtime::build_s3_runtime_deps_from(|name| match name {
         "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:1".to_string()),
         "RSS_S3_ALLOW_PLAINTEXT" => Some("true".to_string()),

@@ -108,7 +108,7 @@ mergeExtends = probes,resources,workers
 05 | run.plan.load | assemblies/runtime/src/lib.rs | plan::RuntimePlan::bundled().context( | status=ok
 06 | run.provider.oidc | assemblies/runtime/src/lib.rs | build_runtime_oidc_provider(runtime_inputs.config()).context( | status=ok
 07 | run.provider.vault | assemblies/runtime/src/lib.rs | build_vault_runtime_deps(config_value) | status=ok
-08 | run.provider.redis | assemblies/runtime/src/lib.rs | build_redis_runtime_deps(config_value) | status=ok
+08 | run.provider.redis | assemblies/runtime/src/lib.rs | build_redis_runtime_deps(redis_config) | status=ok
 09 | run.provider.s3 | assemblies/runtime/src/lib.rs | build_s3_runtime_deps_from(config_value) | status=ok
 10 | run.provider.pg | assemblies/runtime/src/lib.rs | PgRuntimeDeps::setup_with_audit_admin_config | status=ok
 11 | run.shared-deps | assemblies/runtime/src/lib.rs | let deps = SharedRuntimeDeps { | status=ok

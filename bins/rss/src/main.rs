@@ -47,13 +47,21 @@ async fn main() -> anyhow::Result<()> {
     let runtime_inputs = runtime::prepare_runtime()?;
     let operator_result = match command {
         CommandFamily::Serving => return runtime::run(runtime_inputs).await,
-        CommandFamily::Postgres => runtime::run_postgres_reader_migration_command(&args).await,
-        CommandFamily::Projection => runtime::run_projection_control_command(&args).await,
-        CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args).await,
-        CommandFamily::Dlq => runtime::run_dlq_control_command(&args).await,
-        CommandFamily::ReconcileTarget => runtime::run_reconcile_target_command(&args).await,
+        CommandFamily::Postgres => {
+            runtime::run_postgres_reader_migration_command(&args, &runtime_inputs).await
+        }
+        CommandFamily::Projection => {
+            runtime::run_projection_control_command(&args, &runtime_inputs).await
+        }
+        CommandFamily::AuditLedgerVerify => {
+            runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await
+        }
+        CommandFamily::Dlq => runtime::run_dlq_control_command(&args, &runtime_inputs).await,
+        CommandFamily::ReconcileTarget => {
+            runtime::run_reconcile_target_command(&args, &runtime_inputs).await
+        }
         CommandFamily::SettingsConfigValueMaintenance => {
-            runtime::run_settings_config_value_maintenance(&args).await
+            runtime::run_settings_config_value_maintenance(&args, &runtime_inputs).await
         }
         CommandFamily::OidcJwksExport => runtime::run_oidc_jwks_export_command(&args).await,
     };

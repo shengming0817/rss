@@ -22,11 +22,8 @@ use base64::Engine as _;
 use bootstrap::compose_bindings;
 use diport::ManagedResource;
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig};
-use runtime::test_support::wire_settings;
-use runtime::{
-    CONFIGS_READY_PROBE_NAME, SharedRuntimeDeps, build_redis_runtime_deps,
-    build_s3_runtime_deps_from,
-};
+use runtime::test_support::{build_redis_runtime_deps_from_values, wire_settings};
+use runtime::{CONFIGS_READY_PROBE_NAME, SharedRuntimeDeps, build_s3_runtime_deps_from};
 use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use vault::{TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver};
@@ -223,12 +220,8 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         )?,
     );
     let redis_fixture = testkit::env_or_redis().await?;
-    let redis = build_redis_runtime_deps(|name| match name {
-        "RSS_REDIS_URL" => Some(redis_fixture.url().to_string()),
-        "RSS_REDIS_ALLOW_PLAINTEXT" => Some("true".to_string()),
-        _ => None,
-    })
-    .await?;
+    let redis =
+        build_redis_runtime_deps_from_values(redis_fixture.url().to_string(), Some("true")).await?;
     let s3 = build_s3_runtime_deps_from(|name| match name {
         "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:1".to_string()),
         "RSS_S3_ALLOW_PLAINTEXT" => Some("true".to_string()),

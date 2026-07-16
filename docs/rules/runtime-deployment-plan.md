@@ -5,7 +5,7 @@ This rule governs how runtime-deployment target constraints select enforcement c
 ## 当前事实
 
 - Assembly manifest validation, generated domain ordering, and committed v1 AssemblyLock drift are governed by typed repository gates.
-- Both serving binaries now enter through `prepare_runtime()`, which captures one closed process-level configuration generation before tracing and provider construction. Listener/auth/tracing/serving-OIDC consumers are capability-only; remaining serving migrations are owned by #1784–#1787. RuntimePlan is still summary-oriented, subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
+- Both serving binaries now enter through `prepare_runtime()`, which captures one closed process-level configuration generation before tracing and provider construction. Listener/auth/tracing/serving-OIDC and every PostgreSQL/Redis consumer are capability-only; remaining serving migrations are owned by #1785–#1787. RuntimePlan is still summary-oriented, subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
 - `cargo xtask archrules list` and its generated matrix derive implemented rules from real carrier anchors. Planning documents are not a second index.
 - The active forge does not make the existing `ci-gate` a required check.
 
@@ -28,8 +28,11 @@ explicit `shutdown_runtime()` call.
 
 `SnapshotConfig<'_>` is a crate-private borrowed capability with a private field. Only
 `RuntimeConfigSnapshot::view()` can mint it. Serving OIDC/JWKS construction, listener auth,
-listener address policy, route assembly, and launch accept this capability directly, so an
-ambient getter cannot type-check at those production boundaries. When the inbound Internal
+listener address policy, route assembly, launch, and the private PostgreSQL/Redis typed
+configuration constructors accept this capability directly, so an ambient getter cannot
+type-check at those production boundaries. The RSS operator commands that need PostgreSQL accept
+the already prepared `RuntimeInputs` and borrow the same capability; the runtime crate exposes no
+PostgreSQL/Redis environment or generic getter builder. When the inbound Internal
 listener resolves to mTLS, route assembly requires and validates a captured, non-empty
 `SPIFFE_ENDPOINT_SOCKET`, parses the allow-set once, and carries the endpoint as a non-optional
 value with the allow-set and readiness slot in `ListenerTransport::Mtls`; launch always passes that
@@ -66,7 +69,8 @@ The active carriers are Hard `SECRET-TEXT-OPAQUE-01` and
 `SnapshotConfig` consumer signatures, and the mTLS transport carrier; omission or capability
 forgery at those boundaries is therefore not expressible. It does not claim that a Rust function
 body cannot name an ambient API. The Medium AST check proves the production module graph contains
-exactly one capture, `RuntimeInputs` construction, and snapshot-backed Vault/Redis/S3 call, and it
+exactly one capture, `RuntimeInputs` construction, typed PostgreSQL/Redis mapping, and the remaining
+snapshot-backed Vault/S3 calls, and it
 rejects ambient environment reads in a `SnapshotConfig` consumer or its crate-wide conservatively
 reachable call graph. Protected aliases, direct and function-item environment aliases, local and
 cross-file wrappers, UFCS, transitive macro and re-export indirection, ambiguous same-name shadows,
@@ -77,11 +81,12 @@ binary lifecycle carrier separately proves one ownership-complete terminal path 
 serving transfers the exact prepared input to `run()`, and every RSS operator reaches the sole
 exact-binding shutdown after pre-acquisition closed command classification. Synthetic reds cover
 duplicate/discarded/wrong generations, detached-module promotion, owner and cleanup bypasses,
-binary wrong bindings and early returns, ambient filter restoration, transitive reachable ambient
+binary wrong bindings and early returns (including the exact prepared input passed to every
+PostgreSQL operator), ambient filter restoration, transitive reachable ambient
 reader variants, and compliant unrelated-name bait.
 
-Ownership after #1783 is explicit: #1784 covers PG/Redis, #1785 Vault/S3, #1786
-event/domain/DLX/worker and composition settings, and #1787 closes the final ambient-read AST
+Ownership after #1784 is explicit: PostgreSQL/Redis are fully snapshot-backed; #1785 covers
+Vault/S3, #1786 covers event/domain/DLX/worker and composition settings, and #1787 closes the final ambient-read AST
 guard. Static OIDC env construction used only by non-serving operator/maintenance commands remains
 outside #1783; those commands bind no listener and do not use the serving OIDC/JWKS provider.
 This section records the boundary; it is not a second or Soft enforcement mechanism.

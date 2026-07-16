@@ -876,7 +876,7 @@ pub struct SharedRuntimeDeps;
 pub fn wire_distributed(_: &SharedRuntimeDeps) -> DistributedRuntimeDeps {
     DistributedRuntimeDeps
 }
-pub fn run(deps: &SharedRuntimeDeps) {
+pub fn run_startup(deps: &SharedRuntimeDeps) {
     let distributed: DistributedRuntimeDeps = wire_distributed(deps);
     wire_event_transport((), distributed, (), ());
 }

@@ -12,7 +12,7 @@
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must consume the committed generated domain list through `compose_bindings`, must merge its output, and must not restore per-domain handwritten wiring.
 //!
-//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::snapshot_consumers_reject_reachable_ambient_env_variants", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- the unique production `prepare_runtime()` must capture exactly one `EnvConfigSource` generation and move that same binding into `RuntimeInputs`; the unique production async `run()` must use its `RuntimeInputs` parameter's `SnapshotConfig`-backed reader for the unique legacy Vault, Redis, and S3 provider seams, with no discarded generation, wrong-generation, ambient, or compliant-bait side path. `SnapshotConfig` makes capability omission a native Hard boundary; ambient-reader exclusivity across the production crate's conservatively reachable consumer graph remains this explicit Medium AST gate.
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_pg_redis_snapshot_wiring", anti_vacuity = "tests::runtime_pg_redis_snapshot_wiring" } -- the unique production `prepare_runtime()` captures exactly one `EnvConfigSource` generation and moves that same binding into `RuntimeInputs`; the unique production async `run()` exposes a closed set of exact same-generation views, including one shared named PG/Redis binding that constructs exactly one `PgRuntimeConfig` and `RedisRuntimeConfig`, consumes the Redis config by value, and retains the canonical PG setup plus legacy Vault/S3 seams, with no discarded generation, wrong-generation, ambient, alias, wrapper, or compliant-bait side path. `SnapshotConfig` makes capability omission a native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
 //! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before acquiring `RuntimeInputs`; serving uniquely transfers the exact binding to `run`, while every operator arm yields a `Result` before the sole exact-binding shutdown, with no pre-consumption early return, alias, macro, shadow path, or unreachable bait.
 //!
@@ -274,7 +274,7 @@ impl PrepareRuntimeConfigWiring {
 
 impl<'ast> Visit<'ast> for PrepareRuntimeConfigWiring {
     fn visit_local(&mut self, local: &'ast syn::Local) {
-        let binding = pat_ident(&local.pat);
+        let binding = immutable_pat_ident(&local.pat);
         let initializer = local.init.as_ref().map(|init| init.expr.as_ref());
         if let (Some(binding), Some(initializer)) = (binding, initializer)
             && is_env_snapshot_initializer(initializer)
@@ -339,11 +339,21 @@ impl<'ast> Visit<'ast> for PrepareRuntimeConfigWiring {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct RunRuntimeConfigWiring {
     runtime_inputs_calls: usize,
-    config_value_bindings: usize,
-    canonical_config_value_bindings: usize,
+    runtime_inputs_config_calls: usize,
+    config_view_bindings: usize,
+    canonical_config_view_bindings: usize,
+    snapshot_reader_bindings: usize,
+    pg_config_calls: usize,
+    canonical_pg_config_calls: usize,
+    pg_into_parts_calls: usize,
+    canonical_pg_into_parts_calls: usize,
+    pg_setup_calls: usize,
+    canonical_pg_setup_calls: usize,
+    redis_config_calls: usize,
+    canonical_redis_config_calls: usize,
     vault_calls: usize,
     canonical_vault_calls: usize,
     redis_calls: usize,
@@ -351,6 +361,11 @@ struct RunRuntimeConfigWiring {
     s3_calls: usize,
     canonical_s3_calls: usize,
     runtime_inputs_binding: Option<syn::Ident>,
+    config_binding: Option<syn::Ident>,
+    snapshot_reader_binding: Option<syn::Ident>,
+    pg_config_binding: Option<syn::Ident>,
+    redis_config_binding: Option<syn::Ident>,
+    pg_part_bindings: BTreeMap<String, syn::Ident>,
 }
 
 impl RunRuntimeConfigWiring {
@@ -363,8 +378,18 @@ impl RunRuntimeConfigWiring {
 
     fn is_canonical(&self) -> bool {
         self.runtime_inputs_calls == 0
-            && self.config_value_bindings == 1
-            && self.canonical_config_value_bindings == 1
+            && self.runtime_inputs_config_calls == 4
+            && self.config_view_bindings == 1
+            && self.canonical_config_view_bindings == 1
+            && self.snapshot_reader_bindings == 1
+            && self.pg_config_calls == 1
+            && self.canonical_pg_config_calls == 1
+            && self.pg_into_parts_calls == 1
+            && self.canonical_pg_into_parts_calls == 1
+            && self.pg_setup_calls == 1
+            && self.canonical_pg_setup_calls == 1
+            && self.redis_config_calls == 1
+            && self.canonical_redis_config_calls == 1
             && self.vault_calls == 1
             && self.canonical_vault_calls == 1
             && self.redis_calls == 1
@@ -376,19 +401,67 @@ impl RunRuntimeConfigWiring {
 
 impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
     fn visit_local(&mut self, local: &'ast syn::Local) {
-        let binding = pat_ident(&local.pat);
+        let binding = immutable_pat_ident(&local.pat);
         let initializer = local.init.as_ref().map(|init| init.expr.as_ref());
-        if binding.is_some_and(|binding| binding == "config_value") {
-            self.config_value_bindings += 1;
-            if initializer.is_some_and(|initializer| {
-                self.runtime_inputs_binding
-                    .as_ref()
-                    .is_some_and(|runtime_inputs| {
-                        is_snapshot_config_value_closure(initializer, runtime_inputs)
-                    })
-            }) {
-                self.canonical_config_value_bindings += 1;
+        if let (Some(binding), Some(initializer), Some(runtime_inputs)) =
+            (binding, initializer, self.runtime_inputs_binding.as_ref())
+            && is_runtime_inputs_config_view(initializer, runtime_inputs)
+        {
+            self.config_view_bindings += 1;
+            self.canonical_config_view_bindings += 1;
+            if self.config_binding.is_none() {
+                self.config_binding = Some(binding.clone());
             }
+        }
+        if let (Some(binding), Some(initializer), Some(config)) =
+            (binding, initializer, self.config_binding.as_ref())
+            && is_snapshot_config_value_closure(initializer, config)
+        {
+            self.snapshot_reader_bindings += 1;
+            if self.snapshot_reader_binding.is_none() {
+                self.snapshot_reader_binding = Some(binding.clone());
+            }
+        }
+        if let (Some(binding), Some(initializer)) = (binding, initializer)
+            && let Some(call) = call_behind_result_context(initializer)
+        {
+            if path_ends_with(&call.func, &["PgRuntimeConfig", "from_snapshot"]) {
+                self.pg_config_calls += 1;
+                if self.config_binding.as_ref().is_some_and(|config| {
+                    call.args.len() == 1
+                        && call
+                            .args
+                            .first()
+                            .is_some_and(|arg| is_exact_ident_path(arg, config))
+                }) {
+                    self.canonical_pg_config_calls += 1;
+                    if self.pg_config_binding.is_none() {
+                        self.pg_config_binding = Some(binding.clone());
+                    }
+                }
+            }
+            if path_ends_with(&call.func, &["RedisRuntimeConfig", "from_snapshot"]) {
+                self.redis_config_calls += 1;
+                if self.config_binding.as_ref().is_some_and(|config| {
+                    call.args.len() == 1
+                        && call
+                            .args
+                            .first()
+                            .is_some_and(|arg| is_exact_ident_path(arg, config))
+                }) {
+                    self.canonical_redis_config_calls += 1;
+                    if self.redis_config_binding.is_none() {
+                        self.redis_config_binding = Some(binding.clone());
+                    }
+                }
+            }
+        }
+        if let (Some(initializer), Some(pg_config)) = (initializer, self.pg_config_binding.as_ref())
+            && canonical_pg_parts_initializer(initializer, pg_config)
+            && let Some(bindings) = pg_parts_pattern_bindings(&local.pat)
+            && self.pg_part_bindings.is_empty()
+        {
+            self.pg_part_bindings = bindings;
         }
         syn::visit::visit_local(self, local);
     }
@@ -397,11 +470,13 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
         if path_ends_with(&call.func, &["RuntimeInputs", "new"]) {
             self.runtime_inputs_calls += 1;
         }
-        let canonical_reader = call.args.len() == 1
-            && call
-                .args
-                .first()
-                .is_some_and(|arg| is_exact_path(arg, &["config_value"]));
+        let canonical_reader = self.snapshot_reader_binding.as_ref().is_some_and(|reader| {
+            call.args.len() == 1
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|arg| is_exact_ident_path(arg, reader))
+        });
         match expr_path_last(&call.func)
             .map(ToString::to_string)
             .as_deref()
@@ -412,7 +487,17 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
             }
             Some("build_redis_runtime_deps") => {
                 self.redis_calls += 1;
-                self.canonical_redis_calls += usize::from(canonical_reader);
+                self.canonical_redis_calls += usize::from(
+                    self.redis_config_binding
+                        .as_ref()
+                        .is_some_and(|redis_config| {
+                            call.args.len() == 1
+                                && call
+                                    .args
+                                    .first()
+                                    .is_some_and(|arg| is_exact_ident_path(arg, redis_config))
+                        }),
+                );
             }
             Some("build_s3_runtime_deps_from") => {
                 self.s3_calls += 1;
@@ -420,14 +505,146 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
             }
             _ => {}
         }
+        if path_ends_with(
+            &call.func,
+            &["PgRuntimeDeps", "setup_with_audit_admin_config"],
+        ) {
+            self.pg_setup_calls += 1;
+            self.canonical_pg_setup_calls +=
+                usize::from(pg_setup_uses_named_parts(call, &self.pg_part_bindings));
+        }
         syn::visit::visit_expr_call(self, call);
     }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "config"
+            && call.args.is_empty()
+            && self
+                .runtime_inputs_binding
+                .as_ref()
+                .is_some_and(|runtime_inputs| is_exact_ident_path(&call.receiver, runtime_inputs))
+        {
+            self.runtime_inputs_config_calls += 1;
+        }
+        if call.method == "into_parts" && call.args.is_empty() {
+            self.pg_into_parts_calls += 1;
+            self.canonical_pg_into_parts_calls += usize::from(
+                self.pg_config_binding
+                    .as_ref()
+                    .is_some_and(|pg_config| is_exact_ident_path(&call.receiver, pg_config)),
+            );
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+const PG_RUNTIME_PART_FIELDS: &[&str] = &[
+    "serving",
+    "tenant_read",
+    "migrator",
+    "audit_admin",
+    "dlx_archiver",
+    "dlx_verifier",
+    "dlx_purger",
+    "legacy_policy",
+    "readiness_period",
+];
+
+fn canonical_pg_parts_initializer(expr: &syn::Expr, pg_config: &syn::Ident) -> bool {
+    let syn::Expr::MethodCall(call) = transparent_expr(expr) else {
+        return false;
+    };
+    call.method == "into_parts"
+        && call.args.is_empty()
+        && is_exact_ident_path(&call.receiver, pg_config)
+}
+
+fn pg_parts_pattern_bindings(pat: &syn::Pat) -> Option<BTreeMap<String, syn::Ident>> {
+    let syn::Pat::Struct(parts) = pat else {
+        return None;
+    };
+    if !is_exact_syn_path(&parts.path, &["PgRuntimeConfigParts"])
+        || parts.rest.is_some()
+        || parts.fields.len() != PG_RUNTIME_PART_FIELDS.len()
+    {
+        return None;
+    }
+    let mut bindings = BTreeMap::new();
+    for field in &parts.fields {
+        let syn::Member::Named(member) = &field.member else {
+            return None;
+        };
+        let name = member.to_string();
+        if !PG_RUNTIME_PART_FIELDS.contains(&name.as_str()) {
+            return None;
+        }
+        let binding = immutable_pat_ident(&field.pat)?.clone();
+        if bindings.insert(name, binding).is_some() {
+            return None;
+        }
+    }
+    Some(bindings)
+}
+
+fn method_on_binding(expr: &syn::Expr, method: &str, binding: &syn::Ident) -> bool {
+    matches!(transparent_expr(expr), syn::Expr::MethodCall(call)
+        if call.method == method
+            && call.args.is_empty()
+            && is_exact_ident_path(&call.receiver, binding))
+}
+
+fn pg_setup_uses_named_parts(
+    call: &syn::ExprCall,
+    bindings: &BTreeMap<String, syn::Ident>,
+) -> bool {
+    let Some(migrator) = bindings.get("migrator") else {
+        return false;
+    };
+    let Some(serving) = bindings.get("serving") else {
+        return false;
+    };
+    let Some(tenant_read) = bindings.get("tenant_read") else {
+        return false;
+    };
+    let Some(audit_admin) = bindings.get("audit_admin") else {
+        return false;
+    };
+    let Some(legacy_policy) = bindings.get("legacy_policy") else {
+        return false;
+    };
+    call.args.len() == 7
+        && call
+            .args
+            .first()
+            .is_some_and(|arg| reference_to_binding(arg, migrator))
+        && call
+            .args
+            .iter()
+            .nth(1)
+            .is_some_and(|arg| reference_to_binding(arg, serving))
+        && call
+            .args
+            .iter()
+            .nth(2)
+            .is_some_and(|arg| reference_to_binding(arg, tenant_read))
+        && call
+            .args
+            .iter()
+            .nth(3)
+            .is_some_and(|arg| method_on_binding(arg, "as_ref", audit_admin))
+        && call
+            .args
+            .iter()
+            .nth(4)
+            .is_some_and(|arg| is_exact_ident_path(arg, legacy_policy))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 struct ProductionRuntimeConfigInventory {
     snapshot_calls: usize,
     runtime_inputs_calls: usize,
+    pg_config_calls: usize,
+    redis_config_calls: usize,
     vault_calls: usize,
     redis_calls: usize,
     s3_calls: usize,
@@ -437,10 +654,111 @@ struct ProductionRuntimeConfigInventory {
 const PROTECTED_CONFIG_SYMBOLS: &[&str] = &[
     "RuntimeConfigSnapshot",
     "RuntimeInputs",
+    "PgRuntimeConfig",
+    "PgRuntimeConfigParts",
+    "RedisRuntimeConfig",
     "build_vault_runtime_deps",
     "build_redis_runtime_deps",
     "build_s3_runtime_deps_from",
 ];
+
+fn compact_type_tokens(value: &impl quote::ToTokens) -> String {
+    value
+        .to_token_stream()
+        .to_string()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+fn cfg_terms(attribute: &syn::Attribute) -> Option<Vec<syn::Meta>> {
+    if !attribute.path().is_ident("cfg") {
+        return None;
+    }
+    let syn::Meta::List(cfg) = &attribute.meta else {
+        return None;
+    };
+    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+        .parse2(cfg.tokens.clone())
+        .ok()
+        .map(|terms| terms.into_iter().collect())
+}
+
+fn meta_is_integration_feature(meta: &syn::Meta) -> bool {
+    matches!(meta, syn::Meta::NameValue(value)
+        if value.path.is_ident("feature")
+            && matches!(transparent_expr(&value.value), syn::Expr::Lit(lit)
+                if matches!(&lit.lit, syn::Lit::Str(value) if value.value() == "integration")))
+}
+
+fn cfg_is_exact_integration(attribute: &syn::Attribute) -> bool {
+    cfg_terms(attribute).is_some_and(|terms| {
+        terms.len() == 1 && terms.first().is_some_and(meta_is_integration_feature)
+    })
+}
+
+fn cfg_is_exact_test_or_integration(attribute: &syn::Attribute) -> bool {
+    let Some(terms) = cfg_terms(attribute) else {
+        return false;
+    };
+    let [syn::Meta::List(any)] = terms.as_slice() else {
+        return false;
+    };
+    if !any.path.is_ident("any") {
+        return false;
+    }
+    let Ok(items) = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+        .parse2(any.tokens.clone())
+    else {
+        return false;
+    };
+    items.len() == 2
+        && items
+            .iter()
+            .any(|meta| matches!(meta, syn::Meta::Path(path) if path.is_ident("test")))
+        && items.iter().any(meta_is_integration_feature)
+}
+
+fn has_one_exact_cfg(
+    attributes: &[syn::Attribute],
+    predicate: impl Fn(&syn::Attribute) -> bool,
+) -> bool {
+    let cfgs = attributes
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("cfg"))
+        .collect::<Vec<_>>();
+    cfgs.len() == 1 && predicate(cfgs[0])
+}
+
+fn is_pub_crate(visibility: &syn::Visibility) -> bool {
+    matches!(visibility, syn::Visibility::Restricted(restricted)
+        if restricted.in_token.is_none() && restricted.path.is_ident("crate"))
+}
+
+fn redis_values_signature_is_exact(signature: &syn::Signature) -> bool {
+    let inputs = signature.inputs.iter().collect::<Vec<_>>();
+    let exact_input = |input: &&syn::FnArg, name: &str, ty: &str| {
+        matches!(input, syn::FnArg::Typed(input)
+            if pat_ident(&input.pat).is_some_and(|ident| ident == name)
+                && compact_type_tokens(input.ty.as_ref()) == ty)
+    };
+    signature.ident == "build_redis_runtime_deps_from_values"
+        && signature.asyncness.is_some()
+        && signature.constness.is_none()
+        && signature.unsafety.is_none()
+        && signature.generics.params.is_empty()
+        && inputs.len() == 2
+        && exact_input(&inputs[0], "url", "String")
+        && exact_input(&inputs[1], "allow_plaintext", "Option<&str>")
+        && matches!(&signature.output, syn::ReturnType::Type(_, ty)
+            if compact_type_tokens(ty.as_ref()) == "anyhow::Result<redis::RedisRuntimeDeps>")
+}
+
+fn internal_redis_values_seam_is_exact(item: &syn::ItemFn) -> bool {
+    redis_values_signature_is_exact(&item.sig)
+        && is_pub_crate(&item.vis)
+        && has_one_exact_cfg(&item.attrs, cfg_is_exact_test_or_integration)
+}
 
 fn ident_is_protected_config(ident: &syn::Ident) -> bool {
     PROTECTED_CONFIG_SYMBOLS.contains(&ident.to_string().as_str())
@@ -507,6 +825,9 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
     }
 
     fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if internal_redis_values_seam_is_exact(item) {
+            return;
+        }
         if attrs_may_be_production(&item.attrs) {
             syn::visit::visit_item_fn(self, item);
         }
@@ -550,11 +871,19 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         let snapshot = path_ends_with(&call.func, &["RuntimeConfigSnapshot", "capture"]);
         let inputs = path_ends_with(&call.func, &["RuntimeInputs", "new"]);
+        let pg_mapping = path_ends_with(&call.func, &["PgRuntimeConfig", "from_snapshot"]);
+        let redis_mapping = path_ends_with(&call.func, &["RedisRuntimeConfig", "from_snapshot"]);
         if snapshot {
             self.snapshot_calls += 1;
         }
         if inputs {
             self.runtime_inputs_calls += 1;
+        }
+        if pg_mapping {
+            self.pg_config_calls += 1;
+        }
+        if redis_mapping {
+            self.redis_config_calls += 1;
         }
         match expr_path_last(&call.func)
             .map(ToString::to_string)
@@ -567,6 +896,8 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
         }
         if !snapshot
             && !inputs
+            && !pg_mapping
+            && !redis_mapping
             && expr_path_mentions_protected_config(&call.func)
             && !matches!(
                 expr_path_last(&call.func)
@@ -1088,12 +1419,19 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
             let Some(call) = direct_awaited_call(&arm.body) else {
                 return false;
             };
+            let pg_operator = variant != "OidcJwksExport";
             if !is_exact_path(&call.func, &["runtime", runner])
-                || call.args.len() != 1
+                || call.args.len() != if pg_operator { 2 } else { 1 }
                 || !call
                     .args
                     .first()
                     .is_some_and(|arg| reference_to_binding(arg, args))
+                || (pg_operator
+                    && !call
+                        .args
+                        .iter()
+                        .nth(1)
+                        .is_some_and(|arg| reference_to_binding(arg, runtime_inputs)))
             {
                 return false;
             }
@@ -1141,9 +1479,876 @@ fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule
         }
     };
     let mut findings = runtime_config_snapshot_findings_for_file(&file);
+    if root.join(RSS_MAIN_PATH).exists() && !pg_operator_definitions_are_exact(&file) {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_LIB_PATH,
+            "the six PG operator definitions must expose the exact &RuntimeInputs parameter and flow its .config() view into the typed PG maintenance builder/runtime without ignored, wrong-binding, ambient-wrapper, or compliant-bait paths",
+        ));
+    }
     findings.extend(runtime_config_global_capture_findings(root)?);
     findings.extend(runtime_snapshot_consumer_ambient_findings(root)?);
+    findings.extend(redis_snapshot_boundary_findings(root, &file)?);
     Ok(findings)
+}
+
+fn public_redis_values_wrapper_is_exact(item: &syn::ItemFn) -> bool {
+    if !matches!(item.vis, syn::Visibility::Public(_))
+        || !redis_values_signature_is_exact(&item.sig)
+        || item.block.stmts.len() != 1
+    {
+        return false;
+    }
+    let syn::Stmt::Expr(tail, None) = &item.block.stmts[0] else {
+        return false;
+    };
+    let Some(call) = direct_awaited_call(tail) else {
+        return false;
+    };
+    is_exact_path(
+        &call.func,
+        &[
+            "crate",
+            "infra",
+            "redis",
+            "build_redis_runtime_deps_from_values",
+        ],
+    ) && call.args.len() == 2
+        && call
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_path(arg, &["url"]))
+        && call
+            .args
+            .iter()
+            .nth(1)
+            .is_some_and(|arg| is_exact_path(arg, &["allow_plaintext"]))
+}
+
+fn redis_test_support_wrapper_is_exact(file: &syn::File) -> bool {
+    let modules = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module) if module.ident == "test_support" => Some(module),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(module) = (modules.len() == 1).then_some(modules[0]) else {
+        return false;
+    };
+    if !matches!(module.vis, syn::Visibility::Public(_))
+        || !has_one_exact_cfg(&module.attrs, cfg_is_exact_integration)
+    {
+        return false;
+    }
+    let Some((_, items)) = &module.content else {
+        return false;
+    };
+    let wrappers = items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function)
+                if function.sig.ident == "build_redis_runtime_deps_from_values" =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    wrappers.len() == 1 && public_redis_values_wrapper_is_exact(wrappers[0])
+}
+
+fn method_call_count_in_expr(expr: &syn::Expr, method: &str) -> usize {
+    struct Counter<'a> {
+        method: &'a str,
+        calls: usize,
+    }
+    impl Visit<'_> for Counter<'_> {
+        fn visit_expr_method_call(&mut self, call: &syn::ExprMethodCall) {
+            if call.method == self.method {
+                self.calls += 1;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut counter = Counter { method, calls: 0 };
+    counter.visit_expr(expr);
+    counter.calls
+}
+
+#[derive(Default)]
+struct ProductionCreatePoolInventory {
+    calls: usize,
+}
+
+impl<'ast> Visit<'ast> for ProductionCreatePoolInventory {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "create_pool" {
+            self.calls += 1;
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+#[derive(Default)]
+struct RedisPoolUses<'a> {
+    pool: Option<&'a syn::Ident>,
+    verify_calls: usize,
+    canonical_verify_calls: usize,
+    setup_calls: usize,
+    canonical_setup_calls: usize,
+}
+
+impl<'ast> Visit<'ast> for RedisPoolUses<'ast> {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if path_ends_with(&call.func, &["verify_redis_pool"]) {
+            self.verify_calls += 1;
+            self.canonical_verify_calls += usize::from(self.pool.is_some_and(|pool| {
+                call.args.len() == 1
+                    && call
+                        .args
+                        .first()
+                        .is_some_and(|arg| reference_to_binding(arg, pool))
+            }));
+        }
+        if path_ends_with(&call.func, &["RedisRuntimeDeps", "setup"]) {
+            self.setup_calls += 1;
+            self.canonical_setup_calls += usize::from(self.pool.is_some_and(|pool| {
+                call.args.len() == 1
+                    && call
+                        .args
+                        .first()
+                        .is_some_and(|arg| is_exact_ident_path(arg, pool))
+            }));
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+fn redis_pool_flow_is_exact(file: &syn::File) -> bool {
+    let builders = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function)
+                if function.sig.ident == "build_redis_runtime_deps"
+                    && attrs_may_be_production(&function.attrs) =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(builder) = (builders.len() == 1).then_some(builders[0]) else {
+        return false;
+    };
+    let pool_bindings = builder
+        .block
+        .stmts
+        .iter()
+        .filter_map(|statement| match statement {
+            syn::Stmt::Local(local)
+                if local.init.as_ref().is_some_and(|init| {
+                    method_call_count_in_expr(&init.expr, "create_pool") == 1
+                }) =>
+            {
+                pat_ident(&local.pat)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(pool) = (pool_bindings.len() == 1).then_some(pool_bindings[0]) else {
+        return false;
+    };
+    let mut global = ProductionCreatePoolInventory::default();
+    global.visit_file(file);
+    let mut uses = RedisPoolUses {
+        pool: Some(pool),
+        ..RedisPoolUses::default()
+    };
+    uses.visit_block(&builder.block);
+    global.calls == 1
+        && method_call_count_in_block(&builder.block, "create_pool") == 1
+        && uses.verify_calls == 1
+        && uses.canonical_verify_calls == 1
+        && uses.setup_calls == 1
+        && uses.canonical_setup_calls == 1
+}
+
+fn redis_snapshot_boundary_findings(
+    root: &Path,
+    runtime_file: &syn::File,
+) -> Result<Vec<Finding<Rule>>> {
+    let path = root.join("assemblies/runtime/src/infra/redis.rs");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let source =
+        fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
+    let redis_file = match syn::parse_file(&source) {
+        Ok(file) => file,
+        Err(error) => {
+            return Ok(vec![finding(
+                Rule::ForbiddenWiring,
+                "assemblies/runtime/src/infra/redis.rs",
+                format!("Redis snapshot boundary gate 无法解析 Rust: {error}"),
+            )]);
+        }
+    };
+    let internal = redis_file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function)
+                if function.sig.ident == "build_redis_runtime_deps_from_values" =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if internal.len() == 1
+        && internal_redis_values_seam_is_exact(internal[0])
+        && redis_test_support_wrapper_is_exact(runtime_file)
+        && redis_pool_flow_is_exact(&redis_file)
+    {
+        return Ok(Vec::new());
+    }
+    Ok(vec![finding(
+        Rule::ForbiddenWiring,
+        "assemblies/runtime/src/infra/redis.rs",
+        "Redis explicit-values seam must remain cfg(any(test, feature = \"integration\")) + pub(crate) with its exact signature, the public wrapper must remain cfg(feature = \"integration\"), and the sole production create_pool binding must flow to both verify_redis_pool and RedisRuntimeDeps::setup",
+    )])
+}
+
+fn pg_operator_signature_bindings(
+    item: &syn::ItemFn,
+    name: &str,
+) -> Option<(syn::Ident, syn::Ident)> {
+    let inputs = item.sig.inputs.iter().collect::<Vec<_>>();
+    if item.sig.ident != name
+        || !matches!(item.vis, syn::Visibility::Public(_))
+        || item.sig.asyncness.is_none()
+        || item.sig.constness.is_some()
+        || item.sig.unsafety.is_some()
+        || !item.sig.generics.params.is_empty()
+        || inputs.len() != 2
+        || !matches!(&item.sig.output, syn::ReturnType::Type(_, ty)
+            if compact_type_tokens(ty.as_ref()) == "anyhow::Result<()>")
+    {
+        return None;
+    }
+    let syn::FnArg::Typed(args) = inputs[0] else {
+        return None;
+    };
+    let syn::FnArg::Typed(runtime_inputs) = inputs[1] else {
+        return None;
+    };
+    if compact_type_tokens(args.ty.as_ref()) != "&[String]"
+        || compact_type_tokens(runtime_inputs.ty.as_ref()) != "&RuntimeInputs"
+    {
+        return None;
+    }
+    Some((
+        pat_ident(&args.pat)?.clone(),
+        pat_ident(&runtime_inputs.pat)?.clone(),
+    ))
+}
+
+fn self_config_field(expr: &syn::Expr) -> bool {
+    matches!(transparent_expr(expr), syn::Expr::Field(field)
+        if is_exact_path(&field.base, &["self"])
+            && matches!(&field.member, syn::Member::Named(member) if member == "config"))
+}
+
+#[derive(Clone, Copy)]
+enum PgBuilderOrigin<'a> {
+    SelfConfig,
+    RuntimeInputs(&'a syn::Ident),
+}
+
+fn pg_source_expr_is_canonical(
+    expr: &syn::Expr,
+    origin: PgBuilderOrigin<'_>,
+    aliases: &BTreeSet<String>,
+) -> bool {
+    let expr = transparent_expr(expr);
+    if let syn::Expr::Path(path) = expr
+        && let Some(ident) = path.path.get_ident()
+        && aliases.contains(&ident.to_string())
+    {
+        return true;
+    }
+    match origin {
+        PgBuilderOrigin::SelfConfig => self_config_field(expr),
+        PgBuilderOrigin::RuntimeInputs(runtime_inputs) => {
+            is_runtime_inputs_config_view(expr, runtime_inputs)
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PgConfigProvenance {
+    Migrator,
+    AuditMigrator,
+    AuditAdmin,
+}
+
+struct PgBuilderFlow<'a> {
+    expected_builder: &'a str,
+    origin: PgBuilderOrigin<'a>,
+    source_aliases: BTreeSet<String>,
+    config_aliases: BTreeMap<String, PgConfigProvenance>,
+    builder_like_calls: usize,
+    exact_calls: usize,
+    config_calls: usize,
+    canonical_config_calls: usize,
+    sink_calls: usize,
+    canonical_sink_calls: usize,
+}
+
+impl PgBuilderFlow<'_> {
+    fn expected_builder_kind(&self) -> PgConfigProvenance {
+        if self.expected_builder == "build_pg_audit_maintenance_config" {
+            PgConfigProvenance::AuditMigrator
+        } else {
+            PgConfigProvenance::Migrator
+        }
+    }
+
+    fn builder_call<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::ExprCall> {
+        let expr = match transparent_expr(expr) {
+            syn::Expr::Reference(reference) => reference.expr.as_ref(),
+            expr => expr,
+        };
+        call_behind_result_context(expr)
+    }
+
+    fn builder_is_canonical(&self, call: &syn::ExprCall) -> bool {
+        expr_path_last(&call.func).is_some_and(|name| name == self.expected_builder)
+            && call.args.len() == 1
+            && call.args.first().is_some_and(|argument| {
+                pg_source_expr_is_canonical(argument, self.origin, &self.source_aliases)
+            })
+    }
+
+    fn config_provenance(&self, expr: &syn::Expr) -> Option<PgConfigProvenance> {
+        let expr = transparent_expr(expr);
+        match expr {
+            syn::Expr::Reference(reference) => self.config_provenance(&reference.expr),
+            syn::Expr::Path(path) => path
+                .path
+                .get_ident()
+                .and_then(|ident| self.config_aliases.get(&ident.to_string()).copied()),
+            syn::Expr::MethodCall(call) if call.method == "as_ref" && call.args.is_empty() => {
+                let kind = self.config_provenance(&call.receiver)?;
+                (kind == PgConfigProvenance::AuditAdmin).then_some(kind)
+            }
+            _ => {
+                let call = self.builder_call(expr)?;
+                self.builder_is_canonical(call)
+                    .then(|| self.expected_builder_kind())
+            }
+        }
+    }
+
+    fn record_sink(&mut self, call: &syn::ExprCall) {
+        let name = expr_path_last(&call.func).map(ToString::to_string);
+        let expected_kind = self.expected_builder_kind();
+        let canonical = match (self.expected_builder, name.as_deref()) {
+            ("build_pg_audit_maintenance_config", Some("connect_maintenance")) => {
+                call.args.len() == 1
+                    && call
+                        .args
+                        .first()
+                        .and_then(|arg| self.config_provenance(arg))
+                        == Some(PgConfigProvenance::AuditMigrator)
+            }
+            (
+                "build_pg_audit_maintenance_config",
+                Some("connect_maintenance_with_audit_admin_config"),
+            ) => {
+                call.args.len() == 2
+                    && call
+                        .args
+                        .first()
+                        .and_then(|arg| self.config_provenance(arg))
+                        == Some(PgConfigProvenance::AuditMigrator)
+                    && call
+                        .args
+                        .iter()
+                        .nth(1)
+                        .and_then(|arg| self.config_provenance(arg))
+                        == Some(PgConfigProvenance::AuditAdmin)
+            }
+            (_, Some("connect_maintenance" | "migrate_reader_lane_only")) => {
+                call.args.len() == 1
+                    && call
+                        .args
+                        .first()
+                        .and_then(|arg| self.config_provenance(arg))
+                        == Some(expected_kind)
+            }
+            _ => return,
+        };
+        self.sink_calls += 1;
+        self.canonical_sink_calls += usize::from(canonical);
+    }
+
+    fn is_exact(&self) -> bool {
+        let expected_sinks = if self.expected_builder == "build_pg_audit_maintenance_config" {
+            2
+        } else {
+            1
+        };
+        let expected_config_calls =
+            usize::from(matches!(self.origin, PgBuilderOrigin::RuntimeInputs(_)));
+        self.builder_like_calls == 1
+            && self.exact_calls == 1
+            && self.config_calls == expected_config_calls
+            && self.canonical_config_calls == expected_config_calls
+            && self.sink_calls == expected_sinks
+            && self.canonical_sink_calls == expected_sinks
+    }
+}
+
+impl<'ast> Visit<'ast> for PgBuilderFlow<'_> {
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        let Some(initializer) = local.init.as_ref().map(|init| init.expr.as_ref()) else {
+            syn::visit::visit_local(self, local);
+            return;
+        };
+        if let Some(binding) = immutable_pat_ident(&local.pat)
+            && pg_source_expr_is_canonical(initializer, self.origin, &self.source_aliases)
+        {
+            self.source_aliases.insert(binding.to_string());
+        }
+        if let Some(call) = self.builder_call(initializer)
+            && self.builder_is_canonical(call)
+        {
+            if self.expected_builder == "build_pg_audit_maintenance_config" {
+                if let syn::Pat::Tuple(tuple) = &local.pat
+                    && tuple.elems.len() == 2
+                    && let (Some(migrator), Some(admin)) = (
+                        tuple.elems.first().and_then(immutable_pat_ident),
+                        tuple.elems.last().and_then(immutable_pat_ident),
+                    )
+                {
+                    self.config_aliases
+                        .insert(migrator.to_string(), PgConfigProvenance::AuditMigrator);
+                    self.config_aliases
+                        .insert(admin.to_string(), PgConfigProvenance::AuditAdmin);
+                }
+            } else if let Some(binding) = immutable_pat_ident(&local.pat) {
+                self.config_aliases
+                    .insert(binding.to_string(), PgConfigProvenance::Migrator);
+            }
+        }
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_call(&mut self, call: &syn::ExprCall) {
+        let name = expr_path_last(&call.func).map(ToString::to_string);
+        if name
+            .as_deref()
+            .is_some_and(|name| name.starts_with("build_pg_") && name.contains("config"))
+        {
+            self.builder_like_calls += 1;
+        }
+        if name.as_deref() == Some(self.expected_builder) && call.args.len() == 1 {
+            let canonical = self.builder_is_canonical(call);
+            self.exact_calls += usize::from(canonical);
+        }
+        self.record_sink(call);
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &syn::ExprMethodCall) {
+        if call.method == "config" && call.args.is_empty() {
+            self.config_calls += 1;
+            self.canonical_config_calls += usize::from(
+                matches!(self.origin, PgBuilderOrigin::RuntimeInputs(runtime_inputs)
+                    if is_exact_ident_path(&call.receiver, runtime_inputs)),
+            );
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_match(&mut self, match_: &'ast syn::ExprMatch) {
+        syn::visit::visit_expr(self, &match_.expr);
+        let matched = self.config_provenance(&match_.expr);
+        for arm in &match_.arms {
+            for attribute in &arm.attrs {
+                self.visit_attribute(attribute);
+            }
+            let introduced = if matched == Some(PgConfigProvenance::AuditAdmin)
+                && let syn::Pat::TupleStruct(some) = &arm.pat
+                && is_exact_syn_path(&some.path, &["Some"])
+                && some.elems.len() == 1
+                && let Some(binding) = some.elems.first().and_then(immutable_pat_ident)
+            {
+                self.config_aliases
+                    .insert(binding.to_string(), PgConfigProvenance::AuditAdmin);
+                Some(binding.to_string())
+            } else {
+                None
+            };
+            if let Some((_, guard)) = &arm.guard {
+                self.visit_expr(guard);
+            }
+            self.visit_expr(&arm.body);
+            if let Some(binding) = introduced {
+                self.config_aliases.remove(&binding);
+            }
+        }
+    }
+}
+
+fn pg_operator_runtime_struct_is_exact(file: &syn::File, name: &str) -> bool {
+    let structures = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == name => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(item) = (structures.len() == 1).then_some(structures[0]) else {
+        return false;
+    };
+    let syn::Fields::Named(fields) = &item.fields else {
+        return false;
+    };
+    fields.named.len() == 1
+        && fields.named.first().is_some_and(|field| {
+            field.ident.as_ref().is_some_and(|ident| ident == "config")
+                && type_last_ident(&field.ty).is_some_and(|ident| ident == "SnapshotConfig")
+                && matches!(field.vis, syn::Visibility::Inherited)
+        })
+}
+
+struct PgOperatorWrapperFlow<'a> {
+    args: &'a syn::Ident,
+    runtime_inputs: &'a syn::Ident,
+    runtime_type: &'a str,
+    with_runtime: &'a str,
+    source_aliases: BTreeSet<String>,
+    runtime_bindings: BTreeSet<String>,
+    result_bindings: BTreeSet<String>,
+    config_calls: usize,
+    canonical_config_calls: usize,
+    runtime_structs: usize,
+    canonical_runtime_structs: usize,
+    with_runtime_calls: usize,
+    canonical_with_runtime_calls: usize,
+}
+
+impl<'a> PgOperatorWrapperFlow<'a> {
+    fn new(
+        args: &'a syn::Ident,
+        runtime_inputs: &'a syn::Ident,
+        runtime_type: &'a str,
+        with_runtime: &'a str,
+    ) -> Self {
+        Self {
+            args,
+            runtime_inputs,
+            runtime_type,
+            with_runtime,
+            source_aliases: BTreeSet::new(),
+            runtime_bindings: BTreeSet::new(),
+            result_bindings: BTreeSet::new(),
+            config_calls: 0,
+            canonical_config_calls: 0,
+            runtime_structs: 0,
+            canonical_runtime_structs: 0,
+            with_runtime_calls: 0,
+            canonical_with_runtime_calls: 0,
+        }
+    }
+
+    fn runtime_struct_is_canonical(&self, runtime: &syn::ExprStruct) -> bool {
+        is_exact_syn_path(&runtime.path, &[self.runtime_type])
+            && runtime.rest.is_none()
+            && runtime.fields.len() == 1
+            && runtime.fields.first().is_some_and(|field| {
+                matches!(&field.member, syn::Member::Named(member) if member == "config")
+                    && pg_source_expr_is_canonical(
+                        &field.expr,
+                        PgBuilderOrigin::RuntimeInputs(self.runtime_inputs),
+                        &self.source_aliases,
+                    )
+            })
+    }
+
+    fn call_is_canonical(&self, call: &syn::ExprCall) -> bool {
+        is_exact_path(&call.func, &[self.with_runtime])
+            && call.args.len() == 2
+            && call
+                .args
+                .first()
+                .is_some_and(|argument| is_exact_ident_path(argument, self.args))
+            && call.args.iter().nth(1).is_some_and(|argument| {
+                matches!(transparent_expr(argument), syn::Expr::Reference(reference)
+                if reference.mutability.is_none()
+                    && matches!(transparent_expr(&reference.expr), syn::Expr::Path(path)
+                        if path.path.get_ident().is_some_and(|ident| {
+                            self.runtime_bindings.contains(&ident.to_string())
+                        })))
+            })
+    }
+
+    fn expr_call_is_canonical(&self, expr: &syn::Expr) -> bool {
+        direct_call_behind_runtime_context(expr).is_some_and(|call| self.call_is_canonical(call))
+    }
+
+    fn return_expr_is_canonical(&self, expr: &syn::Expr) -> bool {
+        self.expr_call_is_canonical(expr)
+            || matches!(transparent_expr(expr), syn::Expr::Path(path)
+            if path.path.get_ident().is_some_and(|ident| {
+                self.result_bindings.contains(&ident.to_string())
+            }))
+    }
+
+    fn is_exact(&self) -> bool {
+        self.config_calls == 1
+            && self.canonical_config_calls == 1
+            && self.runtime_structs == 1
+            && self.canonical_runtime_structs == 1
+            && self.with_runtime_calls == 1
+            && self.canonical_with_runtime_calls == 1
+    }
+}
+
+impl<'ast> Visit<'ast> for PgOperatorWrapperFlow<'_> {
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        let binding = immutable_pat_ident(&local.pat);
+        let initializer = local.init.as_ref().map(|init| init.expr.as_ref());
+        if let (Some(binding), Some(initializer)) = (binding, initializer)
+            && pg_source_expr_is_canonical(
+                initializer,
+                PgBuilderOrigin::RuntimeInputs(self.runtime_inputs),
+                &self.source_aliases,
+            )
+        {
+            self.source_aliases.insert(binding.to_string());
+        }
+        if let (Some(binding), Some(syn::Expr::Struct(runtime))) =
+            (binding, initializer.map(transparent_expr))
+            && is_exact_syn_path(&runtime.path, &[self.runtime_type])
+        {
+            self.runtime_structs += 1;
+            if self.runtime_struct_is_canonical(runtime) {
+                self.canonical_runtime_structs += 1;
+                self.runtime_bindings.insert(binding.to_string());
+            }
+        }
+        if let (Some(binding), Some(initializer)) = (binding, initializer)
+            && self.expr_call_is_canonical(initializer)
+        {
+            self.result_bindings.insert(binding.to_string());
+        }
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if is_exact_path(&call.func, &[self.with_runtime]) {
+            self.with_runtime_calls += 1;
+            self.canonical_with_runtime_calls += usize::from(self.call_is_canonical(call));
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "config" && call.args.is_empty() {
+            self.config_calls += 1;
+            self.canonical_config_calls +=
+                usize::from(is_exact_ident_path(&call.receiver, self.runtime_inputs));
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+fn pg_operator_wrapper_is_exact(
+    file: &syn::File,
+    function: &syn::ItemFn,
+    runtime_inputs: &syn::Ident,
+    runtime_type: &str,
+    runtime_trait: &str,
+    builder: &str,
+    with_runtime: &str,
+) -> bool {
+    if !pg_operator_runtime_struct_is_exact(file, runtime_type) {
+        return false;
+    }
+    let Some((args, _)) = pg_operator_signature_bindings(function, &function.sig.ident.to_string())
+    else {
+        return false;
+    };
+    let mut wrapper_flow =
+        PgOperatorWrapperFlow::new(&args, runtime_inputs, runtime_type, with_runtime);
+    wrapper_flow.visit_block(&function.block);
+    let tail_is_exact = function
+        .block
+        .stmts
+        .last()
+        .and_then(|statement| match statement {
+            syn::Stmt::Expr(expr, None) => Some(expr),
+            _ => None,
+        })
+        .is_some_and(|tail| wrapper_flow.return_expr_is_canonical(tail));
+    let implementations = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if attrs_may_be_production(&item.attrs)
+                    && type_last_ident(&item.self_ty)
+                        .is_some_and(|ident| ident == runtime_type)
+                    && item
+                        .trait_
+                        .as_ref()
+                        .and_then(|(_, path, _)| path.segments.last())
+                        .is_some_and(|segment| segment.ident == runtime_trait) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(implementation) = (implementations.len() == 1).then_some(implementations[0]) else {
+        return false;
+    };
+    let connects = implementation
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(method) if method.sig.ident == "connect_maintenance" => Some(method),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(connect) = (connects.len() == 1).then_some(connects[0]) else {
+        return false;
+    };
+    let mut flow = PgBuilderFlow {
+        expected_builder: builder,
+        origin: PgBuilderOrigin::SelfConfig,
+        source_aliases: BTreeSet::new(),
+        config_aliases: BTreeMap::new(),
+        builder_like_calls: 0,
+        exact_calls: 0,
+        config_calls: 0,
+        canonical_config_calls: 0,
+        sink_calls: 0,
+        canonical_sink_calls: 0,
+    };
+    flow.visit_block(&connect.block);
+    wrapper_flow.is_exact() && tail_is_exact && flow.is_exact()
+}
+
+fn direct_pg_operator_is_exact(function: &syn::ItemFn, runtime_inputs: &syn::Ident) -> bool {
+    let mut flow = PgBuilderFlow {
+        expected_builder: "build_pg_migrator_config",
+        origin: PgBuilderOrigin::RuntimeInputs(runtime_inputs),
+        source_aliases: BTreeSet::new(),
+        config_aliases: BTreeMap::new(),
+        builder_like_calls: 0,
+        exact_calls: 0,
+        config_calls: 0,
+        canonical_config_calls: 0,
+        sink_calls: 0,
+        canonical_sink_calls: 0,
+    };
+    flow.visit_block(&function.block);
+    flow.is_exact()
+}
+
+fn pg_operator_definitions_are_exact(file: &syn::File) -> bool {
+    let specs = [
+        ("run_postgres_reader_migration_command", None),
+        (
+            "run_projection_control_command",
+            Some((
+                "ProductionProjectionControlRuntime",
+                "ProjectionControlRuntime",
+                "build_pg_migrator_config",
+                "run_projection_control_command_with_runtime",
+            )),
+        ),
+        (
+            "run_audit_ledger_verify_command",
+            Some((
+                "ProductionAuditLedgerVerifyRuntime",
+                "AuditLedgerVerifyRuntime",
+                "build_pg_audit_maintenance_config",
+                "run_audit_ledger_verify_command_with_runtime",
+            )),
+        ),
+        (
+            "run_dlq_control_command",
+            Some((
+                "ProductionDlqControlRuntime",
+                "DlqControlRuntime",
+                "build_pg_migrator_config",
+                "run_dlq_control_command_with_runtime",
+            )),
+        ),
+        ("run_reconcile_target_command", None),
+        ("run_settings_config_value_maintenance", None),
+    ];
+    specs.iter().all(|(name, wrapper)| {
+        let functions = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(function)
+                    if function.sig.ident == *name && attrs_may_be_production(&function.attrs) =>
+                {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let Some(function) = (functions.len() == 1).then_some(functions[0]) else {
+            return false;
+        };
+        let Some((_, runtime_inputs)) = pg_operator_signature_bindings(function, name) else {
+            return false;
+        };
+        match wrapper {
+            Some((runtime_type, runtime_trait, builder, with_runtime)) => {
+                pg_operator_wrapper_is_exact(
+                    file,
+                    function,
+                    &runtime_inputs,
+                    runtime_type,
+                    runtime_trait,
+                    builder,
+                    with_runtime,
+                )
+            }
+            None => direct_pg_operator_is_exact(function, &runtime_inputs),
+        }
+    })
 }
 
 fn runtime_config_global_capture_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
@@ -1164,6 +2369,9 @@ fn runtime_config_global_capture_findings(root: &Path) -> Result<Vec<Finding<Rul
         if ![
             "RuntimeConfigSnapshot",
             "RuntimeInputs",
+            "PgRuntimeConfig",
+            "PgRuntimeConfigParts",
+            "RedisRuntimeConfig",
             "build_vault_runtime_deps",
             "build_redis_runtime_deps",
             "build_s3_runtime_deps_from",
@@ -1190,6 +2398,8 @@ fn runtime_config_global_capture_findings(root: &Path) -> Result<Vec<Finding<Rul
         observed.visit_file(&file);
         inventory.snapshot_calls += observed.snapshot_calls;
         inventory.runtime_inputs_calls += observed.runtime_inputs_calls;
+        inventory.pg_config_calls += observed.pg_config_calls;
+        inventory.redis_config_calls += observed.redis_config_calls;
         inventory.vault_calls += observed.vault_calls;
         inventory.redis_calls += observed.redis_calls;
         inventory.s3_calls += observed.s3_calls;
@@ -1197,6 +2407,8 @@ fn runtime_config_global_capture_findings(root: &Path) -> Result<Vec<Finding<Rul
     }
     if inventory.snapshot_calls == 1
         && inventory.runtime_inputs_calls == 1
+        && inventory.pg_config_calls == 1
+        && inventory.redis_config_calls == 1
         && inventory.vault_calls == 1
         && inventory.redis_calls == 1
         && inventory.s3_calls == 1
@@ -1207,7 +2419,9 @@ fn runtime_config_global_capture_findings(root: &Path) -> Result<Vec<Finding<Rul
     Ok(vec![finding(
         Rule::ForbiddenWiring,
         RUNTIME_SRC_PATH,
-        "runtime production module graph must contain exactly one RuntimeConfigSnapshot::capture, one RuntimeInputs::new, and one Vault/Redis/S3 provider builder call; protected aliases, UFCS, local function aliases, and macro indirection fail closed",
+        format!(
+            "runtime production module graph must contain exactly one RuntimeConfigSnapshot::capture, one RuntimeInputs::new, one PgRuntimeConfig/RedisRuntimeConfig snapshot mapping, and one Vault/Redis/S3 provider builder call; protected aliases, UFCS, local function aliases, and macro indirection fail closed: {inventory:?}"
+        ),
     )])
 }
 
@@ -2270,6 +3484,8 @@ fn runtime_config_snapshot_findings_for_file(file: &syn::File) -> Vec<Finding<Ru
         && runtime_lifecycle_outer_is_canonical(file, runs[0])
         && inventory.snapshot_calls == 1
         && inventory.runtime_inputs_calls == 1
+        && inventory.pg_config_calls == 1
+        && inventory.redis_config_calls == 1
         && inventory.vault_calls == 1
         && inventory.redis_calls == 1
         && inventory.s3_calls == 1
@@ -2280,7 +3496,9 @@ fn runtime_config_snapshot_findings_for_file(file: &syn::File) -> Vec<Finding<Ru
         vec![finding(
             Rule::ForbiddenWiring,
             RUNTIME_LIB_PATH,
-            "prepare_runtime() must move its sole EnvConfigSource snapshot binding into RuntimeInputs; the exact RuntimeLifecycleOwner outer run must unconditionally finish one run_startup(&mut inputs) result, preserving primary errors through the sole pending-exporter cleanup; run_startup() must feed Vault/Redis/S3 from that exact snapshot binding without alias or bait paths",
+            format!(
+                "prepare_runtime() must move its sole EnvConfigSource snapshot binding into RuntimeInputs; the exact RuntimeLifecycleOwner outer run must unconditionally finish one run_startup(&mut inputs) result, preserving primary errors through the sole pending-exporter cleanup; run_startup() must use one exact config view for the typed PG/Redis mappings, consume Redis config by value, preserve canonical PG setup, and feed Vault/S3 without alias or bait paths: run={run_wiring:?}, inventory={inventory:?}"
+            ),
         )]
     }
 }
@@ -2448,6 +3666,18 @@ fn pat_ident(pat: &syn::Pat) -> Option<&syn::Ident> {
     }
 }
 
+fn immutable_pat_ident(pat: &syn::Pat) -> Option<&syn::Ident> {
+    match pat {
+        syn::Pat::Ident(pat)
+            if pat.by_ref.is_none() && pat.mutability.is_none() && pat.subpat.is_none() =>
+        {
+            Some(&pat.ident)
+        }
+        syn::Pat::Type(pat) => immutable_pat_ident(&pat.pat),
+        _ => None,
+    }
+}
+
 fn call_behind_result_context(expr: &syn::Expr) -> Option<&syn::ExprCall> {
     match transparent_expr(expr) {
         syn::Expr::Call(call) => Some(call),
@@ -2479,6 +3709,15 @@ fn is_snapshot_view(expr: &syn::Expr, snapshot: &syn::Ident) -> bool {
         return false;
     };
     call.method == "view" && call.args.is_empty() && is_exact_ident_path(&call.receiver, snapshot)
+}
+
+fn is_runtime_inputs_config_view(expr: &syn::Expr, runtime_inputs: &syn::Ident) -> bool {
+    let syn::Expr::MethodCall(call) = transparent_expr(expr) else {
+        return false;
+    };
+    call.method == "config"
+        && call.args.is_empty()
+        && is_exact_ident_path(&call.receiver, runtime_inputs)
 }
 
 fn is_snapshot_rust_log_filter(expr: &syn::Expr, config: &syn::Ident) -> bool {
@@ -2594,7 +3833,7 @@ fn runtime_inputs_parameter(item: &syn::ItemFn) -> Option<&syn::Ident> {
     pat_ident(&input.pat)
 }
 
-fn is_snapshot_config_value_closure(expr: &syn::Expr, runtime_inputs_binding: &syn::Ident) -> bool {
+fn is_snapshot_config_value_closure(expr: &syn::Expr, config_binding: &syn::Ident) -> bool {
     let syn::Expr::Closure(outer) = transparent_expr(expr) else {
         return false;
     };
@@ -2610,10 +3849,6 @@ fn is_snapshot_config_value_closure(expr: &syn::Expr, runtime_inputs_binding: &s
     let syn::Expr::MethodCall(value) = transparent_expr(&map.receiver) else {
         return false;
     };
-    let syn::Expr::MethodCall(config) = transparent_expr(&value.receiver) else {
-        return false;
-    };
-
     map.method == "map"
         && map.args.len() == 1
         && map
@@ -2626,9 +3861,7 @@ fn is_snapshot_config_value_closure(expr: &syn::Expr, runtime_inputs_binding: &s
             .args
             .first()
             .is_some_and(|arg| expr_path_last(arg).is_some_and(|ident| ident == name))
-        && config.method == "config"
-        && config.args.is_empty()
-        && is_exact_ident_path(&config.receiver, runtime_inputs_binding)
+        && is_exact_ident_path(&value.receiver, config_binding)
 }
 
 fn generated_domains_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
@@ -5789,7 +7022,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.provider.redis",
         path: RUNTIME_LIB_PATH,
-        pattern: "build_redis_runtime_deps(config_value)",
+        pattern: "build_redis_runtime_deps(redis_config)",
     },
     AnchorSpec {
         id: "run.provider.s3",
@@ -6435,6 +7668,10 @@ mod tests {
         assert_ne!(
             startup, legacy,
             "fixture must contain the legacy run signature"
+        );
+        let startup = startup.replace(
+            "    let config = runtime_inputs.config();",
+            "    build_runtime_oidc_provider(runtime_inputs.config());\n    assemble_authed_routers(runtime_inputs.config());\n    launch(runtime_inputs.config());\n    let config = runtime_inputs.config();",
         );
         format!(
             r#"{startup}
@@ -8045,8 +9282,8 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
                 "build_vault_runtime_deps(|name| std::env::var(name).ok())",
             ),
             (
-                "build_redis_runtime_deps(config_value)",
-                "build_redis_runtime_deps(|name| std::env::var(name).ok())",
+                "build_redis_runtime_deps(redis_config)",
+                "build_redis_runtime_deps(build_redis_config_from(|name| std::env::var(name).ok()))",
             ),
             (
                 "build_s3_runtime_deps_from(config_value)",
@@ -8079,8 +9316,9 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
             r#"
 use config::RuntimeConfigSnapshot;
 use phase::RuntimeInputs;
+use infra::pg::PgRuntimeConfig;
 use infra::vault::build_vault_runtime_deps;
-use infra::redis::build_redis_runtime_deps;
+use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
 use infra::s3::build_s3_runtime_deps_from;
 
 pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
@@ -8099,14 +9337,27 @@ pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
 }
 
 pub async fn run(mut runtime_inputs: RuntimeInputs) {
-    let config_value = |name: &str| {
-        runtime_inputs
-            .config()
-            .value(name)
-            .map(str::to_owned)
-    };
+    let config = runtime_inputs.config();
+    let pg_config = PgRuntimeConfig::from_snapshot(config)?;
+    let redis_config = RedisRuntimeConfig::from_snapshot(config)?;
+    let PgRuntimeConfigParts {
+        serving: serving_config,
+        tenant_read: tenant_read_config,
+        migrator: migrator_config,
+        audit_admin: audit_admin_config,
+        dlx_archiver: dlx_archiver_config,
+        dlx_verifier: dlx_verifier_config,
+        dlx_purger: dlx_purger_config,
+        legacy_policy: plaintext_policy,
+        readiness_period: pg_readiness_period,
+    } = pg_config.into_parts();
+    PgRuntimeDeps::setup_with_audit_admin_config(
+        &migrator_config, &serving_config, &tenant_read_config,
+        audit_admin_config.as_ref(), plaintext_policy, generation, inputs,
+    );
+    let config_value = |name: &str| config.value(name).map(str::to_owned);
     let vault = build_vault_runtime_deps(config_value);
-    let redis = build_redis_runtime_deps(config_value);
+    let redis = build_redis_runtime_deps(redis_config);
     let s3 = build_s3_runtime_deps_from(config_value);
 }
 "#,
@@ -8129,7 +9380,7 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
         );
 
         let ambient_closure = canonical.replace(
-            "runtime_inputs\n            .config()\n            .value(name)\n            .map(str::to_owned)",
+            "config.value(name).map(str::to_owned)",
             "std::env::var(name).ok()",
         );
         write(&runtime_path, &ambient_closure)?;
@@ -8157,8 +9408,8 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
             (
                 "redis ambient call beside compliant bait",
                 canonical.replace(
-                    "let redis = build_redis_runtime_deps(config_value);",
-                    "let _redis_bait = build_redis_runtime_deps(config_value);\n    let redis = build_redis_runtime_deps(|name| std::env::var(name).ok());",
+                    "let redis = build_redis_runtime_deps(redis_config);",
+                    "let _redis_bait = build_redis_runtime_deps(redis_config);\n    let redis = build_redis_runtime_deps(build_redis_config_from(|name| std::env::var(name).ok()));",
                 ),
             ),
             (
@@ -8191,8 +9442,8 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
             (
                 "config_value reads a different RuntimeInputs binding",
                 canonical.replace(
-                    "runtime_inputs\n            .config()",
-                    "other_runtime_inputs\n            .config()",
+                    "let config = runtime_inputs.config();",
+                    "let config = other_runtime_inputs.config();",
                 ),
             ),
         ] {
@@ -8247,8 +9498,9 @@ mod phase {}
 mod infra { pub mod vault {} pub mod redis {} pub mod s3 {} }
 use config::RuntimeConfigSnapshot;
 use phase::RuntimeInputs;
+use infra::pg::PgRuntimeConfig;
 use infra::vault::build_vault_runtime_deps;
-use infra::redis::build_redis_runtime_deps;
+use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
 use infra::s3::build_s3_runtime_deps_from;
 
 pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
@@ -8260,9 +9512,12 @@ pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
 }
 
 pub async fn run(mut runtime_inputs: RuntimeInputs) {
-    let config_value = |name: &str| runtime_inputs.config().value(name).map(str::to_owned);
+    let config = runtime_inputs.config();
+    let _pg_config = PgRuntimeConfig::from_snapshot(config);
+    let redis_config = RedisRuntimeConfig::from_snapshot(config);
+    let config_value = |name: &str| config.value(name).map(str::to_owned);
     let vault = build_vault_runtime_deps(config_value);
-    let redis = build_redis_runtime_deps(config_value);
+    let redis = build_redis_runtime_deps(redis_config);
     let s3 = build_s3_runtime_deps_from(config_value);
 }
 "#;
@@ -8359,14 +9614,17 @@ fn harmless() {
         let canonical = r#"
 use config::RuntimeConfigSnapshot;
 use phase::RuntimeInputs;
+use infra::pg::PgRuntimeConfig;
 use infra::vault::build_vault_runtime_deps;
-use infra::redis::build_redis_runtime_deps;
+use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
 use infra::s3::build_s3_runtime_deps_from;
-fn canonical(reader: Reader) {
+fn canonical(reader: Reader, config: SnapshotConfig<'_>) {
     let snapshot = RuntimeConfigSnapshot::capture(EnvConfigSource);
     let _inputs = RuntimeInputs::new(snapshot, trace());
+    let _pg_config = PgRuntimeConfig::from_snapshot(config);
+    let redis_config = RedisRuntimeConfig::from_snapshot(config);
     let _vault = build_vault_runtime_deps(reader);
-    let _redis = build_redis_runtime_deps(reader);
+    let _redis = build_redis_runtime_deps(redis_config);
     let _s3 = build_s3_runtime_deps_from(reader);
 }
 "#;
@@ -8407,8 +9665,9 @@ fn fixture_only() {
         r#"
 use config::RuntimeConfigSnapshot;
 use phase::RuntimeInputs;
+use infra::pg::PgRuntimeConfig;
 use infra::vault::build_vault_runtime_deps;
-use infra::redis::build_redis_runtime_deps;
+use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
 use infra::s3::build_s3_runtime_deps_from;
 
 pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
@@ -8452,9 +9711,35 @@ pub async fn run(runtime_inputs: RuntimeInputs) -> anyhow::Result<()> {
 }
 
 async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
-    let config_value = |name: &str| runtime_inputs.config().value(name).map(str::to_owned);
+    build_runtime_oidc_provider(runtime_inputs.config());
+    assemble_authed_routers(runtime_inputs.config());
+    launch(runtime_inputs.config());
+    let config = runtime_inputs.config();
+    let pg_config = PgRuntimeConfig::from_snapshot(config)?;
+    let redis_config = RedisRuntimeConfig::from_snapshot(config)?;
+    let PgRuntimeConfigParts {
+        serving: serving_config,
+        tenant_read: tenant_read_config,
+        migrator: migrator_config,
+        audit_admin: audit_admin_config,
+        dlx_archiver: dlx_archiver_config,
+        dlx_verifier: dlx_verifier_config,
+        dlx_purger: dlx_purger_config,
+        legacy_policy: plaintext_policy,
+        readiness_period: pg_readiness_period,
+    } = pg_config.into_parts();
+    PgRuntimeDeps::setup_with_audit_admin_config(
+        &migrator_config,
+        &serving_config,
+        &tenant_read_config,
+        audit_admin_config.as_ref(),
+        plaintext_policy,
+        generation,
+        inputs,
+    );
+    let config_value = |name: &str| config.value(name).map(str::to_owned);
     build_vault_runtime_deps(config_value);
-    build_redis_runtime_deps(config_value);
+    build_redis_runtime_deps(redis_config);
     build_s3_runtime_deps_from(config_value);
     Ok(())
 }
@@ -8603,12 +9888,12 @@ async fn main() -> anyhow::Result<()> {
     let runtime_inputs = runtime::prepare_runtime()?;
     let operator_result = match command {
         CommandFamily::Serving => return runtime::run(runtime_inputs).await,
-        CommandFamily::Postgres => runtime::run_postgres_reader_migration_command(&args).await,
-        CommandFamily::Projection => runtime::run_projection_control_command(&args).await,
-        CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args).await,
-        CommandFamily::Dlq => runtime::run_dlq_control_command(&args).await,
-        CommandFamily::ReconcileTarget => runtime::run_reconcile_target_command(&args).await,
-        CommandFamily::SettingsConfigValueMaintenance => runtime::run_settings_config_value_maintenance(&args).await,
+        CommandFamily::Postgres => runtime::run_postgres_reader_migration_command(&args, &runtime_inputs).await,
+        CommandFamily::Projection => runtime::run_projection_control_command(&args, &runtime_inputs).await,
+        CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await,
+        CommandFamily::Dlq => runtime::run_dlq_control_command(&args, &runtime_inputs).await,
+        CommandFamily::ReconcileTarget => runtime::run_reconcile_target_command(&args, &runtime_inputs).await,
+        CommandFamily::SettingsConfigValueMaintenance => runtime::run_settings_config_value_maintenance(&args, &runtime_inputs).await,
         CommandFamily::OidcJwksExport => runtime::run_oidc_jwks_export_command(&args).await,
     };
     runtime::shutdown_runtime(runtime_inputs).await?;
@@ -8697,6 +9982,445 @@ async fn main() -> anyhow::Result<()> {
     }
 
     #[test]
+    fn runtime_pg_redis_snapshot_wiring() -> Result<()> {
+        let canonical = runtime_lifecycle_snapshot_fixture().to_owned();
+        let canonical_file = syn::parse_file(&canonical)?;
+        assert!(
+            runtime_config_snapshot_findings_for_file(&canonical_file).is_empty(),
+            "one runtime_inputs.config() view must construct the PG and Redis typed configs; the Redis builder consumes its config by value"
+        );
+
+        let renamed = canonical
+            .replace(
+                "let config = runtime_inputs.config();",
+                "let snapshot_view = runtime_inputs.config();",
+            )
+            .replace("from_snapshot(config)?", "from_snapshot(snapshot_view)?")
+            .replace(
+                "let config_value = |name: &str| config.value(name).map(str::to_owned);",
+                "let read_snapshot = |name: &str| snapshot_view.value(name).map(str::to_owned);",
+            )
+            .replace(
+                "build_vault_runtime_deps(config_value)",
+                "build_vault_runtime_deps(read_snapshot)",
+            )
+            .replace(
+                "build_s3_runtime_deps_from(config_value)",
+                "build_s3_runtime_deps_from(read_snapshot)",
+            );
+        assert_ne!(
+            renamed, canonical,
+            "renamed fixture must change identifiers"
+        );
+        let renamed_file = syn::parse_file(&renamed)?;
+        assert!(
+            runtime_config_snapshot_findings_for_file(&renamed_file).is_empty(),
+            "equivalent local renames must preserve snapshot provenance"
+        );
+
+        for (label, mutated) in [
+            (
+                "wrong RuntimeInputs generation",
+                canonical.replace(
+                    "let config = runtime_inputs.config();",
+                    "let config = other_runtime_inputs.config();",
+                ),
+            ),
+            (
+                "duplicate snapshot view",
+                canonical.replace(
+                    "let config = runtime_inputs.config();",
+                    "let _discarded_config = runtime_inputs.config();\n    let config = runtime_inputs.config();",
+                ),
+            ),
+            (
+                "discarded wildcard snapshot view",
+                canonical.replace(
+                    "let config = runtime_inputs.config();",
+                    "let _ = runtime_inputs.config();\n    let config = runtime_inputs.config();",
+                ),
+            ),
+            (
+                "discarded bare snapshot view",
+                canonical.replace(
+                    "let config = runtime_inputs.config();",
+                    "runtime_inputs.config();\n    let config = runtime_inputs.config();",
+                ),
+            ),
+            (
+                "discarded PG typed mapping",
+                canonical.replace(
+                    "let pg_config = PgRuntimeConfig::from_snapshot(config)?;",
+                    "let _discarded = PgRuntimeConfig::from_snapshot(config)?;\n    let pg_config = build_pg_config()?;",
+                ),
+            ),
+            (
+                "duplicate Redis typed mapping",
+                canonical.replace(
+                    "let redis_config = RedisRuntimeConfig::from_snapshot(config)?;",
+                    "let _bait = RedisRuntimeConfig::from_snapshot(config)?;\n    let redis_config = RedisRuntimeConfig::from_snapshot(config)?;",
+                ),
+            ),
+            (
+                "borrowed Redis config",
+                canonical.replace(
+                    "build_redis_runtime_deps(redis_config)",
+                    "build_redis_runtime_deps(&redis_config)",
+                ),
+            ),
+            (
+                "typed parts do not feed postgres setup",
+                canonical.replace("&migrator_config,", "&wrong_migrator_config,"),
+            ),
+            (
+                "discarded typed parts are compliant bait",
+                canonical.replace(
+                    "} = pg_config.into_parts();",
+                    "} = pg_config.into_parts();\n    let _ = (serving_config, tenant_read_config, migrator_config, audit_admin_config, plaintext_policy);",
+                )
+                .replace("&migrator_config,", "&wrong_migrator_config,"),
+            ),
+            (
+                "ambient std env PG getter",
+                canonical.replace(
+                    "PgRuntimeConfig::from_snapshot(config)?",
+                    "build_pg_config_from(|name| std::env::var(name).ok())?",
+                ),
+            ),
+            (
+                "ambient Redis getter beside compliant bait",
+                canonical.replace(
+                    "let redis_config = RedisRuntimeConfig::from_snapshot(config)?;",
+                    "let _compliant_bait = RedisRuntimeConfig::from_snapshot(config)?;\n    let redis_config = build_redis_config_from(|name| std::env::var(name).ok())?;",
+                ),
+            ),
+            (
+                "typed config import alias",
+                canonical
+                    .replace(
+                        "use infra::pg::PgRuntimeConfig;",
+                        "use infra::pg::PgRuntimeConfig as DatabaseConfig;",
+                    )
+                    .replace(
+                        "PgRuntimeConfig::from_snapshot(config)?",
+                        "DatabaseConfig::from_snapshot(config)?",
+                    ),
+            ),
+            (
+                "typed mapping wrapper",
+                canonical
+                    .replace(
+                        "PgRuntimeConfig::from_snapshot(config)?",
+                        "map_pg(config)?",
+                    )
+                    .replace(
+                        "pub fn prepare_runtime()",
+                        "fn map_pg(config: SnapshotConfig<'_>) -> anyhow::Result<PgRuntimeConfig> { PgRuntimeConfig::from_snapshot(config) }\n\npub fn prepare_runtime()",
+                    ),
+            ),
+        ] {
+            assert_ne!(mutated, canonical, "synthetic red must mutate {label}");
+            let file = syn::parse_file(&mutated)?;
+            assert!(
+                !runtime_config_snapshot_findings_for_file(&file).is_empty(),
+                "PG/Redis snapshot gate must reject {label}"
+            );
+        }
+
+        let root = fixture_root("runtime-pg-operator-snapshot-wiring")?;
+        let rss_path = root.join(RSS_MAIN_PATH);
+        let canonical_rss = canonical_rss_binary_fixture();
+        write(&rss_path, canonical_rss)?;
+        assert!(
+            runtime_binary_config_findings(&root)?.is_empty(),
+            "six PG operator calls must receive the exact prepared &runtime_inputs binding"
+        );
+        for operator_call in [
+            "run_postgres_reader_migration_command(&args, &runtime_inputs)",
+            "run_projection_control_command(&args, &runtime_inputs)",
+            "run_audit_ledger_verify_command(&args, &runtime_inputs)",
+            "run_dlq_control_command(&args, &runtime_inputs)",
+            "run_reconcile_target_command(&args, &runtime_inputs)",
+            "run_settings_config_value_maintenance(&args, &runtime_inputs)",
+        ] {
+            let wrong_inputs = canonical_rss.replace(
+                operator_call,
+                &operator_call.replace("runtime_inputs", "other_inputs"),
+            );
+            assert_ne!(wrong_inputs, canonical_rss);
+            write(&rss_path, &wrong_inputs)?;
+            assert!(
+                !runtime_binary_config_findings(&root)?.is_empty(),
+                "binary gate must reject wrong RuntimeInputs for {operator_call}"
+            );
+            let missing_inputs = canonical_rss.replace(
+                operator_call,
+                &operator_call.replace(", &runtime_inputs", ""),
+            );
+            assert_ne!(missing_inputs, canonical_rss);
+            write(&rss_path, &missing_inputs)?;
+            assert!(
+                !runtime_binary_config_findings(&root)?.is_empty(),
+                "binary gate must reject missing RuntimeInputs for {operator_call}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_pg_redis_snapshot_wiring_rejects_operator_definition_bypasses() -> Result<()> {
+        let source = fs::read_to_string(workspace_root()?.join(RUNTIME_LIB_PATH))?;
+        let canonical = syn::parse_file(&source)?;
+        assert!(
+            pg_operator_definitions_are_exact(&canonical),
+            "the six production operator definitions are the anti-vacuity green"
+        );
+
+        let mutations = [
+            (
+                "ignored exact parameter",
+                source.replacen(
+                    "runtime_inputs: &RuntimeInputs,",
+                    "_runtime_inputs: &RuntimeInputs,",
+                    1,
+                ),
+            ),
+            (
+                "wrapper reads the wrong binding",
+                source.replacen(
+                    "config: runtime_inputs.config(),",
+                    "config: other_inputs.config(),",
+                    1,
+                ),
+            ),
+            (
+                "typed runtime reads the wrong snapshot field",
+                source.replacen(
+                    "build_pg_migrator_config(self.config)?",
+                    "build_pg_migrator_config(other.config)?",
+                    1,
+                ),
+            ),
+            (
+                "direct operator reads the wrong RuntimeInputs",
+                source.replacen(
+                    "build_pg_migrator_config(runtime_inputs.config())?",
+                    "build_pg_migrator_config(other_inputs.config())?",
+                    1,
+                ),
+            ),
+            (
+                "ambient wrapper beside compliant typed bait",
+                source.replacen(
+                    "build_pg_migrator_config(runtime_inputs.config())?",
+                    "{ let _compliant_bait = build_pg_migrator_config(runtime_inputs.config())?; build_pg_migrator_config_from(|name| std::env::var(name).ok())? }",
+                    1,
+                ),
+            ),
+            (
+                "discarded compliant builder beside wrong maintenance config",
+                source.replacen(
+                    "PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(self.config)?)",
+                    "{ let _compliant_bait = build_pg_migrator_config(self.config)?; PgRuntimeDeps::connect_maintenance(&wrong_config) }",
+                    1,
+                ),
+            ),
+            (
+                "mutable config local is reassigned before maintenance sink",
+                source.replacen(
+                    "PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(self.config)?)",
+                    "{ let mut config = build_pg_migrator_config(self.config)?; config = wrong_config; PgRuntimeDeps::connect_maintenance(&config) }",
+                    1,
+                ),
+            ),
+            (
+                "audit tuple does not feed audit maintenance sink",
+                source.replacen(
+                    "PgRuntimeDeps::connect_maintenance_with_audit_admin_config(&migrator_config, config)",
+                    "PgRuntimeDeps::connect_maintenance_with_audit_admin_config(&wrong_migrator_config, config)",
+                    1,
+                ),
+            ),
+        ];
+        for (label, mutated) in mutations {
+            assert_ne!(mutated, source, "synthetic red must mutate {label}");
+            let file = syn::parse_file(&mutated)?;
+            assert!(
+                !pg_operator_definitions_are_exact(&file),
+                "PG operator definition gate must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_pg_operator_provenance_allows_equivalent_local_structure() -> Result<()> {
+        let source = fs::read_to_string(workspace_root()?.join(RUNTIME_LIB_PATH))?;
+        let renamed_and_split = source
+            .replacen(
+                "pub async fn run_projection_control_command(\n    args: &[String],\n    runtime_inputs: &RuntimeInputs,\n) -> anyhow::Result<()> {\n    let runtime = ProductionProjectionControlRuntime {\n        config: runtime_inputs.config(),\n    };\n    run_projection_control_command_with_runtime(args, &runtime).await\n}",
+                "pub async fn run_projection_control_command(\n    command_args: &[String],\n    inputs: &RuntimeInputs,\n) -> anyhow::Result<()> {\n    let snapshot = inputs.config();\n    let runtime = ProductionProjectionControlRuntime { config: snapshot };\n    let outcome = run_projection_control_command_with_runtime(command_args, &runtime)\n        .await\n        .context(\"run projection operator\");\n    outcome\n}",
+                1,
+            );
+        assert_ne!(
+            renamed_and_split, source,
+            "green fixture must change structure"
+        );
+        assert!(
+            pg_operator_definitions_are_exact(&syn::parse_file(&renamed_and_split)?),
+            "equivalent parameter/local renames, config split, context, and result local must preserve provenance"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_pg_redis_snapshot_wiring_locks_integration_seam_and_single_pool() -> Result<()> {
+        let internal = r#"
+#[cfg(any(test, feature = "integration"))]
+pub(crate) async fn build_redis_runtime_deps_from_values(
+    url: String,
+    allow_plaintext: Option<&str>,
+) -> anyhow::Result<redis::RedisRuntimeDeps> {
+    build_redis_runtime_deps(config).await.map(|(deps, _)| deps)
+}
+"#;
+        let wrapper = r#"
+#[cfg(feature = "integration")]
+pub mod test_support {
+    pub async fn build_redis_runtime_deps_from_values(
+        url: String,
+        allow_plaintext: Option<&str>,
+    ) -> anyhow::Result<redis::RedisRuntimeDeps> {
+        crate::infra::redis::build_redis_runtime_deps_from_values(url, allow_plaintext).await
+    }
+}
+"#;
+        let pool = r#"
+pub(crate) async fn build_redis_runtime_deps(config: RedisRuntimeConfig) -> anyhow::Result<(redis::RedisRuntimeDeps, Duration)> {
+    let pool = deadpool_redis::Config::from_url(raw_url)
+        .create_pool(Some(Runtime::Tokio1))
+        .context("create redis pool")?;
+    verify_redis_pool(&pool).await?;
+    Ok((redis::RedisRuntimeDeps::setup(pool), readiness_interval))
+}
+"#;
+        let internal_is_exact = |source: &str| -> Result<bool> {
+            let file = syn::parse_file(source)?;
+            let functions = file
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Fn(function)
+                        if function.sig.ident == "build_redis_runtime_deps_from_values" =>
+                    {
+                        Some(function)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            Ok(functions.len() == 1 && internal_redis_values_seam_is_exact(functions[0]))
+        };
+        assert!(internal_is_exact(internal)?);
+        assert!(redis_test_support_wrapper_is_exact(&syn::parse_file(
+            wrapper
+        )?));
+        assert!(redis_pool_flow_is_exact(&syn::parse_file(pool)?));
+
+        for (label, mutated) in [
+            (
+                "internal cfg deleted",
+                internal.replace("#[cfg(any(test, feature = \"integration\"))]\n", ""),
+            ),
+            (
+                "internal cfg narrowed",
+                internal.replace("cfg(any(test, feature = \"integration\"))", "cfg(test)"),
+            ),
+            (
+                "internal visibility widened",
+                internal.replace("pub(crate) async fn", "pub async fn"),
+            ),
+            (
+                "internal name bait",
+                internal.replace(
+                    "build_redis_runtime_deps_from_values",
+                    "build_redis_runtime_deps_from_value_bait",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, internal, "synthetic red must mutate {label}");
+            assert!(
+                !internal_is_exact(&mutated)?,
+                "internal integration seam must reject {label}"
+            );
+        }
+
+        for (label, mutated) in [
+            (
+                "public wrapper cfg deleted",
+                wrapper.replace("#[cfg(feature = \"integration\")]\n", ""),
+            ),
+            (
+                "public wrapper name bait",
+                wrapper.replace(
+                    "pub async fn build_redis_runtime_deps_from_values",
+                    "pub async fn build_redis_runtime_deps_from_value_bait",
+                ),
+            ),
+            (
+                "public wrapper replaced by re-export bait",
+                wrapper.replace(
+                    "pub async fn build_redis_runtime_deps_from_values",
+                    "pub use crate::infra::redis::build_redis_runtime_deps_from_values;\n    pub async fn redis_values_bait",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, wrapper, "synthetic red must mutate {label}");
+            assert!(
+                !redis_test_support_wrapper_is_exact(&syn::parse_file(&mutated)?),
+                "public integration wrapper must reject {label}"
+            );
+        }
+
+        for (label, mutated) in [
+            (
+                "second startup pool",
+                pool.replace(
+                    "let pool = deadpool_redis::Config::from_url(raw_url)",
+                    "let _second = deadpool_redis::Config::from_url(other_url).create_pool(Some(Runtime::Tokio1))?;\n    let pool = deadpool_redis::Config::from_url(raw_url)",
+                ),
+            ),
+            (
+                "verify uses a different pool",
+                pool.replace("verify_redis_pool(&pool)", "verify_redis_pool(&other_pool)"),
+            ),
+            (
+                "business deps use a different pool",
+                pool.replace("RedisRuntimeDeps::setup(pool)", "RedisRuntimeDeps::setup(other_pool)"),
+            ),
+            (
+                "wrong verify beside compliant bait",
+                pool.replace(
+                    "verify_redis_pool(&pool).await?;",
+                    "verify_redis_pool(&pool).await?;\n    verify_redis_pool(&other_pool).await?;",
+                ),
+            ),
+            (
+                "readiness sampler creates a second pool",
+                format!(
+                    "{pool}\nfn readiness_sampler() {{ deadpool_redis::Config::from_url(other_url).create_pool(Some(Runtime::Tokio1)); }}\n"
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, pool, "synthetic red must mutate {label}");
+            assert!(
+                !redis_pool_flow_is_exact(&syn::parse_file(&mutated)?),
+                "Redis single-pool provenance must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn runtime_binary_operator_lifecycle_is_proof_aware() -> Result<()> {
         let root = fixture_root("runtime-binary-operator-lifecycle")?;
         let rss_path = root.join(RSS_MAIN_PATH);
@@ -8736,8 +10460,8 @@ async fn main() -> anyhow::Result<()> {
             (
                 "shadow runtime runner path",
                 canonical.replace(
-                    "runtime::run_projection_control_command(&args).await",
-                    "shadow::runtime::run_projection_control_command(&args).await",
+                    "runtime::run_projection_control_command(&args, &runtime_inputs).await",
+                    "shadow::runtime::run_projection_control_command(&args, &runtime_inputs).await",
                 ),
             ),
             (
@@ -8779,15 +10503,15 @@ async fn main() -> anyhow::Result<()> {
             (
                 "operator arm returns before shared shutdown",
                 canonical.replace(
-                    "CommandFamily::Projection => runtime::run_projection_control_command(&args).await,",
-                    "CommandFamily::Projection => return runtime::run_projection_control_command(&args).await,",
+                    "CommandFamily::Projection => runtime::run_projection_control_command(&args, &runtime_inputs).await,",
+                    "CommandFamily::Projection => return runtime::run_projection_control_command(&args, &runtime_inputs).await,",
                 ),
             ),
             (
                 "duplicate operator arm is unreachable bait",
                 canonical.replace(
-                    "CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args).await,",
-                    "CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args).await,\n        CommandFamily::AuditLedgerVerify => command_bait().await,",
+                    "CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await,",
+                    "CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await,\n        CommandFamily::AuditLedgerVerify => command_bait().await,",
                 ),
             ),
             (
@@ -8826,8 +10550,9 @@ mod routes;
 mod wrapper;
 use config::RuntimeConfigSnapshot;
 use phase::RuntimeInputs;
+use infra::pg::PgRuntimeConfig;
 use infra::vault::build_vault_runtime_deps;
-use infra::redis::build_redis_runtime_deps;
+use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
 use infra::s3::build_s3_runtime_deps_from;
 
 pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
@@ -8842,9 +10567,27 @@ pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
 }
 
 pub async fn run(mut runtime_inputs: RuntimeInputs) {
-    let config_value = |name: &str| runtime_inputs.config().value(name).map(str::to_owned);
+    let config = runtime_inputs.config();
+    let pg_config = PgRuntimeConfig::from_snapshot(config)?;
+    let redis_config = RedisRuntimeConfig::from_snapshot(config)?;
+    let PgRuntimeConfigParts {
+        serving: serving_config,
+        tenant_read: tenant_read_config,
+        migrator: migrator_config,
+        audit_admin: audit_admin_config,
+        dlx_archiver: dlx_archiver_config,
+        dlx_verifier: dlx_verifier_config,
+        dlx_purger: dlx_purger_config,
+        legacy_policy: plaintext_policy,
+        readiness_period: pg_readiness_period,
+    } = pg_config.into_parts();
+    PgRuntimeDeps::setup_with_audit_admin_config(
+        &migrator_config, &serving_config, &tenant_read_config,
+        audit_admin_config.as_ref(), plaintext_policy, generation, inputs,
+    );
+    let config_value = |name: &str| config.value(name).map(str::to_owned);
     build_vault_runtime_deps(config_value);
-    build_redis_runtime_deps(config_value);
+    build_redis_runtime_deps(redis_config);
     build_s3_runtime_deps_from(config_value);
 }
 "#,
@@ -9028,8 +10771,9 @@ fn unreachable_bait() { let _ = std::env::var("UNREACHABLE"); }
             r#"
 use config::RuntimeConfigSnapshot;
 use phase::RuntimeInputs;
+use infra::pg::PgRuntimeConfig;
 use infra::vault::build_vault_runtime_deps;
-use infra::redis::build_redis_runtime_deps;
+use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
 use infra::s3::build_s3_runtime_deps_from;
 pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
     use tracing_subscriber::{EnvFilter, fmt};
@@ -9046,9 +10790,27 @@ pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
     Ok(RuntimeInputs::new(runtime_config, trace_export))
 }
 pub async fn run(mut runtime_inputs: RuntimeInputs) {
-    let config_value = |name: &str| runtime_inputs.config().value(name).map(str::to_owned);
+    let config = runtime_inputs.config();
+    let pg_config = PgRuntimeConfig::from_snapshot(config)?;
+    let redis_config = RedisRuntimeConfig::from_snapshot(config)?;
+    let PgRuntimeConfigParts {
+        serving: serving_config,
+        tenant_read: tenant_read_config,
+        migrator: migrator_config,
+        audit_admin: audit_admin_config,
+        dlx_archiver: dlx_archiver_config,
+        dlx_verifier: dlx_verifier_config,
+        dlx_purger: dlx_purger_config,
+        legacy_policy: plaintext_policy,
+        readiness_period: pg_readiness_period,
+    } = pg_config.into_parts();
+    PgRuntimeDeps::setup_with_audit_admin_config(
+        &migrator_config, &serving_config, &tenant_read_config,
+        audit_admin_config.as_ref(), plaintext_policy, generation, inputs,
+    );
+    let config_value = |name: &str| config.value(name).map(str::to_owned);
     build_vault_runtime_deps(config_value);
-    build_redis_runtime_deps(config_value);
+    build_redis_runtime_deps(redis_config);
     build_s3_runtime_deps_from(config_value);
 }
 "#,

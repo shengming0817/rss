@@ -43,10 +43,6 @@ pub mod saga_runtime;
 pub use distributed_runtime::{DistributedRuntimeDeps, wire_distributed};
 pub use domains::settings::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
 pub use infra::oidc::{build_provider, provider_from_b64};
-pub use infra::pg::{
-    build_pg_audit_admin_config, build_pg_config, build_pg_migrator_config, build_pg_read_config,
-};
-pub use infra::redis::build_redis_runtime_deps;
 pub use infra::s3::build_s3_runtime_deps_from;
 pub use infra::vault::{
     build_settings_config_value_key_name_from, build_vault_runtime_deps,
@@ -61,6 +57,17 @@ pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 #[cfg(feature = "integration")]
 pub mod test_support {
     use super::{DistributedRuntimeDeps, SharedRuntimeDeps};
+
+    /// Builds the production Redis capability bundle from explicit integration-test values.
+    ///
+    /// The default production API exposes only the snapshot-backed typed constructor; this seam is
+    /// compiled solely for the container-backed integration lane.
+    pub async fn build_redis_runtime_deps_from_values(
+        url: String,
+        allow_plaintext: Option<&str>,
+    ) -> anyhow::Result<redis::RedisRuntimeDeps> {
+        crate::infra::redis::build_redis_runtime_deps_from_values(url, allow_plaintext).await
+    }
 
     /// Wires the production event transport through an integration-only seam.
     pub async fn wire_event_transport(
@@ -96,11 +103,11 @@ use infra::oidc::{
     build_runtime_oidc_provider,
 };
 use infra::pg::{
-    build_pg_dlx_archiver_config_from, build_pg_dlx_purger_config_from,
-    build_pg_dlx_verifier_config_from, build_readiness_interval, legacy_config_plaintext_policy,
+    PgRuntimeConfig, PgRuntimeConfigParts, build_pg_audit_maintenance_config,
+    build_pg_migrator_config,
 };
 use infra::redis::{
-    REDIS_READY_PROBE_NAME, RedisReadyProbe, build_redis_readiness_interval,
+    REDIS_READY_PROBE_NAME, RedisReadyProbe, RedisRuntimeConfig, build_redis_runtime_deps,
     spawn_redis_readiness_sampler,
 };
 use infra::s3::{build_s3_canary_config_from, build_s3_dlx_archive_store_from, wire_s3_canary};
@@ -226,15 +233,12 @@ struct DlxLifecycleBootstrapConfig {
 }
 
 async fn build_dlx_lifecycle_bootstrap_config_from(
+    archiver_pg: postgres::PgConfig,
+    verifier_pg: postgres::PgConfig,
+    purger_pg: postgres::PgConfig,
     get: impl Fn(&str) -> Option<String>,
     clock: Arc<dyn diport::Clock>,
 ) -> anyhow::Result<DlxLifecycleBootstrapConfig> {
-    let archiver_pg =
-        build_pg_dlx_archiver_config_from(&get).context("build DLX archiver postgres config")?;
-    let verifier_pg =
-        build_pg_dlx_verifier_config_from(&get).context("build DLX verifier postgres config")?;
-    let purger_pg =
-        build_pg_dlx_purger_config_from(&get).context("build DLX purger postgres config")?;
     let archive_key = event_transport::build_dlx_archive_key_name_from(&get)
         .context("build DLX archive key name")?;
     let hot_key = eventexec::DlxHotKeyName::try_new(
@@ -604,12 +608,15 @@ pub fn is_postgres_command(args: &[String]) -> bool {
 
 /// Run the release-only reader-lane migration without constructing serving pools or requiring
 /// reader credentials. The postgres adapter independently verifies the exact embedded/ledger edge.
-pub async fn run_postgres_reader_migration_command(args: &[String]) -> anyhow::Result<()> {
+pub async fn run_postgres_reader_migration_command(
+    args: &[String],
+    runtime_inputs: &RuntimeInputs,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(args, [namespace, command] if namespace == "postgres" && command == "migrate-reader-lane"),
         "usage: rss postgres migrate-reader-lane"
     );
-    PgRuntimeDeps::migrate_reader_lane_only(&build_pg_migrator_config()?)
+    PgRuntimeDeps::migrate_reader_lane_only(&build_pg_migrator_config(runtime_inputs.config())?)
         .await
         .context("apply exact postgres 0066 to 0067 reader-lane migration")
 }
@@ -1526,9 +1533,11 @@ trait ProjectionControlRuntime {
     async fn shutdown(&self, session: Self::Session);
 }
 
-struct ProductionProjectionControlRuntime;
+struct ProductionProjectionControlRuntime<'a> {
+    config: SnapshotConfig<'a>,
+}
 
-impl ProjectionControlRuntime for ProductionProjectionControlRuntime {
+impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
     type Session = PgMaintenanceDeps;
 
     fn build_registry(&self) -> anyhow::Result<ProjectionTargetRegistry> {
@@ -1536,7 +1545,7 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime {
     }
 
     async fn connect_maintenance(&self) -> anyhow::Result<Self::Session> {
-        PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config()?)
+        PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(self.config)?)
             .await
             .context("setup postgres maintenance deps")
     }
@@ -1645,8 +1654,14 @@ where
 }
 
 /// 执行 `rss projections replay|status|swap`。
-pub async fn run_projection_control_command(args: &[String]) -> anyhow::Result<()> {
-    run_projection_control_command_with_runtime(args, &ProductionProjectionControlRuntime).await
+pub async fn run_projection_control_command(
+    args: &[String],
+    runtime_inputs: &RuntimeInputs,
+) -> anyhow::Result<()> {
+    let runtime = ProductionProjectionControlRuntime {
+        config: runtime_inputs.config(),
+    };
+    run_projection_control_command_with_runtime(args, &runtime).await
 }
 
 /// `rss` binary 是否请求 per-tenant audit ledger full-chain verify。
@@ -1949,22 +1964,23 @@ trait AuditLedgerVerifyRuntime {
     async fn shutdown(&self, session: Self::Session);
 }
 
-struct ProductionAuditLedgerVerifyRuntime;
+struct ProductionAuditLedgerVerifyRuntime<'a> {
+    config: SnapshotConfig<'a>,
+}
 
-impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime {
+impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime<'_> {
     type Session = PgMaintenanceDeps;
 
     async fn connect_maintenance(&self) -> anyhow::Result<Self::Session> {
-        let audit_admin_config =
-            build_pg_audit_admin_config().context("build audit admin postgres config")?;
+        let (migrator_config, audit_admin_config) = build_pg_audit_maintenance_config(self.config)
+            .context("build audit maintenance postgres config")?;
         match audit_admin_config.as_ref() {
-            Some(config) => PgRuntimeDeps::connect_maintenance_with_audit_admin_config(
-                &build_pg_migrator_config()?,
-                config,
-            )
-            .await
-            .context("setup postgres maintenance deps with audit admin"),
-            None => PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config()?)
+            Some(config) => {
+                PgRuntimeDeps::connect_maintenance_with_audit_admin_config(&migrator_config, config)
+                    .await
+                    .context("setup postgres maintenance deps with audit admin")
+            }
+            None => PgRuntimeDeps::connect_maintenance(&migrator_config)
                 .await
                 .context("setup postgres maintenance deps"),
         }
@@ -2079,8 +2095,14 @@ where
 }
 
 /// 执行 `rss audit-ledger verify`。
-pub async fn run_audit_ledger_verify_command(args: &[String]) -> anyhow::Result<()> {
-    run_audit_ledger_verify_command_with_runtime(args, &ProductionAuditLedgerVerifyRuntime).await
+pub async fn run_audit_ledger_verify_command(
+    args: &[String],
+    runtime_inputs: &RuntimeInputs,
+) -> anyhow::Result<()> {
+    let runtime = ProductionAuditLedgerVerifyRuntime {
+        config: runtime_inputs.config(),
+    };
+    run_audit_ledger_verify_command_with_runtime(args, &runtime).await
 }
 
 /// `rss` binary 是否请求 DLQ inspection / replay / redrive 控制命令。
@@ -3079,14 +3101,16 @@ trait DlqControlRuntime {
     async fn shutdown(&self, session: Self::Session);
 }
 
-struct ProductionDlqControlRuntime;
+struct ProductionDlqControlRuntime<'a> {
+    config: SnapshotConfig<'a>,
+}
 
-impl DlqControlRuntime for ProductionDlqControlRuntime {
+impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
     type Session = PgMaintenanceDeps;
     type Store = PgDlqStore;
 
     async fn connect_maintenance(&self) -> anyhow::Result<Self::Session> {
-        PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config()?)
+        PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(self.config)?)
             .await
             .context("setup postgres maintenance deps")
     }
@@ -3217,8 +3241,14 @@ fn issue_authorized_dlq_capability() -> OperatorDlqCapability {
 }
 
 /// 执行 `rss dlq ...`。
-pub async fn run_dlq_control_command(args: &[String]) -> anyhow::Result<()> {
-    run_dlq_control_command_with_runtime(args, &ProductionDlqControlRuntime).await
+pub async fn run_dlq_control_command(
+    args: &[String],
+    runtime_inputs: &RuntimeInputs,
+) -> anyhow::Result<()> {
+    let runtime = ProductionDlqControlRuntime {
+        config: runtime_inputs.config(),
+    };
+    run_dlq_control_command_with_runtime(args, &runtime).await
 }
 
 /// Whether the rss binary was invoked for reconcile target inspection or recovery.
@@ -3443,14 +3473,18 @@ fn issue_authorized_reconcile_capability() -> OperatorReconcileCapability {
 }
 
 /// Execute an authenticated, audited tenant-scoped reconcile target operator command.
-pub async fn run_reconcile_target_command(args: &[String]) -> anyhow::Result<()> {
+pub async fn run_reconcile_target_command(
+    args: &[String],
+    runtime_inputs: &RuntimeInputs,
+) -> anyhow::Result<()> {
     let parsed = parse_reconcile_target_args(args)?;
     let resource_id = format!("tenant={} target_id={}", parsed.tenant, parsed.target_id);
     let start_action = format!("reconcile.target.{}.start", parsed.action.as_str());
     let finish_action = format!("reconcile.target.{}.finish", parsed.action.as_str());
-    let pg = PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config()?)
-        .await
-        .context("setup postgres maintenance deps")?;
+    let pg =
+        PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(runtime_inputs.config())?)
+            .await
+            .context("setup postgres maintenance deps")?;
     if let Err(error) = record_reconcile_audit(
         &pg,
         UNVERIFIED_RECONCILE_OPERATOR,
@@ -3774,13 +3808,17 @@ async fn settings_config_value_maintenance_protection(
 }
 
 /// 执行 `rss settings-config-values maintenance`。
-pub async fn run_settings_config_value_maintenance(args: &[String]) -> anyhow::Result<()> {
+pub async fn run_settings_config_value_maintenance(
+    args: &[String],
+    runtime_inputs: &RuntimeInputs,
+) -> anyhow::Result<()> {
     let parsed = parse_settings_config_value_maintenance_args(args)?;
     let options = parsed.options.clone();
     let resource_id = settings_config_value_maintenance_resource_id(&options);
-    let pg = PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config()?)
-        .await
-        .context("setup postgres maintenance deps")?;
+    let pg =
+        PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(runtime_inputs.config())?)
+            .await
+            .context("setup postgres maintenance deps")?;
     pg.record_config_value_maintenance_audit(
         UNVERIFIED_CONFIG_MAINTENANCE_OPERATOR,
         "settings.config-values.maintenance.start",
@@ -4318,25 +4356,37 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
         dlx_lifecycle,
         domain_transport,
         metrics_exporter,
+        pg_readiness_period,
+        redis_readiness_period,
         _command_idempotency_keyring,
     ) = phase_result(
         RuntimePhase::BuildInfra,
         async {
-            let config_value = |name: &str| runtime_inputs.config().value(name).map(str::to_owned);
+            let config = runtime_inputs.config();
+            let pg_config = PgRuntimeConfig::from_snapshot(config)
+                .context("build snapshot-backed postgres config")?;
+            let redis_config = RedisRuntimeConfig::from_snapshot(config)
+                .context("build snapshot-backed redis config")?;
+            let PgRuntimeConfigParts {
+                serving: app_pg_config,
+                tenant_read: tenant_read_pg_config,
+                migrator: migrator_config,
+                audit_admin: audit_admin_config,
+                dlx_archiver: dlx_archiver_pg_config,
+                dlx_verifier: dlx_verifier_pg_config,
+                dlx_purger: dlx_purger_pg_config,
+                legacy_policy: plaintext_policy,
+                readiness_period: pg_readiness_period,
+            } = pg_config.into_parts();
+            let config_value = |name: &str| config.value(name).map(str::to_owned);
             // Phase A parses every configuration and proves all external DLX capabilities before
             // the forward-only 0062 migration can commit. A bad credential or WORM/key capability
             // therefore cannot strand the deployment between incompatible schema generations.
-            let audit_admin_config =
-                build_pg_audit_admin_config().context("build audit admin postgres config")?;
-            let migrator_config = build_pg_migrator_config()?;
-            let app_pg_config = build_pg_config()?;
-            let tenant_read_pg_config = build_pg_read_config()?;
-            let plaintext_policy = legacy_config_plaintext_policy()?;
             let vault = build_vault_runtime_deps(config_value).context("setup vault deps")?;
             let settings_config_value_key_name =
                 build_settings_config_value_key_name_from(config_value)
                     .context("settings config value key name")?;
-            let redis = build_redis_runtime_deps(config_value)
+            let (redis, redis_readiness_period) = build_redis_runtime_deps(redis_config)
                 .await
                 .context("setup redis deps")?;
             let s3 = build_s3_runtime_deps_from(config_value).context("setup s3 deps")?;
@@ -4358,9 +4408,14 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
                      use durable-shared or durable-isolated"
                 );
             }
-            let dlx_bootstrap =
-                build_dlx_lifecycle_bootstrap_config_from(config_value, Arc::new(SystemClock))
-                    .await?;
+            let dlx_bootstrap = build_dlx_lifecycle_bootstrap_config_from(
+                dlx_archiver_pg_config,
+                dlx_verifier_pg_config,
+                dlx_purger_pg_config,
+                config_value,
+                Arc::new(SystemClock),
+            )
+            .await?;
             let DlxLifecycleBootstrapConfig {
                 archiver_pg: dlx_archiver_pg_config,
                 verifier_pg: dlx_verifier_pg_config,
@@ -4492,6 +4547,8 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
                 dlx_lifecycle,
                 domain_transport,
                 metrics_exporter,
+                pg_readiness_period,
+                redis_readiness_period,
                 command_idempotency_keyring,
             ))
         }
@@ -4523,9 +4580,6 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
             validate_provider_output_evidence()
                 .context("validate runtime provider-output evidence")?;
             let oidc_resource = runtime_oidc.managed_resource();
-            let pg_readiness_period = build_readiness_interval();
-            let redis_readiness_period = build_redis_readiness_interval();
-
             // 框架归属 RLS 能力门 readyz 兜底探针（须先于 take_health_reporter）：把启动期 verify_rls_capability
             // 的结果显式暴露到 readyz（启动已 fail-fast，故进程在跑时恒 ready；运维可见 + 周期再核验接线点）。
             let rls_probe_name =
@@ -4719,16 +4773,6 @@ mod tests {
 
     fn full_dlx_bootstrap_env(name: &str) -> Option<String> {
         match name {
-            "RSS_PG_HOST" => Some("postgres.internal".to_owned()),
-            "RSS_PG_PORT" => Some("5432".to_owned()),
-            "RSS_PG_DATABASE" => Some("rss".to_owned()),
-            "RSS_PG_DLX_ARCHIVER_USERNAME" => Some("rss_dlx_archiver".to_owned()),
-            "RSS_PG_DLX_ARCHIVER_PASSWORD" => Some("dlx-pg-secret".to_owned()),
-            "RSS_PG_DLX_VERIFIER_USERNAME" => Some("rss_dlx_verifier".to_owned()),
-            "RSS_PG_DLX_VERIFIER_PASSWORD" => Some("dlx-verify-secret".to_owned()),
-            "RSS_PG_DLX_PURGER_USERNAME" => Some("rss_dlx_purger".to_owned()),
-            "RSS_PG_DLX_PURGER_PASSWORD" => Some("dlx-purge-secret".to_owned()),
-            "RSS_PG_SSL_MODE" => Some("disable".to_owned()),
             "RSS_S3_ENDPOINT_URL" => Some("https://s3.example.test".to_owned()),
             "RSS_DLX_ARCHIVE_S3_BUCKET" => Some("rss-dlx-archive".to_owned()),
             "RSS_VAULT_ADDR" => Some("https://vault.example.test".to_owned()),
@@ -4742,52 +4786,23 @@ mod tests {
         }
     }
 
+    fn test_dlx_pg_config(username: &str) -> postgres::PgConfig {
+        postgres::PgConfig::new(
+            "postgres.internal",
+            5432,
+            "rss",
+            username,
+            postgres::PgPassword::new("test-only-password"),
+        )
+        .with_ssl_mode(postgres::PgSslMode::Disable)
+    }
+
     #[tokio::test]
-    async fn dlx_bootstrap_config_requires_independent_credentials_and_key_domains() {
-        let general_pg_only = build_dlx_lifecycle_bootstrap_config_from(
-            |name| match name {
-                "RSS_PG_DLX_ARCHIVER_USERNAME" | "RSS_PG_DLX_ARCHIVER_PASSWORD" => None,
-                "RSS_PG_USERNAME" => Some("rss_app".to_owned()),
-                "RSS_PG_PASSWORD" => Some("app-secret".to_owned()),
-                _ => full_dlx_bootstrap_env(name),
-            },
-            Arc::new(FixedDlxBootstrapClock),
-        )
-        .await;
-        assert!(
-            general_pg_only
-                .err()
-                .is_some_and(|error| format!("{error:#}").contains("RSS_PG_DLX_ARCHIVER_USERNAME"))
-        );
-        let missing_verifier = build_dlx_lifecycle_bootstrap_config_from(
-            |name| match name {
-                "RSS_PG_DLX_VERIFIER_USERNAME" | "RSS_PG_DLX_VERIFIER_PASSWORD" => None,
-                _ => full_dlx_bootstrap_env(name),
-            },
-            Arc::new(FixedDlxBootstrapClock),
-        )
-        .await;
-        assert!(
-            missing_verifier
-                .err()
-                .is_some_and(|error| format!("{error:#}").contains("RSS_PG_DLX_VERIFIER_USERNAME"))
-        );
-
-        let missing_purger = build_dlx_lifecycle_bootstrap_config_from(
-            |name| match name {
-                "RSS_PG_DLX_PURGER_USERNAME" | "RSS_PG_DLX_PURGER_PASSWORD" => None,
-                _ => full_dlx_bootstrap_env(name),
-            },
-            Arc::new(FixedDlxBootstrapClock),
-        )
-        .await;
-        assert!(
-            missing_purger
-                .err()
-                .is_some_and(|error| format!("{error:#}").contains("RSS_PG_DLX_PURGER_USERNAME"))
-        );
-
+    async fn dlx_bootstrap_config_requires_independent_key_domains() {
         let reused_key = build_dlx_lifecycle_bootstrap_config_from(
+            test_dlx_pg_config("rss_dlx_archiver"),
+            test_dlx_pg_config("rss_dlx_verifier"),
+            test_dlx_pg_config("rss_dlx_purger"),
             |name| match name {
                 "RSS_DLX_ARCHIVE_KEY_NAME" => Some("dlx-hot".to_owned()),
                 _ => full_dlx_bootstrap_env(name),
@@ -6748,8 +6763,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn projection_control_entrypoint_rejects_bad_args_before_runtime_setup() {
-        let result = run_projection_control_command(&args(&["projections"])).await;
+        let snapshot = crate::config::test_snapshot(&[]).expect("capture operator config");
+        let runtime_inputs = RuntimeInputs::new(snapshot, None);
+        let result = run_projection_control_command(&args(&["projections"]), &runtime_inputs).await;
         assert!(result.is_err());
     }
 

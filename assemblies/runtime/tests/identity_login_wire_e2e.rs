@@ -420,11 +420,10 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     );
     // SharedRuntimeDeps 现含 redis bundle（#1255/#332）——构造 redis fixture 满足结构（identity wiring 不消费）。
     let redis_fixture = testkit::env_or_redis().await?;
-    let redis = runtime::build_redis_runtime_deps(|name| match name {
-        "RSS_REDIS_URL" => Some(redis_fixture.url().to_string()),
-        "RSS_REDIS_ALLOW_PLAINTEXT" => Some("true".to_string()),
-        _ => None,
-    })
+    let redis = runtime::test_support::build_redis_runtime_deps_from_values(
+        redis_fixture.url().to_string(),
+        Some("true"),
+    )
     .await?;
     let s3 = runtime::build_s3_runtime_deps_from(|name| match name {
         "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:1".to_string()),
@@ -664,11 +663,10 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         )?,
     );
     let redis_fixture = testkit::env_or_redis().await?;
-    let redis = runtime::build_redis_runtime_deps(|name| match name {
-        "RSS_REDIS_URL" => Some(redis_fixture.url().to_string()),
-        "RSS_REDIS_ALLOW_PLAINTEXT" => Some("true".to_string()),
-        _ => None,
-    })
+    let redis = runtime::test_support::build_redis_runtime_deps_from_values(
+        redis_fixture.url().to_string(),
+        Some("true"),
+    )
     .await?;
     let s3 = runtime::build_s3_runtime_deps_from(|name| match name {
         "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:1".to_string()),
