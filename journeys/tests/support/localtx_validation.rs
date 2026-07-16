@@ -11,8 +11,8 @@ mod common;
 
 use std::collections::HashMap;
 use std::future::{Future, poll_fn};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, anyhow, ensure};
@@ -25,7 +25,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use diport::{
     DynKeyProvider, EncryptOutput, KeyName, KeyProvider, KeyProviderError, KeyRef, KeyVersion,
-    ManagedResource, RedactedBytes,
+    ManagedResource, OutboxEmitError, OutboxEnvelopeParts, RedactedBytes,
 };
 use generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse;
 use generated::http::identity_v1::{
@@ -39,7 +39,8 @@ use identity::ports::{
     AuthOutcome, Credential, CredentialRepo, DynCredentialRepo, DynRefreshTokenStore,
     DynSessionLifecycle, IdentityError, LoginIdentifier, PasswordChangeMutation,
     RefreshRotationMutation, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
-    RefreshTokenStore, TenantRepoScope as IdentityScope,
+    RefreshTokenStore, Session, SessionId, SessionLifecycle, SessionLogoutMutation,
+    TenantRepoScope as IdentityScope,
 };
 use identity::{LoginService, RefreshService, SeedSigner};
 use memory::{FixedClock, MemBus, MemEmitter};
@@ -394,6 +395,82 @@ impl CredentialRepo for BarrierCredentialRepo {
         now: SystemTime,
     ) -> Result<bool, IdentityError> {
         self.inner.lockout_status(scope, login, now).await
+    }
+}
+
+struct SessionFindBarrier {
+    target: Mutex<Option<String>>,
+    barrier: Barrier,
+}
+
+impl SessionFindBarrier {
+    fn new() -> Self {
+        Self {
+            target: Mutex::new(None),
+            barrier: Barrier::new(2),
+        }
+    }
+
+    fn arm(&self, session_id: &str) -> Result<()> {
+        let mut target = self
+            .target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ensure!(target.is_none(), "session find barrier is already armed");
+        *target = Some(session_id.to_owned());
+        Ok(())
+    }
+
+    async fn wait_if_armed(&self, session_id: &SessionId) {
+        let armed = self
+            .target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_deref()
+            .is_some_and(|target| target == session_id.as_str());
+        if armed && self.barrier.wait().await.is_leader() {
+            self.target
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
+    }
+}
+
+struct BarrierSessionLifecycle {
+    inner: Arc<DynSessionLifecycle<'static>>,
+    find_barrier: Arc<SessionFindBarrier>,
+}
+
+impl SessionLifecycle for BarrierSessionLifecycle {
+    async fn persist_session_and_emit(
+        &self,
+        scope: IdentityScope,
+        session: Session,
+        entry: consistency::EventEntry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(), OutboxEmitError> {
+        self.inner
+            .persist_session_and_emit(scope, session, entry, envelope)
+            .await
+    }
+
+    async fn find(
+        &self,
+        scope: IdentityScope,
+        session_id: SessionId,
+    ) -> Result<Option<Session>, IdentityError> {
+        let session = self.inner.find(scope, session_id.clone()).await?;
+        self.find_barrier.wait_if_armed(&session_id).await;
+        Ok(session)
+    }
+
+    async fn logout(
+        &self,
+        scope: IdentityScope,
+        mutation: SessionLogoutMutation,
+    ) -> Result<(), IdentityError> {
+        self.inner.logout(scope, mutation).await
     }
 }
 
@@ -930,31 +1007,6 @@ impl ProvisionedTestPgCredential {
     }
 }
 
-async fn provision_test_login(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    credential: &TestPgCredential,
-) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-        .bind(credential.role)
-        .execute(&mut **tx)
-        .await?;
-    let ddl: String = sqlx::query_scalar(
-        r#"
-        SELECT CASE
-            WHEN EXISTS (SELECT FROM pg_roles WHERE rolname = $1)
-                THEN format('ALTER ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', $1, $2)
-            ELSE format('CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', $1, $2)
-        END
-        "#,
-    )
-    .bind(credential.role)
-    .bind(credential.password)
-    .fetch_one(&mut **tx)
-    .await?;
-    sqlx::query(&ddl).execute(&mut **tx).await?;
-    Ok(())
-}
-
 async fn provision_test_logins(
     params: &testkit::PgConnParams,
 ) -> Result<(
@@ -962,24 +1014,18 @@ async fn provision_test_logins(
     ProvisionedTestPgCredential,
     ProvisionedTestPgCredential,
 )> {
-    let options = PgConnectOptions::new()
-        .host(&params.host)
-        .port(params.port)
-        .database(&params.database)
-        .username(&params.username)
-        .password(&params.password)
-        .ssl_mode(SqlxPgSslMode::Prefer);
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect_with(options)
-        .await?;
-    let mut tx = pool.begin().await?;
-    provision_test_login(&mut tx, &RSS_APP_LOGIN).await?;
-    provision_test_login(&mut tx, &RSS_APP_READ_LOGIN).await?;
-    provision_test_login(&mut tx, &RSS_AUDIT_ADMIN_LOGIN).await?;
-    tx.commit().await?;
-    pool.close().await;
+    testkit::provision_postgres_test_logins(
+        params,
+        &[
+            testkit::PostgresTestLogin::new(RSS_APP_LOGIN.role, RSS_APP_LOGIN.password),
+            testkit::PostgresTestLogin::new(RSS_APP_READ_LOGIN.role, RSS_APP_READ_LOGIN.password),
+            testkit::PostgresTestLogin::new(
+                RSS_AUDIT_ADMIN_LOGIN.role,
+                RSS_AUDIT_ADMIN_LOGIN.password,
+            ),
+        ],
+    )
+    .await?;
     Ok((
         ProvisionedTestPgCredential {
             credential: &RSS_APP_LOGIN,
@@ -1442,6 +1488,7 @@ struct IdentityHarness {
     session_identity: axum::Router,
     tenant_b_identity: axum::Router,
     credential_observer: PgCredentialRepo,
+    session_find_barrier: Arc<SessionFindBarrier>,
 }
 
 async fn build_identity_harness(
@@ -1506,6 +1553,12 @@ async fn build_identity_harness(
     let lifecycle: Arc<DynSessionLifecycle<'static>> = Arc::from(DynSessionLifecycle::new_box(
         identity_deps.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
     ));
+    let session_find_barrier = Arc::new(SessionFindBarrier::new());
+    let lifecycle: Arc<DynSessionLifecycle<'static>> =
+        Arc::from(DynSessionLifecycle::new_box(BarrierSessionLifecycle {
+            inner: lifecycle,
+            find_barrier: Arc::clone(&session_find_barrier),
+        }));
     let refresh = identity::seed_refresh_service(
         || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
@@ -1562,6 +1615,7 @@ async fn build_identity_harness(
             None,
         )?,
         credential_observer: identity_deps.credential_repo(),
+        session_find_barrier,
     })
 }
 
@@ -1987,6 +2041,7 @@ async fn drive_logout_contention(
     let (body, sentinels) = logout_payload(case, &session)?;
     let probes = [harness.tenant_a, harness.tenant_b];
     let before = session_snapshot(observation_pool, probes, &session).await?;
+    harness.session_find_barrier.arm(&session)?;
     let pair = tokio::time::timeout(Duration::from_secs(15), async {
         tokio::join!(
             send_recorded(

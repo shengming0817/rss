@@ -106,8 +106,8 @@ mod containers;
 #[cfg(feature = "containers")]
 pub use containers::{
     FixtureError, MinioConnParams, MinioFixture, MqttFixture, PgConnParams, PgFixture,
-    RabbitFixture, RedisFixture, env_or_minio, env_or_mosquitto, env_or_postgres, env_or_rabbitmq,
-    env_or_redis,
+    PostgresTestLogin, RabbitFixture, RedisFixture, env_or_minio, env_or_mosquitto,
+    env_or_postgres, env_or_rabbitmq, env_or_redis, provision_postgres_test_logins,
 };
 
 // tenant-scope repository conformance 骨架（#1437 PERSIST-016 种子；#1426 在此扩展全套 repo conformance）。

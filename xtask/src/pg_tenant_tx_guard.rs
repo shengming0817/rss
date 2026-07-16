@@ -23,6 +23,13 @@
 //! internal publish / republish must use the generic runner and may not impersonate the HTTP
 //! contract.
 //!
+//! INVARIANT: PG-LOCALTX-QUARANTINE-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::localtx_quarantine_guard_rejects_bypass_and_escape_classes", anti_vacuity = "tests::localtx_quarantine_guard_real_workspace_closes_exact_sites" } —
+//! both production LocalTx write funnels must acquire and begin through the private armed lease,
+//! then tail-settle the exact branded transaction once. The wrapper borrow-binds that transaction
+//! to its lease's closed quarantine stage; only a top-level consuming commit/rollback ACK may clear
+//! it. The lease, wrapper, settlement dataflow, observability, and `close_on_drop` fallback are
+//! closed against conditional, helper, raw, macro, and disarm escapes.
+//!
 //! INVARIANT: TENANCY-SECRET-KEY-MUTATION-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::secret_ref_mutation_guard_rejects_split_or_legacy_owners", anti_vacuity = "tests::secret_ref_mutation_guard_real_workspace_has_exact_capability_sites" } —
 //! production `secret_refs` mutations are append-only INSERTs confined to the transaction-bound
 //! `key_lock::LockedSecretKey::{cas_insert,append_tombstone}` capability. `SecretRepo` is read-only;
@@ -69,6 +76,10 @@ pub(crate) enum Rule {
     RetryPlacement,
     /// real workspace scan did not find every required retry boundary.
     RetrySitesAbsent,
+    /// LocalTx pooled connection bypassed or weakened the armed quarantine lease.
+    LocalTxQuarantineBypass,
+    /// The exact LocalTx lease or one of its two production funnel sites disappeared.
+    LocalTxQuarantineSitesAbsent,
     /// `secret_refs` mutation escaped the keyed `LockedSecretKey` capability.
     SecretRefMutationBypass,
     /// canonical `LockedSecretKey` mutation sites are absent or duplicated.
@@ -106,6 +117,7 @@ impl GovernanceCheck for PgTenantTxGuard {
         let settings_ports = std::fs::read_to_string(&settings_ports_path)
             .with_context(|| format!("读 {} 失败", settings_ports_path.display()))?;
         let (summary, mut findings) = scan_guard(&migrations, &files);
+        findings.extend(localtx_required_carriers_missing(&files));
         let dlx_path = root.join("adapters/postgres/src/dlx_lifecycle.rs");
         let dlx_source = std::fs::read_to_string(&dlx_path)
             .with_context(|| format!("读 {} 失败", dlx_path.display()))?;
@@ -358,6 +370,7 @@ pub(crate) fn scan_guard(
     let mut state = ScanState::default();
     let writer_sql_helpers = workspace_writer_sql_helpers(files);
     findings.extend(fault_matrix_exception_staleness(files));
+    findings.extend(localtx_quarantine_findings(files));
 
     for (rel, content) in files {
         findings.extend(scan_source_file(
@@ -444,6 +457,944 @@ pub(crate) fn scan_guard(
         state.raw_sites
     );
     (summary, findings)
+}
+
+fn localtx_quarantine_findings(files: &[(String, String)]) -> Vec<Finding> {
+    let cotx = files
+        .iter()
+        .find(|(path, _)| matches!(path.as_str(), "cotx.rs" | "cotx/mod.rs"));
+    let settlement = files.iter().find(|(path, _)| path == "cotx/settlement.rs");
+    if cotx.is_none() && settlement.is_none() {
+        return Vec::new();
+    }
+
+    let mut findings = Vec::new();
+    match cotx {
+        Some((path, source)) => {
+            let stripped = strip_cfg_test_modules(source);
+            match syn::parse_file(&stripped) {
+                Ok(syntax) => {
+                    let protected_funnels =
+                        ["tenant_scoped_write_inner", "co_tx_with_outbox_inner"];
+                    for function_name in ["tenant_scoped_write_inner", "co_tx_with_outbox_inner"] {
+                        let Some(function) = syntax.items.iter().find_map(|item| match item {
+                            syn::Item::Fn(function) if function.sig.ident == function_name => {
+                                Some(function)
+                            }
+                            _ => None,
+                        }) else {
+                            findings.push(finding(
+                                Rule::LocalTxQuarantineSitesAbsent,
+                                format!("{path}::{function_name}"),
+                                "required LocalTx production write funnel is missing",
+                            ));
+                            continue;
+                        };
+                        if !localtx_funnel_flow_is_closed(function) {
+                            findings.push(finding(
+                                Rule::LocalTxQuarantineBypass,
+                                format!("{path}::{function_name}"),
+                                "LocalTx write funnel must contain one direct top-level acquire/begin/consuming-finish dataflow, with the same symbolic lease and transaction bindings, finish as the tail expression, and no nested, conditional, helper, shadow, reassignment, or early-return escape",
+                            ));
+                        }
+                    }
+                    for function in syntax.items.iter().filter_map(|item| match item {
+                        syn::Item::Fn(function) => Some(function),
+                        _ => None,
+                    }) {
+                        if !protected_funnels
+                            .iter()
+                            .any(|name| function.sig.ident == *name)
+                            && localtx_funnel_call_counts(&function.block).acquire > 0
+                        {
+                            findings.push(finding(
+                                Rule::LocalTxQuarantineBypass,
+                                format!("{path}::{}", function.sig.ident),
+                                "LocalTxConnectionLease acquire is allowed only in the two production LocalTx funnels",
+                            ));
+                        }
+                    }
+                }
+                Err(error) => findings.push(finding(
+                    Rule::LocalTxQuarantineBypass,
+                    path,
+                    format!("cannot parse LocalTx funnel source: {error}"),
+                )),
+            }
+        }
+        None => findings.push(finding(
+            Rule::LocalTxQuarantineSitesAbsent,
+            "cotx/mod.rs",
+            "LocalTx production funnel module is missing",
+        )),
+    }
+
+    match settlement {
+        Some((path, source)) => {
+            let stripped = strip_cfg_test_modules(source);
+            match syn::parse_file(&stripped) {
+                Ok(syntax) => findings.extend(localtx_lease_shape_findings(path, &syntax)),
+                Err(error) => findings.push(finding(
+                    Rule::LocalTxQuarantineBypass,
+                    path,
+                    format!("cannot parse LocalTx settlement source: {error}"),
+                )),
+            }
+        }
+        None => findings.push(finding(
+            Rule::LocalTxQuarantineSitesAbsent,
+            "cotx/settlement.rs",
+            "LocalTx armed connection lease carrier is missing",
+        )),
+    }
+    for (path, source) in files
+        .iter()
+        .filter(|(path, _)| path != "cotx/settlement.rs")
+    {
+        let Ok(syntax) = syn::parse_file(&strip_cfg_test_modules(source)) else {
+            continue;
+        };
+        if contains_localtx_foreign_impl_or_macro(&syntax.items) {
+            findings.push(finding(
+                Rule::LocalTxQuarantineBypass,
+                path,
+                "LocalTx lease and branded transaction impls or opaque macros must remain confined to cotx/settlement.rs",
+            ));
+        }
+    }
+    findings.extend(localtx_unsafe_seam_call_findings(files));
+    findings
+}
+
+#[derive(Default)]
+struct LocalTxFunnelCallCounts {
+    acquire: usize,
+    begin: usize,
+    finish: usize,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for LocalTxFunnelCallCounts {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        match exact_expr_path(&call.func).as_deref() {
+            Some("LocalTxConnectionLease::acquire") => self.acquire += 1,
+            Some("finish_local_tx") => self.finish += 1,
+            _ => {}
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "begin" {
+            self.begin += 1;
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+fn localtx_funnel_call_counts(block: &syn::Block) -> LocalTxFunnelCallCounts {
+    let mut counts = LocalTxFunnelCallCounts::default();
+    syn::visit::Visit::visit_block(&mut counts, block);
+    counts
+}
+
+fn simple_binding(pattern: &syn::Pat) -> Option<String> {
+    match pattern {
+        syn::Pat::Ident(ident) if ident.subpat.is_none() => Some(ident.ident.to_string()),
+        syn::Pat::Type(typed) => simple_binding(&typed.pat),
+        syn::Pat::Paren(paren) => simple_binding(&paren.pat),
+        _ => None,
+    }
+}
+
+fn local_initializer(local: &syn::Local) -> Option<&syn::Expr> {
+    local.init.as_ref().map(|init| init.expr.as_ref())
+}
+
+fn match_awaited_expression(expression: &syn::Expr) -> Option<&syn::Expr> {
+    let syn::Expr::Match(expression) = transparent_expr(expression) else {
+        return None;
+    };
+    let syn::Expr::Await(awaited) = transparent_expr(&expression.expr) else {
+        return None;
+    };
+    Some(transparent_expr(&awaited.base))
+}
+
+fn matched_await_local(statement: &syn::Stmt) -> Option<(String, &syn::Expr)> {
+    let syn::Stmt::Local(local) = statement else {
+        return None;
+    };
+    let binding = simple_binding(&local.pat)?;
+    Some((
+        binding,
+        match_awaited_expression(local_initializer(local)?)?,
+    ))
+}
+
+fn acquired_lease_binding(statement: &syn::Stmt) -> Option<String> {
+    let (binding, syn::Expr::Call(call)) = matched_await_local(statement)? else {
+        return None;
+    };
+    (exact_expr_path(&call.func).as_deref() == Some("LocalTxConnectionLease::acquire")
+        && call.args.len() == 1)
+        .then_some(binding)
+}
+
+fn begun_transaction_binding(statement: &syn::Stmt, lease: &str) -> Option<String> {
+    let (binding, syn::Expr::MethodCall(call)) = matched_await_local(statement)? else {
+        return None;
+    };
+    (call.method == "begin"
+        && call.args.is_empty()
+        && exact_expr_path(&call.receiver).as_deref() == Some(lease))
+    .then_some(binding)
+}
+
+fn consuming_finish_tail(statement: &syn::Stmt, transaction: &str) -> bool {
+    let syn::Stmt::Expr(expression, None) = statement else {
+        return false;
+    };
+    let syn::Expr::Await(awaited) = transparent_expr(expression) else {
+        return false;
+    };
+    let syn::Expr::Call(call) = transparent_expr(&awaited.base) else {
+        return false;
+    };
+    exact_expr_path(&call.func).as_deref() == Some("finish_local_tx")
+        && call
+            .args
+            .first()
+            .is_some_and(|argument| exact_expr_path(argument).as_deref() == Some(transaction))
+}
+
+#[derive(Default)]
+struct ReturnScan(bool);
+
+impl<'ast> syn::visit::Visit<'ast> for ReturnScan {
+    fn visit_expr_return(&mut self, _expression: &'ast syn::ExprReturn) {
+        self.0 = true;
+    }
+}
+
+fn statements_contain_return(statements: &[syn::Stmt]) -> bool {
+    let mut scan = ReturnScan::default();
+    for statement in statements {
+        syn::visit::Visit::visit_stmt(&mut scan, statement);
+    }
+    scan.0
+}
+
+fn top_level_binding_count(block: &syn::Block, binding: &str) -> usize {
+    block
+        .stmts
+        .iter()
+        .filter_map(|statement| match statement {
+            syn::Stmt::Local(local) => simple_binding(&local.pat),
+            _ => None,
+        })
+        .filter(|candidate| candidate == binding)
+        .count()
+}
+
+fn localtx_funnel_flow_is_closed(function: &syn::ItemFn) -> bool {
+    let statements = &function.block.stmts;
+    let Some((acquire_index, lease)) =
+        statements
+            .iter()
+            .enumerate()
+            .find_map(|(index, statement)| {
+                acquired_lease_binding(statement).map(|binding| (index, binding))
+            })
+    else {
+        return false;
+    };
+    let Some((begin_index, transaction)) =
+        statements
+            .iter()
+            .enumerate()
+            .find_map(|(index, statement)| {
+                begun_transaction_binding(statement, &lease).map(|binding| (index, binding))
+            })
+    else {
+        return false;
+    };
+    let counts = localtx_funnel_call_counts(&function.block);
+    acquire_index < begin_index
+        && begin_index + 1 < statements.len()
+        && statements
+            .last()
+            .is_some_and(|tail| consuming_finish_tail(tail, &transaction))
+        && top_level_binding_count(&function.block, &lease) == 1
+        && top_level_binding_count(&function.block, &transaction) == 1
+        && !statements_contain_return(&statements[begin_index + 1..statements.len() - 1])
+        && counts.acquire == 1
+        && counts.begin == 1
+        && counts.finish == 1
+}
+
+fn localtx_unsafe_seam_call_findings(files: &[(String, String)]) -> Vec<Finding> {
+    let Some((funnel_path, _)) = files
+        .iter()
+        .find(|(path, _)| matches!(path.as_str(), "cotx.rs" | "cotx/mod.rs"))
+    else {
+        return Vec::new();
+    };
+    let mut calls = Vec::new();
+    for (path, source) in files.iter().filter(|(path, _)| {
+        matches!(path.as_str(), "cotx.rs" | "cotx/mod.rs") || path.starts_with("cotx/")
+    }) {
+        let stripped = strip_cfg_test_modules(source);
+        let Ok(syntax) = syn::parse_file(&stripped) else {
+            return vec![finding(
+                Rule::LocalTxQuarantineBypass,
+                path,
+                "cannot parse production cotx source while counting unsafe settlement seam calls",
+            )];
+        };
+        let mut visitor = LocalTxUnsafeSeamCallVisitor::new(path);
+        syn::visit::Visit::visit_file(&mut visitor, &syntax);
+        calls.extend(visitor.calls);
+    }
+    calls.sort();
+    let mut expected = vec![
+        (
+            "commit_unknown_after_ack".to_owned(),
+            format!("{funnel_path}::finish_local_tx"),
+        ),
+        (
+            "rollback_failed_after_ack".to_owned(),
+            format!("{funnel_path}::finish_local_tx"),
+        ),
+        (
+            "rollback_paused_before_ack".to_owned(),
+            format!("{funnel_path}::finish_local_tx"),
+        ),
+    ];
+    expected.sort();
+    if calls == expected {
+        Vec::new()
+    } else {
+        vec![finding(
+            Rule::LocalTxQuarantineBypass,
+            format!("{funnel_path}::finish_local_tx"),
+            format!(
+                "unsafe LocalTx seams must each have one production call owned by finish_local_tx; found {calls:?}"
+            ),
+        )]
+    }
+}
+
+struct LocalTxUnsafeSeamCallVisitor {
+    path: String,
+    owners: Vec<String>,
+    calls: Vec<(String, String)>,
+}
+
+impl LocalTxUnsafeSeamCallVisitor {
+    fn new(path: &str) -> Self {
+        Self {
+            path: path.to_owned(),
+            owners: Vec::new(),
+            calls: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, name: &str) {
+        let owner = self.owners.last().map_or_else(
+            || format!("{}::<module>", self.path),
+            |owner| format!("{}::{owner}", self.path),
+        );
+        self.calls.push((name.to_owned(), owner));
+    }
+
+    fn is_unsafe_seam(name: &str) -> bool {
+        matches!(
+            name,
+            "commit_unknown_after_ack" | "rollback_failed_after_ack" | "rollback_paused_before_ack"
+        )
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for LocalTxUnsafeSeamCallVisitor {
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        self.owners.push(function.sig.ident.to_string());
+        syn::visit::visit_item_fn(self, function);
+        self.owners.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+        self.owners.push(function.sig.ident.to_string());
+        syn::visit::visit_impl_item_fn(self, function);
+        self.owners.pop();
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        let name = call.method.to_string();
+        if Self::is_unsafe_seam(&name) {
+            self.record(&name);
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        if let Some(segment) = path.path.segments.last() {
+            let name = segment.ident.to_string();
+            if Self::is_unsafe_seam(&name) {
+                self.record(&name);
+            }
+        }
+        syn::visit::visit_expr_path(self, path);
+    }
+
+    fn visit_item_use(&mut self, item_use: &'ast syn::ItemUse) {
+        let tokens = compact_tokens(item_use);
+        for name in [
+            "commit_unknown_after_ack",
+            "rollback_failed_after_ack",
+            "rollback_paused_before_ack",
+        ] {
+            if tokens.contains(name) {
+                self.record(name);
+            }
+        }
+        syn::visit::visit_item_use(self, item_use);
+    }
+
+    fn visit_macro(&mut self, invocation: &'ast syn::Macro) {
+        let tokens = compact_tokens(&invocation.tokens);
+        for name in [
+            "commit_unknown_after_ack",
+            "rollback_failed_after_ack",
+            "rollback_paused_before_ack",
+        ] {
+            if tokens.contains(name) {
+                self.record(name);
+            }
+        }
+        syn::visit::visit_macro(self, invocation);
+    }
+}
+
+fn contains_localtx_foreign_impl_or_macro(items: &[syn::Item]) -> bool {
+    items.iter().any(|item| match item {
+        syn::Item::Impl(item_impl) => matches!(
+            type_last_ident(&item_impl.self_ty).as_deref(),
+            Some("LocalTxConnectionLease" | "LocalTxTransaction" | "LocalTxQuarantineStage")
+        ),
+        syn::Item::Mod(module) => module
+            .content
+            .as_ref()
+            .is_some_and(|(_, items)| contains_localtx_foreign_impl_or_macro(items)),
+        syn::Item::Macro(item_macro) => {
+            let tokens = compact_tokens(item_macro);
+            tokens.contains("LocalTxConnectionLease")
+                || tokens.contains("LocalTxTransaction")
+                || tokens.contains("LocalTxQuarantineStage")
+                || tokens.contains("quarantine_stage")
+        }
+        _ => false,
+    })
+}
+
+fn localtx_required_carriers_missing(files: &[(String, String)]) -> Vec<Finding> {
+    let has_cotx = files
+        .iter()
+        .any(|(path, _)| matches!(path.as_str(), "cotx.rs" | "cotx/mod.rs"));
+    let has_settlement = files.iter().any(|(path, _)| path == "cotx/settlement.rs");
+    if has_cotx || has_settlement {
+        Vec::new()
+    } else {
+        vec![finding(
+            Rule::LocalTxQuarantineSitesAbsent,
+            "cotx/mod.rs + cotx/settlement.rs",
+            "both LocalTx quarantine carriers are missing from the production workspace scan",
+        )]
+    }
+}
+
+fn super_visible(visibility: &syn::Visibility) -> bool {
+    matches!(visibility, syn::Visibility::Restricted(restricted) if restricted.path.is_ident("super"))
+}
+
+fn localtx_stage_option(ty: &syn::Type) -> bool {
+    type_last_ident(ty).as_deref() == Some("Option")
+        && nested_type(ty).and_then(type_last_ident).as_deref() == Some("LocalTxQuarantineStage")
+}
+
+fn localtx_stage_reference(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Reference(reference)
+        if reference.mutability.is_some() && localtx_stage_option(&reference.elem))
+}
+
+fn named_fields(item: &syn::ItemStruct) -> BTreeMap<String, &syn::Field> {
+    item.fields
+        .iter()
+        .filter_map(|field| field.ident.as_ref().map(|name| (name.to_string(), field)))
+        .collect()
+}
+
+fn path_string(path: &syn::Path) -> String {
+    path.segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+fn localtx_test_only_statement(statement: &syn::Stmt) -> bool {
+    let statement = compact_tokens(statement);
+    statement.starts_with("#[cfg(") && statement.contains("test")
+}
+
+fn localtx_production_statements(block: &syn::Block) -> Vec<&syn::Stmt> {
+    block
+        .stmts
+        .iter()
+        .filter(|statement| !localtx_test_only_statement(statement))
+        .collect()
+}
+
+fn call_argument<'ast>(expression: &'ast syn::Expr, function: &str) -> Option<&'ast syn::Expr> {
+    let syn::Expr::Call(call) = transparent_expr(expression) else {
+        return None;
+    };
+    (exact_expr_path(&call.func).as_deref() == Some(function) && call.args.len() == 1)
+        .then(|| call.args.first())
+        .flatten()
+}
+
+fn localtx_stage_value(expression: &syn::Expr, stage: &str) -> bool {
+    call_argument(expression, "Some").is_some_and(|argument| {
+        exact_expr_path(argument).as_deref()
+            == Some(format!("LocalTxQuarantineStage::{stage}").as_str())
+    })
+}
+
+fn localtx_stage_cleared(expression: &syn::Expr) -> bool {
+    exact_expr_path(expression).as_deref() == Some("None")
+}
+
+fn self_destructure_bindings(statement: &syn::Stmt) -> Option<BTreeMap<String, String>> {
+    let syn::Stmt::Local(local) = statement else {
+        return None;
+    };
+    let syn::Pat::Struct(pattern) = &local.pat else {
+        return None;
+    };
+    if !pattern.path.is_ident("Self") || pattern.rest.is_some() {
+        return None;
+    }
+    pattern
+        .fields
+        .iter()
+        .map(|field| {
+            let syn::Member::Named(member) = &field.member else {
+                return None;
+            };
+            Some((member.to_string(), simple_binding(&field.pat)?))
+        })
+        .collect()
+}
+
+fn expression_references_binding(expression: &syn::Expr, binding: &str) -> bool {
+    match transparent_expr(expression) {
+        syn::Expr::Path(_) => exact_expr_path(expression).as_deref() == Some(binding),
+        syn::Expr::Reference(reference) => expression_references_binding(&reference.expr, binding),
+        syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+            expression_references_binding(&unary.expr, binding)
+        }
+        _ => false,
+    }
+}
+
+fn awaited_try_method_statement(statement: &syn::Stmt, receiver: &str, method: &str) -> bool {
+    let syn::Stmt::Expr(expression, Some(_)) = statement else {
+        return false;
+    };
+    let syn::Expr::Try(expression) = transparent_expr(expression) else {
+        return false;
+    };
+    let syn::Expr::Await(expression) = transparent_expr(&expression.expr) else {
+        return false;
+    };
+    matches!(transparent_expr(&expression.base), syn::Expr::MethodCall(call)
+        if call.method == method
+            && call.args.is_empty()
+            && expression_references_binding(&call.receiver, receiver))
+}
+
+fn stage_assignment(statement: &syn::Stmt, binding: &str, stage: Option<&str>) -> bool {
+    let syn::Stmt::Expr(expression, Some(_)) = statement else {
+        return false;
+    };
+    let syn::Expr::Assign(assignment) = transparent_expr(expression) else {
+        return false;
+    };
+    expression_references_binding(&assignment.left, binding)
+        && stage.map_or_else(
+            || localtx_stage_cleared(&assignment.right),
+            |stage| localtx_stage_value(&assignment.right, stage),
+        )
+}
+
+fn result_unit_tail(statement: &syn::Stmt) -> bool {
+    let syn::Stmt::Expr(expression, None) = statement else {
+        return false;
+    };
+    call_argument(expression, "Ok").is_some_and(|argument| {
+        matches!(transparent_expr(argument), syn::Expr::Tuple(tuple) if tuple.elems.is_empty())
+    })
+}
+
+fn consuming_self(signature: &syn::Signature) -> bool {
+    matches!(signature.inputs.first(), Some(syn::FnArg::Receiver(receiver))
+        if receiver.reference.is_none() && signature.inputs.len() == 1)
+}
+
+fn localtx_ack_then_disarm(
+    method: &syn::ImplItemFn,
+    transaction_field: &str,
+    stage_field: &str,
+    settlement: &str,
+    stage: &str,
+) -> bool {
+    let statements = localtx_production_statements(&method.block);
+    let Some(bindings) = statements
+        .first()
+        .and_then(|statement| self_destructure_bindings(statement))
+    else {
+        return false;
+    };
+    let (Some(transaction), Some(stage_binding)) =
+        (bindings.get(transaction_field), bindings.get(stage_field))
+    else {
+        return false;
+    };
+    consuming_self(&method.sig)
+        && method.sig.asyncness.is_some()
+        && statements.len() == 5
+        && bindings.len() == 2
+        && statements
+            .get(1)
+            .is_some_and(|statement| stage_assignment(statement, stage_binding, Some(stage)))
+        && statements.get(2).is_some_and(|statement| {
+            awaited_try_method_statement(statement, transaction, settlement)
+        })
+        && statements
+            .get(3)
+            .is_some_and(|statement| stage_assignment(statement, stage_binding, None))
+        && statements
+            .last()
+            .is_some_and(|statement| result_unit_tail(statement))
+}
+
+fn self_field(expression: &syn::Expr, field: &str) -> bool {
+    matches!(transparent_expr(expression), syn::Expr::Field(access)
+        if matches!(&access.member, syn::Member::Named(member) if member == field)
+            && exact_expr_path(&access.base).as_deref() == Some("self"))
+}
+
+fn test_seam_signature_is_closed(method: &syn::ImplItemFn) -> bool {
+    attributes_are_test_only(&method.attrs)
+        && super_visible(&method.vis)
+        && consuming_self(&method.sig)
+        && method.sig.asyncness.is_some()
+        && compact_tokens(&method.sig).contains("->Result<(),sqlx::Error>")
+}
+
+struct SeamEscapeScan<'a> {
+    stage: &'a str,
+    escaped: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for SeamEscapeScan<'_> {
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        self.escaped |= path.path.is_ident("None");
+        syn::visit::visit_expr_path(self, path);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        self.escaped |= call
+            .args
+            .iter()
+            .any(|argument| expression_references_binding(argument, self.stage));
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.escaped |= expression_references_binding(&call.receiver, self.stage)
+            && matches!(call.method.to_string().as_str(), "take" | "replace");
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_macro(&mut self, _invocation: &'ast syn::Macro) {
+        self.escaped = true;
+    }
+}
+
+fn test_seam_stays_armed(
+    method: &syn::ImplItemFn,
+    stage_field: &str,
+    expected_stage: &str,
+) -> bool {
+    let statements = localtx_production_statements(&method.block);
+    let Some(stage) = statements
+        .first()
+        .and_then(|statement| self_destructure_bindings(statement))
+        .and_then(|bindings| bindings.get(stage_field).cloned())
+    else {
+        return false;
+    };
+    let mut scan = SeamEscapeScan {
+        stage: &stage,
+        escaped: false,
+    };
+    syn::visit::Visit::visit_block(&mut scan, &method.block);
+    test_seam_signature_is_closed(method)
+        && statements
+            .iter()
+            .skip(1)
+            .all(|statement| !matches!(statement, syn::Stmt::Local(_)))
+        && statements
+            .iter()
+            .any(|statement| stage_assignment(statement, &stage, Some(expected_stage)))
+        && !scan.escaped
+}
+
+fn some_pattern_binding(pattern: &syn::Pat) -> Option<String> {
+    let syn::Pat::TupleStruct(pattern) = pattern else {
+        return None;
+    };
+    (path_string(&pattern.path) == "Some" && pattern.elems.len() == 1)
+        .then(|| pattern.elems.first().and_then(simple_binding))
+        .flatten()
+}
+
+fn localtx_drop_is_fail_closed(
+    method: &syn::ImplItemFn,
+    connection_field: &str,
+    stage_field: &str,
+) -> bool {
+    let [syn::Stmt::Expr(syn::Expr::If(branch), _)] = method.block.stmts.as_slice() else {
+        return false;
+    };
+    let syn::Expr::Let(condition) = transparent_expr(&branch.cond) else {
+        return false;
+    };
+    if some_pattern_binding(&condition.pat).is_none()
+        || !self_field(&condition.expr, stage_field)
+        || branch.else_branch.is_some()
+    {
+        return false;
+    }
+    let body = compact_tokens(&branch.then_branch);
+    body.match_indices(".close_on_drop()").count() == 1
+        && body.contains("metrics::counter!")
+        && body.contains("tracing::warn!")
+        && branch.then_branch.stmts.iter().any(|statement| {
+            matches!(statement, syn::Stmt::Expr(syn::Expr::MethodCall(call), Some(_))
+                if call.method == "close_on_drop" && self_field(&call.receiver, connection_field))
+        })
+}
+
+fn localtx_lease_shape_findings(path: &str, syntax: &syn::File) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let lease_struct = syntax.items.iter().find_map(|item| match item {
+        syn::Item::Struct(item) if item.ident == "LocalTxConnectionLease" => Some(item),
+        _ => None,
+    });
+    let Some(lease_struct) = lease_struct else {
+        return vec![finding(
+            Rule::LocalTxQuarantineSitesAbsent,
+            path,
+            "private LocalTxConnectionLease struct is missing",
+        )];
+    };
+    let lease_fields = named_fields(lease_struct);
+    let connection_field = lease_fields.iter().find_map(|(name, field)| {
+        (type_last_ident(&field.ty).as_deref() == Some("PoolConnection")).then_some(name.as_str())
+    });
+    let stage_field = lease_fields
+        .iter()
+        .find_map(|(name, field)| localtx_stage_option(&field.ty).then_some(name.as_str()));
+    let fields_are_closed = super_visible(&lease_struct.vis)
+        && lease_fields.len() == 2
+        && lease_fields
+            .values()
+            .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+        && connection_field.is_some()
+        && stage_field.is_some();
+    let (Some(connection_field), Some(stage_field)) = (connection_field, stage_field) else {
+        findings.push(finding(
+            Rule::LocalTxQuarantineBypass,
+            path,
+            "LocalTx lease must have only private PoolConnection and Option<LocalTxQuarantineStage> fields",
+        ));
+        return findings;
+    };
+
+    let transaction_struct = syntax.items.iter().find_map(|item| match item {
+        syn::Item::Struct(item) if item.ident == "LocalTxTransaction" => Some(item),
+        _ => None,
+    });
+    let transaction_fields = transaction_struct.map(named_fields).unwrap_or_default();
+    let transaction_field = transaction_fields.iter().find_map(|(name, field)| {
+        (type_last_ident(&field.ty).as_deref() == Some("Transaction")).then_some(name.as_str())
+    });
+    let transaction_stage_field = transaction_fields
+        .iter()
+        .find_map(|(name, field)| localtx_stage_reference(&field.ty).then_some(name.as_str()));
+    let transaction_fields_are_bound = transaction_struct.is_some_and(|item| {
+        super_visible(&item.vis)
+            && transaction_fields.len() == 2
+            && transaction_fields
+                .values()
+                .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+            && transaction_field.is_some()
+            && transaction_stage_field == Some(stage_field)
+    });
+    let Some(transaction_field) = transaction_field else {
+        findings.push(finding(
+            Rule::LocalTxQuarantineBypass,
+            path,
+            "LocalTxTransaction must privately borrow-bind the transaction and quarantine stage",
+        ));
+        return findings;
+    };
+
+    let stage_enum_is_closed = syntax.items.iter().any(|item| {
+        matches!(item, syn::Item::Enum(item)
+            if item.ident == "LocalTxQuarantineStage"
+                && matches!(item.vis, syn::Visibility::Inherited)
+                && item.variants.iter().all(|variant| matches!(variant.fields, syn::Fields::Unit))
+                && item.variants.iter().map(|variant| variant.ident.to_string()).collect::<BTreeSet<_>>()
+                    == BTreeSet::from(["Begin".to_owned(), "Body".to_owned(), "Commit".to_owned(), "Rollback".to_owned()]))
+    });
+
+    let mut lease_methods = BTreeMap::new();
+    let mut transaction_methods = BTreeMap::new();
+    let mut transaction_traits = BTreeSet::new();
+    let mut drop_method = None;
+    let mut lease_trait_escape = false;
+    for item in &syntax.items {
+        let syn::Item::Impl(item_impl) = item else {
+            continue;
+        };
+        let owner = type_last_ident(&item_impl.self_ty);
+        if owner.as_deref() == Some("LocalTxConnectionLease") {
+            if let Some((_, trait_path, _)) = &item_impl.trait_ {
+                if trait_path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "Drop")
+                {
+                    drop_method = item_impl.items.iter().find_map(|item| match item {
+                        syn::ImplItem::Fn(method) if method.sig.ident == "drop" => Some(method),
+                        _ => None,
+                    });
+                } else {
+                    lease_trait_escape = true;
+                }
+            } else {
+                for item in &item_impl.items {
+                    if let syn::ImplItem::Fn(method) = item {
+                        lease_methods.insert(method.sig.ident.to_string(), method);
+                    }
+                }
+            }
+        } else if owner.as_deref() == Some("LocalTxTransaction") {
+            if let Some((_, trait_path, _)) = &item_impl.trait_ {
+                if let Some(segment) = trait_path.segments.last() {
+                    transaction_traits.insert(segment.ident.to_string());
+                }
+            } else {
+                for item in &item_impl.items {
+                    if let syn::ImplItem::Fn(method) = item {
+                        transaction_methods.insert(method.sig.ident.to_string(), method);
+                    }
+                }
+            }
+        }
+    }
+
+    let lease_surface_is_closed = lease_methods.keys().map(String::as_str).collect::<Vec<_>>()
+        == ["acquire", "begin"]
+        && !lease_trait_escape
+        && lease_methods
+            .values()
+            .all(|method| super_visible(&method.vis));
+    let transaction_surface_is_closed = transaction_traits.is_empty()
+        && transaction_methods
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+            == BTreeSet::from([
+                "capability",
+                "commit",
+                "commit_unknown_after_ack",
+                "rollback",
+                "rollback_failed_after_ack",
+                "rollback_paused_before_ack",
+            ])
+        && transaction_methods.values().all(|method| {
+            let signature = compact_tokens(&method.sig);
+            super_visible(&method.vis)
+                && !signature.contains("PoolConnection")
+                && !signature.contains("Transaction<")
+        })
+        && transaction_methods
+            .get("commit_unknown_after_ack")
+            .is_some_and(|method| test_seam_stays_armed(method, stage_field, "Commit"))
+        && transaction_methods
+            .get("rollback_failed_after_ack")
+            .is_some_and(|method| test_seam_stays_armed(method, stage_field, "Rollback"))
+        && transaction_methods
+            .get("rollback_paused_before_ack")
+            .is_some_and(|method| test_seam_stays_armed(method, stage_field, "Rollback"));
+    let acknowledged_settlement_is_bound =
+        transaction_methods.get("commit").is_some_and(|method| {
+            localtx_ack_then_disarm(method, transaction_field, stage_field, "commit", "Commit")
+        }) && transaction_methods.get("rollback").is_some_and(|method| {
+            localtx_ack_then_disarm(
+                method,
+                transaction_field,
+                stage_field,
+                "rollback",
+                "Rollback",
+            )
+        });
+    let drop_is_fail_closed = drop_method
+        .is_some_and(|method| localtx_drop_is_fail_closed(method, connection_field, stage_field));
+    let free_function_escape = syntax.items.iter().any(|item| {
+        matches!(item, syn::Item::Fn(function) if {
+            let tokens = compact_tokens(function);
+            tokens.contains("LocalTxConnectionLease")
+                || tokens.contains("LocalTxTransaction")
+                || tokens.contains("LocalTxQuarantineStage")
+                || tokens.contains(stage_field)
+        })
+    });
+    let opaque_nested_scope = syntax
+        .items
+        .iter()
+        .any(|item| matches!(item, syn::Item::Mod(_) | syn::Item::Macro(_)));
+    if !fields_are_closed
+        || !transaction_fields_are_bound
+        || !stage_enum_is_closed
+        || !lease_surface_is_closed
+        || !transaction_surface_is_closed
+        || !acknowledged_settlement_is_bound
+        || !drop_is_fail_closed
+        || free_function_escape
+        || opaque_nested_scope
+    {
+        findings.push(finding(
+            Rule::LocalTxQuarantineBypass,
+            path,
+            "LocalTx lease must AST-bind its private stage through Begin→Body and consuming Commit/Rollback→ACK→None flows, keep test seams armed, observe and close every armed Drop, and reject carrier escapes",
+        ));
+    }
+    findings
 }
 
 fn required_retry_site_findings(
@@ -4890,6 +5841,424 @@ mod key_lock {
     }
 }
 "#
+    }
+
+    fn localtx_quarantine_semantic_fixture() -> Vec<(String, String)> {
+        files(&[
+            (
+                "cotx/mod.rs",
+                r#"
+async fn tenant_scoped_write_inner(pool: &PgPool) {
+    let mut lease = match LocalTxConnectionLease::acquire(pool).await { Ok(value) => value, Err(_) => return };
+    let mut tx = match lease.begin().await { Ok(value) => value, Err(_) => return };
+    finish_local_tx(tx, result).await
+}
+
+async fn co_tx_with_outbox_inner(pool: &PgPool) {
+    let mut lease = match LocalTxConnectionLease::acquire(pool).await { Ok(value) => value, Err(_) => return };
+    let mut tx = match lease.begin().await { Ok(value) => value, Err(_) => return };
+    finish_local_tx(tx, result).await
+}
+
+async fn finish_local_tx(mut tx: LocalTxTransaction<'_>) {
+    let commit_result = if inject_commit_unknown {
+        tx.commit_unknown_after_ack().await
+    } else {
+        tx.commit().await
+    };
+    let rollback_result = if inject_rollback_failed {
+        tx.rollback_failed_after_ack().await
+    } else {
+        tx.rollback().await
+    };
+    let rollback_pause_result = if inject_rollback_pause {
+        tx.rollback_paused_before_ack().await
+    } else {
+        tx.rollback().await
+    };
+}
+"#,
+            ),
+            (
+                "cotx/settlement.rs",
+                r#"
+pub(super) struct LocalTxConnectionLease {
+    quarantine_stage: Option<LocalTxQuarantineStage>,
+    connection: PoolConnection<Postgres>,
+}
+
+enum LocalTxQuarantineStage { Rollback, Commit, Body, Begin }
+
+pub(super) struct LocalTxTransaction<'lease> {
+    quarantine_stage: &'lease mut Option<LocalTxQuarantineStage>,
+    transaction: Transaction<'lease, Postgres>,
+}
+
+impl LocalTxConnectionLease {
+    pub(super) async fn acquire(pool: &PgPool) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            quarantine_stage: Some(LocalTxQuarantineStage::Begin),
+            connection: pool.acquire().await?,
+        })
+    }
+    pub(super) async fn begin(&mut self) -> Result<LocalTxTransaction<'_>, sqlx::Error> {
+        let Self { quarantine_stage, connection, } = self;
+        let transaction = (&mut *connection).begin().await?;
+        *quarantine_stage = Some(LocalTxQuarantineStage::Body);
+        Ok(LocalTxTransaction { quarantine_stage, transaction, })
+    }
+}
+
+impl LocalTxTransaction<'_> {
+    pub(super) fn capability(&mut self) -> super::TxCapability<'_> {
+        super::TxCapability::from_transaction(&mut self.transaction)
+    }
+    pub(super) async fn commit(self) -> Result<(), sqlx::Error> {
+        let Self { quarantine_stage, transaction } = self;
+        *quarantine_stage = Some(LocalTxQuarantineStage::Commit);
+        transaction.commit().await?;
+        *quarantine_stage = None;
+        Ok(())
+    }
+    pub(super) async fn rollback(self) -> Result<(), sqlx::Error> {
+        let Self { quarantine_stage, transaction } = self;
+        *quarantine_stage = Some(LocalTxQuarantineStage::Rollback);
+        transaction.rollback().await?;
+        *quarantine_stage = None;
+        Ok(())
+    }
+    #[cfg(test)]
+    pub(super) async fn commit_unknown_after_ack(self) -> Result<(), sqlx::Error> {
+        let Self { quarantine_stage, transaction } = self;
+        *quarantine_stage = Some(LocalTxQuarantineStage::Commit);
+        transaction.commit().await?;
+        Err(sqlx::Error::PoolTimedOut)
+    }
+    #[cfg(test)]
+    pub(super) async fn rollback_failed_after_ack(self) -> Result<(), sqlx::Error> {
+        let Self { quarantine_stage, transaction } = self;
+        *quarantine_stage = Some(LocalTxQuarantineStage::Rollback);
+        transaction.rollback().await?;
+        Err(sqlx::Error::PoolTimedOut)
+    }
+    #[cfg(test)]
+    pub(super) async fn rollback_paused_before_ack(self) -> Result<(), sqlx::Error> {
+        let Self { quarantine_stage, transaction } = self;
+        *quarantine_stage = Some(LocalTxQuarantineStage::Rollback);
+        super::notify_rollback_pause_entered_for_test();
+        std::future::pending::<()>().await;
+        drop(transaction);
+        Ok(())
+    }
+}
+
+impl Drop for LocalTxConnectionLease {
+    fn drop(&mut self) {
+        if let Some(stage) = self.quarantine_stage {
+            metrics::counter!("postgres_localtx_connection_quarantine_total", "stage" => stage.as_label()).increment(1);
+            tracing::warn!(quarantine_stage = stage.as_label(), "localtx connection quarantined");
+            self.connection.close_on_drop();
+        }
+    }
+}
+"#,
+            ),
+        ])
+    }
+
+    #[test]
+    fn localtx_quarantine_guard_accepts_closed_lease_and_semantic_funnels() {
+        let findings = localtx_quarantine_findings(&localtx_quarantine_semantic_fixture());
+        assert!(
+            findings.is_empty(),
+            "closed LocalTx lease rejected: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn localtx_quarantine_guard_rejects_non_dominating_ack_control_flow() {
+        let cases = [
+            (
+                "dead-branch",
+                "        transaction.commit().await?;",
+                "        if false { transaction.commit().await?; }",
+            ),
+            (
+                "closure",
+                "        transaction.commit().await?;",
+                "        let _ack = || async { transaction.commit().await?; Ok::<(), sqlx::Error>(()) };",
+            ),
+            (
+                "unawaited-async",
+                "        transaction.commit().await?;",
+                "        let _ack = async { transaction.commit().await?; Ok::<(), sqlx::Error>(()) };",
+            ),
+            (
+                "zero-iteration-loop",
+                "        transaction.commit().await?;",
+                "        for _ in 0..0 { transaction.commit().await?; }",
+            ),
+            (
+                "helper-indirection",
+                "        transaction.commit().await?;",
+                "        settle(transaction).await?;",
+            ),
+            (
+                "early-return",
+                "        transaction.commit().await?;",
+                "        return Ok(());\n        transaction.commit().await?;",
+            ),
+        ];
+
+        for (name, before, after) in cases {
+            let mut sources = localtx_quarantine_semantic_fixture();
+            let mutated = sources[1].1.replacen(before, after, 1);
+            assert_ne!(sources[1].1, mutated, "{name} fixture must be non-vacuous");
+            sources[1].1 = mutated;
+            let findings = localtx_quarantine_findings(&sources);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::LocalTxQuarantineBypass),
+                "{name} must not satisfy ACK-before-disarm: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn localtx_quarantine_guard_accepts_equivalent_binding_and_field_order_changes() {
+        let mut sources = localtx_quarantine_semantic_fixture();
+        let original_funnel = sources[0].1.clone();
+        sources[0].1 = sources[0]
+            .1
+            .replace("let mut lease", "let mut connection_lease")
+            .replace("lease.begin()", "connection_lease.begin()")
+            .replace("let mut tx =", "let mut local_tx =")
+            .replace(
+                "finish_local_tx(tx, result)",
+                "finish_local_tx(local_tx, result)",
+            );
+        assert_ne!(original_funnel, sources[0].1);
+        let original_settlement = sources[1].1.clone();
+        sources[1].1 = sources[1]
+            .1
+            .replace(
+                "let Self { quarantine_stage, connection, } = self;",
+                "let Self { connection, quarantine_stage, } = self;",
+            )
+            .replace(
+                "let Self { quarantine_stage, transaction } = self;",
+                "let Self { transaction, quarantine_stage } = self;",
+            );
+        assert_ne!(original_settlement, sources[1].1);
+
+        let findings = localtx_quarantine_findings(&sources);
+        assert!(
+            findings.is_empty(),
+            "equivalent binding renames and field order must remain green: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn localtx_quarantine_guard_real_workspace_closes_exact_sites() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let files = load_prod_rs(&root.join("adapters/postgres/src"))?;
+        let findings = localtx_quarantine_findings(&files);
+        assert!(findings.is_empty(), "{findings:?}");
+        assert!(
+            files.iter().any(|(path, _)| path == "cotx/mod.rs")
+                && files.iter().any(|(path, _)| path == "cotx/settlement.rs"),
+            "real workspace must contain both LocalTx quarantine enforcement sites"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn localtx_quarantine_guard_rejects_bypass_and_escape_classes() {
+        let cases = [
+            (
+                "direct-pool-begin",
+                "LocalTxConnectionLease::acquire(pool).await",
+                "pool.begin().await",
+            ),
+            (
+                "missing-finish",
+                "    finish_local_tx(tx, result).await\n",
+                "    drop(tx);\n",
+            ),
+            (
+                "helper-indirection",
+                "    let mut tx = match lease.begin().await { Ok(value) => value, Err(_) => return };",
+                "    let mut bound = match lease.begin().await { Ok(value) => value, Err(_) => return };\n    let mut tx = helper(pool).await;",
+            ),
+            (
+                "tx-shadow",
+                "    finish_local_tx(tx, result).await",
+                "    let mut tx = helper(pool).await;\n    finish_local_tx(tx, result).await",
+            ),
+            (
+                "arbitrary-disarm",
+                "    pub(super) async fn begin(&mut self)",
+                "    pub(super) fn disarm(&mut self) { self.quarantine_stage = None; }\n    pub(super) async fn begin(&mut self)",
+            ),
+            (
+                "raw-connection-escape",
+                "    pub(super) async fn begin(&mut self)",
+                "    pub(super) fn into_inner(self) -> PoolConnection<Postgres> { todo!() }\n    pub(super) async fn begin(&mut self)",
+            ),
+            (
+                "free-function-disarm",
+                "impl LocalTxConnectionLease {",
+                "fn disarm(lease: &mut LocalTxConnectionLease) { lease.quarantine_stage = None; }\n\nimpl LocalTxConnectionLease {",
+            ),
+            (
+                "nested-module-disarm",
+                "impl LocalTxConnectionLease {",
+                "mod escape { fn disarm(lease: &mut super::LocalTxConnectionLease) { lease.quarantine_stage = None; } }\n\nimpl LocalTxConnectionLease {",
+            ),
+            (
+                "unknown-seam-disarm",
+                "        Err(sqlx::Error::PoolTimedOut)",
+                "        *quarantine_stage = None;\n        Err(sqlx::Error::PoolTimedOut)",
+            ),
+            (
+                "unknown-seam-mem-take",
+                "        Err(sqlx::Error::PoolTimedOut)",
+                "        let _ = std::mem::take(quarantine_stage);\n        Err(sqlx::Error::PoolTimedOut)",
+            ),
+            (
+                "missing-close-on-drop",
+                "            self.connection.close_on_drop();",
+                "            let _ = &self.connection;",
+            ),
+        ];
+
+        for (name, before, after) in cases {
+            let mut sources = localtx_quarantine_semantic_fixture();
+            let target = if matches!(
+                name,
+                "direct-pool-begin" | "missing-finish" | "helper-indirection" | "tx-shadow"
+            ) {
+                "cotx/mod.rs"
+            } else {
+                "cotx/settlement.rs"
+            };
+            let source_index = usize::from(target == "cotx/settlement.rs");
+            let source = &mut sources[source_index].1;
+            let mutated = source.replacen(before, after, 1);
+            assert_ne!(
+                *source, mutated,
+                "{name} fixture mutation must be non-vacuous"
+            );
+            *source = mutated;
+            let findings = localtx_quarantine_findings(&sources);
+            assert!(
+                findings.iter().any(|finding| {
+                    matches!(
+                        finding.rule,
+                        Rule::LocalTxQuarantineBypass | Rule::LocalTxQuarantineSitesAbsent
+                    )
+                }),
+                "{name} must fail closed: {findings:?}"
+            );
+        }
+
+        let mut unused_unsafe_seam = localtx_quarantine_semantic_fixture();
+        unused_unsafe_seam[0].1 = unused_unsafe_seam[0].1.replacen(
+            "tx.commit_unknown_after_ack().await",
+            "tx.commit().await",
+            1,
+        );
+        let findings = localtx_quarantine_findings(&unused_unsafe_seam);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::LocalTxQuarantineBypass),
+            "unused unsafe seam must fail closed: {findings:?}"
+        );
+
+        let mut duplicate_unsafe_seam = localtx_quarantine_semantic_fixture();
+        duplicate_unsafe_seam[0]
+            .1
+            .push_str("\nasync fn duplicate(mut tx: LocalTxTransaction<'_>) { let _ = tx.commit_unknown_after_ack().await; }\n");
+        let findings = localtx_quarantine_findings(&duplicate_unsafe_seam);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::LocalTxQuarantineBypass),
+            "duplicate unsafe seam use must fail closed: {findings:?}"
+        );
+
+        let mut ufcs_unsafe_seam = localtx_quarantine_semantic_fixture();
+        ufcs_unsafe_seam[0].1.push_str(
+            "\nasync fn ufcs_duplicate(tx: LocalTxTransaction<'_>) { let _ = LocalTxTransaction::commit_unknown_after_ack(tx).await; }\n",
+        );
+        let findings = localtx_quarantine_findings(&ufcs_unsafe_seam);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::LocalTxQuarantineBypass),
+            "UFCS unsafe seam use must fail closed: {findings:?}"
+        );
+
+        let mut aliased_unsafe_seam = localtx_quarantine_semantic_fixture();
+        aliased_unsafe_seam[0].1.push_str(
+            "\nuse LocalTxTransaction::commit_unknown_after_ack as unsafe_commit;\nasync fn alias_duplicate(tx: LocalTxTransaction<'_>) { let _ = unsafe_commit(tx).await; }\n",
+        );
+        let findings = localtx_quarantine_findings(&aliased_unsafe_seam);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::LocalTxQuarantineBypass),
+            "aliased unsafe seam use must fail closed: {findings:?}"
+        );
+
+        let mut external_unsafe_seam = localtx_quarantine_semantic_fixture();
+        external_unsafe_seam.push((
+            "cotx/helper.rs".to_owned(),
+            "async fn duplicate(mut tx: LocalTxTransaction<'_>) { let _ = tx.rollback_failed_after_ack().await; }".to_owned(),
+        ));
+        let findings = localtx_quarantine_findings(&external_unsafe_seam);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::LocalTxQuarantineBypass),
+            "external-module unsafe seam use must fail closed: {findings:?}"
+        );
+
+        let mut foreign_impl = localtx_quarantine_semantic_fixture();
+        foreign_impl.push((
+            "cotx/escape.rs".to_owned(),
+            "impl LocalTxConnectionLease { fn escape(&mut self) {} }".to_owned(),
+        ));
+        let findings = localtx_quarantine_findings(&foreign_impl);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::LocalTxQuarantineBypass),
+            "foreign impl must fail closed: {findings:?}"
+        );
+
+        let mut nested_foreign_impl = localtx_quarantine_semantic_fixture();
+        nested_foreign_impl.push((
+            "cotx/escape.rs".to_owned(),
+            "mod nested { impl LocalTxConnectionLease { fn escape(&mut self) {} } }".to_owned(),
+        ));
+        let findings = localtx_quarantine_findings(&nested_foreign_impl);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::LocalTxQuarantineBypass),
+            "nested foreign impl must fail closed: {findings:?}"
+        );
+
+        let findings = localtx_required_carriers_missing(&[]);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::LocalTxQuarantineSitesAbsent),
+            "missing both carriers must fail the production gate: {findings:?}"
+        );
     }
 
     #[test]

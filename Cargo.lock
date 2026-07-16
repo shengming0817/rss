@@ -6231,6 +6231,7 @@ dependencies = [
  "axum",
  "serde",
  "serde_json",
+ "sqlx",
  "testcontainers",
  "testcontainers-modules",
  "thiserror",

@@ -212,7 +212,14 @@ async fn connect_pg()
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    provision_runtime_logins(p).await?;
+    testkit::provision_postgres_test_logins(
+        p,
+        &[
+            testkit::PostgresTestLogin::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
+            testkit::PostgresTestLogin::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
+        ],
+    )
+    .await?;
     let tenant_read_config =
         PgTenantReadConfig::new(pg_config(p, TEST_READ_ROLE, TEST_READ_PASSWORD));
     let deps = PgRuntimeDeps::setup(
@@ -236,45 +243,6 @@ fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgCon
     )
     .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
-}
-
-async fn provision_runtime_logins(
-    p: &testkit::PgConnParams,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let options = pg_connect_options(p, &p.username, &p.password);
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect_with(options)
-        .await?;
-    sqlx::query(&format!(
-        r#"
-        DO $$
-        BEGIN
-            PERFORM pg_advisory_xact_lock(hashtext('{TEST_APP_ROLE}'));
-            PERFORM pg_advisory_xact_lock(hashtext('{TEST_READ_ROLE}'));
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_APP_ROLE}') THEN
-                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}'
-                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-            ELSE
-                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}'
-                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-            END IF;
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_READ_ROLE}') THEN
-                CREATE ROLE {TEST_READ_ROLE} LOGIN PASSWORD '{TEST_READ_PASSWORD}'
-                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-            ELSE
-                ALTER ROLE {TEST_READ_ROLE} LOGIN PASSWORD '{TEST_READ_PASSWORD}'
-                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-            END IF;
-        END
-        $$;
-        "#,
-    ))
-    .execute(&pool)
-    .await?;
-    pool.close().await;
-    Ok(())
 }
 
 fn pg_connect_options(

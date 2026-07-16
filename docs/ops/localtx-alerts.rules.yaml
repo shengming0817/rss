@@ -6,10 +6,10 @@
 #
 # Validation: promtool check rules docs/ops/localtx-alerts.rules.yaml
 #
-# Prometheus alerting guidance favors few, actionable symptoms. Only settlements whose database
-# outcome requires human verification page here. Retry exhaustion is deliberately excluded: it is
-# a retry-engine condition, may have a known rolled_back settlement, and remains dashboard/trace
-# evidence instead of an independent page.
+# Prometheus alerting guidance favors few, actionable symptoms. Unsafe settlements page
+# immediately; sustained connection quarantine is a warning for pool churn without claiming an
+# outcome. Retry exhaustion is deliberately excluded: it is a retry-engine condition, may have a
+# known rolled_back settlement, and remains dashboard/trace evidence instead of an independent page.
 groups:
   - name: localtx-settlement
     rules:
@@ -32,6 +32,16 @@ groups:
           summary: "LocalTx rollback failed (domain={{ $labels.domain }}, contract_id={{ $labels.contract_id }})"
           description: "Rollback failed at {{ $labels.boundary }}; do not retry on the same transaction or connection. Check database health, isolate the affected connection, and verify authoritative state before reconciliation."
           runbook: "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md#rollback-failed"
+
+      - alert: PostgresLocalTxConnectionQuarantineBurst
+        expr: sum by (stage) (increase(postgres_localtx_connection_quarantine_total[5m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained PostgreSQL LocalTx connection quarantine (stage={{ $labels.stage }})"
+          description: "LocalTx futures have continuously discarded unsafe pooled connections for at least 15 minutes. Correlate the closed stage with request cancellation, timeout, database and pool pressure; do not infer transaction settlement or replay mutations."
+          runbook: "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md#connection-quarantine"
 
       - alert: GenericTxCommitUnknown
         expr: sum by (boundary) (increase(tx_settlement_final_total{final_status="commit_unknown"}[5m])) > 0

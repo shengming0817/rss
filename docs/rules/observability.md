@@ -184,6 +184,7 @@ LocalTx 结算；禁止从 `TxRetryFinalStatus` 反推 commit / rollback 结果�
 | `localtx_retry_attempts_total` | Counter | `domain`,`contract_id`,`boundary`,`retry_class` | LocalTx 失败 attempt 的 settlement-safe retry 分类 |
 | `localtx_final_total` | Counter | `domain`,`contract_id`,`boundary`,`final_status` | 一次 LocalTx retry invocation 最后真实可观测的结算状态 |
 | `localtx_attempts` | Histogram | `domain`,`contract_id`,`boundary`,`final_status` | 有真实终态的 invocation 实际 attempt 数 |
+| `postgres_localtx_connection_quarantine_total` | Counter | `stage` | acquire 后未获安全复用 ACK 而物理隔离的 PostgreSQL 连接；stage 闭合为 `begin`/`body`/`commit`/`rollback` |
 
 label 与 trace 字段纪律：
 
@@ -203,6 +204,9 @@ label 与 trace 字段纪律：
 - `commit_unknown` / `rollback_failed` 强制不可重试，retry exhausted 也在契约级 LocalTx span 下发 warn；普通
   attempt/completion 只发 debug。trace invocation/attempt/completion 只携 contract、closed label、attempt count；
   tenant、业务 key、SQL、payload 与错误文本不得进入 metric label。
+- connection quarantine 与 settlement 正交：future cancellation/panic 可能没有 `LocalTxFinalStatus`，但 armed
+  lease Drop 必须以私有闭阶段发射 `postgres_localtx_connection_quarantine_total` 和同阶段结构化 WARN 后
+  `close_on_drop()`。该信号不得携 tenant、contract、SQL 或错误文本，也不得据此伪造 transaction final status。
 - `LOCALTX-OBS-LABELS-01` 由 typed LocalTx route + 私有 façade + 闭枚举在编译期 Hard 化；generated route
   provenance 仍由 codegen golden 与 `CONTRACT-BINDING-FUNNEL-01`（Medium）守卫，不虚称跨 crate 来源 Hard。
 - 运维消费闭环由 `docs/ops/202607082104-1642-consistency-dashboard-checklist.md`、

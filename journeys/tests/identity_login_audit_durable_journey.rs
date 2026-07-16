@@ -146,49 +146,6 @@ fn pg_config_for(p: &testkit::PgConnParams, username: &str, password: &str) -> P
     .with_acquire_timeout(Duration::from_secs(5))
 }
 
-async fn provision_runtime_logins(p: &testkit::PgConnParams) -> Result<()> {
-    let options = PgConnectOptions::new()
-        .host(&p.host)
-        .port(p.port)
-        .database(&p.database)
-        .username(&p.username)
-        .password(&p.password)
-        .ssl_mode(SqlxPgSslMode::Prefer);
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect_with(options)
-        .await?;
-    sqlx::query(&format!(
-        r#"
-        DO $$
-        BEGIN
-            PERFORM pg_advisory_xact_lock(hashtext('{RSS_APP_ROLE}'));
-            PERFORM pg_advisory_xact_lock(hashtext('{RSS_APP_READ_ROLE}'));
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{RSS_APP_ROLE}') THEN
-                CREATE ROLE {RSS_APP_ROLE} LOGIN PASSWORD '{RSS_APP_PASSWORD}'
-                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-            ELSE
-                ALTER ROLE {RSS_APP_ROLE} LOGIN PASSWORD '{RSS_APP_PASSWORD}'
-                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-            END IF;
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{RSS_APP_READ_ROLE}') THEN
-                CREATE ROLE {RSS_APP_READ_ROLE} LOGIN PASSWORD '{RSS_APP_READ_PASSWORD}'
-                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-            ELSE
-                ALTER ROLE {RSS_APP_READ_ROLE} LOGIN PASSWORD '{RSS_APP_READ_PASSWORD}'
-                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-            END IF;
-        END
-        $$;
-        "#,
-    ))
-    .execute(&pool)
-    .await?;
-    pool.close().await;
-    Ok(())
-}
-
 async fn database_now_epoch(p: &testkit::PgConnParams) -> Result<i64> {
     let options = PgConnectOptions::new()
         .host(&p.host)
@@ -290,7 +247,14 @@ async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn login_audit_durable_topology() -> Result<()> {
     let pg = testkit::env_or_postgres().await?;
-    provision_runtime_logins(pg.params()).await?;
+    testkit::provision_postgres_test_logins(
+        pg.params(),
+        &[
+            testkit::PostgresTestLogin::new(RSS_APP_ROLE, RSS_APP_PASSWORD),
+            testkit::PostgresTestLogin::new(RSS_APP_READ_ROLE, RSS_APP_READ_PASSWORD),
+        ],
+    )
+    .await?;
     let authority_epoch = database_now_epoch(pg.params()).await?;
     let owner_config = pg_config(pg.params())?;
     let app_config = pg_config_for(pg.params(), RSS_APP_ROLE, RSS_APP_PASSWORD);

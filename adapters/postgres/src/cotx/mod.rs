@@ -36,7 +36,6 @@ use crate::projection_events::ProjectionWriteRegistry;
 
 mod settlement;
 
-use settlement::rollback_failed;
 #[cfg(any(
     feature = "domain-settings",
     feature = "domain-identity",
@@ -49,6 +48,7 @@ pub(crate) use settlement::{LocalTxAttempt, LocalTxRetryError, commit_unknown};
     feature = "domain-audit"
 )))]
 pub(crate) use settlement::{LocalTxAttempt, commit_unknown};
+use settlement::{LocalTxConnectionLease, LocalTxTransaction, rollback_failed};
 
 const TX_RETRY_LOCK_TIMEOUT: &str = "5s";
 
@@ -173,6 +173,16 @@ impl<'tx> TxCapability<'tx> {
         &mut self,
     ) -> Result<(), sqlx::Error> {
         sqlx::query("SELECT set_config('rss.test_rollback_failed_after_rollback', '1', true)")
+            .execute(&mut *self.conn)
+            .await
+            .map(|_| ())
+    }
+
+    /// Integration-only seam that leaves rollback without an acknowledgement until the caller's
+    /// timeout cancels the LocalTx future. The armed connection lease must quarantine the backend.
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) async fn inject_rollback_timeout(&mut self) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT set_config('rss.test_rollback_timeout', '1', true)")
             .execute(&mut *self.conn)
             .await
             .map(|_| ())
@@ -730,20 +740,24 @@ where
     E: std::error::Error + Send + Sync + 'static,
     T: Send,
 {
-    let mut tx = match pool.begin().await {
+    let mut lease = match LocalTxConnectionLease::acquire(pool).await {
+        Ok(lease) => lease,
+        Err(error) => return LocalTxAttempt::unsettled(map_storage(error)),
+    };
+    let mut tx = match lease.begin().await {
         Ok(tx) => tx,
         Err(error) => return LocalTxAttempt::unsettled(map_storage(error)),
     };
     let result = async {
-        set_local_tenant(&mut tx, tenant)
+        let mut tx_cap = tx.capability();
+        set_local_tenant(tx_cap.conn(), tenant)
             .await
             .map_err(&map_storage)?;
         if bound_lock_wait {
-            set_local_retry_lock_timeout(&mut tx)
+            set_local_retry_lock_timeout(tx_cap.conn())
                 .await
                 .map_err(&map_storage)?;
         }
-        let mut tx_cap = TxCapability::from_transaction(&mut tx);
         write(&mut tx_cap).await
     }
     .await;
@@ -812,21 +826,28 @@ where
     F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
     E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
 {
-    let mut tx = match pool.begin().await {
+    let mut lease = match LocalTxConnectionLease::acquire(pool).await {
+        Ok(lease) => lease,
+        Err(error) => return LocalTxAttempt::unsettled(map_storage(error)),
+    };
+    let mut tx = match lease.begin().await {
         Ok(tx) => tx,
         Err(error) => return LocalTxAttempt::unsettled(map_storage(error)),
     };
-    let result = match write_in_tx(
-        &mut tx,
-        projection_registry,
-        write.tenant,
-        write.entry,
-        write.env,
-        business_write,
-        bound_lock_wait,
-    )
-    .await
-    {
+    let write_result = {
+        let mut tx_cap = tx.capability();
+        write_in_tx(
+            &mut tx_cap,
+            projection_registry,
+            write.tenant,
+            write.entry,
+            write.env,
+            business_write,
+            bound_lock_wait,
+        )
+        .await
+    };
+    let result = match write_result {
         Ok(()) => Ok(()),
         Err(e) => {
             log_cotx_write_error(write.entry, write.env, &e);
@@ -838,7 +859,7 @@ where
 
 /// Settle one LocalTx attempt through the only commit/explicit-rollback branch.
 async fn finish_local_tx<T, E>(
-    tx: Transaction<'_, Postgres>,
+    tx: LocalTxTransaction<'_>,
     result: Result<T, E>,
     map_storage: impl Fn(sqlx::Error) -> E,
     operation: &'static str,
@@ -852,40 +873,126 @@ where
             #[allow(unused_mut)]
             let mut tx = tx;
             #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
-            let inject_commit_unknown = test_commit_unknown_after_commit_requested(&mut tx).await;
-            let commit_result = tx.commit().await;
-            #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
-            let commit_result = if inject_commit_unknown && commit_result.is_ok() {
-                Err(sqlx::Error::PoolTimedOut)
-            } else {
-                commit_result
+            let inject_commit_unknown = {
+                let mut tx_cap = tx.capability();
+                test_commit_unknown_after_commit_requested(&mut tx_cap).await
             };
+            #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+            let commit_result = if inject_commit_unknown {
+                tx.commit_unknown_after_ack().await
+            } else {
+                tx.commit().await
+            };
+            #[cfg(not(any(
+                all(test, feature = "integration"),
+                feature = "journey-fault-support"
+            )))]
+            let commit_result = tx.commit().await;
             finish_local_tx_commit_result(commit_result, value, map_storage, operation, tenant)
         }
         Err(error) => {
             #[allow(unused_mut)]
             let mut tx = tx;
             #[cfg(all(test, feature = "integration"))]
-            let inject_rollback_failed =
-                test_rollback_failed_after_rollback_requested(&mut tx).await;
-            let rollback_result = tx.rollback().await;
-            #[cfg(all(test, feature = "integration"))]
-            let rollback_result = if inject_rollback_failed && rollback_result.is_ok() {
-                Err(sqlx::Error::PoolTimedOut)
-            } else {
-                rollback_result
+            let inject_rollback_timeout = {
+                let mut tx_cap = tx.capability();
+                test_rollback_timeout_requested(&mut tx_cap).await
             };
+            #[cfg(all(test, feature = "integration"))]
+            let inject_rollback_failed = {
+                let mut tx_cap = tx.capability();
+                test_rollback_failed_after_rollback_requested(&mut tx_cap).await
+            };
+            #[cfg(all(test, feature = "integration"))]
+            let rollback_result = if inject_rollback_timeout {
+                tx.rollback_paused_before_ack().await
+            } else if inject_rollback_failed {
+                tx.rollback_failed_after_ack().await
+            } else {
+                tx.rollback().await
+            };
+            #[cfg(not(all(test, feature = "integration")))]
+            let rollback_result = tx.rollback().await;
             finish_local_tx_rollback_result(rollback_result, error, map_storage, operation, tenant)
         }
     }
 }
 
+#[cfg(all(test, feature = "integration"))]
+static TEST_ROLLBACK_TIMEOUT_ENTERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+#[cfg(all(test, feature = "integration"))]
+static TEST_LOCALTX_PAUSE_SEAM: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(all(test, feature = "integration"))]
+static TEST_BEGIN_PAUSE_ENTERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+#[cfg(all(test, feature = "integration"))]
+static TEST_COMMIT_PAUSE_ENTERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+#[cfg(all(test, feature = "integration"))]
+tokio::task_local! {
+    static TEST_LOCALTX_PAUSE_STAGE: LocalTxTestPauseStage;
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocalTxTestPauseStage {
+    Begin,
+    Commit,
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) async fn with_localtx_pause_for_test<T>(
+    stage: LocalTxTestPauseStage,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    TEST_LOCALTX_PAUSE_STAGE.scope(stage, future).await
+}
+
+#[cfg(all(test, feature = "integration"))]
+async fn pause_localtx_stage_for_test(stage: LocalTxTestPauseStage) {
+    if TEST_LOCALTX_PAUSE_STAGE
+        .try_with(|requested| *requested == stage)
+        .unwrap_or(false)
+    {
+        match stage {
+            LocalTxTestPauseStage::Begin => TEST_BEGIN_PAUSE_ENTERED.notify_one(),
+            LocalTxTestPauseStage::Commit => TEST_COMMIT_PAUSE_ENTERED.notify_one(),
+        }
+        std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) async fn wait_for_localtx_pause_for_test(stage: LocalTxTestPauseStage) {
+    match stage {
+        LocalTxTestPauseStage::Begin => TEST_BEGIN_PAUSE_ENTERED.notified().await,
+        LocalTxTestPauseStage::Commit => TEST_COMMIT_PAUSE_ENTERED.notified().await,
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+fn notify_rollback_pause_entered_for_test() {
+    TEST_ROLLBACK_TIMEOUT_ENTERED.notify_one();
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) async fn lock_rollback_timeout_seam_for_test() -> tokio::sync::MutexGuard<'static, ()> {
+    TEST_LOCALTX_PAUSE_SEAM.lock().await
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) async fn wait_for_rollback_timeout_for_test() {
+    TEST_ROLLBACK_TIMEOUT_ENTERED.notified().await;
+}
+
 #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
-async fn test_commit_unknown_after_commit_requested(tx: &mut Transaction<'_, Postgres>) -> bool {
+async fn test_commit_unknown_after_commit_requested(tx: &mut TxCapability<'_>) -> bool {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT current_setting('rss.test_commit_unknown_after_commit', true)",
     )
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.conn())
     .await
     .ok()
     .flatten()
@@ -893,11 +1000,23 @@ async fn test_commit_unknown_after_commit_requested(tx: &mut Transaction<'_, Pos
 }
 
 #[cfg(all(test, feature = "integration"))]
-async fn test_rollback_failed_after_rollback_requested(tx: &mut Transaction<'_, Postgres>) -> bool {
+async fn test_rollback_failed_after_rollback_requested(tx: &mut TxCapability<'_>) -> bool {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT current_setting('rss.test_rollback_failed_after_rollback', true)",
     )
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.conn())
+    .await
+    .ok()
+    .flatten()
+    .is_some_and(|value| value == "1")
+}
+
+#[cfg(all(test, feature = "integration"))]
+async fn test_rollback_timeout_requested(tx: &mut TxCapability<'_>) -> bool {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT current_setting('rss.test_rollback_timeout', true)",
+    )
+    .fetch_one(tx.conn())
     .await
     .ok()
     .flatten()
@@ -960,7 +1079,7 @@ where
 /// 事务体：SET LOCAL tenant → 业务写 → `append_outbox`（任一步 Err 即冒泡，由调用方 rollback）。
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 async fn write_in_tx<F, E>(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut TxCapability<'_>,
     projection_registry: ProjectionWriteRegistry,
     tenant: TenantId,
     entry: &EventEntry,
@@ -972,7 +1091,7 @@ where
     F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
 {
     // tenant scope（事务级，commit/rollback 自动失效；与 plain 写共享 set_local_tenant，F3）。
-    set_local_tenant(tx, tenant)
+    set_local_tenant(tx.conn(), tenant)
         .await
         .map_err(CoTxWriteError::TenantScope)?;
     if env.tenant() != tenant {
@@ -981,18 +1100,17 @@ where
         )));
     }
     if bound_lock_wait {
-        set_local_retry_lock_timeout(tx)
+        set_local_retry_lock_timeout(tx.conn())
             .await
             .map_err(CoTxWriteError::RetryLockTimeout)?;
     }
     // 业务写（同 tx；CAS 0 行 → 业务 E::VersionConflict）。tx_cap 是从 live Transaction 铸造的能力令牌；
     // append_outbox 也只接受该令牌，裸 PgPool/PgConnection 无法调用 outbox 双写入口。
-    let mut tx_cap = TxCapability::from_transaction(tx);
-    business_write(&mut tx_cap)
+    business_write(tx)
         .await
         .map_err(CoTxWriteError::BusinessWrite)?;
     // outbox append（同 tx — co-tx 原子性；复用 append_outbox + OUTBOX-ATOMIC-IDEM-01）。
-    append_outbox_with_projection(&mut tx_cap, entry, env, &projection_registry)
+    append_outbox_with_projection(tx, entry, env, &projection_registry)
         .await
         .map(|_| ())
         .map_err(CoTxWriteError::AppendOutbox)

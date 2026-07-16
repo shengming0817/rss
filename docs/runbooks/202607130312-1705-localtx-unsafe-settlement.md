@@ -94,6 +94,24 @@ Correlate sustained transient/exhausted WARN evidence with database availability
 rate. Promote it to a deployment-specific warning only when a measured SLO supplies a stable
 threshold and the alert has a distinct operator action.
 
+## Connection quarantine
+
+`PostgresLocalTxConnectionQuarantineBurst` means armed LocalTx leases have continuously discarded pooled
+PostgreSQL connections for at least 15 minutes. Its only label is the closed lifecycle `stage`:
+`begin`, `body`, `commit`, or `rollback`. It is a connection-lifecycle warning, not settlement
+evidence; cancellation and panic can legitimately produce no `localtx_final_total` sample.
+
+1. Correlate the stage with request cancellation/timeout rates, database latency or failover, pool
+   saturation, and the matching `localtx connection quarantined` WARN events.
+2. Confirm replacement connections are being established and the affected pool is not exhausting
+   its acquire budget. Do not re-enable or reuse an old backend to reduce churn.
+3. For `commit` or `rollback`, inspect authoritative domain state before any reconciliation. The
+   quarantine signal alone cannot prove whether the server accepted the settlement command.
+4. Do not add tenant, SQL, key, payload, or raw error labels. Use access-controlled traces and audit
+   storage for record-level investigation.
+5. Resolve after quarantine stops, pool capacity recovers, and any ambiguous authoritative state is
+   handled through the owning domain operation without blind replay.
+
 ## Resolution
 
 Resolve only after authoritative state is known, unsafe automatic replay remains disabled or has

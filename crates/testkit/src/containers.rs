@@ -519,6 +519,81 @@ pub struct PgConnParams {
     pub password: String,
 }
 
+/// A PostgreSQL login role used only by integration-test fixtures.
+///
+/// Keeping the role and password paired preserves their association across fixture setup. The
+/// provisioner exposes no policy knobs and always applies the complete fixed least-privilege
+/// attribute set; a structural test rejects consumer-owned role DDL.
+#[derive(Clone, Copy)]
+pub struct PostgresTestLogin<'a> {
+    role: &'a str,
+    password: &'a str,
+}
+
+impl<'a> PostgresTestLogin<'a> {
+    /// Bind a role name to the password used by the corresponding test client.
+    pub const fn new(role: &'a str, password: &'a str) -> Self {
+        Self { role, password }
+    }
+}
+
+/// Provision PostgreSQL integration-test login roles with one fixed least-privilege policy.
+///
+/// # INVARIANT: PG-TEST-LOGIN-POLICY-01 { level = "Hard", exec = "native-compile", source = "code", native = "PostgresTestLogin keeps each role/password pair private and the provision function exposes no policy parameters, so every call applies the same complete least-privilege attributes" }
+///
+/// Role names and passwords are bind parameters. PostgreSQL's `format('%I', ...)` and
+/// `format('%L', ...)` produce the dynamic DDL, so no consumer interpolates credentials. A
+/// transaction-scoped advisory lock serializes create-vs-alter for each role. Every invocation
+/// enforces `LOGIN PASSWORD NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+/// NOINHERIT`.
+pub async fn provision_postgres_test_logins(
+    params: &PgConnParams,
+    logins: &[PostgresTestLogin<'_>],
+) -> Result<()> {
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+
+    let options = PgConnectOptions::new()
+        .host(&params.host)
+        .port(params.port)
+        .database(&params.database)
+        .username(&params.username)
+        .password(&params.password)
+        .ssl_mode(PgSslMode::Prefer);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(options)
+        .await?;
+    let mut tx = pool.begin().await?;
+
+    let mut ordered = logins.to_vec();
+    ordered.sort_unstable_by_key(|login| login.role);
+    for login in ordered {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(login.role)
+            .execute(&mut *tx)
+            .await?;
+        let ddl: String = sqlx::query_scalar(
+            r#"
+            SELECT CASE
+                WHEN EXISTS (SELECT FROM pg_roles WHERE rolname = $1)
+                    THEN format('ALTER ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT', $1, $2)
+                ELSE format('CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT', $1, $2)
+            END
+            "#,
+        )
+        .bind(login.role)
+        .bind(login.password)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(&ddl).execute(&mut *tx).await?;
+    }
+
+    tx.commit().await?;
+    pool.close().await;
+    Ok(())
+}
+
 impl std::fmt::Debug for PgConnParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PgConnParams")

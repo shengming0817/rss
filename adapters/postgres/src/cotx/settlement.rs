@@ -8,6 +8,7 @@
 //! sibling postgres modules and the retry boundary may only consume settlement methods.
 //!
 //! INVARIANT: PG-LOCALTX-SETTLEMENT-01 { level = "Hard", exec = "native-compile", source = "code", native = "opaque sum type; pub(super) mint under cotx; run_pg_tx_retry consumes LocalTxAttempt only" }
+//! INVARIANT: PG-LOCALTX-QUARANTINE-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private armed RAII lease borrow-splits its PoolConnection transaction and closed quarantine stage into LocalTxTransaction; only that wrapper's consuming commit/rollback ACK methods can disarm the originating lease" }
 
 use consistency::LocalTxFinalStatus;
 #[cfg(any(
@@ -17,6 +18,7 @@ use consistency::LocalTxFinalStatus;
     feature = "domain-audit"
 ))]
 use consistency::TxRetryClass;
+use sqlx::{Acquire, PgPool, Postgres, Transaction, pool::PoolConnection};
 
 /// One complete Postgres LocalTx attempt and its settlement evidence.
 #[derive(Debug)]
@@ -33,7 +35,161 @@ enum LocalTxAttemptState<T, E> {
     CommitUnknown(E),
 }
 
+/// A pooled connection whose default drop behavior is quarantine.
+///
+/// The parent `cotx` module can acquire and begin this lease, but it cannot inject a reuse decision
+/// or recover the raw pooled connection. The returned [`LocalTxTransaction`] exclusively holds the
+/// transaction together with the originating lease's quarantine flag, so another attempt cannot
+/// authorize reuse. Missing settlement and cancelled futures keep `quarantine_stage` armed.
+pub(super) struct LocalTxConnectionLease {
+    connection: PoolConnection<Postgres>,
+    quarantine_stage: Option<LocalTxQuarantineStage>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalTxQuarantineStage {
+    Begin,
+    Body,
+    Commit,
+    Rollback,
+}
+
+impl LocalTxQuarantineStage {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Begin => "begin",
+            Self::Body => "body",
+            Self::Commit => "commit",
+            Self::Rollback => "rollback",
+        }
+    }
+}
+
+impl LocalTxConnectionLease {
+    pub(super) async fn acquire(pool: &PgPool) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            connection: pool.acquire().await?,
+            quarantine_stage: Some(LocalTxQuarantineStage::Begin),
+        })
+    }
+
+    pub(super) async fn begin(&mut self) -> Result<LocalTxTransaction<'_>, sqlx::Error> {
+        let Self {
+            connection,
+            quarantine_stage,
+        } = self;
+        #[cfg(all(test, feature = "integration"))]
+        super::pause_localtx_stage_for_test(super::LocalTxTestPauseStage::Begin).await;
+        let transaction = (&mut *connection).begin().await?;
+        *quarantine_stage = Some(LocalTxQuarantineStage::Body);
+        Ok(LocalTxTransaction {
+            transaction,
+            quarantine_stage,
+        })
+    }
+}
+
+/// A transaction branded with the quarantine flag of the lease that began it.
+///
+/// There is no constructor and no way to extract the transaction or flag. Consuming settlement
+/// methods are therefore the only safe-reuse authority, and they disarm only after a real ACK.
+pub(super) struct LocalTxTransaction<'lease> {
+    transaction: Transaction<'lease, Postgres>,
+    quarantine_stage: &'lease mut Option<LocalTxQuarantineStage>,
+}
+
+impl LocalTxTransaction<'_> {
+    pub(super) fn capability(&mut self) -> super::TxCapability<'_> {
+        super::TxCapability::from_transaction(&mut self.transaction)
+    }
+
+    pub(super) async fn commit(self) -> Result<(), sqlx::Error> {
+        let Self {
+            transaction,
+            quarantine_stage,
+        } = self;
+        *quarantine_stage = Some(LocalTxQuarantineStage::Commit);
+        #[cfg(all(test, feature = "integration"))]
+        super::pause_localtx_stage_for_test(super::LocalTxTestPauseStage::Commit).await;
+        transaction.commit().await?;
+        *quarantine_stage = None;
+        Ok(())
+    }
+
+    pub(super) async fn rollback(self) -> Result<(), sqlx::Error> {
+        let Self {
+            transaction,
+            quarantine_stage,
+        } = self;
+        *quarantine_stage = Some(LocalTxQuarantineStage::Rollback);
+        transaction.rollback().await?;
+        *quarantine_stage = None;
+        Ok(())
+    }
+
+    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+    pub(super) async fn commit_unknown_after_ack(self) -> Result<(), sqlx::Error> {
+        let Self {
+            transaction,
+            quarantine_stage,
+        } = self;
+        *quarantine_stage = Some(LocalTxQuarantineStage::Commit);
+        transaction.commit().await?;
+        Err(sqlx::Error::PoolTimedOut)
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(super) async fn rollback_failed_after_ack(self) -> Result<(), sqlx::Error> {
+        let Self {
+            transaction,
+            quarantine_stage,
+        } = self;
+        *quarantine_stage = Some(LocalTxQuarantineStage::Rollback);
+        transaction.rollback().await?;
+        Err(sqlx::Error::PoolTimedOut)
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(super) async fn rollback_paused_before_ack(self) -> Result<(), sqlx::Error> {
+        let Self {
+            transaction,
+            quarantine_stage,
+        } = self;
+        *quarantine_stage = Some(LocalTxQuarantineStage::Rollback);
+        super::notify_rollback_pause_entered_for_test();
+        std::future::pending::<()>().await;
+        drop(transaction);
+        Ok(())
+    }
+}
+
+impl Drop for LocalTxConnectionLease {
+    fn drop(&mut self) {
+        if let Some(stage) = self.quarantine_stage {
+            metrics::counter!(
+                "postgres_localtx_connection_quarantine_total",
+                "stage" => stage.as_label()
+            )
+            .increment(1);
+            tracing::warn!(
+                target: "postgres",
+                quarantine_stage = stage.as_label(),
+                "localtx connection quarantined"
+            );
+            self.connection.close_on_drop();
+        }
+    }
+}
+
 impl<T, E> LocalTxAttempt<T, E> {
+    #[cfg(test)]
+    fn has_acknowledged_settlement(&self) -> bool {
+        matches!(
+            &self.state,
+            LocalTxAttemptState::Committed(_) | LocalTxAttemptState::RolledBack(_)
+        )
+    }
+
     /// Construct a successfully committed attempt.
     pub(super) fn committed(value: T) -> Self {
         Self {
@@ -222,7 +378,7 @@ struct PgTxRollbackFailedError {
 mod tests {
     use consistency::{LocalTxFinalStatus, TxRetryClass};
 
-    use super::LocalTxAttempt;
+    use super::{LocalTxAttempt, LocalTxQuarantineStage};
     #[cfg(feature = "domain-settings")]
     use super::{commit_unknown, rollback_failed};
     #[cfg(feature = "domain-settings")]
@@ -285,6 +441,55 @@ mod tests {
         assert_eq!(
             commit_unknown.retry_class(classify),
             Some(TxRetryClass::Permanent)
+        );
+    }
+
+    #[test]
+    fn only_commit_and_rollback_states_represent_acknowledged_settlement() {
+        let cases = [
+            (LocalTxAttempt::<(), _>::committed(()), true, "committed"),
+            (
+                LocalTxAttempt::<(), _>::unsettled(FakeError::Transient),
+                false,
+                "unsettled",
+            ),
+            (
+                LocalTxAttempt::<(), _>::rolled_back(FakeError::Transient),
+                true,
+                "rolled_back",
+            ),
+            (
+                LocalTxAttempt::<(), _>::rollback_failed(FakeError::Transient),
+                false,
+                "rollback_failed",
+            ),
+            (
+                LocalTxAttempt::<(), _>::commit_unknown(FakeError::Transient),
+                false,
+                "commit_unknown",
+            ),
+        ];
+
+        for (attempt, expected, state) in cases {
+            assert_eq!(
+                attempt.has_acknowledged_settlement(),
+                expected,
+                "unexpected connection policy for {state}"
+            );
+        }
+    }
+
+    #[test]
+    fn quarantine_stage_labels_are_closed_and_low_cardinality() {
+        assert_eq!(
+            [
+                LocalTxQuarantineStage::Begin,
+                LocalTxQuarantineStage::Body,
+                LocalTxQuarantineStage::Commit,
+                LocalTxQuarantineStage::Rollback,
+            ]
+            .map(LocalTxQuarantineStage::as_label),
+            ["begin", "body", "commit", "rollback"]
         );
     }
 

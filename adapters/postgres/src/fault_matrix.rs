@@ -85,6 +85,43 @@ impl PgFaultMatrixConfig {
     }
 }
 
+/// Opaque credentials generated for one fault-matrix harness and provisioned by its journey.
+///
+/// Fields stay private so callers cannot replace the generated values. Named accessors keep the
+/// intended serving/reader association explicit; if a caller pairs them incorrectly during
+/// provisioning, the subsequent role-authenticated setup fails. The journey must provision these
+/// exact pairs before moving the value into [`PgFaultMatrixHarness::setup`].
+pub struct PgFaultMatrixLoginCredentials {
+    serving_password: String,
+    reader_password: String,
+}
+
+impl PgFaultMatrixLoginCredentials {
+    /// Generate fresh credentials for one fault-matrix run.
+    pub fn generate() -> Self {
+        Self {
+            serving_password: format!("rss_app_{}", uuid::Uuid::new_v4().simple()),
+            reader_password: format!("rss_app_read_{}", uuid::Uuid::new_v4().simple()),
+        }
+    }
+
+    pub fn serving_role(&self) -> &'static str {
+        RSS_APP_ROLE
+    }
+
+    pub fn serving_password(&self) -> &str {
+        &self.serving_password
+    }
+
+    pub fn reader_role(&self) -> &'static str {
+        RSS_APP_READ_ROLE
+    }
+
+    pub fn reader_password(&self) -> &str {
+        &self.reader_password
+    }
+}
+
 /// Closed outbox status observer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultMatrixOutboxStatus {
@@ -233,16 +270,14 @@ pub struct PgFaultMatrixHarness {
 }
 
 impl PgFaultMatrixHarness {
-    /// Provision the least-privilege serving role, run migrations, and construct runtime deps.
+    /// Use already-provisioned opaque logins, run migrations, and construct runtime deps.
     pub async fn setup(
         config: PgFaultMatrixConfig,
+        logins: PgFaultMatrixLoginCredentials,
         relay_budget: RelayBudget,
         projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> FaultMatrixResult<Self> {
-        let serving_password = format!("rss_app_{}", uuid::Uuid::new_v4().simple());
-        let reader_password = format!("rss_app_read_{}", uuid::Uuid::new_v4().simple());
-        provision_runtime_logins(&config, &serving_password, &reader_password).await?;
         let migrator = pg_config(
             &config.host,
             config.port,
@@ -255,14 +290,14 @@ impl PgFaultMatrixHarness {
             config.port,
             &config.database,
             RSS_APP_ROLE,
-            &serving_password,
+            &logins.serving_password,
         );
         let tenant_read = PgTenantReadConfig::new(pg_config(
             &config.host,
             config.port,
             &config.database,
             RSS_APP_READ_ROLE,
-            &reader_password,
+            &logins.reader_password,
         ));
         let deps = PgRuntimeDeps::setup(
             &migrator,
@@ -886,56 +921,6 @@ async fn owner_pool(config: &PgFaultMatrixConfig) -> FaultMatrixResult<PgPool> {
         .acquire_timeout(Duration::from_secs(5))
         .connect_with(options)
         .await?)
-}
-
-async fn provision_runtime_logins(
-    config: &PgFaultMatrixConfig,
-    serving_password: &str,
-    reader_password: &str,
-) -> FaultMatrixResult<()> {
-    for password in [serving_password, reader_password] {
-        if !password
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            bail!("generated postgres role password contains an unsafe SQL literal byte");
-        }
-    }
-    let pool = owner_pool(config).await?;
-    sqlx::query(
-        r#"
-        DO $$
-        BEGIN
-            PERFORM pg_advisory_xact_lock(hashtext('rss_app'));
-            PERFORM pg_advisory_xact_lock(hashtext('rss_app_read'));
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app') THEN
-                CREATE ROLE rss_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-            ELSE
-                ALTER ROLE rss_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-            END IF;
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app_read') THEN
-                CREATE ROLE rss_app_read LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-            ELSE
-                ALTER ROLE rss_app_read LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-            END IF;
-        END
-        $$;
-        "#,
-    )
-    .execute(&pool)
-    .await?;
-    sqlx::query(&format!(
-        "ALTER ROLE {RSS_APP_ROLE} LOGIN PASSWORD '{serving_password}' NOBYPASSRLS"
-    ))
-    .execute(&pool)
-    .await?;
-    sqlx::query(&format!(
-        "ALTER ROLE {RSS_APP_READ_ROLE} LOGIN PASSWORD '{reader_password}' NOBYPASSRLS"
-    ))
-    .execute(&pool)
-    .await?;
-    pool.close().await;
-    Ok(())
 }
 
 async fn seed_outbox(

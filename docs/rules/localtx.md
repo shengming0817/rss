@@ -169,13 +169,22 @@ tombstone monotonicity 证明位于真实 `PgSecretRepo` + `PgSecretUnitOfWork` 
 toy transaction table 不作为该 contract 的仓储语义证据。
 
 ref: sqlx sqlx-core/src/transaction.rs@bab1b022bd56a64f9a08b46b36b97c5cff19d77e
+ref: sqlx sqlx-core/src/pool/connection.rs@bab1b022bd56a64f9a08b46b36b97c5cff19d77e
 
 Postgres runner 以 `cotx::settlement` 私有模块持有的 crate-private `LocalTxAttempt<T, E>` opaque 和式
 状态承载 `Committed` / `Unsettled` / `RolledBack` / `RollbackFailed` / `CommitUnknown`，非法的
 result/status 组合在类型层不可表达（Hard）。生产 mint 构造器为 `pub(super)`，仅 `cotx` settlement
 funnel 可铸造；兄弟模块与 `tx_retry` 只能消费。`PgTenantWritePool` 是 tenant scope 与 write transaction
-capability 的唯一入口；`cotx` 在每次 attempt 内重新 begin、注入 `SET LOCAL`，并经单一 settlement
-funnel commit 或显式 rollback。显式 rollback 失败时经 `map_storage` 收口为独立 Storage settlement
+capability 的唯一入口；`cotx` 在每次 attempt 内先显式 acquire pooled connection 并立即装入默认 armed 的
+`LocalTxConnectionLease`。lease begin 时把 transaction 与同一 lease 的 closed armed stage 分字段独占借入私有
+`LocalTxTransaction`；调用方不能构造 wrapper、取得 pooled connection 或跨 attempt 复用授权。wrapper 经
+`SET LOCAL` 与事务体后被单一 settlement funnel 消费；只有其自身 commit/rollback 收到明确 ACK，消费式方法才
+直接把原 lease stage 置空。stage 仅为 `begin` / `body` / `commit` / `rollback`，armed Drop 在发射同一闭标签的
+quarantine counter/WARN 后 `close_on_drop()`；它不携租户/SQL/错误文本，也不伪造 settlement。`LocalTxAttempt`
+只承载结果/重试证据，不再参与连接复用授权；
+`Unsettled`（acquire 后 begin 失败）、`RollbackFailed`、`CommitUnknown` 以及 begin/body/settlement future 被取消
+或 timeout 均保持 armed，Drop 时 `close_on_drop`，不得依赖 SQLx queued rollback + release ping 恢复后复用。
+取消路径没有结算证据，不得伪造 final status。显式 rollback 失败时经 `map_storage` 收口为独立 Storage settlement
 错误（保留 primary+rollback 因果链），不再把领域冲突（如 `VersionConflict`）误分类为 transient retry。
 Postgres retry operation 只接受 `LocalTxAttempt`：`Unsettled` / `RolledBack` 仅在分类为 transient 时有界
 重试，`RollbackFailed` / `CommitUnknown` 强制不可重试。通用 `run_pg_tx_retry` 保留 adapter operation
@@ -202,6 +211,12 @@ route marker 实现，并从 marker 派生唯一 `PgTxRetryBoundary`；错误 ro
 `SecretRepo::save`、identity 旧 port、adapter factory、generic/legacy `write`、手制 observation 或手工 boundary
 均阻断 verify。internal publish / republish 只接受 generic runner，
 三条 publish 语义最终共享唯一 keyed CAS attempt funnel；delete 共享同一 lock capability 并只追加 tombstone。
+连接复用权限由 `PG-LOCALTX-QUARANTINE-TYPE-01` 的私有 armed lease + borrow-bound transaction wrapper 在类型
+边界封闭；两个生产 write funnel 必须有一条符号绑定一致的 acquire→begin→consuming finish 顶层必经数据流，且
+finish 必须为 tail expression，由
+`PG-LOCALTX-QUARANTINE-FUNNEL-01`（`pg-tenant-tx-guard`，Medium，含 synthetic red）阻断 direct
+`pool.begin()`、helper transaction、shadow/reassign/drop、条件/closure/未 await async/提前 return、跨文件 impl、
+自由函数 disarm/raw connection escape 与 fail-open Drop；变量改名或等价字段解构顺序不构成源码协议。
 
 `observ::LocalTxObservation<M>` 从 typed generated route 私有提取 domain / contract id、在类型中保留 marker，并以
 `LocalTxBoundary` / `TxRetryClass` / `LocalTxFinalStatus` 的闭标签发射 metrics 与 trace。每个 failed attempt

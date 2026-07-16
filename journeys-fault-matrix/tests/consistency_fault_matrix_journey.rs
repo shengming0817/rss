@@ -24,6 +24,7 @@ use futures::future::LocalBoxFuture;
 use postgres::fault_matrix::{
     FaultMatrixDeadLetterEncoding, FaultMatrixDeadLetterSource, FaultMatrixDeadLetterSummary,
     FaultMatrixOutboxStatus, FaultMatrixPublishOutcome, PgFaultMatrixConfig, PgFaultMatrixHarness,
+    PgFaultMatrixLoginCredentials,
 };
 use redis::RedisRuntimeDeps;
 use testkit::crash_matrix::{CrashCase, CrashFaultSpec, CrashMatrix, CrashRunner, CrashStatus};
@@ -252,8 +253,18 @@ async fn pg_harness() -> Result<PgHarness> {
         p.username.clone(),
         p.password.clone(),
     );
+    let logins = PgFaultMatrixLoginCredentials::generate();
+    testkit::provision_postgres_test_logins(
+        p,
+        &[
+            testkit::PostgresTestLogin::new(logins.serving_role(), logins.serving_password()),
+            testkit::PostgresTestLogin::new(logins.reader_role(), logins.reader_password()),
+        ],
+    )
+    .await?;
     let harness = PgFaultMatrixHarness::setup(
         config,
+        logins,
         relay_budget()?,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,

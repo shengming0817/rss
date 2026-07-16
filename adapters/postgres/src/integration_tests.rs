@@ -290,51 +290,14 @@ fn runtime_pg_config(p: &testkit::PgConnParams, username: &str, password: &str) 
 }
 
 async fn provision_runtime_logins(p: &testkit::PgConnParams) -> TestResult {
-    let options = sqlx::postgres::PgConnectOptions::new()
-        .host(&p.host)
-        .port(p.port)
-        .database(&p.database)
-        .username(&p.username)
-        .password(&p.password)
-        .ssl_mode(sqlx::postgres::PgSslMode::Prefer);
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(5))
-        .connect_with(options)
-        .await?;
-    sqlx::query(
-        r#"
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app') THEN
-                CREATE ROLE rss_app LOGIN PASSWORD 'rss_app_test_pw' NOBYPASSRLS;
-            ELSE
-                ALTER ROLE rss_app LOGIN PASSWORD 'rss_app_test_pw' NOBYPASSRLS;
-            END IF;
-        END
-        $$;
-        "#,
+    testkit::provision_postgres_test_logins(
+        p,
+        &[
+            testkit::PostgresTestLogin::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
+            testkit::PostgresTestLogin::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
+        ],
     )
-    .execute(&pool)
     .await?;
-    sqlx::query(
-        r#"
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app_read') THEN
-                CREATE ROLE rss_app_read
-                    LOGIN PASSWORD 'rss_app_read_test_pw'
-                    NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT;
-            ELSE
-                ALTER ROLE rss_app_read PASSWORD 'rss_app_read_test_pw';
-            END IF;
-        END
-        $$;
-        "#,
-    )
-    .execute(&pool)
-    .await?;
-    pool.close().await;
     Ok(())
 }
 
@@ -9838,6 +9801,538 @@ async fn timed_out_owned_transaction_evicts_backend_and_recovers_a_max_two_pool(
 
     drop(replacement);
     drop(held);
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+async fn localtx_assert_backend_reused(
+    pool: &sqlx::PgPool,
+    expected_pid: i32,
+    context: &str,
+) -> TestResult {
+    let mut connection = tokio::time::timeout(Duration::from_secs(1), pool.acquire()).await??;
+    let actual_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *connection)
+        .await?;
+    assert_eq!(
+        actual_pid, expected_pid,
+        "{context}: safe backend was closed"
+    );
+    Ok(())
+}
+
+const LOCALTX_BACKEND_CLOSE_TIMEOUT: Duration = Duration::from_secs(6);
+
+async fn localtx_assert_backend_quarantined(
+    owner: &PgStore,
+    pool: &sqlx::PgPool,
+    unsafe_pid: i32,
+    context: &str,
+) -> TestResult {
+    assert!(
+        unsafe_pid > 0,
+        "{context}: LocalTx attempt did not observe a real backend"
+    );
+    let mut replacement =
+        tokio::time::timeout(LOCALTX_BACKEND_CLOSE_TIMEOUT, pool.acquire()).await??;
+    let replacement_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *replacement)
+        .await?;
+    assert_ne!(
+        replacement_pid, unsafe_pid,
+        "{context}: unsafe backend was returned to the pool"
+    );
+    drop(replacement);
+
+    let mut old_backend_gone = false;
+    for _ in 0..240 {
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid = $1")
+            .bind(unsafe_pid)
+            .fetch_one(&owner.pool)
+            .await?;
+        if count == 0 {
+            old_backend_gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        old_backend_gone,
+        "{context}: close_on_drop did not terminate backend {unsafe_pid}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::panic)]
+async fn localtx_settlement_connection_policy() -> TestResult {
+    use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+
+    use consistency::LocalTxFinalStatus;
+    use settings::ports::{ConfigRepoError, TenantRepoScope};
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(7)).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+
+    let committed = scoped
+        .retry_write(
+            TenantRepoScope::for_test(tenant),
+            |tx| {
+                Box::pin(async move {
+                    sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(tx.conn())
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))
+                })
+            },
+            |error| ConfigRepoError::Storage(Box::new(error)),
+        )
+        .await;
+    assert_eq!(committed.settlement(), Some(LocalTxFinalStatus::Committed));
+    let committed_pid = committed.into_result()?;
+    localtx_assert_backend_reused(&app.pool, committed_pid, "commit ack").await?;
+
+    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let isolation_key = format!("localtx-cross-tenant-{}", uuid::Uuid::new_v4());
+    let tenant_a_id = tenant.to_string();
+    let tenant_b_id = tenant_b.to_string();
+    let key_for_a = isolation_key.clone();
+    let tenant_a_for_insert = tenant_a_id.clone();
+    let tenant_a_pid = scoped
+        .retry_write(
+            TenantRepoScope::for_test(tenant),
+            move |tx| {
+                Box::pin(async move {
+                    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(tx.conn())
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    sqlx::query(
+                        "INSERT INTO config_entries \
+                         (tenant_id, config_key, version, value, protection_scheme) \
+                         VALUES ($1::uuid, $2, 1, 'value-a', 0)",
+                    )
+                    .bind(&tenant_a_for_insert)
+                    .bind(&key_for_a)
+                    .execute(tx.conn())
+                    .await
+                    .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    Ok(pid)
+                })
+            },
+            |error| ConfigRepoError::Storage(Box::new(error)),
+        )
+        .await
+        .into_result()?;
+
+    let key_for_b = isolation_key.clone();
+    let tenant_b_for_insert = tenant_b_id.clone();
+    let (tenant_b_pid, tenant_b_visible_before_insert) = scoped
+        .retry_write(
+            TenantRepoScope::for_test(tenant_b),
+            move |tx| {
+                Box::pin(async move {
+                    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(tx.conn())
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    let visible: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM config_entries WHERE config_key = $1 AND version = 1",
+                    )
+                    .bind(&key_for_b)
+                    .fetch_one(tx.conn())
+                    .await
+                    .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    sqlx::query(
+                        "INSERT INTO config_entries \
+                         (tenant_id, config_key, version, value, protection_scheme) \
+                         VALUES ($1::uuid, $2, 1, 'value-b', 0)",
+                    )
+                    .bind(&tenant_b_for_insert)
+                    .bind(&key_for_b)
+                    .execute(tx.conn())
+                    .await
+                    .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    Ok((pid, visible))
+                })
+            },
+            |error| ConfigRepoError::Storage(Box::new(error)),
+        )
+        .await
+        .into_result()?;
+    assert_eq!(
+        tenant_b_visible_before_insert, 0,
+        "tenant B must not observe tenant A state on a safely reused backend"
+    );
+
+    let key_for_a = isolation_key.clone();
+    let (tenant_a_return_pid, tenant_a_values) = scoped
+        .retry_write(
+            TenantRepoScope::for_test(tenant),
+            move |tx| {
+                Box::pin(async move {
+                    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(tx.conn())
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    let values: Vec<String> = sqlx::query_scalar(
+                        "SELECT value FROM config_entries WHERE config_key = $1 ORDER BY value",
+                    )
+                    .bind(&key_for_a)
+                    .fetch_all(tx.conn())
+                    .await
+                    .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    Ok((pid, values))
+                })
+            },
+            |error| ConfigRepoError::Storage(Box::new(error)),
+        )
+        .await
+        .into_result()?;
+    assert_eq!(tenant_a_values, ["value-a"]);
+    assert_eq!(
+        [tenant_a_pid, tenant_b_pid, tenant_a_return_pid],
+        [tenant_a_pid; 3],
+        "safe A→B→A transactions must rebuild tenant scope on the same backend"
+    );
+    let durable_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT tenant_id::text, value FROM config_entries WHERE config_key = $1 ORDER BY value",
+    )
+    .bind(&isolation_key)
+    .fetch_all(&owner.pool)
+    .await?;
+    assert_eq!(
+        durable_rows,
+        [
+            (tenant_a_id, "value-a".to_owned()),
+            (tenant_b_id, "value-b".to_owned()),
+        ],
+        "owner snapshot must retain one isolated durable value per tenant"
+    );
+
+    let rolled_back_pid = Arc::new(AtomicI32::new(0));
+    let operation_pid = Arc::clone(&rolled_back_pid);
+    let rolled_back = scoped
+        .retry_write(
+            TenantRepoScope::for_test(tenant),
+            move |tx| {
+                Box::pin(async move {
+                    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(tx.conn())
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    operation_pid.store(pid, Ordering::SeqCst);
+                    Err::<(), _>(ConfigRepoError::VersionConflict)
+                })
+            },
+            |error| ConfigRepoError::Storage(Box::new(error)),
+        )
+        .await;
+    assert_eq!(
+        rolled_back.settlement(),
+        Some(LocalTxFinalStatus::RolledBack)
+    );
+    assert!(matches!(
+        rolled_back.into_result(),
+        Err(ConfigRepoError::VersionConflict)
+    ));
+    localtx_assert_backend_reused(
+        &app.pool,
+        rolled_back_pid.load(Ordering::SeqCst),
+        "rollback ack",
+    )
+    .await?;
+
+    let backend_pid = Arc::new(AtomicI32::new(0));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let operation_pid = Arc::clone(&backend_pid);
+    let operation_attempts = Arc::clone(&attempts);
+
+    let attempt = scoped
+        .retry_write(
+            TenantRepoScope::for_test(tenant),
+            move |tx| {
+                Box::pin(async move {
+                    operation_attempts.fetch_add(1, Ordering::SeqCst);
+                    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(tx.conn())
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    operation_pid.store(pid, Ordering::SeqCst);
+                    tx.inject_commit_unknown_after_commit()
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    Ok(())
+                })
+            },
+            |error| ConfigRepoError::Storage(Box::new(error)),
+        )
+        .await;
+
+    assert_eq!(
+        attempt.settlement(),
+        Some(LocalTxFinalStatus::CommitUnknown)
+    );
+    assert!(attempt.into_result().is_err());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    let old_pid = backend_pid.load(Ordering::SeqCst);
+    assert!(old_pid > 0, "LocalTx attempt must acquire a real backend");
+    localtx_assert_backend_quarantined(&owner, &app.pool, old_pid, "commit unknown").await?;
+
+    let backend_pid = Arc::new(AtomicI32::new(0));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let operation_pid = Arc::clone(&backend_pid);
+    let operation_attempts = Arc::clone(&attempts);
+    let attempt = scoped
+        .retry_write(
+            TenantRepoScope::for_test(tenant),
+            move |tx| {
+                Box::pin(async move {
+                    operation_attempts.fetch_add(1, Ordering::SeqCst);
+                    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(tx.conn())
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    operation_pid.store(pid, Ordering::SeqCst);
+                    tx.inject_rollback_failed_after_rollback()
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    Err::<(), _>(ConfigRepoError::VersionConflict)
+                })
+            },
+            |error| ConfigRepoError::Storage(Box::new(error)),
+        )
+        .await;
+    assert_eq!(
+        attempt.settlement(),
+        Some(LocalTxFinalStatus::RollbackFailed)
+    );
+    assert!(matches!(
+        attempt.into_result(),
+        Err(ConfigRepoError::Storage(_))
+    ));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    localtx_assert_backend_quarantined(
+        &owner,
+        &app.pool,
+        backend_pid.load(Ordering::SeqCst),
+        "rollback failed",
+    )
+    .await?;
+
+    let backend_pid = Arc::new(AtomicI32::new(0));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let operation_pid = Arc::clone(&backend_pid);
+    let operation_attempts = Arc::clone(&attempts);
+    let (body_entered_tx, body_entered_rx) = tokio::sync::oneshot::channel();
+    let cancellation_scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+    let cancelled = tokio::spawn(async move {
+        cancellation_scoped
+            .retry_write(
+                TenantRepoScope::for_test(tenant),
+                move |tx| {
+                    Box::pin(async move {
+                        operation_attempts.fetch_add(1, Ordering::SeqCst);
+                        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                            .fetch_one(tx.conn())
+                            .await
+                            .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                        operation_pid.store(pid, Ordering::SeqCst);
+                        let _ = body_entered_tx.send(());
+                        std::future::pending::<Result<(), ConfigRepoError>>().await
+                    })
+                },
+                |error| ConfigRepoError::Storage(Box::new(error)),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), body_entered_rx).await??;
+    cancelled.abort();
+    assert!(
+        cancelled.await.is_err_and(|error| error.is_cancelled()),
+        "pending LocalTx body must be cancelled after entering the target stage"
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    localtx_assert_backend_quarantined(
+        &owner,
+        &app.pool,
+        backend_pid.load(Ordering::SeqCst),
+        "body cancellation",
+    )
+    .await?;
+
+    let backend_pid = Arc::new(AtomicI32::new(0));
+    let operation_pid = Arc::clone(&backend_pid);
+    let panic_scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+    let panicked = tokio::spawn(async move {
+        panic_scoped
+            .retry_write(
+                TenantRepoScope::for_test(tenant),
+                move |tx| {
+                    Box::pin(async move {
+                        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                            .fetch_one(tx.conn())
+                            .await
+                            .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                        operation_pid.store(pid, Ordering::SeqCst);
+                        panic!("synthetic LocalTx body panic");
+                        #[allow(unreachable_code)]
+                        Ok::<(), ConfigRepoError>(())
+                    })
+                },
+                |error| ConfigRepoError::Storage(Box::new(error)),
+            )
+            .await
+    })
+    .await;
+    assert!(
+        panicked.is_err_and(|error| error.is_panic()),
+        "LocalTx body panic must unwind the armed lease"
+    );
+    localtx_assert_backend_quarantined(
+        &owner,
+        &app.pool,
+        backend_pid.load(Ordering::SeqCst),
+        "body panic",
+    )
+    .await?;
+
+    let backend_pid = Arc::new(AtomicI32::new(0));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let operation_pid = Arc::clone(&backend_pid);
+    let operation_attempts = Arc::clone(&attempts);
+    let rollback_timeout_seam = crate::cotx::lock_rollback_timeout_seam_for_test().await;
+    let rollback_scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+    let rollback_timeout = tokio::spawn(async move {
+        rollback_scoped
+            .retry_write(
+                TenantRepoScope::for_test(tenant),
+                move |tx| {
+                    Box::pin(async move {
+                        operation_attempts.fetch_add(1, Ordering::SeqCst);
+                        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                            .fetch_one(tx.conn())
+                            .await
+                            .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                        operation_pid.store(pid, Ordering::SeqCst);
+                        tx.inject_rollback_timeout()
+                            .await
+                            .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                        Err::<(), _>(ConfigRepoError::VersionConflict)
+                    })
+                },
+                |error| ConfigRepoError::Storage(Box::new(error)),
+            )
+            .await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::cotx::wait_for_rollback_timeout_for_test(),
+    )
+    .await?;
+    rollback_timeout.abort();
+    assert!(
+        rollback_timeout
+            .await
+            .is_err_and(|error| error.is_cancelled()),
+        "rollback must be cancelled after entering the no-ack stage"
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    localtx_assert_backend_quarantined(
+        &owner,
+        &app.pool,
+        backend_pid.load(Ordering::SeqCst),
+        "rollback timeout",
+    )
+    .await?;
+    drop(rollback_timeout_seam);
+
+    let occurred_at = i64::try_from(TEST_OCCURRED_SECS)?;
+    let contract = config_contract();
+    let entry = config_outbox_entry(&unique_event_id("localtx-co-tx-commit"));
+    let env = OutboxEnvelope::new(
+        contract.domain().to_owned(),
+        contract.contract_id().to_owned(),
+        OutboxMetadata::new(occurred_at, tenant, contract)
+            .with_subject_id(subject_id("localtx-co-tx-commit")),
+    );
+    let co_tx_pid = Arc::new(AtomicI32::new(0));
+    let operation_pid = Arc::clone(&co_tx_pid);
+    let attempt = scoped
+        .retry_co_tx_with_outbox(
+            settings_scope(tenant),
+            &entry,
+            &env,
+            move |tx| {
+                Box::pin(async move {
+                    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(tx.conn())
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    operation_pid.store(pid, Ordering::SeqCst);
+                    Ok(())
+                })
+            },
+            |error| ConfigRepoError::Storage(Box::new(error)),
+        )
+        .await;
+    assert_eq!(attempt.settlement(), Some(LocalTxFinalStatus::Committed));
+    attempt.into_result()?;
+    localtx_assert_backend_reused(
+        &app.pool,
+        co_tx_pid.load(Ordering::SeqCst),
+        "co-tx commit ack",
+    )
+    .await?;
+
+    let contract = config_contract();
+    let entry = config_outbox_entry(&unique_event_id("localtx-co-tx-unknown"));
+    let env = OutboxEnvelope::new(
+        contract.domain().to_owned(),
+        contract.contract_id().to_owned(),
+        OutboxMetadata::new(occurred_at, tenant, contract)
+            .with_subject_id(subject_id("localtx-co-tx-unknown")),
+    );
+    let co_tx_pid = Arc::new(AtomicI32::new(0));
+    let operation_pid = Arc::clone(&co_tx_pid);
+    let attempt = scoped
+        .retry_co_tx_with_outbox(
+            settings_scope(tenant),
+            &entry,
+            &env,
+            move |tx| {
+                Box::pin(async move {
+                    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(tx.conn())
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    operation_pid.store(pid, Ordering::SeqCst);
+                    tx.inject_commit_unknown_after_commit()
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    Ok(())
+                })
+            },
+            |error| ConfigRepoError::Storage(Box::new(error)),
+        )
+        .await;
+    assert_eq!(
+        attempt.settlement(),
+        Some(LocalTxFinalStatus::CommitUnknown)
+    );
+    assert!(attempt.into_result().is_err());
+    localtx_assert_backend_quarantined(
+        &owner,
+        &app.pool,
+        co_tx_pid.load(Ordering::SeqCst),
+        "co-tx commit unknown",
+    )
+    .await?;
+
     app.shutdown().await?;
     owner.shutdown().await?;
     Ok(())
@@ -20141,6 +20636,238 @@ async fn identity_logout_retry_metrics_bind_contract_to_session_boundary() -> Te
             "logout retry metrics omitted {expected}: {rendered}"
         );
     }
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn localtx_cancellation_quarantine_reports_closed_stage_without_final_status() -> TestResult {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    use settings::ports::{ConfigRepoError, TenantRepoScope};
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(7)).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let pause_seam = crate::cotx::lock_rollback_timeout_seam_for_test().await;
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+
+    metrics::with_local_recorder(&recorder, || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut connection = app.pool.acquire().await?;
+                let begin_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *connection)
+                    .await?;
+                drop(connection);
+                {
+                    let scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+                    let operation = crate::cotx::with_localtx_pause_for_test(
+                        crate::cotx::LocalTxTestPauseStage::Begin,
+                        scoped.retry_write(
+                            TenantRepoScope::for_test(tenant),
+                            |_tx| Box::pin(async { Ok::<(), ConfigRepoError>(()) }),
+                            |error| ConfigRepoError::Storage(Box::new(error)),
+                        ),
+                    );
+                    tokio::pin!(operation);
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        tokio::select! {
+                            result = &mut operation => Err(std::io::Error::other(format!(
+                                "begin-pause LocalTx completed before cancellation: {result:?}"
+                            ))),
+                            () = crate::cotx::wait_for_localtx_pause_for_test(
+                                crate::cotx::LocalTxTestPauseStage::Begin,
+                            ) => Ok(()),
+                        }
+                    })
+                    .await??;
+                }
+                localtx_assert_backend_quarantined(
+                    &owner,
+                    &app.pool,
+                    begin_pid,
+                    "begin cancellation",
+                )
+                .await?;
+
+                let body_pid = Arc::new(AtomicI32::new(0));
+                let operation_pid = Arc::clone(&body_pid);
+                let (body_entered_tx, mut body_entered_rx) = tokio::sync::oneshot::channel();
+                {
+                    let scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+                    let operation = scoped.retry_write(
+                        TenantRepoScope::for_test(tenant),
+                        move |tx| {
+                            Box::pin(async move {
+                                let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                                    .fetch_one(tx.conn())
+                                    .await
+                                    .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                                operation_pid.store(pid, Ordering::SeqCst);
+                                let _ = body_entered_tx.send(());
+                                std::future::pending::<Result<(), ConfigRepoError>>().await
+                            })
+                        },
+                        |error| ConfigRepoError::Storage(Box::new(error)),
+                    );
+                    tokio::pin!(operation);
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        tokio::select! {
+                            result = &mut operation => Err(std::io::Error::other(format!(
+                                "body-pause LocalTx completed before cancellation: {result:?}"
+                            ))),
+                            entered = &mut body_entered_rx => {
+                                entered.map_err(std::io::Error::other)?;
+                                Ok(())
+                            },
+                        }
+                    })
+                    .await??;
+                }
+                localtx_assert_backend_quarantined(
+                    &owner,
+                    &app.pool,
+                    body_pid.load(Ordering::SeqCst),
+                    "body cancellation stage metric",
+                )
+                .await?;
+
+                let commit_pid = Arc::new(AtomicI32::new(0));
+                let operation_pid = Arc::clone(&commit_pid);
+                {
+                    let scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+                    let operation = crate::cotx::with_localtx_pause_for_test(
+                        crate::cotx::LocalTxTestPauseStage::Commit,
+                        scoped.retry_write(
+                            TenantRepoScope::for_test(tenant),
+                            move |tx| {
+                                Box::pin(async move {
+                                    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                                        .fetch_one(tx.conn())
+                                        .await
+                                        .map_err(|error| {
+                                            ConfigRepoError::Storage(Box::new(error))
+                                        })?;
+                                    operation_pid.store(pid, Ordering::SeqCst);
+                                    Ok(())
+                                })
+                            },
+                            |error| ConfigRepoError::Storage(Box::new(error)),
+                        ),
+                    );
+                    tokio::pin!(operation);
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        tokio::select! {
+                            result = &mut operation => Err(std::io::Error::other(format!(
+                                "commit-pause LocalTx completed before cancellation: {result:?}"
+                            ))),
+                            () = crate::cotx::wait_for_localtx_pause_for_test(
+                                crate::cotx::LocalTxTestPauseStage::Commit,
+                            ) => Ok(()),
+                        }
+                    })
+                    .await??;
+                }
+                localtx_assert_backend_quarantined(
+                    &owner,
+                    &app.pool,
+                    commit_pid.load(Ordering::SeqCst),
+                    "commit cancellation",
+                )
+                .await?;
+                Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+            })
+        })
+    })?;
+    drop(pause_seam);
+
+    let rendered = handle.render();
+    for stage in ["begin", "body", "commit"] {
+        assert!(
+            rendered.contains(&format!(
+                "postgres_localtx_connection_quarantine_total{{stage=\"{stage}\"}} 1"
+            )),
+            "missing closed quarantine stage {stage}: {rendered}"
+        );
+    }
+    assert!(
+        !rendered.contains("localtx_final_total"),
+        "cancelled LocalTx stages must not forge final status: {rendered}"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn localtx_rollback_timeout_does_not_forge_final_status() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(7)).await?;
+    let tenant = TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let session_id = format!("logout-rollback-timeout-{}", uuid::Uuid::new_v4());
+    seed_active_session(&owner, tenant, &session_id).await?;
+    let lifecycle = crate::PgSessionLifecycle::new(&app, fixed_clock()).with_logout_fault(
+        &session_id,
+        crate::session_lifecycle::SessionLogoutFault::RollbackTimeout,
+        1,
+    );
+    let mut connection = app.pool.acquire().await?;
+    let unsafe_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *connection)
+        .await?;
+    drop(connection);
+    let rollback_timeout_seam = crate::cotx::lock_rollback_timeout_seam_for_test().await;
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let logout = lifecycle.logout(
+                    identity_scope(tenant),
+                    SessionLogoutMutation::for_test(test_session_id(&session_id)),
+                );
+                tokio::pin!(logout);
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::select! {
+                        result = &mut logout => Err(std::io::Error::other(format!(
+                            "rollback-timeout LocalTx completed before cancellation: {result:?}"
+                        ))),
+                        () = crate::cotx::wait_for_rollback_timeout_for_test() => Ok(()),
+                    }
+                })
+                .await??;
+                Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+            })
+        });
+        metrics::counter!("localtx_cancellation_recorder_probe_total").increment(1);
+        result
+    })?;
+
+    assert_eq!(lifecycle.logout_attempts(&session_id), 1);
+    let rendered = handle.render();
+    assert!(
+        rendered.contains("localtx_cancellation_recorder_probe_total"),
+        "local recorder anti-vacuity probe missing: {rendered}"
+    );
+    assert!(
+        !rendered.contains("localtx_final_total"),
+        "cancelled rollback without ACK must not forge a final status: {rendered}"
+    );
+    assert!(
+        rendered.contains("postgres_localtx_connection_quarantine_total{stage=\"rollback\"} 1"),
+        "rollback cancellation must emit its closed quarantine stage: {rendered}"
+    );
+    localtx_assert_backend_quarantined(&owner, &app.pool, unsafe_pid, "rollback timeout metrics")
+        .await?;
+    drop(rollback_timeout_seam);
 
     app.shutdown().await?;
     owner.shutdown().await?;

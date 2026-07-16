@@ -74,6 +74,7 @@ pub(crate) enum SessionLogoutFault {
     Conflict,
     CommitUnknown,
     RollbackFailed,
+    RollbackTimeout,
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -370,6 +371,12 @@ impl SessionLifecycle for PgSessionLifecycle {
                                             }
                                             SessionLogoutFault::RollbackFailed => {
                                                 tx.inject_rollback_failed_after_rollback()
+                                                    .await
+                                                    .map_err(storage)?;
+                                                return Err(storage(sqlx::Error::PoolTimedOut));
+                                            }
+                                            SessionLogoutFault::RollbackTimeout => {
+                                                tx.inject_rollback_timeout()
                                                     .await
                                                     .map_err(storage)?;
                                                 return Err(storage(sqlx::Error::PoolTimedOut));
