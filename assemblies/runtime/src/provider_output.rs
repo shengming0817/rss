@@ -234,21 +234,28 @@ mod tests {
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("lazy redis pool construction does not connect");
         let redis = redis::RedisRuntimeDeps::setup(redis_pool);
-        let s3 = crate::build_s3_runtime_deps_from(|name| match name {
-            "RSS_S3_ENDPOINT_URL" => Some("https://s3.us-east-1.amazonaws.com".to_owned()),
-            "RSS_S3_BUCKET" => Some("rss-provider-output-test".to_owned()),
-            "RSS_S3_ACCESS_KEY_ID" => Some("access-key".to_owned()),
-            "RSS_S3_SECRET_ACCESS_KEY" => Some("secret-key".to_owned()),
-            _ => None,
-        })
-        .expect("valid hermetic s3 provider configuration");
-        let vault = crate::build_vault_runtime_deps(|name| match name {
-            "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_owned()),
-            "RSS_VAULT_TOKEN" => Some("s.testtoken".to_owned()),
-            "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_owned()),
-            _ => None,
-        })
-        .expect("valid hermetic vault provider configuration");
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_S3_ENDPOINT_URL", "https://s3.us-east-1.amazonaws.com"),
+            ("RSS_S3_BUCKET", "rss-provider-output-test"),
+            ("RSS_S3_ACCESS_KEY_ID", "access-key"),
+            ("RSS_S3_SECRET_ACCESS_KEY", "secret-key"),
+            ("RSS_DLX_ARCHIVE_S3_BUCKET", "rss-provider-output-archive"),
+            ("RSS_VAULT_ADDR", "https://vault.example:8200"),
+            ("RSS_VAULT_TOKEN", "s.testtoken"),
+            ("RSS_VAULT_TRANSIT_MOUNT", "transit"),
+            ("RSS_SETTINGS_CONFIG_VALUE_KEY_NAME", "settings-config"),
+        ])
+        .expect("snapshot");
+        let crate::infra::s3::S3RuntimeConfigParts { general, .. } =
+            crate::infra::s3::S3RuntimeConfig::from_snapshot(snapshot.view())
+                .expect("valid hermetic s3 provider configuration")
+                .into_parts();
+        let s3 =
+            crate::infra::s3::build_s3_runtime_deps(general).expect("valid hermetic s3 provider");
+        let (vault, _) = crate::infra::vault::VaultRuntimeConfig::from_snapshot(snapshot.view())
+            .expect("valid hermetic vault provider configuration")
+            .into_runtime()
+            .expect("valid hermetic vault providers");
 
         let mut module = DomainModuleResult::default();
         module.merge_provider(&redis);

@@ -66,6 +66,9 @@ use diport::{ManagedResource, ShutdownError};
 struct VaultToken(zeroize::Zeroizing<String>);
 
 #[cfg(feature = "backend")]
+impl zeroize::ZeroizeOnDrop for VaultToken {}
+
+#[cfg(feature = "backend")]
 impl std::fmt::Debug for VaultToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("VaultToken(<redacted>)")
@@ -179,10 +182,11 @@ impl VaultSigner {
         timeout: Duration,
         marshaling: SignatureMarshaling,
     ) -> Result<Self, VaultConfigError> {
+        let token = VaultToken::new(token.into());
         Self::build(
             client,
             addr.into(),
-            token.into(),
+            token,
             mount.into(),
             timeout,
             false,
@@ -200,10 +204,11 @@ impl VaultSigner {
         timeout: Duration,
         marshaling: SignatureMarshaling,
     ) -> Result<Self, VaultConfigError> {
+        let token = VaultToken::new(token.into());
         Self::build(
             client,
             addr.into(),
-            token.into(),
+            token,
             mount.into(),
             timeout,
             true,
@@ -214,7 +219,7 @@ impl VaultSigner {
     fn build(
         client: reqwest::Client,
         addr: String,
-        token: String,
+        token: VaultToken,
         mount: String,
         timeout: Duration,
         allow_http: bool,
@@ -243,14 +248,8 @@ impl VaultKeyProvider {
         mount: impl Into<String>,
         timeout: Duration,
     ) -> Result<Self, VaultConfigError> {
-        Self::build(
-            client,
-            addr.into(),
-            token.into(),
-            mount.into(),
-            timeout,
-            false,
-        )
+        let token = VaultToken::new(token.into());
+        Self::build(client, addr.into(), token, mount.into(), timeout, false)
     }
 
     /// 同 [`new`](Self::new)，但**显式放行 http**——仅用于本地 dev / 集成测试对接 plaintext Vault。
@@ -261,20 +260,14 @@ impl VaultKeyProvider {
         mount: impl Into<String>,
         timeout: Duration,
     ) -> Result<Self, VaultConfigError> {
-        Self::build(
-            client,
-            addr.into(),
-            token.into(),
-            mount.into(),
-            timeout,
-            true,
-        )
+        let token = VaultToken::new(token.into());
+        Self::build(client, addr.into(), token, mount.into(), timeout, true)
     }
 
     fn build(
         client: reqwest::Client,
         addr: String,
-        token: String,
+        token: VaultToken,
         mount: String,
         timeout: Duration,
         allow_http: bool,
@@ -298,28 +291,68 @@ struct ValidatedVaultConfig {
 }
 
 #[cfg(feature = "backend")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VaultBaseUrlError {
+    Empty,
+    Invalid,
+    InsecureScheme,
+}
+
+#[cfg(feature = "backend")]
+fn validate_vault_base_url(
+    addr: &str,
+    allow_http: bool,
+) -> Result<reqwest::Url, VaultBaseUrlError> {
+    let trimmed = addr.trim();
+    if trimmed.is_empty() {
+        return Err(VaultBaseUrlError::Empty);
+    }
+    let base = reqwest::Url::parse(trimmed).map_err(|_| VaultBaseUrlError::Invalid)?;
+    let authority_has_userinfo = trimmed.split_once("://").is_some_and(|(_, remainder)| {
+        let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+        remainder[..authority_end].contains('@')
+    });
+    if authority_has_userinfo
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+    {
+        return Err(VaultBaseUrlError::Invalid);
+    }
+    match base.scheme() {
+        "https" => Ok(base),
+        "http" if allow_http => Ok(base),
+        _ => Err(VaultBaseUrlError::InsecureScheme),
+    }
+}
+
+#[cfg(feature = "backend")]
+impl From<VaultBaseUrlError> for VaultConfigError {
+    fn from(error: VaultBaseUrlError) -> Self {
+        match error {
+            VaultBaseUrlError::Empty => Self::EmptyAddr,
+            VaultBaseUrlError::Invalid => Self::InvalidAddr,
+            VaultBaseUrlError::InsecureScheme => Self::InsecureScheme,
+        }
+    }
+}
+
+#[cfg(feature = "backend")]
 fn validate_vault_config(
     addr: String,
-    token: String,
+    token: VaultToken,
     mount: String,
     allow_http: bool,
 ) -> Result<ValidatedVaultConfig, VaultConfigError> {
-    if addr.trim().is_empty() {
-        return Err(VaultConfigError::EmptyAddr);
-    }
-    if token.trim().is_empty() {
+    if token.as_str().trim().is_empty() {
         return Err(VaultConfigError::EmptyToken);
     }
-    let base = reqwest::Url::parse(addr.trim()).map_err(|_| VaultConfigError::InvalidAddr)?;
-    match base.scheme() {
-        "https" => {}
-        "http" if allow_http => {}
-        _ => return Err(VaultConfigError::InsecureScheme),
-    }
+    let base = validate_vault_base_url(&addr, allow_http)?;
     let mount_segments = parse_mount_segments(&mount)?;
     Ok(ValidatedVaultConfig {
         base,
-        token: VaultToken::new(token),
+        token,
         mount_segments,
     })
 }
@@ -520,7 +553,10 @@ mod backend_tests {
     //! 构造期 fail-fast（空值 / 非法 URL / 非 https scheme / 非法 mount 段）+ 生命周期（name + 双 shutdown），无 live 后端。
     use std::time::Duration;
 
-    use super::{SignatureMarshaling, VaultConfigError, VaultKeyProvider, VaultSigner};
+    use super::{
+        SignatureMarshaling, VaultConfigError, VaultKeyProvider, VaultSigner, VaultToken,
+        validate_vault_config,
+    };
     use diport::{KeyProvider, ManagedResource, Signer};
 
     const ADDR: &str = "https://vault.example:8200";
@@ -577,6 +613,30 @@ mod backend_tests {
             ),
             Err(VaultConfigError::InvalidAddr)
         ));
+    }
+
+    #[test]
+    fn new_rejects_sensitive_base_url_components_without_disclosure() {
+        const MARKER: &str = "vault-url-secret-marker";
+        for addr in [
+            "https://vault-url-secret-marker@vault.example:8200",
+            "https://vault.example:8200?token=vault-url-secret-marker",
+            "https://vault.example:8200#vault-url-secret-marker",
+        ] {
+            let result = VaultSigner::new(
+                reqwest::Client::new(),
+                addr,
+                TOKEN,
+                MOUNT,
+                TIMEOUT,
+                SignatureMarshaling::Asn1,
+            );
+            assert!(matches!(&result, Err(VaultConfigError::InvalidAddr)));
+            if let Err(error) = result {
+                let rendered = format!("{error:?} {error}");
+                assert!(!rendered.contains(MARKER), "error must be value-free");
+            }
+        }
     }
 
     #[test]
@@ -694,6 +754,40 @@ mod backend_tests {
                 MOUNT,
                 TIMEOUT,
                 SignatureMarshaling::Asn1
+            ),
+            Err(VaultConfigError::EmptyToken)
+        ));
+    }
+
+    #[test]
+    fn validation_failure_paths_own_zeroizing_token() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<VaultToken>();
+
+        assert!(matches!(
+            validate_vault_config(
+                String::new(),
+                VaultToken::new("vault-error-path-token".to_owned()),
+                MOUNT.to_owned(),
+                false,
+            ),
+            Err(VaultConfigError::EmptyAddr)
+        ));
+        assert!(matches!(
+            validate_vault_config(
+                ADDR.to_owned(),
+                VaultToken::new("vault-error-path-token".to_owned()),
+                "transit/..".to_owned(),
+                false,
+            ),
+            Err(VaultConfigError::InvalidMountSegment)
+        ));
+        assert!(matches!(
+            validate_vault_config(
+                ADDR.to_owned(),
+                VaultToken::new("   ".to_owned()),
+                MOUNT.to_owned(),
+                false,
             ),
             Err(VaultConfigError::EmptyToken)
         ));

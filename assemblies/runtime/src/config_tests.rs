@@ -176,6 +176,111 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
 }
 
 #[test]
+fn runtime_infra_vault_s3_snapshot_reads_each_key_once_across_repeated_typed_mapping() {
+    const VAULT_S3_KEYS: [&str; 17] = [
+        "RSS_VAULT_ADDR",
+        "RSS_VAULT_TOKEN",
+        "RSS_VAULT_TRANSIT_MOUNT",
+        "RSS_VAULT_CA_CERT_PEM_PATH",
+        "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME",
+        "RSS_S3_ENDPOINT_URL",
+        "RSS_S3_BUCKET",
+        "RSS_S3_ACCESS_KEY_ID",
+        "RSS_S3_SECRET_ACCESS_KEY",
+        "RSS_S3_SESSION_TOKEN",
+        "RSS_S3_REGION",
+        "RSS_S3_FORCE_PATH_STYLE",
+        "RSS_S3_ALLOW_PLAINTEXT",
+        "RSS_DLX_ARCHIVE_S3_BUCKET",
+        "RSS_S3_CANARY_KEY_PREFIX",
+        "RSS_S3_CANARY_INTERVAL_SECS",
+        "RSS_S3_CANARY_TIMEOUT_SECS",
+    ];
+
+    let source = FakeSource::new(VAULT_S3_KEYS.iter().filter_map(|key| {
+        let value = match *key {
+            "RSS_VAULT_ADDR" => "https://vault.generation-one.test",
+            "RSS_VAULT_TOKEN" => "vault-generation-one-token",
+            "RSS_VAULT_TRANSIT_MOUNT" => "transit",
+            "RSS_VAULT_CA_CERT_PEM_PATH" => return None,
+            "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME" => "settings-generation-one",
+            "RSS_S3_ENDPOINT_URL" => "https://s3.generation-one.test",
+            "RSS_S3_BUCKET" => "rss-generation-one",
+            "RSS_S3_ACCESS_KEY_ID" => "generation-one-access",
+            "RSS_S3_SECRET_ACCESS_KEY" => "generation-one-secret",
+            "RSS_S3_SESSION_TOKEN" => "generation-one-session",
+            "RSS_S3_REGION" => "us-test-1",
+            "RSS_S3_FORCE_PATH_STYLE" | "RSS_S3_ALLOW_PLAINTEXT" => "false",
+            "RSS_DLX_ARCHIVE_S3_BUCKET" => "rss-generation-one-archive",
+            "RSS_S3_CANARY_KEY_PREFIX" => "rss/generation-one",
+            "RSS_S3_CANARY_INTERVAL_SECS" => "30",
+            "RSS_S3_CANARY_TIMEOUT_SECS" => "5",
+            _ => return None,
+        };
+        Some((*key, FakeValue::Present(value.to_owned())))
+    }));
+    let reads = read_log(&source);
+    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+
+    for _ in 0..2 {
+        let vault = crate::infra::vault::VaultRuntimeConfig::from_snapshot(snapshot.view())
+            .expect("Vault typed mapping succeeds");
+        let s3 = crate::infra::s3::S3RuntimeConfig::from_snapshot(snapshot.view())
+            .expect("S3 typed mapping succeeds");
+        drop((vault, s3));
+    }
+
+    let reads = reads.lock().expect("read log mutex");
+    for key in VAULT_S3_KEYS {
+        assert_eq!(
+            reads.iter().filter(|read| read.as_str() == key).count(),
+            1,
+            "{key} must be read once by snapshot capture and never by typed mapping"
+        );
+    }
+}
+
+#[test]
+fn runtime_infra_vault_s3_snapshot_debug_is_opaque() {
+    let snapshot = crate::config::test_snapshot(&[
+        ("RSS_VAULT_ADDR", "https://vault.snapshot.test"),
+        ("RSS_VAULT_TOKEN", "vault-debug-bait"),
+        ("RSS_VAULT_TRANSIT_MOUNT", "transit"),
+        (
+            "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME",
+            "settings-key-debug-bait",
+        ),
+        ("RSS_S3_ENDPOINT_URL", "https://s3.snapshot.test"),
+        ("RSS_S3_BUCKET", "rss-snapshot-general"),
+        ("RSS_S3_ACCESS_KEY_ID", "access-key-debug-bait"),
+        ("RSS_S3_SECRET_ACCESS_KEY", "secret-key-debug-bait"),
+        ("RSS_S3_SESSION_TOKEN", "session-token-debug-bait"),
+        ("RSS_DLX_ARCHIVE_S3_BUCKET", "rss-snapshot-archive"),
+    ])
+    .expect("snapshot");
+
+    let vault = crate::infra::vault::VaultRuntimeConfig::from_snapshot(snapshot.view())
+        .expect("Vault typed mapping succeeds");
+    let s3 = crate::infra::s3::S3RuntimeConfig::from_snapshot(snapshot.view())
+        .expect("S3 typed mapping succeeds");
+    let debug = format!("{vault:?} {s3:?}");
+
+    assert!(debug.contains("VaultRuntimeConfig"), "{debug}");
+    assert!(debug.contains("S3RuntimeConfig"), "{debug}");
+    for bait in [
+        "vault-debug-bait",
+        "settings-key-debug-bait",
+        "access-key-debug-bait",
+        "secret-key-debug-bait",
+        "session-token-debug-bait",
+        "vault.snapshot.test",
+        "s3.snapshot.test",
+    ] {
+        assert!(!debug.contains(bait), "Debug leaked {bait}: {debug}");
+    }
+}
+
+#[test]
 fn runtime_config_catalog_deduplicates_static_dynamic_keys_and_excludes_maintenance() {
     let source = FakeSource::new([(
         "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS",

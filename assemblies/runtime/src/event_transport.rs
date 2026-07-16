@@ -1829,16 +1829,16 @@ pub(crate) fn build_dlx_vault_key_providers_from(
     let hot_token = EnvSecret::required(get, DLX_HOT_VAULT_TOKEN_ENV)?;
     let archive_token = EnvSecret::required(get, DLX_ARCHIVE_VAULT_TOKEN_ENV)?;
     anyhow::ensure!(
-        hot_token.expose() != archive_token.expose(),
+        hot_token.differs_from(&archive_token),
         "{DLX_HOT_VAULT_TOKEN_ENV} must differ from {DLX_ARCHIVE_VAULT_TOKEN_ENV}"
     );
     if let Some(general_token) = EnvSecret::optional(get, "RSS_VAULT_TOKEN")? {
         anyhow::ensure!(
-            hot_token.expose() != general_token.expose(),
+            hot_token.differs_from(&general_token),
             "{DLX_HOT_VAULT_TOKEN_ENV} must differ from RSS_VAULT_TOKEN"
         );
         anyhow::ensure!(
-            archive_token.expose() != general_token.expose(),
+            archive_token.differs_from(&general_token),
             "{DLX_ARCHIVE_VAULT_TOKEN_ENV} must differ from RSS_VAULT_TOKEN"
         );
     }

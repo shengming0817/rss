@@ -51,8 +51,11 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
 use runtime::event_transport::{bridge_generated_subscriptions, build_event_transport_config_from};
-use runtime::test_support::{build_redis_runtime_deps_from_values, wire_event_transport};
-use runtime::{SharedRuntimeDeps, SystemClock, build_vault_runtime_deps, wire_distributed};
+use runtime::test_support::{
+    build_redis_runtime_deps_from_values, build_s3_runtime_deps_from_values,
+    build_vault_runtime_from_values, wire_event_transport,
+};
+use runtime::{SharedRuntimeDeps, SystemClock, wire_distributed};
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 
 const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
@@ -701,29 +704,26 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let redis_fixture = testkit::env_or_redis().await?;
     let redis =
         build_redis_runtime_deps_from_values(redis_fixture.url().to_string(), Some("true")).await?;
-    let s3 = runtime::build_s3_runtime_deps_from(|name| match name {
-        "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:1".to_string()),
-        "RSS_S3_ALLOW_PLAINTEXT" => Some("true".to_string()),
-        "RSS_S3_BUCKET" => Some("rss-test-bucket".to_string()),
-        "RSS_S3_ACCESS_KEY_ID" => Some("access-key".to_string()),
-        "RSS_S3_SECRET_ACCESS_KEY" => Some("secret-key".to_string()),
-        "RSS_S3_FORCE_PATH_STYLE" => Some("true".to_string()),
-        _ => None,
-    })?;
-    let vault = build_vault_runtime_deps(|name| match name {
-        "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_string()),
-        "RSS_VAULT_TOKEN" => Some("s.testtoken".to_string()),
-        "RSS_DLX_HOT_VAULT_TOKEN" => Some("s.dlx-hot-testtoken".to_string()),
-        "RSS_DLX_ARCHIVE_VAULT_TOKEN" => Some("s.dlx-archive-testtoken".to_string()),
-        "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
-        _ => None,
-    })?;
+    let s3 = build_s3_runtime_deps_from_values(
+        "http://127.0.0.1:1".to_string(),
+        "rss-test-bucket".to_string(),
+        "access-key".to_string(),
+        "secret-key".to_string(),
+        true,
+        true,
+    )?;
+    let (vault, settings_config_value_key_name) = build_vault_runtime_from_values(
+        "https://vault.example:8200".to_string(),
+        "s.testtoken".to_string(),
+        "transit".to_string(),
+        "settings-config".to_string(),
+    )?;
     let deps = SharedRuntimeDeps {
         pg: pg.clone(),
         redis,
         s3,
         vault,
-        settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
+        settings_config_value_key_name,
         domain_transport: noop_domain_transport(),
     };
     let demo_cfg = build_event_transport_config_from(|name| {

@@ -31,7 +31,7 @@ use identity::ports::{Role, RoleWriteRepo as _, TenantId, TenantRepoScope};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
 use primitives::ListenerKind;
-use runtime::test_support::{wire_identity_with, wire_settings};
+use runtime::test_support::{build_s3_runtime_deps_from_values, wire_identity_with, wire_settings};
 use runtime::{SharedRuntimeDeps, SystemClock, TracingAuthAuditSink};
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -393,15 +393,14 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         Some("true"),
     )
     .await?;
-    let s3 = runtime::build_s3_runtime_deps_from(|name| match name {
-        "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:1".to_string()),
-        "RSS_S3_ALLOW_PLAINTEXT" => Some("true".to_string()),
-        "RSS_S3_BUCKET" => Some("rss-test-bucket".to_string()),
-        "RSS_S3_ACCESS_KEY_ID" => Some("access-key".to_string()),
-        "RSS_S3_SECRET_ACCESS_KEY" => Some("secret-key".to_string()),
-        "RSS_S3_FORCE_PATH_STYLE" => Some("true".to_string()),
-        _ => None,
-    })?;
+    let s3 = build_s3_runtime_deps_from_values(
+        "http://127.0.0.1:1".to_string(),
+        "rss-test-bucket".to_string(),
+        "access-key".to_string(),
+        "secret-key".to_string(),
+        true,
+        true,
+    )?;
     let deps = SharedRuntimeDeps {
         pg: pg.clone(),
         redis,
@@ -636,15 +635,14 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         Some("true"),
     )
     .await?;
-    let s3 = runtime::build_s3_runtime_deps_from(|name| match name {
-        "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:1".to_string()),
-        "RSS_S3_ALLOW_PLAINTEXT" => Some("true".to_string()),
-        "RSS_S3_BUCKET" => Some("rss-test-bucket".to_string()),
-        "RSS_S3_ACCESS_KEY_ID" => Some("access-key".to_string()),
-        "RSS_S3_SECRET_ACCESS_KEY" => Some("secret-key".to_string()),
-        "RSS_S3_FORCE_PATH_STYLE" => Some("true".to_string()),
-        _ => None,
-    })?;
+    let s3 = build_s3_runtime_deps_from_values(
+        "http://127.0.0.1:1".to_string(),
+        "rss-test-bucket".to_string(),
+        "access-key".to_string(),
+        "secret-key".to_string(),
+        true,
+        true,
+    )?;
     let deps = SharedRuntimeDeps {
         pg: pg.clone(),
         redis,

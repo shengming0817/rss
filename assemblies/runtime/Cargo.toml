@@ -65,6 +65,7 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
 reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 aws-sdk-s3 = { workspace = true }
 aws-config = { workspace = true }
+aws-credential-types = { workspace = true }
 aws-smithy-http-client = { workspace = true }
 axum = { workspace = true }
 tracing = { workspace = true }
@@ -107,7 +108,6 @@ prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"
 integration = ["testkit/containers", "identity/seed-login"]
 
 [dev-dependencies]
-aws-credential-types = { workspace = true }
 aws-smithy-http-client = { workspace = true, features = ["test-util"] }
 http = "1"
 settings-composition = { path = "../../composition/settings", features = ["test-support"] }

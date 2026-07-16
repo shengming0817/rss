@@ -758,23 +758,271 @@ fn required_s3_shapes(file: &syn::File) -> Vec<String> {
     {
         missing.push("const `DLX_ARCHIVE_S3_BUCKET_ENV` = `RSS_DLX_ARCHIVE_S3_BUCKET`".to_owned());
     }
-    for required_call in [
-        "aws_config::provider_config::ProviderConfig::without_region",
-        "aws_config::default_provider::credentials::DefaultCredentialsChain::builder",
-        "build_s3_client_from_settings",
-    ] {
-        if !function_has_path_call(file, "build_s3_dlx_archive_store_from", required_call) {
-            missing.push(format!("DLX refreshable provider call `{required_call}`"));
-        }
-    }
-    if !function_has_method_call(
-        file,
-        "build_s3_dlx_archive_store_from",
-        "provide_credentials",
-    ) {
-        missing.push("DLX provider startup credential resolution".to_owned());
+    if !s3_dlx_archive_builder_is_exact(file) {
+        missing.push(
+            "typed DLX S3 identity inequality plus refreshable credential-provider handoff"
+                .to_owned(),
+        );
     }
     missing
+}
+
+const S3_DLX_ARCHIVE_BODY: &str = r#"{
+    let S3DlxArchiveConfig {
+        settings,
+        bucket,
+        general_identity,
+    } = config;
+    let http_client = s3_http_client(&settings.endpoint);
+    let region = aws_sdk_s3::config::Region::new(settings.region.clone());
+    let provider_config = aws_config::provider_config::ProviderConfig::without_region()
+        .with_region(Some(region.clone()))
+        .with_http_client(http_client.clone());
+    let credentials_provider =
+        aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
+            .region(region)
+            .configure(provider_config)
+            .build()
+            .await;
+    let credentials_provider =
+        DlxIsolatedCredentialsProvider::new(credentials_provider, general_identity);
+    credentials_provider
+        .provide_credentials()
+        .await
+        .context("validate isolated DLX archive credentials from the AWS default provider chain")?;
+    let client = build_s3_dlx_client_from_settings(&settings, credentials_provider, http_client);
+    S3DlxArchiveStore::new(client, bucket, clock).context("construct DLX archive S3 store")
+}"#;
+
+const S3_DLX_IDENTITY_CAPABILITY_SHAPE: &str = r#"
+struct S3GeneralIdentityMarker(secure::SecretText);
+
+impl S3GeneralIdentityMarker {
+    fn from_credentials(credentials: &aws_sdk_s3::config::Credentials) -> Self {
+        Self(secure::SecretText::from_string(
+            credentials.access_key_id().to_owned(),
+        ))
+    }
+
+    fn collides_with(&self, credentials: &aws_sdk_s3::config::Credentials) -> bool {
+        self.0.expose() == credentials.access_key_id()
+    }
+}
+
+pub(crate) struct S3DlxArchiveConfig {
+    settings: Arc<S3ClientSettings>,
+    bucket: String,
+    general_identity: S3GeneralIdentityMarker,
+}
+"#;
+
+const DLX_ISOLATED_PROVIDER_SHAPE: &str = r#"
+struct DlxIsolatedCredentialsProvider<P> {
+    inner: P,
+    general_identity: S3GeneralIdentityMarker,
+}
+
+impl<P> DlxIsolatedCredentialsProvider<P> {
+    fn new(inner: P, general_identity: S3GeneralIdentityMarker) -> Self {
+        Self {
+            inner,
+            general_identity,
+        }
+    }
+
+    fn identity_is_distinct(&self, credentials: &aws_sdk_s3::config::Credentials) -> bool {
+        !self.general_identity.collides_with(credentials)
+    }
+}
+
+impl<P> aws_sdk_s3::config::ProvideCredentials for DlxIsolatedCredentialsProvider<P>
+where
+    P: aws_sdk_s3::config::ProvideCredentials,
+{
+    fn provide_credentials<'a>(
+        &'a self,
+    ) -> aws_credential_types::provider::future::ProvideCredentials<'a>
+    where
+        Self: 'a,
+    {
+        aws_credential_types::provider::future::ProvideCredentials::new(async move {
+            let credentials = self.inner.provide_credentials().await?;
+            if self.identity_is_distinct(&credentials) {
+                Ok(credentials)
+            } else {
+                Err(
+                    aws_credential_types::provider::error::CredentialsError::invalid_configuration(
+                        DLX_IDENTITY_COLLISION_ERROR,
+                    ),
+                )
+            }
+        })
+    }
+
+    fn fallback_on_interrupt(&self) -> Option<aws_sdk_s3::config::Credentials> {
+        self.inner
+            .fallback_on_interrupt()
+            .filter(|credentials| self.identity_is_distinct(credentials))
+    }
+}
+"#;
+
+fn compact_tokens(tokens: &impl quote::ToTokens) -> String {
+    tokens
+        .to_token_stream()
+        .to_string()
+        .split_whitespace()
+        .collect()
+}
+
+fn s3_dlx_archive_builder_is_exact(file: &syn::File) -> bool {
+    let Ok(expected_capabilities) = syn::parse_file(S3_DLX_IDENTITY_CAPABILITY_SHAPE) else {
+        return false;
+    };
+    let Ok(expected_provider) = syn::parse_file(DLX_ISOLATED_PROVIDER_SHAPE) else {
+        return false;
+    };
+    let expected_marker = expected_capabilities
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "S3GeneralIdentityMarker" => Some(item),
+            _ => None,
+        });
+    let expected_archive_config = expected_capabilities
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "S3DlxArchiveConfig" => Some(item),
+            _ => None,
+        });
+    let expected_marker_impl = expected_capabilities
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Impl(item)
+                if compact_tokens(item.self_ty.as_ref()) == "S3GeneralIdentityMarker"
+                    && item.trait_.is_none() =>
+            {
+                Some(item)
+            }
+            _ => None,
+        });
+    let expected_struct = expected_provider.items.iter().find_map(|item| match item {
+        syn::Item::Struct(item) => Some(item),
+        _ => None,
+    });
+    let expected_impls = expected_provider
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let actual_structs = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "DlxIsolatedCredentialsProvider" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let actual_marker = file.items.iter().filter_map(|item| match item {
+        syn::Item::Struct(item) if item.ident == "S3GeneralIdentityMarker" => Some(item),
+        _ => None,
+    });
+    let actual_archive_config = file.items.iter().filter_map(|item| match item {
+        syn::Item::Struct(item) if item.ident == "S3DlxArchiveConfig" => Some(item),
+        _ => None,
+    });
+    let actual_marker_impl = file.items.iter().filter_map(|item| match item {
+        syn::Item::Impl(item)
+            if compact_tokens(item.self_ty.as_ref()) == "S3GeneralIdentityMarker"
+                && item.trait_.is_none() =>
+        {
+            Some(item)
+        }
+        _ => None,
+    });
+    let actual_impls = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if compact_tokens(item.self_ty.as_ref()) == "DlxIsolatedCredentialsProvider<P>"
+                    && item.trait_.as_ref().is_none_or(|(_, path, _)| {
+                        compact_tokens(path) == "aws_sdk_s3::config::ProvideCredentials"
+                    }) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let actual_marker = actual_marker.collect::<Vec<_>>();
+    let actual_archive_config = actual_archive_config.collect::<Vec<_>>();
+    let actual_marker_impl = actual_marker_impl.collect::<Vec<_>>();
+    let identity_capability_is_exact = expected_marker.is_some_and(|expected| {
+        actual_marker.len() == 1 && compact_tokens(actual_marker[0]) == compact_tokens(expected)
+    }) && expected_archive_config.is_some_and(|expected| {
+        actual_archive_config.len() == 1
+            && compact_tokens(actual_archive_config[0]) == compact_tokens(expected)
+    }) && expected_marker_impl.is_some_and(|expected| {
+        actual_marker_impl.len() == 1
+            && compact_tokens(actual_marker_impl[0]) == compact_tokens(expected)
+    });
+    let provider_shape_is_exact = expected_struct.is_some_and(|expected| {
+        actual_structs.len() == 1
+            && compact_tokens(actual_structs[0]) == compact_tokens(expected)
+            && actual_impls.len() == expected_impls.len()
+            && expected_impls.iter().all(|expected_impl| {
+                actual_impls.iter().any(|actual_impl| {
+                    compact_tokens(*actual_impl) == compact_tokens(expected_impl)
+                })
+            })
+    });
+    let builders = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "build_s3_dlx_archive_store" => {
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(builder) = builders.first().filter(|_| builders.len() == 1) else {
+        return false;
+    };
+    let inputs = builder.sig.inputs.iter().collect::<Vec<_>>();
+    let input_is = |index: usize, binding: &str, ty: &str| {
+        inputs.get(index).is_some_and(|input| {
+            matches!(input, syn::FnArg::Typed(input)
+            if matches!(input.pat.as_ref(), syn::Pat::Ident(ident)
+                if ident.ident == binding
+                    && ident.by_ref.is_none()
+                    && ident.mutability.is_none()
+                    && ident.subpat.is_none())
+                && compact_tokens(input.ty.as_ref()) == ty)
+        })
+    };
+    let expected_body = syn::parse_str::<syn::Block>(S3_DLX_ARCHIVE_BODY).ok();
+    identity_capability_is_exact
+        && provider_shape_is_exact
+        && matches!(builder.vis, syn::Visibility::Restricted(_))
+        && builder.sig.asyncness.is_some()
+        && builder.sig.constness.is_none()
+        && builder.sig.unsafety.is_none()
+        && builder.sig.generics.params.is_empty()
+        && inputs.len() == 2
+        && input_is(0, "config", "S3DlxArchiveConfig")
+        && input_is(1, "clock", "Arc<dyndiport::Clock>")
+        && matches!(&builder.sig.output, syn::ReturnType::Type(_, ty)
+            if compact_tokens(ty.as_ref()) == "anyhow::Result<S3DlxArchiveStore>")
+        && expected_body
+            .as_ref()
+            .is_some_and(|expected| compact_tokens(&builder.block) == compact_tokens(expected))
 }
 
 fn required_assembly_provider_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
@@ -906,6 +1154,7 @@ fn function_ends_with_string_config_call(
     actual == expected_strings
 }
 
+#[cfg(test)]
 fn function_has_path_call(file: &syn::File, function: &str, expected: &str) -> bool {
     let Some(item) = file.items.iter().find_map(|item| match item {
         syn::Item::Fn(item) if item.sig.ident == function => Some(item),
@@ -913,48 +1162,26 @@ fn function_has_path_call(file: &syn::File, function: &str, expected: &str) -> b
     }) else {
         return false;
     };
-    let mut calls = FunctionCalls::default();
-    syn::visit::Visit::visit_block(&mut calls, &item.block);
-    calls.path_calls.iter().any(|call| call == expected)
-}
-
-fn function_has_method_call(file: &syn::File, function: &str, expected: &str) -> bool {
-    let Some(item) = file.items.iter().find_map(|item| match item {
-        syn::Item::Fn(item) if item.sig.ident == function => Some(item),
-        _ => None,
-    }) else {
-        return false;
-    };
-    let mut calls = FunctionCalls::default();
-    syn::visit::Visit::visit_block(&mut calls, &item.block);
-    calls.method_calls.iter().any(|call| call == expected)
-}
-
-#[derive(Default)]
-struct FunctionCalls {
-    path_calls: Vec<String>,
-    method_calls: Vec<String>,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for FunctionCalls {
-    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(path) = call.func.as_ref() {
-            self.path_calls.push(
-                path.path
-                    .segments
-                    .iter()
-                    .map(|segment| segment.ident.to_string())
-                    .collect::<Vec<_>>()
-                    .join("::"),
-            );
+    #[derive(Default)]
+    struct PathCalls(Vec<String>);
+    impl<'ast> syn::visit::Visit<'ast> for PathCalls {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = call.func.as_ref() {
+                self.0.push(
+                    path.path
+                        .segments
+                        .iter()
+                        .map(|segment| segment.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::"),
+                );
+            }
+            syn::visit::visit_expr_call(self, call);
         }
-        syn::visit::visit_expr_call(self, call);
     }
-
-    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        self.method_calls.push(call.method.to_string());
-        syn::visit::visit_expr_method_call(self, call);
-    }
+    let mut calls = PathCalls::default();
+    syn::visit::Visit::visit_block(&mut calls, &item.block);
+    calls.0.iter().any(|call| call == expected)
 }
 
 fn has_provider_output_binding(file: &syn::File, port: &str, provider: &str) -> bool {
@@ -1002,6 +1229,98 @@ fn has_provider_output_binding(file: &syn::File, port: &str, provider: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn canonical_s3_archive_builder_fixture() -> &'static str {
+        r#"
+const DLX_ARCHIVE_S3_BUCKET_ENV: &str = "RSS_DLX_ARCHIVE_S3_BUCKET";
+const DLX_IDENTITY_COLLISION_ERROR: &str = "DLX archive workload identity must differ";
+struct S3GeneralIdentityMarker(secure::SecretText);
+impl S3GeneralIdentityMarker {
+    fn from_credentials(credentials: &aws_sdk_s3::config::Credentials) -> Self {
+        Self(secure::SecretText::from_string(
+            credentials.access_key_id().to_owned(),
+        ))
+    }
+    fn collides_with(&self, credentials: &aws_sdk_s3::config::Credentials) -> bool {
+        self.0.expose() == credentials.access_key_id()
+    }
+}
+pub(crate) struct S3DlxArchiveConfig {
+    settings: Arc<S3ClientSettings>,
+    bucket: String,
+    general_identity: S3GeneralIdentityMarker,
+}
+struct DlxIsolatedCredentialsProvider<P> {
+    inner: P,
+    general_identity: S3GeneralIdentityMarker,
+}
+impl<P> DlxIsolatedCredentialsProvider<P> {
+    fn new(inner: P, general_identity: S3GeneralIdentityMarker) -> Self {
+        Self {
+            inner,
+            general_identity,
+        }
+    }
+    fn identity_is_distinct(&self, credentials: &aws_sdk_s3::config::Credentials) -> bool {
+        !self.general_identity.collides_with(credentials)
+    }
+}
+impl<P> aws_sdk_s3::config::ProvideCredentials for DlxIsolatedCredentialsProvider<P>
+where
+    P: aws_sdk_s3::config::ProvideCredentials,
+{
+    fn provide_credentials<'a>(
+        &'a self,
+    ) -> aws_credential_types::provider::future::ProvideCredentials<'a>
+    where
+        Self: 'a,
+    {
+        aws_credential_types::provider::future::ProvideCredentials::new(async move {
+            let credentials = self.inner.provide_credentials().await?;
+            if self.identity_is_distinct(&credentials) {
+                Ok(credentials)
+            } else {
+                Err(
+                    aws_credential_types::provider::error::CredentialsError::invalid_configuration(
+                        DLX_IDENTITY_COLLISION_ERROR,
+                    ),
+                )
+            }
+        })
+    }
+    fn fallback_on_interrupt(&self) -> Option<aws_sdk_s3::config::Credentials> {
+        self.inner
+            .fallback_on_interrupt()
+            .filter(|credentials| self.identity_is_distinct(credentials))
+    }
+}
+pub(crate) async fn build_s3_dlx_archive_store(
+    config: S3DlxArchiveConfig,
+    clock: Arc<dyn diport::Clock>,
+) -> anyhow::Result<S3DlxArchiveStore> {
+    let S3DlxArchiveConfig { settings, bucket, general_identity, } = config;
+    let http_client = s3_http_client(&settings.endpoint);
+    let region = aws_sdk_s3::config::Region::new(settings.region.clone());
+    let provider_config = aws_config::provider_config::ProviderConfig::without_region()
+        .with_region(Some(region.clone()))
+        .with_http_client(http_client.clone());
+    let credentials_provider =
+        aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
+            .region(region)
+            .configure(provider_config)
+            .build()
+            .await;
+    let credentials_provider =
+        DlxIsolatedCredentialsProvider::new(credentials_provider, general_identity);
+    credentials_provider
+        .provide_credentials()
+        .await
+        .context("validate isolated DLX archive credentials from the AWS default provider chain")?;
+    let client = build_s3_dlx_client_from_settings(&settings, credentials_provider, http_client);
+    S3DlxArchiveStore::new(client, bucket, clock).context("construct DLX archive S3 store")
+}
+"#
+    }
 
     fn canonical_pg_runtime_config_fixture() -> &'static str {
         r#"
@@ -1207,6 +1526,85 @@ mod tests {
             .is_empty(),
             "a wrapper plus compliant bait must not satisfy the direct mapping",
         );
+
+        let canonical_s3 = canonical_s3_archive_builder_fixture();
+        let canonical_s3_findings = required_runtime_source_findings(
+            Path::new("assemblies/runtime/src/infra/s3.rs"),
+            canonical_s3,
+        );
+        assert!(
+            canonical_s3_findings.is_empty(),
+            "canonical S3 identity/refresh flow is the anti-vacuity green: {canonical_s3_findings:?}"
+        );
+        for (label, mutated) in [
+            (
+                "identity inequality deleted",
+                canonical_s3.replace(
+                    "        !self.general_identity.collides_with(credentials)\n",
+                    "        true\n",
+                ),
+            ),
+            (
+                "identity inequality reversed",
+                canonical_s3.replace(
+                    "        !self.general_identity.collides_with(credentials)",
+                    "        self.general_identity.collides_with(credentials)",
+                ),
+            ),
+            (
+                "identity comparison same binding",
+                canonical_s3.replace(
+                    "self.0.expose() == credentials.access_key_id()",
+                    "credentials.access_key_id() == credentials.access_key_id()",
+                ),
+            ),
+            (
+                "refresh wrapper deleted",
+                canonical_s3.replace(
+                    "DlxIsolatedCredentialsProvider::new(credentials_provider, general_identity)",
+                    "credentials_provider",
+                ),
+            ),
+            (
+                "identity string bait",
+                canonical_s3.replace(
+                    "        !self.general_identity.collides_with(credentials)",
+                    "        let _bait = \"!self.general_identity.collides_with(credentials)\";\n        true",
+                ),
+            ),
+            (
+                "full credentials capability in archive config",
+                canonical_s3.replacen(
+                    "    general_identity: S3GeneralIdentityMarker,\n}",
+                    "    general_identity: S3GeneralIdentityMarker,\n    general_credentials: aws_sdk_s3::config::Credentials,\n}",
+                    1,
+                ),
+            ),
+            (
+                "full credentials capability in provider",
+                canonical_s3.replace(
+                    "    general_identity: S3GeneralIdentityMarker,\n}\nimpl<P> DlxIsolatedCredentialsProvider<P>",
+                    "    general_identity: S3GeneralIdentityMarker,\n    general_credentials: aws_sdk_s3::config::Credentials,\n}\nimpl<P> DlxIsolatedCredentialsProvider<P>",
+                ),
+            ),
+            (
+                "full credentials identity marker",
+                canonical_s3.replace(
+                    "struct S3GeneralIdentityMarker(secure::SecretText);",
+                    "struct S3GeneralIdentityMarker(aws_sdk_s3::config::Credentials);",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, canonical_s3, "mutation must change {label}");
+            assert!(
+                !required_runtime_source_findings(
+                    Path::new("assemblies/runtime/src/infra/s3.rs"),
+                    &mutated,
+                )
+                .is_empty(),
+                "S3 DLX shape must reject {label}"
+            );
+        }
     }
 
     #[test]
@@ -1266,7 +1664,7 @@ mod tests {
         );
         assert_eq!(
             missing.len(),
-            4,
+            1,
             "string bait is not a refreshable provider chain"
         );
     }

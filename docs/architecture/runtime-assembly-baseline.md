@@ -32,9 +32,9 @@ cleanup; the current production startup body has these phases:
    - OIDC `build_provider()`
    - Postgres non-Clone owner from `PgRuntimeDeps::setup_with_audit_admin_config`, then its
      cloneable `PgRuntimeHandle` capability projection
-   - Vault `build_vault_runtime_deps`
+   - Vault `VaultRuntimeConfig::from_snapshot` → consuming `into_runtime`
    - Redis `build_redis_runtime_deps`
-   - S3 `build_s3_runtime_deps_from`
+   - S3 `S3RuntimeConfig::from_snapshot` → named parts → `build_s3_runtime_deps` and the DLX archive builder
    - outbound domain transport from event topology
 2. Build `SharedRuntimeDeps` from infrastructure-only inputs.
 3. Wire domain roots:

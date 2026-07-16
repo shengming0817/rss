@@ -39,15 +39,14 @@ pub mod plan;
 mod provider_output;
 pub mod routes;
 pub mod saga_runtime;
+mod secret_config;
+
+pub(crate) use secret_config::EnvSecret;
 
 pub use distributed_runtime::{DistributedRuntimeDeps, wire_distributed};
 pub use domains::settings::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
 pub use infra::oidc::{build_provider, provider_from_b64};
-pub use infra::s3::build_s3_runtime_deps_from;
-pub use infra::vault::{
-    build_settings_config_value_key_name_from, build_vault_runtime_deps,
-    is_oidc_jwks_export_command, run_oidc_jwks_export_command,
-};
+pub use infra::vault::{is_oidc_jwks_export_command, run_oidc_jwks_export_command};
 pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 
 /// Explicit integration-only seams for exercising typed domain wiring with hermetic providers.
@@ -57,6 +56,40 @@ pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 #[cfg(feature = "integration")]
 pub mod test_support {
     use super::{DistributedRuntimeDeps, SharedRuntimeDeps};
+
+    /// Builds the production S3 capability bundle from explicit integration-test values.
+    pub fn build_s3_runtime_deps_from_values(
+        endpoint_url: String,
+        bucket: String,
+        access_key_id: String,
+        secret_access_key: String,
+        allow_plaintext: bool,
+        force_path_style: bool,
+    ) -> anyhow::Result<s3::S3RuntimeDeps> {
+        crate::infra::s3::build_s3_runtime_deps_from_values(
+            endpoint_url,
+            bucket,
+            access_key_id,
+            secret_access_key,
+            allow_plaintext,
+            force_path_style,
+        )
+    }
+
+    /// Builds the production Vault capability bundle from explicit integration-test values.
+    pub fn build_vault_runtime_from_values(
+        addr: String,
+        token: String,
+        transit_mount: String,
+        settings_key_name: String,
+    ) -> anyhow::Result<(vault::VaultRuntimeDeps, diport::KeyName)> {
+        crate::infra::vault::build_vault_runtime_from_values(
+            addr,
+            token,
+            transit_mount,
+            settings_key_name,
+        )
+    }
 
     /// Builds the production Redis capability bundle from explicit integration-test values.
     ///
@@ -110,8 +143,11 @@ use infra::redis::{
     REDIS_READY_PROBE_NAME, RedisReadyProbe, RedisRuntimeConfig, build_redis_runtime_deps,
     spawn_redis_readiness_sampler,
 };
-use infra::s3::{build_s3_canary_config_from, build_s3_dlx_archive_store_from, wire_s3_canary};
-use infra::vault::build_vault_key_provider_from;
+use infra::s3::{
+    S3DlxArchiveConfig, S3RuntimeConfig, S3RuntimeConfigParts, build_s3_dlx_archive_store,
+    build_s3_runtime_deps, wire_s3_canary,
+};
+use infra::vault::{VaultRuntimeConfig, VaultRuntimeConfigError};
 use phase::{RuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
 
 #[cfg(test)]
@@ -161,49 +197,6 @@ const DOMAIN_TRANSPORT_SHARED_URL_ENV: &str = "RSS_DOMAIN_TRANSPORT_URL";
 /// Local workload SPIFFE ID expected from the outbound SPIRE source.
 const DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV: &str = "RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID";
 
-/// Composition-root validation wrapper around the shared zeroizing secret carrier. Selected
-/// credentials transfer the same `String` allocation to the provider's own secret owner.
-#[derive(secure::Redact)]
-pub(crate) struct EnvSecret(#[redact(sensitivity = secret)] secure::SecretText);
-
-impl EnvSecret {
-    pub(crate) fn required(
-        get: &impl Fn(&str) -> Option<String>,
-        name: &'static str,
-    ) -> anyhow::Result<Self> {
-        let value = get(name).ok_or_else(|| anyhow::anyhow!("missing required env var: {name}"))?;
-        anyhow::ensure!(!value.is_empty(), "{name} must not be empty");
-        anyhow::ensure!(
-            value.trim() == value,
-            "{name} must not have leading or trailing whitespace"
-        );
-        Ok(Self(secure::SecretText::from_string(value)))
-    }
-
-    pub(crate) fn optional(
-        get: &impl Fn(&str) -> Option<String>,
-        name: &'static str,
-    ) -> anyhow::Result<Option<Self>> {
-        get(name)
-            .map(|value| {
-                anyhow::ensure!(!value.is_empty(), "{name} must not be empty");
-                anyhow::ensure!(
-                    value.trim() == value,
-                    "{name} must not have leading or trailing whitespace"
-                );
-                Ok(Self(secure::SecretText::from_string(value)))
-            })
-            .transpose()
-    }
-
-    pub(crate) fn expose(&self) -> &str {
-        self.0.expose()
-    }
-
-    pub(crate) fn transfer_secret_allocation(self) -> String {
-        self.0.into_string()
-    }
-}
 /// 生产系统时钟（组合根注入 `OidcProvider`）。
 ///
 /// 组合根是 sanctioned 直读系统时钟点（`diport::Clock` rustdoc：「prod `SystemClock` 内部调 `SystemTime::now`，
@@ -236,6 +229,7 @@ async fn build_dlx_lifecycle_bootstrap_config_from(
     archiver_pg: postgres::PgConfig,
     verifier_pg: postgres::PgConfig,
     purger_pg: postgres::PgConfig,
+    s3_archive: S3DlxArchiveConfig,
     get: impl Fn(&str) -> Option<String>,
     clock: Arc<dyn diport::Clock>,
 ) -> anyhow::Result<DlxLifecycleBootstrapConfig> {
@@ -249,7 +243,7 @@ async fn build_dlx_lifecycle_bootstrap_config_from(
     let (hot_vault_provider, archive_vault_provider) =
         event_transport::build_dlx_vault_key_providers_from(&get)
             .context("build independent DLX Vault key providers")?;
-    let archive_store = build_s3_dlx_archive_store_from(&get, clock)
+    let archive_store = build_s3_dlx_archive_store(s3_archive, clock)
         .await
         .context("build DLX archive S3 store")?;
     Ok(DlxLifecycleBootstrapConfig {
@@ -3765,40 +3759,52 @@ async fn settings_config_value_maintenance_operator_subject(
     }
 }
 
+fn settings_config_value_maintenance_vault_failure(
+    error: &VaultRuntimeConfigError,
+) -> (&'static str, &'static str) {
+    match error {
+        VaultRuntimeConfigError::SettingsKeyNameConfig(_) => {
+            ("key_name_config", "settings config value key name")
+        }
+        VaultRuntimeConfigError::VaultClientConfig(_) => (
+            "key_provider_config",
+            "settings config value maintenance key provider",
+        ),
+    }
+}
+
 async fn settings_config_value_maintenance_protection(
     pg: &PgMaintenanceDeps,
     operator_subject: &str,
     resource_id: &str,
+    config: SnapshotConfig<'_>,
 ) -> anyhow::Result<ConfigValueProtection> {
-    let key_provider = match build_vault_key_provider_from(|name| std::env::var(name).ok()) {
-        Ok(provider) => provider,
+    let vault_config = match VaultRuntimeConfig::from_snapshot(config) {
+        Ok(config) => config,
         Err(err) => {
+            let (reason, context) = settings_config_value_maintenance_vault_failure(&err);
             record_config_value_maintenance_finish_audit(
                 pg,
                 operator_subject,
                 resource_id,
-                MaintenanceAuditOutcome::Failure {
-                    reason: "key_provider_config",
-                },
+                MaintenanceAuditOutcome::Failure { reason },
             )
             .await?;
-            return Err(err).context("settings config value maintenance key provider");
+            return Err(err).context(context);
         }
     };
-    let key_name = match build_settings_config_value_key_name_from(|name| std::env::var(name).ok())
-    {
-        Ok(key_name) => key_name,
+    let (key_provider, key_name) = match vault_config.into_settings_key_provider() {
+        Ok(parts) => parts,
         Err(err) => {
+            let (reason, context) = settings_config_value_maintenance_vault_failure(&err);
             record_config_value_maintenance_finish_audit(
                 pg,
                 operator_subject,
                 resource_id,
-                MaintenanceAuditOutcome::Failure {
-                    reason: "key_name_config",
-                },
+                MaintenanceAuditOutcome::Failure { reason },
             )
             .await?;
-            return Err(err).context("settings config value key name");
+            return Err(err).context(context);
         }
     };
     Ok(ConfigValueProtection::new(
@@ -3843,16 +3849,20 @@ pub async fn run_settings_config_value_maintenance(
     let capability =
         ConfigValueMaintenanceCapability::from_verified_service_subject(operator_subject.clone())
             .context("settings config value maintenance operator subject")?;
-    let protection =
-        match settings_config_value_maintenance_protection(&pg, &operator_subject, &resource_id)
-            .await
-        {
-            Ok(protection) => protection,
-            Err(err) => {
-                pg.shutdown().await.ok();
-                return Err(err);
-            }
-        };
+    let protection = match settings_config_value_maintenance_protection(
+        &pg,
+        &operator_subject,
+        &resource_id,
+        runtime_inputs.config(),
+    )
+    .await
+    {
+        Ok(protection) => protection,
+        Err(err) => {
+            pg.shutdown().await.ok();
+            return Err(err);
+        }
+    };
     let maintenance = pg.config_value_maintenance(protection, capability);
     let report = match maintenance.run(&options).await {
         Ok(report) => report,
@@ -4367,6 +4377,8 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
                 .context("build snapshot-backed postgres config")?;
             let redis_config = RedisRuntimeConfig::from_snapshot(config)
                 .context("build snapshot-backed redis config")?;
+            let s3_config = S3RuntimeConfig::from_snapshot(config)
+                .context("build snapshot-backed s3 config")?;
             let PgRuntimeConfigParts {
                 serving: app_pg_config,
                 tenant_read: tenant_read_pg_config,
@@ -4378,20 +4390,23 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
                 legacy_policy: plaintext_policy,
                 readiness_period: pg_readiness_period,
             } = pg_config.into_parts();
+            let S3RuntimeConfigParts {
+                general: s3_general_config,
+                canary: s3_canary_config,
+                dlx_archive: s3_dlx_archive_config,
+            } = s3_config.into_parts();
             let config_value = |name: &str| config.value(name).map(str::to_owned);
             // Phase A parses every configuration and proves all external DLX capabilities before
             // the forward-only 0062 migration can commit. A bad credential or WORM/key capability
             // therefore cannot strand the deployment between incompatible schema generations.
-            let vault = build_vault_runtime_deps(config_value).context("setup vault deps")?;
-            let settings_config_value_key_name =
-                build_settings_config_value_key_name_from(config_value)
-                    .context("settings config value key name")?;
+            let vault_config = VaultRuntimeConfig::from_snapshot(config)
+                .context("build snapshot-backed vault config")?;
+            let (vault, settings_config_value_key_name) =
+                vault_config.into_runtime().context("setup vault deps")?;
             let (redis, redis_readiness_period) = build_redis_runtime_deps(redis_config)
                 .await
                 .context("setup redis deps")?;
-            let s3 = build_s3_runtime_deps_from(config_value).context("setup s3 deps")?;
-            let s3_canary_config =
-                build_s3_canary_config_from(config_value).context("s3 canary config")?;
+            let s3 = build_s3_runtime_deps(s3_general_config).context("setup s3 deps")?;
             let event_cfg = build_event_transport_config().context("event transport config")?;
             tracing::info!(
                 runtime.event_topology = topology_label(event_cfg.topology),
@@ -4412,6 +4427,7 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
                 dlx_archiver_pg_config,
                 dlx_verifier_pg_config,
                 dlx_purger_pg_config,
+                s3_dlx_archive_config,
                 config_value,
                 Arc::new(SystemClock),
             )
@@ -4755,7 +4771,7 @@ mod tests {
     }
 
     #[test]
-    fn env_secret_is_redacted_borrow_compared_and_owned_by_the_shared_funnel() {
+    fn env_secret_is_opaque_compared_and_owned_by_the_shared_funnel() {
         let first = EnvSecret::required(
             &|name| (name == "SECRET").then(|| "secret-value".to_owned()),
             "SECRET",
@@ -4766,9 +4782,16 @@ mod tests {
             "SECRET",
         )
         .unwrap_or_else(|_| unreachable!());
-        assert_eq!(first.expose(), second.expose());
+        let different = EnvSecret::required(
+            &|name| (name == "SECRET").then(|| "different-value".to_owned()),
+            "SECRET",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert!(!first.differs_from(&second));
+        assert!(first.differs_from(&different));
         assert_eq!(format!("{first:?}"), "EnvSecret(<redacted>)");
-        assert_eq!(second.expose(), "secret-value");
+        assert!(!format!("{second:?}").contains("secret-value"));
+        assert!(!format!("{different:?}").contains("different-value"));
     }
 
     fn full_dlx_bootstrap_env(name: &str) -> Option<String> {
@@ -4797,12 +4820,30 @@ mod tests {
         .with_ssl_mode(postgres::PgSslMode::Disable)
     }
 
+    #[allow(clippy::expect_used)]
+    fn test_s3_dlx_archive_config() -> S3DlxArchiveConfig {
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_S3_ENDPOINT_URL", "https://s3.example.test"),
+            ("RSS_S3_BUCKET", "rss-general"),
+            ("RSS_S3_ACCESS_KEY_ID", "general-access-key"),
+            ("RSS_S3_SECRET_ACCESS_KEY", "general-secret-key"),
+            ("RSS_DLX_ARCHIVE_S3_BUCKET", "rss-dlx-archive"),
+        ])
+        .expect("snapshot");
+        let S3RuntimeConfigParts { dlx_archive, .. } =
+            S3RuntimeConfig::from_snapshot(snapshot.view())
+                .expect("valid S3 DLX archive config")
+                .into_parts();
+        dlx_archive
+    }
+
     #[tokio::test]
     async fn dlx_bootstrap_config_requires_independent_key_domains() {
         let reused_key = build_dlx_lifecycle_bootstrap_config_from(
             test_dlx_pg_config("rss_dlx_archiver"),
             test_dlx_pg_config("rss_dlx_verifier"),
             test_dlx_pg_config("rss_dlx_purger"),
+            test_s3_dlx_archive_config(),
             |name| match name {
                 "RSS_DLX_ARCHIVE_KEY_NAME" => Some("dlx-hot".to_owned()),
                 _ => full_dlx_bootstrap_env(name),
@@ -8701,6 +8742,28 @@ mod tests {
                 "ops@example.com",
             ]))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn settings_config_value_maintenance_config_failures_keep_exact_audit_and_context() {
+        let key_name_error = crate::infra::vault::VaultRuntimeConfigError::SettingsKeyNameConfig(
+            anyhow::anyhow!("invalid key name"),
+        );
+        assert_eq!(
+            settings_config_value_maintenance_vault_failure(&key_name_error),
+            ("key_name_config", "settings config value key name")
+        );
+
+        let client_error = crate::infra::vault::VaultRuntimeConfigError::VaultClientConfig(
+            anyhow::anyhow!("invalid Vault client"),
+        );
+        assert_eq!(
+            settings_config_value_maintenance_vault_failure(&client_error),
+            (
+                "key_provider_config",
+                "settings config value maintenance key provider"
+            )
         );
     }
 

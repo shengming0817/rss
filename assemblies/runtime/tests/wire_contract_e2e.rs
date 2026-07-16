@@ -9,7 +9,8 @@
 //!
 //! 对标 `controller-runtime/envtest`：负例查外部 env 缺失，**正向路径用测试内受控依赖继续执行**，不让核心
 //! 正向集成依赖 ambient env 才跑（避无 env 时 `return` 空转）。fail-closed（缺 `RSS_VAULT_ADDR`/`TOKEN`/`TRANSIT_MOUNT`）的
-//! 负例由 `runtime` 库单测 `build_vault_runtime_deps_missing_*_fails_fast` 覆盖（无需真实后端、常态跑），
+//! 负例由 `runtime` 库 `VaultRuntimeConfig` snapshot 单测
+//! `runtime_infra_vault_snapshot_missing_values_fail_in_mapping_order` 覆盖（无需真实后端、常态跑），
 //! 此处不重复 env 二分（旧址 `return Ok(())` 致正向接线在无 vault env 的常态 CI 被跳过——review F1）。
 //!
 //! `integration` feature 门控；`cargo nextest run -p runtime --features integration --no-run` 能编译即满足验收。
@@ -22,8 +23,10 @@ use base64::Engine as _;
 use bootstrap::compose_bindings;
 use diport::ManagedResource;
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig};
-use runtime::test_support::{build_redis_runtime_deps_from_values, wire_settings};
-use runtime::{CONFIGS_READY_PROBE_NAME, SharedRuntimeDeps, build_s3_runtime_deps_from};
+use runtime::test_support::{
+    build_redis_runtime_deps_from_values, build_s3_runtime_deps_from_values, wire_settings,
+};
+use runtime::{CONFIGS_READY_PROBE_NAME, SharedRuntimeDeps};
 use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 use vault::{TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver};
 use wiremock::matchers::{body_partial_json, method, path};
@@ -183,15 +186,14 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
     let redis_fixture = testkit::env_or_redis().await?;
     let redis =
         build_redis_runtime_deps_from_values(redis_fixture.url().to_string(), Some("true")).await?;
-    let s3 = build_s3_runtime_deps_from(|name| match name {
-        "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:1".to_string()),
-        "RSS_S3_ALLOW_PLAINTEXT" => Some("true".to_string()),
-        "RSS_S3_BUCKET" => Some("rss-test-bucket".to_string()),
-        "RSS_S3_ACCESS_KEY_ID" => Some("access-key".to_string()),
-        "RSS_S3_SECRET_ACCESS_KEY" => Some("secret-key".to_string()),
-        "RSS_S3_FORCE_PATH_STYLE" => Some("true".to_string()),
-        _ => None,
-    })?;
+    let s3 = build_s3_runtime_deps_from_values(
+        "http://127.0.0.1:1".to_string(),
+        "rss-test-bucket".to_string(),
+        "access-key".to_string(),
+        "secret-key".to_string(),
+        true,
+        true,
+    )?;
 
     let deps = SharedRuntimeDeps {
         pg: pg.handle(),

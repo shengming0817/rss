@@ -36,7 +36,7 @@ use diport::{
 };
 use vocab::TenantId;
 
-use crate::VaultToken;
+use crate::{VaultBaseUrlError, VaultToken, validate_vault_base_url};
 
 /// Vault token header（复用 transit 范式）。
 const VAULT_TOKEN_HEADER: &str = "X-Vault-Token";
@@ -186,7 +186,8 @@ impl VaultSecretResolver {
         timeout: Duration,
         stores: TenantStoreAllowlist,
     ) -> Result<Self, VaultSecretResolverConfigError> {
-        Self::build(client, addr.into(), token.into(), timeout, stores, false)
+        let token = VaultToken::new(token.into());
+        Self::build(client, addr.into(), token, timeout, stores, false)
     }
 
     /// 同 [`new`](Self::new)，但**显式放行 http**——仅用于本地 dev / 集成测试（具名 typed opt-in，
@@ -198,34 +199,30 @@ impl VaultSecretResolver {
         timeout: Duration,
         stores: TenantStoreAllowlist,
     ) -> Result<Self, VaultSecretResolverConfigError> {
-        Self::build(client, addr.into(), token.into(), timeout, stores, true)
+        let token = VaultToken::new(token.into());
+        Self::build(client, addr.into(), token, timeout, stores, true)
     }
 
     fn build(
         client: reqwest::Client,
         addr: String,
-        token: String,
+        token: VaultToken,
         timeout: Duration,
         stores: TenantStoreAllowlist,
         allow_http: bool,
     ) -> Result<Self, VaultSecretResolverConfigError> {
-        if addr.trim().is_empty() {
-            return Err(VaultSecretResolverConfigError::EmptyAddr);
-        }
-        if token.trim().is_empty() {
+        if token.as_str().trim().is_empty() {
             return Err(VaultSecretResolverConfigError::EmptyToken);
         }
-        let base = reqwest::Url::parse(addr.trim())
-            .map_err(|_| VaultSecretResolverConfigError::InvalidAddr)?;
-        match base.scheme() {
-            "https" => {}
-            "http" if allow_http => {}
-            _ => return Err(VaultSecretResolverConfigError::InsecureScheme),
-        }
+        let base = validate_vault_base_url(&addr, allow_http).map_err(|error| match error {
+            VaultBaseUrlError::Empty => VaultSecretResolverConfigError::EmptyAddr,
+            VaultBaseUrlError::Invalid => VaultSecretResolverConfigError::InvalidAddr,
+            VaultBaseUrlError::InsecureScheme => VaultSecretResolverConfigError::InsecureScheme,
+        })?;
         Ok(Self {
             client,
             base,
-            token: VaultToken::new(token),
+            token,
             timeout,
             stores,
         })
@@ -708,6 +705,32 @@ mod backend_tests {
             ),
             Err(VaultSecretResolverConfigError::InvalidAddr)
         ));
+    }
+
+    #[test]
+    fn new_rejects_sensitive_base_url_components_without_disclosure() {
+        const MARKER: &str = "vault-url-secret-marker";
+        for addr in [
+            "https://vault-url-secret-marker@vault.example:8200",
+            "https://vault.example:8200?token=vault-url-secret-marker",
+            "https://vault.example:8200#vault-url-secret-marker",
+        ] {
+            let result = VaultSecretResolver::new(
+                reqwest::Client::new(),
+                addr,
+                TOKEN,
+                TIMEOUT,
+                simple_allowlist(),
+            );
+            assert!(matches!(
+                &result,
+                Err(VaultSecretResolverConfigError::InvalidAddr)
+            ));
+            if let Err(error) = result {
+                let rendered = format!("{error:?} {error}");
+                assert!(!rendered.contains(MARKER), "error must be value-free");
+            }
+        }
     }
 
     #[test]

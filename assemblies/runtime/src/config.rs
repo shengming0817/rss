@@ -3,10 +3,11 @@
 //! Configuration owned by this funnel crosses exactly one `source -> snapshot` boundary. The
 //! source is consumed by value, every closed-catalog key is read once, and the snapshot adapter can
 //! only borrow captured values. `SnapshotConfig` seals the listener/auth/tracing/serving-OIDC
-//! consumers migrated by #1783 and every PostgreSQL/Redis serving or maintenance consumer migrated
-//! by #1784; remaining ambient readers owned by #1785–#1787 are outside the full-reader-exclusivity
-//! claim. Maintenance grants, CI/Forge credentials, the AWS default credential chain, and SPIFFE
-//! rotation material are deliberately outside this serving catalog.
+//! consumers migrated by #1783, every PostgreSQL/Redis serving or maintenance consumer migrated by
+//! #1784, and the Vault/S3 serving plus settings-maintenance consumers migrated by #1785. Remaining
+//! event/domain readers owned by #1786 stay outside the full-reader-exclusivity claim until #1787
+//! closes the global guard. Maintenance grants, CI/Forge credentials, the AWS default credential
+//! chain, and SPIFFE rotation material are deliberately outside this serving catalog.
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -210,7 +211,7 @@ pub(crate) enum RuntimeConfigCaptureError {
 
 /// Immutable process-lifetime configuration generation.
 ///
-/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- private storage, by-value source consumption, the required owned `RuntimeInputs` field, and private-field `SnapshotConfig` signatures make snapshot omission and capability forgery unrepresentable for migrated serving and PostgreSQL maintenance consumers.
+/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- private storage, by-value source consumption, the required owned `RuntimeInputs` field, and private-field `SnapshotConfig` signatures make snapshot omission and capability forgery unrepresentable for migrated serving, PostgreSQL maintenance, and Vault-backed settings-maintenance consumers.
 ///
 /// The separate Medium `RUNTIME-CONFIG-SNAPSHOT-LIVE-01` carrier in `runtime-baseline` guards the
 /// production capture-to-consumer flow against ambient implementation substitutions; #1787 owns
