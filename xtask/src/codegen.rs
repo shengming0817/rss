@@ -816,8 +816,8 @@ fn render_http_effect_kind(effect: EffectKind) -> &'static str {
         EffectKind::Read => "Read",
         EffectKind::Auth => "Auth",
         EffectKind::Projection => "Projection",
-        EffectKind::Write => "Write",
-        EffectKind::Transaction => "Transaction",
+        EffectKind::BusinessWrite => "BusinessWrite",
+        EffectKind::BusinessTransaction => "BusinessTransaction",
         EffectKind::Outbox => "Outbox",
         EffectKind::Publish => "Publish",
         EffectKind::Workflow => "Workflow",
@@ -2328,6 +2328,11 @@ mod tests {
     use super::*;
     use crate::testutil::unique_tmp;
 
+    const BUSINESS_LOCAL_TX_EFFECT_PROFILE: &str = concat!(
+        "[effectProfile]\n",
+        "effects = [\"auth\", \"business-write\", \"business-transaction\"]\n",
+    );
+
     fn assert_generated_contains(source: &str, needle: &str, message: &str) {
         assert!(source.contains(needle), "{message}:\n{source}");
     }
@@ -3260,8 +3265,8 @@ mod tests {
                 "  \"read\",\n",
                 "  \"auth\",\n",
                 "  \"projection\",\n",
-                "  \"write\",\n",
-                "  \"transaction\",\n",
+                "  \"business-write\",\n",
+                "  \"business-transaction\",\n",
                 "  \"outbox\",\n",
                 "  \"publish\",\n",
                 "  \"workflow\",\n",
@@ -3282,8 +3287,8 @@ mod tests {
             "Read",
             "Auth",
             "Projection",
-            "Write",
-            "Transaction",
+            "BusinessWrite",
+            "BusinessTransaction",
             "Outbox",
             "Publish",
             "Workflow",
@@ -3313,10 +3318,7 @@ mod tests {
                 "mode = \"permission\"\n",
                 "permission = \"identity:policy:read\"\n",
             ),
-            Some(concat!(
-                "[effectProfile]\n",
-                "effects = [\"auth\", \"write\", \"transaction\"]\n",
-            )),
+            Some(BUSINESS_LOCAL_TX_EFFECT_PROFILE),
             concat!(
                 "[capabilities.localTx]\n",
                 "boundary = \"single-domain\"\n",
@@ -3453,10 +3455,7 @@ mod tests {
                 "mode = \"permission\"\n",
                 "permission = \"identity:policy:read\"\n",
             ),
-            Some(concat!(
-                "[effectProfile]\n",
-                "effects = [\"auth\", \"write\", \"transaction\"]\n",
-            )),
+            Some(BUSINESS_LOCAL_TX_EFFECT_PROFILE),
             concat!(
                 "[capabilities.localTx]\n",
                 "boundary = \"single-domain\"\n",
@@ -3494,10 +3493,7 @@ mod tests {
                 "mode = \"permission\"\n",
                 "permission = \"identity:policy:read\"\n",
             ),
-            Some(concat!(
-                "[effectProfile]\n",
-                "effects = [\"auth\", \"write\", \"transaction\"]\n",
-            )),
+            Some(BUSINESS_LOCAL_TX_EFFECT_PROFILE),
             concat!(
                 "[capabilities.localTx]\n",
                 "boundary = \"single-domain\"\n",
@@ -3555,10 +3551,7 @@ mod tests {
                 "mode = \"permission\"\n",
                 "permission = \"identity:policy:read\"\n",
             ),
-            Some(concat!(
-                "[effectProfile]\n",
-                "effects = [\"auth\", \"write\", \"transaction\"]\n",
-            )),
+            Some(BUSINESS_LOCAL_TX_EFFECT_PROFILE),
             "",
         )?;
         let result = generate(&root.join("contracts"), &root.join("generated/src"), false);

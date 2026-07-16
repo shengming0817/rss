@@ -62,17 +62,20 @@ entry_hash = HMAC-SHA256(key, prev_hash ‖ canonical(entry_content))
 `(tenant_id, seq)` 唯一，读路径复用同一 keyed HMAC 链验证语义。
 普通仓储入口通过共享 `Arc<PgAuditRepo>` 分别擦除为 `DynAuditWriteRepo` / `DynAuditReadRepo`；生产事件
 订阅不经过 ambient `AuditDomain` 的仓储字段，而由 owner-sealed `PgAuditConsumerTx` 在同一个 PostgreSQL
-事务内完成链 append 与 inbox commit，其公开 handler 擦除路径固定分类为 `WriteEffect`。
+事务内完成链 append 与 inbox commit，其公开 handler 擦除路径固定分类为 `BusinessWriteEffect`。
 
 **跨租户 admin 读**只支持“指定租户”读取
 （`GET /api/v1/audit/tenants/{tenantId}/entries`），不提供全租户全局列表。旧
 `GET /api/v1/audit/entries?tenantId=...` 不兼容并返回 400。
 handler 必须先 durable append cross-tenant audit event，append 成功后才调用 admin repo 读取；append 失败
 fail-closed 不读取。append 是该 LocalTx 的唯一写 UoW；read 在提交成功后执行，不与 append 构成同一事务。
+该 route 的 contract 继续声明 `business-write + business-transaction + cross-tenant-audit`，不得因读取阶段使用
+provider-owned transaction 而降级为 LocalOnly 或 operational effect。
 handler 将 audited `RowVisibility` 消费成 sealed `CrossTenantReadScope`，`AuditAdminRepo::list_tenant` 不接受裸
 tenant。Postgres admin repo 使用可选专用 `rss_audit_admin` 只读池：直连角色必须为
 `rss_audit_admin` LOGIN 角色、非 superuser、`NOBYPASSRLS`，且仅有 `audit_entries` SELECT 权限。读取时在
-只读事务中 `SET LOCAL rss.tenant_id = targetTenant`，复用现有 tenant-isolation RLS policy；不得授写权限、
+provider-owned read-path transaction 中 `SET LOCAL rss.tenant_id = targetTenant`，复用现有 tenant-isolation
+RLS policy；helper 不承诺 PostgreSQL `READ ONLY` 或稳定 snapshot，限制写能力依赖专用角色/授权。不得授写权限、
 其它 public relation 权限，也不得新增 allow-all RLS policy。admin 池未配置时 privileged audit read 返回
 501 `ERR_CORE_NOT_IMPLEMENTED`，配置不完整或权限不安全则启动失败。
 

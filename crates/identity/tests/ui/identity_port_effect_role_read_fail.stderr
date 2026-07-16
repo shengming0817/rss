@@ -2,7 +2,7 @@ error[E0271]: type mismatch resolving `<DynRoleWriteRepo<'static> as IdentityPor
  --> tests/ui/identity_port_effect_role_read_fail.rs:7:20
   |
 7 |     require_read::<DynRoleWriteRepo<'static>>();
-  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^ expected `ReadEffect`, found `WriteEffect`
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^ expected `ReadEffect`, found `BusinessWriteEffect`
   |
 note: required by a bound in `require_read`
  --> tests/ui/identity_port_effect_role_read_fail.rs:4:39

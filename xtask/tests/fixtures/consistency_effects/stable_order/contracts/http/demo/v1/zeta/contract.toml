@@ -9,4 +9,4 @@ path = "/api/v1/demo/zeta"
 method = "POST"
 
 [effectProfile]
-effects = ["write", "write"]
+effects = ["business-write", "business-write"]

@@ -351,7 +351,7 @@ classify_settings_ports! {
     DynConfigRepo => diport::ReadEffect,
     DynConfigUnitOfWork => diport::OutboxEffect,
     DynSecretRepo => diport::ReadEffect,
-    DynSecretUnitOfWork => diport::WriteEffect,
+    DynSecretUnitOfWork => diport::BusinessWriteEffect,
 }
 
 impl<T: SettingsPortEffect + ?Sized> settings_port_effect_sealed::Sealed for std::sync::Arc<T> {}
@@ -395,7 +395,7 @@ mod smoke {
         );
         assert_effect::<
             super::DynSecretUnitOfWork<'static>,
-            diport::WriteEffect,
+            diport::BusinessWriteEffect,
             diport::LocalPrivilege,
         >();
     }

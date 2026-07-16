@@ -141,8 +141,8 @@ pub use dlx_lifecycle::{
     ReceiptCasOutcome,
 };
 pub use effect::{
-    AuthEffect, CrossTenantPrivilege, DiPortEffect, LocalPrivilege, OutboxEffect, PortEffectClass,
-    PortPrivilegeClass, ReadEffect, WorkflowEffect, WriteEffect,
+    AuthEffect, BusinessWriteEffect, CrossTenantPrivilege, DiPortEffect, LocalPrivilege,
+    OutboxEffect, PortEffectClass, PortPrivilegeClass, ReadEffect, WorkflowEffect,
 };
 pub use envelope::{
     EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, EnvelopeSchemaHash,

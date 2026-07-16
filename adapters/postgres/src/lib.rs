@@ -285,7 +285,7 @@ mod smoke {
     }
     fn assert_audit_consumer_tx_effect<T>(_: PhantomData<T>)
     where
-        T: super::AuditConsumerTxEffect<Effect = diport::WriteEffect>,
+        T: super::AuditConsumerTxEffect<Effect = diport::BusinessWriteEffect>,
     {
     }
     fn assert_send_sync<T: Send + Sync>(_: PhantomData<T>) {}
@@ -329,7 +329,7 @@ mod smoke {
         assert_audit_repo(
             PhantomData::<super::PgAuditRepo<super::audit_repo::test_support::TestVerifier>>,
         );
-        // 真实 durable audit subscriber 在擦除为 ConsumerTxHandlerFn 前必须携带 WriteEffect。
+        // 真实 durable audit subscriber 在擦除为 ConsumerTxHandlerFn 前必须携带 BusinessWriteEffect。
         assert_audit_consumer_tx_effect(
             PhantomData::<super::PgAuditConsumerTx<super::audit_repo::test_support::TestVerifier>>,
         );

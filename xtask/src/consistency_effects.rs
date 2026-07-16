@@ -23,7 +23,7 @@ use syn::{
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
-const CONSISTENCY_REPORT_SCHEMA_VERSION: u8 = 3;
+const CONSISTENCY_REPORT_SCHEMA_VERSION: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Rule {
@@ -1950,7 +1950,7 @@ fn certify_receipt_source(
         bail!("{subject}: observers must use the exact three-dimension absolute initializer");
     }
 
-    let expected_dimensions = ["Write", "Outbox", "Publish"];
+    let expected_dimensions = ["BusinessWrite", "Outbox", "Publish"];
     let mut proof_ident: Option<String> = None;
     let mut runtime_observers = Vec::new();
     for (argument, dimension) in observer_call.args.iter().zip(expected_dimensions) {
@@ -5697,7 +5697,7 @@ impl<'ast> Visit<'ast> for ProvenanceCallScan<'ast> {
         }
         if absolute_call_path_is(
             &node.func,
-            &["testkit", "local_only", "ProviderCounter", "write"],
+            &["testkit", "local_only", "ProviderCounter", "business_write"],
         ) || is_current_mounted_proof_call(node)
         {
             self.allowed_api_locations.insert(location);
@@ -6923,7 +6923,7 @@ fn effect_rank(effect: &str) -> u8 {
     match effect {
         "AuthEffect" => 0,
         "ReadEffect" => 1,
-        "WriteEffect" => 2,
+        "BusinessWriteEffect" => 2,
         "OutboxEffect" => 3,
         "WorkflowEffect" => 4,
         _ => 255,
@@ -7059,8 +7059,8 @@ fn http_effect_wire(effect: vocab::HttpEffectKind) -> &'static str {
         vocab::HttpEffectKind::Read => "read",
         vocab::HttpEffectKind::Auth => "auth",
         vocab::HttpEffectKind::Projection => "projection",
-        vocab::HttpEffectKind::Write => "write",
-        vocab::HttpEffectKind::Transaction => "transaction",
+        vocab::HttpEffectKind::BusinessWrite => "business-write",
+        vocab::HttpEffectKind::BusinessTransaction => "business-transaction",
         vocab::HttpEffectKind::Outbox => "outbox",
         vocab::HttpEffectKind::Publish => "publish",
         vocab::HttpEffectKind::Workflow => "workflow",
@@ -7298,7 +7298,7 @@ fn synthetic_report_fixture() -> ConsistencyReport {
             path: "/v1/z".to_string(),
             consistency_level: "LocalTx".to_string(),
             effects: canonical_effects(&[
-                vocab::HttpEffectKind::Transaction,
+                vocab::HttpEffectKind::BusinessTransaction,
                 vocab::HttpEffectKind::Auth,
             ]),
             route: RoutePosture {
@@ -7424,7 +7424,7 @@ mod tests {
             self.replace(
                 &self.ports(),
                 "classify_demo_ports!(DynReadRepo => diport::ReadEffect);",
-                "classify_demo_ports!(DynReadRepo => diport::ReadEffect); classify_demo_ports!(DynWriteRepo => diport::WriteEffect);",
+                "classify_demo_ports!(DynReadRepo => diport::ReadEffect); classify_demo_ports!(DynWriteRepo => diport::BusinessWriteEffect);",
             )
         }
 
@@ -8129,9 +8129,9 @@ async fn cfg_test_is_valid_rust() { hidden_receipt!(); }
 "#;
 
     const GOVERNED_PROVENANCE: &str = r#"
-struct Repo { counter: ::testkit::local_only::ProviderCounter<::testkit::local_only::Write> }
+struct Repo { counter: ::testkit::local_only::ProviderCounter<::testkit::local_only::BusinessWrite> }
 impl Repo {
-    fn default() -> Self { Self { counter: ::testkit::local_only::ProviderCounter::write() } }
+    fn default() -> Self { Self { counter: ::testkit::local_only::ProviderCounter::business_write() } }
     fn test_repo(&self) {}
 }
 trait RecordedMutation { fn mutate(&self); }
@@ -8375,7 +8375,7 @@ fn conforms() {
             )
             .replace(
                 "repo_probe.counter.handle()",
-                "::testkit::local_only::StaticExclusion::<::testkit::local_only::Write>::from_governed(&proof)",
+                "::testkit::local_only::StaticExclusion::<::testkit::local_only::BusinessWrite>::from_governed(&proof)",
             );
         let stateless_workspace = receipt_workspace(&stateless)?;
         let stateless_registration =
@@ -9042,9 +9042,9 @@ pub mod decoy {
     }
 
     #[test]
-    fn settings_provider_write_observer_is_method_variant_and_state_bound() -> Result<()> {
+    fn settings_provider_business_write_observer_is_method_variant_and_state_bound() -> Result<()> {
         let canonical = r#"
-struct SettingsConfigGetRepoProbe { state: State, write_effects: Counter }
+struct SettingsConfigGetRepoProbe { state: State, business_write_effects: Counter }
 impl ConfigRepo for SettingsConfigGetRepoProbe {
     fn find_version(&self) {
         let (_, synthetic_write, _) = {
@@ -9052,7 +9052,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             ((), state.synthetic_write, ())
         };
         if synthetic_write == ConfigGetSyntheticWrite::FindVersion {
-            self.write_effects.record();
+            self.business_write_effects.record();
         }
     }
     fn head(&self) {
@@ -9061,7 +9061,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             ((), state.synthetic_write, ())
         };
         if synthetic_write == ConfigGetSyntheticWrite::Head {
-            self.write_effects.record();
+            self.business_write_effects.record();
         }
     }
 }
@@ -9074,7 +9074,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         };
         assert_eq!(
             recorded(canonical)?,
-            BTreeSet::from(["write_effects".to_string()])
+            BTreeSet::from(["business_write_effects".to_string()])
         );
         for (name, red) in [
             (
@@ -9382,8 +9382,8 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             (
                 "legacy owner trait",
                 GOVERNED_PROVENANCE.replace(
-                    "struct Repo { counter: ::testkit::local_only::ProviderCounter<::testkit::local_only::Write> }",
-                    "impl StaticExclusionOwner<Write> for Fake {}\nstruct Repo { counter: ::testkit::local_only::ProviderCounter<::testkit::local_only::Write> }",
+                    "struct Repo { counter: ::testkit::local_only::ProviderCounter<::testkit::local_only::BusinessWrite> }",
+                    "impl StaticExclusionOwner<BusinessWrite> for Fake {}\nstruct Repo { counter: ::testkit::local_only::ProviderCounter<::testkit::local_only::BusinessWrite> }",
                 ),
             ),
             (
@@ -9441,7 +9441,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 GOVERNED_PROVENANCE
                     .replace(
                         "fn conforms()",
-                        "fn conforms(input_handle: ProviderCounterHandle<Write>)",
+                        "fn conforms(input_handle: ProviderCounterHandle<BusinessWrite>)",
                     )
                     .replace("repo_probe.counter.handle()", "input_handle"),
             ),
@@ -9539,7 +9539,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
     }
 
     #[test]
-    fn forbidden_profiles_are_stable_and_closed() -> Result<()> {
+    fn business_effect_profiles_are_stable_and_closed() -> Result<()> {
         let (_, findings) = check_root(&fixture("all_forbidden"))?;
         assert_eq!(findings.len(), 10);
         assert!(
@@ -9555,6 +9555,16 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             .map(|finding| finding.detail.as_str())
             .collect();
         assert!(details.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("business-write"))
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("business-transaction"))
+        );
         Ok(())
     }
 
@@ -9573,10 +9583,10 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
     }
 
     #[test]
-    fn consistency_report_schema_is_v3_and_receipt_coverage_is_fail_closed() -> Result<()> {
+    fn consistency_report_schema_is_v4_and_receipt_coverage_is_fail_closed() -> Result<()> {
         let report = synthetic_report_fixture();
         let json = serde_json::to_value(&report)?;
-        assert_eq!(json["schemaVersion"], 3);
+        assert_eq!(json["schemaVersion"], 4);
         assert_eq!(
             json["localOnlyReceiptCoverage"]["enforcement"],
             "failClosed"
@@ -10020,8 +10030,10 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
     fn report_row_red_matrix_preserves_status_classes_sources_and_sorted_findings() -> Result<()> {
         use crate::localtx_coverage::{CanonicalMountedState, CanonicalRouteMount};
         const READ: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Read];
-        const READ_WRITE: &[vocab::HttpEffectKind] =
-            &[vocab::HttpEffectKind::Write, vocab::HttpEffectKind::Read];
+        const READ_WRITE: &[vocab::HttpEffectKind] = &[
+            vocab::HttpEffectKind::BusinessWrite,
+            vocab::HttpEffectKind::Read,
+        ];
         let source_path = "crates/_seed/src/lib.rs";
         let empty = empty_proof_source();
 
@@ -10123,7 +10135,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         classified_source.states.insert(
             "State".to_string(),
             StateImpl {
-                effect: "WriteEffect".to_string(),
+                effect: "BusinessWriteEffect".to_string(),
                 privilege: "CrossTenantPrivilege".to_string(),
                 subject: format!("{source_path}:1"),
             },
@@ -10142,7 +10154,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         classified_source.ports.insert(
             "DynAdmin".to_string(),
             PortClass {
-                effect: "WriteEffect".to_string(),
+                effect: "BusinessWriteEffect".to_string(),
                 privilege: "CrossTenantPrivilege".to_string(),
                 subject: format!("{source_path}:3"),
                 port: "DynAdmin".to_string(),
@@ -10177,7 +10189,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         );
         assert_eq!(
             classified.effect_proof.effect_class.as_deref(),
-            Some("WriteEffect")
+            Some("BusinessWriteEffect")
         );
         assert_eq!(
             classified.effect_proof.privilege_class.as_deref(),
@@ -10211,8 +10223,8 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             Effect::Read,
             Effect::Auth,
             Effect::Projection,
-            Effect::Write,
-            Effect::Transaction,
+            Effect::BusinessWrite,
+            Effect::BusinessTransaction,
             Effect::Outbox,
             Effect::Publish,
             Effect::Workflow,
@@ -10234,8 +10246,8 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             ManifestEffect::Read,
             ManifestEffect::Auth,
             ManifestEffect::Projection,
-            ManifestEffect::Write,
-            ManifestEffect::Transaction,
+            ManifestEffect::BusinessWrite,
+            ManifestEffect::BusinessTransaction,
             ManifestEffect::Outbox,
             ManifestEffect::Publish,
             ManifestEffect::Workflow,
@@ -10330,7 +10342,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
     #[test]
     fn strongest_effect_ranking_is_fail_closed() {
         assert!(effect_rank("BogusEffect") > effect_rank("WorkflowEffect"));
-        assert!(effect_rank("WorkflowEffect") > effect_rank("WriteEffect"));
+        assert!(effect_rank("WorkflowEffect") > effect_rank("BusinessWriteEffect"));
     }
 
     #[test]
@@ -10375,7 +10387,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             ports: BTreeMap::from([(
                 "DynWriter".to_string(),
                 PortClass {
-                    effect: "WriteEffect".to_string(),
+                    effect: "BusinessWriteEffect".to_string(),
                     privilege: "LocalPrivilege".to_string(),
                     subject: "crates/demo/src/ports.rs".to_string(),
                     port: "DynWriter".to_string(),
@@ -10396,7 +10408,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             states: BTreeMap::from([(
                 "State".to_string(),
                 StateImpl {
-                    effect: "WriteEffect".to_string(),
+                    effect: "BusinessWriteEffect".to_string(),
                     privilege: "CrossTenantPrivilege".to_string(),
                     subject: "crates/demo/src/lib.rs:4".to_string(),
                 },
@@ -10416,7 +10428,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 (
                     "DynWriter".to_string(),
                     PortClass {
-                        effect: "WriteEffect".to_string(),
+                        effect: "BusinessWriteEffect".to_string(),
                         privilege: "LocalPrivilege".to_string(),
                         subject: "crates/demo/src/ports.rs:10".to_string(),
                         port: "DynWriter".to_string(),
@@ -10441,7 +10453,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             trusted_port_macros: BTreeSet::new(),
         };
         let class = source.classify_state("State")?;
-        assert_eq!(class.effect, "WriteEffect");
+        assert_eq!(class.effect, "BusinessWriteEffect");
         assert_eq!(class.privilege, "CrossTenantPrivilege");
         Ok(())
     }
@@ -10525,7 +10537,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         workspace.replace(
             &workspace.ports(),
             "classify_demo_ports!(DynReadRepo => diport::ReadEffect);",
-            "classify_demo_ports!(DynReadRepo => diport::ReadEffect); classify_demo_ports!(DynWriteRepo => diport::WriteEffect);",
+            "classify_demo_ports!(DynReadRepo => diport::ReadEffect); classify_demo_ports!(DynWriteRepo => diport::BusinessWriteEffect);",
         )?;
         workspace.replace(
             &workspace.source(),
@@ -10769,7 +10781,7 @@ struct Demo;"#,
 
     #[test]
     fn every_forbidden_effect_and_cross_tenant_privilege_is_red() -> Result<()> {
-        for effect in ["WriteEffect", "OutboxEffect", "WorkflowEffect"] {
+        for effect in ["BusinessWriteEffect", "OutboxEffect", "WorkflowEffect"] {
             let workspace = WorkspaceFixture::new()?;
             workspace.replace(&workspace.ports(), "ReadEffect);", &format!("{effect});"))?;
             assert!(

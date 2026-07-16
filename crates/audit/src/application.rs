@@ -1272,7 +1272,8 @@ mod tests {
     #[derive(Clone)]
     struct CountingScopedReadRepo {
         list_calls: Arc<std::sync::atomic::AtomicUsize>,
-        write_effects: testkit::local_only::ProviderCounter<testkit::local_only::Write>,
+        business_write_effects:
+            testkit::local_only::ProviderCounter<testkit::local_only::BusinessWrite>,
         scopes: Arc<std::sync::Mutex<Vec<vocab::TenantId>>>,
         fail: bool,
         inject_forbidden_write: bool,
@@ -1282,7 +1283,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 list_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                write_effects: ::testkit::local_only::ProviderCounter::write(),
+                business_write_effects: ::testkit::local_only::ProviderCounter::business_write(),
                 scopes: Arc::new(std::sync::Mutex::new(Vec::new())),
                 fail: false,
                 inject_forbidden_write: false,
@@ -1327,7 +1328,7 @@ mod tests {
             _scope: TenantRepoScope,
             _record: AuditRecord,
         ) -> Result<(), AuditError> {
-            self.write_effects.record();
+            self.business_write_effects.record();
             Ok(())
         }
     }
@@ -1345,7 +1346,7 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner())
                 .push(scope.tenant());
             if self.inject_forbidden_write {
-                self.write_effects.record();
+                self.business_write_effects.record();
             }
             if self.fail {
                 Err(AuditError::HashMismatch)
@@ -2063,8 +2064,8 @@ mod tests {
                     vocab::HttpEffectKind::Auth,
                     vocab::HttpEffectKind::Read,
                     vocab::HttpEffectKind::Projection,
-                    vocab::HttpEffectKind::Write,
-                    vocab::HttpEffectKind::Transaction,
+                    vocab::HttpEffectKind::BusinessWrite,
+                    vocab::HttpEffectKind::BusinessTransaction,
                     vocab::HttpEffectKind::CrossTenantAudit,
                 ][..],
             ),
@@ -2700,7 +2701,7 @@ mod tests {
                 authorizer.clone(),
             );
             let observers = ::testkit::local_only::LocalOnlyObservers::new(
-                repo_probe.write_effects.handle(),
+                repo_probe.business_write_effects.handle(),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
                     &proof,
                 ),
@@ -2803,7 +2804,7 @@ mod tests {
             Arc::new(ProjectionAuthorizer::new(&[], true)),
         );
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
-            repo_probe.write_effects.handle(),
+            repo_probe.business_write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
                 &proof,
             ),
@@ -2842,7 +2843,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn local_only_real_route_provider_write_effect_trips_typed_probe() {
+    async fn local_only_real_route_provider_business_write_effect_trips_typed_probe() {
         let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
         let repo_probe = CountingScopedReadRepo::with_forbidden_write();
         let domain_sink = RecordingAuditSink::ok();
@@ -2857,7 +2858,7 @@ mod tests {
             Arc::new(ProjectionAuthorizer::new(&[], true)),
         );
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
-            repo_probe.write_effects.handle(),
+            repo_probe.business_write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
                 &proof,
             ),
@@ -2879,7 +2880,7 @@ mod tests {
             result,
             Err(
                 testkit::local_only::LocalOnlyConformanceError::ForbiddenEffects {
-                    writes: 1,
+                    business_writes: 1,
                     outbox: 0,
                     publishes: 0,
                 }

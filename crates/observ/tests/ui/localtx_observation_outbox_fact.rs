@@ -19,7 +19,7 @@ fn main() {
         HttpRouteAuth::ServiceOwned,
         None,
         false,
-        HttpEffectProfile::new(&[HttpEffectKind::Write]),
+        HttpEffectProfile::new(&[HttpEffectKind::BusinessWrite]),
     );
     let _ = LocalTxObservation::new(route, LocalTxBoundary::SingleDomain);
 }

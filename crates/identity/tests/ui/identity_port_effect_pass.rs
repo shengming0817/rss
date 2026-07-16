@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use diport::{
     AuthEffect, LocalPrivilege, OutboxEffect, PortEffectClass, PortPrivilegeClass, ReadEffect,
-    WriteEffect,
+    BusinessWriteEffect,
 };
 use identity::ports::{
     DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynRefreshTokenStore,
@@ -23,12 +23,12 @@ fn main() {
     assert_effect::<DynPolicyRepo<'static>, AuthEffect, LocalPrivilege>();
 
     assert_effect::<DynResourceAttributeReadRepo<'static>, AuthEffect, LocalPrivilege>();
-    assert_effect::<DynResourceAttributeWriteRepo<'static>, WriteEffect, LocalPrivilege>();
+    assert_effect::<DynResourceAttributeWriteRepo<'static>, BusinessWriteEffect, LocalPrivilege>();
     assert_effect::<DynRoleReadRepo<'static>, ReadEffect, LocalPrivilege>();
     assert_effect::<DynRoleBindingReadRepo<'static>, AuthEffect, LocalPrivilege>();
-    assert_effect::<DynRoleWriteRepo<'static>, WriteEffect, LocalPrivilege>();
-    assert_effect::<DynCredentialRepo<'static>, WriteEffect, LocalPrivilege>();
-    assert_effect::<DynRefreshTokenStore<'static>, WriteEffect, LocalPrivilege>();
+    assert_effect::<DynRoleWriteRepo<'static>, BusinessWriteEffect, LocalPrivilege>();
+    assert_effect::<DynCredentialRepo<'static>, BusinessWriteEffect, LocalPrivilege>();
+    assert_effect::<DynRefreshTokenStore<'static>, BusinessWriteEffect, LocalPrivilege>();
 
     assert_effect::<DynPolicyLifecycle<'static>, OutboxEffect, LocalPrivilege>();
     assert_effect::<DynRoleBindingLifecycle<'static>, OutboxEffect, LocalPrivilege>();

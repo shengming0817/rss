@@ -185,8 +185,8 @@ pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[];
 /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
     ::vocab::HttpEffectKind::Auth,
-    ::vocab::HttpEffectKind::Write,
-    ::vocab::HttpEffectKind::Transaction,
+    ::vocab::HttpEffectKind::BusinessWrite,
+    ::vocab::HttpEffectKind::BusinessTransaction,
 ];
 
 /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。

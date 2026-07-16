@@ -199,8 +199,8 @@ pub mod login {
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
         ::vocab::HttpEffectKind::Auth,
-        ::vocab::HttpEffectKind::Write,
-        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::BusinessWrite,
+        ::vocab::HttpEffectKind::BusinessTransaction,
         ::vocab::HttpEffectKind::Outbox,
         ::vocab::HttpEffectKind::Publish,
     ];
@@ -383,8 +383,8 @@ pub mod logout {
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
         ::vocab::HttpEffectKind::Auth,
-        ::vocab::HttpEffectKind::Write,
-        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::BusinessWrite,
+        ::vocab::HttpEffectKind::BusinessTransaction,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -577,8 +577,8 @@ pub mod password_change {
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
         ::vocab::HttpEffectKind::Auth,
-        ::vocab::HttpEffectKind::Write,
-        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::BusinessWrite,
+        ::vocab::HttpEffectKind::BusinessTransaction,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -2464,8 +2464,8 @@ pub mod policies_create {
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
         ::vocab::HttpEffectKind::Auth,
-        ::vocab::HttpEffectKind::Write,
-        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::BusinessWrite,
+        ::vocab::HttpEffectKind::BusinessTransaction,
         ::vocab::HttpEffectKind::Outbox,
         ::vocab::HttpEffectKind::Publish,
     ];
@@ -2659,8 +2659,8 @@ pub mod policies_deactivate {
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
         ::vocab::HttpEffectKind::Auth,
-        ::vocab::HttpEffectKind::Write,
-        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::BusinessWrite,
+        ::vocab::HttpEffectKind::BusinessTransaction,
         ::vocab::HttpEffectKind::Outbox,
         ::vocab::HttpEffectKind::Publish,
     ];
@@ -6445,8 +6445,8 @@ pub mod policies_update {
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
         ::vocab::HttpEffectKind::Auth,
-        ::vocab::HttpEffectKind::Write,
-        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::BusinessWrite,
+        ::vocab::HttpEffectKind::BusinessTransaction,
         ::vocab::HttpEffectKind::Outbox,
         ::vocab::HttpEffectKind::Publish,
     ];
@@ -6972,8 +6972,8 @@ pub mod refresh {
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
         ::vocab::HttpEffectKind::Auth,
-        ::vocab::HttpEffectKind::Write,
-        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::BusinessWrite,
+        ::vocab::HttpEffectKind::BusinessTransaction,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -7160,8 +7160,8 @@ pub mod roles_assign {
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
         ::vocab::HttpEffectKind::Auth,
-        ::vocab::HttpEffectKind::Write,
-        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::BusinessWrite,
+        ::vocab::HttpEffectKind::BusinessTransaction,
         ::vocab::HttpEffectKind::Outbox,
         ::vocab::HttpEffectKind::Publish,
     ];
@@ -7586,8 +7586,8 @@ pub mod roles_revoke {
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
         ::vocab::HttpEffectKind::Auth,
-        ::vocab::HttpEffectKind::Write,
-        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::BusinessWrite,
+        ::vocab::HttpEffectKind::BusinessTransaction,
         ::vocab::HttpEffectKind::Outbox,
         ::vocab::HttpEffectKind::Publish,
     ];

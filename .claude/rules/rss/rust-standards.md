@@ -20,13 +20,17 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 
 | 级别 | 语义 | 测试要求 |
 |------|------|----------|
-| L0 | 本地纯计算 | 表驱动单元测试（`rstest` 参数化） |
+| L0 | 业务持久化/outbox/publish 为零；允许 provider-owned read-path transaction | 表驱动单元测试 + LocalOnly conformance |
 | L1 | 单域 crate 本地事务 | 事务完整性测试 |
 | L2 | 本地事务 + outbox | outbox 原子性 + consumer 幂等 |
 | L3 | 跨域最终一致 | replay + 投影重建 |
 | L4 | 长延迟设备闭环 | 状态机、超时、重试、迟到消息 |
 
 级别声明在 `contract.toml` 的 `consistencyLevel` 字段（与 wire 语义同源），由 `cargo xtask` 校验。L2 覆盖由 `cargo xtask` 原子性+幂等治理测试（Medium）守。
+HTTP contract 的业务写/事务 effect 只使用 `business-write` / `business-transaction`；Rust port marker 使用
+`BusinessWriteEffect`。LocalOnly 准入仍只允许 `auth` / `read` / `projection`，其 runtime observer 使用
+`BusinessWrite` / `business_writes`。correctness cache、metrics/trace、auth security audit 不作为 business
+effect，但必须遵守其各自治理边界。
 
 ## 工程护栏
 

@@ -3328,7 +3328,7 @@ mod tests {
         // seam to observe, so all three forbidden dimensions are explicit static exclusions rather
         // than interchangeable closures over an unrelated domain capture.
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
-            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Write>::from_governed(
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::BusinessWrite>::from_governed(
                 &proof,
             ),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
@@ -3388,7 +3388,8 @@ mod tests {
         bindings: crate::internal::mem::InMemRoleBindingLifecycle,
         resource_attributes: crate::internal::mem::InMemResourceAttributeRepo,
         calls: Arc<std::sync::Mutex<Vec<(IdentityLocalOnlyRead, vocab::TenantId)>>>,
-        write_effects: ::testkit::local_only::ProviderCounter<::testkit::local_only::Write>,
+        business_write_effects:
+            ::testkit::local_only::ProviderCounter<::testkit::local_only::BusinessWrite>,
         fail_on: Option<IdentityLocalOnlyRead>,
         forbidden_write_on: Option<IdentityLocalOnlyRead>,
     }
@@ -3427,7 +3428,7 @@ mod tests {
                 ),
                 resource_attributes: crate::internal::mem::InMemResourceAttributeRepo::new(),
                 calls: Arc::new(std::sync::Mutex::new(Vec::new())),
-                write_effects: ::testkit::local_only::ProviderCounter::write(),
+                business_write_effects: ::testkit::local_only::ProviderCounter::business_write(),
                 fail_on: None,
                 forbidden_write_on: None,
             }
@@ -3526,7 +3527,7 @@ mod tests {
         ) -> Result<Option<Role>, IdentityError> {
             self.record(IdentityLocalOnlyRead::RoleFind, scope);
             if self.forbidden_write_on == Some(IdentityLocalOnlyRead::RoleFind) {
-                self.write_effects.record();
+                self.business_write_effects.record();
             }
             if self.fail_on == Some(IdentityLocalOnlyRead::RoleFind) {
                 return Err(Self::read_failure());
@@ -3541,7 +3542,7 @@ mod tests {
         ) -> Result<crate::ports::RoleListResult, IdentityError> {
             self.record(IdentityLocalOnlyRead::RoleList, scope);
             if self.forbidden_write_on == Some(IdentityLocalOnlyRead::RoleList) {
-                self.write_effects.record();
+                self.business_write_effects.record();
             }
             if self.fail_on == Some(IdentityLocalOnlyRead::RoleList) {
                 return Err(Self::read_failure());
@@ -3558,7 +3559,7 @@ mod tests {
         ) -> Result<Option<Policy>, IdentityError> {
             self.record(IdentityLocalOnlyRead::PolicyFind, scope);
             if self.forbidden_write_on == Some(IdentityLocalOnlyRead::PolicyFind) {
-                self.write_effects.record();
+                self.business_write_effects.record();
             }
             if self.fail_on == Some(IdentityLocalOnlyRead::PolicyFind) {
                 return Err(Self::read_failure());
@@ -3573,7 +3574,7 @@ mod tests {
         ) -> Result<crate::ports::PolicyListResult, IdentityError> {
             self.record(IdentityLocalOnlyRead::PolicyList, scope);
             if self.forbidden_write_on == Some(IdentityLocalOnlyRead::PolicyList) {
-                self.write_effects.record();
+                self.business_write_effects.record();
             }
             if self.fail_on == Some(IdentityLocalOnlyRead::PolicyList) {
                 return Err(Self::read_failure());
@@ -3589,7 +3590,7 @@ mod tests {
         ) -> Result<Vec<Policy>, IdentityError> {
             self.record(IdentityLocalOnlyRead::PolicyEffective, tenant_scope);
             if self.forbidden_write_on == Some(IdentityLocalOnlyRead::PolicyEffective) {
-                self.write_effects.record();
+                self.business_write_effects.record();
             }
             if self.fail_on == Some(IdentityLocalOnlyRead::PolicyEffective) {
                 return Err(Self::read_failure());
@@ -3606,7 +3607,7 @@ mod tests {
         ) -> Result<Vec<crate::domain::RoleBinding>, IdentityError> {
             self.record(IdentityLocalOnlyRead::BindingList, scope);
             if self.forbidden_write_on == Some(IdentityLocalOnlyRead::BindingList) {
-                self.write_effects.record();
+                self.business_write_effects.record();
             }
             if self.fail_on == Some(IdentityLocalOnlyRead::BindingList) {
                 return Err(Self::read_failure());
@@ -3626,7 +3627,7 @@ mod tests {
         ) -> Result<ResourceAttributeResolution, IdentityError> {
             self.record(IdentityLocalOnlyRead::ResourceAttributes, tenant_scope);
             if self.forbidden_write_on == Some(IdentityLocalOnlyRead::ResourceAttributes) {
-                self.write_effects.record();
+                self.business_write_effects.record();
             }
             if self.fail_on == Some(IdentityLocalOnlyRead::ResourceAttributes) {
                 return Err(Self::read_failure());
@@ -6706,7 +6707,7 @@ mod tests {
             Some(tid(CANON_TENANT)),
         )));
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
-            repo_probe.write_effects.handle(),
+            repo_probe.business_write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
                 &proof,
             ),
@@ -6776,7 +6777,7 @@ mod tests {
             Some(tid(CANON_TENANT)),
         )));
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
-            repo_probe.write_effects.handle(),
+            repo_probe.business_write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
                 &proof,
             ),
@@ -6843,7 +6844,7 @@ mod tests {
             Some(tid(CANON_TENANT)),
         )));
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
-            repo_probe.write_effects.handle(),
+            repo_probe.business_write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
                 &proof,
             ),
@@ -6916,7 +6917,7 @@ mod tests {
             .path();
         let first = ::testkit::local_only::assert_local_only(
             ::testkit::local_only::LocalOnlyObservers::new(
-                repo_probe.write_effects.handle(),
+                repo_probe.business_write_effects.handle(),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
             ),
@@ -6936,7 +6937,7 @@ mod tests {
         let cursor = first.next_cursor.expect("first page cursor");
         let second = ::testkit::local_only::assert_local_only(
             ::testkit::local_only::LocalOnlyObservers::new(
-                repo_probe.write_effects.handle(),
+                repo_probe.business_write_effects.handle(),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
             ),
@@ -6955,7 +6956,7 @@ mod tests {
         for bad_query in ["limit=0", "limit=501", "cursor=not-base64"] {
             ::testkit::local_only::assert_local_only(
                 ::testkit::local_only::LocalOnlyObservers::new(
-                    repo_probe.write_effects.handle(),
+                    repo_probe.business_write_effects.handle(),
                     ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
                     ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
                 ),
@@ -6992,7 +6993,7 @@ mod tests {
             .path();
         let first = ::testkit::local_only::assert_local_only(
             ::testkit::local_only::LocalOnlyObservers::new(
-                repo_probe.write_effects.handle(),
+                repo_probe.business_write_effects.handle(),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
             ),
@@ -7012,7 +7013,7 @@ mod tests {
         let cursor = first["nextCursor"].as_str().expect("first page cursor");
         let second = ::testkit::local_only::assert_local_only(
             ::testkit::local_only::LocalOnlyObservers::new(
-                repo_probe.write_effects.handle(),
+                repo_probe.business_write_effects.handle(),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
             ),
@@ -7031,7 +7032,7 @@ mod tests {
         for bad_query in ["limit=0", "limit=501", "cursor=not-base64"] {
             ::testkit::local_only::assert_local_only(
                 ::testkit::local_only::LocalOnlyObservers::new(
-                    repo_probe.write_effects.handle(),
+                    repo_probe.business_write_effects.handle(),
                     ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
                     ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
                 ),
@@ -7073,7 +7074,7 @@ mod tests {
         ] {
             ::testkit::local_only::assert_local_only(
                 ::testkit::local_only::LocalOnlyObservers::new(
-                    repo_probe.write_effects.handle(),
+                    repo_probe.business_write_effects.handle(),
                     ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&proof),
                     ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&proof),
                 ),
@@ -7103,7 +7104,7 @@ mod tests {
             );
         ::testkit::local_only::assert_local_only(
             ::testkit::local_only::LocalOnlyObservers::new(
-                missing_auth_probe.write_effects.handle(),
+                missing_auth_probe.business_write_effects.handle(),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&missing_auth_proof),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&missing_auth_proof),
             ),
@@ -7139,7 +7140,7 @@ mod tests {
             )));
         ::testkit::local_only::assert_local_only(
             ::testkit::local_only::LocalOnlyObservers::new(
-                missing_permission_probe.write_effects.handle(),
+                missing_permission_probe.business_write_effects.handle(),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&missing_permission_proof),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&missing_permission_proof),
             ),
@@ -7187,7 +7188,7 @@ mod tests {
             )));
         ::testkit::local_only::assert_local_only(
             ::testkit::local_only::LocalOnlyObservers::new(
-                cross_tenant_probe.write_effects.handle(),
+                cross_tenant_probe.business_write_effects.handle(),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&cross_tenant_proof),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&cross_tenant_proof),
             ),
@@ -7241,7 +7242,7 @@ mod tests {
         )));
         let response = ::testkit::local_only::assert_local_only(
             ::testkit::local_only::LocalOnlyObservers::new(
-                roles_probe.write_effects.handle(),
+                roles_probe.business_write_effects.handle(),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&roles_proof),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&roles_proof),
             ),
@@ -7267,7 +7268,7 @@ mod tests {
         )));
         let response = ::testkit::local_only::assert_local_only(
             ::testkit::local_only::LocalOnlyObservers::new(
-                get_probe.write_effects.handle(),
+                get_probe.business_write_effects.handle(),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&get_proof),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&get_proof),
             ),
@@ -7293,7 +7294,7 @@ mod tests {
         )));
         let response = ::testkit::local_only::assert_local_only(
             ::testkit::local_only::LocalOnlyObservers::new(
-                list_probe.write_effects.handle(),
+                list_probe.business_write_effects.handle(),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(&list_proof),
                 ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(&list_proof),
             ),
@@ -7309,7 +7310,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn finalized_identity_synthetic_writes_trip_each_local_only_guard() {
+    async fn finalized_identity_synthetic_business_writes_trip_each_local_only_guard() {
         #[derive(Clone, Copy)]
         enum RouteCase {
             RolesList,
@@ -7347,7 +7348,7 @@ mod tests {
                         RecordingAuthAuditSink::default(),
                     );
                     let observers = ::testkit::local_only::LocalOnlyObservers::new(
-                        probe.write_effects.handle(),
+                        probe.business_write_effects.handle(),
                         ::testkit::local_only::StaticExclusion::<
                             ::testkit::local_only::Outbox,
                         >::from_governed(&proof),
@@ -7376,7 +7377,7 @@ mod tests {
                         RecordingAuthAuditSink::default(),
                     );
                     let observers = ::testkit::local_only::LocalOnlyObservers::new(
-                        probe.write_effects.handle(),
+                        probe.business_write_effects.handle(),
                         ::testkit::local_only::StaticExclusion::<
                             ::testkit::local_only::Outbox,
                         >::from_governed(&proof),
@@ -7405,7 +7406,7 @@ mod tests {
                         RecordingAuthAuditSink::default(),
                     );
                     let observers = ::testkit::local_only::LocalOnlyObservers::new(
-                        probe.write_effects.handle(),
+                        probe.business_write_effects.handle(),
                         ::testkit::local_only::StaticExclusion::<
                             ::testkit::local_only::Outbox,
                         >::from_governed(&proof),
@@ -7432,7 +7433,7 @@ mod tests {
                     let (authorizer, proof) =
                         self::mounted_identity_resource_authorizer(probe.test_repo());
                     let observers = ::testkit::local_only::LocalOnlyObservers::new(
-                        probe.write_effects.handle(),
+                        probe.business_write_effects.handle(),
                         ::testkit::local_only::StaticExclusion::<
                             ::testkit::local_only::Outbox,
                         >::from_governed(&proof),
@@ -7459,7 +7460,7 @@ mod tests {
             assert_eq!(
                 error,
                 ::testkit::local_only::LocalOnlyConformanceError::ForbiddenEffects {
-                    writes: 1,
+                    business_writes: 1,
                     outbox: 0,
                     publishes: 0,
                 },
@@ -7552,7 +7553,7 @@ mod tests {
             Some(tid(CANON_TENANT)),
         )));
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
-            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Write>::from_governed(
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::BusinessWrite>::from_governed(
                 &proof,
             ),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(

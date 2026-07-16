@@ -3,10 +3,10 @@ use std::sync::Arc;
 use audit::ports::{
     AuditPortEffect, DynAuditAdminRepo, DynAuditReadRepo, DynAuditWriteRepo,
 };
-use diport::{CrossTenantPrivilege, LocalPrivilege, ReadEffect, WriteEffect};
+use diport::{CrossTenantPrivilege, LocalPrivilege, ReadEffect, BusinessWriteEffect};
 
 fn assert_read<T: AuditPortEffect<Effect = ReadEffect, Privilege = LocalPrivilege> + ?Sized>() {}
-fn assert_write<T: AuditPortEffect<Effect = WriteEffect, Privilege = LocalPrivilege> + ?Sized>() {}
+fn assert_write<T: AuditPortEffect<Effect = BusinessWriteEffect, Privilege = LocalPrivilege> + ?Sized>() {}
 fn assert_cross_tenant_read<
     T: AuditPortEffect<Effect = ReadEffect, Privilege = CrossTenantPrivilege> + ?Sized,
 >() {

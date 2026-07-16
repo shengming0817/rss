@@ -25,7 +25,7 @@ fn assert_json_coverage(json: &serde_json::Value) {
 }
 
 fn assert_json_rows(json: &serde_json::Value) {
-    assert_eq!(json["schemaVersion"], 3);
+    assert_eq!(json["schemaVersion"], 4);
     assert_eq!(json["status"], "passed");
     assert_eq!(json["activeHttpContractCount"], 20);
     assert_eq!(json["contracts"].as_array().map(Vec::len), Some(20));

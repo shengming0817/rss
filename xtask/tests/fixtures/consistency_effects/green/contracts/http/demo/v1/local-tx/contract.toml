@@ -7,4 +7,4 @@ consistencyLevel = "LocalTx"
 lifecycle = "active"
 
 [effectProfile]
-effects = ["write", "transaction"]
+effects = ["business-write", "business-transaction"]

@@ -223,8 +223,8 @@ pub enum EffectKind {
     Read,
     Auth,
     Projection,
-    Write,
-    Transaction,
+    BusinessWrite,
+    BusinessTransaction,
     Outbox,
     Publish,
     Workflow,
@@ -241,8 +241,8 @@ impl EffectKind {
             Self::Read => "read",
             Self::Auth => "auth",
             Self::Projection => "projection",
-            Self::Write => "write",
-            Self::Transaction => "transaction",
+            Self::BusinessWrite => "business-write",
+            Self::BusinessTransaction => "business-transaction",
             Self::Outbox => "outbox",
             Self::Publish => "publish",
             Self::Workflow => "workflow",
@@ -1081,12 +1081,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_effect_profile() -> anyhow::Result<()> {
+    fn effect_profile_accepts_business_effect_tokens_and_rejects_legacy_tokens()
+    -> anyhow::Result<()> {
         let toml = format!(
             r#"{VALID_HTTP}
 
             [effectProfile]
-            effects = ["auth", "read", "projection", "write", "transaction", "outbox", "publish", "workflow", "saga", "reconcile", "worker", "cross-tenant-audit"]
+            effects = ["auth", "read", "projection", "business-write", "business-transaction", "outbox", "publish", "workflow", "saga", "reconcile", "worker", "cross-tenant-audit"]
         "#
         );
         let m = ContractManifest::from_toml_str(&toml)?;
@@ -1099,8 +1100,8 @@ mod tests {
                 EffectKind::Auth,
                 EffectKind::Read,
                 EffectKind::Projection,
-                EffectKind::Write,
-                EffectKind::Transaction,
+                EffectKind::BusinessWrite,
+                EffectKind::BusinessTransaction,
                 EffectKind::Outbox,
                 EffectKind::Publish,
                 EffectKind::Workflow,
@@ -1121,8 +1122,8 @@ mod tests {
                 "auth",
                 "read",
                 "projection",
-                "write",
-                "transaction",
+                "business-write",
+                "business-transaction",
                 "outbox",
                 "publish",
                 "workflow",
@@ -1132,6 +1133,16 @@ mod tests {
                 "cross-tenant-audit",
             ]
         );
+        for (current, legacy) in [
+            ("business-write", "write"),
+            ("business-transaction", "transaction"),
+        ] {
+            let legacy_manifest = toml.replace(current, legacy);
+            assert!(
+                ContractManifest::from_toml_str(&legacy_manifest).is_err(),
+                "legacy effect token `{legacy}` must be rejected"
+            );
+        }
         Ok(())
     }
 

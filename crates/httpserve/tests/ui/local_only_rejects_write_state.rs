@@ -4,7 +4,7 @@ use axum::extract::State;
 struct WriteState;
 
 impl httpserve::ClassifiedRouteState for WriteState {
-    type Effect = diport::WriteEffect;
+    type Effect = diport::BusinessWriteEffect;
     type Privilege = diport::LocalPrivilege;
 }
 

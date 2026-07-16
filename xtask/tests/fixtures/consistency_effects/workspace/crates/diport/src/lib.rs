@@ -3,13 +3,13 @@ pub trait PortPrivilegeClass {}
 pub trait SubscribeInitializer: Send + Sync {}
 pub struct DynSubscriber<'a>(core::marker::PhantomData<&'a ()>);
 pub struct ReadEffect;
-pub struct WriteEffect;
+pub struct BusinessWriteEffect;
 pub struct OutboxEffect;
 pub struct WorkflowEffect;
 pub struct LocalPrivilege;
 pub struct CrossTenantPrivilege;
 impl PortEffectClass for ReadEffect {}
-impl PortEffectClass for WriteEffect {}
+impl PortEffectClass for BusinessWriteEffect {}
 impl PortEffectClass for OutboxEffect {}
 impl PortEffectClass for WorkflowEffect {}
 impl PortPrivilegeClass for LocalPrivilege {}

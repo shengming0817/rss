@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "status": "failed",
   "activeHttpContractCount": 2,
   "localOnlyReceiptCoverage": {
@@ -80,7 +80,7 @@
       "consistencyLevel": "LocalTx",
       "effects": [
         "auth",
-        "transaction"
+        "business-transaction"
       ],
       "route": {
         "mountStatus": "missing",

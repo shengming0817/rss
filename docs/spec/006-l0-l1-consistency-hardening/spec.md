@@ -26,7 +26,7 @@ As a reviewer, I can determine from generated evidence and machine checks whethe
 
 **Acceptance scenarios**:
 
-1. A strict LocalOnly handler that captures write, transaction, outbox, publish, workflow, saga, reconcile, worker, or cross-tenant audit effects is rejected.
+1. A strict LocalOnly handler that captures `business-write`, `business-transaction`, outbox, publish, workflow, saga, reconcile, worker, or cross-tenant audit effects is rejected; provider-owned read-path transactions remain allowed.
 2. Cross-tenant reads require `CrossTenantPrivilege`, which makes the capability ineligible for LocalOnly; classifying it as an ordinary read cannot bypass that boundary.
 3. Generated effect and route evidence is checked against source manifests, so hand-written documentation cannot attest compliance.
 
@@ -84,7 +84,7 @@ As a contributor, I can select fast, full, or live validation without confusing 
 ### Key Entities
 
 - **Typed gate catalog**: Closed `GateId` metadata registry that derives verification plans.
-- **LocalOnly effect proof**: Generated and checked evidence that a local route has no forbidden effects and respects tenant/privilege boundaries.
+- **LocalOnly effect proof**: Generated and checked evidence that a local route has no forbidden business effects and respects tenant/privilege boundaries; business persistence/outbox/publish are zero, provider reads may execute transactions, and operational state remains governed by its dedicated controls.
 - **LocalTx closure**: Contract-to-route-to-test-to-adapter evidence required for every active LocalTx contract.
 - **Scoped LocalTx journey**: Additional board/fixture/runner/lane closure for status-board admitted contracts only.
 - **Consistency report**: Diagnostic evidence artifact whose JSON `status` carries its verdict.

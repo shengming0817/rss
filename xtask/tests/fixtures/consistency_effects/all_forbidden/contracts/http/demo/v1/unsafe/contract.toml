@@ -9,4 +9,4 @@ path = "/api/v1/demo/unsafe"
 method = "GET"
 
 [effectProfile]
-effects = ["write", "transaction", "outbox", "publish", "workflow", "saga", "reconcile", "worker", "cross-tenant-audit", "write"]
+effects = ["business-write", "business-transaction", "outbox", "publish", "workflow", "saga", "reconcile", "worker", "cross-tenant-audit", "business-write"]

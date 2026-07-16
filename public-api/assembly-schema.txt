@@ -66,6 +66,29 @@ impl core::marker::Unpin for assembly_schema::AssemblyListenerKind
 impl core::marker::UnsafeUnpin for assembly_schema::AssemblyListenerKind
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyListenerKind
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyListenerKind
+pub enum assembly_schema::AssemblyLockErrorStage
+pub assembly_schema::AssemblyLockErrorStage::ContractCatalog
+pub assembly_schema::AssemblyLockErrorStage::FileSystem
+pub assembly_schema::AssemblyLockErrorStage::GeneratedUniverse
+pub assembly_schema::AssemblyLockErrorStage::LockFile
+pub assembly_schema::AssemblyLockErrorStage::Manifest
+pub assembly_schema::AssemblyLockErrorStage::Serialization
+impl core::clone::Clone for assembly_schema::AssemblyLockErrorStage
+pub fn assembly_schema::AssemblyLockErrorStage::clone(&self) -> assembly_schema::AssemblyLockErrorStage
+impl core::cmp::Eq for assembly_schema::AssemblyLockErrorStage
+impl core::cmp::PartialEq for assembly_schema::AssemblyLockErrorStage
+pub fn assembly_schema::AssemblyLockErrorStage::eq(&self, &assembly_schema::AssemblyLockErrorStage) -> bool
+impl core::fmt::Debug for assembly_schema::AssemblyLockErrorStage
+pub fn assembly_schema::AssemblyLockErrorStage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::AssemblyLockErrorStage
+impl core::marker::StructuralPartialEq for assembly_schema::AssemblyLockErrorStage
+impl core::marker::Freeze for assembly_schema::AssemblyLockErrorStage
+impl core::marker::Send for assembly_schema::AssemblyLockErrorStage
+impl core::marker::Sync for assembly_schema::AssemblyLockErrorStage
+impl core::marker::Unpin for assembly_schema::AssemblyLockErrorStage
+impl core::marker::UnsafeUnpin for assembly_schema::AssemblyLockErrorStage
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyLockErrorStage
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyLockErrorStage
 pub enum assembly_schema::AssemblyProfile
 pub assembly_schema::AssemblyProfile::Demo
 pub assembly_schema::AssemblyProfile::Production
@@ -393,6 +416,8 @@ impl core::marker::UnsafeUnpin for assembly_schema::AssemblyLock
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyLock
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyLock
 pub struct assembly_schema::AssemblyLockError(_)
+impl assembly_schema::AssemblyLockError
+pub const fn assembly_schema::AssemblyLockError::stage(&self) -> assembly_schema::AssemblyLockErrorStage
 impl core::error::Error for assembly_schema::AssemblyLockError
 pub fn assembly_schema::AssemblyLockError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Debug for assembly_schema::AssemblyLockError

@@ -55,14 +55,14 @@ feature 模块是域 crate 内的子单元；`adapters/`、`contracts/`、`bins/
 - 一个 bounded context = 一个**域 crate**；feature 模块是域 crate 内的子单元，不是独立 crate。
 - 契约元数据落 `contract.toml`（id / kind / consistencyLevel / owner / endpoints / auth …），
   `contractUsages` ⇒ 域 crate 的 `Cargo.toml [dependencies]`（声明即约束，编译期强制）。
-- 跨域只通过 **contract** 通信（crate 依赖图 + deny.toml 强制）；纯计算库 crate（L0）可被同一 assembly 内兄弟 crate 直接 path 依赖。
+- 跨域只通过 **contract** 通信（crate 依赖图 + deny.toml 强制）；仅 validation/newtype 等纯计算库 crate 可被同一 assembly 内兄弟 crate 直接 path 依赖。该例外不因 route 标为 LocalOnly 而扩张到 provider I/O。
 - 域内类型用 `pub(crate)` 封装；跨域 wire 类型只经 contract（`contracts/` 声明 → `generated/`）。
 
 ### 一致性等级（L0-L4）
 
 | 级别 | 含义 | 场景 |
 |------|------|------|
-| L0 LocalOnly | 域 crate 内本地纯计算 | 纯计算、校验 |
+| L0 LocalOnly | 无业务持久化、outbox、publish；允许 provider-owned read-path transaction | 读取、校验、投影、鉴权 |
 | L1 LocalTx | 单域 crate 本地事务 | session 创建、审计写入 |
 | L2 OutboxFact | 本地事务 + outbox 发布 | session.created 事件、config.entry-upserted 事件 |
 | L3 WorkflowEventual | 跨域最终一致 | 查询投影、CQRS、Saga |

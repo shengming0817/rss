@@ -9,4 +9,5 @@ fn port_effect_markers() {
     tests.compile_fail("tests/ui/port_effect_external_impl_fail.rs");
     tests.compile_fail("tests/ui/port_effect_wrong_class_fail.rs");
     tests.compile_fail("tests/ui/port_effect_arc_box_bypass_fail.rs");
+    tests.compile_fail("tests/ui/port_effect_legacy_write_fail.rs");
 }

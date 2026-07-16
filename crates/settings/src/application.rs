@@ -1464,14 +1464,15 @@ mod tests {
     #[derive(Clone)]
     struct SettingsConfigGetRepoProbe {
         state: Arc<Mutex<ConfigGetProbeState>>,
-        write_effects: ::testkit::local_only::ProviderCounter<::testkit::local_only::Write>,
+        business_write_effects:
+            ::testkit::local_only::ProviderCounter<::testkit::local_only::BusinessWrite>,
     }
 
     impl Default for SettingsConfigGetRepoProbe {
         fn default() -> Self {
             Self {
                 state: Arc::new(Mutex::new(ConfigGetProbeState::default())),
-                write_effects: ::testkit::local_only::ProviderCounter::write(),
+                business_write_effects: ::testkit::local_only::ProviderCounter::business_write(),
             }
         }
     }
@@ -1595,7 +1596,7 @@ mod tests {
                 )
             };
             if synthetic_write == ConfigGetSyntheticWrite::FindVersion {
-                self.write_effects.record();
+                self.business_write_effects.record();
             }
             if failure == ConfigGetProbeFailure::FindVersion {
                 return Err(ConfigRepoError::Storage(Box::new(std::io::Error::other(
@@ -1624,7 +1625,7 @@ mod tests {
                 )
             };
             if synthetic_write == ConfigGetSyntheticWrite::Head {
-                self.write_effects.record();
+                self.business_write_effects.record();
             }
             if failure == ConfigGetProbeFailure::Head {
                 return Err(ConfigRepoError::Storage(Box::new(std::io::Error::other(
@@ -2019,7 +2020,7 @@ mod tests {
             Some(tenant()),
         )));
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
-            probe.write_effects.handle(),
+            probe.business_write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
                 &proof,
             ),
@@ -2108,7 +2109,7 @@ mod tests {
             with_config_get_auth(router, kind, tenant_id)
         });
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
-            probe.write_effects.handle(),
+            probe.business_write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
                 &proof,
             ),
@@ -2138,7 +2139,7 @@ mod tests {
     ) -> Result<::testkit::ContractResponse, ::testkit::local_only::LocalOnlyConformanceError> {
         let router = with_config_get_auth(router.clone(), PrincipalKind::Admin, Some(tenant_id));
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
-            probe.write_effects.handle(),
+            probe.business_write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
                 proof,
             ),
@@ -2521,7 +2522,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn config_get_local_only_cache_paths_trip_provider_write_probe() {
+    async fn config_get_local_only_cache_paths_trip_provider_business_write_probe() {
         #[derive(Clone, Copy, Debug)]
         enum Scenario {
             CacheHit,
@@ -2569,7 +2570,7 @@ mod tests {
                     result,
                     Err(
                         ::testkit::local_only::LocalOnlyConformanceError::ForbiddenEffects {
-                            writes: 1,
+                            business_writes: 1,
                             outbox: 0,
                             publishes: 0,
                         }
@@ -2601,7 +2602,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_get_local_only_synthetic_provider_writes_trip_exact_probe() {
+    async fn config_get_local_only_synthetic_provider_business_writes_trip_exact_probe() {
         for injection in [
             ConfigGetSyntheticWrite::Head,
             ConfigGetSyntheticWrite::FindVersion,
@@ -2621,7 +2622,7 @@ mod tests {
                 result,
                 Err(
                     ::testkit::local_only::LocalOnlyConformanceError::ForbiddenEffects {
-                        writes: 1,
+                        business_writes: 1,
                         outbox: 0,
                         publishes: 0,
                     }
@@ -3086,8 +3087,8 @@ mod tests {
                 vocab::HttpConsistencyLevel::OutboxFact,
                 &[
                     vocab::HttpEffectKind::Auth,
-                    vocab::HttpEffectKind::Write,
-                    vocab::HttpEffectKind::Transaction,
+                    vocab::HttpEffectKind::BusinessWrite,
+                    vocab::HttpEffectKind::BusinessTransaction,
                     vocab::HttpEffectKind::Outbox,
                     vocab::HttpEffectKind::Publish,
                 ][..],
@@ -3101,8 +3102,8 @@ mod tests {
                 vocab::HttpConsistencyLevel::LocalTx,
                 &[
                     vocab::HttpEffectKind::Auth,
-                    vocab::HttpEffectKind::Write,
-                    vocab::HttpEffectKind::Transaction,
+                    vocab::HttpEffectKind::BusinessWrite,
+                    vocab::HttpEffectKind::BusinessTransaction,
                 ][..],
             ),
             (
@@ -3123,8 +3124,8 @@ mod tests {
                 vocab::HttpConsistencyLevel::OutboxFact,
                 &[
                     vocab::HttpEffectKind::Auth,
-                    vocab::HttpEffectKind::Write,
-                    vocab::HttpEffectKind::Transaction,
+                    vocab::HttpEffectKind::BusinessWrite,
+                    vocab::HttpEffectKind::BusinessTransaction,
                     vocab::HttpEffectKind::Outbox,
                     vocab::HttpEffectKind::Publish,
                 ][..],
@@ -3138,8 +3139,8 @@ mod tests {
                 vocab::HttpConsistencyLevel::OutboxFact,
                 &[
                     vocab::HttpEffectKind::Auth,
-                    vocab::HttpEffectKind::Write,
-                    vocab::HttpEffectKind::Transaction,
+                    vocab::HttpEffectKind::BusinessWrite,
+                    vocab::HttpEffectKind::BusinessTransaction,
                     vocab::HttpEffectKind::Outbox,
                     vocab::HttpEffectKind::Publish,
                 ][..],

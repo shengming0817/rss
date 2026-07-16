@@ -7,6 +7,8 @@
 //! carry-over 全集，以闭值状态、审计 PBI registry、仓内证据与 proof registry 守住唯一现行迁移索引。
 //!
 //! INVARIANT: OUTBOX-DELIVERY-SEMANTICS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_false_outbox_delivery_guarantees", anti_vacuity = "tests::scan_content_accepts_correct_and_scoped_delivery_semantics" }—— Outbox relay transport 只承诺 at-least-once；规则/spec、crash-matrix 说明与生产 rustdoc 不得把 CAS/lease fencing 误写成 broker at-most-once/exactly-once。负向扫描与 canonical 三 facet 完整性共同防止错误语义被 AI 复制或整段删除。
+//!
+//! INVARIANT: LOCALONLY-BUSINESS-EFFECT-SEMANTICS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_legacy_localonly_effect_semantics", anti_vacuity = "tests::scan_content_accepts_current_localonly_business_effect_semantics" }—— active 文档与生产 rustdoc 只使用 business-qualified 写/事务词汇；LocalOnly 证明业务持久化/outbox/publish 为零，但允许 provider-owned read-path transaction。负向语义扫描、显式 carrier 清单与 canonical facets 共同阻断旧 token/API 和“完全无事务/等同纯函数”的回流或整段删除。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -25,6 +27,17 @@ const CONTENT_ROOTS: &[(&str, &str)] = &[
 ];
 const SEMANTIC_DOC_FILES: &[&str] =
     &["docs/architecture/202607111257-1673-l2-outbox-crash-matrix.md"];
+const LOCALONLY_SEMANTIC_DOC_FILES: &[&str] = &[
+    "docs/rules/consistency-l0.md",
+    "docs/runbooks/202607141556-1771-local-only-proof.md",
+    "contracts/README.md",
+    "CLAUDE.md",
+    ".claude/rules/rss/rust-standards.md",
+    "docs/rules/architecture.md",
+    "docs/rules/audit-ledger.md",
+    "docs/spec/consistency-runtime/spec.md",
+    "docs/spec/006-l0-l1-consistency-hardening/spec.md",
+];
 const RUSTDOC_ROOTS: &[&str] = &[
     "crates",
     "adapters",
@@ -48,6 +61,38 @@ const OUTBOX_CANONICAL_FACETS: &[(&str, &str)] = &[
     (
         "consumer-transactional-dedupe",
         "tenant-scoped `Inbox` / `ConsumerTx` 收口重复数据库副作用",
+    ),
+];
+const LOCALONLY_CANONICAL_FILE: &str = "docs/rules/consistency-l0.md";
+const LOCALONLY_CANONICAL_HEADING: &str = "LocalOnly business effect 语义";
+const LOCALONLY_CANONICAL_FACETS: &[(&str, &str)] = &[
+    (
+        "qualified-vocabulary-and-admission",
+        "HTTP effect vocabulary 仅使用 `business-write` / `business-transaction`；LocalOnly 准入仍只允许 `auth` / `read` / `projection`",
+    ),
+    (
+        "typed-marker-and-observer",
+        "port marker 是 `BusinessWriteEffect`，runtime observer 使用 `BusinessWrite` / `business_writes`",
+    ),
+    (
+        "zero-business-effects",
+        "LocalOnly 证明的是业务持久化、outbox、publish 为零",
+    ),
+    (
+        "provider-owned-read-transaction",
+        "LocalOnly 允许 provider-owned read-path transaction",
+    ),
+    (
+        "postgres-non-guarantees",
+        "`tenant_scoped_read*` 不承诺 PostgreSQL `READ ONLY` 或稳定 snapshot",
+    ),
+    (
+        "operational-exclusions",
+        "correctness cache、metrics/trace、auth security audit 不计入 business effect",
+    ),
+    (
+        "durable-cross-tenant-audit",
+        "跨租户 durable audit 仍声明 `business-write + business-transaction + cross-tenant-audit` 并保持 LocalTx",
     ),
 ];
 const CARRYOVER_DOC_FILE: &str =
@@ -757,6 +802,7 @@ pub(crate) enum Rule {
     OutboxTenantScope,
     SagaTenantScope,
     OutboxDeliverySemantics,
+    LocalOnlyBusinessEffects,
     MigrationCarryover,
 }
 
@@ -778,22 +824,37 @@ impl GovernanceCheck for DocContracts {
 
     fn check(&self) -> Result<(String, Vec<Finding>)> {
         let root = crate::workspace_root()?;
-        let (scanned, carryover_summary, findings) = scan_docs(&root)?;
+        let (scanned, localonly_carriers, rustdoc_files, carryover_summary, findings) =
+            scan_docs(&root)?;
         if scanned < 3 {
             bail!(
                 "doc-contracts: 仅扫到 {scanned} 个文档文件，疑似 docs/rules 或 docs/spec 结构异常"
             );
         }
         Ok((
-            format!(
-                "{scanned} docs/source 文件扫描，command/outbox tenant-aware 片段无漂移；carry-over {carryover_summary}"
+            format_doc_contracts_summary(
+                scanned,
+                localonly_carriers,
+                rustdoc_files,
+                &carryover_summary,
             ),
             findings,
         ))
     }
 }
 
-fn scan_docs(root: &Path) -> Result<(usize, String, Vec<Finding>)> {
+fn format_doc_contracts_summary(
+    scanned: usize,
+    localonly_carriers: usize,
+    rustdoc_files: usize,
+    carryover_summary: &str,
+) -> String {
+    format!(
+        "{scanned} docs/source 文件扫描，command/outbox tenant-aware 片段无漂移；LocalOnly semantic carriers={localonly_carriers}、canonical 完整性与 production rustdoc files={rustdoc_files} 已检查；carry-over {carryover_summary}"
+    )
+}
+
+fn scan_docs(root: &Path) -> Result<(usize, usize, usize, String, Vec<Finding>)> {
     let mut files = Vec::new();
     for (dir, extension) in CONTENT_ROOTS {
         let mut found = content_files(&root.join(dir), extension)?;
@@ -809,7 +870,16 @@ fn scan_docs(root: &Path) -> Result<(usize, String, Vec<Finding>)> {
         }
         files.push(path);
     }
+    let mut localonly_files = Vec::new();
+    for rel in LOCALONLY_SEMANTIC_DOC_FILES {
+        let path = root.join(rel);
+        if !path.is_file() {
+            bail!("doc-contracts: LocalOnly semantic 文档 {rel} 缺失，fail-closed");
+        }
+        localonly_files.push(path);
+    }
     files.sort();
+    files.dedup();
 
     let mut findings = Vec::new();
     for path in &files {
@@ -820,6 +890,20 @@ fn scan_docs(root: &Path) -> Result<(usize, String, Vec<Finding>)> {
         if rel == Path::new(OUTBOX_CANONICAL_FILE) {
             findings.extend(scan_outbox_canonical_semantics(&content));
         }
+        if rel == Path::new(LOCALONLY_CANONICAL_FILE) {
+            findings.extend(scan_localonly_canonical_semantics(&content));
+        }
+    }
+    let mut extra_localonly_files = 0;
+    for path in &localonly_files {
+        if files.binary_search(path).is_ok() {
+            continue;
+        }
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("doc-contracts: 读 {} 失败: {e}", path.display()))?;
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        findings.extend(scan_localonly_business_effect_semantics(rel, &content));
+        extra_localonly_files += 1;
     }
     let mut rustdoc_files = Vec::new();
     for dir in RUSTDOC_ROOTS {
@@ -832,11 +916,14 @@ fn scan_docs(root: &Path) -> Result<(usize, String, Vec<Finding>)> {
             .map_err(|e| anyhow::anyhow!("doc-contracts: 读 {} 失败: {e}", path.display()))?;
         let rel = path.strip_prefix(root).unwrap_or(path);
         findings.extend(scan_false_outbox_delivery_guarantees(rel, &content));
+        findings.extend(scan_localonly_business_effect_semantics(rel, &content));
     }
     let (carryover_summary, carryover_findings) = scan_carryover(root)?;
     findings.extend(carryover_findings);
     Ok((
-        files.len() + rustdoc_files.len() + 1,
+        files.len() + extra_localonly_files + rustdoc_files.len() + 1,
+        localonly_files.len(),
+        rustdoc_files.len(),
         carryover_summary,
         findings,
     ))
@@ -2742,7 +2829,168 @@ fn scan_content(path: &Path, content: &str) -> Vec<Finding> {
         }
     }
     findings.extend(scan_false_outbox_delivery_guarantees(path, content));
+    findings.extend(scan_localonly_business_effect_semantics(path, content));
     findings
+}
+
+fn scan_localonly_business_effect_semantics(path: &Path, content: &str) -> Vec<Finding> {
+    let prose_lines = if path.extension().is_some_and(|extension| extension == "rs") {
+        rustdoc_prose_lines(content)
+    } else {
+        content
+            .lines()
+            .enumerate()
+            .map(|(index, line)| (index + 1, line.to_owned()))
+            .collect()
+    };
+    let mut findings = prose_lines
+        .into_iter()
+        .filter(|(_, line)| contains_legacy_localonly_effect_term(path, line))
+        .map(|(line, _)| {
+            finding(
+                Rule::LocalOnlyBusinessEffects,
+                format!("{}:{line}", path.display()),
+                "现行语义必须使用 business-write/business-transaction、BusinessWriteEffect、BusinessWrite/business_writes；旧 token、marker、observer API 已删除",
+            )
+        })
+        .collect::<Vec<_>>();
+
+    findings.extend(
+        semantic_clauses(path, content)
+            .into_iter()
+            .filter(|clause| contains_false_localonly_transaction_claim(&clause.text))
+            .map(|clause| {
+                finding(
+                    Rule::LocalOnlyBusinessEffects,
+                    format!("{}:{}", path.display(), clause.line),
+                    "LocalOnly 只排除业务持久化/outbox/publish；允许 provider-owned read-path transaction，不得写成完全无事务或等同纯函数",
+                )
+            }),
+    );
+    findings.sort_by(|left, right| left.subject.cmp(&right.subject));
+    findings.dedup_by(|left, right| left.subject == right.subject && left.rule == right.rule);
+    findings
+}
+
+fn contains_legacy_localonly_effect_term(path: &Path, line: &str) -> bool {
+    const LEGACY_API_PATTERNS: &[&str] = &[
+        "diport::WriteEffect",
+        "testkit::local_only::Write",
+        "ProviderCounter::write",
+        "ForbiddenEffects.writes",
+    ];
+    if LEGACY_API_PATTERNS
+        .iter()
+        .any(|pattern| line.contains(pattern))
+    {
+        return true;
+    }
+    if [
+        "WriteEffect",
+        "EffectKind::Write",
+        "EffectKind::Transaction",
+        "HttpEffectKind::Write",
+        "HttpEffectKind::Transaction",
+    ]
+    .iter()
+    .any(|symbol| contains_symbol(line, symbol))
+        || (is_localonly_observer_carrier(path, line) && line.contains("`Write`"))
+    {
+        return true;
+    }
+    if is_localonly_observer_carrier(path, line) && contains_legacy_writes_field(line) {
+        return true;
+    }
+
+    let lower = line.to_lowercase();
+    let mentions_effect_carrier = is_localonly_observer_carrier(path, line)
+        || lower.contains("localonly")
+        || lower.contains("local only")
+        || lower.contains("effect")
+        || lower.contains("contract");
+    mentions_effect_carrier
+        && (line.contains("`write`")
+            || line.contains("`transaction`")
+            || lower.contains("\"write\"")
+            || lower.contains("\"transaction\""))
+}
+
+fn contains_symbol(line: &str, symbol: &str) -> bool {
+    line.match_indices(symbol).any(|(offset, matched)| {
+        let left = offset == 0
+            || line[..offset]
+                .chars()
+                .next_back()
+                .is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_');
+        let right = line[offset + matched.len()..]
+            .chars()
+            .next()
+            .is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_');
+        left && right
+    })
+}
+
+fn is_localonly_observer_carrier(path: &Path, line: &str) -> bool {
+    let display = path.to_string_lossy().to_lowercase();
+    line.to_lowercase().contains("localonly")
+        || display.contains("local_only")
+        || display.contains("local-only")
+        || LOCALONLY_SEMANTIC_DOC_FILES
+            .iter()
+            .any(|carrier| path == Path::new(carrier))
+}
+
+fn contains_legacy_writes_field(line: &str) -> bool {
+    line.match_indices("writes").any(|(offset, word)| {
+        let boundary = offset == 0
+            || line[..offset]
+                .chars()
+                .next_back()
+                .is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_');
+        boundary && line[offset + word.len()..].trim_start().starts_with('=')
+    })
+}
+
+fn contains_false_localonly_transaction_claim(text: &str) -> bool {
+    let normalized = normalize_semantic_text(text);
+    let compact = normalized
+        .chars()
+        .filter(|character| !character.is_whitespace() && !"`*_".contains(*character))
+        .collect::<String>();
+    let has_localonly_context = compact.contains("localonly")
+        || compact.contains("l0localonly")
+        || is_standalone_l0_definition(&normalized);
+    has_localonly_context
+        && [
+            "完全没有事务",
+            "没有事务",
+            "无事务",
+            "不启动本地事务边界",
+            "等同纯函数",
+            "是纯函数",
+            "本地纯计算",
+            "pure local",
+            "purelocal",
+            "pure function",
+            "purefunction",
+            "no local transaction boundary",
+            "nolocaltransactionboundary",
+        ]
+        .iter()
+        .any(|claim| normalized.contains(claim) && !guarantee_is_denied(&normalized, claim))
+}
+
+fn is_standalone_l0_definition(text: &str) -> bool {
+    let trimmed = text.trim_start_matches(|character: char| {
+        character.is_whitespace() || "`*_#>-".contains(character)
+    });
+    let Some(after_l0) = trimmed.strip_prefix("l0") else {
+        return false;
+    };
+    after_l0
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_ascii_alphanumeric() && character != '_')
 }
 
 fn scan_outbox_canonical_semantics(content: &str) -> Vec<Finding> {
@@ -2767,12 +3015,36 @@ fn scan_outbox_canonical_semantics(content: &str) -> Vec<Finding> {
         .collect()
 }
 
+fn scan_localonly_canonical_semantics(content: &str) -> Vec<Finding> {
+    let visible = visible_canonical_section(content, LOCALONLY_CANONICAL_HEADING);
+    LOCALONLY_CANONICAL_FACETS
+        .iter()
+        .filter(|(_, needle)| {
+            let normalized_needle = normalize_semantic_text(needle);
+            !visible.lines().any(|line| {
+                let normalized_line = normalize_semantic_text(line);
+                normalized_line.contains(&normalized_needle)
+                    && !guarantee_is_denied(&normalized_line, &normalized_needle)
+            })
+        })
+        .map(|(facet, needle)| {
+            finding(
+                Rule::LocalOnlyBusinessEffects,
+                LOCALONLY_CANONICAL_FILE,
+                format!("canonical LocalOnly business effect 语义缺少 {facet} facet: {needle:?}"),
+            )
+        })
+        .collect()
+}
+
 fn visible_outbox_canonical_section(content: &str) -> String {
-    const HEADING: &str = "Outbox relay 投递语义";
+    visible_canonical_section(content, "Outbox relay 投递语义")
+}
+
+fn visible_canonical_section(content: &str, heading: &str) -> String {
     let mut in_section = false;
     let mut section_level = 0;
-    let mut in_fence = false;
-    let mut fence_marker = None;
+    let mut open_fence = None;
     let mut in_comment = false;
     let mut visible = String::new();
 
@@ -2784,9 +3056,15 @@ fn visible_outbox_canonical_section(content: &str) -> String {
                 .take_while(|character| *character == '#')
                 .count();
             let title = trimmed[level..].trim_start();
-            in_section = level > 0 && title.starts_with(HEADING);
+            in_section = level > 0 && title.starts_with(heading);
             if in_section {
                 section_level = level;
+            }
+            continue;
+        }
+        if let Some(fence) = open_fence {
+            if is_fence_closer(raw, fence) {
+                open_fence = None;
             }
             continue;
         }
@@ -2797,20 +3075,12 @@ fn visible_outbox_canonical_section(content: &str) -> String {
         if heading_level > 0 && heading_level <= section_level {
             break;
         }
-        if let Some(marker) = fence_open_marker(trimmed) {
-            if in_fence {
-                if fence_marker == Some(marker) {
-                    in_fence = false;
-                    fence_marker = None;
-                }
-            } else {
-                in_fence = true;
-                fence_marker = Some(marker);
-            }
+        if let Some(fence) = fence_opening(raw) {
+            open_fence = Some(fence);
             continue;
         }
         // CommonMark indented code + any open fence stay invisible (unclosed = fail-closed).
-        if in_fence || trimmed.starts_with('>') || is_indented_code_line(raw) {
+        if trimmed.starts_with('>') || is_indented_code_line(raw) {
             continue;
         }
         let mut remainder = raw;
@@ -2840,14 +3110,59 @@ fn visible_outbox_canonical_section(content: &str) -> String {
     visible
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fence {
+    marker: char,
+    run_len: usize,
+}
+
 fn fence_open_marker(trimmed: &str) -> Option<char> {
-    let mut chars = trimmed.chars();
-    let marker = chars.next()?;
+    fence_opening(trimmed).map(|fence| fence.marker)
+}
+
+fn fence_opening(raw: &str) -> Option<Fence> {
+    let candidate = commonmark_fence_candidate(raw)?;
+    let (fence, remainder) = fence_run(candidate)?;
+    if fence.run_len < 3 || (fence.marker == '`' && remainder.contains('`')) {
+        return None;
+    }
+    Some(fence)
+}
+
+fn is_fence_closer(raw: &str, opening: Fence) -> bool {
+    let Some(candidate) = commonmark_fence_candidate(raw) else {
+        return false;
+    };
+    let Some((closing, remainder)) = fence_run(candidate) else {
+        return false;
+    };
+    closing.marker == opening.marker
+        && closing.run_len >= opening.run_len
+        && remainder.chars().all(char::is_whitespace)
+}
+
+fn commonmark_fence_candidate(raw: &str) -> Option<&str> {
+    let indent = raw
+        .chars()
+        .take_while(|character| *character == ' ')
+        .count();
+    if indent > 3 || raw.starts_with('\t') {
+        return None;
+    }
+    Some(&raw[indent..])
+}
+
+fn fence_run(candidate: &str) -> Option<(Fence, &str)> {
+    let marker = candidate.chars().next()?;
     if marker != '`' && marker != '~' {
         return None;
     }
-    let run = 1 + chars.take_while(|character| *character == marker).count();
-    (run >= 3).then_some(marker)
+    let run_len = candidate
+        .chars()
+        .take_while(|character| *character == marker)
+        .count();
+    let byte_len = marker.len_utf8() * run_len;
+    Some((Fence { marker, run_len }, &candidate[byte_len..]))
 }
 
 fn is_indented_code_line(raw: &str) -> bool {
@@ -3271,12 +3586,14 @@ fn guarantee_is_denied(text: &str, guarantee: &str) -> bool {
             "不得声称",
             "并非",
             "不是",
+            "不等同",
             "不再声明",
             "无运行时保证",
             "does not guarantee",
             "doesn't guarantee",
             "is not",
             "isn't",
+            "not equivalent to",
             "no guarantee",
             "must not claim",
             "cannot guarantee",
@@ -4154,6 +4471,158 @@ fn never_ignored_test() {}
     fn scan_content_accepts_current_event_topology_and_entry_symbols() {
         let src = "generated::event::EVENTS\nSPEC.subscriptions()\nEventEntry\nStoredOutboxEntry";
         assert!(scan_content(Path::new("docs/rules/eventbus.md"), src).is_empty());
+    }
+
+    #[test]
+    fn scan_content_rejects_legacy_localonly_effect_semantics() {
+        let cases = [
+            "LocalOnly contract 仍声明 `write`。",
+            "LocalOnly contract 仍声明 `transaction`。",
+            "- `write`",
+            "- `transaction`",
+            "LocalOnly port 使用 `WriteEffect` marker。",
+            "LocalOnly runtime observer 使用 `testkit::local_only::Write`。",
+            "LocalOnly generated 仍暴露 `EffectKind::Write` / `HttpEffectKind::Write`。",
+            "LocalOnly generated 仍暴露 `EffectKind::Transaction` / `HttpEffectKind::Transaction`。",
+            "LocalOnly runtime observer marker 仍是 `Write`。",
+            "LocalOnly provider 调用 `ProviderCounter::write()` 并断言 `writes=0`。",
+            "LocalOnly 完全没有事务。",
+            "LocalOnly 等同纯函数。",
+        ];
+
+        for source in cases {
+            let findings = scan_content(Path::new("docs/rules/consistency-l0.md"), source);
+            assert_eq!(findings.len(), 1, "source should fail: {source:?}");
+            assert_eq!(findings[0].rule, Rule::LocalOnlyBusinessEffects);
+        }
+    }
+
+    #[test]
+    fn legacy_effect_token_scan_does_not_reject_generic_localtx_write_api() {
+        let source = "`SecretRepo::save`、adapter factory、generic/legacy `write`、手制 observation 或手工 boundary。";
+        assert!(scan_content(Path::new("docs/rules/localtx.md"), source).is_empty());
+    }
+
+    #[test]
+    fn scan_content_accepts_current_localonly_business_effect_semantics() {
+        let source = "\
+HTTP effect vocabulary 仅使用 `business-write` / `business-transaction`；LocalOnly 准入仍只允许 `auth` / `read` / `projection`，port 使用 `BusinessWriteEffect` 分类危险能力。
+observer 使用 `BusinessWrite` / `business_writes`，证明业务持久化、outbox、publish 为零。
+LocalOnly 允许 provider-owned read-path transaction；`tenant_scoped_read*` 不承诺 PostgreSQL `READ ONLY` 或稳定 snapshot。
+correctness cache、metrics/trace、auth security audit 不计入 business effect。
+跨租户 durable audit 仍是 `business-write + business-transaction + cross-tenant-audit` 且保持 LocalTx。
+";
+
+        assert!(scan_content(Path::new("docs/rules/consistency-l0.md"), source).is_empty());
+    }
+
+    #[test]
+    fn scan_content_accepts_denied_legacy_localonly_claims() {
+        for source in [
+            "LocalOnly 并非完全没有事务。",
+            "LocalOnly 不是无事务。",
+            "LocalOnly 不等同纯函数。",
+        ] {
+            assert!(
+                scan_content(Path::new("docs/rules/consistency-l0.md"), source).is_empty(),
+                "explicit denial must not be treated as an affirmative legacy claim: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_content_rejects_standalone_l0_pure_definition() {
+        let findings = scan_content(
+            Path::new("crates/contractreg/src/domain/mod.rs"),
+            "/// L0 本地纯计算。",
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::LocalOnlyBusinessEffects);
+        assert!(
+            scan_content(
+                Path::new("crates/contractreg/src/domain/mod.rs"),
+                "/// L0 只约束 business persistence/outbox/publish。",
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn localonly_canonical_semantics_requires_every_visible_facet() {
+        let canonical = format!(
+            "## {LOCALONLY_CANONICAL_HEADING}\n{}\n",
+            LOCALONLY_CANONICAL_FACETS
+                .iter()
+                .map(|(_, needle)| *needle)
+                .collect::<Vec<_>>()
+                .join("。\n")
+        );
+        assert!(scan_localonly_canonical_semantics(&canonical).is_empty());
+
+        for (_, required) in LOCALONLY_CANONICAL_FACETS {
+            let incomplete = canonical.replacen(required, "", 1);
+            assert_eq!(
+                scan_localonly_canonical_semantics(&incomplete).len(),
+                1,
+                "missing facet should fail: {required:?}"
+            );
+        }
+
+        let hidden = format!(
+            "## {LOCALONLY_CANONICAL_HEADING}\n<!--\n{}\n-->\n",
+            LOCALONLY_CANONICAL_FACETS
+                .iter()
+                .map(|(_, needle)| *needle)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert_eq!(
+            scan_localonly_canonical_semantics(&hidden).len(),
+            LOCALONLY_CANONICAL_FACETS.len()
+        );
+
+        let denied = canonical.replacen(
+            LOCALONLY_CANONICAL_FACETS[0].1,
+            &format!("不再声明 {}", LOCALONLY_CANONICAL_FACETS[0].1),
+            1,
+        );
+        assert_eq!(scan_localonly_canonical_semantics(&denied).len(), 1);
+    }
+
+    #[test]
+    fn canonical_fences_require_matching_marker_length_and_bare_closer() {
+        let facets = LOCALONLY_CANONICAL_FACETS
+            .iter()
+            .map(|(_, needle)| *needle)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for false_closer in ["```", "````text", "~~~"] {
+            let hidden = format!(
+                "## {LOCALONLY_CANONICAL_HEADING}\n````text\ndecoy\n{false_closer}\n{facets}\n````\n"
+            );
+            assert_eq!(
+                scan_localonly_canonical_semantics(&hidden).len(),
+                LOCALONLY_CANONICAL_FACETS.len(),
+                "false closer must not expose fenced facets: {false_closer:?}"
+            );
+        }
+
+        let hidden_with_longer_closer =
+            format!("## {LOCALONLY_CANONICAL_HEADING}\n```text\n{facets}\n````\n");
+        assert_eq!(
+            scan_localonly_canonical_semantics(&hidden_with_longer_closer).len(),
+            LOCALONLY_CANONICAL_FACETS.len()
+        );
+    }
+
+    #[test]
+    fn doc_contracts_summary_names_localonly_semantic_canonical_and_rustdoc_checks() {
+        let summary = format_doc_contracts_summary(321, 9, 87, "ledger ok");
+        assert!(summary.contains("321 docs/source 文件扫描"));
+        assert!(summary.contains("LocalOnly semantic carriers=9"));
+        assert!(summary.contains("canonical 完整性"));
+        assert!(summary.contains("production rustdoc files=87"));
+        assert!(summary.ends_with("carry-over ledger ok"));
     }
 
     #[test]

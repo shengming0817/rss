@@ -32,4 +32,4 @@ retry = "bounded-transient"
 commitUnknown = "not-retryable"
 
 [effectProfile]
-effects = ["auth", "write", "transaction"]
+effects = ["auth", "business-write", "business-transaction"]

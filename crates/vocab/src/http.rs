@@ -131,7 +131,7 @@ impl_non_local_consistency!(LocalTx, OutboxFact, WorkflowEventual, DeviceLatent)
 /// Runtime consistency semantics declared by an HTTP contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpConsistencyLevel {
-    /// Read-only or otherwise local work without a transaction boundary.
+    /// Local computation and read paths without a writable business unit of work.
     LocalOnly,
     /// One tenant-scoped local transaction.
     LocalTx,
@@ -153,10 +153,10 @@ pub enum HttpEffectKind {
     Auth,
     /// Project fields according to authorization obligations.
     Projection,
-    /// Write state.
-    Write,
-    /// Open a local transaction boundary.
-    Transaction,
+    /// Persist business state.
+    BusinessWrite,
+    /// Open a writable business transaction or unit-of-work boundary.
+    BusinessTransaction,
     /// Append a durable outbox fact.
     Outbox,
     /// Publish a message.

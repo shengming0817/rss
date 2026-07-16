@@ -12,9 +12,9 @@ cargo xtask consistency report --format md > consistency-posture.md
 CLI 不提供默认格式、alias 或 `--output`。缺失、重复、未知 `--format` 以及任何尾参都会失败。相同源码状态
 连续运行应字节一致，可直接作为 PR/CI artifact 比较；仓库不提交真实 workspace 报告。
 
-JSON 只输出 `schemaVersion = 3`，不保留旧 alias 或双 schema；receipt coverage 固定
+JSON 只输出 `schemaVersion = 4`，不保留旧 alias 或双 schema；receipt coverage 固定
 `localOnlyReceiptCoverage` 和每条 contract 的显式 `sourceReceiptRegistration`
-（`evidence=sourceRegistered`、`enforcement=failClosed`、`status=registered|missing|notApplicable`）；missing 产生 `missingLocalOnlyReceipt` finding 并令顶层 `status=failed`，但 sourceRegistered 不表示本次执行 route test；旧消费者必须直接升级解析 v3。
+（`evidence=sourceRegistered`、`enforcement=failClosed`、`status=registered|missing|notApplicable`）；missing 产生 `missingLocalOnlyReceipt` finding 并令顶层 `status=failed`，但 sourceRegistered 不表示本次执行 route test；旧消费者必须直接升级解析 v4。
 
 ## 检查规则
 

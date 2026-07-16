@@ -528,7 +528,7 @@ fn rule_consistency_capability_one(
                     m,
                     label,
                     "local-only-http",
-                    "LocalOnly 当前只允许 kind=http 契约声明本地纯能力",
+                    "LocalOnly 当前只允许 kind=http；LocalOnly 约束业务持久化/outbox/publish，不排除 provider-owned read-path transaction",
                 ));
             }
             out.extend(unexpected_capabilities(m, label, &[]));
@@ -5316,6 +5316,21 @@ mod tests {
         let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
         assert_r22_detail(&findings, "seed.local-event", "local-only-http");
         assert_r22_detail(&findings, "seed.local-event", "capability-scope");
+        for required in [
+            "LocalOnly 当前只允许 kind=http",
+            "业务持久化/outbox/publish",
+            "不排除 provider-owned read-path transaction",
+        ] {
+            assert!(
+                findings.iter().any(|finding| {
+                    finding
+                        .detail
+                        .contains("missing capability=local-only-http")
+                        && finding.detail.contains(required)
+                }),
+                "R22 LocalOnly diagnostic missing {required:?}: {findings:?}"
+            );
+        }
     }
 
     #[test]
@@ -5346,8 +5361,11 @@ mod tests {
         );
         manifest.id = "settings.secret-publish".to_string();
         manifest.capabilities = repo_atomic_cas_local_tx_capability();
-        manifest.effect_profile =
-            effect_profile(&[EffectKind::Auth, EffectKind::Write, EffectKind::Transaction]);
+        manifest.effect_profile = effect_profile(&[
+            EffectKind::Auth,
+            EffectKind::BusinessWrite,
+            EffectKind::BusinessTransaction,
+        ]);
 
         assert!(
             rule_consistency_capability(&[discovered(manifest, PathBuf::from("/settings"))])
@@ -5705,8 +5723,11 @@ mod tests {
         );
         local_tx.id = "identity.logout".to_string();
         local_tx.capabilities = local_tx_capability();
-        local_tx.effect_profile =
-            effect_profile(&[EffectKind::Auth, EffectKind::Write, EffectKind::Transaction]);
+        local_tx.effect_profile = effect_profile(&[
+            EffectKind::Auth,
+            EffectKind::BusinessWrite,
+            EffectKind::BusinessTransaction,
+        ]);
 
         let mut fact = manifest(
             ContractKind::Event,
@@ -5730,8 +5751,8 @@ mod tests {
         producer.capabilities = outbox_producer_capability(&["identity.session-created"]);
         producer.effect_profile = effect_profile(&[
             EffectKind::Auth,
-            EffectKind::Write,
-            EffectKind::Transaction,
+            EffectKind::BusinessWrite,
+            EffectKind::BusinessTransaction,
             EffectKind::Outbox,
             EffectKind::Publish,
         ]);

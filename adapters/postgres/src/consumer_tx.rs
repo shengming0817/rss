@@ -45,7 +45,7 @@ mod audit_consumer_tx_effect_sealed {
 ///
 /// The trait is sealed by the postgres adapter, so downstream composition roots can erase a
 /// [`PgAuditConsumerTx`] into an event handler only after the compiler has proved that the typed
-/// capability carries [`diport::WriteEffect`].
+/// capability carries [`diport::BusinessWriteEffect`].
 #[cfg(feature = "domain-audit")]
 pub trait AuditConsumerTxEffect: audit_consumer_tx_effect_sealed::Sealed {
     /// Strongest effect exposed by the durable consumer transaction.
@@ -55,7 +55,7 @@ pub trait AuditConsumerTxEffect: audit_consumer_tx_effect_sealed::Sealed {
     #[must_use]
     fn into_handler(self) -> ConsumerTxHandlerFn
     where
-        Self: Sized + AuditConsumerTxEffect<Effect = diport::WriteEffect>;
+        Self: Sized + AuditConsumerTxEffect<Effect = diport::BusinessWriteEffect>;
 }
 
 #[cfg(feature = "domain-audit")]
@@ -176,7 +176,7 @@ impl<M> AuditConsumerTxEffect for PgAuditConsumerTx<M>
 where
     M: MacVerifier + Send + Sync + 'static,
 {
-    type Effect = diport::WriteEffect;
+    type Effect = diport::BusinessWriteEffect;
 
     fn into_handler(self) -> ConsumerTxHandlerFn {
         self.erase_into_handler()

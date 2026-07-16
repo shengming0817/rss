@@ -94,7 +94,7 @@ pub(crate) enum ContractStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum ConsistencyLevel {
-    /// L0 本地纯计算。
+    /// L0 LocalOnly：排除业务持久化/outbox/publish，不排除 provider-owned read-path transaction。
     L0,
     /// L1 单域本地事务。
     L1,

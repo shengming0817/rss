@@ -33,7 +33,7 @@ macro_rules! define_effect_classes {
 define_effect_classes!(
     ReadEffect,
     AuthEffect,
-    WriteEffect,
+    BusinessWriteEffect,
     OutboxEffect,
     WorkflowEffect,
 );
@@ -112,14 +112,14 @@ classify_ports! {
     dyn DynSecretResolver => AuthEffect;
     dyn DynSigner => AuthEffect;
 
-    dyn DynAcker => WriteEffect;
-    dyn DynAuditSink => WriteEffect;
-    dyn DynCasStore => WriteEffect;
-    dyn DynOwnerCheckpointStore => WriteEffect;
-    dyn DynDeadLetterStore => WriteEffect;
-    dyn DynFencedWriter => WriteEffect;
-    dyn DynObjectStore => WriteEffect;
-    dyn DynRevocationStore => WriteEffect;
+    dyn DynAcker => BusinessWriteEffect;
+    dyn DynAuditSink => BusinessWriteEffect;
+    dyn DynCasStore => BusinessWriteEffect;
+    dyn DynOwnerCheckpointStore => BusinessWriteEffect;
+    dyn DynDeadLetterStore => BusinessWriteEffect;
+    dyn DynFencedWriter => BusinessWriteEffect;
+    dyn DynObjectStore => BusinessWriteEffect;
+    dyn DynRevocationStore => BusinessWriteEffect;
 
     dyn DynOutboxEmitter => OutboxEffect;
     dyn DynPublisher => OutboxEffect;

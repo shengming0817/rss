@@ -16,7 +16,7 @@ fn main() {
         vocab::HttpRouteAuth::ServiceOwned,
         None,
         false,
-        vocab::HttpEffectProfile::new(&[vocab::HttpEffectKind::Transaction]),
+        vocab::HttpEffectProfile::new(&[vocab::HttpEffectKind::BusinessTransaction]),
     );
     let _ = httpserve::GeneratedEndpoint::<(), vocab::http::LocalOnly>::new(
         binding,

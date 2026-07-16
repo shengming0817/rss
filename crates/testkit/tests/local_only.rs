@@ -3,8 +3,8 @@
 
 mod local_only {
     use testkit::local_only::{
-        LocalOnlyConformanceError, LocalOnlyObservers, Outbox, ProviderCounter, Publish, Write,
-        assert_local_only_with_receipt,
+        BusinessWrite, LocalOnlyConformanceError, LocalOnlyObservers, Outbox, ProviderCounter,
+        Publish, assert_local_only_with_receipt,
     };
 
     struct TestRouteMarker;
@@ -12,25 +12,29 @@ mod local_only {
     const CONTRACT_ID: &str = "testkit.local-only-fixture";
 
     fn observers(
-        writes: &ProviderCounter<Write>,
+        business_writes: &ProviderCounter<BusinessWrite>,
         outbox: &ProviderCounter<Outbox>,
         publishes: &ProviderCounter<Publish>,
     ) -> LocalOnlyObservers {
-        LocalOnlyObservers::new(writes.handle(), outbox.handle(), publishes.handle())
+        LocalOnlyObservers::new(
+            business_writes.handle(),
+            outbox.handle(),
+            publishes.handle(),
+        )
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn clean_operation_preserves_output_with_non_zero_baseline() {
-        let writes = ProviderCounter::write();
+        let business_writes = ProviderCounter::business_write();
         let outbox = ProviderCounter::outbox();
         let publishes = ProviderCounter::publish();
-        writes.add(7);
+        business_writes.add(7);
         outbox.add(11);
         publishes.add(13);
         let (output, receipt) = assert_local_only_with_receipt::<TestRouteMarker, _, _, _>(
             CONTRACT_ID,
-            observers(&writes, &outbox, &publishes),
+            observers(&business_writes, &outbox, &publishes),
             || async { "operation-output" },
         )
         .await
@@ -46,7 +50,7 @@ mod local_only {
         let result = assert_local_only_with_receipt::<TestRouteMarker, _, _, _>(
             CONTRACT_ID,
             observers(
-                &ProviderCounter::write(),
+                &ProviderCounter::business_write(),
                 &ProviderCounter::outbox(),
                 &ProviderCounter::publish(),
             ),
@@ -62,26 +66,26 @@ mod local_only {
     #[tokio::test]
     async fn every_forbidden_effect_has_a_synthetic_red() {
         for (effect, expected) in [
-            ("write", (2, 0, 0)),
+            ("business-write", (2, 0, 0)),
             ("outbox", (0, 3, 0)),
             ("publish", (0, 0, 4)),
         ] {
-            let writes = ProviderCounter::write();
+            let business_writes = ProviderCounter::business_write();
             let outbox = ProviderCounter::outbox();
             let publishes = ProviderCounter::publish();
-            writes.add(10);
+            business_writes.add(10);
             outbox.add(20);
             publishes.add(30);
-            let operation_writes = writes.clone();
+            let operation_business_writes = business_writes.clone();
             let operation_outbox = outbox.clone();
             let operation_publishes = publishes.clone();
 
             let result = assert_local_only_with_receipt::<TestRouteMarker, _, _, _>(
                 CONTRACT_ID,
-                observers(&writes, &outbox, &publishes),
+                observers(&business_writes, &outbox, &publishes),
                 move || async move {
                     match effect {
-                        "write" => operation_writes.add(2),
+                        "business-write" => operation_business_writes.add(2),
                         "outbox" => operation_outbox.add(3),
                         "publish" => operation_publishes.add(4),
                         _ => unreachable!("table contains only known effects"),
@@ -94,10 +98,10 @@ mod local_only {
                 matches!(
                     result,
                     Err(LocalOnlyConformanceError::ForbiddenEffects {
-                        writes,
+                        business_writes,
                         outbox,
                         publishes,
-                    }) if (writes, outbox, publishes) == expected
+                    }) if (business_writes, outbox, publishes) == expected
                 ),
                 "synthetic red for {effect}: forbidden effects cannot produce a receipt"
             );
@@ -105,25 +109,52 @@ mod local_only {
     }
 
     #[tokio::test]
+    async fn business_write_dimension_is_explicit_and_closed() {
+        use testkit::local_only::BusinessWrite;
+
+        let business_writes = ProviderCounter::<BusinessWrite>::business_write();
+        let operation_business_writes = business_writes.clone();
+        let result = assert_local_only_with_receipt::<TestRouteMarker, _, _, _>(
+            CONTRACT_ID,
+            LocalOnlyObservers::new(
+                business_writes.handle(),
+                ProviderCounter::outbox().handle(),
+                ProviderCounter::publish().handle(),
+            ),
+            move || async move { operation_business_writes.record() },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(LocalOnlyConformanceError::ForbiddenEffects {
+                business_writes: 1,
+                outbox: 0,
+                publishes: 0,
+            })
+        ));
+    }
+
+    #[tokio::test]
     async fn observer_regression_cannot_produce_a_receipt() {
-        let writes = ProviderCounter::write();
-        writes.add(u64::MAX);
-        let operation_writes = writes.clone();
+        let business_writes = ProviderCounter::business_write();
+        business_writes.add(u64::MAX);
+        let operation_business_writes = business_writes.clone();
         let result = assert_local_only_with_receipt::<TestRouteMarker, _, _, _>(
             CONTRACT_ID,
             observers(
-                &writes,
+                &business_writes,
                 &ProviderCounter::outbox(),
                 &ProviderCounter::publish(),
             ),
-            move || async move { operation_writes.record() },
+            move || async move { operation_business_writes.record() },
         )
         .await;
 
         assert!(matches!(
             result,
             Err(LocalOnlyConformanceError::ObservationRegressed {
-                effect: "write",
+                effect: "business-write",
                 before: u64::MAX,
                 after: 0,
             })
@@ -132,16 +163,16 @@ mod local_only {
 
     #[tokio::test]
     async fn operation_construction_effect_cannot_produce_a_receipt() {
-        let writes = ProviderCounter::write();
+        let business_writes = ProviderCounter::business_write();
         let outbox = ProviderCounter::outbox();
         let publishes = ProviderCounter::publish();
-        let operation_writes = writes.clone();
+        let operation_business_writes = business_writes.clone();
 
         let result = assert_local_only_with_receipt::<TestRouteMarker, _, _, _>(
             CONTRACT_ID,
-            observers(&writes, &outbox, &publishes),
+            observers(&business_writes, &outbox, &publishes),
             move || {
-                operation_writes.record();
+                operation_business_writes.record();
                 async {}
             },
         )
@@ -150,7 +181,7 @@ mod local_only {
         assert!(matches!(
             result,
             Err(LocalOnlyConformanceError::ForbiddenEffects {
-                writes: 1,
+                business_writes: 1,
                 outbox: 0,
                 publishes: 0,
             })

@@ -1,6 +1,7 @@
 //! Runtime conformance assertion for `LocalOnly` routes.
 //!
-//! An exercised operation must not increase its caller-supplied write, outbox, or publish probes.
+//! An exercised operation must not increase its caller-supplied business-write, outbox, or
+//! publish probes.
 //! This observes only the runtime seams supplied by the caller and explicit typed-route exclusions;
 //! it is not a process-wide filesystem, network, or global-state sandbox.
 //! Run `cargo test -p testkit local_only` for the focused local check.
@@ -16,8 +17,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Write-effect observer dimension.
-pub enum Write {}
+/// Business-write effect observer dimension.
+pub enum BusinessWrite {}
 
 /// Outbox-effect observer dimension.
 pub enum Outbox {}
@@ -55,9 +56,9 @@ impl<D> Clone for ProviderCounterHandle<D> {
     }
 }
 
-impl ProviderCounter<Write> {
-    /// Creates a provider-owned write counter.
-    pub fn write() -> Self {
+impl ProviderCounter<BusinessWrite> {
+    /// Creates a provider-owned business-write counter.
+    pub fn business_write() -> Self {
         Self::new()
     }
 }
@@ -164,13 +165,13 @@ impl<D> From<StaticExclusion<D>> for EffectEvidence<D> {
 /// The constructor requires all dimensions together so a conformance call cannot silently omit an
 /// effect. Each runtime probe returns a monotonically non-decreasing cumulative count.
 pub struct LocalOnlyObservers {
-    write: EffectEvidence<Write>,
+    business_write: EffectEvidence<BusinessWrite>,
     outbox: EffectEvidence<Outbox>,
     publish: EffectEvidence<Publish>,
 }
 
 impl LocalOnlyObservers {
-    /// Creates a complete observer set for write, outbox, and publish effects.
+    /// Creates a complete observer set for business-write, outbox, and publish effects.
     ///
     /// Dimension-specific probe types make swapped arguments fail to compile.
     ///
@@ -178,7 +179,7 @@ impl LocalOnlyObservers {
     /// use testkit::local_only::{LocalOnlyObservers, ProviderCounter};
     /// LocalOnlyObservers::new(
     ///     ProviderCounter::outbox().handle(),
-    ///     ProviderCounter::write().handle(),
+    ///     ProviderCounter::business_write().handle(),
     ///     ProviderCounter::publish().handle(),
     /// );
     /// ```
@@ -188,12 +189,12 @@ impl LocalOnlyObservers {
     /// let _ = RuntimeProbe::write(|| 0);
     /// ```
     pub fn new(
-        write: impl Into<EffectEvidence<Write>>,
+        business_write: impl Into<EffectEvidence<BusinessWrite>>,
         outbox: impl Into<EffectEvidence<Outbox>>,
         publish: impl Into<EffectEvidence<Publish>>,
     ) -> Self {
         Self {
-            write: write.into(),
+            business_write: business_write.into(),
             outbox: outbox.into(),
             publish: publish.into(),
         }
@@ -201,7 +202,7 @@ impl LocalOnlyObservers {
 
     fn sample(&mut self) -> LocalOnlySideEffects {
         LocalOnlySideEffects {
-            writes: self.write.sample(),
+            business_writes: self.business_write.sample(),
             outbox: self.outbox.sample(),
             publishes: self.publish.sample(),
         }
@@ -212,15 +213,15 @@ impl LocalOnlyObservers {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[must_use]
 pub struct LocalOnlySideEffects {
-    writes: u64,
+    business_writes: u64,
     outbox: u64,
     publishes: u64,
 }
 
 impl LocalOnlySideEffects {
-    /// Returns the observed write count.
-    pub const fn writes(self) -> u64 {
-        self.writes
+    /// Returns the observed business-write count.
+    pub const fn business_writes(self) -> u64 {
+        self.business_writes
     }
 
     /// Returns the observed outbox count.
@@ -283,11 +284,11 @@ pub enum LocalOnlyConformanceError {
     },
     /// At least one forbidden effect increased while the operation ran.
     #[error(
-        "LocalOnly operation produced forbidden effects: writes={writes}, outbox={outbox}, publishes={publishes}"
+        "LocalOnly operation produced forbidden effects: business_writes={business_writes}, outbox={outbox}, publishes={publishes}"
     )]
     ForbiddenEffects {
-        /// Write count increase.
-        writes: u64,
+        /// Business-write count increase.
+        business_writes: u64,
         /// Outbox count increase.
         outbox: u64,
         /// Publish count increase.
@@ -295,7 +296,7 @@ pub enum LocalOnlyConformanceError {
     },
 }
 
-/// Runs an operation and rejects observable write, outbox, or publish effects.
+/// Runs an operation and rejects observable business-write, outbox, or publish effects.
 ///
 /// The baseline is sampled before `operation` is invoked, so both future construction and its
 /// complete await lifecycle are inside the observation window. When conformance holds, the
@@ -342,16 +343,20 @@ fn validate_observations(
     before: LocalOnlySideEffects,
     after: LocalOnlySideEffects,
 ) -> Result<(), LocalOnlyConformanceError> {
-    let writes = checked_delta("write", before.writes(), after.writes())?;
+    let business_writes = checked_delta(
+        "business-write",
+        before.business_writes(),
+        after.business_writes(),
+    )?;
     let outbox = checked_delta("outbox", before.outbox(), after.outbox())?;
     let publishes = checked_delta("publish", before.publishes(), after.publishes())?;
 
-    if writes == 0 && outbox == 0 && publishes == 0 {
+    if business_writes == 0 && outbox == 0 && publishes == 0 {
         return Ok(());
     }
 
     Err(LocalOnlyConformanceError::ForbiddenEffects {
-        writes,
+        business_writes,
         outbox,
         publishes,
     })
@@ -374,23 +379,27 @@ fn checked_delta(
 #[cfg(test)]
 mod tests {
     use super::{
-        LocalOnlyConformanceError, LocalOnlyObservers, Outbox, ProviderCounter, Publish, Write,
-        assert_local_only,
+        BusinessWrite, LocalOnlyConformanceError, LocalOnlyObservers, Outbox, ProviderCounter,
+        Publish, assert_local_only,
     };
 
     fn observers(
-        writes: &ProviderCounter<Write>,
+        business_writes: &ProviderCounter<BusinessWrite>,
         outbox: &ProviderCounter<Outbox>,
         publishes: &ProviderCounter<Publish>,
     ) -> LocalOnlyObservers {
-        LocalOnlyObservers::new(writes.handle(), outbox.handle(), publishes.handle())
+        LocalOnlyObservers::new(
+            business_writes.handle(),
+            outbox.handle(),
+            publishes.handle(),
+        )
     }
 
     #[tokio::test]
     async fn operation_failure_is_returned_after_post_check() {
         let clean = assert_local_only(
             observers(
-                &ProviderCounter::write(),
+                &ProviderCounter::business_write(),
                 &ProviderCounter::outbox(),
                 &ProviderCounter::publish(),
             ),
@@ -399,16 +408,16 @@ mod tests {
         .await;
         assert_eq!(clean, Ok(Err("domain failure")));
 
-        let writes = ProviderCounter::write();
-        let operation_writes = writes.clone();
+        let business_writes = ProviderCounter::business_write();
+        let operation_business_writes = business_writes.clone();
         let violated = assert_local_only(
             observers(
-                &writes,
+                &business_writes,
                 &ProviderCounter::outbox(),
                 &ProviderCounter::publish(),
             ),
             move || async move {
-                operation_writes.record();
+                operation_business_writes.record();
                 Result::<(), &str>::Err("must not appear in conformance error")
             },
         )
@@ -416,7 +425,7 @@ mod tests {
         assert_eq!(
             violated,
             Err(LocalOnlyConformanceError::ForbiddenEffects {
-                writes: 1,
+                business_writes: 1,
                 outbox: 0,
                 publishes: 0,
             })
@@ -425,23 +434,23 @@ mod tests {
 
     #[tokio::test]
     async fn observer_regression_fails_loudly() {
-        let writes = ProviderCounter::write();
-        writes.add(u64::MAX);
-        let operation_writes = writes.clone();
+        let business_writes = ProviderCounter::business_write();
+        business_writes.add(u64::MAX);
+        let operation_business_writes = business_writes.clone();
         let result = assert_local_only(
             observers(
-                &writes,
+                &business_writes,
                 &ProviderCounter::outbox(),
                 &ProviderCounter::publish(),
             ),
-            move || async move { operation_writes.record() },
+            move || async move { operation_business_writes.record() },
         )
         .await;
 
         assert_eq!(
             result,
             Err(LocalOnlyConformanceError::ObservationRegressed {
-                effect: "write",
+                effect: "business-write",
                 before: u64::MAX,
                 after: 0,
             })
@@ -450,21 +459,24 @@ mod tests {
 
     #[tokio::test]
     async fn operation_is_created_only_after_baseline_sampling() {
-        let writes = ProviderCounter::write();
+        let business_writes = ProviderCounter::business_write();
         let outbox = ProviderCounter::outbox();
         let publishes = ProviderCounter::publish();
-        let operation_writes = writes.clone();
+        let operation_business_writes = business_writes.clone();
 
-        let result = assert_local_only(observers(&writes, &outbox, &publishes), move || {
-            operation_writes.record();
-            async {}
-        })
+        let result = assert_local_only(
+            observers(&business_writes, &outbox, &publishes),
+            move || {
+                operation_business_writes.record();
+                async {}
+            },
+        )
         .await;
 
         assert_eq!(
             result,
             Err(LocalOnlyConformanceError::ForbiddenEffects {
-                writes: 1,
+                business_writes: 1,
                 outbox: 0,
                 publishes: 0,
             })

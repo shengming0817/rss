@@ -7,7 +7,7 @@ error[E0599]: the method `with_classified_state` exists for struct `GeneratedEnd
   ::: $WORKSPACE/crates/diport/src/effect.rs
    |
    |             pub struct $effect;
-   |             ------------------- doesn't satisfy `WriteEffect: LocalOnlyAllowedEffect`
+   |             ------------------- doesn't satisfy `BusinessWriteEffect: LocalOnlyAllowedEffect`
    |
    = note: the following trait bounds were not satisfied:
-           `WriteEffect: LocalOnlyAllowedEffect`
+           `BusinessWriteEffect: LocalOnlyAllowedEffect`

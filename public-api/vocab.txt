@@ -476,6 +476,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpConsistencyLev
 impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpConsistencyLevel
 #[repr(u8)] pub enum vocab::http::HttpEffectKind
 pub vocab::http::HttpEffectKind::Auth
+pub vocab::http::HttpEffectKind::BusinessTransaction
+pub vocab::http::HttpEffectKind::BusinessWrite
 pub vocab::http::HttpEffectKind::CrossTenantAudit
 pub vocab::http::HttpEffectKind::Outbox
 pub vocab::http::HttpEffectKind::Projection
@@ -483,10 +485,8 @@ pub vocab::http::HttpEffectKind::Publish
 pub vocab::http::HttpEffectKind::Read
 pub vocab::http::HttpEffectKind::Reconcile
 pub vocab::http::HttpEffectKind::Saga
-pub vocab::http::HttpEffectKind::Transaction
 pub vocab::http::HttpEffectKind::Worker
 pub vocab::http::HttpEffectKind::Workflow
-pub vocab::http::HttpEffectKind::Write
 impl core::clone::Clone for vocab::http::HttpEffectKind
 pub fn vocab::http::HttpEffectKind::clone(&self) -> vocab::http::HttpEffectKind
 impl core::cmp::Eq for vocab::http::HttpEffectKind
@@ -1262,6 +1262,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpConsistencyLev
 impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpConsistencyLevel
 #[repr(u8)] pub enum vocab::HttpEffectKind
 pub vocab::HttpEffectKind::Auth
+pub vocab::HttpEffectKind::BusinessTransaction
+pub vocab::HttpEffectKind::BusinessWrite
 pub vocab::HttpEffectKind::CrossTenantAudit
 pub vocab::HttpEffectKind::Outbox
 pub vocab::HttpEffectKind::Projection
@@ -1269,10 +1271,8 @@ pub vocab::HttpEffectKind::Publish
 pub vocab::HttpEffectKind::Read
 pub vocab::HttpEffectKind::Reconcile
 pub vocab::HttpEffectKind::Saga
-pub vocab::HttpEffectKind::Transaction
 pub vocab::HttpEffectKind::Worker
 pub vocab::HttpEffectKind::Workflow
-pub vocab::HttpEffectKind::Write
 impl core::clone::Clone for vocab::http::HttpEffectKind
 pub fn vocab::http::HttpEffectKind::clone(&self) -> vocab::http::HttpEffectKind
 impl core::cmp::Eq for vocab::http::HttpEffectKind

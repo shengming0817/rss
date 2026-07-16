@@ -31,4 +31,4 @@ atomicity = "same-transaction"
 emits = ["identity.session-created"]
 
 [effectProfile]
-effects = ["auth", "write", "transaction", "outbox", "publish"]
+effects = ["auth", "business-write", "business-transaction", "outbox", "publish"]

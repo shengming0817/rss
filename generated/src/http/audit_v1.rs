@@ -676,8 +676,8 @@ pub mod list_tenant_entries {
         ::vocab::HttpEffectKind::Auth,
         ::vocab::HttpEffectKind::Read,
         ::vocab::HttpEffectKind::Projection,
-        ::vocab::HttpEffectKind::Write,
-        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::BusinessWrite,
+        ::vocab::HttpEffectKind::BusinessTransaction,
         ::vocab::HttpEffectKind::CrossTenantAudit,
     ];
 

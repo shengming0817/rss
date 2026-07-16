@@ -7,4 +7,4 @@ consistencyLevel = "LocalOnly"
 lifecycle = "draft"
 
 [effectProfile]
-effects = ["write"]
+effects = ["business-write"]

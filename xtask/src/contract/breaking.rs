@@ -21,7 +21,7 @@
 //!   lifecycle 固定分级：active 默认 deny，deprecated warn，draft 跳过；仅下列 consistency/effect
 //!   review 规则固定 warn；active 未携精确 review ack 时 fail-closed，deprecated 仍为非阻断 warn。
 //!   既有契约以 base lifecycle 分级，working 降级不得绕过。
-//! INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "local_only_boundary_is_review_only_but_non_l0_drift_is_denied", anti_vacuity = "effect_reorder_is_clean" }——
+//! INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "working_rejects_legacy_tokens_and_breaking_preserves_base_identity", anti_vacuity = "effect_reorder_is_clean" }——
 //!   LocalOnly 边界与 HTTP effect 集合漂移生成固定 review-only finding；base commit + 排序后的
 //!   rule/subject/detail 派生 SHA-256，Git commit trailer 提供机器确认。其余 breaking 规则仍按 lifecycle
 //!   fail-closed。base/working HTTP effectProfile 均严格投影，缺失、空集或重复值拒绝执行。
@@ -650,9 +650,73 @@ pub(crate) struct ManifestProjection {
     topic: Option<String>,
     delivery: Option<String>,
     consistency: Option<String>,
-    effects: BTreeSet<EffectKind>,
+    effects: BTreeSet<EffectIdentity>,
     outbox: Option<OutboxProjection>,
     subscriptions: BTreeSet<SubscriptionProjection>,
+}
+
+/// Authoring spelling identity used only by the base↔working breaking diff.
+///
+/// Runtime code never sees the legacy variants: the strict working parser only constructs the
+/// business-qualified identities. Keeping the historical spelling here is what lets an active
+/// vocabulary rename produce the required removal/addition review evidence before semantics are
+/// interpreted by runtime consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EffectIdentity {
+    Read,
+    Auth,
+    Projection,
+    Write,
+    Transaction,
+    BusinessWrite,
+    BusinessTransaction,
+    Outbox,
+    Publish,
+    Workflow,
+    Saga,
+    Reconcile,
+    Worker,
+    CrossTenantAudit,
+}
+
+impl EffectIdentity {
+    fn as_wire(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Auth => "auth",
+            Self::Projection => "projection",
+            Self::Write => "write",
+            Self::Transaction => "transaction",
+            Self::BusinessWrite => "business-write",
+            Self::BusinessTransaction => "business-transaction",
+            Self::Outbox => "outbox",
+            Self::Publish => "publish",
+            Self::Workflow => "workflow",
+            Self::Saga => "saga",
+            Self::Reconcile => "reconcile",
+            Self::Worker => "worker",
+            Self::CrossTenantAudit => "cross-tenant-audit",
+        }
+    }
+}
+
+impl From<EffectKind> for EffectIdentity {
+    fn from(effect: EffectKind) -> Self {
+        match effect {
+            EffectKind::Read => Self::Read,
+            EffectKind::Auth => Self::Auth,
+            EffectKind::Projection => Self::Projection,
+            EffectKind::BusinessWrite => Self::BusinessWrite,
+            EffectKind::BusinessTransaction => Self::BusinessTransaction,
+            EffectKind::Outbox => Self::Outbox,
+            EffectKind::Publish => Self::Publish,
+            EffectKind::Workflow => Self::Workflow,
+            EffectKind::Saga => Self::Saga,
+            EffectKind::Reconcile => Self::Reconcile,
+            EffectKind::Worker => Self::Worker,
+            EffectKind::CrossTenantAudit => Self::CrossTenantAudit,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -870,8 +934,8 @@ fn compare_consistency(out: &mut Vec<RawBreak>, old: &Option<String>, new: &Opti
 
 fn compare_effects(
     out: &mut Vec<RawBreak>,
-    old: &BTreeSet<EffectKind>,
-    new: &BTreeSet<EffectKind>,
+    old: &BTreeSet<EffectIdentity>,
+    new: &BTreeSet<EffectIdentity>,
 ) {
     for effect in old.difference(new) {
         out.push(RawBreak {
@@ -1604,7 +1668,7 @@ struct BaseContractManifest {
     #[serde(default, rename = "consistencyLevel")]
     consistency_level: Option<ConsistencyLevel>,
     #[serde(default, rename = "effectProfile")]
-    effect_profile: Option<EffectProfile>,
+    effect_profile: Option<BaseEffectProfile>,
     #[serde(default)]
     endpoints: Option<BaseEndpoints>,
     #[serde(default)]
@@ -1619,6 +1683,74 @@ struct BaseContractManifest {
     schemas: BaseSchemas,
     #[serde(default)]
     saga: Option<BaseSagaBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BaseEffectProfile {
+    effects: Vec<BaseEffectKind>,
+}
+
+/// Historical-only parser vocabulary for immutable Git base manifests.
+///
+/// The parser accepts both generations, while the breaking projection preserves their spelling
+/// identity until the review diff. This type is private and is never used by working-tree
+/// validation, code generation, or runtime metadata.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum BaseEffectKind {
+    Read,
+    Auth,
+    Projection,
+    Write,
+    Transaction,
+    BusinessWrite,
+    BusinessTransaction,
+    Outbox,
+    Publish,
+    Workflow,
+    Saga,
+    Reconcile,
+    Worker,
+    CrossTenantAudit,
+}
+
+impl BaseEffectKind {
+    fn semantic(self) -> EffectKind {
+        match self {
+            Self::Read => EffectKind::Read,
+            Self::Auth => EffectKind::Auth,
+            Self::Projection => EffectKind::Projection,
+            Self::Write | Self::BusinessWrite => EffectKind::BusinessWrite,
+            Self::Transaction | Self::BusinessTransaction => EffectKind::BusinessTransaction,
+            Self::Outbox => EffectKind::Outbox,
+            Self::Publish => EffectKind::Publish,
+            Self::Workflow => EffectKind::Workflow,
+            Self::Saga => EffectKind::Saga,
+            Self::Reconcile => EffectKind::Reconcile,
+            Self::Worker => EffectKind::Worker,
+            Self::CrossTenantAudit => EffectKind::CrossTenantAudit,
+        }
+    }
+
+    fn identity(self) -> EffectIdentity {
+        match self {
+            Self::Read => EffectIdentity::Read,
+            Self::Auth => EffectIdentity::Auth,
+            Self::Projection => EffectIdentity::Projection,
+            Self::Write => EffectIdentity::Write,
+            Self::Transaction => EffectIdentity::Transaction,
+            Self::BusinessWrite => EffectIdentity::BusinessWrite,
+            Self::BusinessTransaction => EffectIdentity::BusinessTransaction,
+            Self::Outbox => EffectIdentity::Outbox,
+            Self::Publish => EffectIdentity::Publish,
+            Self::Workflow => EffectIdentity::Workflow,
+            Self::Saga => EffectIdentity::Saga,
+            Self::Reconcile => EffectIdentity::Reconcile,
+            Self::Worker => EffectIdentity::Worker,
+            Self::CrossTenantAudit => EffectIdentity::CrossTenantAudit,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1831,7 +1963,7 @@ fn base_manifest_projection(m: &BaseContractManifest) -> Result<ManifestProjecti
         topic: m.topic.clone(),
         delivery: m.delivery.map(delivery).map(str::to_string),
         consistency: m.consistency_level.map(consistency).map(str::to_string),
-        effects: strict_http_effects(m.kind, m.effect_profile.as_ref(), &m.id)?,
+        effects: strict_base_http_effects(m.kind, m.effect_profile.as_ref(), &m.id)?,
         outbox: m.capabilities.outbox.as_ref().map(|o| OutboxProjection {
             role: outbox_role(o.role).to_string(),
             atomicity: o.atomicity.map(outbox_atomicity).map(str::to_string),
@@ -1856,7 +1988,7 @@ fn strict_http_effects(
     kind: ContractKind,
     profile: Option<&EffectProfile>,
     id: &str,
-) -> Result<BTreeSet<EffectKind>> {
+) -> Result<BTreeSet<EffectIdentity>> {
     if kind != ContractKind::Http {
         return Ok(BTreeSet::new());
     }
@@ -1870,7 +2002,36 @@ fn strict_http_effects(
     if unique.len() != effects.len() {
         bail!("HTTP contract `{id}` effectProfile.effects contains duplicate values");
     }
-    Ok(unique)
+    Ok(unique.into_iter().map(EffectIdentity::from).collect())
+}
+
+fn strict_base_http_effects(
+    kind: ContractKind,
+    profile: Option<&BaseEffectProfile>,
+    id: &str,
+) -> Result<BTreeSet<EffectIdentity>> {
+    if kind != ContractKind::Http {
+        return Ok(BTreeSet::new());
+    }
+    let effects = &profile
+        .ok_or_else(|| anyhow::anyhow!("HTTP contract `{id}` missing effectProfile"))?
+        .effects;
+    if effects.is_empty() {
+        bail!("HTTP contract `{id}` effectProfile.effects must not be empty");
+    }
+    let semantic_unique: BTreeSet<EffectKind> = effects
+        .iter()
+        .copied()
+        .map(BaseEffectKind::semantic)
+        .collect();
+    if semantic_unique.len() != effects.len() {
+        bail!("HTTP contract `{id}` effectProfile.effects contains duplicate semantic values");
+    }
+    Ok(effects
+        .iter()
+        .copied()
+        .map(BaseEffectKind::identity)
+        .collect())
 }
 
 fn consistency(value: ConsistencyLevel) -> &'static str {
@@ -3011,10 +3172,7 @@ lifecycle = "active"
             topic: Some("identity.session-created.v1".into()),
             delivery: Some("at-least-once".into()),
             consistency: Some("OutboxFact".into()),
-            effects: BTreeSet::from([
-                crate::contract::manifest::EffectKind::Auth,
-                crate::contract::manifest::EffectKind::Read,
-            ]),
+            effects: BTreeSet::from([EffectIdentity::Auth, EffectIdentity::Read]),
             outbox: Some(OutboxProjection {
                 role: "producer".into(),
                 atomicity: Some("same-transaction".into()),
@@ -3095,11 +3253,9 @@ lifecycle = "active"
 
     #[test]
     fn effect_set_diff_is_review_only_deterministic_and_lifecycle_aware() {
-        use crate::contract::manifest::EffectKind;
-
         let old = full_projection();
         let mut new = old.clone();
-        new.effects = BTreeSet::from([EffectKind::Projection, EffectKind::Write]);
+        new.effects = BTreeSet::from([EffectIdentity::Projection, EffectIdentity::BusinessWrite]);
 
         for lifecycle in [Lifecycle::Active, Lifecycle::Deprecated] {
             let result = evaluate(&[manifest_diff(lifecycle, old.clone(), new.clone())]);
@@ -3113,7 +3269,10 @@ lifecycle = "active"
                     (BreakingRule::EffectRemoved, "HTTP effect `read` 被移除"),
                     (BreakingRule::EffectRemoved, "HTTP effect `auth` 被移除"),
                     (BreakingRule::EffectAdded, "HTTP effect `projection` 被新增"),
-                    (BreakingRule::EffectAdded, "HTTP effect `write` 被新增"),
+                    (
+                        BreakingRule::EffectAdded,
+                        "HTTP effect `business-write` 被新增",
+                    ),
                 ]
             );
             assert!(
@@ -3134,16 +3293,22 @@ lifecycle = "active"
 
     #[test]
     fn effect_reorder_is_clean() {
-        use crate::contract::manifest::EffectKind;
-
         let mut old = full_projection();
-        old.effects = [EffectKind::Write, EffectKind::Read, EffectKind::Auth]
-            .into_iter()
-            .collect();
+        old.effects = [
+            EffectIdentity::BusinessWrite,
+            EffectIdentity::Read,
+            EffectIdentity::Auth,
+        ]
+        .into_iter()
+        .collect();
         let mut new = old.clone();
-        new.effects = [EffectKind::Auth, EffectKind::Write, EffectKind::Read]
-            .into_iter()
-            .collect();
+        new.effects = [
+            EffectIdentity::Auth,
+            EffectIdentity::BusinessWrite,
+            EffectIdentity::Read,
+        ]
+        .into_iter()
+        .collect();
         assert!(compare_manifests(&old, &new).is_empty());
     }
 
@@ -3156,12 +3321,17 @@ lifecycle = "active"
             subject: "http/identity/v1 manifest (effectProfile.effects)".to_string(),
             detail: detail.to_string(),
         };
-        let first = review_ack_fingerprint("base-oid", &[finding("write"), finding("publish")]);
-        let reordered = review_ack_fingerprint("base-oid", &[finding("publish"), finding("write")]);
+        let first =
+            review_ack_fingerprint("base-oid", &[finding("business-write"), finding("publish")]);
+        let reordered =
+            review_ack_fingerprint("base-oid", &[finding("publish"), finding("business-write")]);
         assert_eq!(first, reordered);
         assert_ne!(
             first,
-            review_ack_fingerprint("other-base", &[finding("write"), finding("publish")])
+            review_ack_fingerprint(
+                "other-base",
+                &[finding("business-write"), finding("publish")]
+            )
         );
         assert_ne!(
             first,
@@ -3191,7 +3361,7 @@ lifecycle = "active"
             disposition: Disposition::Warn,
             rule: BreakingRule::EffectAdded,
             subject: "http/identity/v1 manifest (effectProfile.effects)".to_string(),
-            detail: "HTTP effect `write` 被新增".to_string(),
+            detail: "HTTP effect `business-write` 被新增".to_string(),
         }];
         assert!(verify_review_ack("base-oid", &findings, "").is_err());
         assert!(
@@ -3213,7 +3383,7 @@ lifecycle = "active"
             disposition: Disposition::Warn,
             rule: BreakingRule::EffectAdded,
             subject: "http/identity/v1 manifest (effectProfile.effects)".to_string(),
-            detail: "HTTP effect `write` 被新增".to_string(),
+            detail: "HTTP effect `business-write` 被新增".to_string(),
         };
 
         // A deprecated warning must return before touching Git. The deliberately missing
@@ -3250,15 +3420,13 @@ lifecycle = "active"
 
     #[test]
     fn effect_diff_is_not_hidden_by_missing_http_endpoint_projection() {
-        use crate::contract::manifest::EffectKind;
-
         let old = ManifestProjection {
             consistency: Some("LocalTx".to_string()),
-            effects: BTreeSet::from([EffectKind::Read]),
+            effects: BTreeSet::from([EffectIdentity::Read]),
             ..ManifestProjection::default()
         };
         let mut new = old.clone();
-        new.effects = BTreeSet::from([EffectKind::Write]);
+        new.effects = BTreeSet::from([EffectIdentity::BusinessWrite]);
 
         let result = evaluate(&[manifest_diff(Lifecycle::Deprecated, old, new)]);
         assert_eq!(
@@ -3278,11 +3446,9 @@ lifecycle = "active"
 
     #[test]
     fn review_warning_does_not_mask_schema_deny() {
-        use crate::contract::manifest::EffectKind;
-
         let old = full_projection();
         let mut new = old.clone();
-        new.effects.insert(EffectKind::Write);
+        new.effects.insert(EffectIdentity::BusinessWrite);
         let mut contract = manifest_diff(Lifecycle::Active, old, new);
         contract.schemas.push(SchemaVersions {
             file: "request".to_string(),
@@ -3352,6 +3518,123 @@ idempotency = "idempotent"
                 "[effectProfile]\neffects = [\"network\"]"
             ))
             .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn base_effect_profile_rejects_unknown_nested_fields_but_keeps_top_level_history_tolerance()
+    -> anyhow::Result<()> {
+        let manifest = |nested: &str| {
+            format!(
+                r#"
+id = "identity.profile"
+kind = "http"
+version = "v1"
+lifecycle = "active"
+historicalNote = "retained by top-level history projection"
+consistencyLevel = "LocalOnly"
+path = "/api/v1/identity/profile"
+method = "GET"
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+[effectProfile]
+effects = ["read"]
+{nested}
+"#
+            )
+        };
+
+        assert!(toml::from_str::<BaseContractManifest>(&manifest("")).is_ok());
+        assert!(
+            toml::from_str::<BaseContractManifest>(&manifest("legacyEffect = true")).is_err(),
+            "historical effectProfile must remain fail-closed on unknown nested fields"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn working_rejects_legacy_tokens_and_breaking_preserves_base_identity() -> anyhow::Result<()> {
+        let manifest = |lifecycle: &str, effects: &str| {
+            format!(
+                r#"
+id = "identity.profile"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "LocalTx"
+lifecycle = "{lifecycle}"
+path = "/api/v1/identity/profile"
+method = "POST"
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+[effectProfile]
+effects = [{effects}]
+"#
+            )
+        };
+
+        for lifecycle in ["active", "deprecated", "draft"] {
+            for legacy in ["\"write\"", "\"transaction\""] {
+                assert!(
+                    ContractManifest::from_toml_str(&manifest(lifecycle, legacy)).is_err(),
+                    "working parser accepted `{legacy}` in lifecycle `{lifecycle}`"
+                );
+            }
+        }
+
+        let historical: BaseContractManifest =
+            toml::from_str(&manifest("active", "\"write\", \"transaction\""))?;
+        let current_base: BaseContractManifest = toml::from_str(&manifest(
+            "active",
+            "\"business-write\", \"business-transaction\"",
+        ))?;
+        let current_working = ContractManifest::from_toml_str(&manifest(
+            "active",
+            "\"business-write\", \"business-transaction\"",
+        ))?;
+        let historical_projection = base_manifest_projection(&historical)?;
+        let current_projection = manifest_projection(&current_working)?;
+        assert_eq!(
+            base_manifest_projection(&current_base)?,
+            current_projection,
+            "current base spelling and strict working parser must share one identity"
+        );
+
+        let result = evaluate(&[manifest_diff(
+            Lifecycle::Active,
+            historical_projection,
+            current_projection,
+        )]);
+        assert_eq!(
+            result
+                .findings
+                .iter()
+                .map(|finding| (finding.rule, finding.detail.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (BreakingRule::EffectRemoved, "HTTP effect `write` 被移除"),
+                (
+                    BreakingRule::EffectRemoved,
+                    "HTTP effect `transaction` 被移除",
+                ),
+                (
+                    BreakingRule::EffectAdded,
+                    "HTTP effect `business-write` 被新增",
+                ),
+                (
+                    BreakingRule::EffectAdded,
+                    "HTTP effect `business-transaction` 被新增",
+                ),
+            ],
+            "authoring token rename must remain visible to the review gate"
+        );
+        assert!(
+            verify_review_ack("base-oid", &result.findings, "").is_err(),
+            "active rename findings must require an exact review acknowledgement"
         );
         Ok(())
     }

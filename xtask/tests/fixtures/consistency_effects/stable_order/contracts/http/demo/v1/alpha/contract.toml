@@ -9,4 +9,4 @@ path = "/api/v1/demo/alpha"
 method = "DELETE"
 
 [effectProfile]
-effects = ["transaction"]
+effects = ["business-transaction"]

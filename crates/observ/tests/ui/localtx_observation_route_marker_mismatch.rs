@@ -20,7 +20,7 @@ fn route() -> HttpRouteBinding<LogoutRoute, LocalTx> {
         HttpRouteAuth::ServiceOwned,
         None,
         false,
-        HttpEffectProfile::new(&[HttpEffectKind::Write]),
+        HttpEffectProfile::new(&[HttpEffectKind::BusinessWrite]),
     )
 }
 

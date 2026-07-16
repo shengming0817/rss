@@ -88,7 +88,7 @@ RSS declares consistency level in `contract.toml` as `consistencyLevel`; `docs/r
 
 | Level | Manifest Value | Runtime Meaning | Primary Mechanisms |
 |-------|----------------|-----------------|--------------------|
-| L0 | `LocalOnly` | Pure local read/state-machine or idempotency decision with no local transaction boundary and no cross-domain event fact. | Newtypes, validation, idempotency key parsing, pure `consistency` state transitions |
+| L0 | `LocalOnly` | Local handler/domain path with zero business persistence, outbox, and direct publish; provider-owned read-path transactions are allowed and do not imply a PostgreSQL `READ ONLY` or stable-snapshot guarantee. | Newtypes, validation, authenticated reads, projections, idempotency decisions, tenant-scoped provider reads |
 | L1 | `LocalTx` | Single-domain local transaction boundary; success is complete when the local store commits. | Repository transaction funnel, tenant-scoped `SET LOCAL`, rollback/commit tests |
 | L2 | `OutboxFact` | Local transaction commits authoritative state and an outbox fact for at-least-once asynchronous delivery. | Outbox entry, relay, inbox claim, command dispatch, tenant authority, DLX |
 | L3 | `WorkflowEventual` | Eventual workflow or projection semantics where completion may require replay, journal resume, compensation, or checkpoint advancement. | Saga, projection/CQRS, workflow journal, projection checkpoint |

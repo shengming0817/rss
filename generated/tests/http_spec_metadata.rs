@@ -125,8 +125,8 @@ fn audit_reads_expose_split_effect_profiles() {
             HttpEffectKind::Auth,
             HttpEffectKind::Read,
             HttpEffectKind::Projection,
-            HttpEffectKind::Write,
-            HttpEffectKind::Transaction,
+            HttpEffectKind::BusinessWrite,
+            HttpEffectKind::BusinessTransaction,
             HttpEffectKind::CrossTenantAudit,
         ]
     );

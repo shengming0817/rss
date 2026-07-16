@@ -334,7 +334,7 @@ macro_rules! classify_audit_port {
 }
 
 classify_audit_port!(DynAuditReadRepo<'_> => diport::ReadEffect, diport::LocalPrivilege);
-classify_audit_port!(DynAuditWriteRepo<'_> => diport::WriteEffect, diport::LocalPrivilege);
+classify_audit_port!(DynAuditWriteRepo<'_> => diport::BusinessWriteEffect, diport::LocalPrivilege);
 classify_audit_port!(DynAuditAdminRepo<'_> => diport::ReadEffect, diport::CrossTenantPrivilege);
 
 impl<T: AuditPortEffect + ?Sized> effect_sealed::Sealed for std::sync::Arc<T> {}

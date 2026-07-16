@@ -5,7 +5,7 @@ use diport::{
     DynPublisher, DynRateLimiter, DynRevocationStore, DynSagaInstanceStore, DynSagaJournal,
     DynSagaTenantSource, DynSecretResolver, DynSigner, DynSubscriber, MetricsExporter,
     LocalPrivilege, OutboxEffect, PortEffectClass, PortPrivilegeClass, ReadEffect,
-    ServiceTokenReplayGuard, SubscribeInitializer, WorkflowEffect, WriteEffect,
+    ServiceTokenReplayGuard, SubscribeInitializer, WorkflowEffect, BusinessWriteEffect,
 };
 
 fn assert_classification<T, E, P>()
@@ -33,14 +33,14 @@ fn main() {
     assert_local_effect!(dyn ServiceTokenReplayGuard, AuthEffect);
     assert_local_effect!(DynSigner<'static>, AuthEffect);
 
-    assert_local_effect!(DynAcker<'static>, WriteEffect);
-    assert_local_effect!(DynAuditSink<'static>, WriteEffect);
-    assert_local_effect!(DynCasStore<'static>, WriteEffect);
-    assert_local_effect!(DynOwnerCheckpointStore<'static>, WriteEffect);
-    assert_local_effect!(DynDeadLetterStore<'static>, WriteEffect);
-    assert_local_effect!(DynFencedWriter<'static>, WriteEffect);
-    assert_local_effect!(DynObjectStore<'static>, WriteEffect);
-    assert_local_effect!(DynRevocationStore<'static>, WriteEffect);
+    assert_local_effect!(DynAcker<'static>, BusinessWriteEffect);
+    assert_local_effect!(DynAuditSink<'static>, BusinessWriteEffect);
+    assert_local_effect!(DynCasStore<'static>, BusinessWriteEffect);
+    assert_local_effect!(DynOwnerCheckpointStore<'static>, BusinessWriteEffect);
+    assert_local_effect!(DynDeadLetterStore<'static>, BusinessWriteEffect);
+    assert_local_effect!(DynFencedWriter<'static>, BusinessWriteEffect);
+    assert_local_effect!(DynObjectStore<'static>, BusinessWriteEffect);
+    assert_local_effect!(DynRevocationStore<'static>, BusinessWriteEffect);
 
     assert_local_effect!(DynOutboxEmitter<'static>, OutboxEffect);
     assert_local_effect!(DynPublisher<'static>, OutboxEffect);

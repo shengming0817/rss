@@ -51,7 +51,7 @@ trap 'rm -f "$report_file"' EXIT
 ./hack/cargo.sh xtask consistency report --format json >"$report_file"
 jq -e '.status == "passed"' "$report_file"
 jq -e '
-  .schemaVersion == 3 and
+  .schemaVersion == 4 and
   .localOnlyReceiptCoverage.enforcement == "failClosed" and
   .localOnlyReceiptCoverage.evidence == "sourceRegistered"
 ' "$report_file"
