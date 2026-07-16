@@ -10,6 +10,7 @@ use oidc::OidcProvider;
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 use tokio_util::sync::CancellationToken;
 
+use crate::config::SnapshotConfig;
 use crate::{RuntimeServiceTokenReplayGuard, SystemClock};
 
 const OIDC_JWKS_PATH_ENV: &str = "RSS_OIDC_JWKS_PATH";
@@ -19,6 +20,34 @@ const OIDC_JWKS_SOURCE_ID: &str = "primary-idp";
 const DEFAULT_OIDC_JWKS_REFRESH_INTERVAL_SECS: u64 = 60;
 const MIN_OIDC_JWKS_REFRESH_INTERVAL_SECS: u64 = 5;
 const MAX_OIDC_JWKS_REFRESH_INTERVAL_SECS: u64 = 3600;
+
+/// Secret-safe classification of serving JWKS source failures.
+///
+/// The configured path is deliberately absent from every variant and message. Operators still
+/// retain the actionable source category instead of receiving one lossy catch-all error.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+enum RuntimeJwksLoadError {
+    #[error("{OIDC_JWKS_PATH_ENV} source is unreadable")]
+    Unreadable,
+    #[error("{OIDC_JWKS_PATH_ENV} source is malformed")]
+    Malformed,
+    #[error("{OIDC_JWKS_PATH_ENV} source contains no usable keys")]
+    NoUsableKeys,
+    #[error("{OIDC_JWKS_PATH_ENV} source setup failed")]
+    Setup,
+}
+
+impl From<oidc::JwksError> for RuntimeJwksLoadError {
+    fn from(error: oidc::JwksError) -> Self {
+        match error {
+            oidc::JwksError::Unreadable => Self::Unreadable,
+            oidc::JwksError::Malformed => Self::Malformed,
+            oidc::JwksError::NoUsableKeys => Self::NoUsableKeys,
+            oidc::JwksError::ZeroInterval | oidc::JwksError::NoRuntime => Self::Setup,
+            _ => Self::Setup,
+        }
+    }
+}
 
 pub(crate) struct RuntimeOidcProvider {
     provider: Arc<OidcProvider>,
@@ -77,39 +106,51 @@ impl bootstrap::HealthProbe for OidcJwksReadyProbe {
     }
 }
 
-/// 从 env 构造 serving 验签 `OidcProvider`（issuer / audience / 本地 JWKS 文件源）。
+/// 从进程配置快照构造 serving 验签 `OidcProvider`（issuer / audience / 本地 JWKS 文件源）。
 ///
 /// HTTP listener 的生产 key-source 必须是本地 JWKS 文件（外部 agent / init-container 经 TLS 拉取后写入只读挂载）；
 /// 静态 ES256 env 只保留给 operator CLI / 单测路径，不再作为 serving production fallback。
-pub(crate) fn build_runtime_oidc_provider() -> anyhow::Result<RuntimeOidcProvider> {
-    build_runtime_oidc_provider_from(|name| std::env::var(name).ok(), Box::new(SystemClock))
+pub(crate) fn build_runtime_oidc_provider(
+    config: SnapshotConfig<'_>,
+) -> anyhow::Result<RuntimeOidcProvider> {
+    build_runtime_oidc_provider_from_values(
+        config.value("RSS_OIDC_ISSUER"),
+        config.value("RSS_OIDC_AUDIENCE"),
+        config.value("RSS_OIDC_TRUSTED_KINDS"),
+        config.value(OIDC_JWKS_PATH_ENV),
+        config.value(OIDC_JWKS_REFRESH_INTERVAL_ENV),
+        Box::new(SystemClock),
+    )
 }
 
-pub(crate) fn build_runtime_oidc_provider_from(
-    get: impl Fn(&str) -> Option<String>,
+fn build_runtime_oidc_provider_from_values(
+    issuer: Option<&str>,
+    audience: Option<&str>,
+    trusted_kinds: Option<&str>,
+    jwks_path: Option<&str>,
+    refresh_interval: Option<&str>,
     clock: Box<dyn diport::Clock>,
 ) -> anyhow::Result<RuntimeOidcProvider> {
-    let issuer = get("RSS_OIDC_ISSUER")
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_ISSUER"))?;
-    let audience = get("RSS_OIDC_AUDIENCE")
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_AUDIENCE"))?;
-    let trusted_kinds = get("RSS_OIDC_TRUSTED_KINDS")
+    let issuer =
+        issuer.ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_ISSUER"))?;
+    let audience =
+        audience.ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_AUDIENCE"))?;
+    let trusted_kinds = trusted_kinds
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_TRUSTED_KINDS"))?;
-    let jwks_path = get(OIDC_JWKS_PATH_ENV)
+    let jwks_path = jwks_path
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {OIDC_JWKS_PATH_ENV}"))?;
-    let refresh_interval =
-        oidc_jwks_refresh_interval_from(get(OIDC_JWKS_REFRESH_INTERVAL_ENV).as_deref())?;
+    let refresh_interval = oidc_jwks_refresh_interval_from(refresh_interval)?;
     let jwks = oidc::JwksKeySource::load_and_watch(
         OIDC_JWKS_SOURCE_ID,
         PathBuf::from(jwks_path.trim()),
         refresh_interval,
         CancellationToken::new(),
     )
-    .with_context(|| format!("load OIDC JWKS source from {OIDC_JWKS_PATH_ENV}"))?;
+    .map_err(RuntimeJwksLoadError::from)?;
     let jwks_readiness = jwks.readiness_handle();
 
-    let mut builder = oidc::VerifierConfigBuilder::new(&issuer, &audience)
+    let mut builder = oidc::VerifierConfigBuilder::new(issuer, audience)
         .keys_jwks(jwks)
         .service_token_replay_guard(Arc::new(RuntimeServiceTokenReplayGuard::default()));
     let mut trusted = 0usize;
@@ -164,42 +205,62 @@ fn oidc_jwks_refresh_interval_from(raw: Option<&str>) -> anyhow::Result<Duration
 /// - `RSS_OIDC_HS256_SECRET_B64URL`：service-token 路径 HS256 密钥，base64url（可选）。
 /// - `RSS_OIDC_HS256_KID`：service-token 路径 key id；配置 HS256 secret 时必填。
 ///
-/// 薄壳：注入 `std::env::var` 读取器，委托可测核心 [`build_provider_from`]。
+/// 该 operator / maintenance CLI 入口不启动 serving listener，故不属于 serving snapshot 迁移范围。
+/// 它仍从静态 env 构造 provider，再委托显式 raw-value 核心。
 pub fn build_provider() -> anyhow::Result<OidcProvider> {
-    build_provider_from(|name| std::env::var(name).ok())
+    build_provider_from_static_env(None)
 }
 
 pub(crate) fn build_provider_with_replay_guard(
     replay_guard: Arc<dyn diport::ServiceTokenReplayGuard>,
 ) -> anyhow::Result<OidcProvider> {
-    build_provider_from_with_replay_guard(|name| std::env::var(name).ok(), Some(replay_guard))
+    build_provider_from_static_env(Some(replay_guard))
 }
 
-/// 由注入的配置读取器构造 `OidcProvider`（DI：测试传 fake getter，无 env 副作用——workspace `forbid(unsafe)`
-/// 下测试不能 `set_var`，故读取器入参化）。错误只含变量**名**，不含值（无 PII / 无 secret 泄漏）。
-pub(crate) fn build_provider_from(
-    get: impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<OidcProvider> {
-    build_provider_from_with_replay_guard(get, None)
-}
-
-fn build_provider_from_with_replay_guard(
-    get: impl Fn(&str) -> Option<String>,
+/// 非 serving 的 operator / maintenance OOS 路径；不得被 listener 装配调用。
+fn build_provider_from_static_env(
     replay_guard: Option<Arc<dyn diport::ServiceTokenReplayGuard>>,
 ) -> anyhow::Result<OidcProvider> {
-    let issuer = get("RSS_OIDC_ISSUER")
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_ISSUER"))?;
-    let audience = get("RSS_OIDC_AUDIENCE")
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_AUDIENCE"))?;
-    let trusted_kinds = get("RSS_OIDC_TRUSTED_KINDS")
+    let issuer = std::env::var("RSS_OIDC_ISSUER").ok();
+    let audience = std::env::var("RSS_OIDC_AUDIENCE").ok();
+    let trusted_kinds = std::env::var("RSS_OIDC_TRUSTED_KINDS").ok();
+    let es256 = std::env::var("RSS_OIDC_ES256_SEC1_B64URL").ok();
+    let hs256 = std::env::var("RSS_OIDC_HS256_SECRET_B64URL").ok();
+    let hs256_kid = std::env::var("RSS_OIDC_HS256_KID").ok();
+    build_provider_from_values(
+        issuer.as_deref(),
+        audience.as_deref(),
+        trusted_kinds.as_deref(),
+        es256.as_deref(),
+        hs256.as_deref(),
+        hs256_kid.as_deref(),
+        replay_guard,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_provider_from_values(
+    issuer: Option<&str>,
+    audience: Option<&str>,
+    trusted_kinds: Option<&str>,
+    es256: Option<&str>,
+    hs256: Option<&str>,
+    hs256_kid: Option<&str>,
+    replay_guard: Option<Arc<dyn diport::ServiceTokenReplayGuard>>,
+) -> anyhow::Result<OidcProvider> {
+    let issuer =
+        issuer.ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_ISSUER"))?;
+    let audience =
+        audience.ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_AUDIENCE"))?;
+    let trusted_kinds = trusted_kinds
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_TRUSTED_KINDS"))?;
     provider_from_b64_with_replay_guard(
-        &issuer,
-        &audience,
-        &trusted_kinds,
-        get("RSS_OIDC_ES256_SEC1_B64URL").as_deref(),
-        get("RSS_OIDC_HS256_SECRET_B64URL").as_deref(),
-        get("RSS_OIDC_HS256_KID").as_deref(),
+        issuer,
+        audience,
+        trusted_kinds,
+        es256,
+        hs256,
+        hs256_kid,
         ProviderAuthDeps {
             clock: Box::new(SystemClock),
             replay_guard,
@@ -335,21 +396,6 @@ mod tests {
         format!(r#"{{"keys":[{{"kty":"oct","kid":"{kid}","alg":"HS256","k":"{key}"}}]}}"#)
     }
 
-    fn runtime_oidc_get(
-        jwks_path: &std::path::Path,
-        refresh_interval: Option<&str>,
-        name: &str,
-    ) -> Option<String> {
-        match name {
-            "RSS_OIDC_ISSUER" => Some("https://issuer.test".to_string()),
-            "RSS_OIDC_AUDIENCE" => Some("rss-test".to_string()),
-            "RSS_OIDC_TRUSTED_KINDS" => Some("service,user,admin".to_string()),
-            OIDC_JWKS_PATH_ENV => Some(jwks_path.display().to_string()),
-            OIDC_JWKS_REFRESH_INTERVAL_ENV => refresh_interval.map(str::to_owned),
-            _ => None,
-        }
-    }
-
     #[allow(clippy::expect_used)]
     fn tenant_binding(raw: &str) -> diport::ServiceTokenTenantBinding {
         diport::ServiceTokenTenantBinding::new(vocab::TenantId::parse(raw).expect("tenant"))
@@ -382,15 +428,42 @@ mod tests {
         format!("{signing_input}.{}", B64.encode(tag))
     }
 
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn serving_oidc_snapshot_mapping_matches_explicit_values() {
+        let secret = [0x22u8; 32];
+        let jwks_path = write_temp_file(
+            "snapshot-runtime-oidc-jwks.json",
+            hs256_jwks(&secret, "svc-snapshot").as_bytes(),
+        );
+        let jwks_path = jwks_path.to_string_lossy();
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_OIDC_ISSUER", "https://issuer.test"),
+            ("RSS_OIDC_AUDIENCE", "rss-test"),
+            ("RSS_OIDC_TRUSTED_KINDS", "service,user,admin"),
+            (OIDC_JWKS_PATH_ENV, jwks_path.as_ref()),
+            (OIDC_JWKS_REFRESH_INTERVAL_ENV, "5"),
+        ])
+        .expect("capture serving OIDC generation");
+
+        let runtime = build_runtime_oidc_provider(snapshot.view())
+            .expect("snapshot mapping builds the serving provider");
+        assert!(runtime.jwks_readiness().is_ready());
+        runtime
+            .managed_resource()
+            .shutdown()
+            .await
+            .expect("shutdown snapshot-backed OIDC provider");
+    }
+
     #[test]
-    fn build_runtime_oidc_provider_from_missing_jwks_path_fails_fast() {
-        let result = build_runtime_oidc_provider_from(
-            |name| match name {
-                "RSS_OIDC_ISSUER" => Some("https://issuer.test".to_string()),
-                "RSS_OIDC_AUDIENCE" => Some("rss-test".to_string()),
-                "RSS_OIDC_TRUSTED_KINDS" => Some("service".to_string()),
-                _ => None,
-            },
+    fn build_runtime_oidc_provider_from_values_missing_jwks_path_fails_fast() {
+        let result = build_runtime_oidc_provider_from_values(
+            Some("https://issuer.test"),
+            Some("rss-test"),
+            Some("service"),
+            None,
+            None,
             clk(),
         );
         assert!(
@@ -400,14 +473,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_runtime_oidc_provider_from_invalid_jwks_path_fails_fast() {
-        let missing = unique_temp_path("missing-runtime-jwks.json");
-        let result =
-            build_runtime_oidc_provider_from(|name| runtime_oidc_get(&missing, None, name), clk());
-        assert!(
-            matches!(&result, Err(err) if format!("{err:#}").contains(OIDC_JWKS_PATH_ENV)),
-            "bad JWKS path should fail during runtime OIDC provider construction"
+    async fn build_runtime_oidc_provider_from_values_invalid_jwks_path_is_redacted() {
+        const SECRET_PATH_FRAGMENT: &str = "tenant-secret-missing-runtime-jwks.json";
+        let missing = unique_temp_path(SECRET_PATH_FRAGMENT);
+        let missing = missing.to_string_lossy();
+        let result = build_runtime_oidc_provider_from_values(
+            Some("https://issuer.test"),
+            Some("rss-test"),
+            Some("service,user,admin"),
+            Some(&missing),
+            None,
+            clk(),
         );
+        let error = result
+            .err()
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_default();
+        assert!(
+            !error.is_empty(),
+            "bad JWKS path must fail during runtime OIDC provider construction"
+        );
+        assert!(
+            error.contains(OIDC_JWKS_PATH_ENV),
+            "redacted error must identify the invalid setting"
+        );
+        assert!(
+            !error.contains(SECRET_PATH_FRAGMENT),
+            "redacted error must not expose the configured path"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn runtime_jwks_load_error_keeps_safe_typed_classification() {
+        let malformed = write_temp_file("secret-malformed-jwks.json", b"not json");
+        let empty = write_temp_file("secret-empty-jwks.json", br#"{"keys":[]}"#);
+
+        for (path, expected) in [
+            (malformed, RuntimeJwksLoadError::Malformed),
+            (empty, RuntimeJwksLoadError::NoUsableKeys),
+        ] {
+            let path = path.to_string_lossy();
+            let error = build_runtime_oidc_provider_from_values(
+                Some("https://issuer.test"),
+                Some("rss-test"),
+                Some("service"),
+                Some(&path),
+                None,
+                clk(),
+            )
+            .err()
+            .expect("invalid JWKS source must fail");
+            assert_eq!(
+                error.downcast_ref::<RuntimeJwksLoadError>(),
+                Some(&expected)
+            );
+            let rendered = format!("{error:#}");
+            assert!(rendered.contains(OIDC_JWKS_PATH_ENV));
+            assert!(!rendered.contains(path.as_ref()));
+        }
+
+        let missing = unique_temp_path("secret-unreadable-jwks.json");
+        let missing = missing.to_string_lossy();
+        let error = build_runtime_oidc_provider_from_values(
+            Some("https://issuer.test"),
+            Some("rss-test"),
+            Some("service"),
+            Some(&missing),
+            None,
+            clk(),
+        )
+        .err()
+        .expect("unreadable JWKS source must fail");
+        assert_eq!(
+            error.downcast_ref::<RuntimeJwksLoadError>(),
+            Some(&RuntimeJwksLoadError::Unreadable)
+        );
+        assert!(!format!("{error:#}").contains(missing.as_ref()));
     }
 
     #[test]
@@ -437,8 +579,13 @@ mod tests {
             "runtime-oidc-jwks.json",
             hs256_jwks(&secret, "svc-1").as_bytes(),
         );
-        let runtime = build_runtime_oidc_provider_from(
-            |name| runtime_oidc_get(&jwks_path, None, name),
+        let jwks_path = jwks_path.to_string_lossy();
+        let runtime = build_runtime_oidc_provider_from_values(
+            Some("https://issuer.test"),
+            Some("rss-test"),
+            Some("service,user,admin"),
+            Some(&jwks_path),
+            None,
             clk(),
         )
         .expect("valid runtime OIDC provider");
@@ -462,8 +609,13 @@ mod tests {
             "runtime-oidc-jwks.json",
             hs256_jwks(&secret, "svc-1").as_bytes(),
         );
-        let runtime = build_runtime_oidc_provider_from(
-            |name| runtime_oidc_get(&jwks_path, Some("5"), name),
+        let jwks_path_display = jwks_path.to_string_lossy();
+        let runtime = build_runtime_oidc_provider_from_values(
+            Some("https://issuer.test"),
+            Some("rss-test"),
+            Some("service,user,admin"),
+            Some(&jwks_path_display),
+            Some("5"),
             clk(),
         )
         .expect("valid runtime OIDC provider");
@@ -549,47 +701,57 @@ mod tests {
     }
 
     #[test]
-    fn build_provider_from_missing_trusted_kinds_fails_fast() {
+    fn build_provider_from_values_missing_trusted_kinds_fails_fast() {
         // issuer + audience 在、trusted kinds 缺 → fail-fast（F1 生产失效根因守）。
-        let get = |k: &str| match k {
-            "RSS_OIDC_ISSUER" => Some("https://issuer.test".to_string()),
-            "RSS_OIDC_AUDIENCE" => Some("rss".to_string()),
-            _ => None,
-        };
-        assert!(
-            matches!(&build_provider_from(get), Err(e) if e.to_string().contains("RSS_OIDC_TRUSTED_KINDS"))
+        let result = build_provider_from_values(
+            Some("https://issuer.test"),
+            Some("rss"),
+            None,
+            None,
+            None,
+            None,
+            None,
         );
+        assert!(matches!(&result, Err(e) if e.to_string().contains("RSS_OIDC_TRUSTED_KINDS")));
     }
 
     #[test]
-    fn build_provider_from_missing_issuer_fails_fast() {
-        // 注入恒空读取器 → 缺 RSS_OIDC_ISSUER fail-fast（错误含变量名，不读真 env）。
+    fn build_provider_from_values_missing_issuer_fails_fast() {
+        // 显式 raw values 缺 RSS_OIDC_ISSUER → fail-fast（错误含变量名，不含值）。
         // OidcProvider 无 Debug（不能 expect_err），用 matches! 既断言 Err 又锁错误文案。
-        let result = build_provider_from(|_| None);
+        let result = build_provider_from_values(None, None, None, None, None, None, None);
         assert!(matches!(&result, Err(e) if e.to_string().contains("RSS_OIDC_ISSUER")));
     }
 
     #[test]
-    fn build_provider_from_missing_audience_fails_fast() {
+    fn build_provider_from_values_missing_audience_fails_fast() {
         // issuer 存在、audience 缺失 → fail-fast 命中 audience 那行（独立于 issuer 缺失路径）。
-        let get = |k: &str| (k == "RSS_OIDC_ISSUER").then(|| "https://issuer.test".to_string());
-        let result = build_provider_from(get);
+        let result = build_provider_from_values(
+            Some("https://issuer.test"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(matches!(&result, Err(e) if e.to_string().contains("RSS_OIDC_AUDIENCE")));
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn build_provider_from_happy_hs256() {
+    fn build_provider_from_values_happy_hs256() {
         let secret = B64.encode([7u8; 32]);
-        let get = |k: &str| match k {
-            "RSS_OIDC_ISSUER" => Some("https://issuer.test".to_string()),
-            "RSS_OIDC_AUDIENCE" => Some("rss".to_string()),
-            "RSS_OIDC_TRUSTED_KINDS" => Some("user,admin".to_string()),
-            "RSS_OIDC_HS256_SECRET_B64URL" => Some(secret.clone()),
-            "RSS_OIDC_HS256_KID" => Some("cell-a.svc-a".to_string()),
-            _ => None,
-        };
-        build_provider_from(get).expect("issuer + aud + trusted kinds + hs256 key ⇒ 构造成功");
+        build_provider_from_values(
+            Some("https://issuer.test"),
+            Some("rss"),
+            Some("user,admin"),
+            None,
+            Some(&secret),
+            Some("cell-a.svc-a"),
+            None,
+        )
+        .expect("issuer + aud + trusted kinds + hs256 key ⇒ 构造成功");
     }
 
     #[test]

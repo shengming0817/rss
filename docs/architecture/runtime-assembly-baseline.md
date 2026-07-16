@@ -1,6 +1,6 @@
 # Runtime Assembly Baseline
 
-This document records the current runtime assembly shape after the `runtime::run()` decomposition and #1677 PG lifecycle-ownership hardening. The machine-readable inventory lives in `runtime-baseline/runtime.txt` and is regenerated with:
+This document records the current runtime assembly shape after the `runtime::run()` decomposition, #1677 PG lifecycle-ownership hardening, and the startup owner funnel. The machine-readable inventory lives in `runtime-baseline/runtime.txt` and is regenerated with:
 
 ```bash
 cargo xtask runtime-baseline list > runtime-baseline/runtime.txt
@@ -15,15 +15,18 @@ The baseline locks static repository facts only:
 - `assemblies/runtime/assembly.toml` `[[diportProviders]]`
 - `assemblies/runtime/src/module.rs` `SharedRuntimeDeps` fields
 - `crates/bootstrap/src/module.rs` `DomainModuleResult` fields plus `merge`
-- ordered anchors inside `assemblies/runtime/src/lib.rs` `runtime::run()`
+- the exact outer `runtime::run()` lifecycle owner and ordered assembly anchors inside its unique
+  `run_startup()` body
 - the unique PG lifecycle-output helper and production call
 - ordered launch anchors inside `assemblies/runtime/src/launch.rs`
 
 Dynamic state is not asserted by this gate: environment variables, live provider health, generated event subscriptions, topology-specific routing, socket bind results, and OS signal behavior remain runtime facts.
 
-## Current `runtime::run()` Inventory
+## Current `runtime::run_startup()` Inventory
 
-The current production runtime assembly has these phases:
+The public `runtime::run()` only transfers `RuntimeInputs` into `RuntimeLifecycleOwner`. The owner
+always finishes the unique `run_startup(&mut RuntimeInputs)` result through pending-exporter
+cleanup; the current production startup body has these phases:
 
 1. Build provider bundles and transport handles:
    - OIDC `build_provider()`
@@ -85,7 +88,7 @@ The infrastructure-only input boundary is enforced by `cargo xtask runtime-deps 
 (`WIRING-DEPS-INFRA-ONLY-01`). The baseline remains an inventory drift gate; semantic field
 allowlisting belongs to the runtime deps guard.
 
-`PgRuntimeDeps` remains local to `run()` as the non-Clone lifecycle owner; it is not a second shared
+`PgRuntimeDeps` remains local to `run_startup()` as the non-Clone lifecycle owner; it is not a second shared
 input. The owner directly wraps the same `PgRuntimeHandle` used by capability consumers and is retained
 until launch assembly consumes it. `PgRuntimeHandle` exposes only domain/infra/readiness projections.
 Pool guards and the readiness sampler can only leave the owner through
@@ -109,10 +112,11 @@ module type directly: AMQP guards are resources and event loops are workers, wit
 
 ## Listener, Health, And Shutdown Order
 
-Authenticated listeners are built through `assemble_authed_routers`. Health and metrics use a dedicated plain listener from `health_listener`, after route groups are drained and before `run()` hands a `LaunchPlan` to `launch::launch`.
+Authenticated listeners are built through `assemble_authed_routers`. Health and metrics use a dedicated plain listener from `health_listener`, after route groups are drained and before `run_startup()` hands a `LaunchPlan` to `launch::launch`.
 
-`LaunchPlan::register` transfers non-listener resources into `ShutdownStack` before
-`launch_until` binds listener sockets. Shutdown is registered in LIFO order:
+`LaunchPlan::register` transfers both PG and domain lifecycle batches into `ShutdownStack` before
+it propagates either batch's validation result, so an earlier invalid batch cannot synchronously
+drop the later batch. `launch_until` then binds listener sockets. Shutdown is registered in LIFO order:
 
 1. optional OTEL exporter
 2. PG `DomainModuleResult`: primary pool guard, optional audit-admin pool guard, then readiness sampler
@@ -130,12 +134,13 @@ The effective shutdown drain order is the reverse: listeners first, then workers
 - `runtime-baseline/runtime.txt` is missing
 - regenerated baseline text differs from the committed file
 - runtime dependencies or assembly providers are empty
-- required `runtime::run()` or `launch.rs` anchors are missing or out of order
+- the exact outer `runtime::run()` owner, required `run_startup()` anchors, or `launch.rs` anchors
+  are missing or out of order
 - the unique PG helper or its unique production call is missing/duplicated, PG implements generic
   `ProviderOutput`, lifecycle primitives escape the helper, a parallel PG output type appears, or
   PG module registration moves after the unified domain module
 - event transport restores a parallel output type, exposes its production wiring API outside the crate,
-  extracts channels in `run()`, bypasses the single merge, or registers lifecycle primitives outside the common helper
+  extracts channels in `run_startup()`, bypasses the single merge, or registers lifecycle primitives outside the common helper
 - `DomainModuleResult::merge` is absent or stops merging a field
 
 `cargo xtask verify --fast` and `cargo xtask ci full` run this gate before `archrules`, so `RUNTIME-BASELINE-DRIFT-01` is indexed by `cargo xtask archrules verify`.

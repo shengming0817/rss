@@ -449,11 +449,14 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     let mut bindings = vec![identity_binding];
     let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;
     let mut primary = None;
-    for assembled in runtime::routes::assemble_authed_routers(
+    for assembled in runtime::routes::assemble_authed_routers_from_values(
         &mut registry,
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
+        None,
+        None,
+        None,
     )? {
         let (listener, routes) = assembled.into_parts();
         if listener == ListenerKind::Primary {
@@ -687,11 +690,14 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     let mut bindings = vec![identity_binding, settings_binding];
     let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;
     let mut primary = None;
-    for assembled in runtime::routes::assemble_authed_routers(
+    for assembled in runtime::routes::assemble_authed_routers_from_values(
         &mut registry,
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
+        None,
+        None,
+        None,
     )? {
         let (listener, routes) = assembled.into_parts();
         if listener == ListenerKind::Primary {

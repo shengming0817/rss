@@ -1,6 +1,6 @@
 //! Runtime listener route finalization and auth wiring.
 
-use crate::auth_bridge;
+use crate::{SPIFFE_ENDPOINT_SOCKET_ENV, auth_bridge, config::SnapshotConfig};
 
 use std::future::Future;
 use std::pin::Pin;
@@ -20,24 +20,28 @@ pub(crate) const INTERNAL_AUTH_SCHEME_SERVICE_TOKEN: &str = "service-token";
 /// Comma-separated exact SPIFFE IDs accepted on the Internal mTLS listener.
 pub(crate) const INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV: &str = "RSS_INTERNAL_MTLS_SPIFFE_ALLOW_SET";
 
-pub(crate) fn auth_scheme_from(
+/// Resolve one listener's auth policy exclusively from the captured serving generation.
+pub(crate) fn auth_scheme(
+    config: SnapshotConfig<'_>,
     listener: ListenerKind,
-    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<AuthScheme> {
+    auth_scheme_from_value(listener, config.value(INTERNAL_AUTH_SCHEME_ENV))
+}
+
+pub(crate) fn auth_scheme_from_value(
+    listener: ListenerKind,
+    internal_auth_scheme: Option<&str>,
 ) -> anyhow::Result<AuthScheme> {
     Ok(match listener {
         ListenerKind::Primary | ListenerKind::Admin => AuthScheme::Jwt,
-        ListenerKind::Internal => internal_auth_scheme_from(get)?,
+        ListenerKind::Internal => internal_auth_scheme_from_value(internal_auth_scheme)?,
         ListenerKind::Health => AuthScheme::NoAuth,
-        // ListenerKind non_exhaustive——未知 listener fail-closed 要求 JWT 认证（绝不默认 NoAuth）+ 配置期 warn 埋点。
-        _ => {
-            tracing::warn!(listener = ?listener, "unknown ListenerKind; fail-closed to JWT auth scheme");
-            AuthScheme::Jwt
-        }
+        _ => anyhow::bail!("unknown ListenerKind {listener:?}; refusing to infer an auth scheme"),
     })
 }
 
-fn internal_auth_scheme_from(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<AuthScheme> {
-    let Some(raw) = get(INTERNAL_AUTH_SCHEME_ENV) else {
+fn internal_auth_scheme_from_value(raw: Option<&str>) -> anyhow::Result<AuthScheme> {
+    let Some(raw) = raw else {
         return Ok(AuthScheme::Mtls);
     };
     let normalized = raw.trim().to_ascii_lowercase();
@@ -54,7 +58,7 @@ fn internal_auth_scheme_from(get: impl Fn(&str) -> Option<String>) -> anyhow::Re
             "{INTERNAL_AUTH_SCHEME_ENV} must be either '{INTERNAL_AUTH_SCHEME_MTLS}' or '{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN}'"
         ),
         _ => anyhow::bail!(
-            "{INTERNAL_AUTH_SCHEME_ENV} has unsupported value '{raw}' (expected '{INTERNAL_AUTH_SCHEME_MTLS}' or '{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN}')"
+            "{INTERNAL_AUTH_SCHEME_ENV} has an unsupported value (expected '{INTERNAL_AUTH_SCHEME_MTLS}' or '{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN}')"
         ),
     }
 }
@@ -76,7 +80,20 @@ pub struct AssembledListener {
     pub(crate) listener: ListenerKind,
     pub(crate) scheme: AuthScheme,
     pub(crate) routes: httpserve::AuthenticatedRoutes,
-    pub(crate) mtls_health: Option<Arc<MtlsHealthSlot>>,
+    pub(crate) transport: ListenerTransport,
+}
+
+/// Transport material resolved during route assembly from the same captured generation.
+///
+/// The mTLS variant makes the allow-set, SPIFFE endpoint, and readiness slot indivisible, so the
+/// launch phase cannot bind mTLS and then fall back to an ambient configuration source.
+pub(crate) enum ListenerTransport {
+    Plaintext,
+    Mtls {
+        allow_set: authn::MtlsAllowSet,
+        spiffe_endpoint: String,
+        health: Arc<MtlsHealthSlot>,
+    },
 }
 
 impl AssembledListener {
@@ -97,7 +114,7 @@ impl AssembledListener {
             listener,
             scheme: AuthScheme::NoAuth,
             routes,
-            mtls_health: None,
+            transport: ListenerTransport::Plaintext,
         }
     }
 }
@@ -185,12 +202,8 @@ impl httpserve::RouteAuthorizer for MtlsRouteAuthorizer {
     }
 }
 
-fn mtls_route_authorizer_from(
-    listener: ListenerKind,
-    get: impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<Arc<dyn httpserve::RouteAuthorizer>> {
-    let allow_set = mtls_allow_set_from_env(listener, get)?;
-    Ok(Arc::new(MtlsRouteAuthorizer { allow_set }))
+fn mtls_route_authorizer(allow_set: authn::MtlsAllowSet) -> Arc<dyn httpserve::RouteAuthorizer> {
+    Arc::new(MtlsRouteAuthorizer { allow_set })
 }
 
 /// 默认限流配额：10 req/s，burst 20（per-peer-IP keyed，组合根 owner；可配置化 follow-up #1106）。
@@ -231,23 +244,62 @@ fn default_rate_quota() -> ratelimit::QuotaConfig {
 /// [`bootstrap::Registry::take_health_reporter`] 取出探针装入 `Arc<HealthReporter>`（`Send + Sync`）注入
 /// Health listener 的 readyz handler（每请求 `report`，[`health_listener`]）；整体非 `Sync` 的 `Registry`
 /// 无法进 axum handler 闭包。
-pub fn assemble_authed_routers(
+pub(crate) fn assemble_authed_routers(
+    config: SnapshotConfig<'_>,
     registry: &mut bootstrap::Registry,
     provider: Arc<OidcProvider>,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
 ) -> anyhow::Result<Vec<AssembledListener>> {
-    assemble_authed_routers_from(registry, provider, audit_sink, audit_clock, |name| {
-        std::env::var(name).ok()
-    })
+    let internal_scheme = auth_scheme(config, ListenerKind::Internal)
+        .context("resolve captured Internal auth scheme")?;
+    assemble_authed_routers_with_resolved_internal_auth(
+        registry,
+        provider,
+        audit_sink,
+        audit_clock,
+        internal_scheme,
+        config.value(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV),
+        config.value(SPIFFE_ENDPOINT_SOCKET_ENV),
+    )
 }
 
-pub(crate) fn assemble_authed_routers_from(
+/// Explicit-value assembly core for integration tests that cannot mint [`SnapshotConfig`].
+///
+/// Production must enter through [`assemble_authed_routers`]. This boundary accepts only the
+/// three raw values owned by route/listener transport assembly; it cannot accept an ambient reader
+/// and therefore cannot introduce late environment reads.
+#[cfg(feature = "integration")]
+pub fn assemble_authed_routers_from_values(
     registry: &mut bootstrap::Registry,
     provider: Arc<OidcProvider>,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
-    get: impl Fn(&str) -> Option<String> + Copy,
+    internal_auth_scheme: Option<&str>,
+    internal_mtls_allow_set: Option<&str>,
+    spiffe_endpoint: Option<&str>,
+) -> anyhow::Result<Vec<AssembledListener>> {
+    let internal_scheme = auth_scheme_from_value(ListenerKind::Internal, internal_auth_scheme)
+        .context("resolve explicit Internal auth scheme")?;
+    assemble_authed_routers_with_resolved_internal_auth(
+        registry,
+        provider,
+        audit_sink,
+        audit_clock,
+        internal_scheme,
+        internal_mtls_allow_set,
+        spiffe_endpoint,
+    )
+}
+
+fn assemble_authed_routers_with_resolved_internal_auth(
+    registry: &mut bootstrap::Registry,
+    provider: Arc<OidcProvider>,
+    audit_sink: httpserve::AuditSinkHandle,
+    audit_clock: Arc<dyn diport::Clock>,
+    internal_scheme: AuthScheme,
+    internal_mtls_allow_set: Option<&str>,
+    spiffe_endpoint: Option<&str>,
 ) -> anyhow::Result<Vec<AssembledListener>> {
     crate::modules_gen::register_framework_routes(registry).context("register framework routes")?;
     let primary_authorizer = registry
@@ -268,9 +320,15 @@ pub(crate) fn assemble_authed_routers_from(
     )
     .context("validate framework serving")?;
     for (listener, routes) in finalized_routes {
-        let scheme = auth_scheme_from(listener, get).context("resolve listener auth scheme")?;
+        let scheme = if listener == ListenerKind::Internal {
+            internal_scheme
+        } else {
+            auth_scheme_from_value(listener, None).context("resolve listener auth scheme")?
+        };
         let plan = AuthPlan::new(listener, scheme).context("build auth plan")?;
-        let mtls_health = if scheme == AuthScheme::Mtls {
+        let transport = if scheme == AuthScheme::Mtls {
+            let allow_set = mtls_allow_set_from_value(listener, internal_mtls_allow_set)?;
+            let spiffe_endpoint = mtls_spiffe_endpoint_from_value(spiffe_endpoint)?;
             let slot = Arc::new(MtlsHealthSlot::new());
             let probe_name = mtls_probe_name(listener)?;
             registry
@@ -279,18 +337,26 @@ pub(crate) fn assemble_authed_routers_from(
                     Box::new(MtlsSourceHealthProbe::new(probe_name, slot.clone())),
                 )
                 .context("register mtls source health probe")?;
-            Some(slot)
+            ListenerTransport::Mtls {
+                allow_set,
+                spiffe_endpoint,
+                health: slot,
+            }
         } else {
-            None
+            ListenerTransport::Plaintext
         };
-        let authed = finalize_listener_auth_from(
+        let mtls_authorizer = match &transport {
+            ListenerTransport::Mtls { allow_set, .. } => Some(allow_set.clone()),
+            ListenerTransport::Plaintext => None,
+        };
+        let authed = finalize_listener_auth_with_mtls(
             listener,
             routes,
             plan,
             audit_sink.clone(),
             audit_clock.clone(),
             primary_authorizer.clone(),
-            get,
+            mtls_authorizer,
         )
         .context("finalize_auth")?;
         let required = required_scheme_for_auth_scheme(scheme);
@@ -316,7 +382,7 @@ pub(crate) fn assemble_authed_routers_from(
             listener,
             scheme,
             routes: wired,
-            mtls_health,
+            transport,
         });
     }
     Ok(out)
@@ -331,25 +397,25 @@ pub(crate) fn finalize_listener_auth(
     audit_clock: Arc<dyn diport::Clock>,
     primary_authorizer: Arc<dyn httpserve::RouteAuthorizer>,
 ) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
-    finalize_listener_auth_from(
+    finalize_listener_auth_with_mtls(
         listener,
         routes,
         plan,
         audit_sink,
         audit_clock,
         primary_authorizer,
-        |name| std::env::var(name).ok(),
+        None,
     )
 }
 
-fn finalize_listener_auth_from(
+fn finalize_listener_auth_with_mtls(
     listener: ListenerKind,
     routes: httpserve::UnfinalizedRoutes,
     plan: AuthPlan,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
     primary_authorizer: Arc<dyn httpserve::RouteAuthorizer>,
-    get: impl Fn(&str) -> Option<String> + Copy,
+    mtls_allow_set: Option<authn::MtlsAllowSet>,
 ) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
     let scheme = plan.scheme();
     if listener == ListenerKind::Primary {
@@ -373,12 +439,15 @@ fn finalize_listener_auth_from(
         .map_err(Into::into);
     }
     if scheme == AuthScheme::Mtls {
+        let allow_set = mtls_allow_set.ok_or_else(|| {
+            anyhow::anyhow!("mTLS listener {listener:?} is missing its captured allow-set")
+        })?;
         return httpserve::finalize_auth_with_audit_and_authorizer(
             routes,
             plan,
             audit_sink,
             audit_clock,
-            mtls_route_authorizer_from(listener, get)?,
+            mtls_route_authorizer(allow_set),
         )
         .map_err(Into::into);
     }
@@ -402,23 +471,41 @@ pub(crate) fn mtls_allow_set_from_csv_for_env(
     authn::MtlsAllowSet::new(ids).map_err(|e| anyhow::anyhow!("{env} invalid: {e}"))
 }
 
-pub(crate) fn mtls_allow_set_from_env(
+pub(crate) fn mtls_allow_set_from_value(
     listener: ListenerKind,
-    get: impl Fn(&str) -> Option<String>,
+    raw: Option<&str>,
 ) -> anyhow::Result<authn::MtlsAllowSet> {
     anyhow::ensure!(
         listener == ListenerKind::Internal,
         "mTLS listener config is only wired for Internal"
     );
-    let raw = get(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV).ok_or_else(|| {
+    let raw = raw.ok_or_else(|| {
         anyhow::anyhow!("missing required env var: {INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV}")
     })?;
-    mtls_allow_set_from_csv(&raw)
+    mtls_allow_set_from_csv(raw)
+}
+
+fn mtls_spiffe_endpoint_from_value(raw: Option<&str>) -> anyhow::Result<String> {
+    let raw = raw
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {SPIFFE_ENDPOINT_SOCKET_ENV}"))?;
+    let endpoint = raw.trim();
+    anyhow::ensure!(
+        !endpoint.is_empty(),
+        "{SPIFFE_ENDPOINT_SOCKET_ENV} must be a non-empty explicit endpoint"
+    );
+    anyhow::ensure!(
+        endpoint == raw
+            && !endpoint.chars().any(char::is_control)
+            && !endpoint.chars().any(char::is_whitespace),
+        "{SPIFFE_ENDPOINT_SOCKET_ENV} must not contain whitespace or control characters"
+    );
+    Ok(raw.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{RuntimeConfigSnapshot, test_snapshot};
     use crate::listeners::health_listener;
     use crate::{SystemClock, TracingAuthAuditSink, provider_from_b64};
 
@@ -437,6 +524,14 @@ mod tests {
 
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    #[allow(clippy::expect_used)]
+    fn test_config(
+        entries: impl IntoIterator<Item = (&'static str, &'static str)>,
+    ) -> RuntimeConfigSnapshot {
+        let entries = entries.into_iter().collect::<Vec<_>>();
+        test_snapshot(&entries).expect("capture test serving config")
+    }
 
     #[derive(Clone)]
     struct AllowAuthorizer;
@@ -547,19 +642,19 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     fn auth_scheme_per_listener() {
         assert_eq!(
-            auth_scheme_from(ListenerKind::Primary, |_| None).unwrap(),
+            auth_scheme_from_value(ListenerKind::Primary, None).unwrap(),
             AuthScheme::Jwt
         );
         assert_eq!(
-            auth_scheme_from(ListenerKind::Admin, |_| None).unwrap(),
+            auth_scheme_from_value(ListenerKind::Admin, None).unwrap(),
             AuthScheme::Jwt
         );
         assert_eq!(
-            auth_scheme_from(ListenerKind::Internal, |_| None).unwrap(),
+            auth_scheme_from_value(ListenerKind::Internal, None).unwrap(),
             AuthScheme::Mtls
         );
         assert_eq!(
-            auth_scheme_from(ListenerKind::Health, |_| None).unwrap(),
+            auth_scheme_from_value(ListenerKind::Health, None).unwrap(),
             AuthScheme::NoAuth
         );
     }
@@ -567,10 +662,10 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn internal_service_token_requires_explicit_transition_flag() {
-        let scheme = auth_scheme_from(ListenerKind::Internal, |name| {
-            (name == INTERNAL_AUTH_SCHEME_ENV)
-                .then(|| INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string())
-        })
+        let scheme = auth_scheme_from_value(
+            ListenerKind::Internal,
+            Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN),
+        )
         .expect("explicit service-token transition is accepted");
         assert_eq!(scheme, AuthScheme::ServiceToken);
     }
@@ -578,13 +673,17 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn internal_auth_scheme_rejects_unknown_value() {
-        let err = auth_scheme_from(ListenerKind::Internal, |name| {
-            (name == INTERNAL_AUTH_SCHEME_ENV).then(|| "mtls-or-token".to_string())
-        })
-        .expect_err("unknown internal auth scheme must fail-fast");
+        const SECRET_FRAGMENT: &str = "auth-secret-bait";
+        let err = auth_scheme_from_value(ListenerKind::Internal, Some(SECRET_FRAGMENT))
+            .expect_err("unknown internal auth scheme must fail-fast");
+        let error = err.to_string();
         assert!(
-            err.to_string().contains(INTERNAL_AUTH_SCHEME_ENV),
+            error.contains(INTERNAL_AUTH_SCHEME_ENV),
             "error should name env var: {err}"
+        );
+        assert!(
+            !error.contains(SECRET_FRAGMENT),
+            "auth errors must not expose configured values"
         );
     }
 
@@ -625,13 +724,94 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn mtls_allow_set_from_env_requires_config_for_internal_mtls() {
-        let err = mtls_allow_set_from_env(ListenerKind::Internal, |_| None)
+    fn mtls_allow_set_from_value_requires_config_for_internal_mtls() {
+        let err = mtls_allow_set_from_value(ListenerKind::Internal, None)
             .expect_err("mTLS allow-set must be configured");
         assert!(
             err.to_string().contains(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV),
             "error should name env var: {err}"
         );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn mtls_spiffe_endpoint_requires_a_nonempty_captured_value_without_echoing_it() {
+        for raw in [None, Some(""), Some("   \t")] {
+            let err = mtls_spiffe_endpoint_from_value(raw)
+                .expect_err("Internal mTLS must require an explicit SPIFFE endpoint");
+            assert!(err.to_string().contains(SPIFFE_ENDPOINT_SOCKET_ENV));
+        }
+
+        const SECRET_BAIT: &str = "unix:///tenant-secret/spire.sock";
+        assert_eq!(
+            mtls_spiffe_endpoint_from_value(Some("unix:///run/spire/agent.sock"))
+                .expect("explicit endpoint"),
+            "unix:///run/spire/agent.sock"
+        );
+        let padded = format!(" {SECRET_BAIT} ");
+        let err = mtls_spiffe_endpoint_from_value(Some(&padded))
+            .expect_err("leading or trailing whitespace must be rejected");
+        assert!(!err.to_string().contains(SECRET_BAIT));
+        let invalid = format!("{SECRET_BAIT}\ninner");
+        let err = mtls_spiffe_endpoint_from_value(Some(&invalid))
+            .expect_err("control characters must be rejected");
+        assert!(!err.to_string().contains(SECRET_BAIT));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn route_assembly_requires_endpoint_only_for_internal_mtls() {
+        fn internal_registry() -> bootstrap::Registry {
+            let mut registry = bootstrap::Registry::new();
+            registry
+                .route_group::<httpserve::Internal>("/internal", |rb| {
+                    Ok(rb.mount_raw_for_test(
+                        Route {
+                            method: Method::GET,
+                            path: "/internal/probe",
+                            contract_id: "runtime.mtls.endpoint",
+                        },
+                        get(|| async { "internal" }),
+                    )?)
+                })
+                .expect("internal route group");
+            registry
+                .register_primary_authorizer(allow_authorizer())
+                .expect("Primary authorizer registered");
+            registry
+        }
+
+        let mut mtls_registry = internal_registry();
+        let mtls_snapshot = test_config([(
+            INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV,
+            "spiffe://example.org/ns/rss/sa/internal",
+        )]);
+        let error = assemble_authed_routers(
+            mtls_snapshot.view(),
+            &mut mtls_registry,
+            runtime_test_provider(),
+            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            Arc::new(SystemClock),
+        )
+        .err()
+        .expect("mTLS route assembly must fail without a captured SPIFFE endpoint");
+        assert!(error.to_string().contains(SPIFFE_ENDPOINT_SOCKET_ENV));
+
+        let mut plaintext_registry = internal_registry();
+        let plaintext_snapshot =
+            test_config([(INTERNAL_AUTH_SCHEME_ENV, INTERNAL_AUTH_SCHEME_SERVICE_TOKEN)]);
+        let listeners = assemble_authed_routers(
+            plaintext_snapshot.view(),
+            &mut plaintext_registry,
+            runtime_test_provider(),
+            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            Arc::new(SystemClock),
+        )
+        .expect("service-token Internal assembly must not require a SPIFFE endpoint");
+        assert!(listeners.iter().any(|listener| {
+            listener.listener == ListenerKind::Internal
+                && matches!(listener.transport, ListenerTransport::Plaintext)
+        }));
     }
 
     #[test]
@@ -651,7 +831,9 @@ mod tests {
             .expect("provider"),
         );
         let mut registry = bootstrap::compose(&[]).expect("compose empty");
+        let snapshot = test_config([]);
         let error = assemble_authed_routers(
+            snapshot.view(),
             &mut registry,
             provider,
             httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
@@ -713,15 +895,19 @@ mod tests {
             .register_primary_authorizer(allow_authorizer())
             .expect("Primary authorizer registered");
 
-        let listeners = assemble_authed_routers_from(
+        let snapshot = test_config([
+            (
+                INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV,
+                "spiffe://example.org/ns/rss/sa/internal",
+            ),
+            (SPIFFE_ENDPOINT_SOCKET_ENV, "unix:///run/spire/test.sock"),
+        ]);
+        let listeners = assemble_authed_routers(
+            snapshot.view(),
             &mut registry,
             runtime_test_provider(),
             httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
             Arc::new(SystemClock),
-            |name| {
-                (name == INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV)
-                    .then(|| "spiffe://example.org/ns/rss/sa/internal".to_string())
-            },
         )
         .expect("assemble listeners");
         let (health_listener_kind, health_routes) =
@@ -733,6 +919,27 @@ mod tests {
         let mut internal = None;
         let mut unexpected = Vec::new();
         for assembled in listeners {
+            if assembled.listener() == ListenerKind::Internal {
+                let carried = match &assembled.transport {
+                    ListenerTransport::Mtls {
+                        allow_set,
+                        spiffe_endpoint,
+                        ..
+                    } => Some((allow_set, spiffe_endpoint)),
+                    ListenerTransport::Plaintext => None,
+                };
+                assert!(
+                    carried.is_some(),
+                    "Internal mTLS auth must carry its resolved transport config"
+                );
+                if let Some((allow_set, spiffe_endpoint)) = carried {
+                    let expected =
+                        authn::SpiffeId::parse("spiffe://example.org/ns/rss/sa/internal")
+                            .expect("valid expected SPIFFE ID");
+                    assert!(allow_set.allows(&expected));
+                    assert_eq!(spiffe_endpoint, "unix:///run/spire/test.sock");
+                }
+            }
             let (listener, routes) = assembled.into_parts();
             match listener {
                 ListenerKind::Primary => primary = Some(routes.into_router_for_test()),

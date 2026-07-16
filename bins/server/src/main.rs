@@ -4,6 +4,6 @@
 //! 显式 dispatch。
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let trace_export = runtime::init_tracing()?;
-    runtime::run(trace_export).await
+    let runtime_inputs = runtime::prepare_runtime()?;
+    runtime::run(runtime_inputs).await
 }

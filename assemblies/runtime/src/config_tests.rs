@@ -79,14 +79,19 @@ fn runtime_config_snapshot_reads_source_once_and_replays_stable_values() {
 
     assert!(dropped.load(Ordering::Acquire), "source must be dropped");
     assert_eq!(
-        snapshot.get("RSS_VAULT_TOKEN").map(|v| v.expose()),
+        snapshot.view().value("RSS_VAULT_TOKEN"),
         Some("generation-one")
     );
     assert_eq!(
-        snapshot.get("RSS_VAULT_TOKEN").map(|v| v.expose()),
+        snapshot.view().value("RSS_VAULT_TOKEN"),
         Some("generation-one")
     );
-    assert!(snapshot.get("RSS_NOT_IN_SERVING_CATALOG").is_none());
+    assert!(
+        snapshot
+            .view()
+            .value("RSS_NOT_IN_SERVING_CATALOG")
+            .is_none()
+    );
 
     let reads = reads.lock().expect("read log mutex");
     let counts = reads.iter().fold(BTreeMap::new(), |mut counts, key| {
@@ -249,9 +254,10 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
             RuntimeConfigSnapshot::capture(FakeSource::new(values)).expect("capture succeeds");
         captured.push_str(&format!(
             "[{name}]\n{}\n",
-            runtime_config_decision_transcript(&|key| {
-                snapshot.get(key).map(|value| value.expose().to_owned())
-            })
+            runtime_config_decision_transcript(&|key| snapshot
+                .view()
+                .value(key)
+                .map(str::to_owned))
         ));
     }
 
@@ -293,11 +299,11 @@ fn runtime_config_snapshot_preserves_env_var_ok_transcript() {
     ]);
     let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
 
-    assert!(snapshot.get("RSS_MISSING_SERVING_KEY").is_none());
-    assert!(snapshot.get("RSS_VAULT_TOKEN").is_none());
-    assert_eq!(snapshot.get("RSS_VAULT_ADDR").map(|v| v.expose()), Some(""));
+    assert!(snapshot.view().value("RSS_MISSING_SERVING_KEY").is_none());
+    assert!(snapshot.view().value("RSS_VAULT_TOKEN").is_none());
+    assert_eq!(snapshot.view().value("RSS_VAULT_ADDR"), Some(""));
     assert_eq!(
-        snapshot.get("RSS_VAULT_TRANSIT_MOUNT").map(|v| v.expose()),
+        snapshot.view().value("RSS_VAULT_TRANSIT_MOUNT"),
         Some("  transit  ")
     );
 }
@@ -334,6 +340,55 @@ fn runtime_config_snapshot_is_owned_send_sync_static() {
 }
 
 #[test]
+fn snapshot_capability_reuses_one_generation_for_serving_decisions() {
+    let source = FakeSource::new([
+        ("RUST_LOG", FakeValue::Present("runtime=debug".to_owned())),
+        (
+            "RSS_INTERNAL_AUTH_SCHEME",
+            FakeValue::Present("service-token".to_owned()),
+        ),
+        (
+            "RSS_INTERNAL_LISTEN_ADDR",
+            FakeValue::Present("127.0.0.1:18080".to_owned()),
+        ),
+        (
+            "RSS_LISTENER_ALLOW_PLAINTEXT",
+            FakeValue::Present("true".to_owned()),
+        ),
+    ]);
+    let reads = read_log(&source);
+    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+    let config = snapshot.view();
+
+    let scheme = crate::routes::auth_scheme(config, primitives::ListenerKind::Internal)
+        .expect("generation-one auth scheme");
+    let addr = crate::listeners::listener_addr_for_scheme_at(
+        config,
+        primitives::ListenerKind::Internal,
+        scheme,
+        std::time::SystemTime::UNIX_EPOCH,
+    )
+    .expect("generation-one listener address");
+
+    assert_eq!(config.value("RUST_LOG"), Some("runtime=debug"));
+    assert_eq!(scheme, primitives::AuthScheme::ServiceToken);
+    assert_eq!(addr.to_string(), "127.0.0.1:18080");
+    let reads = reads.lock().expect("read log mutex");
+    for key in [
+        "RUST_LOG",
+        "RSS_INTERNAL_AUTH_SCHEME",
+        "RSS_INTERNAL_LISTEN_ADDR",
+        "RSS_LISTENER_ALLOW_PLAINTEXT",
+    ] {
+        assert_eq!(
+            reads.iter().filter(|read| read.as_str() == key).count(),
+            1,
+            "{key} must come from the single captured generation"
+        );
+    }
+}
+
+#[test]
 fn runtime_config_invalid_required_domains_are_deferred_to_the_existing_builder() {
     let source = FakeSource::new([(
         "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS",
@@ -342,7 +397,7 @@ fn runtime_config_invalid_required_domains_are_deferred_to_the_existing_builder(
     let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture must not parse-fail");
 
     let error = crate::domain_transport_required_domains_from(&|name| {
-        snapshot.get(name).map(|value| value.expose().to_owned())
+        snapshot.view().value(name).map(str::to_owned)
     })
     .expect_err("existing builder owns the parse error");
     assert_eq!(

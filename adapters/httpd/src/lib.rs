@@ -548,6 +548,16 @@ pub struct MtlsServerConfig {
     allow_set: authn::MtlsAllowSet,
 }
 
+/// Failure to construct hermetic TLS material for an assembly test.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, thiserror::Error)]
+pub enum MtlsTestConfigError {
+    #[error("hermetic mTLS certificate construction failed")]
+    Certificate(#[from] rcgen::Error),
+    #[error("hermetic mTLS rustls configuration failed")]
+    Rustls(#[from] rustls::Error),
+}
+
 impl MtlsServerConfig {
     /// Build from SPIRE Agent Workload API. `endpoint=None` uses `SPIFFE_ENDPOINT_SOCKET`.
     pub async fn from_spire(
@@ -597,6 +607,30 @@ impl MtlsServerConfig {
         self.source
             .as_ref()
             .is_some_and(spiffe::X509Source::is_healthy)
+    }
+
+    /// Construct hermetic server TLS material for downstream assembly tests.
+    ///
+    /// This entry point and `rcgen` are absent from the default production artifact. It exists only
+    /// to exercise the real `serve_mtls` resource-registration and drain path without a live SPIRE
+    /// Agent; no request is accepted by this no-client-auth test certificate configuration.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(allow_set: authn::MtlsAllowSet) -> Result<Self, MtlsTestConfigError> {
+        let key = rcgen::KeyPair::generate()?;
+        let cert =
+            rcgen::CertificateParams::new(vec!["localhost".to_owned()])?.self_signed(&key)?;
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(key.serialize_der()),
+        );
+        let mut server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], key)?;
+        server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Ok(Self {
+            source: None,
+            acceptor: spiffe_rustls_tokio::TlsAcceptor::new(Arc::new(server_config)),
+            allow_set,
+        })
     }
 
     #[cfg(test)]

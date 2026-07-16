@@ -10,7 +10,15 @@ pub(crate) fn plaintext_endpoint_policy_from(
     get: impl Fn(&str) -> Option<String>,
     env: &str,
 ) -> anyhow::Result<PlaintextEndpointPolicy> {
-    let Some(raw) = get(env) else {
+    let raw = get(env);
+    plaintext_endpoint_policy_from_value(raw.as_deref(), env)
+}
+
+pub(crate) fn plaintext_endpoint_policy_from_value(
+    raw: Option<&str>,
+    env: &str,
+) -> anyhow::Result<PlaintextEndpointPolicy> {
+    let Some(raw) = raw else {
         return Ok(PlaintextEndpointPolicy::Deny);
     };
     match raw.trim().to_ascii_lowercase().as_str() {

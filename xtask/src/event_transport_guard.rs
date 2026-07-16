@@ -1869,7 +1869,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
         (
             "assemblies/runtime/src/lib.rs",
             "runtime event transport budget loaded",
-            "run",
+            "run_startup",
             &[
                 "runtime.event_topology",
                 "relay.lease_ttl_ms",

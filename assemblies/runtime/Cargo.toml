@@ -90,7 +90,7 @@ httpd = { path = "../../adapters/httpd" }
 # in-mem keyed 限流 adapter（GovernorLimiter：per-peer-IP GCRA，diport::RateLimiter impl；#1106 rate-limit wiring）。
 # lifecycle=active providerCrate 须直接依赖（contract-fanout.md §DI provider）。
 ratelimit = { path = "../../adapters/ratelimit" }
-# 生产 tracing subscriber（init_tracing：fmt + RUST_LOG env filter + 可选 otel 桥接 Layer）——否则运行时入口日志全 no-op。
+# 生产 tracing subscriber（prepare_runtime：snapshot-backed RUST_LOG filter + 可选 otel 桥接 Layer）——否则运行时入口日志全 no-op。
 # 同时供 dev e2e 捕获 tracing 输出断言（auth_e2e 埋点）。registry()/fmt::layer() 经默认 fmt feature（fmt→registry）可用。
 tracing-subscriber = { workspace = true }
 # 可观测性导出 adapter（#1253 Join 接线）：otel = OTLP/gRPC trace 导出 + tracing 桥接 Layer；
@@ -102,7 +102,8 @@ prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"
 [features]
 # 需要真实后端的集成测试（event transport 使用 postgres + RabbitMQ；其它测试可按需用 Redis）。
 # testkit/containers：激活 testcontainers fixture（PgFixture/RabbitFixture/RedisFixture）。
-# identity/seed-login：启用 LoginService::with_seed_credential（仅 e2e 测试用；生产组合根不启用）。
+# identity/seed-login：启用 LoginService::with_seed_credential；同时门控 identity wire e2e 所需的
+# explicit-value route assembly seam（仅 integration 测试用；默认生产 library 不编译这些入口）。
 integration = ["testkit/containers", "identity/seed-login"]
 
 [dev-dependencies]
@@ -136,3 +137,6 @@ wiremock = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rcgen = { workspace = true }
+# Runtime launch unit tests exercise real mTLS serve registration/drain with hermetic TLS material;
+# the constructor and rcgen dependency are absent from default httpd production artifacts.
+httpd = { path = "../../adapters/httpd", features = ["test-support"] }

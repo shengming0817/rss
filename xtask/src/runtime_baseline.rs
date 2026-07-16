@@ -12,7 +12,9 @@
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must consume the committed generated domain list through `compose_bindings`, must merge its output, and must not restore per-domain handwritten wiring.
 //!
-//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_config_snapshot_rejects_ambient_provider_readers", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must capture the process configuration exactly once after loading the plan and before constructing any provider; the same capture binding must flow into `RuntimeInputs`, whose unique snapshot-backed `config_value` reader must feed the unique Vault, Redis, and S3 calls without ambient, discarded-generation, or bait side paths.
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::snapshot_consumers_reject_reachable_ambient_env_variants", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- the unique production `prepare_runtime()` must capture exactly one `EnvConfigSource` generation and move that same binding into `RuntimeInputs`; the unique production async `run()` must use its `RuntimeInputs` parameter's `SnapshotConfig`-backed reader for the unique legacy Vault, Redis, and S3 provider seams, with no discarded generation, wrong-generation, ambient, or compliant-bait side path. `SnapshotConfig` makes capability omission a native Hard boundary; ambient-reader exclusivity across the production crate's conservatively reachable consumer graph remains this explicit Medium AST gate.
+//!
+//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before acquiring `RuntimeInputs`; serving uniquely transfers the exact binding to `run`, while every operator arm yields a `Result` before the sole exact-binding shutdown, with no pre-consumption early return, alias, macro, shadow path, or unreachable bait.
 //!
 //! INVARIANT: SECRET-TEXT-TRANSFER-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff", anti_vacuity = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff" } -- runtime raw secret allocation transfer is a unique named funnel whose four production handoffs are closed and bait-resistant.
 //!
@@ -29,6 +31,7 @@ use quote::ToTokens as _;
 use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry};
 use std::fs;
 use std::path::{Path, PathBuf};
+use syn::parse::Parser as _;
 use syn::visit::Visit;
 
 const BASELINE_PATH: &str = "runtime-baseline/runtime.txt";
@@ -41,6 +44,8 @@ const RUNTIME_SRC_PATH: &str = "assemblies/runtime/src";
 const PROVIDER_OUTPUT_PATH: &str = "assemblies/runtime/src/provider_output.rs";
 const PROVIDER_OUTPUT_FIXTURE_MARKER: &str = ".runtime-provider-output-fixture";
 const RUNTIME_CONFIG_FIXTURE_MARKER: &str = ".runtime-config-snapshot-fixture";
+const SERVER_MAIN_PATH: &str = "bins/server/src/main.rs";
+const RSS_MAIN_PATH: &str = "bins/rss/src/main.rs";
 const GENERATED_MODULES_PATH: &str = "assemblies/runtime/src/generated/modules_gen.rs";
 const RUNTIME_LAUNCH_PATH: &str = "assemblies/runtime/src/launch.rs";
 const RUNTIME_EVENT_PATH: &str = "assemblies/runtime/src/event_transport.rs";
@@ -214,6 +219,7 @@ fn collect_report(root: &Path) -> Result<Report> {
         }
     }
     findings.extend(runtime_config_snapshot_live_findings(root)?);
+    findings.extend(runtime_binary_config_findings(root)?);
     findings.extend(runtime_secret_transfer_live_findings(root)?);
     findings.extend(generated_domains_live_findings(root)?);
     findings.extend(provider_outputs_live_findings(root)?);
@@ -238,13 +244,104 @@ fn collect_report(root: &Path) -> Result<Report> {
 }
 
 #[derive(Default)]
-struct RuntimeConfigWiring {
+struct PrepareRuntimeConfigWiring {
     snapshot_calls: usize,
     canonical_snapshot_calls: usize,
     snapshot_binding: Option<syn::Ident>,
     runtime_inputs_calls: usize,
-    canonical_runtime_inputs_bindings: usize,
-    runtime_inputs_binding: Option<syn::Ident>,
+    canonical_runtime_inputs_calls: usize,
+    snapshot_config_binding: Option<syn::Ident>,
+    snapshot_filter_binding: Option<syn::Ident>,
+    snapshot_filter_bindings: usize,
+    subscriber_filter_uses: usize,
+    ambient_rust_log_calls: usize,
+}
+
+impl PrepareRuntimeConfigWiring {
+    fn is_canonical(&self) -> bool {
+        self.snapshot_calls == 1
+            && self.canonical_snapshot_calls == 1
+            && self.snapshot_binding.is_some()
+            && self.runtime_inputs_calls == 1
+            && self.canonical_runtime_inputs_calls == 1
+            && self.snapshot_config_binding.is_some()
+            && self.snapshot_filter_binding.is_some()
+            && self.snapshot_filter_bindings == 1
+            && self.subscriber_filter_uses == 1
+            && self.ambient_rust_log_calls == 0
+    }
+}
+
+impl<'ast> Visit<'ast> for PrepareRuntimeConfigWiring {
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        let binding = pat_ident(&local.pat);
+        let initializer = local.init.as_ref().map(|init| init.expr.as_ref());
+        if let (Some(binding), Some(initializer)) = (binding, initializer)
+            && is_env_snapshot_initializer(initializer)
+            && self.snapshot_binding.is_none()
+        {
+            self.snapshot_binding = Some(binding.clone());
+        }
+        if let (Some(binding), Some(initializer), Some(snapshot)) =
+            (binding, initializer, self.snapshot_binding.as_ref())
+            && is_snapshot_view(initializer, snapshot)
+            && self.snapshot_config_binding.is_none()
+        {
+            self.snapshot_config_binding = Some(binding.clone());
+        }
+        if let (Some(binding), Some(initializer), Some(config)) =
+            (binding, initializer, self.snapshot_config_binding.as_ref())
+            && is_snapshot_rust_log_filter(initializer, config)
+        {
+            self.snapshot_filter_bindings += 1;
+            if self.snapshot_filter_binding.is_none() {
+                self.snapshot_filter_binding = Some(binding.clone());
+            }
+        }
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if path_ends_with(&call.func, &["RuntimeConfigSnapshot", "capture"]) {
+            self.snapshot_calls += 1;
+            if is_env_snapshot_call(call) {
+                self.canonical_snapshot_calls += 1;
+            }
+        }
+        if path_ends_with(&call.func, &["RuntimeInputs", "new"]) {
+            self.runtime_inputs_calls += 1;
+            if call.args.len() == 2
+                && self.snapshot_binding.as_ref().is_some_and(|snapshot| {
+                    call.args
+                        .first()
+                        .is_some_and(|arg| is_exact_ident_path(arg, snapshot))
+                })
+            {
+                self.canonical_runtime_inputs_calls += 1;
+            }
+        }
+        if path_ends_with(&call.func, &["EnvFilter", "try_from_default_env"])
+            || path_ends_with(&call.func, &["std", "env", "var"])
+        {
+            self.ambient_rust_log_calls += 1;
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "init"
+            && call.args.is_empty()
+            && let Some(filter) = self.snapshot_filter_binding.as_ref()
+        {
+            self.subscriber_filter_uses += subscriber_with_binding_count(&call.receiver, filter);
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+#[derive(Default)]
+struct RunRuntimeConfigWiring {
+    runtime_inputs_calls: usize,
     config_value_bindings: usize,
     canonical_config_value_bindings: usize,
     vault_calls: usize,
@@ -253,16 +350,19 @@ struct RuntimeConfigWiring {
     canonical_redis_calls: usize,
     s3_calls: usize,
     canonical_s3_calls: usize,
+    runtime_inputs_binding: Option<syn::Ident>,
 }
 
-impl RuntimeConfigWiring {
+impl RunRuntimeConfigWiring {
+    fn new(runtime_inputs_binding: syn::Ident) -> Self {
+        Self {
+            runtime_inputs_binding: Some(runtime_inputs_binding),
+            ..Self::default()
+        }
+    }
+
     fn is_canonical(&self) -> bool {
-        self.snapshot_calls == 1
-            && self.canonical_snapshot_calls == 1
-            && self.snapshot_binding.is_some()
-            && self.runtime_inputs_calls == 1
-            && self.canonical_runtime_inputs_bindings == 1
-            && self.runtime_inputs_binding.is_some()
+        self.runtime_inputs_calls == 0
             && self.config_value_bindings == 1
             && self.canonical_config_value_bindings == 1
             && self.vault_calls == 1
@@ -274,24 +374,10 @@ impl RuntimeConfigWiring {
     }
 }
 
-impl<'ast> Visit<'ast> for RuntimeConfigWiring {
+impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
     fn visit_local(&mut self, local: &'ast syn::Local) {
         let binding = pat_ident(&local.pat);
         let initializer = local.init.as_ref().map(|init| init.expr.as_ref());
-
-        if let (Some(binding), Some(initializer)) = (binding, initializer) {
-            if is_env_snapshot_initializer(initializer) && self.snapshot_binding.is_none() {
-                self.snapshot_binding = Some(binding.clone());
-            }
-
-            if is_runtime_inputs_initializer(initializer, self.snapshot_binding.as_ref()) {
-                self.canonical_runtime_inputs_bindings += 1;
-                if self.runtime_inputs_binding.is_none() {
-                    self.runtime_inputs_binding = Some(binding.clone());
-                }
-            }
-        }
-
         if binding.is_some_and(|binding| binding == "config_value") {
             self.config_value_bindings += 1;
             if initializer.is_some_and(|initializer| {
@@ -308,17 +394,6 @@ impl<'ast> Visit<'ast> for RuntimeConfigWiring {
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if path_ends_with(&call.func, &["RuntimeConfigSnapshot", "capture"]) {
-            self.snapshot_calls += 1;
-            if call.args.len() == 1
-                && call
-                    .args
-                    .first()
-                    .is_some_and(|arg| is_exact_path(arg, &["EnvConfigSource"]))
-            {
-                self.canonical_snapshot_calls += 1;
-            }
-        }
         if path_ends_with(&call.func, &["RuntimeInputs", "new"]) {
             self.runtime_inputs_calls += 1;
         }
@@ -349,6 +424,700 @@ impl<'ast> Visit<'ast> for RuntimeConfigWiring {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+struct ProductionRuntimeConfigInventory {
+    snapshot_calls: usize,
+    runtime_inputs_calls: usize,
+    vault_calls: usize,
+    redis_calls: usize,
+    s3_calls: usize,
+    forbidden_indirections: usize,
+}
+
+const PROTECTED_CONFIG_SYMBOLS: &[&str] = &[
+    "RuntimeConfigSnapshot",
+    "RuntimeInputs",
+    "build_vault_runtime_deps",
+    "build_redis_runtime_deps",
+    "build_s3_runtime_deps_from",
+];
+
+fn ident_is_protected_config(ident: &syn::Ident) -> bool {
+    PROTECTED_CONFIG_SYMBOLS.contains(&ident.to_string().as_str())
+}
+
+fn use_tree_has_protected_rename(tree: &syn::UseTree) -> bool {
+    match tree {
+        syn::UseTree::Rename(rename) => ident_is_protected_config(&rename.ident),
+        syn::UseTree::Path(path) => use_tree_has_protected_rename(&path.tree),
+        syn::UseTree::Group(group) => group.items.iter().any(use_tree_has_protected_rename),
+        syn::UseTree::Name(_) | syn::UseTree::Glob(_) => false,
+    }
+}
+
+fn type_mentions_protected_config(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Path(path) => {
+            path.path
+                .segments
+                .iter()
+                .any(|segment| ident_is_protected_config(&segment.ident))
+                || path
+                    .qself
+                    .as_ref()
+                    .is_some_and(|qself| type_mentions_protected_config(&qself.ty))
+        }
+        syn::Type::Reference(reference) => type_mentions_protected_config(&reference.elem),
+        syn::Type::Paren(paren) => type_mentions_protected_config(&paren.elem),
+        syn::Type::Group(group) => type_mentions_protected_config(&group.elem),
+        _ => false,
+    }
+}
+
+fn expr_path_mentions_protected_config(expr: &syn::Expr) -> bool {
+    let syn::Expr::Path(path) = transparent_expr(expr) else {
+        return false;
+    };
+    path.path
+        .segments
+        .iter()
+        .any(|segment| ident_is_protected_config(&segment.ident))
+        || path
+            .qself
+            .as_ref()
+            .is_some_and(|qself| type_mentions_protected_config(&qself.ty))
+}
+
+fn macro_mentions_protected_config(mac: &syn::Macro) -> bool {
+    fn contains(tokens: proc_macro2::TokenStream) -> bool {
+        tokens.into_iter().any(|token| match token {
+            proc_macro2::TokenTree::Ident(ident) => ident_is_protected_config(&ident),
+            proc_macro2::TokenTree::Group(group) => contains(group.stream()),
+            _ => false,
+        })
+    }
+    contains(mac.tokens.clone())
+}
+
+impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_impl(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if attrs_may_be_production(&item.attrs) && use_tree_has_protected_rename(&item.tree) {
+            self.forbidden_indirections += 1;
+        }
+    }
+
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        if attrs_may_be_production(&item.attrs) && type_mentions_protected_config(&item.ty) {
+            self.forbidden_indirections += 1;
+        }
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if local
+            .init
+            .as_ref()
+            .is_some_and(|init| expr_path_mentions_protected_config(&init.expr))
+        {
+            self.forbidden_indirections += 1;
+        }
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        let snapshot = path_ends_with(&call.func, &["RuntimeConfigSnapshot", "capture"]);
+        let inputs = path_ends_with(&call.func, &["RuntimeInputs", "new"]);
+        if snapshot {
+            self.snapshot_calls += 1;
+        }
+        if inputs {
+            self.runtime_inputs_calls += 1;
+        }
+        match expr_path_last(&call.func)
+            .map(ToString::to_string)
+            .as_deref()
+        {
+            Some("build_vault_runtime_deps") => self.vault_calls += 1,
+            Some("build_redis_runtime_deps") => self.redis_calls += 1,
+            Some("build_s3_runtime_deps_from") => self.s3_calls += 1,
+            _ => {}
+        }
+        if !snapshot
+            && !inputs
+            && expr_path_mentions_protected_config(&call.func)
+            && !matches!(
+                expr_path_last(&call.func)
+                    .map(ToString::to_string)
+                    .as_deref(),
+                Some(
+                    "build_vault_runtime_deps"
+                        | "build_redis_runtime_deps"
+                        | "build_s3_runtime_deps_from"
+                )
+            )
+        {
+            self.forbidden_indirections += 1;
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if macro_mentions_protected_config(mac) {
+            self.forbidden_indirections += 1;
+        }
+    }
+}
+
+fn direct_call_behind_runtime_context(expr: &syn::Expr) -> Option<&syn::ExprCall> {
+    match transparent_expr(expr) {
+        syn::Expr::Call(call) => Some(call),
+        syn::Expr::Try(expr) => direct_call_behind_runtime_context(&expr.expr),
+        syn::Expr::Await(expr) => direct_call_behind_runtime_context(&expr.base),
+        syn::Expr::MethodCall(call)
+            if matches!(call.method.to_string().as_str(), "context" | "with_context") =>
+        {
+            direct_call_behind_runtime_context(&call.receiver)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct BinaryRuntimeWiring {
+    prepare_calls: usize,
+    run_calls: usize,
+    shutdown_calls: usize,
+    prepared_binding: Option<syn::Ident>,
+    canonical_run_calls: usize,
+    canonical_shutdown_calls: usize,
+    forbidden_indirections: usize,
+}
+
+fn use_tree_has_binary_indirection(tree: &syn::UseTree) -> bool {
+    match tree {
+        syn::UseTree::Rename(rename) => {
+            matches!(
+                rename.ident.to_string().as_str(),
+                "runtime" | "prepare_runtime" | "run" | "shutdown_runtime"
+            ) || matches!(
+                rename.rename.to_string().as_str(),
+                "runtime" | "prepare_runtime" | "run" | "shutdown_runtime"
+            )
+        }
+        syn::UseTree::Name(name) => matches!(
+            name.ident.to_string().as_str(),
+            "runtime" | "prepare_runtime" | "run" | "shutdown_runtime"
+        ),
+        syn::UseTree::Path(path) => use_tree_has_binary_indirection(&path.tree),
+        syn::UseTree::Group(group) => group.items.iter().any(use_tree_has_binary_indirection),
+        syn::UseTree::Glob(_) => true,
+    }
+}
+
+fn macro_mentions_binary_runtime(mac: &syn::Macro) -> bool {
+    let rendered = mac.tokens.to_string();
+    ["prepare_runtime", "shutdown_runtime", "runtime :: run"]
+        .iter()
+        .any(|symbol| rendered.contains(symbol))
+}
+
+impl BinaryRuntimeWiring {
+    fn record_exact_binding(&mut self, call: &syn::ExprCall, run: bool) {
+        let canonical = self.prepared_binding.as_ref().is_some_and(|binding| {
+            call.args.len() == 1
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|arg| is_exact_ident_path(arg, binding))
+        });
+        if canonical {
+            if run {
+                self.canonical_run_calls += 1;
+            } else {
+                self.canonical_shutdown_calls += 1;
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for BinaryRuntimeWiring {
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if attrs_may_be_production(&item.attrs) && use_tree_has_binary_indirection(&item.tree) {
+            self.forbidden_indirections += 1;
+        }
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if let (Some(binding), Some(call)) = (
+            pat_ident(&local.pat),
+            local
+                .init
+                .as_ref()
+                .and_then(|init| direct_call_behind_runtime_context(&init.expr)),
+        ) && path_ends_with(&call.func, &["runtime", "prepare_runtime"])
+            && self.prepared_binding.is_none()
+        {
+            self.prepared_binding = Some(binding.clone());
+        }
+        if local.init.as_ref().is_some_and(|init| {
+            let Some(last) = expr_path_last(&init.expr) else {
+                return false;
+            };
+            matches!(
+                last.to_string().as_str(),
+                "prepare_runtime" | "run" | "shutdown_runtime"
+            )
+        }) {
+            self.forbidden_indirections += 1;
+        }
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if path_ends_with(&call.func, &["runtime", "prepare_runtime"]) {
+            self.prepare_calls += 1;
+        } else if path_ends_with(&call.func, &["runtime", "run"]) {
+            self.run_calls += 1;
+            self.record_exact_binding(call, true);
+        } else if path_ends_with(&call.func, &["runtime", "shutdown_runtime"]) {
+            self.shutdown_calls += 1;
+            self.record_exact_binding(call, false);
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if macro_mentions_binary_runtime(mac) {
+            self.forbidden_indirections += 1;
+        }
+    }
+}
+
+const RSS_COMMAND_FAMILIES: &[(&str, Option<&str>, Option<&str>)] = &[
+    ("Serving", None, None),
+    (
+        "Projection",
+        Some("is_projection_command"),
+        Some("run_projection_control_command"),
+    ),
+    (
+        "AuditLedgerVerify",
+        Some("is_audit_ledger_verify_command"),
+        Some("run_audit_ledger_verify_command"),
+    ),
+    (
+        "Dlq",
+        Some("is_dlq_command"),
+        Some("run_dlq_control_command"),
+    ),
+    (
+        "ReconcileTarget",
+        Some("is_reconcile_target_command"),
+        Some("run_reconcile_target_command"),
+    ),
+    (
+        "SettingsConfigValueMaintenance",
+        Some("is_settings_config_value_maintenance_command"),
+        Some("run_settings_config_value_maintenance"),
+    ),
+    (
+        "OidcJwksExport",
+        Some("is_oidc_jwks_export_command"),
+        Some("run_oidc_jwks_export_command"),
+    ),
+];
+
+fn exact_command_variant(expr: &syn::Expr, expected: &str) -> bool {
+    is_exact_path(expr, &["CommandFamily", expected])
+}
+
+fn ok_command_variant(expr: &syn::Expr, expected: &str) -> bool {
+    let Some(call) = direct_call_behind_runtime_context(expr) else {
+        return false;
+    };
+    is_exact_path(&call.func, &["Ok"])
+        && call.args.len() == 1
+        && call
+            .args
+            .first()
+            .is_some_and(|arg| exact_command_variant(arg, expected))
+}
+
+fn command_variant_pattern(pattern: &syn::Pat) -> Option<&syn::Ident> {
+    let syn::Pat::Path(path) = pattern else {
+        return None;
+    };
+    if path.qself.is_some() || path.path.segments.len() != 2 {
+        return None;
+    }
+    let mut segments = path.path.segments.iter();
+    if segments
+        .next()
+        .is_none_or(|segment| segment.ident != "CommandFamily")
+    {
+        return None;
+    }
+    segments.next().map(|segment| &segment.ident)
+}
+
+fn reference_to_binding(expr: &syn::Expr, binding: &syn::Ident) -> bool {
+    matches!(
+        transparent_expr(expr),
+        syn::Expr::Reference(reference)
+            if reference.mutability.is_none() && is_exact_ident_path(&reference.expr, binding)
+    )
+}
+
+fn direct_awaited_call(expr: &syn::Expr) -> Option<&syn::ExprCall> {
+    let syn::Expr::Await(awaited) = transparent_expr(expr) else {
+        return None;
+    };
+    let syn::Expr::Call(call) = transparent_expr(&awaited.base) else {
+        return None;
+    };
+    Some(call)
+}
+
+fn is_canonical_process_args(expr: &syn::Expr) -> bool {
+    let syn::Expr::MethodCall(collect) = transparent_expr(expr) else {
+        return false;
+    };
+    let syn::Expr::MethodCall(skip) = transparent_expr(&collect.receiver) else {
+        return false;
+    };
+    let Some(args_call) = direct_call_behind_runtime_context(&skip.receiver) else {
+        return false;
+    };
+    collect.method == "collect"
+        && collect.args.is_empty()
+        && skip.method == "skip"
+        && skip.args.len() == 1
+        && skip.args.first().is_some_and(|amount| {
+            matches!(
+                transparent_expr(amount),
+                syn::Expr::Lit(literal)
+                    if matches!(&literal.lit, syn::Lit::Int(value) if value.base10_digits() == "1")
+            )
+        })
+        && is_exact_path(&args_call.func, &["std", "env", "args"])
+        && args_call.args.is_empty()
+}
+
+fn classifier_if_is_canonical(
+    statement: &syn::Stmt,
+    args: &syn::Ident,
+    predicate: &str,
+    variant: &str,
+) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    let Some(condition) = direct_call_behind_runtime_context(&branch.cond) else {
+        return false;
+    };
+    let condition_is_canonical = is_exact_path(&condition.func, &["runtime", predicate])
+        && condition.args.len() == 1
+        && condition
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_ident_path(arg, args));
+    let return_is_canonical = match branch.then_branch.stmts.as_slice() {
+        [syn::Stmt::Expr(expr, Some(_))] | [syn::Stmt::Expr(expr, None)] => {
+            let syn::Expr::Return(returned) = transparent_expr(expr) else {
+                return false;
+            };
+            returned
+                .expr
+                .as_deref()
+                .is_some_and(|expr| ok_command_variant(expr, variant))
+        }
+        _ => false,
+    };
+    condition_is_canonical && return_is_canonical && branch.else_branch.is_none()
+}
+
+fn classifier_is_canonical(file: &syn::File) -> bool {
+    let enums = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item)
+                if item.ident == "CommandFamily" && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let classifiers = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item)
+                if item.sig.ident == "classify_command" && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if enums.len() != 1 || classifiers.len() != 1 {
+        return false;
+    }
+    let expected_variants = RSS_COMMAND_FAMILIES
+        .iter()
+        .map(|(variant, _, _)| (*variant).to_owned())
+        .collect::<BTreeSet<_>>();
+    let observed_variants = enums[0]
+        .variants
+        .iter()
+        .filter(|variant| matches!(variant.fields, syn::Fields::Unit))
+        .map(|variant| variant.ident.to_string())
+        .collect::<BTreeSet<_>>();
+    if enums[0].variants.len() != expected_variants.len() || observed_variants != expected_variants
+    {
+        return false;
+    }
+
+    let classifier = classifiers[0];
+    if classifier.sig.asyncness.is_some() || classifier.sig.inputs.len() != 1 {
+        return false;
+    }
+    let Some(syn::FnArg::Typed(input)) = classifier.sig.inputs.first() else {
+        return false;
+    };
+    let Some(args) = pat_ident(&input.pat) else {
+        return false;
+    };
+    let operator_families = RSS_COMMAND_FAMILIES
+        .iter()
+        .filter_map(|(variant, predicate, _)| predicate.map(|predicate| (*variant, predicate)))
+        .collect::<Vec<_>>();
+    if classifier.block.stmts.len() != operator_families.len() + 2 {
+        return false;
+    }
+    if !operator_families.iter().zip(&classifier.block.stmts).all(
+        |((variant, predicate), statement)| {
+            classifier_if_is_canonical(statement, args, predicate, variant)
+        },
+    ) {
+        return false;
+    }
+    let ensure_statement = &classifier.block.stmts[operator_families.len()];
+    let ensure_is_canonical = match ensure_statement {
+        syn::Stmt::Macro(statement) => {
+            let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+            is_exact_syn_path(&statement.mac.path, &["anyhow", "ensure"])
+                && parser
+                    .parse2(statement.mac.tokens.clone())
+                    .ok()
+                    .and_then(|arguments| arguments.into_iter().next())
+                    .is_some_and(|condition| {
+                        matches!(
+                            transparent_expr(&condition),
+                            syn::Expr::MethodCall(call)
+                                if call.method == "is_empty"
+                                    && call.args.is_empty()
+                                    && is_exact_ident_path(&call.receiver, args)
+                        )
+                    })
+        }
+        _ => false,
+    };
+    let serving_is_canonical = match classifier.block.stmts.last() {
+        Some(syn::Stmt::Expr(expr, None)) => ok_command_variant(expr, "Serving"),
+        _ => false,
+    };
+    ensure_is_canonical && serving_is_canonical
+}
+
+fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
+    if main.sig.asyncness.is_none() || main.block.stmts.len() != 6 {
+        return false;
+    }
+    let [
+        args_statement,
+        command_statement,
+        prepare_statement,
+        result_statement,
+        shutdown_statement,
+        tail_statement,
+    ] = main.block.stmts.as_slice()
+    else {
+        return false;
+    };
+    let syn::Stmt::Local(args_local) = args_statement else {
+        return false;
+    };
+    let Some(args) = pat_ident(&args_local.pat) else {
+        return false;
+    };
+    if !args_local
+        .init
+        .as_ref()
+        .is_some_and(|init| is_canonical_process_args(&init.expr))
+    {
+        return false;
+    }
+    let syn::Stmt::Local(command_local) = command_statement else {
+        return false;
+    };
+    let Some(command) = pat_ident(&command_local.pat) else {
+        return false;
+    };
+    let Some(classify_call) = command_local
+        .init
+        .as_ref()
+        .and_then(|init| direct_call_behind_runtime_context(&init.expr))
+    else {
+        return false;
+    };
+    if !is_exact_path(&classify_call.func, &["classify_command"])
+        || classify_call.args.len() != 1
+        || !classify_call
+            .args
+            .first()
+            .is_some_and(|arg| reference_to_binding(arg, args))
+    {
+        return false;
+    }
+    let syn::Stmt::Local(prepare_local) = prepare_statement else {
+        return false;
+    };
+    let Some(runtime_inputs) = pat_ident(&prepare_local.pat) else {
+        return false;
+    };
+    let Some(prepare_call) = prepare_local
+        .init
+        .as_ref()
+        .and_then(|init| direct_call_behind_runtime_context(&init.expr))
+    else {
+        return false;
+    };
+    if !is_exact_path(&prepare_call.func, &["runtime", "prepare_runtime"])
+        || !prepare_call.args.is_empty()
+    {
+        return false;
+    }
+    let syn::Stmt::Local(result_local) = result_statement else {
+        return false;
+    };
+    let Some(result) = pat_ident(&result_local.pat) else {
+        return false;
+    };
+    let Some(syn::Expr::Match(dispatch)) = result_local
+        .init
+        .as_ref()
+        .map(|init| transparent_expr(&init.expr))
+    else {
+        return false;
+    };
+    if !is_exact_ident_path(&dispatch.expr, command)
+        || dispatch.arms.len() != RSS_COMMAND_FAMILIES.len()
+    {
+        return false;
+    }
+    let mut observed = BTreeSet::new();
+    for arm in &dispatch.arms {
+        if arm.guard.is_some() || !arm.attrs.is_empty() {
+            return false;
+        }
+        let Some(variant) = command_variant_pattern(&arm.pat).map(ToString::to_string) else {
+            return false;
+        };
+        let Some((_, _, runner)) = RSS_COMMAND_FAMILIES
+            .iter()
+            .find(|(expected, _, _)| *expected == variant)
+        else {
+            return false;
+        };
+        if !observed.insert(variant.clone()) {
+            return false;
+        }
+        if variant == "Serving" {
+            let syn::Expr::Return(returned) = transparent_expr(&arm.body) else {
+                return false;
+            };
+            let Some(call) = returned.expr.as_deref().and_then(direct_awaited_call) else {
+                return false;
+            };
+            if !is_exact_path(&call.func, &["runtime", "run"])
+                || call.args.len() != 1
+                || !call
+                    .args
+                    .first()
+                    .is_some_and(|arg| is_exact_ident_path(arg, runtime_inputs))
+            {
+                return false;
+            }
+        } else {
+            let Some(runner) = runner else {
+                return false;
+            };
+            let Some(call) = direct_awaited_call(&arm.body) else {
+                return false;
+            };
+            if !is_exact_path(&call.func, &["runtime", runner])
+                || call.args.len() != 1
+                || !call
+                    .args
+                    .first()
+                    .is_some_and(|arg| reference_to_binding(arg, args))
+            {
+                return false;
+            }
+        }
+    }
+    let syn::Stmt::Expr(shutdown, Some(_)) = shutdown_statement else {
+        return false;
+    };
+    let syn::Expr::Try(shutdown) = transparent_expr(shutdown) else {
+        return false;
+    };
+    let Some(shutdown_call) = direct_awaited_call(&shutdown.expr) else {
+        return false;
+    };
+    if !is_exact_path(&shutdown_call.func, &["runtime", "shutdown_runtime"])
+        || shutdown_call.args.len() != 1
+        || !shutdown_call
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_ident_path(arg, runtime_inputs))
+    {
+        return false;
+    }
+    matches!(
+        tail_statement,
+        syn::Stmt::Expr(expr, None) if is_exact_ident_path(expr, result)
+    )
+}
+
 fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     if !root.join("Cargo.toml").exists() && !root.join(RUNTIME_CONFIG_FIXTURE_MARKER).exists() {
         return Ok(Vec::new());
@@ -366,38 +1135,1215 @@ fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule
             )]);
         }
     };
-    Ok(runtime_config_snapshot_findings_for_file(&file))
+    let mut findings = runtime_config_snapshot_findings_for_file(&file);
+    findings.extend(runtime_config_global_capture_findings(root)?);
+    findings.extend(runtime_snapshot_consumer_ambient_findings(root)?);
+    Ok(findings)
 }
 
-fn runtime_config_snapshot_findings_for_file(file: &syn::File) -> Vec<Finding<Rule>> {
-    let runs = file
+fn runtime_config_global_capture_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let mut paths = Vec::new();
+    collect_rust_sources(&root.join(RUNTIME_SRC_PATH), &mut paths)?;
+    let production_sources = production_module_sources(&paths)?;
+    let mut inventory = ProductionRuntimeConfigInventory::default();
+    for path in paths {
+        if !production_sources.contains(&normalize_path(&path)) {
+            continue;
+        }
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
+        // Baseline fixtures intentionally keep unrelated production files as isolated,
+        // non-compiling anchor fragments. Protected aliases must still name or import at least
+        // one governed symbol, so this token prefilter skips only files outside this invariant.
+        let masked = mask_comments_and_strings(&source);
+        if ![
+            "RuntimeConfigSnapshot",
+            "RuntimeInputs",
+            "build_vault_runtime_deps",
+            "build_redis_runtime_deps",
+            "build_s3_runtime_deps_from",
+        ]
+        .iter()
+        .any(|symbol| masked.contains(symbol))
+        {
+            continue;
+        }
+        let file = match syn::parse_file(&source) {
+            Ok(file) => file,
+            Err(error) => {
+                return Ok(vec![finding(
+                    Rule::ForbiddenWiring,
+                    RUNTIME_SRC_PATH,
+                    format!(
+                        "runtime configuration global capture gate 无法解析 {}: {error}",
+                        path.display()
+                    ),
+                )]);
+            }
+        };
+        let mut observed = ProductionRuntimeConfigInventory::default();
+        observed.visit_file(&file);
+        inventory.snapshot_calls += observed.snapshot_calls;
+        inventory.runtime_inputs_calls += observed.runtime_inputs_calls;
+        inventory.vault_calls += observed.vault_calls;
+        inventory.redis_calls += observed.redis_calls;
+        inventory.s3_calls += observed.s3_calls;
+        inventory.forbidden_indirections += observed.forbidden_indirections;
+    }
+    if inventory.snapshot_calls == 1
+        && inventory.runtime_inputs_calls == 1
+        && inventory.vault_calls == 1
+        && inventory.redis_calls == 1
+        && inventory.s3_calls == 1
+        && inventory.forbidden_indirections == 0
+    {
+        return Ok(Vec::new());
+    }
+    Ok(vec![finding(
+        Rule::ForbiddenWiring,
+        RUNTIME_SRC_PATH,
+        "runtime production module graph must contain exactly one RuntimeConfigSnapshot::capture, one RuntimeInputs::new, and one Vault/Redis/S3 provider builder call; protected aliases, UFCS, local function aliases, and macro indirection fail closed",
+    )])
+}
+
+const AMBIENT_ENV_READERS: &[&str] = &["var", "var_os", "vars", "vars_os"];
+
+#[derive(Clone, Default)]
+struct AmbientEnvAliases {
+    modules: BTreeSet<String>,
+    readers: BTreeSet<String>,
+    glob: bool,
+}
+
+impl AmbientEnvAliases {
+    fn add_use_tree(&mut self, tree: &syn::UseTree, prefix: &mut Vec<String>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                self.add_use_tree(&path.tree, prefix);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) => {
+                let mut full = prefix.clone();
+                full.push(name.ident.to_string());
+                self.record_import(&full, name.ident.to_string());
+            }
+            syn::UseTree::Rename(rename) => {
+                let mut full = prefix.clone();
+                full.push(rename.ident.to_string());
+                self.record_import(&full, rename.rename.to_string());
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.add_use_tree(item, prefix);
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                if prefix.as_slice() == ["std", "env"] {
+                    self.glob = true;
+                }
+            }
+        }
+    }
+
+    fn record_import(&mut self, full: &[String], local: String) {
+        if full == ["std", "env"] || full == ["std", "env", "self"] {
+            self.modules.insert(local);
+        } else if full.len() == 3
+            && full[0] == "std"
+            && full[1] == "env"
+            && AMBIENT_ENV_READERS.contains(&full[2].as_str())
+        {
+            self.readers.insert(local);
+        }
+    }
+
+    fn path_is_reader(&self, path: &syn::Path) -> bool {
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        (segments.len() == 3
+            && segments[0] == "std"
+            && segments[1] == "env"
+            && AMBIENT_ENV_READERS.contains(&segments[2].as_str()))
+            || (segments.len() == 2
+                && self.modules.contains(&segments[0])
+                && AMBIENT_ENV_READERS.contains(&segments[1].as_str()))
+            || (segments.len() == 1
+                && (self.readers.contains(&segments[0])
+                    || (self.glob && AMBIENT_ENV_READERS.contains(&segments[0].as_str()))))
+    }
+
+    fn tokens_mention_reader(&self, tokens: &proc_macro2::TokenStream) -> bool {
+        let rendered = tokens.to_string();
+        AMBIENT_ENV_READERS.iter().any(|reader| {
+            rendered.contains(&format!("std :: env :: {reader}"))
+                || self
+                    .modules
+                    .iter()
+                    .any(|module| rendered.contains(&format!("{module} :: {reader}")))
+                || self
+                    .readers
+                    .iter()
+                    .any(|alias| rendered.split_whitespace().any(|token| token == alias))
+        })
+    }
+}
+
+struct AmbientContext {
+    aliases: AmbientEnvAliases,
+    macros: BTreeSet<String>,
+    callable_aliases: BTreeMap<String, String>,
+    snapshot_types: BTreeSet<String>,
+}
+
+impl Default for AmbientContext {
+    fn default() -> Self {
+        Self {
+            aliases: AmbientEnvAliases::default(),
+            macros: BTreeSet::new(),
+            callable_aliases: BTreeMap::new(),
+            snapshot_types: BTreeSet::from(["SnapshotConfig".to_owned()]),
+        }
+    }
+}
+
+impl AmbientContext {
+    fn add_callable_use_tree(&mut self, tree: &syn::UseTree) {
+        match tree {
+            syn::UseTree::Path(path) => self.add_callable_use_tree(&path.tree),
+            syn::UseTree::Rename(rename) => {
+                let original = rename.ident.to_string();
+                let local = rename.rename.to_string();
+                self.callable_aliases
+                    .insert(local.clone(), original.clone());
+                if self.snapshot_types.contains(&original) {
+                    self.snapshot_types.insert(local);
+                }
+            }
+            syn::UseTree::Name(name) => {
+                if name.ident == "SnapshotConfig" {
+                    self.snapshot_types.insert(name.ident.to_string());
+                }
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.add_callable_use_tree(item);
+                }
+            }
+            syn::UseTree::Glob(_) => {}
+        }
+    }
+
+    fn tokens_mention_ambient_macro(&self, tokens: &proc_macro2::TokenStream) -> bool {
+        fn collect(tokens: proc_macro2::TokenStream, names: &mut BTreeSet<String>) {
+            for token in tokens {
+                match token {
+                    proc_macro2::TokenTree::Ident(ident) => {
+                        names.insert(ident.to_string());
+                    }
+                    proc_macro2::TokenTree::Group(group) => collect(group.stream(), names),
+                    _ => {}
+                }
+            }
+        }
+        let mut names = BTreeSet::new();
+        collect(tokens.clone(), &mut names);
+        names.into_iter().any(|name| {
+            self.macros
+                .contains(&resolve_callable_alias(&self.callable_aliases, &name))
+        })
+    }
+
+    fn close_macro_aliases(&mut self) {
+        let aliases = self
+            .callable_aliases
+            .keys()
+            .filter(|alias| {
+                self.macros
+                    .contains(&resolve_callable_alias(&self.callable_aliases, alias))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        self.macros.extend(aliases);
+    }
+}
+
+fn resolve_callable_alias(aliases: &BTreeMap<String, String>, name: &str) -> String {
+    let mut current = name.to_owned();
+    let mut visited = BTreeSet::new();
+    while visited.insert(current.clone()) {
+        let Some(next) = aliases.get(&current) else {
+            break;
+        };
+        current = next.clone();
+    }
+    current
+}
+
+impl<'ast> Visit<'ast> for AmbientContext {
+    fn visit_item_fn(&mut self, _item: &'ast syn::ItemFn) {}
+
+    fn visit_impl_item_fn(&mut self, _item: &'ast syn::ImplItemFn) {}
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if attrs_may_be_production(&item.attrs) {
+            self.aliases.add_use_tree(&item.tree, &mut Vec::new());
+            self.add_callable_use_tree(&item.tree);
+        }
+    }
+
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        if attrs_may_be_production(&item.attrs)
+            && type_mentions_named_types(&item.ty, &self.snapshot_types)
+        {
+            self.snapshot_types.insert(item.ident.to_string());
+        }
+    }
+
+    fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+        if attrs_may_be_production(&item.attrs)
+            && (self.aliases.tokens_mention_reader(&item.mac.tokens)
+                || self.tokens_mention_ambient_macro(&item.mac.tokens))
+            && let Some(ident) = &item.ident
+        {
+            self.macros.insert(ident.to_string());
+        }
+    }
+}
+
+#[derive(Default)]
+struct AmbientFunctionFact {
+    snapshot_consumer: bool,
+    reads_ambient: bool,
+    callees: BTreeSet<String>,
+}
+
+impl AmbientFunctionFact {
+    fn merge(&mut self, other: Self) {
+        self.snapshot_consumer |= other.snapshot_consumer;
+        self.reads_ambient |= other.reads_ambient;
+        self.callees.extend(other.callees);
+    }
+}
+
+struct AmbientFunctionScanner {
+    aliases: AmbientEnvAliases,
+    ambient_macros: BTreeSet<String>,
+    function_aliases: BTreeMap<String, String>,
+    fact: AmbientFunctionFact,
+}
+
+impl AmbientFunctionScanner {
+    fn new(context: &AmbientContext, snapshot_consumer: bool) -> Self {
+        Self {
+            aliases: context.aliases.clone(),
+            ambient_macros: context.macros.clone(),
+            function_aliases: context.callable_aliases.clone(),
+            fact: AmbientFunctionFact {
+                snapshot_consumer,
+                ..AmbientFunctionFact::default()
+            },
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for AmbientFunctionScanner {
+    fn visit_item_fn(&mut self, _item: &'ast syn::ItemFn) {}
+
+    fn visit_impl_item_fn(&mut self, _item: &'ast syn::ImplItemFn) {}
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if attrs_may_be_production(&item.attrs) {
+            self.aliases.add_use_tree(&item.tree, &mut Vec::new());
+            let mut context = AmbientContext::default();
+            context.add_callable_use_tree(&item.tree);
+            self.function_aliases.extend(context.callable_aliases);
+        }
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if let (Some(binding), Some(syn::Expr::Path(path))) = (
+            pat_ident(&local.pat),
+            local.init.as_ref().map(|init| transparent_expr(&init.expr)),
+        ) {
+            if self.aliases.path_is_reader(&path.path) {
+                self.aliases.readers.insert(binding.to_string());
+            } else if let Some(target) = path.path.segments.last() {
+                self.function_aliases
+                    .insert(binding.to_string(), target.ident.to_string());
+            }
+        }
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = transparent_expr(&call.func) {
+            if self.aliases.path_is_reader(&path.path) {
+                self.fact.reads_ambient = true;
+            } else if let Some(callee) = path.path.segments.last() {
+                let callee =
+                    resolve_callable_alias(&self.function_aliases, &callee.ident.to_string());
+                self.fact.callees.insert(callee);
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.fact.callees.insert(call.method.to_string());
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        let macro_name = path_last_ident(&mac.path).map(ToString::to_string);
+        let resolved_macro = macro_name
+            .as_ref()
+            .map(|name| resolve_callable_alias(&self.function_aliases, name));
+        if resolved_macro
+            .as_ref()
+            .is_some_and(|ident| self.ambient_macros.contains(ident))
+            || self.aliases.tokens_mention_reader(&mac.tokens)
+        {
+            self.fact.reads_ambient = true;
+        }
+    }
+}
+
+#[derive(Default)]
+struct AmbientFunctionGraph {
+    context: AmbientContext,
+    facts: BTreeMap<String, AmbientFunctionFact>,
+}
+
+impl AmbientFunctionGraph {
+    fn record(
+        &mut self,
+        signature: &syn::Signature,
+        block: &syn::Block,
+        self_is_snapshot_config: bool,
+    ) {
+        let mut scanner = AmbientFunctionScanner::new(
+            &self.context,
+            self_is_snapshot_config
+                || signature_accepts_snapshot_config(signature, &self.context.snapshot_types),
+        );
+        scanner.visit_block(block);
+        self.facts
+            .entry(signature.ident.to_string())
+            .or_default()
+            .merge(scanner.fact);
+    }
+
+    fn has_reachable_ambient_reader(&self) -> bool {
+        let mut queue = self
+            .facts
+            .iter()
+            .filter(|(_, fact)| fact.snapshot_consumer)
+            .map(|(name, _)| name.clone())
+            .collect::<VecDeque<_>>();
+        let mut visited = BTreeSet::new();
+        while let Some(name) = queue.pop_front() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let Some(fact) = self.facts.get(&name) else {
+                continue;
+            };
+            if fact.reads_ambient {
+                return true;
+            }
+            queue.extend(
+                fact.callees
+                    .iter()
+                    .filter(|callee| self.facts.contains_key(*callee))
+                    .cloned(),
+            );
+        }
+        false
+    }
+}
+
+impl<'ast> Visit<'ast> for AmbientFunctionGraph {
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            self.record(&item.sig, &item.block, false);
+        }
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if !attrs_may_be_production(&item.attrs) {
+            return;
+        }
+        let self_is_snapshot_config =
+            type_mentions_named_types(&item.self_ty, &self.context.snapshot_types);
+        for implementation in &item.items {
+            if let syn::ImplItem::Fn(method) = implementation
+                && attrs_may_be_production(&method.attrs)
+            {
+                self.record(&method.sig, &method.block, self_is_snapshot_config);
+            }
+        }
+    }
+
+    fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+        if !attrs_may_be_production(&item.attrs) {
+            return;
+        }
+        for trait_item in &item.items {
+            if let syn::TraitItem::Fn(method) = trait_item
+                && attrs_may_be_production(&method.attrs)
+                && let Some(block) = &method.default
+            {
+                self.record(&method.sig, block, false);
+            }
+        }
+    }
+
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_production(&item.attrs)
+            && let Some((_, nested)) = &item.content
+        {
+            for item in nested {
+                self.visit_item(item);
+            }
+        }
+    }
+}
+
+fn signature_accepts_snapshot_config(
+    signature: &syn::Signature,
+    snapshot_types: &BTreeSet<String>,
+) -> bool {
+    signature.inputs.iter().any(|input| match input {
+        syn::FnArg::Receiver(_) => false,
+        syn::FnArg::Typed(input) => type_mentions_named_types(&input.ty, snapshot_types),
+    })
+}
+
+fn type_mentions_named_types(ty: &syn::Type, expected: &BTreeSet<String>) -> bool {
+    match ty {
+        syn::Type::Path(path) => {
+            path.path
+                .segments
+                .iter()
+                .any(|segment| expected.contains(&segment.ident.to_string()))
+                || path
+                    .qself
+                    .as_ref()
+                    .is_some_and(|qself| type_mentions_named_types(&qself.ty, expected))
+        }
+        syn::Type::Reference(reference) => type_mentions_named_types(&reference.elem, expected),
+        syn::Type::Paren(paren) => type_mentions_named_types(&paren.elem, expected),
+        syn::Type::Group(group) => type_mentions_named_types(&group.elem, expected),
+        syn::Type::Tuple(tuple) => tuple
+            .elems
+            .iter()
+            .any(|element| type_mentions_named_types(element, expected)),
+        _ => false,
+    }
+}
+
+fn ambient_context_measure<'a>(
+    contexts: impl Iterator<Item = &'a AmbientContext>,
+) -> (usize, usize, usize, usize) {
+    contexts.fold((0, 0, 0, 0), |observed, context| {
+        (
+            observed.0
+                + context.aliases.modules.len()
+                + context.aliases.readers.len()
+                + usize::from(context.aliases.glob),
+            observed.1 + context.macros.len(),
+            observed.2 + context.snapshot_types.len(),
+            observed.3 + context.callable_aliases.len(),
+        )
+    })
+}
+
+fn runtime_snapshot_consumer_ambient_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let mut paths = Vec::new();
+    collect_rust_sources(&root.join(RUNTIME_SRC_PATH), &mut paths)?;
+    let production_sources = production_module_sources(&paths)?;
+    let mut findings = Vec::new();
+    let require_complete = root.join("Cargo.toml").exists();
+    let mut parsed = Vec::new();
+    for path in paths {
+        if !production_sources.contains(&normalize_path(&path)) {
+            continue;
+        }
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        let file = match syn::parse_file(&source) {
+            Ok(file) => file,
+            Err(error)
+                if require_complete
+                    || ["SnapshotConfig", "std::env", "std :: env"]
+                        .iter()
+                        .any(|token| mask_comments_and_strings(&source).contains(token)) =>
+            {
+                findings.push(finding(
+                    Rule::ForbiddenWiring,
+                    relative,
+                    format!("SnapshotConfig consumer ambient-env gate 无法解析生产 Rust: {error}"),
+                ));
+                continue;
+            }
+            Err(_) => continue,
+        };
+        parsed.push((file, AmbientContext::default()));
+    }
+
+    loop {
+        let before = ambient_context_measure(parsed.iter().map(|(_, context)| context));
+        let ambient_macros = parsed
+            .iter()
+            .flat_map(|(_, context)| context.macros.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let snapshot_types = parsed
+            .iter()
+            .flat_map(|(_, context)| context.snapshot_types.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        for (file, context) in &mut parsed {
+            context.macros.extend(ambient_macros.iter().cloned());
+            context
+                .snapshot_types
+                .extend(snapshot_types.iter().cloned());
+            context.close_macro_aliases();
+            context.visit_file(file);
+            context.close_macro_aliases();
+        }
+        let after = ambient_context_measure(parsed.iter().map(|(_, context)| context));
+        if before == after {
+            break;
+        }
+    }
+    let mut graph = AmbientFunctionGraph::default();
+    for (file, context) in parsed {
+        for reader in &context.aliases.readers {
+            graph.facts.entry(reader.clone()).or_default().reads_ambient = true;
+        }
+        if context.aliases.glob || !context.aliases.modules.is_empty() {
+            for reader in AMBIENT_ENV_READERS {
+                graph
+                    .facts
+                    .entry((*reader).to_owned())
+                    .or_default()
+                    .reads_ambient = true;
+            }
+        }
+        for (alias, target) in &context.callable_aliases {
+            graph
+                .facts
+                .entry(alias.clone())
+                .or_default()
+                .callees
+                .insert(target.clone());
+        }
+        graph.context = context;
+        graph.visit_file(&file);
+    }
+    if graph.has_reachable_ambient_reader() {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_SRC_PATH,
+            "every production SnapshotConfig consumer and its crate-wide conservatively reachable call chain must reject ambient std::env var/var_os/vars/vars_os reads, including import/function aliases, wrappers, macros, and trait UFCS",
+        ));
+    }
+    Ok(findings)
+}
+
+fn runtime_inputs_mut_parameter(item: &syn::ItemFn) -> Option<&syn::Ident> {
+    if item.sig.inputs.len() != 1 {
+        return None;
+    }
+    let syn::FnArg::Typed(input) = item.sig.inputs.first()? else {
+        return None;
+    };
+    let syn::Type::Reference(reference) = input.ty.as_ref() else {
+        return None;
+    };
+    let syn::Type::Path(ty) = reference.elem.as_ref() else {
+        return None;
+    };
+    if reference.mutability.is_none()
+        || ty.qself.is_some()
+        || ty
+            .path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != "RuntimeInputs")
+    {
+        return None;
+    }
+    pat_ident(&input.pat)
+}
+
+fn mutable_reference_to_self_field(expr: &syn::Expr, field_name: &str) -> bool {
+    matches!(
+        transparent_expr(expr),
+        syn::Expr::Reference(reference)
+            if reference.mutability.is_some()
+                && matches!(transparent_expr(&reference.expr), syn::Expr::Field(field)
+                    if is_exact_path(&field.base, &["self"])
+                        && matches!(&field.member, syn::Member::Named(member) if member == field_name))
+    )
+}
+
+fn owner_receiver_is_mut_value(receiver: &syn::Receiver) -> bool {
+    receiver.reference.is_none() && receiver.mutability.is_some() && receiver.colon_token.is_none()
+}
+
+fn owner_method<'a>(item: &'a syn::ItemImpl, name: &str) -> Option<&'a syn::ImplItemFn> {
+    let methods = item
         .items
         .iter()
         .filter_map(|item| match item {
-            syn::Item::Fn(item) if item.sig.ident == "run" && item.sig.asyncness.is_some() => {
+            syn::ImplItem::Fn(method)
+                if method.sig.ident == name && attrs_may_be_production(&method.attrs) =>
+            {
+                Some(method)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (methods.len() == 1).then_some(methods[0])
+}
+
+fn runtime_lifecycle_owner_struct_is_canonical(file: &syn::File) -> bool {
+    let owners = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item)
+                if item.ident == "RuntimeLifecycleOwner"
+                    && attrs_may_be_production(&item.attrs) =>
+            {
                 Some(item)
             }
             _ => None,
         })
         .collect::<Vec<_>>();
-    if runs.len() != 1 {
+    let Some(owner) = (owners.len() == 1).then_some(owners[0]) else {
+        return false;
+    };
+    let syn::Fields::Named(fields) = &owner.fields else {
+        return false;
+    };
+    fields.named.len() == 1
+        && fields.named.first().is_some_and(|field| {
+            field.ident.as_ref().is_some_and(|ident| ident == "inputs")
+                && matches!(field.vis, syn::Visibility::Inherited)
+                && type_last_ident(&field.ty).is_some_and(|ident| ident == "RuntimeInputs")
+        })
+}
+
+fn runtime_lifecycle_new_is_canonical(method: &syn::ImplItemFn) -> bool {
+    if method.sig.asyncness.is_some() || method.sig.inputs.len() != 1 {
+        return false;
+    }
+    let Some(syn::FnArg::Typed(input)) = method.sig.inputs.first() else {
+        return false;
+    };
+    let Some(inputs) = pat_ident(&input.pat) else {
+        return false;
+    };
+    if type_last_ident(&input.ty).is_none_or(|ident| ident != "RuntimeInputs") {
+        return false;
+    }
+    let [syn::Stmt::Expr(expr, None)] = method.block.stmts.as_slice() else {
+        return false;
+    };
+    let syn::Expr::Struct(owner) = transparent_expr(expr) else {
+        return false;
+    };
+    is_exact_syn_path(&owner.path, &["Self"])
+        && owner.rest.is_none()
+        && owner.fields.len() == 1
+        && owner.fields.first().is_some_and(|field| {
+            matches!(&field.member, syn::Member::Named(member) if member == "inputs")
+                && is_exact_ident_path(&field.expr, inputs)
+        })
+}
+
+fn runtime_lifecycle_run_is_canonical(method: &syn::ImplItemFn) -> bool {
+    if method.sig.inputs.len() != 1 {
+        return false;
+    }
+    let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
+        return false;
+    };
+    if method.sig.asyncness.is_none()
+        || !owner_receiver_is_mut_value(receiver)
+        || method.block.stmts.len() != 2
+    {
+        return false;
+    }
+    let syn::Stmt::Local(startup_local) = &method.block.stmts[0] else {
+        return false;
+    };
+    let Some(startup_result) = pat_ident(&startup_local.pat) else {
+        return false;
+    };
+    let Some(startup_call) = startup_local
+        .init
+        .as_ref()
+        .and_then(|init| direct_awaited_call(&init.expr))
+    else {
+        return false;
+    };
+    let startup_is_canonical = is_exact_path(&startup_call.func, &["run_startup"])
+        && startup_call.args.len() == 1
+        && startup_call
+            .args
+            .first()
+            .is_some_and(|arg| mutable_reference_to_self_field(arg, "inputs"));
+    let syn::Stmt::Expr(tail, None) = &method.block.stmts[1] else {
+        return false;
+    };
+    let syn::Expr::Await(awaited) = transparent_expr(tail) else {
+        return false;
+    };
+    let syn::Expr::MethodCall(finish) = transparent_expr(&awaited.base) else {
+        return false;
+    };
+    startup_is_canonical
+        && finish.method == "finish"
+        && finish.args.len() == 1
+        && is_exact_path(&finish.receiver, &["self"])
+        && finish
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_ident_path(arg, startup_result))
+}
+
+fn err_of_binding(expr: &syn::Expr, binding: &str) -> bool {
+    let expr = match transparent_expr(expr) {
+        syn::Expr::Block(block) => match block.block.stmts.last() {
+            Some(syn::Stmt::Expr(expr, None)) => transparent_expr(expr),
+            _ => return false,
+        },
+        expr => expr,
+    };
+    let Some(call) = direct_call_behind_runtime_context(expr) else {
+        return false;
+    };
+    is_exact_path(&call.func, &["Err"])
+        && call.args.len() == 1
+        && call
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_path(arg, &[binding]))
+}
+
+fn awaited_method_behind_result_context(expr: &syn::Expr) -> Option<&syn::ExprMethodCall> {
+    match transparent_expr(expr) {
+        syn::Expr::Try(try_) => awaited_method_behind_result_context(&try_.expr),
+        syn::Expr::MethodCall(call)
+            if matches!(call.method.to_string().as_str(), "context" | "with_context") =>
+        {
+            awaited_method_behind_result_context(&call.receiver)
+        }
+        syn::Expr::Await(awaited) => match transparent_expr(&awaited.base) {
+            syn::Expr::MethodCall(call) => Some(call),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn ok_unit_expr(expr: &syn::Expr) -> bool {
+    let Some(call) = direct_call_behind_runtime_context(expr) else {
+        return false;
+    };
+    is_exact_path(&call.func, &["Ok"])
+        && call.args.len() == 1
+        && matches!(call.args.first().map(transparent_expr), Some(syn::Expr::Tuple(unit)) if unit.elems.is_empty())
+}
+
+fn shutdown_pending_trace_export_is_canonical(file: &syn::File) -> bool {
+    let helpers = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item)
+                if item.sig.ident == "shutdown_pending_trace_export"
+                    && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(helper) = (helpers.len() == 1).then_some(helpers[0]) else {
+        return false;
+    };
+    let Some(runtime_inputs) = runtime_inputs_mut_parameter(helper) else {
+        return false;
+    };
+    if helper.sig.asyncness.is_none()
+        || !matches!(helper.vis, syn::Visibility::Inherited)
+        || helper.block.stmts.len() != 2
+    {
+        return false;
+    }
+    let syn::Stmt::Expr(branch, None) = &helper.block.stmts[0] else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(branch) else {
+        return false;
+    };
+    let syn::Expr::Let(condition) = transparent_expr(&branch.cond) else {
+        return false;
+    };
+    let syn::Pat::TupleStruct(some) = condition.pat.as_ref() else {
+        return false;
+    };
+    let Some(syn::Pat::Ident(exporter)) = some.elems.first() else {
+        return false;
+    };
+    let syn::Expr::MethodCall(take) = transparent_expr(&condition.expr) else {
+        return false;
+    };
+    let take_is_canonical = is_exact_syn_path(&some.path, &["Some"])
+        && some.elems.len() == 1
+        && take.method == "take_trace_export"
+        && take.args.is_empty()
+        && is_exact_ident_path(&take.receiver, runtime_inputs);
+    let shutdown_is_canonical = match branch.then_branch.stmts.as_slice() {
+        [syn::Stmt::Expr(expr, Some(_))] | [syn::Stmt::Expr(expr, None)] => {
+            matches!(transparent_expr(expr), syn::Expr::Try(_))
+                && awaited_method_behind_result_context(expr).is_some_and(|shutdown| {
+                    shutdown.method == "shutdown"
+                        && shutdown.args.is_empty()
+                        && is_exact_ident_path(&shutdown.receiver, &exporter.ident)
+                })
+        }
+        _ => false,
+    };
+    let tail_is_canonical = matches!(
+        &helper.block.stmts[1],
+        syn::Stmt::Expr(expr, None) if ok_unit_expr(expr)
+    );
+    take_is_canonical && shutdown_is_canonical && tail_is_canonical && branch.else_branch.is_none()
+}
+
+fn reports_cleanup_error_then_returns_primary(expr: &syn::Expr) -> bool {
+    let syn::Expr::Block(block) = transparent_expr(expr) else {
+        return false;
+    };
+    let [syn::Stmt::Macro(report), syn::Stmt::Expr(tail, None)] = block.block.stmts.as_slice()
+    else {
+        return false;
+    };
+    is_exact_syn_path(&report.mac.path, &["tracing", "error"])
+        && report
+            .mac
+            .tokens
+            .to_string()
+            .contains("cleanup_error = % cleanup_error")
+        && err_of_binding(tail, "startup_error")
+}
+
+fn runtime_lifecycle_finish_is_canonical(method: &syn::ImplItemFn) -> bool {
+    if method.sig.asyncness.is_none()
+        || method.sig.inputs.len() != 2
+        || method.block.stmts.len() != 2
+    {
+        return false;
+    }
+    let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
+        return false;
+    };
+    let Some(syn::FnArg::Typed(startup_input)) = method.sig.inputs.iter().nth(1) else {
+        return false;
+    };
+    let Some(startup_result) = pat_ident(&startup_input.pat) else {
+        return false;
+    };
+    if !owner_receiver_is_mut_value(receiver)
+        || compact_tokens(&startup_input.ty) != "anyhow::Result<()>"
+    {
+        return false;
+    }
+    let syn::Stmt::Local(cleanup_local) = &method.block.stmts[0] else {
+        return false;
+    };
+    let Some(cleanup_result) = pat_ident(&cleanup_local.pat) else {
+        return false;
+    };
+    let Some(cleanup_call) = cleanup_local
+        .init
+        .as_ref()
+        .and_then(|init| direct_awaited_call(&init.expr))
+    else {
+        return false;
+    };
+    if !is_exact_path(&cleanup_call.func, &["shutdown_pending_trace_export"])
+        || cleanup_call.args.len() != 1
+        || !cleanup_call
+            .args
+            .first()
+            .is_some_and(|arg| mutable_reference_to_self_field(arg, "inputs"))
+    {
+        return false;
+    }
+    let syn::Stmt::Expr(tail, None) = &method.block.stmts[1] else {
+        return false;
+    };
+    let syn::Expr::Match(outcome) = transparent_expr(tail) else {
+        return false;
+    };
+    let syn::Expr::Tuple(pair) = transparent_expr(&outcome.expr) else {
+        return false;
+    };
+    if pair.elems.len() != 2
+        || !pair
+            .elems
+            .first()
+            .is_some_and(|expr| is_exact_ident_path(expr, startup_result))
+        || !pair
+            .elems
+            .last()
+            .is_some_and(|expr| is_exact_ident_path(expr, cleanup_result))
+        || outcome.arms.len() != 3
+    {
+        return false;
+    }
+    let mut ok_cleanup = false;
+    let mut primary_only = false;
+    let mut primary_over_cleanup = false;
+    for arm in &outcome.arms {
+        if arm.guard.is_some() || !arm.attrs.is_empty() {
+            return false;
+        }
+        match compact_tokens(&arm.pat).as_str() {
+            "(Ok(()),cleanup_result)" => {
+                ok_cleanup = is_exact_path(&arm.body, &["cleanup_result"]);
+            }
+            "(Err(startup_error),Ok(()))" => {
+                primary_only = err_of_binding(&arm.body, "startup_error");
+            }
+            "(Err(startup_error),Err(cleanup_error))" => {
+                primary_over_cleanup = reports_cleanup_error_then_returns_primary(&arm.body);
+            }
+            _ => return false,
+        }
+    }
+    ok_cleanup && primary_only && primary_over_cleanup
+}
+
+fn runtime_lifecycle_outer_is_canonical(file: &syn::File, run: &syn::ItemFn) -> bool {
+    if !matches!(run.vis, syn::Visibility::Public(_)) || run.block.stmts.len() != 1 {
+        return false;
+    }
+    let Some(runtime_inputs) = runtime_inputs_parameter(run) else {
+        return false;
+    };
+    let [syn::Stmt::Expr(tail, None)] = run.block.stmts.as_slice() else {
+        return false;
+    };
+    let syn::Expr::Await(awaited) = transparent_expr(tail) else {
+        return false;
+    };
+    let syn::Expr::MethodCall(owner_run) = transparent_expr(&awaited.base) else {
+        return false;
+    };
+    let Some(owner_new) = direct_call_behind_runtime_context(&owner_run.receiver) else {
+        return false;
+    };
+    if owner_run.method != "run"
+        || !owner_run.args.is_empty()
+        || !is_exact_path(&owner_new.func, &["RuntimeLifecycleOwner", "new"])
+        || owner_new.args.len() != 1
+        || !owner_new
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_ident_path(arg, runtime_inputs))
+    {
+        return false;
+    }
+    let implementations = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if item.trait_.is_none()
+                    && type_last_ident(&item.self_ty)
+                        .is_some_and(|ident| ident == "RuntimeLifecycleOwner")
+                    && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(owner_impl) = (implementations.len() == 1).then_some(implementations[0]) else {
+        return false;
+    };
+    runtime_lifecycle_owner_struct_is_canonical(file)
+        && shutdown_pending_trace_export_is_canonical(file)
+        && owner_method(owner_impl, "new").is_some_and(runtime_lifecycle_new_is_canonical)
+        && owner_method(owner_impl, "run").is_some_and(runtime_lifecycle_run_is_canonical)
+        && owner_method(owner_impl, "finish").is_some_and(runtime_lifecycle_finish_is_canonical)
+        && exact_path_call_count_in_file(file, &["run_startup"]) == 1
+}
+
+fn runtime_config_snapshot_findings_for_file(file: &syn::File) -> Vec<Finding<Rule>> {
+    let prepares = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item)
+                if item.sig.ident == "prepare_runtime" && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let runs = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item)
+                if item.sig.ident == "run" && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let startups = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item)
+                if item.sig.ident == "run_startup" && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if prepares.len() != 1
+        || prepares[0].sig.asyncness.is_some()
+        || runs.len() != 1
+        || runs[0].sig.asyncness.is_none()
+        || startups.len() != 1
+        || startups[0].sig.asyncness.is_none()
+    {
         return vec![finding(
             Rule::ForbiddenWiring,
             RUNTIME_LIB_PATH,
-            "runtime configuration snapshot gate requires exactly one async run()",
+            "runtime configuration snapshot gate requires exactly one production prepare_runtime(), one public async run(), and one private async run_startup()",
         )];
     }
-    let mut wiring = RuntimeConfigWiring::default();
-    wiring.visit_block(&runs[0].block);
-    if wiring.is_canonical() {
+
+    let Some(runtime_inputs_binding) = runtime_inputs_mut_parameter(startups[0]) else {
+        return vec![finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_LIB_PATH,
+            "production run_startup() must accept exactly one named &mut RuntimeInputs parameter",
+        )];
+    };
+    let mut prepare_wiring = PrepareRuntimeConfigWiring::default();
+    prepare_wiring.visit_block(&prepares[0].block);
+    let mut run_wiring = RunRuntimeConfigWiring::new(runtime_inputs_binding.clone());
+    run_wiring.visit_block(&startups[0].block);
+    let mut inventory = ProductionRuntimeConfigInventory::default();
+    inventory.visit_file(file);
+
+    if prepare_wiring.is_canonical()
+        && run_wiring.is_canonical()
+        && runtime_lifecycle_outer_is_canonical(file, runs[0])
+        && inventory.snapshot_calls == 1
+        && inventory.runtime_inputs_calls == 1
+        && inventory.vault_calls == 1
+        && inventory.redis_calls == 1
+        && inventory.s3_calls == 1
+        && inventory.forbidden_indirections == 0
+    {
         Vec::new()
     } else {
         vec![finding(
             Rule::ForbiddenWiring,
             RUNTIME_LIB_PATH,
-            "run() configuration snapshot funnel must bind one EnvConfigSource capture into one RuntimeInputs value, define one config_value closure backed by that input's config().get(), and call Vault/Redis/S3 exactly once with that reader",
+            "prepare_runtime() must move its sole EnvConfigSource snapshot binding into RuntimeInputs; the exact RuntimeLifecycleOwner outer run must unconditionally finish one run_startup(&mut inputs) result, preserving primary errors through the sole pending-exporter cleanup; run_startup() must feed Vault/Redis/S3 from that exact snapshot binding without alias or bait paths",
         )]
     }
+}
+
+fn runtime_binary_config_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let mut findings = Vec::new();
+    for (relative, rss) in [(SERVER_MAIN_PATH, false), (RSS_MAIN_PATH, true)] {
+        let path = root.join(relative);
+        if !path.exists() {
+            continue;
+        }
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
+        let file = match syn::parse_file(&source) {
+            Ok(file) => file,
+            Err(error) => {
+                findings.push(finding(
+                    Rule::ForbiddenWiring,
+                    relative,
+                    format!("runtime binary snapshot gate 无法解析 Rust: {error}"),
+                ));
+                continue;
+            }
+        };
+        let mains = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(item)
+                    if item.sig.ident == "main" && attrs_may_be_production(&item.attrs) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut inventory = BinaryRuntimeWiring::default();
+        inventory.visit_file(&file);
+        let shared_wiring_is_canonical = mains.len() == 1
+            && inventory.prepare_calls == 1
+            && inventory.prepared_binding.is_some()
+            && inventory.run_calls == 1
+            && inventory.canonical_run_calls == 1
+            && inventory.forbidden_indirections == 0;
+        let canonical = if rss {
+            shared_wiring_is_canonical
+                && classifier_is_canonical(&file)
+                && rss_main_is_canonical(mains[0])
+                && inventory.shutdown_calls == 1
+                && inventory.canonical_shutdown_calls == 1
+        } else {
+            shared_wiring_is_canonical
+                && mains[0].sig.asyncness.is_some()
+                && inventory.shutdown_calls == 0
+        };
+        if !canonical {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                relative,
+                if rss {
+                    "rss main must classify the closed command family before its sole runtime::prepare_runtime acquisition; serving must uniquely return runtime::run while every operator arm yields one Result followed by the sole exact-binding shutdown, with no pre-consumption early-return, alias, macro, or unreachable bait"
+                } else {
+                    "server main must bind its sole runtime::prepare_runtime result and pass that exact binding exactly once to runtime::run, with no shutdown or alias side path"
+                },
+            ));
+        }
+    }
+    Ok(findings)
 }
 
 fn runtime_secret_transfer_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
@@ -463,6 +2409,16 @@ fn path_ends_with(expr: &syn::Expr, expected: &[&str]) -> bool {
             .all(|(segment, expected)| segment.ident == *expected)
 }
 
+fn is_exact_syn_path(path: &syn::Path, expected: &[&str]) -> bool {
+    path.leading_colon.is_none()
+        && path.segments.len() == expected.len()
+        && path
+            .segments
+            .iter()
+            .zip(expected)
+            .all(|(segment, expected)| segment.ident == *expected)
+}
+
 fn transparent_expr(mut expr: &syn::Expr) -> &syn::Expr {
     loop {
         match expr {
@@ -501,14 +2457,101 @@ fn call_behind_result_context(expr: &syn::Expr) -> Option<&syn::ExprCall> {
 }
 
 fn is_env_snapshot_initializer(expr: &syn::Expr) -> bool {
-    call_behind_result_context(expr).is_some_and(|call| {
-        path_ends_with(&call.func, &["RuntimeConfigSnapshot", "capture"])
+    call_behind_result_context(expr).is_some_and(is_env_snapshot_call)
+}
+
+fn is_env_snapshot_call(call: &syn::ExprCall) -> bool {
+    path_ends_with(&call.func, &["RuntimeConfigSnapshot", "capture"])
+        && call.args.len() == 1
+        && call
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_path(arg, &["EnvConfigSource"]))
+}
+
+fn is_snapshot_view(expr: &syn::Expr, snapshot: &syn::Ident) -> bool {
+    let syn::Expr::MethodCall(call) = transparent_expr(expr) else {
+        return false;
+    };
+    call.method == "view" && call.args.is_empty() && is_exact_ident_path(&call.receiver, snapshot)
+}
+
+fn is_snapshot_rust_log_filter(expr: &syn::Expr, config: &syn::Ident) -> bool {
+    let syn::Expr::MethodCall(fallback) = transparent_expr(expr) else {
+        return false;
+    };
+    if fallback.method != "unwrap_or_else" || fallback.args.len() != 1 {
+        return false;
+    }
+    let Some(syn::Expr::Closure(default)) = fallback.args.first().map(transparent_expr) else {
+        return false;
+    };
+    if !default.inputs.is_empty() {
+        return false;
+    }
+    let Some(default_call) = direct_call_behind_runtime_context(&default.body) else {
+        return false;
+    };
+    let default_is_info = path_ends_with(&default_call.func, &["EnvFilter", "new"])
+        && default_call.args.len() == 1
+        && default_call.args.first().is_some_and(|arg| {
+            matches!(transparent_expr(arg), syn::Expr::Lit(lit)
+                if matches!(&lit.lit, syn::Lit::Str(value) if value.value() == "info"))
+        });
+    let syn::Expr::MethodCall(and_then) = transparent_expr(&fallback.receiver) else {
+        return false;
+    };
+    if and_then.method != "and_then" || and_then.args.len() != 1 {
+        return false;
+    }
+    let Some(syn::Expr::Closure(parse)) = and_then.args.first().map(transparent_expr) else {
+        return false;
+    };
+    let Some(raw) = parse.inputs.first().and_then(pat_ident) else {
+        return false;
+    };
+    if parse.inputs.len() != 1 {
+        return false;
+    }
+    let syn::Expr::MethodCall(ok) = transparent_expr(&parse.body) else {
+        return false;
+    };
+    let Some(parse_call) = direct_call_behind_runtime_context(&ok.receiver) else {
+        return false;
+    };
+    let parser_is_canonical = ok.method == "ok"
+        && ok.args.is_empty()
+        && path_ends_with(&parse_call.func, &["EnvFilter", "try_new"])
+        && parse_call.args.len() == 1
+        && parse_call
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_ident_path(arg, raw));
+    let syn::Expr::MethodCall(value) = transparent_expr(&and_then.receiver) else {
+        return false;
+    };
+    let value_is_snapshot = value.method == "value"
+        && value.args.len() == 1
+        && is_exact_ident_path(&value.receiver, config)
+        && value.args.first().is_some_and(|arg| {
+            matches!(transparent_expr(arg), syn::Expr::Lit(lit)
+                if matches!(&lit.lit, syn::Lit::Str(value) if value.value() == "RUST_LOG"))
+        });
+    default_is_info && parser_is_canonical && value_is_snapshot
+}
+
+fn subscriber_with_binding_count(expr: &syn::Expr, binding: &syn::Ident) -> usize {
+    let syn::Expr::MethodCall(call) = transparent_expr(expr) else {
+        return 0;
+    };
+    usize::from(
+        call.method == "with"
             && call.args.len() == 1
             && call
                 .args
                 .first()
-                .is_some_and(|arg| is_exact_path(arg, &["EnvConfigSource"]))
-    })
+                .is_some_and(|arg| is_exact_ident_path(arg, binding)),
+    ) + subscriber_with_binding_count(&call.receiver, binding)
 }
 
 fn is_exact_ident_path(expr: &syn::Expr, expected: &syn::Ident) -> bool {
@@ -524,18 +2567,26 @@ fn is_exact_ident_path(expr: &syn::Expr, expected: &syn::Ident) -> bool {
             .is_some_and(|segment| segment.ident == *expected)
 }
 
-fn is_runtime_inputs_initializer(expr: &syn::Expr, snapshot_binding: Option<&syn::Ident>) -> bool {
-    let Some(snapshot_binding) = snapshot_binding else {
-        return false;
+fn runtime_inputs_parameter(item: &syn::ItemFn) -> Option<&syn::Ident> {
+    if item.sig.inputs.len() != 1 {
+        return None;
+    }
+    let syn::FnArg::Typed(input) = item.sig.inputs.first()? else {
+        return None;
     };
-    call_behind_result_context(expr).is_some_and(|call| {
-        path_ends_with(&call.func, &["RuntimeInputs", "new"])
-            && call.args.len() == 2
-            && call
-                .args
-                .first()
-                .is_some_and(|arg| is_exact_ident_path(arg, snapshot_binding))
-    })
+    let syn::Type::Path(ty) = input.ty.as_ref() else {
+        return None;
+    };
+    if ty.qself.is_some()
+        || ty
+            .path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != "RuntimeInputs")
+    {
+        return None;
+    }
+    pat_ident(&input.pat)
 }
 
 fn is_snapshot_config_value_closure(expr: &syn::Expr, runtime_inputs_binding: &syn::Ident) -> bool {
@@ -551,49 +2602,34 @@ fn is_snapshot_config_value_closure(expr: &syn::Expr, runtime_inputs_binding: &s
     let syn::Expr::MethodCall(map) = transparent_expr(&outer.body) else {
         return false;
     };
-    let syn::Expr::MethodCall(get) = transparent_expr(&map.receiver) else {
+    let syn::Expr::MethodCall(value) = transparent_expr(&map.receiver) else {
         return false;
     };
-    let syn::Expr::MethodCall(config) = transparent_expr(&get.receiver) else {
-        return false;
-    };
-    let Some(syn::Expr::Closure(expose_closure)) = map.args.first().map(transparent_expr) else {
-        return false;
-    };
-    let Some(value) = expose_closure.inputs.first().and_then(pat_ident) else {
-        return false;
-    };
-    let syn::Expr::MethodCall(to_owned) = transparent_expr(&expose_closure.body) else {
-        return false;
-    };
-    let syn::Expr::MethodCall(expose) = transparent_expr(&to_owned.receiver) else {
+    let syn::Expr::MethodCall(config) = transparent_expr(&value.receiver) else {
         return false;
     };
 
     map.method == "map"
         && map.args.len() == 1
-        && get.method == "get"
-        && get.args.len() == 1
-        && get
+        && map
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_path(arg, &["str", "to_owned"]))
+        && value.method == "value"
+        && value.args.len() == 1
+        && value
             .args
             .first()
             .is_some_and(|arg| expr_path_last(arg).is_some_and(|ident| ident == name))
         && config.method == "config"
         && config.args.is_empty()
         && is_exact_ident_path(&config.receiver, runtime_inputs_binding)
-        && expose_closure.inputs.len() == 1
-        && to_owned.method == "to_owned"
-        && to_owned.args.is_empty()
-        && expose.method == "expose"
-        && expose.args.is_empty()
-        && expr_path_last(&expose.receiver).is_some_and(|ident| ident == value)
 }
 
 fn generated_domains_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     let path = root.join(RUNTIME_LIB_PATH);
     let text = fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
-    let run =
-        extract_braced_body_at(&text, 0, "pub async fn run(").unwrap_or_else(|| empty_scope(&text));
+    let run = production_async_function_scope(&text, "run_startup", "async fn run_startup(");
     let masked_run = mask_comments_and_strings(run.body);
     let mut findings = Vec::new();
     for forbidden in [
@@ -862,10 +2898,7 @@ fn event_transport_output_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         ));
     }
 
-    let run = runtime.items.iter().find_map(|item| match item {
-        syn::Item::Fn(item) if item.sig.ident == "run" => Some(item),
-        _ => None,
-    });
+    let run = unique_production_async_function(&runtime, "run_startup");
     let wire_blocks = run.map(wire_domains_blocks).unwrap_or_default();
     let event_binding = wire_blocks
         .first()
@@ -913,6 +2946,27 @@ fn event_transport_output_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
 fn parse_rust_file(path: &Path) -> Result<syn::File> {
     let source = fs::read_to_string(path).with_context(|| format!("读 {} 失败", path.display()))?;
     syn::parse_file(&source).with_context(|| format!("解析 {} 失败", path.display()))
+}
+
+fn unique_production_async_function<'a>(
+    file: &'a syn::File,
+    name: &str,
+) -> Option<&'a syn::ItemFn> {
+    let functions = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item)
+                if item.sig.ident == name
+                    && item.sig.asyncness.is_some()
+                    && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (functions.len() == 1).then_some(functions[0])
 }
 
 fn compact_tokens(tokens: &impl quote::ToTokens) -> String {
@@ -1100,12 +3154,7 @@ fn provider_outputs_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
             return Ok(findings);
         }
     };
-    let run = file.items.iter().find_map(|item| match item {
-        syn::Item::Fn(item) if item.sig.ident == "run" && item.sig.asyncness.is_some() => {
-            Some(item)
-        }
-        _ => None,
-    });
+    let run = unique_production_async_function(&file, "run_startup");
     if run.is_none_or(|run| !has_canonical_pg_runtime_build(run))
         || exact_path_call_count_in_file(
             &file,
@@ -1861,19 +3910,48 @@ fn has_canonical_pg_runtime_registration(file: &syn::File) -> bool {
     let trace = stmts.iter().position(is_trace_registration_stmt);
     let pg = stmts
         .iter()
-        .position(|stmt| is_pg_runtime_registration_stmt(stmt, &pg_binding));
-    let domain = stmts
+        .position(|stmt| is_module_registration_result_stmt(stmt, &pg_binding, "pg_result"));
+    let domain = stmts.iter().position(|stmt| {
+        is_module_registration_result_stmt(stmt, &domain_binding, "domain_result")
+    });
+    let pg_propagation = stmts
         .iter()
-        .position(|stmt| is_pg_runtime_registration_stmt(stmt, &domain_binding));
-    matches!((trace, pg, domain), (Some(trace), Some(pg), Some(domain)) if trace < pg && pg < domain)
+        .position(|stmt| is_result_propagation_stmt(stmt, "pg_result"));
+    let domain_propagation = stmts
+        .iter()
+        .position(|stmt| is_result_propagation_stmt(stmt, "domain_result"));
+    matches!(
+        (trace, pg, domain, pg_propagation, domain_propagation),
+        (
+            Some(trace),
+            Some(pg),
+            Some(domain),
+            Some(pg_propagation),
+            Some(domain_propagation)
+        ) if trace < pg
+            && pg < domain
+            && domain < pg_propagation
+            && pg_propagation < domain_propagation
+    ) && stmts
+        .iter()
+        .filter(|stmt| is_module_registration_result_stmt(stmt, &pg_binding, "pg_result"))
+        .count()
+        == 1
         && stmts
             .iter()
-            .filter(|stmt| is_pg_runtime_registration_stmt(stmt, &pg_binding))
+            .filter(|stmt| {
+                is_module_registration_result_stmt(stmt, &domain_binding, "domain_result")
+            })
             .count()
             == 1
         && stmts
             .iter()
-            .filter(|stmt| is_pg_runtime_registration_stmt(stmt, &domain_binding))
+            .filter(|stmt| is_result_propagation_stmt(stmt, "pg_result"))
+            .count()
+            == 1
+        && stmts
+            .iter()
+            .filter(|stmt| is_result_propagation_stmt(stmt, "domain_result"))
             .count()
             == 1
         && module_registration_call_count(file, &pg_binding) == 1
@@ -1918,13 +3996,39 @@ fn launch_lifecycle_calls_are_canonical(file: &syn::File) -> bool {
             || method_call_count_in_block(block, "register_with_token") != 0
     }
 
+    let mtls_helpers = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function)
+                if function.sig.ident == "register_mtls_server"
+                    && attrs_may_be_production(&function.attrs) =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let split_mtls_registration = mtls_helpers.len() == 1
+        && method_call_count_in_block(&mtls_helpers[0].block, "register_detached") == 0
+        && method_call_count_in_block(&mtls_helpers[0].block, "register_with_token") == 1;
+
     for item in &file.items {
         match item {
             syn::Item::Fn(function) if attrs_may_be_production(&function.attrs) => {
                 let detached = method_call_count_in_block(&function.block, "register_detached");
                 let with_token = method_call_count_in_block(&function.block, "register_with_token");
                 if function.sig.ident == "bind_and_register" {
-                    if detached != 0 || with_token != 2 {
+                    let inline = mtls_helpers.is_empty() && with_token == 2;
+                    let split = split_mtls_registration
+                        && with_token == 1
+                        && exact_named_path_call_count(&function.block, &["register_mtls_server"])
+                            == 1;
+                    if detached != 0 || (!inline && !split) {
+                        return false;
+                    }
+                } else if function.sig.ident == "register_mtls_server" {
+                    if !split_mtls_registration {
                         return false;
                     }
                 } else if detached != 0 || with_token != 0 {
@@ -2027,31 +4131,45 @@ fn is_trace_registration_stmt(stmt: &syn::Stmt) -> bool {
                 if path.path.is_ident("trace_exporter"))))
 }
 
-fn is_pg_runtime_registration_stmt(stmt: &syn::Stmt, binding: &str) -> bool {
-    struct Finder<'a> {
-        binding: &'a str,
-        count: usize,
-    }
-    impl<'ast> Visit<'ast> for Finder<'_> {
-        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-            if expr_path_last(&call.func).is_some_and(|ident| ident == "register_module_output")
-                && call.args.len() == 2
-                && call
-                    .args
-                    .first()
-                    .is_some_and(|arg| expr_path_last(arg).is_some_and(|ident| ident == "stack"))
-                && call.args.last().is_some_and(|arg| {
-                    expr_path_last(arg).is_some_and(|ident| ident == self.binding)
-                })
-            {
-                self.count += 1;
-            }
-            syn::visit::visit_expr_call(self, call);
-        }
-    }
-    let mut finder = Finder { binding, count: 0 };
-    finder.visit_stmt(stmt);
-    finder.count == 1
+fn is_module_registration_result_stmt(
+    stmt: &syn::Stmt,
+    module_binding: &str,
+    result_binding: &str,
+) -> bool {
+    let syn::Stmt::Local(local) = stmt else {
+        return false;
+    };
+    let syn::Pat::Ident(result) = &local.pat else {
+        return false;
+    };
+    let Some(init) = &local.init else {
+        return false;
+    };
+    let Some(call) = direct_call_behind_runtime_context(&init.expr) else {
+        return false;
+    };
+    result.ident == result_binding
+        && result.by_ref.is_none()
+        && result.mutability.is_none()
+        && init.diverge.is_none()
+        && is_exact_path(&call.func, &["Self", "register_module_output"])
+        && call.args.len() == 2
+        && call
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_path(arg, &["stack"]))
+        && call
+            .args
+            .last()
+            .is_some_and(|arg| is_exact_path(arg, &[module_binding]))
+}
+
+fn is_result_propagation_stmt(stmt: &syn::Stmt, result_binding: &str) -> bool {
+    matches!(
+        stmt,
+        syn::Stmt::Expr(syn::Expr::Try(propagation), Some(_))
+            if is_exact_path(&propagation.expr, &[result_binding])
+    )
 }
 
 #[derive(Default)]
@@ -3629,19 +5747,34 @@ struct AnchorSearchScope<'a> {
 
 const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
+        id: "prepare.config.snapshot",
+        path: RUNTIME_LIB_PATH,
+        pattern: "RuntimeConfigSnapshot::capture(EnvConfigSource)",
+    },
+    AnchorSpec {
+        id: "prepare.tracing.filter",
+        path: RUNTIME_LIB_PATH,
+        pattern: "let filter = config",
+    },
+    AnchorSpec {
+        id: "prepare.tracing.otel",
+        path: RUNTIME_LIB_PATH,
+        pattern: "let trace_export = build_trace_export(config)?;",
+    },
+    AnchorSpec {
+        id: "prepare.inputs",
+        path: RUNTIME_LIB_PATH,
+        pattern: "Ok(RuntimeInputs::new(runtime_config, trace_export))",
+    },
+    AnchorSpec {
         id: "run.plan.load",
         path: RUNTIME_LIB_PATH,
         pattern: "plan::RuntimePlan::bundled().context(",
     },
     AnchorSpec {
-        id: "run.config.snapshot",
-        path: RUNTIME_LIB_PATH,
-        pattern: "RuntimeConfigSnapshot::capture(EnvConfigSource)",
-    },
-    AnchorSpec {
         id: "run.provider.oidc",
         path: RUNTIME_LIB_PATH,
-        pattern: "build_runtime_oidc_provider().context(",
+        pattern: "build_runtime_oidc_provider(runtime_inputs.config()).context(",
     },
     AnchorSpec {
         id: "run.provider.vault",
@@ -3739,9 +5872,9 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "for (name, probe) in std::mem::take(&mut module.probes)",
     },
     AnchorSpec {
-        id: "run.auth.routers",
+        id: "run.auth.routers-capability",
         path: RUNTIME_LIB_PATH,
-        pattern: "assemble_authed_routers(",
+        pattern: "assemble_authed_routers(\n                runtime_inputs.config(),",
     },
     AnchorSpec {
         id: "run.health.listener",
@@ -3754,9 +5887,9 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period)",
     },
     AnchorSpec {
-        id: "run.launch",
+        id: "run.launch-capability",
         path: RUNTIME_LIB_PATH,
-        pattern: "launch::launch(launch_plan)",
+        pattern: "launch::launch(runtime_inputs.config(), launch_plan)",
     },
     AnchorSpec {
         id: "launch.shutdown.trace",
@@ -3766,22 +5899,32 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "launch.shutdown.pg-output",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "Self::register_module_output(stack, pg_runtime_module)?;",
+        pattern: "let pg_result = Self::register_module_output(stack, pg_runtime_module);",
     },
     AnchorSpec {
         id: "launch.shutdown.domain-output",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "Self::register_module_output(stack, domain_module)?;",
+        pattern: "let domain_result = Self::register_module_output(stack, domain_module);",
+    },
+    AnchorSpec {
+        id: "launch.shutdown.pg-result",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "pg_result?;",
+    },
+    AnchorSpec {
+        id: "launch.shutdown.domain-result",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "domain_result?;",
     },
     AnchorSpec {
         id: "launch.shutdown.resources",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "for resource in output.resources",
+        pattern: "for resource in resources",
     },
     AnchorSpec {
         id: "launch.shutdown.workers",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "for worker in output.workers",
+        pattern: "for worker in workers",
     },
     AnchorSpec {
         id: "launch.register-plan",
@@ -3838,8 +5981,11 @@ fn wiring_anchors(root: &Path) -> Result<Vec<AnchorEntry>> {
 
 fn anchor_search_scope<'a>(spec: &AnchorSpec, text: &'a str) -> AnchorSearchScope<'a> {
     if spec.path == RUNTIME_LIB_PATH {
-        return extract_braced_body_at(text, 0, "pub async fn run(")
-            .unwrap_or_else(|| empty_scope(text));
+        if spec.id.starts_with("prepare.") {
+            return extract_braced_body_at(text, 0, "pub fn prepare_runtime(")
+                .unwrap_or_else(|| empty_scope(text));
+        }
+        return production_async_function_scope(text, "run_startup", "async fn run_startup(");
     }
     if spec.path == RUNTIME_LAUNCH_PATH {
         if matches!(
@@ -3866,7 +6012,10 @@ fn anchor_search_scope<'a>(spec: &AnchorSpec, text: &'a str) -> AnchorSearchScop
 
 fn anchor_order_key(spec: &AnchorSpec) -> (&'static str, &'static str) {
     if spec.path == RUNTIME_LIB_PATH {
-        return (spec.path, "run");
+        if spec.id.starts_with("prepare.") {
+            return (spec.path, "prepare");
+        }
+        return (spec.path, "run_startup");
     }
     if spec.path == RUNTIME_LAUNCH_PATH
         && matches!(
@@ -3917,6 +6066,42 @@ fn extract_braced_body_at<'a>(
         }
     }
     None
+}
+
+fn production_async_function_scope<'a>(
+    text: &'a str,
+    name: &str,
+    needle: &str,
+) -> AnchorSearchScope<'a> {
+    let Ok(file) = syn::parse_file(text) else {
+        return extract_braced_body_at(text, 0, needle).unwrap_or_else(|| empty_scope(text));
+    };
+    let functions = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item)
+                if item.sig.ident == name
+                    && item.sig.asyncness.is_some()
+                    && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(function) = (functions.len() == 1).then_some(functions[0]) else {
+        return empty_scope(text);
+    };
+    let line = function.sig.ident.span().start().line;
+    let search_from = if line <= 1 {
+        0
+    } else {
+        text.match_indices('\n')
+            .nth(line - 2)
+            .map_or(0, |(offset, _)| offset + 1)
+    };
+    extract_braced_body_at(text, search_from, needle).unwrap_or_else(|| empty_scope(text))
 }
 
 fn launch_plan_register_scope(text: &str) -> Option<AnchorSearchScope<'_>> {
@@ -4237,6 +6422,48 @@ mod tests {
         Ok(())
     }
 
+    fn snapshot_program_with_lifecycle(legacy: &str) -> String {
+        let startup = legacy.replace(
+            "pub async fn run(mut runtime_inputs: RuntimeInputs)",
+            "async fn run_startup(runtime_inputs: &mut RuntimeInputs)",
+        );
+        assert_ne!(
+            startup, legacy,
+            "fixture must contain the legacy run signature"
+        );
+        format!(
+            r#"{startup}
+
+async fn shutdown_pending_trace_export(inputs: &mut RuntimeInputs) -> anyhow::Result<()> {{
+    if let Some(exporter) = inputs.take_trace_export() {{ exporter.shutdown().await?; }}
+    Ok(())
+}}
+struct RuntimeLifecycleOwner {{ inputs: RuntimeInputs }}
+impl RuntimeLifecycleOwner {{
+    fn new(inputs: RuntimeInputs) -> Self {{ Self {{ inputs }} }}
+    async fn run(mut self) -> anyhow::Result<()> {{
+        let startup_result = run_startup(&mut self.inputs).await;
+        self.finish(startup_result).await
+    }}
+    async fn finish(mut self, startup_result: anyhow::Result<()>) -> anyhow::Result<()> {{
+        let cleanup_result = shutdown_pending_trace_export(&mut self.inputs).await;
+        match (startup_result, cleanup_result) {{
+            (Ok(()), cleanup_result) => cleanup_result,
+            (Err(startup_error), Ok(())) => Err(startup_error),
+            (Err(startup_error), Err(cleanup_error)) => {{
+                tracing::error!(cleanup_error = %cleanup_error, "cleanup failed");
+                Err(startup_error)
+            }}
+        }}
+    }}
+}}
+pub async fn run(runtime_inputs: RuntimeInputs) -> anyhow::Result<()> {{
+    RuntimeLifecycleOwner::new(runtime_inputs).run().await
+}}
+"#
+        )
+    }
+
     fn fixture_root(name: &str) -> Result<std::path::PathBuf> {
         let root = unique_tmp(name);
         write(
@@ -4327,16 +6554,27 @@ impl DomainModuleResult {
 
     fn runtime_lib_fixture(omit: Option<&str>) -> String {
         format!(
-            "pub async fn run() {{\n{}\n}}\nfn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) {{\nlet mut module = DomainModuleResult::default();\nmodule.merge(inputs.domains_module);\nmodule.merge(inputs.provider_module);\n}}\n",
-            runtime_anchor_lines(omit)
+            "use config::RuntimeConfigSnapshot;\nuse phase::RuntimeInputs;\nuse infra::vault::build_vault_runtime_deps;\nuse infra::redis::build_redis_runtime_deps;\nuse infra::s3::build_s3_runtime_deps_from;\n\npub fn prepare_runtime() {{\n{}\n}}\nasync fn run_startup(runtime_inputs: &mut RuntimeInputs) {{\n{}\n}}\nfn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) {{\nlet mut module = DomainModuleResult::default();\nmodule.merge(inputs.domains_module);\nmodule.merge(inputs.provider_module);\n}}\n",
+            prepare_anchor_lines(omit),
+            run_anchor_lines(omit)
         )
     }
 
-    fn runtime_anchor_lines(omit: Option<&str>) -> String {
+    fn prepare_anchor_lines(omit: Option<&str>) -> String {
+        RUNTIME_ANCHORS
+            .iter()
+            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH && anchor.id.starts_with("prepare."))
+            .filter(|anchor| omit != Some(anchor.id))
+            .map(|anchor| anchor.pattern)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn run_anchor_lines(omit: Option<&str>) -> String {
         let mut lines = Vec::new();
         for anchor in RUNTIME_ANCHORS
             .iter()
-            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH)
+            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH && anchor.id.starts_with("run."))
         {
             if omit == Some(anchor.id) {
                 continue;
@@ -4512,10 +6750,10 @@ serde = workspace=true; features=[derive]
                 .contains("mergeExtends = probes,resources,workers")
         );
         assert!(report.rendered.contains(
-            "02 | run.config.snapshot | assemblies/runtime/src/lib.rs | RuntimeConfigSnapshot::capture(EnvConfigSource)"
+            "01 | prepare.config.snapshot | assemblies/runtime/src/lib.rs | RuntimeConfigSnapshot::capture(EnvConfigSource)"
         ));
-        assert!(report.rendered.contains("32 | launch.register-plan"));
-        assert!(report.rendered.contains("33 | launch.listeners"));
+        assert!(report.rendered.contains("37 | launch.register-plan"));
+        assert!(report.rendered.contains("38 | launch.listeners"));
         Ok(())
     }
 
@@ -4743,7 +6981,7 @@ domains = []
 
     fn provider_output_fixture() -> String {
         r#"
-pub async fn run() {
+async fn run_startup() {
     let _wire = phase_result(RuntimePhase::WireDomains, async {
     let provider_module = crate::provider_output::build_provider_module(&deps);
     let _module = crate::assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
@@ -4784,7 +7022,7 @@ async fn wire_durable() {
         write(
             &root.join(RUNTIME_LIB_PATH),
             r#"
-pub async fn run() {
+async fn run_startup() {
     let _ = phase_result(RuntimePhase::WireDomains, async {
         let event_module = event_transport::wire_event_transport()
             .await
@@ -4810,8 +7048,10 @@ impl LaunchPlan {
     fn register(self, stack: &mut ShutdownStack) {
         let Self { trace_exporter, pg_runtime_module, domain_module } = self;
         if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }
-        Self::register_module_output(stack, pg_runtime_module)?;
-        Self::register_module_output(stack, domain_module)?;
+        let pg_result = Self::register_module_output(stack, pg_runtime_module);
+        let domain_result = Self::register_module_output(stack, domain_module);
+        pg_result?;
+        domain_result?;
     }
     fn register_module_output(stack: &mut ShutdownStack, output: DomainModuleResult) {
         for resource in output.resources { stack.register_detached(resource); }
@@ -4946,8 +7186,8 @@ impl LaunchPlan {
                 "direct lifecycle bypass",
                 &launch_path,
                 launch.replace(
-                    "Self::register_module_output(stack, domain_module)?;",
-                    "Self::register_module_output(stack, domain_module)?;\n        stack.register_detached(event_guard);",
+                    "let domain_result = Self::register_module_output(stack, domain_module);",
+                    "let domain_result = Self::register_module_output(stack, domain_module);\n        stack.register_detached(event_guard);",
                 ),
             ),
             (
@@ -4971,8 +7211,8 @@ impl LaunchPlan {
                             "let Self { trace_exporter, pg_runtime_module, domain_module, event_lifecycle } = self;",
                         )
                         .replace(
-                            "Self::register_module_output(stack, domain_module)?;",
-                            "Self::register_module_output(stack, domain_module)?;\n        register_event_lifecycle(stack, event_lifecycle);",
+                            "let domain_result = Self::register_module_output(stack, domain_module);",
+                            "let domain_result = Self::register_module_output(stack, domain_module);\n        register_event_lifecycle(stack, event_lifecycle);",
                         )
                 ),
             ),
@@ -5025,8 +7265,10 @@ impl LaunchPlan {
     fn register(self, stack: &mut ShutdownStack) {
         let Self { trace_exporter, pg_runtime_module, domain_module } = self;
         if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }
-        Self::register_module_output(stack, pg_runtime_module)?;
-        Self::register_module_output(stack, domain_module)?;
+        let pg_result = Self::register_module_output(stack, pg_runtime_module);
+        let domain_result = Self::register_module_output(stack, domain_module);
+        pg_result?;
+        domain_result?;
     }
     fn register_module_output(stack: &mut ShutdownStack, output: DomainModuleResult) {
         for resource in output.resources { stack.register_detached(resource); }
@@ -5643,22 +7885,22 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
             (
                 "pg registration before trace",
                 canonical_launch.replace(
-                    "        if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }\n        Self::register_module_output(stack, pg_runtime_module)?;",
-                    "        Self::register_module_output(stack, pg_runtime_module)?;\n        if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }",
+                    "        if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }\n        let pg_result = Self::register_module_output(stack, pg_runtime_module);",
+                    "        let pg_result = Self::register_module_output(stack, pg_runtime_module);\n        if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }",
                 ),
             ),
             (
                 "duplicate pg registration",
                 canonical_launch.replace(
-                    "        Self::register_module_output(stack, pg_runtime_module)?;",
-                    "        Self::register_module_output(stack, pg_runtime_module)?;\n        Self::register_module_output(stack, pg_runtime_module)?;",
+                    "        let pg_result = Self::register_module_output(stack, pg_runtime_module);",
+                    "        let pg_result = Self::register_module_output(stack, pg_runtime_module);\n        let _duplicate_pg_result = Self::register_module_output(stack, pg_runtime_module);",
                 ),
             ),
             (
                 "legacy direct pg registration",
                 canonical_launch.replace(
-                    "        Self::register_module_output(stack, pg_runtime_module)?;",
-                    "        stack.register_detached(pg_store_guard);",
+                    "        let pg_result = Self::register_module_output(stack, pg_runtime_module);",
+                    "        stack.register_detached(pg_store_guard);\n        let pg_result = Ok(());",
                 ),
             ),
         ] {
@@ -5666,7 +7908,7 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
             assert_provider_gate_fails(&root, label)?;
         }
         write(&launch_path, &canonical_launch)?;
-        write(&root.join(RUNTIME_LIB_PATH), "pub async fn run( {\n")?;
+        write(&root.join(RUNTIME_LIB_PATH), "async fn run_startup( {\n")?;
         assert!(!provider_outputs_live_findings(&root)?.is_empty());
         write(&root.join(RUNTIME_LIB_PATH), &provider_output_fixture())?;
         write(&legacy_source, "fn broken( {\n")?;
@@ -5680,7 +7922,7 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
         let mut lines = Vec::new();
         for anchor in RUNTIME_ANCHORS
             .iter()
-            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH)
+            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH && anchor.id.starts_with("run."))
         {
             if anchor.id == "run.provider.oidc" {
                 lines.push("phase_result(RuntimePhase::BuildProvider, Ok::<_, anyhow::Error>(()))");
@@ -5693,7 +7935,7 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
         }
         write(
             &root.join(RUNTIME_LIB_PATH),
-            &format!("pub async fn run() {{\n{}\n}}\n", lines.join("\n")),
+            &format!("async fn run_startup() {{\n{}\n}}\n", lines.join("\n")),
         )?;
         let report = collect_report(&root)?;
         assert!(
@@ -5721,7 +7963,7 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
         lines.push(plan.pattern);
         for anchor in RUNTIME_ANCHORS
             .iter()
-            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH)
+            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH && anchor.id.starts_with("run."))
         {
             if matches!(anchor.id, "run.plan.load" | "run.provider.oidc") {
                 continue;
@@ -5733,7 +7975,7 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
         }
         write(
             &root.join(RUNTIME_LIB_PATH),
-            &format!("pub async fn run() {{\n{}\n}}\n", lines.join("\n")),
+            &format!("async fn run_startup() {{\n{}\n}}\n", lines.join("\n")),
         )?;
         let report = collect_report(&root)?;
         assert!(
@@ -5746,41 +7988,42 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
     }
 
     #[test]
-    fn runtime_baseline_requires_config_snapshot_before_provider_construction() -> Result<()> {
-        let root = fixture_root("runtime-baseline-config-snapshot-before-provider")?;
-        let mut lines = Vec::new();
+    fn runtime_baseline_requires_config_snapshot_before_runtime_inputs() -> Result<()> {
+        let root = fixture_root("runtime-baseline-config-snapshot-before-inputs")?;
+        let mut prepare_lines = Vec::new();
         let snapshot = RUNTIME_ANCHORS
             .iter()
-            .find(|anchor| anchor.id == "run.config.snapshot")
+            .find(|anchor| anchor.id == "prepare.config.snapshot")
             .context("config snapshot anchor")?;
-        let oidc = RUNTIME_ANCHORS
+        let inputs = RUNTIME_ANCHORS
             .iter()
-            .find(|anchor| anchor.id == "run.provider.oidc")
-            .context("oidc anchor")?;
-        lines.push(oidc.pattern);
-        lines.push(snapshot.pattern);
+            .find(|anchor| anchor.id == "prepare.inputs")
+            .context("runtime inputs anchor")?;
+        prepare_lines.push(inputs.pattern);
+        prepare_lines.push(snapshot.pattern);
         for anchor in RUNTIME_ANCHORS
             .iter()
-            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH)
+            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH && anchor.id.starts_with("prepare."))
         {
-            if matches!(anchor.id, "run.config.snapshot" | "run.provider.oidc") {
+            if matches!(anchor.id, "prepare.config.snapshot" | "prepare.inputs") {
                 continue;
             }
-            lines.push(anchor.pattern);
-            if anchor.id == "run.shared-deps" {
-                lines.push("}");
-            }
+            prepare_lines.push(anchor.pattern);
         }
         write(
             &root.join(RUNTIME_LIB_PATH),
-            &format!("pub async fn run() {{\n{}\n}}\n", lines.join("\n")),
+            &format!(
+                "pub fn prepare_runtime() {{\n{}\n}}\nasync fn run_startup(runtime_inputs: &mut RuntimeInputs) {{\n{}\n}}\n",
+                prepare_lines.join("\n"),
+                run_anchor_lines(None)
+            ),
         )?;
         let report = collect_report(&root)?;
         assert!(
             report.findings.iter().any(|finding| {
-                finding.rule == Rule::MissingAnchor && finding.detail.contains("run.provider.oidc")
+                finding.rule == Rule::MissingAnchor && finding.detail.contains("prepare.inputs")
             }),
-            "configuration snapshot must precede provider construction"
+            "configuration snapshot must precede RuntimeInputs construction"
         );
         Ok(())
     }
@@ -5827,32 +8070,53 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
             );
         }
 
-        let canonical = r#"
-pub async fn run() {
+        let canonical = snapshot_program_with_lifecycle(
+            r#"
+use config::RuntimeConfigSnapshot;
+use phase::RuntimeInputs;
+use infra::vault::build_vault_runtime_deps;
+use infra::redis::build_redis_runtime_deps;
+use infra::s3::build_s3_runtime_deps_from;
+
+pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
     let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource);
-    let runtime_inputs = RuntimeInputs::new(runtime_config, None);
+    let config = runtime_config.view();
+    let filter = config
+        .value("RUST_LOG")
+        .and_then(|raw| EnvFilter::try_new(raw).ok())
+        .unwrap_or_else(|| EnvFilter::new("info"));
+    let trace_export = build_trace_export(config)?;
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer())
+        .init();
+    Ok(RuntimeInputs::new(runtime_config, trace_export))
+}
+
+pub async fn run(mut runtime_inputs: RuntimeInputs) {
     let config_value = |name: &str| {
         runtime_inputs
             .config()
-            .get(name)
-            .map(|value| value.expose().to_owned())
+            .value(name)
+            .map(str::to_owned)
     };
     let vault = build_vault_runtime_deps(config_value);
     let redis = build_redis_runtime_deps(config_value);
     let s3 = build_s3_runtime_deps_from(config_value);
 }
-"#;
-        let canonical_file = syn::parse_file(canonical)?;
+"#,
+        );
+        let canonical_file = syn::parse_file(&canonical)?;
         assert!(
             runtime_config_snapshot_findings_for_file(&canonical_file).is_empty(),
             "canonical snapshot funnel must pass"
         );
-        write(&runtime_path, canonical)?;
+        write(&runtime_path, &canonical)?;
         let report = collect_report(&root)?;
         let is_config_finding = |finding: &Finding<Rule>| {
             finding.rule == Rule::ForbiddenWiring
                 && finding.subject == RUNTIME_LIB_PATH
-                && finding.detail.contains("configuration snapshot")
+                && finding.detail.contains("snapshot")
         };
         assert!(
             !report.findings.iter().any(is_config_finding),
@@ -5860,7 +8124,7 @@ pub async fn run() {
         );
 
         let ambient_closure = canonical.replace(
-            "runtime_inputs\n            .config()\n            .get(name)\n            .map(|value| value.expose().to_owned())",
+            "runtime_inputs\n            .config()\n            .value(name)\n            .map(str::to_owned)",
             "std::env::var(name).ok()",
         );
         write(&runtime_path, &ambient_closure)?;
@@ -5900,10 +8164,30 @@ pub async fn run() {
                 ),
             ),
             (
-                "captured snapshot discarded before RuntimeInputs",
+                "captured generation discarded before RuntimeInputs",
                 canonical.replace(
-                    "let runtime_inputs = RuntimeInputs::new(runtime_config, None);",
-                    "let _discarded = runtime_config;\n    let runtime_inputs = RuntimeInputs::new(snapshot_from_helper(), None);",
+                    "Ok(RuntimeInputs::new(runtime_config, trace_export))",
+                    "let _discarded = runtime_config;\n    Ok(RuntimeInputs::new(snapshot_from_helper(), trace_export))",
+                ),
+            ),
+            (
+                "second generation captured in run",
+                canonical.replace(
+                    "async fn run_startup(runtime_inputs: &mut RuntimeInputs) {",
+                    "async fn run_startup(runtime_inputs: &mut RuntimeInputs) {\n    let _wrong_generation = RuntimeConfigSnapshot::capture(EnvConfigSource);",
+                ),
+            ),
+            (
+                "production helper hides a second generation",
+                format!(
+                    "{canonical}\nfn ambient_generation_bait() {{ let _ = RuntimeConfigSnapshot::capture(EnvConfigSource); }}\n"
+                ),
+            ),
+            (
+                "config_value reads a different RuntimeInputs binding",
+                canonical.replace(
+                    "runtime_inputs\n            .config()",
+                    "other_runtime_inputs\n            .config()",
                 ),
             ),
         ] {
@@ -5915,6 +8199,862 @@ pub async fn run() {
                 "snapshot funnel must reject {label}"
             );
         }
+
+        write(&runtime_path, &canonical)?;
+        let sidepath = root.join(RUNTIME_SRC_PATH).join("capture_sidepath.rs");
+        write(
+            &sidepath,
+            "fn capture_sidepath() { let _ = RuntimeConfigSnapshot::capture(EnvConfigSource); }\n",
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.rule == Rule::ForbiddenWiring
+                    && finding.subject == RUNTIME_SRC_PATH
+                    && finding
+                        .detail
+                        .contains("exactly one RuntimeConfigSnapshot::capture")
+            }),
+            "a second capture in another production source file must fail the global gate: {:?}",
+            report.findings
+        );
+        fs::remove_file(sidepath)?;
+
+        let test_only_bait = format!(
+            "{canonical}\n#[cfg(test)]\nfn test_generation_bait() {{ let _ = RuntimeConfigSnapshot::capture(EnvConfigSource); }}\n#[cfg(test)]\npub fn prepare_runtime() {{}}\n#[cfg(test)]\npub async fn run() {{}}\n"
+        );
+        let file = syn::parse_file(&test_only_bait)?;
+        assert!(
+            runtime_config_snapshot_findings_for_file(&file).is_empty(),
+            "cfg(test) functions and captures are outside the production inventory"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_config_inventory_rejects_aliases_and_reserves_protected_type_names() -> Result<()> {
+        let root = fixture_root("runtime-config-snapshot-alias-resistant")?;
+        write(&root.join(RUNTIME_CONFIG_FIXTURE_MARKER), "enabled\n")?;
+        let runtime_path = root.join(RUNTIME_LIB_PATH);
+        let canonical = r#"
+mod config {}
+mod phase {}
+mod infra { pub mod vault {} pub mod redis {} pub mod s3 {} }
+use config::RuntimeConfigSnapshot;
+use phase::RuntimeInputs;
+use infra::vault::build_vault_runtime_deps;
+use infra::redis::build_redis_runtime_deps;
+use infra::s3::build_s3_runtime_deps_from;
+
+pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
+    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource);
+    let config = runtime_config.view();
+    let filter = config.value("RUST_LOG");
+    let trace_export = build_trace_export(config)?;
+    Ok(RuntimeInputs::new(runtime_config, trace_export))
+}
+
+pub async fn run(mut runtime_inputs: RuntimeInputs) {
+    let config_value = |name: &str| runtime_inputs.config().value(name).map(str::to_owned);
+    let vault = build_vault_runtime_deps(config_value);
+    let redis = build_redis_runtime_deps(config_value);
+    let s3 = build_s3_runtime_deps_from(config_value);
+}
+"#;
+        write(&runtime_path, canonical)?;
+        assert!(
+            runtime_config_global_capture_findings(&root)?.is_empty(),
+            "canonical inventory must pass"
+        );
+
+        let side_path = root.join(RUNTIME_SRC_PATH).join("alias_sidepath.rs");
+        for (label, source) in [
+            (
+                "renamed use plus local function alias",
+                r#"use crate::config::RuntimeConfigSnapshot as Snapshot;
+fn hidden() { let take = Snapshot::capture; let _ = take(EnvConfigSource); }
+"#,
+            ),
+            (
+                "grouped module alias plus type alias and UFCS",
+                r#"use crate::{phase as runtime_phase};
+type Inputs = runtime_phase::RuntimeInputs;
+fn hidden() { let _ = <Inputs>::new(snapshot(), trace()); }
+"#,
+            ),
+            (
+                "provider module aliases and local aliases",
+                r#"use crate::infra::{vault as v, redis as r, s3 as object_store};
+fn hidden() {
+    let vault = v::build_vault_runtime_deps;
+    let redis = r::build_redis_runtime_deps;
+    let s3 = object_store::build_s3_runtime_deps_from;
+    let _ = vault(reader); let _ = redis(reader); let _ = s3(reader);
+}
+"#,
+            ),
+            (
+                "protected invocation hidden in a macro",
+                r#"use crate::config::RuntimeConfigSnapshot as Snapshot;
+fn hidden() { passthrough!(Snapshot::capture(EnvConfigSource)); }
+"#,
+            ),
+        ] {
+            write(&side_path, source)?;
+            assert!(
+                !runtime_config_global_capture_findings(&root)?.is_empty(),
+                "global inventory must reject {label}"
+            );
+        }
+
+        write(
+            &side_path,
+            r#"
+mod local {
+    pub struct RuntimeConfigSnapshot;
+    impl RuntimeConfigSnapshot { pub fn capture(_: LocalSource) {} }
+    pub struct RuntimeInputs;
+    impl RuntimeInputs { pub fn new(_: LocalSnapshot, _: LocalTrace) {} }
+    pub fn build_vault_runtime_deps(_: LocalReader) {}
+    pub fn build_redis_runtime_deps(_: LocalReader) {}
+    pub fn build_s3_runtime_deps_from(_: LocalReader) {}
+}
+use local::{RuntimeConfigSnapshot, RuntimeInputs};
+use local::{build_vault_runtime_deps, build_redis_runtime_deps, build_s3_runtime_deps_from};
+fn harmless() {
+    RuntimeConfigSnapshot::capture(LocalSource);
+    RuntimeInputs::new(LocalSnapshot, LocalTrace);
+    build_vault_runtime_deps(LocalReader);
+    build_redis_runtime_deps(LocalReader);
+    build_s3_runtime_deps_from(LocalReader);
+}
+"#,
+        )?;
+        assert!(
+            !runtime_config_global_capture_findings(&root)?.is_empty(),
+            "production source must reserve protected type/builder names instead of allowing ambiguous local shadows"
+        );
+
+        write(
+            &side_path,
+            "fn capture(_: LocalSource) {}\nfn harmless() { capture(LocalSource); }\n",
+        )?;
+        assert!(
+            runtime_config_global_capture_findings(&root)?.is_empty(),
+            "an unrelated local function with a generic call name must remain a compliant bait"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_config_inventory_follows_the_real_production_module_graph() -> Result<()> {
+        let root = fixture_root("runtime-config-snapshot-module-graph")?;
+        write(&root.join(RUNTIME_CONFIG_FIXTURE_MARKER), "enabled\n")?;
+        let runtime_path = root.join(RUNTIME_LIB_PATH);
+        let canonical = r#"
+use config::RuntimeConfigSnapshot;
+use phase::RuntimeInputs;
+use infra::vault::build_vault_runtime_deps;
+use infra::redis::build_redis_runtime_deps;
+use infra::s3::build_s3_runtime_deps_from;
+fn canonical(reader: Reader) {
+    let snapshot = RuntimeConfigSnapshot::capture(EnvConfigSource);
+    let _inputs = RuntimeInputs::new(snapshot, trace());
+    let _vault = build_vault_runtime_deps(reader);
+    let _redis = build_redis_runtime_deps(reader);
+    let _s3 = build_s3_runtime_deps_from(reader);
+}
+"#;
+        write(
+            &runtime_path,
+            &format!("{canonical}\n#[cfg(test)] mod detached_snapshot_tests;\n"),
+        )?;
+        let detached = root
+            .join(RUNTIME_SRC_PATH)
+            .join("detached_snapshot_tests.rs");
+        write(
+            &detached,
+            r#"use crate::config::RuntimeConfigSnapshot;
+use crate::phase::RuntimeInputs;
+fn fixture_only() {
+    let snapshot = RuntimeConfigSnapshot::capture(EnvConfigSource);
+    let _ = RuntimeInputs::new(snapshot, trace());
+}
+"#,
+        )?;
+        assert!(
+            runtime_config_global_capture_findings(&root)?.is_empty(),
+            "a detached module reachable only through cfg(test) must be excluded"
+        );
+
+        write(
+            &runtime_path,
+            &format!("{canonical}\nmod detached_snapshot_tests;\n"),
+        )?;
+        assert!(
+            !runtime_config_global_capture_findings(&root)?.is_empty(),
+            "removing the parent cfg(test) must expose the second snapshot/input generation"
+        );
+        Ok(())
+    }
+
+    fn runtime_lifecycle_snapshot_fixture() -> &'static str {
+        r#"
+use config::RuntimeConfigSnapshot;
+use phase::RuntimeInputs;
+use infra::vault::build_vault_runtime_deps;
+use infra::redis::build_redis_runtime_deps;
+use infra::s3::build_s3_runtime_deps_from;
+
+pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
+    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource);
+    let config = runtime_config.view();
+    let filter = config.value("RUST_LOG")
+        .and_then(|raw| EnvFilter::try_new(raw).ok())
+        .unwrap_or_else(|| EnvFilter::new("info"));
+    let trace_export = build_trace_export(config)?;
+    tracing_subscriber::registry().with(filter).init();
+    Ok(RuntimeInputs::new(runtime_config, trace_export))
+}
+
+async fn shutdown_pending_trace_export(inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
+    if let Some(exporter) = inputs.take_trace_export() { exporter.shutdown().await?; }
+    Ok(())
+}
+
+struct RuntimeLifecycleOwner { inputs: RuntimeInputs }
+impl RuntimeLifecycleOwner {
+    fn new(inputs: RuntimeInputs) -> Self { Self { inputs } }
+    async fn run(mut self) -> anyhow::Result<()> {
+        let startup_result = run_startup(&mut self.inputs).await;
+        self.finish(startup_result).await
+    }
+    async fn finish(mut self, startup_result: anyhow::Result<()>) -> anyhow::Result<()> {
+        let cleanup_result = shutdown_pending_trace_export(&mut self.inputs).await;
+        match (startup_result, cleanup_result) {
+            (Ok(()), cleanup_result) => cleanup_result,
+            (Err(startup_error), Ok(())) => Err(startup_error),
+            (Err(startup_error), Err(cleanup_error)) => {
+                tracing::error!(cleanup_error = %cleanup_error, "cleanup failed");
+                Err(startup_error)
+            }
+        }
+    }
+}
+
+pub async fn run(runtime_inputs: RuntimeInputs) -> anyhow::Result<()> {
+    RuntimeLifecycleOwner::new(runtime_inputs).run().await
+}
+
+async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
+    let config_value = |name: &str| runtime_inputs.config().value(name).map(str::to_owned);
+    build_vault_runtime_deps(config_value);
+    build_redis_runtime_deps(config_value);
+    build_s3_runtime_deps_from(config_value);
+    Ok(())
+}
+"#
+    }
+
+    #[test]
+    fn runtime_lifecycle_owner_rejects_terminal_cleanup_bypasses() -> Result<()> {
+        let canonical = runtime_lifecycle_snapshot_fixture();
+        let canonical_file = syn::parse_file(canonical)?;
+        assert!(
+            runtime_config_snapshot_findings_for_file(&canonical_file).is_empty(),
+            "outer lifecycle owner plus inner startup is the anti-vacuity green"
+        );
+        for (label, mutated) in [
+            (
+                "outer direct startup return",
+                canonical.replace(
+                    "RuntimeLifecycleOwner::new(runtime_inputs).run().await",
+                    "run_startup(&mut runtime_inputs).await",
+                ),
+            ),
+            (
+                "outer wrong owner binding",
+                canonical.replace(
+                    "RuntimeLifecycleOwner::new(runtime_inputs).run().await",
+                    "RuntimeLifecycleOwner::new(other_inputs).run().await",
+                ),
+            ),
+            (
+                "owner skips finish",
+                canonical.replace(
+                    "let startup_result = run_startup(&mut self.inputs).await;\n        self.finish(startup_result).await",
+                    "return run_startup(&mut self.inputs).await;",
+                ),
+            ),
+            (
+                "finish receives wrong result binding",
+                canonical.replace(
+                    "self.finish(startup_result).await",
+                    "self.finish(other_result).await",
+                ),
+            ),
+            (
+                "duplicate terminal cleanup",
+                canonical.replace(
+                    "let cleanup_result = shutdown_pending_trace_export(&mut self.inputs).await;",
+                    "let _duplicate = shutdown_pending_trace_export(&mut self.inputs).await;\n        let cleanup_result = shutdown_pending_trace_export(&mut self.inputs).await;",
+                ),
+            ),
+            (
+                "pending exporter cleanup is a noop",
+                canonical.replace(
+                    "if let Some(exporter) = inputs.take_trace_export() { exporter.shutdown().await?; }",
+                    "let _ = inputs;",
+                ),
+            ),
+            (
+                "pending exporter takes from wrong binding",
+                canonical.replace(
+                    "inputs.take_trace_export()",
+                    "other_inputs.take_trace_export()",
+                ),
+            ),
+            (
+                "pending exporter function alias",
+                canonical.replace(
+                    "if let Some(exporter) = inputs.take_trace_export() { exporter.shutdown().await?; }",
+                    "let take = RuntimeInputs::take_trace_export;\n    if let Some(exporter) = take(inputs) { exporter.shutdown().await?; }",
+                ),
+            ),
+            (
+                "inner alias plus direct-call bait",
+                canonical.replace(
+                    "let startup_result = run_startup(&mut self.inputs).await;",
+                    "let startup = run_startup;\n        if false { let _bait = run_startup(&mut self.inputs).await; }\n        let startup_result = startup(&mut self.inputs).await;",
+                ),
+            ),
+            (
+                "cleanup error compliant bait without reporting",
+                canonical.replace(
+                    "tracing::error!(cleanup_error = %cleanup_error, \"cleanup failed\");",
+                    "let _compliant_bait = &cleanup_error;",
+                ),
+            ),
+            (
+                "finish returns cleanup over primary failure",
+                canonical.replace(
+                    "(Err(startup_error), Err(cleanup_error)) => {\n                tracing::error!(cleanup_error = %cleanup_error, \"cleanup failed\");\n                Err(startup_error)\n            }",
+                    "(Err(_startup_error), Err(cleanup_error)) => Err(cleanup_error)",
+                ),
+            ),
+        ] {
+            let file = syn::parse_file(&mutated)?;
+            assert!(
+                !runtime_config_snapshot_findings_for_file(&file).is_empty(),
+                "runtime lifecycle gate must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    fn canonical_rss_binary_fixture() -> &'static str {
+        r#"
+enum CommandFamily {
+    Serving,
+    Projection,
+    AuditLedgerVerify,
+    Dlq,
+    ReconcileTarget,
+    SettingsConfigValueMaintenance,
+    OidcJwksExport,
+}
+
+fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
+    if runtime::is_projection_command(args) {
+        return Ok(CommandFamily::Projection);
+    }
+    if runtime::is_audit_ledger_verify_command(args) {
+        return Ok(CommandFamily::AuditLedgerVerify);
+    }
+    if runtime::is_dlq_command(args) {
+        return Ok(CommandFamily::Dlq);
+    }
+    if runtime::is_reconcile_target_command(args) {
+        return Ok(CommandFamily::ReconcileTarget);
+    }
+    if runtime::is_settings_config_value_maintenance_command(args) {
+        return Ok(CommandFamily::SettingsConfigValueMaintenance);
+    }
+    if runtime::is_oidc_jwks_export_command(args) {
+        return Ok(CommandFamily::OidcJwksExport);
+    }
+    anyhow::ensure!(args.is_empty(), "unknown rss command: {args:?}");
+    Ok(CommandFamily::Serving)
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let command = classify_command(&args)?;
+    let runtime_inputs = runtime::prepare_runtime()?;
+    let operator_result = match command {
+        CommandFamily::Serving => return runtime::run(runtime_inputs).await,
+        CommandFamily::Projection => runtime::run_projection_control_command(&args).await,
+        CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args).await,
+        CommandFamily::Dlq => runtime::run_dlq_control_command(&args).await,
+        CommandFamily::ReconcileTarget => runtime::run_reconcile_target_command(&args).await,
+        CommandFamily::SettingsConfigValueMaintenance => runtime::run_settings_config_value_maintenance(&args).await,
+        CommandFamily::OidcJwksExport => runtime::run_oidc_jwks_export_command(&args).await,
+    };
+    runtime::shutdown_runtime(runtime_inputs).await?;
+    operator_result
+}
+"#
+    }
+
+    #[test]
+    fn runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings() -> Result<()>
+    {
+        let root = fixture_root("runtime-binary-snapshot-wiring")?;
+        let server_path = root.join("bins/server/src/main.rs");
+        let rss_path = root.join("bins/rss/src/main.rs");
+        let canonical_server = r#"#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let runtime_inputs = runtime::prepare_runtime()?;
+    runtime::run(runtime_inputs).await
+}
+"#;
+        let canonical_rss = canonical_rss_binary_fixture();
+        write(&server_path, canonical_server)?;
+        write(&rss_path, canonical_rss)?;
+        assert!(runtime_binary_config_findings(&root)?.is_empty());
+
+        for (label, mutated) in [
+            (
+                "server duplicate prepare",
+                canonical_server.replace(
+                    "let runtime_inputs = runtime::prepare_runtime()?;",
+                    "let _bait = runtime::prepare_runtime()?;\n    let runtime_inputs = runtime::prepare_runtime()?;",
+                ),
+            ),
+            (
+                "server discarded prepare through alias",
+                canonical_server.replace(
+                    "let runtime_inputs = runtime::prepare_runtime()?;",
+                    "use runtime::prepare_runtime as prepare;\n    prepare()?;\n    let runtime_inputs = other_inputs();",
+                ),
+            ),
+            (
+                "server wrong run binding",
+                canonical_server.replace("runtime::run(runtime_inputs)", "runtime::run(other_inputs)"),
+            ),
+        ] {
+            write(&server_path, &mutated)?;
+            assert!(
+                !runtime_binary_config_findings(&root)?.is_empty(),
+                "binary gate must reject {label}"
+            );
+        }
+        write(&server_path, canonical_server)?;
+
+        for (label, mutated) in [
+            (
+                "rss duplicate prepare through module alias",
+                canonical_rss.replace(
+                    "let runtime_inputs = runtime::prepare_runtime()?;",
+                    "use runtime as rt;\n    let _bait = rt::prepare_runtime()?;\n    let runtime_inputs = runtime::prepare_runtime()?;",
+                ),
+            ),
+            (
+                "rss wrong shutdown binding",
+                canonical_rss.replace(
+                    "runtime::shutdown_runtime(runtime_inputs)",
+                    "runtime::shutdown_runtime(other_inputs)",
+                ),
+            ),
+            (
+                "rss ambient local alias",
+                canonical_rss.replace(
+                    "runtime::run(runtime_inputs)",
+                    "{ let serving = runtime::run; serving(other_inputs) }",
+                ),
+            ),
+        ] {
+            write(&rss_path, &mutated)?;
+            assert!(
+                !runtime_binary_config_findings(&root)?.is_empty(),
+                "binary gate must reject {label}"
+            );
+        }
+        write(&rss_path, canonical_rss)?;
+        assert!(runtime_binary_config_findings(&root)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_binary_operator_lifecycle_is_proof_aware() -> Result<()> {
+        let root = fixture_root("runtime-binary-operator-lifecycle")?;
+        let rss_path = root.join(RSS_MAIN_PATH);
+        let canonical = canonical_rss_binary_fixture();
+        write(&rss_path, canonical)?;
+        assert!(
+            runtime_binary_config_findings(&root)?.is_empty(),
+            "closed classification plus single shutdown must be the anti-vacuity green"
+        );
+
+        for (label, mutated) in [
+            (
+                "unknown command check after acquisition",
+                canonical.replace(
+                    "let command = classify_command(&args)?;\n    let runtime_inputs = runtime::prepare_runtime()?;",
+                    "let runtime_inputs = runtime::prepare_runtime()?;\n    let command = classify_command(&args)?;",
+                ),
+            ),
+            (
+                "shadow ensure macro",
+                canonical.replace("anyhow::ensure!", "fake::ensure!"),
+            ),
+            (
+                "vacuous unknown condition",
+                canonical.replace(
+                    "args.is_empty(), \"unknown rss command: {args:?}\"",
+                    "args.is_empty() || true, \"unknown rss command: {args:?}\"",
+                ),
+            ),
+            (
+                "shadow runtime acquisition path",
+                canonical.replace(
+                    "runtime::prepare_runtime()?",
+                    "shadow::runtime::prepare_runtime()?",
+                ),
+            ),
+            (
+                "shadow runtime runner path",
+                canonical.replace(
+                    "runtime::run_projection_control_command(&args).await",
+                    "shadow::runtime::run_projection_control_command(&args).await",
+                ),
+            ),
+            (
+                "shadow runtime import",
+                canonical.replacen(
+                    "enum CommandFamily",
+                    "use shadow::runtime;\nenum CommandFamily",
+                    1,
+                ),
+            ),
+            (
+                "synthetic process arguments",
+                canonical.replace(
+                    "std::env::args().skip(1).collect()",
+                    "Vec::new()",
+                ),
+            ),
+            (
+                "fallible pre-consumption side path",
+                canonical.replace(
+                    "let runtime_inputs = runtime::prepare_runtime()?;",
+                    "let runtime_inputs = runtime::prepare_runtime()?;\n    preflight()?;",
+                ),
+            ),
+            (
+                "ensure pre-consumption side path",
+                canonical.replace(
+                    "let runtime_inputs = runtime::prepare_runtime()?;",
+                    "let runtime_inputs = runtime::prepare_runtime()?;\n    anyhow::ensure!(ready(), \"not ready\");",
+                ),
+            ),
+            (
+                "bail pre-consumption side path",
+                canonical.replace(
+                    "let runtime_inputs = runtime::prepare_runtime()?;",
+                    "let runtime_inputs = runtime::prepare_runtime()?;\n    if !ready() { anyhow::bail!(\"not ready\"); }",
+                ),
+            ),
+            (
+                "operator arm returns before shared shutdown",
+                canonical.replace(
+                    "CommandFamily::Projection => runtime::run_projection_control_command(&args).await,",
+                    "CommandFamily::Projection => return runtime::run_projection_control_command(&args).await,",
+                ),
+            ),
+            (
+                "duplicate operator arm is unreachable bait",
+                canonical.replace(
+                    "CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args).await,",
+                    "CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args).await,\n        CommandFamily::AuditLedgerVerify => command_bait().await,",
+                ),
+            ),
+            (
+                "wrong shutdown binding",
+                canonical.replace(
+                    "runtime::shutdown_runtime(runtime_inputs)",
+                    "runtime::shutdown_runtime(other_inputs)",
+                ),
+            ),
+            (
+                "runtime macro bait",
+                canonical.replace(
+                    "let runtime_inputs = runtime::prepare_runtime()?;",
+                    "let runtime_inputs = runtime::prepare_runtime()?;\n    passthrough!(runtime::run(other_inputs));",
+                ),
+            ),
+        ] {
+            write(&rss_path, &mutated)?;
+            assert!(
+                !runtime_binary_config_findings(&root)?.is_empty(),
+                "proof-aware binary gate must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_consumers_reject_reachable_ambient_env_variants() -> Result<()> {
+        let root = fixture_root("runtime-snapshot-consumer-ambient")?;
+        write(&root.join(RUNTIME_CONFIG_FIXTURE_MARKER), "enabled\n")?;
+        let runtime_path = root.join(RUNTIME_LIB_PATH);
+        let canonical_runtime = snapshot_program_with_lifecycle(
+            r#"
+mod ambient;
+mod routes;
+mod wrapper;
+use config::RuntimeConfigSnapshot;
+use phase::RuntimeInputs;
+use infra::vault::build_vault_runtime_deps;
+use infra::redis::build_redis_runtime_deps;
+use infra::s3::build_s3_runtime_deps_from;
+
+pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
+    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource);
+    let config = runtime_config.view();
+    let filter = config.value("RUST_LOG")
+        .and_then(|raw| EnvFilter::try_new(raw).ok())
+        .unwrap_or_else(|| EnvFilter::new("info"));
+    let trace_export = build_trace_export(config)?;
+    tracing_subscriber::registry().with(filter).init();
+    Ok(RuntimeInputs::new(runtime_config, trace_export))
+}
+
+pub async fn run(mut runtime_inputs: RuntimeInputs) {
+    let config_value = |name: &str| runtime_inputs.config().value(name).map(str::to_owned);
+    build_vault_runtime_deps(config_value);
+    build_redis_runtime_deps(config_value);
+    build_s3_runtime_deps_from(config_value);
+}
+"#,
+        );
+        write(&runtime_path, &canonical_runtime)?;
+        let routes_path = root.join(RUNTIME_SRC_PATH).join("routes.rs");
+        let ambient_path = root.join(RUNTIME_SRC_PATH).join("ambient.rs");
+        let wrapper_path = root.join(RUNTIME_SRC_PATH).join("wrapper.rs");
+        write(&ambient_path, "")?;
+        write(&wrapper_path, "")?;
+        let compliant = r#"
+use crate::config::SnapshotConfig;
+fn assemble(config: SnapshotConfig<'_>) { let _ = config.value("SAFE"); }
+fn unreachable_bait() { let _ = std::env::var("UNREACHABLE"); }
+"#;
+        write(&routes_path, compliant)?;
+        assert!(
+            runtime_config_snapshot_live_findings(&root)?.is_empty(),
+            "an unreachable ambient helper is compliant bait"
+        );
+
+        for (label, mutation) in [
+            ("direct var", "let _ = std::env::var(\"X\");"),
+            ("direct var_os", "let _ = std::env::var_os(\"X\");"),
+            ("direct vars", "let _ = std::env::vars();"),
+            ("direct vars_os", "let _ = std::env::vars_os();"),
+            (
+                "import alias",
+                "use std::env as ambient; let _ = ambient::var(\"X\");",
+            ),
+            (
+                "imported function alias",
+                "use std::env::var as read; let _ = read(\"X\");",
+            ),
+            (
+                "local function alias",
+                "let read = std::env::var_os; let _ = read(\"X\");",
+            ),
+            ("reachable local wrapper", "read_ambient();"),
+            ("reachable ambient macro", "ambient_read!();"),
+            (
+                "reachable trait UFCS",
+                "<AmbientReader as ReadAmbient>::read();",
+            ),
+        ] {
+            let support = match label {
+                "reachable local wrapper" => "fn read_ambient() { let _ = std::env::vars(); }",
+                "reachable ambient macro" => {
+                    "macro_rules! ambient_read { () => { std::env::vars_os() }; }"
+                }
+                "reachable trait UFCS" => {
+                    "trait ReadAmbient { fn read(); } struct AmbientReader; impl ReadAmbient for AmbientReader { fn read() { let _ = std::env::var(\"X\"); } }"
+                }
+                _ => "",
+            };
+            write(
+                &routes_path,
+                &format!(
+                    "use crate::config::SnapshotConfig;\n{support}\nfn assemble(config: SnapshotConfig<'_>) {{ let _ = config.value(\"SAFE\"); {mutation} }}\n"
+                ),
+            )?;
+            assert!(
+                !runtime_config_snapshot_live_findings(&root)?.is_empty(),
+                "SnapshotConfig consumer guard must reject {label}"
+            );
+        }
+
+        for (label, ambient, consumer) in [
+            (
+                "cross-file wrapper",
+                "pub fn read_env() { let _ = std::env::var(\"X\"); }",
+                "use crate::config::SnapshotConfig; fn assemble(config: SnapshotConfig<'_>) { let _ = config.value(\"SAFE\"); crate::ambient::read_env(); }",
+            ),
+            (
+                "cross-file imported function rename",
+                "pub fn read_env() { let _ = std::env::var_os(\"X\"); }",
+                "use crate::ambient::read_env as read; use crate::config::SnapshotConfig; fn assemble(config: SnapshotConfig<'_>) { let _ = config.value(\"SAFE\"); read(); }",
+            ),
+            (
+                "cross-file trait UFCS",
+                "pub trait ReadAmbient { fn read(); } pub struct AmbientReader; impl ReadAmbient for AmbientReader { fn read() { let _ = std::env::vars(); } }",
+                "use crate::ambient::{AmbientReader, ReadAmbient}; use crate::config::SnapshotConfig; fn assemble(config: SnapshotConfig<'_>) { let _ = config.value(\"SAFE\"); <AmbientReader as ReadAmbient>::read(); }",
+            ),
+            (
+                "cross-file macro",
+                "macro_rules! ambient_read { () => { std::env::vars_os() }; } pub(crate) use ambient_read;",
+                "use crate::ambient::ambient_read; use crate::config::SnapshotConfig; fn assemble(config: SnapshotConfig<'_>) { let _ = config.value(\"SAFE\"); ambient_read!(); }",
+            ),
+        ] {
+            write(&ambient_path, ambient)?;
+            write(&routes_path, consumer)?;
+            assert!(
+                !runtime_snapshot_consumer_ambient_findings(&root)?.is_empty(),
+                "crate-wide SnapshotConfig consumer guard must reject {label}"
+            );
+        }
+
+        write(&ambient_path, "")?;
+        write(
+            &routes_path,
+            "use crate::config::SnapshotConfig as Config; fn assemble(config: Config<'_>) { let _ = config.value(\"SAFE\"); let _ = std::env::var(\"X\"); }",
+        )?;
+        assert!(
+            !runtime_snapshot_consumer_ambient_findings(&root)?.is_empty(),
+            "SnapshotConfig import alias must remain a consumer seed"
+        );
+
+        write(
+            &routes_path,
+            "use crate::config::SnapshotConfig; type C<'a> = B<'a>; type B<'a> = A<'a>; type A<'a> = SnapshotConfig<'a>; fn assemble(config: C<'_>) { let _ = config.value(\"SAFE\"); let _ = std::env::var(\"X\"); }",
+        )?;
+        assert!(
+            !runtime_snapshot_consumer_ambient_findings(&root)?.is_empty(),
+            "three-layer reverse-ordered SnapshotConfig type aliases must reach a fixpoint"
+        );
+
+        write(
+            &ambient_path,
+            "macro_rules! ambient_base { () => { std::env::var(\"X\") }; } pub(crate) use ambient_base;",
+        )?;
+        write(
+            &wrapper_path,
+            "use crate::ambient::ambient_base; macro_rules! wrapped { () => { ambient_base!() }; } pub(crate) use wrapped;",
+        )?;
+        write(
+            &routes_path,
+            "use crate::config::SnapshotConfig; use crate::wrapper::wrapped; fn assemble(config: SnapshotConfig<'_>) { let _ = config.value(\"SAFE\"); wrapped!(); }",
+        )?;
+        assert!(
+            !runtime_snapshot_consumer_ambient_findings(&root)?.is_empty(),
+            "two-hop cross-file ambient macro chain must reach a fixpoint"
+        );
+
+        write(
+            &ambient_path,
+            "pub fn read_env() { let _ = std::env::var_os(\"X\"); }",
+        )?;
+        write(
+            &wrapper_path,
+            "pub(crate) use crate::ambient::read_env as read; pub(crate) use read as hidden;",
+        )?;
+        write(
+            &routes_path,
+            "use crate::config::SnapshotConfig; use crate::wrapper::hidden; fn assemble(config: SnapshotConfig<'_>) { let _ = config.value(\"SAFE\"); hidden(); }",
+        )?;
+        assert!(
+            !runtime_snapshot_consumer_ambient_findings(&root)?.is_empty(),
+            "two-hop callable re-export alias must conservatively reach the ambient wrapper"
+        );
+
+        write(&ambient_path, "pub(crate) use std::env::var as read_env;")?;
+        write(
+            &wrapper_path,
+            "pub(crate) use crate::ambient::read_env as hidden;",
+        )?;
+        write(
+            &routes_path,
+            "use crate::config::SnapshotConfig; use crate::wrapper::hidden; fn assemble(config: SnapshotConfig<'_>) { let _ = config.value(\"SAFE\"); let _ = hidden(\"X\"); }",
+        )?;
+        assert!(
+            !runtime_snapshot_consumer_ambient_findings(&root)?.is_empty(),
+            "direct ambient reader re-export alias must remain an ambient graph seed"
+        );
+
+        write(&ambient_path, "pub(crate) use std::env as ambient_env;")?;
+        write(&wrapper_path, "")?;
+        write(
+            &routes_path,
+            "use crate::ambient::ambient_env; use crate::config::SnapshotConfig; fn assemble(config: SnapshotConfig<'_>) { let _ = config.value(\"SAFE\"); let _ = ambient_env::var(\"X\"); }",
+        )?;
+        assert!(
+            !runtime_snapshot_consumer_ambient_findings(&root)?.is_empty(),
+            "ambient module re-export must seed all governed reader names"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_tracing_filter_must_flow_from_snapshot_into_the_subscriber() -> Result<()> {
+        let canonical = snapshot_program_with_lifecycle(
+            r#"
+use config::RuntimeConfigSnapshot;
+use phase::RuntimeInputs;
+use infra::vault::build_vault_runtime_deps;
+use infra::redis::build_redis_runtime_deps;
+use infra::s3::build_s3_runtime_deps_from;
+pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource)?;
+    let config = runtime_config.view();
+    let filter = config.value("RUST_LOG")
+        .and_then(|raw| EnvFilter::try_new(raw).ok())
+        .unwrap_or_else(|| EnvFilter::new("info"));
+    let trace_export = build_trace_export(config)?;
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer())
+        .init();
+    Ok(RuntimeInputs::new(runtime_config, trace_export))
+}
+pub async fn run(mut runtime_inputs: RuntimeInputs) {
+    let config_value = |name: &str| runtime_inputs.config().value(name).map(str::to_owned);
+    build_vault_runtime_deps(config_value);
+    build_redis_runtime_deps(config_value);
+    build_s3_runtime_deps_from(config_value);
+}
+"#,
+        );
+        let canonical_file = syn::parse_file(&canonical)?;
+        assert!(runtime_config_snapshot_findings_for_file(&canonical_file).is_empty());
+
+        let ambient = canonical.replace(
+            "let filter = config.value(\"RUST_LOG\")\n        .and_then(|raw| EnvFilter::try_new(raw).ok())\n        .unwrap_or_else(|| EnvFilter::new(\"info\"));",
+            "let _compliant_bait = config.value(\"RUST_LOG\")\n        .and_then(|raw| EnvFilter::try_new(raw).ok())\n        .unwrap_or_else(|| EnvFilter::new(\"info\"));\n    let filter = EnvFilter::try_from_default_env()\n        .unwrap_or_else(|_| EnvFilter::new(\"info\"));",
+        );
+        let ambient_file = syn::parse_file(&ambient)?;
+        assert!(
+            !runtime_config_snapshot_findings_for_file(&ambient_file).is_empty(),
+            "an unused snapshot-derived bait must not hide an ambient subscriber filter"
+        );
         Ok(())
     }
 
@@ -5967,15 +9107,17 @@ pub async fn run() {
             r#"
 impl LaunchPlan { fn register() {
 if let Some(exporter) = trace_exporter
-Self::register_module_output(stack, pg_runtime_module)?;
-Self::register_module_output(stack, domain_module)?;
+let pg_result = Self::register_module_output(stack, pg_runtime_module);
+let domain_result = Self::register_module_output(stack, domain_module);
+pg_result?;
+domain_result?;
 }
 fn register_module_output() {
-for worker in output.workers
-for resource in output.resources
+for worker in workers
+for resource in resources
 }}
 async fn launch_until_observed() {
-let listeners = plan.register(&mut stack);
+let listeners = plan.register(&mut stack)?;
 bind_and_register(&mut stack, listener, &addr_resolver).await?;
 }
 "#,
@@ -5991,7 +9133,7 @@ bind_and_register(&mut stack, listener, &addr_resolver).await?;
         assert!(
             report
                 .rendered
-                .contains("launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in output.workers | status=out-of-order"),
+                .contains("launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in workers | status=out-of-order"),
             "out-of-order launch anchor must be rendered explicitly: {}",
             report.rendered
         );
@@ -6083,9 +9225,8 @@ bind_and_register(&mut stack, listener, &addr_resolver).await?;
         write(
             &root.join(RUNTIME_LIB_PATH),
             &format!(
-                "{}\n#[cfg(test)]\nmod tests {{ fn false_positive() {{ {} }} }}\n",
-                runtime_lib_fixture(Some("run.wire.generated-domains")),
-                "modules_gen::wire_domains(&deps);"
+                "#[cfg(test)] async fn run_startup() {{ {} }}\nasync fn run_startup() {{}}\n",
+                "modules_gen::wire_domains(&deps);",
             ),
         )?;
         let report = collect_report(&root)?;
@@ -6093,7 +9234,7 @@ bind_and_register(&mut stack, listener, &addr_resolver).await?;
             report.findings.iter().any(|f| {
                 f.rule == Rule::MissingAnchor && f.detail.contains("run.wire.generated-domains")
             }),
-            "anchor outside run() body must not satisfy runtime wiring baseline"
+            "test-only same-name startup bait must not satisfy runtime wiring baseline"
         );
         Ok(())
     }
@@ -6104,8 +9245,8 @@ bind_and_register(&mut stack, listener, &addr_resolver).await?;
         write(
             &root.join(RUNTIME_LIB_PATH),
             &format!(
-                "pub async fn run() {{\n{}\n// {}\nlet _ = {:?};\n}}\n",
-                runtime_anchor_lines(Some("run.wire.generated-domains")),
+                "async fn run_startup() {{\n{}\n// {}\nlet _ = {:?};\n}}\n",
+                run_anchor_lines(Some("run.wire.generated-domains")),
                 "modules_gen::wire_domains(&deps);",
                 "modules_gen::wire_domains(&deps);"
             ),

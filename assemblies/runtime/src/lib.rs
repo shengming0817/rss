@@ -108,7 +108,7 @@ use phase::{RuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
 #[cfg(test)]
 use config::DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV;
 use config::{
-    EnvConfigSource, RuntimeConfigSnapshot, domain_transport_mtls_allow_set_env,
+    EnvConfigSource, RuntimeConfigSnapshot, SnapshotConfig, domain_transport_mtls_allow_set_env,
     domain_transport_required_domains_from, domain_transport_url_env,
 };
 
@@ -4065,22 +4065,25 @@ fn wire_session_sweeper(pg: &PgRuntimeHandle) -> anyhow::Result<DomainModuleResu
 /// otel OTLP/gRPC 导出端点环境变量（**按需开启**：未设 → 不导出 trace，仅 fmt 日志；设了 → 按 scheme 派发 typed endpoint）。
 const OTEL_ENDPOINT_ENV: &str = "RSS_OTEL_ENDPOINT";
 
-/// 由注入的配置读取器构建可选 otel trace 导出 exporter（DI 核心，可测；**不**触碰全局 subscriber）。
+/// 从进程配置快照构建可选 otel trace 导出 exporter。
+fn build_trace_export(config: SnapshotConfig<'_>) -> anyhow::Result<Option<otel::OtelExporter>> {
+    build_trace_export_from_value(config.value(OTEL_ENDPOINT_ENV))
+}
+
+/// 从显式原始值构建可选 exporter（纯解析内核，**不**触碰配置源或全局 subscriber）。
 ///
 /// **按需开启**：[`OTEL_ENDPOINT_ENV`] 未设 → `Ok(None)`（仅 fmt 日志，不导出 trace）。设了则按 scheme 派发
 /// typed [`otel::OtelEndpoint`]——`https://` → TLS（生产默认）；`http://` → 仅 loopback host 显式明文 opt-in
 /// （非 loopback 即 `Err`，零信任 fail-closed）；其它 scheme → `Err`。**fail-fast**：误配在组合根接线期即暴露，
 /// 不静默退回 fmt（值非法 ≠ 未配）。返回的 exporter 由 [`run`] 接管生命周期（注册进 `ShutdownStack` 关停时 flush）。
-fn build_trace_export(
-    get: impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<Option<otel::OtelExporter>> {
-    let Some(raw) = get(OTEL_ENDPOINT_ENV) else {
+fn build_trace_export_from_value(raw: Option<&str>) -> anyhow::Result<Option<otel::OtelExporter>> {
+    let Some(raw) = raw else {
         return Ok(None);
     };
     let endpoint = if raw.starts_with("https://") {
-        otel::OtelEndpoint::tls(raw.as_str()).context("RSS_OTEL_ENDPOINT https (TLS) endpoint")?
+        otel::OtelEndpoint::tls(raw).context("RSS_OTEL_ENDPOINT https (TLS) endpoint")?
     } else if raw.starts_with("http://") {
-        otel::OtelEndpoint::insecure_localhost(raw.as_str())
+        otel::OtelEndpoint::insecure_localhost(raw)
             .context("RSS_OTEL_ENDPOINT http endpoint must target a loopback host")?
     } else {
         // 错误只含变量名、不含 raw 值（endpoint 可携 userinfo/token，避免明文进启动日志；调试细节经
@@ -4091,25 +4094,27 @@ fn build_trace_export(
     Ok(Some(otel::OtelExporter::new(provider)))
 }
 
-/// 装配生产 tracing subscriber（fmt + `RUST_LOG` env filter + 可选 otel OTLP/gRPC 桥接 Layer，默认 `info`）。
+/// 在入口捕获唯一一代生产配置，并装配 tracing subscriber（fmt + `RUST_LOG`
+/// filter + 可选 otel OTLP/gRPC 桥接 Layer，默认 `info`）。
 ///
-/// 组合根 binary 入口在 [`run`] **之前**调用（`main`）——否则运行时入口的全部结构化日志（bind / serve /
-/// shutdown / fail-fast）皆为 no-op、生产零可见性。仅生产入口调用；测试不调（各测试自设 subscriber，见
-/// `auth_e2e` 的 `set_default`），故本 fn 不进 `run`（避免与测试 subscriber 冲突 / 全局 init 重复 panic）。
+/// 组合根 binary 入口在 [`run`] **之前**调用——否则运行时入口的全部结构化日志
+/// （bind / serve / shutdown / fail-fast）皆为 no-op。`RUST_LOG`、[`OTEL_ENDPOINT_ENV`] 与后续
+/// serving consumer 全部来自这个 snapshot，不再读取 ambient environment。
 ///
-/// 返回构建出的 [`otel::OtelExporter`]（若 [`OTEL_ENDPOINT_ENV`] 已配；否则 `None`）——`main` 把它交给 [`run`]，
-/// 由组合根注册进 `ShutdownStack`，关停时 flush 未导出 span。`Err` = endpoint 误配（fail-fast，见 [`build_trace_export`]）。
-///
-/// **覆盖边界**：本 fn 是薄壳（同 `listener_addr` 之于 `listener_addr_from`）——可测逻辑全在内核
-/// [`build_trace_export`]（5 态表驱动单测覆盖 endpoint 派发 / fail-fast）。薄壳本身的全局
-/// `registry().…with(otel_layer).init()` 是进程级一次性 init，仅生产 `main` 执行、无法单元测试（测试各自
-/// `set_default`，见 `auth_e2e`），故不单测；`otel_layer` 的 `Some/None` 两态由 `build_trace_export` 单测间接覆盖。
-pub fn init_tracing() -> anyhow::Result<Option<otel::OtelExporter>> {
+/// 返回必填 [`RuntimeInputs`]；只有该输入可进入 [`run`] 或 [`shutdown_runtime`]。
+pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let trace_export = build_trace_export(|name| std::env::var(name).ok())?;
+
+    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource)
+        .context("capture process runtime configuration")?;
+    let config = runtime_config.view();
+    let filter = config
+        .value("RUST_LOG")
+        .and_then(|raw| EnvFilter::try_new(raw).ok())
+        .unwrap_or_else(|| EnvFilter::new("info"));
+    let trace_export = build_trace_export(config)?;
     // Option<Layer> 即 no-op layer（None → 不导出 trace）：覆盖「配 / 未配 endpoint」两态，subscriber 形态恒定。
     let otel_layer = trace_export.as_ref().map(|e| e.layer());
     tracing_subscriber::registry()
@@ -4117,17 +4122,53 @@ pub fn init_tracing() -> anyhow::Result<Option<otel::OtelExporter>> {
         .with(fmt::layer().with_writer(std::io::stderr))
         .with(otel_layer)
         .init();
-    Ok(trace_export)
+    Ok(RuntimeInputs::new(runtime_config, trace_export))
 }
 
-pub async fn shutdown_trace_export(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()> {
-    if let Some(trace_export) = trace_export {
+/// Flush the trace exporter when a prepared runtime exits before serving launch.
+pub async fn shutdown_runtime(mut runtime_inputs: RuntimeInputs) -> anyhow::Result<()> {
+    shutdown_pending_trace_export(&mut runtime_inputs).await
+}
+
+async fn shutdown_pending_trace_export(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
+    if let Some(trace_export) = runtime_inputs.take_trace_export() {
         trace_export
             .shutdown()
             .await
             .context("shutdown trace exporter")?;
     }
     Ok(())
+}
+
+/// Owns resources prepared before startup until the inner startup body moves them into launch.
+struct RuntimeLifecycleOwner {
+    inputs: RuntimeInputs,
+}
+
+impl RuntimeLifecycleOwner {
+    fn new(inputs: RuntimeInputs) -> Self {
+        Self { inputs }
+    }
+
+    async fn run(mut self) -> anyhow::Result<()> {
+        let startup_result = run_startup(&mut self.inputs).await;
+        self.finish(startup_result).await
+    }
+
+    async fn finish(mut self, startup_result: anyhow::Result<()>) -> anyhow::Result<()> {
+        let cleanup_result = shutdown_pending_trace_export(&mut self.inputs).await;
+        match (startup_result, cleanup_result) {
+            (Ok(()), cleanup_result) => cleanup_result,
+            (Err(startup_error), Ok(())) => Err(startup_error),
+            (Err(startup_error), Err(cleanup_error)) => {
+                tracing::error!(
+                    cleanup_error = %cleanup_error,
+                    "runtime startup failed and trace cleanup also failed; preserving startup error"
+                );
+                Err(startup_error)
+            }
+        }
+    }
 }
 
 struct RuntimeModuleAssemblyInputs {
@@ -4212,11 +4253,16 @@ where
 ///
 /// 缺配 / 连不上 / migration 失败均 **fail-fast**（不静默 ready）。各域业务 handler ↔ service 接线
 /// 由 manifest-derived domain list 驱动，禁止回退为手写 per-domain wiring。
-/// tracing subscriber 由 [`init_tracing`] 在 `main` 中先于本 fn 装配。
+/// tracing subscriber 与配置 snapshot 由 [`prepare_runtime`] 在 `main` 中先于本 fn 装配。
 // reason: 组合根入口顺序编排（provider setup → generated domains → compose → finalize → serve）
 // 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点——item-level carve-out（error-handling.md §Carve-out）。
 #[allow(clippy::cognitive_complexity)]
-pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()> {
+pub async fn run(runtime_inputs: RuntimeInputs) -> anyhow::Result<()> {
+    RuntimeLifecycleOwner::new(runtime_inputs).run().await
+}
+
+#[allow(clippy::cognitive_complexity)]
+async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
     let runtime_plan = plan::RuntimePlan::bundled().context("build runtime assembly plan")?;
     let runtime_plan_summary = runtime_plan.summary();
     let provider_counts = runtime_plan_summary.provider_counts();
@@ -4236,14 +4282,10 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     );
     drop(runtime_plan);
 
-    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource)
-        .context("capture process runtime configuration")?;
-    let mut runtime_inputs = RuntimeInputs::new(runtime_config, trace_export);
-
     // BuildProvider phase: production credential verifier provider.
     let runtime_oidc = phase_result(
         RuntimePhase::BuildProvider,
-        build_runtime_oidc_provider().context("build runtime OIDC provider"),
+        build_runtime_oidc_provider(runtime_inputs.config()).context("build runtime OIDC provider"),
     )?;
     let provider = runtime_oidc.provider();
 
@@ -4260,12 +4302,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     ) = phase_result(
         RuntimePhase::BuildInfra,
         async {
-            let config_value = |name: &str| {
-                runtime_inputs
-                    .config()
-                    .get(name)
-                    .map(|value| value.expose().to_owned())
-            };
+            let config_value = |name: &str| runtime_inputs.config().value(name).map(str::to_owned);
             // Phase A parses every configuration and proves all external DLX capabilities before
             // the forward-only 0062 migration can commit. A bad credential or WORM/key capability
             // therefore cannot strand the deployment between incompatible schema generations.
@@ -4571,9 +4608,14 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                 deps.pg.for_domain::<caps::Audit>().auth_audit_sink(),
             );
             let auth_audit_clock: Arc<dyn diport::Clock> = Arc::new(SystemClock);
-            let mut listeners =
-                assemble_authed_routers(&mut registry, provider, auth_audit_sink, auth_audit_clock)
-                    .context("assemble authed routers")?;
+            let mut listeners = assemble_authed_routers(
+                runtime_inputs.config(),
+                &mut registry,
+                provider,
+                auth_audit_sink,
+                auth_audit_clock,
+            )
+            .context("assemble authed routers")?;
 
             // Health listener（框架归属）：readyz 经 Arc<HealthReporter>（Send+Sync）每请求聚合探针。registry 路由组
             // 已 drain，探针经 take_health_reporter 移出（整体非 Sync 的 Registry 无法进 axum handler 闭包）。
@@ -4599,7 +4641,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     });
     phase_result(
         RuntimePhase::Launch,
-        launch::launch(launch_plan)
+        launch::launch(runtime_inputs.config(), launch_plan)
             .await
             .map(|()| RuntimeOutputs::completed()),
     )?;
@@ -5631,7 +5673,9 @@ mod tests {
         );
         let domains: [&dyn bootstrap::Domain; 2] = [&identity_domain, &audit_domain];
         let mut registry = bootstrap::compose(&domains)?;
+        let runtime_config = crate::config::test_snapshot(&[])?;
         let app = extract_admin_router(assemble_authed_routers(
+            runtime_config.view(),
             &mut registry,
             runtime_test_provider(),
             httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
@@ -8951,35 +8995,95 @@ mod tests {
         );
     }
 
-    // ── build_trace_export：otel 导出按需开启 + endpoint typed 安全边界（fail-fast）─────────────
-    // get 注入式（不读真实 env），覆盖 None / TLS / loopback-http / 非 loopback 明文 / 非法 scheme 五态。
+    // ── build_trace_export_from_value：endpoint typed 安全边界（fail-fast）─────────────
+    // 显式 raw value（不读真实 env）覆盖 None / TLS / loopback-http / 非 loopback 明文 / 非法 scheme 五态。
 
     #[test]
     #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
     fn build_trace_export_unset_endpoint_is_none() {
         // 未配 RSS_OTEL_ENDPOINT → 仅 fmt 日志、不导出 trace（按需开启），且非 Err。
-        let out = build_trace_export(|_| None).expect("unset endpoint is Ok(None)");
+        let out = build_trace_export_from_value(None).expect("unset endpoint is Ok(None)");
         assert!(out.is_none(), "unset endpoint must yield None");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn build_trace_export_uses_the_captured_endpoint_mapping() {
+        let snapshot =
+            crate::config::test_snapshot(&[(OTEL_ENDPOINT_ENV, "http://localhost:4317")])
+                .expect("capture trace endpoint");
+
+        let out = build_trace_export(snapshot.view())
+            .expect("snapshot-backed loopback endpoint builds exporter");
+        assert!(out.is_some(), "captured endpoint must enable exporting");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn run_pre_handoff_failure_explicitly_shuts_down_trace_exporter() {
+        let snapshot = crate::config::test_snapshot(&[]).expect("capture empty runtime config");
+        let endpoint = otel::OtelEndpoint::insecure_localhost("http://localhost:4317")
+            .expect("hermetic loopback endpoint");
+        let provider = otel::build_otlp_provider(endpoint).expect("build lazy hermetic provider");
+        let shutdown_witness = provider.clone();
+        let inputs = RuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider)));
+
+        let err = run(inputs)
+            .await
+            .expect_err("missing OIDC config must fail before launch handoff");
+        assert!(format!("{err:#}").contains("build runtime OIDC provider"));
+        assert!(
+            shutdown_witness.shutdown().is_err(),
+            "pre-handoff failure must explicitly shut down the shared provider"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn runtime_lifecycle_owner_does_not_shutdown_exporter_after_handoff() {
+        let snapshot = crate::config::test_snapshot(&[]).expect("capture empty runtime config");
+        let endpoint = otel::OtelEndpoint::insecure_localhost("http://localhost:4317")
+            .expect("hermetic loopback endpoint");
+        let provider = otel::build_otlp_provider(endpoint).expect("build lazy hermetic provider");
+        let handoff_witness = provider.clone();
+        let inputs = RuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider)));
+        let mut owner = RuntimeLifecycleOwner::new(inputs);
+        let handed_off = owner
+            .inputs
+            .take_trace_export()
+            .expect("exporter must move into launch ownership");
+
+        owner
+            .finish(Ok(()))
+            .await
+            .expect("empty outer owner must finish without a second shutdown");
+        assert!(
+            handoff_witness.force_flush().is_ok(),
+            "provider must remain live after exporter handoff"
+        );
+        diport::ManagedResource::shutdown(&handed_off)
+            .await
+            .expect("launch owner shuts exporter down");
+        assert!(
+            handoff_witness.shutdown().is_err(),
+            "launch shutdown must be visible through the shared provider"
+        );
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
     async fn build_trace_export_loopback_http_builds_exporter() {
         // 明文 http 指向 loopback → 显式 opt-in，构建出 exporter（connect_lazy，不连真实 collector）。
-        let out = build_trace_export(|name| {
-            (name == OTEL_ENDPOINT_ENV).then(|| "http://localhost:4317".to_owned())
-        })
-        .expect("loopback http endpoint builds exporter");
+        let out = build_trace_export_from_value(Some("http://localhost:4317"))
+            .expect("loopback http endpoint builds exporter");
         assert!(out.is_some(), "loopback http must build Some(exporter)");
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
     async fn build_trace_export_tls_https_builds_exporter() {
-        let out = build_trace_export(|name| {
-            (name == OTEL_ENDPOINT_ENV).then(|| "https://collector.internal:4317".to_owned())
-        })
-        .expect("https TLS endpoint builds exporter");
+        let out = build_trace_export_from_value(Some("https://collector.internal:4317"))
+            .expect("https TLS endpoint builds exporter");
         assert!(out.is_some(), "https endpoint must build Some(exporter)");
     }
 
@@ -8987,11 +9091,9 @@ mod tests {
     #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
     fn build_trace_export_nonloopback_http_is_err() {
         // 明文 http 指向非 loopback host → fail-closed Err（不静默放行明文导出到远端）。
-        let err = build_trace_export(|name| {
-            (name == OTEL_ENDPOINT_ENV).then(|| "http://collector.internal:4317".to_owned())
-        })
-        .map(|_| ()) // OtelExporter 非 Debug，expect_err 前把 Ok 臂折叠成 ()
-        .expect_err("non-loopback plaintext must fail-fast");
+        let err = build_trace_export_from_value(Some("http://collector.internal:4317"))
+            .map(|_| ()) // OtelExporter 非 Debug，expect_err 前把 Ok 臂折叠成 ()
+            .expect_err("non-loopback plaintext must fail-fast");
         assert!(
             format!("{err:#}").contains("loopback"),
             "err 应提示 loopback 约束: {err:#}"
@@ -9002,14 +9104,20 @@ mod tests {
     #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
     fn build_trace_export_bad_scheme_is_err() {
         // 非 http(s) scheme → fail-fast（误配在接线期暴露，不静默退回 fmt）。
-        let err = build_trace_export(|name| {
-            (name == OTEL_ENDPOINT_ENV).then(|| "grpc://collector:4317".to_owned())
-        })
+        const SECRET_FRAGMENT: &str = "collector-token";
+        let err = build_trace_export_from_value(Some(
+            "grpc://user:collector-token@collector.internal:4317",
+        ))
         .map(|_| ()) // OtelExporter 非 Debug，expect_err 前把 Ok 臂折叠成 ()
         .expect_err("non http(s) scheme must fail-fast");
+        let error = format!("{err:#}");
         assert!(
-            err.to_string().contains(OTEL_ENDPOINT_ENV),
+            error.contains(OTEL_ENDPOINT_ENV),
             "err 应含 env 变量名: {err}"
+        );
+        assert!(
+            !error.contains(SECRET_FRAGMENT),
+            "trace endpoint errors must not expose configured credentials"
         );
     }
 }

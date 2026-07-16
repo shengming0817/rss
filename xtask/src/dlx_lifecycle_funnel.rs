@@ -102,12 +102,12 @@ fn runtime_run_funnel_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
             return Ok(vec![finding(
                 Rule::MissingRuntimeProvider,
                 RUNTIME.to_owned(),
-                format!("无法解析生产 runtime run(): {error}"),
+                format!("无法解析生产 runtime run_startup(): {error}"),
             )]);
         }
     };
     let Some(run) = file.items.iter().find_map(|item| match item {
-        syn::Item::Fn(item) if item.sig.ident == "run" && item.sig.asyncness.is_some() => {
+        syn::Item::Fn(item) if item.sig.ident == "run_startup" && item.sig.asyncness.is_some() => {
             Some(item)
         }
         _ => None,
@@ -115,7 +115,7 @@ fn runtime_run_funnel_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         return Ok(vec![finding(
             Rule::MissingRuntimeProvider,
             RUNTIME.to_owned(),
-            "生产 async run() 缺失".to_owned(),
+            "生产 async run_startup() 缺失".to_owned(),
         )]);
     };
     let rendered = run.block.to_token_stream().to_string();
@@ -141,7 +141,9 @@ fn runtime_run_funnel_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
             return Ok(vec![finding(
                 Rule::MissingRuntimeProvider,
                 RUNTIME.to_owned(),
-                format!("run() DLX preflight→migration→ACL→wire 数据流缺失或乱序: `{expected}`"),
+                format!(
+                    "run_startup() DLX preflight→migration→ACL→wire 数据流缺失或乱序: `{expected}`"
+                ),
             )]);
         };
         cursor += relative + expected.len();
@@ -928,7 +930,7 @@ mod tests {
         );
         std::fs::write(
             root.join("assemblies/runtime/src/lib.rs"),
-            "pub fn run() {}",
+            "pub fn run_startup() {}",
         )?;
         assert_eq!(
             runtime_run_funnel_findings(&root)?[0].rule,
@@ -1083,7 +1085,7 @@ mod tests {
         std::fs::create_dir_all(root.join("assemblies/runtime/src"))?;
         std::fs::write(
             root.join("assemblies/runtime/src/lib.rs"),
-            "pub async fn run() {}\n",
+            "pub async fn run_startup() {}\n",
         )?;
         std::fs::write(&bypass, "DELETE FROM dead_letter WHERE id = $1")?;
 
@@ -1102,7 +1104,7 @@ mod tests {
         std::fs::create_dir_all(root.join("assemblies/runtime/src"))?;
         std::fs::write(
             root.join("assemblies/runtime/src/lib.rs"),
-            r#"pub async fn run() {
+            r#"pub async fn run_startup() {
                 let _bait = "after_required_preflight(PgDlxLifecycleRuntime::preflight_identity(&dlx_pg_config))";
             }
             "#,

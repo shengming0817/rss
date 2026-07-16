@@ -8,6 +8,11 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# Hermetic TLS material for downstream assembly unit tests. Default production artifacts do not
+# compile this constructor or its certificate-generation dependency.
+test-support = ["dep:rcgen"]
+
 # HTTP 传输 adapter（对标 adapters/grpc 的 GrpcServer）：bind TcpListener + axum::serve + graceful
 # shutdown，impl diport::ManagedResource。adapter 是 DI port impl 的 blessed 站点（rss_diport_impl_allowlist
 # DIPORT-IMPL-ALLOWLIST-01：crates/* 服务层不可 impl ManagedResource）。组合根经 ShutdownStack 注入 token。
@@ -34,6 +39,7 @@ spiffe-rustls-tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tower = { workspace = true }
 url = { workspace = true }
+rcgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 # bind 127.0.0.1:0 → 真 socket serve + raw TcpStream HTTP/1.1 GET 断言 200 + shutdown 收敛（hermetic，无外部 dep）。

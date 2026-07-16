@@ -35,12 +35,12 @@ impl RuntimePhase {
     }
 }
 
-use crate::config::RuntimeConfigSnapshot;
+use crate::config::{RuntimeConfigSnapshot, SnapshotConfig};
 
 /// Inputs owned by the runtime phase orchestrator.
 ///
 /// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- the crate-private constructor requires an owned, non-optional snapshot, so phases cannot be assembled without one.
-pub(crate) struct RuntimeInputs {
+pub struct RuntimeInputs {
     config: RuntimeConfigSnapshot,
     trace_export: Option<otel::OtelExporter>,
 }
@@ -57,9 +57,9 @@ impl RuntimeInputs {
         }
     }
 
-    /// Borrow the process snapshot owned by the phase orchestrator.
-    pub(crate) fn config(&self) -> &RuntimeConfigSnapshot {
-        &self.config
+    /// Mint a borrowed capability for the process snapshot owned by the phase orchestrator.
+    pub(crate) fn config(&self) -> SnapshotConfig<'_> {
+        self.config.view()
     }
 
     /// Move the optional trace exporter into the launch phase while retaining the process snapshot
@@ -195,9 +195,9 @@ mod tests {
         let snapshot = RuntimeConfigSnapshot::capture(MissingConfigSource)
             .expect("closed catalog capture succeeds");
         let mut inputs = RuntimeInputs::new(snapshot, None);
-        assert!(inputs.config().get("RSS_VAULT_TOKEN").is_none());
+        assert!(inputs.config().value("RSS_VAULT_TOKEN").is_none());
         assert!(inputs.take_trace_export().is_none());
-        assert!(inputs.config().get("RSS_VAULT_TOKEN").is_none());
+        assert!(inputs.config().value("RSS_VAULT_TOKEN").is_none());
     }
 
     #[test]

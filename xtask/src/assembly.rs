@@ -499,7 +499,7 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
                 findings.push(finding(
                     Rule::ActiveDistributedProviderConsumer,
                     &subject,
-                    "field=consumer active distributed Lock/CAS provider 必须有 composition-root consumer 证据：wire_distributed + DistributedRuntimeDeps 必填注入真实 consumer",
+                    "field=consumer active distributed Lock/CAS provider 必须在唯一 run_startup composition root 有 consumer 证据：wire_distributed + DistributedRuntimeDeps 必填注入真实 consumer",
                 ));
             }
         }
@@ -1382,7 +1382,7 @@ struct DistributedConsumerVisitor {
 
 impl<'ast> syn::visit::Visit<'ast> for DistributedConsumerVisitor {
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if node.sig.ident != "run" {
+        if node.sig.ident != "run_startup" {
             return;
         }
 
@@ -4224,7 +4224,7 @@ postgres = { path = "../../adapters/postgres" }
 pub struct DistributedRuntimeDeps;
 	pub fn wire_distributed(_: &SharedRuntimeDeps) -> DistributedRuntimeDeps { DistributedRuntimeDeps }
 	pub struct SharedRuntimeDeps;
-	pub fn run(deps: &SharedRuntimeDeps) {
+	pub fn run_startup(deps: &SharedRuntimeDeps) {
 	    let pg = ();
 	    let subscribers = Vec::new();
 	    let cfg = ();
@@ -4244,8 +4244,7 @@ pub struct DistributedRuntimeDeps;
     }
 
     #[test]
-    fn active_distributed_provider_comment_or_dead_helper_evidence_is_rejected()
-    -> anyhow::Result<()> {
+    fn active_distributed_provider_comment_or_outer_run_bait_is_rejected() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-distributed-string-evidence");
         write_assembly(
             &root,
@@ -4299,7 +4298,7 @@ pub struct SharedRuntimeDeps;
 // wire_distributed( DistributedRuntimeDeps wire_event_transport
 const COMMENT_BAIT: &str = "wire_distributed(DistributedRuntimeDeps) wire_event_transport";
 
-fn unused_helper(deps: &SharedRuntimeDeps) {
+fn run(deps: &SharedRuntimeDeps) {
     let distributed: DistributedRuntimeDeps = wire_distributed(deps);
     let pg = ();
     let subscribers = Vec::new();
@@ -4319,7 +4318,7 @@ fn wire_event_transport(_: &(), _: DistributedRuntimeDeps, _: Vec<()>, _: ()) {}
             findings
                 .iter()
                 .any(|f| f.rule == Rule::ActiveDistributedProviderConsumer),
-            "comment/string/dead helper evidence must not satisfy real consumer guard: {findings:?}"
+            "comment/string/outer run bait must not satisfy the run_startup consumer guard: {findings:?}"
         );
         Ok(())
     }

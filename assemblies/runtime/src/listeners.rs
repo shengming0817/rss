@@ -1,6 +1,6 @@
 //! Runtime health listener and listener bind-address policy.
 
-use crate::infra::plaintext_endpoint_policy_from;
+use crate::{config::SnapshotConfig, infra::plaintext_endpoint_policy_from_value};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -76,34 +76,54 @@ pub(crate) fn listener_name(listener: ListenerKind) -> &'static str {
     }
 }
 
-/// 由已解析的 listener auth scheme + `std::env` 解析 bind 地址。
+/// 由已解析的 listener auth scheme + 配置快照解析 bind 地址。
 ///
 /// Auth scheme 在 route finalize 阶段解析一次并随 `AssembledListener` 传入；这里只消费 resolved scheme，
-/// 避免 bind policy 与 serve strategy 各自重新读 env 后漂移。
+/// 避免 bind policy 与 serve strategy 各自重新解析配置后漂移。
 pub(crate) fn listener_addr_for_scheme(
+    config: SnapshotConfig<'_>,
     listener: ListenerKind,
     scheme: AuthScheme,
 ) -> anyhow::Result<SocketAddr> {
-    // reason: composition-root startup policy compares operator-provided migration expiry with the
-    // process clock. Domain logic still receives clocks by DI; this is env guard evaluation.
+    // reason: sample the process clock once at the startup policy boundary; tests use the explicit
+    // `_at` entry to keep the decision transcript deterministic.
     #[allow(clippy::disallowed_methods)]
     let now = SystemTime::now();
-    listener_addr_for_scheme_from(listener, scheme, |name| std::env::var(name).ok(), now)
+    listener_addr_for_scheme_at(config, listener, scheme, now)
 }
 
-pub(crate) fn listener_addr_for_scheme_from(
+pub(crate) fn listener_addr_for_scheme_at(
+    config: SnapshotConfig<'_>,
     listener: ListenerKind,
     scheme: AuthScheme,
-    get: impl Fn(&str) -> Option<String>,
     now: SystemTime,
 ) -> anyhow::Result<SocketAddr> {
     let var = listener_addr_env(listener)?;
-    let raw = get(var)
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {var} (listener has routes)"))?;
+    listener_addr_for_scheme_from_values(
+        listener,
+        scheme,
+        var,
+        config.value(var),
+        config.value(LISTENER_ALLOW_PLAINTEXT_ENV),
+        now,
+    )
+}
+
+fn listener_addr_for_scheme_from_values(
+    listener: ListenerKind,
+    scheme: AuthScheme,
+    addr_env: &str,
+    raw_addr: Option<&str>,
+    raw_plaintext_policy: Option<&str>,
+    now: SystemTime,
+) -> anyhow::Result<SocketAddr> {
+    let raw = raw_addr.ok_or_else(|| {
+        anyhow::anyhow!("missing required env var: {addr_env} (listener has routes)")
+    })?;
     let addr = raw
         .parse::<SocketAddr>()
-        .with_context(|| format!("{var} must be a valid host:port SocketAddr: {raw}"))?;
-    enforce_listener_plaintext_policy(listener, scheme, addr, &get, now)?;
+        .with_context(|| format!("{addr_env} must be a valid host:port SocketAddr"))?;
+    enforce_listener_plaintext_policy(listener, scheme, addr, raw_plaintext_policy, now)?;
     Ok(addr)
 }
 
@@ -111,13 +131,14 @@ fn enforce_listener_plaintext_policy(
     listener: ListenerKind,
     scheme: AuthScheme,
     addr: SocketAddr,
-    get: impl Fn(&str) -> Option<String>,
+    raw_plaintext_policy: Option<&str>,
     _now: SystemTime,
 ) -> anyhow::Result<()> {
     if scheme == AuthScheme::Mtls {
         return Ok(());
     }
-    let policy = plaintext_endpoint_policy_from(&get, LISTENER_ALLOW_PLAINTEXT_ENV)?;
+    let policy =
+        plaintext_endpoint_policy_from_value(raw_plaintext_policy, LISTENER_ALLOW_PLAINTEXT_ENV)?;
     match policy {
         PlaintextEndpointPolicy::Deny => anyhow::bail!(
             "{LISTENER_ALLOW_PLAINTEXT_ENV} must explicitly allow plaintext listener {listener:?} at {addr}"
@@ -156,9 +177,7 @@ fn enforce_internal_service_token_loopback_only(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::{
-        INTERNAL_AUTH_SCHEME_ENV, INTERNAL_AUTH_SCHEME_SERVICE_TOKEN, auth_scheme_from,
-    };
+    use crate::routes::{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN, auth_scheme_from_value};
     use crate::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
 
     use std::time::Duration;
@@ -190,22 +209,38 @@ mod tests {
 
     fn listener_addr_from(
         listener: ListenerKind,
-        get: impl Fn(&str) -> Option<String> + Copy,
+        internal_auth_scheme: Option<&str>,
+        raw_addr: Option<&str>,
+        raw_plaintext_policy: Option<&str>,
     ) -> anyhow::Result<SocketAddr> {
-        // reason: test compatibility helper for env-driven cases; production consumes the resolved scheme carrier.
         #[allow(clippy::disallowed_methods)]
         let now = SystemTime::now();
-        listener_addr_from_at(listener, get, now)
+        listener_addr_from_at(
+            listener,
+            internal_auth_scheme,
+            raw_addr,
+            raw_plaintext_policy,
+            now,
+        )
     }
 
     fn listener_addr_from_at(
         listener: ListenerKind,
-        get: impl Fn(&str) -> Option<String> + Copy,
+        internal_auth_scheme: Option<&str>,
+        raw_addr: Option<&str>,
+        raw_plaintext_policy: Option<&str>,
         now: SystemTime,
     ) -> anyhow::Result<SocketAddr> {
-        let scheme =
-            auth_scheme_from(listener, get).context("resolve test listener auth scheme")?;
-        listener_addr_for_scheme_from(listener, scheme, get, now)
+        let scheme = auth_scheme_from_value(listener, internal_auth_scheme)
+            .context("resolve test listener auth scheme")?;
+        listener_addr_for_scheme_from_values(
+            listener,
+            scheme,
+            listener_addr_env(listener)?,
+            raw_addr,
+            raw_plaintext_policy,
+            now,
+        )
     }
 
     /// 各标准 listener → 正确 env 变量名（per-listener `RSS_<LISTENER>_LISTEN_ADDR`）。
@@ -234,7 +269,8 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn listener_addr_missing_env_fails_fast() {
-        let err = listener_addr_from(ListenerKind::Primary, |_| None).expect_err("missing addr");
+        let err =
+            listener_addr_from(ListenerKind::Primary, None, None, None).expect_err("missing addr");
         assert!(
             err.to_string().contains("RSS_PRIMARY_LISTEN_ADDR"),
             "error 含 env 变量名: {err}"
@@ -245,11 +281,14 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn listener_addr_invalid_value_fails_fast() {
-        let err = listener_addr_from(ListenerKind::Health, |_| Some("not-an-addr".to_string()))
+        const SECRET_FRAGMENT: &str = "listener-secret-bait";
+        let err = listener_addr_from(ListenerKind::Health, None, Some(SECRET_FRAGMENT), None)
             .expect_err("invalid addr");
+        let error = err.to_string();
+        assert!(error.contains("RSS_HEALTH_LISTEN_ADDR"), "含 env 名: {err}");
         assert!(
-            err.to_string().contains("RSS_HEALTH_LISTEN_ADDR"),
-            "含 env 名: {err}"
+            !error.contains(SECRET_FRAGMENT),
+            "listener errors must not expose configured values"
         );
     }
 
@@ -257,11 +296,12 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn listener_addr_valid_value_parses() {
-        let addr = listener_addr_from(ListenerKind::Primary, |name| match name {
-            "RSS_PRIMARY_LISTEN_ADDR" => Some("0.0.0.0:8080".to_string()),
-            LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
-            _ => None,
-        })
+        let addr = listener_addr_from(
+            ListenerKind::Primary,
+            None,
+            Some("0.0.0.0:8080"),
+            Some("dev-container"),
+        )
         .expect("valid dev-container listener addr");
         assert_eq!(addr.port(), 8080);
     }
@@ -269,10 +309,8 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn listener_plaintext_default_rejects_loopback() {
-        let err = listener_addr_from(ListenerKind::Health, |name| {
-            (name == "RSS_HEALTH_LISTEN_ADDR").then(|| "127.0.0.1:8083".to_string())
-        })
-        .expect_err("plaintext listener needs explicit opt-in even on loopback");
+        let err = listener_addr_from(ListenerKind::Health, None, Some("127.0.0.1:8083"), None)
+            .expect_err("plaintext listener needs explicit opt-in even on loopback");
         assert!(
             format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
             "error must identify plaintext opt-in env: {err:#}"
@@ -282,10 +320,8 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn listener_plaintext_default_rejects_non_loopback() {
-        let err = listener_addr_from(ListenerKind::Primary, |name| {
-            (name == "RSS_PRIMARY_LISTEN_ADDR").then(|| "0.0.0.0:8080".to_string())
-        })
-        .expect_err("non-loopback plaintext listener must fail closed by default");
+        let err = listener_addr_from(ListenerKind::Primary, None, Some("0.0.0.0:8080"), None)
+            .expect_err("non-loopback plaintext listener must fail closed by default");
         assert!(
             format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
             "error must identify plaintext opt-in env: {err:#}"
@@ -295,19 +331,21 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn listener_plaintext_true_allows_loopback_only() {
-        let loopback = listener_addr_from(ListenerKind::Health, |name| match name {
-            "RSS_HEALTH_LISTEN_ADDR" => Some("127.0.0.1:8083".to_string()),
-            LISTENER_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
-            _ => None,
-        })
+        let loopback = listener_addr_from(
+            ListenerKind::Health,
+            None,
+            Some("127.0.0.1:8083"),
+            Some("true"),
+        )
         .expect("explicit loopback opt-in should allow loopback bind");
         assert!(loopback.ip().is_loopback());
 
-        let err = listener_addr_from(ListenerKind::Health, |name| match name {
-            "RSS_HEALTH_LISTEN_ADDR" => Some("10.0.0.8:8083".to_string()),
-            LISTENER_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
-            _ => None,
-        })
+        let err = listener_addr_from(
+            ListenerKind::Health,
+            None,
+            Some("10.0.0.8:8083"),
+            Some("true"),
+        )
         .expect_err("loopback opt-in must reject fixed non-loopback addresses");
         assert!(format!("{err:#}").contains("loopback"), "{err:#}");
     }
@@ -316,20 +354,22 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn listener_plaintext_dev_container_allows_only_loopback_or_unspecified() {
         for raw in ["0.0.0.0:8080", "[::]:8080", "127.0.0.1:8080"] {
-            let addr = listener_addr_from(ListenerKind::Primary, |name| match name {
-                "RSS_PRIMARY_LISTEN_ADDR" => Some(raw.to_string()),
-                LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
-                _ => None,
-            })
+            let addr = listener_addr_from(
+                ListenerKind::Primary,
+                None,
+                Some(raw),
+                Some("dev-container"),
+            )
             .expect("dev-container policy allows compose wildcard and loopback binds");
             assert!(addr.ip().is_unspecified() || addr.ip().is_loopback());
         }
 
-        let err = listener_addr_from(ListenerKind::Primary, |name| match name {
-            "RSS_PRIMARY_LISTEN_ADDR" => Some("10.0.0.8:8080".to_string()),
-            LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
-            _ => None,
-        })
+        let err = listener_addr_from(
+            ListenerKind::Primary,
+            None,
+            Some("10.0.0.8:8080"),
+            Some("dev-container"),
+        )
         .expect_err("dev-container policy must not allow arbitrary non-loopback binds");
         assert!(
             format!("{err:#}").contains("dev-container"),
@@ -340,11 +380,12 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn listener_plaintext_invalid_opt_in_fails_fast() {
-        let err = listener_addr_from(ListenerKind::Health, |name| match name {
-            "RSS_HEALTH_LISTEN_ADDR" => Some("127.0.0.1:8083".to_string()),
-            LISTENER_ALLOW_PLAINTEXT_ENV => Some("enabled".to_string()),
-            _ => None,
-        })
+        let err = listener_addr_from(
+            ListenerKind::Health,
+            None,
+            Some("127.0.0.1:8083"),
+            Some("enabled"),
+        )
         .expect_err("invalid plaintext opt-in should fail");
         assert!(
             format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
@@ -355,38 +396,35 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn internal_mtls_listener_is_not_plaintext() {
-        let addr = listener_addr_from(ListenerKind::Internal, |name| {
-            (name == "RSS_INTERNAL_LISTEN_ADDR").then(|| "0.0.0.0:8081".to_string())
-        })
-        .expect("default Internal listener is mTLS and not gated as plaintext");
+        let addr = listener_addr_from(ListenerKind::Internal, None, Some("0.0.0.0:8081"), None)
+            .expect("default Internal listener is mTLS and not gated as plaintext");
         assert!(addr.ip().is_unspecified());
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn listener_addr_policy_consumes_resolved_scheme_without_rereading_auth_env() {
-        let addr = listener_addr_for_scheme_from(
+    fn listener_addr_policy_consumes_resolved_scheme_without_auth_input() {
+        let addr = listener_addr_for_scheme_from_values(
             ListenerKind::Internal,
             AuthScheme::Mtls,
-            |name| match name {
-                "RSS_INTERNAL_LISTEN_ADDR" => Some("0.0.0.0:8081".to_string()),
-                INTERNAL_AUTH_SCHEME_ENV => Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string()),
-                _ => None,
-            },
+            "RSS_INTERNAL_LISTEN_ADDR",
+            Some("0.0.0.0:8081"),
+            None,
             SystemTime::UNIX_EPOCH,
         )
-        .expect("resolved mTLS scheme bypasses plaintext policy even if env later differs");
+        .expect("resolved mTLS scheme bypasses plaintext policy without another auth input");
         assert!(addr.ip().is_unspecified());
     }
 
     #[test]
     #[allow(clippy::expect_used)]
     fn internal_service_token_listener_is_plaintext_and_requires_opt_in() {
-        let err = listener_addr_from(ListenerKind::Internal, |name| match name {
-            "RSS_INTERNAL_LISTEN_ADDR" => Some("0.0.0.0:8081".to_string()),
-            "RSS_INTERNAL_AUTH_SCHEME" => Some("service-token".to_string()),
-            _ => None,
-        })
+        let err = listener_addr_from(
+            ListenerKind::Internal,
+            Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN),
+            Some("0.0.0.0:8081"),
+            None,
+        )
         .expect_err("Internal service-token mode is plaintext and must be gated");
         assert!(
             format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
@@ -396,18 +434,13 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn internal_service_token_non_loopback_rejects_even_with_legacy_migration_envs() {
+    fn internal_service_token_non_loopback_rejects_even_with_plaintext_opt_in() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
         let err = listener_addr_from_at(
             ListenerKind::Internal,
-            |name| match name {
-                "RSS_INTERNAL_LISTEN_ADDR" => Some("0.0.0.0:8081".to_string()),
-                INTERNAL_AUTH_SCHEME_ENV => Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string()),
-                LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
-                "RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET" => Some("SEC-1500".to_string()),
-                "RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX" => Some("3000".to_string()),
-                _ => None,
-            },
+            Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN),
+            Some("0.0.0.0:8081"),
+            Some("dev-container"),
             now,
         )
         .expect_err("non-loopback Internal service-token is no longer a migration path");
@@ -423,12 +456,9 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
         let addr = listener_addr_from_at(
             ListenerKind::Internal,
-            |name| match name {
-                "RSS_INTERNAL_LISTEN_ADDR" => Some("127.0.0.1:8081".to_string()),
-                INTERNAL_AUTH_SCHEME_ENV => Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string()),
-                LISTENER_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
-                _ => None,
-            },
+            Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN),
+            Some("127.0.0.1:8081"),
+            Some("true"),
             now,
         )
         .expect("loopback service-token listener remains a local test path");

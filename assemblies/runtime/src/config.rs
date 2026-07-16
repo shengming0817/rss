@@ -2,9 +2,10 @@
 //!
 //! Configuration owned by this funnel crosses exactly one `source -> snapshot` boundary. The
 //! source is consumed by value, every closed-catalog key is read once, and the snapshot adapter can
-//! only borrow captured values. Ambient readers still owned by #1783–#1787 are outside this Hard
-//! claim. Maintenance/CI/Forge credentials, the AWS default credential chain, and SPIFFE rotation
-//! material are deliberately outside this serving catalog.
+//! only borrow captured values. `SnapshotConfig` seals the listener/auth/tracing/serving-OIDC
+//! consumers migrated by #1783; remaining ambient readers owned by #1784–#1787 are outside the
+//! full-reader-exclusivity claim. Maintenance/CI/Forge credentials, the AWS default credential
+//! chain, and SPIFFE rotation material are deliberately outside this serving catalog.
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -166,6 +167,35 @@ impl RuntimeConfigSource for EnvConfigSource {
     }
 }
 
+#[cfg(test)]
+struct TestConfigSource(BTreeMap<String, String>);
+
+#[cfg(test)]
+impl RuntimeConfigSource for TestConfigSource {
+    fn read(&mut self, key: &RuntimeConfigKey) -> CapturedConfigValue {
+        self.0
+            .remove(key.as_str())
+            .map_or(CapturedConfigValue::Missing, |value| {
+                CapturedConfigValue::Present(SecretText::from_string(value))
+            })
+    }
+}
+
+/// Capture a test generation from explicit UTF-8 values without duplicating source fakes.
+///
+/// Read-count and non-Unicode tests keep their purpose-built sources in `config_tests`.
+#[cfg(test)]
+pub(crate) fn test_snapshot(
+    entries: &[(&str, &str)],
+) -> Result<RuntimeConfigSnapshot, RuntimeConfigCaptureError> {
+    RuntimeConfigSnapshot::capture(TestConfigSource(
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect(),
+    ))
+}
+
 /// Closed, secret-safe capture failure.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum RuntimeConfigCaptureError {
@@ -175,9 +205,32 @@ pub(crate) enum RuntimeConfigCaptureError {
 
 /// Immutable process-lifetime configuration generation.
 ///
-/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- private storage, by-value source consumption, and the required owned `RuntimeInputs` field close the captured source lifetime and make snapshot omission unrepresentable; #1787 owns reader exclusivity as a Medium property.
+/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- private storage, by-value source consumption, the required owned `RuntimeInputs` field, and private-field `SnapshotConfig` signatures make snapshot omission and capability forgery unrepresentable for migrated serving consumers.
+///
+/// The separate Medium `RUNTIME-CONFIG-SNAPSHOT-LIVE-01` carrier in `runtime-baseline` guards the
+/// production capture-to-consumer flow against ambient implementation substitutions; #1787 owns
+/// the final global reader-exclusivity gate.
 pub(crate) struct RuntimeConfigSnapshot {
     values: BTreeMap<RuntimeConfigKey, CapturedConfigValue>,
+}
+
+/// Borrowed authority to read one immutable serving-configuration generation.
+///
+/// Only [`RuntimeConfigSnapshot::view`] can mint this capability. Production consumers that
+/// require snapshot-backed configuration accept this type directly, so an ambient environment
+/// reader cannot be substituted accidentally.
+#[derive(Clone, Copy)]
+pub(crate) struct SnapshotConfig<'a> {
+    snapshot: &'a RuntimeConfigSnapshot,
+}
+
+impl<'a> SnapshotConfig<'a> {
+    /// Borrow a captured UTF-8 value without cloning or exposing the snapshot's secret carrier.
+    /// Missing, non-Unicode, and unknown keys have the same `None` decision as
+    /// `std::env::var(name).ok()`; there is no source fallback.
+    pub(crate) fn value(self, name: &str) -> Option<&'a str> {
+        self.snapshot.get(name).map(SecretText::expose)
+    }
 }
 
 impl RuntimeConfigSnapshot {
@@ -216,9 +269,14 @@ impl RuntimeConfigSnapshot {
         Ok(Self { values })
     }
 
+    /// Mint the only configuration capability accepted by serving-runtime consumers.
+    pub(crate) fn view(&self) -> SnapshotConfig<'_> {
+        SnapshotConfig { snapshot: self }
+    }
+
     /// Borrow a captured UTF-8 value. Missing, non-Unicode, and unknown keys all match
     /// `std::env::var(name).ok()` and return `None`; no source fallback exists.
-    pub(super) fn get(&self, name: &str) -> Option<&SecretText> {
+    fn get(&self, name: &str) -> Option<&SecretText> {
         self.values.get(name).and_then(present_text)
     }
 }
