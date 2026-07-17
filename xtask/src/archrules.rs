@@ -780,6 +780,8 @@ fn scan_record_granular_xtask_invariants(
         "xtask/src/localtx_evidence.rs" => LOCALTX_EVIDENCE_INVARIANT_BINDINGS,
         "xtask/src/localonly_evidence.rs" => LOCALONLY_EVIDENCE_INVARIANT_BINDINGS,
         "xtask/src/assembly_lock.rs" => ASSEMBLY_LOCK_INVARIANT_BINDINGS,
+        "xtask/src/l2_assurance.rs" => L2_ASSURANCE_INVARIANT_BINDINGS,
+        "xtask/src/producer_assurance.rs" => PRODUCER_ASSURANCE_INVARIANT_BINDINGS,
         _ => return Ok(false),
     };
     let found_invariants = extract_invariants(root, path)?;
@@ -1234,6 +1236,52 @@ const ASSEMBLY_LOCK_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "typed exact-once aggregate plan synthetic reds",
+        gates: "verify,ci,ci-meta",
+    },
+];
+
+const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/l2_assurance.rs",
+        id: "L2-ASSURANCE-TYPE-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "closed private assurance record and complete-evidence construction types",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/l2_assurance.rs",
+        id: "L2-ASSURANCE-WIRE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "typed committed JSON golden with byte-drift synthetic red and real inventory anti-vacuity",
+        gates: "verify,ci,ci-meta",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/l2_assurance.rs",
+        id: "L2-ASSURANCE-CLOSURE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "bidirectional exact-set synthetic red and real 9/5 workspace closure",
+        gates: "verify,ci,ci-meta",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/l2_assurance.rs",
+        id: "L2-ASSURANCE-PATH-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "path escape and symlink synthetic red with real repository carriers",
+        gates: "verify,ci,ci-meta",
+    },
+];
+
+const PRODUCER_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/producer_assurance.rs",
+        id: "L2-PRODUCER-RECEIPT-CLOSURE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "typed receipt cross-file exact-set synthetic red and real 9-producer workspace closure",
         gates: "verify,ci,ci-meta",
     },
 ];
@@ -2526,6 +2574,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
     GateDeclaration {
         path: "xtask/src/codegen.rs",
         tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/l2_assurance.rs",
+        tokens: "native-compile,verify,ci,ci-meta",
         role: GateDeclarationRole::PlanStep,
     },
     GateDeclaration {
@@ -4328,6 +4381,64 @@ fn unrelated_green_accepted() { assert!(true); }
             finding.rule == Rule::CarrierBindingMismatch
                 && finding.subject.contains("assembly_lock.rs")
                 && finding.detail.contains("ASSEMBLY-LOCK-DIAGNOSTIC-01")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn l2_assurance_binding_rejects_omission_and_wrong_carrier_red() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let path = root.join("xtask/src/l2_assurance.rs");
+        let found = extract_invariants(&root, &path)?;
+
+        let omitted = L2_ASSURANCE_INVARIANT_BINDINGS
+            .iter()
+            .copied()
+            .filter(|binding| binding.id != "L2-ASSURANCE-PATH-01")
+            .collect::<Vec<_>>();
+        let mut missing = Index::default();
+        validate_closed_invariant_bindings(&mut missing, &path, &found, &omitted);
+        assert!(missing.findings.iter().any(|finding| {
+            finding.rule == Rule::MissingInvariant && finding.detail.contains("缺 carrier binding")
+        }));
+
+        let mut wrong = L2_ASSURANCE_INVARIANT_BINDINGS.to_vec();
+        wrong
+            .iter_mut()
+            .find(|binding| binding.id == "L2-ASSURANCE-TYPE-01")
+            .context("L2 assurance type binding missing")?
+            .carrier = "xtask";
+        let mut invalid = Index::default();
+        for binding in wrong {
+            scan_extracted_invariant_rules_filtered(
+                &root,
+                &mut invalid,
+                &found,
+                binding.carrier,
+                binding.evidence,
+                Some(binding.gates),
+                |rule| binding.matches(rule) && binding.accepts(rule),
+            )?;
+        }
+        assert!(invalid.findings.iter().any(|finding| {
+            finding.rule == Rule::CarrierBindingMismatch
+                && finding.subject.contains("l2_assurance.rs")
+                && finding.detail.contains("L2-ASSURANCE-TYPE-01")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn producer_assurance_binding_rejects_omission_red() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let path = root.join("xtask/src/producer_assurance.rs");
+        let found = extract_invariants(&root, &path)?;
+        let mut missing = Index::default();
+        validate_closed_invariant_bindings(&mut missing, &path, &found, &[]);
+        assert!(missing.findings.iter().any(|finding| {
+            finding.rule == Rule::MissingInvariant
+                && finding.detail.contains("L2-PRODUCER-RECEIPT-CLOSURE-01")
+                && finding.detail.contains("缺 carrier binding")
         }));
         Ok(())
     }

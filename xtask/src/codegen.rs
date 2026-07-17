@@ -5,6 +5,7 @@
 //! INVARIANT: EVENT-TOPOLOGY-GENERATED-01 { level = "Hard", exec = "verify", source = "codegen", facet = "single-registry", golden = "generated/src/event/mod.rs", synthetic_red = "codegen::tests::event_partition_strategy_mismatch_rejected", anti_vacuity = "codegen::tests::event_glue_with_subscription_emitted" }
 //! INVARIANT: COMMAND-JOURNAL-GENERATED-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-policy", golden = "generated/src/command/mod.rs", synthetic_red = "codegen::tests::command_missing_policy_is_rejected", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }
 //! INVARIANT: ROUTE-EVIDENCE-CODEGEN-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-to-generated-atomic-http-route", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::codegen_rejects_active_http_without_effect_profile", anti_vacuity = "codegen::tests::codegen_emits_http_consistency_level_inside_route_evidence" }
+//! INVARIANT: HTTP-PRODUCER-CODEGEN-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-emits-to-generated-producer-binding", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::producer_codegen_rejects_duplicate_emitted_fact", anti_vacuity = "codegen::tests::codegen_emits_typed_http_producer_binding_and_closed_registry" }
 //! INVARIANT: LOCAL-ONLY-RECEIPT-TARGET-01 { level = "Hard", exec = "verify", source = "codegen", facet = "active-http-local-only-marker-registry", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::local_only_receipt_targets_exclude_non_active_and_non_local_only_http", anti_vacuity = "codegen::tests::codegen_emits_local_only_receipt_target" }
 //! INVARIANT: GENERATED-TUPLE-REDACTION-01 { level = "Hard", exec = "verify", source = "codegen", facet = "constrained-scalar-redaction", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy", anti_vacuity = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy" }
 //! INVARIANT: DEFERRED-STRING-LENGTH-VALIDATION-01 { level = "Hard", exec = "verify", source = "codegen", facet = "schema-marked-transport-policy-boundary", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::deferred_string_length_marker_rejects_other_validation_keywords", anti_vacuity = "codegen::tests::schema_marker_defers_transport_length_checks" }
@@ -29,8 +30,8 @@ use typify::{TypeSpace, TypeSpaceSettings};
 use crate::contract::manifest::{
     CommandJournalPolicy, ConsistencyLevel, ContractKind, ContractOwner, EffectKind, HttpAuthMode,
     HttpHeaderMode, HttpIdempotency, HttpResourceSharingMode, Lifecycle, LocalTxBoundary,
-    LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, SubscriptionEffect, SubscriptionExecution,
-    WorkflowMode,
+    LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxRole, SubscriptionEffect,
+    SubscriptionExecution, WorkflowMode,
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
@@ -72,6 +73,109 @@ enum ModKind {
     Event,
     Command,
     Saga,
+}
+
+/// Closed set of generated Rust items that governance carriers may name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GeneratedItem {
+    Contract,
+    Spec,
+    EffectProfile,
+    Producer,
+}
+
+impl GeneratedItem {
+    const fn ident(self) -> &'static str {
+        match self {
+            Self::Contract => "CONTRACT",
+            Self::Spec => "SPEC",
+            Self::EffectProfile => "EFFECT_PROFILE",
+            Self::Producer => "PRODUCER",
+        }
+    }
+}
+
+/// One exact generated-file/symbol carrier projected with the same naming functions as codegen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedItemProjection {
+    pub(crate) repo_path: String,
+    pub(crate) symbol: String,
+}
+
+/// Typed generated module projection; callers cannot independently author path and FQN strings.
+#[derive(Debug, Clone)]
+pub(crate) struct GeneratedCarrier {
+    repo_path: String,
+    module_path: String,
+    kind: ContractKind,
+    lifecycle: Lifecycle,
+    is_http_producer: bool,
+}
+
+impl GeneratedCarrier {
+    pub(crate) fn from_contract(contract: &DiscoveredContract) -> Result<Self> {
+        let kind = contract.manifest.kind;
+        let kind_dir = kind.as_dir();
+        let module = module_name(&contract.manifest.domain, &contract.manifest.version);
+        if pathsafe::is_unsafe_segment(&module) {
+            bail!("generated carrier module is unsafe: {module}");
+        }
+        let mut module_path = format!("generated::{kind_dir}::{module}");
+        if let Some(slug) = contract.slug.as_deref() {
+            module_path.push_str("::");
+            module_path.push_str(&slug_module_ident(slug)?);
+        }
+        Ok(Self {
+            repo_path: format!("generated/src/{kind_dir}/{module}.rs"),
+            module_path,
+            kind,
+            lifecycle: contract.manifest.lifecycle,
+            is_http_producer: kind == ContractKind::Http
+                && contract.manifest.lifecycle == Lifecycle::Active
+                && contract.manifest.consistency_level == ConsistencyLevel::OutboxFact
+                && contract
+                    .manifest
+                    .capabilities
+                    .outbox
+                    .as_ref()
+                    .is_some_and(|outbox| outbox.role == OutboxRole::Producer),
+        })
+    }
+
+    /// Canonical generated HTTP module key used by runtime/source assurance joins.
+    pub(crate) fn route_key(&self) -> Result<&str> {
+        if self.kind != ContractKind::Http {
+            bail!("only HTTP contracts have a generated route key");
+        }
+        self.module_path
+            .strip_prefix("generated::http::")
+            .context("generated HTTP module path lost its canonical prefix")
+    }
+
+    pub(crate) fn item(&self, item: GeneratedItem) -> Result<GeneratedItemProjection> {
+        match item {
+            GeneratedItem::Contract => {}
+            GeneratedItem::Spec => {
+                if self.kind == ContractKind::Http && self.lifecycle != Lifecycle::Active {
+                    bail!("inactive HTTP contract has no generated SPEC");
+                }
+            }
+            GeneratedItem::EffectProfile => {
+                if self.kind != ContractKind::Http || self.lifecycle != Lifecycle::Active {
+                    bail!("only active HTTP contracts have generated EFFECT_PROFILE");
+                }
+            }
+            GeneratedItem::Producer => {
+                if !self.is_http_producer {
+                    bail!("only active OutboxFact HTTP producers have generated PRODUCER");
+                }
+            }
+        }
+        Ok(GeneratedItemProjection {
+            repo_path: self.repo_path.clone(),
+            symbol: format!("{}::{}", self.module_path, item.ident()),
+        })
+    }
 }
 
 /// 渲染全部期望文件（相对 `generated/src` 的路径 → 内容），确定性排序。
@@ -130,7 +234,7 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
     }
     for ((kind_dir, module), (_mod_kind, group)) in &groups {
         let rel = PathBuf::from(kind_dir).join(format!("{module}.rs"));
-        files.push((rel, render_module_file(group)?));
+        files.push((rel, render_module_file(group, contracts)?));
     }
     for (kind_dir, (modules, mod_kind)) in &kinds {
         let mut mod_rs = render_mod_rs(modules, *mod_kind);
@@ -157,7 +261,10 @@ fn module_name(domain: &str, version: &str) -> String {
 
 /// 渲染一个 `{domain}_{version}.rs` 模块文件（含 1 个 `@generated` 头 + 1..N 个契约 body）。
 /// 扁平（单契约 `slug=None`）→ 裸 body；嵌套（多契约 `slug=Some`）→ 每契约 `pub mod <slug_ident> { body }`。
-fn render_module_file(group: &[&DiscoveredContract]) -> Result<String> {
+fn render_module_file(
+    group: &[&DiscoveredContract],
+    contracts: &[DiscoveredContract],
+) -> Result<String> {
     let first = group
         .first()
         .context("空契约 group（codegen 不变式被破坏）")?;
@@ -190,7 +297,7 @@ fn render_module_file(group: &[&DiscoveredContract]) -> Result<String> {
         }
         return Ok(format!(
             "{header}{}",
-            render_contract_body(first, "super::")?
+            render_contract_body(first, "super::", contracts)?
         ));
     }
 
@@ -212,7 +319,7 @@ fn render_module_file(group: &[&DiscoveredContract]) -> Result<String> {
                 first.manifest.version
             );
         }
-        let body = render_contract_body(c, "super::super::")?;
+        let body = render_contract_body(c, "super::super::", contracts)?;
         out.push_str(&format!(
             "\n/// 端点 `{slug}` 派生契约（源 `{slug}/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。\npub mod {ident} {{\n{body}\n}}\n"
         ));
@@ -294,7 +401,11 @@ fn subscription_dispatch_variant(c: &DiscoveredContract, consumer: &str) -> Resu
 /// `sup` 是 POD 引用前缀：扁平 body 用 `"super::"`（POD 在父 `{kind}/mod.rs`）、嵌套 body 在
 /// `pub mod <slug>` 内故用 `"super::super::"`。对 event kind 追加订阅注册 glue（CONTRACT_ID / TOPIC /
 /// SUBSCRIPTIONS），http kind 追加 SPEC，command kind 追加 emit/register wrapper。
-fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
+fn render_contract_body(
+    c: &DiscoveredContract,
+    sup: &str,
+    contracts: &[DiscoveredContract],
+) -> Result<String> {
     let mut settings = TypeSpaceSettings::default();
     settings.with_struct_builder(false); // 不要 builder 噪声
     let mut space = TypeSpace::new(&settings);
@@ -387,7 +498,11 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
     match c.manifest.kind {
         ContractKind::Event => Ok(format!("{}{}", payload, render_event_glue(c, sup)?)),
         ContractKind::Command => Ok(format!("{}{}", payload, render_command_glue(c, sup)?)),
-        ContractKind::Http => Ok(format!("{}{}", payload, render_http_glue(c, sup)?)),
+        ContractKind::Http => Ok(format!(
+            "{}{}",
+            payload,
+            render_http_glue(c, sup, contracts)?
+        )),
         ContractKind::Saga => Ok(format!("{}{}", payload, render_saga_glue(c, sup)?)),
     }
 }
@@ -495,7 +610,11 @@ pub const SPEC: {sup}SagaSpec = {sup}SagaSpec::from_parts(CONTRACT, POLICY, STEP
     ))
 }
 
-fn render_http_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
+fn render_http_glue(
+    c: &DiscoveredContract,
+    sup: &str,
+    contracts: &[DiscoveredContract],
+) -> Result<String> {
     let domain = &c.manifest.domain;
     let owner = match &c.manifest.owner {
         ContractOwner::Domain(owner) => {
@@ -597,6 +716,7 @@ pub const CONTRACT: ::vocab::ContractBinding =
     };
     let effect_profile = render_http_effect_profile_consts(c)?;
     let (local_tx_evidence, local_tx) = render_http_local_tx(c, sup)?;
+    let producer_binding = render_http_producer_binding(c, contracts)?;
     let resource = render_option_str(http.resource.as_deref(), "resource")?;
     let self_scoped = http.self_scoped;
     let resource_present = http
@@ -726,6 +846,7 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::{consiste
     {self_scoped},
     EFFECT_PROFILE,
 );
+{producer_binding}
 {local_tx_evidence}
 
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -754,6 +875,100 @@ fn render_http_consistency_level(level: ConsistencyLevel) -> &'static str {
         ConsistencyLevel::WorkflowEventual => "WorkflowEventual",
         ConsistencyLevel::DeviceLatent => "DeviceLatent",
     }
+}
+
+fn render_http_producer_binding(
+    producer: &DiscoveredContract,
+    contracts: &[DiscoveredContract],
+) -> Result<String> {
+    if producer.manifest.consistency_level != ConsistencyLevel::OutboxFact {
+        return Ok(String::new());
+    }
+    let outbox = producer
+        .manifest
+        .capabilities
+        .outbox
+        .as_ref()
+        .with_context(|| {
+            format!(
+                "active OutboxFact HTTP {} lacks producer capability (codegen fail-closed)",
+                producer.manifest.id
+            )
+        })?;
+    if outbox.role != OutboxRole::Producer {
+        bail!(
+            "active OutboxFact HTTP {} has non-producer outbox role {:?} (codegen fail-closed)",
+            producer.manifest.id,
+            outbox.role
+        );
+    }
+    if outbox.emits.is_empty() {
+        bail!(
+            "active OutboxFact HTTP {} has empty emits (codegen fail-closed)",
+            producer.manifest.id
+        );
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut emitted = Vec::with_capacity(outbox.emits.len());
+    for emitted_id in &outbox.emits {
+        if !seen.insert(emitted_id.as_str()) {
+            bail!(
+                "active OutboxFact HTTP {} repeats emitted fact {} (codegen fail-closed)",
+                producer.manifest.id,
+                emitted_id
+            );
+        }
+        let matches = contracts
+            .iter()
+            .filter(|candidate| {
+                candidate.manifest.kind == ContractKind::Event
+                    && candidate.manifest.lifecycle == Lifecycle::Active
+                    && candidate.manifest.id == *emitted_id
+            })
+            .collect::<Vec<_>>();
+        let [fact] = matches.as_slice() else {
+            bail!(
+                "active OutboxFact HTTP {} emitted fact {} resolves to {} active events (expected exactly one)",
+                producer.manifest.id,
+                emitted_id,
+                matches.len()
+            );
+        };
+        let fact_outbox = fact
+            .manifest
+            .capabilities
+            .outbox
+            .as_ref()
+            .with_context(|| format!("emitted event {emitted_id} lacks outbox capability"))?;
+        if fact.manifest.consistency_level != ConsistencyLevel::OutboxFact
+            || fact_outbox.role != OutboxRole::Fact
+            || fact.manifest.domain != producer.manifest.domain
+        {
+            bail!(
+                "HTTP producer {} emitted contract {} is not a same-domain active OutboxFact fact",
+                producer.manifest.id,
+                emitted_id
+            );
+        }
+        let module = module_name(&fact.manifest.domain, &fact.manifest.version);
+        let path = match fact.slug.as_deref() {
+            Some(slug) => format!("{module}::{}", slug_module_ident(slug)?),
+            None => module,
+        };
+        emitted.push(format!("    crate::event::{path}::CONTRACT"));
+    }
+    let emitted = format!("\n{},\n", emitted.join(",\n"));
+    Ok(format!(
+        r#"
+/// Exact emitted event contracts derived from `[capabilities.outbox].emits`.
+pub const EMITTED_FACTS: &[::vocab::ContractBinding] = &[{emitted}];
+
+/// Generated producer binding（route + exact emitted facts 单一载体）。由 codegen 派生；勿手改。
+pub const PRODUCER: ::vocab::http::HttpProducerBinding<RouteMarker> =
+    ::vocab::http::HttpProducerBinding::from_static(ROUTE, EMITTED_FACTS);
+"#
+    ))
 }
 
 fn render_local_only_conformance_marker(level: ConsistencyLevel) -> &'static str {
@@ -2223,10 +2438,22 @@ fn render_http_spec_path(c: &DiscoveredContract) -> Result<String> {
     }
 }
 
+fn render_http_producer_path(c: &DiscoveredContract) -> Result<String> {
+    let module = module_name(&c.manifest.domain, &c.manifest.version);
+    match c.slug.as_deref() {
+        Some(slug) => Ok(format!(
+            "{module}::{}::PRODUCER.evidence()",
+            slug_module_ident(slug)?
+        )),
+        None => Ok(format!("{module}::PRODUCER.evidence()")),
+    }
+}
+
 fn render_http_root_specs(contracts: &[DiscoveredContract]) -> Result<String> {
     let mut entries = Vec::new();
     let mut local_only_entries = Vec::new();
     let mut local_tx_entries = Vec::new();
+    let mut producer_entries = Vec::new();
     for c in contracts
         .iter()
         .filter(|c| c.manifest.kind == ContractKind::Http)
@@ -2236,9 +2463,10 @@ fn render_http_root_specs(contracts: &[DiscoveredContract]) -> Result<String> {
         match c.manifest.consistency_level {
             ConsistencyLevel::LocalOnly => local_only_entries.push(format!("    {path}")),
             ConsistencyLevel::LocalTx => local_tx_entries.push(format!("    {path}")),
-            ConsistencyLevel::OutboxFact
-            | ConsistencyLevel::WorkflowEventual
-            | ConsistencyLevel::DeviceLatent => {}
+            ConsistencyLevel::OutboxFact => {
+                producer_entries.push(format!("    {}", render_http_producer_path(c)?))
+            }
+            ConsistencyLevel::WorkflowEventual | ConsistencyLevel::DeviceLatent => {}
         }
         entries.push(format!("    {path}"));
     }
@@ -2257,6 +2485,11 @@ fn render_http_root_specs(contracts: &[DiscoveredContract]) -> Result<String> {
     } else {
         format!("\n{},\n", local_only_entries.join(",\n"))
     };
+    let producer_body = if producer_entries.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", producer_entries.join(",\n"))
+    };
     Ok(format!(
         r#"
 /// Root registry for active HTTP specs generated from every HTTP contract.
@@ -2267,6 +2500,9 @@ pub const LOCAL_ONLY_SPECS: &[HttpSpec] = &[{local_only_body}];
 
 /// Root registry for active LocalTx HTTP specs generated from `consistencyLevel = "LocalTx"`.
 pub const LOCAL_TX_SPECS: &[HttpSpec] = &[{local_tx_body}];
+
+/// Closed registry of every active OutboxFact HTTP producer and its exact generated fact set.
+pub const OUTBOX_PRODUCERS: &[::vocab::http::HttpProducerEvidence] = &[{producer_body}];
 "#
     ))
 }
@@ -2799,6 +3035,8 @@ mod tests {
                 "delivery = \"at-least-once\"\n",
                 "[schemas]\n",
                 "payload = \"payload.schema.json\"\n",
+                "[capabilities.outbox]\n",
+                "role = \"fact\"\n",
                 "[[subscriptions]]\n",
                 "consumer = \"audit\"\n",
                 "group = \"audit.seed-happened\"\n",
@@ -3584,6 +3822,112 @@ mod tests {
                 "wire semantics must not create a parallel HttpSpec field: {removed}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_emits_typed_http_producer_binding_and_closed_registry() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-http-producer");
+        seed_http(&root)?;
+        seed_event_with_subscription(&root)?;
+        write_seed_active_http_contract(
+            &root,
+            "OutboxFact",
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"identity:policy:read\"\n",
+            ),
+            Some(concat!(
+                "[effectProfile]\n",
+                "effects = [\"auth\", \"business-write\", \"business-transaction\", \"outbox\", \"publish\"]\n",
+            )),
+            concat!(
+                "[capabilities.outbox]\n",
+                "role = \"producer\"\n",
+                "atomicity = \"same-transaction\"\n",
+                "emits = [\"seed.happened\"]\n",
+            ),
+        )?;
+        let contracts = discover(&root.join("contracts"))?;
+        let producer_contract = contracts
+            .iter()
+            .find(|contract| contract.manifest.id == "seed.echo")
+            .context("seed producer")?;
+        let carrier = GeneratedCarrier::from_contract(producer_contract)?;
+        assert_eq!(carrier.route_key()?, "_seed_v1");
+        assert_eq!(
+            carrier.item(GeneratedItem::Producer)?.symbol,
+            "generated::http::_seed_v1::PRODUCER"
+        );
+
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let root_mod = std::fs::read_to_string(gen_src.join("http/mod.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        for needle in [
+            "pub const EMITTED_FACTS: &[::vocab::ContractBinding]",
+            "crate::event::_seed_v1::CONTRACT",
+            "pub const PRODUCER: ::vocab::http::HttpProducerBinding<RouteMarker>",
+            "HttpProducerBinding::from_static(ROUTE, EMITTED_FACTS)",
+        ] {
+            assert_generated_contains(
+                &rendered,
+                needle,
+                "OutboxFact producer should carry a generated typed binding",
+            );
+        }
+        assert_generated_contains(
+            &root_mod,
+            "pub const OUTBOX_PRODUCERS: &[::vocab::http::HttpProducerEvidence]",
+            "HTTP root module should expose a closed producer registry",
+        );
+        assert_generated_contains(
+            &root_mod,
+            "_seed_v1::PRODUCER.evidence()",
+            "active producer should enter the closed registry",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn producer_codegen_rejects_duplicate_emitted_fact() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-http-producer-duplicate");
+        seed_http(&root)?;
+        seed_event_with_subscription(&root)?;
+        write_seed_active_http_contract(
+            &root,
+            "OutboxFact",
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"identity:policy:read\"\n",
+            ),
+            Some(concat!(
+                "[effectProfile]\n",
+                "effects = [\"business-write\", \"business-transaction\", \"outbox\", \"publish\"]\n",
+            )),
+            concat!(
+                "[capabilities.outbox]\n",
+                "role = \"producer\"\n",
+                "atomicity = \"same-transaction\"\n",
+                "emits = [\"seed.happened\", \"seed.happened\"]\n",
+            ),
+        )?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        let error = match result {
+            Ok(()) => anyhow::bail!("duplicate emitted facts unexpectedly passed codegen"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("repeats emitted fact seed.happened"),
+            "unexpected error: {error:#}"
+        );
         Ok(())
     }
 

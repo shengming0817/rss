@@ -8,8 +8,10 @@
 //!
 //! INVARIANT: CONSISTENCY-CRASH-FIXTURE-01 { level = "Medium", exec = "verify", source = "code" } -- consistency crash fixture ids must be unique and fixtures must parse as the closed TOML DSL.
 //! INVARIANT: CONSISTENCY-FAULT-MATRIX-01 { level = "Medium", exec = "verify", source = "code" } -- N-028 ready cases must cover all consistency mechanisms and each ready fixture must have a real journey runner mapping.
+//! INVARIANT: CONSISTENCY-FAULT-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code" } -- ready L2 evidence is exported only after full fixture, contract, generated-binding, runner, filesystem-safety, and anti-vacuity validation succeeds.
 
-use crate::contract::manifest::{ConsistencyLevel, ContractManifest, ContractOwner};
+use crate::contract::DiscoveredContract;
+use crate::contract::manifest::{ConsistencyLevel, ContractOwner};
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,6 +26,8 @@ const MAX_ALIAS_LEN: usize = 128;
 const LONG_MATERIAL_MIN: usize = 32;
 const JOURNEY_RUNNER_SOURCE: &str =
     "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs";
+const MAX_RUNNER_SOURCE_BYTES: u64 = 1024 * 1024;
+const MAX_FIXTURE_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -237,70 +241,6 @@ impl CrashFaultSpec {
             | Self::ReconcileLeaseLostBeforeWrite => CrashRunner::Postgres,
         }
     }
-
-    fn expected_domain(self) -> &'static str {
-        match self {
-            Self::OutboxTransientPublishFailure | Self::ProjectionStaleCheckpointWriter => {
-                "settings"
-            }
-            Self::SagaForwardCompletedBeforeCheckpoint | Self::SagaCompensationInterrupted => {
-                "billing"
-            }
-            Self::ProjectionAfterApplyBeforeCheckpoint => "audit",
-            Self::OutboxAfterPublishBeforeSettle
-            | Self::OutboxAmbiguousPublishFailure
-            | Self::OutboxPermanentPublishFailure
-            | Self::InboxClaimCrashBeforeCommit
-            | Self::InboxCommitBeforeAckCrash
-            | Self::InboxLeaseLostBeforeCommit
-            | Self::ReconcileDispatchBeforeResultRecord
-            | Self::ReconcileLeaseLostBeforeWrite => "identity",
-        }
-    }
-
-    fn expected_contract_id(self) -> &'static str {
-        match self {
-            Self::OutboxAfterPublishBeforeSettle
-            | Self::InboxClaimCrashBeforeCommit
-            | Self::InboxCommitBeforeAckCrash
-            | Self::InboxLeaseLostBeforeCommit => "identity.session-created",
-            Self::OutboxTransientPublishFailure => "settings.config-version-changed",
-            Self::OutboxAmbiguousPublishFailure => "identity.session-created",
-            Self::OutboxPermanentPublishFailure => "identity.role-assigned",
-            Self::SagaForwardCompletedBeforeCheckpoint | Self::SagaCompensationInterrupted => {
-                "billing.checkout"
-            }
-            Self::ProjectionAfterApplyBeforeCheckpoint => "audit.session-projection",
-            Self::ProjectionStaleCheckpointWriter => "settings.config-projection",
-            Self::ReconcileDispatchBeforeResultRecord | Self::ReconcileLeaseLostBeforeWrite => {
-                "identity.reconcile-loop"
-            }
-        }
-    }
-
-    fn expected_run_fn(self) -> &'static str {
-        match self {
-            Self::OutboxAfterPublishBeforeSettle => "run_outbox_after_publish_before_settle",
-            Self::OutboxTransientPublishFailure => "run_outbox_transient_publish_failure",
-            Self::OutboxAmbiguousPublishFailure => "run_outbox_ambiguous_publish_failure",
-            Self::OutboxPermanentPublishFailure => "run_outbox_permanent_publish_failure",
-            Self::InboxClaimCrashBeforeCommit => "run_inbox_claim_crash_before_commit",
-            Self::InboxCommitBeforeAckCrash => "run_inbox_commit_before_ack_crash",
-            Self::InboxLeaseLostBeforeCommit => "run_inbox_lease_lost_before_commit",
-            Self::SagaForwardCompletedBeforeCheckpoint => {
-                "run_saga_forward_completed_before_checkpoint"
-            }
-            Self::SagaCompensationInterrupted => "run_saga_compensation_interrupted",
-            Self::ProjectionAfterApplyBeforeCheckpoint => {
-                "run_projection_after_apply_before_checkpoint"
-            }
-            Self::ProjectionStaleCheckpointWriter => "run_projection_stale_checkpoint_writer",
-            Self::ReconcileDispatchBeforeResultRecord => {
-                "run_reconcile_dispatch_before_result_record"
-            }
-            Self::ReconcileLeaseLostBeforeWrite => "run_reconcile_lease_lost_before_write",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -347,13 +287,23 @@ struct Fixture {
 struct RunnerContract {
     fault_spec: CrashFaultSpec,
     runner: CrashRunner,
-    run_fn: String,
+    generated_contract: String,
 }
 
 #[derive(Debug, Clone)]
 struct ContractEntry {
     owner_domain: String,
     consistency_level: ConsistencyLevel,
+    generated_contract: String,
+}
+
+/// One canonical ready-L2 fault carrier, exported only after complete validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyL2FaultEvidence {
+    pub case_id: String,
+    pub contract_id: String,
+    pub fixture_carrier: String,
+    pub runner_carrier: String,
 }
 
 #[derive(Debug, Default)]
@@ -361,32 +311,90 @@ struct FixtureScan {
     ready_ids: BTreeSet<String>,
     ready_count: usize,
     ready_by_mechanism: BTreeMap<CrashMechanism, usize>,
+    ready_l2_evidence: Vec<ReadyL2FaultEvidence>,
     findings: Vec<Finding>,
 }
 
+#[derive(Debug, Default)]
+struct RootValidation {
+    summary: String,
+    findings: Vec<Finding>,
+    ready_l2_evidence: Vec<ReadyL2FaultEvidence>,
+}
+
 fn check_root(root: &Path) -> (String, Vec<Finding>) {
+    let validation = validate_root(root);
+    (validation.summary, validation.findings)
+}
+
+/// Export canonical ready-L2 carriers from an immutable, already validated contract universe.
+///
+/// The assurance builder uses this API so contract discovery and validation happen exactly once.
+pub(crate) fn ready_l2_fault_evidence_from_validated(
+    root: &Path,
+    contracts: &[DiscoveredContract],
+) -> Result<Vec<ReadyL2FaultEvidence>> {
+    let mut validation = validate_root_with_contracts(root, contracts);
+    if !validation.findings.is_empty() {
+        let first = &validation.findings[0];
+        anyhow::bail!(
+            "consistency fixture validation failed with {} finding(s); first: {}: {}",
+            validation.findings.len(),
+            first.subject,
+            first.detail
+        );
+    }
+    if validation.ready_l2_evidence.is_empty() {
+        anyhow::bail!("consistency fixture validation produced no ready L2 evidence");
+    }
+    validation.ready_l2_evidence.sort_by(|left, right| {
+        (&left.contract_id, &left.case_id).cmp(&(&right.contract_id, &right.case_id))
+    });
+    Ok(validation.ready_l2_evidence)
+}
+
+fn validate_root(root: &Path) -> RootValidation {
+    match crate::contract::discover(&root.join("contracts")) {
+        Ok(contracts) => validate_root_with_contracts(root, &contracts),
+        Err(error) => RootValidation {
+            findings: vec![finding(
+                Rule::InvalidFixture,
+                "contracts",
+                format!("contract discovery failed: {error}"),
+            )],
+            ..RootValidation::default()
+        },
+    }
+}
+
+fn validate_root_with_contracts(
+    root: &Path,
+    discovered_contracts: &[DiscoveredContract],
+) -> RootValidation {
     let dir = root.join("fixtures").join("consistency");
     let mut findings = Vec::new();
-    if !dir.is_dir() {
-        findings.push(finding(
-            Rule::MissingDirectory,
-            rel(root, &dir),
-            "fixtures/consistency directory is required",
-        ));
-        return (String::new(), findings);
+    if let Err(detail) = require_real_directory(&dir) {
+        findings.push(finding(Rule::MissingDirectory, rel(root, &dir), detail));
+        return RootValidation {
+            findings,
+            ..RootValidation::default()
+        };
     }
-    if !dir.join("README.md").is_file() {
+    if !is_real_file(&dir.join("README.md")) {
         findings.push(finding(
             Rule::MissingReadme,
             "fixtures/consistency/README.md",
-            "README must describe how to add consistency crash cases",
+            "README must be a real regular file describing how to add consistency crash cases",
         ));
     }
 
     let mut files = Vec::new();
     if let Err(e) = collect_fixture_files(&dir, &mut files) {
-        findings.push(finding(Rule::MissingDirectory, rel(root, &dir), e));
-        return (String::new(), findings);
+        findings.push(finding(Rule::InvalidFixture, rel(root, &dir), e));
+        return RootValidation {
+            findings,
+            ..RootValidation::default()
+        };
     }
     files.sort();
     if files.is_empty() {
@@ -395,10 +403,13 @@ fn check_root(root: &Path) -> (String, Vec<Finding>) {
             rel(root, &dir),
             "no fixture-*.toml files found",
         ));
-        return (String::new(), findings);
+        return RootValidation {
+            findings,
+            ..RootValidation::default()
+        };
     }
 
-    let contracts = match contract_index(root) {
+    let contracts = match contract_index(discovered_contracts) {
         Ok(contracts) => contracts,
         Err(detail) => {
             findings.push(finding(Rule::InvalidFixture, "contracts", detail));
@@ -433,7 +444,11 @@ fn check_root(root: &Path) -> (String, Vec<Finding>) {
         files.len(),
         scan.ready_count
     );
-    (summary, findings)
+    RootValidation {
+        summary,
+        findings,
+        ready_l2_evidence: scan.ready_l2_evidence,
+    }
 }
 
 fn scan_fixture_corpus(
@@ -446,7 +461,11 @@ fn scan_fixture_corpus(
     let mut ids = BTreeSet::new();
     for path in files {
         let rel_path = rel(root, path);
-        let src = match std::fs::read_to_string(path) {
+        let src = match crate::generated_file::read_stable_utf8_file(
+            path,
+            MAX_FIXTURE_BYTES,
+            "fixture TOML",
+        ) {
             Ok(src) => src,
             Err(e) => {
                 scan.findings
@@ -477,6 +496,14 @@ fn scan_fixture_corpus(
                 .ready_by_mechanism
                 .entry(fixture.mechanism)
                 .or_default() += 1;
+            if fixture.level == CrashLevel::L2 && journey_runners.contains_key(&fixture.id) {
+                scan.ready_l2_evidence.push(ReadyL2FaultEvidence {
+                    case_id: fixture.id.clone(),
+                    contract_id: fixture.contract_id.clone(),
+                    fixture_carrier: rel_path.clone(),
+                    runner_carrier: JOURNEY_RUNNER_SOURCE.to_string(),
+                });
+            }
         }
         if !ids.insert(fixture.id.clone()) {
             scan.findings.push(finding(
@@ -546,16 +573,60 @@ fn add_ready_coverage_findings(
 }
 
 fn collect_fixture_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    require_real_directory(dir)?;
     for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
-        if path.is_dir() {
+        if path.file_name().and_then(|name| name.to_str()).is_none() {
+            return Err(format!(
+                "fixture discovery rejects non-UTF-8 path under {}",
+                dir.display()
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "fixture discovery rejects symlink: {}",
+                path.display()
+            ));
+        }
+        if metadata.is_dir() {
             collect_fixture_files(&path, out)?;
-        } else if is_fixture_toml(&path) {
+        } else if metadata.is_file() && is_fixture_toml(&path) {
             out.push(path);
+        } else if !metadata.is_file() {
+            return Err(format!(
+                "fixture discovery rejects non-regular entry: {}",
+                path.display()
+            ));
         }
     }
     Ok(())
+}
+
+fn require_real_directory(path: &Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "required directory {} is unavailable: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "fixture discovery rejects symlink directory: {}",
+            path.display()
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(format!("{} must be a real directory", path.display()));
+    }
+    Ok(())
+}
+
+fn is_real_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| !metadata.file_type().is_symlink() && metadata.is_file())
 }
 
 fn is_fixture_toml(path: &Path) -> bool {
@@ -566,21 +637,26 @@ fn is_fixture_toml(path: &Path) -> bool {
             .is_some_and(|name| name.starts_with("fixture-"))
 }
 
-fn contract_index(root: &Path) -> Result<BTreeMap<String, ContractEntry>, String> {
-    let dir = root.join("contracts");
-    if !dir.is_dir() {
-        return Err("contracts directory is required for contractId validation".to_string());
+fn contract_index(
+    discovered_contracts: &[DiscoveredContract],
+) -> Result<BTreeMap<String, ContractEntry>, String> {
+    if discovered_contracts.is_empty() {
+        return Err("contract discovery found no contract.toml files".to_string());
     }
-
-    let mut files = Vec::new();
-    collect_contract_files(&dir, &mut files)?;
     let mut contracts = BTreeMap::new();
-    for path in files {
-        let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let manifest = ContractManifest::from_toml_str(&src)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        let owner_domain = match manifest.owner {
-            ContractOwner::Domain(owner) => owner,
+    for contract in discovered_contracts {
+        let generated_contract = crate::codegen::GeneratedCarrier::from_contract(contract)
+            .and_then(|carrier| carrier.item(crate::codegen::GeneratedItem::Contract))
+            .map_err(|error| {
+                format!(
+                    "generated carrier projection failed for {}: {error}",
+                    contract.manifest.id
+                )
+            })?
+            .symbol;
+        let manifest = &contract.manifest;
+        let owner_domain = match &manifest.owner {
+            ContractOwner::Domain(owner) => owner.clone(),
             ContractOwner::Framework => "_framework".to_string(),
         };
         let consistency_level = manifest.consistency_level;
@@ -590,6 +666,7 @@ fn contract_index(root: &Path) -> Result<BTreeMap<String, ContractEntry>, String
                 ContractEntry {
                     owner_domain,
                     consistency_level,
+                    generated_contract,
                 },
             )
             .is_some()
@@ -599,19 +676,6 @@ fn contract_index(root: &Path) -> Result<BTreeMap<String, ContractEntry>, String
     }
 
     Ok(contracts)
-}
-
-fn collect_contract_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_contract_files(&path, out)?;
-        } else if path.file_name().and_then(|name| name.to_str()) == Some("contract.toml") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 fn validate_fixture(
@@ -681,7 +745,13 @@ fn validate_fixture(
     }
     if fixture.status == CrashStatus::Ready {
         match journey_runners.get(&fixture.id) {
-            Some(runner) => validate_runner_contract(&mut findings, rel_path, fixture, runner),
+            Some(runner) => validate_runner_contract(
+                &mut findings,
+                rel_path,
+                fixture,
+                runner,
+                contracts.get(&fixture.contract_id),
+            ),
             None => findings.push(finding(
                 Rule::MissingRunnerMapping,
                 rel_path,
@@ -710,6 +780,7 @@ fn validate_runner_contract(
     rel_path: &str,
     fixture: &Fixture,
     runner: &RunnerContract,
+    contract: Option<&ContractEntry>,
 ) {
     match CrashFaultSpec::from_fixture(fixture) {
         Some(spec) if spec == runner.fault_spec => {}
@@ -753,50 +824,39 @@ fn validate_runner_contract(
             ),
         ));
     }
-    if runner.run_fn != runner.fault_spec.expected_run_fn() {
+    if let Some(contract) = contract
+        && runner.generated_contract != contract.generated_contract
+    {
         findings.push(finding(
             Rule::RunnerMismatch,
             rel_path,
             format!(
-                "journey runner for `{}` binds function `{}`, but fault spec {:?} expects `{}`",
-                fixture.id,
-                runner.run_fn,
-                runner.fault_spec,
-                runner.fault_spec.expected_run_fn()
-            ),
-        ));
-    }
-    if fixture.domain != runner.fault_spec.expected_domain() {
-        findings.push(finding(
-            Rule::RunnerMismatch,
-            rel_path,
-            format!(
-                "ready fixture `{}` declares domain `{}`, but fault spec {:?} expects `{}`",
-                fixture.id,
-                fixture.domain,
-                runner.fault_spec,
-                runner.fault_spec.expected_domain()
-            ),
-        ));
-    }
-    if fixture.contract_id != runner.fault_spec.expected_contract_id() {
-        findings.push(finding(
-            Rule::RunnerMismatch,
-            rel_path,
-            format!(
-                "ready fixture `{}` declares contract `{}`, but fault spec {:?} expects `{}`",
+                "ready fixture `{}` contract `{}` requires generated contract `{}`, but journey runner binds `{}`",
                 fixture.id,
                 fixture.contract_id,
-                runner.fault_spec,
-                runner.fault_spec.expected_contract_id()
+                contract.generated_contract,
+                runner.generated_contract
             ),
         ));
     }
 }
 
 fn journey_runner_mappings(root: &Path) -> Result<BTreeMap<String, RunnerContract>, String> {
+    journey_runner_mappings_with_hook(root, || {})
+}
+
+fn journey_runner_mappings_with_hook(
+    root: &Path,
+    after_open: impl FnOnce(),
+) -> Result<BTreeMap<String, RunnerContract>, String> {
     let path = root.join(JOURNEY_RUNNER_SOURCE);
-    let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let src = crate::generated_file::read_stable_utf8_file_with_hook(
+        &path,
+        MAX_RUNNER_SOURCE_BYTES,
+        "runner source",
+        after_open,
+    )
+    .map_err(|error| error.to_string())?;
     let syntax = syn::parse_file(&src).map_err(|e| format!("{}: {e}", path.display()))?;
     let entries = ready_case_runner_array(&syntax)
         .ok_or_else(|| "READY_CASE_RUNNERS table not found".to_string())?;
@@ -845,13 +905,13 @@ fn parse_journey_runner_entry(entry: &Expr) -> Result<(String, RunnerContract), 
     let id = string_arg(args.next(), "id")?;
     let fault_spec = crash_fault_spec_arg(args.next())?;
     let runner = crash_runner_arg(args.next())?;
-    let run_fn = function_arg(args.next())?;
+    let generated_contract = generated_contract_arg(args.next())?;
     Ok((
         id,
         RunnerContract {
             fault_spec,
             runner,
-            run_fn,
+            generated_contract,
         },
     ))
 }
@@ -910,15 +970,41 @@ fn crash_fault_spec_arg(expr: Option<&Expr>) -> Result<CrashFaultSpec, String> {
         .ok_or_else(|| format!("unknown READY_CASE_RUNNERS fault spec `{variant}`"))
 }
 
-fn function_arg(expr: Option<&Expr>) -> Result<String, String> {
+fn generated_contract_arg(expr: Option<&Expr>) -> Result<String, String> {
     let Some(Expr::Path(path)) = expr else {
-        return Err("ReadyCaseRunner::run must be a function path".to_string());
+        return Err(
+            "ReadyCaseRunner::contract must be a generated::<kind>::<module>::...::CONTRACT path"
+                .to_string(),
+        );
     };
-    path.path
+    if path.qself.is_some()
+        || path.path.leading_colon.is_some()
+        || path
+            .path
+            .segments
+            .iter()
+            .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+    {
+        return Err(
+            "ReadyCaseRunner::contract must be a canonical generated CONTRACT path".to_string(),
+        );
+    }
+    let segments = path
+        .path
         .segments
-        .last()
+        .iter()
         .map(|segment| segment.ident.to_string())
-        .ok_or_else(|| "ReadyCaseRunner::run must be a function path".to_string())
+        .collect::<Vec<_>>();
+    if segments.len() < 4
+        || segments.first().map(String::as_str) != Some("generated")
+        || segments.last().map(String::as_str) != Some("CONTRACT")
+    {
+        return Err(
+            "ReadyCaseRunner::contract must be a generated::<kind>::<module>::...::CONTRACT path"
+                .to_string(),
+        );
+    }
+    Ok(segments.join("::"))
 }
 
 fn fixture_strings(fixture: &Fixture) -> [(&'static str, &str); 10] {
@@ -1276,7 +1362,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         "outbox-after-publish-before-settle",
         CrashFaultSpec::OutboxAfterPublishBeforeSettle,
         CrashRunner::PostgresRabbitmq,
-        run_outbox_after_publish_before_settle,
+        generated::event::identity_v1::session_created::CONTRACT,
     ),
 ];
 "#;
@@ -1408,23 +1494,190 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
     }
 
     #[test]
-    fn red_runner_function_mismatch_is_reported() -> Result<()> {
-        let root = temp_root("runner-fn-mismatch")?;
+    fn red_runner_generated_contract_binding_mismatch_is_reported() -> Result<()> {
+        let root = temp_root("runner-contract-binding-mismatch")?;
         fs::write(
             root.join(JOURNEY_RUNNER_SOURCE),
             VALID_JOURNEY_RUNNERS.replace(
-                "run_outbox_after_publish_before_settle",
-                "run_outbox_transient_publish_failure",
+                "generated::event::identity_v1::session_created::CONTRACT",
+                "generated::event::identity_v1::role_assigned::CONTRACT",
             ),
         )?;
-        write_fixture(&root, "runner-fn", VALID)?;
+        write_fixture(&root, "runner-contract-binding", VALID)?;
+        let (_, findings) = check_root(&root);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::RunnerMismatch
+                    && f.detail.contains("generated contract")
+                    && f.detail.contains("session_created")
+            }),
+            "generated contract binding mismatch should be reported: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn red_runner_raw_contract_binding_is_rejected() -> Result<()> {
+        let root = temp_root("runner-raw-contract-binding")?;
+        fs::write(
+            root.join(JOURNEY_RUNNER_SOURCE),
+            VALID_JOURNEY_RUNNERS.replace(
+                "generated::event::identity_v1::session_created::CONTRACT",
+                "vocab::ContractBinding::from_static(\"identity\", \"identity.session-created\", \"v1\", \"sha256:test\")",
+            ),
+        )?;
+        write_fixture(&root, "runner-raw-contract-binding", VALID)?;
+        let (_, findings) = check_root(&root);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::MissingRunnerMapping
+                    && f.detail.contains("generated")
+                    && f.detail.contains("CONTRACT")
+            }),
+            "raw ContractBinding constructor should be rejected: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn red_symlink_fixture_is_rejected_without_following_it() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("symlink-fixture")?;
+        let outside = root.join("outside-fixture.toml");
+        fs::write(&outside, VALID)?;
+        symlink(
+            &outside,
+            root.join("fixtures/consistency/outbox/fixture-symlink.toml"),
+        )?;
         let (_, findings) = check_root(&root);
         assert!(
             findings
                 .iter()
-                .any(|f| { f.rule == Rule::RunnerMismatch && f.detail.contains("binds function") }),
-            "runner function mismatch should be reported: {findings:?}"
+                .any(|f| f.detail.contains("rejects symlink")),
+            "symlink fixture should fail closed: {findings:?}"
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn red_non_regular_fixture_is_rejected_before_read() -> Result<()> {
+        use std::os::unix::net::UnixListener;
+
+        let root = temp_root("non-regular-fixture")?;
+        let socket_path = root.join("fixtures/consistency/outbox/fixture-socket.toml");
+        let bind_path = std::env::temp_dir().join(format!(
+            "rss-fixture-socket-{}-{}",
+            std::process::id(),
+            NEXT_TMP.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _listener = UnixListener::bind(&bind_path)?;
+        fs::rename(bind_path, &socket_path)?;
+        let (_, findings) = check_root(&root);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail.contains("rejects non-regular")),
+            "non-regular fixture should fail closed: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn red_runner_source_symlink_is_rejected_without_following_it() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("runner-source-symlink")?;
+        let runner = root.join(JOURNEY_RUNNER_SOURCE);
+        let outside = root.join("outside-runner.rs");
+        fs::write(&outside, VALID_JOURNEY_RUNNERS)?;
+        fs::remove_file(&runner)?;
+        symlink(&outside, &runner)?;
+        write_fixture(&root, "runner-source-symlink", VALID)?;
+        let (_, findings) = check_root(&root);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::MissingRunnerMapping && finding.detail.contains("symlink")
+            }),
+            "runner source symlink must fail closed: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn red_runner_source_replacement_after_open_is_rejected() -> Result<()> {
+        let root = temp_root("runner-source-replacement")?;
+        let runner = root.join(JOURNEY_RUNNER_SOURCE);
+        let original = fs::read(&runner)?;
+        let replacement = root.join("replacement-runner.rs");
+        fs::write(&replacement, &original)?;
+
+        let result = journey_runner_mappings_with_hook(&root, || {
+            let opened = root.join("opened-runner.rs");
+            assert!(fs::rename(&runner, opened).is_ok());
+            assert!(fs::rename(&replacement, &runner).is_ok());
+        });
+        let error = result
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("runner replacement was accepted"))?;
+        assert!(error.contains("replaced during read"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn ready_l2_fault_evidence_is_available_only_after_complete_validation() -> Result<()> {
+        let root = temp_root("invalid-evidence")?;
+        write_fixture(&root, "one", VALID)?;
+
+        let contracts = crate::contract::discover(&root.join("contracts"))?;
+        let error = ready_l2_fault_evidence_from_validated(&root, &contracts)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("incomplete fixture corpus exported evidence"))?;
+        assert!(
+            error.to_string().contains("validation"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn real_ready_l2_evidence_closes_all_five_fact_contracts() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let contracts = crate::contract::discover(&root.join("contracts"))?;
+        let expected = contracts
+            .iter()
+            .filter(|contract| {
+                contract.manifest.lifecycle == crate::contract::manifest::Lifecycle::Active
+                    && contract.manifest.consistency_level == ConsistencyLevel::OutboxFact
+                    && contract.manifest.kind == crate::contract::manifest::ContractKind::Event
+                    && contract
+                        .manifest
+                        .capabilities
+                        .outbox
+                        .as_ref()
+                        .is_some_and(|outbox| {
+                            outbox.role == crate::contract::manifest::OutboxRole::Fact
+                        })
+            })
+            .map(|contract| contract.manifest.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected.len(), 5, "active fact anti-vacuity count drift");
+
+        let evidence = ready_l2_fault_evidence_from_validated(&root, &contracts)?;
+        let actual = evidence
+            .iter()
+            .map(|item| item.contract_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        assert!(evidence.iter().all(|item| {
+            item.fixture_carrier.starts_with("fixtures/consistency/")
+                && item.fixture_carrier.ends_with(".toml")
+                && item.runner_carrier == JOURNEY_RUNNER_SOURCE
+        }));
         Ok(())
     }
 

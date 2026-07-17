@@ -30,6 +30,8 @@
 //!   `cargo xtask localtx-coverage`       active LocalTx manifest/generated/route/test closure 门（CI 门）
 //!   `cargo xtask localtx report --format json|markdown`
 //!                                      active LocalTx static proof inventory（只读）
+//!   `cargo xtask l2-assurance [--check]`
+//!                                      deterministic active L2 producer/fact assurance inventory
 //!   `cargo xtask runtime-baseline list|verify`
 //!                                      runtime assembly baseline 清单 / 漂移门（#1656，CI 门）
 //!   `cargo xtask runtime-deps guard`    SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）
@@ -99,6 +101,7 @@ mod generated_file;
 mod graph;
 mod inbox_cutover_guard;
 mod integration_shards;
+mod l2_assurance;
 mod layerdeps;
 mod layers;
 mod localonly_evidence;
@@ -111,6 +114,7 @@ mod pathsafe;
 mod pdpallow;
 mod pg_tenant_tx_guard;
 mod postgres_feature_matrix;
+mod producer_assurance;
 mod promtool;
 mod publicapi;
 mod reconcile_outbox_command_guard;
@@ -174,6 +178,9 @@ enum Command {
     LocalTxCoverage,
     LocalTxReport {
         format: ReportFormat,
+    },
+    L2Assurance {
+        check: bool,
     },
     Verify {
         fast: bool,
@@ -263,6 +270,13 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["consistency", rest @ ..] => parse_consistency(rest),
         ["localtx", rest @ ..] => parse_localtx(rest),
         ["localtx-coverage"] => Ok(Command::LocalTxCoverage),
+        ["l2-assurance"] => Ok(Command::L2Assurance { check: false }),
+        ["l2-assurance", "--check"] => Ok(Command::L2Assurance { check: true }),
+        ["l2-assurance", ..] => {
+            bail!(
+                "invalid l2-assurance arguments; use `./hack/cargo.sh xtask l2-assurance [--check]`"
+            )
+        }
         ["verify", rest @ ..] => parse_verify(rest),
         ["public-api", rest @ ..] => parse_public_api(rest),
         ["ci", rest @ ..] => parse_ci(rest),
@@ -651,6 +665,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::ConsistencyReport { format } => consistency_effects::run_report(format),
         Command::LocalTxReport { format } => localtx_report::run_report(format),
         Command::LocalTxCoverage => diagnostic::run_check(&localtx_coverage::LocalTxCoverage),
+        Command::L2Assurance { check } => l2_assurance::run(check),
         Command::Verify {
             fast,
             allow_missing_tools,
@@ -1798,6 +1813,35 @@ mod tests {
         assert!(parse_command(&s(&["contract", "bogus"])).is_err());
         assert!(parse_command(&s(&["assembly"])).is_err()); // 缺 validate
         assert!(parse_command(&s(&["assembly", "bogus"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_l2_assurance_is_closed() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["l2-assurance"]))?,
+            Command::L2Assurance { check: false }
+        );
+        assert_eq!(
+            parse_command(&s(&["l2-assurance", "--check"]))?,
+            Command::L2Assurance { check: true }
+        );
+        for invalid in [
+            vec!["l2-assurance", "--check", "--check"],
+            vec!["l2-assurance", "--output", "inventory.json"],
+            vec!["l2-assurance", "--bogus"],
+            vec!["l2-assurance", "extra"],
+        ] {
+            let Err(error) = parse_command(&s(&invalid)) else {
+                anyhow::bail!("accepted invalid l2-assurance argv: {invalid:?}");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("./hack/cargo.sh xtask l2-assurance [--check]"),
+                "missing dedicated recovery hint for {invalid:?}: {error}"
+            );
+        }
+        Ok(())
     }
 
     /// 合法子命令后的未知尾参必须 fail-closed（不被静默吞掉）。

@@ -5720,7 +5720,12 @@ fn marker_key_from_type(ty: &Type, resolver: &Resolver) -> Option<String> {
         return None;
     };
     let canonical = canonical_segments(&ty.path, resolver)?;
-    if canonical.as_slice() == ["httpserve", "ContractMarker"] {
+    if matches!(
+        canonical.as_slice(),
+        [httpserve, marker]
+            if httpserve == "httpserve"
+                && matches!(marker.as_str(), "ContractMarker" | "ProducerMarker")
+    ) {
         let contract = ty.path.segments.last()?;
         let PathArguments::AngleBracketed(args) = &contract.arguments else {
             return None;
@@ -5740,6 +5745,7 @@ fn route_key(expr: &Expr, resolver: &Resolver) -> Option<String> {
         return None;
     };
     generated_key_from_path(&path.path, "ROUTE", resolver)
+        .or_else(|| generated_key_from_path(&path.path, "PRODUCER", resolver))
 }
 
 fn handler_identity(expr: &Expr, module: &[String], resolver: &Resolver) -> Option<String> {
@@ -5838,10 +5844,10 @@ fn constructor_is_canonical(call: &ExprCall, resolver: &Resolver) -> bool {
     };
     matches!(
         segments.as_slice(),
-        [httpserve, endpoint, new]
+        [httpserve, endpoint, constructor]
             if httpserve == "httpserve"
                 && matches!(endpoint.as_str(), "GeneratedEndpoint" | "GeneratedPrimaryEndpoint")
-                && new == "new"
+                && matches!(constructor.as_str(), "new" | "new_producer")
     )
 }
 
@@ -6073,6 +6079,29 @@ fn bounded_stderr(stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn producer_mount_uses_the_same_canonical_route_key() -> anyhow::Result<()> {
+        let resolver = Resolver::default();
+        let marker: Type = syn::parse_str(
+            "::httpserve::ProducerMarker<::generated::http::demo_v1::write::RouteMarker>",
+        )?;
+        let producer: Expr = syn::parse_str("::generated::http::demo_v1::write::PRODUCER")?;
+        let constructor: ExprCall = syn::parse_str(
+            "::httpserve::GeneratedPrimaryEndpoint::new_producer(\
+             ::generated::http::demo_v1::write::PRODUCER, handler)",
+        )?;
+        assert_eq!(
+            marker_key_from_type(&marker, &resolver).as_deref(),
+            Some("demo_v1::write")
+        );
+        assert_eq!(
+            route_key(&producer, &resolver).as_deref(),
+            Some("demo_v1::write")
+        );
+        assert!(constructor_is_canonical(&constructor, &resolver));
+        Ok(())
+    }
     use std::fs;
     use std::path::PathBuf;
 

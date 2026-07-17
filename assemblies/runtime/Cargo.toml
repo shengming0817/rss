@@ -114,6 +114,8 @@ integration = [
 aws-smithy-http-client = { workspace = true, features = ["test-util"] }
 http = "1"
 settings-composition = { path = "../../composition/settings", features = ["test-support"] }
+# Direct service tests bypass the HTTP router only through the explicitly test-gated receipt mint.
+settings = { path = "../../crates/settings", features = ["test-support"] }
 # 默认单测仅启用 lazy typed capability bundle；不连接 postgres。
 postgres = { path = "../../adapters/postgres", features = ["domain-settings", "domain-identity", "domain-audit", "test-support"] }
 # runtime 单元/e2e 测试需要显式构造 domain-local TenantRepoScope；生产依赖不启用 test-support。

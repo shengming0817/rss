@@ -27,8 +27,9 @@ pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};
 pub use routes::{
     Admin, AuthenticatedRoutes, ClassifiedRouteState, ContractMarker, GeneratedEndpoint,
     GeneratedPrimaryEndpoint, Health, Internal, Listener, ListenerRouter, LocalOnlyAllowedEffect,
-    NonPrimaryListener, Primary, ServerMakeService, UnfinalizedRoutes, finalize_auth,
-    finalize_auth_with_audit, finalize_auth_with_audit_and_authorizer, finalize_primary_auth,
+    NonPrimaryListener, Primary, ProducerAssuranceReceipt, ProducerAuthorization, ProducerMarker,
+    ServerMakeService, UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit,
+    finalize_auth_with_audit_and_authorizer, finalize_primary_auth,
     finalize_primary_auth_with_audit,
 };
 #[cfg(any(test, feature = "test-util"))]

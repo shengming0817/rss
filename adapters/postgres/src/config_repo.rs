@@ -1,12 +1,12 @@
 //! `PgConfigRepo` —— settings 配置版本化仓储 + co-tx UoW 的 postgres adapter（#1249）。
 //!
 //! impl `settings::ports::ConfigRepo`（find / find_version / save / delete）+ `settings::ports::ConfigUnitOfWork`
-//! （`commit` co-tx）。adapter→域 DIP 内向边（postgres 依赖 settings、native AFIT impl 其域形
+//! （publish/delete/rollback 三条 receipt-typed co-tx）。adapter→域 DIP 内向边（postgres 依赖 settings、native AFIT impl 其域形
 //! port，经 deny.toml settings wrapper + `allows(Adapter,Domain)` 放行；adapter 不被域依赖）。
 //!
 //! 版本历史模型 + CAS（etcd 版本模型，settings ports.rs）：每 (tenant, key) 全版本行；`find` = max(version)、
 //! `find_version` = 精确版本、`save` = `INSERT ... WHERE $v = 1 + COALESCE(max(version),0)`（0 行 → VersionConflict；
-//! 并发同版本写经 PK unique violation 亦 → VersionConflict）。`commit` 经 `co_tx_with_outbox`
+//! 并发同版本写经 PK unique violation 亦 → VersionConflict）。三条 typed commit 经 `co_tx_with_outbox`
 //! 把同一 CAS INSERT 与 outbox append 收进单事务（both-or-neither，OUTBOX-COTX-CONFIG-01）。
 //!
 //! storage 错误经 `ConfigRepoError::Storage(Box::new(sqlx_err))` 分层冒泡（保留 source 链；域 crate 不依赖
@@ -30,7 +30,8 @@ use diport::{
 };
 use secure::{DerivedAad, Plaintext, ProtectionContext};
 use settings::ports::{
-    ConfigEntry, ConfigHead, ConfigMutation, ConfigRepo, ConfigRepoError, ConfigTombstone,
+    CONFIG_VERSION_CHANGED_CONTRACT, ConfigDeleteReceipt, ConfigEntry, ConfigHead, ConfigMutation,
+    ConfigPublishReceipt, ConfigRepo, ConfigRepoError, ConfigRollbackReceipt, ConfigTombstone,
     ConfigUnitOfWork, SettingKey, TenantId, TenantRepoScope,
 };
 use sqlx::{Executor, Postgres, Row};
@@ -462,6 +463,12 @@ fn maybe_fail_config_retry(key: &SettingKey) -> Result<(), ConfigRepoError> {
 fn tenant_mismatch_storage_error(path: &'static str) -> ConfigRepoError {
     ConfigRepoError::Storage(Box::new(std::io::Error::other(format!(
         "{path}: outbox envelope tenant does not match transaction tenant"
+    ))))
+}
+
+fn producer_authorization_storage_error(path: &'static str) -> ConfigRepoError {
+    ConfigRepoError::Storage(Box::new(std::io::Error::other(format!(
+        "{path}: producer receipt does not authorize outbox envelope contract"
     ))))
 }
 
@@ -1275,14 +1282,18 @@ impl ConfigRepo for PgConfigRepo {
     }
 }
 
-impl ConfigUnitOfWork for PgConfigRepo {
-    async fn commit(
+impl PgConfigRepo {
+    async fn commit_authorized<A>(
         &self,
+        authorization: A,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
         outbox_entry: EventEntry,
         envelope: OutboxEnvelopeParts,
-    ) -> Result<(), ConfigRepoError> {
+    ) -> Result<(), ConfigRepoError>
+    where
+        A: Fn() -> vocab::ContractBinding + Copy + Send + Sync,
+    {
         let tenant = scope.tenant();
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgSessionLifecycle）。
         // `contract` 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at
@@ -1312,6 +1323,9 @@ impl ConfigUnitOfWork for PgConfigRepo {
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
+        if !env.matches_contract(authorization()) {
+            return Err(producer_authorization_storage_error("config co-tx"));
+        }
         // co-tx：CAS 配置写 + outbox append 同事务（OUTBOX-COTX-CONFIG-01）。CAS 冲突 → VersionConflict 使整
         // 事务回滚（outbox 不落库）；storage 失败 → Storage。
         run_pg_tx_retry(
@@ -1357,6 +1371,71 @@ impl ConfigUnitOfWork for PgConfigRepo {
                 }
             },
             classify_config_repo_error,
+        )
+        .await
+    }
+}
+
+impl ConfigUnitOfWork for PgConfigRepo {
+    async fn commit_publish(
+        &self,
+        receipt: ConfigPublishReceipt,
+        scope: TenantRepoScope,
+        mutation: ConfigMutation,
+        outbox_entry: EventEntry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(), ConfigRepoError> {
+        let authorization = receipt
+            .authorize(CONFIG_VERSION_CHANGED_CONTRACT)
+            .ok_or_else(|| producer_authorization_storage_error("config publish co-tx"))?;
+        self.commit_authorized(
+            move || authorization.fact_contract(),
+            scope,
+            mutation,
+            outbox_entry,
+            envelope,
+        )
+        .await
+    }
+
+    async fn commit_delete(
+        &self,
+        receipt: ConfigDeleteReceipt,
+        scope: TenantRepoScope,
+        mutation: ConfigMutation,
+        outbox_entry: EventEntry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(), ConfigRepoError> {
+        let authorization = receipt
+            .authorize(CONFIG_VERSION_CHANGED_CONTRACT)
+            .ok_or_else(|| producer_authorization_storage_error("config delete co-tx"))?;
+        self.commit_authorized(
+            move || authorization.fact_contract(),
+            scope,
+            mutation,
+            outbox_entry,
+            envelope,
+        )
+        .await
+    }
+
+    async fn commit_rollback(
+        &self,
+        receipt: ConfigRollbackReceipt,
+        scope: TenantRepoScope,
+        mutation: ConfigMutation,
+        outbox_entry: EventEntry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(), ConfigRepoError> {
+        let authorization = receipt
+            .authorize(CONFIG_VERSION_CHANGED_CONTRACT)
+            .ok_or_else(|| producer_authorization_storage_error("config rollback co-tx"))?;
+        self.commit_authorized(
+            move || authorization.fact_contract(),
+            scope,
+            mutation,
+            outbox_entry,
+            envelope,
         )
         .await
     }

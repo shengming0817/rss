@@ -455,13 +455,14 @@ struct BarrierSessionLifecycle {
 impl SessionLifecycle for BarrierSessionLifecycle {
     async fn persist_session_and_emit(
         &self,
+        receipt: identity::ports::LoginProducerReceipt,
         scope: IdentityScope,
         session: Session,
         entry: consistency::EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         self.inner
-            .persist_session_and_emit(scope, session, entry, envelope)
+            .persist_session_and_emit(receipt, scope, session, entry, envelope)
             .await
     }
 

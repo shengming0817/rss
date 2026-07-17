@@ -21,11 +21,13 @@ use eventexec::{DlxHotKeyName, TenantAuthority, TenantAuthorityBinding};
 use generated::event::identity_v1::session_created;
 use identity::ports::{
     DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo, DynRoleBindingLifecycle,
-    DynRoleBindingReadRepo, DynRoleReadRepo, IdentityError, Policy, PolicyId, PolicyLifecycle,
-    PolicyListResult, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyVersion,
+    DynRoleBindingReadRepo, DynRoleReadRepo, IdentityError, PoliciesCreateProducerReceipt,
+    PoliciesDeactivateProducerReceipt, PoliciesUpdateProducerReceipt, Policy, PolicyId,
+    PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyVersion,
     ResourceAttributeKey, ResourceAttributeReadRepo, ResourceAttributeResolution,
     ResourceAttributeResourceId, Role, RoleBinding, RoleBindingLifecycle, RoleBindingReadRepo,
-    RoleId, RoleListResult, RolePage, RoleReadRepo, TenantRepoScope,
+    RoleId, RoleListResult, RolePage, RoleReadRepo, RolesAssignProducerReceipt,
+    RolesRevokeProducerReceipt, TenantRepoScope,
 };
 use identity::{
     IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
@@ -327,6 +329,7 @@ struct NoopRoleBindingLifecycle;
 impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
     async fn assign_and_emit(
         &self,
+        _receipt: RolesAssignProducerReceipt,
         _scope: TenantRepoScope,
         _binding: RoleBinding,
         _entry: EventEntry,
@@ -337,6 +340,7 @@ impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
 
     async fn revoke_and_emit(
         &self,
+        _receipt: RolesRevokeProducerReceipt,
         _scope: TenantRepoScope,
         _role_id: RoleId,
         _subject: String,
@@ -414,6 +418,7 @@ struct NoopPolicyLifecycle;
 impl PolicyLifecycle for NoopPolicyLifecycle {
     async fn create_and_emit(
         &self,
+        _receipt: PoliciesCreateProducerReceipt,
         _scope: TenantRepoScope,
         policy: Policy,
         _entry: EventEntry,
@@ -424,6 +429,7 @@ impl PolicyLifecycle for NoopPolicyLifecycle {
 
     async fn update_and_emit(
         &self,
+        _receipt: PoliciesUpdateProducerReceipt,
         _scope: TenantRepoScope,
         policy: Policy,
         _expected: PolicyVersion,
@@ -435,6 +441,7 @@ impl PolicyLifecycle for NoopPolicyLifecycle {
 
     async fn deactivate_and_emit(
         &self,
+        _receipt: PoliciesDeactivateProducerReceipt,
         _scope: TenantRepoScope,
         _id: PolicyId,
         _expected: PolicyVersion,

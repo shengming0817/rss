@@ -60,8 +60,9 @@ use diport::{
 };
 use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, WorkerHealth, spawn_consumer};
 use futures::future::BoxFuture;
-use generated::http::identity_v1::login::IdentityLoginRequest;
-use identity::ports::DynSessionLifecycle;
+use generated::http::identity_v1::login::{IdentityLoginRequest, PRODUCER as LOGIN_PRODUCER};
+use httpserve::ProducerMarker;
+use identity::ports::{DynSessionLifecycle, LoginProducerReceipt};
 use identity::{LoginService, RefreshService, SeedSigner};
 use memory::{
     FixedClock, InMemClaimer, MemBus, MemDeadLetterStore, MemEmitter, MemSessionLifecycle,
@@ -73,6 +74,10 @@ use vocab::TenantId;
 
 /// 手造 relay payload 的 session_id——审计 resource id 是 typed `ids::SessionId`（canonical uuid）。
 const CANON_SESSION: &str = "22222222-3333-4444-8555-666666666666";
+
+fn login_producer_receipt() -> LoginProducerReceipt {
+    ProducerMarker::for_test(LOGIN_PRODUCER).into_receipt()
+}
 
 /// 有界等待断言条件成立（防消费未跑挂死）；超时即 `Err`。
 async fn wait_until(mut pred: impl FnMut() -> bool) -> Result<()> {
@@ -325,6 +330,7 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
     let (login, _refresh) = login_service(&bus, tenant)?;
     let response = login
         .login(
+            login_producer_receipt(),
             tenant,
             IdentityLoginRequest {
                 // 非 uuid 登录标识——旧实现会把 "alice" 当 subject 写 wire，audit 断链（#1277 F1 证伪点）。
@@ -529,6 +535,7 @@ async fn rejected_login_does_not_audit() -> Result<()> {
     let (login, _refresh) = login_service(&bus, tenant)?;
     let result = login
         .login(
+            login_producer_receipt(),
             tenant,
             IdentityLoginRequest {
                 username: "mallory".to_string(),

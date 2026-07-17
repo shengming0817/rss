@@ -634,6 +634,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     );
     publisher_settings_service
         .publish_config(
+            settings::config_publish_receipt_for_test(),
             tenant,
             settings_actor.clone(),
             SettingsConfigPublishRequest {
@@ -838,6 +839,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     .await?;
     publisher_settings_service
         .publish_config(
+            settings::config_publish_receipt_for_test(),
             tenant,
             settings_actor,
             SettingsConfigPublishRequest {

@@ -5318,6 +5318,7 @@ mod tests {
     impl identity::ports::RoleBindingLifecycle for StaticRoleBindings {
         async fn assign_and_emit(
             &self,
+            _receipt: identity::ports::RolesAssignProducerReceipt,
             _scope: IdentityTenantRepoScope,
             _binding: identity::ports::RoleBinding,
             _entry: consistency::EventEntry,
@@ -5330,6 +5331,7 @@ mod tests {
 
         async fn revoke_and_emit(
             &self,
+            _receipt: identity::ports::RolesRevokeProducerReceipt,
             _scope: IdentityTenantRepoScope,
             _role_id: identity::ports::RoleId,
             _subject: String,
@@ -5416,6 +5418,7 @@ mod tests {
     impl identity::ports::PolicyLifecycle for EmptyPolicyLifecycle {
         async fn create_and_emit(
             &self,
+            _receipt: identity::ports::PoliciesCreateProducerReceipt,
             _scope: IdentityTenantRepoScope,
             _policy: identity::ports::Policy,
             _entry: consistency::EventEntry,
@@ -5428,6 +5431,7 @@ mod tests {
 
         async fn update_and_emit(
             &self,
+            _receipt: identity::ports::PoliciesUpdateProducerReceipt,
             _scope: IdentityTenantRepoScope,
             _policy: identity::ports::Policy,
             _expected: identity::ports::PolicyVersion,
@@ -5441,6 +5445,7 @@ mod tests {
 
         async fn deactivate_and_emit(
             &self,
+            _receipt: identity::ports::PoliciesDeactivateProducerReceipt,
             _scope: IdentityTenantRepoScope,
             _id: identity::ports::PolicyId,
             _expected: identity::ports::PolicyVersion,
@@ -5511,6 +5516,7 @@ mod tests {
     impl identity::ports::SessionLifecycle for UnusedSessionLifecycle {
         async fn persist_session_and_emit(
             &self,
+            _receipt: identity::ports::LoginProducerReceipt,
             _scope: IdentityTenantRepoScope,
             _session: identity::ports::Session,
             _entry: consistency::EventEntry,

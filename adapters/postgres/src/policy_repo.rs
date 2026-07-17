@@ -5,9 +5,11 @@ use std::time::SystemTime;
 use consistency::EventEntry;
 use diport::{Clock, OutboxEnvelopeParts};
 use identity::ports::{
-    AttributeKey, AttributeValue, GlobPattern, IdentityError, Operator, Policy, PolicyCondition,
-    PolicyEffect, PolicyId, PolicyLifecycle, PolicyListResult, PolicyObligations, PolicyPage,
-    PolicyRepo, PolicyRouteScope, PolicyRule, PolicyVersion, TenantId, TenantRepoScope,
+    AttributeKey, AttributeValue, GlobPattern, IdentityError, Operator, POLICY_UPDATED_CONTRACT,
+    PoliciesCreateProducerReceipt, PoliciesDeactivateProducerReceipt,
+    PoliciesUpdateProducerReceipt, Policy, PolicyCondition, PolicyEffect, PolicyId,
+    PolicyLifecycle, PolicyListResult, PolicyObligations, PolicyPage, PolicyRepo, PolicyRouteScope,
+    PolicyRule, PolicyVersion, TenantId, TenantRepoScope,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -91,6 +93,12 @@ fn storage(e: sqlx::Error) -> IdentityError {
 
 fn storage_boxed(e: impl std::error::Error + Send + Sync + 'static) -> IdentityError {
     IdentityError::Storage(Box::new(e))
+}
+
+fn producer_authorization_storage_error(path: &'static str) -> IdentityError {
+    storage_boxed(std::io::Error::other(format!(
+        "{path}: producer receipt does not authorize outbox envelope contract"
+    )))
 }
 
 fn append_storage(error: OutboxAppendError) -> IdentityError {
@@ -482,6 +490,7 @@ impl PolicyRepo for PgPolicyRepo {
 impl PolicyLifecycle for PgPolicyLifecycle {
     async fn create_and_emit(
         &self,
+        receipt: PoliciesCreateProducerReceipt,
         tenant_scope: TenantRepoScope,
         policy: Policy,
         entry: EventEntry,
@@ -540,6 +549,15 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                                 Err(IdentityError::PolicyAlreadyExists)
                             }
                         })?;
+                        let authorization =
+                            receipt.authorize(POLICY_UPDATED_CONTRACT).ok_or_else(|| {
+                                producer_authorization_storage_error("policy create co-tx")
+                            })?;
+                        if !env.matches_contract(authorization.fact_contract()) {
+                            return Err(producer_authorization_storage_error(
+                                "policy create co-tx",
+                            ));
+                        }
                         let _outcome =
                             append_outbox_with_projection(conn, &entry, &env, &projection_registry)
                                 .await
@@ -556,6 +574,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
 
     async fn update_and_emit(
         &self,
+        receipt: PoliciesUpdateProducerReceipt,
         tenant_scope: TenantRepoScope,
         policy: Policy,
         expected: PolicyVersion,
@@ -612,6 +631,16 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                         .await
                         .map_err(storage)?;
                         if row.is_some() {
+                            let authorization = receipt
+                                .authorize(POLICY_UPDATED_CONTRACT)
+                                .ok_or_else(|| {
+                                    producer_authorization_storage_error("policy update co-tx")
+                                })?;
+                            if !env.matches_contract(authorization.fact_contract()) {
+                                return Err(producer_authorization_storage_error(
+                                    "policy update co-tx",
+                                ));
+                            }
                             let _outcome = append_outbox_with_projection(
                                 conn,
                                 &entry,
@@ -654,6 +683,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
 
     async fn deactivate_and_emit(
         &self,
+        receipt: PoliciesDeactivateProducerReceipt,
         tenant_scope: TenantRepoScope,
         id: PolicyId,
         expected: PolicyVersion,
@@ -695,6 +725,16 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                         .map_err(storage)
                         .map(|r| r.rows_affected())?;
                         if rows > 0 {
+                            let authorization = receipt
+                                .authorize(POLICY_UPDATED_CONTRACT)
+                                .ok_or_else(|| {
+                                    producer_authorization_storage_error("policy deactivate co-tx")
+                                })?;
+                            if !env.matches_contract(authorization.fact_contract()) {
+                                return Err(producer_authorization_storage_error(
+                                    "policy deactivate co-tx",
+                                ));
+                            }
                             let _outcome = append_outbox_with_projection(
                                 conn,
                                 &entry,

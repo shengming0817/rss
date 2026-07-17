@@ -23,6 +23,19 @@ use diport::OutboxEnvelopeParts;
 use dynosaur::dynosaur;
 use generated::http::settings_v2::{LOCAL_TX as SECRET_LOCAL_TX, ROUTE as SECRET_HTTP_ROUTE};
 
+/// Exact generated fact binding authorized by every config producer receipt.
+pub use generated::event::settings_v1::CONTRACT as CONFIG_VERSION_CHANGED_CONTRACT;
+
+/// One-shot producer receipt for `settings.config-publish`.
+pub type ConfigPublishReceipt =
+    httpserve::ProducerAssuranceReceipt<generated::http::settings_v1::RouteMarker>;
+/// One-shot producer receipt for `settings.config-delete`.
+pub type ConfigDeleteReceipt =
+    httpserve::ProducerAssuranceReceipt<generated::http::settings_v5::RouteMarker>;
+/// One-shot producer receipt for `settings.config-rollback`.
+pub type ConfigRollbackReceipt =
+    httpserve::ProducerAssuranceReceipt<generated::http::settings_v6::RouteMarker>;
+
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造器仍 `pub(crate)` funnel）。
 pub use crate::domain::{
     ConfigEntry, ConfigHead, ConfigMutation, ConfigRepoError, ConfigTombstone, SettingKey,
@@ -138,7 +151,7 @@ pub trait ConfigRepoLocal: Send + Sync {
 
 /// 配置写入 **co-tx** Unit-of-Work DI port（L2 OutboxFact 同事务接缝）。
 ///
-/// [`ConfigUnitOfWork::commit`] 把 CAS 配置 mutation 与
+/// 三条 route-specific commit 方法把各自的 generated producer receipt、CAS 配置 mutation 与
 /// `settings.config-version-changed` outbox 行 append **同一本地事务**原子落库（both-or-neither）——消除
 /// 「先 save 后 emit」的 write-without-event 窗口（#1232）。`outbox_entry` / `envelope` 由应用层内容派生
 /// 构造（topic / IdemKey / opaque subjectId），adapter 仅在事务内复用既有 `append_outbox` 落 durable outbox；
@@ -151,11 +164,33 @@ pub trait ConfigRepoLocal: Send + Sync {
 // reason: 同 ConfigRepoLocal——Send 由 trait_variant `ConfigUnitOfWork` 变体 + dynosaur wrapper 承载。
 // `Send + Sync` supertrait（#1430）：随 `SettingsService` 作 axum handler 共享 state（同 ConfigRepoLocal 约定）。
 pub trait ConfigUnitOfWorkLocal: Send + Sync {
-    /// CAS 写新配置版本 + 同事务 append outbox 行（both-or-neither）。CAS 冲突返
+    /// 从 config-publish receipt 授权唯一 generated fact，再 CAS 写新配置版本 + 同事务 append outbox 行。
+    /// CAS 冲突返
     /// [`ConfigRepoError::VersionConflict`]、持久化失败返 [`ConfigRepoError::Storage`]；任一步失败整事务
     /// 回滚（配置写与 outbox 行皆不落库）。
-    async fn commit(
+    async fn commit_publish(
         &self,
+        receipt: ConfigPublishReceipt,
+        scope: TenantRepoScope,
+        mutation: ConfigMutation,
+        outbox_entry: EventEntry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(), ConfigRepoError>;
+
+    /// Commit a config tombstone and its generated deletion fact through the exact delete route.
+    async fn commit_delete(
+        &self,
+        receipt: ConfigDeleteReceipt,
+        scope: TenantRepoScope,
+        mutation: ConfigMutation,
+        outbox_entry: EventEntry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(), ConfigRepoError>;
+
+    /// Commit a restored config version and its generated rollback fact through the exact route.
+    async fn commit_rollback(
+        &self,
+        receipt: ConfigRollbackReceipt,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
         outbox_entry: EventEntry,
@@ -374,8 +409,9 @@ mod smoke {
     use diport::OutboxEnvelopeParts;
 
     use super::{
-        ConfigEntry, ConfigHead, ConfigMutation, ConfigRepo, ConfigRepoError, ConfigUnitOfWork,
-        DynConfigRepo, DynConfigUnitOfWork, SettingKey, SettingsPortEffect, TenantRepoScope,
+        ConfigDeleteReceipt, ConfigEntry, ConfigHead, ConfigMutation, ConfigPublishReceipt,
+        ConfigRepo, ConfigRepoError, ConfigRollbackReceipt, ConfigUnitOfWork, DynConfigRepo,
+        DynConfigUnitOfWork, SettingKey, SettingsPortEffect, TenantRepoScope,
     };
 
     fn assert_effect<T, E, P>()
@@ -428,8 +464,29 @@ mod smoke {
 
     struct NoopConfigUow;
     impl ConfigUnitOfWork for NoopConfigUow {
-        async fn commit(
+        async fn commit_publish(
             &self,
+            _receipt: ConfigPublishReceipt,
+            _scope: TenantRepoScope,
+            _mutation: ConfigMutation,
+            _outbox_entry: EventEntry,
+            _envelope: OutboxEnvelopeParts,
+        ) -> Result<(), ConfigRepoError> {
+            Ok(())
+        }
+        async fn commit_delete(
+            &self,
+            _receipt: ConfigDeleteReceipt,
+            _scope: TenantRepoScope,
+            _mutation: ConfigMutation,
+            _outbox_entry: EventEntry,
+            _envelope: OutboxEnvelopeParts,
+        ) -> Result<(), ConfigRepoError> {
+            Ok(())
+        }
+        async fn commit_rollback(
+            &self,
+            _receipt: ConfigRollbackReceipt,
             _scope: TenantRepoScope,
             _mutation: ConfigMutation,
             _outbox_entry: EventEntry,
@@ -519,8 +576,25 @@ mod smoke {
     mockall::mock! {
         TestConfigUow {}
         impl ConfigUnitOfWork for TestConfigUow {
-            async fn commit(
+            async fn commit_publish(
                 &self,
+                receipt: ConfigPublishReceipt,
+                scope: TenantRepoScope,
+                mutation: ConfigMutation,
+                outbox_entry: EventEntry,
+                envelope: OutboxEnvelopeParts,
+            ) -> Result<(), ConfigRepoError>;
+            async fn commit_delete(
+                &self,
+                receipt: ConfigDeleteReceipt,
+                scope: TenantRepoScope,
+                mutation: ConfigMutation,
+                outbox_entry: EventEntry,
+                envelope: OutboxEnvelopeParts,
+            ) -> Result<(), ConfigRepoError>;
+            async fn commit_rollback(
+                &self,
+                receipt: ConfigRollbackReceipt,
                 scope: TenantRepoScope,
                 mutation: ConfigMutation,
                 outbox_entry: EventEntry,

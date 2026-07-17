@@ -34,6 +34,24 @@ pub use application::{
 pub use ports::ConfigEntry;
 pub use secret_application::{SecretService, SecretServiceError};
 
+/// Mint a route-typed config-publish receipt for tests that bypass the HTTP router.
+#[cfg(any(test, feature = "test-support"))]
+pub fn config_publish_receipt_for_test() -> ports::ConfigPublishReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::settings_v1::PRODUCER).into_receipt()
+}
+
+/// Mint a route-typed config-delete receipt for tests that bypass the HTTP router.
+#[cfg(any(test, feature = "test-support"))]
+pub fn config_delete_receipt_for_test() -> ports::ConfigDeleteReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::settings_v5::PRODUCER).into_receipt()
+}
+
+/// Mint a route-typed config-rollback receipt for tests that bypass the HTTP router.
+#[cfg(any(test, feature = "test-support"))]
+pub fn config_rollback_receipt_for_test() -> ports::ConfigRollbackReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::settings_v6::PRODUCER).into_receipt()
+}
+
 /// 返回空 flag 仓储（不透明封装 [`FlagStoreBox`]）。
 ///
 /// 生产 flag store 待 #1120（订阅缓存 consumer 填充快照）。当前空 store 满足 fail-closed 语义：

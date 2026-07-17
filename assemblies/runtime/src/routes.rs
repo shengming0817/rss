@@ -561,8 +561,8 @@ mod tests {
         fn init(&self, registry: &mut bootstrap::Registry) -> Result<(), bootstrap::KernelError> {
             let capture = self.capture.clone();
             registry.route_group::<httpserve::Primary>("/api/v1/identity", move |router| {
-                let endpoint = httpserve::GeneratedPrimaryEndpoint::new(
-                    generated::http::identity_v1::login::ROUTE,
+                let endpoint = httpserve::GeneratedPrimaryEndpoint::new_producer(
+                    generated::http::identity_v1::login::PRODUCER,
                     route_meta_capture_handler,
                 )?
                 .with_state(capture);
@@ -573,7 +573,7 @@ mod tests {
     }
 
     async fn route_meta_capture_handler(
-        _: httpserve::ContractMarker<generated::http::identity_v1::login::RouteMarker>,
+        _: httpserve::ProducerMarker<generated::http::identity_v1::login::RouteMarker>,
         axum::extract::State(capture): axum::extract::State<RouteMetaCapture>,
         axum::extract::Extension(meta): axum::extract::Extension<httpserve::RouteMeta>,
     ) -> StatusCode {

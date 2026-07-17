@@ -1,12 +1,13 @@
 # L2 OutboxFact crash matrix
 
-`identity.session-created` 在契约中声明 `consistencyLevel = "OutboxFact"`（L2）。L2 的保证是：业务写与
-outbox fact 同一本地事务提交；relay 以稳定 event/message ID 做 **at-least-once publish**；consumer 以
-同一 ID 经 inbox 状态机幂等收口。它不保证 broker exactly-once publish。
+active producer 契约及其 5 个 fact 在契约中声明 `consistencyLevel = "OutboxFact"`（L2）。L2 的保证是：
+业务写与 outbox fact 同一本地事务提交；relay 以稳定 event/message ID 做 **at-least-once publish**；
+consumer 以同一 ID 经 inbox 状态机幂等收口。它不保证 broker exactly-once publish。
 
 ref: serverlesstechnology/cqrs src/cqrs.rs@b13692ce3db62b3b7fea19dddeec90a9d8af3180
 ref: apalis packages/apalis-sql/migrations/postgres/20250307001101_add_job_priority.sql@49f90e1304f8f218eb08ce6ca0f1b4934f3ed011
 ref: sqlxmq migrations/20220208120856_fix_concurrent_poll.up.sql@79cbd3091ab39178d5de65d14416dad6067ac067
+ref: rust-analyzer xtask/src/codegen.rs@76d092ea9d27a66c53aedf630c07e3dae42db1c1
 
 上游 `cqrs-es` 在事件存储后同步 dispatch；RSS 为跨进程 broker 投递增加 durable outbox 的
 typed atomic claim → publish → strict-deadline CAS settle，以及 consumer inbox claim → commit → ack。
@@ -64,10 +65,22 @@ cargo test -p postgres relay_publish_request_reuses_durable_identity_on_every_at
 cargo xtask consistency-fixtures
 ```
 
-#1641 已落地的真实后端 journey 位于
-`journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs`，同一 fixture 被绑定到
-`CrashRunner::PostgresRabbitmq` 和 `run_outbox_after_publish_before_settle`。它验证真实 PostgreSQL
-lease/CAS 与 RabbitMQ delivery/ack 行为；属于 opt-in lane，不进入默认快测：
+#1641 起落地的真实后端 journey 位于
+`journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs`。每条 ready fixture 都与 generated
+`ContractBinding`、闭合 `CrashFaultSpec` dispatch 和真实 backend runner 同源绑定；当前 active L2 fact 的
+direct ready evidence 已达到 5/5：
+
+| Fact | Direct ready evidence | 真实后端断言 |
+|---|---|---|
+| `identity.session-created` | publish 成功后、settle 前崩溃 | PostgreSQL lease/CAS 恢复、稳定身份重发及 RabbitMQ delivery/ack |
+| `identity.policy-updated` | transient publish failure | PostgreSQL outbox 精确读取为 `pending`、`retry_count = 1`、`retry_after > updated_at`，且 lease 已清除 |
+| `identity.role-assigned` | permanent publish failure | PostgreSQL outbox 进入 DLX，摘要脱敏且 payload 使用受保护编码 |
+| `identity.role-revoked` | permanent publish failure | PostgreSQL outbox 进入 DLX，摘要脱敏且 payload 使用受保护编码 |
+| `settings.config-version-changed` | transient publish failure | PostgreSQL outbox 精确读取为 `pending`、`retry_count = 1`、`retry_after > updated_at`，且 lease 已清除 |
+
+其中新增的 `identity.policy-updated` transient 场景通过 tenant + event 精确 owner-pool observation
+证明失败后已进入合法退避且没有残留 lease；新增的
+`identity.role-revoked` permanent 场景证明进入受保护 DLX summary。该 journey 属于 opt-in lane，不进入默认快测：
 
 ```bash
 cargo xtask ci run --job integration/consistency-fault
@@ -78,8 +91,8 @@ cargo xtask ci run --job integration/consistency-fault
 | 证据 | 能证明 | 不能证明 |
 |---|---|---|
 | 默认 hermetic 测试 | fixture/闭枚举及 status/domain/contract/runner 绑定；公共 relay loop 的 crash 中间态、显式 lease 恢复、fake 重发、最终 settle、未过期对照行保持不变；生产 `publish_request` 对同一 durable event 的 broker identity 不漂移；实际 inbox 纯状态机去重 | PostgreSQL SQL、RLS、真实 tenant/partition scope、真实时钟 TTL、AMQP confirm/channel redelivery、网络结果 |
-| #1641 Postgres/RabbitMQ journey | 真实 PG durable row、lease/CAS 与 RabbitMQ publish/redelivery/ack 的既有集成证据 | 任意网络分区、进程被 SIGKILL 的所有时点、broker 集群灾难 |
-| 尚未覆盖 | publish 请求已到 broker、client 在 confirm 前断线等所有 ambiguous outcome 组合；40s timeout 的每种 broker 结果；跨节点时钟/网络分区组合 | 不得据现有测试宣称已覆盖或 exactly-once；timeout 仍须保守按可能已 delivery 处理 |
+| 5/5 direct ready journey | 5 个 active fact 的具名真实 PostgreSQL fault evidence；其中 session-created 另覆盖 RabbitMQ publish/redelivery/ack | confirm-lost、#1826 的完整 channel retirement / mutation-count 范围、任意网络分区、进程被 SIGKILL 的所有时点、broker 集群灾难 |
+| 尚未覆盖 | publish 请求已到 broker、client 在 confirm 前断线等 confirm-lost / ambiguous outcome 组合；40s timeout 的每种 broker 结果；跨节点时钟/网络分区组合 | 不得据 5/5 fact inventory 宣称已完成整个 #1826 或 broker exactly-once；timeout 仍须保守按可能已 delivery 处理 |
 
 因此运行期与文档统一采用 at-least-once 术语。任何依赖“CAS 使 broker 至多 publish 一次”的实现或运维
 假设都不成立；稳定事件身份与 consumer inbox 幂等是 L2 闭环不可删减的组成部分。

@@ -484,6 +484,7 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
 
     let response = service
         .publish_config(
+            settings::config_publish_receipt_for_test(),
             tenant,
             test_actor(tenant)?,
             SettingsConfigPublishRequest {

@@ -94,6 +94,7 @@ fault-matrix-test-support = ["dep:anyhow"]
 [dev-dependencies]
 generated = { path = "../../generated" }
 toml = { workspace = true }
+httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 authn = { path = "../../crates/authn", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 # #1224 trace 接线单测：复用 tracewire 的 `test-util` 脚手架（with_test_subscriber）装 otel subscriber，

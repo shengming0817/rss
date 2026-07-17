@@ -105,3 +105,16 @@ pub const LOCAL_TX_SPECS: &[HttpSpec] = &[
     identity_v1::refresh::SPEC,
     settings_v2::SPEC,
 ];
+
+/// Closed registry of every active OutboxFact HTTP producer and its exact generated fact set.
+pub const OUTBOX_PRODUCERS: &[::vocab::http::HttpProducerEvidence] = &[
+    identity_v1::login::PRODUCER.evidence(),
+    identity_v1::policies_create::PRODUCER.evidence(),
+    identity_v1::policies_deactivate::PRODUCER.evidence(),
+    identity_v1::policies_update::PRODUCER.evidence(),
+    identity_v1::roles_assign::PRODUCER.evidence(),
+    identity_v1::roles_revoke::PRODUCER.evidence(),
+    settings_v1::PRODUCER.evidence(),
+    settings_v5::PRODUCER.evidence(),
+    settings_v6::PRODUCER.evidence(),
+];

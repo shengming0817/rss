@@ -1,0 +1,5 @@
+error[E0599]: no associated function or constant named `new` found for struct `ProducerAssuranceReceipt<M>` in the current scope
+ --> tests/ui/producer_receipt_cannot_be_forged.rs:4:65
+  |
+4 |     let _ = httpserve::ProducerAssuranceReceipt::<RouteMarker>::new();
+  |                                                                 ^^^ associated function or constant not found in `ProducerAssuranceReceipt<RouteMarker>`

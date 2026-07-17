@@ -5,7 +5,10 @@
 
 use consistency::EventEntry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
-use identity::ports::{RoleBinding, RoleBindingLifecycle, RoleId, TenantId, TenantRepoScope};
+use identity::ports::{
+    ROLE_ASSIGNED_CONTRACT, ROLE_REVOKED_CONTRACT, RoleBinding, RoleBindingLifecycle, RoleId,
+    RolesAssignProducerReceipt, RolesRevokeProducerReceipt, TenantId, TenantRepoScope,
+};
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
@@ -63,6 +66,7 @@ impl PgRoleBindingLifecycle {
 impl RoleBindingLifecycle for PgRoleBindingLifecycle {
     async fn assign_and_emit(
         &self,
+        receipt: RolesAssignProducerReceipt,
         scope: TenantRepoScope,
         binding: RoleBinding,
         entry: EventEntry,
@@ -80,6 +84,7 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
                 "role binding assign co-tx: envelope tenant does not match binding tenant",
             )));
         }
+        let authorized_env = env.clone();
         self.pool
             .co_tx_with_outbox(
                 scope,
@@ -101,7 +106,20 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
                         .execute(conn.conn())
                         .await
                         .map_err(OutboxEmitError::new)
-                        .map(|_| ())
+                        .map(|_| ())?;
+                        let authorization = receipt
+                            .authorize(ROLE_ASSIGNED_CONTRACT)
+                            .ok_or_else(|| {
+                                OutboxEmitError::new(std::io::Error::other(
+                                    "role binding assign co-tx: producer receipt does not authorize role-assigned",
+                                ))
+                            })?;
+                        if !authorized_env.matches_contract(authorization.fact_contract()) {
+                            return Err(OutboxEmitError::new(std::io::Error::other(
+                                "role binding assign co-tx: producer authorization does not match outbox envelope",
+                            )));
+                        }
+                        Ok(())
                     })
                 },
                 OutboxEmitError::new,
@@ -111,6 +129,7 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
 
     async fn revoke_and_emit(
         &self,
+        receipt: RolesRevokeProducerReceipt,
         scope: TenantRepoScope,
         role_id: RoleId,
         subject: String,
@@ -146,6 +165,18 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
                         .rows_affected();
                         if deleted == 0 {
                             return Ok(false);
+                        }
+                        let authorization = receipt
+                            .authorize(ROLE_REVOKED_CONTRACT)
+                            .ok_or_else(|| {
+                                OutboxEmitError::new(std::io::Error::other(
+                                    "role binding revoke co-tx: producer receipt does not authorize role-revoked",
+                                ))
+                            })?;
+                        if !env.matches_contract(authorization.fact_contract()) {
+                            return Err(OutboxEmitError::new(std::io::Error::other(
+                                "role binding revoke co-tx: producer authorization does not match outbox envelope",
+                            )));
                         }
                         let _outcome =
                             append_outbox_with_projection(conn, &entry, &env, &projection_registry)

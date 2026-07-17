@@ -813,6 +813,15 @@ impl OutboxEnvelope {
         &self.schema_hash
     }
 
+    /// Exact-match a generated fact contract against every persisted routing identity column.
+    /// Producer receipts are checked through this funnel immediately before an authorized append.
+    pub(crate) fn matches_contract(&self, contract: vocab::ContractBinding) -> bool {
+        self.domain() == contract.domain()
+            && self.contract_id() == contract.contract_id()
+            && self.contract_version() == contract.version()
+            && self.schema_hash() == contract.schema_hash()
+    }
+
     /// 借出 tenant_id；outbox 表列、RLS 与 metadata `tenantId` 共享此类型层来源。
     pub(crate) fn tenant(&self) -> vocab::TenantId {
         self.tenant

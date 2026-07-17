@@ -10,6 +10,9 @@
 //! - `old_route_api_is_removed`：旧 Route/PrimaryRoute/字段级 auth scope/mount_primary 均不可用。
 //! - `raw_method_router_cannot_mount`：production `mount` 签名不接受 MethodRouter；默认 feature graph
 //!   完全不含 raw test helpers 的独立 Hard 证明见 `default_feature_surface.rs`。
+//! - `producer_*`：OutboxFact route 只能经 generated producer binding + matching move-only marker
+//!   mount；跨 route、旧 `new`、重复 emitted facts、receipt 伪造与 handler 选择 same-marker
+//!   binding 均在编译期失败。
 //!
 //! 正向证据（compile pass）`funnel_pass`：funnel 正确用法编译通过（anti-vacuity——证明上述 fail 非「整个 API 不可用」）。
 //!
@@ -20,6 +23,7 @@ fn ui() {
     t.pass("tests/ui/funnel_pass.rs");
     t.pass("tests/ui/local_only_classified_state_pass.rs");
     t.pass("tests/ui/primary_local_only_classified_state_pass.rs");
+    t.pass("tests/ui/producer_funnel_pass.rs");
     t.compile_fail("tests/ui/cannot_bind_unfinalized.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated.rs");
     t.compile_fail("tests/ui/nonprimary_cannot_mount_primary.rs");
@@ -39,4 +43,9 @@ fn ui() {
     t.compile_fail("tests/ui/primary_local_only_rejects_write_state.rs");
     t.compile_fail("tests/ui/primary_local_only_rejects_cross_tenant_state.rs");
     t.compile_fail("tests/ui/primary_consistency_marker_mismatch.rs");
+    t.compile_fail("tests/ui/producer_old_mount_is_rejected.rs");
+    t.compile_fail("tests/ui/producer_marker_mismatch.rs");
+    t.compile_fail("tests/ui/producer_receipt_cannot_be_forged.rs");
+    t.compile_fail("tests/ui/producer_handler_cannot_select_binding.rs");
+    t.compile_fail("tests/ui/producer_duplicate_facts.rs");
 }

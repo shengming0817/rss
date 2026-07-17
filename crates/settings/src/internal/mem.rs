@@ -23,7 +23,10 @@ use crate::domain::{
 };
 #[cfg(any(test, feature = "seed-data"))]
 use crate::domain::{SecretEntry, SecretKey, SecretRepoError};
-use crate::ports::{ConfigRepo, ConfigUnitOfWork, TenantRepoScope};
+use crate::ports::{
+    ConfigDeleteReceipt, ConfigPublishReceipt, ConfigRepo, ConfigRollbackReceipt, ConfigUnitOfWork,
+    TenantRepoScope,
+};
 #[cfg(any(test, feature = "seed-data"))]
 use crate::ports::{
     SecretInternalPublishCommand, SecretPublishCommand, SecretRepo, SecretRepublishCommand,
@@ -236,9 +239,10 @@ impl<E> InMemConfigUnitOfWork<E> {
     }
 }
 
-impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigUnitOfWork<E> {
-    async fn commit(
+impl<E: OutboxEmitter + Send + Sync + 'static> InMemConfigUnitOfWork<E> {
+    async fn commit_authorized(
         &self,
+        authorized_fact: vocab::ContractBinding,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
         outbox_entry: EventEntry,
@@ -246,9 +250,12 @@ impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigU
     ) -> Result<(), ConfigRepoError> {
         let _commit = self.entries.commit_lock.lock().await;
         let tenant = scope.tenant();
-        if mutation.tenant() != tenant || envelope.tenant() != tenant {
+        if mutation.tenant() != tenant
+            || envelope.tenant() != tenant
+            || *envelope.contract() != authorized_fact
+        {
             return Err(ConfigRepoError::Storage(Box::new(std::io::Error::other(
-                "config tenant mismatch",
+                "config producer authorization mismatch",
             ))));
         }
         cas_mutation(&self.entries, tenant, &mutation)?;
@@ -257,6 +264,83 @@ impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigU
             return Err(ConfigRepoError::Storage(Box::new(error)));
         }
         Ok(())
+    }
+}
+
+impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigUnitOfWork<E> {
+    async fn commit_publish(
+        &self,
+        receipt: ConfigPublishReceipt,
+        scope: TenantRepoScope,
+        mutation: ConfigMutation,
+        outbox_entry: EventEntry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(), ConfigRepoError> {
+        let authorization = receipt
+            .authorize(generated::event::settings_v1::CONTRACT)
+            .ok_or_else(|| {
+                ConfigRepoError::Storage(Box::new(std::io::Error::other(
+                    "config publish receipt does not authorize generated fact",
+                )))
+            })?;
+        self.commit_authorized(
+            authorization.fact_contract(),
+            scope,
+            mutation,
+            outbox_entry,
+            envelope,
+        )
+        .await
+    }
+
+    async fn commit_delete(
+        &self,
+        receipt: ConfigDeleteReceipt,
+        scope: TenantRepoScope,
+        mutation: ConfigMutation,
+        outbox_entry: EventEntry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(), ConfigRepoError> {
+        let authorization = receipt
+            .authorize(generated::event::settings_v1::CONTRACT)
+            .ok_or_else(|| {
+                ConfigRepoError::Storage(Box::new(std::io::Error::other(
+                    "config delete receipt does not authorize generated fact",
+                )))
+            })?;
+        self.commit_authorized(
+            authorization.fact_contract(),
+            scope,
+            mutation,
+            outbox_entry,
+            envelope,
+        )
+        .await
+    }
+
+    async fn commit_rollback(
+        &self,
+        receipt: ConfigRollbackReceipt,
+        scope: TenantRepoScope,
+        mutation: ConfigMutation,
+        outbox_entry: EventEntry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(), ConfigRepoError> {
+        let authorization = receipt
+            .authorize(generated::event::settings_v1::CONTRACT)
+            .ok_or_else(|| {
+                ConfigRepoError::Storage(Box::new(std::io::Error::other(
+                    "config rollback receipt does not authorize generated fact",
+                )))
+            })?;
+        self.commit_authorized(
+            authorization.fact_contract(),
+            scope,
+            mutation,
+            outbox_entry,
+            envelope,
+        )
+        .await
     }
 }
 
@@ -485,7 +569,6 @@ mod tests {
 
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const TENANT_B: &str = "00000000-0000-4000-8000-000000000abc";
-    const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[derive(Clone, Default)]
     struct CountingEmitter {
@@ -601,12 +684,7 @@ mod tests {
     fn envelope(tenant_raw: &str) -> OutboxEnvelopeParts {
         let tenant = tenant(tenant_raw);
         OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static(
-                "settings",
-                "settings.config-version-changed",
-                "v1",
-                HASH,
-            ),
+            generated::event::settings_v1::CONTRACT,
             tenant,
             EnvelopeSubjectId::from_opaque("app.scope").expect("subject"),
             OutboxActor::scoped(
@@ -616,6 +694,10 @@ mod tests {
                 vocab::ScopedTenant::Tenant,
             ),
         )
+    }
+
+    fn publish_receipt() -> ConfigPublishReceipt {
+        httpserve::ProducerMarker::for_test(generated::http::settings_v1::PRODUCER).into_receipt()
     }
 
     #[tokio::test]
@@ -628,7 +710,8 @@ mod tests {
         let key = setting_key("app.scope");
 
         let result = uow
-            .commit(
+            .commit_publish(
+                publish_receipt(),
                 scope(TENANT_A),
                 ConfigMutation::Put(config_entry("app.scope", TENANT_B)),
                 entry("evt-config-entry-mismatch"),
@@ -656,11 +739,53 @@ mod tests {
         let key = setting_key("app.envelope");
 
         let result = uow
-            .commit(
+            .commit_publish(
+                publish_receipt(),
                 scope(TENANT_A),
                 ConfigMutation::Put(config_entry("app.envelope", TENANT_A)),
                 entry("evt-config-envelope-mismatch"),
                 envelope(TENANT_B),
+            )
+            .await;
+
+        assert!(matches!(result, Err(ConfigRepoError::Storage(_))));
+        assert!(
+            repo.find(scope(TENANT_A), &key)
+                .await
+                .expect("find")
+                .is_none()
+        );
+        assert_eq!(emitter.emitted(), 0);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_uow_rejects_fact_not_authorized_by_publish_receipt() {
+        let store = new_config_store();
+        let emitter = CountingEmitter::default();
+        let uow = InMemConfigUnitOfWork::new(store.clone(), emitter.clone());
+        let repo = InMemConfigRepo::from_shared(store);
+        let key = setting_key("app.wrong-fact");
+        let tenant = tenant(TENANT_A);
+        let wrong_envelope = OutboxEnvelopeParts::new(
+            generated::event::identity_v1::session_created::CONTRACT,
+            tenant,
+            EnvelopeSubjectId::from_opaque("app.wrong-fact").expect("subject"),
+            OutboxActor::scoped(
+                vocab::PrincipalKind::Admin,
+                OpaqueActorId::from_opaque("actor").expect("actor"),
+                tenant,
+                vocab::ScopedTenant::Tenant,
+            ),
+        );
+
+        let result = uow
+            .commit_publish(
+                publish_receipt(),
+                scope(TENANT_A),
+                ConfigMutation::Put(config_entry("app.wrong-fact", TENANT_A)),
+                entry("evt-config-wrong-fact"),
+                wrong_envelope,
             )
             .await;
 
@@ -683,7 +808,8 @@ mod tests {
         let key = setting_key("app.rollback");
 
         let result = uow
-            .commit(
+            .commit_publish(
+                publish_receipt(),
                 scope(TENANT_A),
                 ConfigMutation::Put(config_entry("app.rollback", TENANT_A)),
                 entry("evt-config-emit-failure"),
@@ -724,7 +850,8 @@ mod tests {
 
         let first = tokio::spawn(async move {
             failing
-                .commit(
+                .commit_publish(
+                    publish_receipt(),
                     scope(TENANT_A),
                     ConfigMutation::Put(config_entry_version(
                         "app.concurrent-rollback",
@@ -739,7 +866,8 @@ mod tests {
         entered.notified().await;
         let second = tokio::spawn(async move {
             succeeding
-                .commit(
+                .commit_publish(
+                    publish_receipt(),
                     scope(TENANT_A),
                     ConfigMutation::Put(config_entry_version(
                         "app.concurrent-rollback",

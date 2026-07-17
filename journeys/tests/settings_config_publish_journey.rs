@@ -226,6 +226,7 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
     let actor = actor(tenant)?;
     let response = service
         .publish_config(
+            settings::config_publish_receipt_for_test(),
             tenant,
             actor,
             SettingsConfigPublishRequest {
@@ -283,6 +284,7 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
     // 4. publish v1 + v2。
     service
         .publish_config(
+            settings::config_publish_receipt_for_test(),
             tenant,
             subject.clone(),
             SettingsConfigPublishRequest {
@@ -293,6 +295,7 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
         .await?;
     service
         .publish_config(
+            settings::config_publish_receipt_for_test(),
             tenant,
             subject.clone(),
             SettingsConfigPublishRequest {
@@ -303,7 +306,15 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
         .await?;
 
     // 5. rollback to v1（生成 v3）。
-    let resp = service.rollback(tenant, subject, "app.k", 1).await?;
+    let resp = service
+        .rollback(
+            settings::config_rollback_receipt_for_test(),
+            tenant,
+            subject,
+            "app.k",
+            1,
+        )
+        .await?;
     assert_eq!(resp.data.version, 3, "rollback 应生成 v3");
     let restored = query
         .get_config(tenant, "app.k")
@@ -340,8 +351,22 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
     assert_eq!(last.tenant_id, CANON_TENANT);
 
     // 8. delete 追加 v4 tombstone；重复 delete 是 no-op，读取权威 head 后返回 None。
-    service.delete(tenant, actor(tenant)?, "app.k").await?;
-    service.delete(tenant, actor(tenant)?, "app.k").await?;
+    service
+        .delete(
+            settings::config_delete_receipt_for_test(),
+            tenant,
+            actor(tenant)?,
+            "app.k",
+        )
+        .await?;
+    service
+        .delete(
+            settings::config_delete_receipt_for_test(),
+            tenant,
+            actor(tenant)?,
+            "app.k",
+        )
+        .await?;
     assert!(query.get_config(tenant, "app.k").await?.is_none());
     let deleted_message = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await?

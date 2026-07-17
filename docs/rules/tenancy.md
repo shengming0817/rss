@@ -442,8 +442,14 @@ coarse allow/deny；唯一例外是 recognized FieldMask obligation 可转成 se
 
 HTTP route gate 与 gRPC 同源。HTTP route -> permission 由契约
 `endpoints.http.auth.permission` overlay 派生。codegen 将 contract/path/method/auth/resource/selfScoped/
-consistency/effects 原子渲染为 `generated::http::HttpSpec::route: vocab::HttpRouteEvidence`；域 route 装配只能经
-`GeneratedPrimaryEndpoint::new(SPEC.route, handler)` 声明进入 primary route gate。
+consistency/effects 原子渲染为 generated binding。普通 Primary route 只能经
+`GeneratedPrimaryEndpoint::new(ROUTE, handler)` 与同契约 `ContractMarker<RouteMarker>` 声明进入
+primary route gate；`OutboxFact` producer 只能经
+`GeneratedPrimaryEndpoint::new_producer(PRODUCER, handler)` 与同契约 move-only
+`ProducerMarker<RouteMarker>` 进入。`new_producer` 从 `PRODUCER` 安装私有 route-bound witness；
+witness 缺失时 extractor fail-closed，成功时 marker 自带 mounted binding。handler 必须消费
+`marker.into_receipt()` 铸造不可替换 binding 的 receipt，再交给 service / Unit-of-Work producer
+funnel。`SPEC.route` 仅用于元数据查询，不是 production 装配入口。
 `httpserve::RouteAuthorizer` 在 handler 前做统一判定，允许后插入 `AuthorizedSubject`；handler 只消费
 该授权主体上下文，不回读 `Authenticated`。owner-scoped（`endpoints.http.resource`）/ self-scoped
 （`endpoints.http.selfScoped`）由 endpoint 内部从 evidence 三分支派生，见

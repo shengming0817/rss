@@ -28,6 +28,7 @@
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
 //! INVARIANT: ASSEMBLY-LOCK-FAST-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_lock_fast_gate_is_typed_and_fail_closed", anti_vacuity = "lock::tests::shared_child_vectors_freeze_bytes_universes_and_final_fingerprint" }—— `verify --fast` executes the complete AssemblyLock protocol crate test carrier.
+//! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }—— L2 assurance drift check is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
 //! INVARIANT: CI-ADAPTIVE-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— GitHub CI workflow
 //!   精确委托闭合 xtask job，Meta/Security 并行，Core tests 仅依赖单次 prerequisites；门归属由
 //!   Hard registry 闭集与穷举 dispatch 强制，YAML 拓扑、权限和 literal 委托由 Medium 结构化守卫
@@ -120,6 +121,8 @@ enum InternalCheck {
     /// ArchRules 派生索引 + 14 行持久化 funnel matrix 文档漂移门。
     ArchRules,
     CodegenCheck,
+    /// committed L2 assurance inventory raw-byte drift gate.
+    L2AssuranceCheck,
     /// active LocalTx manifest/generated/owner route/test typed marker closure.
     LocalTxCoverage,
     /// active LocalOnly effect closure + canonical source receipt coverage
@@ -381,6 +384,14 @@ fn step_codegen_check() -> Step {
         id: GateId::CodegenCheck,
         args: &[],
         kind: StepKind::Internal(InternalCheck::CodegenCheck),
+        env: &[],
+    }
+}
+fn step_l2_assurance_check() -> Step {
+    Step {
+        id: GateId::L2AssuranceCheck,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::L2AssuranceCheck),
         env: &[],
     }
 }
@@ -1242,6 +1253,7 @@ fn run_internal(check: InternalCheck, contract_against: &str) -> Result<()> {
         InternalCheck::RuntimeDepsGuard => run_check(&runtime_deps_guard::RuntimeDepsGuard),
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
+        InternalCheck::L2AssuranceCheck => crate::l2_assurance::run(true),
         InternalCheck::LocalTxCoverage => run_check(&crate::localtx_coverage::LocalTxCoverage),
         InternalCheck::LocalOnlyEffects => run_check(&consistency_effects::LocalOnlyEffects),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
@@ -1949,7 +1961,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 36);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 37);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -2058,14 +2070,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_55_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_56_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 55);
+        assert_eq!(plan.len(), 56);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 55);
+        assert_eq!(ids.len(), 56);
     }
 
     #[test]
@@ -2105,6 +2117,7 @@ mod tests {
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
+                "l2-assurance-check",
                 "localtx-coverage",
                 "local-only-effects",
                 "local-only-execution",
@@ -2366,6 +2379,7 @@ mod tests {
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
+                "l2-assurance-check",
                 "localtx-coverage",
                 "local-only-effects",
                 "pdp-allow-guard",
@@ -2391,7 +2405,7 @@ mod tests {
 
     /// meta checks（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
     /// doc-contracts / consistency-fixtures / event-transport-guard / inbox-cutover-guard /
-    /// runtime-baseline / runtime-deployment-spec / runtime-deps-guard / archrules / codegen / pdp-allow-guard / contract-binding-guard /
+    /// runtime-baseline / runtime-deployment-spec / runtime-deps-guard / archrules / codegen / L2 assurance / pdp-allow-guard / contract-binding-guard /
     /// schema-rls / setlocal-funnel / pg-tenant-tx-guard / repo-scope-guard / tenancy-closeout / migrations-serial / command-symmetry /
     /// reconcile-outbox-command-guard / defer-gate）在两种模式恒在。
     #[test]
@@ -2427,6 +2441,7 @@ mod tests {
                     "runtime-deps-guard",
                     "archrules",
                     "codegen-check",
+                    "l2-assurance-check",
                     "localtx-coverage",
                     "local-only-effects",
                     "pdp-allow-guard",
@@ -2468,10 +2483,11 @@ mod tests {
 
     #[test]
     fn l0_l1_closeout_gates_have_typed_membership_and_order() -> anyhow::Result<()> {
-        const GATES: [(GateId, InternalCheck); 5] = [
+        const GATES: [(GateId, InternalCheck); 6] = [
             (GateId::ContractValidate, InternalCheck::ContractValidate),
             (GateId::ContractBreaking, InternalCheck::ContractBreaking),
             (GateId::CodegenCheck, InternalCheck::CodegenCheck),
+            (GateId::L2AssuranceCheck, InternalCheck::L2AssuranceCheck),
             (GateId::LocalTxCoverage, InternalCheck::LocalTxCoverage),
             (GateId::LocalOnlyEffects, InternalCheck::LocalOnlyEffects),
         ];
@@ -2511,12 +2527,12 @@ mod tests {
 
             assert!(
                 positions.windows(2).all(|pair| pair[0] < pair[1]),
-                "{name} contract/codegen/L0/L1 order drift: {positions:?}"
+                "{name} contract/codegen/L2-assurance/L0/L1 order drift: {positions:?}"
             );
-            assert_eq!(positions[3], positions[2] + 1, "{name} LocalTx order drift");
+            assert_eq!(positions[4], positions[3] + 1, "{name} LocalTx order drift");
             assert_eq!(
-                positions[4],
-                positions[2] + 2,
+                positions[5],
+                positions[3] + 2,
                 "{name} LocalOnly order drift"
             );
         }
@@ -2640,6 +2656,104 @@ mod tests {
             .clone();
         duplicated.push(duplicate);
         assert!(validate_assembly_lock_check(&duplicated).is_err());
+        Ok(())
+    }
+
+    fn validate_l2_assurance_gate(plan: &[Step]) -> anyhow::Result<()> {
+        let registry = REGISTRY
+            .iter()
+            .filter(|spec| spec.id() == GateId::L2AssuranceCheck)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            registry.len() == 1,
+            "expected exactly one L2 assurance registry entry"
+        );
+        let spec = *registry[0];
+        anyhow::ensure!(
+            spec.label() == "l2-assurance-check"
+                && spec.evidence() == crate::ci_lanes::EvidenceKind::Source,
+            "L2 assurance registry binding drift"
+        );
+        anyhow::ensure!(
+            matches!(
+                step_for_id(GateId::L2AssuranceCheck).kind,
+                StepKind::Internal(InternalCheck::L2AssuranceCheck)
+            ),
+            "L2 assurance catalog executor drift"
+        );
+        let gates = plan
+            .iter()
+            .filter(|step| step.id == GateId::L2AssuranceCheck)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(gates.len() == 1, "expected exactly one L2 assurance gate");
+        let gate = gates[0];
+        anyhow::ensure!(!gate.needs_compile(), "L2 assurance must be no-compile");
+        anyhow::ensure!(
+            gate.carrier_file() == Some("xtask/src/l2_assurance.rs"),
+            "L2 assurance carrier drift"
+        );
+        anyhow::ensure!(
+            matches!(
+                gate.kind,
+                StepKind::Internal(InternalCheck::L2AssuranceCheck)
+            ),
+            "L2 assurance executor drift"
+        );
+        anyhow::ensure!(
+            gate.id.spec().lanes() == [Some(CiLane::Meta), None]
+                && gate.id.spec().verify_membership() == VerifyMembership::Included
+                && gate.id.spec().compat() == CompatMembership::Included
+                && gate.id.spec().tool() == ToolRequirement::InProcess,
+            "L2 assurance typed membership drift"
+        );
+        let codegen = plan
+            .iter()
+            .position(|step| step.id == GateId::CodegenCheck)
+            .context("plan lacks codegen check")?;
+        let assurance = plan
+            .iter()
+            .position(|step| step.id == GateId::L2AssuranceCheck)
+            .context("plan lacks L2 assurance check")?;
+        anyhow::ensure!(
+            assurance == codegen + 1,
+            "L2 assurance must immediately follow codegen"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
+        for (name, plan) in [
+            ("verify", plan_for(PlanTarget::Verify)),
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
+            validate_l2_assurance_gate(&plan).with_context(|| format!("{name} plan"))?;
+        }
+
+        let real_plan = verify_plan(&opts(true, false));
+
+        let mut omitted = real_plan.clone();
+        omitted.retain(|step| step.id != GateId::L2AssuranceCheck);
+        assert!(validate_l2_assurance_gate(&omitted).is_err());
+
+        let mut duplicated = real_plan.clone();
+        let duplicate = real_plan
+            .iter()
+            .find(|step| step.id == GateId::L2AssuranceCheck)
+            .context("committed fast plan lacks L2 assurance check")?
+            .clone();
+        duplicated.push(duplicate);
+        assert!(validate_l2_assurance_gate(&duplicated).is_err());
+
+        let mut wrong_executor = real_plan;
+        wrong_executor
+            .iter_mut()
+            .find(|step| step.id == GateId::L2AssuranceCheck)
+            .context("committed fast plan lacks L2 assurance check")?
+            .kind = StepKind::Internal(InternalCheck::CodegenCheck);
+        assert!(validate_l2_assurance_gate(&wrong_executor).is_err());
         Ok(())
     }
 
@@ -3003,6 +3117,7 @@ mod tests {
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
+                "l2-assurance-check",
                 "localtx-coverage",
                 "local-only-effects",
                 "pdp-allow-guard",
@@ -3125,6 +3240,7 @@ mod tests {
             "runtime-deps-guard",
             "archrules",
             "codegen-check",
+            "l2-assurance-check",
             "localtx-coverage",
             "local-only-effects",
             "pdp-allow-guard",

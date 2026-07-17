@@ -1,0 +1,18 @@
+error[E0080]: evaluation panicked: HTTP producer emitted facts must not contain duplicates
+  --> tests/ui/producer_duplicate_facts.rs:37:45
+   |
+37 | const _: HttpProducerBinding<RouteMarker> = HttpProducerBinding::from_static(ROUTE, &[FACT, FACT]);
+   |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `HttpProducerBinding::<RouteMarker>::from_static`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: $WORKSPACE/crates/vocab/src/http.rs
+   |
+   | /                 assert!(
+   | |                     !contract_binding_eq(emitted_facts[current], emitted_facts[candidate]),
+   | |                     "HTTP producer emitted facts must not contain duplicates"
+   | |                 );
+   | |_________________- in this macro invocation

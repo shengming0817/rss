@@ -25,6 +25,13 @@ use generated::http::identity_v1::{
     refresh::{LOCAL_TX as REFRESH_LOCAL_TX, ROUTE as REFRESH_ROUTE},
 };
 
+// Exact fact bindings cross the domain→adapter port as zero-copy re-exports. Adapters retain the
+// normal Adapter→Domain dependency and cannot introduce an Adapter→Generated layer edge.
+pub use generated::event::identity_v1::policy_updated::CONTRACT as POLICY_UPDATED_CONTRACT;
+pub use generated::event::identity_v1::role_assigned::CONTRACT as ROLE_ASSIGNED_CONTRACT;
+pub use generated::event::identity_v1::role_revoked::CONTRACT as ROLE_REVOKED_CONTRACT;
+pub use generated::event::identity_v1::session_created::CONTRACT as SESSION_CREATED_CONTRACT;
+
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造器仍 `pub(crate)` funnel）。
 // reason: AccountStatus 自 #1277 起不再是任一 port 方法的入/出参（lockout 推进折叠进 `authenticate`，
 // 返回 AuthOutcome）；保留 `pub` 导出是为后续账户门控 handler（PR5/W）跨 crate 消费的账户状态闭值集，
@@ -50,6 +57,26 @@ pub type SessionLogoutRouteMarker = generated::http::identity_v1::logout::RouteM
 pub type PasswordChangeRouteMarker = generated::http::identity_v1::password_change::RouteMarker;
 /// Generated route marker retained by the refresh rotation LocalTx command.
 pub type RefreshRotationRouteMarker = generated::http::identity_v1::refresh::RouteMarker;
+
+/// `identity.login` request-scoped producer assurance carried into the session co-tx funnel.
+pub type LoginProducerReceipt =
+    httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::login::RouteMarker>;
+/// `identity.roles-assign` request-scoped producer assurance.
+pub type RolesAssignProducerReceipt =
+    httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::roles_assign::RouteMarker>;
+/// `identity.roles-revoke` request-scoped producer assurance.
+pub type RolesRevokeProducerReceipt =
+    httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::roles_revoke::RouteMarker>;
+/// `identity.policies-create` request-scoped producer assurance.
+pub type PoliciesCreateProducerReceipt =
+    httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::policies_create::RouteMarker>;
+/// `identity.policies-update` request-scoped producer assurance.
+pub type PoliciesUpdateProducerReceipt =
+    httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::policies_update::RouteMarker>;
+/// `identity.policies-deactivate` request-scoped producer assurance.
+pub type PoliciesDeactivateProducerReceipt = httpserve::ProducerAssuranceReceipt<
+    generated::http::identity_v1::policies_deactivate::RouteMarker,
+>;
 
 /// `identity.logout` 的不可伪造 LocalTx 写命令。
 ///
@@ -307,6 +334,7 @@ pub trait ResourceAttributeWriteRepoLocal: Send + Sync {
 pub trait PolicyLifecycleLocal: Send + Sync {
     async fn create_and_emit(
         &self,
+        receipt: PoliciesCreateProducerReceipt,
         scope: TenantRepoScope,
         policy: Policy,
         entry: EventEntry,
@@ -315,6 +343,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
 
     async fn update_and_emit(
         &self,
+        receipt: PoliciesUpdateProducerReceipt,
         scope: TenantRepoScope,
         policy: Policy,
         expected: PolicyVersion,
@@ -324,6 +353,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
 
     async fn deactivate_and_emit(
         &self,
+        receipt: PoliciesDeactivateProducerReceipt,
         scope: TenantRepoScope,
         id: PolicyId,
         expected: PolicyVersion,
@@ -446,6 +476,7 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
     /// 事务原子写入。tenant scope 来自 `binding.tenant()`（无独立 tenant 入参可错位）。
     async fn assign_and_emit(
         &self,
+        receipt: RolesAssignProducerReceipt,
         scope: TenantRepoScope,
         binding: RoleBinding,
         entry: EventEntry,
@@ -457,6 +488,7 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
     /// 返回 `Ok(false)`（幂等 + 跨租隐藏存在性）。`entry`/`envelope` 在未命中时被丢弃（其 EventId 独立 opaque）。
     async fn revoke_and_emit(
         &self,
+        receipt: RolesRevokeProducerReceipt,
         scope: TenantRepoScope,
         role_id: RoleId,
         subject: String,
@@ -624,6 +656,7 @@ pub trait SessionLifecycleLocal: Send + Sync {
     /// API**（OUTBOX-COTX-SESSION-01：域无 `save`/`emit` 分调、无半开事务句柄）。
     async fn persist_session_and_emit(
         &self,
+        receipt: LoginProducerReceipt,
         scope: TenantRepoScope,
         session: Session,
         entry: EventEntry,
@@ -890,9 +923,9 @@ mod smoke {
     //! smoke **只构造 Dyn wrapper + 断言 `Send`，不 `.await`**（不触 repo `todo!()`）。async future 的 Send + 跨
     //! `tokio::spawn` 调度由 diport `signer.rs` `mockall_mock_loads_into_dyn_signer` 同范式已证（dynosaur Send 变体保证）。
     use super::{
-        DynRoleReadRepo, DynSessionLifecycle, EventEntry, IdentityError, OutboxEmitError,
-        OutboxEnvelopeParts, Role, RoleId, RoleReadRepo, Session, SessionId, SessionLifecycle,
-        SessionLogoutMutation, TenantRepoScope,
+        DynRoleReadRepo, DynSessionLifecycle, EventEntry, IdentityError, LoginProducerReceipt,
+        OutboxEmitError, OutboxEnvelopeParts, Role, RoleId, RoleReadRepo, Session, SessionId,
+        SessionLifecycle, SessionLogoutMutation, TenantRepoScope,
     };
     use std::sync::Arc;
 
@@ -973,6 +1006,7 @@ mod smoke {
     impl SessionLifecycle for NoopSessionLifecycle {
         async fn persist_session_and_emit(
             &self,
+            _receipt: LoginProducerReceipt,
             _scope: TenantRepoScope,
             _session: Session,
             _entry: EventEntry,
@@ -1038,6 +1072,7 @@ mod smoke {
         impl SessionLifecycle for TestSessionLifecycle {
             async fn persist_session_and_emit(
                 &self,
+                receipt: LoginProducerReceipt,
                 scope: TenantRepoScope,
                 session: Session,
                 entry: EventEntry,

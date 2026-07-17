@@ -138,6 +138,58 @@ impl FaultMatrixOutboxStatus {
             Self::Dlx => "dlx",
         }
     }
+
+    fn parse(raw: &str) -> FaultMatrixResult<Self> {
+        match raw {
+            "pending" => Ok(Self::Pending),
+            "published" => Ok(Self::Published),
+            "dlx" => Ok(Self::Dlx),
+            _ => bail!("unknown fault-matrix outbox status `{raw}`"),
+        }
+    }
+}
+
+/// Typed durable retry observation for one exact outbox event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultMatrixOutboxRetryObservation {
+    status: FaultMatrixOutboxStatus,
+    retry_count: u32,
+    retry_after_scheduled: bool,
+    lease_cleared: bool,
+}
+
+impl FaultMatrixOutboxRetryObservation {
+    fn try_from_row(row: Option<(String, i32, bool, bool)>) -> FaultMatrixResult<Self> {
+        let (status, retry_count, retry_after_scheduled, lease_cleared) =
+            row.ok_or_else(|| anyhow!("outbox retry row missing for fault-matrix event"))?;
+        Ok(Self {
+            status: FaultMatrixOutboxStatus::parse(&status)?,
+            retry_count: u32::try_from(retry_count)
+                .map_err(|_| anyhow!("negative fault-matrix outbox retry_count `{retry_count}`"))?,
+            retry_after_scheduled,
+            lease_cleared,
+        })
+    }
+
+    /// Return the closed durable outbox status.
+    pub fn status(&self) -> FaultMatrixOutboxStatus {
+        self.status
+    }
+
+    /// Return the validated non-negative durable retry count.
+    pub fn retry_count(&self) -> u32 {
+        self.retry_count
+    }
+
+    /// Whether `retry_after` is present and strictly later than the row's settlement update.
+    pub fn retry_after_scheduled(&self) -> bool {
+        self.retry_after_scheduled
+    }
+
+    /// Whether both lease token and lease deadline were cleared by requeue settlement.
+    pub fn lease_cleared(&self) -> bool {
+        self.lease_cleared
+    }
 }
 
 /// Closed dead-letter source observer for the fault matrix.
@@ -566,6 +618,25 @@ impl PgFaultMatrixHarness {
         .fetch_one(&self.owner_pool)
         .await?;
         Ok(row.get::<i64, _>(0))
+    }
+
+    /// Read the authoritative retry state for one tenant-scoped outbox event.
+    pub async fn outbox_retry_observation(
+        &self,
+        tenant: vocab::TenantId,
+        event_id: &str,
+    ) -> FaultMatrixResult<FaultMatrixOutboxRetryObservation> {
+        let row: Option<(String, i32, bool, bool)> = sqlx::query_as(
+            "SELECT status, retry_count, \
+                    retry_after IS NOT NULL AND retry_after > updated_at, \
+                    lease_token IS NULL AND lease_until IS NULL \
+             FROM outbox WHERE tenant_id = $1::uuid AND event_id = $2",
+        )
+        .bind(tenant.to_string())
+        .bind(event_id)
+        .fetch_optional(&self.owner_pool)
+        .await?;
+        FaultMatrixOutboxRetryObservation::try_from_row(row)
     }
 
     /// Read the authoritative unified dead-letter row written by outbox relay DLX.
@@ -1513,4 +1584,41 @@ fn test_dlx_payload_protector() -> FaultMatrixResult<DlxPayloadProtector> {
         DynKeyProvider::new_box(FaultMatrixKeyProvider),
         eventexec::DlxHotKeyName::try_new("fault-matrix-dlx")?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FaultMatrixOutboxRetryObservation, FaultMatrixOutboxStatus, FaultMatrixResult};
+
+    #[test]
+    fn outbox_retry_observation_accepts_closed_retry_state() -> FaultMatrixResult<()> {
+        let observation = FaultMatrixOutboxRetryObservation::try_from_row(Some((
+            "pending".to_string(),
+            1,
+            true,
+            true,
+        )))?;
+        assert_eq!(observation.status(), FaultMatrixOutboxStatus::Pending);
+        assert_eq!(observation.retry_count(), 1);
+        assert!(observation.retry_after_scheduled());
+        assert!(observation.lease_cleared());
+        Ok(())
+    }
+
+    #[test]
+    fn outbox_retry_observation_rejects_missing_row() {
+        assert!(FaultMatrixOutboxRetryObservation::try_from_row(None).is_err());
+    }
+
+    #[test]
+    fn outbox_retry_observation_rejects_unknown_status() {
+        let row = Some(("publishing".to_string(), 1, true, true));
+        assert!(FaultMatrixOutboxRetryObservation::try_from_row(row).is_err());
+    }
+
+    #[test]
+    fn outbox_retry_observation_rejects_negative_retry_count() {
+        let row = Some(("pending".to_string(), -1, true, true));
+        assert!(FaultMatrixOutboxRetryObservation::try_from_row(row).is_err());
+    }
 }

@@ -13,7 +13,7 @@ workspace = true
 # `settings = { features = ["seed-data"] }` 启用。
 [features]
 seed-data = []
-test-support = []
+test-support = ["httpserve/test-util"]
 
 [dependencies]
 thiserror = { workspace = true }

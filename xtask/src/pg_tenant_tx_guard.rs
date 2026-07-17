@@ -1614,7 +1614,7 @@ fn retry_placement_findings(
     }
 
     let allowed = match rel {
-        "config_repo.rs" => Some(("commit", "settings-config-commit")),
+        "config_repo.rs" => Some(("commit_authorized", "settings-config-commit")),
         "credential_repo.rs" => Some(("apply_password_change", "identity-password-change")),
         "session_lifecycle.rs" => Some(("logout", "identity-session-logout")),
         "refresh_token_store.rs" => Some(("rotate", "identity-refresh-rotate")),
@@ -7734,11 +7734,27 @@ pub mod fault_matrix;
         let mut sites = BTreeSet::new();
         let findings = retry_placement_findings(
             "config_repo.rs",
-            "use crate::tx_retry::{run_pg_tx_retry as retry}; impl Uow { async fn commit(&self){ retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            "use crate::tx_retry::{run_pg_tx_retry as retry}; impl Uow { async fn commit_authorized(&self){ retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
             &mut sites,
         );
         assert!(findings.is_empty(), "{findings:?}");
         assert!(sites.contains("settings-config-commit"));
+    }
+
+    #[test]
+    fn retry_guard_rejects_settings_retry_outside_private_authorized_funnel() {
+        let mut sites = BTreeSet::new();
+        let findings = retry_placement_findings(
+            "config_repo.rs",
+            "impl Uow { async fn commit_publish(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            &mut sites,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::RetryPlacement),
+            "public route-specific methods must delegate to the single authorized retry funnel"
+        );
     }
 
     #[test]
@@ -7860,7 +7876,7 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         );
         let wrapper = retry_placement_findings(
             "config_repo.rs",
-            "use crate::tx_retry as retry; impl Uow { async fn commit(&self){ retry::run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            "use crate::tx_retry as retry; impl Uow { async fn commit_authorized(&self){ retry::run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
             &mut sites,
         );
         assert!(direct.is_empty(), "{direct:?}");
@@ -8170,7 +8186,7 @@ pub trait SecretRepoLocal: Send + Sync {
         assert_retry_shape(
             &mut sites,
             "config_repo.rs",
-            "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            "impl Uow { async fn commit_authorized(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
         );
         assert_retry_shape(
             &mut sites,

@@ -23,8 +23,8 @@ use futures::StreamExt;
 use futures::future::LocalBoxFuture;
 use postgres::fault_matrix::{
     FaultMatrixDeadLetterEncoding, FaultMatrixDeadLetterSource, FaultMatrixDeadLetterSummary,
-    FaultMatrixOutboxStatus, FaultMatrixPublishOutcome, PgFaultMatrixConfig, PgFaultMatrixHarness,
-    PgFaultMatrixLoginCredentials,
+    FaultMatrixOutboxRetryObservation, FaultMatrixOutboxStatus, FaultMatrixPublishOutcome,
+    PgFaultMatrixConfig, PgFaultMatrixHarness, PgFaultMatrixLoginCredentials,
 };
 use redis::RedisRuntimeDeps;
 use testkit::crash_matrix::{CrashCase, CrashFaultSpec, CrashMatrix, CrashRunner, CrashStatus};
@@ -43,19 +43,12 @@ fn relay_budget() -> Result<RelayBudget> {
     )?)
 }
 
-type CaseRunFn = for<'a> fn(
-    &'a CrashCase,
-    &'a PgHarness,
-    &'a RabbitHarness,
-    &'a RedisHarness,
-    &'a RunScope,
-) -> LocalBoxFuture<'a, Result<()>>;
-
+/// INVARIANT: CONSISTENCY-READY-CONTRACT-BINDING-01 { level = "Hard", exec = "native-compile", source = "code", native = "each ready case carries one generated ContractBinding and CrashFaultSpec dispatch is exhaustive" }
 struct ReadyCaseRunner {
     id: &'static str,
     fault_spec: CrashFaultSpec,
     runner: CrashRunner,
-    run: CaseRunFn,
+    contract: vocab::ContractBinding,
 }
 
 impl ReadyCaseRunner {
@@ -63,13 +56,13 @@ impl ReadyCaseRunner {
         id: &'static str,
         fault_spec: CrashFaultSpec,
         runner: CrashRunner,
-        run: CaseRunFn,
+        contract: vocab::ContractBinding,
     ) -> Self {
         Self {
             id,
             fault_spec,
             runner,
-            run,
+            contract,
         }
     }
 
@@ -99,20 +92,20 @@ impl ReadyCaseRunner {
                 self.fault_spec.expected_runner()
             );
         }
-        if case.domain() != self.fault_spec.expected_domain() {
+        if case.domain() != self.contract.domain() {
             bail!(
-                "ready fixture `{}` declares domain `{}`, but fault spec expects `{}`",
+                "ready fixture `{}` declares domain `{}`, but generated contract binds `{}`",
                 case.id(),
                 case.domain(),
-                self.fault_spec.expected_domain()
+                self.contract.domain()
             );
         }
-        if case.contract_id() != self.fault_spec.expected_contract_id() {
+        if case.contract_id() != self.contract.contract_id() {
             bail!(
-                "ready fixture `{}` declares contract `{}`, but fault spec expects `{}`",
+                "ready fixture `{}` declares contract `{}`, but generated contract binds `{}`",
                 case.id(),
                 case.contract_id(),
-                self.fault_spec.expected_contract_id()
+                self.contract.contract_id()
             );
         }
         Ok(())
@@ -124,79 +117,91 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         "outbox-after-publish-before-settle",
         CrashFaultSpec::OutboxAfterPublishBeforeSettle,
         CrashRunner::PostgresRabbitmq,
-        run_outbox_after_publish_before_settle,
+        generated::event::identity_v1::session_created::CONTRACT,
     ),
     ReadyCaseRunner::new(
         "outbox-transient-publish-failure",
         CrashFaultSpec::OutboxTransientPublishFailure,
         CrashRunner::Postgres,
-        run_outbox_transient_publish_failure,
+        generated::event::settings_v1::CONTRACT,
     ),
     ReadyCaseRunner::new(
         "outbox-ambiguous-publish-failure",
         CrashFaultSpec::OutboxAmbiguousPublishFailure,
         CrashRunner::Postgres,
-        run_outbox_ambiguous_publish_failure,
+        generated::event::identity_v1::session_created::CONTRACT,
     ),
     ReadyCaseRunner::new(
         "outbox-permanent-publish-failure",
         CrashFaultSpec::OutboxPermanentPublishFailure,
         CrashRunner::Postgres,
-        run_outbox_permanent_publish_failure,
+        generated::event::identity_v1::role_assigned::CONTRACT,
+    ),
+    ReadyCaseRunner::new(
+        "outbox-policy-updated-transient-publish-failure",
+        CrashFaultSpec::OutboxTransientPublishFailure,
+        CrashRunner::Postgres,
+        generated::event::identity_v1::policy_updated::CONTRACT,
+    ),
+    ReadyCaseRunner::new(
+        "outbox-role-revoked-permanent-publish-failure",
+        CrashFaultSpec::OutboxPermanentPublishFailure,
+        CrashRunner::Postgres,
+        generated::event::identity_v1::role_revoked::CONTRACT,
     ),
     ReadyCaseRunner::new(
         "inbox-claim-crash-before-commit",
         CrashFaultSpec::InboxClaimCrashBeforeCommit,
         CrashRunner::Postgres,
-        run_inbox_claim_crash_before_commit,
+        generated::event::identity_v1::session_created::CONTRACT,
     ),
     ReadyCaseRunner::new(
         "inbox-commit-before-ack-crash",
         CrashFaultSpec::InboxCommitBeforeAckCrash,
         CrashRunner::PostgresRabbitmq,
-        run_inbox_commit_before_ack_crash,
+        generated::event::identity_v1::session_created::CONTRACT,
     ),
     ReadyCaseRunner::new(
         "inbox-lease-lost-before-commit",
         CrashFaultSpec::InboxLeaseLostBeforeCommit,
         CrashRunner::Postgres,
-        run_inbox_lease_lost_before_commit,
+        generated::event::identity_v1::session_created::CONTRACT,
     ),
     ReadyCaseRunner::new(
         "saga-forward-completed-before-checkpoint",
         CrashFaultSpec::SagaForwardCompletedBeforeCheckpoint,
         CrashRunner::PostgresRedis,
-        run_saga_forward_completed_before_checkpoint,
+        generated::saga::billing_v1::CONTRACT,
     ),
     ReadyCaseRunner::new(
         "saga-compensation-interrupted",
         CrashFaultSpec::SagaCompensationInterrupted,
         CrashRunner::PostgresRedis,
-        run_saga_compensation_interrupted,
+        generated::saga::billing_v1::CONTRACT,
     ),
     ReadyCaseRunner::new(
         "projection-after-apply-before-checkpoint",
         CrashFaultSpec::ProjectionAfterApplyBeforeCheckpoint,
         CrashRunner::Postgres,
-        run_projection_after_apply_before_checkpoint,
+        generated::http::audit_v2::CONTRACT,
     ),
     ReadyCaseRunner::new(
         "projection-stale-checkpoint-writer",
         CrashFaultSpec::ProjectionStaleCheckpointWriter,
         CrashRunner::Postgres,
-        run_projection_stale_checkpoint_writer,
+        generated::http::settings_v3::CONTRACT,
     ),
     ReadyCaseRunner::new(
         "reconcile-dispatch-before-result-record",
         CrashFaultSpec::ReconcileDispatchBeforeResultRecord,
         CrashRunner::Postgres,
-        run_reconcile_dispatch_before_result_record,
+        generated::http::identity_v2::CONTRACT,
     ),
     ReadyCaseRunner::new(
         "reconcile-lease-lost-before-write",
         CrashFaultSpec::ReconcileLeaseLostBeforeWrite,
         CrashRunner::Postgres,
-        run_reconcile_lease_lost_before_write,
+        generated::http::identity_v2::CONTRACT,
     ),
 ];
 
@@ -463,10 +468,57 @@ async fn run_case(
     redis: &RedisHarness,
     scope: &RunScope,
 ) -> Result<()> {
-    let runner = ready_case_runner(case.id())
-        .ok_or_else(|| anyhow!("ready fixture has no runner function: {}", case.id()))?;
+    let runner = ready_case_runner(case.id()).ok_or_else(|| {
+        anyhow!(
+            "ready fixture has no ready-case runner mapping: {}",
+            case.id()
+        )
+    })?;
     runner.validate_case(case)?;
-    (runner.run)(case, pg, rabbit, redis, scope).await
+    match runner.fault_spec {
+        CrashFaultSpec::OutboxAfterPublishBeforeSettle => {
+            run_outbox_after_publish_before_settle(case, pg, rabbit, redis, scope).await
+        }
+        CrashFaultSpec::OutboxTransientPublishFailure => {
+            run_outbox_transient_publish_failure(case, runner.contract, pg, rabbit, redis, scope)
+                .await
+        }
+        CrashFaultSpec::OutboxAmbiguousPublishFailure => {
+            run_outbox_ambiguous_publish_failure(case, runner.contract, pg, rabbit, redis, scope)
+                .await
+        }
+        CrashFaultSpec::OutboxPermanentPublishFailure => {
+            run_outbox_permanent_publish_failure(case, runner.contract, pg, rabbit, redis, scope)
+                .await
+        }
+        CrashFaultSpec::InboxClaimCrashBeforeCommit => {
+            run_inbox_claim_crash_before_commit(case, pg, rabbit, redis, scope).await
+        }
+        CrashFaultSpec::InboxCommitBeforeAckCrash => {
+            run_inbox_commit_before_ack_crash(case, pg, rabbit, redis, scope).await
+        }
+        CrashFaultSpec::InboxLeaseLostBeforeCommit => {
+            run_inbox_lease_lost_before_commit(case, pg, rabbit, redis, scope).await
+        }
+        CrashFaultSpec::SagaForwardCompletedBeforeCheckpoint => {
+            run_saga_forward_completed_before_checkpoint(case, pg, rabbit, redis, scope).await
+        }
+        CrashFaultSpec::SagaCompensationInterrupted => {
+            run_saga_compensation_interrupted(case, pg, rabbit, redis, scope).await
+        }
+        CrashFaultSpec::ProjectionAfterApplyBeforeCheckpoint => {
+            run_projection_after_apply_before_checkpoint(case, pg, rabbit, redis, scope).await
+        }
+        CrashFaultSpec::ProjectionStaleCheckpointWriter => {
+            run_projection_stale_checkpoint_writer(case, pg, rabbit, redis, scope).await
+        }
+        CrashFaultSpec::ReconcileDispatchBeforeResultRecord => {
+            run_reconcile_dispatch_before_result_record(case, pg, rabbit, redis, scope).await
+        }
+        CrashFaultSpec::ReconcileLeaseLostBeforeWrite => {
+            run_reconcile_lease_lost_before_write(case, pg, rabbit, redis, scope).await
+        }
+    }
 }
 
 fn ready_case_runner(id: &str) -> Option<&'static ReadyCaseRunner> {
@@ -497,6 +549,7 @@ fn run_outbox_after_publish_before_settle<'a>(
 
 fn run_outbox_transient_publish_failure<'a>(
     case: &'a CrashCase,
+    contract: vocab::ContractBinding,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
     _redis: &'a RedisHarness,
@@ -508,25 +561,48 @@ fn run_outbox_transient_publish_failure<'a>(
             .run_outbox_publish(
                 scope.tenant,
                 &event_id,
-                "settings",
-                "settings.config-version-changed",
-                "settings.config-version-changed",
+                contract.domain(),
+                contract.contract_id(),
+                contract.contract_id(),
                 FaultMatrixPublishOutcome::Transient,
             )
             .await?;
-        assert_outbox_count(
-            pg,
-            scope.tenant,
-            &event_id,
-            FaultMatrixOutboxStatus::Pending,
-            1,
-        )
-        .await
+        let observation = pg
+            .harness
+            .outbox_retry_observation(scope.tenant, &event_id)
+            .await?;
+        assert_transient_outbox_retry(&event_id, observation)
     })
+}
+
+fn assert_transient_outbox_retry(
+    event_id: &str,
+    observation: FaultMatrixOutboxRetryObservation,
+) -> Result<()> {
+    if observation.status() != FaultMatrixOutboxStatus::Pending {
+        bail!(
+            "transient outbox {event_id} status = {:?}, expected Pending",
+            observation.status()
+        );
+    }
+    if observation.retry_count() != 1 {
+        bail!(
+            "transient outbox {event_id} retry_count = {}, expected 1",
+            observation.retry_count()
+        );
+    }
+    if !observation.retry_after_scheduled() {
+        bail!("transient outbox {event_id} retry_after was not scheduled after updated_at");
+    }
+    if !observation.lease_cleared() {
+        bail!("transient outbox {event_id} retained a lease after requeue");
+    }
+    Ok(())
 }
 
 fn run_outbox_ambiguous_publish_failure<'a>(
     case: &'a CrashCase,
+    contract: vocab::ContractBinding,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
     _redis: &'a RedisHarness,
@@ -539,9 +615,9 @@ fn run_outbox_ambiguous_publish_failure<'a>(
             .run_outbox_publish_to_budget(
                 scope.tenant,
                 &event_id,
-                "identity",
-                "identity.session-created",
-                "identity.session-created",
+                contract.domain(),
+                contract.contract_id(),
+                contract.contract_id(),
                 FaultMatrixPublishOutcome::Ambiguous,
             )
             .await?;
@@ -567,6 +643,7 @@ fn run_outbox_ambiguous_publish_failure<'a>(
 
 fn run_outbox_permanent_publish_failure<'a>(
     case: &'a CrashCase,
+    contract: vocab::ContractBinding,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
     _redis: &'a RedisHarness,
@@ -578,9 +655,9 @@ fn run_outbox_permanent_publish_failure<'a>(
             .run_outbox_publish(
                 scope.tenant,
                 &event_id,
-                "identity",
-                "identity.role-assigned",
-                "identity.role-assigned",
+                contract.domain(),
+                contract.contract_id(),
+                contract.contract_id(),
                 FaultMatrixPublishOutcome::Permanent,
             )
             .await?;

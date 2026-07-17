@@ -33,9 +33,10 @@
 //! INVARIANT: CONTRACT-HTTP-PROJECTION-COVERAGE-01 { level = "Medium", exec = "verify", source = "code" }— active GET response
 //! 中的 `x-pii` 字段与 `tenantId` 字段必须经 `[endpoints.http.projection]` 的 `responsePath` 精确 enrollment（R23）；
 //! contract metadata/codegen 是唯一 carrier，handler 不维护人工矩阵。
-//! INVARIANT: CONTRACT-CONSISTENCY-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" }— `consistencyLevel`
+//! INVARIANT: CONTRACT-CONSISTENCY-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::r22_http_outbox_emits_must_stay_in_producer_domain_for_every_lifecycle", anti_vacuity = "tests::r22_http_outbox_emits_accepts_same_domain_for_every_lifecycle" }— `consistencyLevel`
 //! 必须有 typed `[capabilities.*]` 证据，且能力块不得跨等级漂移（R22）。HTTP L2 producer 的 `emits`
-//! 须引用存在的 L2 active event contract，L3 只接受当前 manifest 能表达的 workflow 证据；L4 还要求
+//! 在 draft/active/deprecated 全 lifecycle 都须引用同 domain 中存在的 L2 event；active producer 还要求目标
+//! active 且有 subscriber readiness。L3 只接受当前 manifest 能表达的 workflow 证据；L4 还要求
 //! device-latent evidence + `[reconcile]` block。
 //! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
@@ -222,9 +223,20 @@ impl GovernanceCheck for ContractValidate {
 fn validate_workspace(root: &Path) -> Result<(usize, Vec<Finding>)> {
     let contracts_root = root.join("contracts");
     let contracts = discover(&contracts_root)?;
+    validate_discovered_workspace(root, &contracts)
+}
+
+/// Run the complete workspace contract validation against an already discovered catalog.
+///
+/// Consumers that need both validation and a typed projection must discover exactly once and
+/// pass that immutable universe here; this prevents validation/build time-of-check drift.
+pub(crate) fn validate_discovered_workspace(
+    root: &Path,
+    contracts: &[DiscoveredContract],
+) -> Result<(usize, Vec<Finding>)> {
     let runtime_relay = read_runtime_relay_wiring(root)?;
-    let mut findings = validate_discovered_contracts(&contracts);
-    findings.extend(rule_runtime_relay_coverage(&contracts, &runtime_relay));
+    let mut findings = validate_discovered_contracts(contracts);
+    findings.extend(rule_runtime_relay_coverage(contracts, &runtime_relay));
     Ok((contracts.len(), findings))
 }
 
@@ -498,8 +510,9 @@ fn active_outbox_event_ready(contract: &DiscoveredContract) -> bool {
         && !manifest.subscriptions.is_empty()
 }
 
-/// R22：consistencyLevel capability gate。跨契约原因：HTTP L2 producer 的 `emits` 必须引用存在的
-/// `kind=event && consistencyLevel=OutboxFact` contract id。
+/// R22：consistencyLevel capability gate。跨契约原因：HTTP L2 producer 的 `emits` 必须在所有
+/// lifecycle 引用同 domain 中存在的 `kind=event && consistencyLevel=OutboxFact` contract id；active
+/// producer 另加 active target + subscriber readiness 门。
 fn rule_consistency_capability(contracts: &[DiscoveredContract]) -> Vec<Finding> {
     let by_id: BTreeMap<&str, &DiscoveredContract> = contracts
         .iter()
@@ -708,6 +721,16 @@ fn rule_outbox_capability(
                         if target.manifest.kind == ContractKind::Event
                             && target.manifest.consistency_level == ConsistencyLevel::OutboxFact =>
                     {
+                        if target.manifest.domain != m.domain {
+                            out.push(finding(
+                                Rule::ConsistencyCapability,
+                                label,
+                                format!(
+                                    "contract id={} emitted fact domain={} must equal producer domain={} for capability ref={emitted_id}",
+                                    m.id, target.manifest.domain, m.domain
+                                ),
+                            ));
+                        }
                         if m.lifecycle == Lifecycle::Active
                             && (target.manifest.lifecycle != Lifecycle::Active
                                 || target.manifest.subscriptions.is_empty())
@@ -5104,7 +5127,12 @@ mod tests {
         );
     }
 
-    fn active_http_outbox_producer(domain: &str, id: &str, emits: &[&str]) -> DiscoveredContract {
+    fn http_outbox_producer(
+        lifecycle: Lifecycle,
+        domain: &str,
+        id: &str,
+        emits: &[&str],
+    ) -> DiscoveredContract {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::OutboxFact,
@@ -5113,12 +5141,12 @@ mod tests {
         );
         m.id = id.to_string();
         m.domain = domain.to_string();
-        m.lifecycle = Lifecycle::Active;
+        m.lifecycle = lifecycle;
         m.capabilities = outbox_producer_capability(emits);
         discovered(m, PathBuf::from(format!("/{id}")))
     }
 
-    fn active_outbox_event(domain: &str, id: &str) -> DiscoveredContract {
+    fn outbox_event(lifecycle: Lifecycle, domain: &str, id: &str) -> DiscoveredContract {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
@@ -5127,10 +5155,18 @@ mod tests {
         );
         m.id = id.to_string();
         m.domain = domain.to_string();
-        m.lifecycle = Lifecycle::Active;
+        m.lifecycle = lifecycle;
         m.subscriptions = vec![one_subscription()];
         m.capabilities = outbox_fact_capability();
         discovered(m, PathBuf::from(format!("/{id}")))
+    }
+
+    fn active_http_outbox_producer(domain: &str, id: &str, emits: &[&str]) -> DiscoveredContract {
+        http_outbox_producer(Lifecycle::Active, domain, id, emits)
+    }
+
+    fn active_outbox_event(domain: &str, id: &str) -> DiscoveredContract {
+        outbox_event(Lifecycle::Active, domain, id)
     }
 
     fn runtime_relay_wiring(
@@ -5446,6 +5482,60 @@ mod tests {
                         .contains("missing capability ref=identity.missing-event")
             }),
             "{findings:?}"
+        );
+    }
+
+    #[rstest]
+    #[case(Lifecycle::Draft)]
+    #[case(Lifecycle::Active)]
+    #[case(Lifecycle::Deprecated)]
+    fn r22_http_outbox_emits_must_stay_in_producer_domain_for_every_lifecycle(
+        #[case] lifecycle: Lifecycle,
+    ) {
+        let contracts = vec![
+            http_outbox_producer(
+                lifecycle,
+                "identity",
+                "identity.roles-assign",
+                &["settings.config-version-changed"],
+            ),
+            outbox_event(lifecycle, "settings", "settings.config-version-changed"),
+        ];
+
+        let findings = rule_consistency_capability(&contracts);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ConsistencyCapability
+                    && finding.detail.contains("contract id=identity.roles-assign")
+                    && finding.detail.contains(
+                        "emitted fact domain=settings must equal producer domain=identity",
+                    )
+            }),
+            "{lifecycle:?} cross-domain emits must fail closed: {findings:?}"
+        );
+    }
+
+    #[rstest]
+    #[case(Lifecycle::Draft)]
+    #[case(Lifecycle::Active)]
+    #[case(Lifecycle::Deprecated)]
+    fn r22_http_outbox_emits_accepts_same_domain_for_every_lifecycle(#[case] lifecycle: Lifecycle) {
+        let contracts = vec![
+            http_outbox_producer(
+                lifecycle,
+                "identity",
+                "identity.roles-assign",
+                &["identity.role-assigned"],
+            ),
+            outbox_event(lifecycle, "identity", "identity.role-assigned"),
+        ];
+
+        let findings = rule_consistency_capability(&contracts);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| !finding.detail.contains("emitted fact domain=")),
+            "{lifecycle:?} same-domain emits must pass domain guard: {findings:?}"
         );
     }
 

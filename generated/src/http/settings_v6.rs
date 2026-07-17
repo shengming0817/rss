@@ -191,6 +191,13 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFac
         EFFECT_PROFILE,
     );
 
+/// Exact emitted event contracts derived from `[capabilities.outbox].emits`.
+pub const EMITTED_FACTS: &[::vocab::ContractBinding] = &[crate::event::settings_v1::CONTRACT];
+
+/// Generated producer binding（route + exact emitted facts 单一载体）。由 codegen 派生；勿手改。
+pub const PRODUCER: ::vocab::http::HttpProducerBinding<RouteMarker> =
+    ::vocab::http::HttpProducerBinding::from_static(ROUTE, EMITTED_FACTS);
+
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SPEC: super::HttpSpec = super::HttpSpec {
     mount_key: "settings_v6",

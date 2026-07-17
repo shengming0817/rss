@@ -80,6 +80,7 @@ closed_label_enum! {
 mod consistency_sealed {
     pub trait HttpConsistencyClass {}
     pub trait NonLocalHttpConsistency {}
+    pub trait NonProducerHttpConsistency {}
 }
 
 /// Sealed consistency class carried by generated HTTP route bindings.
@@ -91,6 +92,15 @@ pub trait HttpConsistencyClass: consistency_sealed::HttpConsistencyClass {
 /// Sealed marker for consistency classes that may bind arbitrary Axum state.
 pub trait NonLocalHttpConsistency:
     HttpConsistencyClass + consistency_sealed::NonLocalHttpConsistency
+{
+}
+
+/// Sealed marker for HTTP consistency classes that use the ordinary route constructor.
+///
+/// [`OutboxFact`] is deliberately excluded: an L2 producer must carry its generated emitted-fact
+/// binding through the dedicated producer funnel.
+pub trait NonProducerHttpConsistency:
+    HttpConsistencyClass + consistency_sealed::NonProducerHttpConsistency
 {
 }
 
@@ -127,6 +137,17 @@ macro_rules! impl_non_local_consistency {
 }
 
 impl_non_local_consistency!(LocalTx, OutboxFact, WorkflowEventual, DeviceLatent);
+
+macro_rules! impl_non_producer_consistency {
+    ($($class:ident),+ $(,)?) => {
+        $(
+            impl consistency_sealed::NonProducerHttpConsistency for $class {}
+            impl NonProducerHttpConsistency for $class {}
+        )+
+    };
+}
+
+impl_non_producer_consistency!(LocalOnly, LocalTx, WorkflowEventual, DeviceLatent);
 
 /// Runtime consistency semantics declared by an HTTP contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,6 +432,138 @@ impl<M, C: HttpConsistencyClass> HttpRouteBinding<M, C> {
     pub const fn evidence(&self) -> HttpRouteEvidence {
         self.evidence
     }
+}
+
+/// Generated binding between one active `OutboxFact` HTTP route and its exact emitted-fact set.
+///
+/// `M` is the same unnameable-per-contract marker carried by [`HttpRouteBinding`]. Code generation
+/// constructs this value from the generated route and generated event [`ContractBinding`] constants;
+/// serving and transaction code may inspect the closed set but cannot replace one route marker with
+/// another.
+///
+/// INVARIANT: PRODUCER-BINDING-EXACT-01 { level = "Hard", exec = "native-compile", source = "code", native = "HttpProducerBinding shares the route marker, requires a non-empty same-domain fact set, and rejects duplicate generated fact identities during const evaluation" }
+pub struct HttpProducerBinding<M> {
+    route: HttpRouteBinding<M, OutboxFact>,
+    emitted_facts: &'static [ContractBinding],
+}
+
+/// Marker-erased generated producer evidence used by closed registries and assurance projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpProducerEvidence {
+    route: HttpRouteEvidence,
+    emitted_facts: &'static [ContractBinding],
+}
+
+impl<M> Copy for HttpProducerBinding<M> {}
+
+impl<M> Clone for HttpProducerBinding<M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<M> HttpProducerBinding<M> {
+    /// Construct a generated producer binding from one route and its generated event contracts.
+    ///
+    /// # Panics
+    ///
+    /// Panics in const evaluation when the set is empty, contains a cross-domain fact, or repeats
+    /// the same generated contract identity.
+    #[must_use]
+    pub const fn from_static(
+        route: HttpRouteBinding<M, OutboxFact>,
+        emitted_facts: &'static [ContractBinding],
+    ) -> Self {
+        assert!(
+            !emitted_facts.is_empty(),
+            "HTTP producer must emit at least one fact"
+        );
+        let producer_domain = route.evidence().contract().domain();
+        let mut current = 0;
+        while current < emitted_facts.len() {
+            assert!(
+                static_str_eq(producer_domain, emitted_facts[current].domain()),
+                "HTTP producer and emitted fact domains must match"
+            );
+            let mut candidate = current + 1;
+            while candidate < emitted_facts.len() {
+                assert!(
+                    !contract_binding_eq(emitted_facts[current], emitted_facts[candidate]),
+                    "HTTP producer emitted facts must not contain duplicates"
+                );
+                candidate += 1;
+            }
+            current += 1;
+        }
+        Self {
+            route,
+            emitted_facts,
+        }
+    }
+
+    /// Typed route bound to this producer.
+    #[must_use]
+    pub const fn route(&self) -> HttpRouteBinding<M, OutboxFact> {
+        self.route
+    }
+
+    /// Runtime route evidence derived from the bound route.
+    #[must_use]
+    pub const fn route_evidence(&self) -> HttpRouteEvidence {
+        self.route.evidence()
+    }
+
+    /// Exact generated fact contract set declared by the producer manifest.
+    #[must_use]
+    pub const fn emitted_facts(&self) -> &'static [ContractBinding] {
+        self.emitted_facts
+    }
+
+    /// Erase only the compile-time route marker for closed registry projection.
+    #[must_use]
+    pub const fn evidence(&self) -> HttpProducerEvidence {
+        HttpProducerEvidence {
+            route: self.route.evidence(),
+            emitted_facts: self.emitted_facts,
+        }
+    }
+}
+
+impl HttpProducerEvidence {
+    /// HTTP route evidence bound to this producer.
+    #[must_use]
+    pub const fn route(&self) -> HttpRouteEvidence {
+        self.route
+    }
+
+    /// Exact generated emitted-fact set.
+    #[must_use]
+    pub const fn emitted_facts(&self) -> &'static [ContractBinding] {
+        self.emitted_facts
+    }
+}
+
+const fn static_str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn contract_binding_eq(left: ContractBinding, right: ContractBinding) -> bool {
+    static_str_eq(left.domain(), right.domain())
+        && static_str_eq(left.contract_id(), right.contract_id())
+        && static_str_eq(left.version(), right.version())
+        && static_str_eq(left.schema_hash(), right.schema_hash())
 }
 
 impl HttpRouteEvidence {

@@ -28,7 +28,8 @@ use vocab::TenantId;
 use super::unix_secs;
 use crate::domain::{IdentityError, RoleBinding, RoleId};
 use crate::ports::{
-    DynRoleBindingLifecycle, DynRoleReadRepo, RoleBindingLifecycle, RoleReadRepo, TenantRepoScope,
+    DynRoleBindingLifecycle, DynRoleReadRepo, RoleBindingLifecycle, RoleReadRepo,
+    RolesAssignProducerReceipt, RolesRevokeProducerReceipt, TenantRepoScope,
 };
 
 /// 发布域（tracing span 标签）。从契约绑定单源派生（= contract.toml `domain`，两 role 事件同域 `identity`）。
@@ -95,6 +96,7 @@ impl RbacAdminService {
     )]
     pub async fn assign_role(
         &self,
+        receipt: RolesAssignProducerReceipt,
         tenant: TenantId,
         actor: ids::UserId,
         actor_kind: vocab::PrincipalKind,
@@ -146,7 +148,7 @@ impl RbacAdminService {
         // 3. L2 co-tx（binding 行 + outbox 行同一事务原子写入）。
         let binding = RoleBinding::new(subject, role_id, tenant);
         self.bindings
-            .assign_and_emit(tenant_scope, binding, entry, envelope)
+            .assign_and_emit(receipt, tenant_scope, binding, entry, envelope)
             .await
             .map_err(RbacAdminError::BindingWrite)
     }
@@ -167,6 +169,7 @@ impl RbacAdminService {
     )]
     pub async fn revoke_role(
         &self,
+        receipt: RolesRevokeProducerReceipt,
         tenant: TenantId,
         actor: ids::UserId,
         actor_kind: vocab::PrincipalKind,
@@ -203,7 +206,7 @@ impl RbacAdminService {
             OutboxEnvelopeParts::new(ROLE_REVOKED_SPEC.contract(), tenant, subject_id, actor);
 
         self.bindings
-            .revoke_and_emit(tenant_scope, role_id, subject, entry, envelope)
+            .revoke_and_emit(receipt, tenant_scope, role_id, subject, entry, envelope)
             .await
             .map_err(RbacAdminError::BindingWrite)
     }
@@ -244,6 +247,11 @@ mod tests {
     use super::*;
     use crate::internal::mem::{InMemRoleBindingLifecycle, InMemRoleRepo};
     use crate::ports::{DynRoleBindingLifecycle, DynRoleReadRepo};
+    use generated::http::identity_v1::{
+        roles_assign::PRODUCER as ROLES_ASSIGN_PRODUCER,
+        roles_revoke::PRODUCER as ROLES_REVOKE_PRODUCER,
+    };
+    use httpserve::ProducerMarker;
 
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const TENANT_B: &str = "00000000-0000-4000-8000-000000000001";
@@ -263,6 +271,14 @@ mod tests {
 
     fn role(raw: &str) -> RoleId {
         RoleId::new(raw.to_string())
+    }
+
+    fn assign_receipt() -> RolesAssignProducerReceipt {
+        ProducerMarker::for_test(ROLES_ASSIGN_PRODUCER).into_receipt()
+    }
+
+    fn revoke_receipt() -> RolesRevokeProducerReceipt {
+        ProducerMarker::for_test(ROLES_REVOKE_PRODUCER).into_receipt()
     }
 
     /// 固定操作者（authenticated principal，opaque 规范 UUID）——与 target subject 区分。
@@ -306,6 +322,7 @@ mod tests {
         );
 
         svc.assign_role(
+            assign_receipt(),
             t,
             actor(),
             vocab::PrincipalKind::Admin,
@@ -357,6 +374,7 @@ mod tests {
 
         let err = svc
             .assign_role(
+                assign_receipt(),
                 t,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -388,6 +406,7 @@ mod tests {
 
         let err = svc
             .assign_role(
+                assign_receipt(),
                 t_b,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -413,6 +432,7 @@ mod tests {
 
         let err = svc
             .assign_role(
+                assign_receipt(),
                 t,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -441,6 +461,7 @@ mod tests {
 
         let revoked = svc
             .revoke_role(
+                revoke_receipt(),
                 t,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -491,6 +512,7 @@ mod tests {
 
         let revoked = svc
             .revoke_role(
+                revoke_receipt(),
                 t_b,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -522,6 +544,7 @@ mod tests {
 
         let err = svc
             .revoke_role(
+                revoke_receipt(),
                 t,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -552,6 +575,7 @@ mod tests {
         );
 
         svc.assign_role(
+            assign_receipt(),
             t,
             actor(),
             vocab::PrincipalKind::Admin,
@@ -561,6 +585,7 @@ mod tests {
         .await
         .expect("assign 1");
         svc.assign_role(
+            assign_receipt(),
             t,
             actor(),
             vocab::PrincipalKind::Admin,

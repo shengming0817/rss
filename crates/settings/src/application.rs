@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use ::generated::http::settings_v1::{
-    ROUTE as CONFIG_HTTP_ROUTE, SPEC as CONFIG_HTTP_SPEC, SettingsConfigPublishData,
+    PRODUCER as CONFIG_HTTP_PRODUCER, SPEC as CONFIG_HTTP_SPEC, SettingsConfigPublishData,
     SettingsConfigPublishRequest, SettingsConfigPublishResponse,
 };
 use ::generated::http::settings_v2::ROUTE as SECRET_HTTP_ROUTE;
@@ -33,13 +33,15 @@ use ::generated::http::settings_v4::{
     SettingsConfigGetResponse,
 };
 use ::generated::http::settings_v5::{
-    ROUTE as CONFIG_DELETE_HTTP_ROUTE, SPEC as CONFIG_DELETE_HTTP_SPEC,
+    PRODUCER as CONFIG_DELETE_PRODUCER, SPEC as CONFIG_DELETE_HTTP_SPEC,
 };
 use ::generated::http::settings_v6::{
-    ROUTE as CONFIG_ROLLBACK_HTTP_ROUTE, SPEC as CONFIG_ROLLBACK_HTTP_SPEC,
+    PRODUCER as CONFIG_ROLLBACK_PRODUCER, SPEC as CONFIG_ROLLBACK_HTTP_SPEC,
     SettingsConfigRollbackData, SettingsConfigRollbackRequest, SettingsConfigRollbackResponse,
 };
-use ::httpserve::{AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, Primary};
+use ::httpserve::{
+    AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, Primary, ProducerMarker,
+};
 use axum::Json;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Path, Request, State};
@@ -74,8 +76,8 @@ use crate::internal::mem::{
 };
 use crate::internal::ports::FlagStore;
 use crate::ports::{
-    ConfigRepo, ConfigUnitOfWork, DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo,
-    DynSecretUnitOfWork, TenantRepoScope,
+    ConfigDeleteReceipt, ConfigPublishReceipt, ConfigRepo, ConfigRollbackReceipt, ConfigUnitOfWork,
+    DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo, DynSecretUnitOfWork, TenantRepoScope,
 };
 
 /// 配置路由组前缀（Primary listener，业务 API）。
@@ -401,7 +403,7 @@ impl SettingsService {
     }
 
     /// 构造 `config-version-changed` outbox [`EventEntry`] + [`OutboxEnvelopeParts`]（纯派生，无 I/O）；实际落
-    /// durable outbox 与配置写**同事务**由 [`ConfigUnitOfWork::commit`] 承载（L2 OutboxFact）。
+    /// durable outbox 与配置写**同事务**由 route-specific [`ConfigUnitOfWork`] 方法承载（L2 OutboxFact）。
     ///
     /// EventId（outbox `event_id` / `IdemKey`）= 内容派生 `{topic}:{tenant}:{key}:v{version}`：每个
     /// (tenant, key, version) 仅一次发射（version 单调递增，publish/rollback 各产新版本），故按内容确定唯一——
@@ -451,6 +453,7 @@ impl SettingsService {
     #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
     pub async fn publish_config(
         &self,
+        receipt: ConfigPublishReceipt,
         tenant: TenantId,
         actor: OutboxActor,
         request: SettingsConfigPublishRequest,
@@ -475,7 +478,8 @@ impl SettingsService {
         // co-tx：CAS 配置写 + outbox append 同事务（both-or-neither）——冲突冒泡 `VersionConflict`，
         // 存储失败冒泡 `Storage`；二者皆使配置写与 outbox 行共回滚（消除 write-without-event 窗口）。
         self.writer
-            .commit(
+            .commit_publish(
+                receipt,
                 scope,
                 ConfigMutation::Put(entry.clone()),
                 outbox_entry,
@@ -497,6 +501,7 @@ impl SettingsService {
     #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
     pub async fn rollback(
         &self,
+        receipt: ConfigRollbackReceipt,
         tenant: TenantId,
         actor: OutboxActor,
         key: &str,
@@ -525,7 +530,8 @@ impl SettingsService {
         // 不可变无 TOCTOU；新版本号（`next_version`）存在 read-then-write 窗口，由 CAS INSERT 守住——并发
         // 冲突返 `VersionConflict`，调用方读后重写重试。
         self.writer
-            .commit(
+            .commit_rollback(
+                receipt,
                 scope,
                 ConfigMutation::Put(entry.clone()),
                 outbox_entry,
@@ -549,6 +555,7 @@ impl SettingsService {
     #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
     pub async fn delete(
         &self,
+        receipt: ConfigDeleteReceipt,
         tenant: TenantId,
         actor: OutboxActor,
         key: &str,
@@ -578,7 +585,7 @@ impl SettingsService {
         )?;
         match self
             .writer
-            .commit(scope, mutation, outbox_entry, envelope)
+            .commit_delete(receipt, scope, mutation, outbox_entry, envelope)
             .await
         {
             Ok(()) => {}
@@ -769,7 +776,7 @@ fn authenticated_actor(
 /// `settings.config-publish` handler（Primary listener，JWT 认证）：route gate 授权证据取租户 → parse body →
 /// `publish_config`（CAS 写 + outbox co-tx，L2）→ 201。租户来自 `AuthorizedSubject`，非 pre-auth header。
 async fn config_publish_handler(
-    _: ContractMarker<::generated::http::settings_v1::RouteMarker>,
+    producer: ProducerMarker<::generated::http::settings_v1::RouteMarker>,
     State(service): State<Arc<SettingsService>>,
     req: Request<Body>,
 ) -> Response {
@@ -786,12 +793,21 @@ async fn config_publish_handler(
         }
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
-    config_publish_handler_bytes(service, scope, actor, body, &request_id).await
+    config_publish_handler_bytes(
+        service,
+        producer.into_receipt(),
+        scope,
+        actor,
+        body,
+        &request_id,
+    )
+    .await
 }
 
 /// config-publish 核心（tenant 已解析）：parse → service → typed 响应 / 错误映射。供单测直接驱动。
 pub(crate) async fn config_publish_handler_bytes(
     service: Arc<SettingsService>,
+    receipt: ConfigPublishReceipt,
     tenant: TenantId,
     actor: OutboxActor,
     body: Bytes,
@@ -801,7 +817,10 @@ pub(crate) async fn config_publish_handler_bytes(
         Ok(request) => request,
         Err(_) => return httpserve::error::validation_bad_request(request_id),
     };
-    match service.publish_config(tenant, actor, request).await {
+    match service
+        .publish_config(receipt, tenant, actor, request)
+        .await
+    {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(err) => config_error_response(
             &err,
@@ -857,7 +876,7 @@ async fn config_get_handler(
 
 /// `settings.config-delete` handler：首次删除提交 tombstone + Deleted fact，已删除/不存在为 204 no-op。
 async fn config_delete_handler(
-    _: ContractMarker<::generated::http::settings_v5::RouteMarker>,
+    producer: ProducerMarker<::generated::http::settings_v5::RouteMarker>,
     Path(key): Path<String>,
     State(service): State<Arc<SettingsService>>,
     req: Request<Body>,
@@ -867,7 +886,10 @@ async fn config_delete_handler(
         Ok(context) => context,
         Err(reject) => return reject.into_response(&request_id),
     };
-    match service.delete(tenant, actor, &key).await {
+    match service
+        .delete(producer.into_receipt(), tenant, actor, &key)
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => config_error_response(
             &error,
@@ -881,7 +903,7 @@ async fn config_delete_handler(
 
 /// `settings.config-rollback` handler：历史版本值作为新 active version 原子写入并发出 RolledBack fact。
 async fn config_rollback_handler(
-    _: ContractMarker<::generated::http::settings_v6::RouteMarker>,
+    producer: ProducerMarker<::generated::http::settings_v6::RouteMarker>,
     Path(key): Path<String>,
     State(service): State<Arc<SettingsService>>,
     req: Request<Body>,
@@ -904,7 +926,10 @@ async fn config_rollback_handler(
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
     let source_version = request.to_version.get();
-    match service.rollback(tenant, actor, &key, source_version).await {
+    match service
+        .rollback(producer.into_receipt(), tenant, actor, &key, source_version)
+        .await
+    {
         Ok(response) => (
             StatusCode::CREATED,
             Json(SettingsConfigRollbackResponse {
@@ -1072,20 +1097,29 @@ impl ::bootstrap::Domain for SettingsDomain {
             SecretPublishState::new(Arc::clone(&self.secret_repo), Arc::clone(&self.secret_uow));
         reg.route_group::<Primary>(SETTINGS_ROUTE_PREFIX, move |rb| {
             let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(CONFIG_HTTP_ROUTE, config_publish_handler)?
-                    .with_state(Arc::clone(&config)),
+                GeneratedPrimaryEndpoint::new_producer(
+                    CONFIG_HTTP_PRODUCER,
+                    config_publish_handler,
+                )?
+                .with_state(Arc::clone(&config)),
             )?;
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(CONFIG_GET_HTTP_ROUTE, config_get_handler)?
                     .with_classified_state(config_query),
             )?;
             let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(CONFIG_DELETE_HTTP_ROUTE, config_delete_handler)?
-                    .with_state(Arc::clone(&config)),
+                GeneratedPrimaryEndpoint::new_producer(
+                    CONFIG_DELETE_PRODUCER,
+                    config_delete_handler,
+                )?
+                .with_state(Arc::clone(&config)),
             )?;
             let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(CONFIG_ROLLBACK_HTTP_ROUTE, config_rollback_handler)?
-                    .with_state(config),
+                GeneratedPrimaryEndpoint::new_producer(
+                    CONFIG_ROLLBACK_PRODUCER,
+                    config_rollback_handler,
+                )?
+                .with_state(config),
             )?;
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(SECRET_HTTP_ROUTE, secret_publish_handler)?
@@ -1139,6 +1173,18 @@ mod tests {
             tenant(),
             vocab::ScopedTenant::Tenant,
         )
+    }
+
+    fn publish_receipt() -> ConfigPublishReceipt {
+        ProducerMarker::for_test(CONFIG_HTTP_PRODUCER).into_receipt()
+    }
+
+    fn delete_receipt() -> ConfigDeleteReceipt {
+        ProducerMarker::for_test(CONFIG_DELETE_PRODUCER).into_receipt()
+    }
+
+    fn rollback_receipt() -> ConfigRollbackReceipt {
+        ProducerMarker::for_test(CONFIG_ROLLBACK_PRODUCER).into_receipt()
     }
 
     // 域单测不依赖 adapter crate（rust-standards.md §命名）：OutboxEmitter / Clock 替身在此手写。
@@ -1227,7 +1273,12 @@ mod tests {
         let svc = service_with(&capture, InMemFlagStore::new());
 
         let resp = svc
-            .publish_config(tenant(), actor(), publish_req("app.timeout", "30s"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.timeout", "30s"),
+            )
             .await
             .expect("publish ok");
 
@@ -1263,11 +1314,21 @@ mod tests {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
 
-        svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
-            .await
-            .expect("v1");
+        svc.publish_config(
+            publish_receipt(),
+            tenant(),
+            actor(),
+            publish_req("app.k", "v1"),
+        )
+        .await
+        .expect("v1");
         let resp = svc
-            .publish_config(tenant(), actor(), publish_req("app.k", "v2"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "v2"),
+            )
             .await
             .expect("v2");
         assert_eq!(resp.data.version, 2);
@@ -1287,7 +1348,12 @@ mod tests {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
         let err = svc
-            .publish_config(tenant(), actor(), publish_req("nodot", "v"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("nodot", "v"),
+            )
             .await
             .expect_err("invalid key");
         assert!(matches!(err, SettingsServiceError::InvalidKey));
@@ -1299,15 +1365,25 @@ mod tests {
     async fn rollback_restores_value_and_emits_rolled_back() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
-        svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
-            .await
-            .expect("v1");
-        svc.publish_config(tenant(), actor(), publish_req("app.k", "v2"))
-            .await
-            .expect("v2");
+        svc.publish_config(
+            publish_receipt(),
+            tenant(),
+            actor(),
+            publish_req("app.k", "v1"),
+        )
+        .await
+        .expect("v1");
+        svc.publish_config(
+            publish_receipt(),
+            tenant(),
+            actor(),
+            publish_req("app.k", "v2"),
+        )
+        .await
+        .expect("v2");
 
         let resp = svc
-            .rollback(tenant(), actor(), "app.k", 1)
+            .rollback(rollback_receipt(), tenant(), actor(), "app.k", 1)
             .await
             .expect("rollback");
         assert_eq!(resp.data.version, 3, "回滚生成新版本 v3");
@@ -1337,11 +1413,16 @@ mod tests {
     async fn rollback_missing_version_is_not_found() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
-        svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
-            .await
-            .expect("v1");
+        svc.publish_config(
+            publish_receipt(),
+            tenant(),
+            actor(),
+            publish_req("app.k", "v1"),
+        )
+        .await
+        .expect("v1");
         let err = svc
-            .rollback(tenant(), actor(), "app.k", 9)
+            .rollback(rollback_receipt(), tenant(), actor(), "app.k", 9)
             .await
             .expect_err("missing version");
         assert!(matches!(err, SettingsServiceError::NotFound));
@@ -1352,10 +1433,15 @@ mod tests {
     async fn delete_removes_config() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
-        svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
-            .await
-            .expect("v1");
-        svc.delete(tenant(), actor(), "app.k")
+        svc.publish_config(
+            publish_receipt(),
+            tenant(),
+            actor(),
+            publish_req("app.k", "v1"),
+        )
+        .await
+        .expect("v1");
+        svc.delete(delete_receipt(), tenant(), actor(), "app.k")
             .await
             .expect("delete");
         assert!(
@@ -1952,7 +2038,12 @@ mod tests {
                 Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
             );
             writer
-                .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+                .publish_config(
+                    publish_receipt(),
+                    tenant(),
+                    actor(),
+                    publish_req("app.k", "v1"),
+                )
                 .await
                 .expect("seed v1");
 
@@ -1974,13 +2065,18 @@ mod tests {
                 match mutation {
                     ConcurrentMutation::Publish => {
                         writer
-                            .publish_config(tenant(), actor(), publish_req("app.k", "v2"))
+                            .publish_config(
+                                publish_receipt(),
+                                tenant(),
+                                actor(),
+                                publish_req("app.k", "v2"),
+                            )
                             .await
                             .expect("publish v2");
                     }
                     ConcurrentMutation::Delete => {
                         writer
-                            .delete(tenant(), actor(), "app.k")
+                            .delete(delete_receipt(), tenant(), actor(), "app.k")
                             .await
                             .expect("delete v1");
                     }
@@ -2781,11 +2877,16 @@ mod tests {
         let capture = CapturingEmitter::default();
         let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
         service
-            .publish_config(tenant(), actor(), publish_req("app.feature", "enabled"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.feature", "enabled"),
+            )
             .await
             .expect("publish config");
         service
-            .delete(tenant(), actor(), "app.feature")
+            .delete(delete_receipt(), tenant(), actor(), "app.feature")
             .await
             .expect("delete config");
         let key = SettingKey::parse("app.feature").expect("valid key");
@@ -2812,7 +2913,12 @@ mod tests {
         let capture = CapturingEmitter::default();
         let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
         service
-            .publish_config(tenant(), actor(), publish_req("app.feature", "enabled"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.feature", "enabled"),
+            )
             .await
             .expect("publish config");
         let key = SettingKey::parse("app.feature").expect("valid key");
@@ -2840,7 +2946,12 @@ mod tests {
         let capture = CapturingEmitter::default();
         let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
         service
-            .publish_config(tenant(), actor(), publish_req("app.feature", "enabled"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.feature", "enabled"),
+            )
             .await
             .expect("publish config");
         let key = SettingKey::parse("app.feature").expect("valid key");
@@ -2865,7 +2976,12 @@ mod tests {
         let capture = CapturingEmitter::default();
         let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
         service
-            .publish_config(tenant(), actor(), publish_req("app.feature", "enabled"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.feature", "enabled"),
+            )
             .await
             .expect("publish config");
         let key = SettingKey::parse("app.feature").expect("valid key");
@@ -3039,11 +3155,21 @@ mod tests {
         let capture = CapturingEmitter::default();
         let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
         service
-            .publish_config(tenant(), actor(), publish_req("app.feature", "v1"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.feature", "v1"),
+            )
             .await
             .expect("publish v1");
         service
-            .publish_config(tenant(), actor(), publish_req("app.feature", "v2"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.feature", "v2"),
+            )
             .await
             .expect("publish v2");
         let key = SettingKey::parse("app.feature").expect("valid key");
@@ -3172,9 +3298,11 @@ mod tests {
         }
 
         {
-            let config_publish =
-                GeneratedPrimaryEndpoint::new(CONFIG_HTTP_ROUTE, config_publish_handler)
-                    .expect("config publish endpoint");
+            let config_publish = GeneratedPrimaryEndpoint::new_producer(
+                CONFIG_HTTP_PRODUCER,
+                config_publish_handler,
+            )
+            .expect("config publish endpoint");
             assert_eq!(config_publish.evidence(), &CONFIG_HTTP_SPEC.route);
 
             let secret_publish =
@@ -3187,14 +3315,18 @@ mod tests {
                     .expect("config get endpoint");
             assert_eq!(config_get.evidence(), &CONFIG_GET_HTTP_SPEC.route);
 
-            let config_delete =
-                GeneratedPrimaryEndpoint::new(CONFIG_DELETE_HTTP_ROUTE, config_delete_handler)
-                    .expect("config delete endpoint");
+            let config_delete = GeneratedPrimaryEndpoint::new_producer(
+                CONFIG_DELETE_PRODUCER,
+                config_delete_handler,
+            )
+            .expect("config delete endpoint");
             assert_eq!(config_delete.evidence(), &CONFIG_DELETE_HTTP_SPEC.route);
 
-            let config_rollback =
-                GeneratedPrimaryEndpoint::new(CONFIG_ROLLBACK_HTTP_ROUTE, config_rollback_handler)
-                    .expect("config rollback endpoint");
+            let config_rollback = GeneratedPrimaryEndpoint::new_producer(
+                CONFIG_ROLLBACK_PRODUCER,
+                config_rollback_handler,
+            )
+            .expect("config rollback endpoint");
             assert_eq!(config_rollback.evidence(), &CONFIG_ROLLBACK_HTTP_SPEC.route);
         }
     }
@@ -3209,7 +3341,13 @@ mod tests {
 
         assert_eq!(
             production.matches("GeneratedPrimaryEndpoint::new(").count(),
-            5
+            2
+        );
+        assert_eq!(
+            production
+                .matches("GeneratedPrimaryEndpoint::new_producer(")
+                .count(),
+            3
         );
         assert_eq!(production.matches("rb.mount(").count(), 5);
         assert!(!production.contains("mount_primary("));
@@ -3301,11 +3439,21 @@ mod tests {
         let capture = CapturingEmitter::default();
         let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
         service
-            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "v1"),
+            )
             .await
             .expect("publish v1");
         service
-            .publish_config(tenant(), actor(), publish_req("app.k", "v2"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "v2"),
+            )
             .await
             .expect("publish v2");
         let router = config_resource_router(Arc::clone(&service), Some(user_evidence(tenant())));
@@ -3387,7 +3535,12 @@ mod tests {
             let capture = CapturingEmitter::default();
             let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
             service
-                .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+                .publish_config(
+                    publish_receipt(),
+                    tenant(),
+                    actor(),
+                    publish_req("app.k", "v1"),
+                )
                 .await
                 .expect("seed v1");
             let response =
@@ -3427,7 +3580,12 @@ mod tests {
         let capture = CapturingEmitter::default();
         let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
         service
-            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "v1"),
+            )
             .await
             .expect("publish");
         let authed = config_resource_router(Arc::clone(&service), Some(user_evidence(tenant())));
@@ -3489,8 +3647,31 @@ mod tests {
         struct ConflictUnitOfWork;
 
         impl ConfigUnitOfWork for ConflictUnitOfWork {
-            async fn commit(
+            async fn commit_publish(
                 &self,
+                _receipt: ConfigPublishReceipt,
+                _scope: TenantRepoScope,
+                _mutation: ConfigMutation,
+                _outbox_entry: EventEntry,
+                _envelope: OutboxEnvelopeParts,
+            ) -> Result<(), ConfigRepoError> {
+                Err(ConfigRepoError::VersionConflict)
+            }
+
+            async fn commit_delete(
+                &self,
+                _receipt: ConfigDeleteReceipt,
+                _scope: TenantRepoScope,
+                _mutation: ConfigMutation,
+                _outbox_entry: EventEntry,
+                _envelope: OutboxEnvelopeParts,
+            ) -> Result<(), ConfigRepoError> {
+                Err(ConfigRepoError::VersionConflict)
+            }
+
+            async fn commit_rollback(
+                &self,
+                _receipt: ConfigRollbackReceipt,
                 _scope: TenantRepoScope,
                 _mutation: ConfigMutation,
                 _outbox_entry: EventEntry,
@@ -3509,7 +3690,12 @@ mod tests {
             Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
         );
         writer
-            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "v1"),
+            )
             .await
             .expect("seed v1");
 
@@ -3574,6 +3760,7 @@ mod tests {
         let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
         let resp = config_publish_handler_bytes(
             svc,
+            publish_receipt(),
             tenant(),
             actor(),
             axum::body::Bytes::from_static(b"not json"),
@@ -3589,7 +3776,15 @@ mod tests {
         let capture = CapturingEmitter::default();
         let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
         let body = serde_json::to_vec(&publish_req("bad key", "v")).expect("serialize");
-        let resp = config_publish_handler_bytes(svc, tenant(), actor(), body.into(), "rid").await;
+        let resp = config_publish_handler_bytes(
+            svc,
+            publish_receipt(),
+            tenant(),
+            actor(),
+            body.into(),
+            "rid",
+        )
+        .await;
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
@@ -3670,9 +3865,14 @@ mod tests {
     async fn cross_tenant_isolation() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
-        svc.publish_config(tenant(), actor(), publish_req("app.k", "secret"))
-            .await
-            .expect("tenant_a publish");
+        svc.publish_config(
+            publish_receipt(),
+            tenant(),
+            actor(),
+            publish_req("app.k", "secret"),
+        )
+        .await
+        .expect("tenant_a publish");
         let val = svc
             .config_query_service()
             .get_config(tenant_b(), "app.k")
@@ -3691,12 +3891,22 @@ mod tests {
         let cap2 = CapturingEmitter::default();
         let svc2 = service_with(&cap2, InMemFlagStore::new());
 
-        svc1.publish_config(tenant(), actor(), publish_req("app.timeout", "30s"))
-            .await
-            .expect("svc1 publish");
-        svc2.publish_config(tenant(), actor(), publish_req("app.timeout", "30s"))
-            .await
-            .expect("svc2 publish");
+        svc1.publish_config(
+            publish_receipt(),
+            tenant(),
+            actor(),
+            publish_req("app.timeout", "30s"),
+        )
+        .await
+        .expect("svc1 publish");
+        svc2.publish_config(
+            publish_receipt(),
+            tenant(),
+            actor(),
+            publish_req("app.timeout", "30s"),
+        )
+        .await
+        .expect("svc2 publish");
 
         let facts1 = emitted_facts(&cap1);
         let facts2 = emitted_facts(&cap2);
@@ -3732,7 +3942,7 @@ mod tests {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
         let err = svc
-            .rollback(tenant(), actor(), "nodot", 1)
+            .rollback(rollback_receipt(), tenant(), actor(), "nodot", 1)
             .await
             .expect_err("invalid");
         assert!(matches!(err, SettingsServiceError::InvalidKey));
@@ -3759,7 +3969,7 @@ mod tests {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
         let err = svc
-            .delete(tenant(), actor(), "nodot")
+            .delete(delete_receipt(), tenant(), actor(), "nodot")
             .await
             .expect_err("invalid");
         assert!(matches!(err, SettingsServiceError::InvalidKey));
@@ -3771,12 +3981,17 @@ mod tests {
     async fn delete_hides_value_and_is_idempotent() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
-        svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
-            .await
-            .expect("publish");
+        svc.publish_config(
+            publish_receipt(),
+            tenant(),
+            actor(),
+            publish_req("app.k", "v1"),
+        )
+        .await
+        .expect("publish");
 
         // 软删（tombstone）。
-        svc.delete(tenant(), actor(), "app.k")
+        svc.delete(delete_receipt(), tenant(), actor(), "app.k")
             .await
             .expect("delete");
 
@@ -3790,7 +4005,7 @@ mod tests {
         );
 
         // 再次 delete 应幂等（latest 已 tombstone → no-op，返回 Ok）。
-        svc.delete(tenant(), actor(), "app.k")
+        svc.delete(delete_receipt(), tenant(), actor(), "app.k")
             .await
             .expect("幂等 delete");
     }
@@ -3817,7 +4032,12 @@ mod tests {
         let stale_reader = make_service();
 
         writer
-            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "v1"),
+            )
             .await
             .expect("publish");
         assert_eq!(
@@ -3830,12 +4050,12 @@ mod tests {
             Some("v1".to_string())
         );
         writer
-            .delete(tenant(), actor(), "app.k")
+            .delete(delete_receipt(), tenant(), actor(), "app.k")
             .await
             .expect("first instance delete");
 
         stale_reader
-            .delete(tenant(), actor(), "app.k")
+            .delete(delete_receipt(), tenant(), actor(), "app.k")
             .await
             .expect("idempotent delete");
         assert_eq!(
@@ -3871,7 +4091,12 @@ mod tests {
         let stale_reader = make_service();
 
         writer
-            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "v1"),
+            )
             .await
             .expect("publish v1");
         assert_eq!(
@@ -3885,7 +4110,12 @@ mod tests {
         );
 
         writer
-            .publish_config(tenant(), actor(), publish_req("app.k", "v2"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "v2"),
+            )
             .await
             .expect("publish v2");
         assert_eq!(
@@ -3900,7 +4130,7 @@ mod tests {
         );
 
         writer
-            .rollback(tenant(), actor(), "app.k", 1)
+            .rollback(rollback_receipt(), tenant(), actor(), "app.k", 1)
             .await
             .expect("rollback to v1");
         assert_eq!(
@@ -3914,7 +4144,7 @@ mod tests {
         );
 
         writer
-            .delete(tenant(), actor(), "app.k")
+            .delete(delete_receipt(), tenant(), actor(), "app.k")
             .await
             .expect("remote delete");
         assert_eq!(
@@ -3993,7 +4223,12 @@ mod tests {
         );
 
         writer
-            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "v1"),
+            )
             .await
             .expect("publish");
         assert_eq!(
@@ -4071,13 +4306,18 @@ mod tests {
                 SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
             )),
         );
-        svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
-            .await
-            .expect("publish");
+        svc.publish_config(
+            publish_receipt(),
+            tenant(),
+            actor(),
+            publish_req("app.k", "v1"),
+        )
+        .await
+        .expect("publish");
 
         let (first, second) = tokio::join!(
-            svc.delete(tenant(), actor(), "app.k"),
-            svc.delete(tenant(), actor(), "app.k"),
+            svc.delete(delete_receipt(), tenant(), actor(), "app.k"),
+            svc.delete(delete_receipt(), tenant(), actor(), "app.k"),
         );
         first.expect("first delete");
         second.expect("second delete converges to tombstone");
@@ -4104,18 +4344,28 @@ mod tests {
         let svc = service_with(&capture, InMemFlagStore::new());
 
         let v1 = svc
-            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "v1"),
+            )
             .await
             .expect("publish v1");
         assert_eq!(v1.data.version, 1);
 
-        svc.delete(tenant(), actor(), "app.k")
+        svc.delete(delete_receipt(), tenant(), actor(), "app.k")
             .await
             .expect("delete");
 
         // republish：版本继续递增（v1 + tombstone v2 → v3），**非**重置回 1。
         let v3 = svc
-            .publish_config(tenant(), actor(), publish_req("app.k", "v1-again"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "v1-again"),
+            )
             .await
             .expect("republish");
         assert_eq!(
@@ -4163,11 +4413,21 @@ mod tests {
         let svc = service_with(&capture, InMemFlagStore::new());
 
         let resp_a = svc
-            .publish_config(tenant(), actor(), publish_req("app.a", "val-a"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.a", "val-a"),
+            )
             .await
             .expect("publish a");
         let resp_b = svc
-            .publish_config(tenant(), actor(), publish_req("app.b", "val-b"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.b", "val-b"),
+            )
             .await
             .expect("publish b");
 
@@ -4236,8 +4496,18 @@ mod tests {
 
         // 单任务 join! 并发：两 future 都在 barrier 处 yield，同步后各自 save（CAS 竞争）。
         let (r1, r2) = tokio::join!(
-            svc.publish_config(tenant(), actor(), publish_req("app.k", "a")),
-            svc.publish_config(tenant(), actor(), publish_req("app.k", "b")),
+            svc.publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "a")
+            ),
+            svc.publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.k", "b")
+            ),
         );
 
         let results = [r1, r2];
@@ -4288,7 +4558,12 @@ mod tests {
             )),
         );
         let resp = svc
-            .publish_config(tenant(), actor(), publish_req("app.smoke", "v1-value"))
+            .publish_config(
+                publish_receipt(),
+                tenant(),
+                actor(),
+                publish_req("app.smoke", "v1-value"),
+            )
             .await
             .expect("publish ok");
         assert_eq!(resp.data.version, 1);

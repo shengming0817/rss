@@ -18,12 +18,21 @@ Result<httpserve::ListenerRouter<L>, KernelError>`，错误必须冒泡到 boots
 业务路由必须先把 generated evidence 与 handler 原子绑定成 endpoint，再交给 listener-typed builder：
 
 - 非-`Primary` generated route（`Internal` / `Admin`）：`GeneratedEndpoint::new(ROUTE, handler)`。
-- `Primary` generated route：`GeneratedPrimaryEndpoint::new(ROUTE, handler)`；`ROUTE` 是 codegen 产出的
+- 普通 `Primary` generated route（非 `OutboxFact`）：
+  `GeneratedPrimaryEndpoint::new(ROUTE, handler)`；`ROUTE` 是 codegen 产出的
   `HttpRouteBinding<RouteMarker, ConsistencyMarker>`，handler 首 extractor 必须是同一契约的
-  `ContractMarker<RouteMarker>`；`ConsistencyMarker` 由 codegen 从 manifest `consistencyLevel` 单源选择，
-  调用方不得自行替换；
-  method/path/auth/resource scope 全由 binding 内的同一 `HttpRouteEvidence` 推导。`SPEC.route` 仅供元数据查询，
-  不再是 production endpoint 构造入口。
+  `ContractMarker<RouteMarker>`。`ConsistencyMarker` 由 codegen 从 manifest `consistencyLevel` 单源选择，
+  调用方不得自行替换。
+- `Primary` `OutboxFact` producer：
+  `GeneratedPrimaryEndpoint::new_producer(PRODUCER, handler)`；`PRODUCER` 是 codegen 产出的
+  `HttpProducerBinding<RouteMarker>`，原子携带 route evidence 与精确 emitted-fact 集，endpoint 会从它
+  安装私有 route-bound witness。handler 首 extractor 必须是同一契约的 move-only
+  `ProducerMarker<RouteMarker>`；witness 缺失时提取 fail-closed，提取成功后 marker 自带 mounted
+  binding，handler 仅能消费 `marker.into_receipt()` 铸造 receipt，不能替换 binding。receipt
+  继续交给 service / Unit-of-Work producer funnel。`OutboxFact` 不能调用普通
+  `new(ROUTE, handler)`。
+- method/path/auth/resource scope 全由 binding 内的同一 `HttpRouteEvidence` 推导。`SPEC.route`
+  仅供元数据查询，不是 production endpoint 构造入口。
 - 非 L0 stateful handler 在 endpoint 上调用 `.with_state(state)`。L0 (`LocalOnly`) 只能保持
   stateless，或调用 `.with_classified_state(state)` 闭合为 owner-sealed `ReadEffect`/`AuthEffect` +
   `LocalPrivilege`；L0 类型上不存在普通 `.with_state`。`ListenerRouter::mount` 只接受 state 已闭合的
@@ -31,15 +40,23 @@ Result<httpserve::ListenerRouter<L>, KernelError>`，错误必须冒泡到 boots
 - `Health` 不接受业务 mount；组合根只能调用 `httpserve::health::routes(report, render)` 得到固定
   `/health/v1/{healthz,readyz,metrics}`。
 
-示例（域 crate `Domain::init`）：
+示例（`identity.login` 是 `OutboxFact` producer）：
 ```rust
-async fn login_handler(
-    _: httpserve::ContractMarker<generated::http::identity_v1::login::RouteMarker>,
+async fn login_handler<S: diport::Signer + Send + Sync + 'static>(
+    marker: httpserve::ProducerMarker<generated::http::identity_v1::login::RouteMarker>,
+    State(service): State<Arc<LoginService<S>>>,
     // 其余 Axum extractors ...
-) { /* ... */ }
+) -> Response {
+    let receipt = marker.into_receipt();
+    // 解析 tenant/body/request_id 后，receipt 继续交给 service / Unit-of-Work producer funnel。
+    login_handler_bytes(service, receipt, tenant, body, &request_id).await
+}
 
 reg.route_group::<httpserve::Primary>("/api/v1/identity", |rb| {
-    let endpoint = httpserve::GeneratedPrimaryEndpoint::new(LOGIN_HTTP_ROUTE, login_handler)?
+    let endpoint = httpserve::GeneratedPrimaryEndpoint::new_producer(
+        LOGIN_PRODUCER,
+        login_handler::<S>,
+    )?
         .with_state(login_service);
     Ok(rb.mount(endpoint)?)
 })?;

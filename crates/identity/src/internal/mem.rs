@@ -18,7 +18,7 @@ use vocab::TenantId;
 #[cfg(test)]
 use crate::domain::{Session, SessionId};
 #[cfg(test)]
-use crate::ports::{SessionLifecycle, SessionLogoutMutation};
+use crate::ports::{LoginProducerReceipt, SessionLifecycle, SessionLogoutMutation};
 #[cfg(test)]
 use consistency::EventEntry;
 #[cfg(test)]
@@ -42,9 +42,16 @@ use crate::domain::{
 };
 #[cfg(test)]
 use crate::ports::{
-    PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, ResourceAttributeReadRepo,
-    ResourceAttributeWriteRepo, RoleBindingLifecycle, RoleBindingReadRepo, RoleReadRepo,
-    RoleWriteRepo,
+    PoliciesCreateProducerReceipt, PoliciesDeactivateProducerReceipt,
+    PoliciesUpdateProducerReceipt, PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo,
+    ResourceAttributeReadRepo, ResourceAttributeWriteRepo, RoleBindingLifecycle,
+    RoleBindingReadRepo, RoleReadRepo, RoleWriteRepo, RolesAssignProducerReceipt,
+    RolesRevokeProducerReceipt,
+};
+#[cfg(test)]
+use generated::event::identity_v1::{
+    policy_updated::SPEC as POLICY_UPDATED_SPEC, role_assigned::SPEC as ROLE_ASSIGNED_SPEC,
+    role_revoked::SPEC as ROLE_REVOKED_SPEC, session_created::SPEC as SESSION_CREATED_SPEC,
 };
 #[cfg(test)]
 use std::collections::HashSet;
@@ -274,6 +281,7 @@ impl InMemSessionLifecycle {
 impl SessionLifecycle for InMemSessionLifecycle {
     async fn persist_session_and_emit(
         &self,
+        receipt: LoginProducerReceipt,
         scope: TenantRepoScope,
         session: Session,
         _entry: EventEntry,
@@ -284,6 +292,13 @@ impl SessionLifecycle for InMemSessionLifecycle {
                 "session persist tenant scope mismatch",
             )));
         }
+        let _authorization = receipt
+            .authorize(SESSION_CREATED_SPEC.contract())
+            .ok_or_else(|| {
+                OutboxEmitError::new(std::io::Error::other(
+                    "login producer does not authorize session-created",
+                ))
+            })?;
         // reason: in-mem 替身无 durable 事务 / outbox 载体——创建即把 session 直插共享 store（revoked=false）；
         // entry/envelope 不落库（同 MemSessionLifecycle；真实 co-tx 原子性由 PgSessionLifecycle 守）。
         recover(&self.sessions).insert(session.id().clone(), (session, false));
@@ -468,6 +483,7 @@ impl PolicyRepo for InMemPolicyRepo {
 impl PolicyLifecycle for InMemPolicyRepo {
     async fn create_and_emit(
         &self,
+        receipt: PoliciesCreateProducerReceipt,
         scope: TenantRepoScope,
         policy: Policy,
         entry: EventEntry,
@@ -490,6 +506,9 @@ impl PolicyLifecycle for InMemPolicyRepo {
         if guard.contains_key(&key) {
             return Err(IdentityError::PolicyAlreadyExists);
         }
+        let _authorization = receipt
+            .authorize(POLICY_UPDATED_SPEC.contract())
+            .ok_or(IdentityError::InvalidPolicy)?;
         guard.insert(key, StoredPolicy::active(policy.clone()));
         recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
         Ok(policy)
@@ -497,6 +516,7 @@ impl PolicyLifecycle for InMemPolicyRepo {
 
     async fn update_and_emit(
         &self,
+        receipt: PoliciesUpdateProducerReceipt,
         scope: TenantRepoScope,
         policy: Policy,
         expected: PolicyVersion,
@@ -523,6 +543,9 @@ impl PolicyLifecycle for InMemPolicyRepo {
         if current.version != expected {
             return Err(IdentityError::VersionConflict);
         }
+        let _authorization = receipt
+            .authorize(POLICY_UPDATED_SPEC.contract())
+            .ok_or(IdentityError::InvalidPolicy)?;
         let next = policy.with_version(expected.next_checked()?);
         current.version = next.version();
         current.active = Some(next.clone());
@@ -532,6 +555,7 @@ impl PolicyLifecycle for InMemPolicyRepo {
 
     async fn deactivate_and_emit(
         &self,
+        receipt: PoliciesDeactivateProducerReceipt,
         scope: TenantRepoScope,
         id: PolicyId,
         expected: PolicyVersion,
@@ -558,6 +582,9 @@ impl PolicyLifecycle for InMemPolicyRepo {
         if active.version() != expected {
             return Err(IdentityError::VersionConflict);
         }
+        let _authorization = receipt
+            .authorize(POLICY_UPDATED_SPEC.contract())
+            .ok_or(IdentityError::InvalidPolicy)?;
         current.version = expected.next_checked()?;
         current.active = None;
         recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
@@ -940,6 +967,7 @@ impl InMemRoleBindingLifecycle {
 impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
     async fn assign_and_emit(
         &self,
+        receipt: RolesAssignProducerReceipt,
         scope: TenantRepoScope,
         binding: RoleBinding,
         entry: EventEntry,
@@ -961,6 +989,13 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
                 "inmem-rbac-cotx-fail",
             )));
         }
+        let _authorization = receipt
+            .authorize(ROLE_ASSIGNED_SPEC.contract())
+            .ok_or_else(|| {
+                OutboxEmitError::new(std::io::Error::other(
+                    "roles-assign producer does not authorize role-assigned",
+                ))
+            })?;
         recover(&self.bindings).insert((
             binding.tenant().to_string(),
             binding.role_id().as_str().to_string(),
@@ -972,6 +1007,7 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
 
     async fn revoke_and_emit(
         &self,
+        receipt: RolesRevokeProducerReceipt,
         scope: TenantRepoScope,
         role_id: RoleId,
         subject: String,
@@ -995,7 +1031,19 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
             subject.clone(),
         );
         // 仅撤目标 binding；未命中（不存在 / 跨租）→ 不删、不发事件、返回 false（隐藏存在性 + 幂等）。
-        let removed = recover(&self.bindings).remove(&key);
+        let mut bindings = recover(&self.bindings);
+        if !bindings.contains(&key) {
+            return Ok(false);
+        }
+        let _authorization = receipt
+            .authorize(ROLE_REVOKED_SPEC.contract())
+            .ok_or_else(|| {
+                OutboxEmitError::new(std::io::Error::other(
+                    "roles-revoke producer does not authorize role-revoked",
+                ))
+            })?;
+        let removed = bindings.remove(&key);
+        drop(bindings);
         if removed {
             recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
         }
@@ -1149,6 +1197,13 @@ mod tests {
     };
     use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
     use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
+    use generated::http::identity_v1::{
+        login::PRODUCER as LOGIN_PRODUCER, policies_create::PRODUCER as POLICIES_CREATE_PRODUCER,
+        policies_deactivate::PRODUCER as POLICIES_DEACTIVATE_PRODUCER,
+        roles_assign::PRODUCER as ROLES_ASSIGN_PRODUCER,
+        roles_revoke::PRODUCER as ROLES_REVOKE_PRODUCER,
+    };
+    use httpserve::ProducerMarker;
     use std::time::{Duration, SystemTime};
 
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -1165,6 +1220,26 @@ mod tests {
 
     fn scope(tenant: TenantId) -> TenantRepoScope {
         TenantRepoScope::for_test(tenant)
+    }
+
+    fn login_receipt() -> crate::ports::LoginProducerReceipt {
+        ProducerMarker::for_test(LOGIN_PRODUCER).into_receipt()
+    }
+
+    fn policy_create_receipt() -> crate::ports::PoliciesCreateProducerReceipt {
+        ProducerMarker::for_test(POLICIES_CREATE_PRODUCER).into_receipt()
+    }
+
+    fn policy_deactivate_receipt() -> crate::ports::PoliciesDeactivateProducerReceipt {
+        ProducerMarker::for_test(POLICIES_DEACTIVATE_PRODUCER).into_receipt()
+    }
+
+    fn role_assign_receipt() -> crate::ports::RolesAssignProducerReceipt {
+        ProducerMarker::for_test(ROLES_ASSIGN_PRODUCER).into_receipt()
+    }
+
+    fn role_revoke_receipt() -> crate::ports::RolesRevokeProducerReceipt {
+        ProducerMarker::for_test(ROLES_REVOKE_PRODUCER).into_receipt()
     }
 
     fn uid(raw: &str) -> ids::UserId {
@@ -1571,6 +1646,7 @@ mod tests {
         let id = policy_id("policy-tombstone");
 
         repo.create_and_emit(
+            policy_create_receipt(),
             scope(tenant),
             policy("policy-tombstone", tenant),
             dummy_entry(),
@@ -1580,6 +1656,7 @@ mod tests {
         .expect("create policy");
         assert!(
             repo.deactivate_and_emit(
+                policy_deactivate_receipt(),
                 scope(tenant),
                 id.clone(),
                 PolicyVersion::first(),
@@ -1600,6 +1677,7 @@ mod tests {
 
         let recreate = repo
             .create_and_emit(
+                policy_create_receipt(),
                 scope(tenant),
                 policy("policy-tombstone", tenant),
                 dummy_entry(),
@@ -1895,6 +1973,7 @@ mod tests {
         let repo = InMemSessionLifecycle::new();
         let ta = tid(TENANT_A);
         repo.persist_session_and_emit(
+            login_receipt(),
             scope(ta),
             make_session("sid-001", ta),
             dummy_entry(),
@@ -1915,6 +1994,7 @@ mod tests {
         let repo = InMemSessionLifecycle::new();
         let ta = tid(TENANT_A);
         repo.persist_session_and_emit(
+            login_receipt(),
             scope(ta),
             make_session("sid-002", ta),
             dummy_entry(),
@@ -1940,6 +2020,7 @@ mod tests {
         let repo = InMemSessionLifecycle::new();
         let ta = tid(TENANT_A);
         repo.persist_session_and_emit(
+            login_receipt(),
             scope(ta),
             make_session("sid-003", ta),
             dummy_entry(),
@@ -1976,6 +2057,7 @@ mod tests {
         let ta = tid(TENANT_A);
         let tb = tid(TENANT_B);
         repo.persist_session_and_emit(
+            login_receipt(),
             scope(ta),
             make_session("sid-004", ta),
             dummy_entry(),
@@ -1998,6 +2080,7 @@ mod tests {
         let ta = tid(TENANT_A);
         let tb = tid(TENANT_B);
         repo.persist_session_and_emit(
+            login_receipt(),
             scope(ta),
             make_session("sid-005", ta),
             dummy_entry(),
@@ -2026,6 +2109,7 @@ mod tests {
         let role_id = RoleId::parse("role-admin").expect("role id");
         let result = lifecycle
             .assign_and_emit(
+                role_assign_receipt(),
                 scope(tenant),
                 RoleBinding::new("user-1", role_id.clone(), tenant),
                 dummy_entry(),
@@ -2049,6 +2133,7 @@ mod tests {
             InMemRoleBindingLifecycle::default().with_binding(tenant, &role_id, "user-1");
         let result = lifecycle
             .revoke_and_emit(
+                role_revoke_receipt(),
                 scope(tenant),
                 role_id.clone(),
                 "user-1".to_string(),

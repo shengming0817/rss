@@ -33,7 +33,9 @@ use crate::domain::{
     ResourcePolicyAttributeKey,
 };
 use crate::ports::{
-    DynPolicyLifecycle, DynPolicyRepo, PolicyLifecycle, PolicyPage, PolicyRepo, TenantRepoScope,
+    DynPolicyLifecycle, DynPolicyRepo, PoliciesCreateProducerReceipt,
+    PoliciesDeactivateProducerReceipt, PoliciesUpdateProducerReceipt, PolicyLifecycle, PolicyPage,
+    PolicyRepo, TenantRepoScope,
 };
 
 const POLICY_DOMAIN: &str = POLICY_UPDATED_SPEC.contract().domain();
@@ -249,6 +251,7 @@ impl PolicyManageService {
     )]
     pub async fn create_policy(
         &self,
+        receipt: PoliciesCreateProducerReceipt,
         tenant: TenantId,
         actor: ids::UserId,
         actor_kind: vocab::PrincipalKind,
@@ -275,7 +278,7 @@ impl PolicyManageService {
             version: policy.version(),
         })?;
         self.lifecycle
-            .create_and_emit(tenant_scope, policy, entry, envelope)
+            .create_and_emit(receipt, tenant_scope, policy, entry, envelope)
             .await
             .map_err(map_identity_error)
     }
@@ -287,6 +290,7 @@ impl PolicyManageService {
     )]
     pub async fn update_policy(
         &self,
+        receipt: PoliciesUpdateProducerReceipt,
         tenant: TenantId,
         actor: ids::UserId,
         actor_kind: vocab::PrincipalKind,
@@ -318,7 +322,14 @@ impl PolicyManageService {
             version: next,
         })?;
         self.lifecycle
-            .update_and_emit(tenant_scope, policy, draft.expected, entry, envelope)
+            .update_and_emit(
+                receipt,
+                tenant_scope,
+                policy,
+                draft.expected,
+                entry,
+                envelope,
+            )
             .await
             .map_err(map_identity_error)
     }
@@ -330,6 +341,7 @@ impl PolicyManageService {
     )]
     pub async fn deactivate_policy(
         &self,
+        receipt: PoliciesDeactivateProducerReceipt,
         tenant: TenantId,
         actor: ids::UserId,
         actor_kind: vocab::PrincipalKind,
@@ -360,7 +372,14 @@ impl PolicyManageService {
         })?;
         match self
             .lifecycle
-            .deactivate_and_emit(tenant_scope, draft.id, draft.expected, entry, envelope)
+            .deactivate_and_emit(
+                receipt,
+                tenant_scope,
+                draft.id,
+                draft.expected,
+                entry,
+                envelope,
+            )
             .await
             .map_err(map_identity_error)?
         {
@@ -880,6 +899,12 @@ mod tests {
     use generated::event::identity_v1::policy_updated::{
         IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadChangeKind,
     };
+    use generated::http::identity_v1::{
+        policies_create::PRODUCER as POLICIES_CREATE_PRODUCER,
+        policies_deactivate::PRODUCER as POLICIES_DEACTIVATE_PRODUCER,
+        policies_update::PRODUCER as POLICIES_UPDATE_PRODUCER,
+    };
+    use httpserve::ProducerMarker;
 
     struct FixedClock(SystemTime);
 
@@ -898,6 +923,18 @@ mod tests {
 
     fn actor() -> ids::UserId {
         ids::UserId::parse(ACTOR).expect("actor parses")
+    }
+
+    fn create_receipt() -> PoliciesCreateProducerReceipt {
+        ProducerMarker::for_test(POLICIES_CREATE_PRODUCER).into_receipt()
+    }
+
+    fn update_receipt() -> PoliciesUpdateProducerReceipt {
+        ProducerMarker::for_test(POLICIES_UPDATE_PRODUCER).into_receipt()
+    }
+
+    fn deactivate_receipt() -> PoliciesDeactivateProducerReceipt {
+        ProducerMarker::for_test(POLICIES_DEACTIVATE_PRODUCER).into_receipt()
     }
 
     fn clock() -> Box<dyn Clock> {
@@ -1100,6 +1137,7 @@ mod tests {
 
         let err = service
             .create_policy(
+                create_receipt(),
                 t,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -1132,6 +1170,7 @@ mod tests {
         let policy_id = PolicyId::parse("policy-global-static").expect("policy id");
         let created = service
             .create_policy(
+                create_receipt(),
                 t,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -1145,6 +1184,7 @@ mod tests {
 
         let err = service
             .update_policy(
+                update_receipt(),
                 t,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -1172,6 +1212,7 @@ mod tests {
         let t = tenant();
         let created = service
             .create_policy(
+                create_receipt(),
                 t,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -1183,6 +1224,7 @@ mod tests {
 
         let updated = service
             .update_policy(
+                update_receipt(),
                 t,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -1198,6 +1240,7 @@ mod tests {
 
         let deactivated = service
             .deactivate_policy(
+                deactivate_receipt(),
                 t,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -1240,6 +1283,7 @@ mod tests {
         let t = tenant();
         service
             .create_policy(
+                create_receipt(),
                 t,
                 actor(),
                 vocab::PrincipalKind::Admin,
@@ -1276,6 +1320,7 @@ mod tests {
         let t = tenant();
         let err = service
             .create_policy(
+                create_receipt(),
                 t,
                 actor(),
                 vocab::PrincipalKind::Admin,

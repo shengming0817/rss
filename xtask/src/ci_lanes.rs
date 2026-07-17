@@ -695,6 +695,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            L2AssuranceCheck => (step_l2_assurance_check, Some("xtask/src/l2_assurance.rs"),
+                gate(
+                        GateId::L2AssuranceCheck,
+                        "l2-assurance-check",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             LocalTxCoverage => (step_localtx_coverage, Some("xtask/src/localtx_coverage.rs"),
                 gate(
                         GateId::LocalTxCoverage,

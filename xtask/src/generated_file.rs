@@ -1,12 +1,19 @@
 //! Shared primitives for committed generated files.
 
 use anyhow::{Context, Result, ensure};
-use std::fs::{self, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::ffi::{OsStr, OsString};
+use std::fs;
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
+#[cfg(not(unix))]
+use std::io::ErrorKind;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(unix)]
+static MODE_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LfCheckoutFailure {
@@ -102,15 +109,471 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-/// Atomically replace one file in-place, sync its contents, and sync the parent directory on Unix.
+/// An opened parent-directory capability plus its leaf name.
 ///
-/// The caller owns symlink validation and must keep the checkout stable for the duration of this
-/// operation; this primitive never removes a temporary file it did not successfully create.
+/// On Unix every path component is opened relative to the preceding directory with
+/// `O_NOFOLLOW|O_DIRECTORY`; callers never publish through a re-resolved parent pathname.
+#[cfg(unix)]
+pub(crate) struct ParentDirectory {
+    fd: rustix::fd::OwnedFd,
+    file_name: OsString,
+}
+
+#[cfg(unix)]
+impl ParentDirectory {
+    pub(crate) fn fd(&self) -> &rustix::fd::OwnedFd {
+        &self.fd
+    }
+
+    pub(crate) fn file_name(&self) -> &OsStr {
+        &self.file_name
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn open_parent_directory(path: &Path) -> Result<ParentDirectory> {
+    open_parent_directory_impl(path, false)
+}
+
+#[cfg(unix)]
+fn open_or_create_parent_directory(path: &Path) -> Result<ParentDirectory> {
+    open_parent_directory_impl(path, true)
+}
+
+#[cfg(unix)]
+fn open_parent_directory_impl(path: &Path, create_missing: bool) -> Result<ParentDirectory> {
+    use rustix::fs::{Mode, OFlags, fstat, open, openat};
+    use std::os::unix::fs::MetadataExt as _;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} 无父目录", path.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{} 无文件名", path.display()))?
+        .to_os_string();
+    let observable_parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let before = match fs::symlink_metadata(observable_parent) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "{} 不是真实父目录",
+                parent.display()
+            );
+            Some((metadata.dev(), metadata.ino()))
+        }
+        Err(error) if create_missing && error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("读取 {} metadata 失败", parent.display()));
+        }
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = if parent.is_absolute() {
+        open("/", flags, Mode::empty()).context("打开根目录 capability 失败")?
+    } else {
+        open(".", flags, Mode::empty()).context("打开当前目录 capability 失败")?
+    };
+    let mut normal_index = 0usize;
+    for component in parent.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(segment) => {
+                #[cfg(target_os = "macos")]
+                if parent.is_absolute() && normal_index == 0 && macos_system_alias(segment) {
+                    directory = openat(&directory, "private", flags, Mode::empty())
+                        .context("安全打开 macOS /private alias root 失败")?;
+                    directory =
+                        openat(&directory, segment, flags, Mode::empty()).with_context(|| {
+                            format!(
+                                "安全打开 macOS system alias {} 失败",
+                                segment.to_string_lossy()
+                            )
+                        })?;
+                    normal_index += 1;
+                    continue;
+                }
+                directory = open_directory_component(&directory, segment, flags, create_missing)?;
+                normal_index += 1;
+            }
+            Component::ParentDir | Component::Prefix(_) => {
+                anyhow::bail!("{} 父目录不是规范路径", path.display());
+            }
+        }
+    }
+    let opened = fstat(&directory).context("读取父目录 capability metadata 失败")?;
+    if let Some(before) = before {
+        ensure!(
+            before == (opened.st_dev as u64, opened.st_ino as u64),
+            "{} 在打开 capability 前被替换",
+            parent.display()
+        );
+    }
+    let after = fs::symlink_metadata(observable_parent)
+        .with_context(|| format!("重新读取 {} metadata 失败", parent.display()))?;
+    ensure!(
+        after.is_dir()
+            && !after.file_type().is_symlink()
+            && (opened.st_dev as u64, opened.st_ino as u64) == (after.dev(), after.ino()),
+        "{} 在打开 capability 期间被替换",
+        parent.display()
+    );
+    Ok(ParentDirectory {
+        fd: directory,
+        file_name,
+    })
+}
+
+#[cfg(unix)]
+fn open_directory_component(
+    directory: &rustix::fd::OwnedFd,
+    segment: &OsStr,
+    flags: rustix::fs::OFlags,
+    create_missing: bool,
+) -> Result<rustix::fd::OwnedFd> {
+    use rustix::fs::{Mode, fsync, mkdirat, openat};
+
+    match openat(directory, segment, flags, Mode::empty()) {
+        Ok(opened) => Ok(opened),
+        Err(error) if create_missing && error == rustix::io::Errno::NOENT => {
+            match mkdirat(directory, segment, Mode::from_raw_mode(0o777)) {
+                Ok(()) => fsync(directory).with_context(|| {
+                    format!(
+                        "同步新建父目录分量 {} 的 parent capability 失败",
+                        segment.to_string_lossy()
+                    )
+                })?,
+                Err(error) if error == rustix::io::Errno::EXIST => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("安全创建父目录分量 {} 失败", segment.to_string_lossy())
+                    });
+                }
+            }
+            openat(directory, segment, flags, Mode::empty()).with_context(|| {
+                format!("安全打开新建父目录分量 {} 失败", segment.to_string_lossy())
+            })
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("安全打开父目录分量 {} 失败", segment.to_string_lossy())),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_alias(segment: &OsStr) -> bool {
+    let expected = match segment.to_str() {
+        Some("var") => Some("private/var"),
+        Some("tmp") => Some("private/tmp"),
+        _ => None,
+    };
+    expected.is_some_and(|expected| {
+        fs::read_link(Path::new("/").join(segment))
+            .is_ok_and(|target| target == Path::new(expected))
+    })
+}
+
+/// Read one bounded UTF-8 ordinary file through a no-follow parent capability.
+pub(crate) fn read_stable_utf8_file(path: &Path, max_bytes: u64, label: &str) -> Result<String> {
+    read_stable_utf8_file_with_hook(path, max_bytes, label, || {})
+}
+
+#[cfg(unix)]
+pub(crate) fn read_stable_utf8_file_with_hook(
+    path: &Path,
+    max_bytes: u64,
+    label: &str,
+    after_open: impl FnOnce(),
+) -> Result<String> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, fstat, openat, statat};
+    use std::io::Read as _;
+
+    let parent =
+        open_parent_directory(path).with_context(|| format!("{label} parent is unsafe"))?;
+    let before = statat(parent.fd(), parent.file_name(), AtFlags::SYMLINK_NOFOLLOW)
+        .with_context(|| format!("{label} metadata failed"))?;
+    ensure!(
+        FileType::from_raw_mode(before.st_mode) != FileType::Symlink,
+        "{label} rejects symlink"
+    );
+    ensure!(
+        FileType::from_raw_mode(before.st_mode) == FileType::RegularFile,
+        "{label} rejects non-regular file"
+    );
+    ensure!(
+        before.st_size >= 0 && before.st_size as u64 <= max_bytes,
+        "{label} exceeds {max_bytes} byte limit"
+    );
+    let fd = openat(
+        parent.fd(),
+        parent.file_name(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .with_context(|| format!("{label} open failed"))?;
+    let opened = fstat(&fd).with_context(|| format!("{label} fstat failed"))?;
+    ensure!(
+        (before.st_dev, before.st_ino) == (opened.st_dev, opened.st_ino),
+        "{label} was replaced before open"
+    );
+
+    after_open();
+    let mut bytes = Vec::with_capacity((opened.st_size as usize).min(64 * 1024));
+    fs::File::from(fd)
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("{label} read failed"))?;
+    ensure!(
+        bytes.len() as u64 <= max_bytes,
+        "{label} exceeds {max_bytes} byte limit"
+    );
+    let after = statat(parent.fd(), parent.file_name(), AtFlags::SYMLINK_NOFOLLOW)
+        .with_context(|| format!("{label} post-read metadata failed"))?;
+    ensure!(
+        FileType::from_raw_mode(after.st_mode) == FileType::RegularFile
+            && (opened.st_dev, opened.st_ino) == (after.st_dev, after.st_ino),
+        "{label} was replaced during read"
+    );
+    String::from_utf8(bytes).with_context(|| format!("{label} is not UTF-8"))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn read_stable_utf8_file_with_hook(
+    path: &Path,
+    max_bytes: u64,
+    label: &str,
+    after_open: impl FnOnce(),
+) -> Result<String> {
+    use std::io::Read as _;
+
+    let before = fs::symlink_metadata(path).with_context(|| format!("{label} metadata failed"))?;
+    ensure!(
+        !before.file_type().is_symlink() && before.is_file(),
+        "{label} rejects symlink/non-regular file"
+    );
+    ensure!(
+        before.len() <= max_bytes,
+        "{label} exceeds {max_bytes} byte limit"
+    );
+    let mut file = fs::File::open(path).with_context(|| format!("{label} open failed"))?;
+    after_open();
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("{label} read failed"))?;
+    let after =
+        fs::symlink_metadata(path).with_context(|| format!("{label} post-read metadata failed"))?;
+    ensure!(
+        after.is_file()
+            && before.len() == after.len()
+            && before.modified().ok() == after.modified().ok(),
+        "{label} was replaced during read"
+    );
+    String::from_utf8(bytes).with_context(|| format!("{label} is not UTF-8"))
+}
+
+/// Atomically replace one file in-place, sync its contents, and sync the held parent directory.
+///
+/// Unix publication is entirely `*at`-relative to an `O_NOFOLLOW` directory capability. The only
+/// temporary artifact inode starts and remains `0600` while content is written; immediately before
+/// rename its held descriptor receives either the replaced regular file's ordinary permission bits
+/// or `0644` limited by the process umask. This primitive never removes a temporary file it did not
+/// successfully create.
+#[cfg(unix)]
 pub(crate) fn atomic_replace(path: &Path, content: &[u8]) -> Result<()> {
+    atomic_replace_unix(path, content)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn atomic_replace(path: &Path, content: &[u8]) -> Result<()> {
+    atomic_replace_fallback(path, content)
+}
+
+#[cfg(unix)]
+fn atomic_replace_unix(path: &Path, content: &[u8]) -> Result<()> {
+    atomic_replace_unix_with_hook(path, content, |_| {})
+}
+
+#[cfg(unix)]
+fn atomic_replace_unix_with_hook(
+    path: &Path,
+    content: &[u8],
+    temp_ready: impl FnOnce(&fs::File),
+) -> Result<()> {
+    use rustix::fs::{AtFlags, Mode, OFlags, fchmod, fsync, openat, renameat, unlinkat};
+
+    let parent = open_or_create_parent_directory(path)?;
+    let file_name = parent
+        .file_name()
+        .to_str()
+        .context("generated 文件名不是 UTF-8")?;
+    let target = TargetPublication::inspect(&parent)?;
+    let mut opened = None;
+    for _ in 0..64 {
+        let temp_name = format!(
+            ".{file_name}.tmp-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let flags =
+            OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::WRONLY | OFlags::CLOEXEC;
+        match openat(
+            parent.fd(),
+            temp_name.as_str(),
+            flags,
+            Mode::from_raw_mode(0o600),
+        ) {
+            Ok(fd) => {
+                opened = Some((temp_name, fd));
+                break;
+            }
+            Err(error) if error == rustix::io::Errno::EXIST => {}
+            Err(error) => return Err(error).context("创建临时文件失败"),
+        }
+    }
+    let (temp_name, fd) = opened.context("临时文件名冲突次数超限")?;
+    let mut file = fs::File::from(fd);
+    let result = (|| -> Result<()> {
+        file.write_all(content)?;
+        file.flush()?;
+        file.sync_all()?;
+        temp_ready(&file);
+        target.ensure_unchanged(&parent)?;
+        fchmod(&file, target.mode()).context("设置 committed generated 文件 mode 失败")?;
+        file.sync_all()?;
+        renameat(
+            parent.fd(),
+            temp_name.as_str(),
+            parent.fd(),
+            parent.file_name(),
+        )
+        .with_context(|| format!("renameat {temp_name} -> {} 失败", path.display()))?;
+        drop(file);
+        fsync(parent.fd())?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = unlinkat(parent.fd(), temp_name.as_str(), AtFlags::empty());
+    }
+    result
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+enum TargetPublication {
+    Missing {
+        mode: rustix::fs::Mode,
+    },
+    Existing {
+        device: rustix::fs::Dev,
+        inode: u64,
+        mode: rustix::fs::Mode,
+    },
+}
+
+#[cfg(unix)]
+impl TargetPublication {
+    fn inspect(parent: &ParentDirectory) -> Result<Self> {
+        use rustix::fs::{AtFlags, FileType, Mode, statat};
+
+        match statat(parent.fd(), parent.file_name(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => {
+                ensure!(
+                    FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile,
+                    "committed generated 目标不是普通文件"
+                );
+                Ok(Self::Existing {
+                    device: stat.st_dev,
+                    inode: stat.st_ino,
+                    mode: Mode::from_raw_mode(stat.st_mode & 0o777),
+                })
+            }
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(Self::Missing {
+                mode: probe_umask_limited_committed_mode(parent)?,
+            }),
+            Err(error) => Err(error).context("读取 committed generated 目标 metadata 失败"),
+        }
+    }
+
+    fn mode(self) -> rustix::fs::Mode {
+        match self {
+            Self::Missing { mode } | Self::Existing { mode, .. } => mode,
+        }
+    }
+
+    fn ensure_unchanged(self, parent: &ParentDirectory) -> Result<()> {
+        use rustix::fs::{AtFlags, FileType, statat};
+
+        let current = statat(parent.fd(), parent.file_name(), AtFlags::SYMLINK_NOFOLLOW);
+        match (self, current) {
+            (Self::Missing { .. }, Err(error)) if error == rustix::io::Errno::NOENT => Ok(()),
+            (
+                Self::Existing {
+                    device,
+                    inode,
+                    mode,
+                },
+                Ok(stat),
+            ) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+                && (stat.st_dev, stat.st_ino) == (device, inode)
+                && rustix::fs::Mode::from_raw_mode(stat.st_mode & 0o777) == mode =>
+            {
+                Ok(())
+            }
+            (Self::Missing { .. }, Ok(_)) | (Self::Existing { .. }, Ok(_)) => {
+                anyhow::bail!("committed generated 目标在发布前被替换")
+            }
+            (_, Err(error)) => {
+                Err(error).context("重新读取 committed generated 目标 metadata 失败")
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn probe_umask_limited_committed_mode(parent: &ParentDirectory) -> Result<rustix::fs::Mode> {
+    use rustix::fs::{AtFlags, Mode, OFlags, fstat, openat, unlinkat};
+
+    for _ in 0..64 {
+        let probe_name = format!(
+            ".rss-generated-mode-probe-{}-{}",
+            std::process::id(),
+            MODE_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let flags =
+            OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::WRONLY | OFlags::CLOEXEC;
+        match openat(
+            parent.fd(),
+            probe_name.as_str(),
+            flags,
+            Mode::from_raw_mode(0o644),
+        ) {
+            Ok(fd) => {
+                let stat = fstat(&fd).context("读取 committed mode probe metadata 失败");
+                drop(fd);
+                unlinkat(parent.fd(), probe_name.as_str(), AtFlags::empty())
+                    .context("清理 committed mode probe 失败")?;
+                let stat = stat?;
+                return Ok(Mode::from_raw_mode(stat.st_mode & 0o777));
+            }
+            Err(error) if error == rustix::io::Errno::EXIST => {}
+            Err(error) => return Err(error).context("创建 committed mode probe 失败"),
+        }
+    }
+    anyhow::bail!("committed mode probe 文件名冲突次数超限")
+}
+
+#[cfg(not(unix))]
+fn atomic_replace_fallback(path: &Path, content: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} 无父目录", path.display()))?;
     fs::create_dir_all(parent).with_context(|| format!("创建 {} 失败", parent.display()))?;
+    let before = fs::canonicalize(parent).context("解析 generated 父目录失败")?;
+    ensure!(before.is_dir(), "generated 父目录不是目录");
     let file_name = path
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("{} 无文件名", path.display()))?
@@ -137,6 +600,8 @@ pub(crate) fn atomic_replace(path: &Path, content: &[u8]) -> Result<()> {
         file.flush()?;
         file.sync_all()?;
         drop(file);
+        let after = fs::canonicalize(parent).context("重新解析 generated 父目录失败")?;
+        ensure!(before == after, "generated 父目录在发布期间被替换");
         fs::rename(&temp, path)
             .with_context(|| format!("rename {} -> {} 失败", temp.display(), path.display()))?;
         #[cfg(unix)]
@@ -243,6 +708,84 @@ mod tests {
         for path in occupied {
             assert_eq!(fs::read(path)?, b"not owned by this call\n");
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replace_creates_missing_parents_without_following_symlinks() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new("atomic-parent")?;
+        let nested = fixture.root.join("new/deep/generated.json");
+        atomic_replace(&nested, b"nested\n")?;
+        assert_eq!(fs::read(&nested)?, b"nested\n");
+
+        let outside = fixture.root.join("outside");
+        fs::create_dir(&outside)?;
+        symlink(&outside, fixture.root.join("linked"))?;
+        let escaped = fixture.root.join("linked/deep/generated.json");
+        assert!(atomic_replace(&escaped, b"must not escape\n").is_err());
+        assert!(!outside.join("deep/generated.json").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replace_rejects_symlink_target_without_replacing_or_following_it()
+    -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new("atomic-target-symlink")?;
+        let outside = fixture.root.join("outside.json");
+        fs::write(&outside, b"outside\n")?;
+        let output = fixture.root.join("generated.json");
+        symlink(&outside, &output)?;
+
+        assert!(atomic_replace(&output, b"must not publish\n").is_err());
+        assert!(fs::symlink_metadata(&output)?.file_type().is_symlink());
+        assert_eq!(fs::read(&outside)?, b"outside\n");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replace_uses_umask_limited_default_and_preserves_existing_mode() -> anyhow::Result<()>
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+        let fixture = Fixture::new("atomic-mode")?;
+        let reference = fixture.root.join("reference-mode");
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o644)
+            .open(&reference)?;
+        let expected_new_mode = fs::metadata(&reference)?.permissions().mode() & 0o777;
+
+        let output = fixture.root.join("generated.json");
+        atomic_replace_unix_with_hook(&output, b"new\n", |temporary| {
+            assert_eq!(
+                temporary
+                    .metadata()
+                    .expect("temporary metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+                "named temporary inode must remain private before publication"
+            );
+        })?;
+        assert_eq!(
+            fs::metadata(&output)?.permissions().mode() & 0o777,
+            expected_new_mode,
+            "new committed artifact must use 0644 limited by the process umask"
+        );
+
+        fs::set_permissions(&output, fs::Permissions::from_mode(0o640))?;
+        atomic_replace(&output, b"replacement\n")?;
+        assert_eq!(fs::metadata(&output)?.permissions().mode() & 0o777, 0o640);
+        assert_eq!(fs::read(&output)?, b"replacement\n");
         Ok(())
     }
 

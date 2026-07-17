@@ -60,6 +60,12 @@ pub mod test_support {
 
     use vocab::TenantId;
 
+    /// Mint the route-typed login producer receipt for adapter tests that bypass the HTTP router.
+    pub fn login_producer_receipt() -> crate::ports::LoginProducerReceipt {
+        httpserve::ProducerMarker::for_test(generated::http::identity_v1::login::PRODUCER)
+            .into_receipt()
+    }
+
     use crate::domain::{LoginIdentifier, Session, SessionId};
 
     /// Mount the production logout handler for downstream adapter integration tests.

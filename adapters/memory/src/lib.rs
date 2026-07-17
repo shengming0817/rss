@@ -44,7 +44,8 @@ use diport::{
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
 use identity::ports::{
-    IdentityError, Session, SessionId, SessionLifecycle, SessionLogoutMutation, TenantRepoScope,
+    IdentityError, LoginProducerReceipt, Session, SessionId, SessionLifecycle,
+    SessionLogoutMutation, TenantRepoScope,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -365,6 +366,7 @@ impl MemSessionLifecycle {
 impl SessionLifecycle for MemSessionLifecycle {
     async fn persist_session_and_emit(
         &self,
+        receipt: LoginProducerReceipt,
         scope: TenantRepoScope,
         session: Session,
         entry: EventEntry,
@@ -380,6 +382,11 @@ impl SessionLifecycle for MemSessionLifecycle {
                 "session persist envelope tenant scope mismatch",
             )));
         }
+        let _authorization = receipt.authorize(*envelope.contract()).ok_or_else(|| {
+            OutboxEmitError::new(std::io::Error::other(
+                "login producer does not authorize session-created envelope",
+            ))
+        })?;
         // demo：把 session 存入进程内 store（demo logout/查询可见），再复用 MemPublisher 把 entry fan 到总线
         // （`Message.id = entry.idem_key()` = EventId，闭合 demo 侧幂等传播）。
         // reason: 真实 co-tx both-or-neither + durable 持久化由 PgSessionLifecycle 的 OUTBOX-COTX-SESSION-01
@@ -1545,6 +1552,10 @@ mod tests {
     const TOPIC: &str = "identity.session-created";
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    fn login_receipt() -> identity::ports::LoginProducerReceipt {
+        identity::test_support::login_producer_receipt()
+    }
+
     #[allow(clippy::unwrap_used)]
     fn saga_identity(contract_id: &str) -> SagaWorkerIdentity {
         SagaWorkerIdentity::new(
@@ -1830,6 +1841,7 @@ mod tests {
         let signer = Arc::new(RecordingTenantSigner::default());
         MemSessionLifecycle::with_tenant_metadata_signer(bus.clone(), signer)
             .persist_session_and_emit(
+                login_receipt(),
                 identity::ports::TenantRepoScope::for_test(tenant),
                 session,
                 entry,
@@ -1896,6 +1908,7 @@ mod tests {
             MemSessionLifecycle::with_tenant_metadata_signer(MemBus::new(), signer.clone());
         let result = lifecycle
             .persist_session_and_emit(
+                login_receipt(),
                 identity::ports::TenantRepoScope::for_test(tenant_a),
                 session,
                 entry,
@@ -1952,6 +1965,7 @@ mod tests {
             MemSessionLifecycle::with_tenant_metadata_signer(MemBus::new(), signer.clone());
         let result = lifecycle
             .persist_session_and_emit(
+                login_receipt(),
                 identity::ports::TenantRepoScope::for_test(tenant_a),
                 session,
                 entry,

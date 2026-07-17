@@ -278,6 +278,11 @@ fn collect_contract_binding_aliases(file: &syn::File) -> SourceAliases {
     );
     insert_binding_alias(
         &mut binding_constructors,
+        "HttpProducerBinding",
+        "HttpProducerBinding",
+    );
+    insert_binding_alias(
+        &mut binding_constructors,
         "ProjectionInputBinding",
         "ProjectionInputBinding",
     );
@@ -366,6 +371,7 @@ fn binding_constructor_methods(type_name: &str) -> Option<&'static [&'static str
         "ContractBinding"
         | "HttpRouteEvidence"
         | "HttpRouteBinding"
+        | "HttpProducerBinding"
         | "ProjectionInputBinding"
         | "SagaStepBinding" => Some(&["from_static"]),
         "SagaRuntimePolicySpec" => Some(&["from_millis"]),
@@ -609,6 +615,28 @@ mod tests {
         "#;
         let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
         assert_eq!(findings.len(), 1, "typed binding mint must be generated");
+        assert_eq!(findings[0].rule, Rule::BareFromStatic);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prod_http_producer_binding_mint() -> anyhow::Result<()> {
+        let src = r#"
+            struct RouteMarker;
+
+            fn mint() {
+                let _ = vocab::HttpProducerBinding::<RouteMarker>::from_static(
+                    generated::http::identity_v1::login::ROUTE,
+                    &[generated::event::identity_v1::session_created::CONTRACT],
+                );
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(
+            findings.len(),
+            1,
+            "producer binding mint must stay generated-only"
+        );
         assert_eq!(findings[0].rule, Rule::BareFromStatic);
         Ok(())
     }

@@ -100,6 +100,36 @@ fn identity_scope(tenant: vocab::TenantId) -> identity::ports::TenantRepoScope {
     identity::ports::TenantRepoScope::for_test(tenant)
 }
 
+fn login_producer_receipt() -> identity::ports::LoginProducerReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::identity_v1::login::PRODUCER)
+        .into_receipt()
+}
+
+fn policies_create_producer_receipt() -> identity::ports::PoliciesCreateProducerReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::identity_v1::policies_create::PRODUCER)
+        .into_receipt()
+}
+
+fn policies_update_producer_receipt() -> identity::ports::PoliciesUpdateProducerReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::identity_v1::policies_update::PRODUCER)
+        .into_receipt()
+}
+
+fn policies_deactivate_producer_receipt() -> identity::ports::PoliciesDeactivateProducerReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::identity_v1::policies_deactivate::PRODUCER)
+        .into_receipt()
+}
+
+fn roles_assign_producer_receipt() -> identity::ports::RolesAssignProducerReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::identity_v1::roles_assign::PRODUCER)
+        .into_receipt()
+}
+
+fn roles_revoke_producer_receipt() -> identity::ports::RolesRevokeProducerReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::identity_v1::roles_revoke::PRODUCER)
+        .into_receipt()
+}
+
 fn settings_scope(tenant: vocab::TenantId) -> settings::ports::TenantRepoScope {
     settings::ports::TenantRepoScope::for_test(tenant)
 }
@@ -172,7 +202,7 @@ fn command_keyring_k1_only() -> std::sync::Arc<CommandIdempotencyKeyring> {
 }
 
 fn session_contract() -> vocab::ContractBinding {
-    vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC, "v1", TEST_SCHEMA_HASH)
+    generated::event::identity_v1::session_created::CONTRACT
 }
 
 fn config_contract() -> vocab::ContractBinding {
@@ -15680,6 +15710,7 @@ async fn t11_cotx_commits_session_and_outbox() -> TestResult {
 
     crate::PgSessionLifecycle::new(&store, fixed_clock())
         .persist_session_and_emit(
+            login_producer_receipt(),
             identity_scope(tenant),
             session,
             session_entry(&event_id),
@@ -15766,6 +15797,7 @@ async fn t11b_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
 
     let result = crate::PgSessionLifecycle::new(&store, fixed_clock())
         .persist_session_and_emit(
+            login_producer_receipt(),
             identity_scope(tenant),
             session,
             session_entry(&event_id),
@@ -15821,6 +15853,7 @@ async fn t11c_cotx_rejects_scope_session_tenant_mismatch() -> TestResult {
 
     let result = crate::PgSessionLifecycle::new(&store, fixed_clock())
         .persist_session_and_emit(
+            login_producer_receipt(),
             identity_scope(scope_tenant),
             session,
             session_entry(&event_id),
@@ -15943,6 +15976,7 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
             created,
         );
         uow.persist_session_and_emit(
+            login_producer_receipt(),
             identity_scope(tenant),
             session,
             session_entry(&event_id),
@@ -19605,6 +19639,7 @@ async fn t14_cotx_real_method_rollback_on_session_insert_failure() -> TestResult
 
     let result = crate::PgSessionLifecycle::new(&store, fixed_clock())
         .persist_session_and_emit(
+            login_producer_receipt(),
             identity_scope(tenant),
             session,
             session_entry(&event_id),
@@ -19647,6 +19682,7 @@ async fn session_fact_conflict_rolls_back_session_insert() -> TestResult {
 
     let conflict = crate::PgSessionLifecycle::new(&store, fixed_clock())
         .persist_session_and_emit(
+            login_producer_receipt(),
             identity_scope(tenant),
             session,
             session_entry(&event_id),
@@ -19704,6 +19740,7 @@ async fn t14b_session_lifecycle_cotx_conformance() -> TestResult {
                 );
                 lifecycle
                     .persist_session_and_emit(
+                        login_producer_receipt(),
                         identity_scope(tenant),
                         session,
                         session_entry(&ok_event_id),
@@ -19733,6 +19770,7 @@ async fn t14b_session_lifecycle_cotx_conformance() -> TestResult {
                 );
                 lifecycle
                     .persist_session_and_emit(
+                        login_producer_receipt(),
                         identity_scope(tenant),
                         session,
                         session_entry(&fail_event_id),
@@ -19849,6 +19887,7 @@ async fn t20_find_returns_persisted_session() -> TestResult {
     let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
     lifecycle
         .persist_session_and_emit(
+            login_producer_receipt(),
             identity_scope(tenant),
             session,
             session_entry(&event_id),
@@ -19891,6 +19930,7 @@ async fn t21_revoke_soft_deletes_and_is_idempotent() -> TestResult {
     let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
     lifecycle
         .persist_session_and_emit(
+            login_producer_receipt(),
             identity_scope(tenant),
             session,
             session_entry(&event_id),
@@ -19975,6 +20015,7 @@ async fn session_revoke_rollback_on_storage_error() -> TestResult {
     );
     lifecycle
         .persist_session_and_emit(
+            login_producer_receipt(),
             identity_scope(tenant),
             session,
             session_entry(&event_id),
@@ -20028,6 +20069,7 @@ async fn t22_cross_tenant_revoke_and_find_isolated() -> TestResult {
     let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
     lifecycle
         .persist_session_and_emit(
+            login_producer_receipt(),
             identity_scope(tenant_a),
             session,
             session_entry(&event_id),
@@ -20098,6 +20140,7 @@ async fn t22b_session_lifecycle_tenant_noop_conformance() -> TestResult {
         || async {
             lifecycle
                 .persist_session_and_emit(
+                    login_producer_receipt(),
                     identity_scope(tenant_a),
                     session,
                     session_entry(&event_id),
@@ -21381,7 +21424,8 @@ impl ConfigTestWrite for PgConfigRepo {
     ) -> Result<(), ConfigRepoError> {
         let tenant = entry.tenant();
         let subject = entry.key().as_str().to_string();
-        self.commit(
+        self.commit_publish(
+            settings::config_publish_receipt_for_test(),
             scope,
             ConfigMutation::Put(entry),
             config_outbox_entry(&unique_event_id("config-test-put")),
@@ -21400,7 +21444,8 @@ impl ConfigTestWrite for PgConfigRepo {
             return Ok(());
         };
         let result = self
-            .commit(
+            .commit_delete(
+                settings::config_delete_receipt_for_test(),
                 scope,
                 ConfigMutation::Delete(ConfigTombstone::hydrate(
                     key.clone(),
@@ -22137,7 +22182,8 @@ async fn tc1b_bundle_config_save_find_roundtrip() -> TestResult {
         "未写入 → None"
     );
     writer
-        .commit(
+        .commit_publish(
+            settings::config_publish_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Put(config_entry("bundle.timeout", "30s", 1)),
             config_outbox_entry(&unique_event_id("bundle-read-write")),
@@ -22169,7 +22215,8 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
     let event_id = unique_event_id("cfg-tc1c-evt");
 
     writer
-        .commit(
+        .commit_publish(
+            settings::config_publish_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Put(config_entry("bundle.cotx", "v1", 1)),
             config_outbox_entry(&event_id),
@@ -22511,7 +22558,8 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     let event_id = unique_event_id("cfg-tc5-evt");
     let plain_value = "settings-value-must-not-leak";
 
-    repo.commit(
+    repo.commit_publish(
+        settings::config_publish_receipt_for_test(),
         settings_scope(tenant),
         ConfigMutation::Put(config_entry("app.k", plain_value, 1)),
         config_outbox_entry(&event_id),
@@ -22613,7 +22661,8 @@ async fn tc5d_config_delete_cotx_is_both_or_neither() -> TestResult {
     .await?;
 
     let deleted_event = unique_event_id("cfg-tc5d-deleted");
-    repo.commit(
+    repo.commit_delete(
+        settings::config_delete_receipt_for_test(),
         settings_scope(tenant),
         ConfigMutation::Delete(ConfigTombstone::hydrate(key.clone(), tenant, 2)),
         config_deleted_outbox_entry(&deleted_event, key.as_str(), 2),
@@ -22644,7 +22693,8 @@ async fn tc5d_config_delete_cotx_is_both_or_neither() -> TestResult {
 
     let conflict_event = unique_event_id("cfg-tc5d-conflict");
     let conflict = repo
-        .commit(
+        .commit_delete(
+            settings::config_delete_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Delete(ConfigTombstone::hydrate(key.clone(), tenant, 3)),
             config_deleted_outbox_entry(&conflict_event, key.as_str(), 3),
@@ -22684,7 +22734,8 @@ async fn tc5b_config_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
     );
 
     let result = repo
-        .commit(
+        .commit_publish(
+            settings::config_publish_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Put(config_entry("app.mismatch", "v1", 1)),
             config_outbox_entry(&event_id),
@@ -22725,7 +22776,8 @@ async fn tc5c_config_cotx_rejects_scope_entry_tenant_mismatch() -> TestResult {
     let key = "app.scope-entry-mismatch";
 
     let result = repo
-        .commit(
+        .commit_publish(
+            settings::config_publish_receipt_for_test(),
             settings_scope(scope_tenant),
             ConfigMutation::Put(config_entry_for(entry_tenant, key, "v1", 1)),
             config_outbox_entry(&event_id),
@@ -22829,7 +22881,8 @@ async fn config_fact_conflict_rolls_back_mutation() -> TestResult {
     let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
 
     let conflict = repo
-        .commit(
+        .commit_publish(
+            settings::config_publish_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Put(config_entry(key, "must-rollback", 1)),
             config_outbox_entry(&event_id),
@@ -22874,7 +22927,8 @@ async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
     // 以陈旧 v1 走 co-tx → CAS 冲突 → 整事务回滚（无 outbox 行）。
     let event_id = unique_event_id("cfg-tc7-evt");
     let result = repo
-        .commit(
+        .commit_publish(
+            settings::config_publish_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Put(config_entry("app.k", "v1-stale", 1)),
             config_outbox_entry(&event_id),
@@ -22927,7 +22981,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
     testkit::repo_conformance::assert_cotx_both_or_neither(
         testkit::repo_conformance::CotxCase {
             action: || async {
-                repo.commit(settings_scope(tenant),
+                repo.commit_publish(settings::config_publish_receipt_for_test(), settings_scope(tenant),
                     ConfigMutation::Put(config_entry("app.cotx-ok", "v1", 1)),
                     config_outbox_entry(&ok_event),
                     config_envelope("app.cotx-ok"),
@@ -23007,7 +23061,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
         },
         testkit::repo_conformance::CotxCase {
             action: || async {
-                repo.commit(settings_scope(tenant),
+                repo.commit_publish(settings::config_publish_receipt_for_test(), settings_scope(tenant),
                     ConfigMutation::Put(config_entry("app.cotx-conflict", "stale", 1)),
                     config_outbox_entry(&conflict_event),
                     config_envelope("app.cotx-conflict"),
@@ -23068,7 +23122,8 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                     let transient_event = transient_event.clone();
                     arm_config_retry_failpoint("app.retry-transient", 1);
                     async move {
-                        repo.commit(
+                        repo.commit_publish(
+                            settings::config_publish_receipt_for_test(),
                             settings_scope(tenant),
                             ConfigMutation::Put(config_entry("app.retry-transient", "v1", 1)),
                             config_outbox_entry(&transient_event),
@@ -23101,7 +23156,8 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                     let conflict_event = conflict_event.clone();
                     arm_config_retry_failpoint("app.retry-conflict", 0);
                     async move {
-                        repo.commit(
+                        repo.commit_publish(
+                            settings::config_publish_receipt_for_test(),
                             settings_scope(tenant),
                             ConfigMutation::Put(config_entry("app.retry-conflict", "stale", 1)),
                             config_outbox_entry(&conflict_event),
@@ -23133,7 +23189,8 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                 || {
                     arm_config_retry_permanent_failpoint("app.retry-permanent");
                     async {
-                        repo.commit(
+                        repo.commit_publish(
+                            settings::config_publish_receipt_for_test(),
                             settings_scope(tenant),
                             ConfigMutation::Put(config_entry("app.retry-permanent", "v1", 1)),
                             config_outbox_entry(&permanent_event),
@@ -23165,7 +23222,8 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                     let exhaustion_event = exhaustion_event.clone();
                     arm_config_retry_failpoint("app.retry-exhaustion", 3);
                     async move {
-                        repo.commit(
+                        repo.commit_publish(
+                            settings::config_publish_receipt_for_test(),
                             settings_scope(tenant),
                             ConfigMutation::Put(config_entry("app.retry-exhaustion", "v1", 1)),
                             config_outbox_entry(&exhaustion_event),
@@ -23356,7 +23414,8 @@ async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
 
     // publish v1 经 co-tx（content-派生 event_id ...:v1）。
     let ev1 = config_event_id(tenant, "app.k", 1);
-    repo.commit(
+    repo.commit_publish(
+        settings::config_publish_receipt_for_test(),
         settings_scope(tenant),
         ConfigMutation::Put(config_entry("app.k", "v1", 1)),
         config_outbox_entry(&ev1),
@@ -23375,7 +23434,8 @@ async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
     assert_eq!(next, 3, "delete 软删后下一版本 = 3，不重置回 1");
     let ev3 = config_event_id(tenant, "app.k", next);
     assert_ne!(ev1, ev3, "republish event_id 不复用（v1 ≠ v3）");
-    repo.commit(
+    repo.commit_publish(
+        settings::config_publish_receipt_for_test(),
         settings_scope(tenant),
         ConfigMutation::Put(config_entry("app.k", "v1-again", next)),
         config_outbox_entry(&ev3),
@@ -24824,7 +24884,13 @@ async fn policy_create_and_emit(
     let (entry, envelope) =
         policy_lifecycle_event(tenant, policy.id().as_str(), "created", policy.version())?;
     lifecycle
-        .create_and_emit(identity_scope(tenant), policy, entry, envelope)
+        .create_and_emit(
+            policies_create_producer_receipt(),
+            identity_scope(tenant),
+            policy,
+            entry,
+            envelope,
+        )
         .await
 }
 
@@ -24841,7 +24907,14 @@ async fn policy_update_and_emit(
         expected.next_checked()?,
     )?;
     lifecycle
-        .update_and_emit(identity_scope(tenant), policy, expected, entry, envelope)
+        .update_and_emit(
+            policies_update_producer_receipt(),
+            identity_scope(tenant),
+            policy,
+            expected,
+            entry,
+            envelope,
+        )
         .await
 }
 
@@ -24854,7 +24927,14 @@ async fn policy_deactivate_and_emit(
     let (entry, envelope) =
         policy_lifecycle_event(tenant, id.as_str(), "deactivated", expected.next_checked()?)?;
     lifecycle
-        .deactivate_and_emit(identity_scope(tenant), id, expected, entry, envelope)
+        .deactivate_and_emit(
+            policies_deactivate_producer_receipt(),
+            identity_scope(tenant),
+            id,
+            expected,
+            entry,
+            envelope,
+        )
         .await
 }
 
@@ -24873,7 +24953,14 @@ async fn policy_update_and_emit_event(
         event_id,
     )?;
     lifecycle
-        .update_and_emit(identity_scope(tenant), policy, expected, entry, envelope)
+        .update_and_emit(
+            policies_update_producer_receipt(),
+            identity_scope(tenant),
+            policy,
+            expected,
+            entry,
+            envelope,
+        )
         .await
 }
 
@@ -24892,7 +24979,14 @@ async fn policy_deactivate_and_emit_event(
         event_id,
     )?;
     lifecycle
-        .deactivate_and_emit(identity_scope(tenant), id, expected, entry, envelope)
+        .deactivate_and_emit(
+            policies_deactivate_producer_receipt(),
+            identity_scope(tenant),
+            id,
+            expected,
+            entry,
+            envelope,
+        )
         .await
 }
 
@@ -25540,7 +25634,13 @@ async fn policy_fact_conflict_rolls_back_policy_create() -> TestResult {
     )?;
 
     let conflict = PgPolicyLifecycle::new(&store, fixed_clock())
-        .create_and_emit(identity_scope(tenant), policy, entry, envelope)
+        .create_and_emit(
+            policies_create_producer_receipt(),
+            identity_scope(tenant),
+            policy,
+            entry,
+            envelope,
+        )
         .await;
     assert!(
         matches!(conflict, Err(IdentityError::OutboxFactConflict(_))),
@@ -26489,6 +26589,7 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
     let actor = ids::UserId::parse("11111111-2222-4333-8444-555555555555")?;
 
     svc.assign_role(
+        roles_assign_producer_receipt(),
         tenant,
         actor,
         vocab::PrincipalKind::Admin,
@@ -26531,6 +26632,7 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
 
     let cross_tenant_revoked = svc
         .revoke_role(
+            roles_revoke_producer_receipt(),
             tenant_b,
             actor,
             vocab::PrincipalKind::Admin,
@@ -26566,6 +26668,7 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
 
     let revoked = svc
         .revoke_role(
+            roles_revoke_producer_receipt(),
             tenant,
             actor,
             vocab::PrincipalKind::Admin,
@@ -26586,6 +26689,7 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
 
     let revoked_again = svc
         .revoke_role(
+            roles_revoke_producer_receipt(),
             tenant,
             actor,
             vocab::PrincipalKind::Admin,
@@ -26621,12 +26725,7 @@ async fn role_binding_lifecycle_persists_nonempty_causation_id() -> TestResult {
         .await?;
 
     let event_id = unique_event_id("role-causation");
-    let role_assigned_contract = vocab::ContractBinding::from_static(
-        "identity",
-        "identity.role-assigned",
-        "v1",
-        "sha256:7c7a931a40c99329cfd172d834191fdbc47c5d7f3307a4f09f4320693d7722e9",
-    );
+    let role_assigned_contract = generated::event::identity_v1::role_assigned::CONTRACT;
     let entry = EventEntry::new(
         EventTopic::parse("identity.role-assigned").unwrap(),
         IdemKey::parse(&event_id).unwrap(),
@@ -26642,7 +26741,13 @@ async fn role_binding_lifecycle_persists_nonempty_causation_id() -> TestResult {
     let binding = RoleBinding::hydrate("target-user", "role-causation", tenant)?;
 
     PgRoleBindingLifecycle::new(&store, fixed_clock())
-        .assign_and_emit(identity_scope(tenant), binding, entry, envelope)
+        .assign_and_emit(
+            roles_assign_producer_receipt(),
+            identity_scope(tenant),
+            binding,
+            entry,
+            envelope,
+        )
         .await?;
 
     let outbox: (Option<String>, String) =
@@ -26696,12 +26801,7 @@ async fn role_binding_fact_conflict_rolls_back_assignment() -> TestResult {
         ),
     );
     let envelope = OutboxEnvelopeParts::new(
-        vocab::ContractBinding::from_static(
-            "identity",
-            "identity.role-assigned",
-            "v1",
-            "sha256:7c7a931a40c99329cfd172d834191fdbc47c5d7f3307a4f09f4320693d7722e9",
-        ),
+        generated::event::identity_v1::role_assigned::CONTRACT,
         tenant,
         subject_id(&subject),
         actor_for(tenant),
@@ -26709,7 +26809,13 @@ async fn role_binding_fact_conflict_rolls_back_assignment() -> TestResult {
     let binding = RoleBinding::hydrate(&subject, &role_name, tenant)?;
 
     let conflict = PgRoleBindingLifecycle::new(&store, fixed_clock())
-        .assign_and_emit(identity_scope(tenant), binding, entry, envelope)
+        .assign_and_emit(
+            roles_assign_producer_receipt(),
+            identity_scope(tenant),
+            binding,
+            entry,
+            envelope,
+        )
         .await;
     let Err(conflict) = conflict else {
         return Err("role binding write must fail on a conflicting outbox fact".into());

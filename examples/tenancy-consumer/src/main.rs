@@ -4,7 +4,10 @@ use vocab::{HttpRouteAuth, HttpRouteBinding, ProjectionField, RoutePermissionId}
 
 enum ProfileRoute {}
 
-fn profile_endpoint<M: 'static, C: vocab::http::HttpConsistencyClass>(
+fn profile_endpoint<
+    M: 'static,
+    C: vocab::http::HttpConsistencyClass + vocab::http::NonProducerHttpConsistency,
+>(
     binding: HttpRouteBinding<M, C>,
 ) -> Result<GeneratedPrimaryEndpoint<(), C>> {
     let evidence = binding.evidence();

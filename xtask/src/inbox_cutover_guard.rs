@@ -96,7 +96,7 @@ fn should_skip_dir(root: &Path, path: &Path) -> bool {
         .filter_map(|component| component.as_os_str().to_str());
     matches!(
         segments.next(),
-        Some(".git" | ".nextest" | "target" | "worktrees")
+        Some(".cache" | ".git" | ".nextest" | "target" | "worktrees")
     )
 }
 
@@ -183,5 +183,16 @@ mod tests {
             "SELECT * FROM inbox_receipts",
         );
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn workspace_scan_ignores_local_build_cache_snapshots() -> anyhow::Result<()> {
+        let root = crate::testutil::unique_tmp("inbox-cutover-cache");
+        let cached = root.join(".cache/cargo-target/ci-local-sources/base/tree");
+        std::fs::create_dir_all(&cached)?;
+        std::fs::write(cached.join("historical.sql"), legacy_table_token())?;
+        assert!(scan_workspace(&root)?.is_empty());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

@@ -104,28 +104,35 @@ impl GovernanceCheck for EventTransportGuard {
 
     fn check(&self) -> Result<(String, Vec<Finding<Self::Rule>>)> {
         let root = workspace_root()?;
-        let path = root.join(TARGET);
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("event-transport-guard: read {}", path.display()))?;
-        let mut findings = scan_runtime_content(Path::new(TARGET), &content);
-        findings.extend(scan_domain_crates(&root)?);
-        findings.extend(scan_production_bypasses(&root)?);
-        findings.extend(scan_event_producers(&root)?);
-        let claim_cutover_sources = load_outbox_claim_cutover_sources(&root)?;
-        findings.extend(scan_outbox_claim_cutover_sources(&claim_cutover_sources));
-        findings.extend(scan_settlement_funnel_sources(&claim_cutover_sources).findings);
-        let relay_budget_sources = load_relay_budget_sources(&root)?;
-        findings.extend(scan_relay_budget_sources(&relay_budget_sources));
-        findings.extend(scan_relay_budget_constructor_callsites(
-            &claim_cutover_sources,
-        ));
-        Ok((
-            format!(
-                "{TARGET} 经 generated topology bridge + ConsumerTx PG inbox bundle 接线，生产 src 无散装 consumer bundle/outbox split claim"
-            ),
-            findings,
-        ))
+        check_root(&root)
     }
+}
+
+/// Run the complete transport closure against an injected workspace root.
+///
+/// Assurance inventory generation consumes this API instead of maintaining a second AST parser.
+pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
+    let path = root.join(TARGET);
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("event-transport-guard: read {}", path.display()))?;
+    let mut findings = scan_runtime_content(Path::new(TARGET), &content);
+    findings.extend(scan_domain_crates(root)?);
+    findings.extend(scan_production_bypasses(root)?);
+    findings.extend(scan_event_producers(root)?);
+    let claim_cutover_sources = load_outbox_claim_cutover_sources(root)?;
+    findings.extend(scan_outbox_claim_cutover_sources(&claim_cutover_sources));
+    findings.extend(scan_settlement_funnel_sources(&claim_cutover_sources).findings);
+    let relay_budget_sources = load_relay_budget_sources(root)?;
+    findings.extend(scan_relay_budget_sources(&relay_budget_sources));
+    findings.extend(scan_relay_budget_constructor_callsites(
+        &claim_cutover_sources,
+    ));
+    Ok((
+        format!(
+            "{TARGET} 经 generated topology bridge + ConsumerTx PG inbox bundle 接线，生产 src 无散装 consumer bundle/outbox split claim"
+        ),
+        findings,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

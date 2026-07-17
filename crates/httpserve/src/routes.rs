@@ -28,8 +28,11 @@ use diport::{AuthEffect, LocalPrivilege, PortEffectClass, PortPrivilegeClass, Re
 use primitives::{AuthPlan, ListenerKind};
 use std::convert::Infallible;
 use std::sync::Arc;
-use vocab::http::{HttpConsistencyClass, LocalOnly, NonLocalHttpConsistency};
-use vocab::{HttpRouteAuth, HttpRouteBinding, HttpRouteEvidence};
+use vocab::http::{
+    HttpConsistencyClass, HttpProducerBinding, LocalOnly, NonLocalHttpConsistency,
+    NonProducerHttpConsistency, OutboxFact,
+};
+use vocab::{ContractBinding, HttpRouteAuth, HttpRouteBinding, HttpRouteEvidence};
 
 mod local_only_state_sealed {
     pub trait LocalOnlyAllowedEffect {}
@@ -237,6 +240,126 @@ impl<M> ContractMarker<M> {
     }
 }
 
+struct ProducerRouteWitness<M>(HttpProducerBinding<M>);
+
+impl<M> Copy for ProducerRouteWitness<M> {}
+
+impl<M> Clone for ProducerRouteWitness<M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+/// Move-only extractor authorizing the generated HTTP producer route that mounted this request.
+///
+/// [`GeneratedPrimaryEndpoint::new_producer`] installs a private, route-bound witness in the
+/// method router. Extraction fails closed when that witness is absent. The marker retains the
+/// mounted producer binding, so production handlers cannot substitute another same-marker binding
+/// while minting the receipt required by the service/UoW producer funnel.
+pub struct ProducerMarker<M> {
+    producer: HttpProducerBinding<M>,
+}
+
+impl<M, S> FromRequestParts<S> for ProducerMarker<M>
+where
+    M: 'static,
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let Some(witness) = parts.extensions.remove::<ProducerRouteWitness<M>>() else {
+            tracing::error!(
+                route_marker = core::any::type_name::<M>(),
+                "producer route witness missing"
+            );
+            let request_id = crate::request_id_str(&parts.extensions).unwrap_or_default();
+            return Err(crate::error::internal_error(request_id));
+        };
+        Ok(Self {
+            producer: witness.0,
+        })
+    }
+}
+
+impl<M> ProducerMarker<M> {
+    /// Consume the request marker into a receipt for the producer binding installed by the route.
+    #[must_use]
+    pub fn into_receipt(self) -> ProducerAssuranceReceipt<M> {
+        ProducerAssuranceReceipt {
+            producer: self.producer,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl<M> ProducerMarker<M> {
+    /// Construct a producer marker for direct handler/service tests.
+    ///
+    /// This explicit residual test surface is absent from the default production feature graph.
+    /// Tests must still name the binding whose mounted-route witness they intend to model.
+    #[must_use]
+    pub const fn for_test(producer: HttpProducerBinding<M>) -> Self {
+        Self { producer }
+    }
+}
+
+/// Move-only receipt proving a request passed through the matching generated producer route.
+///
+/// Its fields and constructor are private. Transaction orchestration consumes it while selecting
+/// one emitted generated fact, yielding a copyable [`ProducerAuthorization`] for bounded retries.
+pub struct ProducerAssuranceReceipt<M> {
+    producer: HttpProducerBinding<M>,
+}
+
+impl<M> ProducerAssuranceReceipt<M> {
+    /// Consume the one-shot request receipt and authorize one fact from its exact generated set.
+    #[must_use]
+    pub fn authorize(self, fact: ContractBinding) -> Option<ProducerAuthorization<M>> {
+        self.producer
+            .emitted_facts()
+            .contains(&fact)
+            .then_some(ProducerAuthorization {
+                producer: self.producer,
+                fact,
+            })
+    }
+}
+
+/// Copyable authorization for the exact generated facts permitted by one producer route.
+///
+/// This token has no public constructor. It may only be derived by consuming a
+/// [`ProducerAssuranceReceipt`] minted from the matching request marker and generated binding.
+pub struct ProducerAuthorization<M> {
+    producer: HttpProducerBinding<M>,
+    fact: ContractBinding,
+}
+
+impl<M> Copy for ProducerAuthorization<M> {}
+
+impl<M> Clone for ProducerAuthorization<M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<M> ProducerAuthorization<M> {
+    /// Producer HTTP contract carried by this authorization.
+    #[must_use]
+    pub const fn producer_contract(&self) -> ContractBinding {
+        self.producer.route_evidence().contract()
+    }
+
+    /// The exact generated fact selected from this producer's emitted-fact set.
+    #[must_use]
+    pub const fn fact_contract(&self) -> ContractBinding {
+        self.fact
+    }
+}
+
 /// Sealed proof that an Axum handler argument tuple starts with the matching contract marker.
 #[doc(hidden)]
 pub trait ContractHandlerArgs<M>: sealed::ContractHandlerArgs<M> {}
@@ -274,6 +397,43 @@ impl_contract_handler_args!(
     T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15
 );
 
+/// Sealed proof that an Axum handler argument tuple starts with the matching producer marker.
+#[doc(hidden)]
+pub trait ProducerHandlerArgs<M>: sealed::ProducerHandlerArgs<M> {}
+
+macro_rules! impl_producer_handler_args {
+    ($($ty:ident),*) => {
+        impl<Mode, M, $($ty),*> sealed::ProducerHandlerArgs<M>
+            for (Mode, ProducerMarker<M>, $($ty,)*)
+        {
+        }
+
+        impl<Mode, M, $($ty),*> ProducerHandlerArgs<M>
+            for (Mode, ProducerMarker<M>, $($ty,)*)
+        {
+        }
+    };
+}
+
+impl_producer_handler_args!();
+impl_producer_handler_args!(T1);
+impl_producer_handler_args!(T1, T2);
+impl_producer_handler_args!(T1, T2, T3);
+impl_producer_handler_args!(T1, T2, T3, T4);
+impl_producer_handler_args!(T1, T2, T3, T4, T5);
+impl_producer_handler_args!(T1, T2, T3, T4, T5, T6);
+impl_producer_handler_args!(T1, T2, T3, T4, T5, T6, T7);
+impl_producer_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8);
+impl_producer_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8, T9);
+impl_producer_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
+impl_producer_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
+impl_producer_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
+impl_producer_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13);
+impl_producer_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14);
+impl_producer_handler_args!(
+    T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15
+);
+
 struct Endpoint<S> {
     evidence: HttpRouteEvidence,
     identity: GeneratedRouteIdentity,
@@ -281,7 +441,7 @@ struct Endpoint<S> {
     handler: axum::routing::MethodRouter<S>,
 }
 
-/// INVARIANT: ROUTE-ENDPOINT-REQUIRED-01 { level = "Hard", exec = "native-compile", source = "code", native = "public endpoint constructors require a non-optional HttpRouteBinding<M, C> plus a handler whose argument tuple starts with ContractMarker<M>; trybuild omits each and rejects cross-contract markers" }
+/// INVARIANT: ROUTE-ENDPOINT-REQUIRED-01 { level = "Hard", exec = "native-compile", source = "code", native = "ordinary public endpoint constructors require a non-optional HttpRouteBinding<M, C> plus a handler whose argument tuple starts with ContractMarker<M>; trybuild omits each and rejects cross-contract markers" }
 /// INVARIANT: ROUTE-ENDPOINT-ATOMIC-01 { level = "Hard", exec = "native-compile", source = "code", native = "private Endpoint owns evidence, typed route/state identity, parsed method, and MethodRouter as one move-only mount value" }
 impl<S> Endpoint<S>
 where
@@ -325,7 +485,7 @@ pub struct GeneratedEndpoint<S, C>(Endpoint<S>, PhantomData<fn() -> C>);
 impl<S, C> GeneratedEndpoint<S, C>
 where
     S: Clone + Send + Sync + 'static,
-    C: HttpConsistencyClass,
+    C: NonProducerHttpConsistency,
 {
     /// Bind a contract-specific generated route to its matching handler and derive the method filter.
     pub fn new<M, H, T>(
@@ -378,10 +538,18 @@ where
 /// from the same evidence when the endpoint is mounted.
 pub struct GeneratedPrimaryEndpoint<S, C>(Endpoint<S>, PhantomData<fn() -> C>);
 
+impl<S, C> GeneratedPrimaryEndpoint<S, C> {
+    /// Borrow the atomic route proof for either an ordinary or producer endpoint.
+    #[must_use]
+    pub const fn evidence(&self) -> &HttpRouteEvidence {
+        &self.0.evidence
+    }
+}
+
 impl<S, C> GeneratedPrimaryEndpoint<S, C>
 where
     S: Clone + Send + Sync + 'static,
-    C: HttpConsistencyClass,
+    C: NonProducerHttpConsistency,
 {
     /// Bind a contract-specific generated route to its matching handler and derive the method filter.
     pub fn new<M, H, T>(
@@ -396,11 +564,29 @@ where
         Endpoint::new::<M, _, _>(binding.evidence(), handler)
             .map(|endpoint| Self(endpoint, PhantomData))
     }
+}
 
-    /// Borrow the atomic route proof.
-    #[must_use]
-    pub const fn evidence(&self) -> &HttpRouteEvidence {
-        &self.0.evidence
+/// INVARIANT: HTTP-PRODUCER-MOUNT-01 { level = "Hard", exec = "native-compile", source = "code", native = "OutboxFact is excluded from ordinary endpoint constructors; new_producer requires HttpProducerBinding<M>, installs a private route-bound witness, and accepts only a handler beginning with ProducerMarker<M>; extraction without that witness fails closed and production receipt minting cannot substitute a caller-selected binding" }
+impl<S> GeneratedPrimaryEndpoint<S, OutboxFact>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    /// Bind one generated producer route to a handler carrying its matching move-only marker.
+    pub fn new_producer<M, H, T>(
+        producer: HttpProducerBinding<M>,
+        handler: H,
+    ) -> Result<Self, RouteGroupError>
+    where
+        M: 'static,
+        H: Handler<T, S>,
+        T: ProducerHandlerArgs<M> + 'static,
+    {
+        Endpoint::new::<M, _, _>(producer.route_evidence(), handler).map(|mut endpoint| {
+            endpoint.handler = endpoint
+                .handler
+                .layer(axum::Extension(ProducerRouteWitness(producer)));
+            Self(endpoint, PhantomData)
+        })
     }
 }
 
@@ -568,6 +754,7 @@ fn test_route_evidence(
 mod sealed {
     pub trait Sealed {}
     pub trait ContractHandlerArgs<M> {}
+    pub trait ProducerHandlerArgs<M> {}
 }
 
 /// listener 类型层 marker（sealed）。`KIND` 把 marker 落到运行期 [`ListenerKind`] 值（fold 分组键）。
@@ -1329,6 +1516,24 @@ mod tests {
 
     const TEST_EFFECTS: &[vocab::HttpEffectKind] =
         &[vocab::HttpEffectKind::Auth, vocab::HttpEffectKind::Read];
+    const PRODUCER_EFFECTS: &[vocab::HttpEffectKind] = &[
+        vocab::HttpEffectKind::BusinessWrite,
+        vocab::HttpEffectKind::BusinessTransaction,
+        vocab::HttpEffectKind::Outbox,
+        vocab::HttpEffectKind::Publish,
+    ];
+    const PRODUCER_FACT: ContractBinding = ContractBinding::from_static(
+        "test",
+        "test.fact",
+        "v1",
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    );
+    const OTHER_FACT: ContractBinding = ContractBinding::from_static(
+        "test",
+        "test.other-fact",
+        "v1",
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    );
 
     enum TestRouteMarker {}
     enum OtherTestRouteMarker {}
@@ -1406,6 +1611,109 @@ mod tests {
             path,
             contract_id: "test.admin.list",
         }
+    }
+
+    fn producer_binding<M>() -> HttpProducerBinding<M> {
+        let route = HttpRouteBinding::from_static(
+            vocab::HttpContractOwner::domain("test"),
+            ContractBinding::from_static(
+                "test",
+                "test.produce",
+                "v1",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            "/test/produce",
+            "POST",
+            vocab::HttpSuccessStatus::new(201),
+            vocab::HttpIdempotency::NonIdempotent,
+            vocab::HttpRouteAuth::Public,
+            None,
+            false,
+            vocab::HttpEffectProfile::new(PRODUCER_EFFECTS),
+        );
+        HttpProducerBinding::from_static(route, &[PRODUCER_FACT])
+    }
+
+    #[test]
+    fn producer_receipt_authorizes_only_its_generated_fact() {
+        let producer = producer_binding::<TestRouteMarker>();
+        let rejected = ProducerMarker::for_test(producer)
+            .into_receipt()
+            .authorize(OTHER_FACT);
+        assert!(rejected.is_none());
+
+        let authorization = ProducerMarker::for_test(producer)
+            .into_receipt()
+            .authorize(PRODUCER_FACT);
+        assert!(authorization.is_some(), "generated fact must be authorized");
+        if let Some(authorization) = authorization {
+            let retry_copy = authorization;
+            assert_eq!(authorization.fact_contract(), PRODUCER_FACT);
+            assert_eq!(retry_copy.producer_contract().contract_id(), "test.produce");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn producer_marker_without_private_route_witness_fails_closed() {
+        let request = Request::builder()
+            .uri("/test/produce")
+            .body(Body::empty())
+            .expect("request");
+        let (mut parts, _) = request.into_parts();
+
+        let response = ProducerMarker::<TestRouteMarker>::from_request_parts(&mut parts, &())
+            .await
+            .err()
+            .expect("missing producer witness must reject extraction");
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn producer_endpoint_installs_its_private_route_witness() {
+        let producer = producer_binding::<TestRouteMarker>();
+        let endpoint = GeneratedPrimaryEndpoint::<(), OutboxFact>::new_producer(
+            producer,
+            |marker: ProducerMarker<TestRouteMarker>| async move {
+                marker
+                    .into_receipt()
+                    .authorize(PRODUCER_FACT)
+                    .map_or(StatusCode::INTERNAL_SERVER_ERROR, |_| StatusCode::CREATED)
+            },
+        )
+        .expect("producer endpoint");
+        let router = axum::Router::new().route("/test/produce", endpoint.0.handler);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/test/produce")
+            .body(Body::empty())
+            .expect("request");
+
+        let status = router.oneshot(request).await.expect("oneshot").status();
+
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn producer_route_witness_can_only_be_extracted_once() {
+        let request = Request::builder()
+            .uri("/test/produce")
+            .extension(ProducerRouteWitness(producer_binding::<TestRouteMarker>()))
+            .body(Body::empty())
+            .expect("request");
+        let (mut parts, _) = request.into_parts();
+
+        let first = ProducerMarker::<TestRouteMarker>::from_request_parts(&mut parts, &()).await;
+        let second = ProducerMarker::<TestRouteMarker>::from_request_parts(&mut parts, &()).await;
+
+        assert!(
+            first.is_ok(),
+            "mounted witness must authorize one extraction"
+        );
+        assert!(second.is_err(), "mounted witness must be consumed");
     }
 
     #[test]

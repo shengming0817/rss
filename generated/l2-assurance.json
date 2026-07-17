@@ -1,0 +1,1220 @@
+{
+  "schemaVersion": 1,
+  "producerCount": 9,
+  "factCount": 5,
+  "contracts": [
+    {
+      "contractId": "identity.login",
+      "domain": "identity",
+      "version": "v1",
+      "role": "producer",
+      "status": "closed",
+      "emittedFacts": [
+        "identity.session-created"
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/http/identity/v1/login/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::login::PRODUCER"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::login::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/mod.rs",
+              "symbol": "login_handler"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "adapters/postgres/src/session_lifecycle.rs",
+              "symbol": "PgSessionLifecycle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/mod.rs",
+              "symbol": "LoginService"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/mod.rs",
+              "symbol": "login_handler_bytes"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/ports.rs",
+              "symbol": "SessionLifecycleLocal"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::login::EFFECT_PROFILE"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/inbox/fixture-inbox-claim-crash-before-commit.toml",
+              "symbol": "inbox-claim-crash-before-commit"
+            },
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/inbox/fixture-inbox-commit-before-ack-crash.toml",
+              "symbol": "inbox-commit-before-ack-crash"
+            },
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/inbox/fixture-inbox-lease-lost-before-commit.toml",
+              "symbol": "inbox-lease-lost-before-commit"
+            },
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-after-publish-before-settle.toml",
+              "symbol": "outbox-after-publish-before-settle"
+            },
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-ambiguous-publish-failure.toml",
+              "symbol": "outbox-ambiguous-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "identity.policies-create",
+      "domain": "identity",
+      "version": "v1",
+      "role": "producer",
+      "status": "closed",
+      "emittedFacts": [
+        "identity.policy-updated"
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/http/identity/v1/policies-create/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::policies_create::PRODUCER"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::policies_create::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/mod.rs",
+              "symbol": "policies_create_handler"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "adapters/postgres/src/policy_repo.rs",
+              "symbol": "PgPolicyLifecycle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/policy_manage.rs",
+              "symbol": "PolicyManageService"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/ports.rs",
+              "symbol": "PolicyLifecycleLocal"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::policies_create::EFFECT_PROFILE"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-policy-updated-transient-publish-failure.toml",
+              "symbol": "outbox-policy-updated-transient-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "identity.policies-deactivate",
+      "domain": "identity",
+      "version": "v1",
+      "role": "producer",
+      "status": "closed",
+      "emittedFacts": [
+        "identity.policy-updated"
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/http/identity/v1/policies-deactivate/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::policies_deactivate::PRODUCER"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::policies_deactivate::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/mod.rs",
+              "symbol": "policies_deactivate_handler"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "adapters/postgres/src/policy_repo.rs",
+              "symbol": "PgPolicyLifecycle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/policy_manage.rs",
+              "symbol": "PolicyManageService"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/ports.rs",
+              "symbol": "PolicyLifecycleLocal"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::policies_deactivate::EFFECT_PROFILE"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-policy-updated-transient-publish-failure.toml",
+              "symbol": "outbox-policy-updated-transient-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "identity.policies-update",
+      "domain": "identity",
+      "version": "v1",
+      "role": "producer",
+      "status": "closed",
+      "emittedFacts": [
+        "identity.policy-updated"
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/http/identity/v1/policies-update/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::policies_update::PRODUCER"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::policies_update::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/mod.rs",
+              "symbol": "policies_update_handler"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "adapters/postgres/src/policy_repo.rs",
+              "symbol": "PgPolicyLifecycle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/policy_manage.rs",
+              "symbol": "PolicyManageService"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/ports.rs",
+              "symbol": "PolicyLifecycleLocal"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::policies_update::EFFECT_PROFILE"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-policy-updated-transient-publish-failure.toml",
+              "symbol": "outbox-policy-updated-transient-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "identity.policy-updated",
+      "domain": "identity",
+      "version": "v1",
+      "role": "fact",
+      "status": "closed",
+      "topic": "identity.policy-updated",
+      "subscriptions": [
+        {
+          "consumer": "audit",
+          "group": "audit.policy-updated"
+        }
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/event/identity/v1/policy-updated/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/event/identity_v1.rs",
+              "symbol": "generated::event::identity_v1::policy_updated::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "bridge_generated_subscriptions"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "resolve_consumer_tx_plan"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/event/identity_v1.rs",
+              "symbol": "generated::event::identity_v1::policy_updated::SPEC"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-policy-updated-transient-publish-failure.toml",
+              "symbol": "outbox-policy-updated-transient-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "identity.role-assigned",
+      "domain": "identity",
+      "version": "v1",
+      "role": "fact",
+      "status": "closed",
+      "topic": "identity.role-assigned",
+      "subscriptions": [
+        {
+          "consumer": "audit",
+          "group": "audit.role-assigned"
+        }
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/event/identity/v1/role-assigned/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/event/identity_v1.rs",
+              "symbol": "generated::event::identity_v1::role_assigned::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "bridge_generated_subscriptions"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "resolve_consumer_tx_plan"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/event/identity_v1.rs",
+              "symbol": "generated::event::identity_v1::role_assigned::SPEC"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-permanent-publish-failure.toml",
+              "symbol": "outbox-permanent-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "identity.role-revoked",
+      "domain": "identity",
+      "version": "v1",
+      "role": "fact",
+      "status": "closed",
+      "topic": "identity.role-revoked",
+      "subscriptions": [
+        {
+          "consumer": "audit",
+          "group": "audit.role-revoked"
+        }
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/event/identity/v1/role-revoked/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/event/identity_v1.rs",
+              "symbol": "generated::event::identity_v1::role_revoked::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "bridge_generated_subscriptions"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "resolve_consumer_tx_plan"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/event/identity_v1.rs",
+              "symbol": "generated::event::identity_v1::role_revoked::SPEC"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-role-revoked-permanent-publish-failure.toml",
+              "symbol": "outbox-role-revoked-permanent-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "identity.roles-assign",
+      "domain": "identity",
+      "version": "v1",
+      "role": "producer",
+      "status": "closed",
+      "emittedFacts": [
+        "identity.role-assigned"
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/http/identity/v1/roles-assign/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::roles_assign::PRODUCER"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::roles_assign::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/mod.rs",
+              "symbol": "roles_assign_handler"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "adapters/postgres/src/role_binding_lifecycle.rs",
+              "symbol": "PgRoleBindingLifecycle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/rbac_admin.rs",
+              "symbol": "RbacAdminService"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/ports.rs",
+              "symbol": "RoleBindingLifecycleLocal"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::roles_assign::EFFECT_PROFILE"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-permanent-publish-failure.toml",
+              "symbol": "outbox-permanent-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "identity.roles-revoke",
+      "domain": "identity",
+      "version": "v1",
+      "role": "producer",
+      "status": "closed",
+      "emittedFacts": [
+        "identity.role-revoked"
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/http/identity/v1/roles-revoke/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::roles_revoke::PRODUCER"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::roles_revoke::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/mod.rs",
+              "symbol": "roles_revoke_handler"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "adapters/postgres/src/role_binding_lifecycle.rs",
+              "symbol": "PgRoleBindingLifecycle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/application/rbac_admin.rs",
+              "symbol": "RbacAdminService"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/identity/src/ports.rs",
+              "symbol": "RoleBindingLifecycleLocal"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::roles_revoke::EFFECT_PROFILE"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-role-revoked-permanent-publish-failure.toml",
+              "symbol": "outbox-role-revoked-permanent-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "identity.session-created",
+      "domain": "identity",
+      "version": "v1",
+      "role": "fact",
+      "status": "closed",
+      "topic": "identity.session-created",
+      "subscriptions": [
+        {
+          "consumer": "audit",
+          "group": "audit.session-created"
+        }
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/event/identity/v1/session-created/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/event/identity_v1.rs",
+              "symbol": "generated::event::identity_v1::session_created::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "bridge_generated_subscriptions"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "resolve_consumer_tx_plan"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/event/identity_v1.rs",
+              "symbol": "generated::event::identity_v1::session_created::SPEC"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/inbox/fixture-inbox-claim-crash-before-commit.toml",
+              "symbol": "inbox-claim-crash-before-commit"
+            },
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/inbox/fixture-inbox-commit-before-ack-crash.toml",
+              "symbol": "inbox-commit-before-ack-crash"
+            },
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/inbox/fixture-inbox-lease-lost-before-commit.toml",
+              "symbol": "inbox-lease-lost-before-commit"
+            },
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-after-publish-before-settle.toml",
+              "symbol": "outbox-after-publish-before-settle"
+            },
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-ambiguous-publish-failure.toml",
+              "symbol": "outbox-ambiguous-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "settings.config-delete",
+      "domain": "settings",
+      "version": "v5",
+      "role": "producer",
+      "status": "closed",
+      "emittedFacts": [
+        "settings.config-version-changed"
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/http/settings/v5/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/settings_v5.rs",
+              "symbol": "generated::http::settings_v5::PRODUCER"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/settings_v5.rs",
+              "symbol": "generated::http::settings_v5::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "crates/settings/src/application.rs",
+              "symbol": "config_delete_handler"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "adapters/postgres/src/config_repo.rs",
+              "symbol": "PgConfigRepo"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/settings/src/application.rs",
+              "symbol": "SettingsService"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/settings/src/ports.rs",
+              "symbol": "ConfigUnitOfWorkLocal"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/settings_v5.rs",
+              "symbol": "generated::http::settings_v5::EFFECT_PROFILE"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-transient-publish-failure.toml",
+              "symbol": "outbox-transient-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "settings.config-publish",
+      "domain": "settings",
+      "version": "v1",
+      "role": "producer",
+      "status": "closed",
+      "emittedFacts": [
+        "settings.config-version-changed"
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/http/settings/v1/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/settings_v1.rs",
+              "symbol": "generated::http::settings_v1::PRODUCER"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/settings_v1.rs",
+              "symbol": "generated::http::settings_v1::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "crates/settings/src/application.rs",
+              "symbol": "config_publish_handler"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "adapters/postgres/src/config_repo.rs",
+              "symbol": "PgConfigRepo"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/settings/src/application.rs",
+              "symbol": "SettingsService"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/settings/src/application.rs",
+              "symbol": "config_publish_handler_bytes"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/settings/src/ports.rs",
+              "symbol": "ConfigUnitOfWorkLocal"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/settings_v1.rs",
+              "symbol": "generated::http::settings_v1::EFFECT_PROFILE"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-transient-publish-failure.toml",
+              "symbol": "outbox-transient-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "settings.config-rollback",
+      "domain": "settings",
+      "version": "v6",
+      "role": "producer",
+      "status": "closed",
+      "emittedFacts": [
+        "settings.config-version-changed"
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/http/settings/v6/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/settings_v6.rs",
+              "symbol": "generated::http::settings_v6::PRODUCER"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/settings_v6.rs",
+              "symbol": "generated::http::settings_v6::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "crates/settings/src/application.rs",
+              "symbol": "config_rollback_handler"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "adapters/postgres/src/config_repo.rs",
+              "symbol": "PgConfigRepo"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/settings/src/application.rs",
+              "symbol": "SettingsService"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/settings/src/ports.rs",
+              "symbol": "ConfigUnitOfWorkLocal"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/settings_v6.rs",
+              "symbol": "generated::http::settings_v6::EFFECT_PROFILE"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-transient-publish-failure.toml",
+              "symbol": "outbox-transient-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "settings.config-version-changed",
+      "domain": "settings",
+      "version": "v1",
+      "role": "fact",
+      "status": "closed",
+      "topic": "settings.config-version-changed",
+      "subscriptions": [
+        {
+          "consumer": "settings",
+          "group": "settings.config-version-changed"
+        }
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/event/settings/v1/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/event/settings_v1.rs",
+              "symbol": "generated::event::settings_v1::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "bridge_generated_subscriptions"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "resolve_consumer_tx_plan"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/event/settings_v1.rs",
+              "symbol": "generated::event::settings_v1::SPEC"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-transient-publish-failure.toml",
+              "symbol": "outbox-transient-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "READY_CASE_RUNNERS"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

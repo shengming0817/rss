@@ -76,6 +76,18 @@ outbox relay/subscriber rehydrate 的受控路径调用 `insert_wire_pair`。
 
 PostgreSQL adapter 有两条显式 outbox 写入模式，二者不可 fallback / 双写兼容：
 
+### L2 producer-fact domain closure
+
+`kind=http && consistencyLevel=OutboxFact && capabilities.outbox.role=producer` 的每个 `emits`
+必须引用存在的 `kind=event && consistencyLevel=OutboxFact` fact，且 fact `domain` 必须与 producer
+`domain` 完全相等。该 authoring 约束覆盖 `draft`、`active`、`deprecated` 全 lifecycle：draft/deprecated
+只是不进入 active runtime，不是跨域 emits 的兼容豁免。跨域流程必须在各域分别声明本域 producer/fact，
+再由订阅和 workflow 组合，不允许 HTTP producer 直接把其他域 fact 伪装成本域事务输出。
+
+active producer 在同域约束之上另加 runtime readiness：目标 fact 也必须 active 且至少声明一个
+`[[subscriptions]]`。`cargo xtask contract validate` R22 对全 lifecycle 同域约束和 active-only readiness
+分别 fail-closed；契约字段摘要只引用本节，不维护另一套例外规则。
+
 ### Outbox relay 投递语义（at-least-once）
 
 Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event/message ID 发布；publish 成功、settle 前崩溃允许 broker duplicate，broker confirm 的 ambiguous outcome 也必须按可能已发布处理并重试，不能换 ID 或假定消息尚未到达。
@@ -276,6 +288,7 @@ active L2 manifest 的 topic、delivery、consistency level、outbox role/atomic
 跨版本门保护。`emits` 与 subscription 集合的排序不是语义，但元素任何增、删、替换都是
 breaking；active 默认 deny（跨 LocalOnly 边界的 consistency review rule 固定 warn，但须精确
 `Contract-Review-Ack` trailer）、deprecated warn、draft 跳过。
+这里的 lifecycle 分级仅定义 breaking review 处置，不削弱 R22 的全 lifecycle producer/fact 同域约束。
 
 `settings.config-version-changed` 的 `DomainEffect` 捕获 HTTP routes 使用的同一 `SettingsService`；成功路径必须
 先刷新该 singleton cache，再由 ConsumerTx 提交 inbox `done`。refresh transient 不提交 inbox、走 `Requeue`，

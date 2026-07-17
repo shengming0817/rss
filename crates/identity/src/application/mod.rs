@@ -21,7 +21,7 @@ use std::time::{Duration, SystemTime};
 use ::generated::http::audit_v1::list_entries::SPEC as AUDIT_LIST_HTTP_SPEC;
 use ::generated::http::identity_v1::{
     login::{
-        IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse, ROUTE as LOGIN_HTTP_ROUTE,
+        IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse, PRODUCER as LOGIN_PRODUCER,
         SPEC as LOGIN_HTTP_SPEC,
     },
     logout::{
@@ -33,11 +33,11 @@ use ::generated::http::identity_v1::{
         ROUTE as PASSWORD_CHANGE_HTTP_ROUTE, SPEC as PASSWORD_CHANGE_HTTP_SPEC,
     },
     policies_create::{
-        IdentityPoliciesCreateRequest, ROUTE as POLICIES_CREATE_HTTP_ROUTE,
+        IdentityPoliciesCreateRequest, PRODUCER as POLICIES_CREATE_PRODUCER,
         SPEC as POLICIES_CREATE_HTTP_SPEC,
     },
     policies_deactivate::{
-        IdentityPoliciesDeactivateRequest, ROUTE as POLICIES_DEACTIVATE_HTTP_ROUTE,
+        IdentityPoliciesDeactivateRequest, PRODUCER as POLICIES_DEACTIVATE_PRODUCER,
         SPEC as POLICIES_DEACTIVATE_HTTP_SPEC,
     },
     policies_get::{ROUTE as POLICIES_GET_HTTP_ROUTE, SPEC as POLICIES_GET_HTTP_SPEC},
@@ -46,7 +46,7 @@ use ::generated::http::identity_v1::{
         SPEC as POLICIES_LIST_HTTP_SPEC,
     },
     policies_update::{
-        IdentityPoliciesUpdateRequest, ROUTE as POLICIES_UPDATE_HTTP_ROUTE,
+        IdentityPoliciesUpdateRequest, PRODUCER as POLICIES_UPDATE_PRODUCER,
         SPEC as POLICIES_UPDATE_HTTP_SPEC,
     },
     profile::{
@@ -59,14 +59,14 @@ use ::generated::http::identity_v1::{
     },
     roles_assign::{
         IdentityRolesAssignData, IdentityRolesAssignRequest, IdentityRolesAssignResponse,
-        ROUTE as ROLES_ASSIGN_HTTP_ROUTE, SPEC as ROLES_ASSIGN_HTTP_SPEC,
+        PRODUCER as ROLES_ASSIGN_PRODUCER, SPEC as ROLES_ASSIGN_HTTP_SPEC,
     },
     roles_list::{
         IdentityRoleView, IdentityRolesListRequest, IdentityRolesListResponse,
         ROUTE as ROLES_LIST_HTTP_ROUTE, SPEC as ROLES_LIST_HTTP_SPEC,
     },
     roles_revoke::{
-        IdentityRolesRevokeData, IdentityRolesRevokeResponse, ROUTE as ROLES_REVOKE_HTTP_ROUTE,
+        IdentityRolesRevokeData, IdentityRolesRevokeResponse, PRODUCER as ROLES_REVOKE_PRODUCER,
         SPEC as ROLES_REVOKE_HTTP_SPEC,
     },
 };
@@ -78,8 +78,8 @@ use ::generated::http::{
     settings_v6::SPEC as SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
 };
 use ::httpserve::{
-    AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, Primary, ResourceProjection,
-    RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
+    AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, Primary, ProducerMarker,
+    ResourceProjection, RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
 };
 use axum::Json;
 use axum::body::{Body, Bytes, to_bytes};
@@ -120,10 +120,10 @@ use crate::domain::{
 };
 use crate::ports::{
     CredentialRepo, DynCredentialRepo, DynPolicyRepo, DynResourceAttributeReadRepo,
-    DynRoleBindingReadRepo, DynRoleReadRepo, DynSessionLifecycle, Operator, PasswordChangeMutation,
-    PolicyPage, PolicyRepo, RefreshRotationMutation, RefreshTokenStore, ResourceAttributeReadRepo,
-    RoleBindingReadRepo, RolePage, RoleReadRepo, SessionLifecycle, SessionLogoutMutation,
-    TenantRepoScope,
+    DynRoleBindingReadRepo, DynRoleReadRepo, DynSessionLifecycle, LoginProducerReceipt, Operator,
+    PasswordChangeMutation, PolicyPage, PolicyRepo, RefreshRotationMutation, RefreshTokenStore,
+    ResourceAttributeReadRepo, RoleBindingReadRepo, RolePage, RoleReadRepo, SessionLifecycle,
+    SessionLogoutMutation, TenantRepoScope,
 };
 #[cfg(test)]
 use crate::ports::{DynRoleBindingLifecycle, RoleWriteRepo};
@@ -307,6 +307,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
     )]
     pub async fn login(
         &self,
+        receipt: LoginProducerReceipt,
         tenant: TenantId,
         request: IdentityLoginRequest,
     ) -> Result<IdentityLoginResponse, LoginError> {
@@ -404,7 +405,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         // 6. L2 co-tx（session 行 + outbox 行同一事务原子写入，FR-003）
         let session = Session::new(session_id.clone(), subject.clone(), tenant, expires_at, now);
         self.lifecycle
-            .persist_session_and_emit(tenant_scope, session, entry, envelope)
+            .persist_session_and_emit(receipt, tenant_scope, session, entry, envelope)
             .await
             .map_err(LoginError::SessionWrite)?;
 
@@ -1000,7 +1001,7 @@ async fn parse_tenant_and_body(
 }
 
 async fn login_handler<S: diport::Signer + Send + Sync + 'static>(
-    _: ContractMarker<::generated::http::identity_v1::login::RouteMarker>,
+    marker: ProducerMarker<::generated::http::identity_v1::login::RouteMarker>,
     State(service): State<Arc<LoginService<S>>>,
     req: Request<Body>,
 ) -> Response {
@@ -1009,7 +1010,7 @@ async fn login_handler<S: diport::Signer + Send + Sync + 'static>(
         Ok(parts) => parts,
         Err(resp) => return resp,
     };
-    login_handler_bytes(service, tenant, body, &request_id).await
+    login_handler_bytes(service, marker.into_receipt(), tenant, body, &request_id).await
 }
 
 #[cfg(test)]
@@ -1035,6 +1036,7 @@ pub(crate) fn refresh_router_for_test<S: diport::Signer + Send + Sync + 'static>
 #[allow(clippy::cognitive_complexity)] // reason: match 臂 + SessionWrite orphan-refresh warn 分支（F4 reorder，#1252）；拆散 handler 反降低可读性
 async fn login_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
     service: Arc<LoginService<S>>,
+    receipt: LoginProducerReceipt,
     tenant: TenantId,
     body: Bytes,
     request_id: &str,
@@ -1044,7 +1046,7 @@ async fn login_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
         Err(_) => return httpserve::error::validation_bad_request(request_id),
     };
     let tenant_log = tenant.to_string();
-    match service.login(tenant, request).await {
+    match service.login(receipt, tenant, request).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(LoginError::InvalidCredentials) => httpserve::error::unauthenticated(request_id),
         Err(LoginError::SessionWrite(err)) if err.kind() == OutboxEmitErrorKind::FactConflict => {
@@ -1971,7 +1973,7 @@ fn encode_policy_cursor(policy_id: &PolicyId) -> String {
 }
 
 async fn roles_assign_handler(
-    _: ContractMarker<::generated::http::identity_v1::roles_assign::RouteMarker>,
+    marker: ProducerMarker<::generated::http::identity_v1::roles_assign::RouteMarker>,
     State(state): State<RbacHandlerState>,
     Path(role_id_raw): Path<String>,
     req: Request<Body>,
@@ -2003,6 +2005,7 @@ async fn roles_assign_handler(
     match state
         .service
         .assign_role(
+            marker.into_receipt(),
             auth.tenant,
             auth.user_id,
             auth.kind,
@@ -2023,7 +2026,7 @@ async fn roles_assign_handler(
 }
 
 async fn roles_revoke_handler(
-    _: ContractMarker<::generated::http::identity_v1::roles_revoke::RouteMarker>,
+    marker: ProducerMarker<::generated::http::identity_v1::roles_revoke::RouteMarker>,
     State(state): State<RbacHandlerState>,
     Path((role_id_raw, subject_raw)): Path<(String, String)>,
     req: Request<Body>,
@@ -2046,7 +2049,14 @@ async fn roles_revoke_handler(
     }
     match state
         .service
-        .revoke_role(auth.tenant, auth.user_id, auth.kind, role_id, subject_raw)
+        .revoke_role(
+            marker.into_receipt(),
+            auth.tenant,
+            auth.user_id,
+            auth.kind,
+            role_id,
+            subject_raw,
+        )
         .await
     {
         Ok(revoked) => (
@@ -2140,7 +2150,7 @@ async fn roles_list_handler(
 }
 
 async fn policies_create_handler(
-    _: ContractMarker<::generated::http::identity_v1::policies_create::RouteMarker>,
+    marker: ProducerMarker<::generated::http::identity_v1::policies_create::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     req: Request<Body>,
 ) -> Response {
@@ -2174,7 +2184,13 @@ async fn policies_create_handler(
     }
     match state
         .service
-        .create_policy(auth.tenant, auth.user_id, auth.kind, draft)
+        .create_policy(
+            marker.into_receipt(),
+            auth.tenant,
+            auth.user_id,
+            auth.kind,
+            draft,
+        )
         .await
         .and_then(|policy| policy_manage::create_response(&policy))
     {
@@ -2186,7 +2202,7 @@ async fn policies_create_handler(
 }
 
 async fn policies_update_handler(
-    _: ContractMarker<::generated::http::identity_v1::policies_update::RouteMarker>,
+    marker: ProducerMarker<::generated::http::identity_v1::policies_update::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     Path(policy_id_raw): Path<String>,
     req: Request<Body>,
@@ -2242,7 +2258,13 @@ async fn policies_update_handler(
     }
     match state
         .service
-        .update_policy(auth.tenant, auth.user_id, auth.kind, draft)
+        .update_policy(
+            marker.into_receipt(),
+            auth.tenant,
+            auth.user_id,
+            auth.kind,
+            draft,
+        )
         .await
         .and_then(|policy| policy_manage::update_response(&policy))
     {
@@ -2254,7 +2276,7 @@ async fn policies_update_handler(
 }
 
 async fn policies_deactivate_handler(
-    _: ContractMarker<::generated::http::identity_v1::policies_deactivate::RouteMarker>,
+    marker: ProducerMarker<::generated::http::identity_v1::policies_deactivate::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     Path(policy_id_raw): Path<String>,
     req: Request<Body>,
@@ -2308,7 +2330,13 @@ async fn policies_deactivate_handler(
     }
     match state
         .service
-        .deactivate_policy(auth.tenant, auth.user_id, auth.kind, draft)
+        .deactivate_policy(
+            marker.into_receipt(),
+            auth.tenant,
+            auth.user_id,
+            auth.kind,
+            draft,
+        )
         .await
         .and_then(policy_manage::deactivate_response)
     {
@@ -2749,7 +2777,7 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
         let logout = password.clone();
         reg.route_group::<Primary>(LOGIN_ROUTE_PREFIX, move |rb| {
             let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(LOGIN_HTTP_ROUTE, login_handler::<S>)?
+                GeneratedPrimaryEndpoint::new_producer(LOGIN_PRODUCER, login_handler::<S>)?
                     .with_state(login),
             )?;
             let rb = rb.mount(
@@ -2757,28 +2785,40 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
                     .with_state(refresh),
             )?;
             let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(ROLES_ASSIGN_HTTP_ROUTE, roles_assign_handler)?
-                    .with_state(rbac_assign),
+                GeneratedPrimaryEndpoint::new_producer(
+                    ROLES_ASSIGN_PRODUCER,
+                    roles_assign_handler,
+                )?
+                .with_state(rbac_assign),
             )?;
             let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(ROLES_REVOKE_HTTP_ROUTE, roles_revoke_handler)?
-                    .with_state(rbac_revoke),
+                GeneratedPrimaryEndpoint::new_producer(
+                    ROLES_REVOKE_PRODUCER,
+                    roles_revoke_handler,
+                )?
+                .with_state(rbac_revoke),
             )?;
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(ROLES_LIST_HTTP_ROUTE, roles_list_handler)?
                     .with_classified_state(roles),
             )?;
             let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(POLICIES_CREATE_HTTP_ROUTE, policies_create_handler)?
-                    .with_state(policies_create),
+                GeneratedPrimaryEndpoint::new_producer(
+                    POLICIES_CREATE_PRODUCER,
+                    policies_create_handler,
+                )?
+                .with_state(policies_create),
             )?;
             let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(POLICIES_UPDATE_HTTP_ROUTE, policies_update_handler)?
-                    .with_state(policies_update),
+                GeneratedPrimaryEndpoint::new_producer(
+                    POLICIES_UPDATE_PRODUCER,
+                    policies_update_handler,
+                )?
+                .with_state(policies_update),
             )?;
             let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(
-                    POLICIES_DEACTIVATE_HTTP_ROUTE,
+                GeneratedPrimaryEndpoint::new_producer(
+                    POLICIES_DEACTIVATE_PRODUCER,
                     policies_deactivate_handler,
                 )?
                 .with_state(policies_deactivate),
@@ -2833,6 +2873,10 @@ mod tests {
     // 未种子化的 canonical user id（change_password 未知主体 → NotFound，#1277 F2）。
     const GHOST_USER: &str = "99999999-8888-4777-8666-555544443333";
     const RESOURCE_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    fn login_receipt() -> LoginProducerReceipt {
+        ProducerMarker::for_test(LOGIN_PRODUCER).into_receipt()
+    }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
@@ -3019,6 +3063,7 @@ mod tests {
     impl SessionLifecycle for CapturingSessionLifecycle {
         async fn persist_session_and_emit(
             &self,
+            receipt: LoginProducerReceipt,
             scope: TenantRepoScope,
             session: Session,
             entry: EventEntry,
@@ -3026,7 +3071,13 @@ mod tests {
         ) -> Result<(), OutboxEmitError> {
             // 委托 inner 承载 store（创建即写 → 同源 find/logout）；同时捕获写入供 outbox 断言。
             self.inner
-                .persist_session_and_emit(scope, session.clone(), entry.clone(), envelope.clone())
+                .persist_session_and_emit(
+                    receipt,
+                    scope,
+                    session.clone(),
+                    entry.clone(),
+                    envelope.clone(),
+                )
                 .await?;
             self.writes
                 .lock()
@@ -4371,6 +4422,7 @@ mod tests {
         let svc = seed_service(&capture, 1_000, 3_600);
         assert_send_sync(&svc);
         assert_send(svc.login(
+            login_receipt(),
             tid(CANON_TENANT),
             IdentityLoginRequest {
                 username: "alice".to_string(),
@@ -4399,7 +4451,7 @@ mod tests {
             .body(Body::empty())
             .expect("assign request");
         assert_send(roles_assign_handler(
-            ContractMarker::for_test(),
+            ProducerMarker::for_test(ROLES_ASSIGN_PRODUCER),
             State(rbac),
             Path("role-admin".to_string()),
             assign_req,
@@ -4424,7 +4476,7 @@ mod tests {
                         let request: IdentityLoginRequest =
                             serde_json::from_slice(&body).expect("valid login request");
                         let response = svc
-                            .login(tid(CANON_TENANT), request)
+                            .login(login_receipt(), tid(CANON_TENANT), request)
                             .await
                             .expect("login ok");
                         (axum::http::StatusCode::OK, axum::Json(response)).into_response()
@@ -4460,6 +4512,7 @@ mod tests {
 
         let resp = svc
             .login(
+                login_receipt(),
                 tid(CANON_TENANT),
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -4531,6 +4584,7 @@ mod tests {
 
         let err = svc
             .login(
+                login_receipt(),
                 tid(CANON_TENANT),
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -4554,6 +4608,7 @@ mod tests {
 
         let err = svc
             .login(
+                login_receipt(),
                 tid(CANON_TENANT),
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -4577,6 +4632,7 @@ mod tests {
 
         let err = svc
             .login(
+                login_receipt(),
                 tid(CANON_TENANT),
                 IdentityLoginRequest {
                     username: "mallory".to_string(),
@@ -4602,6 +4658,7 @@ mod tests {
         for _ in 0..5 {
             let _ = svc
                 .login(
+                    login_receipt(),
                     tid(CANON_TENANT),
                     IdentityLoginRequest {
                         username: "alice".to_string(),
@@ -4616,6 +4673,7 @@ mod tests {
         // 第 6 次用**正确**密码，被 lockout 门控拒（InvalidCredentials，且零 UoW 写）。
         let err = svc
             .login(
+                login_receipt(),
                 tid(CANON_TENANT),
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -4639,6 +4697,7 @@ mod tests {
 
         let err = svc
             .login(
+                login_receipt(),
                 tid(OTHER_TENANT),
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -4672,6 +4731,7 @@ mod tests {
         // 用新密码 login 成功。
         let resp = svc
             .login(
+                login_receipt(),
                 tid(CANON_TENANT),
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -4686,6 +4746,7 @@ mod tests {
         // 旧密码在 change 后应失效：
         let err = svc
             .login(
+                login_receipt(),
                 tid(CANON_TENANT),
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -4719,6 +4780,7 @@ mod tests {
 
         // 旧密码仍可用（change 失败后不影响原凭据）。
         svc.login(
+            login_receipt(),
             tid(CANON_TENANT),
             IdentityLoginRequest {
                 username: "alice".to_string(),
@@ -4772,6 +4834,7 @@ mod tests {
 
         // 原租户凭据未被改动：旧密码仍可登录。
         svc.login(
+            login_receipt(),
             tid(CANON_TENANT),
             IdentityLoginRequest {
                 username: "alice".to_string(),
@@ -4816,6 +4879,7 @@ mod tests {
 
         // 新密码生效（login 路径仍以登录标识 "alice" 认证）。
         svc.login(
+            login_receipt(),
             tid(CANON_TENANT),
             IdentityLoginRequest {
                 username: "alice".to_string(),
@@ -4840,6 +4904,7 @@ mod tests {
         // login：经 lifecycle.persist_session_and_emit 创建会话（co-tx 写恰一次）。
         let resp = svc
             .login(
+                login_receipt(),
                 ta,
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -4888,6 +4953,7 @@ mod tests {
         // login（CANON_TENANT，凭据所在租户）写入会话。
         let resp = svc
             .login(
+                login_receipt(),
                 ta,
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -4936,6 +5002,7 @@ mod tests {
         let ta = tid(CANON_TENANT);
         let resp = svc
             .login(
+                login_receipt(),
                 ta,
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -8036,6 +8103,7 @@ mod tests {
             let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
             let login_resp = svc
                 .login(
+                    login_receipt(),
                     tid(CANON_TENANT),
                     IdentityLoginRequest {
                         username: "alice".to_string(),
@@ -8081,6 +8149,7 @@ mod tests {
         let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
         let login_resp = svc
             .login(
+                login_receipt(),
                 tid(CANON_TENANT),
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -8126,6 +8195,7 @@ mod tests {
         let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
         let login_resp = svc
             .login(
+                login_receipt(),
                 tid(CANON_TENANT),
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -8902,6 +8972,7 @@ mod tests {
 
         let resp = svc
             .login(
+                login_receipt(),
                 tid(CANON_TENANT),
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -9197,6 +9268,7 @@ mod tests {
 
         let err = svc
             .login(
+                login_receipt(),
                 tid(CANON_TENANT),
                 IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -9248,6 +9320,7 @@ mod tests {
 
         let resp = login_svc
             .login(
+                login_receipt(),
                 ta,
                 IdentityLoginRequest {
                     username: "alice".to_string(),

@@ -34,7 +34,8 @@
 use consistency::EventEntry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
 use identity::ports::{
-    IdentityError, Session, SessionId, SessionLifecycle, SessionLogoutMutation, TenantRepoScope,
+    IdentityError, LoginProducerReceipt, SESSION_CREATED_CONTRACT, Session, SessionId,
+    SessionLifecycle, SessionLogoutMutation, TenantRepoScope,
 };
 use sqlx::Row;
 
@@ -183,6 +184,7 @@ fn take_logout_fault_if(
 impl SessionLifecycle for PgSessionLifecycle {
     async fn persist_session_and_emit(
         &self,
+        receipt: LoginProducerReceipt,
         scope: TenantRepoScope,
         session: Session,
         entry: EventEntry,
@@ -214,6 +216,7 @@ impl SessionLifecycle for PgSessionLifecycle {
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
+        let authorized_env = env.clone();
         self.write_pool
             .co_tx_with_outbox(
                 scope,
@@ -223,7 +226,20 @@ impl SessionLifecycle for PgSessionLifecycle {
                     Box::pin(async move {
                         write_session(conn.conn(), &session)
                             .await
-                            .map_err(OutboxEmitError::new)
+                            .map_err(OutboxEmitError::new)?;
+                        let authorization = receipt
+                            .authorize(SESSION_CREATED_CONTRACT)
+                            .ok_or_else(|| {
+                                OutboxEmitError::new(std::io::Error::other(
+                                    "session co-tx: producer receipt does not authorize session-created",
+                                ))
+                            })?;
+                        if !authorized_env.matches_contract(authorization.fact_contract()) {
+                            return Err(OutboxEmitError::new(std::io::Error::other(
+                                "session co-tx: producer authorization does not match outbox envelope",
+                            )));
+                        }
+                        Ok(())
                     })
                 },
                 OutboxEmitError::new,

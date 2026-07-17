@@ -358,10 +358,9 @@ async fn publish_then_crash_recovers_with_stable_identity_and_consumer_dedup() {
     let spec = fixture.fault_spec().expect("closed crash spec");
     assert_eq!(spec, CrashFaultSpec::OutboxAfterPublishBeforeSettle);
     assert_eq!(fixture.status(), CrashStatus::Ready);
-    assert_eq!(fixture.domain(), spec.expected_domain());
-    assert_eq!(fixture.contract_id(), spec.expected_contract_id());
+    assert_eq!(fixture.domain(), "identity");
+    assert_eq!(fixture.contract_id(), CONTRACT_ID);
     assert_eq!(fixture.runner(), spec.expected_runner());
-    assert_eq!(CONTRACT_ID, fixture.contract_id());
     assert_eq!(TOPIC, fixture.contract_id());
 
     let store = CrashStore::new();
