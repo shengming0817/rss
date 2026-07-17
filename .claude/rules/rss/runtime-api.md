@@ -91,7 +91,7 @@ listener auth chain 必须显式声明。无认证使用 `AuthNone`，`None` 是
 `httpserve` 边缘防护层（tower Layer），层序（外→内）固定为：
 
 ```
-request_id → correlation → security-headers → body-limit → rate-limit → 验签桥 → trace → panic_recovery → Extension(plan) → 路由匹配 → enforce → handler
+security-headers → request_id → correlation → server-request-budget → body-limit → rate-limit → 验签桥 → trace → panic_recovery → Extension(plan) → 路由匹配 → enforce → handler
 ```
 
 Health listener 例外：`finalize_auth` 从 `AuthPlan::listener()` 派生 trace policy，Health listener 不挂 `trace`
@@ -105,6 +105,16 @@ Health listener 例外：`finalize_auth` 从 `AuthPlan::listener()` 派生 trace
   CSP `default-src 'none'`/`Cross-Origin-Resource-Policy`/`Cache-Control`/HSTS）。组合根可经
   `AuthenticatedRoutes::with_edge_hardening(EdgeHardening)` 覆盖（owner=httpserve 定默认，组合根可调；`without_hsts()`
   关 HSTS）。
+- **SERVER-REQUEST-BUDGET-01**：`RSS_HTTP_SERVER_REQUEST_BUDGET_MS` 是必填、非零的进程快照配置；runtime
+  在任何 listener bind 前解析为 `httpserve::ServerRequestBudget`。唯一生产出口
+  `AuthenticatedRoutes::into_make_service(budget)` 返回字段私有的 `ServerMakeService`，而 `httpd` 的
+  plaintext / mTLS serve API 只接受该 capability，故无法绑定无预算 raw router（Hard）。预算覆盖 body、验签、
+  授权、handler 与其下游 future；耗尽由 Tokio drop 整条 request future，返回统一 503
+  `ERR_CORE_UNAVAILABLE` envelope（outcome 未知，`retryable=false`），仍带
+  requestId/correlation/security headers。日志只记闭值
+  `decision=unavailable`、`reason=server_request_budget_exhausted`、budget_ms 与 request_id。bridge 禁止再加局部
+  verifier timeout；该跨 runtime/httpserve/httpd 的结构由 `server_budget_structure` synthetic-red + anti-vacuity
+  守卫（Medium）。
 - **BODYLIMIT-BEFORE-AUTH-01**（精确语义，两路径）：body-limit **层**（CL 闸 + Limited wrap）outer 于 auth：
   · **CL-declared 超限 → before-auth clean 413（`ERR_CORE_PAYLOAD_TOO_LARGE`）**：CL fast-reject 在验签桥前拒，
     无 auth 开销（auth 计算 + body 读取双重开销可避免，gocell 史 commit 248dbdd12）。

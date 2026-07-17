@@ -375,6 +375,7 @@ pub vocab::error::CoreErrorKind::OutboxFactConflict
 pub vocab::error::CoreErrorKind::PayloadTooLarge
 pub vocab::error::CoreErrorKind::TooManyRequests
 pub vocab::error::CoreErrorKind::Unauthenticated
+pub vocab::error::CoreErrorKind::Unavailable
 pub vocab::error::CoreErrorKind::Validation
 pub vocab::error::CoreErrorKind::VersionConflict
 impl vocab::error::CoreErrorKind
@@ -1136,6 +1137,7 @@ pub vocab::CoreErrorKind::OutboxFactConflict
 pub vocab::CoreErrorKind::PayloadTooLarge
 pub vocab::CoreErrorKind::TooManyRequests
 pub vocab::CoreErrorKind::Unauthenticated
+pub vocab::CoreErrorKind::Unavailable
 pub vocab::CoreErrorKind::Validation
 pub vocab::CoreErrorKind::VersionConflict
 impl vocab::error::CoreErrorKind

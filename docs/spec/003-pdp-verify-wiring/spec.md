@@ -10,6 +10,11 @@
 
 **Tracking**: Azure Boards #1109（`[authn] VerifiedJwt newtype 类型层强制验签先于派生 Principal`，cx-3 / pri-p1 / area-auth）· Epic #991（GoCell→Rust 迁移 · W 宽扇出阶段）· ADR-006（`docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md`）
 
+> **Supersession（#1828）**：本 feature 落地时的 CPU-only verifier / Send-only dyn-port 前提已失效。
+> 生产 bridge 现在直接 await `Pdp: Send + Sync`；终止预算由必填、非零的全请求
+> `ServerRequestBudget` 在唯一 bindable HTTP funnel 统一拥有，不由 bridge 局部 timeout；以 #1828 与
+> ADR-003 / ADR-006 async-serving addendum 为准。
+
 ---
 
 ## 背景与读者
@@ -71,7 +76,7 @@ httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Auth
 
 ### User Story 3 - 生产认证接线 + 验签桥 + e2e（启用生产认证·安全同批）(Priority: P1)
 
-组合根（`bins/server`、`bins/rss`）从配置构造 `OidcProvider` → `Box<DynPdp>`，在 `httpserve::finalize_auth` 产出的 router **外层**挂 verify-bridge 中间件：提取 Authorization 凭据 → `authn::verify_jwt(raw, &pdp)` → 成功则 `Authenticated::new(verified_scheme, principal.kind())`（`verified_scheme` = 验签桥实际验证的 `RequiredScheme`）注入 request → enforce exact-match `Require(required)` 放行；失败 / 方案不匹配 fail-closed 401。中间件埋 tracing span（verify ok→`authz.decision=allow`+`principal.kind`；fail→`deny`+区分 `PdpError` 变体），无 PII。
+组合根（`bins/server`、`bins/rss`）从配置构造 `OidcProvider` → `Arc<OidcProvider>`，经泛型 `apply_verify_bridge<P>` 注入（`P: Pdp + Send + Sync + 'static`），在 `httpserve::finalize_auth` 产出的 router **外层**挂 verify-bridge 中间件：提取 Authorization 凭据 → `authn::verify_jwt(raw, &pdp)` → 成功则 `Authenticated::new(verified_scheme, principal.kind())`（`verified_scheme` = 验签桥实际验证的 `RequiredScheme`）注入 request → enforce exact-match `Require(required)` 放行；失败 / 方案不匹配 fail-closed 401。中间件埋 tracing span（verify ok→`authz.decision=allow`+`principal.kind`；fail→`deny`+区分 `PdpError` 变体），无 PII。
 
 **Why this priority**: 这是**唯一启用生产认证**的环节，也是 ADR-006 §8 ③「httpserve↔authn 验签接线有集成测试覆盖（含拒绝路径）」的验收点。必须 blocked-by 真 verifier（US1）+ 放行接缝（US2），三者同批生效 → 零验签空窗。
 
@@ -126,9 +131,9 @@ httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Auth
   - **实现（#1197，见 research.md R3 决断）**：采纳「本地文件源」分支——`JwksKeySource` 从受文件权限 / Secret RBAC 保护的本地路径读 JWKS 文档（外部 agent 经各自 TLS 拉取 + 轮转后写入），**in-app 零 HTTP/TLS provider**；后台 poll 重载 + `RwLock<Arc<KeySet>>` 快照原子换出 + kid 索引 + fail-closed（源不可读/畸形/空 → 构造期拒 / 刷新期保留 last-good + `oidc_jwks_ready=false`，绝不 swap 空集）。in-app HTTPS 直连外部标准 IdP = follow-up（待成熟 license-clean provider，如 graviola 1.0+审计）。readiness probe 注册经组合根 = T004（本 adapter 切片仅暴露 `is_ready()` 状态）。
 - **FR-006**: httpserve MUST 定义 own `Authenticated` 证据 extension（基础级类型，脱敏标量：已验证的 `scheme: RequiredScheme` + `principal_kind`，**零 authn 依赖**，私有字段 + `Authenticated::new` 构造 funnel）；enforce 层 `Require(required)` 路由 MUST 仅在请求携 `Authenticated`、其 `principal_kind` 非 `Anonymous`、**且 `scheme()` exact-match `required`** 时放行，缺证据 / 方案不匹配 MUST fail-closed 401（杜绝 scheme 混淆，如 Jwt 证据撞 `Require(Mtls)`）。既有 opt-out（Public/PasswordResetExempt）与 AUTH-FAILCLOSED-01（无 plan→403）MUST 不回归。
 - **FR-007**: httpserve crate MUST NOT 新增任何 path 依赖（不引 authn/oidc/crypto）；`finalize_auth(router, plan)` 签名 MUST 保持冻结（验签桥由组合根外层 `.layer()` 装配，非穿入 finalize_auth）。
-- **FR-008**: 组合根（`bins/server`、`bins/rss`）MUST 从配置构造 `OidcProvider` → `Box<DynPdp>`（构造器必填位置参），MUST 在 `finalize_auth` 产出 router 的**外层**挂 verify-bridge 中间件；**仅组合根**启用生产认证（注入 + 挂载）。
+- **FR-008**: 组合根（`bins/server`、`bins/rss`）MUST 从配置构造 `OidcProvider` → `Arc<OidcProvider>`，并经泛型 `apply_verify_bridge<P>` 的 `Arc<P>` 构造器必填位置参注入（`P: Pdp + Send + Sync + 'static`）；MUST 在 `finalize_auth` 产出 router 的**外层**挂 verify-bridge 中间件；**仅组合根**启用生产认证（注入 + 挂载）。
 - **FR-009**: verify-bridge MUST 提取凭据 → `authn::verify_jwt`/`verify_service_token`（注入 `&DynPdp`）→ 成功 MUST 经 `Authenticated::new(verified_scheme, principal.kind())`（`verified_scheme` = 验签桥实际验证的 `RequiredScheme`）注入、失败 fail-closed 401；MUST 埋 tracing span（verify ok→`authz.decision=allow`+`principal.kind`；fail→`deny`+区分 `PdpError` 变体），span 字段 MUST NOT 含 PII（subject/token/email）。
-- **FR-010**: 安全同批门 MUST 由结构闸坐实：(a) 仅启用生产认证的 PR blocked-by 真 verifier PR（DAG）；(b) **测试 stub adapter crate** MUST NOT 进生产 bin 依赖图（`deny.toml` adapter wrapper + dev-dependency 隔离，Medium）；(c) `Box<DynPdp>` 注入为构造器必填参（缺失即编译错，Hard）；(d) fail-closed 为缺省态（Hard）；(e) **生产 bins 信任根守卫（Medium，本 feature 内 PR-C 交付，不 defer）**：`Box<DynPdp>` 是 trait object、bins 在 dylint 组合根白名单可合法 `impl Pdp`，故 PR-C MUST 配套 governance 守卫（`cargo xtask` 或 dylint）扫 bins 生产 `src/` 的 `impl diport::Pdp`，仅放行 `#[cfg(test)]` / dev-dep，生产内联 always-allow impl 即 fail（synthetic red case + anti-vacuity）——**不接受 Soft、不 defer**（AI-robust：新增治理 ≥ Medium）。
+- **FR-010**: 安全同批门 MUST 由结构闸坐实：(a) 仅启用生产认证的 PR blocked-by 真 verifier PR（DAG）；(b) **测试 stub adapter crate** MUST NOT 进生产 bin 依赖图（`deny.toml` adapter wrapper + dev-dependency 隔离，Medium）；(c) `Arc<P>` 注入为构造器必填参，且 `P: Pdp + Send + Sync + 'static`（缺失或不可共享 provider 即编译错，Hard）；(d) fail-closed 为缺省态（Hard）；(e) **生产 Pdp 信任根守卫（Medium，本 feature 内 PR-C 交付，不 defer）**：生产 `impl Pdp` 仅允许 provider adapter，测试替身仅允许测试构建；`rss_pdp_impl_adapter_only` dylint 与 `pdpallow` 守卫 MUST 拒绝其他生产内联 always-allow impl（synthetic red case + anti-vacuity）——**不接受 Soft、不 defer**（AI-robust：新增治理 ≥ Medium）。
 - **FR-011**: 系统 MUST 有 e2e 集成测试覆盖 httpserve↔authn 验签接线（ADR-006 §8 ③）：有效凭据 → 200 + `Authenticated`（`scheme` + principal_kind facet）、scheme exact-match 注入放行；无/坏/过期/错 aud 凭据 / 方案不匹配 → 401/403（拒绝路径全覆盖）。本批不承诺 handler 读完整 `Principal`（属 W）。
 - **FR-012**: 既有类型层不变式 MUST 不回归：`VerifiedClaims` 仅 `diport::pdp` 定义、仅 Pdp 验签后 mint（ADR-006 ①）；`Principal::from_verified_*` 仅收 newtype（②）；dynosaur 宏白名单无新增越界（④，本 feature 不新增 port，天然满足）。
 - **FR-013**: 每个 PR MUST ≤ 2000 行净增删（特殊情况例外须在 PR 说明理由）；MUST 只在 G0 冻结接缝（`diport::Pdp` / `authn` bridge / `finalize_auth`）内兑现 body，不改公共签名（finalize_auth 保留、Pdp trait 保留）；feature MUST 拆为 4 PR / 2 wave，形成 blocked-by DAG + `[P]` 并行标记，全部挂 Azure Boards #1109。

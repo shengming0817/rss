@@ -131,29 +131,10 @@ note: required by a bound in `assert_send`
 19 | fn assert_send<T: Send>() {}
    |                   ^^^^ required by this bound in `assert_send`
 
-error[E0277]: `(dyn pdp::__dynosaur_macro_dynpdp::ErasedPdp + 'static)` cannot be shared between threads safely
+error[E0277]: `(dyn outbox_emitter::__dynosaur_macro_dynoutboxemitter::ErasedOutboxEmitter + 'static)` cannot be shared between threads safely
   --> tests/ui/arc_dyn_ports_not_send.rs:30:19
    |
-30 |     assert_send::<Arc<DynPdp<'static>>>();
-   |                   ^^^^^^^^^^^^^^^^^^^^ `(dyn pdp::__dynosaur_macro_dynpdp::ErasedPdp + 'static)` cannot be shared between threads safely
-   |
-   = help: within `DynPdp<'static>`, the trait `Sync` is not implemented for `(dyn pdp::__dynosaur_macro_dynpdp::ErasedPdp + 'static)`
-note: required because it appears within the type `DynPdp<'static>`
-  --> src/pdp.rs
-   |
-   | #[dynosaur(pub DynPdp = dyn(box) Pdp, bridge(dyn))]
-   |                ^^^^^^
-   = note: required for `Arc<DynPdp<'static>>` to implement `Send`
-note: required by a bound in `assert_send`
-  --> tests/ui/arc_dyn_ports_not_send.rs:19:19
-   |
-19 | fn assert_send<T: Send>() {}
-   |                   ^^^^ required by this bound in `assert_send`
-
-error[E0277]: `(dyn outbox_emitter::__dynosaur_macro_dynoutboxemitter::ErasedOutboxEmitter + 'static)` cannot be shared between threads safely
-  --> tests/ui/arc_dyn_ports_not_send.rs:31:19
-   |
-31 |     assert_send::<Arc<DynOutboxEmitter<'static>>>();
+30 |     assert_send::<Arc<DynOutboxEmitter<'static>>>();
    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn outbox_emitter::__dynosaur_macro_dynoutboxemitter::ErasedOutboxEmitter + 'static)` cannot be shared between threads safely
    |
    = help: within `DynOutboxEmitter<'static>`, the trait `Sync` is not implemented for `(dyn outbox_emitter::__dynosaur_macro_dynoutboxemitter::ErasedOutboxEmitter + 'static)`
@@ -170,9 +151,9 @@ note: required by a bound in `assert_send`
    |                   ^^^^ required by this bound in `assert_send`
 
 error[E0277]: `(dyn revocation_store::__dynosaur_macro_dynrevocationstore::ErasedRevocationStore + 'static)` cannot be shared between threads safely
-  --> tests/ui/arc_dyn_ports_not_send.rs:32:19
+  --> tests/ui/arc_dyn_ports_not_send.rs:31:19
    |
-32 |     assert_send::<Arc<DynRevocationStore<'static>>>();
+31 |     assert_send::<Arc<DynRevocationStore<'static>>>();
    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn revocation_store::__dynosaur_macro_dynrevocationstore::ErasedRevocationStore + 'static)` cannot be shared between threads safely
    |
    = help: within `DynRevocationStore<'static>`, the trait `Sync` is not implemented for `(dyn revocation_store::__dynosaur_macro_dynrevocationstore::ErasedRevocationStore + 'static)`
@@ -189,9 +170,9 @@ note: required by a bound in `assert_send`
    |                   ^^^^ required by this bound in `assert_send`
 
 error[E0277]: `(dyn cas_store::__dynosaur_macro_dyncasstore::ErasedCasStore + 'static)` cannot be shared between threads safely
-  --> tests/ui/arc_dyn_ports_not_send.rs:33:19
+  --> tests/ui/arc_dyn_ports_not_send.rs:32:19
    |
-33 |     assert_send::<Arc<DynCasStore<'static>>>();
+32 |     assert_send::<Arc<DynCasStore<'static>>>();
    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn cas_store::__dynosaur_macro_dyncasstore::ErasedCasStore + 'static)` cannot be shared between threads safely
    |
    = help: within `DynCasStore<'static>`, the trait `Sync` is not implemented for `(dyn cas_store::__dynosaur_macro_dyncasstore::ErasedCasStore + 'static)`
@@ -208,9 +189,9 @@ note: required by a bound in `assert_send`
    |                   ^^^^ required by this bound in `assert_send`
 
 error[E0277]: `(dyn lock_store::__dynosaur_macro_dynlockstore::ErasedLockStore + 'static)` cannot be shared between threads safely
-  --> tests/ui/arc_dyn_ports_not_send.rs:34:19
+  --> tests/ui/arc_dyn_ports_not_send.rs:33:19
    |
-34 |     assert_send::<Arc<DynLockStore<'static>>>();
+33 |     assert_send::<Arc<DynLockStore<'static>>>();
    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn lock_store::__dynosaur_macro_dynlockstore::ErasedLockStore + 'static)` cannot be shared between threads safely
    |
    = help: within `DynLockStore<'static>`, the trait `Sync` is not implemented for `(dyn lock_store::__dynosaur_macro_dynlockstore::ErasedLockStore + 'static)`

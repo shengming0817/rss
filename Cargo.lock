@@ -2716,6 +2716,7 @@ dependencies = [
  "axum",
  "diport",
  "distributed",
+ "httpserve",
  "rcgen",
  "reqwest",
  "rustls",

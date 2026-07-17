@@ -1608,12 +1608,13 @@ mod verify_bridge_tests {
 
     const CANON: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
-    /// 桩 `Pdp`：按预置结果应答 `verify`（native-AFIT impl → 经 `DynPdp` 注入）。
+    /// 桩 `Pdp`：先主动 yield，再按预置结果应答（native-AFIT impl → 经 `DynPdp` 注入）。
     struct StubPdp {
         result: Result<VerifiedClaims, PdpError>,
     }
     impl Pdp for StubPdp {
         async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
+            tokio::task::yield_now().await;
             self.result.clone()
         }
     }
@@ -1624,6 +1625,22 @@ mod verify_bridge_tests {
     #[allow(clippy::expect_used)]
     fn service_binding() -> diport::ServiceTokenTenantBinding {
         diport::ServiceTokenTenantBinding::new(TenantId::parse(CANON).expect("canonical tenant"))
+    }
+
+    #[test]
+    fn verify_futures_are_send_across_yielding_dyn_pdp() {
+        fn assert_send<T: Send>(_: T) {}
+
+        let raw = test_jwt(r#"{"sub":"u"}"#);
+        let jwt_pdp = boxed(Err(PdpError::InvalidSignature));
+        assert_send(verify_jwt(&raw, &jwt_pdp));
+
+        let service_pdp = boxed(Err(PdpError::InvalidSignature));
+        assert_send(verify_service_token(
+            "opaque",
+            service_binding(),
+            &service_pdp,
+        ));
     }
 
     /// happy：验签 ok → `(VerifiedJwt, Principal)`；身份反映**验签产物**而非 raw 重解析。

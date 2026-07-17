@@ -233,8 +233,8 @@ fn default_rate_quota() -> ratelimit::QuotaConfig {
 /// 产出 `AuthenticatedRoutes` 经 `into_make_service` 交给 launch phase 绑 socket + serve——bind 点
 /// 天生只能消费已认证 router（ROUTE-AUTH-FUNNEL-01/02：未跑 finalize_auth 的 router 无 bindable 出口）。
 ///
-/// 层序（外→内）：body-limit（httpserve sealed_router，最外防护）→ rate-limit（本函数 verify-bridge 后叠）
-/// → 验签桥 → trace → enforce → handler。rate-limit outer 于验签桥保证限流在 auth 计算前生效
+/// 层序（外→内）：security headers → request-id → correlation → 全请求 server budget → body-limit
+/// → rate-limit（本函数 verify-bridge 后叠）→ 验签桥 → trace → enforce → handler。rate-limit outer 于验签桥保证限流在 auth 计算前生效
 /// （INVARIANT RATELIMIT-BEFORE-AUTH-01：组合根在 verify-bridge 后 .layer ⇒ outer 于桥）。
 ///
 /// Health listener 由 [`health_listener`] 单独构造、**不经本函数、不叠限流**——探针不限速（k8s

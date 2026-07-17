@@ -7,6 +7,7 @@
 - **后续修订**：**Amendment（#1095，2026-06-23）**——async DI port 注入形态收口（`make(X: Send)` 的 `DynX` 是 Send 非 Sync ⇒ `Arc<DynX>` 是 `!Send`；多次调用 async 消费者用泛型静态分发而非 `Arc<DynX>`）。§4.3 / §4.5 冲突段就地重写、§7 威胁矩阵补行、Option A defer。见下「Amendment」节。
 - **后续修订**：**Amendment（#1142，2026-06-25）**——新增 ack-capable delivery seam（`Acker` / `AckableSubscriber` 两个 async DI port + `Delivery`/`AckAction` 值类型），照本 ADR 既定 `make(X: Send)`+dynosaur 范式扩端口（**非新机制**），使 AMQP 消费达成 at-least-once。§7 补行、威胁矩阵重评。见下「Amendment（#1142）」节。
 - **后续修订**：**Amendment（#1168，2026-07-14）**——DLX lifecycle 两个 provider-neutral port 归 `diport`，按 #1095 的多次 `Send + Sync` 调用形态使用 `trait_variant` Send 变体 + 静态泛型；不生成无消费方的 dyn wrapper。第三个 cipher port 删除，eventexec 直接静态消费既有 `KeyProvider`。见下「Amendment（#1168）」节。
+- **后续修订**：**Amendment（#1828，2026-07-16）**——HTTP serving 的 PDP 必须跨 Pending 共享，故 `PdpLocal` / `Pdp` 收紧为 `Send + Sync`，成为 #1095 默认规则的窄例外；同步轮询路径删除并由机器门禁止。
 - **归属**：framework（DI 接缝是 provider-agnostic 基础设施，不绑单一域）
 - **AI-robust 评级**：见 §7（本 ADR 引入的 enforcement 逐条 Hard/Medium）
 
@@ -58,6 +59,20 @@ supertrait、又作 async 返回 future 的 bound，且**只取所列 bound、�
 in-repo 编译期证据：负例 `crates/diport/tests/ui/arc_dyn_ports_not_send.rs`（`dyn ErasedAuditSink` 非
 Sync ⇒ `Arc<DynAuditSink>` 非 Send，trybuild compile-fail）。
 
+### 窄例外（2026-07-16，#1828）：HTTP serving PDP 必须 `Send + Sync`
+
+`Pdp::verify` 允许远程 JWKS、外置 PDP 与网络 KMS I/O；runtime middleware 必须跨 await 持有共享
+provider。因此 `PdpLocal: Send + Sync` 且 `make(Pdp: Send)`；base supertrait 让生成的 `Pdp` / `DynPdp`
+具备 `Send + Sync`，variant 参数只给 async future 加 `Send`，不强求无必要的 `Future: Sync`。`Arc<DynPdp>` 成为
+可共享的显式例外。这不是其余端口 Option A 的兼容扩张：生产 bridge 仍以 `Arc<P>` 泛型静态分发持有实际
+provider，仅在 authn-owned verify funnel 内借为 `&DynPdp`；其余 dyn wrapper 维持 #1095 默认。
+
+Hard 证据为 `Arc<DynPdp>: Send + Sync` 正向 compile-pass 与 non-Sync provider compile-fail；旧同步轮询
+另由 Clippy `disallowed-methods` 和 runtime async bridge 结构守卫（Medium）禁止。终止预算不属于 PDP port
+或 bridge：runtime 从必填非零 snapshot 配置解析 `ServerRequestBudget`，httpserve 唯一 bindable funnel 用它
+包住完整 request future，httpd plaintext/mTLS 只接受 budget-sealed `ServerMakeService`。耗尽 drop 整条 future
+并返回统一 503（outcome 未知，`retryable=false`）；局部 verifier timeout 由结构门明确拒绝。
+
 ### 决策（sanctioned 注入形态，三分）
 
 | 消费场景 | 注入形态 |
@@ -81,10 +96,12 @@ trait-variant / dynosaur 是否接受 / 传递 `Send + Sync` 在 pinned pre-1.0�
 ### 威胁矩阵 / 安全模型重评（ai-robust：amendment 须同步重评）
 
 - **新增攻击面**：无。本 amendment 不改运行期行为，仅收口注入形态选择。
-- **错误形态可表达性**：`Arc<DynX>` 跨 Send future = **编译期不可表达（Hard）**——`Arc<DynX>: !Send` 使
+- **错误形态可表达性**：默认 `Arc<DynX>` 跨 Send future = **编译期不可表达（Hard）**——`Arc<DynX>: !Send` 使
   `tokio::spawn` 处直接 `E0277`，不依赖人记规范。负例 `arc_dyn_ports_not_send.rs`（trybuild compile-fail，
   **Medium** anti-vacuity，INVARIANT DIPORT-ASYNC-ARC-SEND-01）锁该事实：若改 Send+Sync（Option A）此例转可
   编译，强制有意识更新本 ADR + 负例。
+- **PDP 反向约束**：`Arc<DynPdp>: Send + Sync` 与 non-Sync provider 不可实现均为 **Hard**；两条独立
+  trybuild fixture 防止聚合负例因移除 PDP 后假绿。共享能力只开放给验签端口，不改变其它端口威胁面。
 - **provider 可互换性**：泛型静态分发经 `S: X` trait bound 保持（与 dyn 注入同等可换 provider、同样经构造器
   必填参注入），未削弱 §2「可替换 provider」与 §7 其余行——安全模型不退化。
 - INVARIANT: DIPORT-ASYNC-ARC-SEND-01（`diport` crate rustdoc「注入形态」节 + 负例 + 本节，三处同源）。

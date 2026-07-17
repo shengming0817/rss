@@ -60,7 +60,7 @@ Cedar 的 `Authorizer::is_authorized(&self, r: &Request, p: &PolicySet, e: &Enti
 
 ## 3. 范式（落地代码）
 
-> **形状草稿**：以下为接缝形状示意，**以 ADR-003 落地结论 + `crates/diport/src/` 既有 port 写法为准**（dynosaur exact-pin，`#[trait_variant::make(X: Send)]` + `#[dynosaur(pub DynX = dyn(box) X, bridge(dyn))]`）；#1109 实施前须对照既有 port（如 `signer.rs` / `audit_sink.rs`）校对宏参数形式，防止复制偏差。
+> **形状草稿**：以下为接缝形状示意，**以 ADR-003 落地结论 + `crates/diport/src/` 既有 port 写法为准**（dynosaur exact-pin；PDP 自 #1828 起显式 `Send + Sync`）；#1109 实施前须对照既有 port 校对宏参数形式，防止复制偏差。
 
 ```rust
 // crates/diport/src/pdp.rs —— 预留接缝（本 PR 不交付，形状随 #1109 细化）
@@ -79,13 +79,18 @@ pub enum PdpError { /* InvalidSignature / Expired / Untrusted，#1109 细化 */ 
 #[trait_variant::make(Pdp: Send)]
 #[dynosaur(pub DynPdp = dyn(box) Pdp, bridge(dyn))]
 #[allow(async_fn_in_trait)]
-pub trait PdpLocal {
+pub trait PdpLocal: Send + Sync {
     /// 验签 + claims 派生（I/O：可能查 JWKS / 调外置引擎）。
     async fn verify(&self, raw: &RawCredential) -> Result<VerifiedClaims, PdpError>;
 }
 ```
 
-**authplan 侧不变**：`resolve_requirement` 仍是纯函数，PDP 消费其输出（`AuthRequirement::Require(scheme)`）+ `RequestCtx`，**不反向耦合**——authplan 决定「这条 route 要不要认证、要哪种 scheme」，`Pdp` 决定「这份凭据是否有效、派生谁」。组合根经构造器必填位置参注入 `Box<DynPdp>`（prod = 内置验签器 / 未来 OPA 客户端；test = mock）。
+**Async-serving addendum（#1828）**：验签实现可能等待远程 I/O，middleware 必须直接 await verifier；
+`PdpLocal` / `Pdp` 的 `Send + Sync` 是共享 serving state 的类型约束，不得用同步首轮 poll 代替。bridge
+不拥有局部 verifier timeout；终止性由 mandatory `ServerRequestBudget` 在唯一 HTTP bindable funnel 包住完整
+request future，耗尽 drop verifier + handler 且经共享 503 `ERR_CORE_UNAVAILABLE` envelope 表达。
+
+**authplan 侧不变**：`resolve_requirement` 仍是纯函数，PDP 消费其输出（`AuthRequirement::Require(scheme)`）+ `RequestCtx`，**不反向耦合**——authplan 决定「这条 route 要不要认证、要哪种 scheme」，`Pdp` 决定「这份凭据是否有效、派生谁」。组合根经构造器必填位置参注入 `Arc<P>`，其中 `P: Pdp + Send + Sync + 'static`（prod = 内置验签器 / 未来 OPA 客户端；test = mock）；authn funnel 内借为 `&DynPdp`。
 
 ---
 
@@ -128,7 +133,8 @@ pub trait PdpLocal {
 |------|------|------|
 | 本 ADR 为纯决策记录，**当前不新增 enforcement** | —（N/A） | 决策方向 + 切换判据成文；无机器守卫新增 |
 | 未来 `diport::Pdp` 定义面只在 `diport`（上游） + impl 面仅 adapter/组合根（下游） | **Medium（cargo-deny + dylint）** | 上游定义面：dynosaur/trait-variant 宏收敛白名单（`DIPORT-MACRO-CONFINE-01′`，cargo-deny + xtask，Medium）；下游 impl 面：AST 级 impl-site allowlist（`DIPORT-IMPL-ALLOWLIST-01`，dylint #1060，Medium——sealed-trait 无法对独立 adapter crate 跨 crate Hard 封闭，dylint 为最强可用载体）。**非 Hard**（与 ADR-005 §6 同源评级） |
-| 未来 PDP 必填注入 + `VerifiedClaims` 仅 Pdp mint + `from_verified_*` 入参 newtype | **Hard（类型 / 可见性 / 构造器）** | `Box<DynPdp>` 构造器必填位置参（缺失即编译错误，继承 ADR-004 C5）；`VerifiedClaims` 私有构造 funnel + `from_verified_*` 仅收 newtype 而非裸 token（类型层杜绝旁路 mint）——这是本接缝**真正 Hard** 的部分（与上行 Medium 的 define/impl 守卫互补） |
+| 未来 PDP 必填注入 + `VerifiedClaims` 仅 Pdp mint + `from_verified_*` 入参 newtype | **Hard（类型 / 可见性 / 构造器）** | `Arc<P>` 构造器必填位置参且 `P: Pdp + Send + Sync + 'static`（缺失或 provider 不可跨 serving task 共享即编译错误，继承 ADR-004 C5）；`VerifiedClaims` 私有构造 funnel + `from_verified_*` 仅收 newtype 而非裸 token（类型层杜绝旁路 mint）——这是本接缝**真正 Hard** 的部分（与上行 Medium 的 define/impl 守卫互补） |
+| 异步 PDP 永久 Pending 占用 request task | **Hard + Medium** | 非零 `ServerRequestBudget` 必填参数 + 私有 `ServerMakeService` capability + httpd 双 transport 同一入参，使无预算 bind 不可表达（Hard）；`server_budget_structure` 锁 runtime snapshot 注入、httpserve timeout 层与 httpd plaintext/mTLS 单路径，且 `auth_bridge_structure` 拒绝局部 timeout（Medium，均有 synthetic-red + anti-vacuity） |
 
 无 Soft 新增 enforcement。
 

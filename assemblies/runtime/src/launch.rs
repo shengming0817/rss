@@ -4,6 +4,7 @@ use crate::{config::SnapshotConfig, listeners, routes};
 
 use std::future::Future;
 use std::net::SocketAddr;
+use std::num::NonZeroU64;
 
 use anyhow::Context as _;
 use bootstrap::DomainModuleResult;
@@ -14,6 +15,25 @@ use diport::DynManagedResource;
 use httpd::HttpServer;
 use primitives::{AuthScheme, ListenerKind};
 use tokio_util::sync::CancellationToken;
+
+pub(crate) const HTTP_SERVER_REQUEST_BUDGET_ENV: &str = "RSS_HTTP_SERVER_REQUEST_BUDGET_MS";
+
+fn server_request_budget(
+    config: SnapshotConfig<'_>,
+) -> anyhow::Result<httpserve::ServerRequestBudget> {
+    let raw = config
+        .value(HTTP_SERVER_REQUEST_BUDGET_ENV)
+        .ok_or_else(|| {
+            anyhow::anyhow!("missing required env var: {HTTP_SERVER_REQUEST_BUDGET_ENV}")
+        })?;
+    let millis = raw.parse::<u64>().with_context(|| {
+        format!("{HTTP_SERVER_REQUEST_BUDGET_ENV} must be a non-zero u64 millisecond value")
+    })?;
+    let millis = NonZeroU64::new(millis).ok_or_else(|| {
+        anyhow::anyhow!("{HTTP_SERVER_REQUEST_BUDGET_ENV} must be greater than zero")
+    })?;
+    Ok(httpserve::ServerRequestBudget::from_millis(millis))
+}
 
 /// Resources owned by the launch phase, grouped by lifecycle dependency.
 pub(crate) struct LaunchPlanParts {
@@ -96,8 +116,10 @@ impl LaunchPlan {
 
 /// Production launch entry: bind listeners, wait for SIGTERM/SIGINT, then drain resources.
 pub(crate) async fn launch(config: SnapshotConfig<'_>, plan: LaunchPlan) -> anyhow::Result<()> {
+    let budget = server_request_budget(config).context("resolve HTTP server request budget")?;
     launch_until(
         plan,
+        budget,
         move |listener, scheme| listeners::listener_addr_for_scheme(config, listener, scheme),
         wait_for_shutdown_signal(),
     )
@@ -107,6 +129,7 @@ pub(crate) async fn launch(config: SnapshotConfig<'_>, plan: LaunchPlan) -> anyh
 /// Testable launch core with injected address resolver and shutdown trigger.
 pub(crate) async fn launch_until<R, S>(
     plan: LaunchPlan,
+    budget: httpserve::ServerRequestBudget,
     addr_resolver: R,
     shutdown: S,
 ) -> anyhow::Result<()>
@@ -114,13 +137,14 @@ where
     R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
     S: Future<Output = anyhow::Result<()>>,
 {
-    launch_until_observed(plan, addr_resolver, shutdown, |_| {}).await
+    launch_until_observed(plan, budget, addr_resolver, shutdown, |_| {}).await
 }
 
 // reason: bind loop + registration + drain logging is one launch phase; splitting would hide the startup/drain order.
 #[allow(clippy::cognitive_complexity)]
 async fn launch_until_observed<R, S, O>(
     plan: LaunchPlan,
+    budget: httpserve::ServerRequestBudget,
     addr_resolver: R,
     shutdown: S,
     observe_ready_stack: O,
@@ -139,7 +163,7 @@ where
             "no listener has routes to serve (refusing to start with zero bound sockets)"
         );
         for listener in listeners {
-            bind_and_register(&mut stack, listener, &addr_resolver).await?;
+            bind_and_register(&mut stack, listener, budget, &addr_resolver).await?;
         }
         observe_ready_stack(&stack);
         tracing::info!(listener_count, "all listeners bound; server ready");
@@ -180,6 +204,7 @@ fn preserve_launch_error(
 async fn bind_and_register<R>(
     stack: &mut ShutdownStack,
     listener: routes::AssembledListener,
+    budget: httpserve::ServerRequestBudget,
     addr_resolver: &R,
 ) -> anyhow::Result<()>
 where
@@ -198,7 +223,7 @@ where
         .await
         .with_context(|| format!("bind {name} listener at {addr}"))?;
     tracing::info!(listener = ?listener, name, addr = %bound.local_addr(), "listener bound");
-    let svc = routes.into_make_service();
+    let svc = routes.into_make_service(budget);
     match transport {
         ResolvedListenerTransport::Mtls(material) => {
             let mtls = mtls_config(listener, material.allow_set, &material.spiffe_endpoint)
@@ -270,7 +295,7 @@ fn resolve_listener_transport(
 fn register_mtls_server(
     stack: &mut ShutdownStack,
     bound: httpd::BoundHttpServer,
-    svc: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<axum::Router, SocketAddr>,
+    svc: httpserve::ServerMakeService,
     mtls: httpd::MtlsServerConfig,
     health: std::sync::Arc<routes::MtlsHealthSlot>,
 ) -> anyhow::Result<()> {
@@ -337,6 +362,7 @@ async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_snapshot;
     use crate::listeners::health_listener;
 
     use diport::{ManagedResource, ShutdownError};
@@ -492,6 +518,35 @@ mod tests {
         "127.0.0.1:0".parse::<SocketAddr>().map_err(Into::into)
     }
 
+    fn test_budget() -> httpserve::ServerRequestBudget {
+        httpserve::ServerRequestBudget::for_test()
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn server_request_budget_is_required_non_zero_and_snapshot_backed() {
+        let missing = test_snapshot(&[]).expect("capture empty config");
+        let error = server_request_budget(missing.view()).expect_err("budget is mandatory");
+        assert!(error.to_string().contains(HTTP_SERVER_REQUEST_BUDGET_ENV));
+
+        for raw in ["0", "not-a-number"] {
+            let snapshot = test_snapshot(&[(HTTP_SERVER_REQUEST_BUDGET_ENV, raw)])
+                .expect("capture invalid budget");
+            let error = server_request_budget(snapshot.view()).expect_err("invalid budget");
+            assert!(error.to_string().contains(HTTP_SERVER_REQUEST_BUDGET_ENV));
+        }
+
+        let snapshot = test_snapshot(&[(HTTP_SERVER_REQUEST_BUDGET_ENV, "2500")])
+            .expect("capture valid budget");
+        assert_eq!(
+            server_request_budget(snapshot.view())
+                .expect("valid budget")
+                .millis()
+                .get(),
+            2500
+        );
+    }
+
     fn minimal_plan(listeners: Vec<routes::AssembledListener>) -> LaunchPlan {
         LaunchPlan::new(LaunchPlanParts {
             listeners,
@@ -525,6 +580,7 @@ mod tests {
         let captured = Arc::clone(&names);
         launch_until_observed(
             plan,
+            test_budget(),
             ephemeral_addr,
             std::future::ready(anyhow::Ok(())),
             move |stack| {
@@ -624,9 +680,14 @@ mod tests {
     #[allow(clippy::expect_used)] // reason: direct async test assertion for clean listener launch.
     async fn launch_until_binds_all_listeners_and_drains_clean() {
         let plan = minimal_plan(vec![test_health_assembled(), test_health_assembled()]);
-        launch_until(plan, ephemeral_addr, std::future::ready(anyhow::Ok(())))
-            .await
-            .expect("launch_until binds 2 listeners + drains clean");
+        launch_until(
+            plan,
+            test_budget(),
+            ephemeral_addr,
+            std::future::ready(anyhow::Ok(())),
+        )
+        .await
+        .expect("launch_until binds 2 listeners + drains clean");
     }
 
     #[tokio::test]
@@ -638,9 +699,14 @@ mod tests {
             "recorded-domain",
             Arc::clone(&shutdowns),
         ));
-        let err = launch_until(plan, ephemeral_addr, std::future::ready(anyhow::Ok(())))
-            .await
-            .expect_err("empty listeners must fail fast");
+        let err = launch_until(
+            plan,
+            test_budget(),
+            ephemeral_addr,
+            std::future::ready(anyhow::Ok(())),
+        )
+        .await
+        .expect_err("empty listeners must fail fast");
         assert!(err.to_string().contains("zero bound sockets"));
         assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
     }
@@ -654,6 +720,7 @@ mod tests {
 
         launch_until(
             minimal_plan(vec![listener]),
+            test_budget(),
             move |listener, scheme| {
                 assert_eq!(listener, ListenerKind::Health);
                 *seen.lock().expect("scheme lock") = Some(scheme);
@@ -675,6 +742,7 @@ mod tests {
     async fn launch_until_addr_resolver_failure_propagates() {
         let err = launch_until(
             minimal_plan(vec![test_health_assembled()]),
+            test_budget(),
             |_, _| anyhow::bail!("no addr configured for listener"),
             std::future::ready(anyhow::Ok(())),
         )
@@ -707,6 +775,7 @@ mod tests {
 
         let err = launch_until(
             plan,
+            test_budget(),
             move |_, _| {
                 let index = resolver_index.fetch_add(1, Ordering::SeqCst);
                 addresses
@@ -741,6 +810,7 @@ mod tests {
 
         let err = launch_until(
             plan,
+            test_budget(),
             ephemeral_addr,
             std::future::ready(Err(anyhow::anyhow!("shutdown trigger failed"))),
         )
@@ -769,6 +839,7 @@ mod tests {
 
         let err = launch_until(
             plan,
+            test_budget(),
             ephemeral_addr,
             std::future::ready(Err(anyhow::anyhow!("primary shutdown trigger failure"))),
         )
@@ -813,9 +884,14 @@ mod tests {
             },
         });
 
-        let err = launch_until(plan, ephemeral_addr, std::future::ready(anyhow::Ok(())))
-            .await
-            .expect_err("leftover probe must fail registration");
+        let err = launch_until(
+            plan,
+            test_budget(),
+            ephemeral_addr,
+            std::future::ready(anyhow::Ok(())),
+        )
+        .await
+        .expect_err("leftover probe must fail registration");
 
         assert!(format!("{err:#}").contains("undrained probes"));
         assert_eq!(trace_shutdowns.load(Ordering::SeqCst), 1);
@@ -920,7 +996,7 @@ mod tests {
         register_mtls_server(
             &mut stack,
             bound,
-            routes.into_make_service(),
+            routes.into_make_service(test_budget()),
             mtls,
             Arc::clone(&health),
         )

@@ -25,12 +25,12 @@
 //!   中间件经唯一 bindable 出口封在本桥**外层**，ROUTE-REQUESTID-OUTERMOST-01，本桥运行时 RequestId 已就位）。
 //! - **凭据方案按 listener 静态绑定**（runtime-api.md「单 listener 单 scheme」）：本桥在 finalize_auth 外层，
 //!   `AuthPlan` extension 是内层、本桥运行时尚不可读，故由组合根按 listener 注入对应 [`RequiredScheme`]。
-//! - **Send 安全**：`verify_jwt(&DynPdp)` 的 future 为 `!Send`（`DynPdp` 非 `Sync`，DIPORT-ASYNC-ARC-SEND-01）。
-//!   `OidcProvider::verify` 纯 CPU 无真 await ⇒ future 首 poll 即 ready，经 `now_or_never()` 同步驱动至完成、
-//!   不跨本桥自身 `.await`，故中间件 future 保持 `Send`（生产多线程 `serve` 必需）。`None`（理论上 verify 未
-//!   同步完成，CPU-only 前提下不可达）按 fail-closed 处理（不注证据、记 deny），不 panic。
+//! - **真异步 + Send 安全**：`Pdp` / `DynPdp` 是 `Send + Sync`（#1828），本桥直接 await verifier；合法
+//!   `Poll::Pending` 由 serving runtime 正常恢复，不转换为认证结果。唯一 bindable HTTP funnel 的必填
+//!   `ServerRequestBudget` / request cancellation drop 包含 verifier 的整条请求 future；bridge 不拥有局部
+//!   timeout，无成功产物即不注证据，保持 fail-closed。
 //! - **无 PII 埋点**：成功记 `authz.decision=allow` + `principal.kind`（[`vocab::PrincipalKind`] 脱敏枚举）；
-//!   失败记 `authz.decision=deny` + 闭值 `authz.deny_reason`（三路告警分级，见 [`deny_reason`]）+ `AuthnError`
+//!   失败记 `authz.decision=deny` + 七个固定 `authz.deny_reason` 标签（见 [`deny_reason`]）+ `AuthnError`
 //!   变体；**绝不**记 token / subject / claims。
 //!
 //! `Authenticated::new` callsite 由 `rss_authenticated_callsite` dylint 限组合根
@@ -46,18 +46,25 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use futures::FutureExt;
 use httpserve::{Authenticated, AuthenticatedRoutes};
-use oidc::OidcProvider;
 use primitives::RequiredScheme;
+use tracing::Instrument as _;
 use vocab::{PrincipalKind, TenantId};
 
 /// 验签桥中间件 state：共享验签 provider（多次调用 ⇒ 泛型静态分发的 `Arc<S>` 范式，ADR-003 §注入形态收口；
 /// `OidcProvider` 是 `Send + Sync`）+ 本 listener 绑定的已验证方案。
-#[derive(Clone)]
-struct VerifyState {
-    provider: Arc<OidcProvider>,
+struct VerifyState<P> {
+    provider: Arc<P>,
     scheme: RequiredScheme,
+}
+
+impl<P> Clone for VerifyState<P> {
+    fn clone(&self) -> Self {
+        Self {
+            provider: Arc::clone(&self.provider),
+            scheme: self.scheme,
+        }
+    }
 }
 
 struct VerifiedPrincipal {
@@ -72,11 +79,14 @@ enum VerifyFailure {
 
 /// 在 `finalize_auth` 产出的 [`AuthenticatedRoutes`] **外层**叠验签桥（经 `AuthenticatedRoutes::layer` 只能加层、
 /// 不能替换，funnel 封印不破）。组合根按 listener 的已验证 [`RequiredScheme`] 调用。
-pub fn apply_verify_bridge(
+pub fn apply_verify_bridge<P>(
     routes: AuthenticatedRoutes,
-    provider: Arc<OidcProvider>,
+    provider: Arc<P>,
     scheme: RequiredScheme,
-) -> AuthenticatedRoutes {
+) -> AuthenticatedRoutes
+where
+    P: diport::Pdp + Send + Sync + 'static,
+{
     routes.layer(middleware::from_fn_with_state(
         VerifyState { provider, scheme },
         verify,
@@ -96,42 +106,46 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
     (!token.is_empty()).then(|| token.to_string())
 }
 
-/// 同步驱动验签产物 → `Principal`（按 listener scheme 选 jwt / service-token funnel）。
+/// 异步验签产物 → `Principal`（按 listener scheme 选 jwt / service-token funnel）。
 ///
-/// `OidcProvider::verify` 纯 CPU、future 恒首 poll ready ⇒ `now_or_never()` 恒 `Some`；`None`/`Some(Err)` 均
-/// 不产证据（fail-closed）。`provider` 经 `DynPdp::from_ref` 借为 `&DynPdp` 喂 authn funnel（信任原点单源）。
-fn verify_principal(
-    provider: &OidcProvider,
+/// `provider` 经 `DynPdp::from_ref` 借为 `&DynPdp` 喂 authn funnel（信任原点单源）；所有失败均不产证据。
+async fn verify_principal<P>(
+    provider: &P,
     scheme: RequiredScheme,
     token: &str,
     headers: &HeaderMap,
-) -> Option<Result<VerifiedPrincipal, VerifyFailure>> {
+) -> Option<Result<VerifiedPrincipal, VerifyFailure>>
+where
+    P: diport::Pdp + Send + Sync + 'static,
+{
     let pdp = diport::DynPdp::from_ref(provider);
     match scheme {
-        RequiredScheme::Jwt => authn::verify_jwt(token, pdp).now_or_never().map(|r| {
-            r.map(|(_, principal)| {
-                let ambient_tenant = principal.tenant();
-                VerifiedPrincipal {
-                    principal,
-                    ambient_tenant,
-                }
-            })
-            .map_err(VerifyFailure::Authn)
-        }),
+        RequiredScheme::Jwt => Some(
+            authn::verify_jwt(token, pdp)
+                .await
+                .map(|(_, principal)| {
+                    let ambient_tenant = principal.tenant();
+                    VerifiedPrincipal {
+                        principal,
+                        ambient_tenant,
+                    }
+                })
+                .map_err(VerifyFailure::Authn),
+        ),
         RequiredScheme::ServiceToken => {
             let (binding, tenant) = match httpserve::service_token_tenant_binding(headers) {
                 Ok(parts) => parts,
                 Err(_) => return Some(Err(VerifyFailure::TenantBindingInvalid)),
             };
-            authn::verify_service_token(token, binding, pdp)
-                .now_or_never()
-                .map(|r| {
-                    r.map(|(_, principal)| VerifiedPrincipal {
+            Some(
+                authn::verify_service_token(token, binding, pdp)
+                    .await
+                    .map(|(_, principal)| VerifiedPrincipal {
                         principal,
                         ambient_tenant: Some(tenant),
                     })
-                    .map_err(VerifyFailure::Authn)
-                })
+                    .map_err(VerifyFailure::Authn),
+            )
         }
         // mTLS 不读取 bearer token；由 `verify` 直接消费 transport 层注入的 VerifiedMtlsPeer。
         // JwtFromAssembly 留后续；无证据 = Require 路由 401（fail-closed）。
@@ -139,7 +153,7 @@ fn verify_principal(
     }
 }
 
-/// 验签 + 埋点 → 铸 [`Authenticated`] 证据（成功）或 `None`（无凭据 / 验签失败 / 未同步完成 = 均 fail-closed）。
+/// 验签 + 埋点 → 铸 [`Authenticated`] 证据（成功）或 `None`（无凭据 / 验签失败 = 均 fail-closed）。
 ///
 /// 各分支埋点拆独立 fn（每 fn 一条 `tracing` 宏；宏展开 cognitive-complexity 高，分摊保 ≤15）。
 ///
@@ -147,12 +161,15 @@ fn verify_principal(
 /// `verify_jwt` 的 `From<PdpError>` 三变体一一保真（`InvalidSignature`→`TokenInvalid`、`Untrusted`→`TokenUntrusted`、
 /// `Expired`→`TokenExpired`），故 [`deny_reason`] 据变体记**三路**告警分级（区分疑似攻击 vs 疑似配置错 vs 过期）。
 /// 本桥不为日志粒度旁路 `verify_jwt` funnel（保「唯一信任原点」姿态）——`deny_reason` 只读已收敛的 `AuthnError`。
-fn mint_evidence(
-    state: &VerifyState,
+async fn mint_evidence<P>(
+    state: &VerifyState<P>,
     token: &str,
     headers: &HeaderMap,
-) -> Option<(Authenticated, Option<runctx::AppCtx>, Arc<authn::Principal>)> {
-    match verify_principal(&state.provider, state.scheme, token, headers) {
+) -> Option<(Authenticated, Option<runctx::AppCtx>, Arc<authn::Principal>)>
+where
+    P: diport::Pdp + Send + Sync + 'static,
+{
+    match verify_principal(state.provider.as_ref(), state.scheme, token, headers).await {
         Some(Ok(verified)) => Some(allow_evidence(state.scheme, verified)),
         // err = AuthnError 变体（PdpError 经 verify_* 一一保真，三路），脱敏；不产证据 ⇒ enforce fail-closed。
         Some(Err(VerifyFailure::Authn(err))) => {
@@ -163,14 +180,8 @@ fn mint_evidence(
             log_deny_tenant_binding_invalid();
             None
         }
-        // COVERAGE/不变式：`OidcProvider::verify` 纯 CPU 无真 await ⇒ future 首 poll 恒 ready ⇒ `now_or_never`
-        // 恒 `Some`，本臂结构上不可达（无注入口构造 Pending Pdp，不为覆盖此防御臂 generic 化签名）。防御式
-        // fail-closed（不产证据），不 panic。若 #1197 让 verify 变真 async，`valid_jwt_is_200` e2e 会 401 而 FAIL
-        // （响亮的 tripwire，非静默故障）——届时 bridge 须随 #1197 改造。
-        None => {
-            log_deny_not_synchronous();
-            None
-        }
+        // 非 bearer 方案（mTLS 已在 middleware 前置处理；未来 scheme 缺实现时保持无证据）。
+        None => None,
     }
 }
 
@@ -234,21 +245,22 @@ fn log_deny_verify(err: &authn::AuthnError) {
 }
 
 // deny 告警分级闭值集（observability.md「告警 / metrics label 闭值集」：低基数、无 PII）——bridge deny 路
-// `authz.deny_reason` 仅取此 6 值，与 `AuthnError` deny 变体一一对应（#1275，spec SC-006/FR-009）：
+// `authz.deny_reason` 仅取此 7 值（#1275，spec SC-006/FR-009）：
 //   `SIGNATURE_INVALID` ← `TokenInvalid` = verifier 报告的**凭据签名/MAC/结构失败**（疑似攻击）；
 //   `UNTRUSTED`         ← `TokenUntrusted` = iss/aud/key-path 不受信（疑似配置错）；
 //   `EXPIRED`           ← `TokenExpired` = 时间窗越界；
 //   `PRINCIPAL_INVALID` ← `PrincipalInvalid` = **验签通过后**的 claims/principal 派生失败（良性，#1275 review
 //                          F1：与签名失败分开，杜绝把良性失败误报成 `signature_invalid` 攻击信号）；
-//   `INVALID`           ← `#[non_exhaustive]` 未来 / 本桥不可达变体（`SessionNotFound` / `Forbidden`）fail-safe 兜底；
-//   `NOT_SYNCHRONOUS`   ← verify future 未同步完成的防御式 deny（CPU-only 前提下不可达）。
+//   `TENANT_BINDING_INVALID` ← service-token tenant binding 缺失 / 非法；
+//   `MTLS_PEER_MISSING`      ← mTLS listener 缺 transport 层已验证 peer evidence；
+//   `INVALID`           ← `#[non_exhaustive]` 未来 / 本桥不可达变体（`SessionNotFound` / `Forbidden`）fail-safe 兜底。
 pub(crate) const DENY_REASON_SIGNATURE_INVALID: &str = "signature_invalid";
 pub(crate) const DENY_REASON_UNTRUSTED: &str = "untrusted";
 pub(crate) const DENY_REASON_EXPIRED: &str = "expired";
 pub(crate) const DENY_REASON_PRINCIPAL_INVALID: &str = "principal_invalid";
 pub(crate) const DENY_REASON_TENANT_BINDING_INVALID: &str = "tenant_binding_invalid";
+pub(crate) const DENY_REASON_MTLS_PEER_MISSING: &str = "mtls_peer_missing";
 pub(crate) const DENY_REASON_INVALID: &str = "invalid";
-pub(crate) const DENY_REASON_NOT_SYNCHRONOUS: &str = "not_synchronous";
 
 /// `AuthnError` 变体 → deny 告警分级闭值标签（无 PII；闭值集见上 `DENY_REASON_*`）。
 fn deny_reason(err: &authn::AuthnError) -> &'static str {
@@ -270,15 +282,6 @@ fn log_deny_tenant_binding_invalid() {
     );
 }
 
-/// future 未同步完成 deny 埋点（CPU-only 前提下不可达）。
-fn log_deny_not_synchronous() {
-    tracing::warn!(
-        authz.decision = "deny",
-        authz.deny_reason = DENY_REASON_NOT_SYNCHRONOUS,
-        "verify-bridge"
-    );
-}
-
 /// 验签桥中间件：铸证据 + 埋点 + 透传（不自发裁决，见模块 doc）。
 ///
 /// allow/deny 事件落在 `verify_bridge` span 内（携 `scheme` + `request_id` 上下文，spec FR-009「tracing
@@ -288,14 +291,17 @@ fn log_deny_not_synchronous() {
 // reason: this is the single request middleware junction for mTLS evidence, bearer extraction,
 // verifier result mapping, and audit logging; splitting would obscure request-order semantics.
 #[allow(clippy::cognitive_complexity)]
-async fn verify(State(state): State<VerifyState>, mut req: Request, next: Next) -> Response {
+async fn verify<P>(State(state): State<VerifyState<P>>, mut req: Request, next: Next) -> Response
+where
+    P: diport::Pdp + Send + Sync + 'static,
+{
     if state.scheme == RequiredScheme::Mtls {
         if let Some(evidence) = mtls_evidence(&req) {
             req.extensions_mut().insert(evidence);
         } else {
             tracing::warn!(
                 authz.decision = "deny",
-                authz.deny_reason = "mtls_peer_missing",
+                authz.deny_reason = DENY_REASON_MTLS_PEER_MISSING,
                 "verify-bridge-mtls"
             );
         }
@@ -308,8 +314,9 @@ async fn verify(State(state): State<VerifyState>, mut req: Request, next: Next) 
             .to_owned();
         let span =
             tracing::debug_span!("verify_bridge", scheme = ?state.scheme, request_id = %request_id);
-        if let Some((evidence, ctx, principal)) =
-            span.in_scope(|| mint_evidence(&state, &token, req.headers()))
+        if let Some((evidence, ctx, principal)) = mint_evidence(&state, &token, req.headers())
+            .instrument(span)
+            .await
         {
             req.extensions_mut().insert(evidence);
             req.extensions_mut().insert(principal);
@@ -330,8 +337,9 @@ async fn verify(State(state): State<VerifyState>, mut req: Request, next: Next) 
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        DENY_REASON_EXPIRED, DENY_REASON_INVALID, DENY_REASON_PRINCIPAL_INVALID,
-        DENY_REASON_SIGNATURE_INVALID, DENY_REASON_UNTRUSTED, deny_reason, mtls_evidence,
+        DENY_REASON_EXPIRED, DENY_REASON_INVALID, DENY_REASON_MTLS_PEER_MISSING,
+        DENY_REASON_PRINCIPAL_INVALID, DENY_REASON_SIGNATURE_INVALID,
+        DENY_REASON_TENANT_BINDING_INVALID, DENY_REASON_UNTRUSTED, deny_reason, mtls_evidence,
     };
     use axum::body::Body;
     use axum::http::Request;
@@ -370,6 +378,27 @@ mod tests {
             deny_reason(&authn::AuthnError::Forbidden),
             DENY_REASON_INVALID
         );
+    }
+
+    #[test]
+    fn deny_reason_labels_are_closed_and_unique() {
+        let labels = [
+            DENY_REASON_SIGNATURE_INVALID,
+            DENY_REASON_UNTRUSTED,
+            DENY_REASON_EXPIRED,
+            DENY_REASON_PRINCIPAL_INVALID,
+            DENY_REASON_TENANT_BINDING_INVALID,
+            DENY_REASON_MTLS_PEER_MISSING,
+            DENY_REASON_INVALID,
+        ];
+
+        for (index, label) in labels.iter().enumerate() {
+            assert!(!label.is_empty());
+            assert!(
+                !labels[..index].contains(label),
+                "deny reason label must be unique: {label}"
+            );
+        }
     }
 
     #[test]

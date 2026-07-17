@@ -200,19 +200,20 @@ impl VerifiedClaims {
 
 /// 验签 provider DI port（async）。
 ///
-/// 公开 [`Pdp`] 是 **Send 变体**（adapters `impl Pdp for ...`），[`DynPdp`] 是其 dyn-compatible wrapper
-/// （组合根经 `Box<DynPdp>` / `Arc<DynPdp>` 注入）。非 Send 基 trait `PdpLocal` 仅供静态分发窄场景，
-/// 不在 crate 根 re-export（见 crate rustdoc）。
+/// 公开 [`Pdp`] 是 **Send + Sync 变体**（adapters `impl Pdp for ...`），[`DynPdp`] 是其
+/// dyn-compatible wrapper（组合根经 `Box<DynPdp>` / `Arc<DynPdp>` 注入）。验签发生在多线程 HTTP
+/// serving future 内，故 provider 与 wrapper 均须可跨请求共享；`PdpLocal` 仍不在 crate 根 re-export。
 ///
-/// dyn-safe 约束（ADR-003 §4.6）：方法 `&self`、参数 / 返回为具体类型、supertrait 仅 Send。无
+/// dyn-safe 约束（ADR-003 §4.6 + #1828 amendment）：方法 `&self`、参数 / 返回为具体类型、supertrait
+/// `Send + Sync`。无
 /// `shutdown`——纯验签 port 无 infra 资源；有 JWKS 刷新句柄 / 连接的 adapter 应**另** `impl ManagedResource`
 /// 由 `bootstrap::ShutdownStack` 编排关闭（参 [`crate::ManagedResource`]）。
 #[trait_variant::make(Pdp: Send)]
 #[dynosaur(pub DynPdp = dyn(box) Pdp, bridge(dyn))]
 #[allow(async_fn_in_trait)]
-// reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `Pdp` 变体 +
-// dynosaur `DynPdp` 承载（DI 注入走 Send wrapper）。这是 ADR-003 既定 dyn-port 范式。
-pub trait PdpLocal {
+// reason: base trait 的 Send+Sync 约束共享 provider；trait-variant 的 Send 只约束 async future，
+// 避免无必要的 Future: Sync。dynosaur `DynPdp` 承载运行期可替换 provider（#1828）。
+pub trait PdpLocal: Send + Sync {
     /// 验签原始凭据（签名 / exp / MAC），成功返回可信 [`VerifiedClaims`]；失败 fail-closed（[`PdpError`]）。
     ///
     /// I/O：生产实现可能查 JWKS / 调外置引擎（async）。本 trait 只定义接缝，真实 crypto adapter 留 #1109 W。
@@ -221,7 +222,9 @@ pub trait PdpLocal {
 
 #[cfg(test)]
 mod smoke {
-    //! build smoke：证明 async `Pdp` port 可 native AFIT impl + 经 `Box<DynPdp>` 动态注入 + 跨 spawn（Send）。
+    //! build smoke：证明 async `Pdp` port 可 native AFIT impl + 经 `Arc<DynPdp>` 动态注入 + 跨 spawn。
+    use std::sync::Arc;
+
     use super::{DynPdp, Pdp, PdpError, RawCredential, VerifiedClaims};
 
     struct NoopPdp;
@@ -235,7 +238,10 @@ mod smoke {
     // current-thread 不暴露 Send 违规，故用 multi_thread 真正验证 dyn 注入的 Send 语义。
     #[tokio::test(flavor = "multi_thread")]
     async fn pdp_is_dyn_injectable() {
-        let pdp: Box<DynPdp> = DynPdp::new_box(NoopPdp);
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+
+        let pdp: Arc<DynPdp> = DynPdp::new_arc(NoopPdp);
+        assert_send_sync(&pdp);
         let raw = RawCredential::jwt("h.e.s");
         let joined = tokio::spawn(async move { pdp.verify(&raw).await.is_ok() }).await;
         assert!(matches!(joined, Ok(true)));

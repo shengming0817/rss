@@ -61,7 +61,7 @@ rss/
 │   ├── consistency/      # outbox / saga / reconcile / projection / command_journal / idempotency（纯态机 + trait，L0–L4）
 │   ├── primitives/       # crypto / authplan / healthz / circuitbreaker（引擎纯计算原语）
 │   ├── tracewire/        # W3C traceparent capture/restore 单源（outbox→consumer trace 续传，唯一 otel 桥落点，#1224）
-│   ├── diport/           # DI-infra：可替换 provider 的 DI port trait 单源；动态消费用 dynosaur，跨 Send+Sync 多次调用用静态泛型（ADR-003 #1095）
+│   ├── diport/           # DI-infra：可替换 provider 的 port 单源；dynosaur 默认非 Sync，Pdp/KeyProvider 是共享例外（ADR-003 #1095/#1828）
 │   ├── httpserve/        # axum router / middleware / health
 │   ├── authn/            # jwt / session / refresh / PDP / Principal
 │   ├── bootstrap/        # composition / config / shutdown / worker
@@ -77,7 +77,7 @@ rss/
 │   └── syshealth/        # 域：健康聚合
 ├── adapters/             # 一 adapter 一 crate + feature 门控；裸后端名（adapters/ 路径消歧）
 │   ├── postgres/ redis/ amqp/ mqtt/ s3/
-│   ├── oidc/ grpc/ httpd/ otel/ prometheus/ vault/   # httpd = HTTP 传输（HttpServer bind+serve+ManagedResource，对标 grpc，#1320）
+│   ├── oidc/ grpc/ httpd/ otel/ prometheus/ vault/   # httpd = HTTP 传输（只消费 budget-sealed ServerMakeService；HttpServer bind+serve+ManagedResource，#1320/#1828）
 │   ├── softca/ ratelimit/
 │   └── memory/           # in-mem DI port provider（测试 / demo 注入；被 journeys 组合根消费）
 ├── bins/
@@ -102,7 +102,7 @@ rss/
 - **基础** `vocab`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ vocab ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；`diagctx` 为独立根，不依赖其它基础 crate，不被其它基础 crate 依赖，仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）。现有 sanctioned 前向边:`runctx → vocab`(`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`,ADR-002 §D3,决策 #2)与 `secure → securederive`(字段级脱敏 `#[derive(Redact)]` proc-macro,#1360；`securederive` 是编译期纯工具 crate,出边全外部,非 SemVer 库面 ⇒ public-api baseline 经 `layers::is_proc_macro` 排除)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制(#1022 已落，本 PR 加 intra-base 前向例外)。
 - **引擎/原语** `consistency`/`primitives`/`tracewire`:依赖基础(或仅外部 crate);不依赖 DI-infra/服务/域/adapters。`tracewire`(W3C traceparent capture/restore 单源,#1224)出边全是外部 `opentelemetry`/`tracing-opentelemetry`、无内部边,被服务 `eventexec`(consume 还原)+ adapter `postgres`(emit 捕获)依赖——otel 收口在此 + `adapters/otel`,二者外不直接 import otel(结构性收口,机器硬化待 follow-up dylint)。
 - **DI-infra** `diport`:依赖基础+引擎;**被服务/域/adapter/组合根消费**,自身不依赖服务及以上(无 back-path)。
-  **provider-agnostic** DI port trait 单源(Clock/Signer/Publisher/Subscriber/AuditSink/ManagedResource/DlxLifecycleRepository/DlxArchiveStore…,签名只引基础/wire/port-owned/associated types)。需要运行期动态消费的 async port 使用 dynosaur Dyn wrapper；跨 `Send + Sync` worker 多次调用且 provider 由组合根静态选择的 port 使用 ADR-003 #1095 静态泛型（DLX 两 port），不为无消费方的动态能力生成 wrapper。**服务/域 互不依赖,但都可向下依赖 diport** ——
+  **provider-agnostic** DI port trait 单源(Clock/Signer/Publisher/Subscriber/AuditSink/ManagedResource/DlxLifecycleRepository/DlxArchiveStore…,签名只引基础/wire/port-owned/associated types)。需要运行期动态消费的 async port 使用 dynosaur Dyn wrapper；默认 dyn wrapper 是 Send 非 Sync，跨 `Send + Sync` worker 多次调用且 provider 由组合根静态选择的 port 使用 ADR-003 #1095 静态泛型（DLX 两 port）。`KeyProvider` / `Pdp` 是 base trait 显式 `Send + Sync` 的窄例外，其中 PDP 由 #1828 正向/负向 compile gate 锁定并供 HTTP serving 跨 await 共享。不为无消费方的动态能力生成 wrapper。**服务/域 互不依赖,但都可向下依赖 diport** ——
   服务层 crate(bootstrap/deviceloop/eventexec/authn…)消费 DI port 须经此层,故 diport 不能与它们同层(服务→服务禁)。
   注:**域形** repo/service port(签名引用域内实体)**不归 diport**,归所属域 crate `pub mod ports`(ADR-005 Option 2,见下「域」行 + category line ADR-005 §2.1)。
 - **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`:依赖基础+引擎+DI-infra;不依赖域/adapters。**服务→服务横向默认禁(同 diport 行所述),唯一受控例外 = ADR-009 sanctioned `bootstrap → httpserve` 单向路由类型边**(组合根 typed route funnel:`bootstrap::finalize_routes` 产 `httpserve::UnfinalizedRoutes` → 经 `httpserve::finalize_auth` 换可 bind 的 `AuthenticatedRoutes`;反向 `httpserve → bootstrap` 及其它任意 `服务→服务` 边仍禁),由 `xtask layers::route_funnel_allows` 机器守(INVARIANT LAYER-DEPS-ROUTE-FUNNEL-01,见下「静态强制」表 + ADR-009)。跨层另有且仅有 **`eventexec → generated`** command seam 编译边：eventexec 实现 generated 的 `CommandEmit`/`CommandJournal`，再在自身 crate 内构造私有 reviewed DTO；由 `command_generated_seam_allows` 精确 crate pair 守，不能推广成一般 Service→Generated。`testkit` 是同层 **test-support 库**(HTTP 契约测试 oneshot harness,#1136):出边全外部 crate(axum/tower/serde…,无内部边),经 `[dev-dependencies]` 被域/组合根消费写 per-contract 测试——**零 production-adapter、零 workspace 依赖**(满足「域单测不依赖平台 adapter crate」),分层登记在 `xtask layers.rs` `SERVICE_CRATES`。另带 `containers` feature(#1137):testcontainers self-provision postgres/redis/rabbitmq 容器 fixture,供 adapter 集成测试 + journeys durable journey 经 `[dev-dependencies]` 消费(testcontainers 树 feature-gated + dev-dep-only 不进产物)。机器边界拆为正交两面：LAYER-DEPS-08 `check_test_support_confinement` 守任一 shipped 入边指向 testkit 均失败；LAYER-DEPS-10 `check_test_support_internal_dependencies` 守 testkit 任一 shipped 出边指向 workspace 成员均失败，保证其只依赖外部 crate。

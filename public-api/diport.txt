@@ -2447,18 +2447,18 @@ pub fn diport::DynPdp<'dynosaur_struct>::new_rc(impl diport::pdp::Pdp + 'dynosau
 impl diport::DiPortEffect for diport::DynPdp<'_>
 pub type diport::DynPdp<'_>::Effect = diport::AuthEffect
 pub type diport::DynPdp<'_>::Privilege = diport::LocalPrivilege
-impl<'dynosaur_struct> diport::pdp::Pdp for &diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::pdp::Pdp for &diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynPdp<'dynosaur_struct>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
-impl<'dynosaur_struct> diport::pdp::Pdp for &mut diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::pdp::Pdp for &mut diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynPdp<'dynosaur_struct>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
-impl<'dynosaur_struct> diport::pdp::Pdp for alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::pdp::Pdp for alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
 impl<'dynosaur_struct> diport::pdp::Pdp for diport::DynPdp<'dynosaur_struct>
 pub fn diport::DynPdp<'dynosaur_struct>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Sized for diport::DynPdp<'dynosaur_struct>
-impl<'dynosaur_struct> !core::marker::Sync for diport::DynPdp<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Sync for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Unpin for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynPdp<'dynosaur_struct>
@@ -2521,17 +2521,17 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::VerifiedClaims
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::VerifiedClaims
 pub const diport::pdp::SERVICE_TOKEN_TENANT_HEADER: &str
 pub const diport::pdp::SERVICE_TOKEN_TENANT_MAC_NAME: &str
-pub trait diport::pdp::Pdp: core::marker::Send
+pub trait diport::pdp::Pdp: core::marker::Send + core::marker::Sync + core::marker::Send
 pub fn diport::pdp::Pdp::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
-impl<'dynosaur_struct> diport::pdp::Pdp for &diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::pdp::Pdp for &diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynPdp<'dynosaur_struct>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
-impl<'dynosaur_struct> diport::pdp::Pdp for &mut diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::pdp::Pdp for &mut diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynPdp<'dynosaur_struct>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
-impl<'dynosaur_struct> diport::pdp::Pdp for alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::pdp::Pdp for alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
 impl<'dynosaur_struct> diport::pdp::Pdp for diport::DynPdp<'dynosaur_struct>
 pub fn diport::DynPdp<'dynosaur_struct>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
-pub trait diport::pdp::PdpLocal
+pub trait diport::pdp::PdpLocal: core::marker::Send + core::marker::Sync
 pub async fn diport::pdp::PdpLocal::verify(&self, &diport::pdp::RawCredential) -> core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>
 impl<TraitVariantBlanketType: diport::pdp::Pdp> diport::pdp::PdpLocal for TraitVariantBlanketType
 pub async fn TraitVariantBlanketType::verify(&self, &diport::pdp::RawCredential) -> core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>
@@ -5397,18 +5397,18 @@ pub fn diport::DynPdp<'dynosaur_struct>::new_rc(impl diport::pdp::Pdp + 'dynosau
 impl diport::DiPortEffect for diport::DynPdp<'_>
 pub type diport::DynPdp<'_>::Effect = diport::AuthEffect
 pub type diport::DynPdp<'_>::Privilege = diport::LocalPrivilege
-impl<'dynosaur_struct> diport::pdp::Pdp for &diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::pdp::Pdp for &diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynPdp<'dynosaur_struct>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
-impl<'dynosaur_struct> diport::pdp::Pdp for &mut diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::pdp::Pdp for &mut diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynPdp<'dynosaur_struct>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
-impl<'dynosaur_struct> diport::pdp::Pdp for alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::pdp::Pdp for alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
 impl<'dynosaur_struct> diport::pdp::Pdp for diport::DynPdp<'dynosaur_struct>
 pub fn diport::DynPdp<'dynosaur_struct>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Sized for diport::DynPdp<'dynosaur_struct>
-impl<'dynosaur_struct> !core::marker::Sync for diport::DynPdp<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Sync for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Unpin for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynPdp<'dynosaur_struct>
@@ -7179,13 +7179,13 @@ impl<'dynosaur_struct> diport::checkpoint_store::OwnerCheckpointStore for diport
 pub fn diport::DynOwnerCheckpointStore<'dynosaur_struct>::get_checkpoint(&self, &diport::checkpoint_store::CheckpointOwner, &diport::checkpoint_store::CheckpointId) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<diport::checkpoint_store::Checkpoint>, diport::checkpoint_store::CheckpointStoreError>> + core::marker::Send
 pub fn diport::DynOwnerCheckpointStore<'dynosaur_struct>::save_checkpoint(&self, &diport::checkpoint_store::CheckpointOwner, &diport::checkpoint_store::CheckpointId, consistency::projection::Lsn, diport::checkpoint_store::CheckpointVersion) -> impl core::future::future::Future<Output = core::result::Result<diport::checkpoint_store::SaveOutcome, diport::checkpoint_store::CheckpointStoreError>> + core::marker::Send
 pub fn diport::DynOwnerCheckpointStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::checkpoint_store::CheckpointStoreError>> + core::marker::Send
-pub trait diport::Pdp: core::marker::Send
+pub trait diport::Pdp: core::marker::Send + core::marker::Sync + core::marker::Send
 pub fn diport::Pdp::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
-impl<'dynosaur_struct> diport::pdp::Pdp for &diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::pdp::Pdp for &diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynPdp<'dynosaur_struct>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
-impl<'dynosaur_struct> diport::pdp::Pdp for &mut diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::pdp::Pdp for &mut diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynPdp<'dynosaur_struct>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
-impl<'dynosaur_struct> diport::pdp::Pdp for alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::pdp::Pdp for alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
 impl<'dynosaur_struct> diport::pdp::Pdp for diport::DynPdp<'dynosaur_struct>
 pub fn diport::DynPdp<'dynosaur_struct>::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send

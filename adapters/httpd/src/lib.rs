@@ -1,12 +1,14 @@
 //! httpd adapter —— HTTP 传输 adapter（#1320 运行时入口 Join）。
 //!
 //! 单一 `HttpServer`：bind `TcpListener` → `axum::serve` 已认证 router 的
-//! `IntoMakeServiceWithConnectInfo<Router, SocketAddr>` →
+//! `httpserve::ServerMakeService` →
 //! serve task 监听注入的 [`CancellationToken`] 优雅关停；`impl diport::ManagedResource` 经
 //! `cancel()` + await JoinHandle 收敛。**精确对标 `adapters/grpc` 的 `GrpcServer`**（transport=adapter）。
 //!
 //! ConnectInfo 贯通（#1106）：`into_make_service_with_connect_info::<SocketAddr>()` 在 bind 时注入
 //! `ConnectInfo<SocketAddr>` extension，供 `httpserve::rate_limit` 中间件读 peer IP 做 per-IP keyed 限流。
+//! `ServerMakeService` 同时证明 router 已在唯一 funnel 装入非零全请求预算；plaintext / mTLS 入口均只接受
+//! 该 capability，不存在 transport-specific 或无预算 serve 分支（SERVER-REQUEST-BUDGET-01）。
 //!
 //! # 为何是 adapter（而非 httpserve 服务 crate）
 //!
@@ -40,8 +42,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use axum::Router;
-use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
 use axum::serve::{IncomingStream, Listener, ListenerExt};
 use diport::{ManagedResource, ShutdownError};
 use distributed::{
@@ -864,14 +864,11 @@ impl BoundHttpServer {
     /// 须在 **tokio runtime 上下文**调用——内部 `tokio::spawn` 在无 runtime 时 panic。从 async fn
     /// （如 `serve_until_signal`）或 `ShutdownStack::register_with_token` 闭包内调用即满足（组合根均在
     /// `#[tokio::main]` 运行时内）。
-    pub fn serve(
-        self,
-        svc: IntoMakeServiceWithConnectInfo<Router, SocketAddr>,
-        token: CancellationToken,
-    ) -> HttpServer {
+    pub fn serve(self, svc: httpserve::ServerMakeService, token: CancellationToken) -> HttpServer {
         let serve_token = token.clone();
         let listener = self.listener;
         let handle = tokio::spawn(async move {
+            let svc = svc.into_axum();
             axum::serve(listener, svc)
                 .with_graceful_shutdown(async move {
                     // 关闭信号 = 注入 token 的 cancel（阶段 1 广播 / 内部 detached cancel）。
@@ -895,7 +892,7 @@ impl BoundHttpServer {
     /// `ConnectInfo<SocketAddr>` and `authn::VerifiedMtlsPeer` extensions.
     pub fn serve_mtls(
         self,
-        svc: IntoMakeServiceWithConnectInfo<Router, SocketAddr>,
+        svc: httpserve::ServerMakeService,
         mtls: MtlsServerConfig,
         token: CancellationToken,
     ) -> HttpServer {
@@ -906,6 +903,7 @@ impl BoundHttpServer {
             config: mtls.clone(),
         };
         let handle = tokio::spawn(async move {
+            let svc = svc.into_axum();
             axum::serve(listener.tap_io(|_io| {}), MtlsMakeService::new(svc))
                 .with_graceful_shutdown(async move {
                     serve_token.cancelled().await;
@@ -951,7 +949,7 @@ impl HttpServer {
     pub async fn serve_with_token(
         name: &'static str,
         addr: SocketAddr,
-        svc: IntoMakeServiceWithConnectInfo<Router, SocketAddr>,
+        svc: httpserve::ServerMakeService,
         token: CancellationToken,
     ) -> Result<Self, HttpServeError> {
         Ok(Self::bind(name, addr).await?.serve(svc, token))
@@ -961,7 +959,7 @@ impl HttpServer {
     pub async fn serve_mtls_with_token(
         name: &'static str,
         addr: SocketAddr,
-        svc: IntoMakeServiceWithConnectInfo<Router, SocketAddr>,
+        svc: httpserve::ServerMakeService,
         mtls: MtlsServerConfig,
         token: CancellationToken,
     ) -> Result<Self, HttpServeError> {
@@ -973,7 +971,7 @@ impl HttpServer {
     pub async fn serve(
         name: &'static str,
         addr: SocketAddr,
-        svc: IntoMakeServiceWithConnectInfo<Router, SocketAddr>,
+        svc: httpserve::ServerMakeService,
     ) -> Result<Self, HttpServeError> {
         Self::serve_with_token(name, addr, svc, CancellationToken::new()).await
     }
@@ -1024,8 +1022,11 @@ impl ManagedResource for HttpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU64;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
+    use axum::Router;
     use axum::body::Bytes;
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use axum::response::IntoResponse;
@@ -1040,30 +1041,62 @@ mod tests {
     use tokio::net::TcpStream;
     use tokio_rustls::TlsConnector;
 
-    /// 极简 router → IntoMakeServiceWithConnectInfo（注入 ConnectInfo<SocketAddr>），挂一个 GET /healthz 恒 200。
-    fn make_svc() -> IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
-        Router::new()
-            .route("/healthz", get(|| async { "ok" }))
-            .into_make_service_with_connect_info::<std::net::SocketAddr>()
+    /// 极简 router → budget-sealed make service，挂一个 GET /healthz 恒 200。
+    fn make_svc() -> httpserve::ServerMakeService {
+        httpserve::ServerMakeService::from_router_for_test(
+            Router::new().route("/healthz", get(|| async { "ok" })),
+            httpserve::ServerRequestBudget::for_test(),
+        )
     }
 
-    fn make_mtls_svc() -> IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
-        Router::new()
-            .route(
+    fn make_mtls_svc() -> httpserve::ServerMakeService {
+        httpserve::ServerMakeService::from_router_for_test(
+            Router::new().route(
                 "/mtls-peer",
                 get(
                     |axum::extract::Extension(peer): axum::extract::Extension<
                         authn::VerifiedMtlsPeer,
                     >| async move { peer.spiffe_id().as_str().to_owned() },
                 ),
-            )
-            .into_make_service_with_connect_info::<std::net::SocketAddr>()
+            ),
+            httpserve::ServerRequestBudget::for_test(),
+        )
     }
 
-    fn make_domain_transport_svc() -> IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
-        Router::new()
-            .route("/rpc/echo", axum::routing::post(domain_transport_echo))
-            .into_make_service_with_connect_info::<std::net::SocketAddr>()
+    fn make_domain_transport_svc() -> httpserve::ServerMakeService {
+        httpserve::ServerMakeService::from_router_for_test(
+            Router::new().route("/rpc/echo", axum::routing::post(domain_transport_echo)),
+            httpserve::ServerRequestBudget::for_test(),
+        )
+    }
+
+    struct HandlerDropSignal(Arc<AtomicBool>);
+
+    impl Drop for HandlerDropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn make_pending_svc(dropped: Arc<AtomicBool>) -> httpserve::ServerMakeService {
+        let router = Router::new().route(
+            "/slow",
+            get(move || {
+                let dropped = Arc::clone(&dropped);
+                async move {
+                    let _drop_signal = HandlerDropSignal(dropped);
+                    std::future::pending::<()>().await;
+                    "unreachable"
+                }
+            }),
+        );
+        httpserve::ServerMakeService::from_router_for_test(
+            router,
+            httpserve::ServerRequestBudget::from_millis(
+                NonZeroU64::new(20).expect("non-zero test budget"),
+            ),
+        )
     }
 
     async fn domain_transport_echo(headers: HeaderMap, body: Bytes) -> axum::response::Response {
@@ -1138,10 +1171,10 @@ mod tests {
         reqwest::Url::parse(&format!("http://{addr}/rpc")).expect("loopback url")
     }
 
-    /// 绑 `127.0.0.1:0` ephemeral → 真 socket 上发 HTTP/1.1 GET，读回状态行（raw，无 reqwest dep）。
+    /// 绑 `127.0.0.1:0` ephemeral → 真 socket 上发 HTTP/1.1 GET，读回完整响应（raw，无 reqwest dep）。
     // 测试断言用 expect：item-level carve-out（error-handling.md §Carve-out）。
     #[allow(clippy::expect_used)]
-    async fn raw_get_status_line(addr: SocketAddr, path: &str) -> String {
+    async fn raw_get_response(addr: SocketAddr, path: &str) -> String {
         let mut stream = TcpStream::connect(addr)
             .await
             .expect("connect bound socket");
@@ -1152,8 +1185,16 @@ mod tests {
             .expect("write request");
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await.expect("read response");
-        let text = String::from_utf8_lossy(&buf);
-        text.lines().next().unwrap_or_default().to_owned()
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    async fn raw_get_status_line(addr: SocketAddr, path: &str) -> String {
+        raw_get_response(addr, path)
+            .await
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
     }
 
     struct TestCert {
@@ -1365,6 +1406,32 @@ mod tests {
         assert!(server.shutdown().await.is_ok(), "funnel shutdown 收敛");
     }
 
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn plaintext_server_uses_sealed_request_budget_and_drops_handler() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let bound = HttpServer::bind(
+            "http-budget-plaintext",
+            "127.0.0.1:0".parse().expect("ephemeral address"),
+        )
+        .await
+        .expect("bind");
+        let local = bound.local_addr();
+        let server = bound.serve(
+            make_pending_svc(Arc::clone(&dropped)),
+            CancellationToken::new(),
+        );
+
+        let response = raw_get_response(local, "/slow").await;
+        assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+        assert!(response.contains("ERR_CORE_UNAVAILABLE"), "{response}");
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "plaintext timeout must drop handler future"
+        );
+        assert!(server.shutdown().await.is_ok());
+    }
+
     #[test]
     fn domain_transport_requires_at_least_one_target() {
         let result = DomainHttpTransport::from_targets(BTreeMap::new());
@@ -1525,6 +1592,40 @@ mod tests {
 
         token.cancel();
         assert!(server.shutdown().await.is_ok(), "mTLS shutdown 收敛");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mtls_server_uses_same_sealed_request_budget_and_drops_handler() {
+        let ca = test_ca();
+        let client_id = "spiffe://example.org/ns/rss/sa/internal";
+        let mtls = test_mtls_config(&ca, client_id);
+        let client_cert = leaf_cert(&ca, None, client_id, ExtendedKeyUsagePurpose::ClientAuth);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let bound = HttpServer::bind(
+            "http-budget-mtls",
+            "127.0.0.1:0".parse().expect("ephemeral address"),
+        )
+        .await
+        .expect("bind");
+        let local = bound.local_addr();
+        let server = bound.serve_mtls(
+            make_pending_svc(Arc::clone(&dropped)),
+            mtls,
+            CancellationToken::new(),
+        );
+
+        let response =
+            tls_get_response_with_timeout(local, "/slow", client_config(&ca, Some(client_cert)))
+                .await
+                .expect("mTLS timeout response");
+        assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+        assert!(response.contains("ERR_CORE_UNAVAILABLE"), "{response}");
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "mTLS timeout must drop handler future"
+        );
+        assert!(server.shutdown().await.is_ok());
     }
 
     #[tokio::test]

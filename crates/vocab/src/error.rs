@@ -22,6 +22,8 @@ pub enum CoreErrorKind {
     Validation,
     PayloadTooLarge,
     TooManyRequests,
+    /// 服务端在显式请求预算内无法完成处理；请求 outcome 未知，不宣告可安全重试。
+    Unavailable,
     NotImplemented,
     Internal,
 }
@@ -39,6 +41,7 @@ impl CoreErrorKind {
             CoreErrorKind::Validation => "validation error",
             CoreErrorKind::PayloadTooLarge => "payload too large",
             CoreErrorKind::TooManyRequests => "too many requests",
+            CoreErrorKind::Unavailable => "service unavailable",
             CoreErrorKind::NotImplemented => "not implemented",
             CoreErrorKind::Internal => "internal error",
         }
@@ -60,6 +63,7 @@ impl CoreErrorKind {
             CoreErrorKind::Validation => "ERR_CORE_VALIDATION",
             CoreErrorKind::PayloadTooLarge => "ERR_CORE_PAYLOAD_TOO_LARGE",
             CoreErrorKind::TooManyRequests => "ERR_CORE_TOO_MANY_REQUESTS",
+            CoreErrorKind::Unavailable => "ERR_CORE_UNAVAILABLE",
             CoreErrorKind::NotImplemented => "ERR_CORE_NOT_IMPLEMENTED",
             CoreErrorKind::Internal => "ERR_CORE_INTERNAL",
         }
@@ -176,6 +180,7 @@ mod tests {
             (CoreErrorKind::Validation, "validation error"),
             (CoreErrorKind::PayloadTooLarge, "payload too large"),
             (CoreErrorKind::TooManyRequests, "too many requests"),
+            (CoreErrorKind::Unavailable, "service unavailable"),
             (CoreErrorKind::NotImplemented, "not implemented"),
             (CoreErrorKind::Internal, "internal error"),
         ];
@@ -200,6 +205,7 @@ mod tests {
             (CoreErrorKind::Validation, "ERR_CORE_VALIDATION"),
             (CoreErrorKind::PayloadTooLarge, "ERR_CORE_PAYLOAD_TOO_LARGE"),
             (CoreErrorKind::TooManyRequests, "ERR_CORE_TOO_MANY_REQUESTS"),
+            (CoreErrorKind::Unavailable, "ERR_CORE_UNAVAILABLE"),
             (CoreErrorKind::NotImplemented, "ERR_CORE_NOT_IMPLEMENTED"),
             (CoreErrorKind::Internal, "ERR_CORE_INTERNAL"),
         ];
@@ -217,6 +223,10 @@ mod tests {
             "CAS conflict is retryable"
         );
         assert!(!CoreErrorKind::Conflict.retryable());
+        assert!(
+            !CoreErrorKind::Unavailable.retryable(),
+            "request timeout has an unknown outcome and is not blanket-retryable"
+        );
         assert!(
             !CoreErrorKind::OutboxFactConflict.retryable(),
             "an event id bound to another fact is terminal"

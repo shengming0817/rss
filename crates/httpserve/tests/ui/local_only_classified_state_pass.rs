@@ -43,5 +43,5 @@ fn main() {
             .unwrap();
     let _make = httpserve::finalize_auth(routes, plan)
         .unwrap()
-        .into_make_service();
+        .into_make_service(httpserve::ServerRequestBudget::for_test());
 }

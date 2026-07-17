@@ -11,7 +11,9 @@
 //! NOTE: `bins/rss` 与 `bins/server` 已成薄壳（#1309）；验签桥逻辑现集中在 `assemblies/runtime`。
 
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -20,8 +22,7 @@ use axum::http::{Method, StatusCode, header};
 use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use diport::{AuditEvent, AuditSink, AuditSinkError};
-use futures::FutureExt as _;
+use diport::{AuditEvent, AuditSink, AuditSinkError, Pdp, PdpError, RawCredential, VerifiedClaims};
 use httpserve::{
     RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
     TestPrimaryRoute as PrimaryRoute, TestRoute as Route, TestRoutePermission as RoutePermission,
@@ -32,6 +33,7 @@ use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut};
 use runtime::auth_bridge::apply_verify_bridge;
 use runtime::provider_from_b64;
+use tokio::sync::Notify;
 use tower::ServiceExt as _;
 
 /// 合法测试租户（`user` kind 需 tenant；canonical UUID）。
@@ -322,6 +324,115 @@ fn jwt_router(bridge: Option<RequiredScheme>) -> httpserve::AuthenticatedRoutes 
         Some(scheme) => apply_verify_bridge(authed, Arc::new(es256_provider()), scheme),
         None => authed,
     }
+}
+
+#[derive(Clone)]
+struct YieldingPdp;
+
+impl Pdp for YieldingPdp {
+    async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
+        tokio::task::yield_now().await;
+        Ok(VerifiedClaims::new(
+            "async-subject-secret",
+            None,
+            Some("superAdmin".to_string()),
+        ))
+    }
+}
+
+#[derive(Clone)]
+struct YieldingErrorPdp;
+
+impl Pdp for YieldingErrorPdp {
+    async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
+        tokio::task::yield_now().await;
+        Err(PdpError::Untrusted)
+    }
+}
+
+#[derive(Clone)]
+struct PendingPdp {
+    entered: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+struct VerifyDropSignal(Arc<AtomicBool>);
+
+impl Drop for VerifyDropSignal {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+impl Pdp for PendingPdp {
+    async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
+        let _drop_signal = VerifyDropSignal(Arc::clone(&self.dropped));
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[allow(clippy::expect_used)]
+fn jwt_router_with_pdp<P>(provider: Arc<P>) -> httpserve::AuthenticatedRoutes
+where
+    P: Pdp + Send + Sync + 'static,
+{
+    jwt_router_with_pdp_and_calls(provider, Arc::new(AtomicUsize::new(0)))
+}
+
+#[allow(clippy::expect_used)]
+fn jwt_router_with_pdp_and_calls<P>(
+    provider: Arc<P>,
+    handler_calls: Arc<AtomicUsize>,
+) -> httpserve::AuthenticatedRoutes
+where
+    P: Pdp + Send + Sync + 'static,
+{
+    let routes = test_routes::<httpserve::Primary>(|rb| {
+        let handler_calls = Arc::clone(&handler_calls);
+        rb.mount_primary_raw_for_test(
+            PrimaryRoute::permission(
+                Method::GET,
+                "/protected",
+                "test.protected.async-pdp",
+                RoutePermission {
+                    permission: vocab::RoutePermissionId::IdentityPolicyRead,
+                    scope: RouteResourceScope::None,
+                },
+            ),
+            get(move || {
+                let handler_calls = Arc::clone(&handler_calls);
+                async move {
+                    handler_calls.fetch_add(1, Ordering::AcqRel);
+                    "ok"
+                }
+            }),
+        )
+    });
+    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
+    let authed =
+        httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
+    apply_verify_bridge(authed, provider, RequiredScheme::Jwt)
+}
+
+#[allow(clippy::expect_used)]
+fn service_token_router_with_pdp<P>(provider: Arc<P>) -> httpserve::AuthenticatedRoutes
+where
+    P: Pdp + Send + Sync + 'static,
+{
+    let routes = test_routes::<httpserve::Internal>(|rb| {
+        rb.mount_raw_for_test(
+            Route {
+                method: Method::GET,
+                path: "/svc",
+                contract_id: "test.svc",
+            },
+            get(|| async { "ok" }),
+        )
+    });
+    let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
+    let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
+    apply_verify_bridge(authed, provider, RequiredScheme::ServiceToken)
 }
 
 #[allow(clippy::expect_used)]
@@ -890,18 +1001,133 @@ async fn uppercase_bearer_scheme_is_200() {
     );
 }
 
-/// 评审 F3 tripwire：bridge 依赖 `OidcProvider::verify` 纯 CPU、future 首 poll 即 ready（`now_or_never` 恒 `Some`）。
-/// 若 #1197 让 verify 变真 async（live JWKS fetch），此断言 FAIL = 响亮提醒须随 #1197 改造 bridge（非静默全 401）。
+#[tokio::test]
+async fn yielding_pdp_valid_jwt_is_200() {
+    let token = production_super_admin_jwt();
+    assert_eq!(
+        status(
+            jwt_router_with_pdp(Arc::new(YieldingPdp)),
+            "/protected",
+            Some(&format!("Bearer {token}")),
+        )
+        .await,
+        StatusCode::OK,
+        "合法异步 PDP 首次 Pending 后恢复，仍须铸证据并放行"
+    );
+}
+
+#[tokio::test]
+async fn yielding_pdp_valid_service_token_is_200() {
+    assert_eq!(
+        status_with_tenant(
+            service_token_router_with_pdp(Arc::new(YieldingPdp)),
+            "/svc",
+            Some("Bearer yielding-service-token"),
+            Some(TENANT),
+        )
+        .await,
+        StatusCode::OK,
+        "合法异步 service-token PDP 首次 Pending 后恢复，仍须铸证据并放行"
+    );
+}
+
+#[tokio::test]
+async fn yielding_pdp_error_is_401_and_never_runs_handler() {
+    let token = production_super_admin_jwt();
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let app = jwt_router_with_pdp_and_calls(Arc::new(YieldingErrorPdp), Arc::clone(&handler_calls));
+
+    assert_eq!(
+        status(app, "/protected", Some(&format!("Bearer {token}")),).await,
+        StatusCode::UNAUTHORIZED,
+        "异步 provider error 必须 fail-closed"
+    );
+    assert_eq!(handler_calls.load(Ordering::Acquire), 0);
+}
+
 #[tokio::test]
 #[allow(clippy::expect_used)]
-async fn verify_jwt_is_synchronous_now_or_never_tripwire() {
-    let provider = es256_provider();
-    let pdp = diport::DynPdp::from_ref(&provider);
+async fn server_budget_times_out_pending_pdp_as_503_and_drops_verifier() {
+    fn assert_send<T: Send>(_: &T) {}
+
     let token = production_super_admin_jwt();
-    assert!(
-        authn::verify_jwt(&token, pdp).now_or_never().is_some(),
-        "verify_jwt future 须首 poll 即 ready（CPU-only verify 契约；#1197 真 async 化将破此约 → 须改 bridge）"
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let app = jwt_router_with_pdp_and_calls(
+        Arc::new(PendingPdp {
+            entered,
+            dropped: Arc::clone(&dropped),
+        }),
+        Arc::clone(&handler_calls),
     );
+    let budget = httpserve::ServerRequestBudget::from_millis(
+        NonZeroU64::new(50).expect("non-zero test budget"),
+    );
+    let router = app.into_router_for_test_with_budget(budget);
+    let request = router.oneshot(
+        axum::http::Request::builder()
+            .method(Method::GET)
+            .uri("/protected")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header("x-request-id", "pending-pdp-budget")
+            .body(Body::empty())
+            .expect("request"),
+    );
+    assert_send(&request);
+
+    let response = request.await.expect("infallible router");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("bounded timeout envelope");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("timeout envelope json");
+    assert_eq!(body["error"]["code"], "ERR_CORE_UNAVAILABLE");
+    assert_eq!(body["error"]["requestId"], "pending-pdp-budget");
+    assert_eq!(body["error"]["retryable"], false);
+    assert!(
+        dropped.load(Ordering::Acquire),
+        "server budget 必须 drop 在途 verifier future"
+    );
+    assert_eq!(handler_calls.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn cancelling_request_drops_inflight_verifier_without_authorizing() {
+    let token = production_super_admin_jwt();
+    let entered = Arc::new(Notify::new());
+    let entered_wait = entered.notified();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let app = jwt_router_with_pdp_and_calls(
+        Arc::new(PendingPdp {
+            entered: Arc::clone(&entered),
+            dropped: Arc::clone(&dropped),
+        }),
+        Arc::clone(&handler_calls),
+    );
+    let request =
+        tokio::spawn(
+            async move { status(app, "/protected", Some(&format!("Bearer {token}"))).await },
+        );
+
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), entered_wait)
+            .await
+            .is_ok(),
+        "verifier 应进入 pending 状态"
+    );
+    assert!(!request.is_finished(), "请求必须仍在 await verifier");
+    request.abort();
+    assert!(
+        matches!(request.await, Err(error) if error.is_cancelled()),
+        "请求任务应被显式取消"
+    );
+    assert!(
+        dropped.load(Ordering::Acquire),
+        "request cancellation 必须传播为 verifier future drop"
+    );
+    assert_eq!(handler_calls.load(Ordering::Acquire), 0);
 }
 
 // ── 验收：拒绝路径全覆盖（均 401，由内层 enforce fail-closed 发出） ─────────────────
@@ -1166,19 +1392,7 @@ async fn service_token_hs256_is_200() {
         ),
         TENANT,
     );
-    let routes = test_routes::<httpserve::Internal>(|rb| {
-        rb.mount_raw_for_test(
-            Route {
-                method: Method::GET,
-                path: "/svc",
-                contract_id: "test.svc",
-            },
-            get(|| async { "ok" }),
-        )
-    });
-    let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
-    let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
-    let app = apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken);
+    let app = service_token_router_with_pdp(Arc::new(provider));
     assert_eq!(
         status_with_tenant(app, "/svc", Some(&format!("Bearer {token}")), Some(TENANT)).await,
         StatusCode::OK,
@@ -1428,6 +1642,90 @@ fn tracing_allow_logs_decision_and_kind_no_pii() {
     );
     assert!(!logs.contains("alice"), "禁泄漏 subject: {logs}");
     assert!(!logs.contains(&token), "禁泄漏原始 token: {logs}");
+}
+
+#[test]
+#[allow(clippy::unwrap_used)]
+fn tracing_yielding_provider_error_keeps_span_and_redacts_pii() {
+    let _capture_guard = tracing_capture_lock().lock().unwrap();
+    ensure_global_trace_capture();
+
+    let token = "async-token-canary.subject-canary.claims-canary";
+    let tenant = "tenant-canary";
+    let request_id = "trace-yielding-provider-error";
+    let start = trace_len();
+    let st = block_on_current_thread(status_with_tenant_values_and_request_id(
+        jwt_router_with_pdp(Arc::new(YieldingErrorPdp)),
+        "/protected",
+        Some(&format!("Bearer {token}")),
+        [tenant],
+        Some(request_id),
+    ));
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    let captured = captured_since(start);
+    let logs = logs_for_request(&captured, request_id);
+    assert!(
+        logs.contains("verify_bridge"),
+        "Pending 后须保留 span: {logs}"
+    );
+    assert!(logs.contains("deny"), "provider error 须记 deny: {logs}");
+    assert!(logs.contains("untrusted"), "须只记闭值 reason: {logs}");
+    for canary in [token, "subject-canary", "claims-canary", tenant] {
+        assert!(!logs.contains(canary), "禁泄漏 PII canary {canary}: {logs}");
+    }
+}
+
+#[test]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+fn tracing_server_budget_timeout_uses_closed_reason_and_redacts_pii() {
+    let _capture_guard = tracing_capture_lock().lock().unwrap();
+    ensure_global_trace_capture();
+
+    let token = "timeout-token-canary.claims-canary";
+    let tenant = "timeout-tenant-canary";
+    let request_id = "trace-server-budget-timeout";
+    let dropped = Arc::new(AtomicBool::new(false));
+    let app = jwt_router_with_pdp(Arc::new(PendingPdp {
+        entered: Arc::new(Notify::new()),
+        dropped: Arc::clone(&dropped),
+    }));
+    let budget = httpserve::ServerRequestBudget::from_millis(
+        NonZeroU64::new(20).expect("non-zero test budget"),
+    );
+    let start = trace_len();
+    let status = block_on_current_thread(async move {
+        app.into_router_for_test_with_budget(budget)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::GET)
+                    .uri("/protected")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(diport::SERVICE_TOKEN_TENANT_HEADER, tenant)
+                    .header("x-request-id", request_id)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("infallible router")
+            .status()
+    });
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(dropped.load(Ordering::Acquire));
+
+    let captured = captured_since(start);
+    let logs = logs_for_request(&captured, request_id);
+    assert!(
+        logs.contains("server_request_budget_exhausted"),
+        "timeout must use the closed reason: {logs}"
+    );
+    assert!(logs.contains("unavailable"), "closed decision: {logs}");
+    for canary in [token, "claims-canary", tenant] {
+        assert!(
+            !logs.contains(canary),
+            "timeout telemetry leaked {canary}: {logs}"
+        );
+    }
 }
 
 /// 四路 deny 分级（#1275 + review F1，spec SC-006/FR-009）：deny 路 tracing 须按 deny 来源记不同

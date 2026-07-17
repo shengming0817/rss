@@ -9030,7 +9030,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "launch.listeners",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "bind_and_register(&mut stack, listener, &addr_resolver).await?;",
+        pattern: "bind_and_register(&mut stack, listener, budget, &addr_resolver).await?;",
     },
 ];
 
@@ -13287,7 +13287,7 @@ for resource in resources
 }}
 async fn launch_until_observed() {
 let listeners = plan.register(&mut stack)?;
-bind_and_register(&mut stack, listener, &addr_resolver).await?;
+bind_and_register(&mut stack, listener, budget, &addr_resolver).await?;
 }
 "#,
         )?;
@@ -13365,7 +13365,7 @@ bind_and_register(&mut stack, listener, &addr_resolver).await?;
         write(
             &root.join(RUNTIME_LAUNCH_PATH),
             &format!(
-                "impl LaunchPlan {{ fn register() {{\n{}\n}}\nfn register_module_output() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\nbind_and_register(&mut stack, listener, &addr_resolver).await?;\nlet listeners = plan.register(&mut stack)?;\n}}\n",
+                "impl LaunchPlan {{ fn register() {{\n{}\n}}\nfn register_module_output() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\nbind_and_register(&mut stack, listener, budget, &addr_resolver).await?;\nlet listeners = plan.register(&mut stack)?;\n}}\n",
                 launch_register_anchor_lines(None),
                 launch_module_registration_anchor_lines(None)
             ),
@@ -13381,7 +13381,7 @@ bind_and_register(&mut stack, listener, &addr_resolver).await?;
         assert!(
             report
                 .rendered
-                .contains("launch.listeners | assemblies/runtime/src/launch.rs | bind_and_register(&mut stack, listener, &addr_resolver).await?; | status=out-of-order"),
+                .contains("launch.listeners | assemblies/runtime/src/launch.rs | bind_and_register(&mut stack, listener, budget, &addr_resolver).await?; | status=out-of-order"),
             "out-of-order listener bind must be rendered explicitly: {}",
             report.rendered
         );

@@ -62,5 +62,5 @@ fn main() {
         primitives::AuthPlan::new(primitives::ListenerKind::Admin, primitives::AuthScheme::Jwt)
             .unwrap();
     let authed = httpserve::finalize_auth(routes, plan).unwrap();
-    let _make = authed.into_make_service();
+    let _make = authed.into_make_service(httpserve::ServerRequestBudget::for_test());
 }

@@ -117,7 +117,8 @@ impl<'tcx> LateLintPass<'tcx> for RssPdpImplAdapterOnly {
     }
 }
 
-/// 被 impl 的 trait 是 `diport::Pdp` 或 `diport::PdpLocal`（验签端口的 Send 变体 + 非 Send 基 trait）。
+/// 被 impl 的 trait 是 `diport::Pdp` 或 `diport::PdpLocal`（验签端口的 Send+Sync 变体 +
+/// Send+Sync base trait）。
 /// 按 crate 名（diport）+ trait 名判，不可被别处 `mod diport` / 同名 trait 伪造触发或绕过。
 fn is_pdp_trait(cx: &LateContext<'_>, trait_did: DefId) -> bool {
     cx.tcx.crate_name(trait_did.krate).as_str() == "diport"

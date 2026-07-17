@@ -1,8 +1,10 @@
-//! HTTP 中间件：requestId 注入 + correlation 诊断信道绑定 + tracing span + panic recovery。
+//! HTTP 中间件：全请求 server budget + requestId 注入 + correlation 诊断信道绑定 + tracing span + panic recovery。
 //!
 //! `request_id`：接收或生成 `x-request-id`，写入 extensions，回填到响应 header。
 //! `correlation`：解析 `x-correlation-id`（回退链：入站 header → RequestId → UUID v4），
 //!   经 `diagctx::scope` 绑定 [`diagctx::DiagnosticCtx`]，回填响应 header（ADR-002 §D1-bis）。
+//! `server_request_budget`：drop 超时的完整 request future，返回统一 503 envelope（outcome 未知，
+//!   `retryable=false`）。
 //! `trace`：用 `tracing::Instrument` 包裹 `next.run`，不跨 await 持有 span guard。
 //! `panic_recovery`：request-aware panic → 500 envelope（带 requestId，panic payload 不泄漏）。
 //!
@@ -86,6 +88,37 @@ pub(crate) async fn correlation(req: Request, next: Next) -> Response {
     }
 
     resp
+}
+
+/// Enforce the non-zero wall-clock budget for the complete request future below the HTTP edge.
+///
+/// This layer is inside request-id/correlation setup and outside body/auth/handler processing. On
+/// expiry Tokio drops `next.run(req)`, so an in-flight verifier, body reader, downstream call, or
+/// handler cannot keep consuming a request task. The response uses the shared 503 envelope with
+/// `retryable=false` because the request outcome is unknown, and emits only closed decision fields
+/// plus the request correlation handle.
+pub(crate) async fn server_request_budget(
+    State(budget): State<crate::ServerRequestBudget>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let request_id = req
+        .extensions()
+        .get::<RequestId>()
+        .map_or_else(String::new, |request_id| request_id.0.clone());
+    match tokio::time::timeout(budget.duration(), next.run(req)).await {
+        Ok(response) => response,
+        Err(_elapsed) => {
+            tracing::warn!(
+                decision = "unavailable",
+                reason = "server_request_budget_exhausted",
+                request_id = %request_id,
+                budget_ms = budget.millis().get(),
+                "http server request budget exhausted"
+            );
+            crate::error::service_unavailable(&request_id)
+        }
+    }
 }
 
 /// 请求 ID newtype（存入 extensions 供 enforce 层读取）。

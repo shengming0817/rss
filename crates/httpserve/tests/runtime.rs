@@ -15,7 +15,9 @@ use axum::http::{Method, Request, StatusCode, header};
 use axum::routing::get;
 use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut};
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt; // oneshot
 use vocab::PrincipalKind;
@@ -993,4 +995,59 @@ async fn readyz_reflects_aggregated_health() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+struct HandlerDropSignal(Arc<AtomicBool>);
+
+impl Drop for HandlerDropSignal {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn server_budget_times_out_whole_request_with_shared_envelope_and_drops_handler() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let routes = test_routes::<httpserve::Health>(|rb| {
+        let dropped = Arc::clone(&dropped);
+        rb.mount_raw_for_test(
+            Route {
+                method: Method::GET,
+                path: "/slow",
+                contract_id: "httpserve.test.slow",
+            },
+            get(move || {
+                let dropped = Arc::clone(&dropped);
+                async move {
+                    let _drop_signal = HandlerDropSignal(dropped);
+                    std::future::pending::<()>().await;
+                    "unreachable"
+                }
+            }),
+        )
+    });
+    let budget = httpserve::ServerRequestBudget::from_millis(NonZeroU64::new(20).unwrap());
+    let router = finalize_auth(routes, AuthPlan::none(ListenerKind::Health).unwrap())
+        .unwrap()
+        .into_router_for_test_with_budget(budget);
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/slow")
+        .header(X_REQUEST_ID, "budget-rid")
+        .header("x-correlation-id", "budget-correlation")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[X_REQUEST_ID], "budget-rid");
+    assert_eq!(response.headers()["x-correlation-id"], "budget-correlation");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    let body = body_json(response).await;
+    assert_eq!(body["error"]["code"], "ERR_CORE_UNAVAILABLE");
+    assert_eq!(body["error"]["requestId"], "budget-rid");
+    assert_eq!(body["error"]["retryable"], false);
+    assert!(dropped.load(Ordering::Acquire));
 }

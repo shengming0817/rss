@@ -73,8 +73,7 @@ anyhow = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-# verify_jwt(&DynPdp) future 为 !Send（DynPdp !Sync，DIPORT-ASYNC-ARC-SEND-01）；OidcProvider::verify 纯 CPU 无真
-# await ⇒ future 首 poll 即 ready。验签桥经 now_or_never() 同步驱动该 ready future，使中间件 future 保持 Send。
+# runtime 其它模块仍使用 BoxFuture / stream；认证桥不再同步轮询 futures（#1828）。
 futures = { workspace = true }
 # 从配置（env）解 ES256 SEC1 公钥（base64url）。
 base64 = { workspace = true }

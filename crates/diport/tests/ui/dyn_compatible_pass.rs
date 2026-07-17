@@ -17,6 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+fn assert_send_sync<T: Send + Sync>() {}
+
 struct OkSigner;
 
 impl Signer for OkSigner {
@@ -226,6 +228,7 @@ fn main() {
     // Pdp：async DI port（#1109 验签 provider），dyn(box) wrapper 可 Box/Arc 注入。
     let _pdp_boxed: Box<DynPdp> = DynPdp::new_box(OkPdp);
     let _pdp_arced: Arc<DynPdp> = DynPdp::new_arc(OkPdp);
+    assert_send_sync::<Arc<DynPdp<'static>>>();
 
     // OutboxEmitter：async DI port（#1100 durable outbox 发射），dyn(box) wrapper 可 Box/Arc 注入。
     let _oe_boxed: Box<DynOutboxEmitter> = DynOutboxEmitter::new_box(OkOutboxEmitter);

@@ -9,31 +9,30 @@
 //! - **async DI port**（`Signer` / `KeyProvider` / `Publisher` / `Subscriber` / `AuditSink` / `RateLimiter` / `ObjectStore` / `Pdp` / `ManagedResource`）：native AFIT + dynosaur
 //!   `#[dynosaur(DynX = dyn(box) X, bridge(dyn))]` 生成 dyn-compatible wrapper；static 路径零开销、
 //!   dyn 路径才 box。组合根经 `Box<DynX>` / `Arc<DynX>` 注入（必填构造器位置参，缺失即编译错误）。
-//!   - **Send**：dyn wrapper 的 boxed future 须 `Send`（ShutdownStack 经 `tokio::spawn` 隔离 panic）。
-//!     由 `#[trait_variant::make(X: Send)]` 生成 Send 变体 + dynosaur `bridge(dyn)` 据此生成 Send 的
-//!     `DynX`。本 crate 公开（`pub use`）的是 **Send 变体** `X` + `DynX`；非 Send 基 trait `XLocal`
-//!     仅供静态分发的窄场景，不在 crate 根 re-export（避免方法解析歧义）。
+//!   - **并发 bound**：dyn wrapper 的 boxed future 一律须 `Send`。默认端口用
+//!     `#[trait_variant::make(X: Send)]`；`KeyProvider` / `Pdp` 的 base trait 显式 `Send + Sync`，其中
+//!     `Pdp` 的共享约束由 #1828 编译门锁定。本 crate 根仍只公开 Send 变体 `X` + `DynX`；base trait
+//!     `XLocal` 不 re-export，避免方法解析歧义。
 //! - **sync DI port**（`Clock` / `SubscribeInitializer`）：sync trait 天然 dyn-compatible，经
 //!   `Box<dyn _>` 注入，**不需** dynosaur（仅 async port 需要）。
 //!
 //! ## 注入形态（INVARIANT: DIPORT-ASYNC-ARC-SEND-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）
 //!
-//! async DI port 的 dynosaur Send 变体 `DynX` 是 **`Send` 但非 `Sync`**（`#[trait_variant::make(X: Send)]`
-//! 只加 `Send`，内部 `dyn ErasedX` 无 `Sync`）。推论：`Box<DynX>: Send`（`Box<T>: Send ⟸ T: Send`）成立，
-//! 但 `Arc<DynX>: Send` 需 `DynX: Send + Sync`，故 **`Arc<DynX>` 是 `!Send`**——无法被多次调用且在
-//! `tokio::spawn` / Send `'static` future 中消费的 async 消费者（典型订阅 handler）持有。注入形态据此三分
-//! （ADR-003 amendment §注入形态收口，#1095）：
+//! 默认 async DI port 的 dynosaur Send 变体 `DynX` 是 **`Send` 但非 `Sync`**；`KeyProvider` / `Pdp`
+//! 是 base trait 明确 `Send + Sync` 的窄例外。默认端口的 `Box<DynX>: Send` 成立，但 `Arc<DynX>` 是
+//! `!Send`，注入形态据此三分（ADR-003 amendment §注入形态收口，#1095 / #1828）：
 //!
 //! | 消费场景 | 注入形态 |
 //! |----------|----------|
 //! | 单 owner、非跨 Send-future（如 `ShutdownStack` 顺序关闭） | `Box<DynX>`（仅需 Send） |
 //! | 多次调用 + 在 `tokio::spawn` / Send `'static` future 中消费 | **泛型静态分发** `<S: X + Send + Sync + 'static>` + `Arc<S>`（provider 经 trait bound 仍可互换，零运行期成本） |
 //! | 单线程 / 不跨 Send-future 持有 | `Arc<DynX>`（窄场景） |
+//! | 显式共享端口（`KeyProvider` / `Pdp`） | `Arc<DynX>`（类型系统保证 `Send + Sync`） |
 //!
-//! 错误形态（`Arc<DynX>` 跨 Send future）**编译期不可表达**（Hard）；负例
-//! `tests/ui/arc_dyn_ports_not_send.rs` 锁该事实（anti-vacuity：改 `Send + Sync` 即破）。泛型静态分发
-//! 范例见 `audit::application::SessionCreatedAuditHandler`。Option A（改 `DynX: Send + Sync` 让 `Arc<DynX>`
-//! 可 dyn 注入运行期多态）已评估 defer，见 ADR-003 amendment。
+//! 默认端口误用 `Arc<DynX>` 跨 Send future **编译期不可表达**（Hard），由
+//! `tests/ui/arc_dyn_ports_not_send.rs` 锁定；PDP 的反向约束由 `dyn_compatible_pass.rs` 的
+//! `Arc<DynPdp>: Send + Sync` 正例与 `pdp_non_sync_impl_fail.rs` 负例独立锁定。其余端口全面采用
+//! Option A 仍 defer，见 ADR-003 amendment。
 //!
 //! ## 新增一个 async DI port（三步，照 `signer.rs` 抄）
 //!

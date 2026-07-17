@@ -77,7 +77,10 @@ fn run<S: IdemCheck>(s: &S) { /* 单态、零 box */ }
 
 - 必填 DI 依赖 = 构造器**必填位置参**（非 `Option`），缺失即编译错误：`fn new(store: Box<DynUserStore>, clock: Box<DynClock>) -> Self`。
 - `Clock` 走同一 `Box<DynClock>` 范式；**禁** builder option / Config 字段传 clock，**禁**默认系统时钟（prod clock 仅在组合根构造）。
-- **async DI port 注入形态三分**（单源 = [ADR-003 Amendment #1095](202606212047-003-di-trait-async-dyn-dispatch-strategy.md) §注入形态收口；本节不复制三分表）：`make(X: Send)` 的 `DynX` 是 Send 非 Sync ⇒ `Arc<DynX>` 是 **`!Send`**，**不能**跨 `tokio::spawn` / Send `'static` future 共享。故 `Box<DynX>` 单 owner；多次调用 + 跨 Send future 用**泛型静态分发** `<S: X + Send + Sync + 'static>` + `Arc<S>`；`Arc<DynX>` 仅限不跨 Send future 的窄场景。（sync port `Clock` 天然 `Send + Sync`，`Box` / `Arc<DynClock>` 均可。）
+- **async DI port 注入形态三分**（单源 = [ADR-003 Amendment #1095 / #1828](202606212047-003-di-trait-async-dyn-dispatch-strategy.md)）：默认 `make(X: Send)` 的 `DynX` 是 Send 非 Sync，故 `Box<DynX>` 单 owner；多次调用 + 跨 Send future 用泛型静态分发 `<S: X + Send + Sync + 'static>` + `Arc<S>`；`Arc<DynX>` 仅限不跨 Send future。`KeyProvider` / `Pdp` 是 base trait 显式 `Send + Sync` 的窄例外，可共享 `Arc<DynX>`；PDP 由 #1828 compile-pass / compile-fail 门锁定。（sync port `Clock` 天然 `Send + Sync`。）
+- **server policy capability 同样必填**：HTTP bind 只能消费 `AuthenticatedRoutes::into_make_service(ServerRequestBudget)`
+  返回的字段私有 `ServerMakeService`；budget 是非零 newtype，runtime 配置缺失/为零在 bind 前失败。禁止用
+  `Option`、默认无界值或 plaintext/mTLS 双签名绕开完整请求预算。
 
 ### C6. serde 边界
 

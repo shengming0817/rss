@@ -95,6 +95,7 @@ fn status_for(kind: CoreErrorKind) -> StatusCode {
         CoreErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         CoreErrorKind::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         CoreErrorKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+        CoreErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         CoreErrorKind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
         // `CoreErrorKind` 是 `#[non_exhaustive]`：未知未来 kind fail-closed 映射 5xx
         // （→ details strip，绝不把未知 kind 当 4xx 误下发明细）。
@@ -177,6 +178,11 @@ pub fn internal_error(request_id: &str) -> axum::response::Response {
     core_error_response(&CoreError::new(CoreErrorKind::Internal), request_id)
 }
 
+/// 503 Service Unavailable 信封：全请求 server budget 耗尽时的唯一 wire 表达。
+pub fn service_unavailable(request_id: &str) -> axum::response::Response {
+    core_error_response(&CoreError::new(CoreErrorKind::Unavailable), request_id)
+}
+
 /// 501 Not Implemented 信封：`ERR_CORE_NOT_IMPLEMENTED` + `NOT_IMPLEMENTED` 固定配对。
 pub fn not_implemented(request_id: &str) -> axum::response::Response {
     core_error_response(&CoreError::new(CoreErrorKind::NotImplemented), request_id)
@@ -257,6 +263,11 @@ mod tests {
                 internal_error("rid"),
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "ERR_CORE_INTERNAL",
+            ),
+            (
+                service_unavailable("rid"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ERR_CORE_UNAVAILABLE",
             ),
             (
                 payload_too_large("rid"),
@@ -401,6 +412,7 @@ mod tests {
             (CoreErrorKind::Conflict, StatusCode::CONFLICT),
             (CoreErrorKind::Validation, StatusCode::BAD_REQUEST),
             (CoreErrorKind::Internal, StatusCode::INTERNAL_SERVER_ERROR),
+            (CoreErrorKind::Unavailable, StatusCode::SERVICE_UNAVAILABLE),
             (CoreErrorKind::NotImplemented, StatusCode::NOT_IMPLEMENTED),
             (
                 CoreErrorKind::PayloadTooLarge,

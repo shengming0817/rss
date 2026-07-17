@@ -20,6 +20,10 @@ use primitives::{HealthCheck, HealthStatus, ProbeName};
 mod common;
 use common::{FixedMetrics, noop_metrics};
 
+fn test_budget() -> httpserve::ServerRequestBudget {
+    httpserve::ServerRequestBudget::for_test()
+}
+
 /// 健康探针替身（Healthy）。
 struct HealthyProbe;
 impl bootstrap::HealthProbe for HealthyProbe {
@@ -48,7 +52,7 @@ async fn serve_health(with_healthy_probe: bool) -> HttpServer {
     let (_listener, authed) =
         runtime::listeners::health_listener(reporter, noop_metrics()).expect("health listener");
     let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
-    HttpServer::serve("http-health", addr, authed.into_make_service())
+    HttpServer::serve("http-health", addr, authed.into_make_service(test_budget()))
         .await
         .expect("bind + serve real socket")
 }
@@ -104,7 +108,7 @@ async fn metrics_endpoint_renders_exposition_over_real_socket() {
     let (_listener, authed) =
         runtime::listeners::health_listener(reporter, exporter).expect("health listener");
     let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
-    let server = HttpServer::serve("http-health", addr, authed.into_make_service())
+    let server = HttpServer::serve("http-health", addr, authed.into_make_service(test_budget()))
         .await
         .expect("bind + serve real socket");
     let local = server.local_addr();
@@ -171,7 +175,7 @@ async fn serve_via_shutdownstack_funnel_path() {
     let reporter = Arc::new(reg.take_health_reporter());
     let (_listener, authed) =
         runtime::listeners::health_listener(reporter, noop_metrics()).expect("health listener");
-    let svc = authed.into_make_service();
+    let svc = authed.into_make_service(test_budget());
 
     let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
     let bound = HttpServer::bind("http-health", addr)

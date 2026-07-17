@@ -8,6 +8,7 @@
 //! ref: tokio-rs/axum axum/src/routing/mod.rs@main（`Router<S>` 状态类型表达「缺状态不可 serve」）
 
 mod auth;
+mod budget;
 pub mod error;
 pub mod health;
 mod middleware;
@@ -20,13 +21,14 @@ pub use auth::{
     RouteAuthorizer, RouteMeta, RouteResource, ServiceTokenTenantBindingError,
     authorize_subject_for_permission, service_token_tenant_binding,
 };
+pub use budget::ServerRequestBudget;
 pub use middleware::rate_limit;
 pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};
 pub use routes::{
     Admin, AuthenticatedRoutes, ClassifiedRouteState, ContractMarker, GeneratedEndpoint,
     GeneratedPrimaryEndpoint, Health, Internal, Listener, ListenerRouter, LocalOnlyAllowedEffect,
-    NonPrimaryListener, Primary, UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit,
-    finalize_auth_with_audit_and_authorizer, finalize_primary_auth,
+    NonPrimaryListener, Primary, ServerMakeService, UnfinalizedRoutes, finalize_auth,
+    finalize_auth_with_audit, finalize_auth_with_audit_and_authorizer, finalize_primary_auth,
     finalize_primary_auth_with_audit,
 };
 #[cfg(any(test, feature = "test-util"))]
@@ -38,7 +40,8 @@ pub use routes::{
 pub use routes::{TestPrimaryRoute, TestRoute, TestRoutePermission, TestRouteResourceScope};
 
 /// 读框架注入的 request id（`request_id` 中间件在唯一 bindable 出口
-/// [`AuthenticatedRoutes::into_make_service`] 封为**最外层**，ROUTE-REQUESTID-OUTERMOST-01）。
+/// [`AuthenticatedRoutes::into_make_service`] 封为**最外层 request-context middleware**（仅机械
+/// security response-header layers 在其外），ROUTE-REQUESTID-OUTERMOST-01）。
 ///
 /// 供组合根叠在 `finalize_auth` 产物**外层**（但 request_id 内层）的中间件——如 #1109 验签桥——读
 /// request 关联 id 入自身 span / 日志（桥运行时 request_id 已就位，落实 #1320「桥可读 requestId」）。

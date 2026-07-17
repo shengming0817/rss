@@ -142,4 +142,4 @@ mergeExtends = probes,resources,workers
 37 | launch.shutdown.resources | assemblies/runtime/src/launch.rs | for resource in resources | status=ok
 38 | launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in workers | status=ok
 39 | launch.register-plan | assemblies/runtime/src/launch.rs | let listeners = plan.register(&mut stack)?; | status=ok
-40 | launch.listeners | assemblies/runtime/src/launch.rs | bind_and_register(&mut stack, listener, &addr_resolver).await?; | status=ok
+40 | launch.listeners | assemblies/runtime/src/launch.rs | bind_and_register(&mut stack, listener, budget, &addr_resolver).await?; | status=ok

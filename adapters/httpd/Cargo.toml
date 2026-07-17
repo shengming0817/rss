@@ -25,6 +25,7 @@ test-support = ["dep:rcgen"]
 [dependencies]
 diport = { path = "../../crates/diport" }
 authn = { path = "../../crates/authn" }
+httpserve = { path = "../../crates/httpserve" }
 distributed = { path = "../../crates/distributed" }
 axum = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls-manual-roots"] }
@@ -46,3 +47,4 @@ rcgen = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "net"] }
 rcgen = { workspace = true }
 vocab = { path = "../../crates/vocab" }
+httpserve = { path = "../../crates/httpserve", features = ["test-util"] }

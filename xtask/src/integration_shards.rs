@@ -251,6 +251,8 @@ integration_shard_catalog! {
         units: [
             ("runtime", "runtime", Lib, Serial),
             ("runtime", "auth_e2e", Test, Parallel),
+            ("runtime", "auth_bridge_structure", Test, Parallel),
+            ("runtime", "server_budget_structure", Test, Parallel),
             ("runtime", "configs_ready_e2e", Test, Serial),
             ("runtime", "identity_login_wire_e2e", Test, Serial),
             ("runtime", "infra_builders_api", Test, Parallel),

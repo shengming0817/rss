@@ -951,6 +951,42 @@ impl UnfinalizedRoutes {
     }
 }
 
+/// Opaque make-service accepted by the HTTP transport adapter.
+///
+/// Only [`AuthenticatedRoutes::into_make_service`] can construct this type in production. Its
+/// private field makes an unbudgeted raw axum router impossible to pass to `httpd`, while both the
+/// plaintext and mTLS serve paths consume the same sealed service capability.
+#[derive(Clone)]
+#[must_use = "ServerMakeService must be consumed by the HTTP transport adapter"]
+pub struct ServerMakeService {
+    inner: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
+        axum::Router,
+        std::net::SocketAddr,
+    >,
+}
+
+impl ServerMakeService {
+    /// Consume the sealed capability at the transport adapter boundary.
+    #[doc(hidden)]
+    pub fn into_axum(
+        self,
+    ) -> axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
+        axum::Router,
+        std::net::SocketAddr,
+    > {
+        self.inner
+    }
+
+    /// Build a sealed service around a raw test router. Not present in production feature graphs.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn from_router_for_test(router: axum::Router, budget: crate::ServerRequestBudget) -> Self {
+        Self {
+            inner: seal_server_router(router, crate::protect::EdgeHardening::default(), budget)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        }
+    }
+}
+
 /// auth-finalize 后的 per-listener Router（#1113 funnel 出态，可 bind）。
 ///
 /// INVARIANT: ROUTE-AUTH-FUNNEL-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 唯一生产者 = finalizer 函数（构造 `pub(crate)`，外部 crate 无法
@@ -1004,7 +1040,7 @@ impl AuthenticatedRoutes {
         }
     }
 
-    /// 在唯一 bindable 出口封全局防护中间件链（请求 ID + correlation + security-headers + body-limit）。
+    /// 在唯一 bindable 出口封全局防护中间件链（请求预算 + 请求 ID + correlation + security-headers + body-limit）。
     ///
     /// INVARIANT: ROUTE-REQUESTID-OUTERMOST-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `request_id` **不**在 [`finalize_auth`] 内挂（那会被组合根
     /// 后叠的验签桥包到内层 ⇒ 桥运行时读不到 `RequestId`，#1109 NOTE / #1320）；改由本出口统一注入 ⇒ 每个被
@@ -1024,42 +1060,27 @@ impl AuthenticatedRoutes {
     /// 结构性 Hard：唯一 bindable 出口经本 funnel 封层，不可遗漏。security-headers outer 于 body-limit（所有响应
     /// 含 413 均追加安全头）。
     ///
-    /// 层序（外→内）：`request_id` → `correlation` → security-headers → body-limit → 验签桥
+    /// INVARIANT: SERVER-REQUEST-BUDGET-01 { level = "Hard", exec = "native-compile", source = "code", native = "private capability type + required argument" }——唯一 bindable 出口必须消费非零 [`crate::ServerRequestBudget`]，且 `httpd` plaintext/mTLS 只接受 [`ServerMakeService`]；不存在无预算 bind 路径。
+    ///
+    /// 层序（外→内）：security-headers → `request_id` → `correlation` → server-request-budget
+    /// → body-limit → 验签桥
     /// → listener trace policy（Health 无 `trace`）→ `panic_recovery` → `Extension(plan)` → enforce → handler。
     ///
     /// 生产出口 [`into_make_service`](Self::into_make_service) 与 test 出口
     /// [`into_router_for_test`](Self::into_router_for_test) 共用本 fn ⇒ 层序一致（test 不漂移）。
-    fn sealed_router(self) -> axum::Router {
-        // `.layer` 调用顺序 = 内→外；最后 `.layer(request_id)` 使其成为绝对最外层。
-
-        // 1. body-limit（最内层新防护，outer 于验签桥）。
-        let mut router = self.router.layer(axum::middleware::from_fn_with_state(
-            self.hardening.body_limit,
-            crate::middleware::body_limit,
-        ));
-
-        // 2. security-headers（outer 于 body-limit；所有响应包含安全头）。
-        for hl in self.hardening.headers.response_layers() {
-            router = router.layer(hl);
-        }
-
-        // 3. correlation + request_id（绝对最外两层）。
-        router
-            .layer(axum::middleware::from_fn(crate::middleware::correlation))
-            .layer(axum::middleware::from_fn(crate::middleware::request_id))
+    fn sealed_router(self, budget: crate::ServerRequestBudget) -> axum::Router {
+        seal_server_router(self.router, self.hardening, budget)
     }
 
     /// **唯一** bindable 出口：封防护层（[`sealed_router`](Self::sealed_router)）后转 axum
     /// `IntoMakeServiceWithConnectInfo`（bind 时注入 `ConnectInfo<SocketAddr>`，供 rate_limit
     /// 中间件读 peer IP；天生只能消费已认证 router，ROUTE-AUTH-FUNNEL-02）。
-    pub fn into_make_service(
-        self,
-    ) -> axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
-        axum::Router,
-        std::net::SocketAddr,
-    > {
-        self.sealed_router()
-            .into_make_service_with_connect_info::<std::net::SocketAddr>()
+    pub fn into_make_service(self, budget: crate::ServerRequestBudget) -> ServerMakeService {
+        ServerMakeService {
+            inner: self
+                .sealed_router(budget)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        }
     }
 
     /// 测试专用：取回裸 Router 做 `oneshot` e2e 断言（经 [`sealed_router`](Self::sealed_router) ⇒ 与生产
@@ -1067,8 +1088,43 @@ impl AuthenticatedRoutes {
     /// 生产构建里编译期不存在，不削弱 ROUTE-AUTH-FUNNEL-02（生产唯一 bindable 出口仍是 `into_make_service`）。
     #[cfg(any(test, feature = "test-util"))]
     pub fn into_router_for_test(self) -> axum::Router {
-        self.sealed_router()
+        self.sealed_router(crate::ServerRequestBudget::for_test())
     }
+
+    /// Test-only exit with an explicit short budget for deterministic timeout/cancellation tests.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn into_router_for_test_with_budget(
+        self,
+        budget: crate::ServerRequestBudget,
+    ) -> axum::Router {
+        self.sealed_router(budget)
+    }
+}
+
+fn seal_server_router(
+    router: axum::Router,
+    hardening: crate::protect::EdgeHardening,
+    budget: crate::ServerRequestBudget,
+) -> axum::Router {
+    // `.layer` calls are inner→outer. The timeout covers every fallible/async request component;
+    // request/correlation context wraps it so a timeout response remains correlated. Mechanical
+    // security response headers stay outermost so the synthetic 503 receives the same headers.
+    let mut router = router
+        .layer(axum::middleware::from_fn_with_state(
+            hardening.body_limit,
+            crate::middleware::body_limit,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            budget,
+            crate::middleware::server_request_budget,
+        ))
+        .layer(axum::middleware::from_fn(crate::middleware::correlation))
+        .layer(axum::middleware::from_fn(crate::middleware::request_id));
+
+    for header_layer in hardening.headers.response_layers() {
+        router = router.layer(header_layer);
+    }
+    router
 }
 
 /// 所有非 Primary route 注册完成后装配 auth enforcement（plan 由组合根注入，本函数不构造 `AuthPlan`）。
@@ -1099,11 +1155,11 @@ impl TracePolicy {
 ///
 /// 层序（`.layer` 调用顺序 = 内→外）：`Extension(plan)`（最内，EnforceService 读 plan）→ `panic_recovery`
 /// （request-aware panic → 500 envelope）→ listener 派生 `trace`（Health listener 禁用；其余 listener 启用）。
-/// `request_id` / `correlation` **不**在此挂——二者均由唯一 bindable 出口
-/// [`AuthenticatedRoutes::sealed_router`] 封为最外两层（ROUTE-REQUESTID-OUTERMOST-01 /
-/// ROUTE-CORRELATION-INNER-REQUESTID-01 / #1320）。完整请求流（外→内）：`request_id` → `correlation` →
-/// 验签桥 → listener trace（Health 无）→ `panic_recovery` → `Extension(plan)` → 路由匹配 → `EnforceService`
-/// → handler。
+/// `request_id` / `correlation` / server budget **不**在此挂——三者均由唯一 bindable 出口
+/// [`AuthenticatedRoutes::sealed_router`] 封装（ROUTE-REQUESTID-OUTERMOST-01 /
+/// ROUTE-CORRELATION-INNER-REQUESTID-01 / SERVER-REQUEST-BUDGET-01 / #1320）。完整请求流（外→内）：
+/// security headers → `request_id` → `correlation` → server budget → 验签桥 → listener trace（Health 无）
+/// → `panic_recovery` → `Extension(plan)` → 路由匹配 → `EnforceService` → handler。
 ///
 /// 验签桥（#1109）经 [`AuthenticatedRoutes::layer`] 叠在 `finalize_auth` 产物的**外层**（请求方向先于
 /// `EnforceService`），其注入的 [`Authenticated`](crate::Authenticated) 证据在 enforce 读取前就位；request_id
@@ -2022,7 +2078,7 @@ mod tests {
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
         let authed = finalize_auth(routes, plan).expect("finalize_auth");
-        let _make_service = authed.into_make_service();
+        let _make_service = authed.into_make_service(crate::ServerRequestBudget::for_test());
     }
 
     /// 取回完整 Response（不仅 status）做 header 断言（request_id 封口验证）。
