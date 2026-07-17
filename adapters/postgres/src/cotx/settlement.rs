@@ -10,7 +10,6 @@
 //! INVARIANT: PG-LOCALTX-SETTLEMENT-01 { level = "Hard", exec = "native-compile", source = "code", native = "opaque sum type; pub(super) mint under cotx; run_pg_tx_retry consumes LocalTxAttempt only" }
 //! INVARIANT: PG-LOCALTX-QUARANTINE-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private armed RAII lease borrow-splits its PoolConnection transaction and closed quarantine stage into LocalTxTransaction; only that wrapper's consuming commit/rollback ACK methods can disarm the originating lease" }
 
-use consistency::LocalTxFinalStatus;
 #[cfg(any(
     test,
     feature = "domain-settings",
@@ -18,7 +17,13 @@ use consistency::LocalTxFinalStatus;
     feature = "domain-audit"
 ))]
 use consistency::TxRetryClass;
+use consistency::{LocalTxDeadlineStage, LocalTxFinalStatus};
 use sqlx::{Acquire, PgPool, Postgres, Transaction, pool::PoolConnection};
+
+use crate::tx_retry::{
+    LocalTxAcquireDeadline, LocalTxBeginDeadline, LocalTxCommitDeadline, LocalTxOperationDeadline,
+    LocalTxRollbackDeadline, LocalTxSetupDeadline,
+};
 
 /// One complete Postgres LocalTx attempt and its settlement evidence.
 #[derive(Debug)]
@@ -29,10 +34,50 @@ pub(crate) struct LocalTxAttempt<T, E> {
 #[derive(Debug)]
 enum LocalTxAttemptState<T, E> {
     Committed(T),
-    Unsettled(E),
-    RolledBack(E),
-    RollbackFailed(E),
-    CommitUnknown(E),
+    Unsettled(E, LocalTxDeadlineEvidence),
+    RolledBack(E, LocalTxDeadlineEvidence),
+    RollbackFailed(E, LocalTxDeadlineEvidence),
+    CommitUnknown(E, LocalTxDeadlineEvidence),
+}
+
+/// Opaque deadline proof minted only by the transaction/settlement funnel.
+#[derive(Clone, Copy, Debug)]
+enum LocalTxDeadlineEvidence {
+    None,
+    Acquire(LocalTxAcquireDeadline),
+    Begin(LocalTxBeginDeadline),
+    Setup(LocalTxSetupDeadline),
+    Operation(LocalTxOperationDeadline),
+    Rollback(LocalTxRollbackDeadline),
+    SetupRollback(LocalTxSetupDeadline, LocalTxRollbackDeadline),
+    OperationRollback(LocalTxOperationDeadline, LocalTxRollbackDeadline),
+    Commit(LocalTxCommitDeadline),
+}
+
+impl LocalTxDeadlineEvidence {
+    const fn none() -> Self {
+        Self::None
+    }
+
+    const fn stages(self) -> [Option<LocalTxDeadlineStage>; 2] {
+        match self {
+            Self::None => [None, None],
+            Self::Acquire(_) => [Some(LocalTxDeadlineStage::Acquire), None],
+            Self::Begin(_) => [Some(LocalTxDeadlineStage::Begin), None],
+            Self::Setup(_) => [Some(LocalTxDeadlineStage::Setup), None],
+            Self::Operation(_) => [Some(LocalTxDeadlineStage::Operation), None],
+            Self::Rollback(_) => [None, Some(LocalTxDeadlineStage::Rollback)],
+            Self::SetupRollback(_, _) => [
+                Some(LocalTxDeadlineStage::Setup),
+                Some(LocalTxDeadlineStage::Rollback),
+            ],
+            Self::OperationRollback(_, _) => [
+                Some(LocalTxDeadlineStage::Operation),
+                Some(LocalTxDeadlineStage::Rollback),
+            ],
+            Self::Commit(_) => [Some(LocalTxDeadlineStage::Commit), None],
+        }
+    }
 }
 
 /// A pooled connection whose default drop behavior is quarantine.
@@ -186,7 +231,7 @@ impl<T, E> LocalTxAttempt<T, E> {
     fn has_acknowledged_settlement(&self) -> bool {
         matches!(
             &self.state,
-            LocalTxAttemptState::Committed(_) | LocalTxAttemptState::RolledBack(_)
+            LocalTxAttemptState::Committed(_) | LocalTxAttemptState::RolledBack(_, _)
         )
     }
 
@@ -200,28 +245,105 @@ impl<T, E> LocalTxAttempt<T, E> {
     /// Construct an error observed before a transaction existed.
     pub(super) fn unsettled(error: E) -> Self {
         Self {
-            state: LocalTxAttemptState::Unsettled(error),
+            state: LocalTxAttemptState::Unsettled(error, LocalTxDeadlineEvidence::none()),
+        }
+    }
+
+    pub(super) fn unsettled_acquire_deadline(error: E, evidence: LocalTxAcquireDeadline) -> Self {
+        Self {
+            state: LocalTxAttemptState::Unsettled(
+                error,
+                LocalTxDeadlineEvidence::Acquire(evidence),
+            ),
+        }
+    }
+
+    pub(super) fn unsettled_begin_deadline(error: E, evidence: LocalTxBeginDeadline) -> Self {
+        Self {
+            state: LocalTxAttemptState::Unsettled(error, LocalTxDeadlineEvidence::Begin(evidence)),
         }
     }
 
     /// Construct an attempt whose explicit rollback completed.
     pub(super) fn rolled_back(error: E) -> Self {
         Self {
-            state: LocalTxAttemptState::RolledBack(error),
+            state: LocalTxAttemptState::RolledBack(error, LocalTxDeadlineEvidence::none()),
+        }
+    }
+
+    pub(super) fn rolled_back_setup_deadline(error: E, evidence: LocalTxSetupDeadline) -> Self {
+        Self {
+            state: LocalTxAttemptState::RolledBack(error, LocalTxDeadlineEvidence::Setup(evidence)),
+        }
+    }
+
+    pub(super) fn rolled_back_operation_deadline(
+        error: E,
+        evidence: LocalTxOperationDeadline,
+    ) -> Self {
+        Self {
+            state: LocalTxAttemptState::RolledBack(
+                error,
+                LocalTxDeadlineEvidence::Operation(evidence),
+            ),
         }
     }
 
     /// Construct an attempt whose explicit rollback failed.
     pub(super) fn rollback_failed(error: E) -> Self {
         Self {
-            state: LocalTxAttemptState::RollbackFailed(error),
+            state: LocalTxAttemptState::RollbackFailed(error, LocalTxDeadlineEvidence::none()),
+        }
+    }
+
+    pub(super) fn rollback_failed_deadline(error: E, rollback: LocalTxRollbackDeadline) -> Self {
+        Self {
+            state: LocalTxAttemptState::RollbackFailed(
+                error,
+                LocalTxDeadlineEvidence::Rollback(rollback),
+            ),
+        }
+    }
+
+    pub(super) fn rollback_failed_setup_deadline(
+        error: E,
+        setup: LocalTxSetupDeadline,
+        rollback: LocalTxRollbackDeadline,
+    ) -> Self {
+        Self {
+            state: LocalTxAttemptState::RollbackFailed(
+                error,
+                LocalTxDeadlineEvidence::SetupRollback(setup, rollback),
+            ),
+        }
+    }
+
+    pub(super) fn rollback_failed_operation_deadline(
+        error: E,
+        operation: LocalTxOperationDeadline,
+        rollback: LocalTxRollbackDeadline,
+    ) -> Self {
+        Self {
+            state: LocalTxAttemptState::RollbackFailed(
+                error,
+                LocalTxDeadlineEvidence::OperationRollback(operation, rollback),
+            ),
         }
     }
 
     /// Construct an attempt whose commit result is unknown.
     pub(super) fn commit_unknown(error: E) -> Self {
         Self {
-            state: LocalTxAttemptState::CommitUnknown(error),
+            state: LocalTxAttemptState::CommitUnknown(error, LocalTxDeadlineEvidence::none()),
+        }
+    }
+
+    pub(super) fn commit_unknown_deadline(error: E, evidence: LocalTxCommitDeadline) -> Self {
+        Self {
+            state: LocalTxAttemptState::CommitUnknown(
+                error,
+                LocalTxDeadlineEvidence::Commit(evidence),
+            ),
         }
     }
 
@@ -233,10 +355,10 @@ impl<T, E> LocalTxAttempt<T, E> {
     pub(crate) fn settlement(&self) -> Option<LocalTxFinalStatus> {
         match self.state {
             LocalTxAttemptState::Committed(_) => Some(LocalTxFinalStatus::Committed),
-            LocalTxAttemptState::Unsettled(_) => None,
-            LocalTxAttemptState::RolledBack(_) => Some(LocalTxFinalStatus::RolledBack),
-            LocalTxAttemptState::RollbackFailed(_) => Some(LocalTxFinalStatus::RollbackFailed),
-            LocalTxAttemptState::CommitUnknown(_) => Some(LocalTxFinalStatus::CommitUnknown),
+            LocalTxAttemptState::Unsettled(_, _) => None,
+            LocalTxAttemptState::RolledBack(_, _) => Some(LocalTxFinalStatus::RolledBack),
+            LocalTxAttemptState::RollbackFailed(_, _) => Some(LocalTxFinalStatus::RollbackFailed),
+            LocalTxAttemptState::CommitUnknown(_, _) => Some(LocalTxFinalStatus::CommitUnknown),
         }
     }
 
@@ -248,12 +370,10 @@ impl<T, E> LocalTxAttempt<T, E> {
     ) -> Option<TxRetryClass> {
         match &self.state {
             LocalTxAttemptState::Committed(_) => None,
-            LocalTxAttemptState::Unsettled(error) | LocalTxAttemptState::RolledBack(error) => {
-                Some(classify(error))
-            }
-            LocalTxAttemptState::RollbackFailed(_) | LocalTxAttemptState::CommitUnknown(_) => {
-                Some(TxRetryClass::Permanent)
-            }
+            LocalTxAttemptState::Unsettled(error, _)
+            | LocalTxAttemptState::RolledBack(error, _) => Some(classify(error)),
+            LocalTxAttemptState::RollbackFailed(_, _)
+            | LocalTxAttemptState::CommitUnknown(_, _) => Some(TxRetryClass::Permanent),
         }
     }
 
@@ -261,11 +381,31 @@ impl<T, E> LocalTxAttempt<T, E> {
     pub(crate) fn into_result(self) -> Result<T, E> {
         match self.state {
             LocalTxAttemptState::Committed(value) => Ok(value),
-            LocalTxAttemptState::Unsettled(error)
-            | LocalTxAttemptState::RolledBack(error)
-            | LocalTxAttemptState::RollbackFailed(error)
-            | LocalTxAttemptState::CommitUnknown(error) => Err(error),
+            LocalTxAttemptState::Unsettled(error, _)
+            | LocalTxAttemptState::RolledBack(error, _)
+            | LocalTxAttemptState::RollbackFailed(error, _)
+            | LocalTxAttemptState::CommitUnknown(error, _) => Err(error),
         }
+    }
+
+    /// Map the carrier error without changing settlement or deadline evidence.
+    pub(super) fn map_error<M>(self, map: impl FnOnce(E) -> M) -> LocalTxAttempt<T, M> {
+        let state = match self.state {
+            LocalTxAttemptState::Committed(value) => LocalTxAttemptState::Committed(value),
+            LocalTxAttemptState::Unsettled(error, deadline) => {
+                LocalTxAttemptState::Unsettled(map(error), deadline)
+            }
+            LocalTxAttemptState::RolledBack(error, deadline) => {
+                LocalTxAttemptState::RolledBack(map(error), deadline)
+            }
+            LocalTxAttemptState::RollbackFailed(error, deadline) => {
+                LocalTxAttemptState::RollbackFailed(map(error), deadline)
+            }
+            LocalTxAttemptState::CommitUnknown(error, deadline) => {
+                LocalTxAttemptState::CommitUnknown(map(error), deadline)
+            }
+        };
+        LocalTxAttempt { state }
     }
 
     /// Consume settlement evidence at the bounded retry boundary.
@@ -281,10 +421,10 @@ impl<T, E> LocalTxAttempt<T, E> {
         let settlement = self.settlement();
         match self.state {
             LocalTxAttemptState::Committed(value) => Ok(value),
-            LocalTxAttemptState::Unsettled(error)
-            | LocalTxAttemptState::RolledBack(error)
-            | LocalTxAttemptState::RollbackFailed(error)
-            | LocalTxAttemptState::CommitUnknown(error) => {
+            LocalTxAttemptState::Unsettled(error, deadline)
+            | LocalTxAttemptState::RolledBack(error, deadline)
+            | LocalTxAttemptState::RollbackFailed(error, deadline)
+            | LocalTxAttemptState::CommitUnknown(error, deadline) => {
                 let class = match settlement {
                     Some(
                         LocalTxFinalStatus::Committed
@@ -293,7 +433,11 @@ impl<T, E> LocalTxAttempt<T, E> {
                     ) => TxRetryClass::Permanent,
                     None | Some(LocalTxFinalStatus::RolledBack) => classify(&error),
                 };
-                Err(LocalTxRetryError { error, class })
+                Err(LocalTxRetryError {
+                    error,
+                    class,
+                    deadline,
+                })
             }
         }
     }
@@ -309,6 +453,7 @@ impl<T, E> LocalTxAttempt<T, E> {
 pub(crate) struct LocalTxRetryError<E> {
     error: E,
     class: TxRetryClass,
+    deadline: LocalTxDeadlineEvidence,
 }
 
 #[cfg(any(
@@ -325,6 +470,11 @@ impl<E> LocalTxRetryError<E> {
     /// Borrow the domain error for closed-label diagnostics before it is returned to the caller.
     pub(crate) fn error(&self) -> &E {
         &self.error
+    }
+
+    /// Closed deadline stages proven by the transaction/settlement funnel.
+    pub(crate) fn deadline_stages(&self) -> [Option<LocalTxDeadlineStage>; 2] {
+        self.deadline.stages()
     }
 
     /// Recover the caller's original domain error.
@@ -376,11 +526,71 @@ struct PgTxRollbackFailedError {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
-    use consistency::{LocalTxFinalStatus, TxRetryClass};
+    use consistency::{LocalTxDeadlineStage, LocalTxFinalStatus, TxRetryClass};
 
     use super::{LocalTxAttempt, LocalTxQuarantineStage};
     #[cfg(feature = "domain-settings")]
     use super::{commit_unknown, rollback_failed};
+    use crate::tx_retry::{LocalTxStageResult, localtx_deadline_for_test};
+
+    #[cfg(any(
+        feature = "domain-settings",
+        feature = "domain-identity",
+        feature = "domain-audit"
+    ))]
+    #[tokio::test(start_paused = true)]
+    async fn deadline_evidence_is_typed_and_preserves_primary_plus_settlement_stage() {
+        let deadline = localtx_deadline_for_test();
+        tokio::time::advance(consistency::LocalTxExecutionBudget::DEFAULT.operation()).await;
+        let operation_evidence = match deadline.operation(async { Ok::<(), FakeError>(()) }).await {
+            LocalTxStageResult::Deadline { evidence, .. } => evidence,
+            _ => panic!("operation stage must mint its typed deadline evidence"),
+        };
+        let operation = LocalTxAttempt::<(), _>::rolled_back_operation_deadline(
+            FakeError::Transient,
+            operation_evidence,
+        )
+        .into_retry_result(|_| TxRetryClass::Transient)
+        .expect_err("operation deadline must remain an error");
+        assert_eq!(
+            operation.deadline_stages(),
+            [Some(LocalTxDeadlineStage::Operation), None]
+        );
+
+        tokio::time::advance(consistency::LocalTxExecutionBudget::DEFAULT.settlement_reserve())
+            .await;
+        let rollback_evidence = match deadline.rollback(async { Ok(()) }).await {
+            LocalTxStageResult::Deadline { evidence, .. } => evidence,
+            _ => panic!("rollback stage must mint its typed deadline evidence"),
+        };
+        let rollback = LocalTxAttempt::<(), _>::rollback_failed_operation_deadline(
+            FakeError::Transient,
+            operation_evidence,
+            rollback_evidence,
+        )
+        .into_retry_result(|_| TxRetryClass::Transient)
+        .expect_err("rollback deadline must remain an error");
+        assert_eq!(
+            rollback.deadline_stages(),
+            [
+                Some(LocalTxDeadlineStage::Operation),
+                Some(LocalTxDeadlineStage::Rollback),
+            ]
+        );
+
+        let commit_evidence = match deadline.commit(async { Ok(()) }).await {
+            LocalTxStageResult::Deadline { evidence, .. } => evidence,
+            _ => panic!("commit stage must mint its typed deadline evidence"),
+        };
+        let commit =
+            LocalTxAttempt::<(), _>::commit_unknown_deadline(FakeError::Transient, commit_evidence)
+                .into_retry_result(|_| TxRetryClass::Transient)
+                .expect_err("commit deadline must remain an error");
+        assert_eq!(
+            commit.deadline_stages(),
+            [Some(LocalTxDeadlineStage::Commit), None]
+        );
+    }
     #[cfg(feature = "domain-settings")]
     use std::error::Error;
 

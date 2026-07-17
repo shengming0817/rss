@@ -5,20 +5,23 @@ const DASHBOARD: &str =
     include_str!("../../../docs/ops/202607082104-1642-consistency-dashboard-checklist.md");
 const RUNBOOK: &str =
     include_str!("../../../docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md");
+const RUNBOOK_INDEX: &str =
+    include_str!("../../../docs/runbooks/202607082104-1642-consistency-ops-runbook-index.md");
 const LOCALTX_RULES: &str = include_str!("../../../docs/rules/localtx.md");
 const PROOF_REPORT: &str = include_str!("../../../docs/ops/localtx-proof-report.md");
 const ADOPTION_TEMPLATE: &str =
     include_str!("../../../.specify/templates/overrides/localtx-tasks-template.md");
 
 #[test]
-fn dashboard_consumes_every_transaction_settlement_metric_with_closed_labels() {
+fn dashboard_consumes_every_typed_localtx_metric_with_closed_labels() {
     let operations = localtx_operations_descriptor();
     assert!(operations.is_consistent());
     assert_eq!(
         operations.metrics().len(),
-        3,
+        4,
         "real descriptor anti-vacuity"
     );
+    let mut deadline_diagnostics = 0;
     for metric in operations.metrics() {
         let query = match metric.purpose() {
             LocalTxMetricPurpose::RetryPressureDiagnostic => format!(
@@ -33,6 +36,13 @@ fn dashboard_consumes_every_transaction_settlement_metric_with_closed_labels() {
                 "sum by (domain, contract_id, boundary, final_status, le) (rate({}_bucket[5m]))",
                 metric.name()
             ),
+            LocalTxMetricPurpose::DeadlineDiagnostic => {
+                deadline_diagnostics += 1;
+                format!(
+                    "sum by (domain, contract_id, boundary, stage) (rate({}[5m]))",
+                    metric.name()
+                )
+            }
         };
         assert!(
             DASHBOARD.contains(&query),
@@ -42,6 +52,14 @@ fn dashboard_consumes_every_transaction_settlement_metric_with_closed_labels() {
     }
     assert!(
         DASHBOARD.contains("sum by (boundary, final_status) (rate(tx_settlement_final_total[5m]))")
+    );
+    assert_eq!(
+        deadline_diagnostics, 1,
+        "typed deadline metric anti-vacuity"
+    );
+    assert!(
+        DASHBOARD.contains("Diagnostic only; no paging"),
+        "deadline diagnostic must have an explicit non-paging dashboard contract"
     );
 }
 
@@ -96,6 +114,20 @@ fn alert_rules_page_only_on_actionable_unsafe_settlements() {
         !ALERT_RULES.contains("retry_status=\"exhausted\""),
         "retry exhaustion must not page"
     );
+    for metric in operations
+        .metrics()
+        .iter()
+        .filter(|metric| metric.purpose() == LocalTxMetricPurpose::DeadlineDiagnostic)
+    {
+        assert!(
+            RUNBOOK.contains(metric.name()) && RUNBOOK_INDEX.contains(metric.name()),
+            "typed deadline diagnostics must remain discoverable from the runbook and index"
+        );
+        assert!(
+            !ALERT_RULES.contains(metric.name()),
+            "typed deadline diagnostics must not acquire a paging alert"
+        );
+    }
 }
 
 #[test]

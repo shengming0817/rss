@@ -576,12 +576,13 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         let tenant = scope.tenant();
         run_pg_localtx_retry(
             observation,
-            |_attempt| {
+            |_attempt, deadline| {
                 let entry = entry.clone();
                 async move {
                     self.pool
                         .retry_write(
                             scope,
+                            deadline,
                             move |tx| Box::pin(Self::cas_insert_locked(tx, tenant, entry)),
                             storage,
                         )
@@ -603,12 +604,13 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         let tenant = scope.tenant();
         run_pg_tx_retry(
             SETTINGS_SECRET_BOUNDARY,
-            |_attempt| {
+            |_attempt, deadline| {
                 let entry = entry.clone();
                 async move {
                     self.pool
                         .retry_write(
                             scope,
+                            deadline,
                             move |tx| Box::pin(Self::cas_insert_locked(tx, tenant, entry)),
                             storage,
                         )
@@ -630,12 +632,13 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         let tenant = scope.tenant();
         run_pg_tx_retry(
             SETTINGS_SECRET_BOUNDARY,
-            |_attempt| {
+            |_attempt, deadline| {
                 let entry = entry.clone();
                 async move {
                     self.pool
                         .retry_write(
                             scope,
+                            deadline,
                             move |tx| Box::pin(Self::cas_insert_locked(tx, tenant, entry)),
                             storage,
                         )

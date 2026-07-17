@@ -403,7 +403,7 @@ impl CredentialRepo for PgCredentialRepo {
         let password_change_faults = Arc::clone(&self.password_change_faults);
         run_pg_localtx_retry(
             observation,
-            |_attempt| {
+            |_attempt, deadline| {
                 let tenant_uuid = tenant_uuid.clone();
                 let login_str = login_str.clone();
                 let next = next.clone();
@@ -417,6 +417,7 @@ impl CredentialRepo for PgCredentialRepo {
                     self.write_pool
                         .retry_write(
                             scope,
+                            deadline,
                             move |tx| {
                                 Box::pin(async move {
                                     #[cfg(all(test, feature = "integration"))]

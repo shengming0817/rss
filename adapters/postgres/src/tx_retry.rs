@@ -3,15 +3,15 @@
 use std::error::Error;
 use std::future::Future;
 use std::hash::{BuildHasher, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 #[cfg(feature = "domain-audit")]
 use audit::ports::AuditError;
 use consistency::{
-    LocalTxFinalStatus, TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryReport,
-    run_tx_retry,
+    LocalTxDeadlineStage, LocalTxExecutionBudget, LocalTxFinalStatus, TxRetryBackoff, TxRetryClass,
+    TxRetryFinalStatus, TxRetryPolicy, TxRetryReport, run_tx_retry,
 };
 #[cfg(feature = "domain-identity")]
 use identity::ports::IdentityError;
@@ -25,6 +25,292 @@ use observ::LocalTxObservation;
 use settings::ports::{ConfigRepoError, SecretRepoError};
 
 use crate::cotx::{LocalTxAttempt, LocalTxRetryError};
+
+/// Absolute monotonic deadlines minted once by the retry runner and shared by every attempt.
+///
+/// Fields and constructor stay private: callers can copy the token, but cannot reset either
+/// deadline or manufacture a fresh budget. The transaction funnel receives the token as a
+/// mandatory argument and can only use its stage-specific timeout methods.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LocalTxDeadline {
+    operation: tokio::time::Instant,
+    final_settlement: tokio::time::Instant,
+}
+
+macro_rules! deadline_evidence {
+    ($name:ident) => {
+        #[derive(Clone, Copy, Debug)]
+        pub(crate) struct $name {
+            _sealed: (),
+        }
+
+        impl $name {
+            const fn mint() -> Self {
+                Self { _sealed: () }
+            }
+        }
+    };
+}
+
+deadline_evidence!(LocalTxAcquireDeadline);
+deadline_evidence!(LocalTxBeginDeadline);
+deadline_evidence!(LocalTxSetupDeadline);
+deadline_evidence!(LocalTxOperationDeadline);
+deadline_evidence!(LocalTxCommitDeadline);
+deadline_evidence!(LocalTxRollbackDeadline);
+
+/// A stage result whose deadline evidence can only be minted by that stage's narrow API.
+pub(crate) enum LocalTxStageResult<T, E, D> {
+    Complete(T),
+    Failed(E),
+    Deadline { source: Option<E>, evidence: D },
+}
+
+impl LocalTxDeadline {
+    #[allow(clippy::disallowed_methods)]
+    fn mint(budget: LocalTxExecutionBudget) -> Self {
+        let started = tokio::time::Instant::now();
+        Self {
+            operation: started + budget.operation(),
+            final_settlement: started + budget.total(),
+        }
+    }
+
+    pub(crate) async fn acquire<F, T, E>(
+        self,
+        future: F,
+    ) -> LocalTxStageResult<T, E, LocalTxAcquireDeadline>
+    where
+        F: Future<Output = Result<T, E>>,
+    {
+        match self.operation_stage(future).await {
+            Ok(Ok(value)) => LocalTxStageResult::Complete(value),
+            Ok(Err(error)) => LocalTxStageResult::Failed(error),
+            Err(()) => LocalTxStageResult::Deadline {
+                source: None,
+                evidence: LocalTxAcquireDeadline::mint(),
+            },
+        }
+    }
+
+    pub(crate) async fn begin<F, T, E>(
+        self,
+        future: F,
+    ) -> LocalTxStageResult<T, E, LocalTxBeginDeadline>
+    where
+        F: Future<Output = Result<T, E>>,
+    {
+        match self.operation_stage(future).await {
+            Ok(Ok(value)) => LocalTxStageResult::Complete(value),
+            Ok(Err(error)) => LocalTxStageResult::Failed(error),
+            Err(()) => LocalTxStageResult::Deadline {
+                source: None,
+                evidence: LocalTxBeginDeadline::mint(),
+            },
+        }
+    }
+
+    pub(crate) async fn setup<F, T, E>(
+        self,
+        future: F,
+    ) -> LocalTxStageResult<T, E, LocalTxSetupDeadline>
+    where
+        F: Future<Output = Result<T, E>>,
+        E: Error + 'static,
+    {
+        match self.operation_stage(future).await {
+            Ok(Ok(value)) => LocalTxStageResult::Complete(value),
+            Ok(Err(error)) if is_deadline_derived(&error) => LocalTxStageResult::Deadline {
+                source: Some(error),
+                evidence: LocalTxSetupDeadline::mint(),
+            },
+            Ok(Err(error)) => LocalTxStageResult::Failed(error),
+            Err(()) => LocalTxStageResult::Deadline {
+                source: None,
+                evidence: LocalTxSetupDeadline::mint(),
+            },
+        }
+    }
+
+    pub(crate) async fn operation<F, T, E>(
+        self,
+        future: F,
+    ) -> LocalTxStageResult<T, E, LocalTxOperationDeadline>
+    where
+        F: Future<Output = Result<T, E>>,
+        E: Error + 'static,
+    {
+        match self.operation_stage(future).await {
+            Ok(Ok(value)) => LocalTxStageResult::Complete(value),
+            Ok(Err(error)) if is_deadline_derived(&error) => LocalTxStageResult::Deadline {
+                source: Some(error),
+                evidence: LocalTxOperationDeadline::mint(),
+            },
+            Ok(Err(error)) => LocalTxStageResult::Failed(error),
+            Err(()) => LocalTxStageResult::Deadline {
+                source: None,
+                evidence: LocalTxOperationDeadline::mint(),
+            },
+        }
+    }
+
+    pub(crate) async fn commit<F>(
+        self,
+        future: F,
+    ) -> LocalTxStageResult<(), sqlx::Error, LocalTxCommitDeadline>
+    where
+        F: Future<Output = Result<(), sqlx::Error>>,
+    {
+        match self.settlement_stage(future).await {
+            Ok(Ok(())) => LocalTxStageResult::Complete(()),
+            Ok(Err(error)) if is_deadline_derived(&error) => LocalTxStageResult::Deadline {
+                source: Some(error),
+                evidence: LocalTxCommitDeadline::mint(),
+            },
+            Ok(Err(error)) => LocalTxStageResult::Failed(error),
+            Err(()) => LocalTxStageResult::Deadline {
+                source: None,
+                evidence: LocalTxCommitDeadline::mint(),
+            },
+        }
+    }
+
+    pub(crate) async fn rollback<F>(
+        self,
+        future: F,
+    ) -> LocalTxStageResult<(), sqlx::Error, LocalTxRollbackDeadline>
+    where
+        F: Future<Output = Result<(), sqlx::Error>>,
+    {
+        match self.settlement_stage(future).await {
+            Ok(Ok(())) => LocalTxStageResult::Complete(()),
+            Ok(Err(error)) if is_deadline_derived(&error) => LocalTxStageResult::Deadline {
+                source: Some(error),
+                evidence: LocalTxRollbackDeadline::mint(),
+            },
+            Ok(Err(error)) => LocalTxStageResult::Failed(error),
+            Err(()) => LocalTxStageResult::Deadline {
+                source: None,
+                evidence: LocalTxRollbackDeadline::mint(),
+            },
+        }
+    }
+
+    async fn operation_stage<F: Future>(self, future: F) -> Result<F::Output, ()> {
+        #[allow(clippy::disallowed_methods)]
+        if tokio::time::Instant::now() >= self.operation {
+            return Err(());
+        }
+        tokio::time::timeout_at(self.operation, future)
+            .await
+            .map_err(|_| ())
+    }
+
+    async fn settlement_stage<F: Future>(self, future: F) -> Result<F::Output, ()> {
+        #[allow(clippy::disallowed_methods)]
+        if tokio::time::Instant::now() >= self.final_settlement {
+            return Err(());
+        }
+        tokio::time::timeout_at(self.final_settlement, future)
+            .await
+            .map_err(|_| ())
+    }
+
+    /// Server-side operation limits, both strictly inside the client operation deadline.
+    pub(crate) fn server_timeout_millis(self) -> (u64, u64) {
+        #[allow(clippy::disallowed_methods)]
+        let remaining = self
+            .operation
+            .saturating_duration_since(tokio::time::Instant::now());
+        let remaining_millis = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX);
+        let statement_millis = remaining_millis.saturating_sub(2).max(1);
+        let lock_millis = statement_millis.min(5_000);
+        (statement_millis, lock_millis)
+    }
+
+    async fn backoff(self, ceiling: Duration) -> TxRetryBackoff {
+        #[cfg(all(test, feature = "integration"))]
+        let delay = TEST_LOCALTX_BACKOFF_DELAY
+            .try_with(|delay| *delay)
+            .unwrap_or_else(|_| full_jitter(ceiling));
+        #[cfg(not(all(test, feature = "integration")))]
+        let delay = full_jitter(ceiling);
+        self.wait_backoff(delay).await
+    }
+
+    async fn wait_backoff(self, delay: Duration) -> TxRetryBackoff {
+        #[allow(clippy::disallowed_methods)]
+        let remaining = self
+            .operation
+            .saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() || delay >= remaining {
+            return TxRetryBackoff::Exhausted;
+        }
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        #[allow(clippy::disallowed_methods)]
+        if tokio::time::Instant::now() >= self.operation {
+            TxRetryBackoff::Exhausted
+        } else {
+            TxRetryBackoff::Continue
+        }
+    }
+}
+
+fn is_deadline_derived(error: &(dyn Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(source) = current {
+        if matches!(
+            source.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::Database(database))
+                if database.code().as_deref() == Some("57014")
+        ) {
+            return true;
+        }
+        current = source.source();
+    }
+    false
+}
+
+#[cfg(all(test, feature = "integration"))]
+tokio::task_local! {
+    static TEST_LOCALTX_EXECUTION_BUDGET: LocalTxExecutionBudget;
+}
+
+#[cfg(all(test, feature = "integration"))]
+tokio::task_local! {
+    static TEST_LOCALTX_BACKOFF_DELAY: Duration;
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) async fn with_localtx_execution_budget_for_test<T>(
+    budget: LocalTxExecutionBudget,
+    future: impl Future<Output = T>,
+) -> T {
+    TEST_LOCALTX_EXECUTION_BUDGET.scope(budget, future).await
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) async fn with_localtx_backoff_delay_for_test<T>(
+    delay: Duration,
+    future: impl Future<Output = T>,
+) -> T {
+    TEST_LOCALTX_BACKOFF_DELAY.scope(delay, future).await
+}
+
+#[cfg(test)]
+pub(crate) fn localtx_deadline_for_test() -> LocalTxDeadline {
+    LocalTxDeadline::mint(LocalTxExecutionBudget::DEFAULT)
+}
+
+fn localtx_execution_budget() -> LocalTxExecutionBudget {
+    #[cfg(all(test, feature = "integration"))]
+    if let Ok(budget) = TEST_LOCALTX_EXECUTION_BUDGET.try_with(|budget| *budget) {
+        return budget;
+    }
+    LocalTxExecutionBudget::DEFAULT
+}
 
 /// Closed Postgres retry-routing boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -214,12 +500,13 @@ pub(crate) async fn run_pg_tx_retry<T, E, Op, OpFut, Classify>(
     classify: Classify,
 ) -> Result<T, E>
 where
-    Op: FnMut(u32) -> OpFut,
+    Op: FnMut(u32, LocalTxDeadline) -> OpFut,
     OpFut: Future<Output = LocalTxAttempt<T, E>>,
     Classify: Fn(&E) -> TxRetryClass,
     E: Error + Send + Sync + 'static,
 {
-    let (result, _, settlement) = run_pg_tx_retry_core(boundary, op, classify, |_, _, _| {}).await;
+    let (result, _, settlement) =
+        run_pg_tx_retry_core(boundary, op, classify, |_, _, _, _| {}, |_| {}).await;
     record_generic_settlement(boundary, settlement);
     result
 }
@@ -237,7 +524,7 @@ pub(crate) async fn run_pg_localtx_retry<M, T, E, Op, OpFut, Classify>(
 ) -> Result<T, E>
 where
     M: PgLocalTxOperation,
-    Op: FnMut(u32) -> OpFut,
+    Op: FnMut(u32, LocalTxDeadline) -> OpFut,
     OpFut: Future<Output = LocalTxAttempt<T, E>>,
     Classify: Fn(&E) -> TxRetryClass,
     E: Error + Send + Sync + 'static,
@@ -246,34 +533,42 @@ where
         M::BOUNDARY,
         op,
         classify,
-        |attempt, retry_class, settlement| {
+        |attempt, retry_class, settlement, stages| {
             observation.record_failed_attempt(attempt, retry_class, settlement);
+            for stage in stages.into_iter().flatten() {
+                observation.record_deadline_exceeded(stage);
+            }
         },
+        |stage| observation.record_deadline_exceeded(stage),
     )
     .await;
     observation.finish(report.attempts(), report.final_status(), settlement);
     result
 }
 
-async fn run_pg_tx_retry_core<T, E, Op, OpFut, Classify, OnFailed>(
+async fn run_pg_tx_retry_core<T, E, Op, OpFut, Classify, OnFailed, OnDeadline>(
     boundary: PgTxRetryBoundary,
     mut op: Op,
     classify: Classify,
     on_failed: OnFailed,
+    on_deadline: OnDeadline,
 ) -> (Result<T, E>, TxRetryReport, Option<LocalTxFinalStatus>)
 where
-    Op: FnMut(u32) -> OpFut,
+    Op: FnMut(u32, LocalTxDeadline) -> OpFut,
     OpFut: Future<Output = LocalTxAttempt<T, E>>,
     Classify: Fn(&E) -> TxRetryClass,
-    OnFailed: Fn(u32, TxRetryClass, Option<LocalTxFinalStatus>),
+    OnFailed: Fn(u32, TxRetryClass, Option<LocalTxFinalStatus>, [Option<LocalTxDeadlineStage>; 2]),
+    OnDeadline: Fn(LocalTxDeadlineStage),
     E: Error + Send + Sync + 'static,
 {
+    let deadline = LocalTxDeadline::mint(localtx_execution_budget());
     let last_settlement = Mutex::new(None);
     let last_reason = Mutex::new("none");
+    let backoff_exhausted = AtomicBool::new(false);
     let (result, report) = run_tx_retry(
         TxRetryPolicy::default(),
         |attempt| {
-            let future = op(attempt);
+            let future = op(attempt, deadline);
             let last_settlement = &last_settlement;
             let on_failed = &on_failed;
             let classify = &classify;
@@ -288,7 +583,7 @@ where
                 }
                 let result = attempt_result.into_retry_result(classify);
                 if let Err(error) = &result {
-                    on_failed(attempt, error.class(), settlement);
+                    on_failed(attempt, error.class(), settlement, error.deadline_stages());
                 }
                 result
             }
@@ -303,9 +598,21 @@ where
             record_attempt(boundary, class, reason);
             class
         },
-        sleep_delay,
+        |delay| {
+            let backoff_exhausted = &backoff_exhausted;
+            async move {
+                let outcome = deadline.backoff(delay).await;
+                if outcome == TxRetryBackoff::Exhausted {
+                    backoff_exhausted.store(true, Ordering::Relaxed);
+                }
+                outcome
+            }
+        },
     )
     .await;
+    if backoff_exhausted.load(Ordering::Relaxed) {
+        on_deadline(LocalTxDeadlineStage::Backoff);
+    }
     let reason = match last_reason.into_inner() {
         Ok(reason) => reason,
         Err(poisoned) => poisoned.into_inner(),
@@ -320,12 +627,6 @@ where
         report,
         settlement,
     )
-}
-
-async fn sleep_delay(delay: Duration) {
-    if !delay.is_zero() {
-        tokio::time::sleep(full_jitter(delay)).await;
-    }
 }
 
 static RETRY_JITTER_SEQUENCE: LazyLock<AtomicU64> = LazyLock::new(|| {
@@ -463,17 +764,125 @@ fn record_final(boundary: PgTxRetryBoundary, report: TxRetryReport, reason: &'st
 mod tests {
     #[cfg(feature = "domain-audit")]
     use super::{AUDIT_LIST_TENANT_APPEND_BOUNDARY, PgLocalTxOperation};
-    #[cfg(feature = "domain-settings")]
-    use super::{SETTINGS_SECRET_BOUNDARY, classify_config_repo_error, classify_secret_repo_error};
     use super::{
-        classify_sqlstate, classify_sqlx_error, full_jitter, full_jitter_from_sample, retry_reason,
+        LocalTxDeadline, LocalTxStageResult, classify_sqlstate, classify_sqlx_error, full_jitter,
+        full_jitter_from_sample, retry_reason,
     };
     #[cfg(feature = "domain-settings")]
+    use super::{SETTINGS_SECRET_BOUNDARY, classify_config_repo_error, classify_secret_repo_error};
+    #[cfg(feature = "domain-settings")]
     use crate::cotx::commit_unknown;
-    use consistency::TxRetryClass;
+    use consistency::{LocalTxExecutionBudget, TxRetryBackoff, TxRetryClass};
     #[cfg(feature = "domain-settings")]
     use settings::ports::{ConfigRepoError, SecretRepoError};
+    use sqlx::error::{DatabaseError, ErrorKind};
+    use std::borrow::Cow;
+    use std::fmt;
     use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_token_is_absolute_across_copies_and_keeps_settlement_reserve()
+    -> Result<(), consistency::LocalTxExecutionBudgetError> {
+        let budget =
+            LocalTxExecutionBudget::new(Duration::from_millis(10), Duration::from_millis(2))?;
+        let deadline = LocalTxDeadline::mint(budget);
+        let copied_for_next_attempt = deadline;
+        assert_eq!(deadline.operation, copied_for_next_attempt.operation);
+        assert_eq!(
+            deadline.final_settlement,
+            copied_for_next_attempt.final_settlement
+        );
+
+        tokio::time::advance(budget.operation()).await;
+        assert!(matches!(
+            deadline
+                .operation(async { Ok::<(), FakeDeadlineError>(()) })
+                .await,
+            LocalTxStageResult::Deadline { .. }
+        ));
+        assert!(matches!(
+            deadline.commit(async { Ok(()) }).await,
+            LocalTxStageResult::Complete(())
+        ));
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_backoff_exhausts_without_sleeping_past_operation_budget()
+    -> Result<(), consistency::LocalTxExecutionBudgetError> {
+        let budget =
+            LocalTxExecutionBudget::new(Duration::from_millis(10), Duration::from_millis(2))?;
+        let deadline = LocalTxDeadline::mint(budget);
+        tokio::time::advance(Duration::from_millis(7)).await;
+        let before = tokio::time::Instant::now();
+
+        assert_eq!(
+            deadline.wait_backoff(Duration::from_millis(2)).await,
+            TxRetryBackoff::Exhausted
+        );
+        assert_eq!(tokio::time::Instant::now(), before);
+        Ok(())
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("deadline test error")]
+    struct FakeDeadlineError;
+
+    #[derive(Debug)]
+    struct FakeDatabaseError {
+        code: &'static str,
+    }
+
+    impl fmt::Display for FakeDatabaseError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("fake database error")
+        }
+    }
+
+    impl std::error::Error for FakeDatabaseError {}
+
+    impl DatabaseError for FakeDatabaseError {
+        fn message(&self) -> &str {
+            "fake database error"
+        }
+
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed(self.code))
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> ErrorKind {
+            ErrorKind::Other
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_server_timeouts_are_inside_operation_deadline_and_lock_is_capped() {
+        let deadline = LocalTxDeadline::mint(LocalTxExecutionBudget::DEFAULT);
+        let (statement_millis, lock_millis) = deadline.server_timeout_millis();
+        assert_eq!((statement_millis, lock_millis), (7_998, 5_000));
+
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert_eq!(deadline.server_timeout_millis(), (3_998, 3_998));
+
+        tokio::time::advance(Duration::from_millis(3_999)).await;
+        assert_eq!(
+            deadline.server_timeout_millis(),
+            (1, 1),
+            "sub-3ms residual windows must retain the one millisecond server floor"
+        );
+    }
 
     #[cfg(feature = "domain-audit")]
     #[test]
@@ -549,6 +958,12 @@ mod tests {
     fn retry_diagnostics_use_closed_reason_and_full_jitter() {
         let error = sqlx::Error::PoolTimedOut;
         assert_eq!(retry_reason(&error), "pool_timeout");
+        let deadline = sqlx::Error::Database(Box::new(FakeDatabaseError { code: "57014" }));
+        assert_eq!(
+            retry_reason(&deadline),
+            "database",
+            "typed LocalTx deadline stages are the only deadline signal"
+        );
 
         let ceiling = Duration::from_millis(10);
         for _ in 0..32 {

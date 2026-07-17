@@ -1330,7 +1330,7 @@ impl PgConfigRepo {
         // 事务回滚（outbox 不落库）；storage 失败 → Storage。
         run_pg_tx_retry(
             SETTINGS_CONFIG_BOUNDARY,
-            |_attempt| {
+            |_attempt, deadline| {
                 let mutation = mutation.clone();
                 let encoded = encoded.clone();
                 let outbox_entry = outbox_entry.clone();
@@ -1341,6 +1341,7 @@ impl PgConfigRepo {
                     self.write_pool
                         .retry_co_tx_with_outbox(
                             scope,
+                            deadline,
                             &outbox_entry,
                             &env,
                             move |conn| {

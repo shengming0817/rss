@@ -321,7 +321,7 @@ impl SessionLifecycle for PgSessionLifecycle {
         let logout_faults = Arc::clone(&self.logout_faults);
         run_pg_localtx_retry(
             observation,
-            |_attempt| {
+            |_attempt, deadline| {
                 let tenant_uuid = tenant_uuid.clone();
                 let session_id = session_id.clone();
                 #[cfg(all(test, feature = "integration"))]
@@ -332,6 +332,7 @@ impl SessionLifecycle for PgSessionLifecycle {
                     self.write_pool
                         .retry_write(
                             scope,
+                            deadline,
                             move |tx| {
                                 Box::pin(async move {
                                     #[cfg(all(test, feature = "integration"))]

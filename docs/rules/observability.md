@@ -175,15 +175,16 @@ label 闭值集纪律：
 
 ### LocalTx Settlement Metrics（#1705）
 
-LocalTx-aware Postgres retry 除上述通用 retry-loop 指标外，还经 `observ::LocalTxObservation` 发射契约归属与
-真实 transaction settlement。两组指标正交：`tx_retry_*` 描述 retry engine，`localtx_*` 描述已观测到的
-LocalTx 结算；禁止从 `TxRetryFinalStatus` 反推 commit / rollback 结果。
+LocalTx-aware Postgres retry 除上述通用 retry-loop 指标外，还经 `observ::LocalTxObservation` 发射契约归属的
+attempt、deadline 与真实 transaction settlement。两组指标正交：`tx_retry_*` 描述 retry engine，`localtx_*`
+描述 contract-attributed LocalTx 执行；禁止从 `TxRetryFinalStatus` 或 deadline stage 反推 commit / rollback 结果。
 
 | metric | 类型 | label | 语义 |
 |--------|------|-------|------|
 | `localtx_retry_attempts_total` | Counter | `domain`,`contract_id`,`boundary`,`retry_class` | LocalTx 失败 attempt 的 settlement-safe retry 分类 |
 | `localtx_final_total` | Counter | `domain`,`contract_id`,`boundary`,`final_status` | 一次 LocalTx retry invocation 最后真实可观测的结算状态 |
 | `localtx_attempts` | Histogram | `domain`,`contract_id`,`boundary`,`final_status` | 有真实终态的 invocation 实际 attempt 数 |
+| `localtx_deadline_exceeded_total` | Counter | `domain`,`contract_id`,`boundary`,`stage` | monotonic deadline 在闭阶段耗尽的 diagnostic-only 计数；不分页且不表示结算结果 |
 | `postgres_localtx_connection_quarantine_total` | Counter | `stage` | acquire 后未获安全复用 ACK 而物理隔离的 PostgreSQL 连接；stage 闭合为 `begin`/`body`/`commit`/`rollback` |
 
 label 与 trace 字段纪律：
@@ -195,15 +196,17 @@ label 与 trace 字段纪律：
   opaque command；`PgSecretUnitOfWork::publish_internal` 与 `republish` 使用不携带 observation 的独立 command 并只发
   通用 `tx_retry_*` / `tx_settlement_*`。adapter 自行调用 secret-publish factory、手写 observation，或给 internal/rollback 路径发
   `localtx_*`，都属于 contract attribution 污染。
-- `boundary`、`retry_class`、`final_status` 分别闭合于 `LocalTxBoundary::as_label()`、
-  `TxRetryClass::as_label()`、`LocalTxFinalStatus::as_label()`；当前终态为 `committed` / `rolled_back` /
-  `rollback_failed` / `commit_unknown`。
+- `boundary`、`retry_class`、`final_status`、deadline `stage` 分别闭合于
+  `LocalTxBoundary::as_label()`、`TxRetryClass::as_label()`、`LocalTxFinalStatus::as_label()`、
+  `LocalTxDeadlineStage::as_label()`；deadline stage 固定为 `acquire` / `begin` / `setup` / `operation` /
+  `backoff` / `commit` / `rollback`，当前终态为 `committed` / `rolled_back` / `rollback_failed` /
+  `commit_unknown`。
 - `Unsettled` 表示当前 attempt 在 begin 前失败、没有 transaction settlement：可以按 retry class 有界重试，
   但不得伪造 `final_status`。invocation 全程只有 `Unsettled` 时不发 final；若早先 attempt 已有真实 settlement，
   后续 `Unsettled` 不擦除该最后已观测状态，histogram 的 attempts 仍记录 invocation 总次数。
 - `commit_unknown` / `rollback_failed` 强制不可重试，retry exhausted 也在契约级 LocalTx span 下发 warn；普通
   attempt/completion 只发 debug。trace invocation/attempt/completion 只携 contract、closed label、attempt count；
-  tenant、业务 key、SQL、payload 与错误文本不得进入 metric label。
+  tenant、业务 key、SQL、payload、错误文本与 duration 不得进入 metric label。
 - connection quarantine 与 settlement 正交：future cancellation/panic 可能没有 `LocalTxFinalStatus`，但 armed
   lease Drop 必须以私有闭阶段发射 `postgres_localtx_connection_quarantine_total` 和同阶段结构化 WARN 后
   `close_on_drop()`。该信号不得携 tenant、contract、SQL 或错误文本，也不得据此伪造 transaction final status。
@@ -213,7 +216,9 @@ label 与 trace 字段纪律：
   `docs/ops/localtx-alerts.rules.yaml` 与
   `docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md` 承载。
   仅 `commit_unknown` / `rollback_failed` 是需要人工核实真实数据库状态的 actionable page；retry exhausted
-  保持 dashboard/trace 诊断信号，禁止从通用 `tx_retry_*` 反推或重复告警 LocalTx settlement。
+  与 `localtx_deadline_exceeded_total` 保持 dashboard/trace 诊断信号，不新增 paging alert，禁止从通用
+  `tx_retry_*`、deadline stage 反推或重复告警 LocalTx settlement。typed deadline metric 是共享运维契约，
+  不建立裸 PostgreSQL deadline metric 的第二套 dashboard/runbook truth。
 
 ### Outbox Relay Metrics（#1209）
 

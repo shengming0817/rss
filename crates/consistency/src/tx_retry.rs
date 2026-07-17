@@ -168,6 +168,15 @@ pub struct TxRetryReport {
     final_status: TxRetryFinalStatus,
 }
 
+/// Result of the runtime-owned backoff step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxRetryBackoff {
+    /// The delay completed and another attempt may begin.
+    Continue,
+    /// The shared execution budget ended before another attempt could begin.
+    Exhausted,
+}
+
 impl TxRetryReport {
     /// Number of attempts actually executed.
     pub fn attempts(self) -> u32 {
@@ -195,7 +204,7 @@ where
     OpFut: Future<Output = Result<T, E>>,
     Classify: Fn(&E) -> TxRetryClass,
     Sleep: FnMut(Duration) -> SleepFut,
-    SleepFut: Future<Output = ()>,
+    SleepFut: Future<Output = TxRetryBackoff>,
 {
     let mut attempt = 1;
     loop {
@@ -212,10 +221,22 @@ where
             Err(error) => {
                 let class = classify(&error);
                 if policy.should_retry(class, attempt) {
-                    drop(error);
-                    sleep(policy.delay_after(attempt)).await;
-                    attempt = attempt.saturating_add(1);
-                    continue;
+                    match sleep(policy.delay_after(attempt)).await {
+                        TxRetryBackoff::Continue => {
+                            drop(error);
+                            attempt = attempt.saturating_add(1);
+                            continue;
+                        }
+                        TxRetryBackoff::Exhausted => {
+                            return (
+                                Err(error),
+                                TxRetryReport {
+                                    attempts: attempt,
+                                    final_status: TxRetryFinalStatus::Exhausted,
+                                },
+                            );
+                        }
+                    }
                 }
                 let status = if class == TxRetryClass::Transient {
                     TxRetryFinalStatus::Exhausted
@@ -241,7 +262,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryPolicyError, run_tx_retry,
+        TxRetryBackoff, TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryPolicyError,
+        run_tx_retry,
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,7 +283,9 @@ mod tests {
         }
     }
 
-    async fn no_sleep(_: Duration) {}
+    async fn no_sleep(_: Duration) -> TxRetryBackoff {
+        TxRetryBackoff::Continue
+    }
 
     #[test]
     fn retry_class_labels_are_stable_and_distinct() {
@@ -477,7 +501,7 @@ mod tests {
             classify,
             |delay| {
                 slept.set(delay);
-                async {}
+                async { TxRetryBackoff::Continue }
             },
         )
         .await;
@@ -490,7 +514,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_drops_failed_error_before_backoff_sleep() {
+    async fn retry_retains_failed_error_until_backoff_decision() {
         #[derive(Debug)]
         struct DropSentinel {
             dropped: Rc<Cell<bool>>,
@@ -528,8 +552,8 @@ mod tests {
             },
             |_error| TxRetryClass::Transient,
             move |_delay| {
-                observed_for_sleep.set(dropped.get());
-                async {}
+                observed_for_sleep.set(!dropped.get());
+                async { TxRetryBackoff::Continue }
             },
         )
         .await;
@@ -557,6 +581,26 @@ mod tests {
 
         assert_eq!(result, Err(FakeError::Transient));
         assert_eq!(report.attempts(), 2);
+        assert_eq!(report.final_status(), TxRetryFinalStatus::Exhausted);
+    }
+
+    #[tokio::test]
+    async fn backoff_exhaustion_returns_last_error_without_starting_an_attempt() {
+        let calls = Cell::new(0);
+        let (result, report) = run_tx_retry(
+            TxRetryPolicy::default(),
+            |_attempt| {
+                calls.set(calls.get() + 1);
+                async { Err::<(), _>(FakeError::Transient) }
+            },
+            classify,
+            |_delay| async { TxRetryBackoff::Exhausted },
+        )
+        .await;
+
+        assert_eq!(result, Err(FakeError::Transient));
+        assert_eq!(calls.get(), 1);
+        assert_eq!(report.attempts(), 1);
         assert_eq!(report.final_status(), TxRetryFinalStatus::Exhausted);
     }
 

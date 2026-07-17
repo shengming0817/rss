@@ -1,6 +1,8 @@
 #![allow(clippy::expect_used)]
 
-use consistency::{LocalTxBoundary, LocalTxFinalStatus, TxRetryClass, TxRetryFinalStatus};
+use consistency::{
+    LocalTxBoundary, LocalTxDeadlineStage, LocalTxFinalStatus, TxRetryClass, TxRetryFinalStatus,
+};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use observ::LocalTxObservation;
 use std::{
@@ -71,6 +73,38 @@ fn emits_closed_retry_and_final_metrics() {
     assert!(rendered.contains(
         "localtx_attempts_sum{domain=\"identity\",contract_id=\"identity.password-change\",boundary=\"single_domain\",final_status=\"committed\"} 2"
     ));
+}
+
+#[test]
+fn emits_closed_deadline_stage_metrics_without_sensitive_labels() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+
+    metrics::with_local_recorder(&recorder, || {
+        let observation = LocalTxObservation::new(route(), LocalTxBoundary::SingleDomain);
+        for stage in LocalTxDeadlineStage::ALL {
+            observation.record_deadline_exceeded(*stage);
+        }
+        observation.finish(1, TxRetryFinalStatus::Exhausted, None);
+    });
+
+    let rendered = handle.render();
+    for stage in LocalTxDeadlineStage::ALL {
+        assert!(
+            rendered.contains(&format!(
+                "localtx_deadline_exceeded_total{{domain=\"identity\",contract_id=\"identity.password-change\",boundary=\"single_domain\",stage=\"{}\"}} 1",
+                stage.as_label()
+            )),
+            "missing deadline stage {}: {rendered}",
+            stage.as_label()
+        );
+    }
+    for forbidden in ["tenant_id", "sql", "payload", "error"] {
+        assert!(
+            !rendered.contains(forbidden),
+            "leaked label {forbidden}: {rendered}"
+        );
+    }
 }
 
 #[test]

@@ -557,7 +557,7 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditWriteRepo for PgAuditRepo<M> {
         let record = Arc::new(record);
         run_pg_tx_retry(
             AUDIT_APPEND_BOUNDARY,
-            |_attempt| {
+            |_attempt, deadline| {
                 let tenant_uuid = tenant_uuid.clone();
                 let record = Arc::clone(&record);
                 let hasher = Arc::clone(&self.hasher);
@@ -565,6 +565,7 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditWriteRepo for PgAuditRepo<M> {
                     self.write_pool
                         .retry_write(
                             scope,
+                            deadline,
                             move |tx| {
                                 Box::pin(async move {
                                     append_in_tx(

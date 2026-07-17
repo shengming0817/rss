@@ -87,12 +87,31 @@ This retry-pressure signal is diagnostic-only; it does not change the meaning of
 Use these dashboard panels for diagnosis:
 
 - failed attempt rate by `domain`, `contract_id`, `boundary`, and `retry_class`;
+- deadline exhaustion rate by `domain`, `contract_id`, `boundary`, and closed `stage`;
 - final settlement rate by `domain`, `contract_id`, `boundary`, and `final_status`;
 - P95 attempts by `domain`, `contract_id`, `boundary`, and `final_status`.
 
 Correlate sustained transient/exhausted WARN evidence with database availability and request error
 rate. Promote it to a deployment-specific warning only when a measured SLO supplies a stable
 threshold and the alert has a distinct operator action.
+
+## Deadline exhaustion is diagnostic only
+
+`localtx_deadline_exceeded_total{domain,contract_id,boundary,stage}` is the only shared LocalTx
+deadline dashboard signal. Its `stage` is closed to `acquire`, `begin`, `setup`, `operation`,
+`backoff`, `commit`, or `rollback`; tenant, SQL, business key, error text, duration, payload, and raw
+deadline never become labels. The metric has no paging rule in `docs/ops/localtx-alerts.rules.yaml`.
+
+Use `acquire` for pool pressure, `begin` / `setup` for transaction-start and GUC installation,
+`operation` for the mutation body, and `backoff` for a shared budget that ended before another
+attempt. For `commit` / `rollback`, correlate `localtx_final_total` and connection quarantine, then
+verify authoritative state before any reconciliation. A deadline stage is timing evidence, not
+settlement evidence: it must not trigger replay or be converted into `rolled_back`,
+`rollback_failed`, or `commit_unknown` without the corresponding typed settlement result.
+
+This diagnostic remains on the shared dashboard even when retry pressure is otherwise low. Escalate
+through existing database availability, pool saturation, request error-rate, or unsafe-settlement
+alerts only when their own conditions are met; do not add a deployment-independent deadline page.
 
 ## Connection quarantine
 

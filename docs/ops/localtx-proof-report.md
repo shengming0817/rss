@@ -74,7 +74,7 @@ Schema v1 的 exact golden 是
 
 每份报告的 operations 区只引用已存在的运维 carrier：
 
-- metrics：`localtx_retry_attempts_total`、`localtx_final_total`、`localtx_attempts`；
+- metrics：`localtx_retry_attempts_total`、`localtx_final_total`、`localtx_attempts`、`localtx_deadline_exceeded_total`；
 - unsafe-settlement alerts：`LocalTxCommitUnknown`、`LocalTxRollbackFailed`；
 - rules：`docs/ops/localtx-alerts.rules.yaml`；
 - runbook：`docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md`。
@@ -87,8 +87,9 @@ path 清单。生成报告前，xtask 会把 descriptor 与真实 alert YAML 做
 `referenceOnly`，不会改变 `status`，也不声称执行了 promtool 或真实告警。
 
 `commit_unknown` 与 `rollback_failed` 都可能已经产生 durable effect，禁止自动或盲目 replay。retry-pressure
-是 diagnostic-only：retry exhaustion 不 page；诊断时使用上述指标并结合数据库可用性与请求错误率，告警语义仍
-以 rules 和 runbook 为准。
+与 `deadline-diagnostic` 都是 diagnostic-only：retry exhaustion 和
+`localtx_deadline_exceeded_total` 不 page；诊断时使用 typed metric 的闭阶段并结合数据库可用性、pool pressure
+与请求错误率，不能从 stage 推断 settlement。告警语义仍以既有 rules 和 runbook 为准。
 
 ## CI artifact discovery
 

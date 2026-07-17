@@ -18,6 +18,10 @@
       {
         "name": "localtx_attempts",
         "purpose": "settled-attempt-count"
+      },
+      {
+        "name": "localtx_deadline_exceeded_total",
+        "purpose": "deadline-diagnostic"
       }
     ],
     "alerts": [

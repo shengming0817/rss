@@ -7,7 +7,7 @@ Evidence scope: `staticInventory`. This artifact does not claim real-backend exe
 ## Operations
 
 - Validation: `referenceOnly`; included in report status: `false`
-- Metrics: `localtx_retry_attempts_total`, `localtx_final_total`, `localtx_attempts`
+- Metrics: `localtx_retry_attempts_total`, `localtx_final_total`, `localtx_attempts`, `localtx_deadline_exceeded_total`
 - Actionable alerts: `LocalTxCommitUnknown`, `LocalTxRollbackFailed`
 - Retry pressure: `diagnosticOnly` via `localtx_retry_attempts_total`
 - Rules: `docs/ops/localtx-alerts.rules.yaml`

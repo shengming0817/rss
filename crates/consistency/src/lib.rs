@@ -52,7 +52,8 @@ pub use inbox::{
     InboxReceiptContextError, InboxState, InboxStatus, InboxStatusError, InboxStore,
 };
 pub use localtx::{
-    LocalTxBoundary, LocalTxCommitUnknown, LocalTxFinalStatus, LocalTxModel, LocalTxRetry,
+    LocalTxBoundary, LocalTxCommitUnknown, LocalTxDeadlineStage, LocalTxExecutionBudget,
+    LocalTxExecutionBudgetError, LocalTxFinalStatus, LocalTxModel, LocalTxRetry,
 };
 pub use outbox::{
     BacklogMetricSample, BacklogSample, Disposition, EventEntry, EventTopic, EventTopicError,
@@ -80,8 +81,8 @@ pub use saga::{
     SagaStep, SagaStepCtx, StepName, StepNameError,
 };
 pub use tx_retry::{
-    TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryPolicyError, TxRetryReport,
-    run_tx_retry,
+    TxRetryBackoff, TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryPolicyError,
+    TxRetryReport, run_tx_retry,
 };
 
 #[cfg(test)]

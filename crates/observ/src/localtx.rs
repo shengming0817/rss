@@ -10,7 +10,9 @@
 //! `CONTRACT-BINDING-FUNNEL-01`; this façade does not claim to Hard-seal the public
 //! `HttpRouteBinding::from_static` source.
 
-use consistency::{LocalTxBoundary, LocalTxFinalStatus, TxRetryClass, TxRetryFinalStatus};
+use consistency::{
+    LocalTxBoundary, LocalTxDeadlineStage, LocalTxFinalStatus, TxRetryClass, TxRetryFinalStatus,
+};
 use std::marker::PhantomData;
 use tracing::{Level, Span, field};
 use vocab::{HttpRouteBinding, http::LocalTx};
@@ -21,13 +23,15 @@ pub enum LocalTxMetric {
     RetryAttempts,
     FinalSettlements,
     SettledAttempts,
+    DeadlineExceeded,
 }
 
 impl LocalTxMetric {
-    const ALL: [Self; 3] = [
+    const ALL: [Self; 4] = [
         Self::RetryAttempts,
         Self::FinalSettlements,
         Self::SettledAttempts,
+        Self::DeadlineExceeded,
     ];
 
     #[must_use]
@@ -36,6 +40,7 @@ impl LocalTxMetric {
             Self::RetryAttempts => "localtx_retry_attempts_total",
             Self::FinalSettlements => "localtx_final_total",
             Self::SettledAttempts => "localtx_attempts",
+            Self::DeadlineExceeded => "localtx_deadline_exceeded_total",
         }
     }
 
@@ -45,6 +50,7 @@ impl LocalTxMetric {
             Self::RetryAttempts => LocalTxMetricPurpose::RetryPressureDiagnostic,
             Self::FinalSettlements => LocalTxMetricPurpose::SettlementFinalStatus,
             Self::SettledAttempts => LocalTxMetricPurpose::SettledAttemptCount,
+            Self::DeadlineExceeded => LocalTxMetricPurpose::DeadlineDiagnostic,
         }
     }
 }
@@ -55,6 +61,7 @@ pub enum LocalTxMetricPurpose {
     RetryPressureDiagnostic,
     SettlementFinalStatus,
     SettledAttemptCount,
+    DeadlineDiagnostic,
 }
 
 impl LocalTxMetricPurpose {
@@ -64,6 +71,7 @@ impl LocalTxMetricPurpose {
             Self::RetryPressureDiagnostic => "retry-pressure-diagnostic",
             Self::SettlementFinalStatus => "settlement-final-status",
             Self::SettledAttemptCount => "settled-attempt-count",
+            Self::DeadlineDiagnostic => "deadline-diagnostic",
         }
     }
 }
@@ -249,6 +257,23 @@ impl<M> LocalTxObservation<M> {
     ) {
         self.increment_failed_attempt(retry_class);
         self.trace_failed_attempt(attempt, retry_class, settlement);
+    }
+
+    /// Record one typed deadline stage without exposing dynamic labels to the adapter.
+    pub fn record_deadline_exceeded(&self, stage: LocalTxDeadlineStage) {
+        metrics::counter!(
+            LocalTxMetric::DeadlineExceeded.name(),
+            "domain" => self.domain,
+            "contract_id" => self.contract_id,
+            "boundary" => self.boundary.as_label(),
+            "stage" => stage.as_label(),
+        )
+        .increment(1);
+        tracing::warn!(
+            parent: &self.span,
+            deadline_stage = stage.as_label(),
+            "LocalTx execution deadline exceeded"
+        );
     }
 
     fn increment_failed_attempt(&self, retry_class: TxRetryClass) {
@@ -476,7 +501,7 @@ mod operations_descriptor_tests {
     #[test]
     fn real_descriptor_is_non_vacuous_and_consistent() {
         let descriptor = localtx_operations_descriptor();
-        assert_eq!(descriptor.metrics().len(), 3);
+        assert_eq!(descriptor.metrics().len(), 4);
         assert_eq!(descriptor.alerts().len(), 2);
         assert!(descriptor.is_consistent());
     }

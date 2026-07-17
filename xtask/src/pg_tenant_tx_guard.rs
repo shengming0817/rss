@@ -15,17 +15,20 @@
 //! This guard is a Medium backstop for the Hard typed wrapper in `adapters/postgres/src/cotx/`
 //! and the canonical fact funnels in `outbox.rs` / `outbox_cdc.rs`.
 //!
-//! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries" } —
+//! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses|tests::localtx_deadline_guard_rejects_legacy_missing_forged_and_escaped_tokens|tests::localtx_deadline_observation_guard_rejects_rogue_and_fabricated_stages", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries|tests::localtx_deadline_guard_real_workspace_closes_mint_and_nine_dataflows|tests::localtx_deadline_observation_guard_real_workspace_closes_exact_sink" } —
 //! Postgres retry wrappers are confined to their exact config, secret, identity, and audit
 //! mutation boundaries. Each LocalTx owner must consume its command-carried
 //! generated observation beside `retry_write`; `PgSecretUnitOfWork::publish` is the only settings
 //! secret LocalTx owner;
 //! internal publish / republish must use the generic runner and may not impersonate the HTTP
-//! contract.
+//! contract. Deadline observations are emitted only by the typed retry runner: attempt stages must
+//! originate from `LocalTxRetryError::deadline_stages`, and backoff exhaustion from the canonical
+//! runner callback.
 //!
 //! INVARIANT: PG-LOCALTX-QUARANTINE-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::localtx_quarantine_guard_rejects_bypass_and_escape_classes", anti_vacuity = "tests::localtx_quarantine_guard_real_workspace_closes_exact_sites" } —
-//! both production LocalTx write funnels must acquire and begin through the private armed lease,
-//! then tail-settle the exact branded transaction once. The wrapper borrow-binds that transaction
+//! all four LocalTx entries must flow through one typed execution core that acquires and begins
+//! through the private armed lease, then tail-settles the exact branded transaction once. The core
+//! carries one runner-minted deadline policy through every bounded stage. The wrapper borrow-binds that transaction
 //! to its lease's closed quarantine stage; only a top-level consuming commit/rollback ACK may clear
 //! it. The lease, wrapper, settlement dataflow, observability, and `close_on_drop` fallback are
 //! closed against conditional, helper, raw, macro, and disarm escapes.
@@ -78,7 +81,7 @@ pub(crate) enum Rule {
     RetrySitesAbsent,
     /// LocalTx pooled connection bypassed or weakened the armed quarantine lease.
     LocalTxQuarantineBypass,
-    /// The exact LocalTx lease or one of its two production funnel sites disappeared.
+    /// The exact LocalTx lease, unique core, or one of its four production entries disappeared.
     LocalTxQuarantineSitesAbsent,
     /// `secret_refs` mutation escaped the keyed `LockedSecretKey` capability.
     SecretRefMutationBypass,
@@ -113,11 +116,13 @@ impl GovernanceCheck for PgTenantTxGuard {
         let root = crate::workspace_root()?;
         let migrations = load_sql_files(&root.join("adapters/postgres/migrations"))?;
         let files = load_prod_rs(&root.join("adapters/postgres/src"))?;
+        let workspace_files = load_workspace_prod_rs(&root)?;
         let settings_ports_path = root.join("crates/settings/src/ports.rs");
         let settings_ports = std::fs::read_to_string(&settings_ports_path)
             .with_context(|| format!("读 {} 失败", settings_ports_path.display()))?;
         let (summary, mut findings) = scan_guard(&migrations, &files);
         findings.extend(localtx_required_carriers_missing(&files));
+        findings.extend(localtx_deadline_observation_findings(&workspace_files));
         let dlx_path = root.join("adapters/postgres/src/dlx_lifecycle.rs");
         let dlx_source = std::fs::read_to_string(&dlx_path)
             .with_context(|| format!("读 {} 失败", dlx_path.display()))?;
@@ -265,6 +270,47 @@ fn load_prod_rs(dir: &Path) -> Result<Vec<(String, String)>> {
         }
         let rel = path
             .strip_prefix(dir)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push((
+            rel,
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("读 {} 失败", path.display()))?,
+        ));
+    }
+    Ok(files)
+}
+
+fn load_workspace_prod_rs(root: &Path) -> Result<Vec<(String, String)>> {
+    let manifest_path = root.join("Cargo.toml");
+    let manifest_source = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("读 {} 失败", manifest_path.display()))?;
+    let manifest: toml::Value = toml::from_str(&manifest_source)
+        .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
+    let members = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+        .context("workspace.members missing from root Cargo.toml")?;
+
+    let mut paths = Vec::new();
+    for member in members {
+        let member = member
+            .as_str()
+            .context("workspace member must be a string path")?;
+        paths.extend(collect_rs_paths(&root.join(member).join("src"))?);
+    }
+    paths.sort();
+    paths.dedup();
+
+    let mut files = Vec::new();
+    for path in paths {
+        if is_test_file(&path) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
@@ -474,46 +520,7 @@ fn localtx_quarantine_findings(files: &[(String, String)]) -> Vec<Finding> {
             let stripped = strip_cfg_test_modules(source);
             match syn::parse_file(&stripped) {
                 Ok(syntax) => {
-                    let protected_funnels =
-                        ["tenant_scoped_write_inner", "co_tx_with_outbox_inner"];
-                    for function_name in ["tenant_scoped_write_inner", "co_tx_with_outbox_inner"] {
-                        let Some(function) = syntax.items.iter().find_map(|item| match item {
-                            syn::Item::Fn(function) if function.sig.ident == function_name => {
-                                Some(function)
-                            }
-                            _ => None,
-                        }) else {
-                            findings.push(finding(
-                                Rule::LocalTxQuarantineSitesAbsent,
-                                format!("{path}::{function_name}"),
-                                "required LocalTx production write funnel is missing",
-                            ));
-                            continue;
-                        };
-                        if !localtx_funnel_flow_is_closed(function) {
-                            findings.push(finding(
-                                Rule::LocalTxQuarantineBypass,
-                                format!("{path}::{function_name}"),
-                                "LocalTx write funnel must contain one direct top-level acquire/begin/consuming-finish dataflow, with the same symbolic lease and transaction bindings, finish as the tail expression, and no nested, conditional, helper, shadow, reassignment, or early-return escape",
-                            ));
-                        }
-                    }
-                    for function in syntax.items.iter().filter_map(|item| match item {
-                        syn::Item::Fn(function) => Some(function),
-                        _ => None,
-                    }) {
-                        if !protected_funnels
-                            .iter()
-                            .any(|name| function.sig.ident == *name)
-                            && localtx_funnel_call_counts(&function.block).acquire > 0
-                        {
-                            findings.push(finding(
-                                Rule::LocalTxQuarantineBypass,
-                                format!("{path}::{}", function.sig.ident),
-                                "LocalTxConnectionLease acquire is allowed only in the two production LocalTx funnels",
-                            ));
-                        }
-                    }
+                    findings.extend(localtx_transaction_core_findings(path, &syntax));
                 }
                 Err(error) => findings.push(finding(
                     Rule::LocalTxQuarantineBypass,
@@ -566,37 +573,6 @@ fn localtx_quarantine_findings(files: &[(String, String)]) -> Vec<Finding> {
     findings
 }
 
-#[derive(Default)]
-struct LocalTxFunnelCallCounts {
-    acquire: usize,
-    begin: usize,
-    finish: usize,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for LocalTxFunnelCallCounts {
-    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        match exact_expr_path(&call.func).as_deref() {
-            Some("LocalTxConnectionLease::acquire") => self.acquire += 1,
-            Some("finish_local_tx") => self.finish += 1,
-            _ => {}
-        }
-        syn::visit::visit_expr_call(self, call);
-    }
-
-    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if call.method == "begin" {
-            self.begin += 1;
-        }
-        syn::visit::visit_expr_method_call(self, call);
-    }
-}
-
-fn localtx_funnel_call_counts(block: &syn::Block) -> LocalTxFunnelCallCounts {
-    let mut counts = LocalTxFunnelCallCounts::default();
-    syn::visit::Visit::visit_block(&mut counts, block);
-    counts
-}
-
 fn simple_binding(pattern: &syn::Pat) -> Option<String> {
     match pattern {
         syn::Pat::Ident(ident) if ident.subpat.is_none() => Some(ident.ident.to_string()),
@@ -610,81 +586,578 @@ fn local_initializer(local: &syn::Local) -> Option<&syn::Expr> {
     local.init.as_ref().map(|init| init.expr.as_ref())
 }
 
-fn match_awaited_expression(expression: &syn::Expr) -> Option<&syn::Expr> {
-    let syn::Expr::Match(expression) = transparent_expr(expression) else {
-        return None;
-    };
-    let syn::Expr::Await(awaited) = transparent_expr(&expression.expr) else {
-        return None;
-    };
-    Some(transparent_expr(&awaited.base))
+fn localtx_transaction_core_findings(path: &str, syntax: &syn::File) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if !localtx_execution_policy_is_closed(syntax) {
+        findings.push(finding(
+            Rule::LocalTxQuarantineBypass,
+            format!("{path}::LocalTxExecutionPolicy"),
+            "LocalTxExecutionPolicy must privately carry the single deadline token through closed acquire/begin/setup/operation/commit/rollback stage arms and dynamic setup GUC",
+        ));
+    }
+    if !localtx_ingress_graph_is_closed(syntax) {
+        findings.push(finding(
+            Rule::LocalTxQuarantineSitesAbsent,
+            format!("{path}::execute_local_tx"),
+            "all four plain/retry write/outbox entries must exist exactly once and tail-flow through the unique execute_local_tx core with their unchanged policy/deadline binding",
+        ));
+    }
+    if !localtx_execute_core_is_closed(syntax) {
+        findings.push(finding(
+            Rule::LocalTxQuarantineBypass,
+            format!("{path}::execute_local_tx"),
+            "execute_local_tx must bind one policy through acquire→begin→setup→operation and tail-settle the same transaction/body/policy once, without shadow, reassignment, nested/dead-branch, timeout, or helper escape",
+        ));
+    }
+    if !localtx_settlement_graph_is_closed(syntax) {
+        findings.push(finding(
+            Rule::LocalTxQuarantineBypass,
+            format!("{path}::finish_local_tx"),
+            "execute_local_tx must be the sole caller of one finish_local_tx settlement funnel, whose closed commit/rollback branches own all settlement helpers",
+        ));
+    }
+    findings
 }
 
-fn matched_await_local(statement: &syn::Stmt) -> Option<(String, &syn::Expr)> {
-    let syn::Stmt::Local(local) = statement else {
-        return None;
-    };
-    let binding = simple_binding(&local.pat)?;
-    Some((
-        binding,
-        match_awaited_expression(local_initializer(local)?)?,
-    ))
+fn free_functions<'a>(syntax: &'a syn::File, name: &str) -> Vec<&'a syn::ItemFn> {
+    syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == name => Some(function),
+            _ => None,
+        })
+        .collect()
 }
 
-fn acquired_lease_binding(statement: &syn::Stmt) -> Option<String> {
-    let (binding, syn::Expr::Call(call)) = matched_await_local(statement)? else {
-        return None;
-    };
-    (exact_expr_path(&call.func).as_deref() == Some("LocalTxConnectionLease::acquire")
-        && call.args.len() == 1)
-        .then_some(binding)
-}
-
-fn begun_transaction_binding(statement: &syn::Stmt, lease: &str) -> Option<String> {
-    let (binding, syn::Expr::MethodCall(call)) = matched_await_local(statement)? else {
-        return None;
-    };
-    (call.method == "begin"
-        && call.args.is_empty()
-        && exact_expr_path(&call.receiver).as_deref() == Some(lease))
-    .then_some(binding)
-}
-
-fn consuming_finish_tail(statement: &syn::Stmt, transaction: &str) -> bool {
-    let syn::Stmt::Expr(expression, None) = statement else {
+fn localtx_execution_policy_is_closed(syntax: &syn::File) -> bool {
+    let policies = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "LocalTxExecutionPolicy" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(policy) = policies.first().filter(|_| policies.len() == 1) else {
         return false;
     };
-    let syn::Expr::Await(awaited) = transparent_expr(expression) else {
+    if !matches!(policy.vis, syn::Visibility::Inherited)
+        || policy.variants.len() != 2
+        || !policy.variants.iter().any(canonical_plain_policy_variant)
+        || !policy
+            .variants
+            .iter()
+            .any(canonical_deadline_policy_variant)
+    {
+        return false;
+    }
+    let methods = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if type_last_ident(&item.self_ty).as_deref() == Some("LocalTxExecutionPolicy") =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .flat_map(|item| item.items.iter())
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(method) => Some(method),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    [
+        "acquire",
+        "begin",
+        "setup",
+        "operation",
+        "commit",
+        "rollback",
+    ]
+    .into_iter()
+    .all(|stage| {
+        let matching = methods
+            .iter()
+            .filter(|method| method.sig.ident == stage)
+            .copied()
+            .collect::<Vec<_>>();
+        matching.len() == 1 && canonical_policy_stage_arm(matching[0], stage)
+    }) && methods
+        .iter()
+        .find(|method| method.sig.ident == "setup")
+        .is_some_and(|method| canonical_dynamic_deadline_setup(method))
+}
+
+fn canonical_plain_policy_variant(variant: &syn::Variant) -> bool {
+    if variant.ident != "Plain" {
+        return false;
+    }
+    let syn::Fields::Named(fields) = &variant.fields else {
+        return false;
+    };
+    fields.named.len() == 1
+        && fields.named.first().is_some_and(|field| {
+            field
+                .ident
+                .as_ref()
+                .is_some_and(|ident| ident == "bound_lock_wait")
+                && type_last_ident(&field.ty).as_deref() == Some("bool")
+        })
+}
+
+fn canonical_deadline_policy_variant(variant: &syn::Variant) -> bool {
+    variant.ident == "Deadline"
+        && matches!(&variant.fields, syn::Fields::Unnamed(fields)
+        if fields.unnamed.len() == 1
+            && fields.unnamed.first().is_some_and(|field| {
+                type_last_ident(&field.ty).as_deref() == Some("LocalTxDeadline")
+            }))
+}
+
+fn canonical_policy_stage_arm(method: &syn::ImplItemFn, stage: &str) -> bool {
+    let Some(syn::Stmt::Expr(expression, None)) = method.block.stmts.last() else {
+        return false;
+    };
+    let syn::Expr::Match(stage_match) = transparent_expr(expression) else {
+        return false;
+    };
+    if exact_expr_path(&stage_match.expr).as_deref() != Some("self") {
+        return false;
+    }
+    let deadline_arms = stage_match
+        .arms
+        .iter()
+        .filter_map(|arm| deadline_arm_binding(&arm.pat).map(|binding| (arm, binding)))
+        .collect::<Vec<_>>();
+    let Some((arm, deadline)) = deadline_arms.first().filter(|_| deadline_arms.len() == 1) else {
+        return false;
+    };
+    let Some(call) = awaited_method_tail(&arm.body) else {
+        return false;
+    };
+    call.method == stage
+        && call.args.len() == 1
+        && exact_expr_path(&call.receiver).as_deref() == Some(deadline)
+        && !expression_shadows_or_assigns(&arm.body, deadline)
+}
+
+fn deadline_arm_binding(pattern: &syn::Pat) -> Option<String> {
+    let syn::Pat::TupleStruct(pattern) = pattern else {
+        return None;
+    };
+    if compact_tokens(&pattern.path) != "Self::Deadline" || pattern.elems.len() != 1 {
+        return None;
+    }
+    simple_binding(pattern.elems.first()?)
+}
+
+fn awaited_method_tail(expression: &syn::Expr) -> Option<&syn::ExprMethodCall> {
+    match transparent_expr(expression) {
+        syn::Expr::Block(block) => block_tail(&block.block).and_then(awaited_method_tail),
+        syn::Expr::Await(awaited) => match transparent_expr(&awaited.base) {
+            syn::Expr::MethodCall(call) => Some(call),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn expression_shadows_or_assigns(expression: &syn::Expr, binding: &str) -> bool {
+    let statement = syn::Stmt::Expr(expression.clone(), None);
+    statements_shadow_or_assign(std::slice::from_ref(&statement), binding)
+}
+
+fn canonical_dynamic_deadline_setup(method: &syn::ImplItemFn) -> bool {
+    struct SetupScan {
+        calls: usize,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for SetupScan {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if exact_expr_path(&node.func).as_deref() == Some("set_local_retry_deadlines")
+                && node.args.len() == 2
+                && node.args.get(1).and_then(exact_expr_path).as_deref() == Some("deadline")
+            {
+                self.calls += 1;
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+    let mut scan = SetupScan { calls: 0 };
+    syn::visit::Visit::visit_block(&mut scan, &method.block);
+    scan.calls == 1
+}
+
+fn localtx_ingress_graph_is_closed(syntax: &syn::File) -> bool {
+    let entries = [
+        ("tenant_scoped_write_inner", "execute_local_tx", false, 2),
+        (
+            "tenant_scoped_retry_write_inner",
+            "execute_local_tx",
+            true,
+            2,
+        ),
+        (
+            "co_tx_with_outbox_inner",
+            "execute_outbox_local_tx",
+            false,
+            3,
+        ),
+        (
+            "retry_co_tx_with_outbox_inner",
+            "execute_outbox_local_tx",
+            true,
+            3,
+        ),
+    ];
+    let entries_closed = entries
+        .into_iter()
+        .all(|(name, target, deadline, policy_index)| {
+            let functions = free_functions(syntax, name);
+            functions.len() == 1
+                && canonical_localtx_entry(functions[0], target, deadline, policy_index)
+        });
+    let bridges = free_functions(syntax, "execute_outbox_local_tx");
+    let bridge_closed = bridges.len() == 1 && canonical_outbox_bridge(bridges[0]);
+    let owners = execute_core_call_owners(syntax);
+    let owners_closed = owners
+        == BTreeSet::from([
+            "execute_outbox_local_tx".to_owned(),
+            "tenant_scoped_retry_write_inner".to_owned(),
+            "tenant_scoped_write_inner".to_owned(),
+        ]);
+    entries_closed && bridge_closed && owners_closed
+}
+
+fn canonical_localtx_entry(
+    function: &syn::ItemFn,
+    target: &str,
+    deadline: bool,
+    policy_index: usize,
+) -> bool {
+    let Some(call) = awaited_call_tail(&function.block) else {
+        return false;
+    };
+    if exact_expr_path(&call.func).as_deref() != Some(target) {
+        return false;
+    }
+    let deadline_binding = signature_binding_of_type(&function.sig, "LocalTxDeadline");
+    if deadline != deadline_binding.is_some() {
+        return false;
+    }
+    call.args.get(policy_index).is_some_and(|policy| {
+        if let Some(deadline) = deadline_binding.as_deref() {
+            deadline_policy_expr(policy, deadline)
+        } else {
+            plain_policy_expr(policy)
+        }
+    })
+}
+
+fn canonical_outbox_bridge(function: &syn::ItemFn) -> bool {
+    if function.block.stmts.len() != 2 {
+        return false;
+    }
+    let syn::Stmt::Local(attempt) = &function.block.stmts[0] else {
+        return false;
+    };
+    if simple_binding(&attempt.pat).as_deref() != Some("attempt") {
+        return false;
+    }
+    let Some(initializer) = local_initializer(attempt) else {
+        return false;
+    };
+    let syn::Expr::Await(awaited) = transparent_expr(initializer) else {
         return false;
     };
     let syn::Expr::Call(call) = transparent_expr(&awaited.base) else {
         return false;
     };
-    exact_expr_path(&call.func).as_deref() == Some("finish_local_tx")
-        && call
-            .args
-            .first()
-            .is_some_and(|argument| exact_expr_path(argument).as_deref() == Some(transaction))
+    let Some(policy) = signature_binding_of_type(&function.sig, "LocalTxExecutionPolicy") else {
+        return false;
+    };
+    let tail_maps_attempt = matches!(block_tail(&function.block).map(transparent_expr), Some(syn::Expr::MethodCall(mapper))
+        if mapper.method == "map_error"
+            && exact_expr_path(&mapper.receiver).as_deref() == Some("attempt")
+            && mapper.args.len() == 1);
+    exact_expr_path(&call.func).as_deref() == Some("execute_local_tx")
+        && call.args.get(2).and_then(exact_expr_path).as_deref() == Some(&policy)
+        && call.args.get(3).is_some_and(canonical_outbox_operation)
+        && !statements_shadow_or_assign(&function.block.stmts, &policy)
+        && tail_maps_attempt
 }
 
-#[derive(Default)]
-struct ReturnScan(bool);
+fn canonical_outbox_operation(expression: &syn::Expr) -> bool {
+    let syn::Expr::Struct(operation) = transparent_expr(expression) else {
+        return false;
+    };
+    if compact_tokens(&operation.path) != "OutboxLocalTxOperation"
+        || operation.rest.is_some()
+        || operation.fields.len() != 3
+    {
+        return false;
+    }
+    operation.fields.iter().all(|field| {
+        let syn::Member::Named(member) = &field.member else {
+            return false;
+        };
+        match member.to_string().as_str() {
+            "projection_registry" => compact_tokens(&field.expr) == "projection_registry",
+            "business_write" => compact_tokens(&field.expr) == "business_write",
+            "write" => matches!(transparent_expr(&field.expr), syn::Expr::Struct(write)
+                if compact_tokens(&write.path) == "CoTxOutboxWrite"
+                    && write.rest.is_none()
+                    && write.fields.len() == 3),
+            _ => false,
+        }
+    })
+}
 
-impl<'ast> syn::visit::Visit<'ast> for ReturnScan {
-    fn visit_expr_return(&mut self, _expression: &'ast syn::ExprReturn) {
-        self.0 = true;
+fn signature_binding_of_type(signature: &syn::Signature, expected: &str) -> Option<String> {
+    let matches = signature
+        .inputs
+        .iter()
+        .filter_map(|argument| match argument {
+            syn::FnArg::Typed(argument)
+                if type_last_ident(&argument.ty).as_deref() == Some(expected) =>
+            {
+                simple_binding(&argument.pat)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    matches.first().filter(|_| matches.len() == 1).cloned()
+}
+
+fn deadline_policy_expr(expression: &syn::Expr, deadline: &str) -> bool {
+    let syn::Expr::Call(call) = transparent_expr(expression) else {
+        return false;
+    };
+    exact_expr_path(&call.func).as_deref() == Some("LocalTxExecutionPolicy::Deadline")
+        && call.args.len() == 1
+        && call.args.first().and_then(exact_expr_path).as_deref() == Some(deadline)
+}
+
+fn plain_policy_expr(expression: &syn::Expr) -> bool {
+    matches!(transparent_expr(expression), syn::Expr::Struct(policy)
+        if compact_tokens(&policy.path) == "LocalTxExecutionPolicy::Plain"
+            && policy.rest.is_none())
+}
+
+fn awaited_call_tail(block: &syn::Block) -> Option<&syn::ExprCall> {
+    let expression = block_tail(block)?;
+    let syn::Expr::Await(awaited) = transparent_expr(expression) else {
+        return None;
+    };
+    let syn::Expr::Call(call) = transparent_expr(&awaited.base) else {
+        return None;
+    };
+    Some(call)
+}
+
+fn execute_core_call_owners(syntax: &syn::File) -> BTreeSet<String> {
+    syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if function_call_count(function, "execute_local_tx") == 1 => {
+                Some(function.sig.ident.to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+struct CoreStageScan {
+    policy: String,
+    statement: usize,
+    branch_depth: usize,
+    closure_depth: usize,
+    stages: Vec<(String, usize, usize, usize, Vec<String>)>,
+    finishes: Vec<(usize, usize, usize, Vec<String>)>,
+    outer_timeout: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for CoreStageScan {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if exact_expr_path(&node.receiver).as_deref() == Some(&self.policy)
+            && matches!(
+                node.method.to_string().as_str(),
+                "acquire" | "begin" | "setup" | "operation"
+            )
+        {
+            self.stages.push((
+                node.method.to_string(),
+                self.statement,
+                self.branch_depth,
+                self.closure_depth,
+                node.args.iter().map(compact_tokens).collect(),
+            ));
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        match exact_expr_path(&node.func).as_deref() {
+            Some("finish_local_tx") => self.finishes.push((
+                self.statement,
+                self.branch_depth,
+                self.closure_depth,
+                node.args.iter().map(compact_tokens).collect(),
+            )),
+            Some("tokio::time::timeout" | "tokio::time::timeout_at") => {
+                self.outer_timeout = true;
+            }
+            _ => {}
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        self.closure_depth += 1;
+        syn::visit::visit_expr_closure(self, node);
+        self.closure_depth -= 1;
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        syn::visit::Visit::visit_expr(self, &node.expr);
+        self.branch_depth += 1;
+        for arm in &node.arms {
+            syn::visit::Visit::visit_pat(self, &arm.pat);
+            if let Some((_, guard)) = &arm.guard {
+                syn::visit::Visit::visit_expr(self, guard);
+            }
+            syn::visit::Visit::visit_expr(self, &arm.body);
+        }
+        self.branch_depth -= 1;
+    }
+
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        syn::visit::Visit::visit_expr(self, &node.cond);
+        self.branch_depth += 1;
+        syn::visit::Visit::visit_block(self, &node.then_branch);
+        if let Some((_, branch)) = &node.else_branch {
+            syn::visit::Visit::visit_expr(self, branch);
+        }
+        self.branch_depth -= 1;
     }
 }
 
-fn statements_contain_return(statements: &[syn::Stmt]) -> bool {
-    let mut scan = ReturnScan::default();
-    for statement in statements {
+fn localtx_execute_core_is_closed(syntax: &syn::File) -> bool {
+    let cores = free_functions(syntax, "execute_local_tx");
+    let Some(core) = cores.first().filter(|_| cores.len() == 1) else {
+        return false;
+    };
+    let Some(policy) = signature_binding_of_type(&core.sig, "LocalTxExecutionPolicy") else {
+        return false;
+    };
+    let Some((lease, tx, setup_result, body_result)) = core_top_level_bindings(&core.block) else {
+        return false;
+    };
+    if statements_shadow_or_assign(&core.block.stmts, &policy) {
+        return false;
+    }
+    let mut scan = CoreStageScan {
+        policy: policy.clone(),
+        statement: 0,
+        branch_depth: 0,
+        closure_depth: 0,
+        stages: Vec::new(),
+        finishes: Vec::new(),
+        outer_timeout: false,
+    };
+    for (index, statement) in core.block.stmts.iter().enumerate() {
+        scan.statement = index;
         syn::visit::Visit::visit_stmt(&mut scan, statement);
     }
-    scan.0
+    let stages_closed = canonical_core_stages(&scan, &lease);
+    let finish_closed = canonical_core_finish(&scan, &tx, &body_result, &policy);
+    stages_closed
+        && finish_closed
+        && !scan.outer_timeout
+        && top_level_binding_is_unique(&core.block, &lease)
+        && top_level_binding_is_unique(&core.block, &tx)
+        && top_level_binding_is_unique(&core.block, &setup_result)
+        && top_level_binding_is_unique(&core.block, &body_result)
+        && !statements_shadow_or_assign(&core.block.stmts[1..], &lease)
+        && !statements_shadow_or_assign(&core.block.stmts[2..], &tx)
 }
 
-fn top_level_binding_count(block: &syn::Block, binding: &str) -> usize {
+fn core_top_level_bindings(block: &syn::Block) -> Option<(String, String, String, String)> {
+    if block.stmts.len() != 5 {
+        return None;
+    }
+    let bindings = block
+        .stmts
+        .iter()
+        .take(4)
+        .filter_map(|statement| match statement {
+            syn::Stmt::Local(local) => simple_binding(&local.pat),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (bindings.len() == 4).then(|| {
+        (
+            bindings[0].clone(),
+            bindings[1].clone(),
+            bindings[2].clone(),
+            bindings[3].clone(),
+        )
+    })
+}
+
+fn canonical_core_stages(scan: &CoreStageScan, lease: &str) -> bool {
+    let expected = [
+        ("acquire", 0, 0, vec!["pool".to_owned()]),
+        ("begin", 1, 0, vec![format!("&mut{lease}")]),
+        (
+            "setup",
+            2,
+            0,
+            vec!["&muttx_cap".to_owned(), "tenant".to_owned()],
+        ),
+        (
+            "operation",
+            3,
+            1,
+            vec!["write.execute(&muttx_cap)".to_owned()],
+        ),
+    ];
+    scan.stages.len() == expected.len()
+        && scan.stages.iter().zip(expected).all(
+            |((stage, statement, branch, closure, arguments), expected)| {
+                stage == expected.0
+                    && *statement == expected.1
+                    && *branch == expected.2
+                    && *closure == 0
+                    && *arguments == expected.3
+            },
+        )
+}
+
+fn canonical_core_finish(
+    scan: &CoreStageScan,
+    transaction: &str,
+    body_result: &str,
+    policy: &str,
+) -> bool {
+    scan.finishes.len() == 1
+        && scan
+            .finishes
+            .first()
+            .is_some_and(|(statement, branch, closure, arguments)| {
+                *statement == 4
+                    && *branch == 0
+                    && *closure == 0
+                    && arguments.first().is_some_and(|arg| arg == transaction)
+                    && arguments.get(1).is_some_and(|arg| arg == body_result)
+                    && arguments.last().is_some_and(|arg| arg == policy)
+            })
+}
+
+fn top_level_binding_is_unique(block: &syn::Block, binding: &str) -> bool {
     block
         .stmts
         .iter()
@@ -694,42 +1167,51 @@ fn top_level_binding_count(block: &syn::Block, binding: &str) -> usize {
         })
         .filter(|candidate| candidate == binding)
         .count()
+        == 1
 }
 
-fn localtx_funnel_flow_is_closed(function: &syn::ItemFn) -> bool {
-    let statements = &function.block.stmts;
-    let Some((acquire_index, lease)) =
-        statements
-            .iter()
-            .enumerate()
-            .find_map(|(index, statement)| {
-                acquired_lease_binding(statement).map(|binding| (index, binding))
-            })
-    else {
+fn localtx_settlement_graph_is_closed(syntax: &syn::File) -> bool {
+    let settlements = free_functions(syntax, "finish_local_tx");
+    let Some(settlement) = settlements.first().filter(|_| settlements.len() == 1) else {
         return false;
     };
-    let Some((begin_index, transaction)) =
-        statements
-            .iter()
-            .enumerate()
-            .find_map(|(index, statement)| {
-                begun_transaction_binding(statement, &lease).map(|binding| (index, binding))
-            })
-    else {
-        return false;
-    };
-    let counts = localtx_funnel_call_counts(&function.block);
-    acquire_index < begin_index
-        && begin_index + 1 < statements.len()
-        && statements
-            .last()
-            .is_some_and(|tail| consuming_finish_tail(tail, &transaction))
-        && top_level_binding_count(&function.block, &lease) == 1
-        && top_level_binding_count(&function.block, &transaction) == 1
-        && !statements_contain_return(&statements[begin_index + 1..statements.len() - 1])
-        && counts.acquire == 1
-        && counts.begin == 1
-        && counts.finish == 1
+    function_call_count(settlement, "commit_local_tx") == 1
+        && function_call_count(settlement, "rollback_local_tx") == 3
+        && call_owners(syntax, "finish_local_tx") == BTreeSet::from(["execute_local_tx".to_owned()])
+        && call_owners(syntax, "commit_local_tx") == BTreeSet::from(["finish_local_tx".to_owned()])
+        && call_owners(syntax, "rollback_local_tx")
+            == BTreeSet::from(["finish_local_tx".to_owned()])
+}
+
+fn function_call_count(function: &syn::ItemFn, target: &str) -> usize {
+    struct FunctionCallScan<'a> {
+        target: &'a str,
+        calls: usize,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for FunctionCallScan<'_> {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if exact_expr_path(&node.func).as_deref() == Some(self.target) {
+                self.calls += 1;
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+    let mut scan = FunctionCallScan { target, calls: 0 };
+    syn::visit::Visit::visit_block(&mut scan, &function.block);
+    scan.calls
+}
+
+fn call_owners(syntax: &syn::File, target: &str) -> BTreeSet<String> {
+    syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if function_call_count(function, target) > 0 => {
+                Some(function.sig.ident.to_string())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn localtx_unsafe_seam_call_findings(files: &[(String, String)]) -> Vec<Finding> {
@@ -759,15 +1241,15 @@ fn localtx_unsafe_seam_call_findings(files: &[(String, String)]) -> Vec<Finding>
     let mut expected = vec![
         (
             "commit_unknown_after_ack".to_owned(),
-            format!("{funnel_path}::finish_local_tx"),
+            format!("{funnel_path}::commit_local_tx"),
         ),
         (
             "rollback_failed_after_ack".to_owned(),
-            format!("{funnel_path}::finish_local_tx"),
+            format!("{funnel_path}::run_local_tx_rollback"),
         ),
         (
             "rollback_paused_before_ack".to_owned(),
-            format!("{funnel_path}::finish_local_tx"),
+            format!("{funnel_path}::run_local_tx_rollback"),
         ),
     ];
     expected.sort();
@@ -778,7 +1260,7 @@ fn localtx_unsafe_seam_call_findings(files: &[(String, String)]) -> Vec<Finding>
             Rule::LocalTxQuarantineBypass,
             format!("{funnel_path}::finish_local_tx"),
             format!(
-                "unsafe LocalTx seams must each have one production call owned by finish_local_tx; found {calls:?}"
+                "unsafe LocalTx seams must each have one production call in the closed commit/rollback branches beneath finish_local_tx; found {calls:?}"
             ),
         )]
     }
@@ -1401,30 +1883,33 @@ fn required_retry_site_findings(
     files: &[(String, String)],
     sites: &BTreeSet<&'static str>,
 ) -> Vec<Finding> {
-    if !files.iter().any(|(rel, _)| rel == "tx_retry.rs") {
+    let Some((_, runner)) = files.iter().find(|(rel, _)| rel == "tx_retry.rs") else {
         return Vec::new();
-    }
-    [
-        "settings-config-commit",
-        "settings-secret-publish",
-        "settings-secret-publish-internal",
-        "settings-secret-republish",
-        "identity-password-change",
-        "identity-session-logout",
-        "identity-refresh-rotate",
-        "audit-append",
-        "audit-list-tenant-append",
-    ]
-    .into_iter()
-    .filter(|required| !sites.contains(required))
-    .map(|required| {
-        finding(
-            Rule::RetrySitesAbsent,
-            required,
-            "sanctioned transaction retry boundary was not found",
-        )
-    })
-    .collect()
+    };
+    let mut findings = localtx_deadline_authority_findings(&strip_cfg_test_modules(runner));
+    findings.extend(
+        [
+            "settings-config-commit",
+            "settings-secret-publish",
+            "settings-secret-publish-internal",
+            "settings-secret-republish",
+            "identity-password-change",
+            "identity-session-logout",
+            "identity-refresh-rotate",
+            "audit-append",
+            "audit-list-tenant-append",
+        ]
+        .into_iter()
+        .filter(|required| !sites.contains(required))
+        .map(|required| {
+            finding(
+                Rule::RetrySitesAbsent,
+                required,
+                "sanctioned transaction retry boundary was not found",
+            )
+        }),
+    );
+    findings
 }
 
 fn required_secret_ref_site_findings(
@@ -1564,46 +2049,769 @@ fn scan_source_file(
     findings
 }
 
+fn deadline_type_aliases(syntax: &syn::File) -> BTreeSet<String> {
+    fn collect_use(tree: &syn::UseTree, aliases: &mut BTreeSet<String>) {
+        match tree {
+            syn::UseTree::Path(path) => collect_use(&path.tree, aliases),
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    collect_use(item, aliases);
+                }
+            }
+            syn::UseTree::Name(name) if name.ident == "LocalTxDeadline" => {
+                aliases.insert(name.ident.to_string());
+            }
+            syn::UseTree::Rename(rename) if rename.ident == "LocalTxDeadline" => {
+                aliases.insert(rename.rename.to_string());
+            }
+            syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => {}
+        }
+    }
+
+    let mut aliases = BTreeSet::from(["LocalTxDeadline".to_owned()]);
+    for item in &syntax.items {
+        match item {
+            syn::Item::Use(item) => collect_use(&item.tree, &mut aliases),
+            syn::Item::Type(item)
+                if type_last_ident(&item.ty).as_deref() == Some("LocalTxDeadline") =>
+            {
+                aliases.insert(item.ident.to_string());
+            }
+            _ => {}
+        }
+    }
+    aliases
+}
+
+struct DeadlineEscapeScan {
+    aliases: BTreeSet<String>,
+    deadline_impl: bool,
+    sites: Vec<usize>,
+}
+
+impl DeadlineEscapeScan {
+    fn path_is_deadline(&self, path: &syn::Path) -> bool {
+        path.segments
+            .last()
+            .is_some_and(|segment| self.aliases.contains(&segment.ident.to_string()))
+    }
+
+    fn path_is_mint(&self, path: &syn::Path) -> bool {
+        let segments = path.segments.iter().collect::<Vec<_>>();
+        segments
+            .last()
+            .is_some_and(|segment| segment.ident == "mint")
+            && segments
+                .get(segments.len().saturating_sub(2))
+                .is_some_and(|segment| {
+                    self.aliases.contains(&segment.ident.to_string())
+                        || (segment.ident == "Self" && self.deadline_impl)
+                })
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for DeadlineEscapeScan {
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let previous = self.deadline_impl;
+        self.deadline_impl =
+            type_last_ident(&node.self_ty).is_some_and(|name| self.aliases.contains(&name));
+        syn::visit::visit_item_impl(self, node);
+        self.deadline_impl = previous;
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        if self.path_is_deadline(&node.path) || (node.path.is_ident("Self") && self.deadline_impl) {
+            self.sites.push(node.span().start().line);
+        }
+        syn::visit::visit_expr_struct(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if self.path_is_mint(&node.path) {
+            self.sites.push(node.span().start().line);
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+}
+
+fn deadline_escape_findings(rel: &str, syntax: &syn::File) -> Vec<Finding> {
+    if rel == "tx_retry.rs" {
+        return Vec::new();
+    }
+    let mut scan = DeadlineEscapeScan {
+        aliases: deadline_type_aliases(syntax),
+        deadline_impl: false,
+        sites: Vec::new(),
+    };
+    syn::visit::Visit::visit_file(&mut scan, syntax);
+    scan.sites
+        .into_iter()
+        .map(|line| {
+            finding(
+                Rule::RetryPlacement,
+                site_subject(rel, line),
+                "LocalTxDeadline construction and mint references are confined to tx_retry.rs",
+            )
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct DeadlineAuthoritySite {
+    function: Option<String>,
+    test_only: bool,
+    loop_depth: usize,
+    closure_depth: usize,
+    path: String,
+}
+
+struct DeadlineAuthorityScan {
+    aliases: BTreeSet<String>,
+    deadline_impl: bool,
+    function: Option<String>,
+    test_only: bool,
+    loop_depth: usize,
+    closure_depth: usize,
+    constructors: Vec<DeadlineAuthoritySite>,
+    mint_references: Vec<DeadlineAuthoritySite>,
+}
+
+impl DeadlineAuthorityScan {
+    fn site(&self, path: String) -> DeadlineAuthoritySite {
+        DeadlineAuthoritySite {
+            function: self.function.clone(),
+            test_only: self.test_only,
+            loop_depth: self.loop_depth,
+            closure_depth: self.closure_depth,
+            path,
+        }
+    }
+
+    fn path_is_deadline(&self, path: &syn::Path) -> bool {
+        path.segments
+            .last()
+            .is_some_and(|segment| self.aliases.contains(&segment.ident.to_string()))
+    }
+
+    fn path_is_mint(&self, path: &syn::Path) -> bool {
+        let segments = path.segments.iter().collect::<Vec<_>>();
+        segments
+            .last()
+            .is_some_and(|segment| segment.ident == "mint")
+            && segments
+                .get(segments.len().saturating_sub(2))
+                .is_some_and(|segment| {
+                    self.aliases.contains(&segment.ident.to_string())
+                        || (segment.ident == "Self" && self.deadline_impl)
+                })
+    }
+
+    fn visit_function(
+        &mut self,
+        name: String,
+        attributes: &[syn::Attribute],
+        block: &'_ syn::Block,
+    ) {
+        let previous_function = self.function.replace(name);
+        let previous_test_only = self.test_only;
+        self.test_only |= attributes_guarantee_test(attributes);
+        syn::visit::Visit::visit_block(self, block);
+        self.test_only = previous_test_only;
+        self.function = previous_function;
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for DeadlineAuthorityScan {
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let previous_impl = self.deadline_impl;
+        let previous_test_only = self.test_only;
+        self.deadline_impl =
+            type_last_ident(&node.self_ty).is_some_and(|name| self.aliases.contains(&name));
+        self.test_only |= attributes_guarantee_test(&node.attrs);
+        syn::visit::visit_item_impl(self, node);
+        self.test_only = previous_test_only;
+        self.deadline_impl = previous_impl;
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.visit_function(node.sig.ident.to_string(), &node.attrs, &node.block);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.visit_function(node.sig.ident.to_string(), &node.attrs, &node.block);
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        if self.path_is_deadline(&node.path) || (node.path.is_ident("Self") && self.deadline_impl) {
+            self.constructors
+                .push(self.site(compact_tokens(&node.path)));
+        }
+        syn::visit::visit_expr_struct(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if self.path_is_mint(&node.path) {
+            self.mint_references
+                .push(self.site(compact_tokens(&node.path)));
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        self.closure_depth += 1;
+        syn::visit::visit_expr_closure(self, node);
+        self.closure_depth -= 1;
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        self.loop_depth += 1;
+        syn::visit::visit_expr_for_loop(self, node);
+        self.loop_depth -= 1;
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        self.loop_depth += 1;
+        syn::visit::visit_expr_while(self, node);
+        self.loop_depth -= 1;
+    }
+
+    fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
+        self.loop_depth += 1;
+        syn::visit::visit_expr_loop(self, node);
+        self.loop_depth -= 1;
+    }
+}
+
+fn attributes_guarantee_test(attributes: &[syn::Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        if !attribute.path().is_ident("cfg") {
+            return false;
+        }
+        let cfg = compact_tokens(&attribute.meta);
+        cfg == "cfg(test)" || cfg.starts_with("cfg(all(test,")
+    })
+}
+
+fn localtx_deadline_authority_findings(source: &str) -> Vec<Finding> {
+    let syntax = match syn::parse_file(source) {
+        Ok(syntax) => syntax,
+        Err(error) => {
+            return vec![finding(
+                Rule::RetryPlacement,
+                "tx_retry.rs",
+                format!("cannot parse LocalTxDeadline authority source: {error}"),
+            )];
+        }
+    };
+    let aliases = deadline_type_aliases(&syntax);
+    let mut scan = DeadlineAuthorityScan {
+        aliases,
+        deadline_impl: false,
+        function: None,
+        test_only: false,
+        loop_depth: 0,
+        closure_depth: 0,
+        constructors: Vec::new(),
+        mint_references: Vec::new(),
+    };
+    syn::visit::Visit::visit_file(&mut scan, &syntax);
+
+    let structure_is_closed = deadline_struct_is_private(&syntax)
+        && deadline_mint_is_canonical(&syntax)
+        && production_deadline_mint_is_canonical(&syntax, &scan)
+        && test_deadline_mints_are_explicit(&scan)
+        && scan.constructors.len() == 1
+        && scan.constructors.first().is_some_and(|site| {
+            site.function.as_deref() == Some("mint")
+                && !site.test_only
+                && site.loop_depth == 0
+                && site.closure_depth == 0
+                && site.path == "Self"
+        });
+    if structure_is_closed {
+        Vec::new()
+    } else {
+        vec![finding(
+            Rule::RetryPlacement,
+            "tx_retry.rs::LocalTxDeadline",
+            format!(
+                "LocalTxDeadline must keep private fields and one private canonical mint, with exactly one pre-attempt LocalTxDeadline::mint binding in run_pg_tx_retry_core; direct/aliased/Self/reset construction is forbidden and only an explicit cfg(test) helper may reuse mint (constructors={}, mint_refs={})",
+                scan.constructors.len(),
+                scan.mint_references.len()
+            ),
+        )]
+    }
+}
+
+fn deadline_struct_is_private(syntax: &syn::File) -> bool {
+    let definitions = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "LocalTxDeadline" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(definition) = definitions.first().filter(|_| definitions.len() == 1) else {
+        return false;
+    };
+    let syn::Fields::Named(fields) = &definition.fields else {
+        return false;
+    };
+    fields.named.len() == 2
+        && fields.named.iter().all(|field| {
+            matches!(field.vis, syn::Visibility::Inherited)
+                && field.ident.as_ref().is_some_and(|ident| {
+                    matches!(ident.to_string().as_str(), "operation" | "final_settlement")
+                })
+        })
+}
+
+fn deadline_mint_is_canonical(syntax: &syn::File) -> bool {
+    let methods = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if type_last_ident(&item.self_ty).as_deref() == Some("LocalTxDeadline") =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .flat_map(|item| item.items.iter())
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(item) if item.sig.ident == "mint" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    methods.len() == 1 && canonical_deadline_mint(methods[0])
+}
+
+fn canonical_deadline_mint(method: &syn::ImplItemFn) -> bool {
+    let Some((budget, started, constructor)) = canonical_mint_bindings(method) else {
+        return false;
+    };
+    constructor.rest.is_none()
+        && constructor.path.is_ident("Self")
+        && constructor.fields.len() == 2
+        && constructor.fields.iter().all(|field| {
+            let syn::Member::Named(member) = &field.member else {
+                return false;
+            };
+            let budget_method = match member.to_string().as_str() {
+                "operation" => "operation",
+                "final_settlement" => "total",
+                _ => return false,
+            };
+            deadline_sum_expr(&field.expr, &started, &budget, budget_method)
+        })
+}
+
+fn canonical_mint_bindings(method: &syn::ImplItemFn) -> Option<(String, String, &syn::ExprStruct)> {
+    if !matches!(method.vis, syn::Visibility::Inherited)
+        || method.sig.asyncness.is_some()
+        || method.sig.inputs.len() != 1
+        || !matches!(method.sig.output, syn::ReturnType::Type(_, ref ty) if type_last_ident(ty).as_deref() == Some("Self"))
+        || method.block.stmts.len() != 2
+    {
+        return None;
+    }
+    let syn::FnArg::Typed(argument) = method.sig.inputs.first()? else {
+        return None;
+    };
+    if type_last_ident(&argument.ty).as_deref() != Some("LocalTxExecutionBudget") {
+        return None;
+    }
+    let budget = simple_binding(&argument.pat)?;
+    let syn::Stmt::Local(local) = &method.block.stmts[0] else {
+        return None;
+    };
+    let started = simple_binding(&local.pat)?;
+    let syn::Expr::Call(now) = transparent_expr(local_initializer(local)?) else {
+        return None;
+    };
+    if exact_expr_path(&now.func).as_deref() != Some("tokio::time::Instant::now")
+        || !now.args.is_empty()
+    {
+        return None;
+    }
+    let syn::Stmt::Expr(expression, None) = &method.block.stmts[1] else {
+        return None;
+    };
+    let syn::Expr::Struct(constructor) = transparent_expr(expression) else {
+        return None;
+    };
+    Some((budget, started, constructor))
+}
+
+fn deadline_sum_expr(expression: &syn::Expr, started: &str, budget: &str, method: &str) -> bool {
+    let syn::Expr::Binary(binary) = transparent_expr(expression) else {
+        return false;
+    };
+    let syn::BinOp::Add(_) = binary.op else {
+        return false;
+    };
+    let syn::Expr::MethodCall(duration) = transparent_expr(&binary.right) else {
+        return false;
+    };
+    exact_expr_path(&binary.left).as_deref() == Some(started)
+        && duration.method == method
+        && duration.args.is_empty()
+        && exact_expr_path(&duration.receiver).as_deref() == Some(budget)
+}
+
+fn production_deadline_mint_is_canonical(syntax: &syn::File, scan: &DeadlineAuthorityScan) -> bool {
+    let production = scan
+        .mint_references
+        .iter()
+        .filter(|site| !site.test_only)
+        .collect::<Vec<_>>();
+    let cores = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function)
+                if function.sig.ident == "run_pg_tx_retry_core"
+                    && !attributes_guarantee_test(&function.attrs) =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    production.len() == 1
+        && production[0].function.as_deref() == Some("run_pg_tx_retry_core")
+        && production[0].path == "LocalTxDeadline::mint"
+        && production[0].loop_depth == 0
+        && production[0].closure_depth == 0
+        && cores.len() == 1
+        && core_mints_before_engine(cores[0])
+}
+
+fn core_mints_before_engine(core: &syn::ItemFn) -> bool {
+    let mint_bindings = core
+        .block
+        .stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, statement)| {
+            let syn::Stmt::Local(local) = statement else {
+                return None;
+            };
+            let binding = simple_binding(&local.pat)?;
+            let syn::Expr::Call(call) = transparent_expr(local_initializer(local)?) else {
+                return None;
+            };
+            (exact_expr_path(&call.func).as_deref() == Some("LocalTxDeadline::mint")
+                && call.args.len() == 1)
+                .then_some((index, binding))
+        })
+        .collect::<Vec<_>>();
+    let Some((mint_index, binding)) = mint_bindings.first().filter(|_| mint_bindings.len() == 1)
+    else {
+        return false;
+    };
+    let engine_indices = core
+        .block
+        .stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, statement)| {
+            statement_contains_call(statement, "run_tx_retry").then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let Some(engine_index) = engine_indices.first().filter(|_| engine_indices.len() == 1) else {
+        return false;
+    };
+    mint_index < engine_index
+        && statement_path_count(&core.block.stmts[*engine_index], binding) > 0
+        && !statements_shadow_or_assign(&core.block.stmts[mint_index + 1..], binding)
+}
+
+fn statement_contains_call(statement: &syn::Stmt, function: &str) -> bool {
+    struct CallScan<'a> {
+        function: &'a str,
+        calls: usize,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for CallScan<'_> {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if exact_expr_path(&node.func)
+                .is_some_and(|path| path.rsplit("::").next() == Some(self.function))
+            {
+                self.calls += 1;
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+    let mut scan = CallScan { function, calls: 0 };
+    syn::visit::Visit::visit_stmt(&mut scan, statement);
+    scan.calls == 1
+}
+
+fn statement_path_count(statement: &syn::Stmt, binding: &str) -> usize {
+    struct PathScan<'a> {
+        binding: &'a str,
+        paths: usize,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for PathScan<'_> {
+        fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+            if exact_expr_path(&syn::Expr::Path(node.clone())).as_deref() == Some(self.binding) {
+                self.paths += 1;
+            }
+            syn::visit::visit_expr_path(self, node);
+        }
+    }
+    let mut scan = PathScan { binding, paths: 0 };
+    syn::visit::Visit::visit_stmt(&mut scan, statement);
+    scan.paths
+}
+
+fn statements_shadow_or_assign(statements: &[syn::Stmt], binding: &str) -> bool {
+    struct MutationScan<'a> {
+        binding: &'a str,
+        mutated: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for MutationScan<'_> {
+        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+            if node.ident == self.binding {
+                self.mutated = true;
+            }
+            syn::visit::visit_pat_ident(self, node);
+        }
+
+        fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+            if exact_expr_path(&node.left).as_deref() == Some(self.binding) {
+                self.mutated = true;
+            }
+            syn::visit::visit_expr_assign(self, node);
+        }
+    }
+    let mut scan = MutationScan {
+        binding,
+        mutated: false,
+    };
+    for statement in statements {
+        syn::visit::Visit::visit_stmt(&mut scan, statement);
+    }
+    scan.mutated
+}
+
+fn test_deadline_mints_are_explicit(scan: &DeadlineAuthorityScan) -> bool {
+    let test_sites = scan
+        .mint_references
+        .iter()
+        .filter(|site| site.test_only)
+        .collect::<Vec<_>>();
+    test_sites.len() <= 1
+        && test_sites.first().is_none_or(|site| {
+            site.function.as_deref() == Some("localtx_deadline_for_test")
+                && site.path == "LocalTxDeadline::mint"
+                && site.loop_depth == 0
+                && site.closure_depth == 0
+        })
+}
+
+#[derive(Debug)]
+struct LocalTxDeadlineObservationSite {
+    file: String,
+    function: Option<String>,
+    receiver: String,
+    argument: String,
+    line: usize,
+}
+
+#[derive(Default)]
+struct LocalTxDeadlineObservationScan {
+    function: Option<String>,
+    emissions: Vec<LocalTxDeadlineObservationSite>,
+    stage_sources: Vec<LocalTxDeadlineObservationSite>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for LocalTxDeadlineObservationScan {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if !attributes_are_test_only(&node.attrs) {
+            syn::visit::visit_item_mod(self, node);
+        }
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if attributes_are_test_only(&node.attrs) {
+            return;
+        }
+        let previous = self.function.replace(node.sig.ident.to_string());
+        syn::visit::visit_block(self, &node.block);
+        self.function = previous;
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if attributes_are_test_only(&node.attrs) {
+            return;
+        }
+        let previous = self.function.replace(node.sig.ident.to_string());
+        syn::visit::visit_block(self, &node.block);
+        self.function = previous;
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let method = node.method.to_string();
+        if matches!(
+            method.as_str(),
+            "record_deadline_exceeded" | "deadline_stages"
+        ) {
+            let site = LocalTxDeadlineObservationSite {
+                file: String::new(),
+                function: self.function.clone(),
+                receiver: compact_tokens(&node.receiver),
+                argument: node.args.first().map_or_else(String::new, compact_tokens),
+                line: node.method.span().start().line,
+            };
+            if method == "record_deadline_exceeded" {
+                self.emissions.push(site);
+            } else {
+                self.stage_sources.push(site);
+            }
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn localtx_deadline_observation_findings(files: &[(String, String)]) -> Vec<Finding> {
+    fn is_runner_file(path: &str) -> bool {
+        matches!(path, "tx_retry.rs" | "adapters/postgres/src/tx_retry.rs")
+    }
+
+    let mut findings = Vec::new();
+    let mut emissions = Vec::new();
+    let mut stage_sources = Vec::new();
+    let mut runner_syntax = None;
+
+    for (rel, content) in files {
+        let syntax = match syn::parse_file(content) {
+            Ok(syntax) => syntax,
+            Err(error) => {
+                findings.push(finding(
+                    Rule::RetryPlacement,
+                    rel,
+                    format!(
+                        "cannot parse production Rust for LocalTx deadline observation ownership: {error}"
+                    ),
+                ));
+                continue;
+            }
+        };
+        let mut scan = LocalTxDeadlineObservationScan::default();
+        syn::visit::Visit::visit_file(&mut scan, &syntax);
+        for site in scan.emissions.iter_mut().chain(&mut scan.stage_sources) {
+            site.file.clone_from(rel);
+        }
+        emissions.extend(scan.emissions);
+        stage_sources.extend(scan.stage_sources);
+        if is_runner_file(rel) {
+            if runner_syntax.is_some() {
+                findings.push(finding(
+                    Rule::RetryPlacement,
+                    "tx_retry.rs",
+                    "LocalTx deadline observation owner must be unique",
+                ));
+            } else {
+                runner_syntax = Some(syntax);
+            }
+        }
+    }
+
+    for site in &emissions {
+        if !is_runner_file(&site.file)
+            || site.function.as_deref() != Some("run_pg_localtx_retry")
+            || site.receiver != "observation"
+            || site.argument != "stage"
+        {
+            findings.push(finding(
+                Rule::RetryPlacement,
+                site_subject(&site.file, site.line),
+                "LocalTx deadline observations may only emit the runner-provided stage inside run_pg_localtx_retry",
+            ));
+        }
+    }
+
+    let canonical_source = stage_sources.len() == 1
+        && is_runner_file(&stage_sources[0].file)
+        && stage_sources[0].function.as_deref() == Some("run_pg_tx_retry_core")
+        && stage_sources[0].receiver == "error"
+        && stage_sources[0].argument.is_empty();
+    if !canonical_source {
+        findings.push(finding(
+            Rule::RetryPlacement,
+            "tx_retry.rs::run_pg_tx_retry_core",
+            "attempt deadline stages must have one exact LocalTxRetryError::deadline_stages source",
+        ));
+    }
+
+    let canonical_runner = runner_syntax.as_ref().is_some_and(|syntax| {
+        let runners = free_functions(syntax, "run_pg_localtx_retry");
+        let cores = free_functions(syntax, "run_pg_tx_retry_core");
+        let (Some(runner), Some(core)) = (
+            runners.first().filter(|_| runners.len() == 1),
+            cores.first().filter(|_| cores.len() == 1),
+        ) else {
+            return false;
+        };
+        let runner = compact_tokens(&runner.block);
+        let core_tokens = compact_tokens(&core.block);
+        emissions.len() == 2
+            && emissions.iter().all(|site| {
+                is_runner_file(&site.file)
+                    && site.function.as_deref() == Some("run_pg_localtx_retry")
+                    && site.receiver == "observation"
+                    && site.argument == "stage"
+            })
+            && runner.contains(
+                "|attempt,retry_class,settlement,stages|{observation.record_failed_attempt(attempt,retry_class,settlement);forstageinstages.into_iter().flatten(){observation.record_deadline_exceeded(stage);}}",
+            )
+            && runner.contains("|stage|observation.record_deadline_exceeded(stage)")
+            && core_tokens.contains(
+                "on_failed(attempt,error.class(),settlement,error.deadline_stages());",
+            )
+            && core_tokens.contains(
+                "ifbackoff_exhausted.load(Ordering::Relaxed){on_deadline(LocalTxDeadlineStage::Backoff);}",
+            )
+            && function_call_count(core, "on_deadline") == 1
+    });
+    if !canonical_runner {
+        findings.push(finding(
+            Rule::RetryPlacement,
+            "tx_retry.rs::run_pg_localtx_retry",
+            "deadline observation sink must contain exactly two canonical emissions sourced from typed attempt evidence and backoff exhaustion",
+        ));
+    }
+
+    findings
+}
+
 fn retry_placement_findings(
     rel: &str,
     content: &str,
     sites: &mut BTreeSet<&'static str>,
 ) -> Vec<Finding> {
-    let mut findings = Vec::new();
     let syntax = match syn::parse_file(content) {
         Ok(syntax) => syntax,
         Err(error) => {
-            findings.push(finding(
+            return vec![finding(
                 Rule::RetryPlacement,
                 rel,
                 format!("cannot parse production Rust for retry placement: {error}"),
-            ));
-            return findings;
+            )];
         }
     };
     let aliases = retry_aliases(&syntax);
     let mut scan = RetryAstScan::new(aliases);
     syn::visit::Visit::visit_file(&mut scan, &syntax);
 
-    for call in &scan.direct_calls {
-        if rel != "tx_retry.rs" || call.function.as_deref() != Some("run_pg_tx_retry_core") {
-            findings.push(finding(
-                Rule::RetryPlacement,
-                site_subject(rel, call.line),
-                "consistency::run_tx_retry may only be called by tx_retry.rs::run_pg_tx_retry_core",
-            ));
-        }
-    }
-    findings.extend(scan.legacy_command_evidence_calls.iter().map(|(line, function)| {
-        finding(
-            Rule::RetryPlacement,
-            site_subject(rel, *line),
-            format!(
-                "Postgres adapter function {} must consume typed command evidence; removed optional LocalTx observation factories are forbidden",
-                function.as_deref().unwrap_or("<module>")
-            ),
-        )
-    }));
+    let mut findings = deadline_escape_findings(rel, &syntax);
+    findings.extend(legacy_deadline_helper_findings(rel, &syntax));
+    findings.extend(retry_primitive_signature_findings(rel, &syntax));
+    findings.extend(direct_retry_placement_findings(rel, &scan));
+    findings.extend(legacy_command_evidence_findings(rel, &scan));
     if scan.wrapper_calls.is_empty() {
         return findings;
     }
@@ -1669,6 +2877,110 @@ fn retry_placement_findings(
         ));
     }
     findings
+}
+
+fn legacy_deadline_helper_findings(rel: &str, syntax: &syn::File) -> Vec<Finding> {
+    let forbidden = syntax.items.iter().filter_map(|item| match item {
+        syn::Item::Fn(function)
+            if matches!(
+                function.sig.ident.to_string().as_str(),
+                "set_local_retry_lock_timeout" | "set_local_retry_statement_timeout"
+            ) =>
+        {
+            Some(function.sig.ident.to_string())
+        }
+        _ => None,
+    });
+    forbidden
+        .map(|helper| {
+            finding(
+                Rule::RetryPlacement,
+                format!("{rel}::{helper}"),
+                "legacy fixed LocalTx retry timeout helpers are forbidden",
+            )
+        })
+        .collect()
+}
+
+fn retry_primitive_signature_findings(rel: &str, syntax: &syn::File) -> Vec<Finding> {
+    if rel != "cotx/mod.rs" {
+        return Vec::new();
+    }
+    ["retry_write", "retry_co_tx_with_outbox"]
+        .into_iter()
+        .filter(|method| !has_unique_deadline_primitive(syntax, method))
+        .map(|method| {
+            finding(
+                Rule::RetryPlacement,
+                format!("cotx/mod.rs::{method}"),
+                "LocalTx retry mutation primitive must require the runner-issued deadline as its second typed argument with no legacy overload",
+            )
+        })
+        .collect()
+}
+
+fn has_unique_deadline_primitive(syntax: &syn::File, method: &str) -> bool {
+    let matches = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) => Some(item),
+            _ => None,
+        })
+        .flat_map(|item| item.items.iter())
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(item) if item.sig.ident == method => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(function) = matches.first().filter(|_| matches.len() == 1) else {
+        return false;
+    };
+    let typed = function
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            syn::FnArg::Typed(typed) => Some(typed),
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect::<Vec<_>>();
+    typed.get(1).is_some_and(|argument| {
+        type_last_ident(&argument.ty).as_deref() == Some("LocalTxDeadline")
+            && simple_binding(&argument.pat).as_deref() == Some("deadline")
+    })
+}
+
+fn direct_retry_placement_findings(rel: &str, scan: &RetryAstScan) -> Vec<Finding> {
+    scan.direct_calls
+        .iter()
+        .filter(|call| {
+            rel != "tx_retry.rs" || call.function.as_deref() != Some("run_pg_tx_retry_core")
+        })
+        .map(|call| {
+            finding(
+                Rule::RetryPlacement,
+                site_subject(rel, call.line),
+                "consistency::run_tx_retry may only be called by tx_retry.rs::run_pg_tx_retry_core",
+            )
+        })
+        .collect()
+}
+
+fn legacy_command_evidence_findings(rel: &str, scan: &RetryAstScan) -> Vec<Finding> {
+    scan.legacy_command_evidence_calls
+        .iter()
+        .map(|(line, function)| {
+            finding(
+                Rule::RetryPlacement,
+                site_subject(rel, *line),
+                format!(
+                    "Postgres adapter function {} must consume typed command evidence; removed optional LocalTx observation factories are forbidden",
+                    function.as_deref().unwrap_or("<module>")
+                ),
+            )
+        })
+        .collect()
 }
 
 fn settings_secret_retry_findings(
@@ -1881,6 +3193,7 @@ struct RetryExprFacts {
     operation_method: Option<String>,
     scoped_operation_calls: usize,
     legacy_write: bool,
+    deadline_dataflow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2038,6 +3351,7 @@ impl RetryAstScan {
             operation_method: canonical_retry_operation(expr),
             scoped_operation_calls: operation_scan.calls,
             legacy_write: operation_scan.legacy_write,
+            deadline_dataflow: canonical_deadline_dataflow(expr),
         }
     }
 }
@@ -2138,6 +3452,7 @@ fn valid_settings_retry(call: &RetryCall) -> bool {
         && call.arguments[1].operation_method.as_deref() == Some("retry_co_tx_with_outbox")
         && call.arguments[1].scoped_operation_calls == 1
         && !call.arguments[1].legacy_write
+        && call.arguments[1].deadline_dataflow
 }
 
 fn valid_identity_password_retry(call: &RetryCall) -> bool {
@@ -2147,6 +3462,7 @@ fn valid_identity_password_retry(call: &RetryCall) -> bool {
         && call.arguments[1].operation_method.as_deref() == Some("retry_write")
         && call.arguments[1].scoped_operation_calls == 1
         && !call.arguments[1].legacy_write
+        && call.arguments[1].deadline_dataflow
 }
 
 fn valid_identity_logout_retry(call: &RetryCall) -> bool {
@@ -2156,6 +3472,7 @@ fn valid_identity_logout_retry(call: &RetryCall) -> bool {
         && call.arguments[1].operation_method.as_deref() == Some("retry_write")
         && call.arguments[1].scoped_operation_calls == 1
         && !call.arguments[1].legacy_write
+        && call.arguments[1].deadline_dataflow
 }
 
 fn valid_identity_refresh_retry(call: &RetryCall) -> bool {
@@ -2165,6 +3482,7 @@ fn valid_identity_refresh_retry(call: &RetryCall) -> bool {
         && call.arguments[1].operation_method.as_deref() == Some("retry_write")
         && call.arguments[1].scoped_operation_calls == 1
         && !call.arguments[1].legacy_write
+        && call.arguments[1].deadline_dataflow
 }
 
 fn valid_audit_append_retry(call: &RetryCall) -> bool {
@@ -2174,6 +3492,7 @@ fn valid_audit_append_retry(call: &RetryCall) -> bool {
         && call.arguments[1].operation_method.as_deref() == Some("retry_write")
         && call.arguments[1].scoped_operation_calls == 1
         && !call.arguments[1].legacy_write
+        && call.arguments[1].deadline_dataflow
 }
 
 fn valid_audit_list_tenant_retry(call: &RetryCall) -> bool {
@@ -2183,6 +3502,7 @@ fn valid_audit_list_tenant_retry(call: &RetryCall) -> bool {
         && call.arguments[1].operation_method.as_deref() == Some("retry_write")
         && call.arguments[1].scoped_operation_calls == 1
         && !call.arguments[1].legacy_write
+        && call.arguments[1].deadline_dataflow
 }
 
 fn valid_settings_secret_retry(call: &RetryCall) -> bool {
@@ -2192,6 +3512,7 @@ fn valid_settings_secret_retry(call: &RetryCall) -> bool {
         && call.arguments[1].operation_method.as_deref() == Some("retry_write")
         && call.arguments[1].scoped_operation_calls == 1
         && !call.arguments[1].legacy_write
+        && call.arguments[1].deadline_dataflow
 }
 
 fn valid_settings_secret_generic_retry(call: &RetryCall) -> bool {
@@ -2201,6 +3522,7 @@ fn valid_settings_secret_generic_retry(call: &RetryCall) -> bool {
         && call.arguments[1].operation_method.as_deref() == Some("retry_write")
         && call.arguments[1].scoped_operation_calls == 1
         && !call.arguments[1].legacy_write
+        && call.arguments[1].deadline_dataflow
 }
 
 fn collect_pattern_names(pattern: &syn::Pat, names: &mut Vec<String>) {
@@ -3069,6 +4391,75 @@ fn canonical_retry_operation(expr: &syn::Expr) -> Option<String> {
         return None;
     };
     canonical_retry_tail(&closure.body)
+}
+
+fn canonical_deadline_dataflow(expr: &syn::Expr) -> bool {
+    let syn::Expr::Closure(closure) = transparent_expr(expr) else {
+        return false;
+    };
+    if closure.inputs.len() != 2 {
+        return false;
+    }
+    let Some(syn::Pat::Ident(deadline)) = closure.inputs.iter().nth(1) else {
+        return false;
+    };
+    if deadline.by_ref.is_some() || deadline.mutability.is_some() || deadline.subpat.is_some() {
+        return false;
+    }
+    let deadline = deadline.ident.to_string();
+
+    #[derive(Default)]
+    struct DeadlineFlow {
+        deadline: String,
+        uses: usize,
+        shadows: usize,
+        operation_calls: usize,
+        correctly_bound_calls: usize,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for DeadlineFlow {
+        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+            if node.ident == self.deadline {
+                self.shadows += 1;
+            }
+            syn::visit::visit_pat_ident(self, node);
+        }
+
+        fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+            if exact_expr_path(&syn::Expr::Path(node.clone())).as_deref()
+                == Some(self.deadline.as_str())
+            {
+                self.uses += 1;
+            }
+            syn::visit::visit_expr_path(self, node);
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if is_self_pool(&node.receiver)
+                && matches!(
+                    node.method.to_string().as_str(),
+                    "retry_write" | "retry_co_tx_with_outbox"
+                )
+            {
+                self.operation_calls += 1;
+                if node.args.iter().nth(1).and_then(exact_expr_path).as_deref()
+                    == Some(self.deadline.as_str())
+                {
+                    self.correctly_bound_calls += 1;
+                }
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+
+    let mut flow = DeadlineFlow {
+        deadline,
+        ..DeadlineFlow::default()
+    };
+    syn::visit::Visit::visit_expr(&mut flow, &closure.body);
+    flow.uses == 1
+        && flow.shadows == 0
+        && flow.operation_calls == 1
+        && flow.correctly_bound_calls == 1
 }
 
 #[derive(Default)]
@@ -5771,7 +7162,7 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         let (entry, observation) = command.into_parts();
         run_pg_localtx_retry(
             observation,
-            |_attempt| async { self.pool.retry_write() },
+            |_attempt, deadline| async { self.pool.retry_write(scope, deadline) },
             classify,
         ).await;
     }
@@ -5779,7 +7170,7 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
     async fn publish_internal(&self, command: SecretInternalPublishCommand) {
         run_pg_tx_retry(
             SETTINGS_SECRET_BOUNDARY,
-            |_attempt| async { self.pool.retry_write() },
+            |_attempt, deadline| async { self.pool.retry_write(scope, deadline) },
             classify,
         ).await;
     }
@@ -5787,10 +7178,36 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
     async fn republish(&self, command: SecretRepublishCommand) {
         run_pg_tx_retry(
             SETTINGS_SECRET_BOUNDARY,
-            |_attempt| async { self.pool.retry_write() },
+            |_attempt, deadline| async { self.pool.retry_write(scope, deadline) },
             classify,
         ).await;
     }
+}
+"#
+    }
+
+    fn deadline_authority_green_source() -> &'static str {
+        r#"
+pub(crate) struct LocalTxDeadline {
+    operation: tokio::time::Instant,
+    final_settlement: tokio::time::Instant,
+}
+impl LocalTxDeadline {
+    fn mint(budget: LocalTxExecutionBudget) -> Self {
+        let started = tokio::time::Instant::now();
+        Self {
+            operation: started + budget.operation(),
+            final_settlement: started + budget.total(),
+        }
+    }
+}
+async fn run_pg_tx_retry_core() {
+    let deadline = LocalTxDeadline::mint(localtx_execution_budget());
+    run_tx_retry(policy, move || op(deadline)).await
+}
+#[cfg(test)]
+fn localtx_deadline_for_test() -> LocalTxDeadline {
+    LocalTxDeadline::mint(LocalTxExecutionBudget::DEFAULT)
 }
 "#
     }
@@ -5848,34 +7265,123 @@ mod key_lock {
             (
                 "cotx/mod.rs",
                 r#"
-async fn tenant_scoped_write_inner(pool: &PgPool) {
-    let mut lease = match LocalTxConnectionLease::acquire(pool).await { Ok(value) => value, Err(_) => return };
-    let mut tx = match lease.begin().await { Ok(value) => value, Err(_) => return };
-    finish_local_tx(tx, result).await
+enum LocalTxExecutionPolicy {
+    Plain { bound_lock_wait: bool },
+    Deadline(LocalTxDeadline),
 }
 
-async fn co_tx_with_outbox_inner(pool: &PgPool) {
-    let mut lease = match LocalTxConnectionLease::acquire(pool).await { Ok(value) => value, Err(_) => return };
-    let mut tx = match lease.begin().await { Ok(value) => value, Err(_) => return };
-    finish_local_tx(tx, result).await
+impl LocalTxExecutionPolicy {
+    async fn acquire(self, pool: &PgPool) {
+        match self {
+            Self::Plain { .. } => LocalTxConnectionLease::acquire(pool).await,
+            Self::Deadline(deadline) => deadline.acquire(LocalTxConnectionLease::acquire(pool)).await,
+        }
+    }
+    async fn begin(self, lease: &mut LocalTxConnectionLease) {
+        match self {
+            Self::Plain { .. } => lease.begin().await,
+            Self::Deadline(deadline) => deadline.begin(lease.begin()).await,
+        }
+    }
+    async fn setup(self, tx: &mut TxCapability<'_>, tenant: TenantId) {
+        let setup = async {
+            match self {
+                Self::Plain { .. } => plain_setup(tx, tenant).await,
+                Self::Deadline(deadline) => set_local_retry_deadlines(tx.conn(), deadline).await,
+            }
+        };
+        match self {
+            Self::Plain { .. } => setup.await,
+            Self::Deadline(deadline) => deadline.setup(setup).await,
+        }
+    }
+    async fn operation(self, future: Future) {
+        match self {
+            Self::Plain { .. } => future.await,
+            Self::Deadline(deadline) => deadline.operation(future).await,
+        }
+    }
+    async fn commit(self, future: Future) {
+        match self {
+            Self::Plain { .. } => future.await,
+            Self::Deadline(deadline) => deadline.commit(future).await,
+        }
+    }
+    async fn rollback(self, future: Future) {
+        match self {
+            Self::Plain { .. } => future.await,
+            Self::Deadline(deadline) => deadline.rollback(future).await,
+        }
+    }
+}
+
+async fn tenant_scoped_write_inner(pool: &PgPool, tenant: TenantId, write: F) {
+    execute_local_tx(pool, tenant, LocalTxExecutionPolicy::Plain { bound_lock_wait: false }, PlainLocalTxOperation(write)).await
+}
+
+async fn tenant_scoped_retry_write_inner(pool: &PgPool, tenant: TenantId, deadline: LocalTxDeadline, write: F) {
+    execute_local_tx(pool, tenant, LocalTxExecutionPolicy::Deadline(deadline), PlainLocalTxOperation(write)).await
+}
+
+async fn co_tx_with_outbox_inner(pool: &PgPool, projection_registry: Registry, write: CoTxOutboxWrite<'_>, business_write: F) {
+    execute_outbox_local_tx(pool, projection_registry, write, LocalTxExecutionPolicy::Plain { bound_lock_wait: false }, business_write).await
+}
+
+async fn retry_co_tx_with_outbox_inner(pool: &PgPool, projection_registry: Registry, write: CoTxOutboxWrite<'_>, deadline: LocalTxDeadline, business_write: F) {
+    execute_outbox_local_tx(pool, projection_registry, write, LocalTxExecutionPolicy::Deadline(deadline), business_write).await
+}
+
+async fn execute_outbox_local_tx(pool: &PgPool, projection_registry: Registry, write: CoTxOutboxWrite<'_>, policy: LocalTxExecutionPolicy, business_write: F) {
+    let attempt = execute_local_tx(
+        pool,
+        write.tenant,
+        policy,
+        OutboxLocalTxOperation {
+            projection_registry,
+            write: CoTxOutboxWrite { tenant: write.tenant, entry: write.entry, env: write.env },
+            business_write,
+        },
+    ).await;
+    attempt.map_error(|error| error)
+}
+
+async fn execute_local_tx(pool: &PgPool, tenant: TenantId, policy: LocalTxExecutionPolicy, write: O) {
+    let mut lease = match policy.acquire(pool).await { Complete(value) => value, _ => return };
+    let mut tx = match policy.begin(&mut lease).await { Complete(value) => value, _ => return };
+    let setup_result = {
+        let mut tx_cap = tx.capability();
+        policy.setup(&mut tx_cap, tenant).await
+    };
+    let body_result = match setup_result {
+        Complete(()) => {
+            let mut tx_cap = tx.capability();
+            match policy.operation(write.execute(&mut tx_cap)).await { Complete(value) => Success(value), _ => Failed }
+        }
+        _ => Failed,
+    };
+    finish_local_tx(tx, body_result, map_storage, operation, tenant, policy).await
 }
 
 async fn finish_local_tx(mut tx: LocalTxTransaction<'_>) {
-    let commit_result = if inject_commit_unknown {
-        tx.commit_unknown_after_ack().await
-    } else {
-        tx.commit().await
-    };
-    let rollback_result = if inject_rollback_failed {
-        tx.rollback_failed_after_ack().await
-    } else {
-        tx.rollback().await
-    };
-    let rollback_pause_result = if inject_rollback_pause {
-        tx.rollback_paused_before_ack().await
-    } else {
-        tx.rollback().await
-    };
+    match result {
+        Success(value) => commit_local_tx(tx, value).await,
+        Failed(error) => rollback_local_tx(tx, error).await,
+        SetupDeadline(error) => rollback_local_tx(tx, error).await,
+        OperationDeadline(error) => rollback_local_tx(tx, error).await,
+    }
+}
+
+async fn commit_local_tx(mut tx: LocalTxTransaction<'_>) {
+    let commit_result = tx.commit_unknown_after_ack().await;
+}
+
+async fn rollback_local_tx(tx: LocalTxTransaction<'_>, error: Error) {
+    run_local_tx_rollback(tx, policy).await;
+}
+
+async fn run_local_tx_rollback(mut tx: LocalTxTransaction<'_>) {
+    let rollback_failed = tx.rollback_failed_after_ack().await;
+    let rollback_paused = tx.rollback_paused_before_ack().await;
 }
 "#,
             ),
@@ -6032,11 +7538,15 @@ impl Drop for LocalTxConnectionLease {
         sources[0].1 = sources[0]
             .1
             .replace("let mut lease", "let mut connection_lease")
-            .replace("lease.begin()", "connection_lease.begin()")
-            .replace("let mut tx =", "let mut local_tx =")
             .replace(
-                "finish_local_tx(tx, result)",
-                "finish_local_tx(local_tx, result)",
+                "policy.begin(&mut lease)",
+                "policy.begin(&mut connection_lease)",
+            )
+            .replace("let mut tx =", "let mut local_tx =")
+            .replace("tx.capability()", "local_tx.capability()")
+            .replace(
+                "finish_local_tx(tx, body_result",
+                "finish_local_tx(local_tx, body_result",
             );
         assert_ne!(original_funnel, sources[0].1);
         let original_settlement = sources[1].1.clone();
@@ -6078,23 +7588,38 @@ impl Drop for LocalTxConnectionLease {
         let cases = [
             (
                 "direct-pool-begin",
-                "LocalTxConnectionLease::acquire(pool).await",
+                "deadline.acquire(LocalTxConnectionLease::acquire(pool)).await",
                 "pool.begin().await",
             ),
             (
                 "missing-finish",
-                "    finish_local_tx(tx, result).await\n",
+                "    finish_local_tx(tx, body_result, map_storage, operation, tenant, policy).await\n",
                 "    drop(tx);\n",
             ),
             (
                 "helper-indirection",
-                "    let mut tx = match lease.begin().await { Ok(value) => value, Err(_) => return };",
-                "    let mut bound = match lease.begin().await { Ok(value) => value, Err(_) => return };\n    let mut tx = helper(pool).await;",
+                "    let mut tx = match policy.begin(&mut lease).await { Complete(value) => value, _ => return };",
+                "    let mut tx = match helper(&mut lease).await { Complete(value) => value, _ => return };",
             ),
             (
                 "tx-shadow",
-                "    finish_local_tx(tx, result).await",
-                "    let mut tx = helper(pool).await;\n    finish_local_tx(tx, result).await",
+                "    finish_local_tx(tx, body_result, map_storage, operation, tenant, policy).await",
+                "    let mut tx = helper(pool).await;\n    finish_local_tx(tx, body_result, map_storage, operation, tenant, policy).await",
+            ),
+            (
+                "wrong-policy-binding",
+                "policy.begin(&mut lease).await",
+                "other.begin(&mut lease).await",
+            ),
+            (
+                "dead-operation-branch",
+                "policy.operation(write.execute(&mut tx_cap)).await",
+                "if false { policy.operation(write.execute(&mut tx_cap)).await } else { forged().await }",
+            ),
+            (
+                "policy-reassignment",
+                "    let mut lease = match policy.acquire(pool).await",
+                "    policy = forged;\n    let mut lease = match policy.acquire(pool).await",
             ),
             (
                 "arbitrary-disarm",
@@ -6137,7 +7662,13 @@ impl Drop for LocalTxConnectionLease {
             let mut sources = localtx_quarantine_semantic_fixture();
             let target = if matches!(
                 name,
-                "direct-pool-begin" | "missing-finish" | "helper-indirection" | "tx-shadow"
+                "direct-pool-begin"
+                    | "missing-finish"
+                    | "helper-indirection"
+                    | "tx-shadow"
+                    | "wrong-policy-binding"
+                    | "dead-operation-branch"
+                    | "policy-reassignment"
             ) {
                 "cotx/mod.rs"
             } else {
@@ -6162,6 +7693,25 @@ impl Drop for LocalTxConnectionLease {
                 "{name} must fail closed: {findings:?}"
             );
         }
+
+        let mut removed_deadline_entries = localtx_quarantine_semantic_fixture();
+        removed_deadline_entries[0].1 = removed_deadline_entries[0]
+            .1
+            .replace(
+                "tenant_scoped_retry_write_inner",
+                "removed_retry_write_inner",
+            )
+            .replace(
+                "retry_co_tx_with_outbox_inner",
+                "removed_retry_outbox_inner",
+            );
+        let findings = localtx_quarantine_findings(&removed_deadline_entries);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::LocalTxQuarantineSitesAbsent),
+            "simultaneous deadline entry removal must fail closed: {findings:?}"
+        );
 
         let mut unused_unsafe_seam = localtx_quarantine_semantic_fixture();
         unused_unsafe_seam[0].1 = unused_unsafe_seam[0].1.replacen(
@@ -7734,7 +9284,7 @@ pub mod fault_matrix;
         let mut sites = BTreeSet::new();
         let findings = retry_placement_findings(
             "config_repo.rs",
-            "use crate::tx_retry::{run_pg_tx_retry as retry}; impl Uow { async fn commit_authorized(&self){ retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            "use crate::tx_retry::{run_pg_tx_retry as retry}; impl Uow { async fn commit_authorized(&self){ retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope, deadline) }, classify).await; } }",
             &mut sites,
         );
         assert!(findings.is_empty(), "{findings:?}");
@@ -7762,7 +9312,7 @@ pub mod fault_matrix;
         let mut sites = BTreeSet::new();
         let findings = retry_placement_findings(
             "credential_repo.rs",
-            "use crate::tx_retry::{run_pg_localtx_retry as retry}; impl Repo { async fn apply_password_change(&self, mutation: PasswordChangeMutation){ let (_, _, observation) = mutation.into_parts(); retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
+            "use crate::tx_retry::{run_pg_localtx_retry as retry}; impl Repo { async fn apply_password_change(&self, mutation: PasswordChangeMutation){ let (_, _, observation) = mutation.into_parts(); retry(observation, |_attempt, deadline| async { self.pool.retry_write(scope, deadline) }, classify).await; } }",
             &mut sites,
         );
         assert!(findings.is_empty(), "{findings:?}");
@@ -7779,7 +9329,7 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         let (entry, observation) = command.into_parts();
         retry(
             observation,
-            |_attempt| async { self.pool.retry_write() },
+            |_attempt, deadline| async { self.pool.retry_write(scope, deadline) },
             classify,
         ).await;
     }
@@ -7876,7 +9426,7 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         );
         let wrapper = retry_placement_findings(
             "config_repo.rs",
-            "use crate::tx_retry as retry; impl Uow { async fn commit_authorized(&self){ retry::run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            "use crate::tx_retry as retry; impl Uow { async fn commit_authorized(&self){ retry::run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope, deadline) }, classify).await; } }",
             &mut sites,
         );
         assert!(direct.is_empty(), "{direct:?}");
@@ -8186,32 +9736,32 @@ pub trait SecretRepoLocal: Send + Sync {
         assert_retry_shape(
             &mut sites,
             "config_repo.rs",
-            "impl Uow { async fn commit_authorized(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            "impl Uow { async fn commit_authorized(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope, deadline) }, classify).await; } }",
         );
         assert_retry_shape(
             &mut sites,
             "credential_repo.rs",
-            "impl Repo { async fn apply_password_change(&self, mutation: PasswordChangeMutation){ let (_, _, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn apply_password_change(&self, mutation: PasswordChangeMutation){ let (_, _, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, |_attempt, deadline| async { self.pool.retry_write(scope, deadline) }, classify).await; } }",
         );
         assert_retry_shape(
             &mut sites,
             "session_lifecycle.rs",
-            "impl Repo { async fn logout(&self, mutation: SessionLogoutMutation){ let (_, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn logout(&self, mutation: SessionLogoutMutation){ let (_, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, |_attempt, deadline| async { self.pool.retry_write(scope, deadline) }, classify).await; } }",
         );
         assert_retry_shape(
             &mut sites,
             "refresh_token_store.rs",
-            "impl Repo { async fn rotate(&self, mutation: RefreshRotationMutation){ let (_, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn rotate(&self, mutation: RefreshRotationMutation){ let (_, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, |_attempt, deadline| async { self.pool.retry_write(scope, deadline) }, classify).await; } }",
         );
         assert_retry_shape(
             &mut sites,
             "audit_repo.rs",
-            "impl Repo { async fn append(&self){ run_pg_tx_retry(AUDIT_APPEND_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn append(&self){ run_pg_tx_retry(AUDIT_APPEND_BOUNDARY, |_attempt, deadline| async { self.pool.retry_write(scope, deadline) }, classify).await; } }",
         );
         assert_retry_shape(
             &mut sites,
             "auth_audit_sink.rs",
-            "impl AuditListTenantAppender for PgAuthAuditSink { async fn append(&self, command: AuditListTenantAppend){ let (scope, event, observation) = command.into_parts(); run_pg_localtx_retry(observation, || async { self.pool.retry_write(scope, |_tx| async { persist(event) }, storage) }, classify).await; } }",
+            "impl AuditListTenantAppender for PgAuthAuditSink { async fn append(&self, command: AuditListTenantAppend){ let (scope, event, observation) = command.into_parts(); run_pg_localtx_retry(observation, |_attempt, deadline| async { self.pool.retry_write(scope, deadline, |_tx| async { persist(event) }, storage) }, classify).await; } }",
         );
         assert_retry_shape(&mut sites, "secret_repo.rs", secret_retry_green_source());
         assert_eq!(
@@ -8285,7 +9835,8 @@ pub trait SecretRepoLocal: Send + Sync {
                     | "auth_audit_sink.rs"
             )
         }) {
-            findings.extend(retry_placement_findings(rel, source, &mut sites));
+            let source = strip_cfg_test_modules(source);
+            findings.extend(retry_placement_findings(rel, &source, &mut sites));
         }
         assert!(findings.is_empty(), "{findings:?}");
         assert_eq!(
@@ -8306,10 +9857,233 @@ pub trait SecretRepoLocal: Send + Sync {
     }
 
     #[test]
+    fn localtx_deadline_guard_rejects_legacy_missing_forged_and_escaped_tokens() {
+        for (rel, source) in [
+            (
+                "config_repo.rs",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt| async { self.pool.retry_co_tx_with_outbox(scope) }, classify).await; } }",
+            ),
+            (
+                "config_repo.rs",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope) }, classify).await; } }",
+            ),
+            (
+                "config_repo.rs",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope, attempt) }, classify).await; } }",
+            ),
+            (
+                "config_repo.rs",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { inspect(deadline); self.pool.retry_co_tx_with_outbox(scope, deadline) }, classify).await; } }",
+            ),
+            (
+                "config_repo.rs",
+                "impl Uow { async fn commit(&self){ let forged = LocalTxDeadline { operation: now, final_settlement: now }; run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope, deadline) }, classify).await; } }",
+            ),
+            (
+                "config_repo.rs",
+                "impl Uow { async fn commit(&self){ let forged = LocalTxDeadline\n{ operation: now, final_settlement: now }; run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope, deadline) }, classify).await; } }",
+            ),
+            (
+                "config_repo.rs",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| { let deadline = forged; async { self.pool.retry_co_tx_with_outbox(scope, deadline) } }, classify).await; } }",
+            ),
+            (
+                "config_repo.rs",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, mut deadline| { deadline = forged; async { self.pool.retry_co_tx_with_outbox(scope, deadline) } }, classify).await; } }",
+            ),
+            (
+                "config_repo.rs",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { if false { self.pool.retry_co_tx_with_outbox(scope, deadline).await } else { forged().await } }, classify).await; } }",
+            ),
+            (
+                "config_repo.rs",
+                "impl LocalTxDeadline { fn reset(self) -> Self { Self { operation: now, final_settlement: now } } }",
+            ),
+            (
+                "cotx/mod.rs",
+                "impl<L> PgWritePool<L> { pub(crate) async fn retry_write(&self, scope: Scope) {} pub(crate) async fn retry_co_tx_with_outbox(&self, scope: Scope) {} }",
+            ),
+            ("cotx/mod.rs", "async fn set_local_retry_lock_timeout() {}"),
+        ] {
+            let mut sites = BTreeSet::new();
+            let findings = retry_placement_findings(rel, source, &mut sites);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::RetryPlacement),
+                "deadline bypass must fail closed for {rel}: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn localtx_deadline_observation_guard_rejects_rogue_and_fabricated_stages() {
+        let canonical = r#"
+async fn run_pg_tx_retry_core(on_failed: impl FnMut(), on_deadline: impl FnMut()) {
+    if let Err(error) = &result {
+        on_failed(attempt, error.class(), settlement, error.deadline_stages());
+    }
+    if backoff_exhausted.load(Ordering::Relaxed) {
+        on_deadline(LocalTxDeadlineStage::Backoff);
+    }
+}
+async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
+    run_pg_tx_retry_core(
+        op,
+        classify,
+        |attempt, retry_class, settlement, stages| {
+            observation.record_failed_attempt(attempt, retry_class, settlement);
+            for stage in stages.into_iter().flatten() {
+                observation.record_deadline_exceeded(stage);
+            }
+        },
+        |stage| observation.record_deadline_exceeded(stage),
+    ).await;
+}
+"#;
+        let cases = [
+            (
+                "config_repo.rs",
+                "fn rogue(observation: LocalTxObservation<M>) { observation.record_deadline_exceeded(LocalTxDeadlineStage::Commit); }".to_owned(),
+            ),
+            (
+                "tx_retry.rs",
+                canonical.replace(
+                    "observation.record_deadline_exceeded(stage);",
+                    "observation.record_deadline_exceeded(LocalTxDeadlineStage::Commit);",
+                ),
+            ),
+            (
+                "tx_retry.rs",
+                canonical.replace(
+                    "|stage| observation.record_deadline_exceeded(stage)",
+                    "|stage| observation.record_deadline_exceeded(LocalTxDeadlineStage::Backoff)",
+                ),
+            ),
+        ];
+        for (rel, source) in cases {
+            let source_files = if rel == "tx_retry.rs" {
+                vec![("tx_retry.rs".to_owned(), source)]
+            } else {
+                vec![
+                    ("tx_retry.rs".to_owned(), canonical.to_owned()),
+                    (rel.to_owned(), source),
+                ]
+            };
+            let findings = localtx_deadline_observation_findings(&source_files);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::RetryPlacement),
+                "deadline observation bypass must remain synthetic-red for {rel}: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn localtx_deadline_observation_guard_real_workspace_closes_exact_sink() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let files = load_workspace_prod_rs(&root)?;
+        let findings = localtx_deadline_observation_findings(&files);
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn localtx_deadline_authority_rejects_alias_self_reset_and_per_attempt_mint() {
+        let green = deadline_authority_green_source();
+        assert!(localtx_deadline_authority_findings(green).is_empty());
+        let cases = [
+            green.replacen(
+                "LocalTxDeadline::mint(localtx_execution_budget())",
+                "Self::mint(localtx_execution_budget())",
+                1,
+            ),
+            green
+                .replacen(
+                    "pub(crate) struct LocalTxDeadline",
+                    "type DeadlineAlias = LocalTxDeadline;\npub(crate) struct LocalTxDeadline",
+                    1,
+                )
+                .replacen(
+                    "LocalTxDeadline::mint(localtx_execution_budget())",
+                    "DeadlineAlias::mint(localtx_execution_budget())",
+                    1,
+                ),
+            green.replacen(
+                "let deadline = LocalTxDeadline::mint(localtx_execution_budget());\n    run_tx_retry(policy, move || op(deadline)).await",
+                "run_tx_retry(policy, move || { let deadline = LocalTxDeadline::mint(localtx_execution_budget()); op(deadline) }).await",
+                1,
+            ),
+            green.replacen(
+                "async fn run_pg_tx_retry_core()",
+                "impl LocalTxDeadline { fn reset(self) -> Self { Self { operation: self.operation, final_settlement: self.final_settlement } } }\nasync fn run_pg_tx_retry_core()",
+                1,
+            ),
+        ];
+        for source in cases {
+            assert!(
+                !localtx_deadline_authority_findings(&source).is_empty(),
+                "mint authority bypass must fail closed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn localtx_deadline_guard_real_workspace_closes_mint_and_nine_dataflows() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let files = load_prod_rs(&root.join("adapters/postgres/src"))?;
+        let mut sites = BTreeSet::new();
+        let mut findings = Vec::new();
+        for (rel, source) in files.iter().filter(|(rel, _)| {
+            matches!(
+                rel.as_str(),
+                "tx_retry.rs"
+                    | "cotx/mod.rs"
+                    | "config_repo.rs"
+                    | "secret_repo.rs"
+                    | "credential_repo.rs"
+                    | "session_lifecycle.rs"
+                    | "refresh_token_store.rs"
+                    | "audit_repo.rs"
+                    | "auth_audit_sink.rs"
+            )
+        }) {
+            let source = strip_cfg_test_modules(source);
+            findings.extend(retry_placement_findings(rel, &source, &mut sites));
+        }
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(sites.len(), 9, "{sites:?}");
+
+        let runner = files
+            .iter()
+            .find(|(rel, _)| rel == "tx_retry.rs")
+            .map(|(_, source)| source)
+            .ok_or_else(|| anyhow::anyhow!("tx_retry.rs missing"))?;
+        let runner = strip_cfg_test_modules(runner);
+        let authority = localtx_deadline_authority_findings(&runner);
+        assert!(authority.is_empty(), "{authority:?}");
+        Ok(())
+    }
+
+    #[test]
     fn retry_guard_requires_the_closed_nine_site_set() {
         let files = vec![("tx_retry.rs".to_string(), String::new())];
         let findings = required_retry_site_findings(&files, &BTreeSet::new());
-        assert_eq!(findings.len(), 9, "{findings:?}");
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|finding| finding.rule == Rule::RetrySitesAbsent)
+                .count(),
+            9,
+            "{findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::RetryPlacement),
+            "missing deadline authority must fail closed: {findings:?}"
+        );
         assert!(
             findings
                 .iter()

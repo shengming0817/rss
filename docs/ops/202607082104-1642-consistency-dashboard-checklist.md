@@ -47,6 +47,7 @@ Dashboard 不是 enforcement carrier。metric 名、label 闭值集、PII 边界
 | Consumer lease lost | `sum by (domain) (rate(consumer_lease_lost_total[5m]))` | `domain` | `ConsumerLeaseLostHigh`; check handler duration and lease TTL |
 | Saga DLX | `sum by (domain, contract_id, outcome) (increase(saga_dead_letters_total[10m]))` | `domain`, `contract_id`, `outcome` | `SagaDeadLetterGrowth` / `SagaDeadLetterWriteError` |
 | LocalTx failed attempt rate | `sum by (domain, contract_id, boundary, retry_class) (rate(localtx_retry_attempts_total[5m]))` | `domain`, `contract_id`, `boundary`, `retry_class` | Diagnostic only; correlate sustained transient failures with DB health and request error rate |
+| LocalTx deadline exhaustion rate | `sum by (domain, contract_id, boundary, stage) (rate(localtx_deadline_exceeded_total[5m]))` | `domain`, `contract_id`, `boundary`, `stage` (`acquire`/`begin`/`setup`/`operation`/`backoff`/`commit`/`rollback`) | Diagnostic only; no paging. Correlate the closed stage with DB latency, pool pressure, retry backoff and request errors; do not infer settlement or replay |
 | LocalTx final settlement rate | `sum by (domain, contract_id, boundary, final_status) (rate(localtx_final_total[5m]))` | `domain`, `contract_id`, `boundary`, `final_status` | `LocalTxCommitUnknown` / `LocalTxRollbackFailed`; do not infer settlement from retry status |
 | LocalTx attempts P95 | `histogram_quantile(0.95, sum by (domain, contract_id, boundary, final_status, le) (rate(localtx_attempts_bucket[5m])))` | `domain`, `contract_id`, `boundary`, `final_status` | Retry-pressure diagnosis; exhaustion alone does not page |
 | PostgreSQL LocalTx connection quarantine | `sum by (stage) (increase(postgres_localtx_connection_quarantine_total[5m]))` | `stage` (`begin`/`body`/`commit`/`rollback`) | `PostgresLocalTxConnectionQuarantineBurst`; correlate sustained cancellation/timeout pressure with pool churn without inferring settlement |
@@ -88,5 +89,7 @@ before #1683 / #1684, treat the panel as deployment-local and keep it out of the
   service-token replay nonce and audit path.
 - Missing metric carriers are tracked by #1683 and #1684 instead of being documented as if they
   already existed.
+- The LocalTx deadline panel consumes the typed `LocalTxObservation` metric and closed stage only;
+  it does not create a paging rule or a parallel PostgreSQL deadline metric contract.
 - Operator-local and journey/library-only metrics are explicitly omitted from the shared server
   dashboard until their runtime scrape surface exists.

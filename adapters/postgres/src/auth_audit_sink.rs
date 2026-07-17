@@ -272,7 +272,7 @@ impl AuditListTenantAppender for PgAuthAuditSink {
         let append_faults = Arc::clone(&self.append_faults);
         run_pg_localtx_retry(
             observation,
-            |_attempt| {
+            |_attempt, deadline| {
                 let event = event.clone();
                 #[cfg(all(test, feature = "integration"))]
                 let tenant = tenant.clone();
@@ -284,6 +284,7 @@ impl AuditListTenantAppender for PgAuthAuditSink {
                     self.pool
                         .retry_write(
                             scope,
+                            deadline,
                             move |tx| {
                                 Box::pin(async move {
                                     #[cfg(all(test, feature = "integration"))]

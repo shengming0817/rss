@@ -392,7 +392,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
         let rotation_faults = Arc::clone(&self.rotation_faults);
         run_pg_localtx_retry(
             observation,
-            |_attempt| {
+            |_attempt, deadline| {
                 let tenant_uuid = tenant_uuid.clone();
                 let old_id = old_id.clone();
                 #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
@@ -406,6 +406,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                     self.write_pool
                         .retry_write(
                             scope,
+                            deadline,
                             move |tx| {
                                 Box::pin(async move {
                                     #[cfg(all(test, feature = "integration"))]

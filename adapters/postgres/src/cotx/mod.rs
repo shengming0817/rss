@@ -33,6 +33,10 @@ use crate::pool::{
     VerifiedPgWriteStore,
 };
 use crate::projection_events::ProjectionWriteRegistry;
+use crate::tx_retry::{
+    LocalTxAcquireDeadline, LocalTxBeginDeadline, LocalTxCommitDeadline, LocalTxDeadline,
+    LocalTxOperationDeadline, LocalTxRollbackDeadline, LocalTxSetupDeadline, LocalTxStageResult,
+};
 
 mod settlement;
 
@@ -49,8 +53,6 @@ pub(crate) use settlement::{LocalTxAttempt, LocalTxRetryError, commit_unknown};
 )))]
 pub(crate) use settlement::{LocalTxAttempt, commit_unknown};
 use settlement::{LocalTxConnectionLease, LocalTxTransaction, rollback_failed};
-
-const TX_RETRY_LOCK_TIMEOUT: &str = "5s";
 
 /// Tokio I/O deadlines require a monotonic clock; the wall-clock [`diport::Clock`] contract cannot
 /// represent or safely derive these instants. Keeping this one adapter-private boundary also makes
@@ -433,6 +435,7 @@ impl<L> PgWritePool<L> {
     pub(crate) async fn retry_write<S, T, F, E>(
         &self,
         scope: S,
+        deadline: LocalTxDeadline,
         write: F,
         map_storage: impl Fn(sqlx::Error) -> E + Send,
     ) -> LocalTxAttempt<T, E>
@@ -443,7 +446,7 @@ impl<L> PgWritePool<L> {
         T: Send,
     {
         let tenant = scope.tenant();
-        tenant_scoped_write_inner(&self.pool, tenant, write, map_storage, true).await
+        tenant_scoped_retry_write_inner(&self.pool, tenant, deadline, write, map_storage).await
     }
 
     /// Run a tenant-scoped business write followed by outbox append in the same transaction.
@@ -454,7 +457,7 @@ impl<L> PgWritePool<L> {
         entry: &EventEntry,
         env: &OutboxEnvelope,
         business_write: F,
-        map_storage: impl Fn(sqlx::Error) -> E + Send,
+        map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
     ) -> Result<(), E>
     where
         S: TenantScopeHandle,
@@ -479,10 +482,11 @@ impl<L> PgWritePool<L> {
     pub(crate) async fn retry_co_tx_with_outbox<S, F, E>(
         &self,
         scope: S,
+        deadline: LocalTxDeadline,
         entry: &EventEntry,
         env: &OutboxEnvelope,
         business_write: F,
-        map_storage: impl Fn(sqlx::Error) -> E + Send,
+        map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
     ) -> LocalTxAttempt<(), E>
     where
         S: TenantScopeHandle,
@@ -490,13 +494,13 @@ impl<L> PgWritePool<L> {
         E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
     {
         let tenant = scope.tenant();
-        co_tx_with_outbox_inner(
+        retry_co_tx_with_outbox_inner(
             &self.pool,
             self.projection_registry,
             CoTxOutboxWrite { tenant, entry, env },
+            deadline,
             business_write,
             map_storage,
-            true,
         )
         .await
     }
@@ -720,12 +724,20 @@ pub(crate) async fn set_local_tenant(
         .map(|_| ())
 }
 
-async fn set_local_retry_lock_timeout(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-        .bind(TX_RETRY_LOCK_TIMEOUT)
-        .execute(conn)
-        .await
-        .map(|_| ())
+async fn set_local_retry_deadlines(
+    conn: &mut PgConnection,
+    deadline: LocalTxDeadline,
+) -> Result<(), sqlx::Error> {
+    let (statement_millis, lock_millis) = deadline.server_timeout_millis();
+    sqlx::query(
+        "SELECT set_config('statement_timeout', $1, true), \
+                set_config('lock_timeout', $2, true)",
+    )
+    .bind(format!("{statement_millis}ms"))
+    .bind(format!("{lock_millis}ms"))
+    .execute(conn)
+    .await
+    .map(|_| ())
 }
 
 async fn tenant_scoped_write_inner<T, F, E>(
@@ -740,28 +752,38 @@ where
     E: std::error::Error + Send + Sync + 'static,
     T: Send,
 {
-    let mut lease = match LocalTxConnectionLease::acquire(pool).await {
-        Ok(lease) => lease,
-        Err(error) => return LocalTxAttempt::unsettled(map_storage(error)),
-    };
-    let mut tx = match lease.begin().await {
-        Ok(tx) => tx,
-        Err(error) => return LocalTxAttempt::unsettled(map_storage(error)),
-    };
-    let result = async {
-        let mut tx_cap = tx.capability();
-        set_local_tenant(tx_cap.conn(), tenant)
-            .await
-            .map_err(&map_storage)?;
-        if bound_lock_wait {
-            set_local_retry_lock_timeout(tx_cap.conn())
-                .await
-                .map_err(&map_storage)?;
-        }
-        write(&mut tx_cap).await
-    }
-    .await;
-    finish_local_tx(tx, result, map_storage, "tenant-scoped-write", tenant).await
+    execute_local_tx(
+        pool,
+        tenant,
+        LocalTxExecutionPolicy::Plain { bound_lock_wait },
+        PlainLocalTxOperation(write),
+        map_storage,
+        "tenant-scoped-write",
+    )
+    .await
+}
+
+async fn tenant_scoped_retry_write_inner<T, F, E>(
+    pool: &PgPool,
+    tenant: TenantId,
+    deadline: LocalTxDeadline,
+    write: F,
+    map_storage: impl Fn(sqlx::Error) -> E + Send,
+) -> LocalTxAttempt<T, E>
+where
+    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+    E: std::error::Error + Send + Sync + 'static,
+    T: Send,
+{
+    execute_local_tx(
+        pool,
+        tenant,
+        LocalTxExecutionPolicy::Deadline(deadline),
+        PlainLocalTxOperation(write),
+        map_storage,
+        "tenant-scoped-write",
+    )
+    .await
 }
 
 /// 在单事务内：注入 tenant scope（SET LOCAL）→ 业务写闭包 → `append_outbox` → 单 commit。
@@ -795,7 +817,7 @@ async fn co_tx_with_outbox<F, E>(
     entry: &EventEntry,
     env: &OutboxEnvelope,
     business_write: F,
-    map_storage: impl Fn(sqlx::Error) -> E + Send,
+    map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
 ) -> Result<(), E>
 where
     F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
@@ -807,7 +829,6 @@ where
         CoTxOutboxWrite { tenant, entry, env },
         business_write,
         map_storage,
-        false,
     )
     .await
     .into_result()
@@ -819,103 +840,503 @@ async fn co_tx_with_outbox_inner<F, E>(
     projection_registry: ProjectionWriteRegistry,
     write: CoTxOutboxWrite<'_>,
     business_write: F,
-    map_storage: impl Fn(sqlx::Error) -> E + Send,
-    bound_lock_wait: bool,
+    map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
 ) -> LocalTxAttempt<(), E>
 where
     F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
     E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
 {
-    let mut lease = match LocalTxConnectionLease::acquire(pool).await {
-        Ok(lease) => lease,
-        Err(error) => return LocalTxAttempt::unsettled(map_storage(error)),
-    };
-    let mut tx = match lease.begin().await {
-        Ok(tx) => tx,
-        Err(error) => return LocalTxAttempt::unsettled(map_storage(error)),
-    };
-    let write_result = {
-        let mut tx_cap = tx.capability();
-        write_in_tx(
-            &mut tx_cap,
-            projection_registry,
-            write.tenant,
-            write.entry,
-            write.env,
-            business_write,
-            bound_lock_wait,
-        )
-        .await
-    };
-    let result = match write_result {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            log_cotx_write_error(write.entry, write.env, &e);
-            Err(e.into_domain(&map_storage))
-        }
-    };
-    finish_local_tx(tx, result, map_storage, "co-tx-with-outbox", write.tenant).await
+    execute_outbox_local_tx(
+        pool,
+        projection_registry,
+        write,
+        LocalTxExecutionPolicy::Plain {
+            bound_lock_wait: false,
+        },
+        business_write,
+        map_storage,
+    )
+    .await
 }
 
-/// Settle one LocalTx attempt through the only commit/explicit-rollback branch.
+#[cfg(feature = "domain-settings")]
+async fn retry_co_tx_with_outbox_inner<F, E>(
+    pool: &PgPool,
+    projection_registry: ProjectionWriteRegistry,
+    write: CoTxOutboxWrite<'_>,
+    deadline: LocalTxDeadline,
+    business_write: F,
+    map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
+) -> LocalTxAttempt<(), E>
+where
+    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
+    E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
+{
+    execute_outbox_local_tx(
+        pool,
+        projection_registry,
+        write,
+        LocalTxExecutionPolicy::Deadline(deadline),
+        business_write,
+        map_storage,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum LocalTxExecutionPolicy {
+    Plain { bound_lock_wait: bool },
+    Deadline(LocalTxDeadline),
+}
+
+impl LocalTxExecutionPolicy {
+    async fn acquire(
+        self,
+        pool: &PgPool,
+    ) -> LocalTxStageResult<LocalTxConnectionLease, sqlx::Error, LocalTxAcquireDeadline> {
+        match self {
+            Self::Plain { .. } => match LocalTxConnectionLease::acquire(pool).await {
+                Ok(lease) => LocalTxStageResult::Complete(lease),
+                Err(error) => LocalTxStageResult::Failed(error),
+            },
+            Self::Deadline(deadline) => {
+                deadline
+                    .acquire(LocalTxConnectionLease::acquire(pool))
+                    .await
+            }
+        }
+    }
+
+    async fn begin<'lease>(
+        self,
+        lease: &'lease mut LocalTxConnectionLease,
+    ) -> LocalTxStageResult<LocalTxTransaction<'lease>, sqlx::Error, LocalTxBeginDeadline> {
+        match self {
+            Self::Plain { .. } => match lease.begin().await {
+                Ok(tx) => LocalTxStageResult::Complete(tx),
+                Err(error) => LocalTxStageResult::Failed(error),
+            },
+            Self::Deadline(deadline) => deadline.begin(lease.begin()).await,
+        }
+    }
+
+    async fn setup(
+        self,
+        tx: &mut TxCapability<'_>,
+        tenant: TenantId,
+    ) -> LocalTxStageResult<(), sqlx::Error, LocalTxSetupDeadline> {
+        let setup = async {
+            #[cfg(all(test, feature = "integration"))]
+            pause_localtx_stage_for_test(LocalTxTestPauseStage::Setup).await;
+            set_local_tenant(tx.conn(), tenant).await?;
+            match self {
+                Self::Plain {
+                    bound_lock_wait: true,
+                } => {
+                    sqlx::query("SELECT set_config('lock_timeout', '5s', true)")
+                        .execute(tx.conn())
+                        .await?;
+                }
+                Self::Deadline(deadline) => {
+                    // Compute immediately before this single round-trip; the following statement in
+                    // `execute_local_tx` is the mutation itself.
+                    set_local_retry_deadlines(tx.conn(), deadline).await?;
+                }
+                Self::Plain {
+                    bound_lock_wait: false,
+                } => {}
+            }
+            Ok(())
+        };
+        match self {
+            Self::Plain { .. } => match setup.await {
+                Ok(()) => LocalTxStageResult::Complete(()),
+                Err(error) => LocalTxStageResult::Failed(error),
+            },
+            Self::Deadline(deadline) => deadline.setup(setup).await,
+        }
+    }
+
+    async fn operation<F, T, E>(
+        self,
+        future: F,
+    ) -> LocalTxStageResult<T, E, LocalTxOperationDeadline>
+    where
+        F: std::future::Future<Output = Result<T, E>>,
+        E: std::error::Error + 'static,
+    {
+        match self {
+            Self::Plain { .. } => match future.await {
+                Ok(value) => LocalTxStageResult::Complete(value),
+                Err(error) => LocalTxStageResult::Failed(error),
+            },
+            Self::Deadline(deadline) => deadline.operation(future).await,
+        }
+    }
+
+    async fn commit(
+        self,
+        future: impl std::future::Future<Output = Result<(), sqlx::Error>>,
+    ) -> LocalTxStageResult<(), sqlx::Error, LocalTxCommitDeadline> {
+        match self {
+            Self::Plain { .. } => match future.await {
+                Ok(()) => LocalTxStageResult::Complete(()),
+                Err(error) => LocalTxStageResult::Failed(error),
+            },
+            Self::Deadline(deadline) => deadline.commit(future).await,
+        }
+    }
+
+    async fn rollback(
+        self,
+        future: impl std::future::Future<Output = Result<(), sqlx::Error>>,
+    ) -> LocalTxStageResult<(), sqlx::Error, LocalTxRollbackDeadline> {
+        match self {
+            Self::Plain { .. } => match future.await {
+                Ok(()) => LocalTxStageResult::Complete(()),
+                Err(error) => LocalTxStageResult::Failed(error),
+            },
+            Self::Deadline(deadline) => deadline.rollback(future).await,
+        }
+    }
+}
+
+enum LocalTxBodyResult<T, E> {
+    Success(T),
+    Failed(E),
+    SetupDeadline(E, LocalTxSetupDeadline),
+    OperationDeadline(E, LocalTxOperationDeadline),
+}
+
+trait LocalTxOperation<T, E>: Send {
+    fn execute<'c, 'tx>(self, tx: &'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>>
+    where
+        Self: 'c;
+}
+
+struct PlainLocalTxOperation<F>(F);
+
+impl<T, E, F> LocalTxOperation<T, E> for PlainLocalTxOperation<F>
+where
+    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+{
+    fn execute<'c, 'tx>(self, tx: &'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>>
+    where
+        Self: 'c,
+    {
+        (self.0)(tx)
+    }
+}
+
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+struct OutboxLocalTxOperation<'a, F> {
+    projection_registry: ProjectionWriteRegistry,
+    write: CoTxOutboxWrite<'a>,
+    business_write: F,
+}
+
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+impl<'a, F, E> LocalTxOperation<(), CoTxWriteError<E>> for OutboxLocalTxOperation<'a, F>
+where
+    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn execute<'c, 'tx>(
+        self,
+        tx: &'c mut TxCapability<'tx>,
+    ) -> BoxFuture<'c, Result<(), CoTxWriteError<E>>>
+    where
+        Self: 'c,
+    {
+        Box::pin(write_in_tx_after_setup(
+            tx,
+            self.projection_registry,
+            self.write.tenant,
+            self.write.entry,
+            self.write.env,
+            self.business_write,
+        ))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LocalTxPrimaryDeadline {
+    Setup(LocalTxSetupDeadline),
+    Operation(LocalTxOperationDeadline),
+}
+
+/// The only tenant mutation transaction core.
+async fn execute_local_tx<T, O, E>(
+    pool: &PgPool,
+    tenant: TenantId,
+    policy: LocalTxExecutionPolicy,
+    write: O,
+    map_storage: impl Fn(sqlx::Error) -> E,
+    operation: &'static str,
+) -> LocalTxAttempt<T, E>
+where
+    O: LocalTxOperation<T, E>,
+    E: std::error::Error + Send + Sync + 'static,
+    T: Send,
+{
+    let mut lease = match policy.acquire(pool).await {
+        LocalTxStageResult::Complete(lease) => lease,
+        LocalTxStageResult::Failed(error) => {
+            return LocalTxAttempt::unsettled(map_storage(error));
+        }
+        LocalTxStageResult::Deadline { evidence, .. } => {
+            return LocalTxAttempt::unsettled_acquire_deadline(
+                map_storage(localtx_timeout_error()),
+                evidence,
+            );
+        }
+    };
+    let mut tx = match policy.begin(&mut lease).await {
+        LocalTxStageResult::Complete(tx) => tx,
+        LocalTxStageResult::Failed(error) => {
+            return LocalTxAttempt::unsettled(map_storage(error));
+        }
+        LocalTxStageResult::Deadline { evidence, .. } => {
+            return LocalTxAttempt::unsettled_begin_deadline(
+                map_storage(localtx_timeout_error()),
+                evidence,
+            );
+        }
+    };
+
+    let setup_result = {
+        let mut tx_cap = tx.capability();
+        policy.setup(&mut tx_cap, tenant).await
+    };
+    let body_result = match setup_result {
+        LocalTxStageResult::Complete(()) => {
+            let mut tx_cap = tx.capability();
+            match policy.operation(write.execute(&mut tx_cap)).await {
+                LocalTxStageResult::Complete(value) => LocalTxBodyResult::Success(value),
+                LocalTxStageResult::Failed(error) => LocalTxBodyResult::Failed(error),
+                LocalTxStageResult::Deadline { source, evidence } => {
+                    LocalTxBodyResult::OperationDeadline(
+                        source.unwrap_or_else(|| map_storage(localtx_timeout_error())),
+                        evidence,
+                    )
+                }
+            }
+        }
+        LocalTxStageResult::Failed(error) => LocalTxBodyResult::Failed(map_storage(error)),
+        LocalTxStageResult::Deadline { source, evidence } => LocalTxBodyResult::SetupDeadline(
+            map_storage(source.unwrap_or_else(localtx_timeout_error)),
+            evidence,
+        ),
+    };
+    finish_local_tx(tx, body_result, map_storage, operation, tenant, policy).await
+}
+
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+async fn execute_outbox_local_tx<F, E>(
+    pool: &PgPool,
+    projection_registry: ProjectionWriteRegistry,
+    write: CoTxOutboxWrite<'_>,
+    policy: LocalTxExecutionPolicy,
+    business_write: F,
+    map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
+) -> LocalTxAttempt<(), E>
+where
+    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
+    E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
+{
+    let attempt = execute_local_tx(
+        pool,
+        write.tenant,
+        policy,
+        OutboxLocalTxOperation {
+            projection_registry,
+            write: CoTxOutboxWrite {
+                tenant: write.tenant,
+                entry: write.entry,
+                env: write.env,
+            },
+            business_write,
+        },
+        CoTxWriteError::TenantScope,
+        "co-tx-with-outbox",
+    )
+    .await;
+    attempt.map_error(|error| {
+        log_cotx_write_error(write.entry, write.env, &error);
+        error.into_domain(&map_storage)
+    })
+}
+
+/// Settle every LocalTx attempt through the only commit/explicit-rollback branch.
 async fn finish_local_tx<T, E>(
     tx: LocalTxTransaction<'_>,
-    result: Result<T, E>,
+    result: LocalTxBodyResult<T, E>,
     map_storage: impl Fn(sqlx::Error) -> E,
     operation: &'static str,
     tenant: TenantId,
+    policy: LocalTxExecutionPolicy,
 ) -> LocalTxAttempt<T, E>
 where
     E: std::error::Error + Send + Sync + 'static,
 {
     match result {
-        Ok(value) => {
-            #[allow(unused_mut)]
-            let mut tx = tx;
-            #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
-            let inject_commit_unknown = {
-                let mut tx_cap = tx.capability();
-                test_commit_unknown_after_commit_requested(&mut tx_cap).await
-            };
-            #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
-            let commit_result = if inject_commit_unknown {
-                tx.commit_unknown_after_ack().await
-            } else {
-                tx.commit().await
-            };
-            #[cfg(not(any(
-                all(test, feature = "integration"),
-                feature = "journey-fault-support"
-            )))]
-            let commit_result = tx.commit().await;
-            finish_local_tx_commit_result(commit_result, value, map_storage, operation, tenant)
+        LocalTxBodyResult::Success(value) => {
+            commit_local_tx(tx, value, map_storage, operation, tenant, policy).await
         }
-        Err(error) => {
-            #[allow(unused_mut)]
-            let mut tx = tx;
-            #[cfg(all(test, feature = "integration"))]
-            let inject_rollback_timeout = {
-                let mut tx_cap = tx.capability();
-                test_rollback_timeout_requested(&mut tx_cap).await
-            };
-            #[cfg(all(test, feature = "integration"))]
-            let inject_rollback_failed = {
-                let mut tx_cap = tx.capability();
-                test_rollback_failed_after_rollback_requested(&mut tx_cap).await
-            };
-            #[cfg(all(test, feature = "integration"))]
-            let rollback_result = if inject_rollback_timeout {
-                tx.rollback_paused_before_ack().await
-            } else if inject_rollback_failed {
-                tx.rollback_failed_after_ack().await
-            } else {
-                tx.rollback().await
-            };
-            #[cfg(not(all(test, feature = "integration")))]
-            let rollback_result = tx.rollback().await;
-            finish_local_tx_rollback_result(rollback_result, error, map_storage, operation, tenant)
+        LocalTxBodyResult::Failed(error) => {
+            rollback_local_tx(tx, error, None, map_storage, operation, tenant, policy).await
+        }
+        LocalTxBodyResult::SetupDeadline(error, evidence) => {
+            rollback_local_tx(
+                tx,
+                error,
+                Some(LocalTxPrimaryDeadline::Setup(evidence)),
+                map_storage,
+                operation,
+                tenant,
+                policy,
+            )
+            .await
+        }
+        LocalTxBodyResult::OperationDeadline(error, evidence) => {
+            rollback_local_tx(
+                tx,
+                error,
+                Some(LocalTxPrimaryDeadline::Operation(evidence)),
+                map_storage,
+                operation,
+                tenant,
+                policy,
+            )
+            .await
         }
     }
+}
+
+async fn commit_local_tx<T, E>(
+    tx: LocalTxTransaction<'_>,
+    value: T,
+    map_storage: impl Fn(sqlx::Error) -> E,
+    operation: &'static str,
+    tenant: TenantId,
+    policy: LocalTxExecutionPolicy,
+) -> LocalTxAttempt<T, E> {
+    #[allow(unused_mut)]
+    let mut tx = tx;
+    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+    let inject_commit_unknown = {
+        let mut tx_cap = tx.capability();
+        test_commit_unknown_after_commit_requested(&mut tx_cap).await
+    };
+    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+    let commit_result = if inject_commit_unknown {
+        policy.commit(tx.commit_unknown_after_ack()).await
+    } else {
+        policy.commit(tx.commit()).await
+    };
+    #[cfg(not(any(all(test, feature = "integration"), feature = "journey-fault-support")))]
+    let commit_result = policy.commit(tx.commit()).await;
+
+    match commit_result {
+        LocalTxStageResult::Complete(()) => LocalTxAttempt::committed(value),
+        LocalTxStageResult::Failed(error) => {
+            finish_local_tx_commit_result(Err(error), value, map_storage, operation, tenant)
+        }
+        LocalTxStageResult::Deadline { source, evidence } => {
+            tracing::debug!(
+                target: "postgres",
+                operation,
+                tenant_id = %tenant,
+                "local transaction commit exceeded final deadline"
+            );
+            LocalTxAttempt::commit_unknown_deadline(
+                map_storage(commit_unknown(source.unwrap_or_else(localtx_timeout_error))),
+                evidence,
+            )
+        }
+    }
+}
+
+async fn rollback_local_tx<T, E>(
+    tx: LocalTxTransaction<'_>,
+    error: E,
+    primary: Option<LocalTxPrimaryDeadline>,
+    map_storage: impl Fn(sqlx::Error) -> E,
+    operation: &'static str,
+    tenant: TenantId,
+    policy: LocalTxExecutionPolicy,
+) -> LocalTxAttempt<T, E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let rollback_result = run_local_tx_rollback(tx, policy).await;
+    match rollback_result {
+        LocalTxStageResult::Complete(()) => match primary {
+            None => LocalTxAttempt::rolled_back(error),
+            Some(LocalTxPrimaryDeadline::Setup(evidence)) => {
+                LocalTxAttempt::rolled_back_setup_deadline(error, evidence)
+            }
+            Some(LocalTxPrimaryDeadline::Operation(evidence)) => {
+                LocalTxAttempt::rolled_back_operation_deadline(error, evidence)
+            }
+        },
+        LocalTxStageResult::Failed(rollback_error) => finish_local_tx_rollback_result(
+            Err(rollback_error),
+            error,
+            map_storage,
+            operation,
+            tenant,
+        ),
+        LocalTxStageResult::Deadline { source, evidence } => {
+            let mapped = map_storage(rollback_failed(
+                error,
+                source.unwrap_or_else(localtx_timeout_error),
+            ));
+            match primary {
+                None => LocalTxAttempt::rollback_failed_deadline(mapped, evidence),
+                Some(LocalTxPrimaryDeadline::Setup(setup)) => {
+                    LocalTxAttempt::rollback_failed_setup_deadline(mapped, setup, evidence)
+                }
+                Some(LocalTxPrimaryDeadline::Operation(operation)) => {
+                    LocalTxAttempt::rollback_failed_operation_deadline(mapped, operation, evidence)
+                }
+            }
+        }
+    }
+}
+
+async fn run_local_tx_rollback(
+    tx: LocalTxTransaction<'_>,
+    policy: LocalTxExecutionPolicy,
+) -> LocalTxStageResult<(), sqlx::Error, LocalTxRollbackDeadline> {
+    #[allow(unused_mut)]
+    let mut tx = tx;
+    #[cfg(all(test, feature = "integration"))]
+    let inject_rollback_timeout = {
+        let mut tx_cap = tx.capability();
+        test_rollback_timeout_requested(&mut tx_cap).await
+    };
+    #[cfg(all(test, feature = "integration"))]
+    let inject_rollback_failed = {
+        let mut tx_cap = tx.capability();
+        test_rollback_failed_after_rollback_requested(&mut tx_cap).await
+    };
+    #[cfg(all(test, feature = "integration"))]
+    if inject_rollback_timeout {
+        return policy.rollback(tx.rollback_paused_before_ack()).await;
+    }
+    #[cfg(all(test, feature = "integration"))]
+    if inject_rollback_failed {
+        return policy.rollback(tx.rollback_failed_after_ack()).await;
+    }
+    policy.rollback(tx.rollback()).await
+}
+
+fn localtx_timeout_error() -> sqlx::Error {
+    sqlx::Error::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "LocalTx execution deadline exceeded",
+    ))
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -926,6 +1347,9 @@ static TEST_LOCALTX_PAUSE_SEAM: tokio::sync::Mutex<()> = tokio::sync::Mutex::con
 
 #[cfg(all(test, feature = "integration"))]
 static TEST_BEGIN_PAUSE_ENTERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+#[cfg(all(test, feature = "integration"))]
+static TEST_SETUP_PAUSE_ENTERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 #[cfg(all(test, feature = "integration"))]
 static TEST_COMMIT_PAUSE_ENTERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
@@ -939,6 +1363,7 @@ tokio::task_local! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LocalTxTestPauseStage {
     Begin,
+    Setup,
     Commit,
 }
 
@@ -958,6 +1383,7 @@ async fn pause_localtx_stage_for_test(stage: LocalTxTestPauseStage) {
     {
         match stage {
             LocalTxTestPauseStage::Begin => TEST_BEGIN_PAUSE_ENTERED.notify_one(),
+            LocalTxTestPauseStage::Setup => TEST_SETUP_PAUSE_ENTERED.notify_one(),
             LocalTxTestPauseStage::Commit => TEST_COMMIT_PAUSE_ENTERED.notify_one(),
         }
         std::future::pending::<()>().await;
@@ -968,6 +1394,7 @@ async fn pause_localtx_stage_for_test(stage: LocalTxTestPauseStage) {
 pub(crate) async fn wait_for_localtx_pause_for_test(stage: LocalTxTestPauseStage) {
     match stage {
         LocalTxTestPauseStage::Begin => TEST_BEGIN_PAUSE_ENTERED.notified().await,
+        LocalTxTestPauseStage::Setup => TEST_SETUP_PAUSE_ENTERED.notified().await,
         LocalTxTestPauseStage::Commit => TEST_COMMIT_PAUSE_ENTERED.notified().await,
     }
 }
@@ -1076,33 +1503,23 @@ where
     }
 }
 
-/// 事务体：SET LOCAL tenant → 业务写 → `append_outbox`（任一步 Err 即冒泡，由调用方 rollback）。
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-async fn write_in_tx<F, E>(
+async fn write_in_tx_after_setup<F, E>(
     tx: &mut TxCapability<'_>,
     projection_registry: ProjectionWriteRegistry,
     tenant: TenantId,
     entry: &EventEntry,
     env: &OutboxEnvelope,
     business_write: F,
-    bound_lock_wait: bool,
 ) -> Result<(), CoTxWriteError<E>>
 where
     F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
+    E: std::error::Error + 'static,
 {
-    // tenant scope（事务级，commit/rollback 自动失效；与 plain 写共享 set_local_tenant，F3）。
-    set_local_tenant(tx.conn(), tenant)
-        .await
-        .map_err(CoTxWriteError::TenantScope)?;
     if env.tenant() != tenant {
         return Err(CoTxWriteError::TenantMismatch(sqlx::Error::AnyDriverError(
             Box::new(OutboxTenantMismatch),
         )));
-    }
-    if bound_lock_wait {
-        set_local_retry_lock_timeout(tx.conn())
-            .await
-            .map_err(CoTxWriteError::RetryLockTimeout)?;
     }
     // 业务写（同 tx；CAS 0 行 → 业务 E::VersionConflict）。tx_cap 是从 live Transaction 铸造的能力令牌；
     // append_outbox 也只接受该令牌，裸 PgPool/PgConnection 无法调用 outbox 双写入口。
@@ -1117,12 +1534,16 @@ where
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-enum CoTxWriteError<E> {
-    TenantScope(sqlx::Error),
-    TenantMismatch(sqlx::Error),
-    RetryLockTimeout(sqlx::Error),
-    BusinessWrite(E),
-    AppendOutbox(OutboxAppendError),
+#[derive(Debug, thiserror::Error)]
+enum CoTxWriteError<E: std::error::Error + 'static> {
+    #[error("failed to establish tenant transaction state")]
+    TenantScope(#[source] sqlx::Error),
+    #[error("outbox tenant does not match transaction tenant")]
+    TenantMismatch(#[source] sqlx::Error),
+    #[error("business write failed")]
+    BusinessWrite(#[source] E),
+    #[error("outbox append failed")]
+    AppendOutbox(#[source] OutboxAppendError),
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
@@ -1158,12 +1579,11 @@ impl MapOutboxAppendError for identity::ports::IdentityError {
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-impl<E: MapOutboxAppendError> CoTxWriteError<E> {
+impl<E: MapOutboxAppendError + std::error::Error + 'static> CoTxWriteError<E> {
     fn stage(&self) -> &'static str {
         match self {
             Self::TenantScope(_) => "set-local-tenant",
             Self::TenantMismatch(_) => "outbox-tenant-match",
-            Self::RetryLockTimeout(_) => "set-local-retry-lock-timeout",
             Self::BusinessWrite(_) => "business-write",
             Self::AppendOutbox(_) => "append-outbox",
         }
@@ -1171,7 +1591,7 @@ impl<E: MapOutboxAppendError> CoTxWriteError<E> {
 
     fn sqlx_source(&self) -> Option<&sqlx::Error> {
         match self {
-            Self::TenantScope(e) | Self::TenantMismatch(e) | Self::RetryLockTimeout(e) => Some(e),
+            Self::TenantScope(e) | Self::TenantMismatch(e) => Some(e),
             Self::AppendOutbox(OutboxAppendError::Storage(e)) => Some(e),
             Self::AppendOutbox(
                 OutboxAppendError::Conflict(_)
@@ -1184,9 +1604,7 @@ impl<E: MapOutboxAppendError> CoTxWriteError<E> {
 
     fn into_domain(self, map_storage: &(impl Fn(sqlx::Error) -> E + Send)) -> E {
         match self {
-            Self::TenantScope(e) | Self::TenantMismatch(e) | Self::RetryLockTimeout(e) => {
-                map_storage(e)
-            }
+            Self::TenantScope(e) | Self::TenantMismatch(e) => map_storage(e),
             Self::AppendOutbox(e) => E::from_outbox_append(e),
             Self::BusinessWrite(e) => e,
         }
@@ -1194,7 +1612,7 @@ impl<E: MapOutboxAppendError> CoTxWriteError<E> {
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-fn log_cotx_write_error<E: MapOutboxAppendError>(
+fn log_cotx_write_error<E: MapOutboxAppendError + std::error::Error + 'static>(
     entry: &EventEntry,
     env: &OutboxEnvelope,
     error: &CoTxWriteError<E>,
@@ -1383,6 +1801,7 @@ mod tx_capability_tests {
         let retry = scoped
             .retry_write(
                 settings::ports::TenantRepoScope::for_test(tenant),
+                crate::tx_retry::localtx_deadline_for_test(),
                 |_| Box::pin(async { Ok::<(), ConfigRepoError>(()) }),
                 map_storage,
             )
@@ -1425,6 +1844,7 @@ mod tx_capability_tests {
         let retry_co_tx = scoped
             .retry_co_tx_with_outbox(
                 settings::ports::TenantRepoScope::for_test(tenant),
+                crate::tx_retry::localtx_deadline_for_test(),
                 &entry,
                 &env,
                 |_| Box::pin(async { Ok::<(), ConfigRepoError>(()) }),
@@ -1615,7 +2035,7 @@ mod retry_settlement_tests {
                 let attempts = AtomicU32::new(0);
                 let ok = run_pg_tx_retry(
                     SETTINGS_CONFIG_BOUNDARY,
-                    |attempt| {
+                    |attempt, _deadline| {
                         attempts.store(attempt, Ordering::Release);
                         async move {
                             if attempt == 1 {
@@ -1633,7 +2053,9 @@ mod retry_settlement_tests {
 
                 let conflict = run_pg_tx_retry(
                     SETTINGS_CONFIG_BOUNDARY,
-                    |_attempt| async { LocalTxAttempt::<(), _>::rolled_back(FakeError::Conflict) },
+                    |_attempt, _deadline| async {
+                        LocalTxAttempt::<(), _>::rolled_back(FakeError::Conflict)
+                    },
                     classify_fake,
                 )
                 .await;
@@ -1641,7 +2063,9 @@ mod retry_settlement_tests {
 
                 let exhausted = run_pg_tx_retry(
                     SETTINGS_CONFIG_BOUNDARY,
-                    |_attempt| async { LocalTxAttempt::<(), _>::rolled_back(FakeError::Transient) },
+                    |_attempt, _deadline| async {
+                        LocalTxAttempt::<(), _>::rolled_back(FakeError::Transient)
+                    },
                     classify_fake,
                 )
                 .await;
@@ -1655,7 +2079,7 @@ mod retry_settlement_tests {
                     let mut terminal = Some(terminal);
                     let result = run_pg_tx_retry(
                         SETTINGS_SECRET_BOUNDARY,
-                        |_attempt| {
+                        |_attempt, _deadline| {
                             calls.fetch_add(1, Ordering::Relaxed);
                             core::future::ready(match terminal.take() {
                                 Some(attempt) => attempt,
@@ -1718,7 +2142,7 @@ mod retry_settlement_tests {
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let result = run_pg_localtx_retry(
             settings_secret_observation(),
-            |_attempt| async { LocalTxAttempt::<(), FakeError>::committed(()) },
+            |_attempt, _deadline| async { LocalTxAttempt::<(), FakeError>::committed(()) },
             classify_fake,
         )
         .await;
@@ -1745,7 +2169,7 @@ mod retry_settlement_tests {
             runtime.block_on(async {
                 let result = run_pg_localtx_retry(
                     observation,
-                    |_attempt| async {
+                    |_attempt, _deadline| async {
                         LocalTxAttempt::<(), _>::commit_unknown(FakeError::Transient)
                     },
                     classify_fake,
@@ -1840,7 +2264,7 @@ mod retry_settlement_tests {
             runtime.block_on(async {
                 let committed = run_pg_localtx_retry(
                     committed_observation,
-                    |attempt| async move {
+                    |attempt, _deadline| async move {
                         if attempt == 1 {
                             LocalTxAttempt::rolled_back(FakeError::Transient)
                         } else {
@@ -1863,7 +2287,7 @@ mod retry_settlement_tests {
                     let mut attempt = Some(attempt);
                     let result = run_pg_localtx_retry(
                         observation,
-                        |_attempt| {
+                        |_attempt, _deadline| {
                             core::future::ready(match attempt.take() {
                                 Some(attempt) => attempt,
                                 None => LocalTxAttempt::committed(()),
@@ -1878,7 +2302,9 @@ mod retry_settlement_tests {
 
                 let exhausted = run_pg_localtx_retry(
                     exhausted_observation,
-                    |_attempt| async { LocalTxAttempt::<(), _>::rolled_back(FakeError::Transient) },
+                    |_attempt, _deadline| async {
+                        LocalTxAttempt::<(), _>::rolled_back(FakeError::Transient)
+                    },
                     classify_fake,
                 )
                 .await;
@@ -1925,7 +2351,7 @@ mod retry_settlement_tests {
             runtime.block_on(async {
                 let result = run_pg_localtx_retry(
                     observation,
-                    |attempt| async move {
+                    |attempt, _deadline| async move {
                         if attempt == 1 {
                             LocalTxAttempt::<(), _>::rolled_back(FakeError::Transient)
                         } else {
@@ -1969,7 +2395,9 @@ mod retry_settlement_tests {
             runtime.block_on(async {
                 let result = run_pg_localtx_retry(
                     observation,
-                    |_attempt| async { LocalTxAttempt::<(), _>::unsettled(FakeError::Transient) },
+                    |_attempt, _deadline| async {
+                        LocalTxAttempt::<(), _>::unsettled(FakeError::Transient)
+                    },
                     classify_fake,
                 )
                 .await;
@@ -1992,7 +2420,7 @@ mod retry_settlement_tests {
         let attempts = AtomicU32::new(0);
         let unsettled = run_pg_tx_retry(
             SETTINGS_CONFIG_BOUNDARY,
-            |attempt| {
+            |attempt, _deadline| {
                 attempts.store(attempt, Ordering::Release);
                 async move {
                     if attempt == 1 {
@@ -2019,7 +2447,7 @@ mod retry_settlement_tests {
             let mut terminal = Some(terminal);
             let result = run_pg_tx_retry(
                 SETTINGS_CONFIG_BOUNDARY,
-                |attempt| {
+                |attempt, _deadline| {
                     attempts.store(attempt, Ordering::Release);
                     core::future::ready(match terminal.take() {
                         Some(attempt) => attempt,

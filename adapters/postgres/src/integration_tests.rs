@@ -9999,6 +9999,468 @@ async fn localtx_assert_backend_quarantined(
     Ok(())
 }
 
+async fn run_localtx_deadline_write<T, F>(
+    scoped: &crate::cotx::PgTenantWritePool,
+    tenant: vocab::TenantId,
+    budget: consistency::LocalTxExecutionBudget,
+    write: F,
+) -> (Result<T, settings::ports::ConfigRepoError>, usize)
+where
+    F: for<'c, 'tx> FnOnce(
+            &'c mut crate::cotx::TxCapability<'tx>,
+        ) -> futures::future::BoxFuture<
+            'c,
+            Result<T, settings::ports::ConfigRepoError>,
+        > + Clone
+        + Send,
+    T: Send,
+{
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use generated::http::settings_v2::{LOCAL_TX, ROUTE};
+
+    let observation = observ::LocalTxObservation::new(ROUTE, LOCAL_TX.boundary);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_runner = Arc::clone(&attempts);
+    let result = crate::tx_retry::with_localtx_execution_budget_for_test(
+        budget,
+        crate::tx_retry::run_pg_localtx_retry(
+            observation,
+            |_attempt, deadline| {
+                attempts_for_runner.fetch_add(1, Ordering::SeqCst);
+                scoped.retry_write(
+                    settings::ports::TenantRepoScope::for_test(tenant),
+                    deadline,
+                    write.clone(),
+                    |error| settings::ports::ConfigRepoError::Storage(Box::new(error)),
+                )
+            },
+            crate::tx_retry::classify_config_repo_error,
+        ),
+    )
+    .await;
+    (result, attempts.load(Ordering::SeqCst))
+}
+
+fn localtx_deadline_stage_count(
+    handle: &metrics_exporter_prometheus::PrometheusHandle,
+    stage: consistency::LocalTxDeadlineStage,
+) -> f64 {
+    let stage_label = format!("stage=\"{}\"", stage.as_label());
+    handle
+        .render()
+        .lines()
+        .filter(|line| {
+            line.starts_with("localtx_deadline_exceeded_total{") && line.contains(&stage_label)
+        })
+        .filter_map(|line| line.split_whitespace().last()?.parse::<f64>().ok())
+        .sum()
+}
+
+fn localtx_final_status_count(
+    handle: &metrics_exporter_prometheus::PrometheusHandle,
+    status: consistency::LocalTxFinalStatus,
+) -> f64 {
+    let status_label = format!("final_status=\"{}\"", status.as_label());
+    handle
+        .render()
+        .lines()
+        .filter(|line| line.starts_with("localtx_final_total{") && line.contains(&status_label))
+        .filter_map(|line| line.split_whitespace().last()?.parse::<f64>().ok())
+        .sum()
+}
+
+fn localtx_final_total(handle: &metrics_exporter_prometheus::PrometheusHandle) -> f64 {
+    consistency::LocalTxFinalStatus::ALL
+        .iter()
+        .map(|status| localtx_final_status_count(handle, *status))
+        .sum()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::panic)]
+async fn localtx_deadline_real_postgres_fault_matrix() -> TestResult {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    use consistency::{LocalTxDeadlineStage, LocalTxExecutionBudget, LocalTxFinalStatus};
+    use settings::ports::ConfigRepoError;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(7)).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+    let budget =
+        LocalTxExecutionBudget::new(Duration::from_millis(300), Duration::from_millis(100))?;
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let started = std::time::Instant::now();
+
+    metrics::with_local_recorder(&recorder, || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                // Acquire: exhaust the sole pool slot until the operation deadline.
+                let held = app.pool.acquire().await?;
+                let before = localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Acquire);
+                let final_before = localtx_final_total(&handle);
+                let case_started = std::time::Instant::now();
+                let (acquire, attempts) = run_localtx_deadline_write(&scoped, tenant, budget, |_tx| {
+                    Box::pin(async { Ok::<(), ConfigRepoError>(()) })
+                })
+                .await;
+                drop(held);
+                assert!(acquire.is_err());
+                assert_eq!(attempts, 1, "acquire deadline must not replay");
+                assert!(case_started.elapsed() <= budget.total() + Duration::from_millis(250));
+                assert_eq!(
+                    localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Acquire),
+                    before + 1.0
+                );
+                assert_eq!(localtx_final_total(&handle), final_before);
+
+                // Begin: the armed lease must quarantine the backend when begin is cancelled.
+                let mut connection = app.pool.acquire().await?;
+                let begin_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *connection)
+                    .await?;
+                drop(connection);
+                let before = localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Begin);
+                let final_before = localtx_final_total(&handle);
+                let case_started = std::time::Instant::now();
+                let (begin, attempts) = crate::cotx::with_localtx_pause_for_test(
+                    crate::cotx::LocalTxTestPauseStage::Begin,
+                    run_localtx_deadline_write(&scoped, tenant, budget, |_tx| {
+                        Box::pin(async { Ok::<(), ConfigRepoError>(()) })
+                    }),
+                )
+                .await;
+                assert!(begin.is_err());
+                assert_eq!(attempts, 1, "begin deadline must not replay");
+                assert!(case_started.elapsed() <= budget.total() + Duration::from_millis(250));
+                assert_eq!(
+                    localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Begin),
+                    before + 1.0
+                );
+                assert_eq!(localtx_final_total(&handle), final_before);
+                localtx_assert_backend_quarantined(&owner, &app.pool, begin_pid, "begin deadline")
+                    .await?;
+
+                // Setup: timeout before mutation, followed by an acknowledged rollback and reuse.
+                let mut connection = app.pool.acquire().await?;
+                let setup_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *connection)
+                    .await?;
+                drop(connection);
+                let before = localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Setup);
+                let final_before =
+                    localtx_final_status_count(&handle, LocalTxFinalStatus::RolledBack);
+                let case_started = std::time::Instant::now();
+                let (setup, attempts) = crate::cotx::with_localtx_pause_for_test(
+                    crate::cotx::LocalTxTestPauseStage::Setup,
+                    run_localtx_deadline_write(&scoped, tenant, budget, |_tx| {
+                        Box::pin(async { Ok::<(), ConfigRepoError>(()) })
+                    }),
+                )
+                .await;
+                assert!(setup.is_err());
+                assert_eq!(attempts, 1, "setup deadline must not replay");
+                assert!(case_started.elapsed() <= budget.total() + Duration::from_millis(250));
+                assert_eq!(
+                    localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Setup),
+                    before + 1.0
+                );
+                assert_eq!(
+                    localtx_final_status_count(&handle, LocalTxFinalStatus::RolledBack),
+                    final_before + 1.0
+                );
+                localtx_assert_backend_reused(&app.pool, setup_pid, "setup deadline rollback ack")
+                    .await?;
+
+                // Operation: a durable write before cancellation must still roll back.
+                let operation_pid = std::sync::Arc::new(AtomicI32::new(0));
+                let pid_out = std::sync::Arc::clone(&operation_pid);
+                let statement_timeout_ms = std::sync::Arc::new(AtomicI32::new(0));
+                let statement_timeout_out = std::sync::Arc::clone(&statement_timeout_ms);
+                let lock_timeout_ms = std::sync::Arc::new(AtomicI32::new(0));
+                let lock_timeout_out = std::sync::Arc::clone(&lock_timeout_ms);
+                let key = format!("localtx-deadline-operation-{}", uuid::Uuid::new_v4());
+                let key_for_write = key.clone();
+                let tenant_for_write = tenant.to_string();
+                let before = localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Operation);
+                let final_before =
+                    localtx_final_status_count(&handle, LocalTxFinalStatus::RolledBack);
+                let case_started = std::time::Instant::now();
+                let (operation, attempts) = run_localtx_deadline_write(&scoped, tenant, budget, move |tx| {
+                    let pid_out = std::sync::Arc::clone(&pid_out);
+                    let statement_timeout_out = std::sync::Arc::clone(&statement_timeout_out);
+                    let lock_timeout_out = std::sync::Arc::clone(&lock_timeout_out);
+                    let key = key_for_write.clone();
+                    let tenant = tenant_for_write.clone();
+                    Box::pin(async move {
+                        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                            .fetch_one(tx.conn())
+                            .await
+                            .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                        pid_out.store(pid, Ordering::SeqCst);
+                        let (statement_ms, lock_ms): (i32, i32) = sqlx::query_as(
+                            "SELECT \
+                               (EXTRACT(EPOCH FROM current_setting('statement_timeout')::interval) * 1000)::int, \
+                               (EXTRACT(EPOCH FROM current_setting('lock_timeout')::interval) * 1000)::int",
+                        )
+                        .fetch_one(tx.conn())
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                        statement_timeout_out.store(statement_ms, Ordering::SeqCst);
+                        lock_timeout_out.store(lock_ms, Ordering::SeqCst);
+                        sqlx::query(
+                            "INSERT INTO config_entries \
+                                 (tenant_id, config_key, version, value, protection_scheme) \
+                                 VALUES ($1::uuid, $2, 1, 'pending', 0)",
+                        )
+                        .bind(tenant)
+                        .bind(key)
+                        .execute(tx.conn())
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                        sqlx::query("SELECT pg_sleep(1)")
+                            .execute(tx.conn())
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| ConfigRepoError::Storage(Box::new(error)))
+                    })
+                })
+                .await;
+                assert!(operation.is_err());
+                assert_eq!(attempts, 1, "server 57014 operation deadline must not replay");
+                assert!(case_started.elapsed() <= budget.total() + Duration::from_millis(250));
+                assert_eq!(
+                    localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Operation),
+                    before + 1.0
+                );
+                assert_eq!(
+                    localtx_final_status_count(&handle, LocalTxFinalStatus::RolledBack),
+                    final_before + 1.0
+                );
+                let statement_ms = statement_timeout_ms.load(Ordering::SeqCst);
+                assert!(
+                    (1..200).contains(&statement_ms),
+                    "dynamic statement_timeout must use the latest residual budget: {statement_ms}ms"
+                );
+                assert_eq!(
+                    lock_timeout_ms.load(Ordering::SeqCst),
+                    statement_ms,
+                    "sub-5s statement budget must also bound lock wait"
+                );
+                let durable: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM config_entries WHERE config_key = $1")
+                        .bind(&key)
+                        .fetch_one(&owner.pool)
+                        .await?;
+                assert_eq!(
+                    durable, 0,
+                    "operation timeout must rollback the pending write"
+                );
+                localtx_assert_backend_reused(
+                    &app.pool,
+                    operation_pid.load(Ordering::SeqCst),
+                    "operation deadline rollback ack",
+                )
+                .await?;
+
+                // Backoff: a retryable rolled-back attempt must not sleep beyond the budget.
+                let before = localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Backoff);
+                let final_before =
+                    localtx_final_status_count(&handle, LocalTxFinalStatus::RolledBack);
+                let case_started = std::time::Instant::now();
+                let backoff_pid = std::sync::Arc::new(AtomicI32::new(0));
+                let pid_out = std::sync::Arc::clone(&backoff_pid);
+                let (backoff, attempts) = crate::tx_retry::with_localtx_backoff_delay_for_test(
+                    Duration::from_millis(250),
+                    run_localtx_deadline_write(&scoped, tenant, budget, move |tx| {
+                        let pid_out = std::sync::Arc::clone(&pid_out);
+                        Box::pin(async move {
+                            let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                                .fetch_one(tx.conn())
+                                .await
+                                .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                            pid_out.store(pid, Ordering::SeqCst);
+                            Err::<(), _>(ConfigRepoError::Storage(Box::new(
+                                sqlx::Error::PoolTimedOut,
+                            )))
+                        })
+                    }),
+                )
+                .await;
+                assert!(backoff.is_err());
+                assert_eq!(attempts, 1, "exhausted backoff must not start a second attempt");
+                assert!(case_started.elapsed() <= budget.total() + Duration::from_millis(250));
+                assert_eq!(
+                    localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Backoff),
+                    before + 1.0
+                );
+                assert_eq!(
+                    localtx_final_status_count(&handle, LocalTxFinalStatus::RolledBack),
+                    final_before + 1.0
+                );
+                localtx_assert_backend_reused(
+                    &app.pool,
+                    backoff_pid.load(Ordering::SeqCst),
+                    "backoff exhaustion after rollback ack",
+                )
+                .await?;
+
+                // Commit: no ACK means CommitUnknown, no replay, and connection quarantine.
+                let commit_pid = std::sync::Arc::new(AtomicI32::new(0));
+                let pid_out = std::sync::Arc::clone(&commit_pid);
+                let before = localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Commit);
+                let final_before =
+                    localtx_final_status_count(&handle, LocalTxFinalStatus::CommitUnknown);
+                let case_started = std::time::Instant::now();
+                let (commit, attempts) = crate::cotx::with_localtx_pause_for_test(
+                    crate::cotx::LocalTxTestPauseStage::Commit,
+                    run_localtx_deadline_write(&scoped, tenant, budget, move |tx| {
+                        let pid_out = std::sync::Arc::clone(&pid_out);
+                        Box::pin(async move {
+                            let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                                .fetch_one(tx.conn())
+                                .await
+                                .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                            pid_out.store(pid, Ordering::SeqCst);
+                            Ok(())
+                        })
+                    }),
+                )
+                .await;
+                assert!(commit.is_err());
+                assert_eq!(attempts, 1, "CommitUnknown must never replay");
+                assert!(case_started.elapsed() <= budget.total() + Duration::from_millis(250));
+                assert_eq!(
+                    localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Commit),
+                    before + 1.0
+                );
+                assert_eq!(
+                    localtx_final_status_count(&handle, LocalTxFinalStatus::CommitUnknown),
+                    final_before + 1.0
+                );
+                localtx_assert_backend_quarantined(
+                    &owner,
+                    &app.pool,
+                    commit_pid.load(Ordering::SeqCst),
+                    "commit deadline",
+                )
+                .await?;
+
+                // Rollback: failed settlement carries Rollback evidence and quarantines the PID.
+                let rollback_pid = std::sync::Arc::new(AtomicI32::new(0));
+                let pid_out = std::sync::Arc::clone(&rollback_pid);
+                let before = localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Rollback);
+                let final_before =
+                    localtx_final_status_count(&handle, LocalTxFinalStatus::RollbackFailed);
+                let case_started = std::time::Instant::now();
+                let (rollback, attempts) = run_localtx_deadline_write(&scoped, tenant, budget, move |tx| {
+                    let pid_out = std::sync::Arc::clone(&pid_out);
+                    Box::pin(async move {
+                        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                            .fetch_one(tx.conn())
+                            .await
+                            .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                        pid_out.store(pid, Ordering::SeqCst);
+                        tx.inject_rollback_timeout()
+                            .await
+                            .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                        Err::<(), _>(ConfigRepoError::VersionConflict)
+                    })
+                })
+                .await;
+                assert!(rollback.is_err());
+                assert_eq!(attempts, 1, "RollbackFailed must never replay");
+                assert!(case_started.elapsed() <= budget.total() + Duration::from_millis(250));
+                assert_eq!(
+                    localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Rollback),
+                    before + 1.0
+                );
+                assert_eq!(
+                    localtx_final_status_count(&handle, LocalTxFinalStatus::RollbackFailed),
+                    final_before + 1.0
+                );
+                // Consume this case's notification so a later exact cancellation test cannot
+                // observe a stale permit and abort before its own rollback stage is armed.
+                crate::cotx::wait_for_rollback_timeout_for_test().await;
+                localtx_assert_backend_quarantined(
+                    &owner,
+                    &app.pool,
+                    rollback_pid.load(Ordering::SeqCst),
+                    "rollback deadline",
+                )
+                .await?;
+
+                // Dynamic GUC cap: a residual budget above five seconds keeps statement_timeout
+                // inside the client deadline while capping lock_timeout at five seconds.
+                let cap_budget = LocalTxExecutionBudget::new(
+                    Duration::from_millis(6_200),
+                    Duration::from_millis(100),
+                )?;
+                let (guc_result, attempts) = run_localtx_deadline_write(
+                    &scoped,
+                    tenant,
+                    cap_budget,
+                    |tx| {
+                        Box::pin(async move {
+                            sqlx::query_as::<_, (i32, i32)>(
+                                "SELECT \
+                                   (EXTRACT(EPOCH FROM current_setting('statement_timeout')::interval) * 1000)::int, \
+                                   (EXTRACT(EPOCH FROM current_setting('lock_timeout')::interval) * 1000)::int",
+                            )
+                            .fetch_one(tx.conn())
+                            .await
+                            .map_err(|error| ConfigRepoError::Storage(Box::new(error)))
+                        })
+                    },
+                )
+                .await;
+                let (statement_ms, lock_ms) = guc_result?;
+                assert_eq!(attempts, 1);
+                assert!(
+                    (5_000..6_100).contains(&statement_ms),
+                    "statement timeout must retain the latest >5s residual: {statement_ms}ms"
+                );
+                assert_eq!(lock_ms, 5_000, "lock timeout must be capped at five seconds");
+                Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+            })
+        })
+    })?;
+
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "fault matrix exceeded the aggregate elapsed bound: {:?}",
+        started.elapsed()
+    );
+    let rendered = handle.render();
+    assert!(
+        rendered.contains("localtx_deadline_exceeded_total"),
+        "{rendered}"
+    );
+    for stage in LocalTxDeadlineStage::ALL {
+        assert!(
+            rendered.contains(&format!("stage=\"{}\"", stage.as_label())),
+            "missing deadline stage {}: {rendered}",
+            stage.as_label()
+        );
+    }
+    for sensitive in ["tenant_id", "sql", "error", "duration"] {
+        assert!(
+            !rendered.lines().any(|line| {
+                line.starts_with("localtx_deadline_exceeded_total") && line.contains(sensitive)
+            }),
+            "deadline metric leaked {sensitive}: {rendered}"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::panic)]
 async fn localtx_settlement_connection_policy() -> TestResult {
@@ -10016,6 +10478,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let committed = scoped
         .retry_write(
             TenantRepoScope::for_test(tenant),
+            crate::tx_retry::localtx_deadline_for_test(),
             |tx| {
                 Box::pin(async move {
                     sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -10040,6 +10503,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let tenant_a_pid = scoped
         .retry_write(
             TenantRepoScope::for_test(tenant),
+            crate::tx_retry::localtx_deadline_for_test(),
             move |tx| {
                 Box::pin(async move {
                     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -10069,6 +10533,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let (tenant_b_pid, tenant_b_visible_before_insert) = scoped
         .retry_write(
             TenantRepoScope::for_test(tenant_b),
+            crate::tx_retry::localtx_deadline_for_test(),
             move |tx| {
                 Box::pin(async move {
                     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -10108,6 +10573,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let (tenant_a_return_pid, tenant_a_values) = scoped
         .retry_write(
             TenantRepoScope::for_test(tenant),
+            crate::tx_retry::localtx_deadline_for_test(),
             move |tx| {
                 Box::pin(async move {
                     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -10154,6 +10620,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let rolled_back = scoped
         .retry_write(
             TenantRepoScope::for_test(tenant),
+            crate::tx_retry::localtx_deadline_for_test(),
             move |tx| {
                 Box::pin(async move {
                     let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -10190,6 +10657,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let attempt = scoped
         .retry_write(
             TenantRepoScope::for_test(tenant),
+            crate::tx_retry::localtx_deadline_for_test(),
             move |tx| {
                 Box::pin(async move {
                     operation_attempts.fetch_add(1, Ordering::SeqCst);
@@ -10225,6 +10693,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let attempt = scoped
         .retry_write(
             TenantRepoScope::for_test(tenant),
+            crate::tx_retry::localtx_deadline_for_test(),
             move |tx| {
                 Box::pin(async move {
                     operation_attempts.fetch_add(1, Ordering::SeqCst);
@@ -10269,6 +10738,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
         cancellation_scoped
             .retry_write(
                 TenantRepoScope::for_test(tenant),
+                crate::tx_retry::localtx_deadline_for_test(),
                 move |tx| {
                     Box::pin(async move {
                         operation_attempts.fetch_add(1, Ordering::SeqCst);
@@ -10307,6 +10777,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
         panic_scoped
             .retry_write(
                 TenantRepoScope::for_test(tenant),
+                crate::tx_retry::localtx_deadline_for_test(),
                 move |tx| {
                     Box::pin(async move {
                         let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -10346,6 +10817,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
         rollback_scoped
             .retry_write(
                 TenantRepoScope::for_test(tenant),
+                crate::tx_retry::localtx_deadline_for_test(),
                 move |tx| {
                     Box::pin(async move {
                         operation_attempts.fetch_add(1, Ordering::SeqCst);
@@ -10400,6 +10872,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let attempt = scoped
         .retry_co_tx_with_outbox(
             settings_scope(tenant),
+            crate::tx_retry::localtx_deadline_for_test(),
             &entry,
             &env,
             move |tx| {
@@ -10437,6 +10910,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let attempt = scoped
         .retry_co_tx_with_outbox(
             settings_scope(tenant),
+            crate::tx_retry::localtx_deadline_for_test(),
             &entry,
             &env,
             move |tx| {
@@ -20818,6 +21292,7 @@ async fn localtx_cancellation_quarantine_reports_closed_stage_without_final_stat
                         crate::cotx::LocalTxTestPauseStage::Begin,
                         scoped.retry_write(
                             TenantRepoScope::for_test(tenant),
+                            crate::tx_retry::localtx_deadline_for_test(),
                             |_tx| Box::pin(async { Ok::<(), ConfigRepoError>(()) }),
                             |error| ConfigRepoError::Storage(Box::new(error)),
                         ),
@@ -20850,6 +21325,7 @@ async fn localtx_cancellation_quarantine_reports_closed_stage_without_final_stat
                     let scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
                     let operation = scoped.retry_write(
                         TenantRepoScope::for_test(tenant),
+                        crate::tx_retry::localtx_deadline_for_test(),
                         move |tx| {
                             Box::pin(async move {
                                 let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -20893,6 +21369,7 @@ async fn localtx_cancellation_quarantine_reports_closed_stage_without_final_stat
                         crate::cotx::LocalTxTestPauseStage::Commit,
                         scoped.retry_write(
                             TenantRepoScope::for_test(tenant),
+                            crate::tx_retry::localtx_deadline_for_test(),
                             move |tx| {
                                 Box::pin(async move {
                                     let pid = sqlx::query_scalar("SELECT pg_backend_pid()")

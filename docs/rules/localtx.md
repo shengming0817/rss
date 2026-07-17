@@ -211,6 +211,27 @@ route marker 实现，并从 marker 派生唯一 `PgTxRetryBoundary`；错误 ro
 `SecretRepo::save`、identity 旧 port、adapter factory、generic/legacy `write`、手制 observation 或手工 boundary
 均阻断 verify。internal publish / republish 只接受 generic runner，
 三条 publish 语义最终共享唯一 keyed CAS attempt funnel；delete 共享同一 lock capability 并只追加 tombstone。
+
+所有 Postgres LocalTx retry invocation 使用 `LocalTxExecutionBudget` 的单一默认值：10s total、2s settlement
+reserve、8s operation。budget 只保存 `Duration`，零值、零 reserve 或 `reserve >= total` 无法构造；runner 在
+invocation 起点只 mint 一组 absolute monotonic deadline，并把同一 opaque `LocalTxDeadline` 复制给所有
+attempt。token 字段与构造器私有，caller closure 必须接收 `(attempt, deadline)` 并把 deadline 立即传给
+`retry_write` / `retry_co_tx_with_outbox`；不能重置 budget、读取 raw `Instant`、跨 helper 转发或手制 token。
+operation deadline 分别约束 `acquire` / `begin` / `setup` / `operation` / `backoff`；到达 reserve 后不再 poll
+operation 或启动下一 attempt。setup 从 operation 剩余量设置 `statement_timeout`（client deadline 前至少 1ms）
+与 `lock_timeout = min(statement_timeout, 5s)`；client monotonic deadline 始终为最终约束。
+
+deadline evidence 只由 transaction/settlement funnel 以闭合 `Acquire` / `Begin` / `Setup` / `Operation` /
+`Backoff` / `Commit` / `Rollback` mint，并直接进入 opaque `LocalTxAttempt` 失败变体，不从错误字符串或共享 stage
+tracker 推断。operation timeout + rollback ACK 为 `RolledBack(Operation)`；rollback timeout 为
+`RollbackFailed(primary?, Rollback)`；commit timeout 为 `CommitUnknown(Commit)`；acquire/begin timeout 为
+`Unsettled(stage)`，armed lease 继续负责 quarantine。`run_tx_retry` 的 backoff 返回 typed
+`Continue` / `Exhausted`；Exhausted 保留最后错误且不启动新 attempt。`LocalTxObservation` 只发射闭标签
+`localtx_deadline_exceeded_total{domain,contract_id,boundary,stage}`，禁止 tenant、SQL、错误文本和 duration，也不
+新增 paging alert。唯一 mint、九处 caller dataflow、五个 typed observation owner、必填 mutation token 与
+唯一 settlement funnel 继续由现有 `LOCALTX-PG-RETRY-PLACEMENT-01` / `PG-LOCALTX-QUARANTINE-FUNNEL-01`
+守卫及 synthetic-red/anti-vacuity 阻断，不建立 v2 descriptor 或平行 proof artifact。
+
 连接复用权限由 `PG-LOCALTX-QUARANTINE-TYPE-01` 的私有 armed lease + borrow-bound transaction wrapper 在类型
 边界封闭；两个生产 write funnel 必须有一条符号绑定一致的 acquire→begin→consuming finish 顶层必经数据流，且
 finish 必须为 tail expression，由
