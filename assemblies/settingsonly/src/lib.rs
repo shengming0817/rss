@@ -81,6 +81,7 @@ mod domains {
                 deps.vault.for_domain::<vault_caps::Settings>(),
                 deps.config_value_key_name.clone(),
                 Arc::new(SystemClock),
+                settings_composition::KeyProviderReadinessInterval::default(),
             ))
             .await
         }

@@ -43,7 +43,7 @@ mod secret_config;
 
 pub(crate) use secret_config::EnvSecret;
 
-pub use distributed_runtime::{DistributedRuntimeDeps, wire_distributed};
+pub use distributed_runtime::DistributedRuntimeDeps;
 pub use domains::settings::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
 pub use infra::oidc::{build_provider, provider_from_b64};
 pub use infra::vault::{is_oidc_jwks_export_command, run_oidc_jwks_export_command};
@@ -56,6 +56,9 @@ pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 #[cfg(feature = "integration")]
 pub mod test_support {
     use super::{DistributedRuntimeDeps, SharedRuntimeDeps};
+
+    pub use crate::domains::identity::IdentityTestValues;
+    pub use crate::event_transport::{EventTransportTestValues, EventWorkerTestValues};
 
     /// Builds the production S3 capability bundle from explicit integration-test values.
     pub fn build_s3_runtime_deps_from_values(
@@ -108,24 +111,47 @@ pub mod test_support {
         distributed: DistributedRuntimeDeps,
         subscribers: Vec<crate::event_transport::BridgedSubscription>,
         cfg: crate::event_transport::EventTransportConfig,
+        worker: crate::event_transport::EventWorkerConfig,
+        audit_key: primitives::MacKey,
     ) -> anyhow::Result<bootstrap::DomainModuleResult> {
-        crate::event_transport::wire_event_transport(pg, distributed, subscribers, cfg).await
+        crate::event_transport::wire_event_transport(
+            pg,
+            distributed,
+            subscribers,
+            cfg,
+            worker,
+            audit_key,
+        )
+        .await
+    }
+
+    /// Wires distributed providers with the canonical non-configurable worker timing.
+    pub fn wire_distributed(deps: &SharedRuntimeDeps) -> anyhow::Result<DistributedRuntimeDeps> {
+        crate::distributed_runtime::wire_distributed(
+            deps,
+            crate::distributed_runtime::DistributedWorkerConfig::canonical(),
+        )
     }
 
     /// Builds the settings binding for container-backed integration tests.
     pub async fn wire_settings(
         deps: &SharedRuntimeDeps,
     ) -> anyhow::Result<bootstrap::DomainBinding> {
-        crate::domains::settings::integration_binding(deps).await
+        crate::domains::settings::integration_binding(
+            deps,
+            crate::domains::settings::SettingsModuleInput::new(
+                settings_composition::KeyProviderReadinessInterval::default(),
+            ),
+        )
+        .await
     }
 
-    /// Builds the identity binding with a hermetic configuration source for integration tests.
+    /// Builds the identity binding from explicit hermetic values for integration tests.
     pub fn wire_identity_with(
         deps: &SharedRuntimeDeps,
-        get: impl Fn(&str) -> Option<String>,
-        vault_allow_http: bool,
+        values: IdentityTestValues,
     ) -> anyhow::Result<bootstrap::DomainBinding> {
-        crate::domains::identity::wire_identity_with(deps, get, vault_allow_http)
+        crate::domains::identity::wire_identity_with(deps, values)
     }
 }
 pub use module::SharedRuntimeDeps;
@@ -154,7 +180,8 @@ use phase::{PreparedRuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
 #[cfg(test)]
 use config::DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV;
 use config::{
-    EnvConfigSource, RuntimeConfigSnapshot, SnapshotConfig, domain_transport_mtls_allow_set_env,
+    EnvConfigSource, RuntimeConfigSnapshot, RuntimeServingConfig, RuntimeServingConfigParts,
+    ServingConfigMapper, SnapshotConfig, domain_transport_mtls_allow_set_env,
     domain_transport_required_domains_from, domain_transport_url_env,
 };
 
@@ -376,11 +403,6 @@ impl audit::ports::AuditListTenantAppender for TracingAuthAuditSink {
     }
 }
 
-/// 从 `std::env` 构造 [`event_transport::EventTransportConfig`]。
-pub fn build_event_transport_config() -> anyhow::Result<event_transport::EventTransportConfig> {
-    event_transport::build_event_transport_config_from(|name| std::env::var(name).ok())
-}
-
 fn topology_label(topology: bootstrap::Topology) -> &'static str {
     match topology {
         bootstrap::Topology::Demo => "demo",
@@ -388,6 +410,23 @@ fn topology_label(topology: bootstrap::Topology) -> &'static str {
         bootstrap::Topology::DurableIsolated => "durable-isolated",
         _ => "unknown",
     }
+}
+
+pub(crate) fn required_spiffe_endpoint_from_value(raw: Option<&str>) -> anyhow::Result<String> {
+    let raw = raw
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {SPIFFE_ENDPOINT_SOCKET_ENV}"))?;
+    let endpoint = raw.trim();
+    anyhow::ensure!(
+        !endpoint.is_empty(),
+        "{SPIFFE_ENDPOINT_SOCKET_ENV} must be a non-empty explicit endpoint"
+    );
+    anyhow::ensure!(
+        endpoint == raw
+            && !endpoint.chars().any(char::is_control)
+            && !endpoint.chars().any(char::is_whitespace),
+        "{SPIFFE_ENDPOINT_SOCKET_ENV} must not contain whitespace or control characters"
+    );
+    Ok(endpoint.to_owned())
 }
 
 fn domain_transport_config_from(
@@ -452,6 +491,32 @@ fn build_domain_transport_targets_from(
         );
     }
     Ok(targets)
+}
+
+struct DomainTransportConfig {
+    targets: Vec<httpd::DomainHttpTargetConfig>,
+    spiffe_endpoint: String,
+}
+
+impl DomainTransportConfig {
+    fn from_mapper(
+        topology: bootstrap::Topology,
+        mapper: &ServingConfigMapper<'_>,
+    ) -> anyhow::Result<Self> {
+        let config = mapper.config();
+        let get = |name: &str| config.value(name).map(str::to_owned);
+        let targets = build_domain_transport_targets_from(topology, get)?;
+        anyhow::ensure!(
+            !targets.is_empty(),
+            "outbound domain transport must resolve remote targets"
+        );
+        let spiffe_endpoint =
+            required_spiffe_endpoint_from_value(config.value(SPIFFE_ENDPOINT_SOCKET_ENV))?;
+        Ok(Self {
+            targets,
+            spiffe_endpoint,
+        })
+    }
 }
 
 trait RuntimeDomainTransport:
@@ -534,24 +599,13 @@ where
     }
 }
 
-async fn wire_domain_transport_from(
-    topology: bootstrap::Topology,
-    get: impl Fn(&str) -> Option<String>,
+async fn wire_domain_transport(
+    config: DomainTransportConfig,
 ) -> anyhow::Result<DomainTransportRuntime<httpd::SharedDomainHttpTransport>> {
-    let targets = build_domain_transport_targets_from(topology, &get)?;
-    anyhow::ensure!(
-        !targets.is_empty(),
-        "outbound domain transport must resolve remote targets"
-    );
-    let endpoint = get(SPIFFE_ENDPOINT_SOCKET_ENV);
-    let transport = httpd::DomainHttpTransport::from_spire(targets, endpoint.as_deref())
-        .await
-        .with_context(|| {
-            format!(
-                "build outbound domain transport mTLS client ({} optional override)",
-                SPIFFE_ENDPOINT_SOCKET_ENV
-            )
-        })?;
+    let transport =
+        httpd::DomainHttpTransport::from_spire(config.targets, Some(&config.spiffe_endpoint))
+            .await
+            .context("build outbound domain transport mTLS client from captured endpoint")?;
     Ok(DomainTransportRuntime::new(
         httpd::SharedDomainHttpTransport::new(transport),
     ))
@@ -559,41 +613,8 @@ async fn wire_domain_transport_from(
 
 // ── Session expiry sweeper helper ─────────────────────────────────────────────────────────────
 
-const SESSION_SWEEP_INTERVAL_ENV: &str = "RSS_SESSION_SWEEP_INTERVAL_MS";
-const DEFAULT_SESSION_SWEEP_INTERVAL_MS: u64 = 300_000;
-const MIN_SESSION_SWEEP_INTERVAL_MS: u64 = 1_000;
-const DEFAULT_SESSION_SWEEP_INTERVAL: Duration =
-    Duration::from_millis(DEFAULT_SESSION_SWEEP_INTERVAL_MS);
 pub const SESSION_SWEEPER_PROBE_NAME: &str = "session_sweeper";
 const SESSION_SWEEPER_WORKER_NAME: &str = "session-sweeper";
-
-/// sessions 过期清理周期（env `RSS_SESSION_SWEEP_INTERVAL_MS`）。
-///
-/// 未配置取默认 5 分钟；显式配置解析失败或小于 1 秒时 warn + 默认，避免误配导致热 DELETE 循环。
-pub(crate) fn build_session_sweeper_interval_from(
-    get: impl Fn(&str) -> Option<String>,
-) -> Duration {
-    match get(SESSION_SWEEP_INTERVAL_ENV) {
-        None => DEFAULT_SESSION_SWEEP_INTERVAL,
-        Some(raw) => match raw.trim().parse::<u64>() {
-            Ok(ms) if ms >= MIN_SESSION_SWEEP_INTERVAL_MS => Duration::from_millis(ms),
-            _ => {
-                tracing::warn!(
-                    env = SESSION_SWEEP_INTERVAL_ENV,
-                    raw = %raw,
-                    default_ms = DEFAULT_SESSION_SWEEP_INTERVAL_MS,
-                    min_ms = MIN_SESSION_SWEEP_INTERVAL_MS,
-                    "invalid session sweep interval (expected u64 ms >= 1000); using default"
-                );
-                DEFAULT_SESSION_SWEEP_INTERVAL
-            }
-        },
-    }
-}
-
-fn build_session_sweeper_interval() -> Duration {
-    build_session_sweeper_interval_from(|name| std::env::var(name).ok())
-}
 
 /// `rss` binary 是否请求 PostgreSQL operator namespace；具体 subcommand 由 runner 精确校验。
 #[must_use]
@@ -1114,7 +1135,8 @@ fn parse_projection_maintenance_grants(
     authn::ProjectionMaintenanceGrantSet::new(grants).map_err(Into::into)
 }
 
-fn load_projection_maintenance_grants() -> anyhow::Result<authn::ProjectionMaintenanceGrantSet> {
+fn load_projection_maintenance_grants_from_command_env()
+-> anyhow::Result<authn::ProjectionMaintenanceGrantSet> {
     let raw = std::env::var(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV)
         .with_context(|| format!("{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} is required"))?;
     parse_projection_maintenance_grants(&raw)
@@ -1166,7 +1188,7 @@ async fn projection_maintenance_operator_receipt(
         }
     };
     let subject = principal.audit_subject().to_owned();
-    let grants = match load_projection_maintenance_grants() {
+    let grants = match load_projection_maintenance_grants_from_command_env() {
         Ok(grants) => grants,
         Err(err) => {
             record_projection_maintenance_finish_audit(
@@ -1384,6 +1406,7 @@ async fn run_projection_replay(
     selector: &ProjectionSelector,
     batch_limit: ProjectionBatchLimit,
     receipt: &authn::ProjectionMaintenanceReceipt,
+    dlx_payload_protector: postgres::DlxPayloadProtector,
 ) -> anyhow::Result<ProjectionReplayCliRun> {
     let target = registry
         .target(selector.projection())
@@ -1391,9 +1414,6 @@ async fn run_projection_replay(
     let bindings = registry
         .bindings_for(selector.projection())
         .context("projection input bindings are not generated for this runtime")?;
-    let dlx_payload_protector =
-        event_transport::build_dlx_payload_protector_from(&|name| std::env::var(name).ok())
-            .context("build projection replay DLQ payload protector")?;
     let (source, checkpoint, dead_letter) = pg
         .projection_replay_stores(receipt, selector, dlx_payload_protector)?
         .into_parts()?;
@@ -1445,6 +1465,7 @@ async fn run_projection_command_inner(
     registry: &ProjectionTargetRegistry,
     parsed: &ProjectionCliArgs,
     receipt: &authn::ProjectionMaintenanceReceipt,
+    replay_payload_protector: Option<postgres::DlxPayloadProtector>,
 ) -> anyhow::Result<()> {
     match &parsed.command {
         ProjectionCliCommand::Status => {
@@ -1461,8 +1482,17 @@ async fn run_projection_command_inner(
             .await
         }
         ProjectionCliCommand::Replay { batch_limit } => {
-            let run = run_projection_replay(pg, registry, &parsed.selector, *batch_limit, receipt)
-                .await?;
+            let payload_protector = replay_payload_protector
+                .context("projection replay DLQ payload protector missing")?;
+            let run = run_projection_replay(
+                pg,
+                registry,
+                &parsed.selector,
+                *batch_limit,
+                receipt,
+                payload_protector,
+            )
+            .await?;
             let stop = projection_stop_cli_fields(&run.stop);
             println!(
                 "operation=replay tenant={} projection={} version={} scanned={} matched={} applied={} filtered={} skipped={} dlq={} stop={} failed_at_lsn={} skipped_at_lsn={} kind={}",
@@ -1575,7 +1605,13 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
         parsed: &ProjectionCliArgs,
         receipt: &authn::ProjectionMaintenanceReceipt,
     ) -> anyhow::Result<()> {
-        run_projection_command_inner(session, registry, parsed, receipt).await
+        let replay_payload_protector =
+            matches!(&parsed.command, ProjectionCliCommand::Replay { .. })
+                .then(|| event_transport::build_dlx_payload_protector(self.config))
+                .transpose()
+                .context("build projection replay DLQ payload protector")?;
+        run_projection_command_inner(session, registry, parsed, receipt, replay_payload_protector)
+            .await
     }
 
     async fn shutdown(&self, session: Self::Session) {
@@ -1803,7 +1839,8 @@ fn parse_audit_ledger_verify_grants(raw: &str) -> anyhow::Result<Vec<AuditLedger
     Ok(grants)
 }
 
-fn load_audit_ledger_verify_grants() -> anyhow::Result<Vec<AuditLedgerVerifyGrant>> {
+fn load_audit_ledger_verify_grants_from_command_env() -> anyhow::Result<Vec<AuditLedgerVerifyGrant>>
+{
     let raw = std::env::var(AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV)
         .with_context(|| format!("{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} is required"))?;
     parse_audit_ledger_verify_grants(&raw)
@@ -1898,7 +1935,7 @@ async fn audit_ledger_verify_operator_subject(
             return Err(err);
         }
     };
-    let grants = match load_audit_ledger_verify_grants() {
+    let grants = match load_audit_ledger_verify_grants_from_command_env() {
         Ok(grants) => grants,
         Err(err) => {
             record_audit_ledger_verify_finish_audit(
@@ -2009,7 +2046,7 @@ impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime<'_> {
         session: &Self::Session,
         parsed: &AuditLedgerVerifyArgs,
     ) -> anyhow::Result<AuditLedgerVerifyReport> {
-        let hasher = domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
+        let hasher = domains::audit::build_audit_hasher_from_snapshot(self.config)
             .context("audit chain key")?;
         let repo = session.audit_admin_repo(hasher).context(
             "audit ledger verify requires RSS_PG_AUDIT_ADMIN_USERNAME/RSS_PG_AUDIT_ADMIN_PASSWORD",
@@ -2654,7 +2691,7 @@ fn parse_dlq_operator_grants(raw: &str) -> anyhow::Result<Vec<DlqMaintenanceGran
     Ok(grants)
 }
 
-fn load_dlq_operator_grants() -> anyhow::Result<Vec<DlqMaintenanceGrant>> {
+fn load_dlq_operator_grants_from_command_env() -> anyhow::Result<Vec<DlqMaintenanceGrant>> {
     let raw = std::env::var(DLQ_OPERATOR_GRANTS_ENV)
         .with_context(|| format!("{DLQ_OPERATOR_GRANTS_ENV} is required"))?;
     parse_dlq_operator_grants(&raw)
@@ -2800,7 +2837,7 @@ async fn dlq_operator_subject(
             return Err(err);
         }
     };
-    let grants = match load_dlq_operator_grants() {
+    let grants = match load_dlq_operator_grants_from_command_env() {
         Ok(grants) => grants,
         Err(err) => {
             record_dlq_maintenance_finish_audit(
@@ -3139,9 +3176,8 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
         command: &DlqCliCommand,
     ) -> anyhow::Result<Self::Store> {
         if command.requires_payload_protector() {
-            let dlx_payload_protector =
-                event_transport::build_dlx_payload_protector_from(&|name| std::env::var(name).ok())
-                    .context("build DLQ payload protector")?;
+            let dlx_payload_protector = event_transport::build_dlx_payload_protector(self.config)
+                .context("build DLQ payload protector")?;
             Ok(session.dlq_store(dlx_payload_protector, generated::event::PROJECTION_INPUTS))
         } else {
             Ok(session.dlq_store_without_payload_replay())
@@ -3396,6 +3432,13 @@ fn parse_reconcile_operator_grants(raw: &str) -> anyhow::Result<Vec<ReconcileMai
     Ok(grants)
 }
 
+fn load_reconcile_operator_grants_from_command_env()
+-> anyhow::Result<Vec<ReconcileMaintenanceGrant>> {
+    let raw = std::env::var(RECONCILE_OPERATOR_GRANTS_ENV)
+        .with_context(|| format!("{RECONCILE_OPERATOR_GRANTS_ENV} is required"))?;
+    parse_reconcile_operator_grants(&raw)
+}
+
 fn authorize_reconcile_operator(
     subject: &str,
     parsed: &ReconcileTargetCliArgs,
@@ -3533,9 +3576,7 @@ pub async fn run_reconcile_target_command(
             return Err(error);
         }
     };
-    let authorization = std::env::var(RECONCILE_OPERATOR_GRANTS_ENV)
-        .with_context(|| format!("{RECONCILE_OPERATOR_GRANTS_ENV} is required"))
-        .and_then(|raw| parse_reconcile_operator_grants(&raw))
+    let authorization = load_reconcile_operator_grants_from_command_env()
         .and_then(|grants| authorize_reconcile_operator(&subject, &parsed, &grants));
     if let Err(error) = authorization {
         record_reconcile_audit(
@@ -4116,8 +4157,10 @@ fn session_sweeper_module_result(
     })
 }
 
-fn wire_session_sweeper(pg: &PgRuntimeHandle) -> anyhow::Result<DomainModuleResult> {
-    let period = build_session_sweeper_interval();
+fn wire_session_sweeper(
+    pg: &PgRuntimeHandle,
+    period: Duration,
+) -> anyhow::Result<DomainModuleResult> {
     let sweeper = pg.infra().session_sweeper();
     let health = Arc::new(SessionSweeperHealth::healthy());
     let worker_health = Arc::clone(&health);
@@ -4303,6 +4346,16 @@ struct RuntimeModuleAssemblyInputs {
     redis_readiness_worker: bootstrap::WorkerSpec,
 }
 
+struct RuntimeWiringInputs {
+    event_transport: event_transport::EventTransportConfig,
+    event_worker: event_transport::EventWorkerConfig,
+    dlx_worker: event_transport::DlxWorkerConfig,
+    distributed_worker: distributed_runtime::DistributedWorkerConfig,
+    domain_modules: domains::DomainModuleInputs,
+    audit_consumer_key: primitives::MacKey,
+    session_sweep_interval: Duration,
+}
+
 fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> DomainModuleResult {
     let mut module = DomainModuleResult::default();
     module.merge(inputs.domains_module);
@@ -4415,7 +4468,7 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         pg_owner,
         deps,
         s3_canary_config,
-        event_cfg,
+        wiring_inputs,
         dlx_lifecycle,
         domain_transport,
         metrics_exporter,
@@ -4426,6 +4479,18 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         RuntimePhase::BuildInfra,
         async {
             let config = runtime_inputs.config();
+            let RuntimeServingConfigParts {
+                event_transport,
+                event_worker,
+                dlx_worker,
+                distributed_worker,
+                domain_transport: domain_transport_config,
+                domain_modules,
+                audit_consumer_key,
+                session_sweep_interval,
+            } = RuntimeServingConfig::from_snapshot(config)
+                .context("build snapshot-backed serving config")?
+                .into_parts();
             let pg_config = PgRuntimeConfig::from_snapshot(config)
                 .context("build snapshot-backed postgres config")?;
             let redis_config = RedisRuntimeConfig::from_snapshot(config)
@@ -4460,17 +4525,17 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
                 .await
                 .context("setup redis deps")?;
             let s3 = build_s3_runtime_deps(s3_general_config).context("setup s3 deps")?;
-            let event_cfg = build_event_transport_config().context("event transport config")?;
+            let relay_budget = event_worker.relay_budget();
             tracing::info!(
-                runtime.event_topology = topology_label(event_cfg.topology),
-                relay.lease_ttl_ms = event_cfg.relay_budget.lease_ttl_millis(),
-                relay.publish_timeout_ms = event_cfg.relay_budget.publish_timeout_millis(),
-                relay.settle_timeout_ms = event_cfg.relay_budget.settle_timeout_millis(),
-                relay.safety_margin_ms = event_cfg.relay_budget.safety_margin_millis(),
-                relay.required_budget_ms = event_cfg.relay_budget.required_budget_millis(),
+                runtime.event_topology = topology_label(event_transport.topology()),
+                relay.lease_ttl_ms = relay_budget.lease_ttl_millis(),
+                relay.publish_timeout_ms = relay_budget.publish_timeout_millis(),
+                relay.settle_timeout_ms = relay_budget.settle_timeout_millis(),
+                relay.safety_margin_ms = relay_budget.safety_margin_millis(),
+                relay.required_budget_ms = relay_budget.required_budget_millis(),
                 "runtime event transport budget loaded"
             );
-            if event_cfg.topology == bootstrap::Topology::Demo {
+            if event_transport.topology() == bootstrap::Topology::Demo {
                 anyhow::bail!(
                     "RSS_TOPOLOGY=demo is not supported in the production runtime; \
                      use durable-shared or durable-isolated"
@@ -4495,9 +4560,8 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
                 hot_key,
                 archive_key,
             } = dlx_bootstrap;
-            let hot_payload_protector = event_cfg
-                .dlx_payload_protector
-                .clone()
+            let hot_payload_protector = event_transport
+                .dlx_payload_protector()
                 .context("durable DLX hot payload protector missing")?;
             let archive_key_for_preflight = archive_key.clone();
 
@@ -4581,7 +4645,7 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
                 archive_vault_provider,
                 archive_key,
             );
-            let domain_transport = wire_domain_transport_from(event_cfg.topology, config_value)
+            let domain_transport = wire_domain_transport(domain_transport_config)
                 .await
                 .context("wire outbound domain transport")?;
             let command_idempotency_keyring = build_command_idempotency_keyring_from(config_value)
@@ -4608,12 +4672,21 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
             let metrics_exporter: Arc<dyn diport::MetricsExporter> = Arc::new(
                 prometheus::PromExporter::install().context("install prometheus recorder")?,
             );
+            let wiring_inputs = RuntimeWiringInputs {
+                event_transport,
+                event_worker,
+                dlx_worker,
+                distributed_worker,
+                domain_modules,
+                audit_consumer_key,
+                session_sweep_interval,
+            };
 
             Ok::<_, anyhow::Error>((
                 pg_owner,
                 deps,
                 s3_canary_config,
-                event_cfg,
+                wiring_inputs,
                 dlx_lifecycle,
                 domain_transport,
                 metrics_exporter,
@@ -4629,10 +4702,19 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
     let (mut registry, pg_readiness_period, domain_module) = phase_result(
         RuntimePhase::WireDomains,
         async {
+            let RuntimeWiringInputs {
+                event_transport,
+                event_worker,
+                dlx_worker,
+                distributed_worker,
+                domain_modules,
+                audit_consumer_key,
+                session_sweep_interval,
+            } = wiring_inputs;
             // assembly.toml 的 domain 顺序经 committed generated glue 成为 live 单源；typed route/subscriber
             // handles 已由各 Domain::init 捕获进 Registry，不经 SharedRuntimeDeps/DomainModuleResult service bag。
             // bootstrap 启动 tail-verify（跨租户全量巡检）defer 到 Part B；本接线仍只收窄 request/subscriber capability。
-            let mut domain_bindings = modules_gen::wire_domains(&deps)
+            let mut domain_bindings = modules_gen::wire_domains(&deps, domain_modules)
                 .await
                 .context("wire generated domains")?;
             let (mut registry, domains_module) = bootstrap::compose_bindings(&mut domain_bindings)
@@ -4640,8 +4722,8 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
             validate_domain_listener_evidence(&registry.domain_listener_bindings())
                 .context("validate runtime domain-listener evidence")?;
 
-            let session_sweeper_module =
-                wire_session_sweeper(&deps.pg).context("wire session sweeper")?;
+            let session_sweeper_module = wire_session_sweeper(&deps.pg, session_sweep_interval)
+                .context("wire session sweeper")?;
             let s3_canary_module =
                 wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?;
             // provider capability bundle 单源装配：adapter 保持 diport-only 原语，runtime 本地适配为唯一
@@ -4683,7 +4765,8 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
             let domain_transport_module = domain_transport
                 .module_result()
                 .context("wire outbound domain transport module")?;
-            let distributed = wire_distributed(&deps).context("wire distributed")?;
+            let distributed = distributed_runtime::wire_distributed(&deps, distributed_worker)
+                .context("wire distributed")?;
             let event_subscribers =
                 event_transport::bridge_generated_subscriptions(registry.drain_subscribers())
                     .context("bridge generated event subscriptions")?;
@@ -4691,12 +4774,15 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
                 &deps.pg,
                 distributed,
                 event_subscribers,
-                event_cfg,
+                event_transport,
+                event_worker,
+                audit_consumer_key,
             )
             .await
             .context("wire event transport")?;
             let dlx_lifecycle_module =
-                event_transport::wire_dlx_lifecycle(dlx_lifecycle).context("wire DLX lifecycle")?;
+                event_transport::wire_dlx_lifecycle(dlx_lifecycle, dlx_worker)
+                    .context("wire DLX lifecycle")?;
             // 聚合各域 module result / provider capability guards / event transport outputs。
             let redis_for_sampler = deps.redis.clone();
             let redis_readiness_worker: bootstrap::WorkerSpec = Box::new(move |token| {
@@ -4815,6 +4901,46 @@ mod tests {
 
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn maintenance_command_sources_read_only_their_exact_named_grant() {
+        let source = include_str!("lib.rs");
+        let sources = [
+            (
+                "load_projection_maintenance_grants_from_command_env",
+                "PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV",
+            ),
+            (
+                "load_audit_ledger_verify_grants_from_command_env",
+                "AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV",
+            ),
+            (
+                "load_dlq_operator_grants_from_command_env",
+                "DLQ_OPERATOR_GRANTS_ENV",
+            ),
+            (
+                "load_reconcile_operator_grants_from_command_env",
+                "RECONCILE_OPERATOR_GRANTS_ENV",
+            ),
+        ];
+
+        for (function, exact_key) in sources {
+            let start = source
+                .find(&format!("fn {function}"))
+                .expect("maintenance source");
+            let body = source[start..]
+                .split_once("\n}")
+                .map(|(body, _)| body)
+                .expect("maintenance source body");
+            assert_eq!(body.matches("std::env::var(").count(), 1, "{function}");
+            assert!(body.contains(&format!("std::env::var({exact_key})")));
+            for (_, other_key) in sources {
+                assert!(other_key == exact_key || !body.contains(other_key));
+            }
+            assert!(!body.contains("SnapshotConfig"));
+        }
+    }
 
     struct FixedDlxBootstrapClock;
 
@@ -8945,23 +9071,6 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn session_sweeper_interval_defaults_and_parses_env() {
-        let default = build_session_sweeper_interval_from(|_| None);
-        assert_eq!(default, DEFAULT_SESSION_SWEEP_INTERVAL);
-
-        let parsed = build_session_sweeper_interval_from(|name| {
-            (name == SESSION_SWEEP_INTERVAL_ENV).then(|| "120000".to_string())
-        });
-        assert_eq!(parsed, Duration::from_millis(120_000));
-
-        let invalid = build_session_sweeper_interval_from(|name| {
-            (name == SESSION_SWEEP_INTERVAL_ENV).then(|| "not-a-number".to_string())
-        });
-        assert_eq!(invalid, DEFAULT_SESSION_SWEEP_INTERVAL);
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
     fn identity_maintenance_module_emits_session_sweeper_probe_and_worker() {
         struct NoopResource;
         impl diport::ManagedResource for NoopResource {
@@ -9129,6 +9238,14 @@ mod tests {
             })
             .expect("valid domain transport target config");
         assert_eq!(targets.len(), 1);
+    }
+
+    #[test]
+    fn domain_transport_snapshot_requires_explicit_spiffe_endpoint() {
+        assert!(matches!(
+            required_spiffe_endpoint_from_value(None),
+            Err(error) if error.to_string() == "missing required env var: SPIFFE_ENDPOINT_SOCKET"
+        ));
     }
 
     #[derive(Clone)]

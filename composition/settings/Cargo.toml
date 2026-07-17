@@ -32,4 +32,4 @@ test-support = ["postgres/test-support"]
 [dev-dependencies]
 postgres = { path = "../../adapters/postgres", features = ["domain-settings", "test-support"] }
 reqwest = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

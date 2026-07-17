@@ -37,10 +37,13 @@ cleanup; the current production startup body has these phases:
    - Vault `VaultRuntimeConfig::from_snapshot` → consuming `into_runtime`
    - Redis `build_redis_runtime_deps`
    - S3 `S3RuntimeConfig::from_snapshot` → named parts → `build_s3_runtime_deps` and the DLX archive builder
-   - outbound domain transport from event topology
+   - one `RuntimeServingConfig::from_snapshot` mapping for event/domain/DLX/worker and exact
+     generated-domain inputs
+   - outbound domain transport from its typed target + mandatory SPIFFE endpoint carrier
 2. Build `SharedRuntimeDeps` from infrastructure-only inputs.
 3. Wire domain roots:
-   - `modules_gen::wire_domains(&deps)`
+   - `modules_gen::wire_domains(&deps, domain_modules)`; generated glue consumes one exact typed
+     input per manifest domain
 4. Compose the generated bindings and lifecycle output with `bootstrap::compose_bindings`.
 5. Merge module results, with generated domain output first:
    - generated domain output
@@ -50,7 +53,8 @@ cleanup; the current production startup body has these phases:
    - outbound domain transport module result
    - event transport module result
 6. Register direct framework probes for RLS and Redis readiness.
-7. Call `wire_distributed`, bridge generated event subscriptions, then call `event_transport::wire_event_transport`.
+7. Call `wire_distributed` with its exact worker timing, bridge generated event subscriptions, then
+   call `event_transport::wire_event_transport` with snapshot-derived event timing and audit key.
 8. Drain module probes into `Registry` before `take_health_reporter`.
 9. Assemble authenticated routers and the dedicated health listener.
 10. Consume the retained PG owner once through `build_pg_runtime_module(owner, period)` into the

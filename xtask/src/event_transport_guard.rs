@@ -814,7 +814,7 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                     "pg.infra().inbox()",
                     "LeaseConfig::from_ttl(inbox.lease_ttl())",
                     "dead_letter(security.dlx_payload_protector.clone())",
-                    "consumer_tx_handler_for_subscription(pg,&subscription)",
+                    "consumer_tx_handler_for_subscription(pg,&subscription,audit_key)",
                     "spawn_consumer_ackable_tx_subscriber(",
                     "matchsubscription.readiness()",
                     "SubscriberReadiness::Required=>",
@@ -1760,7 +1760,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
         (
             "assemblies/runtime/src/event_transport.rs",
             &[
-                "pub relay_budget: RelayBudget",
+                "relay: RelayTiming",
                 "budget: RelayBudget",
                 "const RELAY_LEASE_TTL_ENV: &str = \"RSS_RELAY_LEASE_TTL_MS\"",
                 "const RELAY_PUBLISH_TIMEOUT_ENV: &str = \"RSS_RELAY_PUBLISH_TIMEOUT_MS\"",
@@ -1841,7 +1841,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
         (
             "assemblies/runtime/src/event_transport.rs",
             &[
-                "fn config_builder_relay_budget_invalid_values_fail_fast",
+                "fn event_worker_snapshot_relay_budget_invalid_values_fail_fast",
                 "(\"RSS_RELAY_LEASE_TTL_MS\", \"86400001\")",
             ][..],
         ),
@@ -3117,15 +3117,15 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                     None,
                     "wire_event_transport",
                     &[
-                        "budget: cfg.relay_budget",
+                        "let timing = worker.relay",
                         "pg.validate_relay_budget(timing.budget)",
-                        "wire_durable(pg, distributed, subscribers, per_domain, timing, security)",
+                        "wire_durable(pg, distributed, subscribers, per_domain, timing, security, audit_key,)",
                     ][..],
                 ),
                 (
-                    None,
-                    "build_event_transport_config_from",
-                    &["RelayBudget::new(", "relay_budget,"][..],
+                    Some("RelayTiming"),
+                    "from_snapshot",
+                    &["RelayBudget::new(", "budget,"][..],
                 ),
                 (
                     None,
@@ -5819,7 +5819,8 @@ mod tests {
                     pg.infra()
                         .dead_letter(security.dlx_payload_protector.clone()),
                 );
-                let handler = consumer_tx_handler_for_subscription(pg, &subscription)?;
+                let handler =
+                    consumer_tx_handler_for_subscription(pg, &subscription, audit_key)?;
                 let worker = spawn_consumer_ackable_tx_subscriber();
                 let consumer_probe = probe();
                 match subscription.readiness() {
@@ -5868,7 +5869,8 @@ mod tests {
                 let dlx = DynDeadLetterStore::new_box(
                     pg.infra().dead_letter(security.dlx_payload_protector.clone()),
                 );
-                let handler = consumer_tx_handler_for_subscription(pg, &subscription)?;
+                let handler =
+                    consumer_tx_handler_for_subscription(pg, &subscription, audit_key)?;
                 let worker = spawn_consumer_ackable_tx_subscriber();
                 let consumer_probe = probe();
                 match subscription.readiness() {
@@ -7847,18 +7849,18 @@ $do$;
             RelayBudgetRedCase::replace(
                 "runtime typed carrier",
                 "assemblies/runtime/src/event_transport.rs",
-                "pub relay_budget: RelayBudget",
-                "pub relay_budget_ms: u64",
+                "relay: RelayTiming",
+                "relay_budget_ms: u64",
                 &[(
                     "assemblies/runtime/src/event_transport.rs",
-                    "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `pub relay_budget: RelayBudget`",
+                    "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `relay: RelayTiming`",
                 )],
             ),
             RelayBudgetRedCase::replace(
                 "runtime startup carrier",
                 "assemblies/runtime/src/lib.rs",
-                "relay.required_budget_ms = event_cfg.relay_budget.required_budget_millis()",
-                "relay.required_budget = event_cfg.relay_budget.required_budget_millis()",
+                "relay.required_budget_ms = relay_budget.required_budget_millis()",
+                "relay.required_budget = relay_budget.required_budget_millis()",
                 &[(
                     "assemblies/runtime/src/lib.rs",
                     "审计事件 `runtime event transport budget loaded` 缺安全字段 `relay.required_budget_ms`",
@@ -8000,8 +8002,8 @@ $do$;
             (
                 "rust comment bait",
                 "assemblies/runtime/src/event_transport.rs",
-                "pub relay_budget: RelayBudget",
-                "pub relay_budget_ms: u64, // pub relay_budget: RelayBudget",
+                "relay: RelayTiming",
+                "relay_budget_ms: u64, // relay: RelayTiming",
             ),
             (
                 "rust cfg(test) bait",

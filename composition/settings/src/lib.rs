@@ -30,14 +30,46 @@ const KEYPROVIDER_READINESS_CONFIG_KEY: &str = "readiness.probe";
 const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
 const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
 const KEYPROVIDER_READINESS_VALUE: &[u8] = b"rss-keyprovider-ready";
-const MAX_KEYPROVIDER_READINESS_INTERVAL_SECS: u64 = 30;
-
 /// Stable readiness probe name for the settings database dependency.
 pub const CONFIGS_READY_PROBE_NAME: &str = "configs_ready";
 /// Stable readiness probe name for the settings key-provider dependency.
 pub const KEYPROVIDER_READY_PROBE_NAME: &str = "keyprovider_ready";
-/// Default key-provider readiness sampling period.
-pub const DEFAULT_KEYPROVIDER_READINESS_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Validated key-provider readiness sampling period.
+///
+/// The private field keeps zero and runaway intervals outside the settings composition boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyProviderReadinessInterval(Duration);
+
+impl KeyProviderReadinessInterval {
+    const MIN: Duration = Duration::from_secs(1);
+    const MAX: Duration = Duration::from_secs(30);
+
+    /// Validate a readiness sampling period.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `value` is between one and thirty seconds, inclusive.
+    pub fn try_new(value: Duration) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            (Self::MIN..=Self::MAX).contains(&value),
+            "key-provider readiness interval must be between 1s and 30s"
+        );
+        Ok(Self(value))
+    }
+
+    /// Return the validated duration.
+    #[must_use]
+    pub const fn get(self) -> Duration {
+        self.0
+    }
+}
+
+impl Default for KeyProviderReadinessInterval {
+    fn default() -> Self {
+        Self(Duration::from_secs(5))
+    }
+}
 
 /// Complete, typed inputs for settings assembly wiring.
 ///
@@ -67,12 +99,13 @@ impl SettingsModuleDeps {
         vault: VaultDomainDeps<vault_caps::Settings>,
         key_name: KeyName,
         clock: Arc<dyn Clock>,
+        keyprovider_readiness_interval: KeyProviderReadinessInterval,
     ) -> Self {
         let keyprovider_ready = Arc::new(AtomicBool::new(true));
         let readiness_worker = keyprovider_readiness_worker(
             vault.key_provider(),
             key_name.clone(),
-            keyprovider_readiness_interval(),
+            keyprovider_readiness_interval.get(),
             Arc::clone(&keyprovider_ready),
         );
         Self {
@@ -183,32 +216,6 @@ fn keyprovider_readiness_worker(
             provider, key_name, period, token, ready,
         ))
     })
-}
-
-/// Resolve the key-provider readiness period from process configuration.
-#[must_use]
-fn keyprovider_readiness_interval() -> Duration {
-    keyprovider_readiness_interval_from(|name| std::env::var(name).ok())
-}
-
-fn keyprovider_readiness_interval_from(get: impl Fn(&str) -> Option<String>) -> Duration {
-    match get("RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS") {
-        None => DEFAULT_KEYPROVIDER_READINESS_INTERVAL,
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(seconds) if (1..=MAX_KEYPROVIDER_READINESS_INTERVAL_SECS).contains(&seconds) => {
-                Duration::from_secs(seconds)
-            }
-            _ => {
-                tracing::warn!(
-                    env = "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS",
-                    raw = %raw,
-                    max_secs = MAX_KEYPROVIDER_READINESS_INTERVAL_SECS,
-                    "invalid keyprovider readiness sample interval (need 1..=30s); using default 5s"
-                );
-                DEFAULT_KEYPROVIDER_READINESS_INTERVAL
-            }
-        },
-    }
 }
 
 /// DB readiness probe backed by the shared, non-blocking postgres snapshot.
@@ -502,6 +509,7 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use bootstrap::{HealthProbe as _, compose_bindings};
     use diport::{EncryptOutput, KeyProvider, KeyProviderError, KeyRef, KeyVersion, RedactedBytes};
     use secure::DerivedAad;
@@ -611,36 +619,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn readiness_interval_rejects_missing_and_out_of_range_values() {
-        assert_eq!(
-            keyprovider_readiness_interval_from(|_| None),
-            DEFAULT_KEYPROVIDER_READINESS_INTERVAL
-        );
-        for raw in ["0", "31", "invalid"] {
-            assert_eq!(
-                keyprovider_readiness_interval_from(|_| Some(raw.to_owned())),
-                DEFAULT_KEYPROVIDER_READINESS_INTERVAL
-            );
-        }
-        assert_eq!(
-            keyprovider_readiness_interval_from(|_| Some("30".to_owned())),
-            Duration::from_secs(30)
-        );
-    }
-
-    #[test]
-    fn readiness_interval_reads_only_keyprovider_env() {
-        assert_eq!(
-            keyprovider_readiness_interval_from(|name| match name {
-                "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS" => Some("30".to_owned()),
-                "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS" => Some("7".to_owned()),
-                _ => None,
-            }),
-            Duration::from_secs(7)
-        );
-    }
-
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn production_constructor_derives_all_roles_from_one_sealed_vault_capability() {
@@ -671,7 +649,18 @@ mod tests {
             vault.for_domain::<vault_caps::Settings>(),
             KeyName::try_new("settings-config").expect("valid key name"),
             Arc::new(TestClock),
+            KeyProviderReadinessInterval::try_new(Duration::from_secs(7))
+                .expect("valid readiness interval"),
         );
+    }
+
+    #[test]
+    fn keyprovider_readiness_interval_rejects_hot_loop_and_runaway_values() {
+        assert!(KeyProviderReadinessInterval::try_new(Duration::ZERO).is_err());
+        assert!(KeyProviderReadinessInterval::try_new(Duration::from_millis(999)).is_err());
+        assert!(KeyProviderReadinessInterval::try_new(Duration::from_secs(1)).is_ok());
+        assert!(KeyProviderReadinessInterval::try_new(Duration::from_secs(30)).is_ok());
+        assert!(KeyProviderReadinessInterval::try_new(Duration::from_secs(31)).is_err());
     }
 
     #[test]
@@ -749,6 +738,34 @@ mod tests {
         })
         .await
         .expect("sampler updates readiness within timeout");
+        resource.shutdown().await.expect("sampler drains cleanly");
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    async fn readiness_worker_waits_for_the_exact_injected_interval() {
+        let ready = Arc::new(AtomicBool::new(true));
+        let worker = keyprovider_readiness_worker(
+            DynKeyProvider::new_box(FailingKeyProvider),
+            KeyName::try_new("settings-config").expect("valid key"),
+            Duration::from_secs(7),
+            Arc::clone(&ready),
+        );
+        let resource = worker(CancellationToken::new());
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::task::yield_now().await;
+        assert!(ready.load(Ordering::Acquire));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..16 {
+            if !ready.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!ready.load(Ordering::Acquire));
         resource.shutdown().await.expect("sampler drains cleanly");
     }
 }

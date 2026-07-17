@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::{
     CapturedConfigValue, RuntimeConfigKey, RuntimeConfigSnapshot, RuntimeConfigSource,
+    RuntimeServingConfig, ServingConfigMapper, WorkerRuntimeConfig,
 };
 
 #[derive(Clone)]
@@ -99,6 +100,191 @@ fn runtime_config_snapshot_reads_source_once_and_replays_stable_values() {
         counts
     });
     assert!(counts.values().all(|count| *count == 1), "{counts:?}");
+}
+
+#[test]
+fn worker_runtime_config_uses_one_snapshot_generation_for_every_interval() {
+    let values = [
+        ("RSS_RELAY_POLL_INTERVAL_MS", "275"),
+        ("RSS_RELAY_SAMPLE_INTERVAL_MS", "31000"),
+        ("RSS_OUTBOX_SWEEP_INTERVAL_MS", "320000"),
+        ("RSS_SESSION_SWEEP_INTERVAL_MS", "330000"),
+        ("RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS", "7"),
+    ];
+    let source =
+        FakeSource::new(values.map(|(key, value)| (key, FakeValue::Present(value.to_owned()))));
+    let reads = read_log(&source);
+    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+
+    let mapper = ServingConfigMapper::for_test(snapshot.view());
+    let (event, session_sweep_interval, keyprovider_readiness_interval) =
+        WorkerRuntimeConfig::from_mapper(&mapper)
+            .expect("worker config")
+            .into_test_parts();
+
+    assert_eq!(
+        [
+            event.relay_poll_interval(),
+            event.relay_sample_interval(),
+            event.outbox_sweep_interval(),
+            session_sweep_interval,
+            keyprovider_readiness_interval.get(),
+        ],
+        [
+            std::time::Duration::from_millis(275),
+            std::time::Duration::from_secs(31),
+            std::time::Duration::from_secs(320),
+            std::time::Duration::from_secs(330),
+            std::time::Duration::from_secs(7),
+        ]
+    );
+
+    let reads = reads.lock().expect("read log mutex");
+    for (key, _) in values {
+        assert_eq!(
+            reads.iter().filter(|read| read.as_str() == key).count(),
+            1,
+            "{key} must come from the single captured generation"
+        );
+    }
+}
+
+fn complete_shared_serving_values() -> Vec<(String, String)> {
+    [
+        ("RSS_TOPOLOGY", "durable-shared"),
+        ("RSS_AMQP_URL", "amqps://user:pass@broker.test/rss"),
+        (
+            "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL",
+            "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo",
+        ),
+        ("RSS_DLX_PAYLOAD_KEY_NAME", "dlx-hot"),
+        ("RSS_DLX_ARCHIVE_KEY_NAME", "dlx-archive"),
+        ("RSS_VAULT_ADDR", "https://vault.test"),
+        ("RSS_VAULT_TOKEN", "general-token"),
+        ("RSS_DLX_HOT_VAULT_TOKEN", "hot-token"),
+        ("RSS_DLX_ARCHIVE_VAULT_TOKEN", "archive-token"),
+        ("RSS_VAULT_TRANSIT_MOUNT", "transit"),
+        (
+            "RSS_AUDIT_CHAIN_KEY_B64URL",
+            "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
+        ),
+        ("RSS_JWT_ISSUER", "https://issuer.test"),
+        ("RSS_JWT_AUDIENCE", "rss"),
+        ("RSS_JWT_ES256_KEY_ID", "runtime-es256"),
+        ("RSS_JWT_ACCESS_TTL_SECS", "900"),
+        ("RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS", "identity"),
+        ("RSS_DOMAIN_TRANSPORT_URL", "https://gateway.internal/rpc"),
+        (
+            "RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID",
+            "spiffe://example.org/ns/rss/sa/runtime",
+        ),
+        (
+            "RSS_IDENTITY_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET",
+            "spiffe://example.org/ns/rss/sa/identity",
+        ),
+        ("SPIFFE_ENDPOINT_SOCKET", "unix:///run/spire/agent.sock"),
+        ("RSS_RELAY_POLL_INTERVAL_MS", "275"),
+        ("RSS_SESSION_SWEEP_INTERVAL_MS", "330000"),
+        ("RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS", "7"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+    .collect()
+}
+
+fn replace_serving_value(values: &mut [(String, String)], key: &str, value: &str) {
+    values
+        .iter_mut()
+        .find(|(candidate, _)| candidate == key)
+        .expect("serving fixture key")
+        .1 = value.to_owned();
+}
+
+#[test]
+fn runtime_config_serving_event_domain_dlx_and_worker_inputs_share_one_captured_generation() {
+    let values = complete_shared_serving_values();
+    let source = FakeSource::new(
+        values
+            .iter()
+            .cloned()
+            .map(|(key, value)| (key, FakeValue::Present(value))),
+    );
+    let reads = read_log(&source);
+    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+
+    let parts = RuntimeServingConfig::from_snapshot(snapshot.view())
+        .expect("complete serving config")
+        .into_parts();
+
+    assert_eq!(
+        parts.event_transport.topology(),
+        bootstrap::Topology::DurableShared
+    );
+    assert_eq!(
+        parts.event_worker.relay_poll_interval(),
+        std::time::Duration::from_millis(275)
+    );
+    assert_eq!(
+        parts.session_sweep_interval,
+        std::time::Duration::from_secs(330)
+    );
+    assert_eq!(parts.audit_consumer_key.as_bytes(), &[0x42; 32]);
+    assert_eq!(
+        parts
+            .domain_modules
+            .settings
+            .into_readiness_interval()
+            .get(),
+        std::time::Duration::from_secs(7)
+    );
+    drop((
+        parts.domain_transport,
+        parts.dlx_worker,
+        parts.distributed_worker,
+    ));
+
+    let reads = reads.lock().expect("read log mutex");
+    for (key, _) in values {
+        assert_eq!(
+            reads.iter().filter(|read| read.as_str() == key).count(),
+            1,
+            "{key} must be captured once and never reopened by typed mapping"
+        );
+    }
+}
+
+#[test]
+fn runtime_serving_config_accepts_complete_isolated_transport_with_explicit_spiffe_endpoint() {
+    const SPIFFE_ENDPOINT: &str = "unix:///run/spire/isolated-agent.sock";
+    let mut values = complete_shared_serving_values();
+    replace_serving_value(&mut values, "RSS_TOPOLOGY", "durable-isolated");
+    replace_serving_value(&mut values, "SPIFFE_ENDPOINT_SOCKET", SPIFFE_ENDPOINT);
+    values.retain(|(key, _)| key != "RSS_AMQP_URL" && key != "RSS_DOMAIN_TRANSPORT_URL");
+    values.push((
+        "RSS_IDENTITY_DOMAIN_TRANSPORT_URL".to_owned(),
+        "https://identity.internal/rpc".to_owned(),
+    ));
+    for domain in generated::event::PRODUCER_DOMAINS {
+        values.push((
+            format!("RSS_{}_AMQP_URL", domain.as_str().to_ascii_uppercase()),
+            format!("amqps://user:pass@{}.broker.test/rss", domain.as_str()),
+        ));
+    }
+    let snapshot = RuntimeConfigSnapshot::capture(FakeSource::new(
+        values
+            .into_iter()
+            .map(|(key, value)| (key, FakeValue::Present(value))),
+    ))
+    .expect("snapshot capture");
+    let parts = RuntimeServingConfig::from_snapshot(snapshot.view())
+        .expect("complete isolated serving config")
+        .into_parts();
+
+    assert_eq!(
+        parts.event_transport.topology(),
+        bootstrap::Topology::DurableIsolated
+    );
+    assert_eq!(parts.domain_transport.spiffe_endpoint, SPIFFE_ENDPOINT);
 }
 
 #[test]
@@ -341,8 +527,7 @@ fn runtime_config_decision_transcript(get: &impl Fn(&str) -> Option<String>) -> 
         Ok(domains) => domains.join(","),
         Err(error) => format!("error:{error}"),
     };
-    let session_sweep_ms = crate::build_session_sweeper_interval_from(get).as_millis();
-    format!("domains={domains}\nsession-sweep-ms={session_sweep_ms}")
+    format!("domains={domains}")
 }
 
 #[test]
@@ -446,22 +631,16 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
 
     const COMMITTED_TRANSCRIPT: &str = "[configured]\n\
 domains=AUDIT,IDENTITY\n\
-session-sweep-ms=1000\n\
 [default]\n\
 domains=IDENTITY\n\
-session-sweep-ms=300000\n\
 [invalid-fail-soft]\n\
 domains=IDENTITY\n\
-session-sweep-ms=300000\n\
 [non-unicode]\n\
 domains=error:missing required env var: RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS\n\
-session-sweep-ms=300000\n\
 [empty]\n\
 domains=error:RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS must not contain empty entries\n\
-session-sweep-ms=300000\n\
 [whitespace]\n\
-domains=error:RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS entries must not contain whitespace or control characters\n\
-session-sweep-ms=300000\n";
+domains=error:RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS entries must not contain whitespace or control characters\n";
     assert_eq!(direct, COMMITTED_TRANSCRIPT);
     assert_eq!(captured, COMMITTED_TRANSCRIPT);
 }

@@ -22,16 +22,21 @@ use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B6
 use generated::event::settings_v1::TOPIC as SETTINGS_VERSION_CHANGED_TOPIC;
 use generated::http::identity_v1::login::SPEC as LOGIN_SPEC;
 use generated::http::identity_v1::refresh::SPEC as REFRESH_SPEC;
-use generated::http::identity_v1::roles_assign::SPEC as ROLES_ASSIGN_SPEC;
+use generated::http::identity_v1::roles_assign::{
+    PRODUCER as ROLES_ASSIGN_PRODUCER, SPEC as ROLES_ASSIGN_SPEC,
+};
 use generated::http::identity_v1::roles_list::SPEC as ROLES_LIST_SPEC;
 use generated::http::identity_v1::roles_revoke::SPEC as ROLES_REVOKE_SPEC;
 use generated::http::settings_v1::SPEC as SETTINGS_CONFIG_SPEC;
+use httpserve::ProducerMarker;
 use identity::ports::{Credential, CredentialRepo as _, DynRoleBindingLifecycle, DynRoleReadRepo};
 use identity::ports::{Role, RoleWriteRepo as _, TenantId, TenantRepoScope};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
 use primitives::ListenerKind;
-use runtime::test_support::{build_s3_runtime_deps_from_values, wire_identity_with, wire_settings};
+use runtime::test_support::{
+    IdentityTestValues, build_s3_runtime_deps_from_values, wire_identity_with, wire_settings,
+};
 use runtime::{SharedRuntimeDeps, SystemClock, TracingAuthAuditSink};
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -294,6 +299,21 @@ fn test_provider() -> oidc::OidcProvider {
     .expect("test provider")
 }
 
+fn identity_test_values(vault_addr: &str) -> IdentityTestValues {
+    IdentityTestValues {
+        vault_addr: vault_addr.to_owned(),
+        vault_token: "test-token".to_string(),
+        vault_transit_mount: "transit".to_string(),
+        jwt_issuer: "https://issuer.test".to_string(),
+        jwt_audience: "rss".to_string(),
+        jwt_key_id: "rss-jwt-es256".to_string(),
+        jwt_access_ttl: Duration::from_secs(900),
+        session_ttl: Duration::from_secs(3_600),
+        refresh_ttl: Duration::from_secs(2_592_000),
+        vault_allow_http: true,
+    }
+}
+
 async fn outbox_topic_count(
     pool: &PgPool,
     domain: &str,
@@ -421,21 +441,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     };
 
     // 4. wire_identity_with（注入 mock vault URL + JWT 配置，vault_allow_http=true 接受 wiremock http，#1252 F3）。
-    let identity_binding = wire_identity_with(
-        &deps,
-        |name| match name {
-            "RSS_VAULT_ADDR" => Some(vault_uri.clone()),
-            "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
-            "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
-            "RSS_JWT_ISSUER" => Some("https://issuer.test".to_string()),
-            "RSS_JWT_AUDIENCE" => Some("rss".to_string()),
-            "RSS_JWT_ES256_KEY_ID" => Some("rss-jwt-es256".to_string()),
-            "RSS_JWT_ACCESS_TTL_SECS" => Some("900".to_string()),
-            "RSS_REFRESH_TTL_SECS" => Some("2592000".to_string()),
-            _ => None,
-        },
-        true,
-    )?;
+    let identity_binding = wire_identity_with(&deps, identity_test_values(&vault_uri))?;
 
     // 5. 装配 Primary router（compose → assemble_authed_routers → into_router_for_test）。
     let mut bindings = vec![identity_binding];
@@ -604,6 +610,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         identity::RbacAdminService::new(setup_roles, setup_bindings, Box::new(SystemClock));
     setup_rbac
         .assign_role(
+            ProducerMarker::for_test(ROLES_ASSIGN_PRODUCER).into_receipt(),
             tenant,
             actor,
             vocab::PrincipalKind::Admin,
@@ -662,21 +669,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
         domain_transport: noop_domain_transport(),
     };
-    let identity_binding = wire_identity_with(
-        &deps,
-        |name| match name {
-            "RSS_VAULT_ADDR" => Some(vault_uri.clone()),
-            "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
-            "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
-            "RSS_JWT_ISSUER" => Some("https://issuer.test".to_string()),
-            "RSS_JWT_AUDIENCE" => Some("rss".to_string()),
-            "RSS_JWT_ES256_KEY_ID" => Some("rss-jwt-es256".to_string()),
-            "RSS_JWT_ACCESS_TTL_SECS" => Some("900".to_string()),
-            "RSS_REFRESH_TTL_SECS" => Some("2592000".to_string()),
-            _ => None,
-        },
-        true,
-    )?;
+    let identity_binding = wire_identity_with(&deps, identity_test_values(&vault_uri))?;
     let settings_binding = wire_settings(&deps).await?;
     let mut bindings = vec![identity_binding, settings_binding];
     let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;

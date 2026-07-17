@@ -12,7 +12,7 @@
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must consume the committed generated domain list through `compose_bindings`, must merge its output, and must not restore per-domain handwritten wiring.
 //!
-//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring" } -- the unique production `prepare_runtime()` captures exactly one `EnvConfigSource` generation and seals the password blocklist into `ServingRuntimeInputs`, while `prepare_operator_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` maps the serving snapshot view once into each typed PG/Redis/Vault/S3 generation, consumes Redis and Vault by value, destructures the named S3 parts once, routes the exact general and DLX parts to their builders, and preserves canonical PG setup. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes one typed Vault generation. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring" } -- the unique production `prepare_runtime()` captures exactly one `EnvConfigSource` generation and seals the password blocklist into `ServingRuntimeInputs`, while `prepare_operator_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` maps the serving snapshot view once into the exact serving, PG, Redis, Vault, and S3 generations; the serving aggregate is then consumed by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes one typed Vault generation. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
 //! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, while operator commands prepare only `OperatorRuntimeInputs`, every operator arm receives that exact binding, and the sole operator shutdown consumes it. No shared input type, pre-consumption early return, alias, macro, shadow path, or unreachable bait is accepted.
 //!
@@ -425,12 +425,22 @@ struct RunRuntimeConfigWiring {
     runtime_inputs_config_calls: usize,
     config_view_bindings: usize,
     canonical_config_view_bindings: usize,
+    serving_config_calls: usize,
+    canonical_serving_config_calls: usize,
+    serving_into_parts_calls: usize,
+    canonical_serving_into_parts_calls: usize,
+    serving_wiring_inputs_calls: usize,
+    canonical_serving_wiring_inputs_calls: usize,
+    serving_wiring_destructures: usize,
+    canonical_serving_wiring_destructures: usize,
+    closure_depth: usize,
     pg_config_calls: usize,
     canonical_pg_config_calls: usize,
     pg_into_parts_calls: usize,
     canonical_pg_into_parts_calls: usize,
     pg_setup_calls: usize,
     canonical_pg_setup_calls: usize,
+    pg_setup_after_serving_config: usize,
     redis_config_calls: usize,
     canonical_redis_config_calls: usize,
     vault_config_calls: usize,
@@ -460,6 +470,9 @@ struct RunRuntimeConfigWiring {
     s3_canary_module_binding: Option<syn::Ident>,
     pg_part_bindings: BTreeMap<String, syn::Ident>,
     s3_part_bindings: BTreeMap<String, syn::Ident>,
+    serving_part_bindings: BTreeMap<String, syn::Ident>,
+    serving_sink_calls: BTreeMap<String, usize>,
+    canonical_serving_sink_calls: BTreeMap<String, usize>,
 }
 
 impl RunRuntimeConfigWiring {
@@ -471,10 +484,26 @@ impl RunRuntimeConfigWiring {
     }
 
     fn is_canonical(&self) -> bool {
+        let serving_sinks_are_canonical = SERVING_RUNTIME_PART_FIELDS.iter().all(|field| {
+            self.serving_sink_calls.get(*field) == Some(&1)
+                && self.canonical_serving_sink_calls.get(*field) == Some(&1)
+        });
+        let serving_is_canonical = self.serving_config_calls == 1
+            && self.canonical_serving_config_calls == 1
+            && self.serving_into_parts_calls == 1
+            && self.canonical_serving_into_parts_calls == 1
+            && self.serving_part_bindings.len() == SERVING_RUNTIME_PART_FIELDS.len()
+            && self.serving_wiring_inputs_calls == 1
+            && self.canonical_serving_wiring_inputs_calls == 1
+            && self.serving_wiring_destructures == 1
+            && self.canonical_serving_wiring_destructures == 1
+            && serving_sinks_are_canonical
+            && self.pg_setup_after_serving_config == 1;
         self.runtime_inputs_calls == 0
             && self.runtime_inputs_config_calls == 4
             && self.config_view_bindings == 1
             && self.canonical_config_view_bindings == 1
+            && serving_is_canonical
             && self.pg_config_calls == 1
             && self.canonical_pg_config_calls == 1
             && self.pg_into_parts_calls == 1
@@ -585,6 +614,81 @@ impl RunRuntimeConfigWiring {
                     .is_some_and(|argument| is_exact_ident_path(argument, canary))
             })
     }
+
+    fn record_serving_sink(&mut self, field: &str, canonical: bool) {
+        *self.serving_sink_calls.entry(field.to_owned()).or_default() += 1;
+        if canonical {
+            *self
+                .canonical_serving_sink_calls
+                .entry(field.to_owned())
+                .or_default() += 1;
+        }
+    }
+
+    fn serving_argument_is_canonical(
+        &self,
+        call: &syn::ExprCall,
+        index: usize,
+        field: &str,
+    ) -> bool {
+        self.serving_part_bindings
+            .get(field)
+            .is_some_and(|binding| {
+                call.args
+                    .iter()
+                    .nth(index)
+                    .is_some_and(|argument| is_exact_ident_path(argument, binding))
+            })
+    }
+
+    fn record_serving_sink_call(&mut self, call: &syn::ExprCall) {
+        if self.closure_depth != 0 {
+            return;
+        }
+        let Some(name) = expr_path_last(&call.func).map(ToString::to_string) else {
+            return;
+        };
+        match name.as_str() {
+            "wire_domain_transport" => self.record_serving_sink(
+                "domain_transport",
+                call.args.len() == 1
+                    && self.serving_argument_is_canonical(call, 0, "domain_transport"),
+            ),
+            "wire_domains" => self.record_serving_sink(
+                "domain_modules",
+                call.args.len() == 2
+                    && self.serving_argument_is_canonical(call, 1, "domain_modules"),
+            ),
+            "wire_session_sweeper" => self.record_serving_sink(
+                "session_sweep_interval",
+                call.args.len() == 2
+                    && self.serving_argument_is_canonical(call, 1, "session_sweep_interval"),
+            ),
+            "wire_distributed" => self.record_serving_sink(
+                "distributed_worker",
+                call.args.len() == 2
+                    && self.serving_argument_is_canonical(call, 1, "distributed_worker"),
+            ),
+            "wire_event_transport" => {
+                for (field, index) in [
+                    ("event_transport", 3),
+                    ("event_worker", 4),
+                    ("audit_consumer_key", 5),
+                ] {
+                    self.record_serving_sink(
+                        field,
+                        call.args.len() == 6
+                            && self.serving_argument_is_canonical(call, index, field),
+                    );
+                }
+            }
+            "wire_dlx_lifecycle" => self.record_serving_sink(
+                "dlx_worker",
+                call.args.len() == 2 && self.serving_argument_is_canonical(call, 1, "dlx_worker"),
+            ),
+            _ => {}
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
@@ -609,6 +713,18 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
                 self.s3_canary_module_binding = Some(binding.clone());
             }
         }
+        if let (Some(initializer), Some(config)) = (initializer, self.config_binding.as_ref())
+            && canonical_serving_parts_initializer(initializer, config)
+            && let Some(bindings) = serving_parts_pattern_bindings(&local.pat)
+            && self.serving_part_bindings.is_empty()
+        {
+            self.serving_part_bindings = bindings;
+        }
+        if let Some(bindings) = runtime_wiring_inputs_pattern_bindings(&local.pat) {
+            self.serving_wiring_destructures += 1;
+            self.canonical_serving_wiring_destructures +=
+                usize::from(bindings == serving_wiring_bindings(&self.serving_part_bindings));
+        }
         if let (Some(initializer), Some(pg_config)) = (initializer, self.pg_config_binding.as_ref())
             && canonical_pg_parts_initializer(initializer, pg_config)
             && let Some(bindings) = pg_parts_pattern_bindings(&local.pat)
@@ -627,8 +743,20 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        self.record_serving_sink_call(call);
         if path_ends_with(&call.func, &["RuntimeInputs", "new"]) {
             self.runtime_inputs_calls += 1;
+        }
+        if path_ends_with(&call.func, &["RuntimeServingConfig", "from_snapshot"]) {
+            self.serving_config_calls += 1;
+            self.canonical_serving_config_calls +=
+                usize::from(self.config_binding.as_ref().is_some_and(|config| {
+                    call.args.len() == 1
+                        && call
+                            .args
+                            .first()
+                            .is_some_and(|arg| is_exact_ident_path(arg, config))
+                }));
         }
         match expr_path_last(&call.func)
             .map(ToString::to_string)
@@ -683,13 +811,21 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
             &["PgRuntimeDeps", "setup_with_audit_admin_config"],
         ) {
             self.pg_setup_calls += 1;
-            self.canonical_pg_setup_calls +=
-                usize::from(pg_setup_uses_named_parts(call, &self.pg_part_bindings));
+            let canonical = pg_setup_uses_named_parts(call, &self.pg_part_bindings);
+            self.canonical_pg_setup_calls += usize::from(canonical);
+            self.pg_setup_after_serving_config +=
+                usize::from(canonical && self.canonical_serving_into_parts_calls == 1);
         }
         syn::visit::visit_expr_call(self, call);
     }
 
     fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
+        if path_last_ident(&item.path).is_some_and(|ident| ident == "RuntimeWiringInputs") {
+            self.serving_wiring_inputs_calls += 1;
+            self.canonical_serving_wiring_inputs_calls += usize::from(
+                runtime_wiring_inputs_struct_is_canonical(item, &self.serving_part_bindings),
+            );
+        }
         if path_last_ident(&item.path).is_some_and(|ident| ident == "RuntimeModuleAssemblyInputs") {
             for field in &item.fields {
                 if matches!(&field.member, syn::Member::Named(member) if member == "s3_canary_module")
@@ -715,6 +851,21 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
                 .is_some_and(|runtime_inputs| is_exact_ident_path(&call.receiver, runtime_inputs))
         {
             self.runtime_inputs_config_calls += 1;
+        }
+        if call.method == "into_parts"
+            && call.args.is_empty()
+            && let Some(mapping) = call_behind_result_context(&call.receiver)
+            && path_ends_with(&mapping.func, &["RuntimeServingConfig", "from_snapshot"])
+        {
+            self.serving_into_parts_calls += 1;
+            self.canonical_serving_into_parts_calls +=
+                usize::from(self.config_binding.as_ref().is_some_and(|config| {
+                    mapping.args.len() == 1
+                        && mapping
+                            .args
+                            .first()
+                            .is_some_and(|arg| is_exact_ident_path(arg, config))
+                }));
         }
         if call.method == "into_parts"
             && call.args.is_empty()
@@ -746,6 +897,126 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
         }
         syn::visit::visit_expr_method_call(self, call);
     }
+
+    fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+        self.closure_depth += 1;
+        syn::visit::visit_expr_closure(self, closure);
+        self.closure_depth -= 1;
+    }
+}
+
+const SERVING_RUNTIME_PART_FIELDS: &[&str] = &[
+    "event_transport",
+    "event_worker",
+    "dlx_worker",
+    "distributed_worker",
+    "domain_transport",
+    "domain_modules",
+    "audit_consumer_key",
+    "session_sweep_interval",
+];
+
+const RUNTIME_WIRING_INPUT_FIELDS: &[&str] = &[
+    "event_transport",
+    "event_worker",
+    "dlx_worker",
+    "distributed_worker",
+    "domain_modules",
+    "audit_consumer_key",
+    "session_sweep_interval",
+];
+
+fn canonical_serving_parts_initializer(expr: &syn::Expr, config: &syn::Ident) -> bool {
+    let syn::Expr::MethodCall(call) = transparent_expr(expr) else {
+        return false;
+    };
+    if call.method != "into_parts" || !call.args.is_empty() {
+        return false;
+    }
+    let Some(mapping) = call_behind_result_context(&call.receiver) else {
+        return false;
+    };
+    path_ends_with(&mapping.func, &["RuntimeServingConfig", "from_snapshot"])
+        && mapping.args.len() == 1
+        && mapping
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, config))
+}
+
+fn serving_parts_pattern_bindings(pat: &syn::Pat) -> Option<BTreeMap<String, syn::Ident>> {
+    exact_struct_pattern_bindings(
+        pat,
+        "RuntimeServingConfigParts",
+        SERVING_RUNTIME_PART_FIELDS,
+    )
+}
+
+fn runtime_wiring_inputs_pattern_bindings(pat: &syn::Pat) -> Option<BTreeMap<String, syn::Ident>> {
+    exact_struct_pattern_bindings(pat, "RuntimeWiringInputs", RUNTIME_WIRING_INPUT_FIELDS)
+}
+
+fn exact_struct_pattern_bindings(
+    pat: &syn::Pat,
+    type_name: &str,
+    fields: &[&str],
+) -> Option<BTreeMap<String, syn::Ident>> {
+    let syn::Pat::Struct(parts) = pat else {
+        return None;
+    };
+    if !is_exact_syn_path(&parts.path, &[type_name])
+        || parts.rest.is_some()
+        || parts.fields.len() != fields.len()
+    {
+        return None;
+    }
+    let mut bindings = BTreeMap::new();
+    for field in &parts.fields {
+        let syn::Member::Named(member) = &field.member else {
+            return None;
+        };
+        let name = member.to_string();
+        if !fields.contains(&name.as_str()) {
+            return None;
+        }
+        let binding = immutable_pat_ident(&field.pat)?.clone();
+        if bindings.insert(name, binding).is_some() {
+            return None;
+        }
+    }
+    Some(bindings)
+}
+
+fn serving_wiring_bindings(serving: &BTreeMap<String, syn::Ident>) -> BTreeMap<String, syn::Ident> {
+    serving
+        .iter()
+        .filter(|(field, _)| RUNTIME_WIRING_INPUT_FIELDS.contains(&field.as_str()))
+        .map(|(field, binding)| (field.clone(), binding.clone()))
+        .collect()
+}
+
+fn runtime_wiring_inputs_struct_is_canonical(
+    item: &syn::ExprStruct,
+    serving: &BTreeMap<String, syn::Ident>,
+) -> bool {
+    if !is_exact_syn_path(&item.path, &["RuntimeWiringInputs"])
+        || item.rest.is_some()
+        || item.fields.len() != RUNTIME_WIRING_INPUT_FIELDS.len()
+    {
+        return false;
+    }
+    let mut seen = BTreeSet::new();
+    item.fields.iter().all(|field| {
+        let syn::Member::Named(member) = &field.member else {
+            return false;
+        };
+        let name = member.to_string();
+        RUNTIME_WIRING_INPUT_FIELDS.contains(&name.as_str())
+            && seen.insert(name.clone())
+            && serving
+                .get(&name)
+                .is_some_and(|binding| is_exact_ident_path(&field.expr, binding))
+    })
 }
 
 const PG_RUNTIME_PART_FIELDS: &[&str] = &[
@@ -988,6 +1259,8 @@ const RUNTIME_CONFIG_FACT_SPECS: &[RuntimeConfigFactSpec] = &[
 const PROTECTED_CONFIG_SYMBOLS: &[&str] = &[
     "RuntimeConfigSnapshot",
     "PreparedRuntimeInputs",
+    "RuntimeServingConfig",
+    "RuntimeServingConfigParts",
     "PgRuntimeConfig",
     "PgRuntimeConfigParts",
     "RedisRuntimeConfig",
@@ -1006,6 +1279,8 @@ impl ProductionRuntimeConfigInventory {
         match symbol {
             "RuntimeConfigSnapshot" => Some("config::RuntimeConfigSnapshot"),
             "PreparedRuntimeInputs" => Some("phase::PreparedRuntimeInputs"),
+            "RuntimeServingConfig" => Some("config::RuntimeServingConfig"),
+            "RuntimeServingConfigParts" => Some("config::RuntimeServingConfigParts"),
             "PgRuntimeConfig" => Some("infra::pg::PgRuntimeConfig"),
             "RedisRuntimeConfig" => Some("infra::redis::RedisRuntimeConfig"),
             "VaultRuntimeConfig" => Some("infra::vault::VaultRuntimeConfig"),
@@ -1668,6 +1943,8 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         let snapshot = self.associated_call_is_canonical(call, "capture", "RuntimeConfigSnapshot");
         let inputs = self.associated_call_is_canonical(call, "new", "PreparedRuntimeInputs");
+        let serving_mapping =
+            self.associated_call_is_canonical(call, "from_snapshot", "RuntimeServingConfig");
         let pg_mapping =
             self.associated_call_is_canonical(call, "from_snapshot", "PgRuntimeConfig");
         let redis_mapping =
@@ -1708,6 +1985,7 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
         }
         if !snapshot
             && !inputs
+            && !serving_mapping
             && !pg_mapping
             && !redis_mapping
             && !vault_mapping
@@ -6398,10 +6676,11 @@ fn generated_domains_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         }
     }
     if masked_run
-        .matches("modules_gen::wire_domains(&deps)")
+        .matches("modules_gen::wire_domains(&deps, domain_modules)")
         .count()
         != 1
-        || !masked_run.contains("let mut domain_bindings = modules_gen::wire_domains(&deps)")
+        || !masked_run
+            .contains("let mut domain_bindings = modules_gen::wire_domains(&deps, domain_modules)")
         || masked_run
             .matches("bootstrap::compose_bindings(&mut domain_bindings)")
             .count()
@@ -9570,6 +9849,11 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "build_runtime_oidc_provider(runtime_inputs.config()).context(",
     },
     AnchorSpec {
+        id: "run.config.serving",
+        path: RUNTIME_LIB_PATH,
+        pattern: "RuntimeServingConfig::from_snapshot(config)",
+    },
+    AnchorSpec {
         id: "run.config.s3",
         path: RUNTIME_LIB_PATH,
         pattern: "S3RuntimeConfig::from_snapshot(config)",
@@ -9607,7 +9891,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.wire.generated-domains",
         path: RUNTIME_LIB_PATH,
-        pattern: "modules_gen::wire_domains(&deps)",
+        pattern: "modules_gen::wire_domains(&deps, domain_modules)",
     },
     AnchorSpec {
         id: "run.module.input.domains",
@@ -9652,7 +9936,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.wire.distributed",
         path: RUNTIME_LIB_PATH,
-        pattern: "wire_distributed(&deps)",
+        pattern: "distributed_runtime::wire_distributed(&deps, distributed_worker)",
     },
     AnchorSpec {
         id: "run.event.bridge",
@@ -10558,7 +10842,9 @@ impl DomainModuleResult {
                 continue;
             }
             if anchor.id == "run.wire.generated-domains" {
-                lines.push("let mut domain_bindings = modules_gen::wire_domains(&deps)");
+                lines.push(
+                    "let mut domain_bindings = modules_gen::wire_domains(&deps, domain_modules)",
+                );
             } else {
                 lines.push(anchor.pattern);
             }
@@ -10825,8 +11111,8 @@ domains = []
         let root = fixture_root("runtime-generated-domains-red")?;
         let extra_source = root.join("assemblies/runtime/src/handwritten.rs");
         let handwritten = runtime_lib_fixture(None).replace(
-            "modules_gen::wire_domains(&deps)",
-            "modules_gen::wire_domains(&deps)\nwire_settings(&deps)",
+            "modules_gen::wire_domains(&deps, domain_modules)",
+            "modules_gen::wire_domains(&deps, domain_modules)\nwire_settings(&deps)",
         );
         write(&root.join(RUNTIME_LIB_PATH), &handwritten)?;
         let report = collect_report(&root)?;
@@ -10838,8 +11124,8 @@ domains = []
         );
 
         let qualified = runtime_lib_fixture(None).replace(
-            "modules_gen::wire_domains(&deps)",
-            "modules_gen::wire_domains(&deps)\ncrate::wire_settings(&deps)",
+            "modules_gen::wire_domains(&deps, domain_modules)",
+            "modules_gen::wire_domains(&deps, domain_modules)\ncrate::wire_settings(&deps)",
         );
         write(&root.join(RUNTIME_LIB_PATH), &qualified)?;
         let report = collect_report(&root)?;
@@ -12010,7 +12296,7 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
     fn runtime_vault_s3_snapshot_wiring() -> Result<()> {
         let canonical = with_password_policy_preload(snapshot_program_with_lifecycle(
             r#"
-use config::{RuntimeConfigSnapshot, SnapshotConfig};
+use config::{RuntimeConfigSnapshot, RuntimeServingConfig, SnapshotConfig};
 use phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, RuntimeInputs, ServingRuntimeInputs};
 use infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
 use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
@@ -12073,6 +12359,17 @@ pub async fn run_settings_config_value_maintenance(
 
 pub async fn run(mut runtime_inputs: RuntimeInputs) {
     let config = runtime_inputs.config();
+    let RuntimeServingConfigParts {
+        event_transport,
+        event_worker,
+        dlx_worker,
+        distributed_worker,
+        domain_transport,
+        domain_modules,
+        audit_consumer_key,
+        session_sweep_interval,
+    } = RuntimeServingConfig::from_snapshot(config)?
+        .into_parts();
     let pg_config = PgRuntimeConfig::from_snapshot(config)?;
     let redis_config = RedisRuntimeConfig::from_snapshot(config)?;
     let s3_config = S3RuntimeConfig::from_snapshot(config)?;
@@ -12096,6 +12393,37 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
     let (vault, settings_key_name) = vault_config.into_runtime()?;
     let redis = build_redis_runtime_deps(redis_config);
     let s3 = build_s3_runtime_deps(s3_general_config);
+    wire_domain_transport(domain_transport);
+    let wiring_inputs = RuntimeWiringInputs {
+        event_transport,
+        event_worker,
+        dlx_worker,
+        distributed_worker,
+        domain_modules,
+        audit_consumer_key,
+        session_sweep_interval,
+    };
+    let RuntimeWiringInputs {
+        event_transport,
+        event_worker,
+        dlx_worker,
+        distributed_worker,
+        domain_modules,
+        audit_consumer_key,
+        session_sweep_interval,
+    } = wiring_inputs;
+    modules_gen::wire_domains(&deps, domain_modules);
+    wire_session_sweeper(&pg, session_sweep_interval);
+    let distributed = wire_distributed(&deps, distributed_worker);
+    wire_event_transport(
+        &pg,
+        distributed,
+        subscribers,
+        event_transport,
+        event_worker,
+        audit_consumer_key,
+    );
+    wire_dlx_lifecycle(dlx_lifecycle, dlx_worker);
     let s3_canary_module = wire_s3_canary(&deps, s3_canary_config)?;
     let module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
         s3_canary_module,
@@ -12164,7 +12492,72 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
             "relative module and inherent associated paths must preserve canonical origin: {qualified_findings:?}"
         );
 
+        let serving_mapping = r#"    let RuntimeServingConfigParts {
+        event_transport,
+        event_worker,
+        dlx_worker,
+        distributed_worker,
+        domain_transport,
+        domain_modules,
+        audit_consumer_key,
+        session_sweep_interval,
+    } = RuntimeServingConfig::from_snapshot(config)?
+        .into_parts();
+"#;
+        let late_serving_mapping = canonical.replace(serving_mapping, "").replace(
+            "    let config_value = |name: &str|",
+            &format!("{serving_mapping}    let config_value = |name: &str|"),
+        );
         for (label, mutated) in [
+            (
+                "missing serving mapping",
+                canonical.replace(serving_mapping, ""),
+            ),
+            ("serving mapping after migration setup", late_serving_mapping),
+            (
+                "serving wrong generation",
+                canonical.replace(
+                    "RuntimeServingConfig::from_snapshot(config)?",
+                    "RuntimeServingConfig::from_snapshot(other_inputs.config())?",
+                ),
+            ),
+            (
+                "duplicate serving mapping",
+                canonical.replace(
+                    serving_mapping,
+                    &format!(
+                        "    let _serving_bait = RuntimeServingConfig::from_snapshot(config)?\n        .into_parts();\n{serving_mapping}"
+                    ),
+                ),
+            ),
+            (
+                "discarded serving parts",
+                canonical.replace(
+                    serving_mapping,
+                    "    let _serving_parts = RuntimeServingConfig::from_snapshot(config)?\n        .into_parts();\n",
+                ),
+            ),
+            (
+                "serving field replaced before transfer",
+                canonical.replace(
+                    "    let wiring_inputs = RuntimeWiringInputs {\n        event_transport,\n        event_worker,",
+                    "    let wiring_inputs = RuntimeWiringInputs {\n        event_transport,\n        event_worker: other_event_worker,",
+                ),
+            ),
+            (
+                "serving fields swapped before transfer",
+                canonical.replace(
+                    "    let wiring_inputs = RuntimeWiringInputs {\n        event_transport,\n        event_worker,\n        dlx_worker,",
+                    "    let wiring_inputs = RuntimeWiringInputs {\n        event_transport,\n        event_worker: dlx_worker,\n        dlx_worker: event_worker,",
+                ),
+            ),
+            (
+                "serving sink hidden in dead closure",
+                canonical.replace(
+                    "    wire_session_sweeper(&pg, session_sweep_interval);",
+                    "    let _dead = || wire_session_sweeper(&pg, session_sweep_interval);",
+                ),
+            ),
             (
                 "legacy Vault getter revival",
                 canonical.replace(
@@ -12576,7 +12969,9 @@ pub mod test_support {
 mod config {}
 mod phase {}
 mod infra { pub mod vault {} pub mod redis {} pub mod s3 {} }
-use config::{RuntimeConfigSnapshot, SnapshotConfig};
+use config::{
+    RuntimeConfigSnapshot, RuntimeServingConfig, RuntimeServingConfigParts, SnapshotConfig,
+};
 use phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, ServingRuntimeInputs};
 use infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
 use infra::vault::VaultRuntimeConfig;
@@ -12797,7 +13192,9 @@ fn fixture_only() {
     fn runtime_lifecycle_snapshot_fixture() -> String {
         with_password_policy_preload(
             r#"
-use config::{RuntimeConfigSnapshot, SnapshotConfig};
+use config::{
+    RuntimeConfigSnapshot, RuntimeServingConfig, RuntimeServingConfigParts, SnapshotConfig,
+};
 use phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, RuntimeInputs, ServingRuntimeInputs};
 use infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
 use infra::vault::VaultRuntimeConfig;
@@ -12889,6 +13286,17 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
     assemble_authed_routers(runtime_inputs.config());
     launch(runtime_inputs.config());
     let config = runtime_inputs.config();
+    let RuntimeServingConfigParts {
+        event_transport,
+        event_worker,
+        dlx_worker,
+        distributed_worker,
+        domain_transport,
+        domain_modules,
+        audit_consumer_key,
+        session_sweep_interval,
+    } = RuntimeServingConfig::from_snapshot(config)?
+        .into_parts();
     let pg_config = PgRuntimeConfig::from_snapshot(config)?;
     let redis_config = RedisRuntimeConfig::from_snapshot(config)?;
     let s3_config = S3RuntimeConfig::from_snapshot(config)?;
@@ -12912,6 +13320,37 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
     let (vault, settings_key_name) = vault_config.into_runtime()?;
     let redis = build_redis_runtime_deps(redis_config);
     let s3 = build_s3_runtime_deps(s3_general_config);
+    wire_domain_transport(domain_transport);
+    let wiring_inputs = RuntimeWiringInputs {
+        event_transport,
+        event_worker,
+        dlx_worker,
+        distributed_worker,
+        domain_modules,
+        audit_consumer_key,
+        session_sweep_interval,
+    };
+    let RuntimeWiringInputs {
+        event_transport,
+        event_worker,
+        dlx_worker,
+        distributed_worker,
+        domain_modules,
+        audit_consumer_key,
+        session_sweep_interval,
+    } = wiring_inputs;
+    modules_gen::wire_domains(&deps, domain_modules);
+    wire_session_sweeper(&pg, session_sweep_interval);
+    let distributed = wire_distributed(&deps, distributed_worker);
+    wire_event_transport(
+        &pg,
+        distributed,
+        subscribers,
+        event_transport,
+        event_worker,
+        audit_consumer_key,
+    );
+    wire_dlx_lifecycle(dlx_lifecycle, dlx_worker);
     let s3_canary_module = wire_s3_canary(&deps, s3_canary_config)?;
     let module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
         s3_canary_module,
@@ -14286,7 +14725,7 @@ bind_and_register(&mut stack, listener, budget, &addr_resolver).await?;
             &root.join(RUNTIME_LIB_PATH),
             &format!(
                 "#[cfg(test)] async fn run_startup() {{ {} }}\nasync fn run_startup() {{}}\n",
-                "modules_gen::wire_domains(&deps);",
+                "modules_gen::wire_domains(&deps, domain_modules);",
             ),
         )?;
         let report = collect_report(&root)?;
@@ -14307,8 +14746,8 @@ bind_and_register(&mut stack, listener, budget, &addr_resolver).await?;
             &format!(
                 "async fn run_startup() {{\n{}\n// {}\nlet _ = {:?};\n}}\n",
                 run_anchor_lines(Some("run.wire.generated-domains")),
-                "modules_gen::wire_domains(&deps);",
-                "modules_gen::wire_domains(&deps);"
+                "modules_gen::wire_domains(&deps, domain_modules);",
+                "modules_gen::wire_domains(&deps, domain_modules);"
             ),
         )?;
         let report = collect_report(&root)?;

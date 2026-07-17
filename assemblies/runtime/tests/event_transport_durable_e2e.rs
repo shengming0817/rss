@@ -24,7 +24,6 @@ use audit::ports::{
     AuditChainHasher, AuditListTenantAppend, AuditListTenantAppender, DynAuditReadRepo,
 };
 use audit::{AuditDomain, InMemAuditRepo};
-use base64::Engine as _;
 use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
 use diport::{
     DynKeyProvider, EncryptOutput, EnvelopeMetadata, EnvelopeSubjectId, KeyName, KeyProvider,
@@ -37,8 +36,12 @@ use generated::event::identity_v1::{
     session_created::{self, IdentitySessionCreatedPayload},
 };
 use generated::event::settings_v1;
-use generated::http::identity_v1::login::IdentityLoginRequest;
+use generated::http::identity_v1::{
+    login::{IdentityLoginRequest, PRODUCER as LOGIN_PRODUCER},
+    policies_create::PRODUCER as POLICIES_CREATE_PRODUCER,
+};
 use generated::http::settings_v1::SettingsConfigPublishRequest;
+use httpserve::ProducerMarker;
 use identity::ports::{
     AttributeKey, AttributeValue, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
     DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleReadRepo, DynSessionLifecycle,
@@ -51,12 +54,14 @@ use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
-use runtime::event_transport::{bridge_generated_subscriptions, build_event_transport_config_from};
+use runtime::event_transport::{
+    EventTransportTestValues, EventWorkerTestValues, bridge_generated_subscriptions,
+};
 use runtime::test_support::{
     build_redis_runtime_deps_from_values, build_s3_runtime_deps_from_values,
-    build_vault_runtime_from_values, wire_event_transport,
+    build_vault_runtime_from_values, wire_distributed, wire_event_transport,
 };
-use runtime::{SharedRuntimeDeps, SystemClock, wire_distributed};
+use runtime::{SharedRuntimeDeps, SystemClock};
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 
 const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
@@ -689,28 +694,16 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // relay_poll_interval=2s：在 [100ms, 300s] 范围内；2s 窗口使步骤 6 poll 能赢过 relay 第二次轮询。
     // relay_sample_interval=30s：在 [1s, 60s] 范围内。
-    let hmac_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42u8; 32]);
-    let cfg = build_event_transport_config_from(|name| match name {
-        "RSS_TOPOLOGY" => Some("durable-shared".to_string()),
-        "RSS_AMQP_URL" => Some(vhost_url.clone()),
-        "RSS_AMQP_ALLOW_PLAINTEXT" => Some("true".to_string()),
-        "RSS_RELAY_POLL_INTERVAL_MS" => Some("2000".to_string()),
-        "RSS_RELAY_MAX_IN_FLIGHT" => Some("16".to_string()),
-        "RSS_RELAY_SAMPLE_INTERVAL_MS" => Some("30000".to_string()),
-        "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("60000".to_string()),
-        "RSS_OUTBOX_RETAIN_SECONDS" => Some("604800".to_string()),
-        "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL" => Some(hmac_key.clone()),
-        "RSS_DLX_PAYLOAD_KEY_NAME" => Some("dlx-payload".to_string()),
-        "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_string()),
-        "RSS_VAULT_TOKEN" => Some("s.testtoken".to_string()),
-        "RSS_DLX_HOT_VAULT_TOKEN" => Some("s.dlx-hot-testtoken".to_string()),
-        "RSS_DLX_ARCHIVE_VAULT_TOKEN" => Some("s.dlx-archive-testtoken".to_string()),
-        "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
-        _ => None,
-    })?;
+    let cfg = EventTransportTestValues::durable_shared(&vhost_url)
+        .with_plaintext_policy("true")
+        .build()?;
+    let worker = EventWorkerTestValues::canonical()?
+        .with_relay_poll_interval(Duration::from_secs(2))
+        .with_relay_sample_interval(Duration::from_secs(30))
+        .with_outbox_sweep_interval(Duration::from_secs(60))
+        .build()?;
     let redeliver_tenant_authority = cfg
-        .tenant_authority
-        .clone()
+        .tenant_authority_for_test()
         .context("durable e2e tenant authority missing")?;
 
     // ── 步骤 6：wire_event_transport → DomainModuleResult（relay OS 线程 + consumer worker 启动）────
@@ -741,17 +734,31 @@ async fn event_transport_durable_e2e() -> Result<()> {
         settings_config_value_key_name,
         domain_transport: noop_domain_transport(),
     };
-    let demo_cfg = build_event_transport_config_from(|name| {
-        (name == "RSS_TOPOLOGY").then(|| "demo".to_string())
-    })?;
-    let demo_module =
-        wire_event_transport(&pg, wire_distributed(&deps)?, Vec::new(), demo_cfg).await?;
+    let demo_cfg = EventTransportTestValues::demo().build()?;
+    let demo_worker = EventWorkerTestValues::canonical()?.build()?;
+    let demo_module = wire_event_transport(
+        &pg,
+        wire_distributed(&deps)?,
+        Vec::new(),
+        demo_cfg,
+        demo_worker,
+        MacKey::from_bytes(AUDIT_KEY.to_vec()),
+    )
+    .await?;
     assert!(demo_module.probes.is_empty());
     assert!(demo_module.resources.is_empty());
     assert!(demo_module.workers.is_empty());
 
     let distributed = wire_distributed(&deps)?;
-    let event_module = wire_event_transport(&pg, distributed, subscribers, cfg).await?;
+    let event_module = wire_event_transport(
+        &pg,
+        distributed,
+        subscribers,
+        cfg,
+        worker,
+        MacKey::from_bytes(AUDIT_KEY.to_vec()),
+    )
+    .await?;
     let resource_names = event_module
         .resources
         .iter()
@@ -897,6 +904,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     )?;
     policy_lifecycle
         .create_and_emit(
+            ProducerMarker::for_test(POLICIES_CREATE_PRODUCER).into_receipt(),
             TenantRepoScope::for_test(tenant),
             policy,
             policy_entry,
@@ -956,6 +964,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     )?;
     let response = login_svc
         .login(
+            ProducerMarker::for_test(LOGIN_PRODUCER).into_receipt(),
             tenant,
             IdentityLoginRequest {
                 username: LOGIN_USERNAME.to_string(),

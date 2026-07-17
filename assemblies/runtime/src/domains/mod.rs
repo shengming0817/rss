@@ -10,6 +10,32 @@ pub mod audit;
 pub mod identity;
 pub mod settings;
 
+use crate::config::ServingConfigMapper;
+
+pub(crate) struct DomainModuleInputs {
+    pub(crate) settings: settings::SettingsModuleInput,
+    pub(crate) identity: identity::IdentityModuleInput,
+    pub(crate) audit: audit::AuditModuleInput,
+}
+
+impl DomainModuleInputs {
+    pub(crate) fn from_snapshot(
+        mapper: &ServingConfigMapper<'_>,
+        keyprovider_readiness_interval: settings_composition::KeyProviderReadinessInterval,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            settings: settings::SettingsModuleInput::new(keyprovider_readiness_interval),
+            identity: identity::IdentityModuleInput::from_mapper(mapper)?,
+            audit: audit::AuditModuleInput::from_mapper(mapper)?,
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn audit_consumer_key(&self) -> primitives::MacKey {
+        self.audit.consumer_key()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bootstrap::compose_bindings;

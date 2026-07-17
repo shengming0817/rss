@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
+use audit::ports::AuditChainHasher;
 use base64::Engine as _;
 use bootstrap::{
     DomainModuleResult, LifecycleChannel, ProviderOutputBinding, SubscriberBinding,
@@ -62,7 +63,7 @@ use crate::distributed_runtime::{
 };
 use crate::infra::plaintext_endpoint_policy_from;
 use crate::infra::vault::{DEFAULT_VAULT_TIMEOUT, build_vault_tls_client_from};
-use crate::{EnvSecret, SystemClock};
+use crate::{EnvSecret, ServingConfigMapper, SnapshotConfig, SystemClock};
 
 const EVENT_CHANNELS: &[LifecycleChannel] = &[
     LifecycleChannel::Probes,
@@ -108,28 +109,292 @@ pub(crate) const PROVIDER_OUTPUT_BINDINGS: &[ProviderOutputBinding] = &[
 
 // ── 对外类型 ──────────────────────────────────────────────────────────────────
 
-/// topology-gated 事件传输接线的完整配置（由 [`build_event_transport_config_from`] 从 env 构造）。
 pub struct EventTransportConfig {
-    /// 当前拓扑（Demo / DurableShared / DurableIsolated）。
-    pub topology: bootstrap::Topology,
-    /// AMQP per-domain 传输配置（per-domain URL 集合）。
-    pub transport: bootstrap::eventtransport::TransportConfig,
-    /// Outbox relay 轮询间隔。
-    pub relay_poll_interval: Duration,
-    /// Outbox relay 单轮最大在途 claim/publish 数。
-    pub relay_max_in_flight: usize,
-    /// Outbox relay 的 typed lease/publish/settle/safety 预算。
-    pub relay_budget: RelayBudget,
-    /// Outbox relay backlog 采样间隔。
-    pub relay_sample_interval: Duration,
-    /// Outbox published-row sweeper 扫描间隔。
-    pub outbox_sweep_interval: Duration,
-    /// Outbox published-row 保留期（秒）。
-    pub outbox_retain_seconds: u64,
-    /// Tenant authority signer/verifier（durable 必填；Demo 为 `None`）。
-    pub tenant_authority: Option<Arc<TenantAuthority>>,
-    /// DLX payload protector（durable 必填；Demo 为 `None`）。
-    pub dlx_payload_protector: Option<DlxPayloadProtector>,
+    topology: bootstrap::Topology,
+    decision: EventDecision,
+    tenant_authority: Option<Arc<TenantAuthority>>,
+    dlx_payload_protector: Option<DlxPayloadProtector>,
+}
+
+impl EventTransportConfig {
+    pub(crate) fn from_mapper(mapper: &ServingConfigMapper<'_>) -> anyhow::Result<Self> {
+        map_event_transport_from_snapshot(mapper.config())
+    }
+
+    pub(crate) const fn topology(&self) -> bootstrap::Topology {
+        self.topology
+    }
+
+    pub(crate) fn dlx_payload_protector(&self) -> Option<DlxPayloadProtector> {
+        self.dlx_payload_protector.clone()
+    }
+
+    #[cfg(feature = "integration")]
+    pub fn tenant_authority_for_test(&self) -> Option<Arc<TenantAuthority>> {
+        self.tenant_authority.clone()
+    }
+}
+
+pub struct EventWorkerConfig {
+    relay: RelayTiming,
+}
+
+impl EventWorkerConfig {
+    pub(crate) fn from_mapper(mapper: &ServingConfigMapper<'_>) -> anyhow::Result<Self> {
+        Ok(Self {
+            relay: RelayTiming::from_snapshot(mapper.config())?,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn relay_poll_interval(&self) -> Duration {
+        self.relay.relay.poll_interval()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn relay_max_in_flight(&self) -> usize {
+        self.relay.relay.max_in_flight()
+    }
+
+    pub(crate) const fn relay_budget(&self) -> RelayBudget {
+        self.relay.budget
+    }
+
+    #[cfg(test)]
+    pub(crate) fn relay_sample_interval(&self) -> Duration {
+        self.relay.sampler.sample_interval()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn outbox_sweep_interval(&self) -> Duration {
+        self.relay.outbox_sweeper.sweep_interval()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn outbox_retain_seconds(&self) -> u64 {
+        self.relay.outbox_sweeper.retain_seconds()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct DlxWorkerConfig {
+    lifecycle_interval: Duration,
+    lifecycle_tick_timeout: Duration,
+    archive_readiness_interval: Duration,
+    archive_readiness_timeout: Duration,
+}
+
+impl DlxWorkerConfig {
+    pub(crate) const fn canonical() -> Self {
+        Self {
+            lifecycle_interval: DLX_LIFECYCLE_INTERVAL,
+            lifecycle_tick_timeout: DLX_LIFECYCLE_TICK_TIMEOUT,
+            archive_readiness_interval: DLX_ARCHIVE_READINESS_INTERVAL,
+            archive_readiness_timeout: DLX_ARCHIVE_READINESS_TIMEOUT,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "integration"))]
+pub struct EventTransportTestValues {
+    topology: bootstrap::Topology,
+    per_domain: BTreeMap<String, String>,
+    shared: Option<String>,
+    plaintext_policy: Option<String>,
+    tenant_key_b64url: Option<String>,
+    tenant_ttl_secs: u64,
+    tenant_clock_skew_secs: u64,
+    dlx_payload_key_name: Option<String>,
+    vault_addr: String,
+    vault_general_token: Option<String>,
+    dlx_hot_token: String,
+    dlx_archive_token: String,
+    vault_transit_mount: String,
+}
+
+#[cfg(any(test, feature = "integration"))]
+impl EventTransportTestValues {
+    pub fn demo() -> Self {
+        Self {
+            topology: bootstrap::Topology::Demo,
+            per_domain: BTreeMap::new(),
+            shared: None,
+            plaintext_policy: None,
+            tenant_key_b64url: None,
+            tenant_ttl_secs: DEFAULT_TENANT_AUTHORITY_TTL_SECS,
+            tenant_clock_skew_secs: DEFAULT_TENANT_AUTHORITY_CLOCK_SKEW_SECS,
+            dlx_payload_key_name: None,
+            vault_addr: "https://vault.example:8200".to_owned(),
+            vault_general_token: None,
+            dlx_hot_token: "s.dlx-hot-testtoken".to_owned(),
+            dlx_archive_token: "s.dlx-archive-testtoken".to_owned(),
+            vault_transit_mount: "transit".to_owned(),
+        }
+    }
+
+    pub fn durable_shared(shared: impl Into<String>) -> Self {
+        let mut values = Self::demo();
+        values.topology = bootstrap::Topology::DurableShared;
+        values.shared = Some(shared.into());
+        values.tenant_key_b64url =
+            Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42_u8; 32]));
+        values.dlx_payload_key_name = Some("dlx-payload".to_owned());
+        values
+    }
+
+    pub fn durable_isolated_with_shared(shared: impl Into<String>) -> Self {
+        let mut values = Self::durable_shared(shared);
+        values.topology = bootstrap::Topology::DurableIsolated;
+        values
+    }
+
+    pub fn without_shared_url(mut self) -> Self {
+        self.shared = None;
+        self
+    }
+
+    pub fn with_domain_url(mut self, domain: impl Into<String>, url: impl Into<String>) -> Self {
+        self.per_domain.insert(domain.into(), url.into());
+        self
+    }
+
+    pub fn with_plaintext_policy(mut self, policy: impl Into<String>) -> Self {
+        self.plaintext_policy = Some(policy.into());
+        self
+    }
+
+    pub fn without_tenant_authority_key(mut self) -> Self {
+        self.tenant_key_b64url = None;
+        self
+    }
+
+    pub fn with_tenant_authority_key_b64url(mut self, key: impl Into<String>) -> Self {
+        self.tenant_key_b64url = Some(key.into());
+        self
+    }
+
+    pub fn with_tenant_clock_skew_secs(mut self, seconds: u64) -> Self {
+        self.tenant_clock_skew_secs = seconds;
+        self
+    }
+
+    pub fn without_dlx_payload_key(mut self) -> Self {
+        self.dlx_payload_key_name = None;
+        self
+    }
+
+    pub fn build(self) -> anyhow::Result<EventTransportConfig> {
+        let plaintext = |name: &str| {
+            if name == AMQP_ALLOW_PLAINTEXT_ENV {
+                self.plaintext_policy.clone()
+            } else {
+                None
+            }
+        };
+        let policy = plaintext_endpoint_policy_from(plaintext, AMQP_ALLOW_PLAINTEXT_ENV)?;
+        let per_domain = self
+            .per_domain
+            .into_iter()
+            .map(|(domain, url)| {
+                bootstrap::AmqpUrl::parse(url, policy)
+                    .map(|url| (domain, url))
+                    .context("test per-domain AMQP URL is invalid")
+            })
+            .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        let shared = self
+            .shared
+            .map(|url| {
+                bootstrap::AmqpUrl::parse(url, policy).context("test shared AMQP URL is invalid")
+            })
+            .transpose()?;
+        let transport = bootstrap::eventtransport::TransportConfig::new(per_domain, shared);
+        let decision =
+            resolve_event_decision(self.topology, transport, &generated_required_domains())?;
+        if self.topology == bootstrap::Topology::Demo {
+            return Ok(EventTransportConfig {
+                topology: self.topology,
+                decision,
+                tenant_authority: None,
+                dlx_payload_protector: None,
+            });
+        }
+
+        let get = |name: &str| match name {
+            TENANT_AUTHORITY_HMAC_KEY_ENV => self.tenant_key_b64url.clone(),
+            TENANT_AUTHORITY_TTL_ENV => Some(self.tenant_ttl_secs.to_string()),
+            TENANT_AUTHORITY_CLOCK_SKEW_ENV => Some(self.tenant_clock_skew_secs.to_string()),
+            DLX_PAYLOAD_KEY_NAME_ENV => self.dlx_payload_key_name.clone(),
+            VAULT_ADDR_ENV => Some(self.vault_addr.clone()),
+            "RSS_VAULT_TOKEN" => self.vault_general_token.clone(),
+            DLX_HOT_VAULT_TOKEN_ENV => Some(self.dlx_hot_token.clone()),
+            DLX_ARCHIVE_VAULT_TOKEN_ENV => Some(self.dlx_archive_token.clone()),
+            VAULT_TRANSIT_MOUNT_ENV => Some(self.vault_transit_mount.clone()),
+            _ => None,
+        };
+        Ok(EventTransportConfig {
+            topology: self.topology,
+            decision,
+            tenant_authority: Some(build_tenant_authority_from(&get)?),
+            dlx_payload_protector: Some(build_dlx_payload_protector_from(&get)?),
+        })
+    }
+}
+
+#[cfg(any(test, feature = "integration"))]
+pub struct EventWorkerTestValues {
+    poll: Duration,
+    max_in_flight: usize,
+    budget: RelayBudget,
+    sample: Duration,
+    sweep: Duration,
+    retain_seconds: u64,
+}
+
+#[cfg(any(test, feature = "integration"))]
+impl EventWorkerTestValues {
+    pub fn canonical() -> anyhow::Result<Self> {
+        Ok(Self {
+            poll: Duration::from_millis(200),
+            max_in_flight: 16,
+            budget: RelayBudget::new(
+                Duration::from_millis(DEFAULT_RELAY_LEASE_TTL_MS),
+                Duration::from_millis(DEFAULT_RELAY_PUBLISH_TIMEOUT_MS),
+                Duration::from_millis(DEFAULT_RELAY_SETTLE_TIMEOUT_MS),
+                Duration::from_millis(DEFAULT_RELAY_SAFETY_MARGIN_MS),
+            )?,
+            sample: Duration::from_millis(30_000),
+            sweep: Duration::from_millis(300_000),
+            retain_seconds: 604_800,
+        })
+    }
+
+    pub fn with_relay_poll_interval(mut self, value: Duration) -> Self {
+        self.poll = value;
+        self
+    }
+
+    pub fn with_relay_sample_interval(mut self, value: Duration) -> Self {
+        self.sample = value;
+        self
+    }
+
+    pub fn with_outbox_sweep_interval(mut self, value: Duration) -> Self {
+        self.sweep = value;
+        self
+    }
+
+    pub fn build(self) -> anyhow::Result<EventWorkerConfig> {
+        Ok(EventWorkerConfig {
+            relay: RelayTiming::new(
+                self.poll,
+                self.max_in_flight,
+                self.budget,
+                self.sample,
+                self.sweep,
+                self.retain_seconds,
+            )?,
+        })
+    }
 }
 
 // ── 内部类型 ──────────────────────────────────────────────────────────────────
@@ -232,12 +497,99 @@ impl ManagedResource for ThreadedEventWorker {
 
 /// Relay 时序参数聚合（减少 [`wire_durable`] 参数列表长度）。
 struct RelayTiming {
-    poll: Duration,
-    max_in_flight: usize,
+    relay: RelayConfig,
     budget: RelayBudget,
-    sample: Duration,
-    sweep: Duration,
-    retain_seconds: u64,
+    sampler: SamplerConfig,
+    outbox_sweeper: SweeperConfig,
+}
+
+impl RelayTiming {
+    fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+        let budget = RelayBudget::new(
+            parse_strict_duration_ms_env(
+                config.value(RELAY_LEASE_TTL_ENV).map(str::to_owned),
+                RELAY_LEASE_TTL_ENV,
+                DEFAULT_RELAY_LEASE_TTL_MS,
+            )?,
+            parse_strict_duration_ms_env(
+                config.value(RELAY_PUBLISH_TIMEOUT_ENV).map(str::to_owned),
+                RELAY_PUBLISH_TIMEOUT_ENV,
+                DEFAULT_RELAY_PUBLISH_TIMEOUT_MS,
+            )?,
+            parse_strict_duration_ms_env(
+                config.value(RELAY_SETTLE_TIMEOUT_ENV).map(str::to_owned),
+                RELAY_SETTLE_TIMEOUT_ENV,
+                DEFAULT_RELAY_SETTLE_TIMEOUT_MS,
+            )?,
+            parse_strict_duration_ms_env(
+                config.value(RELAY_SAFETY_MARGIN_ENV).map(str::to_owned),
+                RELAY_SAFETY_MARGIN_ENV,
+                DEFAULT_RELAY_SAFETY_MARGIN_MS,
+            )?,
+        )
+        .context("invalid outbox relay budget")?;
+        Self::new(
+            parse_duration_ms_env(
+                config
+                    .value("RSS_RELAY_POLL_INTERVAL_MS")
+                    .map(str::to_owned),
+                "RSS_RELAY_POLL_INTERVAL_MS",
+                200,
+            ),
+            parse_usize_env(
+                config.value("RSS_RELAY_MAX_IN_FLIGHT").map(str::to_owned),
+                "RSS_RELAY_MAX_IN_FLIGHT",
+                16,
+            ),
+            budget,
+            parse_duration_ms_env(
+                config
+                    .value("RSS_RELAY_SAMPLE_INTERVAL_MS")
+                    .map(str::to_owned),
+                "RSS_RELAY_SAMPLE_INTERVAL_MS",
+                30_000,
+            ),
+            parse_duration_ms_env(
+                config
+                    .value("RSS_OUTBOX_SWEEP_INTERVAL_MS")
+                    .map(str::to_owned),
+                "RSS_OUTBOX_SWEEP_INTERVAL_MS",
+                300_000,
+            ),
+            parse_u64_env(
+                config.value("RSS_OUTBOX_RETAIN_SECONDS").map(str::to_owned),
+                "RSS_OUTBOX_RETAIN_SECONDS",
+                604_800,
+            ),
+        )
+    }
+
+    fn new(
+        poll: Duration,
+        max_in_flight: usize,
+        budget: RelayBudget,
+        sample: Duration,
+        sweep: Duration,
+        retain_seconds: u64,
+    ) -> anyhow::Result<Self> {
+        let relay = RelayConfig::new(poll, max_in_flight).context("build relay config")?;
+        let sampler = SamplerConfig::new(
+            generated::event::PRODUCER_DOMAINS
+                .iter()
+                .map(|domain| domain.as_str().to_owned())
+                .collect(),
+            sample,
+        )
+        .context("build outbox sampler config")?;
+        let outbox_sweeper =
+            SweeperConfig::new(retain_seconds, sweep).context("build outbox sweeper config")?;
+        Ok(Self {
+            relay,
+            budget,
+            sampler,
+            outbox_sweeper,
+        })
+    }
 }
 
 /// Production-only verified dependencies for the DLX lifecycle worker. Construction requires the
@@ -333,12 +685,29 @@ impl BridgedSubscription {
 /// 需要 per-domain AMQP vhost 连接的域集 = **generated producer domain ∪ consumer 订阅 topic owner**
 /// （topic 首 '.' 前的前缀段）。两类都要 vhost：relay 往发布域 vhost 发布 outbox，consumer 从订阅 topic owner
 /// vhost 拉取。转小写、去重、排序。
+#[cfg(test)]
 pub(crate) fn required_domains(subscribers: &[BridgedSubscription]) -> Vec<String> {
     let mut domains: Vec<String> = generated::event::PRODUCER_DOMAINS
         .iter()
         .map(|domain| domain.as_str().to_string())
         .collect();
     domains.extend(subscribers.iter().map(BridgedSubscription::topic_owner));
+    domains.sort_unstable();
+    domains.dedup();
+    domains
+}
+
+fn generated_required_domains() -> Vec<String> {
+    let mut domains: Vec<String> = generated::event::PRODUCER_DOMAINS
+        .iter()
+        .map(|domain| domain.as_str().to_owned())
+        .collect();
+    domains.extend(
+        generated::event::EVENTS
+            .iter()
+            .filter(|event| !event.subscriptions().is_empty())
+            .map(|event| topic_owner(event.topic())),
+    );
     domains.sort_unstable();
     domains.dedup();
     domains
@@ -485,12 +854,13 @@ enum EventDecision {
 }
 
 /// resolve transport 接线决策（从 [`wire_event_transport`] 抽出，便于单测）。
-fn resolve_event_decision(
+fn resolve_event_decision<T: AsRef<str>>(
     topology: bootstrap::Topology,
     transport: bootstrap::eventtransport::TransportConfig,
-    required: &[&str],
+    required: &[T],
 ) -> anyhow::Result<EventDecision> {
-    let transport = bootstrap::eventtransport::resolve(topology, transport, required)
+    let required_refs = required.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+    let transport = bootstrap::eventtransport::resolve(topology, transport, &required_refs)
         .context("resolve event transport")?;
     match transport {
         bootstrap::ResolvedTransport::Demo => Ok(EventDecision::Demo),
@@ -512,19 +882,12 @@ pub(crate) async fn wire_event_transport(
     distributed: DistributedRuntimeDeps,
     subscribers: Vec<BridgedSubscription>,
     cfg: EventTransportConfig,
+    worker: EventWorkerConfig,
+    audit_key: MacKey,
 ) -> anyhow::Result<DomainModuleResult> {
-    let required = required_domains(&subscribers);
-    let required_refs: Vec<&str> = required.iter().map(String::as_str).collect();
-    let timing = RelayTiming {
-        poll: cfg.relay_poll_interval,
-        max_in_flight: cfg.relay_max_in_flight,
-        budget: cfg.relay_budget,
-        sample: cfg.relay_sample_interval,
-        sweep: cfg.outbox_sweep_interval,
-        retain_seconds: cfg.outbox_retain_seconds,
-    };
+    let timing = worker.relay;
     let security = event_security_for_topology(cfg.topology, &cfg)?;
-    match resolve_event_decision(cfg.topology, cfg.transport, &required_refs)? {
+    match cfg.decision {
         EventDecision::Demo => {
             // reason: Demo 拓扑返回空产物——函数可在无 env/容器下单测；生产走 Demo 时
             // 组合根 `run()` 在此函数调用前已 fail-fast（TOPO-INMEM-SEAL-01）。
@@ -538,7 +901,16 @@ pub(crate) async fn wire_event_transport(
             let security = security.context("durable event security config missing")?;
             pg.validate_relay_budget(timing.budget)
                 .context("runtime relay budget does not match governed database policy")?;
-            wire_durable(pg, distributed, subscribers, per_domain, timing, security).await
+            wire_durable(
+                pg,
+                distributed,
+                subscribers,
+                per_domain,
+                timing,
+                security,
+                audit_key,
+            )
+            .await
         }
     }
 }
@@ -547,6 +919,7 @@ pub(crate) async fn wire_event_transport(
 /// PostgreSQL pool and worker are registered through the same lifecycle funnel.
 pub(crate) fn wire_dlx_lifecycle(
     deps: DlxLifecycleRuntimeDeps,
+    worker: DlxWorkerConfig,
 ) -> anyhow::Result<DomainModuleResult> {
     let DlxLifecycleRuntimeDeps {
         pg_owner,
@@ -555,11 +928,15 @@ pub(crate) fn wire_dlx_lifecycle(
         lifecycle,
     } = deps;
     let health = Arc::new(WorkerHealth::starting());
-    let worker = build_dlx_lifecycle_worker(lifecycle, backlog_repository, Arc::clone(&health));
+    let lifecycle_worker =
+        build_dlx_lifecycle_worker(lifecycle, backlog_repository, Arc::clone(&health), worker);
     let (probe_name, probe) = build_dlx_lifecycle_probe(health)?;
     let archive_health = Arc::new(WorkerHealth::starting());
-    let archive_worker =
-        build_dlx_archive_readiness_worker(archive_store_readiness, Arc::clone(&archive_health));
+    let archive_worker = build_dlx_archive_readiness_worker(
+        archive_store_readiness,
+        Arc::clone(&archive_health),
+        worker,
+    );
     let archive_probe_name = ProbeName::parse(DLX_ARCHIVE_READINESS_PROBE)
         .context("parse DLX archive readiness probe name")?;
     let archive_probe = Box::new(WorkerHealthProbe::new(
@@ -569,7 +946,7 @@ pub(crate) fn wire_dlx_lifecycle(
     Ok(DomainModuleResult {
         probes: vec![(probe_name, probe), (archive_probe_name, archive_probe)],
         resources: vec![DynManagedResource::new_box(pg_owner)],
-        workers: vec![worker, archive_worker],
+        workers: vec![lifecycle_worker, archive_worker],
     })
 }
 
@@ -614,7 +991,11 @@ fn apply_dlx_archive_probe_result(
     }
 }
 
-fn build_dlx_archive_readiness_worker<S>(store: S, health: Arc<WorkerHealth>) -> WorkerSpec
+fn build_dlx_archive_readiness_worker<S>(
+    store: S,
+    health: Arc<WorkerHealth>,
+    config: DlxWorkerConfig,
+) -> WorkerSpec
 where
     S: DlxArchiveReadiness + Send + 'static,
 {
@@ -639,6 +1020,7 @@ where
                     store,
                     thread_token,
                     Arc::clone(&health),
+                    config,
                 ));
             },
         ))
@@ -649,16 +1031,17 @@ async fn dlx_archive_readiness_loop<S>(
     store: S,
     token: tokio_util::sync::CancellationToken,
     health: Arc<WorkerHealth>,
+    config: DlxWorkerConfig,
 ) where
     S: DlxArchiveReadiness,
 {
-    let mut ticker = tokio::time::interval(DLX_ARCHIVE_READINESS_INTERVAL);
+    let mut ticker = tokio::time::interval(config.archive_readiness_interval);
     loop {
         tokio::select! {
             biased;
             () = token.cancelled() => break,
             _ = ticker.tick() => {
-                if run_bounded_dlx_archive_readiness_probe(&store, &token, &health).await
+                if run_bounded_dlx_archive_readiness_probe(&store, &token, &health, config).await
                     == DlxLoopStep::Cancelled
                 {
                     break;
@@ -672,6 +1055,7 @@ async fn run_bounded_dlx_archive_readiness_probe<S>(
     store: &S,
     token: &tokio_util::sync::CancellationToken,
     health: &WorkerHealth,
+    config: DlxWorkerConfig,
 ) -> DlxLoopStep
 where
     S: DlxArchiveReadiness,
@@ -680,7 +1064,7 @@ where
         biased;
         () = token.cancelled() => DlxLoopStep::Cancelled,
         probe = tokio::time::timeout(
-            DLX_ARCHIVE_READINESS_TIMEOUT,
+            config.archive_readiness_timeout,
             store.probe_archive_readiness(),
         ) => {
             match probe {
@@ -699,6 +1083,7 @@ fn build_dlx_lifecycle_worker<L, B>(
     lifecycle: L,
     backlog_repository: B,
     health: Arc<WorkerHealth>,
+    config: DlxWorkerConfig,
 ) -> WorkerSpec
 where
     L: DlxTickRunner + Send + 'static,
@@ -728,6 +1113,7 @@ where
                     Arc::clone(&health),
                     Arc::new(MetricsDlxLifecycleMetrics),
                     Arc::new(SystemClock),
+                    config,
                 ));
             },
         ))
@@ -803,11 +1189,12 @@ async fn dlx_lifecycle_loop<L, B>(
     health: Arc<WorkerHealth>,
     metrics: Arc<dyn DlxLifecycleMetrics>,
     clock: Arc<dyn Clock>,
+    config: DlxWorkerConfig,
 ) where
     L: DlxTickRunner,
     B: DlxBacklogReader,
 {
-    let mut ticker = tokio::time::interval(DLX_LIFECYCLE_INTERVAL);
+    let mut ticker = tokio::time::interval(config.lifecycle_interval);
     loop {
         tokio::select! {
             biased;
@@ -820,6 +1207,7 @@ async fn dlx_lifecycle_loop<L, B>(
                     &health,
                     metrics.as_ref(),
                     clock.as_ref(),
+                    config,
                 ).await == DlxLoopStep::Cancelled {
                     break;
                 }
@@ -841,6 +1229,7 @@ async fn run_bounded_dlx_lifecycle_tick<L, B>(
     health: &WorkerHealth,
     metrics: &dyn DlxLifecycleMetrics,
     clock: &dyn Clock,
+    config: DlxWorkerConfig,
 ) -> DlxLoopStep
 where
     L: DlxTickRunner,
@@ -850,7 +1239,7 @@ where
         biased;
         () = token.cancelled() => DlxLoopStep::Cancelled,
         result = tokio::time::timeout(
-            DLX_LIFECYCLE_TICK_TIMEOUT,
+            config.lifecycle_tick_timeout,
             run_dlx_lifecycle_tick(lifecycle, backlog_repository, health, metrics, clock),
         ) => {
             if result.is_err() {
@@ -859,7 +1248,7 @@ where
                     RetentionTarget::DeadLetter,
                     RetentionOutcome::Transient,
                     0,
-                    DLX_LIFECYCLE_TICK_TIMEOUT.as_secs_f64(),
+                    config.lifecycle_tick_timeout.as_secs_f64(),
                 );
                 tracing::warn!("DLX lifecycle tick exceeded total I/O budget");
             }
@@ -966,34 +1355,11 @@ fn elapsed_seconds(started: SystemTime, finished: SystemTime) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// 从注入式 getter 构造 [`EventTransportConfig`]（无 env 侧效应，单测友好）。
-///
-/// 必填 env var：
-/// - `RSS_TOPOLOGY`：`demo` | `durable-shared` | `durable-isolated`（必填）
-///
-/// AMQP broker URL（非 Demo；至少一个，否则 `eventtransport::resolve` per-domain fail-closed）：
-/// - `RSS_<DOMAIN>_AMQP_URL`（如 `RSS_IDENTITY_AMQP_URL`）：per-domain broker URL（优先）。
-/// - `RSS_AMQP_URL`：共享回退（`durable-shared` 缺 per-domain 时回退；`durable-isolated` 配此即 fail-closed）。
-///
-/// 可选 env var（缺失时使用括号内默认值）：
-/// - `RSS_RELAY_POLL_INTERVAL_MS`（200ms）
-/// - `RSS_RELAY_MAX_IN_FLIGHT`（16）
-/// - `RSS_RELAY_LEASE_TTL_MS`（60000ms；最大 86400000ms，存在但非法时 fail-fast）
-/// - `RSS_RELAY_PUBLISH_TIMEOUT_MS`（40000ms；最大 86400000ms，存在但非法时 fail-fast）
-/// - `RSS_RELAY_SETTLE_TIMEOUT_MS`（5000ms；最大 86400000ms，存在但非法时 fail-fast）
-/// - `RSS_RELAY_SAFETY_MARGIN_MS`（5000ms；最大 86400000ms，存在但非法时 fail-fast）
-/// - `RSS_RELAY_SAMPLE_INTERVAL_MS`（30000ms）
-/// - `RSS_OUTBOX_SWEEP_INTERVAL_MS`（300000ms）
-/// - `RSS_OUTBOX_RETAIN_SECONDS`（604800s）
-///
-/// Durable 必填安全配置：
-/// - `RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL`（base64url no-pad，解码后至少 32 bytes）
-/// - `RSS_DLX_PAYLOAD_KEY_NAME`（Vault Transit key name）
-/// - `RSS_VAULT_ADDR` / `RSS_DLX_HOT_VAULT_TOKEN` / `RSS_DLX_ARCHIVE_VAULT_TOKEN` /
-///   `RSS_VAULT_TRANSIT_MOUNT`（DLX payload/archive 独立 Vault Transit workloads）
-pub fn build_event_transport_config_from(
-    get: impl Fn(&str) -> Option<String>,
+/// Map one immutable serving snapshot into exact topology/security configuration.
+fn map_event_transport_from_snapshot(
+    config: SnapshotConfig<'_>,
 ) -> anyhow::Result<EventTransportConfig> {
+    let get = |name: &str| config.value(name).map(str::to_owned);
     let topo_raw = get("RSS_TOPOLOGY")
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_TOPOLOGY"))?;
     let topology = parse_topology(topo_raw.trim())?;
@@ -1004,7 +1370,7 @@ pub fn build_event_transport_config_from(
         // env 只把 AMQP 配置完整映射成 typed config——per-domain（`RSS_<DOMAIN>_AMQP_URL`，优先）+ 共享回退
         // （`RSS_AMQP_URL`）；per-domain/shared 完备性与隔离由 `eventtransport::resolve` 单源 fail-closed 强制，
         // env builder 不提前收窄语义（review #342 F1：durable-shared 仅配 RSS_AMQP_URL 也应可启动）。
-        let policy = plaintext_endpoint_policy_from(&get, AMQP_ALLOW_PLAINTEXT_ENV)?;
+        let policy = plaintext_endpoint_policy_from(get, AMQP_ALLOW_PLAINTEXT_ENV)?;
         let mut per_domain = BTreeMap::new();
         for domain in generated::event::PRODUCER_DOMAINS {
             let domain = domain.as_str();
@@ -1027,67 +1393,19 @@ pub fn build_event_transport_config_from(
             .transpose()?;
         bootstrap::eventtransport::TransportConfig::new(per_domain, shared)
     };
+    let decision = resolve_event_decision(topology, transport, &generated_required_domains())?;
     let (tenant_authority, dlx_payload_protector) = if topology == bootstrap::Topology::Demo {
         (None, None)
     } else {
         (
             Some(build_tenant_authority_from(&get)?),
-            Some(build_dlx_payload_protector_from(&get)?),
+            Some(build_dlx_payload_protector(config)?),
         )
     };
-    let relay_budget = RelayBudget::new(
-        parse_strict_duration_ms_env(
-            get(RELAY_LEASE_TTL_ENV),
-            RELAY_LEASE_TTL_ENV,
-            DEFAULT_RELAY_LEASE_TTL_MS,
-        )?,
-        parse_strict_duration_ms_env(
-            get(RELAY_PUBLISH_TIMEOUT_ENV),
-            RELAY_PUBLISH_TIMEOUT_ENV,
-            DEFAULT_RELAY_PUBLISH_TIMEOUT_MS,
-        )?,
-        parse_strict_duration_ms_env(
-            get(RELAY_SETTLE_TIMEOUT_ENV),
-            RELAY_SETTLE_TIMEOUT_ENV,
-            DEFAULT_RELAY_SETTLE_TIMEOUT_MS,
-        )?,
-        parse_strict_duration_ms_env(
-            get(RELAY_SAFETY_MARGIN_ENV),
-            RELAY_SAFETY_MARGIN_ENV,
-            DEFAULT_RELAY_SAFETY_MARGIN_MS,
-        )?,
-    )
-    .context("invalid outbox relay budget")?;
 
     Ok(EventTransportConfig {
         topology,
-        transport,
-        relay_poll_interval: parse_duration_ms_env(
-            get("RSS_RELAY_POLL_INTERVAL_MS"),
-            "RSS_RELAY_POLL_INTERVAL_MS",
-            200,
-        ),
-        relay_max_in_flight: parse_usize_env(
-            get("RSS_RELAY_MAX_IN_FLIGHT"),
-            "RSS_RELAY_MAX_IN_FLIGHT",
-            16,
-        ),
-        relay_budget,
-        relay_sample_interval: parse_duration_ms_env(
-            get("RSS_RELAY_SAMPLE_INTERVAL_MS"),
-            "RSS_RELAY_SAMPLE_INTERVAL_MS",
-            30_000,
-        ),
-        outbox_sweep_interval: parse_duration_ms_env(
-            get("RSS_OUTBOX_SWEEP_INTERVAL_MS"),
-            "RSS_OUTBOX_SWEEP_INTERVAL_MS",
-            300_000,
-        ),
-        outbox_retain_seconds: parse_u64_env(
-            get("RSS_OUTBOX_RETAIN_SECONDS"),
-            "RSS_OUTBOX_RETAIN_SECONDS",
-            604_800,
-        ),
+        decision,
         tenant_authority,
         dlx_payload_protector,
     })
@@ -1125,6 +1443,7 @@ async fn wire_durable(
     per_domain: BTreeMap<String, bootstrap::AmqpUrl>,
     timing: RelayTiming,
     security: EventSecurity,
+    audit_key: MacKey,
 ) -> anyhow::Result<DomainModuleResult> {
     // projection replay / shadow-swap 由 `rss projections` 离线控制面处理；本函数只装配在线传输 worker。
 
@@ -1170,7 +1489,15 @@ async fn wire_durable(
     wire_outbox_maintenance(pg, distributed, &timing, &mut module)?;
 
     // Consumer resource bundle（per binding PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
-    wire_consumer_resource_bundle(pg, subscribers, &amqp_map, &security, &timing, &mut module)?;
+    wire_consumer_resource_bundle(
+        pg,
+        subscribers,
+        &amqp_map,
+        &security,
+        &timing,
+        &audit_key,
+        &mut module,
+    )?;
 
     Ok(module)
 }
@@ -1199,8 +1526,7 @@ fn wire_domain_relay(
     timing: &RelayTiming,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
-    let relay_cfg =
-        RelayConfig::new(timing.poll, timing.max_in_flight).context("build relay config")?;
+    let relay_cfg = timing.relay.clone();
     let health = Arc::new(WorkerHealth::healthy());
     let worker_name = format!("outbox-relay-{domain}");
     let worker_health = Arc::clone(&health);
@@ -1240,16 +1566,8 @@ fn wire_outbox_maintenance(
     timing: &RelayTiming,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
-    let sampler_cfg = SamplerConfig::new(
-        generated::event::PRODUCER_DOMAINS
-            .iter()
-            .map(|domain| domain.as_str().to_string())
-            .collect(),
-        timing.sample,
-    )
-    .context("build outbox sampler config")?;
-    let sweeper_cfg = SweeperConfig::new(timing.retain_seconds, timing.sweep)
-        .context("build outbox sweeper config")?;
+    let sampler_cfg = timing.sampler.clone();
+    let sweeper_cfg = timing.outbox_sweeper.clone();
 
     let maintenance = pg.infra().outbox_maintenance();
     let coordinator = distributed.outbox_maintenance_coordinator();
@@ -1379,6 +1697,7 @@ fn wire_consumer_resource_bundle(
     amqp_map: &BTreeMap<String, amqp::AmqpRuntimeDeps>,
     security: &EventSecurity,
     timing: &RelayTiming,
+    audit_key: &MacKey,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let binding_count = subscribers.len();
@@ -1405,7 +1724,7 @@ fn wire_consumer_resource_bundle(
                 .dead_letter(security.dlx_payload_protector.clone()),
         );
         let worker_name = format!("event-consumer:{consumer}:{topic_name}");
-        let handler = consumer_tx_handler_for_subscription(pg, &subscription)?;
+        let handler = consumer_tx_handler_for_subscription(pg, &subscription, audit_key)?;
         tracing::info!(
             consumer,
             contract_id,
@@ -1543,35 +1862,39 @@ fn settings_config_refresh_plan(
 fn consumer_tx_handler_for_subscription(
     pg: &PgRuntimeHandle,
     subscription: &BridgedSubscription,
+    audit_key: &MacKey,
 ) -> anyhow::Result<ConsumerTxHandlerFn> {
+    let audit_hasher = || {
+        AuditChainHasher::new(RustCryptoMacVerifier, audit_key.clone()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "audit chain key must be at least 32 bytes (weak key, see audit-ledger.md)"
+            )
+        })
+    };
     match &subscription.consumer_tx {
         ConsumerTxPlan::AuditSessionCreated => {
-            let hasher = crate::domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
-                .context("audit session-created consumer tx chain key")?;
+            let hasher = audit_hasher().context("audit session-created consumer tx chain key")?;
             Ok(pg
                 .for_domain::<caps::Audit>()
                 .session_created_consumer_tx(hasher)
                 .into_handler())
         }
         ConsumerTxPlan::AuditRoleAssigned => {
-            let hasher = crate::domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
-                .context("audit role-assigned consumer tx chain key")?;
+            let hasher = audit_hasher().context("audit role-assigned consumer tx chain key")?;
             Ok(pg
                 .for_domain::<caps::Audit>()
                 .role_assigned_consumer_tx(hasher)
                 .into_handler())
         }
         ConsumerTxPlan::AuditRoleRevoked => {
-            let hasher = crate::domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
-                .context("audit role-revoked consumer tx chain key")?;
+            let hasher = audit_hasher().context("audit role-revoked consumer tx chain key")?;
             Ok(pg
                 .for_domain::<caps::Audit>()
                 .role_revoked_consumer_tx(hasher)
                 .into_handler())
         }
         ConsumerTxPlan::AuditPolicyUpdated => {
-            let hasher = crate::domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
-                .context("audit policy-updated consumer tx chain key")?;
+            let hasher = audit_hasher().context("audit policy-updated consumer tx chain key")?;
             Ok(pg
                 .for_domain::<caps::Audit>()
                 .policy_updated_consumer_tx(hasher)
@@ -1590,8 +1913,11 @@ fn wire_inbox_sweeper(
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let sweeper = pg.infra().inbox_sweeper();
-    let config = SweeperConfig::new(sweeper.retention_seconds(), timing.sweep)
-        .context("build inbox sweeper config")?;
+    let config = SweeperConfig::new(
+        sweeper.retention_seconds(),
+        timing.outbox_sweeper.sweep_interval(),
+    )
+    .context("build inbox sweeper config")?;
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
     let worker: WorkerSpec = Box::new(move |token| {
@@ -1794,7 +2120,13 @@ fn build_tenant_authority_from(
     ))
 }
 
-pub(crate) fn build_dlx_payload_protector_from(
+pub(crate) fn build_dlx_payload_protector(
+    config: SnapshotConfig<'_>,
+) -> anyhow::Result<DlxPayloadProtector> {
+    build_dlx_payload_protector_from(&|name| config.value(name).map(str::to_owned))
+}
+
+fn build_dlx_payload_protector_from(
     get: &impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<DlxPayloadProtector> {
     let key_name = get(DLX_PAYLOAD_KEY_NAME_ENV)
@@ -1953,20 +2285,54 @@ mod tests {
         .unwrap()
     }
 
-    fn test_hmac_key_b64url() -> String {
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42u8; 32])
+    #[test]
+    fn event_worker_config_reads_one_snapshot_generation() {
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_RELAY_POLL_INTERVAL_MS", "201"),
+            ("RSS_RELAY_MAX_IN_FLIGHT", "17"),
+            ("RSS_RELAY_SAMPLE_INTERVAL_MS", "30001"),
+            ("RSS_OUTBOX_SWEEP_INTERVAL_MS", "300001"),
+            ("RSS_OUTBOX_RETAIN_SECONDS", "604801"),
+        ])
+        .unwrap_or_else(|_| unreachable!());
+
+        let mapper = crate::config::ServingConfigMapper::for_test(snapshot.view());
+        let worker = EventWorkerConfig::from_mapper(&mapper).unwrap_or_else(|_| unreachable!());
+
+        assert_eq!(worker.relay_poll_interval(), Duration::from_millis(201));
+        assert_eq!(worker.relay_max_in_flight(), 17);
+        assert_eq!(
+            worker.relay_sample_interval(),
+            Duration::from_millis(30_001)
+        );
+        assert_eq!(
+            worker.outbox_sweep_interval(),
+            Duration::from_millis(300_001)
+        );
+        assert_eq!(worker.outbox_retain_seconds(), 604_801);
     }
 
-    fn durable_security_env(name: &str) -> Option<String> {
-        match name {
-            TENANT_AUTHORITY_HMAC_KEY_ENV => Some(test_hmac_key_b64url()),
-            DLX_PAYLOAD_KEY_NAME_ENV => Some("dlx-payload".to_string()),
-            VAULT_ADDR_ENV => Some("https://vault.example:8200".to_string()),
-            DLX_HOT_VAULT_TOKEN_ENV => Some("s.dlx-hot-testtoken".to_string()),
-            DLX_ARCHIVE_VAULT_TOKEN_ENV => Some("s.dlx-archive-testtoken".to_string()),
-            VAULT_TRANSIT_MOUNT_ENV => Some("transit".to_string()),
-            _ => None,
-        }
+    #[test]
+    fn event_transport_config_is_minted_from_snapshot_capability() {
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_TOPOLOGY", "durable-shared"),
+            ("RSS_AMQP_URL", "amqps://su:sp@host/shared"),
+            (
+                TENANT_AUTHORITY_HMAC_KEY_ENV,
+                "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
+            ),
+            (DLX_PAYLOAD_KEY_NAME_ENV, "dlx-payload"),
+            (VAULT_ADDR_ENV, "https://vault.example:8200"),
+            (DLX_HOT_VAULT_TOKEN_ENV, "s.dlx-hot-testtoken"),
+            (DLX_ARCHIVE_VAULT_TOKEN_ENV, "s.dlx-archive-testtoken"),
+            (VAULT_TRANSIT_MOUNT_ENV, "transit"),
+        ])
+        .unwrap_or_else(|_| unreachable!());
+
+        let mapper = crate::config::ServingConfigMapper::for_test(snapshot.view());
+        let config = EventTransportConfig::from_mapper(&mapper).unwrap_or_else(|_| unreachable!());
+
+        assert!(matches!(config.decision, EventDecision::Durable { .. }));
     }
 
     // ── required_domains ──────────────────────────────────────────────────────
@@ -2223,285 +2589,126 @@ mod tests {
         assert!(err.to_string().contains("unknown RSS_TOPOLOGY"));
     }
 
-    // ── build_event_transport_config_from ─────────────────────────────────────
+    // ── explicit test values / snapshot-only production builders ─────────────
 
-    #[allow(clippy::panic)]
-    // reason: 测试 Ok 臂等价 unreachable；panic! 是标准测试断言手段；item-level carve-out。
     #[test]
-    fn config_builder_missing_topology_fails_fast() {
-        let result = build_event_transport_config_from(|_| None);
-        match result {
-            Err(e) => assert!(e.to_string().contains("RSS_TOPOLOGY")),
-            Ok(_) => panic!("expected error for missing RSS_TOPOLOGY"),
-        }
+    fn explicit_demo_values_do_not_require_durable_security() {
+        assert!(EventTransportTestValues::demo().build().is_ok());
     }
 
     #[test]
-    fn config_builder_demo_topology_does_not_require_amqp() {
-        let result = build_event_transport_config_from(|name| {
-            if name == "RSS_TOPOLOGY" {
-                Some("demo".into())
-            } else {
-                None
-            }
-        });
-        assert!(result.is_ok(), "demo topology: no AMQP vars required");
+    fn explicit_durable_shared_values_resolve_shared_transport() {
+        let config = EventTransportTestValues::durable_shared("amqps://su:sp@host/shared")
+            .build()
+            .unwrap_or_else(|_| unreachable!());
+        assert!(matches!(config.decision, EventDecision::Durable { .. }));
     }
 
-    /// review #342 F1 修复：durable-shared 仅配共享 `RSS_AMQP_URL`（无 per-domain）也应可启动——env
-    /// builder 完整映射 → resolver 用共享回退（修复前硬要 RSS_AMQP_IDENTITY_URL，按文档配共享 URL 直接 Err）。
-    #[allow(clippy::unwrap_used)]
-    // reason: 配置齐备必构造成功；item-level carve-out。
     #[test]
-    fn config_builder_durable_shared_url_only_resolves_durable() {
-        let cfg = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqps://su:sp@host/shared".into()),
-            _ => durable_security_env(name),
-        })
-        .unwrap();
-        let decision = resolve_event_decision(cfg.topology, cfg.transport, &["identity"]);
+    fn explicit_plaintext_values_require_loopback_and_opt_in() {
         assert!(
-            matches!(decision, Ok(EventDecision::Durable { .. })),
-            "durable-shared 仅配共享 URL 应回退成 Durable，实得 {decision:?}"
+            EventTransportTestValues::durable_shared("amqp://su:sp@broker/shared")
+                .with_plaintext_policy("true")
+                .build()
+                .is_err()
+        );
+        assert!(
+            EventTransportTestValues::durable_shared("amqp://su:sp@127.0.0.1/shared")
+                .with_plaintext_policy("true")
+                .build()
+                .is_ok()
         );
     }
 
     #[test]
-    fn config_builder_rejects_plaintext_amqp_by_default() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqp://su:sp@broker/shared".into()),
-            _ => durable_security_env(name),
-        });
-        let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(err.contains("RSS_AMQP_URL"), "{err}");
-        assert!(err.contains("amqps://"), "{err}");
-    }
-
-    #[allow(clippy::unwrap_used)]
-    // reason: loopback + explicit opt-in 是测试 fixture 路径，必须构造成功。
-    #[test]
-    fn config_builder_allows_loopback_plaintext_amqp_with_explicit_opt_in() {
-        let cfg = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqp://su:sp@127.0.0.1:5672/shared".into()),
-            AMQP_ALLOW_PLAINTEXT_ENV => Some("true".into()),
-            _ => durable_security_env(name),
-        })
-        .unwrap();
-        let decision = resolve_event_decision(cfg.topology, cfg.transport, &["identity"]);
-        assert!(matches!(decision, Ok(EventDecision::Durable { .. })));
-    }
-
-    #[test]
-    fn config_builder_rejects_non_loopback_plaintext_amqp_even_with_opt_in() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqp://su:sp@broker.internal/shared".into()),
-            AMQP_ALLOW_PLAINTEXT_ENV => Some("true".into()),
-            _ => durable_security_env(name),
-        });
-        let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(err.contains("loopback"), "{err}");
-    }
-
-    #[allow(clippy::unwrap_used)]
-    // reason: dev-container policy 是 compose 演示栈的显式 opt-in，配置齐备应构造成功。
-    #[test]
-    fn config_builder_allows_dev_container_plaintext_amqp_with_explicit_policy() {
-        let cfg = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqp://su:sp@rabbitmq:5672/shared".into()),
-            AMQP_ALLOW_PLAINTEXT_ENV => Some("dev-container".into()),
-            _ => durable_security_env(name),
-        })
-        .unwrap();
-        let decision = resolve_event_decision(cfg.topology, cfg.transport, &["identity"]);
-        assert!(matches!(decision, Ok(EventDecision::Durable { .. })));
-    }
-
-    #[test]
-    fn config_builder_rejects_invalid_amqp_plaintext_opt_in() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqps://su:sp@broker/shared".into()),
-            AMQP_ALLOW_PLAINTEXT_ENV => Some("enabled".into()),
-            _ => durable_security_env(name),
-        });
-        let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(err.contains(AMQP_ALLOW_PLAINTEXT_ENV), "{err}");
-    }
-
-    /// durable 缺所有 AMQP URL（per-domain + shared 均无）→ env builder 不报错（只映射），由 resolver
-    /// 单源 fail-closed（per-domain MissingBrokerUrl）。
-    #[allow(clippy::unwrap_used)]
-    // reason: topology 齐备 → build 必成功；item-level carve-out。
-    #[test]
-    fn config_builder_durable_missing_amqp_resolves_fail_closed() {
-        let cfg = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            _ => durable_security_env(name),
-        })
-        .unwrap();
-        let decision = resolve_event_decision(cfg.topology, cfg.transport, &["identity"]);
-        assert!(
-            decision.is_err(),
-            "durable 缺所有 AMQP URL → resolver fail-closed"
-        );
-    }
-
-    /// durable-isolated 配共享 `RSS_AMQP_URL` → resolver fail-closed（IsolatedFallbackForbidden）：
-    /// 隔离拓扑禁回退共享凭据，env builder 照常映射、resolver 单源拒。
-    #[allow(clippy::unwrap_used)]
-    // reason: topology+shared 齐备 → build 必成功；item-level carve-out。
-    #[test]
-    fn config_builder_durable_isolated_with_shared_fails_closed() {
-        let cfg = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-isolated".into()),
-            "RSS_AMQP_URL" => Some("amqps://su:sp@host/shared".into()),
-            _ => durable_security_env(name),
-        })
-        .unwrap();
-        let decision = resolve_event_decision(cfg.topology, cfg.transport, &["identity"]);
-        assert!(
-            decision.is_err(),
-            "durable-isolated 配共享 URL → resolver fail-closed"
+    fn explicit_durable_missing_transport_fails_in_resolver() {
+        let error = EventTransportTestValues::durable_shared("amqps://su:sp@host/shared")
+            .without_shared_url()
+            .build()
+            .err()
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_default();
+        assert_eq!(
+            error,
+            "resolve event transport: durable transport requires a broker url for domain IDENTITY (set RSS_IDENTITY_AMQP_URL)"
         );
     }
 
     #[test]
-    fn config_builder_durable_defaults_timing_when_absent() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
-            _ => durable_security_env(name),
-        });
-        assert!(result.is_ok(), "full durable config should succeed");
-        let cfg = result.unwrap_or_else(|_| unreachable!());
-        assert_eq!(cfg.relay_poll_interval, Duration::from_millis(200));
-        assert_eq!(cfg.relay_max_in_flight, 16);
-        assert_eq!(cfg.relay_sample_interval, Duration::from_millis(30_000));
-        assert_eq!(cfg.relay_budget.lease_ttl(), Duration::from_secs(60));
-        assert_eq!(cfg.relay_budget.publish_timeout(), Duration::from_secs(40));
-        assert_eq!(cfg.relay_budget.settle_timeout(), Duration::from_secs(5));
-        assert_eq!(cfg.relay_budget.safety_margin(), Duration::from_secs(5));
-        assert_eq!(cfg.relay_budget.required_budget(), Duration::from_secs(50));
-        assert_eq!(cfg.outbox_sweep_interval, Duration::from_millis(300_000));
-        assert_eq!(cfg.outbox_retain_seconds, 604_800);
-        assert!(cfg.tenant_authority.is_some());
-        assert!(cfg.dlx_payload_protector.is_some());
-    }
-
-    #[test]
-    fn config_builder_relay_budget_overrides_are_strict_and_typed() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
-            "RSS_RELAY_LEASE_TTL_MS" => Some("90000".into()),
-            "RSS_RELAY_PUBLISH_TIMEOUT_MS" => Some("60000".into()),
-            "RSS_RELAY_SETTLE_TIMEOUT_MS" => Some("10000".into()),
-            "RSS_RELAY_SAFETY_MARGIN_MS" => Some("10000".into()),
-            _ => durable_security_env(name),
-        });
-        assert!(
-            result.is_ok(),
-            "valid relay budget overrides should succeed"
+    fn isolated_shared_transport_returns_exact_rejection() {
+        let error =
+            EventTransportTestValues::durable_isolated_with_shared("amqps://su:sp@host/shared")
+                .build()
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_default();
+        assert_eq!(
+            error,
+            "resolve event transport: isolated topology must not be configured with a shared broker url (RSS_AMQP_URL)"
         );
-        let cfg = result.unwrap_or_else(|_| unreachable!());
-        assert_eq!(cfg.relay_budget.lease_ttl_millis(), 90_000);
-        assert_eq!(cfg.relay_budget.publish_timeout_millis(), 60_000);
-        assert_eq!(cfg.relay_budget.settle_timeout_millis(), 10_000);
-        assert_eq!(cfg.relay_budget.safety_margin_millis(), 10_000);
-        assert_eq!(cfg.relay_budget.required_budget_millis(), 80_000);
     }
 
     #[test]
-    fn config_builder_relay_budget_invalid_values_fail_fast() {
-        let cases = [
-            ("RSS_RELAY_LEASE_TTL_MS", "not-a-number"),
-            ("RSS_RELAY_PUBLISH_TIMEOUT_MS", "0"),
-            ("RSS_RELAY_SETTLE_TIMEOUT_MS", "18446744073709551615"),
-            ("RSS_RELAY_SAFETY_MARGIN_MS", "0"),
+    fn event_worker_snapshot_defaults_and_strict_budget_are_typed() {
+        let snapshot = crate::config::test_snapshot(&[]).unwrap_or_else(|_| unreachable!());
+        let mapper = crate::config::ServingConfigMapper::for_test(snapshot.view());
+        let worker = EventWorkerConfig::from_mapper(&mapper).unwrap_or_else(|_| unreachable!());
+        assert_eq!(worker.relay_poll_interval(), Duration::from_millis(200));
+        assert_eq!(worker.relay_max_in_flight(), 16);
+        assert_eq!(
+            worker.relay_sample_interval(),
+            Duration::from_millis(30_000)
+        );
+        assert_eq!(
+            worker.outbox_sweep_interval(),
+            Duration::from_millis(300_000)
+        );
+        assert_eq!(worker.outbox_retain_seconds(), 604_800);
+        assert_eq!(worker.relay_budget().required_budget_millis(), 50_000);
+    }
+
+    #[test]
+    fn event_worker_snapshot_maps_each_relay_budget_field_without_swaps() {
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_RELAY_LEASE_TTL_MS", "61000"),
+            ("RSS_RELAY_PUBLISH_TIMEOUT_MS", "17000"),
+            ("RSS_RELAY_SETTLE_TIMEOUT_MS", "9000"),
+            ("RSS_RELAY_SAFETY_MARGIN_MS", "3000"),
+        ])
+        .unwrap_or_else(|_| unreachable!());
+        let mapper = crate::config::ServingConfigMapper::for_test(snapshot.view());
+        let worker = EventWorkerConfig::from_mapper(&mapper).unwrap_or_else(|_| unreachable!());
+        let budget = worker.relay_budget();
+
+        assert_eq!(budget.lease_ttl(), Duration::from_millis(61_000));
+        assert_eq!(budget.publish_timeout(), Duration::from_millis(17_000));
+        assert_eq!(budget.settle_timeout(), Duration::from_millis(9_000));
+        assert_eq!(budget.safety_margin(), Duration::from_millis(3_000));
+    }
+
+    #[test]
+    fn event_worker_snapshot_relay_budget_invalid_values_fail_fast() {
+        for (name, value) in [
             ("RSS_RELAY_LEASE_TTL_MS", "86400001"),
-        ];
-        for (invalid_name, invalid_value) in cases {
-            let result = build_event_transport_config_from(|name| match name {
-                "RSS_TOPOLOGY" => Some("durable-shared".into()),
-                "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
-                _ if name == invalid_name => Some(invalid_value.into()),
-                _ => durable_security_env(name),
-            });
-            assert!(result.is_err(), "{invalid_name}={invalid_value} must fail");
+            ("RSS_RELAY_PUBLISH_TIMEOUT_MS", "86400001"),
+            ("RSS_RELAY_SETTLE_TIMEOUT_MS", "86400001"),
+            ("RSS_RELAY_SAFETY_MARGIN_MS", "86400001"),
+        ] {
+            let snapshot =
+                crate::config::test_snapshot(&[(name, value)]).unwrap_or_else(|_| unreachable!());
+            let mapper = crate::config::ServingConfigMapper::for_test(snapshot.view());
+            assert!(
+                EventWorkerConfig::from_mapper(&mapper).is_err(),
+                "{name} must reject the governed maximum plus one"
+            );
         }
-    }
-
-    #[test]
-    fn config_builder_relay_budget_equal_to_lease_fails_fast() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
-            "RSS_RELAY_LEASE_TTL_MS" => Some("50000".into()),
-            _ => durable_security_env(name),
-        });
-        assert!(result.is_err(), "required budget equal to lease must fail");
-    }
-
-    #[test]
-    fn config_builder_uses_only_relay_max_in_flight_env() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
-            "RSS_RELAY_MAX_IN_FLIGHT" => Some("32".into()),
-            "RSS_RELAY_BATCH_SIZE" => Some("63".into()),
-            _ => durable_security_env(name),
-        });
-        assert!(result.is_ok(), "full durable config should succeed");
-        let cfg = result.unwrap_or_else(|_| unreachable!());
-        assert_eq!(cfg.relay_max_in_flight, 32);
-    }
-
-    #[test]
-    fn config_builder_does_not_alias_legacy_relay_batch_size() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
-            "RSS_RELAY_BATCH_SIZE" => Some("32".into()),
-            _ => durable_security_env(name),
-        });
-        assert!(result.is_ok(), "full durable config should succeed");
-        let cfg = result.unwrap_or_else(|_| unreachable!());
-        assert_eq!(cfg.relay_max_in_flight, 16);
-    }
-
-    #[test]
-    fn config_builder_durable_parses_outbox_maintenance_timing() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
-            "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("120000".into()),
-            "RSS_OUTBOX_RETAIN_SECONDS" => Some("86400".into()),
-            _ => durable_security_env(name),
-        });
-        assert!(result.is_ok(), "full durable config should succeed");
-        let cfg = result.unwrap_or_else(|_| unreachable!());
-        assert_eq!(cfg.outbox_sweep_interval, Duration::from_millis(120_000));
-        assert_eq!(cfg.outbox_retain_seconds, 86_400);
-    }
-
-    #[test]
-    fn config_builder_invalid_outbox_maintenance_timing_falls_back() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
-            "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("bad-ms".into()),
-            "RSS_OUTBOX_RETAIN_SECONDS" => Some("bad-seconds".into()),
-            _ => durable_security_env(name),
-        });
-        assert!(result.is_ok(), "invalid optional timing falls back");
-        let cfg = result.unwrap_or_else(|_| unreachable!());
-        assert_eq!(cfg.outbox_sweep_interval, Duration::from_millis(300_000));
-        assert_eq!(cfg.outbox_retain_seconds, 604_800);
+        let snapshot = crate::config::test_snapshot(&[("RSS_RELAY_MAX_IN_FLIGHT", "0")])
+            .unwrap_or_else(|_| unreachable!());
+        let mapper = crate::config::ServingConfigMapper::for_test(snapshot.view());
+        assert!(
+            EventWorkerConfig::from_mapper(&mapper).is_err(),
+            "invalid worker shape must fail before provider setup or migrations"
+        );
     }
 
     #[test]
@@ -2913,6 +3120,7 @@ mod tests {
             Arc::clone(&health),
             metrics,
             Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH; 2])),
+            DlxWorkerConfig::canonical(),
         )
         .await;
 
@@ -2937,6 +3145,7 @@ mod tests {
             Arc::new(WorkerHealth::starting()),
             Arc::new(RecordingDlxMetrics::default()),
             Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH])),
+            DlxWorkerConfig::canonical(),
         ));
         tokio::task::yield_now().await;
         token.cancel();
@@ -2957,6 +3166,7 @@ mod tests {
             Arc::clone(&health),
             Arc::clone(&metrics) as Arc<dyn DlxLifecycleMetrics>,
             Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH])),
+            DlxWorkerConfig::canonical(),
         ));
         tokio::task::yield_now().await;
         tokio::time::advance(DLX_LIFECYCLE_TICK_TIMEOUT).await;
@@ -3000,6 +3210,7 @@ mod tests {
                 },
                 token,
                 Arc::clone(&health),
+                DlxWorkerConfig::canonical(),
             )
             .await;
             assert_eq!(health.status(), expected);
@@ -3015,7 +3226,13 @@ mod tests {
             token: token.clone(),
         };
         assert_eq!(
-            run_bounded_dlx_archive_readiness_probe(&invariant, &token, &health).await,
+            run_bounded_dlx_archive_readiness_probe(
+                &invariant,
+                &token,
+                &health,
+                DlxWorkerConfig::canonical(),
+            )
+            .await,
             DlxLoopStep::Continue
         );
         assert_eq!(
@@ -3029,7 +3246,13 @@ mod tests {
         };
         let live_token = tokio_util::sync::CancellationToken::new();
         assert_eq!(
-            run_bounded_dlx_archive_readiness_probe(&recovered, &live_token, &health).await,
+            run_bounded_dlx_archive_readiness_probe(
+                &recovered,
+                &live_token,
+                &health,
+                DlxWorkerConfig::canonical(),
+            )
+            .await,
             DlxLoopStep::Continue
         );
         assert_eq!(
@@ -3046,6 +3269,7 @@ mod tests {
             NeverCompletingArchiveReadiness,
             token.clone(),
             Arc::clone(&health),
+            DlxWorkerConfig::canonical(),
         ));
         tokio::task::yield_now().await;
         token.cancel();
@@ -3069,6 +3293,7 @@ mod tests {
             lifecycle,
             FakeDlxBacklogReader(Ok(DlxArchiveBacklog::new(0, 0))),
             Arc::clone(&health),
+            DlxWorkerConfig::canonical(),
         );
 
         let resource = worker(token);
@@ -3131,12 +3356,9 @@ mod tests {
 
     #[test]
     fn config_builder_durable_missing_tenant_authority_key_fails_fast() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqps://su:sp@host/shared".into()),
-            TENANT_AUTHORITY_HMAC_KEY_ENV => None,
-            _ => durable_security_env(name),
-        });
+        let result = EventTransportTestValues::durable_shared("amqps://su:sp@host/shared")
+            .without_tenant_authority_key()
+            .build();
         assert!(
             result.is_err(),
             "missing tenant authority key must fail fast"
@@ -3151,12 +3373,9 @@ mod tests {
     #[test]
     fn config_builder_durable_short_tenant_authority_key_fails_fast() {
         let short_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42u8; 8]);
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqps://su:sp@host/shared".into()),
-            TENANT_AUTHORITY_HMAC_KEY_ENV => Some(short_key.clone()),
-            _ => durable_security_env(name),
-        });
+        let result = EventTransportTestValues::durable_shared("amqps://su:sp@host/shared")
+            .with_tenant_authority_key_b64url(short_key)
+            .build();
         assert!(result.is_err(), "short tenant authority key must fail fast");
         let err = result.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(
@@ -3167,12 +3386,9 @@ mod tests {
 
     #[test]
     fn config_builder_durable_oversized_tenant_authority_clock_skew_fails_fast() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqps://su:sp@host/shared".into()),
-            TENANT_AUTHORITY_CLOCK_SKEW_ENV => Some("301".into()),
-            _ => durable_security_env(name),
-        });
+        let result = EventTransportTestValues::durable_shared("amqps://su:sp@host/shared")
+            .with_tenant_clock_skew_secs(301)
+            .build();
         assert!(
             result.is_err(),
             "oversized tenant authority clock skew must fail fast"
@@ -3186,12 +3402,9 @@ mod tests {
 
     #[test]
     fn config_builder_durable_missing_dlx_payload_key_name_fails_fast() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqps://su:sp@host/shared".into()),
-            DLX_PAYLOAD_KEY_NAME_ENV => None,
-            _ => durable_security_env(name),
-        });
+        let result = EventTransportTestValues::durable_shared("amqps://su:sp@host/shared")
+            .without_dlx_payload_key()
+            .build();
         assert!(
             result.is_err(),
             "missing DLX payload key name must fail fast"
@@ -3231,7 +3444,7 @@ mod tests {
         let result = resolve_event_decision(
             bootstrap::Topology::Demo,
             bootstrap::eventtransport::TransportConfig::default(),
-            &[],
+            &[] as &[&str],
         );
         assert!(result.is_ok(), "Demo topology must succeed: {result:?}");
         assert!(

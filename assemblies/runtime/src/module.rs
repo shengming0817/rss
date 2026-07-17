@@ -10,7 +10,8 @@
 //! # 不变式
 //!
 //! - **INVARIANT: WIRING-DEPS-NO-HANDOFF-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（Hard，签名强制）**：域接线入口
-//!   `domains::X::module(&SharedRuntimeDeps) -> Future<Result<DomainBinding>>` 统一为 async 薄委托；
+//!   `domains::X::module(&SharedRuntimeDeps, ExactModuleInput) -> Future<Result<DomainBinding>>`
+//!   统一为 async 薄委托；generated runtime glue 按 manifest 域逐字段消费 `DomainModuleInputs`；
 //!   identity / audit 的唯一构造实现分别位于 typed composition crate，settings 同样经独立 composition
 //!   入口。入口只接收 infra parameter object 且返回单域 binding，无参数可塞别域的
 //!   `DomainModuleResult`，故 A 域产物喂进 B 域 wiring 编译期不可表达（type-system 一档载体）。

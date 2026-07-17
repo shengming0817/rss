@@ -4,9 +4,9 @@
 //! source is consumed by value, every closed-catalog key is read once, and the snapshot adapter can
 //! only borrow captured values. `SnapshotConfig` seals the listener/auth/tracing/serving-OIDC
 //! consumers migrated by #1783, every PostgreSQL/Redis serving or maintenance consumer migrated by
-//! #1784, and the Vault/S3 serving plus settings-maintenance consumers migrated by #1785. Remaining
-//! event/domain readers owned by #1786 stay outside the full-reader-exclusivity claim until #1787
-//! closes the global guard. Maintenance grants, CI/Forge credentials, the AWS default credential
+//! #1784, the Vault/S3 serving plus settings-maintenance consumers migrated by #1785, and the
+//! event/domain/DLX/worker serving inputs migrated by #1786. Full crate-wide reader exclusivity
+//! remains owned by #1787. Maintenance grants, CI/Forge credentials, the AWS default credential
 //! chain, and SPIFFE rotation material are deliberately outside this serving catalog.
 
 use std::borrow::Borrow;
@@ -92,7 +92,6 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS",
     "RSS_REDIS_URL",
     "RSS_REFRESH_TTL_SECS",
-    "RSS_RELAY_BATCH_SIZE",
     "RSS_RELAY_LEASE_TTL_MS",
     "RSS_RELAY_MAX_IN_FLIGHT",
     "RSS_RELAY_POLL_INTERVAL_MS",
@@ -213,7 +212,7 @@ pub(crate) enum RuntimeConfigCaptureError {
 
 /// Immutable process-lifetime configuration generation.
 ///
-/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- private storage, by-value source consumption, mutually exclusive owned serving/operator inputs, and private-field `SnapshotConfig` signatures make snapshot omission and capability forgery unrepresentable for migrated serving, PostgreSQL maintenance, OIDC JWKS export, and Vault-backed settings-maintenance consumers.
+/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- private storage, by-value source consumption, mutually exclusive owned serving/operator inputs, the sole `RuntimeServingConfig` aggregate mapper, exact generated-domain inputs, and private-field `SnapshotConfig` signatures make snapshot omission and capability forgery unrepresentable for migrated serving, event/domain/DLX/worker, PostgreSQL maintenance, OIDC JWKS export, and Vault-backed settings-maintenance consumers.
 ///
 /// The separate Medium `RUNTIME-CONFIG-SNAPSHOT-LIVE-01` carrier in `runtime-baseline` guards the
 /// production capture-to-consumer flow against ambient implementation substitutions; #1787 owns
@@ -238,6 +237,177 @@ impl<'a> SnapshotConfig<'a> {
     /// `std::env::var(name).ok()`; there is no source fallback.
     pub(crate) fn value(self, name: &str) -> Option<&'a str> {
         self.snapshot.get(name).map(SecretText::expose)
+    }
+}
+
+pub(crate) struct ServingConfigMapper<'a> {
+    config: SnapshotConfig<'a>,
+}
+
+impl<'a> ServingConfigMapper<'a> {
+    fn new(config: SnapshotConfig<'a>) -> Self {
+        Self { config }
+    }
+
+    pub(crate) const fn config(&self) -> SnapshotConfig<'a> {
+        self.config
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(config: SnapshotConfig<'a>) -> Self {
+        Self::new(config)
+    }
+}
+
+pub(crate) struct WorkerRuntimeConfig {
+    event: crate::event_transport::EventWorkerConfig,
+    dlx: crate::event_transport::DlxWorkerConfig,
+    distributed: crate::distributed_runtime::DistributedWorkerConfig,
+    session_sweep_interval: std::time::Duration,
+    keyprovider_readiness_interval: settings_composition::KeyProviderReadinessInterval,
+}
+
+impl WorkerRuntimeConfig {
+    pub(crate) fn from_mapper(mapper: &ServingConfigMapper<'_>) -> anyhow::Result<Self> {
+        let config = mapper.config();
+        Ok(Self {
+            event: crate::event_transport::EventWorkerConfig::from_mapper(mapper)?,
+            dlx: crate::event_transport::DlxWorkerConfig::canonical(),
+            distributed: crate::distributed_runtime::DistributedWorkerConfig::canonical(),
+            session_sweep_interval: session_sweep_interval_from_value(
+                config.value("RSS_SESSION_SWEEP_INTERVAL_MS"),
+            ),
+            keyprovider_readiness_interval: keyprovider_readiness_interval_from_value(
+                config.value("RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS"),
+            ),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_test_parts(
+        self,
+    ) -> (
+        crate::event_transport::EventWorkerConfig,
+        std::time::Duration,
+        settings_composition::KeyProviderReadinessInterval,
+    ) {
+        (
+            self.event,
+            self.session_sweep_interval,
+            self.keyprovider_readiness_interval,
+        )
+    }
+}
+
+pub(crate) struct RuntimeServingConfig {
+    event_transport: crate::event_transport::EventTransportConfig,
+    event_worker: crate::event_transport::EventWorkerConfig,
+    dlx_worker: crate::event_transport::DlxWorkerConfig,
+    distributed_worker: crate::distributed_runtime::DistributedWorkerConfig,
+    domain_transport: crate::DomainTransportConfig,
+    domain_modules: crate::domains::DomainModuleInputs,
+    audit_consumer_key: primitives::MacKey,
+    session_sweep_interval: std::time::Duration,
+}
+
+pub(crate) struct RuntimeServingConfigParts {
+    pub(crate) event_transport: crate::event_transport::EventTransportConfig,
+    pub(crate) event_worker: crate::event_transport::EventWorkerConfig,
+    pub(crate) dlx_worker: crate::event_transport::DlxWorkerConfig,
+    pub(crate) distributed_worker: crate::distributed_runtime::DistributedWorkerConfig,
+    pub(crate) domain_transport: crate::DomainTransportConfig,
+    pub(crate) domain_modules: crate::domains::DomainModuleInputs,
+    pub(crate) audit_consumer_key: primitives::MacKey,
+    pub(crate) session_sweep_interval: std::time::Duration,
+}
+
+impl RuntimeServingConfig {
+    pub(crate) fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+        let mapper = ServingConfigMapper::new(config);
+        let event_transport = crate::event_transport::EventTransportConfig::from_mapper(&mapper)?;
+        let topology = event_transport.topology();
+        let WorkerRuntimeConfig {
+            event,
+            dlx,
+            distributed,
+            session_sweep_interval,
+            keyprovider_readiness_interval,
+        } = WorkerRuntimeConfig::from_mapper(&mapper)?;
+        let domain_transport = crate::DomainTransportConfig::from_mapper(topology, &mapper)?;
+        let domain_modules = crate::domains::DomainModuleInputs::from_snapshot(
+            &mapper,
+            keyprovider_readiness_interval,
+        )?;
+        let audit_consumer_key = domain_modules.audit_consumer_key();
+        Ok(Self {
+            event_transport,
+            event_worker: event,
+            dlx_worker: dlx,
+            distributed_worker: distributed,
+            domain_transport,
+            domain_modules,
+            audit_consumer_key,
+            session_sweep_interval,
+        })
+    }
+
+    pub(crate) fn into_parts(self) -> RuntimeServingConfigParts {
+        RuntimeServingConfigParts {
+            event_transport: self.event_transport,
+            event_worker: self.event_worker,
+            dlx_worker: self.dlx_worker,
+            distributed_worker: self.distributed_worker,
+            domain_transport: self.domain_transport,
+            domain_modules: self.domain_modules,
+            audit_consumer_key: self.audit_consumer_key,
+            session_sweep_interval: self.session_sweep_interval,
+        }
+    }
+}
+
+const DEFAULT_SESSION_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+const MIN_SESSION_SWEEP_INTERVAL_MS: u64 = 1_000;
+fn session_sweep_interval_from_value(raw: Option<&str>) -> std::time::Duration {
+    match raw {
+        None => DEFAULT_SESSION_SWEEP_INTERVAL,
+        Some(raw) => match raw.trim().parse::<u64>() {
+            Ok(milliseconds) if milliseconds >= MIN_SESSION_SWEEP_INTERVAL_MS => {
+                std::time::Duration::from_millis(milliseconds)
+            }
+            _ => {
+                tracing::warn!(
+                    env = "RSS_SESSION_SWEEP_INTERVAL_MS",
+                    default_ms = DEFAULT_SESSION_SWEEP_INTERVAL.as_millis(),
+                    min_ms = MIN_SESSION_SWEEP_INTERVAL_MS,
+                    "invalid session sweep interval (expected u64 ms >= 1000); using default"
+                );
+                DEFAULT_SESSION_SWEEP_INTERVAL
+            }
+        },
+    }
+}
+
+fn keyprovider_readiness_interval_from_value(
+    raw: Option<&str>,
+) -> settings_composition::KeyProviderReadinessInterval {
+    match raw {
+        None => settings_composition::KeyProviderReadinessInterval::default(),
+        Some(raw) => match raw
+            .parse::<u64>()
+            .map(std::time::Duration::from_secs)
+            .ok()
+            .and_then(|value| {
+                settings_composition::KeyProviderReadinessInterval::try_new(value).ok()
+            }) {
+            Some(interval) => interval,
+            _ => {
+                tracing::warn!(
+                    env = "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS",
+                    "invalid keyprovider readiness sample interval (need 1..=30s); using default 5s"
+                );
+                settings_composition::KeyProviderReadinessInterval::default()
+            }
+        },
     }
 }
 

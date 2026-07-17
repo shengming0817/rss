@@ -7,15 +7,23 @@ use bootstrap::DomainBinding;
 
 use crate::SharedRuntimeDeps;
 
-pub async fn wire_domains(deps: &SharedRuntimeDeps) -> anyhow::Result<Vec<DomainBinding>> {
+pub async fn wire_domains(
+    deps: &SharedRuntimeDeps,
+    inputs: crate::domains::DomainModuleInputs,
+) -> anyhow::Result<Vec<DomainBinding>> {
+    let crate::domains::DomainModuleInputs {
+        settings,
+        identity,
+        audit,
+    } = inputs;
     Ok(vec![
-        crate::domains::settings::module(deps)
+        crate::domains::settings::module(deps, settings)
             .await
             .context("wire domain 'settings'")?,
-        crate::domains::identity::module(deps)
+        crate::domains::identity::module(deps, identity)
             .await
             .context("wire domain 'identity'")?,
-        crate::domains::audit::module(deps)
+        crate::domains::audit::module(deps, audit)
             .await
             .context("wire domain 'audit'")?,
     ])
@@ -152,17 +160,27 @@ pub const PROVIDER_OUTPUT_BINDINGS: &[bootstrap::ProviderOutputBinding] = &[
 
 #[cfg(test)]
 pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {
-    Ok(vec![
-        crate::domains::settings::tests::test_binding()
-            .await
-            .context("wire test domain 'settings'")?,
-        crate::domains::identity::tests::test_binding()
-            .await
-            .context("wire test domain 'identity'")?,
-        crate::domains::audit::tests::test_binding()
+    let mut bindings = Vec::new();
+    bindings.push(
+        crate::domains::settings::tests::test_binding(
+            crate::domains::settings::tests::test_input()?
+        )
+        .await
+        .context("wire test domain 'settings'")?,
+    );
+    bindings.push(
+        crate::domains::identity::tests::test_binding(
+            crate::domains::identity::tests::test_input()?
+        )
+        .await
+        .context("wire test domain 'identity'")?,
+    );
+    bindings.push(
+        crate::domains::audit::tests::test_binding(crate::domains::audit::tests::test_input()?)
             .await
             .context("wire test domain 'audit'")?,
-    ])
+    );
+    Ok(bindings)
 }
 
 pub const FRAMEWORK_HTTP_ROUTES: &[bootstrap::FrameworkHttpRoute] = &[];

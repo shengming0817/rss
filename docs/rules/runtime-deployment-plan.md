@@ -5,7 +5,7 @@ This rule governs how runtime-deployment target constraints select enforcement c
 ## 当前事实
 
 - Assembly manifest validation, generated domain ordering, and committed v1 AssemblyLock drift are governed by typed repository gates.
-- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Listener/auth/tracing/serving-OIDC, every PostgreSQL/Redis consumer, and the Vault/S3 plus settings-maintenance consumers are capability-only; remaining serving migrations are owned by #1786/#1787. RuntimePlan is still summary-oriented, subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
+- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Listener/auth/tracing/serving-OIDC, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only; #1787 owns the remaining crate-wide ambient-reader closure. RuntimePlan is still summary-oriented, subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
 - `cargo xtask archrules list` and its generated matrix derive implemented rules from real carrier anchors. Planning documents are not a second index.
 - The active forge does not make the existing `ci-gate` a required check.
 
@@ -40,9 +40,10 @@ listener resolves to mTLS, route assembly requires and validates a captured, non
 value with the allow-set and readiness slot in `ListenerTransport::Mtls`; launch always passes that
 exact endpoint explicitly and has no configuration-source fallback. Plaintext and non-mTLS
 listeners do not require it. Unknown listener/auth states and invalid required values fail closed.
-The outbound domain-transport path still permits the `spiffe` crate's ambient endpoint fallback;
-that separate consumer belongs to the subsequent runtime snapshot migration issues and is not an
-exception for inbound listener assembly.
+Outbound domain transport resolves its URL/mTLS targets and mandatory non-empty
+`SPIFFE_ENDPOINT_SOCKET` from the same serving snapshot. Its typed carrier owns the endpoint and
+always passes it explicitly to the HTTP adapter, so the upstream `spiffe` ambient endpoint fallback
+is unreachable from runtime production wiring.
 The explicit-value route-assembly core used by the identity wire e2e is compiled only under the
 test-only `integration` feature; it is absent from the default production library API.
 
@@ -88,10 +89,11 @@ binary wrong bindings and early returns (including the exact prepared input pass
 PostgreSQL operator), ambient filter restoration, transitive reachable ambient
 reader variants, and compliant unrelated-name bait.
 
-Ownership after #1785 is explicit: PostgreSQL/Redis/Vault/S3, OIDC JWKS export, and Vault-backed
-settings maintenance are fully snapshot-backed; #1786 covers event/domain/DLX/worker and
-composition settings, and #1787 closes the final ambient-read AST guard. Operator commands bind no
-listener and do not use the serving OIDC/JWKS provider or password-policy capability.
+Ownership after #1786 is explicit: PostgreSQL/Redis/Vault/S3, event/domain/DLX/worker,
+composition settings, OIDC JWKS export, and Vault-backed settings maintenance are snapshot-backed.
+The four command-specific maintenance grant sources remain deliberately named and outside the
+serving catalog; #1787 closes the final crate-wide ambient-read AST guard. Operator commands bind
+no listener and do not use the serving OIDC/JWKS provider or password-policy capability.
 This section records the boundary; it is not a second or Soft enforcement mechanism.
 
 ## 目标能力

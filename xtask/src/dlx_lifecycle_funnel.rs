@@ -133,7 +133,7 @@ fn runtime_run_funnel_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         "PgRuntimeDeps::setup_with_audit_admin_config(",
         "PgDlxLifecycleRuntime::setup(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,hot_payload_protector,)",
         "DlxLifecycleRuntimeDeps::new(dlx_pg_owner,archive_store,archive_vault_provider,archive_key",
-        "wire_dlx_lifecycle(dlx_lifecycle)",
+        "wire_dlx_lifecycle(dlx_lifecycle,dlx_worker)",
     ];
     let mut cursor = 0;
     for expected in required {

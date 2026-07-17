@@ -486,20 +486,7 @@ pub(crate) fn mtls_allow_set_from_value(
 }
 
 fn mtls_spiffe_endpoint_from_value(raw: Option<&str>) -> anyhow::Result<String> {
-    let raw = raw
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {SPIFFE_ENDPOINT_SOCKET_ENV}"))?;
-    let endpoint = raw.trim();
-    anyhow::ensure!(
-        !endpoint.is_empty(),
-        "{SPIFFE_ENDPOINT_SOCKET_ENV} must be a non-empty explicit endpoint"
-    );
-    anyhow::ensure!(
-        endpoint == raw
-            && !endpoint.chars().any(char::is_control)
-            && !endpoint.chars().any(char::is_whitespace),
-        "{SPIFFE_ENDPOINT_SOCKET_ENV} must not contain whitespace or control characters"
-    );
-    Ok(raw.to_owned())
+    crate::required_spiffe_endpoint_from_value(raw)
 }
 
 #[cfg(test)]

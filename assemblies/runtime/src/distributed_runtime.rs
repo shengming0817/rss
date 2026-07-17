@@ -22,9 +22,24 @@ use crate::SharedRuntimeDeps;
 
 const OUTBOX_MAINTENANCE_LOCK: &str = "runtime/event/outbox-maintenance";
 const OUTBOX_MAINTENANCE_CAS: &str = "runtime/event/outbox-maintenance";
-const OUTBOX_MAINTENANCE_TTL: Duration = Duration::from_secs(30);
+const DEFAULT_OUTBOX_MAINTENANCE_TTL: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const OUTBOX_MAINTENANCE_RENEW_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Exact, non-optional timing owned by the process configuration snapshot.
+#[derive(Clone, Copy)]
+pub(crate) struct DistributedWorkerConfig {
+    outbox_maintenance_ttl: Duration,
+}
+
+impl DistributedWorkerConfig {
+    /// Preserve the existing non-configurable distributed maintenance timing.
+    pub(crate) const fn canonical() -> Self {
+        Self {
+            outbox_maintenance_ttl: DEFAULT_OUTBOX_MAINTENANCE_TTL,
+        }
+    }
+}
 
 /// Hard-wired distributed runtime dependencies.
 #[derive(Clone)]
@@ -32,6 +47,7 @@ pub struct DistributedRuntimeDeps {
     locker: Arc<Mutex<distributed::Locker>>,
     state_cas: Arc<Mutex<distributed::StateCas>>,
     domain_transport: Arc<dyn DomainTransport>,
+    outbox_maintenance_ttl: Duration,
 }
 
 impl DistributedRuntimeDeps {
@@ -42,6 +58,7 @@ impl DistributedRuntimeDeps {
             locker: Arc::clone(&self.locker),
             state_cas: Arc::clone(&self.state_cas),
             cas_state: Arc::new(Mutex::new(None)),
+            ttl: self.outbox_maintenance_ttl,
         }
     }
 
@@ -57,7 +74,10 @@ impl DistributedRuntimeDeps {
 /// Provider source is intentionally narrow:
 /// - lock provider: `SharedRuntimeDeps.redis.infra().lock_store()`
 /// - state-CAS provider: `SharedRuntimeDeps.pg.infra().cas_store()`
-pub fn wire_distributed(deps: &SharedRuntimeDeps) -> anyhow::Result<DistributedRuntimeDeps> {
+pub(crate) fn wire_distributed(
+    deps: &SharedRuntimeDeps,
+    worker: DistributedWorkerConfig,
+) -> anyhow::Result<DistributedRuntimeDeps> {
     Ok(DistributedRuntimeDeps {
         locker: Arc::new(Mutex::new(distributed::Locker::new(
             deps.redis.infra().lock_store(),
@@ -66,6 +86,7 @@ pub fn wire_distributed(deps: &SharedRuntimeDeps) -> anyhow::Result<DistributedR
             deps.pg.infra().cas_store(),
         ))),
         domain_transport: Arc::clone(&deps.domain_transport),
+        outbox_maintenance_ttl: worker.outbox_maintenance_ttl,
     })
 }
 
@@ -74,6 +95,7 @@ pub struct OutboxMaintenanceCoordinator {
     locker: Arc<Mutex<distributed::Locker>>,
     state_cas: Arc<Mutex<distributed::StateCas>>,
     cas_state: Arc<Mutex<Option<CasState>>>,
+    ttl: Duration,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -98,7 +120,7 @@ impl OutboxMaintenanceCoordinator {
         })?;
         let grant = {
             let locker = self.locker.lock().await;
-            locker.acquire(key, OUTBOX_MAINTENANCE_TTL).await?
+            locker.acquire(key, self.ttl).await?
         };
         let Some(grant) = grant else {
             tracing::debug!("outbox maintenance standby: distributed lock held by peer");
@@ -379,6 +401,7 @@ mod tests {
                     diport::DynCasStore::new_box(self.clone()),
                 ))),
                 domain_transport: Arc::new(NoopDomainTransport),
+                outbox_maintenance_ttl: DEFAULT_OUTBOX_MAINTENANCE_TTL,
             }
         }
 

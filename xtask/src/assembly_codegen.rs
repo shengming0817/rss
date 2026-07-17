@@ -263,14 +263,34 @@ fn render_modules(
     source_label: &str,
 ) -> Result<String> {
     let manifest_digest = manifest.manifest_digest();
+    let wire_domains_signature = if manifest.name() == "runtime" {
+        "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n) -> anyhow::Result<Vec<DomainBinding>>"
+    } else {
+        "pub async fn wire_domains(deps: &SharedRuntimeDeps) -> anyhow::Result<Vec<DomainBinding>>"
+    };
     let mut code = format!(
-        "{OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {manifest_digest}\n\nuse anyhow::Context as _;\nuse bootstrap::DomainBinding;\n\nuse crate::SharedRuntimeDeps;\n\npub async fn wire_domains(deps: &SharedRuntimeDeps) -> anyhow::Result<Vec<DomainBinding>> {{\n    Ok(vec![\n"
+        "{OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {manifest_digest}\n\nuse anyhow::Context as _;\nuse bootstrap::DomainBinding;\n\nuse crate::SharedRuntimeDeps;\n\n{wire_domains_signature} {{\n"
     );
+    if manifest.name() == "runtime" {
+        code.push_str("    let crate::domains::DomainModuleInputs {\n");
+        for domain in manifest.domains() {
+            let module = module_name(*domain)?;
+            code.push_str(&format!("        {module},\n"));
+        }
+        code.push_str("    } = inputs;\n");
+    }
+    code.push_str("    Ok(vec![\n");
     for domain in manifest.domains() {
         let module = module_name(*domain)?;
-        code.push_str(&format!(
-            "        crate::domains::{module}::module(deps)\n            .await\n            .context(\"wire domain '{module}'\")?,\n"
-        ));
+        if manifest.name() == "runtime" {
+            code.push_str(&format!(
+                "        crate::domains::{module}::module(deps, {module})\n            .await\n            .context(\"wire domain '{module}'\")?,\n"
+            ));
+        } else {
+            code.push_str(&format!(
+                "        crate::domains::{module}::module(deps)\n            .await\n            .context(\"wire domain '{module}'\")?,\n"
+            ));
+        }
     }
     code.push_str("    ])\n}\n\npub const DOMAIN_LISTENER_BINDINGS: &[bootstrap::DomainListenerBinding] = &[\n");
     for listener in manifest.listeners() {
@@ -304,16 +324,10 @@ pub const PROVIDER_OUTPUT_BINDINGS: &[bootstrap::ProviderOutputBinding] = &[\n",
         "];
 
 #[cfg(test)]
-pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {
-    Ok(vec![\n",
+pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {\n",
     );
-    for domain in manifest.domains() {
-        let module = module_name(*domain)?;
-        code.push_str(&format!(
-            "        crate::domains::{module}::tests::test_binding()\n            .await\n            .context(\"wire test domain '{module}'\")?,\n"
-        ));
-    }
-    code.push_str("    ])\n}\n\n");
+    render_test_domain_wiring(manifest, &mut code)?;
+    code.push_str("}\n\n");
     if manifest.name() == "runtime" || !framework_routes.is_empty() {
         code.push_str("pub const FRAMEWORK_HTTP_ROUTES: &[bootstrap::FrameworkHttpRoute] = &[\n");
         for route in framework_routes {
@@ -334,6 +348,36 @@ pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {
         }
     }
     crate::codegen::format_rust(&code)
+}
+
+fn render_test_domain_wiring(
+    manifest: &CanonicalAssemblyManifestV1,
+    code: &mut String,
+) -> Result<()> {
+    let is_runtime = manifest.name() == "runtime";
+    if is_runtime {
+        code.push_str("    let mut bindings = Vec::new();\n");
+    } else {
+        code.push_str("    Ok(vec![\n");
+    }
+    for domain in manifest.domains() {
+        let module = module_name(*domain)?;
+        if is_runtime {
+            code.push_str(&format!(
+                "    bindings.push(\n        crate::domains::{module}::tests::test_binding(crate::domains::{module}::tests::test_input()?)\n            .await\n            .context(\"wire test domain '{module}'\")?,\n    );\n"
+            ));
+        } else {
+            code.push_str(&format!(
+                "        crate::domains::{module}::tests::test_binding()\n            .await\n            .context(\"wire test domain '{module}'\")?,\n"
+            ));
+        }
+    }
+    if is_runtime {
+        code.push_str("    Ok(bindings)\n");
+    } else {
+        code.push_str("    ])\n");
+    }
+    Ok(())
 }
 
 fn framework_http_routes(
@@ -446,6 +490,26 @@ domains = [{domains}]
         root.join("assemblies/runtime/src/generated/modules_gen.rs")
     }
 
+    fn assert_runtime_uses_typed_domain_inputs(rendered: &str, domains: &[&str]) {
+        assert!(rendered.contains("inputs: crate::domains::DomainModuleInputs"));
+        assert!(rendered.contains("let crate::domains::DomainModuleInputs {"));
+        assert!(!rendered.contains("DomainModuleInputs { .. }"));
+        for domain in domains {
+            assert!(rendered.contains(&format!("domains::{domain}::module(deps, {domain})")));
+        }
+    }
+
+    fn assert_non_runtime_preserves_shared_deps_signature(rendered: &str, domains: &[&str]) {
+        assert!(rendered.contains("pub async fn wire_domains(deps: &SharedRuntimeDeps)"));
+        assert!(!rendered.contains("DomainModuleInputs"));
+        for domain in domains {
+            assert!(rendered.contains(&format!("domains::{domain}::module(deps)")));
+            assert!(!rendered.contains(&format!("inputs.{domain}")));
+            assert!(rendered.contains(&format!("domains::{domain}::tests::test_binding()")));
+            assert!(!rendered.contains(&format!("domains::{domain}::tests::test_input()")));
+        }
+    }
+
     fn init_git_with_generated_file(root: &Path) -> Result<()> {
         let generated = output(root);
         fs::create_dir_all(
@@ -513,14 +577,41 @@ domains = [{domains}]
         assert!(rendered.contains("// Source: assemblies/runtime/assembly.toml"));
         assert!(rendered.contains("// Source-Manifest-Digest: sha256:"));
         assert!(!rendered.contains("Source-SHA256"));
-        assert_eq!(rendered.matches("::module(deps)").count(), 3);
+        assert!(rendered.contains(
+            "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n)"
+        ));
+        assert!(rendered.contains(
+            "let crate::domains::DomainModuleInputs {\n        settings,\n        identity,\n        audit,\n    } = inputs;"
+        ));
+        assert!(!rendered.contains("DomainModuleInputs { .. }"));
+        assert_eq!(rendered.matches("::module(deps, ").count(), 3);
+        assert!(rendered.contains("domains::settings::module(deps, settings)"));
+        assert!(rendered.contains("domains::identity::module(deps, identity)"));
+        assert!(rendered.contains("domains::audit::module(deps, audit)"));
         assert_eq!(rendered.matches(".context(\"wire domain '").count(), 3);
         assert!(rendered.contains("pub(crate) async fn wire_test_domains"));
+        assert!(rendered.contains("let mut bindings = Vec::new();"));
+        assert_eq!(rendered.matches("bindings.push(").count(), 3);
+        assert!(rendered.contains("Ok(bindings)"));
         assert!(rendered.contains("pub const DOMAIN_LISTENER_BINDINGS"));
         assert!(rendered.contains("bootstrap::ListenerKind::Primary"));
         assert!(rendered.contains("pub const PROVIDER_OUTPUT_BINDINGS"));
         assert!(rendered.contains("bootstrap::LifecycleChannel::Resources"));
-        assert_eq!(rendered.matches("::tests::test_binding()").count(), 3);
+        let compact = rendered
+            .chars()
+            .filter(|character| !character.is_whitespace() && *character != ',')
+            .collect::<String>();
+        assert!(rendered.contains("domains::settings::tests::test_binding"));
+        assert!(compact.contains(
+            "crate::domains::settings::tests::test_binding(crate::domains::settings::tests::test_input()?)"
+        ));
+        assert!(compact.contains(
+            "domains::identity::tests::test_binding(crate::domains::identity::tests::test_input()?)"
+        ));
+        assert!(compact.contains(
+            "domains::audit::tests::test_binding(crate::domains::audit::tests::test_input()?)"
+        ));
+        assert_eq!(rendered.matches("::tests::test_binding()").count(), 0);
         let identity = rendered
             .find("domains::identity")
             .ok_or_else(|| anyhow::anyhow!("missing identity call"))?;
@@ -640,9 +731,11 @@ domains = [{domains}]
         assert!(runtime.contains("domains::identity"));
         assert!(runtime.contains("domains::audit"));
         assert!(!runtime.contains("domains::settings"));
+        assert_runtime_uses_typed_domain_inputs(&runtime, &["identity", "audit"]);
         assert!(settings.contains("domains::settings"));
         assert!(!settings.contains("domains::identity"));
         assert!(!settings.contains("domains::audit"));
+        assert_non_runtime_preserves_shared_deps_signature(&settings, &["settings"]);
         let identity = identity_audit
             .find("domains::identity")
             .ok_or_else(|| anyhow::anyhow!("identityaudit missing identity"))?;
@@ -651,6 +744,7 @@ domains = [{domains}]
             .ok_or_else(|| anyhow::anyhow!("identityaudit missing audit"))?;
         assert!(identity < audit);
         assert!(!identity_audit.contains("domains::settings"));
+        assert_non_runtime_preserves_shared_deps_signature(&identity_audit, &["identity", "audit"]);
 
         fs::write(
             settingsonly.join("assembly.toml"),
