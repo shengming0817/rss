@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use audit::ports::{AuditListTenantAppend, AuditListTenantAppender, actor_kind_to_db};
 use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
 use crate::cotx::PgTenantWritePool;
 use crate::pool::VerifiedPgWriteStore;
@@ -87,7 +87,7 @@ impl PgAuthAuditSink {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_for_test(store: &PgStore) -> Self {
         Self {
             global_pool: store.pool.clone(),

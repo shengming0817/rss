@@ -105,7 +105,11 @@ prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"
 # testkit/containers：激活 testcontainers fixture（PgFixture/RabbitFixture/RedisFixture）。
 # identity/seed-login：启用 LoginService::with_seed_credential；同时门控 identity wire e2e 所需的
 # explicit-value route assembly seam（仅 integration 测试用；默认生产 library 不编译这些入口）。
-integration = ["testkit/containers", "identity/seed-login"]
+integration = [
+  "testkit/containers",
+  "identity/seed-login",
+  "amqp/integration-test-support",
+]
 
 [dev-dependencies]
 aws-smithy-http-client = { workspace = true, features = ["test-util"] }

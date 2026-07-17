@@ -1,0 +1,5 @@
+error[E0599]: no method named `is_transient` found for struct `PublisherError` in the current scope
+ --> tests/ui/publisher_error_legacy_is_transient_fail.rs:7:25
+  |
+7 |     let _legacy = error.is_transient();
+  |                         ^^^^^^^^^^^^ method not found in `PublisherError`

@@ -114,7 +114,7 @@ impl Publisher for MqttPublisher {
         // into_payload()：move payload 出 request（event_id / topic / metadata 已借用完毕）。
         let payload = request.into_payload();
         // submit：入队 + 等 broker PUBACK 才返回 Ok（QoS1 真 at-least-once；broker 拒绝/断连/超时 ⇒ Err，
-        // 消费方据此可重试，不会把未确认 publish 当成功结算）。
+        // 消费方据此可重试；PUBACK 前断连/超时无法判定 broker 是否已接收，按 Ambiguous 处置）。
         self.confirm
             .submit(self.client.publish_with_properties(
                 topic,
@@ -134,20 +134,23 @@ impl Publisher for MqttPublisher {
     }
 }
 
-/// broker ACK 失败 → [`PublisherError`]，按瞬态/永久分类（#1212：永久错误首投即 DLX，不熬满重试预算）。
+/// broker ACK 失败 → [`PublisherError`]，按 definitive transient / permanent / ambiguous 三态分类。
 ///
 /// - `Rejected`（broker 以**已知永久** PUBACK reason 拒绝：NotAuthorized / TopicNameInvalid /
 ///   PayloadFormatInvalid，重试同一消息必然再失败）→ **permanent**：首投即 DLX。
-/// - `RejectedTransient`（QuotaExceeded 等资源压力 / broker 端未知错误）/ `Disconnected`（连接断开）/
-///   `Timeout`（ACK 超时）→ **transient**：退避重连重发，不过早 DLX（保 L2 最终送达）。
+/// - `RejectedTransient`（QuotaExceeded 等资源压力 / broker 端未知错误）→ **transient**：broker 已明确拒绝，
+///   原消息未被接受，退避后可安全重发。
+/// - `Disconnected`（PUBACK 前连接断开）/ `Timeout`（PUBACK 超时）→ **ambiguous**：broker 可能已接收，
+///   必须保持 event ID 重试并由消费端幂等收口 duplicate。
 ///
 /// 永久/瞬态拒绝因的划分单源在 [`conn::puback_result`]（reason → `ConfirmError` 变体）。
 fn classify_confirm(e: conn::ConfirmError) -> PublisherError {
-    if matches!(e, conn::ConfirmError::Rejected) {
-        PublisherError::permanent(e)
-    } else {
-        // RejectedTransient / Disconnected / Timeout
-        PublisherError::transient(e)
+    match e {
+        conn::ConfirmError::Rejected => PublisherError::permanent(e),
+        conn::ConfirmError::RejectedTransient => PublisherError::transient(e),
+        conn::ConfirmError::Disconnected | conn::ConfirmError::Timeout => {
+            PublisherError::ambiguous(e)
+        }
     }
 }
 
@@ -165,8 +168,8 @@ impl ManagedResource for MqttPublisher {
 
 #[cfg(test)]
 mod classify_tests {
-    //! #1212 ConfirmError 瞬态/永久分类表驱动（Rejected→permanent；RejectedTransient/Disconnected/
-    //! Timeout→transient）——覆盖 ConfirmError 全部 4 变体（closed enum）。
+    //! #1212/#1821 ConfirmError 三态分类表驱动（Rejected→permanent；RejectedTransient→transient；
+    //! Disconnected/Timeout→ambiguous）——覆盖 ConfirmError 全部 4 变体（closed enum）。
     use diport::PublishErrorKind;
 
     use super::classify_confirm;
@@ -177,13 +180,13 @@ mod classify_tests {
         let cases: [(ConfirmError, PublishErrorKind, &str); 4] = [
             (
                 ConfirmError::Disconnected,
-                PublishErrorKind::Transient,
-                "Disconnected→transient",
+                PublishErrorKind::Ambiguous,
+                "Disconnected→ambiguous",
             ),
             (
                 ConfirmError::Timeout,
-                PublishErrorKind::Transient,
-                "Timeout→transient",
+                PublishErrorKind::Ambiguous,
+                "Timeout→ambiguous",
             ),
             (
                 ConfirmError::RejectedTransient,

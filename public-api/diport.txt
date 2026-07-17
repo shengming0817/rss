@@ -2540,6 +2540,7 @@ pub fn diport::pdp::ServiceTokenReplayGuard::check_and_record(&self, &str, std::
 pub fn diport::pdp::service_token_mac_input(&[u8], &diport::pdp::ServiceTokenTenantBinding) -> alloc::vec::Vec<u8>
 pub mod diport::publisher
 pub enum diport::publisher::PublishErrorKind
+pub diport::publisher::PublishErrorKind::Ambiguous
 pub diport::publisher::PublishErrorKind::Permanent
 pub diport::publisher::PublishErrorKind::Transient
 impl core::clone::Clone for diport::publisher::PublishErrorKind
@@ -2613,8 +2614,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::publisher::PublishReque
 impl core::panic::unwind_safe::UnwindSafe for diport::publisher::PublishRequest
 pub struct diport::publisher::PublisherError
 impl diport::publisher::PublisherError
+pub fn diport::publisher::PublisherError::ambiguous<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
+pub fn diport::publisher::PublisherError::is_ambiguous(&self) -> bool
 pub fn diport::publisher::PublisherError::is_permanent(&self) -> bool
-pub fn diport::publisher::PublisherError::is_transient(&self) -> bool
+pub fn diport::publisher::PublisherError::is_retryable(&self) -> bool
 pub fn diport::publisher::PublisherError::kind(&self) -> diport::publisher::PublishErrorKind
 pub fn diport::publisher::PublisherError::permanent<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
 pub fn diport::publisher::PublisherError::transient<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
@@ -4235,6 +4238,7 @@ impl core::marker::UnsafeUnpin for diport::pdp::PdpError
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::PdpError
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::PdpError
 pub enum diport::PublishErrorKind
+pub diport::PublishErrorKind::Ambiguous
 pub diport::PublishErrorKind::Permanent
 pub diport::PublishErrorKind::Transient
 impl core::clone::Clone for diport::publisher::PublishErrorKind
@@ -6331,8 +6335,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::publisher::PublishReque
 impl core::panic::unwind_safe::UnwindSafe for diport::publisher::PublishRequest
 pub struct diport::PublisherError
 impl diport::publisher::PublisherError
+pub fn diport::publisher::PublisherError::ambiguous<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
+pub fn diport::publisher::PublisherError::is_ambiguous(&self) -> bool
 pub fn diport::publisher::PublisherError::is_permanent(&self) -> bool
-pub fn diport::publisher::PublisherError::is_transient(&self) -> bool
+pub fn diport::publisher::PublisherError::is_retryable(&self) -> bool
 pub fn diport::publisher::PublisherError::kind(&self) -> diport::publisher::PublishErrorKind
 pub fn diport::publisher::PublisherError::permanent<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
 pub fn diport::publisher::PublisherError::transient<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static

@@ -35,6 +35,97 @@ pub(crate) fn emit_connect_failed(
     );
 }
 
+/// RSS-owned publisher recovery connection result. Unlike initial connection events this funnel
+/// deliberately has no endpoint parameter, so recovery cannot accidentally disclose or even record
+/// broker coordinates. Generation and the closed result vocabulary are sufficient to correlate it
+/// with the lifecycle event that initiated replacement.
+#[derive(Clone, Copy)]
+pub(crate) enum RecoveryConnectResult {
+    Connected,
+    Failed {
+        stage: RecoveryFailureStage,
+        reason: RecoveryFailureReason,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecoveryFailureStage {
+    Connect,
+    CreateChannel,
+    ConfirmSelect,
+}
+
+impl RecoveryFailureStage {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::CreateChannel => "create_channel",
+            Self::ConfirmSelect => "confirm_select",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecoveryFailureReason {
+    Io,
+    Protocol,
+    State,
+    Runtime,
+    Heartbeat,
+    Client,
+}
+
+impl RecoveryFailureReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Io => "io",
+            Self::Protocol => "protocol",
+            Self::State => "state",
+            Self::Runtime => "runtime",
+            Self::Heartbeat => "heartbeat",
+            Self::Client => "client",
+        }
+    }
+}
+
+impl RecoveryConnectResult {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Failed { .. } => "failed",
+        }
+    }
+}
+
+#[allow(clippy::cognitive_complexity)]
+// reason: two closed result variants select only tracing level; macro expansion exceeds the lint threshold.
+pub(crate) fn emit_recovery_connect_result(
+    resource: &str,
+    generation: u64,
+    result: RecoveryConnectResult,
+) {
+    match result {
+        RecoveryConnectResult::Connected => tracing::info!(
+            target: "amqp",
+            resource,
+            transport_generation = generation,
+            phase = "transport_reconnect",
+            result = result.as_str(),
+            "amqp publisher recovery connection completed",
+        ),
+        RecoveryConnectResult::Failed { stage, reason } => tracing::warn!(
+            target: "amqp",
+            resource,
+            transport_generation = generation,
+            phase = "transport_reconnect",
+            result = result.as_str(),
+            failure_stage = stage.as_str(),
+            failure_reason = reason.as_str(),
+            "amqp publisher recovery connection failed",
+        ),
+    }
+}
+
 #[cfg(test)]
 mod cred_redact_tests {
     //! INVARIANT: EVENTTRANSPORT-CRED-REDACT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "cred_redact_tests::n1_ok_and_fail_redact_userinfo", anti_vacuity = "cred_redact_tests::b1_no_userinfo_preserves_endpoint" } ——
@@ -58,7 +149,10 @@ mod cred_redact_tests {
     use tracing_subscriber::layer::Context;
     use tracing_subscriber::layer::SubscriberExt as _;
 
-    use super::{emit_connect_failed, emit_connected};
+    use super::{
+        RecoveryConnectResult, RecoveryFailureReason, RecoveryFailureStage, emit_connect_failed,
+        emit_connected, emit_recovery_connect_result,
+    };
 
     const SENTINEL: &str = "s3cr3t";
     const RESOURCE: &str = "amqp-cred-redact";
@@ -139,6 +233,81 @@ mod cred_redact_tests {
                 "field {name} must not contain user:pass: {value}"
             );
         }
+    }
+
+    #[test]
+    fn recovery_connection_events_have_no_endpoint_or_error_field() {
+        let events = capture(|| {
+            emit_recovery_connect_result("amqp-recovery", 41, RecoveryConnectResult::Connected);
+            for stage in [
+                RecoveryFailureStage::Connect,
+                RecoveryFailureStage::CreateChannel,
+                RecoveryFailureStage::ConfirmSelect,
+            ] {
+                emit_recovery_connect_result(
+                    "amqp-recovery",
+                    41,
+                    RecoveryConnectResult::Failed {
+                        stage,
+                        reason: RecoveryFailureReason::Io,
+                    },
+                );
+            }
+        });
+
+        assert_eq!(events.len(), 4);
+        for (index, fields) in events.iter().enumerate() {
+            assert_eq!(
+                fields.get("resource").map(String::as_str),
+                Some("amqp-recovery")
+            );
+            assert_eq!(
+                fields.get("transport_generation").map(String::as_str),
+                Some("41")
+            );
+            assert_eq!(
+                fields.get("phase").map(String::as_str),
+                Some("transport_reconnect")
+            );
+            assert!(fields.contains_key("result"));
+            assert!(!fields.contains_key("endpoint"));
+            assert!(!fields.contains_key("error"));
+            if index == 0 {
+                assert!(!fields.contains_key("failure_stage"));
+                assert!(!fields.contains_key("failure_reason"));
+            } else {
+                assert!(matches!(
+                    fields.get("failure_stage").map(String::as_str),
+                    Some("connect" | "create_channel" | "confirm_select")
+                ));
+                assert_eq!(fields.get("failure_reason").map(String::as_str), Some("io"));
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_failure_stage_and_reason_vocabularies_are_closed() {
+        assert_eq!(
+            [
+                RecoveryFailureStage::Connect,
+                RecoveryFailureStage::CreateChannel,
+                RecoveryFailureStage::ConfirmSelect,
+            ]
+            .map(RecoveryFailureStage::as_str),
+            ["connect", "create_channel", "confirm_select"]
+        );
+        assert_eq!(
+            [
+                RecoveryFailureReason::Io,
+                RecoveryFailureReason::Protocol,
+                RecoveryFailureReason::State,
+                RecoveryFailureReason::Runtime,
+                RecoveryFailureReason::Heartbeat,
+                RecoveryFailureReason::Client,
+            ]
+            .map(RecoveryFailureReason::as_str),
+            ["io", "protocol", "state", "runtime", "heartbeat", "client"]
+        );
     }
 
     #[allow(clippy::expect_used)]

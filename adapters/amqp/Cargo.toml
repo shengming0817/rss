@@ -39,9 +39,12 @@ thiserror = { workspace = true, optional = true }
 # 注：默认 build（无 backend）整 crate 无 lapin/tracing 链路——调试 AMQP 须 `--features backend`
 # （+ docker / `RSS_AMQP_TEST_URL` 跑集成测试），否则看不到任何 AMQP 日志。
 backend = ["dep:lapin", "dep:futures", "dep:tracing", "dep:thiserror", "dep:tokio"]
+# Deterministic post-send fault barrier + generation observation for cross-crate integration evidence.
+# Deliberately excludes container fixtures so runtime integration can enable this seam without pulling testcontainers.
+integration-test-support = ["backend"]
 # 集成测试需真实 AMQP broker（#[cfg(feature = "integration")]，nextest 按名串行）；
 # testkit/containers 经此传递激活 testcontainers（self-provision rabbitmq + per-domain vhost，无需手工预置）。
-integration = ["backend", "testkit/containers"]
+integration = ["integration-test-support", "testkit/containers"]
 
 [dev-dependencies]
 # 集成测试 #[tokio::test]（仅 feature=integration 下编译执行）；time = 防挂的有界超时。

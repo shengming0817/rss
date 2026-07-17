@@ -4,9 +4,10 @@
 //! 断言 A（至少一次）：登录触发 outbox 落库 → relay 中继 → AMQP consumer 消费 → audit append
 //! 仅一次（20s timeout）。
 //!
-//! 断言 B（PG inbox 幂等去重，tracer 正向见证）：重投同一 event_id（duplicate）+ 一条新 event_id（tracer，
-//! 同 payload → Fresh → append）。FIFO 单 consumer：tracer 被 audit（PG count→2）证明其之前的 duplicate
-//! 已被真实消费+settle；稳定 count==2（original + tracer）证明 duplicate 命中 Duplicate 去重（升到 3 即去重失效）。
+//! 断言 B（Ambiguous + PG inbox 幂等去重）：真实 AMQP frame write 后注入 connection close，首投返回
+//! Ambiguous 并退休 generation；fresh generation 以同 event_id 重试，再发新 event/session tracer。FIFO 单
+//! consumer：tracer 被 audit 证明其前面的 duplicate 已被消费+Ack；original session 仍只有一条业务 mutation，
+//! 且原 event 的 Inbox Done 仍只有一行。
 //!
 //! `#![cfg(feature = "integration")]`：需真实 docker 容器；`cargo test -p runtime --features
 //! integration --no-run` 仅要求编译通过（无 docker 时可用）。
@@ -497,8 +498,8 @@ fn policy_updated_entry_and_envelope(
 /// durable e2e：`wire_event_transport` 真容器贯通验收（#1251 task 6）。
 ///
 /// - 断言 A：login → PgOutbox(pending) → relay → AMQP → consumer → PG inbox(Fresh) → audit append（至少一次）。
-/// - 断言 B：重投同一 event_id（duplicate）+ tracer（新 event_id）→ tracer 被消费正向见证 duplicate 已消费；
-///   稳定 PG audit count==2 + `inbox_receipts` done 行证明 duplicate 命中 PG inbox Duplicate 去重。
+/// - 断言 B：post-send connection close → Ambiguous + transport generation replacement + 同 event_id retry；
+///   独立 tracer 被消费正向见证 duplicate 已 Ack，PG audit mutation 与 `inbox_receipts` Done 各保持一次。
 ///
 /// 需 docker：`cargo test -p runtime --features integration event_transport_durable -- --nocapture`
 /// 或 `cargo nextest run -p runtime --features integration`。无 docker 时只需通过
@@ -1004,17 +1005,65 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "断言 A：original event 必须在 PG inbox_receipts 标记 done"
     );
 
-    // ── 步骤 11：断言 B（PG inbox 幂等去重）──────────────────────────────────────────────────
+    // ── 步骤 11：断言 B（Ambiguous + PG inbox 幂等去重）──────────────────────────────────────
 
-    // 仅「重投后 len 不增」是假阴性（重投未投递/未及处理也会通过）。改用 **tracer 正向见证**：先重投同一
-    // event_id（duplicate，期望 PG inbox `try_claim` 返回 Duplicate、不 append），再投一条**新 event_id**
-    // （tracer，同 payload → Fresh → append）。单 queue 单 consumer FIFO 顺序消费：tracer 被 audit（len 达 2）
-    // 即证明其之前的 duplicate 已被 consumer 真实消费+settle（而非未投递）。去重生效 → 最终稳定 len==2
-    // （original + tracer）；去重失效 → duplicate 也 append、升到 3，被下方 fail-fast 捕获。
+    // integration-only barrier 在真实 basic_publish frame write 完成后、poll confirm 前关闭该 snapshot 的
+    // connection。调用方必须看到 Ambiguous；旧 generation 整体退休，随后只允许 fresh generation 用原 ID
+    // 重试。tracer 使用不同 event/session ID：单 queue 单 consumer FIFO 下 tracer 被 audit，正向证明前面的
+    // same-ID duplicate 已被消费并 Ack；原 session audit count 仍为 1 才证明 ConsumerTx 未重复业务写。
     let redeliver_endpoint = amqp_endpoint(&vhost_url)?;
     let pubr =
         amqp::AmqpPublisher::connect(&redeliver_endpoint, "e2e-redeliver", TEST_PUBLISH_TIMEOUT)
             .await?;
+    let retired_generation = pubr
+        .transport_generation_for_test()
+        .context("publisher must start Ready")?;
+    pubr.inject_post_send_connection_close_once();
+    let ambiguous = match pubr
+        .publish(
+            PublishRequest::new(
+                Topic::new(SESSION_CREATED_TOPIC),
+                MessageId::new(&captured_event_id),
+                captured_payload.clone(),
+            )
+            .with_metadata(signed_session_metadata(
+                &redeliver_tenant_authority,
+                &captured_event_id,
+            )?),
+        )
+        .await
+    {
+        Ok(()) => {
+            return Err(anyhow::anyhow!(
+                "post-send injected close did not report Ambiguous"
+            ));
+        }
+        Err(error) => error,
+    };
+    assert!(
+        ambiguous.is_ambiguous() && ambiguous.is_retryable(),
+        "post-send close must be retryable Ambiguous"
+    );
+
+    let retry_generation = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(generation) = pubr.transport_generation_for_test()
+                && generation > retired_generation
+            {
+                break generation;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!("AMQP publisher transport 未在 20s 内完成 generation replacement")
+    })?;
+    assert!(
+        retry_generation > retired_generation,
+        "Ambiguous 后重试必须使用 fresh transport generation"
+    );
+
     pubr.publish(
         PublishRequest::new(
             Topic::new(SESSION_CREATED_TOPIC),
@@ -1027,12 +1076,17 @@ async fn event_transport_durable_e2e() -> Result<()> {
         )?),
     )
     .await?;
+
     let tracer_id = format!("{captured_event_id}-tracer");
+    let mut tracer_payload: IdentitySessionCreatedPayload =
+        serde_json::from_slice(&captured_payload)?;
+    let tracer_session_id = uuid::Uuid::new_v4().to_string();
+    tracer_payload.session_id.clone_from(&tracer_session_id);
     pubr.publish(
         PublishRequest::new(
             Topic::new(SESSION_CREATED_TOPIC),
             MessageId::new(&tracer_id),
-            captured_payload,
+            serde_json::to_vec(&tracer_payload)?,
         )
         .with_metadata(signed_session_metadata(
             &redeliver_tenant_authority,
@@ -1041,12 +1095,12 @@ async fn event_transport_durable_e2e() -> Result<()> {
     )
     .await?;
 
-    // 正向见证：等 audit 至少再 append 一次（count>=2）——证明重投流被 consumer 真实消费（消除假阴性）。
+    // 正向见证：tracer 新 session 被 audit，证明排在它之前的 same-ID duplicate 已被消费并 settle。
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            if audit_login_count(&assertion_pool, tenant, &session_id)
+            if audit_login_count(&assertion_pool, tenant, &tracer_session_id)
                 .await
-                .is_ok_and(|count| count >= 2)
+                .is_ok_and(|count| count == 1)
             {
                 break;
             }
@@ -1058,12 +1112,12 @@ async fn event_transport_durable_e2e() -> Result<()> {
         anyhow::anyhow!("timeout 20s 内重投流（duplicate/tracer）未被消费——断言 B 无法正向见证")
     })?;
 
-    // 去重生效 → 稳定 len==2；去重失效 → duplicate 也 append、升到 3。再观察 2s：升到 3 即 fail-fast。
+    // 去重失效会让 duplicate 对 original session 再 append。再观察 2s：升到 2 即 fail-fast。
     let leaked_dup = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if audit_login_count(&assertion_pool, tenant, &session_id)
                 .await
-                .is_ok_and(|count| count >= 3)
+                .is_ok_and(|count| count >= 2)
             {
                 break;
             }
@@ -1073,12 +1127,17 @@ async fn event_transport_durable_e2e() -> Result<()> {
     .await;
     assert!(
         leaked_dup.is_err(),
-        "断言 B 失败：duplicate 被重复 append（audit len 升到 3），PG inbox 幂等去重未生效"
+        "断言 B 失败：duplicate 重复写入 original session audit，PG inbox 幂等去重未生效"
     );
     assert_eq!(
         audit_login_count(&assertion_pool, tenant, &session_id).await?,
-        2,
-        "断言 B：original + tracer 各 append 一次，duplicate 命中 PG inbox Duplicate 被去重（共 2）"
+        1,
+        "断言 B：Ambiguous + same-ID retry 不得重复 original session 的业务 mutation"
+    );
+    assert_eq!(
+        audit_login_count(&assertion_pool, tenant, &tracer_session_id).await?,
+        1,
+        "断言 B：独立 tracer 必须产生一次业务 mutation"
     );
     assert_eq!(
         inbox_done_count(&assertion_pool, &captured_event_id, &consumer_group).await?,
@@ -1090,6 +1149,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
         1,
         "断言 B：tracer 新 event 必须在 PG inbox_receipts 标记 done"
     );
+
+    // 本 E2E 只断言此处能实际采集的 Ambiguous、fresh generation、same-ID retry、tracer 与 SQL
+    // 收敛结果。transport 两次投递由 AMQP 真实 integration 覆盖；Duplicate→Ack 由 eventexec
+    // consumer_tx 的直接 acker 测试覆盖，避免用预填常量伪造不可观测结论。
 
     pubr.shutdown().await?;
 

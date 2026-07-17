@@ -760,15 +760,7 @@ impl RabbitFixture {
     /// 同一 guard 多次调用不同 `vhost` → 同容器多 vhost（per-domain 隔离测试用）。
     /// 同一 `vhost` 多次调用幂等——不重复调 rabbitmqctl（已建则直接返回 URL）。
     pub async fn vhost_url(&self, vhost: &str) -> Result<String> {
-        // URL-safe 校验：仅字母数字 / _ / -，防注入 rabbitmqctl 参数。
-        if !vhost
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
-        {
-            return Err(anyhow::anyhow!(
-                "vhost '{vhost}' 含不安全字符，须字母数字/_/-"
-            ));
-        }
+        validate_rabbit_vhost(vhost)?;
         match &self.inner {
             RabbitInner::Container {
                 container,
@@ -796,6 +788,56 @@ impl RabbitFixture {
             RabbitInner::Env { base } => Ok(amqp_url_with_vhost(base, vhost)),
         }
     }
+
+    /// Ask a managed RabbitMQ broker to close one connection in `vhost` from the broker side.
+    ///
+    /// This is intentionally unavailable for externally supplied brokers: possessing an AMQP URL
+    /// does not imply management authority. Tests requiring a real broker-originated close therefore
+    /// fail closed instead of silently substituting a client graceful close.
+    pub async fn broker_force_close_one_connection(&self, vhost: &str, reason: &str) -> Result<()> {
+        validate_rabbit_vhost(vhost)?;
+        if reason.is_empty() || reason.contains('\0') {
+            return Err(anyhow::anyhow!(
+                "RabbitMQ forced-close reason must be non-empty and contain no NUL"
+            ));
+        }
+        match &self.inner {
+            RabbitInner::Container {
+                container, created, ..
+            } => {
+                let exists = created
+                    .lock()
+                    .map_err(|error| anyhow::anyhow!("vhost cache mutex poisoned: {error}"))?
+                    .contains(vhost);
+                if !exists {
+                    return Err(anyhow::anyhow!(
+                        "managed RabbitMQ vhost '{vhost}' must be created before forced close"
+                    ));
+                }
+                run_rabbitmqctl(
+                    container,
+                    &["close_all_connections", "-p", vhost, "--limit", "1", reason],
+                )
+                .await
+            }
+            RabbitInner::Env { .. } => Err(anyhow::anyhow!(
+                "broker-originated connection close requires a managed RabbitMQ container"
+            )),
+        }
+    }
+}
+
+fn validate_rabbit_vhost(vhost: &str) -> Result<()> {
+    if vhost.is_empty()
+        || !vhost
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
+    {
+        return Err(anyhow::anyhow!(
+            "vhost '{vhost}' 含不安全字符，须为非空字母数字/_/-"
+        ));
+    }
+    Ok(())
 }
 
 /// 校验 AMQP base broker URL（无非空 vhost 段）。
@@ -1669,6 +1711,25 @@ mod tests {
         let result2 = rt.block_on(fixture.vhost_url("good-vhost_1"));
         // env 路径无容器，直接拼 URL，不报错（URL-safe）。
         assert!(result2.is_ok(), "合法 vhost 须 Ok");
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试体构造 tokio runtime 辅助调 async fn；runtime build 失败属 programmer error。
+    fn broker_forced_close_rejects_external_fixture_without_management_authority() {
+        let fixture = RabbitFixture {
+            inner: RabbitInner::Env {
+                base: "amqps://guest:guest@example.test:5671".to_string(),
+            },
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let error = rt
+            .block_on(fixture.broker_force_close_one_connection("rss_test", "review test"))
+            .expect_err("external AMQP URL must not imply broker management authority");
+
+        assert!(error.to_string().contains("managed RabbitMQ container"));
     }
 
     /// strict_test_db_name：合法测试库名通过，非测试库名拒绝。

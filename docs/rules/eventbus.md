@@ -80,6 +80,14 @@ PostgreSQL adapter 有两条显式 outbox 写入模式，二者不可 fallback /
 
 Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event/message ID 发布；publish 成功、settle 前崩溃允许 broker duplicate，broker confirm 的 ambiguous outcome 也必须按可能已发布处理并重试，不能换 ID 或假定消息尚未到达。
 
+`PublisherError` 的处置是闭合三态：`Permanent` 首投进入 DLX；`Transient` 与 `Ambiguous` 都在原
+delivery deadline 内以原 event ID 重试。`Ambiguous` 专指 broker 可能已经接收但客户端无法确认的结果，
+包括 AMQP `basic_publish` 已开始后的 connection/channel/confirm 丢失，以及 publish/confirm deadline；它
+不是 exactly-once 证明。AMQP publisher 对这类结果必须退休整个 generation（专用 connection + confirm
+channel），禁止在潜在已接收的旧 transport 上继续 admission；replacement 由 RSS 在一个绝对 recovery
+deadline 内依次 drain、关闭旧 connection、重连并创建 fresh confirm channel。Lapin auto-recovery 不参与，
+避免形成不可由 RSS deadline 取消的第二条恢复路径。
+
 每个 outbox provider 在构造期绑定唯一 typed `DomainName`；relay 只能经 `claim_domain()` 观察该归属，
 `claim_batch(limit)` 不接收调用方传入的 raw domain，`RelayConfig` 也不另存一份可与 publisher 错插的 domain。
 `claim_batch` 在同一数据库语句内选取、铸造 token/deadline 并持久化。Postgres provider

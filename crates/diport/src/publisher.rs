@@ -7,25 +7,32 @@ use crate::redacted::RedactedSource;
 use crate::redacted_bytes::RedactedBytes;
 use crate::subscriber::MessageId;
 
-/// 发布失败的处置类别——决定 relay 是有界退避重试还是首投即 DLX。
+/// 发布失败的处置类别——决定 relay 是按稳定事件 ID 有界重试，还是首投即 DLX。
 ///
-/// 闭合 2 值（非 `#[non_exhaustive]`）：发布失败只有
-/// 「值得重试」与「重试无意义」两态；查询经 [`PublisherError::is_permanent`] / [`PublisherError::is_transient`]
-/// 全覆盖。语义对齐引擎层 [`consistency::EngineErrorKind`] 的 `Transient`/`Permanent`，但不引入对 publish
-/// disposition 无意义的 `Invariant` 臂。
+/// 闭合 3 值（非 `#[non_exhaustive]`）：发布失败分为「明确未成功且值得重试」「重试无意义」和
+/// 「broker 是否已接收不可判定」。查询经 [`PublisherError::is_permanent`] / [`PublisherError::is_ambiguous`] /
+/// [`PublisherError::is_retryable`] 全覆盖。`Transient`/`Permanent` 语义对齐引擎层
+/// [`consistency::EngineErrorKind`]，但不引入对 publish disposition 无意义的 `Invariant` 臂。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishErrorKind {
-    /// 瞬态失败（连接闪断 / 通道丢失等可恢复）→ relay 退避重试至预算耗尽。
+    /// 明确未发送或已明确拒绝的可重试失败（例如 pre-send transport unavailable）
+    /// → relay 退避重试至预算耗尽。
+    ///
+    /// 发送后或等待 confirm 时丢失连接/通道不能归入本变体；该类结果必须使用 [`Self::Ambiguous`]。
     Transient,
     /// 永久失败（序列化 / 路由 / 编码非法，重试无意义）→ relay 首投即 DLX（跳过重试预算）。
     Permanent,
+    /// 发布结果不确定（发送后连接丢失 / confirm 丢失 / deadline）→ relay 使用稳定事件 ID 重试。
+    ///
+    /// broker 可能已经接收并投递消息，因此该类别明确保留 at-least-once duplicate 语义。
+    Ambiguous,
 }
 
-/// 发布失败（携 [`PublishErrorKind`] 决定 relay 重试 vs 首投 DLX）。
+/// 发布失败（携 [`PublishErrorKind`] 决定 relay 按稳定事件 ID 重试 vs 首投 DLX）。
 ///
-/// 构造**必经** [`PublisherError::transient`] / [`PublisherError::permanent`] 二选一显式声明
-/// disposition——类型层杜绝「构造
-/// 发布失败却不分类」（typed function choice，Hard）。
+/// 构造**必经** [`PublisherError::transient`] / [`PublisherError::permanent`] /
+/// [`PublisherError::ambiguous`] 三选一显式声明 disposition——类型层杜绝「构造发布失败却不分类」
+/// （typed function choice，Hard）。
 ///
 /// PII 边界（与 [`crate::ShutdownError`] 同范式）：`Display` 仅安全摘要常量；source 经 [`RedactedSource`]
 /// 脱敏。注意主语——`PublisherError::source()` 因 `#[source]` 返回 `Some(&RedactedSource)`（非 `None`），而
@@ -41,8 +48,9 @@ pub struct PublisherError {
 }
 
 impl PublisherError {
-    /// 瞬态发布失败（连接闪断 / 通道丢失等可恢复）→ relay 退避重试至预算耗尽。原始错误仅作 internal source
-    /// 保留，不经 `Display` 暴露（PII 边界）。
+    /// 明确未发送或已明确拒绝的可重试发布失败（例如 pre-send transport unavailable）
+    /// → relay 退避重试至预算耗尽。发送后/confirm 阶段的连接或通道丢失必须构造为
+    /// [`PublisherError::ambiguous`]。原始错误仅作 internal source 保留，不经 `Display` 暴露（PII 边界）。
     pub fn transient<E>(source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
@@ -65,14 +73,34 @@ impl PublisherError {
         }
     }
 
+    /// 发布结果不确定（broker 可能已接收）→ relay 使用稳定事件 ID 退避重试至预算耗尽。原始错误仅作
+    /// internal source 保留，不经 `Display` 暴露（PII 边界）。
+    pub fn ambiguous<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            kind: PublishErrorKind::Ambiguous,
+            source: RedactedSource::new(source),
+        }
+    }
+
     /// 失败处置类别（relay settle 据此分流重试 vs DLX）。
     pub fn kind(&self) -> PublishErrorKind {
         self.kind
     }
 
-    /// 是否瞬态（`Transient`）——relay 据此退避重试至预算耗尽。
-    pub fn is_transient(&self) -> bool {
-        self.kind == PublishErrorKind::Transient
+    /// 发布结果是否不确定（`Ambiguous`）——broker 可能已接收，retry 必须保持事件 ID 不变。
+    pub fn is_ambiguous(&self) -> bool {
+        self.kind == PublishErrorKind::Ambiguous
+    }
+
+    /// 是否值得重试（`Transient | Ambiguous`）——relay 据此退避重试至预算耗尽。
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self.kind,
+            PublishErrorKind::Transient | PublishErrorKind::Ambiguous
+        )
     }
 
     /// 是否永久（`Permanent`）——relay 据此首投即 DLX，跳过重试预算。
@@ -217,36 +245,60 @@ mod smoke {
         );
     }
 
-    // transient / permanent 构造器 → kind 往返 + is_transient/is_permanent 真值表
-    //（镜像 consistency::EngineError 真值表测试）。两 kind 的 source 均经 RedactedSource 脱敏、Display 同摘要。
+    // transient / permanent / ambiguous 构造器 → kind 往返 +
+    // is_ambiguous/is_retryable/is_permanent 真值表（镜像 consistency::EngineError 真值表测试）。
+    // 三种 kind 的 source 均经 RedactedSource 脱敏，Display/Debug 边界相同。
     #[test]
     fn publisher_error_kind_classification() {
-        let cases: &[(PublisherError, PublishErrorKind, bool, bool)] = &[
+        let cases: &[(&str, PublisherError, PublishErrorKind, bool, bool, bool)] = &[
             (
-                PublisherError::transient(std::io::Error::other("conn-flap")),
+                "leak-marker-transient",
+                PublisherError::transient(std::io::Error::other("leak-marker-transient")),
                 PublishErrorKind::Transient,
+                false,
                 true,
                 false,
             ),
             (
-                PublisherError::permanent(std::io::Error::other("bad-encoding")),
+                "leak-marker-permanent",
+                PublisherError::permanent(std::io::Error::other("leak-marker-permanent")),
                 PublishErrorKind::Permanent,
                 false,
+                false,
                 true,
             ),
+            (
+                "leak-marker-ambiguous",
+                PublisherError::ambiguous(std::io::Error::other("leak-marker-ambiguous")),
+                PublishErrorKind::Ambiguous,
+                true,
+                true,
+                false,
+            ),
         ];
-        for (err, kind, transient, permanent) in cases {
+        for (marker, err, kind, ambiguous, retryable, permanent) in cases {
             assert_eq!(err.kind(), *kind, "kind mismatch");
-            assert_eq!(err.is_transient(), *transient, "is_transient kind={kind:?}");
+            assert_eq!(err.is_ambiguous(), *ambiguous, "is_ambiguous kind={kind:?}");
+            assert_eq!(err.is_retryable(), *retryable, "is_retryable kind={kind:?}");
             assert_eq!(err.is_permanent(), *permanent, "is_permanent kind={kind:?}");
-            // Display 与 source 脱敏不随 kind 改变（PII 边界恒定）。
+            // Display/source/Debug 脱敏不随 kind 改变（PII 边界恒定）。
             assert_eq!(err.to_string(), "publish failed", "Display kind={kind:?}");
             assert!(
                 std::error::Error::source(err).is_some(),
                 "source present kind={kind:?}"
             );
+            assert!(
+                format!("{:?}", std::io::Error::other(*marker)).contains(*marker),
+                "anti-vacuity: raw source Debug omitted marker kind={kind:?}"
+            );
+            assert!(
+                !format!("{err:?}").contains(*marker),
+                "wrapper Debug leaked source kind={kind:?}: {err:?}"
+            );
         }
         assert_ne!(PublishErrorKind::Transient, PublishErrorKind::Permanent);
+        assert_ne!(PublishErrorKind::Transient, PublishErrorKind::Ambiguous);
+        assert_ne!(PublishErrorKind::Permanent, PublishErrorKind::Ambiguous);
     }
 
     // permanent 路径同样经 RedactedSource 脱敏，不泄漏内层 source（与 transient 路径对称回归）。

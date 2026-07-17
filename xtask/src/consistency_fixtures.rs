@@ -110,6 +110,7 @@ impl CrashRunner {
 enum CrashFaultSpec {
     OutboxAfterPublishBeforeSettle,
     OutboxTransientPublishFailure,
+    OutboxAmbiguousPublishFailure,
     OutboxPermanentPublishFailure,
     InboxClaimCrashBeforeCommit,
     InboxCommitBeforeAckCrash,
@@ -127,6 +128,7 @@ impl CrashFaultSpec {
         match value {
             "OutboxAfterPublishBeforeSettle" => Some(Self::OutboxAfterPublishBeforeSettle),
             "OutboxTransientPublishFailure" => Some(Self::OutboxTransientPublishFailure),
+            "OutboxAmbiguousPublishFailure" => Some(Self::OutboxAmbiguousPublishFailure),
             "OutboxPermanentPublishFailure" => Some(Self::OutboxPermanentPublishFailure),
             "InboxClaimCrashBeforeCommit" => Some(Self::InboxClaimCrashBeforeCommit),
             "InboxCommitBeforeAckCrash" => Some(Self::InboxCommitBeforeAckCrash),
@@ -163,6 +165,11 @@ impl CrashFaultSpec {
                 "during-transient-publish",
                 "outbox-transient-remains-retryable",
             ) => Some(Self::OutboxTransientPublishFailure),
+            (
+                CrashMechanism::Outbox,
+                "during-ambiguous-publish",
+                "outbox-ambiguous-stable-id-budget-dlx",
+            ) => Some(Self::OutboxAmbiguousPublishFailure),
             (CrashMechanism::Outbox, "during-permanent-publish", "outbox-dlx-summary-redacted") => {
                 Some(Self::OutboxPermanentPublishFailure)
             }
@@ -220,6 +227,7 @@ impl CrashFaultSpec {
                 CrashRunner::PostgresRedis
             }
             Self::OutboxTransientPublishFailure
+            | Self::OutboxAmbiguousPublishFailure
             | Self::OutboxPermanentPublishFailure
             | Self::InboxClaimCrashBeforeCommit
             | Self::InboxLeaseLostBeforeCommit
@@ -240,6 +248,7 @@ impl CrashFaultSpec {
             }
             Self::ProjectionAfterApplyBeforeCheckpoint => "audit",
             Self::OutboxAfterPublishBeforeSettle
+            | Self::OutboxAmbiguousPublishFailure
             | Self::OutboxPermanentPublishFailure
             | Self::InboxClaimCrashBeforeCommit
             | Self::InboxCommitBeforeAckCrash
@@ -256,6 +265,7 @@ impl CrashFaultSpec {
             | Self::InboxCommitBeforeAckCrash
             | Self::InboxLeaseLostBeforeCommit => "identity.session-created",
             Self::OutboxTransientPublishFailure => "settings.config-version-changed",
+            Self::OutboxAmbiguousPublishFailure => "identity.session-created",
             Self::OutboxPermanentPublishFailure => "identity.role-assigned",
             Self::SagaForwardCompletedBeforeCheckpoint | Self::SagaCompensationInterrupted => {
                 "billing.checkout"
@@ -272,6 +282,7 @@ impl CrashFaultSpec {
         match self {
             Self::OutboxAfterPublishBeforeSettle => "run_outbox_after_publish_before_settle",
             Self::OutboxTransientPublishFailure => "run_outbox_transient_publish_failure",
+            Self::OutboxAmbiguousPublishFailure => "run_outbox_ambiguous_publish_failure",
             Self::OutboxPermanentPublishFailure => "run_outbox_permanent_publish_failure",
             Self::InboxClaimCrashBeforeCommit => "run_inbox_claim_crash_before_commit",
             Self::InboxCommitBeforeAckCrash => "run_inbox_commit_before_ack_crash",

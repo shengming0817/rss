@@ -32,7 +32,8 @@ use diport::{
     DeadLetterSource, DynPublisher, EnvelopeCausationId, EnvelopeHeaderError, EnvelopeMetadata,
     EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SCHEMA_HASH,
     KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_ID, KEY_TRACE, MetadataError, OutboxActor,
-    OutboxEmitError, PublishRequest, Publisher, PublisherError, RESERVED_METADATA_KEYS,
+    OutboxEmitError, PublishErrorKind, PublishRequest, Publisher, PublisherError,
+    RESERVED_METADATA_KEYS,
 };
 use eventexec::{RelayBudget, TenantAuthority, TenantAuthorityBinding};
 use sqlx::Row;
@@ -478,17 +479,20 @@ enum RelayPublishFailure {
 }
 
 impl RelayPublishFailure {
-    fn is_permanent(&self) -> bool {
+    fn kind(&self) -> PublishErrorKind {
         match self {
-            Self::Publisher(err) => err.is_permanent(),
-            Self::Envelope(_) => true,
+            Self::Publisher(err) => err.kind(),
+            Self::Envelope(_) => PublishErrorKind::Permanent,
         }
     }
 
     fn reason_label(&self) -> &'static str {
         match self {
-            Self::Publisher(err) if err.is_transient() => "publisher_transient",
-            Self::Publisher(_) => "publisher_permanent",
+            Self::Publisher(err) => match err.kind() {
+                PublishErrorKind::Transient => "publisher_transient",
+                PublishErrorKind::Permanent => "publisher_permanent",
+                PublishErrorKind::Ambiguous => "publisher_ambiguous",
+            },
             Self::Envelope(err) => err.reason().as_label(),
         }
     }
@@ -1439,10 +1443,12 @@ impl OutboxRelay for PgOutbox {
 
     /// relay 单条 typed claim：publish → strict-deadline settle。
     ///
-    /// `PublisherError` 携 kind（#1212）——`Permanent`（序列化 / 路由 / 编码非法）首投即 dlx（跳过重试预算）；
-    /// `Transient`（连接闪断等可恢复）退避重试至预算耗尽再 dlx。分流见 [`settle_publish_failure`] /
-    /// [`dlx_decision`]。DB/CAS 失败（含 LostLease）返 `Err(EngineError)`；publish 失败仅在 retry/DLX
-    /// settle 成功后才是**已处置**（返 `Ok(Disposition)`）。
+    /// `PublisherError` 携闭合三态 kind（#1212/#1821）：`Permanent`（序列化 / 路由 / 编码非法）
+    /// 首投即 dlx（跳过重试预算）；definitive `Transient` 表示明确未发送或已拒绝，使用原 event ID
+    /// 退避重试；`Ambiguous` 表示 broker 可能已接收，仍以稳定 event ID 重试并由消费端幂等收口。
+    /// 分流见 [`settle_publish_failure`] / [`dlx_decision`]。DB/CAS 失败（含 LostLease）返
+    /// `Err(EngineError)`；publish 失败仅在 retry/DLX settle 成功后才是**已处置**（返
+    /// `Ok(Disposition)`）。
     async fn relay(&self, claimed: Self::Claim) -> Result<consistency::Disposition, EngineError> {
         let event_id = claimed.idem_key().as_str();
         self.validate_claim_provider(&claimed)?;
@@ -1811,9 +1817,10 @@ impl PgOutbox {
         let new_count = retry_count
             .checked_add(1)
             .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
-        let permanent = err.is_permanent();
+        let kind = err.kind();
+        let permanent = matches!(kind, PublishErrorKind::Permanent);
         log_publish_failed(event_id, entry.topic().as_str(), retry_count, err);
-        if dlx_decision(permanent, new_count) {
+        if dlx_decision(kind, new_count) {
             match settlement::ordinary_dlx(
                 &self.tenant_pool,
                 &self.payload_protector,
@@ -1861,14 +1868,9 @@ impl PgOutbox {
 /// 区分「瞬态退避重试」与「永久即将首投 DLX」，无需关联后续 `log_dlx`（便于 metric 聚合 / alert）。
 fn log_publish_failed(event_id: &str, topic: &str, retry_count: i32, err: &RelayPublishFailure) {
     match err {
-        RelayPublishFailure::Publisher(source) => log_publisher_failed(
-            event_id,
-            topic,
-            retry_count,
-            err.is_permanent(),
-            err.reason_label(),
-            source,
-        ),
+        RelayPublishFailure::Publisher(source) => {
+            log_publisher_failed(event_id, topic, retry_count, err.reason_label(), source);
+        }
         RelayPublishFailure::Envelope(source) => {
             log_envelope_validation_failed(event_id, topic, retry_count, source);
         }
@@ -1879,11 +1881,10 @@ fn log_publisher_failed(
     event_id: &str,
     topic: &str,
     retry_count: i32,
-    permanent: bool,
     reason: &'static str,
     err: &PublisherError,
 ) {
-    tracing::warn!(target: "postgres", event_id, topic, retry_count, permanent, reason, error = %secure::redact_error(err), "outbox: publish failed");
+    tracing::warn!(target: "postgres", event_id, topic, retry_count, publish_error_kind = ?err.kind(), permanent = err.is_permanent(), retryable = err.is_retryable(), ambiguous = err.is_ambiguous(), reason, error = %secure::redact_error(err), "outbox: publish failed");
 }
 
 fn log_envelope_validation_failed(
@@ -2068,7 +2069,7 @@ where
                 broker_may_have_received = true,
                 "outbox publisher watchdog timed out"
             );
-            Err(PublisherError::transient(std::io::Error::new(
+            Err(PublisherError::ambiguous(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "outbox publisher watchdog timed out",
             )))
@@ -2215,13 +2216,17 @@ fn metadata_json_with_relay_failure(
 
 // ── 纯函数（单测覆盖）────────────────────────────────────────────────────────
 
-/// 该次 publish 失败是否应进 DLX（而非退避重试）——#1212 瞬态/永久分流谓词。
+/// 该次 publish 失败是否应进 DLX（而非退避重试）——#1212/#1821 三态分流谓词。
 ///
-/// `is_permanent`（来自 [`PublisherError::is_permanent`]）为真 ⇒ 首投即 dlx（重试同一消息无意义，跳过预算）；
-/// 否则瞬态错误熬满重试预算（`new_count >= MAX_PUBLISH_ATTEMPTS`）才 dlx。`new_count` 是本次失败后的累计
-/// 重试次数（= UPDATE 前 `retry_count + 1`）。
-fn dlx_decision(is_permanent: bool, new_count: i32) -> bool {
-    is_permanent || new_count >= MAX_PUBLISH_ATTEMPTS
+/// `Permanent` 首投即 dlx（重试同一消息无意义，跳过预算）；`Transient | Ambiguous` 使用原 event ID
+/// 熬满重试预算后才 dlx。`new_count` 是本次失败后的累计重试次数（= UPDATE 前 `retry_count + 1`）。
+fn dlx_decision(kind: PublishErrorKind, new_count: i32) -> bool {
+    match kind {
+        PublishErrorKind::Permanent => true,
+        PublishErrorKind::Transient | PublishErrorKind::Ambiguous => {
+            new_count >= MAX_PUBLISH_ATTEMPTS
+        }
+    }
 }
 
 /// 指数退避（秒），上限 3600。`retry_count` 是当前已重试次数（0-based，即 UPDATE 前的值）。
@@ -2269,9 +2274,9 @@ mod tests {
         AppendFingerprintObservation, CanonicalOutboxFact, ClaimHydrationError, ClaimedOutboxRow,
         MAX_PUBLISH_ATTEMPTS, OUTBOX_CLAIM_BATCH_MAX, OutboxAppendError, OutboxEnvelope,
         OutboxLease, OutboxLeaseError, OutboxMetadata, OutboxWriteEntry, PublishPreflight,
-        RelayEnvelopeValidationReason, STATUS_ABANDONED, STATUS_DLX, STATUS_PENDING,
-        STATUS_PUBLISHED, STATUS_PUBLISHING, apply_schema_headers_from_columns, backoff_seconds,
-        classify_append_fingerprint, dlx_decision, hydrate_claimed_outbox_row,
+        RelayEnvelopeValidationReason, RelayPublishFailure, STATUS_ABANDONED, STATUS_DLX,
+        STATUS_PENDING, STATUS_PUBLISHED, STATUS_PUBLISHING, apply_schema_headers_from_columns,
+        backoff_seconds, classify_append_fingerprint, dlx_decision, hydrate_claimed_outbox_row,
         hydrate_envelope_metadata, metadata_with_ambient, publish_request,
         record_relay_envelope_validation_failure, unix_secs, validate_publish_request_envelope,
         with_publisher_watchdog,
@@ -2279,7 +2284,8 @@ mod tests {
     use diport::{
         EnvelopeMetadata, EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT,
         KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_ID, KEY_TRACE, MessageId, MetadataError,
-        OpaqueActorId, OutboxActor, PublishRequest, RESERVED_METADATA_KEYS, Topic as PublishTopic,
+        OpaqueActorId, OutboxActor, PublishErrorKind, PublishRequest, PublisherError,
+        RESERVED_METADATA_KEYS, Topic as PublishTopic,
     };
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -2441,8 +2447,32 @@ mod tests {
         })
         .await;
 
-        assert!(matches!(result, Err(error) if error.is_transient()));
+        assert!(matches!(result, Err(error) if error.is_ambiguous() && error.is_retryable()));
         assert_eq!(super::io_deadline_after(Duration::ZERO), deadline);
+    }
+
+    #[test]
+    fn publisher_failure_reason_labels_are_closed_over_all_kinds() {
+        let cases = [
+            (
+                PublisherError::transient(std::io::Error::other("transient")),
+                "publisher_transient",
+            ),
+            (
+                PublisherError::permanent(std::io::Error::other("permanent")),
+                "publisher_permanent",
+            ),
+            (
+                PublisherError::ambiguous(std::io::Error::other("ambiguous")),
+                "publisher_ambiguous",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(
+                RelayPublishFailure::Publisher(error).reason_label(),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -2746,23 +2776,25 @@ mod tests {
         );
     }
 
-    // #1212 dlx 分流谓词表驱动：permanent 首投（new_count=1）即 dlx；transient 仅预算耗尽
-    // （new_count >= MAX_PUBLISH_ATTEMPTS）才 dlx。anti-vacuity：transient 未到预算返 false（仍退避）。
+    // #1212/#1821 dlx 分流谓词表驱动：permanent 首投即 dlx；transient/ambiguous 仅预算耗尽
+    // 才 dlx。anti-vacuity：两个 retryable kind 未到预算均返 false（仍以同一 event ID 退避）。
     #[test]
     fn dlx_decision_table() {
-        let cases: &[(bool, i32, bool)] = &[
-            (true, 1, true),                          // permanent 首投即 dlx
-            (true, MAX_PUBLISH_ATTEMPTS, true),       // permanent 任意次数仍 dlx
-            (false, 1, false),                        // transient 首投 → 退避（不 dlx）
-            (false, MAX_PUBLISH_ATTEMPTS - 1, false), // transient 预算未尽 → 退避
-            (false, MAX_PUBLISH_ATTEMPTS, true),      // transient 预算耗尽 → dlx
-            (false, MAX_PUBLISH_ATTEMPTS + 1, true),  // transient 超预算 → dlx
+        let cases: &[(PublishErrorKind, i32, bool)] = &[
+            (PublishErrorKind::Permanent, 1, true),
+            (PublishErrorKind::Permanent, MAX_PUBLISH_ATTEMPTS, true),
+            (PublishErrorKind::Transient, 1, false),
+            (PublishErrorKind::Transient, MAX_PUBLISH_ATTEMPTS - 1, false),
+            (PublishErrorKind::Transient, MAX_PUBLISH_ATTEMPTS, true),
+            (PublishErrorKind::Ambiguous, 1, false),
+            (PublishErrorKind::Ambiguous, MAX_PUBLISH_ATTEMPTS - 1, false),
+            (PublishErrorKind::Ambiguous, MAX_PUBLISH_ATTEMPTS, true),
         ];
-        for &(is_permanent, new_count, want) in cases {
+        for &(kind, new_count, want) in cases {
             assert_eq!(
-                dlx_decision(is_permanent, new_count),
+                dlx_decision(kind, new_count),
                 want,
-                "dlx_decision(permanent={is_permanent}, new_count={new_count})"
+                "dlx_decision(kind={kind:?}, new_count={new_count})"
             );
         }
     }

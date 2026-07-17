@@ -14,7 +14,7 @@ use amqp::{AmqpPublisher, AmqpRuntimeDeps, AmqpSubscriber};
 use anyhow::anyhow;
 use diport::{
     AckAction, AckableSubscriber, Acker, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT,
-    KEY_SUBJECT_ID, ManagedResource, MessageId, PublishRequest, Publisher, Topic,
+    KEY_SUBJECT_ID, ManagedResource, MessageId, PublishErrorKind, PublishRequest, Publisher, Topic,
 };
 use futures::StreamExt;
 use testkit::FixtureError;
@@ -153,8 +153,9 @@ async fn integration_publish_unroutable_is_transient() -> Result<(), FixtureErro
         .await
     {
         Ok(()) => panic!("publish to unbound queue must fail (mandatory return)"),
-        Err(err) => assert!(
-            err.is_transient(),
+        Err(err) => assert_eq!(
+            err.kind(),
+            PublishErrorKind::Transient,
             "unroutable (no bound queue yet) must be transient for L2 retry, not permanent DLX"
         ),
     }

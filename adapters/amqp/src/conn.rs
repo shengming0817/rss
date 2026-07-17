@@ -5,7 +5,10 @@ use std::sync::Arc;
 use lapin::options::ConfirmSelectOptions;
 use lapin::{Channel, Connection, ConnectionProperties};
 
-use crate::conn_events::{emit_connect_failed, emit_connected};
+use crate::conn_events::{
+    RecoveryConnectResult, RecoveryFailureReason, RecoveryFailureStage, emit_connect_failed,
+    emit_connected, emit_recovery_connect_result,
+};
 
 /// AMQP `channel.close` / `connection.close` 的成功 reply code（AMQP `REPLY_SUCCESS` = 200）。
 pub(crate) const REPLY_SUCCESS: u16 = 200;
@@ -48,47 +51,132 @@ pub(crate) async fn connect(
     name: &str,
     confirm: bool,
 ) -> Result<(Arc<Connection>, Channel), AmqpConnectError> {
+    connect_with_context(endpoint, name, confirm, ConnectContext::Initial).await
+}
+
+/// RSS-owned publisher replacement entry point. Recovery deliberately uses a different closed
+/// logging context from initial assembly: endpoint identity is needed to authenticate the socket,
+/// but it is not admitted to recovery events.
+pub(crate) async fn reconnect_publisher(
+    endpoint: &secure::AmqpEndpoint,
+    name: &str,
+    retiring_generation: u64,
+) -> Result<(Arc<Connection>, Channel), AmqpConnectError> {
+    connect_with_context(
+        endpoint,
+        name,
+        true,
+        ConnectContext::Recovery {
+            replacement_generation: retiring_generation.saturating_add(1),
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum ConnectContext {
+    Initial,
+    Recovery { replacement_generation: u64 },
+}
+
+async fn connect_with_context(
+    endpoint: &secure::AmqpEndpoint,
+    name: &str,
+    confirm: bool,
+    context: ConnectContext,
+) -> Result<(Arc<Connection>, Channel), AmqpConnectError> {
     #[allow(clippy::disallowed_methods)]
     // reason: 唯一 AMQP driver connect callsite；endpoint 已在组合根经 secure::AmqpEndpoint 校验。
     let url = endpoint.expose();
+    // Intentionally keep lapin auto-recovery disabled (`ConnectionProperties::default()` has zero retries and
+    // `auto_recover=false`). Publisher transport replacement is RSS-owned and bounded by one absolute deadline;
+    // enabling lapin recovery here would create an uncancellable second reconnect owner.
     let conn = Arc::new(
         Connection::connect(url, ConnectionProperties::default())
             .await
-            .map_err(|source| connect_err(source, endpoint, name))?,
+            .map_err(|source| {
+                connect_err(
+                    source,
+                    endpoint,
+                    name,
+                    context,
+                    RecoveryFailureStage::Connect,
+                )
+            })?,
     );
-    let channel = if confirm {
-        confirmed_channel(conn.as_ref())
+    let channel = conn.create_channel().await.map_err(|source| {
+        connect_err(
+            source,
+            endpoint,
+            name,
+            context,
+            RecoveryFailureStage::CreateChannel,
+        )
+    })?;
+    if confirm {
+        channel
+            .confirm_select(ConfirmSelectOptions::default())
             .await
-            .map_err(|source| connect_err(source, endpoint, name))?
-    } else {
-        conn.create_channel()
-            .await
-            .map_err(|source| connect_err(source, endpoint, name))?
-    };
-    emit_connected(name, endpoint);
+            .map_err(|source| {
+                connect_err(
+                    source,
+                    endpoint,
+                    name,
+                    context,
+                    RecoveryFailureStage::ConfirmSelect,
+                )
+            })?;
+    }
+    match context {
+        ConnectContext::Initial => emit_connected(name, endpoint),
+        ConnectContext::Recovery {
+            replacement_generation,
+        } => emit_recovery_connect_result(
+            name,
+            replacement_generation,
+            RecoveryConnectResult::Connected,
+        ),
+    }
     Ok((conn, channel))
-}
-
-/// 在既有 publisher connection 上创建一个全新的 confirm channel。
-///
-/// 初始连接和 timeout 后的 channel rotation 共用这一接缝，避免 replacement 忘记
-/// `confirm_select` 而把 [`lapin::Confirmation::NotRequested`] 误当 durable publish 成功。
-pub(crate) async fn confirmed_channel(conn: &Connection) -> lapin::Result<Channel> {
-    let channel = conn.create_channel().await?;
-    channel
-        .confirm_select(ConfirmSelectOptions::default())
-        .await?;
-    Ok(channel)
 }
 
 fn connect_err(
     source: lapin::Error,
     endpoint: &secure::AmqpEndpoint,
     name: &str,
+    context: ConnectContext,
+    recovery_stage: RecoveryFailureStage,
 ) -> AmqpConnectError {
-    emit_connect_failed(name, endpoint, &source);
+    match context {
+        ConnectContext::Initial => emit_connect_failed(name, endpoint, &source),
+        ConnectContext::Recovery {
+            replacement_generation,
+        } => emit_recovery_connect_result(
+            name,
+            replacement_generation,
+            RecoveryConnectResult::Failed {
+                stage: recovery_stage,
+                reason: recovery_failure_reason(&source),
+            },
+        ),
+    }
     AmqpConnectError {
         source: source.into(),
+    }
+}
+
+fn recovery_failure_reason(error: &lapin::Error) -> RecoveryFailureReason {
+    match error.kind() {
+        lapin::ErrorKind::IOError(_) => RecoveryFailureReason::Io,
+        lapin::ErrorKind::ProtocolError(_) => RecoveryFailureReason::Protocol,
+        lapin::ErrorKind::InvalidChannel(_)
+        | lapin::ErrorKind::InvalidChannelState(..)
+        | lapin::ErrorKind::InvalidConnectionState(_) => RecoveryFailureReason::State,
+        lapin::ErrorKind::RuntimeShutdownError(_) | lapin::ErrorKind::NoDefaultRuntime => {
+            RecoveryFailureReason::Runtime
+        }
+        lapin::ErrorKind::MissingHeartbeatError => RecoveryFailureReason::Heartbeat,
+        _ => RecoveryFailureReason::Client,
     }
 }
 
@@ -97,5 +185,56 @@ fn connect_err(
 pub(crate) fn invalid_publisher_timeout() -> AmqpConnectError {
     AmqpConnectError {
         source: AmqpConnectErrorSource::InvalidPublisherTimeout,
+    }
+}
+
+#[cfg(test)]
+mod recovery_failure_reason_tests {
+    use std::sync::Arc;
+
+    use lapin::ErrorKind;
+    use lapin::protocol::{AMQPError, AMQPErrorKind, AMQPHardError};
+
+    use super::{RecoveryFailureReason, recovery_failure_reason};
+
+    #[test]
+    fn lapin_errors_map_to_closed_low_cardinality_recovery_reasons() {
+        let cases = [
+            (
+                ErrorKind::IOError(Arc::new(std::io::Error::other("secret raw io"))).into(),
+                RecoveryFailureReason::Io,
+            ),
+            (
+                ErrorKind::ProtocolError(AMQPError::new(
+                    AMQPErrorKind::Hard(AMQPHardError::CONNECTIONFORCED),
+                    "secret raw protocol".into(),
+                ))
+                .into(),
+                RecoveryFailureReason::Protocol,
+            ),
+            (
+                ErrorKind::InvalidConnectionState(lapin::ConnectionState::Error).into(),
+                RecoveryFailureReason::State,
+            ),
+            (
+                ErrorKind::RuntimeShutdownError(Arc::new(std::io::Error::other(
+                    "secret raw runtime",
+                )))
+                .into(),
+                RecoveryFailureReason::Runtime,
+            ),
+            (
+                ErrorKind::MissingHeartbeatError.into(),
+                RecoveryFailureReason::Heartbeat,
+            ),
+            (
+                ErrorKind::AuthProviderError("secret raw client".into()).into(),
+                RecoveryFailureReason::Client,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(recovery_failure_reason(&error), expected);
+        }
     }
 }

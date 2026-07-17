@@ -475,6 +475,12 @@ transport-safe `user_properties` / memory 直传）。broker-visible metadata �
 `tenantAuthority`、`schemaVersion`、`schemaHash`。`subjectId` / `principal` / `actor` / `causation_id` 与业务 free-form metadata 只可经
 `iter_persisted_metadata()` 留在持久化 / dead-letter 边界，不回填 broker header。subscriber 反向只读 broker
 传来的 transport-safe 元数据，handler 经 `msg.metadata.get(..)` 消费。
+
+publisher 失败日志的 `publish_error_kind` 闭值集为 `Transient|Permanent|Ambiguous`，对应低基数
+`reason` 为 `publisher_transient|publisher_permanent|publisher_ambiguous`。`retryable=true` 覆盖
+`Transient|Ambiguous`；`ambiguous=true` 表示 broker 可能已接收，必须联查同 event ID 的重复 delivery 与
+transport generation replacement。日志不得据 `Ambiguous` 宣称消息未送达或 exactly-once；AMQP recovery
+只记录 generation、phase、deadline/结果等非敏感诊断字段，不记录 endpoint、payload、metadata 或原始错误链。
 ref: Debezium Outbox Event Router（行 id + 附加列 → emitted header）、CloudEvents binary content-mode。
 
 **Tenant authority token（#1535）**：relay 发布 broker 消息前在 reserved metadata `tenantAuthority`

@@ -306,11 +306,11 @@ pub struct InboxKeyArgs {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum PublishMode {
     Ok,
     Transient,
     Permanent,
+    Ambiguous,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +327,55 @@ pub struct RelayObservation {
     /// Broker-visible message id. This should equal the outbox event id.
     pub message_id: Option<String>,
     pub publish_count: u64,
+}
+
+/// Provider-neutral evidence for an ambiguous publish followed by a retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishAmbiguityObservation {
+    /// Broker-visible message id used by the attempt whose outcome was ambiguous.
+    pub first_message_id: String,
+    /// Broker-visible message id used by the retry.
+    pub retry_message_id: String,
+    /// Number of broker-visible deliveries produced by the two attempts.
+    pub transport_deliveries: u64,
+    /// Generation retired after the ambiguous outcome.
+    pub retired_generation: u64,
+    /// Generation used by the retry.
+    pub retry_generation: u64,
+}
+
+/// Assert same-id retry, visible duplication, and retirement of the ambiguous generation.
+pub fn assert_publish_ambiguity_conformance(
+    ids: &EventingIds,
+    observation: &PublishAmbiguityObservation,
+) -> Result<(), EventingConformanceError> {
+    expect(
+        "publish.ambiguity.same-id",
+        ids,
+        observation.first_message_id == ids.event_id
+            && observation.retry_message_id == ids.event_id,
+        "both publish attempts use the original event id",
+        format!(
+            "first_message_id={:?} retry_message_id={:?}",
+            observation.first_message_id, observation.retry_message_id
+        ),
+    )?;
+    expect_eq(
+        "publish.ambiguity.transport-duplicate",
+        ids,
+        observation.transport_deliveries,
+        2,
+    )?;
+    expect(
+        "publish.ambiguity.fresh-generation",
+        ids,
+        observation.retry_generation > observation.retired_generation,
+        "retry_generation > retired_generation",
+        format!(
+            "retired_generation={} retry_generation={}",
+            observation.retired_generation, observation.retry_generation
+        ),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,6 +438,7 @@ pub async fn assert_outbox_relay_conformance(
         ));
     }
     let retry_id = format!("{}-retry", case.ids.event_id);
+    let ambiguous_id = format!("{}-ambiguous", case.ids.event_id);
     let permanent_id = format!("{}-permanent", case.ids.event_id);
     let stale_id = format!("{}-stale", case.ids.event_id);
     let other_id = format!("{}-other", case.ids.event_id);
@@ -397,6 +447,7 @@ pub async fn assert_outbox_relay_conformance(
 
     assert_outbox_claim_and_ack(&mut case, other_id).await?;
     assert_outbox_transient_retry(&mut case, retry_id).await?;
+    assert_outbox_ambiguous_retry(&mut case, ambiguous_id).await?;
     assert_outbox_permanent_dlx(&mut case, permanent_id).await?;
     assert_outbox_stale_and_sample(&mut case, stale_id).await?;
     assert_outbox_sweeper(&mut case, old_published_id, old_dlx_id).await
@@ -520,6 +571,62 @@ async fn assert_outbox_transient_retry(
         })
         .await
         .map_err(|e| provider("outbox.state.retry", e))?;
+        assert_outbox_retry_state(&ids, &state, attempt, expected_disposition)?;
+    }
+    Ok(())
+}
+
+async fn assert_outbox_ambiguous_retry(
+    case: &mut OutboxRelayCase<'_>,
+    retry_id: String,
+) -> Result<(), EventingConformanceError> {
+    (case.seed_pending)(OutboxSeedArgs {
+        event_id: retry_id.clone(),
+        domain: case.domain.clone(),
+    })
+    .await
+    .map_err(|e| provider("outbox.seed.ambiguous", e))?;
+    for attempt in 1..=case.max_attempts {
+        let ids = EventingIds::new(
+            retry_id.clone(),
+            retry_id.clone(),
+            case.ids.consumer_group.clone(),
+            case.ids.lease_token.clone(),
+        );
+        let obs = (case.relay)(OutboxRelayArgs {
+            event_id: retry_id.clone(),
+            mode: PublishMode::Ambiguous,
+        })
+        .await
+        .map_err(|e| provider("outbox.relay.ambiguous", e))?;
+        let expected_disposition = if attempt == case.max_attempts {
+            RelayDisposition::Reject
+        } else {
+            RelayDisposition::Requeue
+        };
+        expect_eq(
+            "outbox.relay.ambiguous.disposition",
+            &ids,
+            obs.disposition,
+            expected_disposition,
+        )?;
+        expect_eq(
+            "outbox.relay.ambiguous.message-id",
+            &ids,
+            obs.message_id.as_deref(),
+            Some(retry_id.as_str()),
+        )?;
+        expect_eq(
+            "outbox.relay.ambiguous.publish-count",
+            &ids,
+            obs.publish_count,
+            1,
+        )?;
+        let state = (case.state)(EventIdArgs {
+            event_id: retry_id.clone(),
+        })
+        .await
+        .map_err(|e| provider("outbox.state.ambiguous", e))?;
         assert_outbox_retry_state(&ids, &state, attempt, expected_disposition)?;
     }
     Ok(())
@@ -941,6 +1048,42 @@ pub struct ConsumerObservation {
     pub topic: String,
 }
 
+/// Provider-neutral evidence for consuming both deliveries of a same-id duplicate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumerDuplicateEffectObservation {
+    /// Number of committed business mutations caused by both deliveries.
+    pub business_mutations: u64,
+    /// Number of done inbox receipts left for the stable event and consumer group.
+    pub inbox_done_rows: u64,
+    /// Broker settlement applied to the duplicate delivery.
+    pub duplicate_settle: SettleAction,
+}
+
+/// Assert a duplicate is acknowledged without repeating its transactional database effect.
+pub fn assert_consumer_duplicate_effect_conformance(
+    ids: &EventingIds,
+    observation: &ConsumerDuplicateEffectObservation,
+) -> Result<(), EventingConformanceError> {
+    expect_eq(
+        "consumer.duplicate-effect.business-mutations",
+        ids,
+        observation.business_mutations,
+        1,
+    )?;
+    expect_eq(
+        "consumer.duplicate-effect.inbox-done",
+        ids,
+        observation.inbox_done_rows,
+        1,
+    )?;
+    expect_eq(
+        "consumer.duplicate-effect.ack",
+        ids,
+        observation.duplicate_settle,
+        SettleAction::Ack,
+    )
+}
+
 pub struct ConsumerConformanceCase<'a> {
     pub ids: EventingIds,
     pub expected_dlx: DlxFields,
@@ -1093,12 +1236,17 @@ fn assert_dlx_fields(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
     use super::{
-        BacklogSample, ConsumerConformanceCase, ConsumerObservation, DlxFields, DomainArgs,
-        EventIdArgs, EventingConformanceError, EventingIds, OutboxRelayArgs, OutboxRelayCase,
-        OutboxSeedArgs, OutboxState, OutboxStatus, OutboxTerminalArgs, PublishMode,
-        RelayDisposition, RelayObservation, SettleAction, TerminalStatus,
-        assert_consumer_conformance, assert_outbox_relay_conformance,
+        BacklogSample, ConsumerConformanceCase, ConsumerDuplicateEffectObservation,
+        ConsumerObservation, DlxFields, DomainArgs, EventIdArgs, EventingConformanceError,
+        EventingIds, OutboxRelayArgs, OutboxRelayCase, OutboxSeedArgs, OutboxState, OutboxStatus,
+        OutboxTerminalArgs, PublishAmbiguityObservation, PublishMode, RelayDisposition,
+        RelayObservation, SettleAction, TerminalStatus, assert_consumer_conformance,
+        assert_consumer_duplicate_effect_conformance, assert_outbox_relay_conformance,
+        assert_publish_ambiguity_conformance,
     };
 
     fn ids() -> EventingIds {
@@ -1145,7 +1293,13 @@ mod tests {
         }
     }
 
-    fn outbox_case_with_publish_count(publish_count: u64) -> OutboxRelayCase<'static> {
+    fn stateful_outbox_case(
+        publish_count: u64,
+        ambiguous_immediate_dlx: bool,
+    ) -> OutboxRelayCase<'static> {
+        let attempts = Arc::new(Mutex::new(HashMap::<String, u32>::new()));
+        let relay_attempts = Arc::clone(&attempts);
+        let state_attempts = Arc::clone(&attempts);
         OutboxRelayCase {
             ids: outbox_ids(),
             domain: "domain-a".to_string(),
@@ -1153,11 +1307,35 @@ mod tests {
             max_attempts: 2,
             seed_pending: Box::new(|OutboxSeedArgs { .. }| Box::pin(async { Ok(()) })),
             relay: Box::new(move |OutboxRelayArgs { event_id, mode }| {
+                let attempt = {
+                    let mut attempts = relay_attempts
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let attempt = attempts.entry(event_id.clone()).or_default();
+                    *attempt += 1;
+                    *attempt
+                };
                 Box::pin(async move {
                     let disposition = match mode {
                         PublishMode::Ok => RelayDisposition::Ack,
-                        PublishMode::Transient => RelayDisposition::Reject,
                         PublishMode::Permanent => RelayDisposition::Reject,
+                        PublishMode::Transient => {
+                            if attempt < 2 {
+                                RelayDisposition::Requeue
+                            } else {
+                                RelayDisposition::Reject
+                            }
+                        }
+                        PublishMode::Ambiguous if ambiguous_immediate_dlx => {
+                            RelayDisposition::Reject
+                        }
+                        PublishMode::Ambiguous => {
+                            if attempt < 2 {
+                                RelayDisposition::Requeue
+                            } else {
+                                RelayDisposition::Reject
+                            }
+                        }
                     };
                     Ok(RelayObservation {
                         disposition,
@@ -1174,24 +1352,39 @@ mod tests {
                     ])
                 })
             }),
-            state: Box::new(|EventIdArgs { event_id }| {
+            state: Box::new(move |EventIdArgs { event_id }| {
+                let attempt = state_attempts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&event_id)
+                    .copied()
+                    .unwrap_or_default();
                 Box::pin(async move {
-                    let state = if event_id.ends_with("-old-published") {
-                        OutboxState {
+                    if event_id.ends_with("-old-published") {
+                        return Ok(OutboxState {
                             exists: false,
                             status: OutboxStatus::Absent,
                             retry_count: 0,
                             retry_after_set: false,
                             dlx_count: 0,
-                        }
-                    } else if event_id.ends_with("-retry") || event_id.ends_with("-permanent") {
-                        outbox_state(OutboxStatus::Dlx, 2, 1)
-                    } else if event_id.ends_with("-old-dlx") {
-                        outbox_state(OutboxStatus::Dlx, 0, 1)
-                    } else {
-                        outbox_state(OutboxStatus::Published, 0, 0)
-                    };
-                    Ok(state)
+                        });
+                    }
+                    if event_id.ends_with("-old-dlx") {
+                        return Ok(outbox_state(OutboxStatus::Dlx, 0, 1));
+                    }
+                    if event_id.ends_with("-permanent") {
+                        return Ok(outbox_state(OutboxStatus::Dlx, 1, 1));
+                    }
+                    if event_id.ends_with("-retry") || event_id.ends_with("-ambiguous") {
+                        let terminal = attempt >= 2
+                            || (ambiguous_immediate_dlx && event_id.ends_with("-ambiguous"));
+                        return Ok(if terminal {
+                            outbox_state(OutboxStatus::Dlx, i64::from(attempt), 1)
+                        } else {
+                            outbox_state(OutboxStatus::Pending, i64::from(attempt), 0)
+                        });
+                    }
+                    Ok(outbox_state(OutboxStatus::Published, 0, 0))
                 })
             }),
             backdate_publishing: Box::new(|EventIdArgs { .. }| Box::pin(async { Ok(()) })),
@@ -1216,7 +1409,7 @@ mod tests {
 
     #[tokio::test]
     async fn outbox_conformance_catches_missing_publish() {
-        let result = assert_outbox_relay_conformance(outbox_case_with_publish_count(0)).await;
+        let result = assert_outbox_relay_conformance(stateful_outbox_case(0, false)).await;
         assert!(
             matches!(
                 result,
@@ -1225,6 +1418,164 @@ mod tests {
             ),
             "broken relay fake must fail, got {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn outbox_conformance_covers_ambiguous_pending_same_id_until_budget_dlx()
+    -> Result<(), EventingConformanceError> {
+        assert_outbox_relay_conformance(stateful_outbox_case(1, false)).await
+    }
+
+    #[tokio::test]
+    async fn outbox_conformance_rejects_ambiguous_immediate_dlx() {
+        let result = assert_outbox_relay_conformance(stateful_outbox_case(1, true)).await;
+        assert!(
+            matches!(
+                result,
+                Err(EventingConformanceError::Mismatch(ref detail))
+                    if detail.stage == "outbox.relay.ambiguous.disposition"
+            ),
+            "Ambiguous treated as Permanent must fail, got {result:?}"
+        );
+    }
+
+    fn publish_ambiguity_observation() -> PublishAmbiguityObservation {
+        PublishAmbiguityObservation {
+            first_message_id: "evt-1".to_string(),
+            retry_message_id: "evt-1".to_string(),
+            transport_deliveries: 2,
+            retired_generation: 7,
+            retry_generation: 8,
+        }
+    }
+
+    fn consumer_duplicate_effect_observation() -> ConsumerDuplicateEffectObservation {
+        ConsumerDuplicateEffectObservation {
+            business_mutations: 1,
+            inbox_done_rows: 1,
+            duplicate_settle: SettleAction::Ack,
+        }
+    }
+
+    #[test]
+    fn publish_ambiguity_conformance_accepts_same_id_duplicate_on_fresh_generation()
+    -> Result<(), EventingConformanceError> {
+        assert_publish_ambiguity_conformance(&ids(), &publish_ambiguity_observation())
+    }
+
+    #[test]
+    fn publish_ambiguity_conformance_catches_changed_retry_id() {
+        let mut observation = publish_ambiguity_observation();
+        observation.retry_message_id = "evt-replacement".to_string();
+
+        let result = assert_publish_ambiguity_conformance(&ids(), &observation);
+
+        assert!(
+            matches!(
+                result,
+                Err(EventingConformanceError::Mismatch(ref detail))
+                    if detail.stage == "publish.ambiguity.same-id"
+            ),
+            "changed retry id must fail, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn publish_ambiguity_conformance_catches_missing_transport_duplicate() {
+        let mut observation = publish_ambiguity_observation();
+        observation.transport_deliveries = 1;
+
+        let result = assert_publish_ambiguity_conformance(&ids(), &observation);
+
+        assert!(
+            matches!(
+                result,
+                Err(EventingConformanceError::Mismatch(ref detail))
+                    if detail.stage == "publish.ambiguity.transport-duplicate"
+            ),
+            "missing transport duplicate must fail, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn publish_ambiguity_conformance_catches_retired_generation_reuse() {
+        let mut observation = publish_ambiguity_observation();
+        observation.retry_generation = observation.retired_generation;
+
+        let result = assert_publish_ambiguity_conformance(&ids(), &observation);
+
+        assert!(
+            matches!(
+                result,
+                Err(EventingConformanceError::Mismatch(ref detail))
+                    if detail.stage == "publish.ambiguity.fresh-generation"
+            ),
+            "retired generation reuse must fail, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn publish_ambiguity_conformance_accepts_single_consumer_effect()
+    -> Result<(), EventingConformanceError> {
+        assert_consumer_duplicate_effect_conformance(
+            &ids(),
+            &consumer_duplicate_effect_observation(),
+        )
+    }
+
+    #[test]
+    fn publish_ambiguity_conformance_catches_duplicate_business_mutation() {
+        let mut observation = consumer_duplicate_effect_observation();
+        observation.business_mutations = 2;
+
+        let result = assert_consumer_duplicate_effect_conformance(&ids(), &observation);
+
+        assert!(
+            matches!(
+                result,
+                Err(EventingConformanceError::Mismatch(ref detail))
+                    if detail.stage == "consumer.duplicate-effect.business-mutations"
+            ),
+            "duplicate business mutation must fail, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn publish_ambiguity_conformance_catches_wrong_inbox_done_count() {
+        for inbox_done_rows in [0, 2] {
+            let mut observation = consumer_duplicate_effect_observation();
+            observation.inbox_done_rows = inbox_done_rows;
+
+            let result = assert_consumer_duplicate_effect_conformance(&ids(), &observation);
+
+            assert!(
+                matches!(
+                    result,
+                    Err(EventingConformanceError::Mismatch(ref detail))
+                        if detail.stage == "consumer.duplicate-effect.inbox-done"
+                ),
+                "inbox_done_rows={inbox_done_rows} must fail, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn publish_ambiguity_conformance_catches_unacked_duplicate() {
+        for duplicate_settle in [SettleAction::Requeue, SettleAction::Reject] {
+            let mut observation = consumer_duplicate_effect_observation();
+            observation.duplicate_settle = duplicate_settle;
+
+            let result = assert_consumer_duplicate_effect_conformance(&ids(), &observation);
+
+            assert!(
+                matches!(
+                    result,
+                    Err(EventingConformanceError::Mismatch(ref detail))
+                        if detail.stage == "consumer.duplicate-effect.ack"
+                ),
+                "duplicate_settle={duplicate_settle:?} must fail, got {result:?}"
+            );
+        }
     }
 
     #[tokio::test]

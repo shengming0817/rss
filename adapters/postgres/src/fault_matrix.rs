@@ -17,11 +17,11 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail};
 use consistency::{
-    CompensationOutcome, ConsumerGroup, ConvergeAction, EngineError, EngineErrorKind, EventTopic,
-    IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, Lsn, OutboxRelay,
-    PartitionSerialDelivery, ProjectionApplyOutcome, ProjectionEvent, ProjectionEventMetadata,
-    ProjectionEventRecord, Projector, SagaId, SagaInstanceRef, SagaJournalAppendRecord, SagaStep,
-    SagaStepCtx, SeenState, SerialInOrder, StepName,
+    CompensationOutcome, ConsumerGroup, ConvergeAction, Disposition, EngineError, EngineErrorKind,
+    EventTopic, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, Lsn,
+    OutboxRelay, PartitionSerialDelivery, ProjectionApplyOutcome, ProjectionEvent,
+    ProjectionEventMetadata, ProjectionEventRecord, Projector, SagaId, SagaInstanceRef,
+    SagaJournalAppendRecord, SagaStep, SagaStepCtx, SeenState, SerialInOrder, StepName,
 };
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
@@ -345,7 +345,112 @@ impl PgFaultMatrixHarness {
             FaultMatrixOutboxStatus::Pending,
         )
         .await?;
-        let publisher = outcome.publisher();
+        let outbox = self.outbox_for_domain(domain, outcome.publisher())?;
+        let claimed = outbox
+            .claim_batch(10)
+            .await?
+            .into_iter()
+            .find(|entry| entry.idem_key().as_str() == event_id)
+            .ok_or_else(|| anyhow!("seeded outbox row was not claimed"))?;
+        outbox.relay(claimed).await?;
+        Ok(())
+    }
+
+    /// Drive a retryable publish outcome from pending through the exact relay retry budget.
+    ///
+    /// Every attempt must keep the durable event id. Intermediate attempts must settle back to
+    /// pending; only the budget-exhausting attempt may settle to DLX.
+    pub async fn run_outbox_publish_to_budget(
+        &self,
+        tenant: vocab::TenantId,
+        event_id: &str,
+        domain: &str,
+        topic: &str,
+        contract_id: &str,
+        outcome: FaultMatrixPublishOutcome,
+    ) -> FaultMatrixResult<Vec<String>> {
+        match outcome {
+            FaultMatrixPublishOutcome::Transient | FaultMatrixPublishOutcome::Ambiguous => {}
+            FaultMatrixPublishOutcome::Ok | FaultMatrixPublishOutcome::Permanent => {
+                bail!("publish-to-budget requires a closed retryable outcome")
+            }
+        }
+        seed_outbox(
+            &self.owner_pool,
+            tenant,
+            event_id,
+            domain,
+            topic,
+            contract_id,
+            FaultMatrixOutboxStatus::Pending,
+        )
+        .await?;
+        let message_ids = Arc::new(Mutex::new(Vec::new()));
+        let outbox = self.outbox_for_domain(
+            domain,
+            outcome.publisher_with_messages(Arc::clone(&message_ids)),
+        )?;
+
+        for attempt in 1..=crate::outbox::MAX_PUBLISH_ATTEMPTS {
+            if attempt > 1 {
+                let affected = sqlx::query(
+                    "UPDATE outbox SET retry_after = clock_timestamp() - interval '1 microsecond' \
+                     WHERE tenant_id = $1::uuid AND event_id = $2 AND status = 'pending'",
+                )
+                .bind(tenant.to_string())
+                .bind(event_id)
+                .execute(&self.owner_pool)
+                .await?
+                .rows_affected();
+                if affected != 1 {
+                    bail!("retryable outbox row was not pending before attempt {attempt}");
+                }
+            }
+
+            let claimed = outbox
+                .claim_batch(10)
+                .await?
+                .into_iter()
+                .find(|entry| entry.idem_key().as_str() == event_id)
+                .ok_or_else(|| {
+                    anyhow!("retryable outbox row was not claimed at attempt {attempt}")
+                })?;
+            let disposition = outbox.relay(claimed).await?;
+            let budget_exhausted = attempt == crate::outbox::MAX_PUBLISH_ATTEMPTS;
+            match (budget_exhausted, disposition) {
+                (false, Disposition::Requeue) | (true, Disposition::Reject) => {}
+                _ => bail!(
+                    "retryable publish attempt {attempt} settled as {disposition:?}; budget_exhausted={budget_exhausted}"
+                ),
+            }
+            let expected_status = if budget_exhausted {
+                FaultMatrixOutboxStatus::Dlx
+            } else {
+                FaultMatrixOutboxStatus::Pending
+            };
+            if self.outbox_count(tenant, event_id, expected_status).await? != 1 {
+                bail!("retryable publish attempt {attempt} did not settle to {expected_status:?}");
+            }
+        }
+
+        let observed = message_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let expected_attempts = usize::try_from(crate::outbox::MAX_PUBLISH_ATTEMPTS)?;
+        if observed.len() != expected_attempts || observed.iter().any(|id| id != event_id) {
+            bail!(
+                "retryable publish attempts must use the same event id exactly {expected_attempts} times"
+            );
+        }
+        Ok(observed)
+    }
+
+    fn outbox_for_domain(
+        &self,
+        domain: &str,
+        publisher: Box<DynPublisher<'static>>,
+    ) -> FaultMatrixResult<crate::PgOutbox> {
         let outbox = match domain {
             "identity" => self
                 .deps
@@ -369,14 +474,7 @@ impl PgFaultMatrixHarness {
                 ),
             _ => bail!("unsupported fault-matrix outbox domain `{domain}`"),
         };
-        let claimed = outbox
-            .claim_batch(10)
-            .await?
-            .into_iter()
-            .find(|entry| entry.idem_key().as_str() == event_id)
-            .ok_or_else(|| anyhow!("seeded outbox row was not claimed"))?;
-        outbox.relay(claimed).await?;
-        Ok(())
+        Ok(outbox)
     }
 
     /// Run the publish-succeeded / settle-not-yet-run phase.
@@ -879,11 +977,12 @@ impl PgFaultMatrixHarness {
 }
 
 /// Publisher outcome used by the outbox fault matrix.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultMatrixPublishOutcome {
     Ok,
     Transient,
     Permanent,
+    Ambiguous,
 }
 
 impl FaultMatrixPublishOutcome {
@@ -892,6 +991,17 @@ impl FaultMatrixPublishOutcome {
             Self::Ok => RecordingPublisher::ok(),
             Self::Transient => RecordingPublisher::transient(),
             Self::Permanent => RecordingPublisher::permanent(),
+            Self::Ambiguous => RecordingPublisher::ambiguous(),
+        })
+    }
+
+    fn publisher_with_messages(
+        self,
+        message_ids: Arc<Mutex<Vec<String>>>,
+    ) -> Box<DynPublisher<'static>> {
+        DynPublisher::new_box(RecordingPublisher {
+            result: self,
+            message_ids: Some(message_ids),
         })
     }
 }
@@ -1264,30 +1374,47 @@ fn metadata_json(tenant: vocab::TenantId) -> String {
 #[derive(Clone)]
 struct RecordingPublisher {
     result: FaultMatrixPublishOutcome,
+    message_ids: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 impl RecordingPublisher {
     fn ok() -> Self {
         Self {
             result: FaultMatrixPublishOutcome::Ok,
+            message_ids: None,
         }
     }
 
     fn transient() -> Self {
         Self {
             result: FaultMatrixPublishOutcome::Transient,
+            message_ids: None,
         }
     }
 
     fn permanent() -> Self {
         Self {
             result: FaultMatrixPublishOutcome::Permanent,
+            message_ids: None,
+        }
+    }
+
+    fn ambiguous() -> Self {
+        Self {
+            result: FaultMatrixPublishOutcome::Ambiguous,
+            message_ids: None,
         }
     }
 }
 
 impl Publisher for RecordingPublisher {
-    async fn publish(&self, _request: PublishRequest) -> Result<(), PublisherError> {
+    async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
+        if let Some(message_ids) = &self.message_ids {
+            message_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.event_id().as_str().to_string());
+        }
         match self.result {
             FaultMatrixPublishOutcome::Ok => Ok(()),
             FaultMatrixPublishOutcome::Transient => Err(PublisherError::transient(
@@ -1295,6 +1422,9 @@ impl Publisher for RecordingPublisher {
             )),
             FaultMatrixPublishOutcome::Permanent => Err(PublisherError::permanent(
                 std::io::Error::other("fault matrix permanent publish failure"),
+            )),
+            FaultMatrixPublishOutcome::Ambiguous => Err(PublisherError::ambiguous(
+                std::io::Error::other("fault matrix ambiguous publish failure"),
             )),
         }
     }

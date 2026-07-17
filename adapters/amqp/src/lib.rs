@@ -26,12 +26,27 @@
 //!
 //! at-most-once 仅 demo 拓扑的 MemBus（`diport::Subscriber`）；AMQP 不实现该 trait。
 //!
+//! # Publisher transport replacement 与 ambiguous outcome
+//!
+//! Publisher 以 generation-scoped `connection + confirm channel` 为不可拆分 transport。只有 Ready generation
+//! 接受 publish；发送后/confirm 阶段的 IO reset、connection/channel close、confirm lost 与共享 deadline
+//! 都先退休整代 transport，再返回 `PublishErrorKind::Ambiguous`。relay 只能用原 event ID 重试，因此 transport
+//! 保持 at-least-once，broker duplicate 由 Inbox/ConsumerTx 收口事务内数据库副作用。
+//!
+//! RSS 独占 reconnect：同一 absolute recovery deadline 依次覆盖旧 confirms drain、旧 connection close、fresh
+//! connection + confirm channel 建立。lapin `ConnectionProperties::enable_auto_recover` 明确不启用，避免产生不受
+//! RSS deadline 取消的第二套 TCP recovery owner。Recovering/Unavailable fail-fast；stale generation 不能退休或
+//! 覆盖 replacement。
+//! ref: amqp-rs/lapin src/generated/channel.rs@v4.10.0（采纳 publish/confirm 生命周期，偏离 auto-recovery）。
+//!
 //! # feature 门控
 //!
 //! 真实 lapin broker I/O 在 `backend` feature 下编译；默认 build（无 feature）退化为 sealed-marker
 //! 签名冻结壳（`todo!()` body），保 ADAPTER-PORT-FREEZE-01 默认 `cargo test` / `verify` 绿、不拉
 //! broker 客户端树。`backend` feature 使用 lapin rustls + ring + webpki roots；native-tls / OpenSSL /
 //! aws-lc provider 由 workspace feature 选择和 `deny.toml` bans 防漂移。
+//! `integration-test-support` 只额外暴露确定性 post-send close 与只读 generation evidence seam，不引容器；
+//! `integration` 才叠加 testcontainers fixture。两者都不属于默认生产 surface。
 //!
 //! ref: lapin examples/pubsub.rs@main（connect → create_channel → queue_declare → basic_publish →
 //! basic_consume → Consumer Stream），与 `adapters/memory` 的 `take_until(token)` 流取消范式一致。

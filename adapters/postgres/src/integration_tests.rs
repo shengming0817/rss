@@ -7333,6 +7333,45 @@ struct RecordingPublisher {
     calls: Arc<Mutex<u32>>,
 }
 
+/// 首投返回 Ambiguous、第二投成功，并记录两次 broker-visible event ID。
+struct AmbiguousOncePublisher {
+    attempts: AtomicU32,
+    message_ids: Arc<Mutex<Vec<String>>>,
+}
+
+impl AmbiguousOncePublisher {
+    fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+        let message_ids = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                attempts: AtomicU32::new(0),
+                message_ids: Arc::clone(&message_ids),
+            },
+            message_ids,
+        )
+    }
+}
+
+impl Publisher for AmbiguousOncePublisher {
+    async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
+        self.message_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(request.event_id().as_str().to_string());
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(PublisherError::ambiguous(std::io::Error::other(
+                "fake ambiguous publish outcome",
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn shutdown(&self) -> Result<(), PublisherError> {
+        Ok(())
+    }
+}
+
 /// 首次 publish 在测试控制器持有 outbox 行锁后才返回；后续 publish 立即成功。
 /// 由此把真实 relay 稳定停在 settle SQL，而不依赖猜测调度时序。
 struct SettleLockPublisher {
@@ -7585,9 +7624,9 @@ impl Publisher for ConformancePublisher {
             eventconf::PublishMode::Permanent => Err(PublisherError::permanent(
                 std::io::Error::other("eventing conformance permanent publish"),
             )),
-            _ => Err(PublisherError::permanent(std::io::Error::other(
-                "eventing conformance unknown publish mode",
-            ))),
+            eventconf::PublishMode::Ambiguous => Err(PublisherError::ambiguous(
+                std::io::Error::other("eventing conformance ambiguous publish"),
+            )),
         }
     }
 
@@ -8963,6 +9002,72 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
     assert!(
         !re.iter().any(|e| e.idem_key().as_str() == event_id),
         "requeued entry must not be reclaimed within backoff window"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── T4b: ambiguous relay 保持 event ID 重试 ───────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t4b_relay_ambiguous_retries_with_the_original_event_id() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let event_id = unique_event_id("t4b-ambiguous");
+    let entry = make_entry(&event_id);
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            let entry = entry.clone();
+            let env = OutboxEnvelope::new(
+                "t4b_ambiguous_domain".to_string(),
+                "c".to_string(),
+                OutboxMetadata::new(0, test_tenant(), test_contract()),
+            );
+            Box::pin(async move {
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let (publisher, message_ids) = AmbiguousOncePublisher::new();
+    let outbox = make_pg_outbox_for_domain(&store, "t4b_ambiguous_domain", publisher);
+
+    let first_claim = claim_entry_for_relay(&outbox, &event_id).await?;
+    assert_eq!(outbox.relay(first_claim).await?, Disposition::Requeue);
+    let first_state: (String, i32) =
+        sqlx::query_as("SELECT status, retry_count FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(first_state, ("pending".to_string(), 1));
+
+    sqlx::query(
+        "UPDATE outbox SET retry_after = clock_timestamp() - interval '1 microsecond' \
+         WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .execute(&store.pool)
+    .await?;
+    let retry_claim = claim_entry_for_relay(&outbox, &event_id).await?;
+    assert_eq!(outbox.relay(retry_claim).await?, Disposition::Ack);
+
+    let final_state: (String, i32) =
+        sqlx::query_as("SELECT status, retry_count FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(final_state, ("published".to_string(), 1));
+    assert_eq!(
+        *message_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        vec![event_id.clone(), event_id],
+        "Ambiguous retry must preserve the original broker-visible event ID"
     );
 
     store.shutdown().await?;

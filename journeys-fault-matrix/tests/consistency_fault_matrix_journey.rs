@@ -133,6 +133,12 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         run_outbox_transient_publish_failure,
     ),
     ReadyCaseRunner::new(
+        "outbox-ambiguous-publish-failure",
+        CrashFaultSpec::OutboxAmbiguousPublishFailure,
+        CrashRunner::Postgres,
+        run_outbox_ambiguous_publish_failure,
+    ),
+    ReadyCaseRunner::new(
         "outbox-permanent-publish-failure",
         CrashFaultSpec::OutboxPermanentPublishFailure,
         CrashRunner::Postgres,
@@ -516,6 +522,46 @@ fn run_outbox_transient_publish_failure<'a>(
             1,
         )
         .await
+    })
+}
+
+fn run_outbox_ambiguous_publish_failure<'a>(
+    case: &'a CrashCase,
+    pg: &'a PgHarness,
+    _rabbit: &'a RabbitHarness,
+    _redis: &'a RedisHarness,
+    scope: &'a RunScope,
+) -> LocalBoxFuture<'a, Result<()>> {
+    Box::pin(async move {
+        let event_id = scope.event_id(case);
+        let attempts = pg
+            .harness
+            .run_outbox_publish_to_budget(
+                scope.tenant,
+                &event_id,
+                "identity",
+                "identity.session-created",
+                "identity.session-created",
+                FaultMatrixPublishOutcome::Ambiguous,
+            )
+            .await?;
+        if attempts.len() < 2 {
+            bail!("ambiguous publish must retry before budget DLX");
+        }
+        if attempts.iter().any(|message_id| message_id != &event_id) {
+            bail!("ambiguous publish retry changed the durable event id");
+        }
+        assert_outbox_count(pg, scope.tenant, &event_id, FaultMatrixOutboxStatus::Dlx, 1).await?;
+        let dlx = pg
+            .harness
+            .outbox_dead_letter(scope.tenant, &event_id)
+            .await?;
+        if dlx.source() != FaultMatrixDeadLetterSource::OutboxRelay
+            || dlx.summary() != FaultMatrixDeadLetterSummary::OutboxRelayPublishFailed
+        {
+            bail!("ambiguous publish budget DLX must retain the closed relay summary");
+        }
+        Ok(())
     })
 }
 
