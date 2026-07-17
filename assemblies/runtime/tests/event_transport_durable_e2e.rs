@@ -76,6 +76,17 @@ const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
 const TEST_READ_ROLE: &str = "rss_app_read";
 const TEST_READ_PASSWORD: &str = "rss_app_read_test_pw";
 
+fn test_password_blocklist() -> Result<Arc<secure::DigestPasswordBlocklist>> {
+    let blocklist = crypto::load_password_blocklist_from_reader(std::io::Cursor::new(
+        b"sha256:2e2b24f8ee40bb847fe85bb23336a39ef5948e6b49d897419ced68766b16967a\n",
+    ))?;
+    Ok(Arc::new(blocklist))
+}
+
+fn test_password_policy() -> Result<secure::PasswordPolicy> {
+    Ok(secure::PasswordPolicy::new(test_password_blocklist()?))
+}
+
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -535,6 +546,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
             id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
         )),
         Arc::clone(&refresh_identity),
+        test_password_policy()?,
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,
@@ -720,6 +732,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "settings-config".to_string(),
     )?;
     let deps = SharedRuntimeDeps {
+        password_blocklist: test_password_blocklist()?,
         pg: pg.clone(),
         redis,
         s3,
@@ -931,6 +944,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
             id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
         )),
         refresh_for_login,
+        test_password_policy()?,
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,

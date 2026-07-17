@@ -25,6 +25,7 @@ pub struct IdentityModuleDeps<S> {
     jwt: authn::JwtIssuerConfig,
     session_ttl: Duration,
     refresh_ttl: Duration,
+    blocklist: Arc<secure::DigestPasswordBlocklist>,
 }
 
 impl<S> IdentityModuleDeps<S> {
@@ -36,6 +37,7 @@ impl<S> IdentityModuleDeps<S> {
         jwt: authn::JwtIssuerConfig,
         session_ttl: Duration,
         refresh_ttl: Duration,
+        blocklist: Arc<secure::DigestPasswordBlocklist>,
     ) -> Self {
         Self {
             pg,
@@ -44,6 +46,7 @@ impl<S> IdentityModuleDeps<S> {
             jwt,
             session_ttl,
             refresh_ttl,
+            blocklist,
         }
     }
 }
@@ -74,6 +77,7 @@ where
         jwt,
         session_ttl,
         refresh_ttl,
+        blocklist,
     } = deps;
 
     let credentials = Arc::from(DynCredentialRepo::new_box(pg.credential_repo()));
@@ -104,10 +108,12 @@ where
         boxed_clock(&clock),
         refresh_ttl,
     ));
+    let password_policy = secure::PasswordPolicy::new(blocklist);
     let login = Arc::new(LoginService::new(
         credentials,
         lifecycle,
         Arc::clone(&refresh),
+        password_policy,
         boxed_clock(&clock),
         session_ttl,
     ));
@@ -171,9 +177,14 @@ pub mod test_support {
     }
 
     /// Construct complete hermetic identity composition inputs.
-    #[must_use]
-    pub fn deps() -> IdentityModuleDeps<TestSigner> {
-        IdentityModuleDeps::new(
+    ///
+    /// # Errors
+    /// Returns an error if the embedded non-empty blocklist fixture is malformed.
+    pub fn deps() -> anyhow::Result<IdentityModuleDeps<TestSigner>> {
+        let blocklist = crypto::load_password_blocklist_from_reader(std::io::Cursor::new(
+            include_bytes!("../../../deploy/password-blocklist.demo.sha256"),
+        ))?;
+        Ok(IdentityModuleDeps::new(
             postgres::PgRuntimeHandle::for_module_test().for_domain(),
             Arc::new(TestSigner),
             Arc::new(FixedClock),
@@ -187,14 +198,15 @@ pub mod test_support {
             },
             Duration::from_secs(3_600),
             Duration::from_secs(30 * 24 * 60 * 60),
-        )
+            Arc::new(blocklist),
+        ))
     }
 
     /// Build a hermetic binding through the production [`wire`] entrypoint.
     /// # Errors
     /// Returns an error if the fixed JWT configuration is rejected.
     pub fn binding() -> anyhow::Result<bootstrap::DomainBinding> {
-        wire(deps())
+        wire(deps()?)
     }
 }
 
@@ -205,7 +217,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn test_support_binding_uses_the_public_wiring_path() {
-        let deps: IdentityModuleDeps<test_support::TestSigner> = test_support::deps();
+        let deps: IdentityModuleDeps<test_support::TestSigner> =
+            test_support::deps().expect("test dependencies build");
         let binding = wire(deps).expect("identity composition builds");
         assert_eq!(binding.name(), "identity");
 
@@ -216,7 +229,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn invalid_jwt_configuration_fails_closed() {
-        let mut deps = test_support::deps();
+        let mut deps = test_support::deps().expect("test dependencies build");
         deps.jwt.issuer.clear();
         let error = wire(deps).err().expect("empty issuer must fail");
         assert!(error.to_string().contains("jwt issuer config error"));

@@ -5,11 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 thiserror = { workspace = true }
 vocab = { path = "../vocab" }
-# 密码哈希原语（secure::password，#1188）：argon2id PHC 哈希 + 内建 constant-time 验签 + 随机盐（OsRng）。
+# 密码哈希原语（secure::password，#1188）：argon2id PHC 哈希 + constant-time digest 比较 + 有界 KDF 验签 + 随机盐（OsRng）。
 argon2 = { workspace = true }
+unicode-normalization = { workspace = true }
 # 字段级脱敏 derive（#[derive(Redact)]，#1360）：intra-base DAG 前向边 secure → securederive（layers.rs）。
 # proc-macro 生成 `::secure::…` 路径，secure 内自用经 lib.rs 的 `extern crate self as secure` 解析。
 securederive = { path = "../securederive" }

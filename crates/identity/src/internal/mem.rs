@@ -80,7 +80,7 @@ impl InMemCredentialRepo {
         }
     }
 
-    /// 以单个种子凭据构造（密码经 `secure::hash_password` 哈希，**不存明文**；version 起 1）。
+    /// 以单个种子凭据构造（密码经 test-support typed seam 哈希，**不存明文**；version 起 1）。
     /// 供 test / `seed-login`（PR4 真实登录种子）。`login` = 登录查找键，`user_id` = canonical actor
     /// subject（写 wire/audit；与 `login` 解耦，#1277 F1）。
     pub(crate) fn with_seed_credential(
@@ -89,7 +89,7 @@ impl InMemCredentialRepo {
         plaintext: &str,
         tenant: TenantId,
     ) -> Result<Self, secure::PasswordError> {
-        let hash = secure::hash_password(plaintext)?;
+        let hash = secure::PasswordHash::for_test(secure::RawPassword::new(plaintext.to_owned()))?;
         let credential = Credential::new(LoginIdentifier::new(login), user_id, tenant, hash, 1);
         let repo = Self::new();
         // key 派生自 credential（与 save 同——身份错位不可表达，F2）。
@@ -129,35 +129,52 @@ impl CredentialRepo for InMemCredentialRepo {
         &self,
         scope: TenantRepoScope,
         login: LoginIdentifier,
-        candidate: String,
+        candidate: secure::RawPassword,
         now: SystemTime,
     ) -> Result<AuthOutcome, IdentityError> {
         let tenant = scope.tenant();
-        // 恒定成本验签（F3）：先克隆出 (hash, user_id) 释放 creds 锁，经 secure::verify_password_constant_time——
-        // 查无凭据也跑等价 argon2 KDF，消登录枚举时序差。再据「已知/未知」+「验签成败」原子分流（F1+F2）。
         // INVARIANT: MEM-LOCK-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }— creds 锁与 lockouts 锁**不交叉持有**：creds guard 在下方 `.map()`
-        // 临时表达式结束即析构释放，KDF 在两锁之外计算，之后才取 lockouts 锁。重构勿引入同时持两锁（防死锁）。
         let key = (tenant, login);
         let found = recover(&self.creds)
             .get(&key)
             .map(|c| (c.password_hash().clone(), c.user_id()));
-        let ok = secure::verify_password_constant_time(&candidate, found.as_ref().map(|(h, _)| h));
-        Ok(match (found, ok) {
+        let verification = secure::verify_password(
+            candidate,
+            found.as_ref().map(|(password_hash, _)| password_hash),
+        )
+        .map_err(|error| IdentityError::Storage(Box::new(error)))?;
+        Ok(match (found, verification) {
             // 已知 + 正确：成功重置失败计数（原子清锁内 RMW），返回 canonical actor subject。
-            (Some((_, user_id)), true) => {
+            (Some((expected_hash, user_id)), secure::PasswordVerification::Verified(receipt)) => {
+                let mut credentials = recover(&self.creds);
+                let Some(current) = credentials.get_mut(&key) else {
+                    return Err(IdentityError::VersionConflict);
+                };
+                if current.password_hash() == &expected_hash
+                    && let Some(replacement) = receipt.upgraded_hash()
+                {
+                    let replaced = current.replace_hash_if_unchanged(&expected_hash, replacement);
+                    debug_assert!(replaced, "hash equality checked under the credential lock");
+                }
+                drop(credentials);
                 recover(&self.lockouts).remove(&key);
                 AuthOutcome::Authenticated(user_id)
             }
             // 已知 + 错：原子推进 lockout（锁内 RMW，达阈值即锁）；对外仍 InvalidCredentials。
-            (Some(_), false) => {
+            (Some(_), secure::PasswordVerification::Invalid) => {
                 recover(&self.lockouts)
                     .entry(key)
                     .or_insert_with(|| AccountLockout::new(now))
                     .record_failure(now);
                 AuthOutcome::InvalidKnownUser
             }
-            // 查无凭据：KDF 已跑（防枚举时序差），但**不建/不动** lockout 态（F2：未知主体不可预置锁定/不撑大表）。
-            (None, _) => AuthOutcome::InvalidUnknown,
+            // 查无凭据：当前档 KDF 已跑以关闭零 KDF 快路径，但**不建/不动** lockout 态（F2：未知主体不可预置锁定/不撑大表）。
+            (None, secure::PasswordVerification::Invalid) => AuthOutcome::InvalidUnknown,
+            (None, secure::PasswordVerification::Verified(_)) => {
+                return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                    "credential verification invariant violated",
+                ))));
+            }
         })
     }
 
@@ -1117,7 +1134,7 @@ impl RefreshTokenStore for InMemRefreshTokenStore {
 mod tests {
     use super::{
         Credential, InMemCredentialRepo, InMemPolicyRepo, InMemResourceAttributeRepo,
-        InMemRoleBindingLifecycle, InMemSessionLifecycle, TenantId,
+        InMemRoleBindingLifecycle, InMemSessionLifecycle, TenantId, recover,
     };
     use crate::domain::{
         AttributeValue, AuthOutcome, IdentityError, LoginIdentifier, Policy, PolicyId,
@@ -1158,12 +1175,26 @@ mod tests {
         LoginIdentifier::new(raw)
     }
 
+    fn raw(password: &str) -> secure::RawPassword {
+        secure::RawPassword::new(password.to_owned())
+    }
+
+    fn verifies(credential: &Credential, password: &str) -> bool {
+        matches!(
+            credential
+                .verify_password(raw(password))
+                .expect("stored test PHC is valid"),
+            secure::PasswordVerification::Verified(_)
+        )
+    }
+
     fn cred(login: &str, user: &str, password: &str, version: u32, tenant: TenantId) -> Credential {
         Credential::new(
             LoginIdentifier::new(login),
             uid(user),
             tenant,
-            secure::hash_password(password).expect("hash"),
+            secure::PasswordHash::for_test(secure::RawPassword::new(password.to_owned()))
+                .expect("hash"),
             version,
         )
     }
@@ -1293,25 +1324,97 @@ mod tests {
         let now = epoch(1_000);
         // 已知 + 正确 → Authenticated(canonical user id)。
         assert_eq!(
-            repo.authenticate(scope(t), lid("alice"), "correct".to_string(), now)
+            repo.authenticate(scope(t), lid("alice"), raw("correct"), now)
                 .await
                 .expect("auth"),
             AuthOutcome::Authenticated(uid(USER_ALICE))
         );
         // 已知 + 错 → InvalidKnownUser。
         assert_eq!(
-            repo.authenticate(scope(t), lid("alice"), "wrong".to_string(), now)
+            repo.authenticate(scope(t), lid("alice"), raw("wrong"), now)
                 .await
                 .expect("auth"),
             AuthOutcome::InvalidKnownUser
         );
-        // 查无主体 → InvalidUnknown（恒定成本 KDF 仍跑，F3；不 panic）。
+        // 查无主体 → InvalidUnknown（当前档 KDF 仍跑，F3；不 panic）。
         assert_eq!(
-            repo.authenticate(scope(t), lid("ghost"), "correct".to_string(), now)
+            repo.authenticate(scope(t), lid("ghost"), raw("correct"), now)
                 .await
                 .expect("auth"),
             AuthOutcome::InvalidUnknown
         );
+    }
+
+    #[tokio::test]
+    async fn authenticate_upgrades_weak_phc_without_bumping_credential_version() {
+        let repo = InMemCredentialRepo::new();
+        let tenant = tid(TENANT_A);
+        let weak = secure::PasswordHash::for_test_with_params(raw("correct"), 1_024, 1, 1)
+            .expect("weak test PHC");
+        let before = weak.as_str().to_owned();
+        repo.save(
+            scope(tenant),
+            Credential::new(lid("alice"), uid(USER_ALICE), tenant, weak, 7),
+        )
+        .await
+        .expect("save weak credential");
+
+        assert_eq!(
+            repo.authenticate(scope(tenant), lid("alice"), raw("correct"), epoch(1_000))
+                .await
+                .expect("authenticate"),
+            AuthOutcome::Authenticated(uid(USER_ALICE))
+        );
+        let upgraded = repo
+            .find_by_user_id(scope(tenant), uid(USER_ALICE))
+            .await
+            .expect("find")
+            .expect("credential");
+        assert_eq!(
+            upgraded.version(),
+            7,
+            "transparent rehash is not a logical change"
+        );
+        assert_ne!(upgraded.password_hash().as_str(), before);
+        assert!(!upgraded.password_hash().needs_rehash().expect("valid PHC"));
+        assert!(verifies(&upgraded, "correct"));
+    }
+
+    #[tokio::test]
+    async fn stale_rehash_replacement_is_rejected_without_changing_the_winner() {
+        let repo = InMemCredentialRepo::new();
+        let tenant = tid(TENANT_A);
+        let weak = secure::PasswordHash::for_test_with_params(raw("correct"), 1_024, 1, 1)
+            .expect("weak test PHC");
+        let expected = weak.clone();
+        repo.save(
+            scope(tenant),
+            Credential::new(lid("alice"), uid(USER_ALICE), tenant, weak, 11),
+        )
+        .await
+        .expect("save weak credential");
+
+        let first = secure::PasswordHash::for_test(raw("correct")).expect("first replacement");
+        let winner = first.as_str().to_owned();
+        let stale = secure::PasswordHash::for_test(raw("correct")).expect("stale replacement");
+        {
+            let mut credentials = recover(&repo.creds);
+            let current = credentials
+                .get_mut(&(tenant, lid("alice")))
+                .expect("stored credential");
+            assert!(current.replace_hash_if_unchanged(&expected, first));
+            assert!(!current.replace_hash_if_unchanged(&expected, stale));
+        }
+
+        let upgraded = repo
+            .find_by_user_id(scope(tenant), uid(USER_ALICE))
+            .await
+            .expect("find")
+            .expect("credential");
+        assert_eq!(upgraded.version(), 11);
+        assert_eq!(upgraded.password_hash().as_str(), winner);
+        assert!(!upgraded.password_hash().needs_rehash().expect("valid PHC"));
+        assert!(verifies(&upgraded, "correct"));
     }
 
     #[tokio::test]
@@ -1328,7 +1431,7 @@ mod tests {
         let now = epoch(1_000);
         for i in 0..50 {
             assert_eq!(
-                repo.authenticate(scope(t), lid(&format!("ghost-{i}")), "x".to_string(), now)
+                repo.authenticate(scope(t), lid(&format!("ghost-{i}")), raw("x"), now)
                     .await
                     .expect("auth"),
                 AuthOutcome::InvalidUnknown
@@ -1340,7 +1443,7 @@ mod tests {
             "未知主体失败不建锁定态（lockout 表不随枚举增长，F2）"
         );
         // 对比：已知主体失败才建恰一条。
-        repo.authenticate(scope(t), lid("alice"), "wrong".to_string(), now)
+        repo.authenticate(scope(t), lid("alice"), raw("wrong"), now)
             .await
             .expect("auth");
         assert_eq!(repo.lockout_len(), 1, "已知主体失败建恰一条 lockout 态");
@@ -1366,7 +1469,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            repo.authenticate(scope(other), lid("alice"), "correct".to_string(), t0)
+            repo.authenticate(scope(other), lid("alice"), raw("correct"), t0)
                 .await
                 .expect("auth"),
             AuthOutcome::InvalidUnknown
@@ -1377,7 +1480,7 @@ mod tests {
             repo.authenticate(
                 scope(a),
                 lid("alice"),
-                "wrong".to_string(),
+                raw("wrong"),
                 t0 + Duration::from_secs(i),
             )
             .await
@@ -1419,7 +1522,7 @@ mod tests {
             .expect("find")
             .expect("some");
         assert_eq!(still.version(), 1);
-        assert!(still.verify_password("pw"));
+        assert!(verifies(&still, "pw"));
     }
 
     #[tokio::test]
@@ -1450,7 +1553,7 @@ mod tests {
             .expect("find")
             .expect("some");
         assert_eq!(found.version(), 2);
-        assert!(found.verify_password("pw2"));
+        assert!(verifies(&found, "pw2"));
         // 查无凭据 → CredentialNotFound。
         let missing = repo
             .apply_password_change(
@@ -1645,7 +1748,7 @@ mod tests {
                 repo.authenticate(
                     scope(t),
                     lid("alice"),
-                    "wrong".to_string(),
+                    raw("wrong"),
                     t0 + Duration::from_secs(i)
                 )
                 .await
@@ -1665,7 +1768,7 @@ mod tests {
         repo.authenticate(
             scope(t),
             lid("alice"),
-            "wrong".to_string(),
+            raw("wrong"),
             t0 + Duration::from_secs(5),
         )
         .await
@@ -1692,7 +1795,7 @@ mod tests {
             repo.authenticate(
                 scope(t),
                 lid("alice"),
-                "wrong".to_string(),
+                raw("wrong"),
                 t0 + Duration::from_secs(i),
             )
             .await
@@ -1724,7 +1827,7 @@ mod tests {
         // 解锁后再失败从 1 重计（不沿用旧计数）→ InvalidKnownUser、未锁。
         let after = lock_at + lock_ttl + Duration::from_secs(2);
         assert_eq!(
-            repo.authenticate(scope(t), lid("alice"), "wrong".to_string(), after)
+            repo.authenticate(scope(t), lid("alice"), raw("wrong"), after)
                 .await
                 .expect("auth"),
             AuthOutcome::InvalidKnownUser
@@ -1755,7 +1858,7 @@ mod tests {
                 repo.authenticate(
                     scope(t),
                     lid("alice"),
-                    "wrong".to_string(),
+                    raw("wrong"),
                     t0 + Duration::from_secs(i)
                 )
                 .await
@@ -1769,7 +1872,7 @@ mod tests {
             repo.authenticate(
                 scope(t),
                 lid("alice"),
-                "correct".to_string(),
+                raw("correct"),
                 t0 + Duration::from_secs(5)
             )
             .await

@@ -1,6 +1,6 @@
 //! identity 应用层：登录编排（哈希凭据 + lockout + L2 co-tx）/ 密码变更（CAS）/ logout（软撤销），#1189。
 //!
-//! 登录路径（PR4 + #1277，F4 reorder）：lockout 门控 → 恒定成本验签 + 原子锁定记账（`authenticate` →
+//! 登录路径（PR4 + #1277，F4 reorder）：lockout 门控 → 有界 KDF 验签 + 原子锁定记账（`authenticate` →
 //! `AuthOutcome` 分流：已知+错推进 lockout、未知不建锁、成功清零）→ mint 会话数据（session_id/payload/
 //! entry/envelope，local，no I/O）→ **首发 token mint**（`issue_initial`，先于 co-tx，F4）→ **co-tx**
 //! （[`Session`] 持久化 + `identity.session-created` outbox append 同一事务，经
@@ -105,8 +105,8 @@ use generated::event::identity_v1::session_created::{
 use primitives::ListenerKind;
 use uuid::Uuid;
 use vocab::{
-    CoreError, CoreErrorKind, GrantPermission, HttpRouteAuth, ProjectionField, RoutePermissionId,
-    TenantId,
+    CoreError, CoreErrorKind, GrantPermission, HttpRouteAuth, ProjectionField, PublicDetail,
+    RoutePermissionId, TenantId,
 };
 
 use crate::domain::{
@@ -147,6 +147,11 @@ pub const LOGIN_ROUTE_PREFIX: &str = "/api/v1/identity";
 /// JWT 署名用途字面量（seed-login / test 路径；≥ 3 处使用，rust-standards §工程护栏抽 const）。
 #[cfg(any(test, feature = "seed-login"))]
 pub(crate) const SEED_JWT_PURPOSE: &str = "auth.jwt.access";
+
+#[cfg(test)]
+pub(crate) fn seed_password_policy() -> secure::PasswordPolicy {
+    secure::PasswordPolicy::for_test("passwordpassword", &[])
+}
 
 /// 登录失败。库错误枚举（const-literal message，不返回 HTTP 状态码——handler 层映射，error-handling.md）。
 #[derive(Debug, thiserror::Error)]
@@ -193,6 +198,9 @@ pub enum ChangePasswordError {
     /// 新密码哈希失败（argon2 处理失败，理论极少触发）。
     #[error("password hash failed")]
     Hash,
+    /// 新密码未通过固定长度或 compromised-password policy。
+    #[error("password policy rejected")]
+    Policy(#[source] secure::PasswordPolicyError),
     /// 凭据仓储操作失败。
     #[error("credential store error")]
     Store(#[source] IdentityError),
@@ -222,17 +230,19 @@ pub struct LoginService<S> {
     credentials: Arc<DynCredentialRepo<'static>>,
     lifecycle: Arc<DynSessionLifecycle<'static>>,
     refresh: Arc<RefreshService<S>>,
+    password_policy: secure::PasswordPolicy,
     clock: Box<dyn Clock>,
     session_ttl: Duration,
 }
 
 impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
-    /// 组合根构造：4 必填依赖位置参（缺失即编译错误）+ 会话 ttl。`lifecycle` 是单一会话生命周期 provider
+    /// 组合根构造：5 必填依赖位置参（缺失即编译错误）+ 会话 ttl。`lifecycle` 是单一会话生命周期 provider
     /// （create/find/logout 同源，#1278）；`refresh` 承载首发 token 签发（#1252）。
     pub fn new(
         credentials: Arc<DynCredentialRepo<'static>>,
         lifecycle: Arc<DynSessionLifecycle<'static>>,
         refresh: Arc<RefreshService<S>>,
+        password_policy: secure::PasswordPolicy,
         clock: Box<dyn Clock>,
         session_ttl: Duration,
     ) -> Self {
@@ -240,6 +250,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             credentials,
             lifecycle,
             refresh,
+            password_policy,
             clock,
             session_ttl,
         }
@@ -248,12 +259,13 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
     /// 种子构造（test/seed-login 门控）：哈希凭据种子 + 注入的会话生命周期 provider。
     /// 明文 `password` 仅入参，经 argon2 哈希入库，不存明文。
     #[cfg(any(test, feature = "seed-login"))]
-    // reason: seed-login 构造器含 8 个必填位置参（lifecycle/refresh/clock/ttl/login/user_id/password/tenant），
+    // reason: seed-login 构造器含 9 个必填位置参（lifecycle/refresh/password_policy/clock/ttl/login/user_id/password/tenant），
     // 每个均为不可省略的域依赖，不拆 builder（YAGNI；test-only / seed-login feature-gated，非业务 public API）。
     #[allow(clippy::too_many_arguments)]
     pub fn with_seed_credential(
         lifecycle: Arc<DynSessionLifecycle<'static>>,
         refresh: Arc<RefreshService<S>>,
+        password_policy: secure::PasswordPolicy,
         clock: Box<dyn Clock>,
         session_ttl: Duration,
         login: impl Into<String>,
@@ -271,12 +283,13 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             Arc::from(crate::ports::DynCredentialRepo::new_box(creds)),
             lifecycle,
             refresh,
+            password_policy,
             clock,
             session_ttl,
         ))
     }
 
-    /// 登录：lockout 门控 → 恒定成本验签 + 原子锁定记账（`authenticate`）→ 据 [`AuthOutcome`] 分流 →
+    /// 登录：lockout 门控 → 有界 KDF 验签 + 原子锁定记账（`authenticate`）→ 据 [`AuthOutcome`] 分流 →
     /// mint 会话数据 → **首发 token mint**（`issue_initial`，先于 co-tx，F4 reorder）→ co-tx（session + outbox）→ 返回响应。
     ///
     /// `tenant` 已由 handler 从 `X-Tenant-ID` header parse，不在本方法重新 parse。`request.username` 仅作
@@ -311,11 +324,16 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             return Err(LoginError::InvalidCredentials);
         }
 
-        // 2. 恒定成本验签 + 原子锁定记账（F1+F2）：provider 据 outcome 分流——已知+错已推进 lockout、
+        // 2. 有界 KDF 验签 + 原子锁定记账（F1+F2）：provider 据 outcome 分流——已知+错已推进 lockout、
         //    未知不建锁、成功清零并返回 canonical actor subject；对外一律 InvalidCredentials（防枚举）。
         let user_id = match self
             .credentials
-            .authenticate(tenant_scope, login, request.password, now)
+            .authenticate(
+                tenant_scope,
+                login,
+                secure::RawPassword::new(request.password),
+                now,
+            )
             .await
             .map_err(LoginError::Credential)?
         {
@@ -428,17 +446,27 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             .await
             .map_err(ChangePasswordError::Store)?
         else {
-            // F3 等价成本盲化：查无凭据仍跑等价 argon2，消除 NotFound 与 InvalidCredentials 的账户枚举
-            // 时序差（与 login 路径 `verify_password_constant_time` 同源防御；身份锚点 = 认证主体 user_id，请求不可选目标账号）。
-            let _ = secure::verify_password_constant_time(&current_password, None);
+            // F3 工作下限：查无凭据仍跑当前 profile KDF，关闭 NotFound 的零 KDF 快路径；变量 PHC
+            // profile 不承诺严格等时（与 login 路径 typed `verify_password` 同源；身份锚点 = 认证主体 user_id）。
+            secure::verify_password(secure::RawPassword::new(current_password), None)
+                .map_err(|_| ChangePasswordError::Hash)?;
             return Err(ChangePasswordError::NotFound);
         };
-        if !credential.verify_password(&current_password) {
+        if !matches!(
+            credential
+                .verify_password(secure::RawPassword::new(current_password))
+                .map_err(|_| ChangePasswordError::Hash)?,
+            secure::PasswordVerification::Verified(_)
+        ) {
             return Err(ChangePasswordError::InvalidCredentials);
         }
-        let new_hash =
-            secure::hash_password(&new_password).map_err(|_| ChangePasswordError::Hash)?;
-        let next = credential.rotate(new_hash);
+        let validated = self
+            .password_policy
+            .validate(secure::RawPassword::new(new_password))
+            .map_err(ChangePasswordError::Policy)?;
+        let next = credential
+            .rotate(validated)
+            .map_err(|_| ChangePasswordError::Hash)?;
         self.credentials
             .apply_password_change(
                 tenant_scope,
@@ -2442,7 +2470,7 @@ async fn password_change_handler<S: diport::Signer + Send + Sync + 'static>(
             auth.tenant,
             auth.user_id,
             request.current_password,
-            request.new_password,
+            request.new_password.into(),
         )
         .await
     {
@@ -2612,6 +2640,7 @@ fn password_error_response(
         ChangePasswordError::InvalidCredentials => CoreErrorKind::Forbidden,
         ChangePasswordError::NotFound => CoreErrorKind::NotFound,
         ChangePasswordError::VersionConflict => CoreErrorKind::VersionConflict,
+        ChangePasswordError::Policy(_) => CoreErrorKind::Validation,
         ChangePasswordError::Hash | ChangePasswordError::Store(_) => CoreErrorKind::Internal,
     };
     if matches!(kind, CoreErrorKind::Internal) {
@@ -2623,6 +2652,13 @@ fn password_error_response(
             contract_id = PASSWORD_CHANGE_HTTP_SPEC.route.contract_id(),
             operation = "password_change",
             "identity password change failed"
+        );
+    }
+    if let ChangePasswordError::Policy(policy) = err {
+        return httpserve::error::core_error_response(
+            &CoreError::new(kind)
+                .with_details(PublicDetail::Str("reason", policy.reason().to_string())),
+            request_id,
         );
     }
     core_response(kind, request_id)
@@ -2926,7 +2962,7 @@ mod tests {
             &self,
             scope: TenantRepoScope,
             login: LoginIdentifier,
-            candidate: String,
+            candidate: secure::RawPassword,
             now: SystemTime,
         ) -> Result<AuthOutcome, IdentityError> {
             self.calls.authenticate.fetch_add(1, Ordering::SeqCst);
@@ -3136,6 +3172,13 @@ mod tests {
         ids::UserId::parse(raw).expect("canonical user id")
     }
 
+    fn credential_matches(credential: &Credential, password: &str) -> bool {
+        matches!(
+            credential.verify_password(secure::RawPassword::new(password.to_string())),
+            Ok(secure::PasswordVerification::Verified(_))
+        )
+    }
+
     /// 构造用 with_seed_credential 的 LoginService（默认 CANON_TENANT + 登录标识 alice / canonical
     /// CANON_USER / correct-horse）。内置独立 in-mem RefreshService（#1252 新 2nd arg）。
     fn seed_service(
@@ -3152,6 +3195,7 @@ mod tests {
         LoginService::with_seed_credential(
             Arc::from(DynSessionLifecycle::new_box(capture.clone())),
             refresh,
+            seed_password_policy(),
             make_clock(now_secs),
             Duration::from_secs(ttl_secs),
             "alice",
@@ -3174,6 +3218,7 @@ mod tests {
                 make_clock(1_000),
                 Duration::from_secs(2_592_000),
             )),
+            seed_password_policy(),
             make_clock(1_000),
             Duration::from_secs(3_600),
         )
@@ -3204,6 +3249,7 @@ mod tests {
             LoginService::with_seed_credential(
                 Arc::from(DynSessionLifecycle::new_box(capture)),
                 Arc::clone(&refresh),
+                seed_password_policy(),
                 make_clock(now_secs),
                 Duration::from_secs(ttl_secs),
                 "alice",
@@ -3685,6 +3731,7 @@ mod tests {
                     CapturingSessionLifecycle::default(),
                 )),
                 Arc::clone(&refresh),
+                seed_password_policy(),
                 make_clock(1_000),
                 Duration::from_secs(3_600),
                 "alice",
@@ -4617,7 +4664,7 @@ mod tests {
             tid(CANON_TENANT),
             uid(CANON_USER),
             "correct-horse".to_string(),
-            "new-pw".to_string(),
+            "new-password-phrase".to_string(),
         )
         .await
         .expect("change_password ok");
@@ -4628,7 +4675,7 @@ mod tests {
                 tid(CANON_TENANT),
                 IdentityLoginRequest {
                     username: "alice".to_string(),
-                    password: "new-pw".to_string(),
+                    password: "new-password-phrase".to_string(),
                 },
             )
             .await
@@ -4750,7 +4797,7 @@ mod tests {
             tid(CANON_TENANT),
             uid(CANON_USER),
             "correct-horse".to_string(),
-            "new-pw".to_string(),
+            "new-password-phrase".to_string(),
         )
         .await
         .expect("change by canonical user_id ok");
@@ -4760,7 +4807,7 @@ mod tests {
             .change_password(
                 tid(CANON_TENANT),
                 uid(GHOST_USER),
-                "new-pw".to_string(),
+                "new-password-phrase".to_string(),
                 "x".to_string(),
             )
             .await
@@ -4772,7 +4819,7 @@ mod tests {
             tid(CANON_TENANT),
             IdentityLoginRequest {
                 username: "alice".to_string(),
-                password: "new-pw".to_string(),
+                password: "new-password-phrase".to_string(),
             },
         )
         .await
@@ -7683,7 +7730,7 @@ mod tests {
             router,
             ContractRequest::post("/password/change").json(&IdentityPasswordChangeRequest {
                 current_password: "correct-horse".to_string(),
-                new_password: "new-correct-horse".to_string(),
+                new_password: "new-correct-horse".try_into().expect("valid new password"),
             }),
         )
         .await
@@ -7696,7 +7743,7 @@ mod tests {
         assert_eq!(probe.bump_commits(), 1);
         let stored = probe.stored_credential().await;
         assert_eq!(stored.version(), 2);
-        assert!(stored.verify_password("new-correct-horse"));
+        assert!(credential_matches(&stored, "new-correct-horse"));
     }
 
     #[tokio::test]
@@ -7717,7 +7764,7 @@ mod tests {
             router,
             ContractRequest::post("/password/change").json(&IdentityPasswordChangeRequest {
                 current_password: "wrong-current".to_string(),
-                new_password: "new-correct-horse".to_string(),
+                new_password: "new-correct-horse".try_into().expect("valid new password"),
             }),
         )
         .await
@@ -7729,8 +7776,133 @@ mod tests {
         assert_eq!(probe.bump_commits(), 0);
         let stored = probe.stored_credential().await;
         assert_eq!(stored.version(), before.version());
-        assert!(stored.verify_password("correct-horse"));
-        assert!(!stored.verify_password("new-correct-horse"));
+        assert!(credential_matches(&stored, "correct-horse"));
+        assert!(!credential_matches(&stored, "new-correct-horse"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn password_change_policy_rejection_is_400_and_current_password_wins() {
+        for (current, new_password, status, code, expected_reason) in [
+            (
+                "correct-horse",
+                "a".repeat(14),
+                StatusCode::BAD_REQUEST,
+                "ERR_CORE_VALIDATION",
+                Some("too_short"),
+            ),
+            (
+                "correct-horse",
+                "a".repeat(65),
+                StatusCode::BAD_REQUEST,
+                "ERR_CORE_VALIDATION",
+                Some("too_long"),
+            ),
+            (
+                "correct-horse",
+                "passwordpassword".to_string(),
+                StatusCode::BAD_REQUEST,
+                "ERR_CORE_VALIDATION",
+                Some("compromised"),
+            ),
+            (
+                "wrong-current",
+                "a".repeat(14),
+                StatusCode::FORBIDDEN,
+                "ERR_CORE_FORBIDDEN",
+                None,
+            ),
+            (
+                "wrong-current",
+                "passwordpassword".to_string(),
+                StatusCode::FORBIDDEN,
+                "ERR_CORE_FORBIDDEN",
+                None,
+            ),
+        ] {
+            let capture = CapturingSessionLifecycle::default();
+            let probe = CredentialRepoProbe::seeded(false);
+            let svc = Arc::new(probed_service(probe.clone(), &capture));
+            let router = with_auth(
+                axum::Router::new().route(
+                    "/password/change",
+                    post(password_change_handler::<TestSigner>).with_state(self_service_state(svc)),
+                ),
+                user_evidence(CANON_USER),
+            );
+            let response = testkit::call(
+                router,
+                ContractRequest::post("/password/change").json(&serde_json::json!({
+                    "currentPassword": current,
+                    "newPassword": new_password,
+                })),
+            )
+            .await
+            .expect("call");
+            response.ensure_error(status, code).expect("mapped error");
+            assert_eq!(probe.bump_attempts(), 0, "policy failure performs zero CAS");
+            let wire = response.wire_error().expect("wire error");
+            match expected_reason {
+                Some(reason) => assert_eq!(wire.details, [serde_json::json!({"reason": reason})]),
+                None => assert!(
+                    wire.details.is_empty(),
+                    "wrong current password must not expose policy status"
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn password_change_rejects_presented_65_code_points_before_policy_oracle_exposure() {
+        let raw_password = format!("{}e\u{301}", "a".repeat(63));
+        assert_eq!(
+            raw_password.chars().count(),
+            65,
+            "transport proof must exceed maxLength"
+        );
+        for (current, status, code, reason) in [
+            (
+                "correct-horse",
+                StatusCode::BAD_REQUEST,
+                "ERR_CORE_VALIDATION",
+                Some("too_long"),
+            ),
+            (
+                "wrong-current",
+                StatusCode::FORBIDDEN,
+                "ERR_CORE_FORBIDDEN",
+                None,
+            ),
+        ] {
+            let capture = CapturingSessionLifecycle::default();
+            let probe = CredentialRepoProbe::seeded(false);
+            let svc = Arc::new(probed_service(probe.clone(), &capture));
+            let router = with_auth(
+                axum::Router::new().route(
+                    "/password/change",
+                    post(password_change_handler::<TestSigner>).with_state(self_service_state(svc)),
+                ),
+                user_evidence(CANON_USER),
+            );
+            let response = testkit::call(
+                router,
+                ContractRequest::post("/password/change").json(&serde_json::json!({
+                    "currentPassword": current,
+                    "newPassword": raw_password.clone(),
+                })),
+            )
+            .await
+            .expect("call");
+
+            response.ensure_error(status, code).expect("mapped error");
+            assert_eq!(probe.bump_attempts(), 0);
+            let wire = response.wire_error().expect("wire error");
+            match reason {
+                Some(reason) => assert_eq!(wire.details, [serde_json::json!({"reason": reason})]),
+                None => assert!(wire.details.is_empty()),
+            }
+        }
     }
 
     #[tokio::test]
@@ -7757,7 +7929,7 @@ mod tests {
                 ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path()).json(
                     &IdentityPasswordChangeRequest {
                         current_password: "correct-horse".to_string(),
-                        new_password: "new-correct-horse".to_string(),
+                        new_password: "new-correct-horse".try_into().expect("valid new password"),
                     },
                 ),
             )
@@ -7784,7 +7956,7 @@ mod tests {
                 ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path()).json(
                     &IdentityPasswordChangeRequest {
                         current_password: "correct-horse".to_string(),
-                        new_password: "new-correct-horse".to_string(),
+                        new_password: "new-correct-horse".try_into().expect("valid new password"),
                     },
                 ),
             )
@@ -7823,7 +7995,7 @@ mod tests {
             ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path()).json(
                 &IdentityPasswordChangeRequest {
                     current_password: CURRENT_PASSWORD.to_string(),
-                    new_password: NEW_PASSWORD.to_string(),
+                    new_password: NEW_PASSWORD.try_into().expect("valid new password"),
                 },
             ),
         )
@@ -7838,8 +8010,8 @@ mod tests {
         assert_eq!(probe.bump_commits(), 0);
         let stored = probe.stored_credential().await;
         assert_eq!(stored.version(), before.version());
-        assert!(stored.verify_password(CURRENT_PASSWORD));
-        assert!(!stored.verify_password(NEW_PASSWORD));
+        assert!(credential_matches(&stored, CURRENT_PASSWORD));
+        assert!(!credential_matches(&stored, NEW_PASSWORD));
         let rendered = String::from_utf8_lossy(resp.body_bytes());
         for secret in [CURRENT_PASSWORD, NEW_PASSWORD] {
             assert!(
@@ -9013,6 +9185,7 @@ mod tests {
         let svc = LoginService::with_seed_credential(
             Arc::from(DynSessionLifecycle::new_box(capture.clone())),
             refresh_svc,
+            seed_password_policy(),
             make_clock(1_700_000_000),
             Duration::from_secs(3_600),
             "alice",
@@ -9062,6 +9235,7 @@ mod tests {
         let login_svc = LoginService::with_seed_credential(
             Arc::from(DynSessionLifecycle::new_box(capture)),
             Arc::clone(&refresh_svc),
+            seed_password_policy(),
             make_clock(1_700_000_000),
             Duration::from_secs(3_600),
             "alice",

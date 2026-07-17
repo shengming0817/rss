@@ -31,7 +31,8 @@ pub use envelope::{
     CipherAlg, CiphertextEnvelope, ENVELOPE_VERSION, EncryptionMode, EnvelopeError,
 };
 pub use password::{
-    PasswordError, PasswordHash, hash_password, verify_password, verify_password_constant_time,
+    DigestPasswordBlocklist, PasswordError, PasswordHash, PasswordPolicy, PasswordPolicyError,
+    PasswordVerification, RawPassword, ValidatedPassword, VerifiedPassword, verify_password,
 };
 pub use pathsafe::is_safe_segment;
 pub use protection::{AadError, DerivedAad, ProtectionAad, ProtectionContext};

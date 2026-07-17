@@ -296,6 +296,8 @@ pub const secure::envelope::ENVELOPE_VERSION: u8
 pub mod secure::password
 #[non_exhaustive] pub enum secure::password::PasswordError
 pub secure::password::PasswordError::Hash
+pub secure::password::PasswordError::InvalidStoredHash
+pub secure::password::PasswordError::UnsupportedProfile
 impl core::error::Error for secure::password::PasswordError
 impl core::fmt::Debug for secure::password::PasswordError
 pub fn secure::password::PasswordError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -308,9 +310,58 @@ impl core::marker::Unpin for secure::password::PasswordError
 impl core::marker::UnsafeUnpin for secure::password::PasswordError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordError
 impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordError
+#[non_exhaustive] pub enum secure::password::PasswordPolicyError
+pub secure::password::PasswordPolicyError::Compromised
+pub secure::password::PasswordPolicyError::TooLong
+pub secure::password::PasswordPolicyError::TooShort
+impl secure::password::PasswordPolicyError
+pub const fn secure::password::PasswordPolicyError::reason(self) -> &'static str
+impl core::clone::Clone for secure::password::PasswordPolicyError
+pub fn secure::password::PasswordPolicyError::clone(&self) -> secure::password::PasswordPolicyError
+impl core::cmp::Eq for secure::password::PasswordPolicyError
+impl core::cmp::PartialEq for secure::password::PasswordPolicyError
+pub fn secure::password::PasswordPolicyError::eq(&self, &secure::password::PasswordPolicyError) -> bool
+impl core::error::Error for secure::password::PasswordPolicyError
+impl core::fmt::Debug for secure::password::PasswordPolicyError
+pub fn secure::password::PasswordPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::password::PasswordPolicyError
+pub fn secure::password::PasswordPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::password::PasswordPolicyError
+impl core::marker::StructuralPartialEq for secure::password::PasswordPolicyError
+impl core::marker::Freeze for secure::password::PasswordPolicyError
+impl core::marker::Send for secure::password::PasswordPolicyError
+impl core::marker::Sync for secure::password::PasswordPolicyError
+impl core::marker::Unpin for secure::password::PasswordPolicyError
+impl core::marker::UnsafeUnpin for secure::password::PasswordPolicyError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordPolicyError
+impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordPolicyError
+pub enum secure::password::PasswordVerification
+pub secure::password::PasswordVerification::Invalid
+pub secure::password::PasswordVerification::Verified(secure::password::VerifiedPassword)
+impl core::marker::Freeze for secure::password::PasswordVerification
+impl core::marker::Send for secure::password::PasswordVerification
+impl core::marker::Sync for secure::password::PasswordVerification
+impl core::marker::Unpin for secure::password::PasswordVerification
+impl core::marker::UnsafeUnpin for secure::password::PasswordVerification
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordVerification
+impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordVerification
+pub struct secure::password::DigestPasswordBlocklist
+impl secure::password::DigestPasswordBlocklist
+pub fn secure::password::DigestPasswordBlocklist::from_nonempty_sha256_digests([u8; 32], impl core::iter::traits::collect::IntoIterator<Item = [u8; 32]>) -> Self
+impl core::fmt::Debug for secure::password::DigestPasswordBlocklist
+pub fn secure::password::DigestPasswordBlocklist::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::password::DigestPasswordBlocklist
+impl core::marker::Send for secure::password::DigestPasswordBlocklist
+impl core::marker::Sync for secure::password::DigestPasswordBlocklist
+impl core::marker::Unpin for secure::password::DigestPasswordBlocklist
+impl core::marker::UnsafeUnpin for secure::password::DigestPasswordBlocklist
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::DigestPasswordBlocklist
+impl core::panic::unwind_safe::UnwindSafe for secure::password::DigestPasswordBlocklist
 pub struct secure::password::PasswordHash(_)
 impl secure::password::PasswordHash
 pub fn secure::password::PasswordHash::as_str(&self) -> &str
+pub fn secure::password::PasswordHash::from_validated(secure::password::ValidatedPassword) -> core::result::Result<Self, secure::password::PasswordError>
+pub fn secure::password::PasswordHash::needs_rehash(&self) -> core::result::Result<bool, secure::password::PasswordError>
 pub fn secure::password::PasswordHash::parse(&str) -> core::result::Result<Self, secure::password::PasswordError>
 impl core::clone::Clone for secure::password::PasswordHash
 pub fn secure::password::PasswordHash::clone(&self) -> secure::password::PasswordHash
@@ -329,9 +380,54 @@ impl core::marker::Unpin for secure::password::PasswordHash
 impl core::marker::UnsafeUnpin for secure::password::PasswordHash
 impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordHash
 impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordHash
-pub fn secure::password::hash_password(&str) -> core::result::Result<secure::password::PasswordHash, secure::password::PasswordError>
-pub fn secure::password::verify_password(&str, &secure::password::PasswordHash) -> bool
-pub fn secure::password::verify_password_constant_time(&str, core::option::Option<&secure::password::PasswordHash>) -> bool
+pub struct secure::password::PasswordPolicy
+impl secure::password::PasswordPolicy
+pub fn secure::password::PasswordPolicy::new(alloc::sync::Arc<secure::password::DigestPasswordBlocklist>) -> Self
+pub fn secure::password::PasswordPolicy::validate(&self, secure::password::RawPassword) -> core::result::Result<secure::password::ValidatedPassword, secure::password::PasswordPolicyError>
+impl core::clone::Clone for secure::password::PasswordPolicy
+pub fn secure::password::PasswordPolicy::clone(&self) -> secure::password::PasswordPolicy
+impl core::marker::Freeze for secure::password::PasswordPolicy
+impl core::marker::Send for secure::password::PasswordPolicy
+impl core::marker::Sync for secure::password::PasswordPolicy
+impl core::marker::Unpin for secure::password::PasswordPolicy
+impl core::marker::UnsafeUnpin for secure::password::PasswordPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordPolicy
+impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordPolicy
+pub struct secure::password::RawPassword
+impl secure::password::RawPassword
+pub fn secure::password::RawPassword::new(alloc::string::String) -> Self
+impl core::fmt::Debug for secure::password::RawPassword
+pub fn secure::password::RawPassword::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::password::RawPassword
+impl core::marker::Send for secure::password::RawPassword
+impl core::marker::Sync for secure::password::RawPassword
+impl core::marker::Unpin for secure::password::RawPassword
+impl core::marker::UnsafeUnpin for secure::password::RawPassword
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::RawPassword
+impl core::panic::unwind_safe::UnwindSafe for secure::password::RawPassword
+pub struct secure::password::ValidatedPassword(_)
+impl core::fmt::Debug for secure::password::ValidatedPassword
+pub fn secure::password::ValidatedPassword::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::password::ValidatedPassword
+impl core::marker::Send for secure::password::ValidatedPassword
+impl core::marker::Sync for secure::password::ValidatedPassword
+impl core::marker::Unpin for secure::password::ValidatedPassword
+impl core::marker::UnsafeUnpin for secure::password::ValidatedPassword
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::ValidatedPassword
+impl core::panic::unwind_safe::UnwindSafe for secure::password::ValidatedPassword
+pub struct secure::password::VerifiedPassword
+impl secure::password::VerifiedPassword
+pub fn secure::password::VerifiedPassword::upgraded_hash(self) -> core::option::Option<secure::password::PasswordHash>
+impl core::fmt::Debug for secure::password::VerifiedPassword
+pub fn secure::password::VerifiedPassword::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::password::VerifiedPassword
+impl core::marker::Send for secure::password::VerifiedPassword
+impl core::marker::Sync for secure::password::VerifiedPassword
+impl core::marker::Unpin for secure::password::VerifiedPassword
+impl core::marker::UnsafeUnpin for secure::password::VerifiedPassword
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::VerifiedPassword
+impl core::panic::unwind_safe::UnwindSafe for secure::password::VerifiedPassword
+pub fn secure::password::verify_password(secure::password::RawPassword, core::option::Option<&secure::password::PasswordHash>) -> core::result::Result<secure::password::PasswordVerification, secure::password::PasswordError>
 pub mod secure::pathsafe
 pub fn secure::pathsafe::is_safe_segment(&str) -> bool
 pub mod secure::protection
@@ -948,6 +1044,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::EnvelopeError
 impl core::panic::unwind_safe::UnwindSafe for secure::envelope::EnvelopeError
 #[non_exhaustive] pub enum secure::PasswordError
 pub secure::PasswordError::Hash
+pub secure::PasswordError::InvalidStoredHash
+pub secure::PasswordError::UnsupportedProfile
 impl core::error::Error for secure::password::PasswordError
 impl core::fmt::Debug for secure::password::PasswordError
 pub fn secure::password::PasswordError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -960,6 +1058,41 @@ impl core::marker::Unpin for secure::password::PasswordError
 impl core::marker::UnsafeUnpin for secure::password::PasswordError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordError
 impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordError
+#[non_exhaustive] pub enum secure::PasswordPolicyError
+pub secure::PasswordPolicyError::Compromised
+pub secure::PasswordPolicyError::TooLong
+pub secure::PasswordPolicyError::TooShort
+impl secure::password::PasswordPolicyError
+pub const fn secure::password::PasswordPolicyError::reason(self) -> &'static str
+impl core::clone::Clone for secure::password::PasswordPolicyError
+pub fn secure::password::PasswordPolicyError::clone(&self) -> secure::password::PasswordPolicyError
+impl core::cmp::Eq for secure::password::PasswordPolicyError
+impl core::cmp::PartialEq for secure::password::PasswordPolicyError
+pub fn secure::password::PasswordPolicyError::eq(&self, &secure::password::PasswordPolicyError) -> bool
+impl core::error::Error for secure::password::PasswordPolicyError
+impl core::fmt::Debug for secure::password::PasswordPolicyError
+pub fn secure::password::PasswordPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::password::PasswordPolicyError
+pub fn secure::password::PasswordPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::password::PasswordPolicyError
+impl core::marker::StructuralPartialEq for secure::password::PasswordPolicyError
+impl core::marker::Freeze for secure::password::PasswordPolicyError
+impl core::marker::Send for secure::password::PasswordPolicyError
+impl core::marker::Sync for secure::password::PasswordPolicyError
+impl core::marker::Unpin for secure::password::PasswordPolicyError
+impl core::marker::UnsafeUnpin for secure::password::PasswordPolicyError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordPolicyError
+impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordPolicyError
+pub enum secure::PasswordVerification
+pub secure::PasswordVerification::Invalid
+pub secure::PasswordVerification::Verified(secure::password::VerifiedPassword)
+impl core::marker::Freeze for secure::password::PasswordVerification
+impl core::marker::Send for secure::password::PasswordVerification
+impl core::marker::Sync for secure::password::PasswordVerification
+impl core::marker::Unpin for secure::password::PasswordVerification
+impl core::marker::UnsafeUnpin for secure::password::PasswordVerification
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordVerification
+impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordVerification
 #[non_exhaustive] pub enum secure::PiiKind
 pub secure::PiiKind::Address
 pub secure::PiiKind::Email
@@ -1303,6 +1436,18 @@ impl core::marker::Unpin for secure::protection::DerivedAad
 impl core::marker::UnsafeUnpin for secure::protection::DerivedAad
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::DerivedAad
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::DerivedAad
+pub struct secure::DigestPasswordBlocklist
+impl secure::password::DigestPasswordBlocklist
+pub fn secure::password::DigestPasswordBlocklist::from_nonempty_sha256_digests([u8; 32], impl core::iter::traits::collect::IntoIterator<Item = [u8; 32]>) -> Self
+impl core::fmt::Debug for secure::password::DigestPasswordBlocklist
+pub fn secure::password::DigestPasswordBlocklist::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::password::DigestPasswordBlocklist
+impl core::marker::Send for secure::password::DigestPasswordBlocklist
+impl core::marker::Sync for secure::password::DigestPasswordBlocklist
+impl core::marker::Unpin for secure::password::DigestPasswordBlocklist
+impl core::marker::UnsafeUnpin for secure::password::DigestPasswordBlocklist
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::DigestPasswordBlocklist
+impl core::panic::unwind_safe::UnwindSafe for secure::password::DigestPasswordBlocklist
 pub struct secure::FieldRedaction<'a>
 pub secure::FieldRedaction::mode: secure::redaction::RedactionMode
 pub secure::FieldRedaction::name: core::option::Option<&'static str>
@@ -1396,6 +1541,8 @@ impl core::panic::unwind_safe::UnwindSafe for secure::refresh::OpaqueToken
 pub struct secure::PasswordHash(_)
 impl secure::password::PasswordHash
 pub fn secure::password::PasswordHash::as_str(&self) -> &str
+pub fn secure::password::PasswordHash::from_validated(secure::password::ValidatedPassword) -> core::result::Result<Self, secure::password::PasswordError>
+pub fn secure::password::PasswordHash::needs_rehash(&self) -> core::result::Result<bool, secure::password::PasswordError>
 pub fn secure::password::PasswordHash::parse(&str) -> core::result::Result<Self, secure::password::PasswordError>
 impl core::clone::Clone for secure::password::PasswordHash
 pub fn secure::password::PasswordHash::clone(&self) -> secure::password::PasswordHash
@@ -1414,6 +1561,19 @@ impl core::marker::Unpin for secure::password::PasswordHash
 impl core::marker::UnsafeUnpin for secure::password::PasswordHash
 impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordHash
 impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordHash
+pub struct secure::PasswordPolicy
+impl secure::password::PasswordPolicy
+pub fn secure::password::PasswordPolicy::new(alloc::sync::Arc<secure::password::DigestPasswordBlocklist>) -> Self
+pub fn secure::password::PasswordPolicy::validate(&self, secure::password::RawPassword) -> core::result::Result<secure::password::ValidatedPassword, secure::password::PasswordPolicyError>
+impl core::clone::Clone for secure::password::PasswordPolicy
+pub fn secure::password::PasswordPolicy::clone(&self) -> secure::password::PasswordPolicy
+impl core::marker::Freeze for secure::password::PasswordPolicy
+impl core::marker::Send for secure::password::PasswordPolicy
+impl core::marker::Sync for secure::password::PasswordPolicy
+impl core::marker::Unpin for secure::password::PasswordPolicy
+impl core::marker::UnsafeUnpin for secure::password::PasswordPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordPolicy
+impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordPolicy
 pub struct secure::Plaintext(_)
 impl secure::aead::Plaintext
 pub fn secure::aead::Plaintext::expose(&self) -> &[u8]
@@ -1465,6 +1625,18 @@ impl core::marker::Unpin for secure::protection::ProtectionContext
 impl core::marker::UnsafeUnpin for secure::protection::ProtectionContext
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionContext
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionContext
+pub struct secure::RawPassword
+impl secure::password::RawPassword
+pub fn secure::password::RawPassword::new(alloc::string::String) -> Self
+impl core::fmt::Debug for secure::password::RawPassword
+pub fn secure::password::RawPassword::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::password::RawPassword
+impl core::marker::Send for secure::password::RawPassword
+impl core::marker::Sync for secure::password::RawPassword
+impl core::marker::Unpin for secure::password::RawPassword
+impl core::marker::UnsafeUnpin for secure::password::RawPassword
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::RawPassword
+impl core::panic::unwind_safe::UnwindSafe for secure::password::RawPassword
 pub struct secure::Redacted(_)
 impl secure::redaction::Redacted
 pub fn secure::redaction::Redacted::as_str(&self) -> &str
@@ -1562,6 +1734,28 @@ impl core::marker::Unpin for secure::SecretText
 impl core::marker::UnsafeUnpin for secure::SecretText
 impl core::panic::unwind_safe::RefUnwindSafe for secure::SecretText
 impl core::panic::unwind_safe::UnwindSafe for secure::SecretText
+pub struct secure::ValidatedPassword(_)
+impl core::fmt::Debug for secure::password::ValidatedPassword
+pub fn secure::password::ValidatedPassword::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::password::ValidatedPassword
+impl core::marker::Send for secure::password::ValidatedPassword
+impl core::marker::Sync for secure::password::ValidatedPassword
+impl core::marker::Unpin for secure::password::ValidatedPassword
+impl core::marker::UnsafeUnpin for secure::password::ValidatedPassword
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::ValidatedPassword
+impl core::panic::unwind_safe::UnwindSafe for secure::password::ValidatedPassword
+pub struct secure::VerifiedPassword
+impl secure::password::VerifiedPassword
+pub fn secure::password::VerifiedPassword::upgraded_hash(self) -> core::option::Option<secure::password::PasswordHash>
+impl core::fmt::Debug for secure::password::VerifiedPassword
+pub fn secure::password::VerifiedPassword::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::password::VerifiedPassword
+impl core::marker::Send for secure::password::VerifiedPassword
+impl core::marker::Sync for secure::password::VerifiedPassword
+impl core::marker::Unpin for secure::password::VerifiedPassword
+impl core::marker::UnsafeUnpin for secure::password::VerifiedPassword
+impl core::panic::unwind_safe::RefUnwindSafe for secure::password::VerifiedPassword
+impl core::panic::unwind_safe::UnwindSafe for secure::password::VerifiedPassword
 pub const secure::ENVELOPE_VERSION: u8
 pub trait secure::Aead
 pub fn secure::Aead::open(&self, &secure::envelope::CiphertextEnvelope, &secure::protection::DerivedAad) -> core::result::Result<secure::aead::Plaintext, secure::aead::AeadError>
@@ -1632,7 +1826,6 @@ pub fn core::option::Option<T>::as_redact_value(&self) -> secure::redaction::Red
 pub trait secure::Redactor
 pub fn secure::Redactor::redact(&self, &str) -> secure::redaction::Redacted
 pub fn secure::digest(&str) -> [u8; 32]
-pub fn secure::hash_password(&str) -> core::result::Result<secure::password::PasswordHash, secure::password::PasswordError>
 pub fn secure::is_safe_segment(&str) -> bool
 pub fn secure::redact_error(&dyn core::error::Error) -> secure::redaction::Redacted
 pub fn secure::redact_field(&str, &str) -> secure::redaction::Redacted
@@ -1640,5 +1833,4 @@ pub fn secure::redact_hash(secure::redaction::RedactValue<'_>, &secure::redactio
 pub fn secure::redact_struct(&'static str, bool, secure::redaction::RedactScope, &[secure::redaction::FieldRedaction<'_>]) -> alloc::string::String
 pub fn secure::redact_url_credentials(&str) -> secure::redaction::Redacted
 pub fn secure::safe<R: secure::redaction::Redact + ?core::marker::Sized>(&R, secure::redaction::RedactScope) -> alloc::string::String
-pub fn secure::verify_password(&str, &secure::password::PasswordHash) -> bool
-pub fn secure::verify_password_constant_time(&str, core::option::Option<&secure::password::PasswordHash>) -> bool
+pub fn secure::verify_password(secure::password::RawPassword, core::option::Option<&secure::password::PasswordHash>) -> core::result::Result<secure::password::PasswordVerification, secure::password::PasswordError>

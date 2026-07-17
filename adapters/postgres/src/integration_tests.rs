@@ -28372,7 +28372,7 @@ async fn sampling_loop_marks_down_when_reader_pool_is_closed() -> TestResult {
 // 折叠锁定态原子 RMW（累计→锁→lazy-unlock 持久化）· password-change CAS · 跨租 fail-closed · F2 未知主体不建行 ·
 // information_schema 明文列断言（DoD）。
 //
-// 构造 `Credential` 经 `Credential::hydrate`（pub funnel + `secure::hash_password`）；`LoginIdentifier` 经
+// 构造 `Credential` 经 `Credential::hydrate`（pub funnel + secure typed test seam）；`LoginIdentifier` 经
 // `identity::test_support::login_identifier`（`pub(crate)` funnel 经 test-support feature 暴露，同
 // `test_support::session` 范式）。锁定策略阈值（5 次 / 15min 窗口 / 15min TTL）域 `AccountLockout` 单源，
 // adapter 仅 I/O；`now` 由测试直传（确定性，无需 Clock）。known/wrong/correct/lazy-unlock 行为镜像 in-mem
@@ -28411,14 +28411,28 @@ fn login_id(raw: &str) -> LoginIdentifier {
     identity::test_support::login_identifier(raw)
 }
 
-fn make_cred(
+fn raw_password(raw: &str) -> secure::RawPassword {
+    secure::RawPassword::new(raw.to_owned())
+}
+
+fn test_password_hash(password: &str) -> CredHelperResult<secure::PasswordHash> {
+    Ok(secure::PasswordHash::for_test(raw_password(password))?)
+}
+
+fn password_matches(password: &str, hash: &secure::PasswordHash) -> CredHelperResult<bool> {
+    Ok(matches!(
+        secure::verify_password(raw_password(password), Some(hash))?,
+        secure::PasswordVerification::Verified(_)
+    ))
+}
+
+fn make_cred_with_hash(
     login: &str,
     user: &str,
-    password: &str,
+    hash: secure::PasswordHash,
     version: u32,
     tenant: TenantId,
 ) -> CredHelperResult<Credential> {
-    let hash = secure::hash_password(password)?;
     Ok(Credential::hydrate(
         login,
         cred_uid(user)?,
@@ -28426,6 +28440,16 @@ fn make_cred(
         hash,
         version,
     ))
+}
+
+fn make_cred(
+    login: &str,
+    user: &str,
+    password: &str,
+    version: u32,
+    tenant: TenantId,
+) -> CredHelperResult<Credential> {
+    make_cred_with_hash(login, user, test_password_hash(password)?, version, tenant)
 }
 
 fn password_change(expected: u32, next: Credential) -> PasswordChangeMutation {
@@ -28456,6 +28480,25 @@ async fn owner_credential_snapshot(
     sqlx::query_as(
         "SELECT version, password_hash FROM credentials \
          WHERE tenant_id = $1::uuid AND login = $2",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(login)
+    .fetch_optional(&owner.pool)
+    .await
+}
+
+type CredentialAuthState = (i64, String, i64, Option<i64>, Option<i64>);
+
+async fn owner_credential_auth_state(
+    owner: &PgStore,
+    tenant: TenantId,
+    login: &str,
+) -> Result<Option<CredentialAuthState>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT version, password_hash, failure_count, \
+         extract(epoch from lockout_window_start)::bigint, \
+         extract(epoch from locked_until)::bigint \
+         FROM credentials WHERE tenant_id = $1::uuid AND login = $2",
     )
     .bind(tenant.as_uuid().to_string())
     .bind(login)
@@ -28548,7 +28591,7 @@ async fn credential_repo_save_find_roundtrip_and_upsert() -> TestResult {
 }
 
 // authenticate 三态：已知+正确 → Authenticated(canonical user_id)；已知+错 → InvalidKnownUser；
-// 查无凭据 → InvalidUnknown（恒定成本 KDF 仍跑，不 panic）。
+// 查无凭据 → InvalidUnknown（当前档 KDF 仍跑，不 panic）。
 #[tokio::test(flavor = "multi_thread")]
 async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -28566,7 +28609,7 @@ async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
         repo.authenticate(
             identity_scope(tenant),
             login_id("alice"),
-            "correct".to_string(),
+            raw_password("correct"),
             now
         )
         .await?,
@@ -28577,7 +28620,7 @@ async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
         repo.authenticate(
             identity_scope(tenant),
             login_id("alice"),
-            "wrong".to_string(),
+            raw_password("wrong"),
             now
         )
         .await?,
@@ -28588,13 +28631,335 @@ async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
         repo.authenticate(
             identity_scope(tenant),
             login_id("ghost"),
-            "correct".to_string(),
+            raw_password("correct"),
             now
         )
         .await?,
         AuthOutcome::InvalidUnknown,
         "查无凭据 → InvalidUnknown"
     );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_rehash_upgrades_weak_phc_without_bumping_version() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let weak =
+        secure::PasswordHash::for_test_with_params(raw_password("legacy-short"), 8 * 1024, 1, 1)?;
+    let weak_phc = weak.as_str().to_owned();
+    repo.save(
+        identity_scope(tenant),
+        make_cred_with_hash("alice", CRED_USER_ALICE, weak, 7, tenant)?,
+    )
+    .await?;
+
+    assert_eq!(
+        repo.authenticate(
+            identity_scope(tenant),
+            login_id("alice"),
+            raw_password("wrong"),
+            cred_epoch(CRED_BASE_SECS),
+        )
+        .await?,
+        AuthOutcome::InvalidKnownUser
+    );
+    assert_eq!(
+        owner_credential_snapshot(&store, tenant, "alice")
+            .await?
+            .ok_or("credential snapshot missing")?,
+        (7, weak_phc.clone()),
+        "failed verification must not replace PHC"
+    );
+    assert_eq!(
+        repo.authenticate(
+            identity_scope(tenant),
+            login_id("alice"),
+            raw_password("legacy-short"),
+            cred_epoch(CRED_BASE_SECS),
+        )
+        .await?,
+        AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?)
+    );
+
+    let (version, upgraded_phc) = owner_credential_snapshot(&store, tenant, "alice")
+        .await?
+        .ok_or("upgraded credential snapshot missing")?;
+    let upgraded = secure::PasswordHash::parse(&upgraded_phc)?;
+    assert_eq!(
+        version, 7,
+        "transparent rehash must preserve business version"
+    );
+    assert_ne!(upgraded_phc, weak_phc, "weak PHC must be replaced");
+    assert!(
+        !upgraded.needs_rehash()?,
+        "replacement must use current profile"
+    );
+    assert!(password_matches("legacy-short", &upgraded)?);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_rehash_preserves_current_and_stronger_phc() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let current = test_password_hash("current-password")?;
+    let stronger = secure::PasswordHash::for_test_with_params(
+        raw_password("stronger-password"),
+        20 * 1024,
+        3,
+        2,
+    )?;
+
+    for (login, user, password, hash) in [
+        ("current", CRED_USER_ALICE, "current-password", current),
+        ("stronger", CRED_USER_BOB, "stronger-password", stronger),
+    ] {
+        let original_phc = hash.as_str().to_owned();
+        repo.save(
+            identity_scope(tenant),
+            make_cred_with_hash(login, user, hash, 11, tenant)?,
+        )
+        .await?;
+        assert_eq!(
+            repo.authenticate(
+                identity_scope(tenant),
+                login_id(login),
+                raw_password(password),
+                cred_epoch(CRED_BASE_SECS),
+            )
+            .await?,
+            AuthOutcome::Authenticated(cred_uid(user)?)
+        );
+        let (version, stored_phc) = owner_credential_snapshot(&store, tenant, login)
+            .await?
+            .ok_or("credential snapshot missing")?;
+        assert_eq!(version, 11, "login must preserve business version");
+        assert_eq!(
+            stored_phc, original_phc,
+            "current/stronger PHC must not be replaced"
+        );
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_rehash_update_failure_rolls_back() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let weak =
+        secure::PasswordHash::for_test_with_params(raw_password("legacy-short"), 8 * 1024, 1, 1)?;
+    let weak_phc = weak.as_str().to_owned();
+    repo.save(
+        identity_scope(tenant),
+        make_cred_with_hash("alice", CRED_USER_ALICE, weak, 19, tenant)?,
+    )
+    .await?;
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_credential_rehash() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'injected rehash update failure'; END $$; \
+         CREATE TRIGGER reject_credential_rehash BEFORE UPDATE OF password_hash ON credentials \
+         FOR EACH ROW EXECUTE FUNCTION reject_credential_rehash();",
+    )
+    .execute(&store.pool)
+    .await?;
+
+    assert!(
+        repo.authenticate(
+            identity_scope(tenant),
+            login_id("alice"),
+            raw_password("legacy-short"),
+            cred_epoch(CRED_BASE_SECS),
+        )
+        .await
+        .is_err(),
+        "rehash UPDATE failure must fail authentication closed"
+    );
+    let (version, stored_phc) = owner_credential_snapshot(&store, tenant, "alice")
+        .await?
+        .ok_or("credential snapshot missing")?;
+    assert_eq!(version, 19);
+    assert_eq!(
+        stored_phc, weak_phc,
+        "failed transaction must roll back PHC"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_rehash_commit_failure_rolls_back_hash_and_lockout_clear() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::from_unverified_for_test(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let weak =
+        secure::PasswordHash::for_test_with_params(raw_password("legacy-short"), 8 * 1024, 1, 1)?;
+    repo.save(
+        identity_scope(tenant),
+        make_cred_with_hash("alice", CRED_USER_ALICE, weak, 23, tenant)?,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE credentials SET failure_count = 4, \
+         lockout_window_start = to_timestamp($3), locked_until = to_timestamp($4) \
+         WHERE tenant_id = $1::uuid AND login = $2",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind("alice")
+    .bind(i64::try_from(CRED_BASE_SECS - 60)?)
+    .bind(i64::try_from(CRED_BASE_SECS + 900)?)
+    .execute(&store.pool)
+    .await?;
+    let before = owner_credential_auth_state(&store, tenant, "alice")
+        .await?
+        .ok_or("credential state missing")?;
+    sqlx::raw_sql(
+        "CREATE SEQUENCE credential_rehash_commit_probe; \
+         CREATE FUNCTION reject_credential_rehash_on_commit() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF OLD.password_hash IS DISTINCT FROM NEW.password_hash THEN \
+             IF NOT EXISTS (SELECT 1 FROM credentials WHERE tenant_id = NEW.tenant_id \
+             AND login = NEW.login AND failure_count = 0 \
+               AND lockout_window_start IS NULL AND locked_until IS NULL) THEN \
+               RAISE EXCEPTION 'rehash lockout clear missing'; \
+             END IF; \
+             PERFORM nextval('credential_rehash_commit_probe'); \
+             RAISE EXCEPTION 'injected rehash commit failure'; \
+           END IF; \
+           RETURN NEW; \
+         END $$; \
+         CREATE CONSTRAINT TRIGGER reject_credential_rehash_on_commit AFTER UPDATE ON credentials \
+         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
+         EXECUTE FUNCTION reject_credential_rehash_on_commit();",
+    )
+    .execute(&store.pool)
+    .await?;
+
+    let error = match repo
+        .authenticate(
+            identity_scope(tenant),
+            login_id("alice"),
+            raw_password("legacy-short"),
+            cred_epoch(CRED_BASE_SECS),
+        )
+        .await
+    {
+        Err(error) => error,
+        Ok(outcome) => return Err(format!("deferred trigger allowed commit: {outcome:?}").into()),
+    };
+    assert!(matches!(error, IdentityError::Storage(_)));
+    let probe: (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM credential_rehash_commit_probe")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        probe,
+        (1, true),
+        "deferred trigger must observe the lockout clear before rejecting commit"
+    );
+    assert_eq!(
+        owner_credential_auth_state(&store, tenant, "alice")
+            .await?
+            .ok_or("credential state missing after rollback")?,
+        before,
+        "commit failure must roll back PHC, version, and pre-existing lockout"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_rehash_concurrent_logins_upgrade_weak_phc_once() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = Arc::new(PgCredentialRepo::from_unverified_for_test(&store));
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let weak =
+        secure::PasswordHash::for_test_with_params(raw_password("legacy-short"), 8 * 1024, 1, 1)?;
+    repo.save(
+        identity_scope(tenant),
+        make_cred_with_hash("alice", CRED_USER_ALICE, weak, 17, tenant)?,
+    )
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE credential_rehash_updates (login text PRIMARY KEY, updates integer NOT NULL DEFAULT 0)",
+    )
+    .execute(&store.pool)
+    .await?;
+    sqlx::query("INSERT INTO credential_rehash_updates (login) VALUES ('alice')")
+        .execute(&store.pool)
+        .await?;
+    sqlx::query(
+        "CREATE FUNCTION count_credential_rehash_update() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN IF OLD.password_hash IS DISTINCT FROM NEW.password_hash THEN \
+         UPDATE credential_rehash_updates SET updates = updates + 1 WHERE login = NEW.login; \
+         END IF; RETURN NEW; END $$",
+    )
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER count_credential_rehash_update AFTER UPDATE OF password_hash ON credentials \
+         FOR EACH ROW EXECUTE FUNCTION count_credential_rehash_update()",
+    )
+    .execute(&store.pool)
+    .await?;
+
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let repo = Arc::clone(&repo);
+        handles.push(tokio::spawn(async move {
+            repo.authenticate(
+                identity_scope(tenant),
+                login_id("alice"),
+                raw_password("legacy-short"),
+                cred_epoch(CRED_BASE_SECS),
+            )
+            .await
+        }));
+    }
+    for handle in handles {
+        assert_eq!(
+            handle
+                .await
+                .map_err(|error| format!("join failed: {error}"))??,
+            AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?)
+        );
+    }
+
+    let (rehash_updates,): (i32,) =
+        sqlx::query_as("SELECT updates FROM credential_rehash_updates WHERE login = 'alice'")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        rehash_updates, 1,
+        "row lock must serialize rehash to one PHC replacement"
+    );
+    let (version, upgraded_phc) = owner_credential_snapshot(&store, tenant, "alice")
+        .await?
+        .ok_or("credential snapshot missing")?;
+    assert_eq!(
+        version, 17,
+        "transparent rehash must preserve business version"
+    );
+    assert!(!secure::PasswordHash::parse(&upgraded_phc)?.needs_rehash()?);
 
     store.shutdown().await?;
     Ok(())
@@ -28619,7 +28984,7 @@ async fn credential_repo_unknown_subject_creates_no_row() -> TestResult {
             repo.authenticate(
                 identity_scope(tenant),
                 login_id(&format!("ghost-{i}")),
-                "x".to_string(),
+                raw_password("x"),
                 now
             )
             .await?,
@@ -28665,7 +29030,7 @@ async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
         repo.authenticate(
             identity_scope(b),
             login_id("alice"),
-            "correct".to_string(),
+            raw_password("correct"),
             now
         )
         .await?,
@@ -28677,7 +29042,7 @@ async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
         repo.authenticate(
             identity_scope(a),
             login_id("alice"),
-            "wrong".to_string(),
+            raw_password("wrong"),
             cred_epoch(CRED_BASE_SECS + i),
         )
         .await?;
@@ -28741,7 +29106,7 @@ async fn credential_repo_tenant_noop_conformance() -> TestResult {
                 .authenticate(
                     identity_scope(b),
                     login_id("alice"),
-                    "correct".to_string(),
+                    raw_password("correct"),
                     now,
                 )
                 .await?;
@@ -28783,7 +29148,7 @@ async fn credential_repo_accumulate_failures_then_locks() -> TestResult {
             repo.authenticate(
                 identity_scope(a),
                 login_id("alice"),
-                "wrong".to_string(),
+                raw_password("wrong"),
                 cred_epoch(CRED_BASE_SECS + i)
             )
             .await?,
@@ -28805,7 +29170,7 @@ async fn credential_repo_accumulate_failures_then_locks() -> TestResult {
     repo.authenticate(
         identity_scope(a),
         login_id("alice"),
-        "wrong".to_string(),
+        raw_password("wrong"),
         cred_epoch(CRED_BASE_SECS + 5),
     )
     .await?;
@@ -28844,7 +29209,7 @@ async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
         repo.authenticate(
             identity_scope(a),
             login_id("alice"),
-            "wrong".to_string(),
+            raw_password("wrong"),
             cred_epoch(CRED_BASE_SECS + i),
         )
         .await?;
@@ -28884,7 +29249,7 @@ async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
         repo.authenticate(
             identity_scope(a),
             login_id("alice"),
-            "wrong".to_string(),
+            raw_password("wrong"),
             cred_epoch(after)
         )
         .await?,
@@ -28919,7 +29284,7 @@ async fn credential_repo_authenticate_success_clears_lockout() -> TestResult {
         repo.authenticate(
             identity_scope(a),
             login_id("alice"),
-            "wrong".to_string(),
+            raw_password("wrong"),
             cred_epoch(CRED_BASE_SECS + i),
         )
         .await?;
@@ -28934,7 +29299,7 @@ async fn credential_repo_authenticate_success_clears_lockout() -> TestResult {
         repo.authenticate(
             identity_scope(a),
             login_id("alice"),
-            "correct".to_string(),
+            raw_password("correct"),
             cred_epoch(CRED_BASE_SECS + 5)
         )
         .await?,
@@ -28986,11 +29351,11 @@ async fn credential_repo_apply_password_change_cas() -> TestResult {
     };
     assert_eq!(after_conflict.version(), 1, "stale CAS 不推进 version");
     assert!(
-        secure::verify_password("pw1", after_conflict.password_hash()),
+        password_matches("pw1", after_conflict.password_hash())?,
         "stale CAS 后旧密码仍有效"
     );
     assert!(
-        !secure::verify_password("pw2", after_conflict.password_hash()),
+        !password_matches("pw2", after_conflict.password_hash())?,
         "stale CAS 后候选密码不得生效"
     );
     // 命中 → 替换 hash + version。
@@ -29007,8 +29372,13 @@ async fn credential_repo_apply_password_change_cas() -> TestResult {
     };
     assert_eq!(got.version(), 2, "CAS 命中后 version = 2");
     assert_eq!(
-        repo.authenticate(identity_scope(a), login_id("alice"), "pw2".to_string(), now)
-            .await?,
+        repo.authenticate(
+            identity_scope(a),
+            login_id("alice"),
+            raw_password("pw2"),
+            now
+        )
+        .await?,
         AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?),
         "新密码验签真"
     );
@@ -29116,15 +29486,15 @@ async fn credential_repo_password_change_concurrent_writers_one_wins() -> TestRe
     assert_eq!(final_version, 2, "并发 CAS 最终只推进至 v2");
     let final_hash = secure::PasswordHash::parse(&final_hash)?;
     assert!(
-        secure::verify_password("pw-left", &final_hash),
+        password_matches("pw-left", &final_hash)?,
         "最终 hash 必须属于先持锁并提交的写者"
     );
     assert!(
-        !secure::verify_password("pw-right", &final_hash),
+        !password_matches("pw-right", &final_hash)?,
         "冲突写者不得覆盖胜出的 hash"
     );
     assert!(
-        !secure::verify_password("pw-v1", &final_hash),
+        !password_matches("pw-v1", &final_hash)?,
         "成功 CAS 后 v1 密码必须失效"
     );
 
@@ -29361,10 +29731,10 @@ async fn identity_password_change_real_rss_app_localtx_matrix() -> TestResult {
     let (_, committed_hash) = owner_credential_snapshot(&owner, tenant_a, &commit_login)
         .await?
         .ok_or("committed credential snapshot missing")?;
-    assert!(secure::verify_password(
+    assert!(password_matches(
         "pw-v2",
         &secure::PasswordHash::parse(&committed_hash)?
-    ));
+    )?);
 
     let missing_login = format!("pc-missing-{}", uuid::Uuid::new_v4().simple());
     let missing_user = uuid::Uuid::new_v4().to_string();
@@ -29484,8 +29854,8 @@ async fn identity_password_change_real_rss_app_validation_profile() -> TestResul
     ))
     .await?;
     let validation_hash = secure::PasswordHash::parse(&validation_baseline.1)?;
-    assert!(secure::verify_password("pw-v1", &validation_hash));
-    assert!(!secure::verify_password("pw-invalid", &validation_hash));
+    assert!(password_matches("pw-v1", &validation_hash)?);
+    assert!(!password_matches("pw-invalid", &validation_hash)?);
 
     app.shutdown().await?;
     owner.shutdown().await?;
@@ -29590,8 +29960,8 @@ async fn identity_password_change_real_rss_app_authorization_profile() -> TestRe
     ))
     .await?;
     let authorization_hash = secure::PasswordHash::parse(&authorization_baseline.1)?;
-    assert!(secure::verify_password("pw-v1", &authorization_hash));
-    assert!(!secure::verify_password("pw-cross", &authorization_hash));
+    assert!(password_matches("pw-v1", &authorization_hash)?);
+    assert!(!password_matches("pw-cross", &authorization_hash)?);
 
     app.shutdown().await?;
     owner.shutdown().await?;
@@ -29749,10 +30119,10 @@ async fn identity_password_change_real_rss_app_transient_stage_profile() -> Test
             .await?
             .ok_or("before-begin credential snapshot missing")?;
     assert_eq!(before_begin_version, 2);
-    assert!(secure::verify_password(
+    assert!(password_matches(
         "pw-begin-2",
         &secure::PasswordHash::parse(&before_begin_hash)?
-    ));
+    )?);
     begin_app.shutdown().await?;
 
     let before_write_login = format!("pc-before-write-{}", uuid::Uuid::new_v4().simple());
@@ -29798,10 +30168,10 @@ async fn identity_password_change_real_rss_app_transient_stage_profile() -> Test
             .await?
             .ok_or("before-write credential snapshot missing")?;
     assert_eq!(before_write_version, 2);
-    assert!(secure::verify_password(
+    assert!(password_matches(
         "pw-write-2",
         &secure::PasswordHash::parse(&before_write_hash)?
-    ));
+    )?);
 
     app.shutdown().await?;
     owner.shutdown().await?;
@@ -29949,16 +30319,16 @@ async fn identity_password_change_real_rss_app_retry_profile() -> TestResult {
         .await?
         .ok_or("retry credential snapshot missing")?;
     assert_eq!(retry_version, 2);
-    assert!(secure::verify_password(
+    assert!(password_matches(
         "pw-r2",
         &secure::PasswordHash::parse(&retry_hash)?
-    ));
+    )?);
     for rejected_password in ["pw-conflict", "pw-permanent", "pw-exhausted"] {
         assert!(
-            !secure::verify_password(
+            !password_matches(
                 rejected_password,
                 &secure::PasswordHash::parse(&retry_hash)?
-            ),
+            )?,
             "rejected retry path must not replace the durable password hash: {rejected_password}"
         );
     }
@@ -30036,10 +30406,10 @@ async fn identity_password_change_real_rss_app_commit_unknown_profile() -> TestR
             .await?
             .ok_or("commit-unknown credential snapshot missing")?;
     assert_eq!(unknown_version, 2);
-    assert!(secure::verify_password(
+    assert!(password_matches(
         "pw-u2",
         &secure::PasswordHash::parse(&unknown_hash)?
-    ));
+    )?);
 
     app.shutdown().await?;
     owner.shutdown().await?;
@@ -30107,7 +30477,7 @@ async fn credential_repo_authenticate_correct_clears_active_lock() -> TestResult
         repo.authenticate(
             identity_scope(a),
             login_id("alice"),
-            "wrong".to_string(),
+            raw_password("wrong"),
             cred_epoch(CRED_BASE_SECS + i),
         )
         .await?;
@@ -30124,7 +30494,7 @@ async fn credential_repo_authenticate_correct_clears_active_lock() -> TestResult
         repo.authenticate(
             identity_scope(a),
             login_id("alice"),
-            "correct".to_string(),
+            raw_password("correct"),
             cred_epoch(CRED_BASE_SECS + 6)
         )
         .await?,
@@ -30356,7 +30726,7 @@ async fn credential_repo_concurrent_failures_no_lost_update() -> TestResult {
             repo.authenticate(
                 identity_scope(a),
                 login_id("alice"),
-                "wrong".to_string(),
+                raw_password("wrong"),
                 now,
             )
             .await

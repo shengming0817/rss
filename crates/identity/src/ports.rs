@@ -490,8 +490,8 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
 /// `ids::UserId`（self-scoped 改密路径，认证主体锚点，#1277 F2）——二者皆经 tenant-keyed 查找天然 fail-closed。
 ///
 /// **验签 + 锁定推进原子化（F1+F2，#1277）**：失败计数 = 安全关键状态，**禁**外部「读-改-写」（并发丢更新）。
-/// `authenticate` 在 provider 内单次原子完成「恒定成本验签 + 据已知/未知主体分流推进 lockout」，返回
-/// [`AuthOutcome`]——已知+正确清零、已知+错推进、未知不动；登录枚举防御（constant-time KDF）与真实账号
+/// `authenticate` 在 provider 内单次原子完成「有界 KDF 验签 + 据已知/未知主体分流推进 lockout」，返回
+/// [`AuthOutcome`]——已知+正确清零、已知+错推进、未知不动；登录枚举防御（禁止未知主体零 KDF 快路径）与真实账号
 /// lockout 推进收进**单一原子结果**，「对未知主体建锁」从此无 API 可表达（F2 Hard：未知主体不可预置锁定、
 /// 不撑大 lockout 表）。`lockout_status` 仅做验签前预门控的原子 lazy-unlock 查询。in-mem = 锁内、
 /// postgres = 事务/行锁/条件 upsert。
@@ -518,9 +518,10 @@ pub trait CredentialRepoLocal: Send + Sync {
         user_id: ids::UserId,
     ) -> Result<Option<Credential>, IdentityError>;
 
-    /// **恒定成本验签 + 原子锁定记账**（F1+F2+F3，#1277）：无论凭据是否存在，候选明文总跑一次 argon2 KDF
-    /// （经 `secure::verify_password_constant_time`）——消除「无此主体（跳 KDF 快返回）」与「密码错（跑 KDF）」
-    /// 的登录枚举时序差。provider 内据 `(tenant, login)` 查得凭据与否，**原子**分流返回 [`AuthOutcome`]：
+    /// **有界 KDF 验签 + 原子锁定记账**（F1+F2+F3，#1277）：无论凭据是否存在，候选明文至少支付当前
+    /// profile 的工作（经 typed `secure::verify_password`）——关闭「无此主体时跳过 KDF」的快速枚举路径；
+    /// 弱档会额外验证 stored KDF，更强档在硬上限内验证，因此不宣称不同 PHC profile 严格等时。
+    /// provider 内据 `(tenant, login)` 查得凭据与否，**原子**分流返回 [`AuthOutcome`]：
     /// - 已知 + 密码正确 → `Authenticated(user_id)`（canonical actor subject，写 wire/audit）+ 清零失败计数；
     /// - 已知 + 密码错 → `InvalidKnownUser` + 原子推进 lockout（达阈值即锁）；
     /// - 查无凭据 → `InvalidUnknown`，**不建/不动 lockout 态**（F2：未知主体不可被预置锁定、不撑大 lockout 表）。
@@ -536,7 +537,7 @@ pub trait CredentialRepoLocal: Send + Sync {
         &self,
         scope: TenantRepoScope,
         login: LoginIdentifier,
-        candidate: String,
+        candidate: secure::RawPassword,
         now: SystemTime,
     ) -> Result<AuthOutcome, IdentityError>;
 
@@ -1081,7 +1082,7 @@ mod smoke_credential {
             &self,
             _scope: TenantRepoScope,
             _login: LoginIdentifier,
-            _candidate: String,
+            _candidate: secure::RawPassword,
             _now: SystemTime,
         ) -> Result<AuthOutcome, IdentityError> {
             todo!()
@@ -1149,7 +1150,7 @@ mod smoke_credential {
         TestCredentialRepo {}
         impl CredentialRepo for TestCredentialRepo {
             async fn find_by_user_id(&self, scope: TenantRepoScope, user_id: ids::UserId) -> Result<Option<Credential>, IdentityError>;
-            async fn authenticate(&self, scope: TenantRepoScope, login: LoginIdentifier, candidate: String, now: SystemTime) -> Result<AuthOutcome, IdentityError>;
+            async fn authenticate(&self, scope: TenantRepoScope, login: LoginIdentifier, candidate: secure::RawPassword, now: SystemTime) -> Result<AuthOutcome, IdentityError>;
             async fn save(&self, scope: TenantRepoScope, credential: Credential) -> Result<(), IdentityError>;
             async fn apply_password_change(&self, scope: TenantRepoScope, mutation: PasswordChangeMutation) -> Result<(), IdentityError>;
             async fn lockout_status(&self, scope: TenantRepoScope, login: LoginIdentifier, now: SystemTime) -> Result<bool, IdentityError>;

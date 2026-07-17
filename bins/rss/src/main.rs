@@ -5,6 +5,10 @@
 //! 组合根。`server` 保持 serving-only entry。
 enum CommandFamily {
     Serving,
+    Operator(OperatorCommand),
+}
+
+enum OperatorCommand {
     Postgres,
     Projection,
     AuditLedgerVerify,
@@ -16,25 +20,27 @@ enum CommandFamily {
 
 fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
     if runtime::is_postgres_command(args) {
-        return Ok(CommandFamily::Postgres);
+        return Ok(CommandFamily::Operator(OperatorCommand::Postgres));
     }
     if runtime::is_projection_command(args) {
-        return Ok(CommandFamily::Projection);
+        return Ok(CommandFamily::Operator(OperatorCommand::Projection));
     }
     if runtime::is_audit_ledger_verify_command(args) {
-        return Ok(CommandFamily::AuditLedgerVerify);
+        return Ok(CommandFamily::Operator(OperatorCommand::AuditLedgerVerify));
     }
     if runtime::is_dlq_command(args) {
-        return Ok(CommandFamily::Dlq);
+        return Ok(CommandFamily::Operator(OperatorCommand::Dlq));
     }
     if runtime::is_reconcile_target_command(args) {
-        return Ok(CommandFamily::ReconcileTarget);
+        return Ok(CommandFamily::Operator(OperatorCommand::ReconcileTarget));
     }
     if runtime::is_settings_config_value_maintenance_command(args) {
-        return Ok(CommandFamily::SettingsConfigValueMaintenance);
+        return Ok(CommandFamily::Operator(
+            OperatorCommand::SettingsConfigValueMaintenance,
+        ));
     }
     if runtime::is_oidc_jwks_export_command(args) {
-        return Ok(CommandFamily::OidcJwksExport);
+        return Ok(CommandFamily::Operator(OperatorCommand::OidcJwksExport));
     }
     anyhow::ensure!(args.is_empty(), "unknown rss command: {args:?}");
     Ok(CommandFamily::Serving)
@@ -44,27 +50,31 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = classify_command(&args)?;
-    let runtime_inputs = runtime::prepare_runtime()?;
+    let CommandFamily::Operator(command) = command else {
+        return runtime::run(runtime::prepare_runtime()?).await;
+    };
+    let runtime_inputs = runtime::prepare_operator_runtime()?;
     let operator_result = match command {
-        CommandFamily::Serving => return runtime::run(runtime_inputs).await,
-        CommandFamily::Postgres => {
+        OperatorCommand::Postgres => {
             runtime::run_postgres_reader_migration_command(&args, &runtime_inputs).await
         }
-        CommandFamily::Projection => {
+        OperatorCommand::Projection => {
             runtime::run_projection_control_command(&args, &runtime_inputs).await
         }
-        CommandFamily::AuditLedgerVerify => {
+        OperatorCommand::AuditLedgerVerify => {
             runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await
         }
-        CommandFamily::Dlq => runtime::run_dlq_control_command(&args, &runtime_inputs).await,
-        CommandFamily::ReconcileTarget => {
+        OperatorCommand::Dlq => runtime::run_dlq_control_command(&args, &runtime_inputs).await,
+        OperatorCommand::ReconcileTarget => {
             runtime::run_reconcile_target_command(&args, &runtime_inputs).await
         }
-        CommandFamily::SettingsConfigValueMaintenance => {
+        OperatorCommand::SettingsConfigValueMaintenance => {
             runtime::run_settings_config_value_maintenance(&args, &runtime_inputs).await
         }
-        CommandFamily::OidcJwksExport => runtime::run_oidc_jwks_export_command(&args).await,
+        OperatorCommand::OidcJwksExport => {
+            runtime::run_oidc_jwks_export_command(&args, &runtime_inputs).await
+        }
     };
-    runtime::shutdown_runtime(runtime_inputs).await?;
+    runtime::shutdown_operator_runtime(runtime_inputs).await?;
     operator_result
 }

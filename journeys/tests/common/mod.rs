@@ -52,6 +52,20 @@ pub const NOW_SECS: u64 = 1_000;
 /// 会话 ttl（确定性断言）。
 pub const TTL_SECS: u64 = 3_600;
 
+const BLOCKED_PASSWORD_DIGEST: [u8; 32] = [
+    0x2e, 0x2b, 0x24, 0xf8, 0xee, 0x40, 0xbb, 0x84, 0x7f, 0xe8, 0x5b, 0xb2, 0x33, 0x36, 0xa3, 0x9e,
+    0xf5, 0x94, 0x8e, 0x6b, 0x49, 0xd8, 0x97, 0x41, 0x9c, 0xed, 0x68, 0x76, 0x6b, 0x16, 0x96, 0x7a,
+];
+
+pub fn password_policy() -> secure::PasswordPolicy {
+    secure::PasswordPolicy::new(Arc::new(
+        secure::DigestPasswordBlocklist::from_nonempty_sha256_digests(
+            BLOCKED_PASSWORD_DIGEST,
+            std::iter::empty(),
+        ),
+    ))
+}
+
 #[derive(Clone, Default)]
 pub struct NoopAuditSink;
 

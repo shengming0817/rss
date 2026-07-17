@@ -129,6 +129,7 @@ pub mod test_support {
     }
 }
 pub use module::SharedRuntimeDeps;
+pub use phase::{OperatorRuntimeInputs, ServingRuntimeInputs};
 
 use bootstrap::DomainModuleResult;
 use infra::oidc::{
@@ -148,7 +149,7 @@ use infra::s3::{
     build_s3_runtime_deps, wire_s3_canary,
 };
 use infra::vault::{VaultRuntimeConfig, VaultRuntimeConfigError};
-use phase::{RuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
+use phase::{PreparedRuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
 
 #[cfg(test)]
 use config::DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV;
@@ -604,7 +605,7 @@ pub fn is_postgres_command(args: &[String]) -> bool {
 /// reader credentials. The postgres adapter independently verifies the exact embedded/ledger edge.
 pub async fn run_postgres_reader_migration_command(
     args: &[String],
-    runtime_inputs: &RuntimeInputs,
+    runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(args, [namespace, command] if namespace == "postgres" && command == "migrate-reader-lane"),
@@ -1650,7 +1651,7 @@ where
 /// 执行 `rss projections replay|status|swap`。
 pub async fn run_projection_control_command(
     args: &[String],
-    runtime_inputs: &RuntimeInputs,
+    runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     let runtime = ProductionProjectionControlRuntime {
         config: runtime_inputs.config(),
@@ -2091,7 +2092,7 @@ where
 /// 执行 `rss audit-ledger verify`。
 pub async fn run_audit_ledger_verify_command(
     args: &[String],
-    runtime_inputs: &RuntimeInputs,
+    runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     let runtime = ProductionAuditLedgerVerifyRuntime {
         config: runtime_inputs.config(),
@@ -3237,7 +3238,7 @@ fn issue_authorized_dlq_capability() -> OperatorDlqCapability {
 /// 执行 `rss dlq ...`。
 pub async fn run_dlq_control_command(
     args: &[String],
-    runtime_inputs: &RuntimeInputs,
+    runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     let runtime = ProductionDlqControlRuntime {
         config: runtime_inputs.config(),
@@ -3469,7 +3470,7 @@ fn issue_authorized_reconcile_capability() -> OperatorReconcileCapability {
 /// Execute an authenticated, audited tenant-scoped reconcile target operator command.
 pub async fn run_reconcile_target_command(
     args: &[String],
-    runtime_inputs: &RuntimeInputs,
+    runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     let parsed = parse_reconcile_target_args(args)?;
     let resource_id = format!("tenant={} target_id={}", parsed.tenant, parsed.target_id);
@@ -3816,7 +3817,7 @@ async fn settings_config_value_maintenance_protection(
 /// 执行 `rss settings-config-values maintenance`。
 pub async fn run_settings_config_value_maintenance(
     args: &[String],
-    runtime_inputs: &RuntimeInputs,
+    runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     let parsed = parse_settings_config_value_maintenance_args(args)?;
     let options = parsed.options.clone();
@@ -4162,43 +4163,94 @@ fn build_trace_export_from_value(raw: Option<&str>) -> anyhow::Result<Option<ote
     Ok(Some(otel::OtelExporter::new(provider)))
 }
 
-/// 在入口捕获唯一一代生产配置，并装配 tracing subscriber（fmt + `RUST_LOG`
-/// filter + 可选 otel OTLP/gRPC 桥接 Layer，默认 `info`）。
+fn prepare_local_before_external<Local, External>(
+    config: SnapshotConfig<'_>,
+    prepare_local: impl FnOnce(SnapshotConfig<'_>) -> anyhow::Result<Local>,
+    build_external: impl FnOnce() -> anyhow::Result<External>,
+) -> anyhow::Result<(Local, External)> {
+    let local = prepare_local(config)?;
+    let external = build_external()?;
+    Ok((local, external))
+}
+
+fn prepare_serving_local(
+    config: SnapshotConfig<'_>,
+) -> anyhow::Result<Arc<secure::DigestPasswordBlocklist>> {
+    domains::identity::load_password_blocklist(config)
+}
+
+fn prepare_operator_local(_: SnapshotConfig<'_>) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Capture one process snapshot, run profile-local preparation, then build external tracing.
 ///
-/// 组合根 binary 入口在 [`run`] **之前**调用——否则运行时入口的全部结构化日志
-/// （bind / serve / shutdown / fail-fast）皆为 no-op。`RUST_LOG`、[`OTEL_ENDPOINT_ENV`] 与后续
-/// serving consumer 全部来自这个 snapshot，不再读取 ambient environment。
-///
-/// 返回必填 [`RuntimeInputs`]；只有该输入可进入 [`run`] 或 [`shutdown_runtime`]。
-pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
+/// The local closure always runs before the OTLP builder. Serving uses it to seal the mandatory
+/// password policy; operators use the same snapshot/tracing lifecycle without receiving that
+/// serving-only capability.
+fn prepare_runtime_kernel<Local>(
+    prepare_local: impl FnOnce(SnapshotConfig<'_>) -> anyhow::Result<Local>,
+) -> anyhow::Result<(PreparedRuntimeInputs, Local)> {
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::fmt;
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
-    use tracing_subscriber::{EnvFilter, fmt};
 
     let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource)
         .context("capture process runtime configuration")?;
     let config = runtime_config.view();
+    let (local, trace_export) =
+        prepare_local_before_external(config, prepare_local, || build_trace_export(config))?;
     let filter = config
         .value("RUST_LOG")
         .and_then(|raw| EnvFilter::try_new(raw).ok())
         .unwrap_or_else(|| EnvFilter::new("info"));
-    let trace_export = build_trace_export(config)?;
-    // Option<Layer> 即 no-op layer（None → 不导出 trace）：覆盖「配 / 未配 endpoint」两态，subscriber 形态恒定。
-    let otel_layer = trace_export.as_ref().map(|e| e.layer());
+    let otel_layer = trace_export.as_ref().map(|exporter| exporter.layer());
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_writer(std::io::stderr))
         .with(otel_layer)
         .init();
-    Ok(RuntimeInputs::new(runtime_config, trace_export))
+    Ok((
+        PreparedRuntimeInputs::new(runtime_config, trace_export),
+        local,
+    ))
+}
+
+/// Prepare serving inputs, sealing the local password policy before any external provider.
+///
+/// 组合根 binary 入口在 [`run`] **之前**调用——否则运行时入口的全部结构化日志
+/// （bind / serve / shutdown / fail-fast）皆为 no-op。`RUST_LOG`、[`OTEL_ENDPOINT_ENV`] 与后续
+/// serving consumer 全部来自这个 snapshot，不再读取 ambient environment。密码 blocklist 在
+/// snapshot 后立即加载并成为必填 [`ServingRuntimeInputs`] typestate，任何 OTLP/外部 provider 都晚于它。
+///
+/// Only this type can enter [`run`] or [`shutdown_runtime`].
+pub fn prepare_runtime() -> anyhow::Result<ServingRuntimeInputs> {
+    let (prepared, password_blocklist) = prepare_runtime_kernel(prepare_serving_local)?;
+    Ok(ServingRuntimeInputs::new(prepared, password_blocklist))
+}
+
+/// Prepare operator inputs without loading serving-only password policy data.
+pub fn prepare_operator_runtime() -> anyhow::Result<OperatorRuntimeInputs> {
+    let (prepared, ()) = prepare_runtime_kernel(prepare_operator_local)?;
+    Ok(OperatorRuntimeInputs::new(prepared))
 }
 
 /// Flush the trace exporter when a prepared runtime exits before serving launch.
-pub async fn shutdown_runtime(mut runtime_inputs: RuntimeInputs) -> anyhow::Result<()> {
-    shutdown_pending_trace_export(&mut runtime_inputs).await
+pub async fn shutdown_runtime(mut runtime_inputs: ServingRuntimeInputs) -> anyhow::Result<()> {
+    shutdown_prepared_runtime(runtime_inputs.prepared_mut()).await
 }
 
-async fn shutdown_pending_trace_export(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
+/// Flush the trace exporter after an operator command completes.
+pub async fn shutdown_operator_runtime(
+    mut runtime_inputs: OperatorRuntimeInputs,
+) -> anyhow::Result<()> {
+    shutdown_prepared_runtime(runtime_inputs.prepared_mut()).await
+}
+
+async fn shutdown_prepared_runtime(
+    runtime_inputs: &mut PreparedRuntimeInputs,
+) -> anyhow::Result<()> {
     if let Some(trace_export) = runtime_inputs.take_trace_export() {
         trace_export
             .shutdown()
@@ -4210,11 +4262,11 @@ async fn shutdown_pending_trace_export(runtime_inputs: &mut RuntimeInputs) -> an
 
 /// Owns resources prepared before startup until the inner startup body moves them into launch.
 struct RuntimeLifecycleOwner {
-    inputs: RuntimeInputs,
+    inputs: ServingRuntimeInputs,
 }
 
 impl RuntimeLifecycleOwner {
-    fn new(inputs: RuntimeInputs) -> Self {
+    fn new(inputs: ServingRuntimeInputs) -> Self {
         Self { inputs }
     }
 
@@ -4224,7 +4276,7 @@ impl RuntimeLifecycleOwner {
     }
 
     async fn finish(mut self, startup_result: anyhow::Result<()>) -> anyhow::Result<()> {
-        let cleanup_result = shutdown_pending_trace_export(&mut self.inputs).await;
+        let cleanup_result = shutdown_prepared_runtime(self.inputs.prepared_mut()).await;
         match (startup_result, cleanup_result) {
             (Ok(()), cleanup_result) => cleanup_result,
             (Err(startup_error), Ok(())) => Err(startup_error),
@@ -4325,12 +4377,13 @@ where
 // reason: 组合根入口顺序编排（provider setup → generated domains → compose → finalize → serve）
 // 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点——item-level carve-out（error-handling.md §Carve-out）。
 #[allow(clippy::cognitive_complexity)]
-pub async fn run(runtime_inputs: RuntimeInputs) -> anyhow::Result<()> {
+pub async fn run(runtime_inputs: ServingRuntimeInputs) -> anyhow::Result<()> {
     RuntimeLifecycleOwner::new(runtime_inputs).run().await
 }
 
 #[allow(clippy::cognitive_complexity)]
-async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
+async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Result<()> {
+    let password_blocklist = Arc::clone(runtime_inputs.password_blocklist());
     let runtime_plan = plan::RuntimePlan::bundled().context("build runtime assembly plan")?;
     let runtime_plan_summary = runtime_plan.summary();
     let provider_counts = runtime_plan_summary.provider_counts();
@@ -4350,7 +4403,7 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
     );
     drop(runtime_plan);
 
-    // BuildProvider phase: production credential verifier provider.
+    // BuildProvider phase: ServingRuntimeInputs proves local policy was sealed before entry.
     let runtime_oidc = phase_result(
         RuntimePhase::BuildProvider,
         build_runtime_oidc_provider(runtime_inputs.config()).context("build runtime OIDC provider"),
@@ -4536,6 +4589,7 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
 
             // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
             let deps = SharedRuntimeDeps {
+                password_blocklist: Arc::clone(&password_blocklist),
                 pg,
                 redis,
                 s3,
@@ -4768,6 +4822,63 @@ mod tests {
         fn now(&self) -> SystemTime {
             SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000)
         }
+    }
+
+    fn test_password_blocklist() -> Arc<secure::DigestPasswordBlocklist> {
+        Arc::new(
+            crypto::load_password_blocklist_from_reader(std::io::Cursor::new(include_bytes!(
+                "../../../deploy/password-blocklist.demo.sha256"
+            )))
+            .unwrap_or_else(|_| unreachable!()),
+        )
+    }
+
+    #[test]
+    fn production_prepare_runtime_loads_policy_before_otlp_and_subscriber_setup() {
+        let external_calls = AtomicUsize::new(0);
+        let missing = crate::config::test_snapshot(&[]).unwrap_or_else(|_| unreachable!());
+        let error = prepare_local_before_external(missing.view(), prepare_serving_local, || {
+            external_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .err()
+        .unwrap_or_else(|| unreachable!());
+        assert_eq!(external_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            error
+                .to_string()
+                .contains(domains::identity::PASSWORD_BLOCKLIST_PATH_ENV)
+        );
+
+        let valid = crate::config::test_snapshot(&[(
+            domains::identity::PASSWORD_BLOCKLIST_PATH_ENV,
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deploy/password-blocklist.demo.sha256"
+            ),
+        )])
+        .unwrap_or_else(|_| unreachable!());
+        let (blocklist, ()) =
+            prepare_local_before_external(valid.view(), prepare_serving_local, || {
+                external_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(external_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(Arc::strong_count(&blocklist), 1);
+    }
+
+    #[test]
+    fn operator_preparation_does_not_require_serving_password_policy() {
+        let external_calls = AtomicUsize::new(0);
+        let missing = crate::config::test_snapshot(&[]).unwrap_or_else(|_| unreachable!());
+        let ((), ()) =
+            prepare_local_before_external(missing.view(), prepare_operator_local, || {
+                external_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(external_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -5357,7 +5468,7 @@ mod tests {
             &self,
             _scope: IdentityTenantRepoScope,
             _login: identity::ports::LoginIdentifier,
-            _candidate: String,
+            _candidate: secure::RawPassword,
             _now: SystemTime,
         ) -> Result<identity::ports::AuthOutcome, identity::ports::IdentityError> {
             Err(identity_storage_error(
@@ -5597,6 +5708,12 @@ mod tests {
                 UnusedSessionLifecycle,
             )),
             Arc::clone(&refresh),
+            secure::PasswordPolicy::new(Arc::new(
+                crypto::load_password_blocklist_from_reader(std::io::Cursor::new(include_bytes!(
+                    "../../../deploy/password-blocklist.demo.sha256"
+                )))
+                .expect("embedded runtime test blocklist"),
+            )),
             Box::new(SystemClock),
             Duration::from_secs(900),
         ));
@@ -6807,7 +6924,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn projection_control_entrypoint_rejects_bad_args_before_runtime_setup() {
         let snapshot = crate::config::test_snapshot(&[]).expect("capture operator config");
-        let runtime_inputs = RuntimeInputs::new(snapshot, None);
+        let runtime_inputs = OperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None));
         let result = run_projection_control_command(&args(&["projections"]), &runtime_inputs).await;
         assert!(result.is_err());
     }
@@ -9140,12 +9257,22 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn run_pre_handoff_failure_explicitly_shuts_down_trace_exporter() {
-        let snapshot = crate::config::test_snapshot(&[]).expect("capture empty runtime config");
+        let snapshot = crate::config::test_snapshot(&[(
+            domains::identity::PASSWORD_BLOCKLIST_PATH_ENV,
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deploy/password-blocklist.demo.sha256"
+            ),
+        )])
+        .expect("capture runtime config with local password policy");
         let endpoint = otel::OtelEndpoint::insecure_localhost("http://localhost:4317")
             .expect("hermetic loopback endpoint");
         let provider = otel::build_otlp_provider(endpoint).expect("build lazy hermetic provider");
         let shutdown_witness = provider.clone();
-        let inputs = RuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider)));
+        let inputs = ServingRuntimeInputs::new(
+            PreparedRuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider))),
+            test_password_blocklist(),
+        );
 
         let err = run(inputs)
             .await
@@ -9165,7 +9292,10 @@ mod tests {
             .expect("hermetic loopback endpoint");
         let provider = otel::build_otlp_provider(endpoint).expect("build lazy hermetic provider");
         let handoff_witness = provider.clone();
-        let inputs = RuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider)));
+        let inputs = ServingRuntimeInputs::new(
+            PreparedRuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider))),
+            test_password_blocklist(),
+        );
         let mut owner = RuntimeLifecycleOwner::new(inputs);
         let handed_off = owner
             .inputs

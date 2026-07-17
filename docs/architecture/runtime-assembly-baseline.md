@@ -24,8 +24,10 @@ Dynamic state is not asserted by this gate: environment variables, live provider
 
 ## Current `runtime::run_startup()` Inventory
 
-The public `runtime::run()` only transfers `RuntimeInputs` into `RuntimeLifecycleOwner`. The owner
-always finishes the unique `run_startup(&mut RuntimeInputs)` result through pending-exporter
+The public `runtime::run()` only accepts `ServingRuntimeInputs` and transfers it into
+`RuntimeLifecycleOwner`; `OperatorRuntimeInputs` is a distinct, unforgeable profile without the
+password-policy capability and cannot enter serving. The owner always finishes the unique
+`run_startup(&mut ServingRuntimeInputs)` result through pending-exporter
 cleanup; the current production startup body has these phases:
 
 1. Build provider bundles and transport handles:

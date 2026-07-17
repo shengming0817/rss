@@ -85,6 +85,15 @@ fn noop_domain_transport() -> Arc<dyn distributed::DomainTransport> {
     Arc::new(NoopDomainTransport)
 }
 
+fn test_password_blocklist() -> Arc<secure::DigestPasswordBlocklist> {
+    Arc::new(
+        crypto::load_password_blocklist_from_reader(std::io::Cursor::new(include_bytes!(
+            "../../../deploy/password-blocklist.demo.sha256"
+        )))
+        .unwrap_or_else(|_| unreachable!()),
+    )
+}
+
 // ── vault Transit mock helpers（mirror refresh_mint_e2e.rs） ────────────────────────────────────
 
 /// 测试 P-256 私钥（静态，dev-only；mock vault 用此 key 签）。
@@ -359,7 +368,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         LOGIN_USERNAME,
         ids::UserId::parse(CANON_USER)?,
         tenant,
-        secure::hash_password(PASSWORD)?,
+        secure::PasswordHash::for_test(secure::RawPassword::new(PASSWORD.to_owned()))?,
         1,
     );
     pg.for_domain::<caps::Identity>()
@@ -402,6 +411,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         true,
     )?;
     let deps = SharedRuntimeDeps {
+        password_blocklist: test_password_blocklist(),
         pg: pg.clone(),
         redis,
         s3,
@@ -644,6 +654,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         true,
     )?;
     let deps = SharedRuntimeDeps {
+        password_blocklist: test_password_blocklist(),
         pg: pg.clone(),
         redis,
         s3,

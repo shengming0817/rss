@@ -32,7 +32,7 @@ use bootstrap::SubscriberExecution;
 use common::{
     CANON_TENANT, CANON_USER, CapturingVerifier, LOGIN_USERNAME, NOW_SECS, PASSWORD,
     SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, dlx_payload_protector, identity_domain,
-    session_created_subscription,
+    password_policy, session_created_subscription,
 };
 use consistency::{
     Disposition, EngineError, EngineErrorKind, HandleResult, OutboxRelay, PermanentError,
@@ -292,6 +292,7 @@ async fn login_audit_durable_topology() -> Result<()> {
                 id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
             )),
             Arc::clone(&refresh_identity),
+            password_policy(),
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
             Duration::from_secs(TTL_SECS),
             LOGIN_USERNAME,
@@ -347,6 +348,7 @@ async fn login_audit_durable_topology() -> Result<()> {
                 id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
             )),
             refresh_for_login,
+            password_policy(),
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
             Duration::from_secs(TTL_SECS),
             LOGIN_USERNAME,

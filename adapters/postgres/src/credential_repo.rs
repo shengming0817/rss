@@ -15,8 +15,9 @@
 //! 域内单源（`identity::ports::AccountLockout`），adapter 仅 I/O：`from_parts` 重建 → `record_failure` /
 //! `try_lazy_unlock` 推进 → 访问器回写三列。
 //!
-//! 恒定成本验签（#1277 F3）：authenticate 无论凭据是否存在都跑 `secure::verify_password_constant_time`（消登录
-//! 枚举时序差），再据「已知/未知 + 验签成败」原子分流（F1+F2）。tenant scope 经 `SET LOCAL`（读经
+//! 有界 KDF 验签（#1277 F3）：authenticate 无论凭据是否存在都跑 typed `secure::verify_password`，未知
+//! 主体支付当前档工作以关闭零 KDF 快路径；变量 PHC profile 不承诺严格等时。随后据「已知/未知 + 验签成败」
+//! 原子分流（F1+F2）。tenant scope 经 `SET LOCAL`（读经
 //! `tenant_scoped_read`，写经事务内 `set_local_tenant`，与 0009 RLS policy `current_setting` 锚点对齐）+ 显式
 //! `WHERE tenant_id`（双重隔离，跨租 → 0 行 → fail-closed）。读出 PHC 经 `secure::PasswordHash::parse` 复核
 //! （损坏持久化值 → `Storage`，fail-closed）。
@@ -337,7 +338,7 @@ impl CredentialRepo for PgCredentialRepo {
         &self,
         scope: TenantRepoScope,
         login: LoginIdentifier,
-        candidate: String,
+        candidate: secure::RawPassword,
         now: SystemTime,
     ) -> Result<AuthOutcome, IdentityError> {
         let tenant = scope.tenant();
@@ -348,7 +349,7 @@ impl CredentialRepo for PgCredentialRepo {
                 scope,
                 move |conn| {
                     Box::pin(async move {
-                        authenticate_in_tx(conn.conn(), &tenant_uuid, &login_str, &candidate, now)
+                        authenticate_in_tx(conn.conn(), &tenant_uuid, &login_str, candidate, now)
                             .await
                     })
                 },
@@ -518,33 +519,37 @@ impl CredentialRepo for PgCredentialRepo {
 /// 行类型：已知主体 SELECT FOR UPDATE 读出（user_id PHC + 锁定三列）；未知主体 → None。
 type AuthRow = (String, String, i64, Option<i64>, Option<i64>);
 
-/// authenticate 事务体（SET LOCAL → 单行 FOR UPDATE → 恒定成本验签 → 原子分流；#1277 F1+F2+F3）。
+/// authenticate 事务体（SET LOCAL → 单行 FOR UPDATE → 有界 KDF 验签 → 原子分流；#1277 F1+F2+F3）。
 async fn authenticate_in_tx(
     tx: &mut PgConnection,
     tenant_uuid: &str,
     login: &str,
-    candidate: &str,
+    candidate: secure::RawPassword,
     now: SystemTime,
 ) -> Result<AuthOutcome, IdentityError> {
     let found = auth_row(tx, tenant_uuid, login).await?;
-    // PHC parse（已知主体）。损坏 PHC = 存储完整性问题 → fail-closed `Storage`，但**先跑等价 KDF 再早退**：
+    // PHC parse（已知主体）。损坏 PHC = 存储完整性问题 → fail-closed `Storage`，但**先跑当前档 KDF 再早退**：
     // 否则「已知主体 + 损坏 PHC」走 ~0 成本早退，与「未知主体」跑满 argon2 KDF 的耗时可区分，泄漏主体存在性
     // （#1277 F3 边缘时序盲区）。与 `application.rs` change_password not-found 路径同款「dummy KDF 后早退」防御。
     let hash = match &found {
         Some((_, phc, ..)) => match secure::PasswordHash::parse(phc) {
             Ok(h) => Some(h),
             Err(e) => {
-                let _ = secure::verify_password_constant_time(candidate, None);
+                let _ = secure::verify_password(candidate, None);
                 return Err(IdentityError::Storage(Box::new(e)));
             }
         },
         None => None,
     };
-    // 恒定成本验签（F3）：未知主体亦跑等价 KDF（消枚举时序差）。
-    let ok = secure::verify_password_constant_time(candidate, hash.as_ref());
-    match (found, ok) {
+    // 有界 KDF 验签（F3）：未知主体亦跑当前档 KDF，关闭无主体零成本快路径。
+    let verification = secure::verify_password(candidate, hash.as_ref())
+        .map_err(|error| IdentityError::Storage(Box::new(error)))?;
+    match (found, verification) {
         // 已知 + 正确：原子清锁 + 返回 canonical actor subject。
-        (Some((user_id_str, ..)), true) => {
+        (Some((user_id_str, ..)), secure::PasswordVerification::Verified(receipt)) => {
+            if let Some(replacement) = receipt.upgraded_hash() {
+                replace_password_hash(tx, tenant_uuid, login, &replacement).await?;
+            }
             clear_lockout(tx, tenant_uuid, login).await?;
             let user_id = ids::UserId::parse(&user_id_str)
                 .map_err(|e| IdentityError::Storage(Box::new(e)))?;
@@ -553,15 +558,39 @@ async fn authenticate_in_tx(
         // 已知 + 错：原子推进 lockout（达阈值即锁），回写三列；对外仍 InvalidCredentials。
         // 注：本分支较 InvalidUnknown 多一次 write_lockout（RTT 差），但两路径均已跑满 argon2 KDF（~100ms）主导
         // 耗时，该写差在 KDF 噪音量级内——属 `ports.rs` 标注的 SHOULD-level 容忍（与 in-mem 替身同语义，#1277）。
-        (Some((_, _, failure_count, window, until)), false) => {
+        (Some((_, _, failure_count, window, until)), secure::PasswordVerification::Invalid) => {
             let mut lockout = rebuild_lockout(failure_count, window, until, now);
             lockout.record_failure(now);
             write_lockout(tx, tenant_uuid, login, &lockout).await?;
             Ok(AuthOutcome::InvalidKnownUser)
         }
         // 查无凭据：KDF 已跑；**不建 / 不动** lockout（F2：未知主体无行 ⇒ 无锁可建）。
-        (None, _) => Ok(AuthOutcome::InvalidUnknown),
+        (None, secure::PasswordVerification::Invalid) => Ok(AuthOutcome::InvalidUnknown),
+        (None, secure::PasswordVerification::Verified(_)) => Err(IdentityError::Storage(Box::new(
+            std::io::Error::other("dummy password verification returned success"),
+        ))),
     }
+}
+
+/// Replace only the PHC maintenance field while preserving the business credential version.
+/// The caller holds the credential row lock and the enclosing transaction also clears lockout.
+async fn replace_password_hash(
+    tx: &mut PgConnection,
+    tenant_uuid: &str,
+    login: &str,
+    replacement: &secure::PasswordHash,
+) -> Result<(), IdentityError> {
+    sqlx::query(
+        "UPDATE credentials SET password_hash = $3 \
+         WHERE tenant_id = $1::uuid AND login = $2",
+    )
+    .bind(tenant_uuid)
+    .bind(login)
+    .bind(replacement.as_str())
+    .execute(&mut *tx)
+    .await
+    .map_err(storage)?;
+    Ok(())
 }
 
 /// 单行 FOR UPDATE 读凭据 + 锁定三列（已知主体）；未知主体 0 行 → None（不建锁，F2）。

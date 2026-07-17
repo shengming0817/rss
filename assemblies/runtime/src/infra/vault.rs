@@ -310,8 +310,16 @@ pub fn is_oidc_jwks_export_command(args: &[String]) -> bool {
     )
 }
 
-pub async fn run_oidc_jwks_export_command(args: &[String]) -> anyhow::Result<()> {
-    run_oidc_jwks_export_command_from(args, |name| std::env::var(name).ok(), false).await
+pub async fn run_oidc_jwks_export_command(
+    args: &[String],
+    runtime_inputs: &crate::OperatorRuntimeInputs,
+) -> anyhow::Result<()> {
+    run_oidc_jwks_export_command_from(
+        args,
+        |name| runtime_inputs.config().value(name).map(str::to_owned),
+        false,
+    )
+    .await
 }
 
 async fn run_oidc_jwks_export_command_from(

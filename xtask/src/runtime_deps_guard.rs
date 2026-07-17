@@ -18,10 +18,12 @@ use crate::diagnostic::{Finding, GovernanceCheck, finding};
 const CONFIG_PATH: &str = "xtask/runtime-deps-guard.toml";
 const STRUCT_NAME: &str = "SharedRuntimeDeps";
 const EXACT_DOMAIN_TRANSPORT_ARC: &str = "Arc<dyn distributed::DomainTransport>";
+const EXACT_PASSWORD_BLOCKLIST_ARC: &str = "Arc<secure::DigestPasswordBlocklist>";
 const EXACT_OIDC_PROVIDER_ARC: &str = "Arc<oidc::OidcProvider>";
 const EXACT_VAULT_SIGNER_ARC: &str = "Arc<vault::VaultSigner>";
 const SUPPORTED_EXACT_EXCEPTIONS: &[&str] = &[
     EXACT_DOMAIN_TRANSPORT_ARC,
+    EXACT_PASSWORD_BLOCKLIST_ARC,
     EXACT_OIDC_PROVIDER_ARC,
     EXACT_VAULT_SIGNER_ARC,
 ];
@@ -386,6 +388,16 @@ fn collect_use_tree_aliases(
 fn is_allowed_field_type(ty: &Type, resolver: &TypeResolver, policy: &RuntimeDepsPolicy) -> bool {
     if policy.allows_domain_transport_arc()
         && is_exact_domain_transport_arc(ty, resolver, &mut Vec::new())
+    {
+        return true;
+    }
+    if policy.allows_exact_exception(EXACT_PASSWORD_BLOCKLIST_ARC)
+        && is_exact_arc_of_path(
+            ty,
+            resolver,
+            &["secure", "DigestPasswordBlocklist"],
+            &mut Vec::new(),
+        )
     {
         return true;
     }
@@ -781,6 +793,7 @@ mod tests {
             [
                 "Arc<dyn distributed::DomainTransport>",
                 "Arc<oidc::OidcProvider>",
+                "Arc<secure::DigestPasswordBlocklist>",
                 "Arc<vault::VaultSigner>"
             ]
         );

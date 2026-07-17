@@ -6,6 +6,8 @@
 //! INVARIANT: COMMAND-JOURNAL-GENERATED-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-policy", golden = "generated/src/command/mod.rs", synthetic_red = "codegen::tests::command_missing_policy_is_rejected", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }
 //! INVARIANT: ROUTE-EVIDENCE-CODEGEN-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-to-generated-atomic-http-route", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::codegen_rejects_active_http_without_effect_profile", anti_vacuity = "codegen::tests::codegen_emits_http_consistency_level_inside_route_evidence" }
 //! INVARIANT: LOCAL-ONLY-RECEIPT-TARGET-01 { level = "Hard", exec = "verify", source = "codegen", facet = "active-http-local-only-marker-registry", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::local_only_receipt_targets_exclude_non_active_and_non_local_only_http", anti_vacuity = "codegen::tests::codegen_emits_local_only_receipt_target" }
+//! INVARIANT: GENERATED-TUPLE-REDACTION-01 { level = "Hard", exec = "verify", source = "codegen", facet = "constrained-scalar-redaction", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy", anti_vacuity = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy" }
+//! INVARIANT: DEFERRED-STRING-LENGTH-VALIDATION-01 { level = "Hard", exec = "verify", source = "codegen", facet = "schema-marked-transport-policy-boundary", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::deferred_string_length_marker_rejects_other_validation_keywords", anti_vacuity = "codegen::tests::schema_marker_defers_transport_length_checks" }
 //! INVARIANT: GENERATED-RUSTDOC-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "codegen::tests::owned_event_and_command_seam_templates_document_public_api", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }—— owned event/command templates require rustdoc on every public item, variant, accessor and associated item.
 //! golden = committed 文件 diff（rust-analyzer `ensure_file_contents` 模式）；
 //! anti-vacuity：注入漂移 / 孤儿文件必失（见 `#[cfg(test)]`）。
@@ -304,6 +306,7 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
     );
     let mut redaction_policies: StructPolicies = BTreeMap::new();
     let mut protection_policies: StructProtectionPolicies = BTreeMap::new();
+    let mut deferred_string_lengths: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let schema_files = if c.manifest.kind == ContractKind::Saga {
         c.manifest.declared_schema_files()
     } else {
@@ -318,6 +321,12 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
             .with_context(|| format!("读 schema {}", path.display()))?;
         let value: serde_json::Value = serde_json::from_str(&text)
             .with_context(|| format!("解析 schema {}", path.display()))?;
+        merge_deferred_string_lengths(
+            &mut deferred_string_lengths,
+            collect_deferred_string_lengths(&value).with_context(|| {
+                format!("解析 schema {} 的 deferred string marker", path.display())
+            })?,
+        );
         if c.manifest.kind == ContractKind::Http
             && c.manifest.schemas.request.as_deref() == Some(schema_file)
             && schema_declares_property(&value, "tenantId")
@@ -361,6 +370,7 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
     }
     let mut parsed =
         syn::parse2::<syn::File>(space.to_stream()).context("syn 解析 typify token 流")?;
+    defer_marked_string_length_validation(&mut parsed, &deferred_string_lengths)?;
     apply_redaction_policy(&mut parsed, &redaction_policies);
     allow_derivable_default_impls(&mut parsed);
     allow_unwrap_in_defaults_mod(&mut parsed);
@@ -1269,10 +1279,225 @@ fn is_safe_codegen_string(s: &str) -> bool {
         .any(|b| b == b'"' || b == b'\\' || b.is_ascii_control())
 }
 
+const DEFER_STRING_LENGTH_VALIDATION: &str = "x-defer-string-length-validation";
+const DEFERRED_LENGTH_ALLOWED_KEYS: &[&str] = &[
+    "$comment",
+    "default",
+    "deprecated",
+    "description",
+    "examples",
+    "maxLength",
+    "minLength",
+    "readOnly",
+    "title",
+    "type",
+    "writeOnly",
+    "x-pii",
+    "x-protection",
+    "x-redaction",
+    DEFER_STRING_LENGTH_VALIDATION,
+];
+
+/// 收集由 schema 显式声明“长度约束留给领域 policy”的 string 字段。marker 只改变 generated
+/// transport constructor；原 schema 的 min/max 继续参与文档、hash 与外部契约元数据。
+fn collect_deferred_string_lengths(
+    schema: &serde_json::Value,
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    fn visit(node: &serde_json::Value, out: &mut BTreeMap<String, BTreeSet<String>>) -> Result<()> {
+        if let Some(object) = node.as_object() {
+            if let Some(properties) = object.get("properties").and_then(|value| value.as_object()) {
+                for (property_name, property) in properties {
+                    let Some(marker) = property.get(DEFER_STRING_LENGTH_VALIDATION) else {
+                        continue;
+                    };
+                    let defer = marker.as_bool().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{DEFER_STRING_LENGTH_VALIDATION} at property {property_name:?} must be boolean"
+                        )
+                    })?;
+                    if !defer {
+                        continue;
+                    }
+                    let property_schema = property.as_object().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{DEFER_STRING_LENGTH_VALIDATION} at property {property_name:?} requires an object schema"
+                        )
+                    })?;
+                    let unsupported: Vec<&str> = property_schema
+                        .keys()
+                        .map(String::as_str)
+                        .filter(|key| !DEFERRED_LENGTH_ALLOWED_KEYS.contains(key))
+                        .collect();
+                    if !unsupported.is_empty() {
+                        bail!(
+                            "{DEFER_STRING_LENGTH_VALIDATION} at property {property_name:?} cannot discard additional schema keywords: {}",
+                            unsupported.join(", ")
+                        );
+                    }
+                    if property.get("type").and_then(|value| value.as_str()) != Some("string")
+                        || !(property.get("minLength").is_some()
+                            || property.get("maxLength").is_some())
+                    {
+                        bail!(
+                            "{DEFER_STRING_LENGTH_VALIDATION} at property {property_name:?} requires a constrained string"
+                        );
+                    }
+                    let title = object.get("title").and_then(|value| value.as_str()).ok_or_else(
+                        || {
+                            anyhow::anyhow!(
+                                "{DEFER_STRING_LENGTH_VALIDATION} at property {property_name:?} requires a titled containing object"
+                            )
+                        },
+                    )?;
+                    out.entry(title.to_string())
+                        .or_default()
+                        .insert(property_name.clone());
+                }
+            }
+            for value in object.values() {
+                visit(value, out)?;
+            }
+        } else if let Some(items) = node.as_array() {
+            for value in items {
+                visit(value, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut out = BTreeMap::new();
+    visit(schema, &mut out)?;
+    Ok(out)
+}
+
+fn merge_deferred_string_lengths(
+    target: &mut BTreeMap<String, BTreeSet<String>>,
+    source: BTreeMap<String, BTreeSet<String>>,
+) {
+    for (struct_name, fields) in source {
+        target.entry(struct_name).or_default().extend(fields);
+    }
+}
+
+/// typify 为 constrained string 生成 tuple newtype，并让 `FromStr` 承载 min/max 检查。对显式 marker
+/// 字段重写这一唯一 constructor 漏斗；`Deserialize` 与各 `TryFrom` 均委托 `FromStr`，因此不会在认证前
+/// 拒绝原始输入，最终 NFC 后的 authoritative policy 仍由 secure::PasswordPolicy 执行。
+fn defer_marked_string_length_validation(
+    file: &mut syn::File,
+    policies: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<()> {
+    let tuple_names: BTreeSet<String> = file
+        .items
+        .iter()
+        .filter_map(|item| {
+            let syn::Item::Struct(item) = item else {
+                return None;
+            };
+            matches!(item.fields, syn::Fields::Unnamed(_)).then(|| item.ident.to_string())
+        })
+        .collect();
+    let mut deferred_types = BTreeSet::new();
+    for (struct_name, fields) in policies {
+        let item = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Struct(item) if item.ident == struct_name => Some(item),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("marked containing type {struct_name:?} was not generated")
+            })?;
+        for wire_name in fields {
+            let field = item
+                .fields
+                .iter()
+                .find(|field| {
+                    field.ident.as_ref().is_some_and(|ident| {
+                        serde_rename(field).unwrap_or_else(|| ident.to_string()) == *wire_name
+                    })
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!("marked field {struct_name}.{wire_name} was not generated")
+                })?;
+            let referenced = referenced_tuple_structs(&field.ty, &tuple_names);
+            if referenced.len() != 1 {
+                bail!(
+                    "marked field {struct_name}.{wire_name} must reference exactly one constrained string type, found {}",
+                    referenced.len()
+                );
+            }
+            deferred_types.extend(referenced);
+        }
+    }
+
+    let mut rewritten = BTreeSet::new();
+    for item in &mut file.items {
+        let syn::Item::Impl(item) = item else {
+            continue;
+        };
+        let Some((_, trait_path, _)) = &item.trait_ else {
+            continue;
+        };
+        if trait_path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != "FromStr")
+        {
+            continue;
+        }
+        let syn::Type::Path(self_type) = item.self_ty.as_ref() else {
+            continue;
+        };
+        let Some(type_name) = self_type
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            continue;
+        };
+        if !deferred_types.contains(&type_name) {
+            continue;
+        }
+        let method = item
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == "from_str" => Some(method),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("marked type {type_name} has no FromStr constructor"))?;
+        let value = method
+            .sig
+            .inputs
+            .first()
+            .and_then(|argument| match argument {
+                syn::FnArg::Typed(argument) => match argument.pat.as_ref() {
+                    syn::Pat::Ident(ident) => Some(&ident.ident),
+                    _ => None,
+                },
+                syn::FnArg::Receiver(_) => None,
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("marked type {type_name} has unexpected FromStr input")
+            })?;
+        method.block = syn::parse_quote!({ Ok(Self(#value.to_string())) });
+        rewritten.insert(type_name);
+    }
+    if rewritten != deferred_types {
+        bail!(
+            "marked constrained string constructors were not rewritten: expected {deferred_types:?}, got {rewritten:?}"
+        );
+    }
+    Ok(())
+}
+
 /// generated struct 统一派生 `secure::Redact`，字段策略从 schema property 的 `x-pii` / `x-redaction`
 /// 注入为 `#[redact(...)]`。非敏感字段默认 `public`，使所有 generated DTO 都有安全 `Debug`，不再裸
 /// derive `Debug` 或把敏感类型去掉 `Debug`。
 fn apply_redaction_policy(file: &mut syn::File, policies: &StructPolicies) {
+    let tuple_policies = tuple_struct_policies(file, policies);
     for item in &mut file.items {
         let syn::Item::Struct(s) = item else {
             continue;
@@ -1280,6 +1505,47 @@ fn apply_redaction_policy(file: &mut syn::File, policies: &StructPolicies) {
         rewrite_struct_derives(&mut s.attrs);
         let struct_policies = policies.get(&s.ident.to_string());
         for field in &mut s.fields {
+            let policy = if let Some(ident) = &field.ident {
+                let wire_name = serde_rename(field).unwrap_or_else(|| ident.to_string());
+                struct_policies
+                    .and_then(|fields| fields.get(&wire_name))
+                    .copied()
+                    .unwrap_or_default()
+            } else {
+                tuple_policies
+                    .get(&s.ident.to_string())
+                    .copied()
+                    .unwrap_or_default()
+            };
+            field.attrs.push(redact_attr(policy));
+        }
+    }
+}
+
+/// typify 将含 `minLength`/`maxLength` 等约束的 scalar property 提升为 tuple newtype。
+/// schema redaction 单源仍挂在父 property，因此沿生成 AST 的字段类型引用把策略传给 tuple 字段。
+fn tuple_struct_policies(
+    file: &syn::File,
+    policies: &StructPolicies,
+) -> BTreeMap<String, FieldPolicy> {
+    let tuple_names: BTreeSet<String> = file
+        .items
+        .iter()
+        .filter_map(|item| {
+            let syn::Item::Struct(item) = item else {
+                return None;
+            };
+            matches!(item.fields, syn::Fields::Unnamed(_)).then(|| item.ident.to_string())
+        })
+        .collect();
+    let mut tuple_policies = BTreeMap::new();
+
+    for item in &file.items {
+        let syn::Item::Struct(item) = item else {
+            continue;
+        };
+        let struct_policies = policies.get(&item.ident.to_string());
+        for field in &item.fields {
             let Some(ident) = &field.ident else {
                 continue;
             };
@@ -1288,7 +1554,54 @@ fn apply_redaction_policy(file: &mut syn::File, policies: &StructPolicies) {
                 .and_then(|fields| fields.get(&wire_name))
                 .copied()
                 .unwrap_or_default();
-            field.attrs.push(redact_attr(policy));
+            for tuple_name in referenced_tuple_structs(&field.ty, &tuple_names) {
+                tuple_policies
+                    .entry(tuple_name)
+                    .and_modify(|current| *current = merge_tuple_policy(*current, policy))
+                    .or_insert(policy);
+            }
+        }
+    }
+    tuple_policies
+}
+
+fn referenced_tuple_structs(ty: &syn::Type, tuple_names: &BTreeSet<String>) -> BTreeSet<String> {
+    struct TupleReferenceVisitor<'a> {
+        tuple_names: &'a BTreeSet<String>,
+        referenced: BTreeSet<String>,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for TupleReferenceVisitor<'_> {
+        fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+            for segment in &node.path.segments {
+                let name = segment.ident.to_string();
+                if self.tuple_names.contains(&name) {
+                    self.referenced.insert(name);
+                }
+            }
+            syn::visit::visit_type_path(self, node);
+        }
+    }
+
+    let mut visitor = TupleReferenceVisitor {
+        tuple_names,
+        referenced: BTreeSet::new(),
+    };
+    syn::visit::Visit::visit_type(&mut visitor, ty);
+    visitor.referenced
+}
+
+/// 同一 tuple type 被复用且字段策略冲突时取更保守策略；两个非 public 策略不一致则固定 secret，
+/// 避免 schema 复用令生成类型的独立 Debug 暴露任一调用点视为敏感的值。
+fn merge_tuple_policy(left: FieldPolicy, right: FieldPolicy) -> FieldPolicy {
+    if left == right || right == FieldPolicy::default() {
+        left
+    } else if left == FieldPolicy::default() {
+        right
+    } else {
+        FieldPolicy {
+            sensitivity: Sensitivity::Secret,
+            mode: None,
         }
     }
 }
@@ -2685,6 +2998,22 @@ mod tests {
         })
     }
 
+    fn tuple_field_has_redact_attr(file: &syn::File, struct_name: &str, needle: &str) -> bool {
+        file.items.iter().any(|item| {
+            let syn::Item::Struct(s) = item else {
+                return false;
+            };
+            s.ident == struct_name
+                && s.fields.iter().any(|field| {
+                    field.ident.is_none()
+                        && field.attrs.iter().any(|attr| {
+                            attr.path().is_ident("redact")
+                                && matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string().contains(needle))
+                        })
+                })
+        })
+    }
+
     /// generated wire struct 须统一 derive `secure::Redact` 并去掉裸 `Debug` derive；
     /// 字段策略由 schema `x-redaction` 注入，未标记字段默认 public。
     #[test]
@@ -2736,6 +3065,98 @@ mod tests {
         assert!(
             field_has_redact_attr(&parsed, "XSensCoordRequest", "store_id", "internal"),
             "storeId 应按 x-redaction=internal 注入字段策略:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    fn constrained_redaction_fixture() -> anyhow::Result<(syn::File, String)> {
+        let root = unique_tmp("codegen");
+        seed_http_sensitive(&root)?;
+        std::fs::write(
+            root.join("contracts/http/_seed/v1/request.schema.json"),
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"SensitiveSeedRequest","type":"object","required":["opaque","label"],"properties":{"opaque":{"type":"string","minLength":1,"maxLength":64,"x-defer-string-length-validation":true,"x-redaction":"secret"},"label":{"type":"string","minLength":1,"maxLength":64}},"additionalProperties":false}"#,
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        let parsed = syn::parse_str::<syn::File>(&rendered).context("解析派生 .rs")?;
+        Ok((parsed, rendered))
+    }
+
+    /// typify constrained tuple newtype 必须精确继承 secret/public 策略；public 样本防止
+    /// 用“全部标 secret”掩盖传播缺失。
+    #[test]
+    fn constrained_newtypes_inherit_exact_redaction_policy() -> anyhow::Result<()> {
+        let (parsed, rendered) = constrained_redaction_fixture()?;
+        assert!(
+            tuple_field_has_redact_attr(&parsed, "SensitiveSeedRequestOpaque", "secret"),
+            "secret constrained string newtype 应继承 secret 策略:\n{rendered}"
+        );
+        assert!(
+            tuple_field_has_redact_attr(&parsed, "SensitiveSeedRequestLabel", "public"),
+            "未标记 constrained string newtype 应保持 public:\n{rendered}"
+        );
+        assert!(
+            !tuple_field_has_redact_attr(&parsed, "SensitiveSeedRequestLabel", "secret"),
+            "public anti-vacuity 样本不得被一律提升成 secret:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    fn generated_from_str_impl<'a>(rendered: &'a str, type_name: &str) -> anyhow::Result<&'a str> {
+        let start = format!("impl ::std::str::FromStr for {type_name}");
+        let (_, tail) = rendered
+            .split_once(&start)
+            .ok_or_else(|| anyhow::anyhow!("missing FromStr impl for {type_name}"))?;
+        Ok(tail.split("\n    impl ").next().unwrap_or(tail))
+    }
+
+    /// marker 必须只移除被标 constrained string 的 transport constructor 检查；未标样本继续检查，
+    /// 防止实现退化为全局移除 typify 约束，且生成文档仍携带原 min/max 与 marker 元数据。
+    #[test]
+    fn schema_marker_defers_transport_length_checks() -> anyhow::Result<()> {
+        let (_, rendered) = constrained_redaction_fixture()?;
+        let deferred = generated_from_str_impl(&rendered, "SensitiveSeedRequestOpaque")?;
+        let enforced = generated_from_str_impl(&rendered, "SensitiveSeedRequestLabel")?;
+        assert!(
+            deferred.contains("Ok(Self(value.to_string()))")
+                && !deferred.contains("chars().count()"),
+            "marked constructor must accept raw transport strings:\n{deferred}"
+        );
+        assert!(
+            enforced.contains("chars().count()"),
+            "unmarked constrained string is the anti-vacuity control:\n{enforced}"
+        );
+        assert!(
+            rendered.contains("\"minLength\": 1")
+                && rendered.contains("\"maxLength\": 64")
+                && rendered.contains("\"x-defer-string-length-validation\": true"),
+            "generated schema docs must retain constraint metadata:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    /// constructor 重写会移除整个 typify validation body，因此 marker 与 pattern 等额外约束组合时
+    /// 必须 codegen fail-closed，不能把 schema 声明的约束静默变成无效元数据。
+    #[test]
+    fn deferred_string_length_marker_rejects_other_validation_keywords() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-deferred-pattern");
+        seed_http_sensitive(&root)?;
+        std::fs::write(
+            root.join("contracts/http/_seed/v1/request.schema.json"),
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"SensitiveSeedRequest","type":"object","required":["opaque"],"properties":{"opaque":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[a-z]+$","x-defer-string-length-validation":true,"x-redaction":"secret"}},"additionalProperties":false}"#,
+        )?;
+        let error = match generate(&root.join("contracts"), &root.join("generated/src"), false) {
+            Ok(()) => anyhow::bail!("marked min/max + pattern must fail closed"),
+            Err(error) => error,
+        };
+        let _ = std::fs::remove_dir_all(&root);
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(DEFER_STRING_LENGTH_VALIDATION) && message.contains("pattern"),
+            "error must identify the marker and discarded keyword: {message}"
         );
         Ok(())
     }

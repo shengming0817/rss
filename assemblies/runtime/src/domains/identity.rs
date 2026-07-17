@@ -8,6 +8,7 @@ use bootstrap::DomainBinding;
 use identity_composition::IdentityModuleDeps;
 use postgres::{PgDomainDeps, caps};
 
+use crate::config::SnapshotConfig;
 use crate::infra::vault::build_vault_signer_with;
 use crate::{SharedRuntimeDeps, SystemClock};
 
@@ -19,6 +20,7 @@ const JWT_AUDIENCE_ENV: &str = "RSS_JWT_AUDIENCE";
 const JWT_KEY_ID_ENV: &str = "RSS_JWT_ES256_KEY_ID";
 const JWT_ACCESS_TTL_ENV: &str = "RSS_JWT_ACCESS_TTL_SECS";
 const REFRESH_TTL_ENV: &str = "RSS_REFRESH_TTL_SECS";
+pub(crate) const PASSWORD_BLOCKLIST_PATH_ENV: &str = "RSS_PASSWORD_BLOCKLIST_PATH";
 const DEFAULT_REFRESH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const MAX_REFRESH_TTL_SECS: u64 = 365 * 24 * 60 * 60;
 const JWT_SIGNING_PURPOSE: &str = "auth.jwt.access";
@@ -30,7 +32,27 @@ const JWT_SIGNING_PURPOSE: &str = "auth.jwt.access";
 /// Returns an error when required JWT or Vault configuration is absent or invalid, session or
 /// refresh TTLs violate their bounds, or identity composition fails.
 pub async fn module(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainBinding> {
-    wire_configured(deps.pg.for_domain(), |name| std::env::var(name).ok(), false)
+    wire_configured(
+        deps.pg.for_domain(),
+        Arc::clone(&deps.password_blocklist),
+        |name| std::env::var(name).ok(),
+        false,
+    )
+}
+
+/// Load the immutable password policy provider from the captured process generation.
+///
+/// This is the sole production file-read boundary. Startup calls it before constructing external
+/// providers and carries the result into identity wiring, which never reopens the source file.
+pub(crate) fn load_password_blocklist(
+    config: SnapshotConfig<'_>,
+) -> anyhow::Result<Arc<secure::DigestPasswordBlocklist>> {
+    let path = config.value(PASSWORD_BLOCKLIST_PATH_ENV).ok_or_else(|| {
+        anyhow::anyhow!("missing required env var: {PASSWORD_BLOCKLIST_PATH_ENV}")
+    })?;
+    crypto::load_password_blocklist(path)
+        .map(Arc::new)
+        .context("load required password blocklist")
 }
 
 fn identity_session_ttl_secs(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<u64> {
@@ -93,6 +115,7 @@ fn build_jwt_issuer_config(
 
 fn wire_configured(
     pg: PgDomainDeps<caps::Identity>,
+    blocklist: Arc<secure::DigestPasswordBlocklist>,
     get: impl Fn(&str) -> Option<String>,
     vault_allow_http: bool,
 ) -> anyhow::Result<DomainBinding> {
@@ -109,6 +132,7 @@ fn wire_configured(
         jwt,
         session_ttl,
         refresh_ttl,
+        blocklist,
     );
     identity_composition::wire(composition)
 }
@@ -127,7 +151,12 @@ pub(crate) fn wire_identity_with(
     get: impl Fn(&str) -> Option<String>,
     vault_allow_http: bool,
 ) -> anyhow::Result<DomainBinding> {
-    wire_configured(deps.pg.for_domain(), get, vault_allow_http)
+    wire_configured(
+        deps.pg.for_domain(),
+        Arc::clone(&deps.password_blocklist),
+        get,
+        vault_allow_http,
+    )
 }
 
 #[cfg(test)]
@@ -149,9 +178,19 @@ pub(crate) mod tests {
         }
     }
 
+    fn test_blocklist() -> Arc<secure::DigestPasswordBlocklist> {
+        Arc::new(
+            crypto::load_password_blocklist_from_reader(std::io::Cursor::new(include_bytes!(
+                "../../../../deploy/password-blocklist.demo.sha256"
+            )))
+            .unwrap_or_else(|_| unreachable!()),
+        )
+    }
+
     pub(crate) async fn test_binding() -> anyhow::Result<DomainBinding> {
         wire_configured(
             postgres::PgRuntimeHandle::for_module_test().for_domain(),
+            test_blocklist(),
             module_env,
             true,
         )

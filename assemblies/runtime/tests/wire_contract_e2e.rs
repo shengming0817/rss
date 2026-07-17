@@ -17,6 +17,7 @@
 
 #![cfg(feature = "integration")]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -196,6 +197,11 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
     )?;
 
     let deps = SharedRuntimeDeps {
+        password_blocklist: Arc::new(crypto::load_password_blocklist_from_reader(
+            std::io::Cursor::new(include_bytes!(
+                "../../../deploy/password-blocklist.demo.sha256"
+            )),
+        )?),
         pg: pg.handle(),
         redis,
         s3,

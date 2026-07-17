@@ -218,6 +218,7 @@ services:
     volumes:
       - vault-tls:/run/rss-demo-vault:ro
       - oidc-jwks:/run/rss-oidc:ro
+      - ./password-blocklist.demo.sha256:/run/rss-password-blocklist.sha256:ro
     cap_drop:
       - ALL # 不需任何 Linux capability（仅 bind 高位端口 8080-8083，无需 NET_BIND_SERVICE）。
     security_opt:

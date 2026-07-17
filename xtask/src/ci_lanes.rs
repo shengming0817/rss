@@ -959,6 +959,17 @@ macro_rules! gate_catalog {
                         VERIFY_SUPERSEDED_BY_COVERAGE,
                     )
             ),
+            SecureProductionTrybuild => (step_secure_production_trybuild, None,
+                gate(
+                        GateId::SecureProductionTrybuild,
+                        "secure-production-trybuild",
+                        CORE,
+                        CompileKind::Workspace,
+                        ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test),
+                        EvidenceKind::Test,
+                        BOTH_INCLUDED,
+                    )
+            ),
             S3BackendTests => (step_s3_backend_tests, None,
                 gate(
                         GateId::S3BackendTests,

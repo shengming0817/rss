@@ -94,6 +94,16 @@ const AUDIT_TENANT_FIXTURE: &str =
 const REFRESH_FIXTURE: &str = include_str!("../../../fixtures/identity-refresh-localtx.toml");
 const AUDIT_ROUTE_ACTION: &str = "audit:list-cross-tenant";
 
+fn password_matches(
+    candidate: &str,
+    stored: &secure::PasswordHash,
+) -> Result<bool, secure::PasswordError> {
+    Ok(matches!(
+        secure::verify_password(secure::RawPassword::new(candidate.to_owned()), Some(stored))?,
+        secure::PasswordVerification::Verified(_)
+    ))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct JourneyFixture {
@@ -366,7 +376,7 @@ impl CredentialRepo for BarrierCredentialRepo {
         &self,
         scope: IdentityScope,
         login: LoginIdentifier,
-        candidate: String,
+        candidate: secure::RawPassword,
         now: SystemTime,
     ) -> Result<AuthOutcome, IdentityError> {
         self.inner.authenticate(scope, login, candidate, now).await
@@ -1143,7 +1153,13 @@ async fn seed_credential(
 ) -> Result<()> {
     repo.save(
         IdentityScope::for_test(tenant),
-        Credential::hydrate(login, user, tenant, secure::hash_password(password)?, 1),
+        Credential::hydrate(
+            login,
+            user,
+            tenant,
+            secure::PasswordHash::for_test(secure::RawPassword::new(password.to_owned()))?,
+            1,
+        ),
     )
     .await?;
     Ok(())
@@ -1567,6 +1583,7 @@ async fn build_identity_harness(
         credentials,
         lifecycle,
         Arc::clone(&refresh),
+        common::password_policy(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
     ));
@@ -1649,7 +1666,7 @@ async fn drive_password_happy(harness: &IdentityHarness, case: &JourneyCase) -> 
     let probes = password_probes(harness, harness.happy_user);
     let request = IdentityPasswordChangeRequest {
         current_password: CURRENT_PASSWORD.to_owned(),
-        new_password: NEW_PASSWORD.to_owned(),
+        new_password: NEW_PASSWORD.try_into()?,
     };
     let body = serde_json::to_vec(&request)?;
     let sentinels = case_sentinels(case, &[&body], None)?;
@@ -1676,14 +1693,8 @@ async fn drive_password_happy(harness: &IdentityHarness, case: &JourneyCase) -> 
         )
         .await?
         .context("happy credential missing")?;
-    ensure!(!secure::verify_password(
-        CURRENT_PASSWORD,
-        stored.password_hash()
-    ));
-    ensure!(secure::verify_password(
-        NEW_PASSWORD,
-        stored.password_hash()
-    ));
+    ensure!(!password_matches(CURRENT_PASSWORD, stored.password_hash())?);
+    ensure!(password_matches(NEW_PASSWORD, stored.password_hash())?);
     let after = credential_snapshot(&harness.credential_observer, probes).await?;
     assert_accounting(
         case,
@@ -1702,7 +1713,7 @@ async fn drive_password_auth_failure(
     let probes = password_probes(harness, harness.happy_user);
     let body = serde_json::to_vec(&IdentityPasswordChangeRequest {
         current_password: CURRENT_PASSWORD.to_owned(),
-        new_password: NEW_PASSWORD.to_owned(),
+        new_password: NEW_PASSWORD.try_into()?,
     })?;
     let sentinels = case_sentinels(case, &[&body], None)?;
     let before = credential_snapshot(&harness.credential_observer, probes).await?;
@@ -1754,11 +1765,11 @@ async fn drive_password_validation(harness: &IdentityHarness, case: &JourneyCase
 async fn drive_password_conflict(harness: &IdentityHarness, case: &JourneyCase) -> Result<()> {
     let request_a = IdentityPasswordChangeRequest {
         current_password: CURRENT_PASSWORD.to_owned(),
-        new_password: CONFLICT_PASSWORD_A.to_owned(),
+        new_password: CONFLICT_PASSWORD_A.try_into()?,
     };
     let request_b = IdentityPasswordChangeRequest {
         current_password: CURRENT_PASSWORD.to_owned(),
-        new_password: CONFLICT_PASSWORD_B.to_owned(),
+        new_password: CONFLICT_PASSWORD_B.try_into()?,
     };
     let body_a = serde_json::to_vec(&request_a)?;
     let body_b = serde_json::to_vec(&request_b)?;
@@ -1815,8 +1826,8 @@ async fn drive_password_conflict(harness: &IdentityHarness, case: &JourneyCase) 
         )
         .await?
         .context("conflict credential missing")?;
-    let password_a_won = secure::verify_password(CONFLICT_PASSWORD_A, stored.password_hash());
-    let password_b_won = secure::verify_password(CONFLICT_PASSWORD_B, stored.password_hash());
+    let password_a_won = password_matches(CONFLICT_PASSWORD_A, stored.password_hash())?;
+    let password_b_won = password_matches(CONFLICT_PASSWORD_B, stored.password_hash())?;
     ensure!(
         password_a_won ^ password_b_won,
         "exactly one new password must win"
@@ -2259,6 +2270,7 @@ fn refresh_router(
             identity_deps.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
         )),
         Arc::clone(&refresh),
+        common::password_policy(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
     ));

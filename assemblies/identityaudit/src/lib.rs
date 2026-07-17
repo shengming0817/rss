@@ -82,6 +82,9 @@ mod domains {
         };
 
         pub(crate) async fn module(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainBinding> {
+            let blocklist = crypto::load_password_blocklist_from_reader(std::io::Cursor::new(
+                include_bytes!("../../../deploy/password-blocklist.demo.sha256"),
+            ))?;
             identity_composition::wire(identity_composition::IdentityModuleDeps::new(
                 deps.pg.for_domain(),
                 Arc::clone(&deps.signer),
@@ -96,6 +99,7 @@ mod domains {
                 },
                 DEMO_SESSION_TTL,
                 DEMO_REFRESH_TTL,
+                Arc::new(blocklist),
             ))
         }
 

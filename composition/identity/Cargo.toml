@@ -18,6 +18,8 @@ authn = { path = "../../crates/authn" }
 bootstrap = { path = "../../crates/bootstrap" }
 diport = { path = "../../crates/diport" }
 identity = { path = "../../crates/identity" }
+crypto-adapter = { path = "../../adapters/crypto" }
+secure = { path = "../../crates/secure" }
 postgres = { path = "../../adapters/postgres", features = ["domain-identity"] }
 
 [features]

@@ -1525,8 +1525,11 @@ name = "crypto-adapter"
 version = "0.0.0"
 dependencies = [
  "hmac 0.12.1",
+ "libc",
  "primitives",
+ "secure",
  "sha2 0.10.9",
+ "thiserror",
 ]
 
 [[package]]
@@ -3056,9 +3059,11 @@ dependencies = [
  "anyhow",
  "authn",
  "bootstrap",
+ "crypto-adapter",
  "diport",
  "identity",
  "postgres",
+ "secure",
  "tokio",
 ]
 
@@ -5282,6 +5287,7 @@ dependencies = [
  "thiserror",
  "time",
  "trybuild",
+ "unicode-normalization",
  "url",
  "uuid",
  "vocab",

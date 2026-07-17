@@ -16,7 +16,8 @@
 //!   `DomainModuleResult`，故 A 域产物喂进 B 域 wiring 编译期不可表达（type-system 一档载体）。
 //! - **INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "code" }（Medium，xtask 字段扫描）**：
 //!   `SharedRuntimeDeps` 字段类型只允许 provider bundle / infra value object 允许列表，以及精确例外
-//!   `Arc<dyn distributed::DomainTransport>`、`Arc<oidc::OidcProvider>`、`Arc<vault::VaultSigner>`；
+//!   `Arc<secure::DigestPasswordBlocklist>`、`Arc<dyn distributed::DomainTransport>`、
+//!   `Arc<oidc::OidcProvider>`、`Arc<vault::VaultSigner>`；
 //!   域 service / repo 类型不得经 deps bag 跨 module handoff。
 //!
 //! # 开源对标
@@ -43,6 +44,10 @@ use vault::VaultRuntimeDeps;
 /// 允许 provider bundle / infra value object 类型根，拒绝域 service / repo 类型，并接入 `verify`。
 #[derive(Clone)]
 pub struct SharedRuntimeDeps {
+    /// Immutable password blocklist loaded and validated before any external provider setup.
+    /// Identity wiring consumes this typed provider and never reopens its source file.
+    pub password_blocklist: Arc<secure::DigestPasswordBlocklist>,
+
     /// 共享 postgres capability bundle；各域经 `for_domain::<caps::X>()` 投影受控 durable 能力句柄。
     ///
     /// 不暴露 `Arc<PgStore>` / `PgPool`，保持 PG-BUNDLE-FUNNEL-01/03：repo/readiness 只经 handle

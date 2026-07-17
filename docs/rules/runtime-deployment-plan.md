@@ -5,34 +5,35 @@ This rule governs how runtime-deployment target constraints select enforcement c
 ## 当前事实
 
 - Assembly manifest validation, generated domain ordering, and committed v1 AssemblyLock drift are governed by typed repository gates.
-- Both serving binaries now enter through `prepare_runtime()`, which captures one closed process-level configuration generation before tracing and provider construction. Listener/auth/tracing/serving-OIDC, every PostgreSQL/Redis consumer, and the Vault/S3 plus settings-maintenance consumers are capability-only; remaining serving migrations are owned by #1786/#1787. RuntimePlan is still summary-oriented, subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
+- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Listener/auth/tracing/serving-OIDC, every PostgreSQL/Redis consumer, and the Vault/S3 plus settings-maintenance consumers are capability-only; remaining serving migrations are owned by #1786/#1787. RuntimePlan is still summary-oriented, subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
 - `cargo xtask archrules list` and its generated matrix derive implemented rules from real carrier anchors. Planning documents are not a second index.
 - The active forge does not make the existing `ci-gate` a required check.
 
 ## Process configuration snapshot
 
-`runtime::prepare_runtime()` consumes `EnvConfigSource` once into an owned
+The private runtime preparation kernel consumes `EnvConfigSource` once into an owned
 `RuntimeConfigSnapshot`, derives the `RUST_LOG` filter and optional OTLP exporter from that same
-generation, installs the subscriber, and returns an opaque `RuntimeInputs`. The source is passed
-by value and is not retained as a closure, trait object, reload handle, or fallback.
-`RuntimeInputs` has private fields and a crate-private constructor but is public as the opaque
-cross-crate carrier used by the thin binaries; it always owns a non-optional snapshot. `run()`
-consumes that carrier, so serving phases cannot be entered without a captured generation. A
+generation, and installs the subscriber. It then returns one of two opaque, mutually exclusive
+carriers: `ServingRuntimeInputs` from `prepare_runtime()` or `OperatorRuntimeInputs` from
+`prepare_operator_runtime()`. The source is passed by value and is not retained as a closure,
+trait object, reload handle, or fallback. Both carriers have private fields and crate-private
+constructors and always own a non-optional snapshot; only `ServingRuntimeInputs` owns the mandatory
+password blocklist and type-checks at `run()`. A
 runtime lifecycle owner retains the optional trace exporter until it is transferred into the
 launch plan; every pre-handoff startup result then crosses one terminal funnel that explicitly
 shuts down any exporter still owned. Launch registers every owned lifecycle output before it can
 return a validation, bind, or shutdown-trigger error, and every launch result drains the one
 `ShutdownStack` exactly once. The RSS binary classifies its closed command family before acquiring
-`RuntimeInputs`; serving transfers ownership to `run()`, while all operator arms converge on one
-explicit `shutdown_runtime()` call.
+profile input; serving transfers ownership to `run()`, while all operator arms converge on one
+explicit `shutdown_operator_runtime()` call.
 
 `SnapshotConfig<'_>` is a crate-private borrowed capability with a private field. Only
 `RuntimeConfigSnapshot::view()` can mint it. Serving OIDC/JWKS construction, listener auth,
 listener address policy, route assembly, launch, and the private PostgreSQL/Redis/Vault/S3 typed
 configuration constructors accept this capability directly, so an ambient getter cannot
-type-check at those production boundaries. The RSS operator commands that need PostgreSQL accept
-the already prepared `RuntimeInputs` and borrow the same capability; Vault-backed settings
-maintenance does the same. The runtime crate exposes no migrated PostgreSQL/Redis/Vault/S3
+type-check at those production boundaries. RSS operator commands accept the already prepared
+`OperatorRuntimeInputs` and borrow the same capability; OIDC JWKS export and Vault-backed settings
+maintenance do the same. The runtime crate exposes no migrated PostgreSQL/Redis/Vault/S3
 environment or generic getter builder. When the inbound Internal
 listener resolves to mTLS, route assembly requires and validates a captured, non-empty
 `SPIFFE_ENDPOINT_SOCKET`, parses the allow-set once, and carries the endpoint as a non-optional
@@ -67,11 +68,11 @@ Vault resolver owner copy.
 
 The active carriers are Hard `SECRET-TEXT-OPAQUE-01` and
 `RUNTIME-CONFIG-SNAPSHOT-01`, plus Medium `RUNTIME-CONFIG-SNAPSHOT-LIVE-01` and
-`RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01` in `runtime-baseline`. The Hard carrier combines owned `RuntimeInputs`, unforgeable
+`RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01` in `runtime-baseline`. The Hard carrier combines the mutually exclusive owned profile inputs, unforgeable
 `SnapshotConfig` consumer signatures, and the mTLS transport carrier; omission or capability
 forgery at those boundaries is therefore not expressible. It does not claim that a Rust function
 body cannot name an ambient API. The Medium AST check proves the production module graph contains
-exactly one capture, `RuntimeInputs` construction, and typed PostgreSQL/Redis/Vault/S3 mappings with
+exactly one capture per selected profile, profile-specific input construction, and typed PostgreSQL/Redis/Vault/S3 mappings with
 their consuming builders, and it
 rejects ambient environment reads in a `SnapshotConfig` consumer or its crate-wide conservatively
 reachable call graph. Protected aliases, direct and function-item environment aliases, local and
@@ -80,17 +81,17 @@ and compliant bait fail closed. It also proves that the snapshot-derived `RUST_L
 installed in the subscriber and that the exact outer runtime owner always finishes the unique
 inner startup result through one pending-exporter cleanup while preserving the primary error. The
 binary lifecycle carrier separately proves one ownership-complete terminal path per command:
-serving transfers the exact prepared input to `run()`, and every RSS operator reaches the sole
-exact-binding shutdown after pre-acquisition closed command classification. Synthetic reds cover
+serving transfers the exact serving input to `run()`, and every RSS operator reaches the sole
+exact operator-input shutdown after pre-acquisition closed command classification. Synthetic reds cover
 duplicate/discarded/wrong generations, detached-module promotion, owner and cleanup bypasses,
 binary wrong bindings and early returns (including the exact prepared input passed to every
 PostgreSQL operator), ambient filter restoration, transitive reachable ambient
 reader variants, and compliant unrelated-name bait.
 
-Ownership after #1785 is explicit: PostgreSQL/Redis/Vault/S3 and Vault-backed settings maintenance
-are fully snapshot-backed; #1786 covers event/domain/DLX/worker and composition settings, and #1787 closes the final ambient-read AST
-guard. Static OIDC env construction used only by non-serving operator/maintenance commands remains
-outside #1783; those commands bind no listener and do not use the serving OIDC/JWKS provider.
+Ownership after #1785 is explicit: PostgreSQL/Redis/Vault/S3, OIDC JWKS export, and Vault-backed
+settings maintenance are fully snapshot-backed; #1786 covers event/domain/DLX/worker and
+composition settings, and #1787 closes the final ambient-read AST guard. Operator commands bind no
+listener and do not use the serving OIDC/JWKS provider or password-policy capability.
 This section records the boundary; it is not a second or Soft enforcement mechanism.
 
 ## 目标能力

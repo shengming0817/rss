@@ -16,6 +16,12 @@ workspace = true
 [dependencies]
 # MacVerifier trait + MacKey/Mac/MacAlgorithm typed funnel + constant_time_eq（CRYPTO-CONST-TIME-01）。
 primitives = { path = "../../crates/primitives" }
+# Concrete non-empty password blocklist value; plaintext never crosses this edge.
+secure = { path = "../../crates/secure" }
 # 生产 HMAC backend（RustCrypto；audit keyed-HMAC 链 verifier 实现）。
 hmac = { workspace = true }
 sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

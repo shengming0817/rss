@@ -6,7 +6,7 @@
 //! - [`AuthOutcome`]：验签原子结果三态（`Authenticated(UserId)` / `InvalidKnownUser` / `InvalidUnknown`），
 //!   provider 内「验签 + 仅对已知主体推进 lockout」单一出口（F1+F2）。
 //! - [`Credential`]：[`LoginIdentifier`] 查找键 + canonical [`ids::UserId`] subject + argon2 哈希凭据（经
-//!   `secure::password`）+ 版本 pin（CAS）+ constant-time 验签；明文永不存、`password_hash` 经
+//!   `secure::password`）+ 版本 pin（CAS）+ constant-time digest 比较 / 有界 KDF 验签；明文永不存、`password_hash` 经
 //!   [`secure::PasswordHash`] 类型层脱敏（Debug 不泄）。
 //! - [`AccountLockout`]：暴力破解防御——阈值 5 / 滑窗 15min / 锁定 TTL 15min + lazy-unlock；窗口 / TTL
 //!   判定经**调用方注入的 `Clock` 读出的 `now`** 计算（域类型不持 `Clock`、不调 `SystemTime::now()`，
@@ -118,7 +118,7 @@ impl LoginIdentifier {
 /// - [`Authenticated`](AuthOutcome::Authenticated)：已知主体 + 密码正确——携 canonical [`ids::UserId`]
 ///   （写 payload/envelope/session subject，audit 必可 `UserId::parse`）；provider 已原子清零失败计数。
 /// - [`InvalidKnownUser`](AuthOutcome::InvalidKnownUser)：已知主体 + 密码错——provider 已**原子推进** lockout。
-/// - [`InvalidUnknown`](AuthOutcome::InvalidUnknown)：查无凭据——恒定成本 KDF 已跑（消枚举时序差），但
+/// - [`InvalidUnknown`](AuthOutcome::InvalidUnknown)：查无凭据——当前 profile KDF 已跑（关闭零 KDF 快路径），但
 ///   **不建 / 不动 lockout 态**（#1277 F2：未知主体不可被预置锁定、不撑大 lockout 表）。
 ///
 /// 消费方对 `InvalidKnownUser` / `InvalidUnknown` 一律对外返回 `InvalidCredentials`（不向客户端区分以防枚举）；
@@ -130,7 +130,7 @@ pub enum AuthOutcome {
     Authenticated(ids::UserId),
     /// 已知主体 + 密码错（provider 已推进 lockout）。
     InvalidKnownUser,
-    /// 查无凭据（恒定成本 KDF 已跑；不动 lockout 态）。
+    /// 查无凭据（当前 profile KDF 已跑；不动 lockout 态）。
     InvalidUnknown,
 }
 
@@ -142,7 +142,7 @@ pub enum AuthOutcome {
 ///
 /// `pub`（ADR-005 Option 2）：作 [`crate::ports::CredentialRepo`] 签名实体被独立 adapter crate 跨 crate
 /// 命名/收发；字段私有、构造器 `pub(crate)` funnel——外部可命名但**不可伪造**（fail-closed）。明文密码
-/// **永不进入本类型**（仅 [`secure::hash_password`] 入参，哈希后丢弃）。
+/// **永不进入本类型**（仅 [`secure::PasswordHash`] 封装持久化 PHC）。
 ///
 /// **登录标识 vs canonical subject（#1277 F1）**：`login` 是凭据查找键（攻击者可控的不透明输入）；`user_id`
 /// 是稳定 canonical actor subject——登录成功后**仅** `user_id` 写入 session / `IdentitySessionCreatedPayload`
@@ -217,20 +217,41 @@ impl Credential {
         }
     }
 
-    /// constant-time 验签：经 `secure::verify_password`（argon2 再哈希 + 常时比对，fail-closed）。
-    pub(crate) fn verify_password(&self, candidate: &str) -> bool {
-        secure::verify_password(candidate, &self.password_hash)
+    /// Typed bounded verification with a current-profile work floor. Success returns an
+    /// unforgeable receipt owned by secure.
+    pub(crate) fn verify_password(
+        &self,
+        candidate: secure::RawPassword,
+    ) -> Result<secure::PasswordVerification, secure::PasswordError> {
+        secure::verify_password(candidate, Some(&self.password_hash))
     }
 
-    /// 密码轮换：返回 `version + 1` 的新凭据（login / user_id / tenant 不变），供密码变更 CAS（PR4 编排）。
-    pub(crate) fn rotate(&self, new_hash: secure::PasswordHash) -> Credential {
-        Credential {
+    /// 密码轮换：只接受策略批准值，返回 `version + 1` 的新凭据供密码变更 CAS。
+    pub(crate) fn rotate(
+        &self,
+        password: secure::ValidatedPassword,
+    ) -> Result<Credential, secure::PasswordError> {
+        let new_hash = secure::PasswordHash::from_validated(password)?;
+        Ok(Credential {
             login: self.login.clone(),
             user_id: self.user_id,
             tenant: self.tenant,
             password_hash: new_hash,
             version: self.version.saturating_add(1),
+        })
+    }
+
+    /// Replace a verified physical PHC encoding without changing the logical credential version.
+    pub(crate) fn replace_hash_if_unchanged(
+        &mut self,
+        expected: &secure::PasswordHash,
+        replacement: secure::PasswordHash,
+    ) -> bool {
+        if &self.password_hash != expected {
+            return false;
         }
+        self.password_hash = replacement;
+        true
     }
 
     /// 登录标识（opaque 查找键；store key 派生用，FR-020 准 PII）。`pub`（#1316 adapter 取 `(tenant, login)` PK）。
@@ -424,8 +445,24 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
     }
 
+    fn validated(password: &str) -> secure::ValidatedPassword {
+        secure::PasswordPolicy::for_test("passwordpassword", &[])
+            .validate(secure::RawPassword::new(password.to_owned()))
+            .expect("password satisfies test policy")
+    }
+
+    fn verifies(credential: &Credential, password: &str) -> bool {
+        matches!(
+            credential
+                .verify_password(secure::RawPassword::new(password.to_owned()))
+                .expect("stored test PHC is valid"),
+            secure::PasswordVerification::Verified(_)
+        )
+    }
+
     fn credential(login: &str, user: &str, password: &str, version: u32) -> Credential {
-        let hash = secure::hash_password(password).expect("hash ok");
+        let hash = secure::PasswordHash::for_test(secure::RawPassword::new(password.to_owned()))
+            .expect("hash ok");
         Credential::new(
             LoginIdentifier::new(login),
             uid(user),
@@ -464,8 +501,8 @@ mod tests {
     #[test]
     fn credential_verify_correct_and_wrong() {
         let cred = credential("alice-login", CANON_USER, "correct-horse", 1);
-        assert!(cred.verify_password("correct-horse"));
-        assert!(!cred.verify_password("wrong"));
+        assert!(verifies(&cred, "correct-horse"));
+        assert!(!verifies(&cred, "wrong"));
         // 登录标识与 canonical actor subject 解耦（#1277 F1）。
         assert_eq!(cred.login().as_str(), "alice-login");
         assert_eq!(cred.user_id(), uid(CANON_USER));
@@ -498,8 +535,9 @@ mod tests {
     #[test]
     fn credential_rotate_bumps_version_and_swaps_hash() {
         let cred = credential("alice-login", CANON_USER, "old-pw", 3);
-        let new_hash = secure::hash_password("new-pw").expect("hash ok");
-        let rotated = cred.rotate(new_hash);
+        let rotated = cred
+            .rotate(validated("a-compliant-new-password"))
+            .expect("hash validated password");
         assert_eq!(rotated.version(), 4, "rotate +1");
         // rotate 保持登录标识 + canonical subject 不变。
         assert_eq!(rotated.login().as_str(), "alice-login");
@@ -508,24 +546,22 @@ mod tests {
             uid(CANON_USER),
             "rotate 保持 canonical subject"
         );
-        assert!(rotated.verify_password("new-pw"));
-        assert!(!rotated.verify_password("old-pw"), "旧密码失效");
+        assert!(verifies(&rotated, "a-compliant-new-password"));
+        assert!(!verifies(&rotated, "old-pw"), "旧密码失效");
     }
 
     #[test]
     fn credential_hydrate_roundtrips_persisted_fields() {
         // adapter 读路径 funnel（#1316）：hydrate(已校验 PHC + 类型化字段) → 访问器回读一致 + 验签仍真。
-        let phc = secure::hash_password("rebuilt-pw").expect("hash ok");
+        let phc = secure::PasswordHash::for_test(secure::RawPassword::new("rebuilt-pw".to_owned()))
+            .expect("hash ok");
         let cred = Credential::hydrate("alice-login", uid(CANON_USER), tid(CANON_TENANT), phc, 7);
         assert_eq!(cred.login().as_str(), "alice-login");
         assert_eq!(cred.user_id(), uid(CANON_USER));
         assert_eq!(cred.tenant(), tid(CANON_TENANT));
         assert_eq!(cred.version(), 7, "version 随重建保真");
-        assert!(
-            cred.verify_password("rebuilt-pw"),
-            "hydrate 回读 PHC 验签真"
-        );
-        assert!(!cred.verify_password("wrong"));
+        assert!(verifies(&cred, "rebuilt-pw"), "hydrate 回读 PHC 验签真");
+        assert!(!verifies(&cred, "wrong"));
     }
 
     // --- AccountLockout 计数 / 阈值 / 锁定 ---

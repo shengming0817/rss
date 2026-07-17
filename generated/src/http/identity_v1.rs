@@ -503,6 +503,9 @@ pub mod password_change {
     ///    },
     ///    "newPassword": {
     ///      "type": "string",
+    ///      "maxLength": 64,
+    ///      "minLength": 15,
+    ///      "x-defer-string-length-validation": true,
     ///      "x-redaction": "secret"
     ///    }
     ///  },
@@ -518,7 +521,77 @@ pub mod password_change {
         pub current_password: ::std::string::String,
         #[serde(rename = "newPassword")]
         #[redact(sensitivity = secret)]
-        pub new_password: ::std::string::String,
+        pub new_password: IdentityPasswordChangeRequestNewPassword,
+    }
+    ///`IdentityPasswordChangeRequestNewPassword`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 64,
+    ///  "minLength": 15,
+    ///  "x-defer-string-length-validation": true,
+    ///  "x-redaction": "secret"
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPasswordChangeRequestNewPassword(
+        #[redact(sensitivity = secret)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPasswordChangeRequestNewPassword {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPasswordChangeRequestNewPassword> for ::std::string::String {
+        fn from(value: IdentityPasswordChangeRequestNewPassword) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPasswordChangeRequestNewPassword {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPasswordChangeRequestNewPassword {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPasswordChangeRequestNewPassword {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPasswordChangeRequestNewPassword {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPasswordChangeRequestNewPassword {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
     }
     ///`IdentityPasswordChangeResponse`
     ///
@@ -565,7 +638,7 @@ pub mod password_change {
         "identity",
         "identity.password-change",
         "v1",
-        "sha256:5b2df127b17dbea700129981a49729011007597f04bd9a6bc572703dd05110a1",
+        "sha256:e41a4f0ee2267eca6e912f728be69dc563769ffc2ad5c0a4518ad7fdbdde1e1c",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。

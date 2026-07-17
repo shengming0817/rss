@@ -96,6 +96,7 @@ fn login_router() -> axum::Router {
             crate::internal::mem::InMemSessionLifecycle::default(),
         )),
         make_refresh_svc(),
+        crate::application::seed_password_policy(),
         clock(),
         Duration::from_secs(SESSION_TTL_SECS),
         SEED_USER,

@@ -16,8 +16,9 @@
 //! - **账号子域（`domain::account`：`AccountStatus` 迁移 + argon2 哈希 `Credential` + `AccountLockout`
 //!   滑窗/锁定 TTL/lazy-unlock）已写实**（表驱动测试）——PR3；生产持久化消费（postgres adapter 直读）待 W（#1258）。
 //!
-//! `application`（登录生命周期：[`LoginService`] / [`IdentityDomain`]）**已写实**——哈希凭据 constant-time
-//! 验签 + lockout 门控/原子推进 + L2 co-tx（session + `identity.session-created` outbox 同一事务）+ 密码变更
+//! `application`（登录生命周期：[`LoginService`] / [`IdentityDomain`]）**已写实**——哈希凭据使用
+//! constant-time digest 比较与有界 KDF（未知/弱档至少支付当前档工作）+ lockout 门控/原子推进 + L2 co-tx
+//! （session + `identity.session-created` outbox 同一事务）+ 密码变更
 //! CAS + logout 软撤销；in-mem DI 替身（`with_seed_credential` 哈希种子）覆盖单测/journey。余下（真实 JWT 颁发、
 //! postgres 持久化接缝）留 W。`application` 模块私有，只 re-export facade。
 //!

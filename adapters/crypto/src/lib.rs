@@ -16,6 +16,12 @@ use sha2::{Sha256, Sha384, Sha512};
 
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier, constant_time_eq};
 
+mod password_blocklist;
+
+pub use password_blocklist::{
+    PasswordBlocklistLoadError, load_password_blocklist, load_password_blocklist_from_reader,
+};
+
 /// buggy / 未知算法路径的 fail-closed 哨兵 tag（与任何真实 HMAC 输出不匹配 ⇒ verify fail-close，永不 panic）。
 const FAIL_TAG: [u8; 32] = [0xFFu8; 32];
 

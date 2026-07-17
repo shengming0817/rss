@@ -7,6 +7,7 @@ use s3::S3RuntimeDeps;
 use vault::VaultRuntimeDeps;
 
 pub struct SharedRuntimeDeps {
+    pub password_blocklist: Arc<secure::DigestPasswordBlocklist>,
     pub pg: PgRuntimeHandle,
     pub redis: RedisRuntimeDeps,
     pub s3: S3RuntimeDeps,

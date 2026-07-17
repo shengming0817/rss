@@ -12,9 +12,9 @@
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must consume the committed generated domain list through `compose_bindings`, must merge its output, and must not restore per-domain handwritten wiring.
 //!
-//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring" } -- the unique production `prepare_runtime()` captures exactly one `EnvConfigSource` generation and moves that same binding into `RuntimeInputs`; `run_startup()` maps that exact view once into each typed PG/Redis/Vault/S3 generation, consumes Redis and Vault by value, destructures the named S3 parts once, routes the exact general and DLX parts to their builders, and preserves canonical PG setup. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes one typed Vault generation. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, and compliant bait all fail closed. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring" } -- the unique production `prepare_runtime()` captures exactly one `EnvConfigSource` generation and seals the password blocklist into `ServingRuntimeInputs`, while `prepare_operator_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` maps the serving snapshot view once into each typed PG/Redis/Vault/S3 generation, consumes Redis and Vault by value, destructures the named S3 parts once, routes the exact general and DLX parts to their builders, and preserves canonical PG setup. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes one typed Vault generation. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
-//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before acquiring `RuntimeInputs`; serving uniquely transfers the exact binding to `run`, while every operator arm yields a `Result` before the sole exact-binding shutdown, with no pre-consumption early return, alias, macro, shadow path, or unreachable bait.
+//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, while operator commands prepare only `OperatorRuntimeInputs`, every operator arm receives that exact binding, and the sole operator shutdown consumes it. No shared input type, pre-consumption early return, alias, macro, shadow path, or unreachable bait is accepted.
 //!
 //! INVARIANT: SECRET-TEXT-TRANSFER-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff", anti_vacuity = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff" } -- runtime raw secret allocation transfer/copy uses two uniquely named funnels whose seven moves plus one required copy into zeroizing Vault/S3 owners are exact, closed, and bait-resistant; both funnel definitions are independently pinned by the same allowlist.
 //!
@@ -51,6 +51,7 @@ const RUNTIME_LAUNCH_PATH: &str = "assemblies/runtime/src/launch.rs";
 const RUNTIME_EVENT_PATH: &str = "assemblies/runtime/src/event_transport.rs";
 const RUNTIME_S3_PATH: &str = "assemblies/runtime/src/infra/s3.rs";
 const RUNTIME_VAULT_PATH: &str = "assemblies/runtime/src/infra/vault.rs";
+const RUNTIME_PHASE_PATH: &str = "assemblies/runtime/src/phase.rs";
 const RUNTIME_SECRET_CONFIG_PATH: &str = "assemblies/runtime/src/secret_config.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,8 +234,13 @@ struct PrepareRuntimeConfigWiring {
     snapshot_calls: usize,
     canonical_snapshot_calls: usize,
     snapshot_binding: Option<syn::Ident>,
+    password_preload_calls: usize,
+    canonical_password_preload_calls: usize,
+    password_blocklist_binding: Option<syn::Ident>,
+    trace_export_binding: Option<syn::Ident>,
     runtime_inputs_calls: usize,
     canonical_runtime_inputs_calls: usize,
+    legacy_runtime_inputs_calls: usize,
     snapshot_config_binding: Option<syn::Ident>,
     snapshot_filter_binding: Option<syn::Ident>,
     snapshot_filter_bindings: usize,
@@ -243,12 +249,23 @@ struct PrepareRuntimeConfigWiring {
 }
 
 impl PrepareRuntimeConfigWiring {
-    fn is_canonical(&self) -> bool {
+    fn is_canonical(&self, require_password_policy: bool) -> bool {
+        let password_policy_is_canonical = !require_password_policy
+            || (self.password_preload_calls == 1
+                && self.canonical_password_preload_calls == 1
+                && self.password_blocklist_binding.is_some()
+                && self.trace_export_binding.is_some());
+        let runtime_inputs_are_canonical = if require_password_policy {
+            self.canonical_runtime_inputs_calls == 1
+        } else {
+            self.canonical_runtime_inputs_calls + self.legacy_runtime_inputs_calls == 1
+        };
         self.snapshot_calls == 1
             && self.canonical_snapshot_calls == 1
             && self.snapshot_binding.is_some()
+            && password_policy_is_canonical
             && self.runtime_inputs_calls == 1
-            && self.canonical_runtime_inputs_calls == 1
+            && runtime_inputs_are_canonical
             && self.snapshot_config_binding.is_some()
             && self.snapshot_filter_binding.is_some()
             && self.snapshot_filter_bindings == 1
@@ -283,6 +300,17 @@ impl<'ast> Visit<'ast> for PrepareRuntimeConfigWiring {
                 self.snapshot_filter_binding = Some(binding.clone());
             }
         }
+        if let (Some(initializer), Some(config)) =
+            (initializer, self.snapshot_config_binding.as_ref())
+            && let Some((password_blocklist, trace_export)) =
+                canonical_password_preload_local(&local.pat, initializer, config)
+        {
+            self.canonical_password_preload_calls += 1;
+            if self.password_blocklist_binding.is_none() {
+                self.password_blocklist_binding = Some(password_blocklist);
+                self.trace_export_binding = Some(trace_export);
+            }
+        }
         syn::visit::visit_local(self, local);
     }
 
@@ -293,8 +321,38 @@ impl<'ast> Visit<'ast> for PrepareRuntimeConfigWiring {
                 self.canonical_snapshot_calls += 1;
             }
         }
+        if path_ends_with(&call.func, &["seal_password_policy_before_external"]) {
+            self.password_preload_calls += 1;
+        }
         if path_ends_with(&call.func, &["RuntimeInputs", "new"]) {
             self.runtime_inputs_calls += 1;
+            if call.args.len() == 3
+                && self.snapshot_binding.as_ref().is_some_and(|snapshot| {
+                    call.args
+                        .first()
+                        .is_some_and(|arg| is_exact_ident_path(arg, snapshot))
+                })
+                && self
+                    .password_blocklist_binding
+                    .as_ref()
+                    .is_some_and(|password_blocklist| {
+                        call.args
+                            .iter()
+                            .nth(1)
+                            .is_some_and(|arg| is_exact_ident_path(arg, password_blocklist))
+                    })
+                && self
+                    .trace_export_binding
+                    .as_ref()
+                    .is_some_and(|trace_export| {
+                        call.args
+                            .iter()
+                            .nth(2)
+                            .is_some_and(|arg| is_exact_ident_path(arg, trace_export))
+                    })
+            {
+                self.canonical_runtime_inputs_calls += 1;
+            }
             if call.args.len() == 2
                 && self.snapshot_binding.as_ref().is_some_and(|snapshot| {
                     call.args
@@ -302,7 +360,7 @@ impl<'ast> Visit<'ast> for PrepareRuntimeConfigWiring {
                         .is_some_and(|arg| is_exact_ident_path(arg, snapshot))
                 })
             {
-                self.canonical_runtime_inputs_calls += 1;
+                self.legacy_runtime_inputs_calls += 1;
             }
         }
         if path_ends_with(&call.func, &["EnvFilter", "try_from_default_env"])
@@ -322,6 +380,43 @@ impl<'ast> Visit<'ast> for PrepareRuntimeConfigWiring {
         }
         syn::visit::visit_expr_method_call(self, call);
     }
+}
+
+fn canonical_password_preload_local(
+    pat: &syn::Pat,
+    initializer: &syn::Expr,
+    config: &syn::Ident,
+) -> Option<(syn::Ident, syn::Ident)> {
+    let syn::Pat::Tuple(tuple) = pat else {
+        return None;
+    };
+    if tuple.elems.len() != 2 {
+        return None;
+    }
+    let password_blocklist = immutable_pat_ident(tuple.elems.first()?)?.clone();
+    let trace_export = immutable_pat_ident(tuple.elems.iter().nth(1)?)?.clone();
+    let call = call_behind_result_context(initializer)?;
+    if !path_ends_with(&call.func, &["seal_password_policy_before_external"])
+        || call.args.len() != 2
+        || call
+            .args
+            .first()
+            .is_none_or(|arg| !is_exact_ident_path(arg, config))
+    {
+        return None;
+    }
+    let syn::Expr::Closure(external) = transparent_expr(call.args.iter().nth(1)?) else {
+        return None;
+    };
+    let trace_call = call_behind_result_context(&external.body)?;
+    (external.inputs.is_empty()
+        && path_ends_with(&trace_call.func, &["build_trace_export"])
+        && trace_call.args.len() == 1
+        && trace_call
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_ident_path(arg, config)))
+    .then_some((password_blocklist, trace_export))
 }
 
 #[derive(Debug, Default)]
@@ -892,7 +987,7 @@ const RUNTIME_CONFIG_FACT_SPECS: &[RuntimeConfigFactSpec] = &[
 
 const PROTECTED_CONFIG_SYMBOLS: &[&str] = &[
     "RuntimeConfigSnapshot",
-    "RuntimeInputs",
+    "PreparedRuntimeInputs",
     "PgRuntimeConfig",
     "PgRuntimeConfigParts",
     "RedisRuntimeConfig",
@@ -910,7 +1005,7 @@ impl ProductionRuntimeConfigInventory {
     fn canonical_origin(symbol: &str) -> Option<&'static str> {
         match symbol {
             "RuntimeConfigSnapshot" => Some("config::RuntimeConfigSnapshot"),
-            "RuntimeInputs" => Some("phase::RuntimeInputs"),
+            "PreparedRuntimeInputs" => Some("phase::PreparedRuntimeInputs"),
             "PgRuntimeConfig" => Some("infra::pg::PgRuntimeConfig"),
             "RedisRuntimeConfig" => Some("infra::redis::RedisRuntimeConfig"),
             "VaultRuntimeConfig" => Some("infra::vault::VaultRuntimeConfig"),
@@ -1572,7 +1667,7 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         let snapshot = self.associated_call_is_canonical(call, "capture", "RuntimeConfigSnapshot");
-        let inputs = self.associated_call_is_canonical(call, "new", "RuntimeInputs");
+        let inputs = self.associated_call_is_canonical(call, "new", "PreparedRuntimeInputs");
         let pg_mapping =
             self.associated_call_is_canonical(call, "from_snapshot", "PgRuntimeConfig");
         let redis_mapping =
@@ -1830,7 +1925,7 @@ fn ok_command_variant(expr: &syn::Expr, expected: &str) -> bool {
             .is_some_and(|arg| exact_command_variant(arg, expected))
 }
 
-fn command_variant_pattern(pattern: &syn::Pat) -> Option<&syn::Ident> {
+fn command_variant_pattern<'a>(pattern: &'a syn::Pat, enum_name: &str) -> Option<&'a syn::Ident> {
     let syn::Pat::Path(path) = pattern else {
         return None;
     };
@@ -1840,7 +1935,7 @@ fn command_variant_pattern(pattern: &syn::Pat) -> Option<&syn::Ident> {
     let mut segments = path.path.segments.iter();
     if segments
         .next()
-        .is_none_or(|segment| segment.ident != "CommandFamily")
+        .is_none_or(|segment| segment.ident != enum_name)
     {
         return None;
     }
@@ -1916,10 +2011,22 @@ fn classifier_if_is_canonical(
             let syn::Expr::Return(returned) = transparent_expr(expr) else {
                 return false;
             };
-            returned
-                .expr
-                .as_deref()
-                .is_some_and(|expr| ok_command_variant(expr, variant))
+            returned.expr.as_deref().is_some_and(|expr| {
+                let Some(ok) = direct_call_behind_runtime_context(expr) else {
+                    return false;
+                };
+                let Some(operator) = ok.args.first().and_then(direct_call_behind_runtime_context)
+                else {
+                    return false;
+                };
+                is_exact_path(&ok.func, &["Ok"])
+                    && ok.args.len() == 1
+                    && is_exact_path(&operator.func, &["CommandFamily", "Operator"])
+                    && operator.args.len() == 1
+                    && operator.args.first().is_some_and(|command| {
+                        is_exact_path(command, &["OperatorCommand", variant])
+                    })
+            })
         }
         _ => false,
     };
@@ -1927,7 +2034,7 @@ fn classifier_if_is_canonical(
 }
 
 fn classifier_is_canonical(file: &syn::File) -> bool {
-    let enums = file
+    let family_enums = file
         .items
         .iter()
         .filter_map(|item| match item {
@@ -1951,20 +2058,46 @@ fn classifier_is_canonical(file: &syn::File) -> bool {
             _ => None,
         })
         .collect::<Vec<_>>();
-    if enums.len() != 1 || classifiers.len() != 1 {
+    let operator_enums = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item)
+                if item.ident == "OperatorCommand" && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if family_enums.len() != 1 || operator_enums.len() != 1 || classifiers.len() != 1 {
         return false;
     }
+    let family = family_enums[0];
+    let family_is_exact = family.variants.len() == 2
+        && family.variants.iter().any(|variant| {
+            variant.ident == "Serving" && matches!(variant.fields, syn::Fields::Unit)
+        })
+        && family.variants.iter().any(|variant| {
+            variant.ident == "Operator"
+                && matches!(&variant.fields, syn::Fields::Unnamed(fields)
+                    if fields.unnamed.len() == 1
+                        && compact_type_tokens(&fields.unnamed[0].ty) == "OperatorCommand")
+        });
     let expected_variants = RSS_COMMAND_FAMILIES
         .iter()
+        .filter(|(variant, _, _)| *variant != "Serving")
         .map(|(variant, _, _)| (*variant).to_owned())
         .collect::<BTreeSet<_>>();
-    let observed_variants = enums[0]
+    let observed_variants = operator_enums[0]
         .variants
         .iter()
         .filter(|variant| matches!(variant.fields, syn::Fields::Unit))
         .map(|variant| variant.ident.to_string())
         .collect::<BTreeSet<_>>();
-    if enums[0].variants.len() != expected_variants.len() || observed_variants != expected_variants
+    if !family_is_exact
+        || operator_enums[0].variants.len() != expected_variants.len()
+        || observed_variants != expected_variants
     {
         return false;
     }
@@ -2022,12 +2155,17 @@ fn classifier_is_canonical(file: &syn::File) -> bool {
 }
 
 fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
-    if main.sig.asyncness.is_none() || main.block.stmts.len() != 6 {
+    if main.sig.asyncness.is_none()
+        || !matches!(&main.sig.output, syn::ReturnType::Type(_, ty)
+            if compact_type_tokens(ty.as_ref()) == "anyhow::Result<()>")
+        || main.block.stmts.len() != 7
+    {
         return false;
     }
     let [
         args_statement,
         command_statement,
+        serving_statement,
         prepare_statement,
         result_statement,
         shutdown_statement,
@@ -2071,6 +2209,54 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     {
         return false;
     }
+    let syn::Stmt::Local(serving_local) = serving_statement else {
+        return false;
+    };
+    let syn::Pat::TupleStruct(operator_pattern) = &serving_local.pat else {
+        return false;
+    };
+    let Some(syn::Pat::Ident(operator_command)) = operator_pattern.elems.first() else {
+        return false;
+    };
+    let Some(serving_init) = serving_local.init.as_ref() else {
+        return false;
+    };
+    let serving_is_canonical =
+        is_exact_syn_path(&operator_pattern.path, &["CommandFamily", "Operator"])
+            && operator_pattern.elems.len() == 1
+            && operator_command.by_ref.is_none()
+            && operator_command.mutability.is_none()
+            && operator_command.subpat.is_none()
+            && is_exact_ident_path(&serving_init.expr, command)
+            && serving_init.diverge.as_ref().is_some_and(|(_, diverge)| {
+                let syn::Expr::Block(block) = transparent_expr(diverge) else {
+                    return false;
+                };
+                let [syn::Stmt::Expr(return_expr, Some(_))] = block.block.stmts.as_slice() else {
+                    return false;
+                };
+                let syn::Expr::Return(returned) = transparent_expr(return_expr) else {
+                    return false;
+                };
+                let Some(run_call) = returned.expr.as_deref().and_then(direct_awaited_call) else {
+                    return false;
+                };
+                let Some(prepare_call) = run_call
+                    .args
+                    .first()
+                    .and_then(direct_call_behind_runtime_context)
+                else {
+                    return false;
+                };
+                is_exact_path(&run_call.func, &["runtime", "run"])
+                    && run_call.args.len() == 1
+                    && is_exact_path(&prepare_call.func, &["runtime", "prepare_runtime"])
+                    && prepare_call.args.is_empty()
+            });
+    if !serving_is_canonical {
+        return false;
+    }
+
     let syn::Stmt::Local(prepare_local) = prepare_statement else {
         return false;
     };
@@ -2084,7 +2270,7 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     else {
         return false;
     };
-    if !is_exact_path(&prepare_call.func, &["runtime", "prepare_runtime"])
+    if !is_exact_path(&prepare_call.func, &["runtime", "prepare_operator_runtime"])
         || !prepare_call.args.is_empty()
     {
         return false;
@@ -2102,8 +2288,8 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     else {
         return false;
     };
-    if !is_exact_ident_path(&dispatch.expr, command)
-        || dispatch.arms.len() != RSS_COMMAND_FAMILIES.len()
+    if !is_exact_ident_path(&dispatch.expr, &operator_command.ident)
+        || dispatch.arms.len() != RSS_COMMAND_FAMILIES.len() - 1
     {
         return false;
     }
@@ -2112,7 +2298,9 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         if arm.guard.is_some() || !arm.attrs.is_empty() {
             return false;
         }
-        let Some(variant) = command_variant_pattern(&arm.pat).map(ToString::to_string) else {
+        let Some(variant) =
+            command_variant_pattern(&arm.pat, "OperatorCommand").map(ToString::to_string)
+        else {
             return false;
         };
         let Some((_, _, runner)) = RSS_COMMAND_FAMILIES
@@ -2124,45 +2312,25 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         if !observed.insert(variant.clone()) {
             return false;
         }
-        if variant == "Serving" {
-            let syn::Expr::Return(returned) = transparent_expr(&arm.body) else {
-                return false;
-            };
-            let Some(call) = returned.expr.as_deref().and_then(direct_awaited_call) else {
-                return false;
-            };
-            if !is_exact_path(&call.func, &["runtime", "run"])
-                || call.args.len() != 1
-                || !call
-                    .args
-                    .first()
-                    .is_some_and(|arg| is_exact_ident_path(arg, runtime_inputs))
-            {
-                return false;
-            }
-        } else {
-            let Some(runner) = runner else {
-                return false;
-            };
-            let Some(call) = direct_awaited_call(&arm.body) else {
-                return false;
-            };
-            let pg_operator = variant != "OidcJwksExport";
-            if !is_exact_path(&call.func, &["runtime", runner])
-                || call.args.len() != if pg_operator { 2 } else { 1 }
-                || !call
-                    .args
-                    .first()
-                    .is_some_and(|arg| reference_to_binding(arg, args))
-                || (pg_operator
-                    && !call
-                        .args
-                        .iter()
-                        .nth(1)
-                        .is_some_and(|arg| reference_to_binding(arg, runtime_inputs)))
-            {
-                return false;
-            }
+        let Some(runner) = runner else {
+            return false;
+        };
+        let Some(call) = direct_awaited_call(&arm.body) else {
+            return false;
+        };
+        if !is_exact_path(&call.func, &["runtime", runner])
+            || call.args.len() != 2
+            || !call
+                .args
+                .first()
+                .is_some_and(|arg| reference_to_binding(arg, args))
+            || !call
+                .args
+                .iter()
+                .nth(1)
+                .is_some_and(|arg| reference_to_binding(arg, runtime_inputs))
+        {
+            return false;
         }
     }
     let syn::Stmt::Expr(shutdown, Some(_)) = shutdown_statement else {
@@ -2174,8 +2342,10 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     let Some(shutdown_call) = direct_awaited_call(&shutdown.expr) else {
         return false;
     };
-    if !is_exact_path(&shutdown_call.func, &["runtime", "shutdown_runtime"])
-        || shutdown_call.args.len() != 1
+    if !is_exact_path(
+        &shutdown_call.func,
+        &["runtime", "shutdown_operator_runtime"],
+    ) || shutdown_call.args.len() != 1
         || !shutdown_call
             .args
             .first()
@@ -2206,19 +2376,150 @@ fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule
             )]);
         }
     };
-    let mut findings = runtime_config_snapshot_findings_for_file(&file);
+    let mut findings = production_runtime_config_snapshot_findings(&file);
     if root.join(RSS_MAIN_PATH).exists() && !pg_operator_definitions_are_exact(&file) {
         findings.push(finding(
             Rule::ForbiddenWiring,
             RUNTIME_LIB_PATH,
-            "the six PG operator definitions must expose the exact &RuntimeInputs parameter and flow its .config() view into the typed PG maintenance builder/runtime without ignored, wrong-binding, ambient-wrapper, or compliant-bait paths",
+            "the six PG operator definitions must expose the exact &OperatorRuntimeInputs parameter and flow its .config() view into the typed PG maintenance builder/runtime without ignored, wrong-binding, ambient-wrapper, or compliant-bait paths",
         ));
     }
+    findings.extend(runtime_profile_inputs_findings(root)?);
     findings.extend(runtime_config_global_capture_findings(root)?);
     findings.extend(runtime_snapshot_consumer_ambient_findings(root)?);
     findings.extend(redis_snapshot_boundary_findings(root, &file)?);
     findings.extend(vault_s3_values_boundary_findings(root, &file)?);
     Ok(findings)
+}
+
+fn runtime_profile_inputs_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let phase_path = root.join(RUNTIME_PHASE_PATH);
+    if !phase_path.exists() {
+        return Ok(Vec::new());
+    }
+    let phase_source = fs::read_to_string(&phase_path)
+        .with_context(|| format!("读 {} 失败", phase_path.display()))?;
+    let phase_file = match syn::parse_file(&phase_source) {
+        Ok(file) => file,
+        Err(error) => {
+            return Ok(vec![finding(
+                Rule::ForbiddenWiring,
+                RUNTIME_PHASE_PATH,
+                format!("runtime profile input gate 无法解析 Rust: {error}"),
+            )]);
+        }
+    };
+    let mut findings = Vec::new();
+    if !runtime_profile_input_structs_are_exact(&phase_file) {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_PHASE_PATH,
+            "ServingRuntimeInputs must privately own exactly PreparedRuntimeInputs plus Arc<secure::DigestPasswordBlocklist>; OperatorRuntimeInputs must privately own only PreparedRuntimeInputs, making the password capability unrepresentable",
+        ));
+    }
+
+    let vault_path = root.join(RUNTIME_VAULT_PATH);
+    if vault_path.exists() {
+        let vault_source = fs::read_to_string(&vault_path)
+            .with_context(|| format!("读 {} 失败", vault_path.display()))?;
+        let vault_file = match syn::parse_file(&vault_source) {
+            Ok(file) => file,
+            Err(error) => {
+                findings.push(finding(
+                    Rule::ForbiddenWiring,
+                    RUNTIME_VAULT_PATH,
+                    format!("OIDC operator profile gate 无法解析 Rust: {error}"),
+                ));
+                return Ok(findings);
+            }
+        };
+        if !oidc_operator_signature_is_exact(&vault_file) {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                RUNTIME_VAULT_PATH,
+                "run_oidc_jwks_export_command must accept the exact &[String] and &crate::OperatorRuntimeInputs inputs; serving inputs and ambient configuration are forbidden",
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+fn runtime_profile_input_structs_are_exact(file: &syn::File) -> bool {
+    fn exact_fields(file: &syn::File, name: &str, expected: &[(&str, &str)]) -> bool {
+        let structs = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Struct(item)
+                    if item.ident == name && attrs_may_be_production(&item.attrs) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let Some(item) = (structs.len() == 1).then_some(structs[0]) else {
+            return false;
+        };
+        let syn::Fields::Named(fields) = &item.fields else {
+            return false;
+        };
+        matches!(item.vis, syn::Visibility::Public(_))
+            && fields.named.len() == expected.len()
+            && fields.named.iter().zip(expected).all(|(field, expected)| {
+                matches!(field.vis, syn::Visibility::Inherited)
+                    && field
+                        .ident
+                        .as_ref()
+                        .is_some_and(|ident| ident == expected.0)
+                    && compact_type_tokens(&field.ty) == expected.1
+            })
+    }
+
+    exact_fields(
+        file,
+        "ServingRuntimeInputs",
+        &[
+            ("prepared", "PreparedRuntimeInputs"),
+            (
+                "password_blocklist",
+                "std::sync::Arc<secure::DigestPasswordBlocklist>",
+            ),
+        ],
+    ) && exact_fields(
+        file,
+        "OperatorRuntimeInputs",
+        &[("prepared", "PreparedRuntimeInputs")],
+    )
+}
+
+fn oidc_operator_signature_is_exact(file: &syn::File) -> bool {
+    let functions = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function)
+                if function.sig.ident == "run_oidc_jwks_export_command"
+                    && attrs_may_be_production(&function.attrs) =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(function) = (functions.len() == 1).then_some(functions[0]) else {
+        return false;
+    };
+    let inputs = function.sig.inputs.iter().collect::<Vec<_>>();
+    function.sig.asyncness.is_some()
+        && matches!(function.vis, syn::Visibility::Public(_))
+        && inputs.len() == 2
+        && matches!(inputs[0], syn::FnArg::Typed(input)
+            if compact_type_tokens(input.ty.as_ref()) == "&[String]")
+        && matches!(inputs[1], syn::FnArg::Typed(input)
+            if compact_type_tokens(input.ty.as_ref()) == "&crate::OperatorRuntimeInputs")
+        && matches!(&function.sig.output, syn::ReturnType::Type(_, ty)
+            if compact_type_tokens(ty.as_ref()) == "anyhow::Result<()>")
 }
 
 fn public_redis_values_wrapper_is_exact(item: &syn::ItemFn) -> bool {
@@ -2543,8 +2844,9 @@ fn pg_operator_signature_bindings(
     let syn::FnArg::Typed(runtime_inputs) = inputs[1] else {
         return None;
     };
+    let runtime_inputs_type = compact_type_tokens(runtime_inputs.ty.as_ref());
     if compact_type_tokens(args.ty.as_ref()) != "&[String]"
-        || compact_type_tokens(runtime_inputs.ty.as_ref()) != "&RuntimeInputs"
+        || runtime_inputs_type != "&OperatorRuntimeInputs"
     {
         return None;
     }
@@ -4002,7 +4304,7 @@ fn runtime_inputs_mut_parameter(item: &syn::ItemFn) -> Option<&syn::Ident> {
             .path
             .segments
             .last()
-            .is_none_or(|segment| segment.ident != "RuntimeInputs")
+            .is_none_or(|segment| segment.ident != "ServingRuntimeInputs")
     {
         return None;
     }
@@ -4064,7 +4366,7 @@ fn runtime_lifecycle_owner_struct_is_canonical(file: &syn::File) -> bool {
         && fields.named.first().is_some_and(|field| {
             field.ident.as_ref().is_some_and(|ident| ident == "inputs")
                 && matches!(field.vis, syn::Visibility::Inherited)
-                && type_last_ident(&field.ty).is_some_and(|ident| ident == "RuntimeInputs")
+                && type_last_ident(&field.ty).is_some_and(|ident| ident == "ServingRuntimeInputs")
         })
 }
 
@@ -4078,7 +4380,7 @@ fn runtime_lifecycle_new_is_canonical(method: &syn::ImplItemFn) -> bool {
     let Some(inputs) = pat_ident(&input.pat) else {
         return false;
     };
-    if type_last_ident(&input.ty).is_none_or(|ident| ident != "RuntimeInputs") {
+    if type_last_ident(&input.ty).is_none_or(|ident| ident != "ServingRuntimeInputs") {
         return false;
     }
     let [syn::Stmt::Expr(expr, None)] = method.block.stmts.as_slice() else {
@@ -4191,13 +4493,13 @@ fn ok_unit_expr(expr: &syn::Expr) -> bool {
         && matches!(call.args.first().map(transparent_expr), Some(syn::Expr::Tuple(unit)) if unit.elems.is_empty())
 }
 
-fn shutdown_pending_trace_export_is_canonical(file: &syn::File) -> bool {
+fn shutdown_prepared_runtime_is_canonical(file: &syn::File) -> bool {
     let helpers = file
         .items
         .iter()
         .filter_map(|item| match item {
             syn::Item::Fn(item)
-                if item.sig.ident == "shutdown_pending_trace_export"
+                if item.sig.ident == "shutdown_prepared_runtime"
                     && attrs_may_be_production(&item.attrs) =>
             {
                 Some(item)
@@ -4205,14 +4507,23 @@ fn shutdown_pending_trace_export_is_canonical(file: &syn::File) -> bool {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let Some(helper) = (helpers.len() == 1).then_some(helpers[0]) else {
+    let Some(helper) = helpers.first().filter(|_| helpers.len() == 1).copied() else {
         return false;
     };
-    let Some(runtime_inputs) = runtime_inputs_mut_parameter(helper) else {
+    let Some(syn::FnArg::Typed(input)) = helper.sig.inputs.first() else {
+        return false;
+    };
+    let syn::Type::Reference(reference) = input.ty.as_ref() else {
+        return false;
+    };
+    let Some(runtime_inputs) = pat_ident(&input.pat) else {
         return false;
     };
     if helper.sig.asyncness.is_none()
         || !matches!(helper.vis, syn::Visibility::Inherited)
+        || helper.sig.inputs.len() != 1
+        || reference.mutability.is_none()
+        || compact_type_tokens(reference.elem.as_ref()) != "PreparedRuntimeInputs"
         || helper.block.stmts.len() != 2
     {
         return false;
@@ -4309,12 +4620,17 @@ fn runtime_lifecycle_finish_is_canonical(method: &syn::ImplItemFn) -> bool {
     else {
         return false;
     };
-    if !is_exact_path(&cleanup_call.func, &["shutdown_pending_trace_export"])
+    if !is_exact_path(&cleanup_call.func, &["shutdown_prepared_runtime"])
         || cleanup_call.args.len() != 1
-        || !cleanup_call
-            .args
-            .first()
-            .is_some_and(|arg| mutable_reference_to_self_field(arg, "inputs"))
+        || !cleanup_call.args.first().is_some_and(|arg| {
+            matches!(transparent_expr(arg), syn::Expr::MethodCall(call)
+                    if call.method == "prepared_mut"
+                        && call.args.is_empty()
+                        && matches!(transparent_expr(&call.receiver), syn::Expr::Field(field)
+                            if is_exact_path(&field.base, &["self"])
+                                && matches!(&field.member, syn::Member::Named(member)
+                                    if member == "inputs")))
+        })
     {
         return false;
     }
@@ -4412,14 +4728,345 @@ fn runtime_lifecycle_outer_is_canonical(file: &syn::File, run: &syn::ItemFn) -> 
         return false;
     };
     runtime_lifecycle_owner_struct_is_canonical(file)
-        && shutdown_pending_trace_export_is_canonical(file)
+        && shutdown_prepared_runtime_is_canonical(file)
         && owner_method(owner_impl, "new").is_some_and(runtime_lifecycle_new_is_canonical)
         && owner_method(owner_impl, "run").is_some_and(runtime_lifecycle_run_is_canonical)
         && owner_method(owner_impl, "finish").is_some_and(runtime_lifecycle_finish_is_canonical)
         && exact_path_call_count_in_file(file, &["run_startup"]) == 1
 }
 
+fn production_named_function<'a>(file: &'a syn::File, name: &str) -> Option<&'a syn::ItemFn> {
+    let functions = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item)
+                if item.sig.ident == name && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    functions.first().filter(|_| functions.len() == 1).copied()
+}
+
+fn password_policy_preload_helper_is_canonical(file: &syn::File) -> bool {
+    let Some(helper) = production_named_function(file, "prepare_local_before_external") else {
+        return false;
+    };
+    if helper.sig.asyncness.is_some() || helper.sig.inputs.len() != 3 {
+        return false;
+    }
+    let mut inputs = helper.sig.inputs.iter();
+    let (
+        Some(syn::FnArg::Typed(config)),
+        Some(syn::FnArg::Typed(prepare_local)),
+        Some(syn::FnArg::Typed(build_external)),
+    ) = (inputs.next(), inputs.next(), inputs.next())
+    else {
+        return false;
+    };
+    let (Some(config), Some(prepare_local), Some(build_external)) = (
+        pat_ident(&config.pat),
+        pat_ident(&prepare_local.pat),
+        pat_ident(&build_external.pat),
+    ) else {
+        return false;
+    };
+    let [
+        syn::Stmt::Local(local),
+        syn::Stmt::Local(external),
+        syn::Stmt::Expr(result, None),
+    ] = helper.block.stmts.as_slice()
+    else {
+        return false;
+    };
+    let (Some(local_binding), Some(local_init)) =
+        (immutable_pat_ident(&local.pat), local.init.as_ref())
+    else {
+        return false;
+    };
+    let (Some(external_binding), Some(external_init)) =
+        (immutable_pat_ident(&external.pat), external.init.as_ref())
+    else {
+        return false;
+    };
+    let Some(local_call) = call_behind_result_context(&local_init.expr) else {
+        return false;
+    };
+    let Some(external_call) = call_behind_result_context(&external_init.expr) else {
+        return false;
+    };
+    let syn::Expr::Call(ok) = transparent_expr(result) else {
+        return false;
+    };
+    let Some(syn::Expr::Tuple(tuple)) = ok.args.first().map(transparent_expr) else {
+        return false;
+    };
+
+    local
+        .init
+        .as_ref()
+        .is_some_and(|init| init.diverge.is_none())
+        && external
+            .init
+            .as_ref()
+            .is_some_and(|init| init.diverge.is_none())
+        && is_exact_ident_path(&local_call.func, prepare_local)
+        && local_call.args.len() == 1
+        && local_call
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_ident_path(arg, config))
+        && is_exact_ident_path(&external_call.func, build_external)
+        && external_call.args.is_empty()
+        && is_exact_path(&ok.func, &["Ok"])
+        && ok.args.len() == 1
+        && tuple.elems.len() == 2
+        && tuple
+            .elems
+            .first()
+            .is_some_and(|arg| is_exact_ident_path(arg, local_binding))
+        && tuple
+            .elems
+            .iter()
+            .nth(1)
+            .is_some_and(|arg| is_exact_ident_path(arg, external_binding))
+}
+
+fn profile_local_functions_are_canonical(file: &syn::File) -> bool {
+    let Some(serving) = production_named_function(file, "prepare_serving_local") else {
+        return false;
+    };
+    let Some(operator) = production_named_function(file, "prepare_operator_local") else {
+        return false;
+    };
+    if serving.sig.inputs.len() != 1 {
+        return false;
+    }
+    let Some(syn::FnArg::Typed(serving_config)) = serving.sig.inputs.first() else {
+        return false;
+    };
+    let Some(serving_config) = pat_ident(&serving_config.pat) else {
+        return false;
+    };
+    let [syn::Stmt::Expr(serving_result, None)] = serving.block.stmts.as_slice() else {
+        return false;
+    };
+    let Some(serving_call) = direct_call_behind_runtime_context(serving_result) else {
+        return false;
+    };
+    if operator.sig.inputs.len() != 1
+        || !matches!(operator.sig.inputs.first(), Some(syn::FnArg::Typed(_)))
+    {
+        return false;
+    }
+    let [syn::Stmt::Expr(operator_result, None)] = operator.block.stmts.as_slice() else {
+        return false;
+    };
+    let syn::Expr::Call(operator_ok) = transparent_expr(operator_result) else {
+        return false;
+    };
+    let operator_unit = operator_ok.args.first().is_some_and(
+        |arg| matches!(transparent_expr(arg), syn::Expr::Tuple(tuple) if tuple.elems.is_empty()),
+    );
+
+    serving.sig.asyncness.is_none()
+        && operator.sig.asyncness.is_none()
+        && is_exact_path(
+            &serving_call.func,
+            &["domains", "identity", "load_password_blocklist"],
+        )
+        && serving_call.args.len() == 1
+        && serving_call
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_ident_path(arg, serving_config))
+        && is_exact_path(&operator_ok.func, &["Ok"])
+        && operator_ok.args.len() == 1
+        && operator_unit
+}
+
+fn profile_prepare_function_is_canonical(
+    file: &syn::File,
+    function_name: &str,
+    local_function: &str,
+    output_type: &str,
+    carries_password_blocklist: bool,
+) -> bool {
+    let Some(function) = production_named_function(file, function_name) else {
+        return false;
+    };
+    if function.sig.asyncness.is_some()
+        || !function.sig.inputs.is_empty()
+        || !matches!(function.vis, syn::Visibility::Public(_))
+    {
+        return false;
+    }
+    let [syn::Stmt::Local(prepared), syn::Stmt::Expr(result, None)] =
+        function.block.stmts.as_slice()
+    else {
+        return false;
+    };
+    let syn::Pat::Tuple(bindings) = &prepared.pat else {
+        return false;
+    };
+    if bindings.elems.len() != 2 {
+        return false;
+    }
+    let Some(first_binding) = bindings.elems.first() else {
+        return false;
+    };
+    let Some(prepared_binding) = immutable_pat_ident(first_binding) else {
+        return false;
+    };
+    let password_binding = bindings.elems.iter().nth(1).and_then(immutable_pat_ident);
+    if carries_password_blocklist != password_binding.is_some() {
+        return false;
+    }
+    let Some(kernel_call) = prepared
+        .init
+        .as_ref()
+        .and_then(|init| call_behind_result_context(&init.expr))
+    else {
+        return false;
+    };
+    let syn::Expr::Call(ok) = transparent_expr(result) else {
+        return false;
+    };
+    let Some(syn::Expr::Call(constructor)) = ok.args.first().map(transparent_expr) else {
+        return false;
+    };
+    let constructor_arguments_are_canonical = constructor.args.len()
+        == if carries_password_blocklist { 2 } else { 1 }
+        && constructor
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_ident_path(arg, prepared_binding))
+        && (!carries_password_blocklist
+            || password_binding.is_some_and(|password| {
+                constructor
+                    .args
+                    .iter()
+                    .nth(1)
+                    .is_some_and(|arg| is_exact_ident_path(arg, password))
+            }));
+
+    is_exact_path(&kernel_call.func, &["prepare_runtime_kernel"])
+        && kernel_call.args.len() == 1
+        && kernel_call
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_path(arg, &[local_function]))
+        && is_exact_path(&ok.func, &["Ok"])
+        && ok.args.len() == 1
+        && is_exact_path(&constructor.func, &[output_type, "new"])
+        && constructor_arguments_are_canonical
+}
+
+fn runtime_kernel_uses_ordered_helper(file: &syn::File) -> bool {
+    let Some(kernel) = production_named_function(file, "prepare_runtime_kernel") else {
+        return false;
+    };
+    let calls = kernel
+        .block
+        .stmts
+        .iter()
+        .filter_map(|statement| match statement {
+            syn::Stmt::Local(local) => local.init.as_ref(),
+            _ => None,
+        })
+        .filter_map(|init| call_behind_result_context(&init.expr))
+        .filter(|call| is_exact_path(&call.func, &["prepare_local_before_external"]))
+        .collect::<Vec<_>>();
+    let Some(call) = (calls.len() == 1).then_some(calls[0]) else {
+        return false;
+    };
+    let Some(syn::Expr::Closure(external)) = call.args.iter().nth(2).map(transparent_expr) else {
+        return false;
+    };
+    let Some(external_call) = direct_call_behind_runtime_context(&external.body) else {
+        return false;
+    };
+    call.args.len() == 3
+        && call
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_path(arg, &["config"]))
+        && call
+            .args
+            .iter()
+            .nth(1)
+            .is_some_and(|arg| is_exact_path(arg, &["prepare_local"]))
+        && external.inputs.is_empty()
+        && is_exact_path(&external_call.func, &["build_trace_export"])
+        && external_call.args.len() == 1
+        && external_call
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_path(arg, &["config"]))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PasswordPreloadStatus {
+    prepare_wiring: bool,
+    helper_shape: bool,
+    calls: usize,
+}
+
+impl PasswordPreloadStatus {
+    fn inspect(file: &syn::File) -> Self {
+        Self {
+            prepare_wiring: profile_local_functions_are_canonical(file)
+                && profile_prepare_function_is_canonical(
+                    file,
+                    "prepare_runtime",
+                    "prepare_serving_local",
+                    "ServingRuntimeInputs",
+                    true,
+                )
+                && profile_prepare_function_is_canonical(
+                    file,
+                    "prepare_operator_runtime",
+                    "prepare_operator_local",
+                    "OperatorRuntimeInputs",
+                    false,
+                ),
+            helper_shape: password_policy_preload_helper_is_canonical(file)
+                && runtime_kernel_uses_ordered_helper(file),
+            calls: production_exact_path_call_count_in_file(
+                file,
+                &["prepare_local_before_external"],
+            ),
+        }
+    }
+
+    fn is_canonical(self) -> bool {
+        self.prepare_wiring && self.helper_shape && self.calls == 1
+    }
+
+    fn diagnostic(self) -> String {
+        format!(
+            "password preload: prepare_wiring={}, helper_shape={}, calls={}/1",
+            self.prepare_wiring, self.helper_shape, self.calls
+        )
+    }
+}
+
+#[cfg(test)]
 fn runtime_config_snapshot_findings_for_file(file: &syn::File) -> Vec<Finding<Rule>> {
+    runtime_config_snapshot_findings(file, false)
+}
+
+fn production_runtime_config_snapshot_findings(file: &syn::File) -> Vec<Finding<Rule>> {
+    runtime_config_snapshot_findings(file, true)
+}
+
+fn runtime_config_snapshot_findings(
+    file: &syn::File,
+    require_password_policy: bool,
+) -> Vec<Finding<Rule>> {
     let prepares = file
         .items
         .iter()
@@ -4474,7 +5121,7 @@ fn runtime_config_snapshot_findings_for_file(file: &syn::File) -> Vec<Finding<Ru
         return vec![finding(
             Rule::ForbiddenWiring,
             RUNTIME_LIB_PATH,
-            "production run_startup() must accept exactly one named &mut RuntimeInputs parameter",
+            "production run_startup() must accept exactly one named &mut ServingRuntimeInputs parameter",
         )];
     };
     let mut prepare_wiring = PrepareRuntimeConfigWiring::default();
@@ -4484,7 +5131,20 @@ fn runtime_config_snapshot_findings_for_file(file: &syn::File) -> Vec<Finding<Ru
     let mut inventory = ProductionRuntimeConfigInventory::default();
     inventory.visit_file(file);
 
-    if prepare_wiring.is_canonical()
+    let password_preload = PasswordPreloadStatus::inspect(file);
+    let prepare_wiring_is_canonical = if require_password_policy {
+        password_preload.prepare_wiring
+    } else {
+        prepare_wiring.is_canonical(false)
+    };
+    let password_preload_helper_is_canonical =
+        !require_password_policy || password_preload.helper_shape;
+    let password_preload_calls_are_canonical =
+        !require_password_policy || password_preload.is_canonical();
+
+    if prepare_wiring_is_canonical
+        && password_preload_helper_is_canonical
+        && password_preload_calls_are_canonical
         && run_wiring.is_canonical()
         && settings_vault_snapshot_definition_is_exact(file)
         && runtime_lifecycle_outer_is_canonical(file, runs[0])
@@ -4496,7 +5156,8 @@ fn runtime_config_snapshot_findings_for_file(file: &syn::File) -> Vec<Finding<Ru
             Rule::ForbiddenWiring,
             RUNTIME_LIB_PATH,
             format!(
-                "prepare_runtime() must move its sole EnvConfigSource snapshot binding into RuntimeInputs; the exact lifecycle owner must finish one run_startup result; run_startup must map exact PG/Redis/Vault/S3 generations, consume Vault/Redis and named S3 parts by value, preserve canonical PG setup, and route the DLX S3 part without aliases or bait: run={run_wiring:?}, inventory={} ",
+                "prepare_runtime() must seal its sole EnvConfigSource snapshot and password blocklist into ServingRuntimeInputs while prepare_operator_runtime() constructs capability-free OperatorRuntimeInputs; the exact serving lifecycle owner must finish one run_startup result; run_startup must map exact PG/Redis/Vault/S3 generations, consume Vault/Redis and named S3 parts by value, preserve canonical PG setup, and route the DLX S3 part without aliases or bait; {}; run={run_wiring:?}, inventory={} ",
+                password_preload.diagnostic(),
                 inventory.diagnostic()
             ),
         )]
@@ -4544,11 +5205,10 @@ fn runtime_binary_config_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
             && inventory.canonical_run_calls == 1
             && inventory.forbidden_indirections == 0;
         let canonical = if rss {
-            shared_wiring_is_canonical
+            mains.len() == 1
                 && classifier_is_canonical(&file)
                 && rss_main_is_canonical(mains[0])
-                && inventory.shutdown_calls == 1
-                && inventory.canonical_shutdown_calls == 1
+                && inventory.forbidden_indirections == 0
         } else {
             shared_wiring_is_canonical
                 && mains[0].sig.asyncness.is_some()
@@ -4559,7 +5219,7 @@ fn runtime_binary_config_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
                 Rule::ForbiddenWiring,
                 relative,
                 if rss {
-                    "rss main must classify the closed command family before its sole runtime::prepare_runtime acquisition; serving must uniquely return runtime::run while every operator arm yields one Result followed by the sole exact-binding shutdown, with no pre-consumption early-return, alias, macro, or unreachable bait"
+                    "rss main must classify the closed command family before preparation; serving must inline the sole prepare_runtime -> run path, while operators must acquire exact OperatorRuntimeInputs once, pass it to every closed operator arm, and consume it in the sole shutdown_operator_runtime call without aliases, macros, or bait"
                 } else {
                     "server main must bind its sole runtime::prepare_runtime result and pass that exact binding exactly once to runtime::run, with no shutdown or alias side path"
                 },
@@ -5705,7 +6365,7 @@ fn runtime_inputs_parameter(item: &syn::ItemFn) -> Option<&syn::Ident> {
             .path
             .segments
             .last()
-            .is_none_or(|segment| segment.ident != "RuntimeInputs")
+            .is_none_or(|segment| segment.ident != "ServingRuntimeInputs")
     {
         return None;
     }
@@ -7566,6 +8226,48 @@ fn exact_path_call_count_in_file(file: &syn::File, path: &[&str]) -> usize {
     counter.calls
 }
 
+fn production_exact_path_call_count_in_file(file: &syn::File, path: &[&str]) -> usize {
+    struct Counter<'a> {
+        path: &'a [&'a str],
+        calls: usize,
+    }
+    impl Visit<'_> for Counter<'_> {
+        fn visit_item_mod(&mut self, item: &syn::ItemMod) {
+            if attrs_may_be_production(&item.attrs) {
+                syn::visit::visit_item_mod(self, item);
+            }
+        }
+
+        fn visit_item_fn(&mut self, item: &syn::ItemFn) {
+            if attrs_may_be_production(&item.attrs) {
+                syn::visit::visit_item_fn(self, item);
+            }
+        }
+
+        fn visit_item_impl(&mut self, item: &syn::ItemImpl) {
+            if attrs_may_be_production(&item.attrs) {
+                syn::visit::visit_item_impl(self, item);
+            }
+        }
+
+        fn visit_impl_item_fn(&mut self, item: &syn::ImplItemFn) {
+            if attrs_may_be_production(&item.attrs) {
+                syn::visit::visit_impl_item_fn(self, item);
+            }
+        }
+
+        fn visit_expr_call(&mut self, call: &syn::ExprCall) {
+            if is_exact_path(&call.func, self.path) {
+                self.calls += 1;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut counter = Counter { path, calls: 0 };
+    counter.visit_file(file);
+    counter.calls
+}
+
 fn is_provider_assembly_call(expr: &syn::Expr) -> bool {
     let syn::Expr::Call(call) = expr else {
         return false;
@@ -8838,19 +9540,24 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "RuntimeConfigSnapshot::capture(EnvConfigSource)",
     },
     AnchorSpec {
+        id: "prepare.password-policy.preload",
+        path: RUNTIME_LIB_PATH,
+        pattern: "prepare_runtime_kernel(prepare_serving_local)?",
+    },
+    AnchorSpec {
+        id: "prepare.tracing.otel",
+        path: RUNTIME_LIB_PATH,
+        pattern: "prepare_local_before_external(config, prepare_local, || build_trace_export(config))?",
+    },
+    AnchorSpec {
         id: "prepare.tracing.filter",
         path: RUNTIME_LIB_PATH,
         pattern: "let filter = config",
     },
     AnchorSpec {
-        id: "prepare.tracing.otel",
-        path: RUNTIME_LIB_PATH,
-        pattern: "let trace_export = build_trace_export(config)?;",
-    },
-    AnchorSpec {
         id: "prepare.inputs",
         path: RUNTIME_LIB_PATH,
-        pattern: "Ok(RuntimeInputs::new(runtime_config, trace_export))",
+        pattern: "PreparedRuntimeInputs::new(runtime_config, trace_export)",
     },
     AnchorSpec {
         id: "run.plan.load",
@@ -9078,8 +9785,12 @@ fn wiring_anchors(root: &Path) -> Result<Vec<AnchorEntry>> {
 fn anchor_search_scope<'a>(spec: &AnchorSpec, text: &'a str) -> AnchorSearchScope<'a> {
     if spec.path == RUNTIME_LIB_PATH {
         if spec.id.starts_with("prepare.") {
-            return extract_braced_body_at(text, 0, "pub fn prepare_runtime(")
-                .unwrap_or_else(|| empty_scope(text));
+            let function = if spec.id == "prepare.password-policy.preload" {
+                "pub fn prepare_runtime("
+            } else {
+                "fn prepare_runtime_kernel<"
+            };
+            return extract_braced_body_at(text, 0, function).unwrap_or_else(|| empty_scope(text));
         }
         return production_async_function_scope(text, "run_startup", "async fn run_startup(");
     }
@@ -9109,7 +9820,11 @@ fn anchor_search_scope<'a>(spec: &AnchorSpec, text: &'a str) -> AnchorSearchScop
 fn anchor_order_key(spec: &AnchorSpec) -> (&'static str, &'static str) {
     if spec.path == RUNTIME_LIB_PATH {
         if spec.id.starts_with("prepare.") {
-            return (spec.path, "prepare");
+            return if spec.id == "prepare.password-policy.preload" {
+                (spec.path, "prepare-serving")
+            } else {
+                (spec.path, "prepare-kernel")
+            };
         }
         return (spec.path, "run_startup");
     }
@@ -9518,10 +10233,127 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn password_policy_preload_helper_gate_is_ordered_and_non_vacuous() -> Result<()> {
+        let canonical = r#"
+fn prepare_local_before_external<Local, External>(
+    config: SnapshotConfig<'_>,
+    prepare_local: impl FnOnce(SnapshotConfig<'_>) -> anyhow::Result<Local>,
+    build_external: impl FnOnce() -> anyhow::Result<External>,
+) -> anyhow::Result<(Local, External)> {
+    let local = prepare_local(config)?;
+    let external = build_external()?;
+    Ok((local, external))
+}
+fn prepare_serving_local(config: SnapshotConfig<'_>) -> anyhow::Result<Blocklist> {
+    domains::identity::load_password_blocklist(config)
+}
+fn prepare_operator_local(_: SnapshotConfig<'_>) -> anyhow::Result<()> { Ok(()) }
+fn prepare_runtime_kernel<Local>(prepare_local: impl FnOnce() -> Local) {
+    let (local, trace_export) =
+        prepare_local_before_external(config, prepare_local, || build_trace_export(config))?;
+}
+pub fn prepare_runtime() -> anyhow::Result<ServingRuntimeInputs> {
+    let (prepared, password_blocklist) = prepare_runtime_kernel(prepare_serving_local)?;
+    Ok(ServingRuntimeInputs::new(prepared, password_blocklist))
+}
+pub fn prepare_operator_runtime() -> anyhow::Result<OperatorRuntimeInputs> {
+    let (prepared, ()) = prepare_runtime_kernel(prepare_operator_local)?;
+    Ok(OperatorRuntimeInputs::new(prepared))
+}
+"#;
+        let status = PasswordPreloadStatus::inspect(&syn::parse_file(canonical)?);
+        assert!(status.is_canonical(), "canonical profile split: {status:?}");
+
+        let cases = [
+            (
+                "prepare wiring",
+                canonical.replacen(
+                    "prepare_runtime_kernel(prepare_serving_local)?",
+                    "prepare_runtime_kernel(prepare_operator_local)?",
+                    1,
+                ),
+                "password preload: prepare_wiring=false, helper_shape=true, calls=1/1",
+            ),
+            (
+                "helper order",
+                canonical.replacen(
+                    "let local = prepare_local(config)?;\n    let external = build_external()?;",
+                    "let external = build_external()?;\n    let local = prepare_local(config)?;",
+                    1,
+                ),
+                "password preload: prepare_wiring=true, helper_shape=false, calls=1/1",
+            ),
+            (
+                "production helper call count",
+                format!(
+                    "{canonical}\nfn duplicate() {{ prepare_local_before_external(config, local, external); }}\n"
+                ),
+                "password preload: prepare_wiring=true, helper_shape=true, calls=2/1",
+            ),
+        ];
+        for (case, source, expected) in cases {
+            let status = PasswordPreloadStatus::inspect(&syn::parse_file(&source)?);
+            assert!(!status.is_canonical(), "{case} must be rejected");
+            assert_eq!(status.diagnostic(), expected, "{case}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_profile_input_gate_rejects_password_capability_leaks() -> Result<()> {
+        let canonical = r#"
+pub struct PreparedRuntimeInputs;
+pub struct ServingRuntimeInputs {
+    prepared: PreparedRuntimeInputs,
+    password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
+}
+pub struct OperatorRuntimeInputs {
+    prepared: PreparedRuntimeInputs,
+}
+"#;
+        assert!(runtime_profile_input_structs_are_exact(&syn::parse_file(
+            canonical
+        )?));
+        for (case, source) in [
+            (
+                "adapter-owned blocklist alias",
+                canonical.replace(
+                    "secure::DigestPasswordBlocklist",
+                    "crypto::DigestPasswordBlocklist",
+                ),
+            ),
+            (
+                "operator carries password capability",
+                canonical.replace(
+                    "pub struct OperatorRuntimeInputs {\n    prepared: PreparedRuntimeInputs,\n}",
+                    "pub struct OperatorRuntimeInputs {\n    prepared: PreparedRuntimeInputs,\n    password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,\n}",
+                ),
+            ),
+        ] {
+            assert!(
+                !runtime_profile_input_structs_are_exact(&syn::parse_file(&source)?),
+                "{case} must be rejected"
+            );
+        }
+
+        let oidc = r#"
+pub async fn run_oidc_jwks_export_command(
+    args: &[String],
+    runtime_inputs: &crate::OperatorRuntimeInputs,
+) -> anyhow::Result<()> { todo!() }
+"#;
+        assert!(oidc_operator_signature_is_exact(&syn::parse_file(oidc)?));
+        assert!(!oidc_operator_signature_is_exact(&syn::parse_file(
+            &oidc.replace("OperatorRuntimeInputs", "ServingRuntimeInputs")
+        )?));
+        Ok(())
+    }
+
     fn snapshot_program_with_lifecycle(legacy: &str) -> String {
         let startup = legacy.replace(
             "pub async fn run(mut runtime_inputs: RuntimeInputs)",
-            "async fn run_startup(runtime_inputs: &mut RuntimeInputs)",
+            "async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs)",
         );
         assert_ne!(
             startup, legacy,
@@ -9534,19 +10366,19 @@ mod tests {
         format!(
             r#"{startup}
 
-async fn shutdown_pending_trace_export(inputs: &mut RuntimeInputs) -> anyhow::Result<()> {{
+async fn shutdown_prepared_runtime(inputs: &mut PreparedRuntimeInputs) -> anyhow::Result<()> {{
     if let Some(exporter) = inputs.take_trace_export() {{ exporter.shutdown().await?; }}
     Ok(())
 }}
-struct RuntimeLifecycleOwner {{ inputs: RuntimeInputs }}
+struct RuntimeLifecycleOwner {{ inputs: ServingRuntimeInputs }}
 impl RuntimeLifecycleOwner {{
-    fn new(inputs: RuntimeInputs) -> Self {{ Self {{ inputs }} }}
+    fn new(inputs: ServingRuntimeInputs) -> Self {{ Self {{ inputs }} }}
     async fn run(mut self) -> anyhow::Result<()> {{
         let startup_result = run_startup(&mut self.inputs).await;
         self.finish(startup_result).await
     }}
     async fn finish(mut self, startup_result: anyhow::Result<()>) -> anyhow::Result<()> {{
-        let cleanup_result = shutdown_pending_trace_export(&mut self.inputs).await;
+        let cleanup_result = shutdown_prepared_runtime(self.inputs.prepared_mut()).await;
         match (startup_result, cleanup_result) {{
             (Ok(()), cleanup_result) => cleanup_result,
             (Err(startup_error), Ok(())) => Err(startup_error),
@@ -9557,10 +10389,41 @@ impl RuntimeLifecycleOwner {{
         }}
     }}
 }}
-pub async fn run(runtime_inputs: RuntimeInputs) -> anyhow::Result<()> {{
+pub async fn run(runtime_inputs: ServingRuntimeInputs) -> anyhow::Result<()> {{
     RuntimeLifecycleOwner::new(runtime_inputs).run().await
 }}
 "#
+        )
+    }
+
+    fn with_password_policy_preload(source: String) -> String {
+        let source = source.replacen(
+            "let trace_export = build_trace_export(config)?;",
+            "let (password_blocklist, trace_export) =\n        seal_password_policy_before_external(config, || build_trace_export(config))?;",
+            1,
+        );
+        let source = source.replacen(
+            "Ok(RuntimeInputs::new(runtime_config, trace_export))",
+            "Ok(RuntimeInputs::new(runtime_config, password_blocklist, trace_export))",
+            1,
+        );
+        let source = source.replacen(
+            "Ok(RuntimeInputs::new(runtime_config, password_blocklist, trace_export))",
+            "let _prepared_inputs = PreparedRuntimeInputs::new(runtime_config, trace_export);\n    Ok(RuntimeInputs::new(runtime_config, password_blocklist, trace_export))",
+            1,
+        );
+        format!(
+            r#"
+use phase::PreparedRuntimeInputs;
+fn seal_password_policy_before_external<External>(
+    config: SnapshotConfig<'_>,
+    build_external: impl FnOnce() -> anyhow::Result<External>,
+) -> anyhow::Result<(Arc<secure::DigestPasswordBlocklist>, External)> {{
+    let password_blocklist = domains::identity::load_password_blocklist(config)?;
+    let external = build_external()?;
+    Ok((password_blocklist, external))
+}}
+{source}"#
         )
     }
 
@@ -9654,16 +10517,31 @@ impl DomainModuleResult {
 
     fn runtime_lib_fixture(omit: Option<&str>) -> String {
         format!(
-            "use config::RuntimeConfigSnapshot;\nuse phase::RuntimeInputs;\nuse infra::vault::VaultRuntimeConfig;\nuse infra::redis::{{build_redis_runtime_deps, RedisRuntimeConfig}};\nuse infra::s3::{{build_s3_dlx_archive_store, build_s3_runtime_deps, S3RuntimeConfig}};\n\npub fn prepare_runtime() {{\n{}\n}}\nasync fn run_startup(runtime_inputs: &mut RuntimeInputs) {{\n{}\n}}\nfn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) {{\nlet mut module = DomainModuleResult::default();\nmodule.merge(inputs.domains_module);\nmodule.merge(inputs.provider_module);\n}}\n",
-            prepare_anchor_lines(omit),
+            "use config::RuntimeConfigSnapshot;\nuse phase::ServingRuntimeInputs;\nuse infra::vault::VaultRuntimeConfig;\nuse infra::redis::{{build_redis_runtime_deps, RedisRuntimeConfig}};\nuse infra::s3::{{build_s3_dlx_archive_store, build_s3_runtime_deps, S3RuntimeConfig}};\n\npub fn prepare_runtime() {{\n{}\n}}\nfn prepare_runtime_kernel<Local>() {{\n{}\n}}\nasync fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) {{\n{}\n}}\nfn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) {{\nlet mut module = DomainModuleResult::default();\nmodule.merge(inputs.domains_module);\nmodule.merge(inputs.provider_module);\n}}\n",
+            prepare_profile_anchor_lines(omit),
+            prepare_kernel_anchor_lines(omit),
             run_anchor_lines(omit)
         )
     }
 
-    fn prepare_anchor_lines(omit: Option<&str>) -> String {
+    fn prepare_profile_anchor_lines(omit: Option<&str>) -> String {
         RUNTIME_ANCHORS
             .iter()
-            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH && anchor.id.starts_with("prepare."))
+            .filter(|anchor| anchor.id == "prepare.password-policy.preload")
+            .filter(|anchor| omit != Some(anchor.id))
+            .map(|anchor| anchor.pattern)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn prepare_kernel_anchor_lines(omit: Option<&str>) -> String {
+        RUNTIME_ANCHORS
+            .iter()
+            .filter(|anchor| {
+                anchor.path == RUNTIME_LIB_PATH
+                    && anchor.id.starts_with("prepare.")
+                    && anchor.id != "prepare.password-policy.preload"
+            })
             .filter(|anchor| omit != Some(anchor.id))
             .map(|anchor| anchor.pattern)
             .collect::<Vec<_>>()
@@ -11130,10 +12008,10 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
 
     #[test]
     fn runtime_vault_s3_snapshot_wiring() -> Result<()> {
-        let canonical = snapshot_program_with_lifecycle(
+        let canonical = with_password_policy_preload(snapshot_program_with_lifecycle(
             r#"
 use config::{RuntimeConfigSnapshot, SnapshotConfig};
-use phase::RuntimeInputs;
+use phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, RuntimeInputs, ServingRuntimeInputs};
 use infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
 use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
 use infra::s3::{
@@ -11182,7 +12060,7 @@ async fn settings_config_value_maintenance_protection(
 
 pub async fn run_settings_config_value_maintenance(
     args: &[String],
-    runtime_inputs: &RuntimeInputs,
+    runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     settings_config_value_maintenance_protection(
         &pg,
@@ -11238,7 +12116,7 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
     );
 }
 "#,
-        );
+        ));
         let canonical_file = syn::parse_file(&canonical)?;
         assert!(
             settings_vault_snapshot_definition_is_exact(&canonical_file),
@@ -11699,7 +12577,7 @@ mod config {}
 mod phase {}
 mod infra { pub mod vault {} pub mod redis {} pub mod s3 {} }
 use config::{RuntimeConfigSnapshot, SnapshotConfig};
-use phase::RuntimeInputs;
+use phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, ServingRuntimeInputs};
 use infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
 use infra::vault::VaultRuntimeConfig;
 use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
@@ -11708,12 +12586,12 @@ use infra::s3::{
     S3RuntimeConfig, S3RuntimeConfigParts,
 };
 
-pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
+pub fn prepare_runtime() -> anyhow::Result<PreparedRuntimeInputs> {
     let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource);
     let config = runtime_config.view();
     let filter = config.value("RUST_LOG");
     let trace_export = build_trace_export(config)?;
-    Ok(RuntimeInputs::new(runtime_config, trace_export))
+    Ok(PreparedRuntimeInputs::new(runtime_config, trace_export))
 }
 
 async fn build_dlx_lifecycle_bootstrap_config_from(
@@ -11742,7 +12620,7 @@ async fn settings_config_value_maintenance_protection(
 
 pub async fn run_settings_config_value_maintenance(
     args: &[String],
-    runtime_inputs: &RuntimeInputs,
+    runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     settings_config_value_maintenance_protection(
         &pg,
@@ -11753,7 +12631,7 @@ pub async fn run_settings_config_value_maintenance(
     Ok(())
 }
 
-pub async fn run(mut runtime_inputs: RuntimeInputs) {
+pub async fn run(mut runtime_inputs: ServingRuntimeInputs) {
     let config = runtime_inputs.config();
     let _pg_config = PgRuntimeConfig::from_snapshot(config);
     let redis_config = RedisRuntimeConfig::from_snapshot(config);
@@ -11794,7 +12672,7 @@ fn hidden() { let take = Snapshot::capture; let _ = take(EnvConfigSource); }
             (
                 "grouped module alias plus type alias and UFCS",
                 r#"use crate::{phase as runtime_phase};
-type Inputs = runtime_phase::RuntimeInputs;
+type Inputs = runtime_phase::PreparedRuntimeInputs;
 fn hidden() { let _ = <Inputs>::new(snapshot(), trace()); }
 "#,
             ),
@@ -11829,17 +12707,17 @@ fn hidden() { passthrough!(Snapshot::capture(EnvConfigSource)); }
 mod local {
     pub struct RuntimeConfigSnapshot;
     impl RuntimeConfigSnapshot { pub fn capture(_: LocalSource) {} }
-    pub struct RuntimeInputs;
-    impl RuntimeInputs { pub fn new(_: LocalSnapshot, _: LocalTrace) {} }
+    pub struct PreparedRuntimeInputs;
+    impl PreparedRuntimeInputs { pub fn new(_: LocalSnapshot, _: LocalTrace) {} }
     pub fn build_vault_runtime_deps(_: LocalReader) {}
     pub fn build_redis_runtime_deps(_: LocalReader) {}
     pub fn build_s3_runtime_deps_from(_: LocalReader) {}
 }
-use local::{RuntimeConfigSnapshot, RuntimeInputs};
+use local::{PreparedRuntimeInputs, RuntimeConfigSnapshot};
 use local::{build_vault_runtime_deps, build_redis_runtime_deps, build_s3_runtime_deps_from};
 fn harmless() {
     RuntimeConfigSnapshot::capture(LocalSource);
-    RuntimeInputs::new(LocalSnapshot, LocalTrace);
+    PreparedRuntimeInputs::new(LocalSnapshot, LocalTrace);
     build_vault_runtime_deps(LocalReader);
     build_redis_runtime_deps(LocalReader);
     build_s3_runtime_deps_from(LocalReader);
@@ -11916,10 +12794,11 @@ fn fixture_only() {
         Ok(())
     }
 
-    fn runtime_lifecycle_snapshot_fixture() -> &'static str {
-        r#"
+    fn runtime_lifecycle_snapshot_fixture() -> String {
+        with_password_policy_preload(
+            r#"
 use config::{RuntimeConfigSnapshot, SnapshotConfig};
-use phase::RuntimeInputs;
+use phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, RuntimeInputs, ServingRuntimeInputs};
 use infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
 use infra::vault::VaultRuntimeConfig;
 use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
@@ -11965,7 +12844,7 @@ async fn settings_config_value_maintenance_protection(
 
 pub async fn run_settings_config_value_maintenance(
     args: &[String],
-    runtime_inputs: &RuntimeInputs,
+    runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     settings_config_value_maintenance_protection(
         &pg,
@@ -11976,20 +12855,20 @@ pub async fn run_settings_config_value_maintenance(
     Ok(())
 }
 
-async fn shutdown_pending_trace_export(inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
+async fn shutdown_prepared_runtime(inputs: &mut PreparedRuntimeInputs) -> anyhow::Result<()> {
     if let Some(exporter) = inputs.take_trace_export() { exporter.shutdown().await?; }
     Ok(())
 }
 
-struct RuntimeLifecycleOwner { inputs: RuntimeInputs }
+struct RuntimeLifecycleOwner { inputs: ServingRuntimeInputs }
 impl RuntimeLifecycleOwner {
-    fn new(inputs: RuntimeInputs) -> Self { Self { inputs } }
+    fn new(inputs: ServingRuntimeInputs) -> Self { Self { inputs } }
     async fn run(mut self) -> anyhow::Result<()> {
         let startup_result = run_startup(&mut self.inputs).await;
         self.finish(startup_result).await
     }
     async fn finish(mut self, startup_result: anyhow::Result<()>) -> anyhow::Result<()> {
-        let cleanup_result = shutdown_pending_trace_export(&mut self.inputs).await;
+        let cleanup_result = shutdown_prepared_runtime(self.inputs.prepared_mut()).await;
         match (startup_result, cleanup_result) {
             (Ok(()), cleanup_result) => cleanup_result,
             (Err(startup_error), Ok(())) => Err(startup_error),
@@ -12001,11 +12880,11 @@ impl RuntimeLifecycleOwner {
     }
 }
 
-pub async fn run(runtime_inputs: RuntimeInputs) -> anyhow::Result<()> {
+pub async fn run(runtime_inputs: ServingRuntimeInputs) -> anyhow::Result<()> {
     RuntimeLifecycleOwner::new(runtime_inputs).run().await
 }
 
-async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
+async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Result<()> {
     build_runtime_oidc_provider(runtime_inputs.config());
     assemble_authed_routers(runtime_inputs.config());
     launch(runtime_inputs.config());
@@ -12059,15 +12938,22 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
     Ok(())
 }
 "#
+            .to_owned(),
+        )
     }
 
     #[test]
     fn runtime_lifecycle_owner_rejects_terminal_cleanup_bypasses() -> Result<()> {
         let canonical = runtime_lifecycle_snapshot_fixture();
-        let canonical_file = syn::parse_file(canonical)?;
+        let canonical_file = syn::parse_file(&canonical)?;
+        let canonical_findings = runtime_config_snapshot_findings_for_file(&canonical_file);
         assert!(
-            runtime_config_snapshot_findings_for_file(&canonical_file).is_empty(),
-            "outer lifecycle owner plus inner startup is the anti-vacuity green"
+            canonical_findings.is_empty(),
+            "outer lifecycle owner plus inner startup is the anti-vacuity green: owner={}, shutdown={}, outer={}, findings={canonical_findings:?}",
+            runtime_lifecycle_owner_struct_is_canonical(&canonical_file),
+            shutdown_prepared_runtime_is_canonical(&canonical_file),
+            production_named_function(&canonical_file, "run")
+                .is_some_and(|run| runtime_lifecycle_outer_is_canonical(&canonical_file, run)),
         );
         for (label, mutated) in [
             (
@@ -12101,8 +12987,8 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
             (
                 "duplicate terminal cleanup",
                 canonical.replace(
-                    "let cleanup_result = shutdown_pending_trace_export(&mut self.inputs).await;",
-                    "let _duplicate = shutdown_pending_trace_export(&mut self.inputs).await;\n        let cleanup_result = shutdown_pending_trace_export(&mut self.inputs).await;",
+                    "let cleanup_result = shutdown_prepared_runtime(self.inputs.prepared_mut()).await;",
+                    "let _duplicate = shutdown_prepared_runtime(self.inputs.prepared_mut()).await;\n        let cleanup_result = shutdown_prepared_runtime(self.inputs.prepared_mut()).await;",
                 ),
             ),
             (
@@ -12123,7 +13009,7 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
                 "pending exporter function alias",
                 canonical.replace(
                     "if let Some(exporter) = inputs.take_trace_export() { exporter.shutdown().await?; }",
-                    "let take = RuntimeInputs::take_trace_export;\n    if let Some(exporter) = take(inputs) { exporter.shutdown().await?; }",
+                    "let take = PreparedRuntimeInputs::take_trace_export;\n    if let Some(exporter) = take(inputs) { exporter.shutdown().await?; }",
                 ),
             ),
             (
@@ -12161,6 +13047,10 @@ async fn run_startup(runtime_inputs: &mut RuntimeInputs) -> anyhow::Result<()> {
         r#"
 enum CommandFamily {
     Serving,
+    Operator(OperatorCommand),
+}
+
+enum OperatorCommand {
     Postgres,
     Projection,
     AuditLedgerVerify,
@@ -12172,25 +13062,25 @@ enum CommandFamily {
 
 fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
     if runtime::is_postgres_command(args) {
-        return Ok(CommandFamily::Postgres);
+        return Ok(CommandFamily::Operator(OperatorCommand::Postgres));
     }
     if runtime::is_projection_command(args) {
-        return Ok(CommandFamily::Projection);
+        return Ok(CommandFamily::Operator(OperatorCommand::Projection));
     }
     if runtime::is_audit_ledger_verify_command(args) {
-        return Ok(CommandFamily::AuditLedgerVerify);
+        return Ok(CommandFamily::Operator(OperatorCommand::AuditLedgerVerify));
     }
     if runtime::is_dlq_command(args) {
-        return Ok(CommandFamily::Dlq);
+        return Ok(CommandFamily::Operator(OperatorCommand::Dlq));
     }
     if runtime::is_reconcile_target_command(args) {
-        return Ok(CommandFamily::ReconcileTarget);
+        return Ok(CommandFamily::Operator(OperatorCommand::ReconcileTarget));
     }
     if runtime::is_settings_config_value_maintenance_command(args) {
-        return Ok(CommandFamily::SettingsConfigValueMaintenance);
+        return Ok(CommandFamily::Operator(OperatorCommand::SettingsConfigValueMaintenance));
     }
     if runtime::is_oidc_jwks_export_command(args) {
-        return Ok(CommandFamily::OidcJwksExport);
+        return Ok(CommandFamily::Operator(OperatorCommand::OidcJwksExport));
     }
     anyhow::ensure!(args.is_empty(), "unknown rss command: {args:?}");
     Ok(CommandFamily::Serving)
@@ -12200,18 +13090,20 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = classify_command(&args)?;
-    let runtime_inputs = runtime::prepare_runtime()?;
-    let operator_result = match command {
-        CommandFamily::Serving => return runtime::run(runtime_inputs).await,
-        CommandFamily::Postgres => runtime::run_postgres_reader_migration_command(&args, &runtime_inputs).await,
-        CommandFamily::Projection => runtime::run_projection_control_command(&args, &runtime_inputs).await,
-        CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await,
-        CommandFamily::Dlq => runtime::run_dlq_control_command(&args, &runtime_inputs).await,
-        CommandFamily::ReconcileTarget => runtime::run_reconcile_target_command(&args, &runtime_inputs).await,
-        CommandFamily::SettingsConfigValueMaintenance => runtime::run_settings_config_value_maintenance(&args, &runtime_inputs).await,
-        CommandFamily::OidcJwksExport => runtime::run_oidc_jwks_export_command(&args).await,
+    let CommandFamily::Operator(command) = command else {
+        return runtime::run(runtime::prepare_runtime()?).await;
     };
-    runtime::shutdown_runtime(runtime_inputs).await?;
+    let runtime_inputs = runtime::prepare_operator_runtime()?;
+    let operator_result = match command {
+        OperatorCommand::Postgres => runtime::run_postgres_reader_migration_command(&args, &runtime_inputs).await,
+        OperatorCommand::Projection => runtime::run_projection_control_command(&args, &runtime_inputs).await,
+        OperatorCommand::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await,
+        OperatorCommand::Dlq => runtime::run_dlq_control_command(&args, &runtime_inputs).await,
+        OperatorCommand::ReconcileTarget => runtime::run_reconcile_target_command(&args, &runtime_inputs).await,
+        OperatorCommand::SettingsConfigValueMaintenance => runtime::run_settings_config_value_maintenance(&args, &runtime_inputs).await,
+        OperatorCommand::OidcJwksExport => runtime::run_oidc_jwks_export_command(&args, &runtime_inputs).await,
+    };
+    runtime::shutdown_operator_runtime(runtime_inputs).await?;
     operator_result
 }
 "#
@@ -12266,21 +13158,21 @@ async fn main() -> anyhow::Result<()> {
             (
                 "rss duplicate prepare through module alias",
                 canonical_rss.replace(
-                    "let runtime_inputs = runtime::prepare_runtime()?;",
-                    "use runtime as rt;\n    let _bait = rt::prepare_runtime()?;\n    let runtime_inputs = runtime::prepare_runtime()?;",
+                    "let runtime_inputs = runtime::prepare_operator_runtime()?;",
+                    "use runtime as rt;\n    let _bait = rt::prepare_operator_runtime()?;\n    let runtime_inputs = runtime::prepare_operator_runtime()?;",
                 ),
             ),
             (
                 "rss wrong shutdown binding",
                 canonical_rss.replace(
-                    "runtime::shutdown_runtime(runtime_inputs)",
-                    "runtime::shutdown_runtime(other_inputs)",
+                    "runtime::shutdown_operator_runtime(runtime_inputs)",
+                    "runtime::shutdown_operator_runtime(other_inputs)",
                 ),
             ),
             (
                 "rss ambient local alias",
                 canonical_rss.replace(
-                    "runtime::run(runtime_inputs)",
+                    "runtime::run(runtime::prepare_runtime()?)",
                     "{ let serving = runtime::run; serving(other_inputs) }",
                 ),
             ),
@@ -12491,8 +13383,8 @@ async fn main() -> anyhow::Result<()> {
             (
                 "ignored exact parameter",
                 source.replacen(
-                    "runtime_inputs: &RuntimeInputs,",
-                    "_runtime_inputs: &RuntimeInputs,",
+                    "runtime_inputs: &OperatorRuntimeInputs,",
+                    "_runtime_inputs: &OperatorRuntimeInputs,",
                     1,
                 ),
             ),
@@ -12569,8 +13461,8 @@ async fn main() -> anyhow::Result<()> {
         let source = fs::read_to_string(workspace_root()?.join(RUNTIME_LIB_PATH))?;
         let renamed_and_split = source
             .replacen(
-                "pub async fn run_projection_control_command(\n    args: &[String],\n    runtime_inputs: &RuntimeInputs,\n) -> anyhow::Result<()> {\n    let runtime = ProductionProjectionControlRuntime {\n        config: runtime_inputs.config(),\n    };\n    run_projection_control_command_with_runtime(args, &runtime).await\n}",
-                "pub async fn run_projection_control_command(\n    command_args: &[String],\n    inputs: &RuntimeInputs,\n) -> anyhow::Result<()> {\n    let snapshot = inputs.config();\n    let runtime = ProductionProjectionControlRuntime { config: snapshot };\n    let outcome = run_projection_control_command_with_runtime(command_args, &runtime)\n        .await\n        .context(\"run projection operator\");\n    outcome\n}",
+                "pub async fn run_projection_control_command(\n    args: &[String],\n    runtime_inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let runtime = ProductionProjectionControlRuntime {\n        config: runtime_inputs.config(),\n    };\n    run_projection_control_command_with_runtime(args, &runtime).await\n}",
+                "pub async fn run_projection_control_command(\n    command_args: &[String],\n    inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let snapshot = inputs.config();\n    let runtime = ProductionProjectionControlRuntime { config: snapshot };\n    let outcome = run_projection_control_command_with_runtime(command_args, &runtime)\n        .await\n        .context(\"run projection operator\");\n    outcome\n}",
                 1,
             );
         assert_ne!(
@@ -12746,8 +13638,8 @@ pub(crate) async fn build_redis_runtime_deps(config: RedisRuntimeConfig) -> anyh
             (
                 "unknown command check after acquisition",
                 canonical.replace(
-                    "let command = classify_command(&args)?;\n    let runtime_inputs = runtime::prepare_runtime()?;",
-                    "let runtime_inputs = runtime::prepare_runtime()?;\n    let command = classify_command(&args)?;",
+                    "let command = classify_command(&args)?;",
+                    "let _early = runtime::prepare_operator_runtime()?;\n    let command = classify_command(&args)?;",
                 ),
             ),
             (
@@ -12793,50 +13685,50 @@ pub(crate) async fn build_redis_runtime_deps(config: RedisRuntimeConfig) -> anyh
             (
                 "fallible pre-consumption side path",
                 canonical.replace(
-                    "let runtime_inputs = runtime::prepare_runtime()?;",
-                    "let runtime_inputs = runtime::prepare_runtime()?;\n    preflight()?;",
+                    "let runtime_inputs = runtime::prepare_operator_runtime()?;",
+                    "let runtime_inputs = runtime::prepare_operator_runtime()?;\n    preflight()?;",
                 ),
             ),
             (
                 "ensure pre-consumption side path",
                 canonical.replace(
-                    "let runtime_inputs = runtime::prepare_runtime()?;",
-                    "let runtime_inputs = runtime::prepare_runtime()?;\n    anyhow::ensure!(ready(), \"not ready\");",
+                    "let runtime_inputs = runtime::prepare_operator_runtime()?;",
+                    "let runtime_inputs = runtime::prepare_operator_runtime()?;\n    anyhow::ensure!(ready(), \"not ready\");",
                 ),
             ),
             (
                 "bail pre-consumption side path",
                 canonical.replace(
-                    "let runtime_inputs = runtime::prepare_runtime()?;",
-                    "let runtime_inputs = runtime::prepare_runtime()?;\n    if !ready() { anyhow::bail!(\"not ready\"); }",
+                    "let runtime_inputs = runtime::prepare_operator_runtime()?;",
+                    "let runtime_inputs = runtime::prepare_operator_runtime()?;\n    if !ready() { anyhow::bail!(\"not ready\"); }",
                 ),
             ),
             (
                 "operator arm returns before shared shutdown",
                 canonical.replace(
-                    "CommandFamily::Projection => runtime::run_projection_control_command(&args, &runtime_inputs).await,",
-                    "CommandFamily::Projection => return runtime::run_projection_control_command(&args, &runtime_inputs).await,",
+                    "OperatorCommand::Projection => runtime::run_projection_control_command(&args, &runtime_inputs).await,",
+                    "OperatorCommand::Projection => return runtime::run_projection_control_command(&args, &runtime_inputs).await,",
                 ),
             ),
             (
                 "duplicate operator arm is unreachable bait",
                 canonical.replace(
-                    "CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await,",
-                    "CommandFamily::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await,\n        CommandFamily::AuditLedgerVerify => command_bait().await,",
+                    "OperatorCommand::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await,",
+                    "OperatorCommand::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await,\n        OperatorCommand::AuditLedgerVerify => command_bait().await,",
                 ),
             ),
             (
                 "wrong shutdown binding",
                 canonical.replace(
-                    "runtime::shutdown_runtime(runtime_inputs)",
-                    "runtime::shutdown_runtime(other_inputs)",
+                    "runtime::shutdown_operator_runtime(runtime_inputs)",
+                    "runtime::shutdown_operator_runtime(other_inputs)",
                 ),
             ),
             (
                 "runtime macro bait",
                 canonical.replace(
-                    "let runtime_inputs = runtime::prepare_runtime()?;",
-                    "let runtime_inputs = runtime::prepare_runtime()?;\n    passthrough!(runtime::run(other_inputs));",
+                    "let runtime_inputs = runtime::prepare_operator_runtime()?;",
+                    "let runtime_inputs = runtime::prepare_operator_runtime()?;\n    passthrough!(runtime::run(other_inputs));",
                 ),
             ),
         ] {
@@ -12854,10 +13746,8 @@ pub(crate) async fn build_redis_runtime_deps(config: RedisRuntimeConfig) -> anyh
         let root = fixture_root("runtime-snapshot-consumer-ambient")?;
         write(&root.join(RUNTIME_CONFIG_FIXTURE_MARKER), "enabled\n")?;
         let runtime_path = root.join(RUNTIME_LIB_PATH);
-        let canonical_runtime = format!(
-            "mod ambient;\nmod routes;\nmod wrapper;\n{}",
-            runtime_lifecycle_snapshot_fixture()
-        );
+        let live_runtime = fs::read_to_string(workspace_root()?.join(RUNTIME_LIB_PATH))?;
+        let canonical_runtime = format!("{live_runtime}\nmod ambient;\nmod wrapper;\n");
         write(&runtime_path, &canonical_runtime)?;
         let routes_path = root.join(RUNTIME_SRC_PATH).join("routes.rs");
         let ambient_path = root.join(RUNTIME_SRC_PATH).join("ambient.rs");
@@ -12870,9 +13760,10 @@ fn assemble(config: SnapshotConfig<'_>) { let _ = config.value("SAFE"); }
 fn unreachable_bait() { let _ = std::env::var("UNREACHABLE"); }
 "#;
         write(&routes_path, compliant)?;
+        let compliant_findings = runtime_config_snapshot_live_findings(&root)?;
         assert!(
-            runtime_config_snapshot_live_findings(&root)?.is_empty(),
-            "an unreachable ambient helper is compliant bait"
+            compliant_findings.is_empty(),
+            "an unreachable ambient helper is compliant bait: {compliant_findings:?}"
         );
 
         for (label, mutation) in [

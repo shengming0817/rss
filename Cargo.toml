@@ -128,16 +128,20 @@ futures = "0.3"
 # 编码 / 加密原语（基础层 + 引擎原语 opt-in）
 base64 = "0.22"   # vocab Cursor base64url（URL_SAFE_NO_PAD）不透明 token 解码校验
 subtle = "2"      # primitives constant_time_eq 常数时间比较（RustCrypto 工业标准，免自维护 black_box 屏障）。ref: dalek-cryptography/subtle src/lib.rs@main
+# Unix blocklist loader open(2) flags (`O_NONBLOCK|O_NOFOLLOW`); direct target-only dependency
+# keeps the filesystem capability boundary explicit instead of relying on a transitive crate.
+libc = "=0.2.186"
 # softca dev-CA 签名 provider（adapters/softca，#1010）：ECDSA P-256 sign-bytes 原语
 # （EcdsaKeyPair generate_pkcs8 / from_pkcs8 / sign）。ring 0.17 已因 rustls←sqlx/redis 在树、LICENSE 判
 # ISC 在 deny allow-list 内 ⇒ 零新增 crypto license 面（对标 adapters/oidc 选 ring 同款理由）；仅 softca
 # backend feature 直接消费。ref: briansmith/ring src/signature/ecdsa.rs@0.17.14
 ring = "0.17"
-# 密码哈希（secure::password，#1188）：argon2id PHC 哈希 + 内建 constant-time 验签 + 随机盐。default `rand`
+# 密码哈希（secure::password，#1188）：argon2id PHC 哈希 + constant-time digest 比较 + 有界 KDF 验签 + 随机盐。default `rand`
 # 给 `SaltString::generate`；额外 `std` 经 password-hash/std → rand_core/std 拉起 getrandom，暴露
 # `password_hash::rand_core::OsRng`（CSPRNG 盐源）。ref: RustCrypto/argon2 argon2/src/lib.rs@master
 # （Apache-2.0 OR MIT，deny allow-list 内；传递 blake2/password-hash 同许可）。
 argon2 = { version = "0.5", features = ["std"] }
+unicode-normalization = "0.1"
 # DI port trait 的 async dyn 派发：native AFIT + dynosaur 宏生成 dyn-compatible wrapper（ADR-003）。
 # exact-pin（pre-1.0，new_box/new_arc/bridge API 仍破坏式演进；升级须审 changelog）。仅 diport
 # 可依赖（deny.toml wrapper 守 DI port 集中 + 单一 dyn-dispatch 依赖点；别处 import 不到宏）。

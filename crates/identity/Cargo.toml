@@ -11,7 +11,7 @@ workspace = true
 # 种子登录（with_seed_credential：argon2 哈希凭据 in-mem CredentialRepo 替身；会话生命周期 provider 由组合根注入）仅 test / demo 用——
 # 经 feature 门控做编译期边界：生产组合根不启用即不编译，防种子凭据路径误入生产（machine boundary）。
 [features]
-seed-login = []
+seed-login = ["secure/test-support"]
 # test-support：暴露 `test_support::session` 供**下游 adapter crate**（如 postgres）集成测试构造
 # `ports::Session`（funnel `Session::new` 为 pub(crate)，生产不可伪造）。生产构建不启用即不编译——funnel
 # seal 不变。与 authn / runctx 的 `test-support` 同信任模型。
@@ -63,6 +63,7 @@ rstest = { workspace = true }
 # authz 纯逻辑单测构造 Principal（test-support feature 仅 dev/test 生效，生产 seal 不变）。
 authn = { path = "../authn", features = ["test-support"] }
 httpserve = { path = "../httpserve", features = ["test-util"] }
+secure = { path = "../secure", features = ["test-support"] }
 # identity.login 契约测试样板（#1136 login_contract）：testkit oneshot harness + axum 挂载样板 handler。
 # testkit 零 adapter 依赖（dev-dep 消费不破「域单测不依赖 adapter crate」）；axum 构建样板 router。
 testkit = { path = "../testkit" }

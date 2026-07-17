@@ -47,8 +47,8 @@ use bootstrap::shutdown::ShutdownStack;
 use bootstrap::{IdempotencyConfig, ResolvedIdempotency, SubscriberExecution, Topology};
 use common::{
     CANON_TENANT, CANON_USER, LOGIN_USERNAME, NOW_SECS, PASSWORD, SESSION_CREATED_TOPIC, TTL_SECS,
-    audit_domain, identity_domain, memory_tenant_signer, session_created_subscription,
-    signed_metadata, tenant_authority,
+    audit_domain, identity_domain, memory_tenant_signer, password_policy,
+    session_created_subscription, signed_metadata, tenant_authority,
 };
 use consistency::{
     EngineError, EventEntry, EventTopic, HandleResult, IdemKey, InboxReceiptContext, InboxStore,
@@ -261,6 +261,7 @@ fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginBundle> {
             MemSessionLifecycle::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
         )),
         Arc::clone(&refresh),
+        password_policy(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,

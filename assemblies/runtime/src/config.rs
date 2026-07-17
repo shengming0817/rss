@@ -64,6 +64,7 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_OTEL_ENDPOINT",
     "RSS_OUTBOX_RETAIN_SECONDS",
     "RSS_OUTBOX_SWEEP_INTERVAL_MS",
+    "RSS_PASSWORD_BLOCKLIST_PATH",
     "RSS_PG_AUDIT_ADMIN_PASSWORD",
     "RSS_PG_AUDIT_ADMIN_USERNAME",
     "RSS_PG_DATABASE",
@@ -212,7 +213,7 @@ pub(crate) enum RuntimeConfigCaptureError {
 
 /// Immutable process-lifetime configuration generation.
 ///
-/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- private storage, by-value source consumption, the required owned `RuntimeInputs` field, and private-field `SnapshotConfig` signatures make snapshot omission and capability forgery unrepresentable for migrated serving, PostgreSQL maintenance, and Vault-backed settings-maintenance consumers.
+/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- private storage, by-value source consumption, mutually exclusive owned serving/operator inputs, and private-field `SnapshotConfig` signatures make snapshot omission and capability forgery unrepresentable for migrated serving, PostgreSQL maintenance, OIDC JWKS export, and Vault-backed settings-maintenance consumers.
 ///
 /// The separate Medium `RUNTIME-CONFIG-SNAPSHOT-LIVE-01` carrier in `runtime-baseline` guards the
 /// production capture-to-consumer flow against ambient implementation substitutions; #1787 owns

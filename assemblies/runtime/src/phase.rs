@@ -37,16 +37,13 @@ impl RuntimePhase {
 
 use crate::config::{RuntimeConfigSnapshot, SnapshotConfig};
 
-/// Inputs owned by the runtime phase orchestrator.
-///
-/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- the crate-private constructor requires an owned, non-optional snapshot, so phases cannot be assembled without one.
-pub struct RuntimeInputs {
+/// Process-wide inputs shared by the mutually exclusive serving and operator preparations.
+pub(crate) struct PreparedRuntimeInputs {
     config: RuntimeConfigSnapshot,
     trace_export: Option<otel::OtelExporter>,
 }
 
-impl RuntimeInputs {
-    /// Construct the complete process-lifetime runtime inputs.
+impl PreparedRuntimeInputs {
     pub(crate) fn new(
         config: RuntimeConfigSnapshot,
         trace_export: Option<otel::OtelExporter>,
@@ -57,15 +54,72 @@ impl RuntimeInputs {
         }
     }
 
-    /// Mint a borrowed capability for the process snapshot owned by the phase orchestrator.
     pub(crate) fn config(&self) -> SnapshotConfig<'_> {
         self.config.view()
+    }
+
+    pub(crate) fn take_trace_export(&mut self) -> Option<otel::OtelExporter> {
+        self.trace_export.take()
+    }
+}
+
+/// Serving-only runtime inputs.
+///
+/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- the crate-private constructor requires an owned process snapshot and a non-optional typed password blocklist, while operator inputs cannot be passed to [`crate::run`].
+pub struct ServingRuntimeInputs {
+    prepared: PreparedRuntimeInputs,
+    password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
+}
+
+impl ServingRuntimeInputs {
+    pub(crate) fn new(
+        prepared: PreparedRuntimeInputs,
+        password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
+    ) -> Self {
+        Self {
+            prepared,
+            password_blocklist,
+        }
+    }
+
+    /// Mint a borrowed capability for the process snapshot owned by the phase orchestrator.
+    pub(crate) fn config(&self) -> SnapshotConfig<'_> {
+        self.prepared.config()
+    }
+
+    /// Borrow the typed local policy loaded before any external provider construction.
+    pub(crate) fn password_blocklist(&self) -> &std::sync::Arc<secure::DigestPasswordBlocklist> {
+        &self.password_blocklist
     }
 
     /// Move the optional trace exporter into the launch phase while retaining the process snapshot
     /// until `run()` exits.
     pub(crate) fn take_trace_export(&mut self) -> Option<otel::OtelExporter> {
-        self.trace_export.take()
+        self.prepared.take_trace_export()
+    }
+
+    pub(crate) fn prepared_mut(&mut self) -> &mut PreparedRuntimeInputs {
+        &mut self.prepared
+    }
+}
+
+/// Operator-only runtime inputs. Password-policy capabilities are intentionally unrepresentable.
+pub struct OperatorRuntimeInputs {
+    prepared: PreparedRuntimeInputs,
+}
+
+impl OperatorRuntimeInputs {
+    pub(crate) fn new(prepared: PreparedRuntimeInputs) -> Self {
+        Self { prepared }
+    }
+
+    /// Mint a borrowed capability for operator configuration consumers.
+    pub(crate) fn config(&self) -> SnapshotConfig<'_> {
+        self.prepared.config()
+    }
+
+    pub(crate) fn prepared_mut(&mut self) -> &mut PreparedRuntimeInputs {
+        &mut self.prepared
     }
 }
 
@@ -143,6 +197,15 @@ mod tests {
         }
     }
 
+    fn test_password_blocklist() -> Arc<secure::DigestPasswordBlocklist> {
+        Arc::new(
+            crypto::load_password_blocklist_from_reader(std::io::Cursor::new(include_bytes!(
+                "../../../deploy/password-blocklist.demo.sha256"
+            )))
+            .unwrap_or_else(|_| unreachable!()),
+        )
+    }
+
     #[test]
     fn runtime_phase_labels_are_closed_and_ordered() {
         let labels: Vec<_> = RuntimePhase::ALL
@@ -191,13 +254,21 @@ mod tests {
     }
 
     #[test]
-    fn runtime_config_inputs_own_snapshot_and_trace_export_without_fallback() {
+    fn runtime_config_inputs_separate_serving_policy_from_operator_capabilities() {
         let snapshot = RuntimeConfigSnapshot::capture(MissingConfigSource)
             .expect("closed catalog capture succeeds");
-        let mut inputs = RuntimeInputs::new(snapshot, None);
-        assert!(inputs.config().value("RSS_VAULT_TOKEN").is_none());
-        assert!(inputs.take_trace_export().is_none());
-        assert!(inputs.config().value("RSS_VAULT_TOKEN").is_none());
+        let blocklist = test_password_blocklist();
+        let prepared = PreparedRuntimeInputs::new(snapshot, None);
+        let mut serving = ServingRuntimeInputs::new(prepared, Arc::clone(&blocklist));
+        assert!(serving.config().value("RSS_VAULT_TOKEN").is_none());
+        assert!(Arc::ptr_eq(serving.password_blocklist(), &blocklist));
+        assert!(serving.take_trace_export().is_none());
+
+        let snapshot = RuntimeConfigSnapshot::capture(MissingConfigSource)
+            .expect("closed catalog capture succeeds");
+        let mut operator = OperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None));
+        assert!(operator.config().value("RSS_VAULT_TOKEN").is_none());
+        assert!(operator.prepared_mut().take_trace_export().is_none());
     }
 
     #[test]

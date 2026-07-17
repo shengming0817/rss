@@ -5,7 +5,13 @@
   "required": ["currentPassword", "newPassword"],
   "properties": {
     "currentPassword": { "type": "string", "x-redaction": "secret" },
-    "newPassword": { "type": "string", "x-redaction": "secret" }
+    "newPassword": {
+      "type": "string",
+      "minLength": 15,
+      "maxLength": 64,
+      "x-defer-string-length-validation": true,
+      "x-redaction": "secret"
+    }
   },
   "additionalProperties": false
 }

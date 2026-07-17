@@ -655,6 +655,27 @@ fn step_nextest() -> Step {
     }
 }
 
+/// Prove production password test constructors stay absent in an isolated Cargo feature graph.
+/// Workspace test graphs legitimately unify `secure/test-support` through identity seed fixtures.
+fn step_secure_production_trybuild() -> Step {
+    Step {
+        id: GateId::SecureProductionTrybuild,
+        args: &[
+            "test",
+            "-p",
+            "secure",
+            "--no-default-features",
+            "--test",
+            "trybuild",
+            "production_seams_absent",
+            "--",
+            "--exact",
+        ],
+        kind: StepKind::Cargo,
+        env: &[],
+    }
+}
+
 // ---- feature-gated 行为测试门（确定性 mock / lazy 构造，无需 live 后端）----
 //
 // 默认 feature 的 workspace nextest（[`step_nextest`] / coverage）**不编入** adapter 的
@@ -839,6 +860,7 @@ fn selected_for(target: PlanTarget, id: GateId) -> bool {
                 | GateId::ClippyAllFeatures
                 | GateId::Dylint
                 | GateId::PostgresFeatureMatrix
+                | GateId::SecureProductionTrybuild
         ),
         PlanTarget::Core(CoreExecution::Tests) => matches!(
             id,
@@ -1981,7 +2003,7 @@ mod tests {
         let full = plan_for(PlanTarget::Core(CoreExecution::Full));
         let prerequisites = plan_for(PlanTarget::Core(CoreExecution::Prerequisites));
         let tests = plan_for(PlanTarget::Core(CoreExecution::Tests));
-        assert_eq!(prerequisites.len(), 4);
+        assert_eq!(prerequisites.len(), 5);
         assert_eq!(tests.len(), 11);
         let prereq_ids = prerequisites
             .iter()
@@ -2011,14 +2033,39 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_54_unique_gates_and_supersedes_nextest() {
+    fn secure_production_trybuild_gate_is_feature_isolated() -> anyhow::Result<()> {
+        let prerequisites = plan_for(PlanTarget::Core(CoreExecution::Prerequisites));
+        let production = prerequisites
+            .iter()
+            .find(|step| step.id == GateId::SecureProductionTrybuild)
+            .context("feature-isolated password proof must be a normal core test gate")?;
+        assert_eq!(
+            production.args,
+            &[
+                "test",
+                "-p",
+                "secure",
+                "--no-default-features",
+                "--test",
+                "trybuild",
+                "production_seams_absent",
+                "--",
+                "--exact",
+            ]
+        );
+        assert_eq!(production.kind, StepKind::Cargo);
+        Ok(())
+    }
+
+    #[test]
+    fn ci_lane_compatibility_plan_keeps_55_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 54);
+        assert_eq!(plan.len(), 55);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 54);
+        assert_eq!(ids.len(), 55);
     }
 
     #[test]
@@ -2974,6 +3021,7 @@ mod tests {
                 "build",
                 "clippy",
                 "coverage",
+                "secure-production-trybuild",
                 "s3-backend-tests",
                 "redis-backend-tests",
                 "oidc-backend-tests",
