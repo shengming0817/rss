@@ -22,6 +22,7 @@ RUNNER_PATHS = (
     "Cargo.toml",
     "Makefile",
     "hack/cargo.sh",
+    "hack/target-pool.py",
     "hack/ci-local-supervisor.py",
     "rust-toolchain.toml",
     "xtask",

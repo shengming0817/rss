@@ -31,17 +31,73 @@ find_verified_sccache() {
 repo_root=$(/usr/bin/git rev-parse --show-toplevel)
 repo_root=$(CDPATH='' cd -- "$repo_root" && pwd -P)
 tool_adapter="$repo_root/.github/scripts/ci-tool-adapters.sh"
+target_pool="$repo_root/hack/target-pool.py"
 
+# Pool defaults on (N=5). Explicit 0/off restores worktree-local target.
+# Dual-explicit RSS_TARGET_POOL_N + CARGO_TARGET_DIR is fail-closed.
+pool_n_explicit=0
+if [ "${RSS_TARGET_POOL_N+x}" = x ]; then
+    pool_n_raw=$RSS_TARGET_POOL_N
+    pool_n_explicit=1
+else
+    pool_n_raw=5
+fi
+
+cargo_target_explicit=0
 if [ "${CARGO_TARGET_DIR+x}" = x ]; then
-    target_source=env-override
+    cargo_target_explicit=1
+fi
+
+resolve_env_override_target() {
     case "$CARGO_TARGET_DIR" in
         /*) resolved_target=$CARGO_TARGET_DIR ;;
         *) resolved_target="$(pwd -P)/$CARGO_TARGET_DIR" ;;
     esac
-else
-    target_source=config-default
-    resolved_target="$repo_root/.cache/cargo-target"
-fi
+}
+
+case "$pool_n_raw" in
+    0|off)
+        if [ "$cargo_target_explicit" = 1 ]; then
+            target_source=env-override
+            resolve_env_override_target
+        else
+            target_source=config-default
+            resolved_target="$repo_root/.cache/cargo-target"
+        fi
+        ;;
+    *[!0-9]*|'')
+        fail "RSS_TARGET_POOL_N must be a positive integer, 0, or off; got: $pool_n_raw"
+        ;;
+    *)
+        if [ "$pool_n_raw" -lt 1 ]; then
+            fail "RSS_TARGET_POOL_N must be a positive integer, 0, or off; got: $pool_n_raw"
+        fi
+        if [ "$pool_n_explicit" = 1 ] && [ "$cargo_target_explicit" = 1 ]; then
+            fail "RSS_TARGET_POOL_N and CARGO_TARGET_DIR are both set; choose one"
+        fi
+        if [ "$cargo_target_explicit" = 1 ]; then
+            target_source=env-override
+            resolve_env_override_target
+            printf 'rss-cargo: pool=skipped reason=env-override\n' >&2
+        else
+            pool_root=${RSS_TARGET_POOL_ROOT:-$HOME/.cache/rss-cargo-target-pool}
+            branch=$(/usr/bin/git -C "$repo_root" rev-parse --abbrev-ref HEAD 2>/dev/null || printf '')
+            resolved_target=$(
+                /usr/bin/python3 "$target_pool" acquire \
+                    --pool-root "$pool_root" \
+                    --n "$pool_n_raw" \
+                    --worktree "$repo_root" \
+                    --pid "$$" \
+                    --branch "$branch"
+            ) || fail "target pool acquire failed"
+            target_source=pool-lease
+            slot_name=${resolved_target##*/}
+            printf 'rss-cargo: pool=enabled n=%s slot=%s root=%s\n' \
+                "$pool_n_raw" "$slot_name" "$pool_root" >&2
+        fi
+        ;;
+esac
+
 CARGO_TARGET_DIR=$resolved_target
 export CARGO_TARGET_DIR
 

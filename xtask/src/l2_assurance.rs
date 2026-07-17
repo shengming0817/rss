@@ -1441,6 +1441,7 @@ pub mod cfg_attr_parent {
     }
 
     #[test]
+    #[allow(clippy::expect_used)] // reason: unit-test Err assertion; Ok is the failure mode.
     fn governance_failure_reports_every_finding() {
         #[derive(Debug, Clone, Copy)]
         enum SyntheticRule {

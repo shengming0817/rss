@@ -112,9 +112,13 @@ JSON v1 的紧凑 wire 约定如下：
 .github/scripts/ci-tool-adapters.sh specs --lane all --backend all
 ```
 
-Cargo 构建产物遵循 worktree/job 隔离：本地默认写当前 worktree 的 `.cache/cargo-target`，CI 写
-`$RUNNER_TEMP/rss-cargo-target`；显式 `CARGO_TARGET_DIR` 仍由 Cargo 原样处理。受控入口默认
-`CARGO_BUILD_JOBS=2`，可由同名环境变量覆盖。完整 target 不跨 worktree 或 CI job 持久化。
+Cargo 构建产物遵循 worktree/job 隔离：直接 `cargo` 默认写当前 worktree 的 `.cache/cargo-target`，
+受控入口（`make` / `hack/cargo.sh`）默认使用 N 槽串行独占租约池（`N=5`，
+`$HOME/.cache/rss-cargo-target-pool/slot-K`）；`RSS_TARGET_POOL_N=off` 退回 worktree-local。
+CI 写 `$RUNNER_TEMP/rss-cargo-target`。显式 `CARGO_TARGET_DIR` 在默认池下仍覆盖；与显式
+`RSS_TARGET_POOL_N` 同设则 fail-closed。受控入口默认 `CARGO_BUILD_JOBS=2`，可由同名环境变量覆盖。
+完整 target 不跨 worktree 或 CI job 共享可变状态；本地膨胀清理、`gc` 与 sccache 验收见
+`docs/ops/202607171340-1851-local-target-pool-and-cleanup.md`。
 
 `hack/cargo.sh`、Make 及其启动的 xtask 会清除外部 `RUSTC_WRAPPER`。默认 `auto` 会按 PATH
 顺序物理规范化并验证 sccache 候选，跳过无效项，仅在找到首个精确版本 `sccache 0.15.0` 后启用

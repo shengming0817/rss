@@ -2139,6 +2139,7 @@ mod tests {
                 "integration-compile",
                 "clippy",
                 "default-test-runner",
+                "secure-production-trybuild",
                 "s3-backend-tests",
                 "redis-backend-tests",
                 "oidc-backend-tests",

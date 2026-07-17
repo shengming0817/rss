@@ -316,6 +316,50 @@ _azure_pr_mergeable() { # <pr> -> MERGEABLE|CONFLICTING|UNKNOWN
 
 _azure_pr_web_url() { printf '%s/pullrequest/%s\n' "$(_az_pr_url_base)" "$1"; }
 
+# branch-pr-merged: true when a completed (squash-merged) PR used this source
+# branch AND no active PR still uses it. Branch-name history alone is too wide
+# after squash: reuse / continue-on-branch must stay false while an open PR exists.
+_azure_branch_pr_merged() { # <branch> -> true|false
+    local branch="$1" ref
+    case "${branch}" in
+        '')
+            echo "forge azure: branch-pr-merged requires a branch name" >&2
+            return 64
+            ;;
+        refs/heads/*) ref="${branch}" ;;
+        *) ref="refs/heads/${branch}" ;;
+    esac
+    local -a active_cmd=(az repos pr list
+        --status active
+        --source-branch "${ref}"
+        --repository "${ADO_REPO}"
+        --org "${ADO_ORG}"
+        --project "${ADO_PROJECT}"
+        --output json)
+    local -a completed_cmd=(az repos pr list
+        --status completed
+        --source-branch "${ref}"
+        --repository "${ADO_REPO}"
+        --org "${ADO_ORG}"
+        --project "${ADO_PROJECT}"
+        --output json)
+    if [ "${DRY_RUN}" = "1" ]; then
+        _dry "${active_cmd[@]}"
+        _dry "${completed_cmd[@]}"
+        return 0
+    fi
+    local active completed
+    active="$("${active_cmd[@]}")" || return $?
+    if printf '%s' "${active}" | jq -e 'length > 0' >/dev/null; then
+        printf 'false\n'
+        return 0
+    fi
+    completed="$("${completed_cmd[@]}")" || return $?
+    printf '%s' "${completed}" | jq -e 'length > 0' >/dev/null \
+        && printf 'true\n' \
+        || printf 'false\n'
+}
+
 # --- Azure Pipelines ----------------------------------------------------------
 # These registration functions are intentionally read-after-write. CLI success
 # is not proof that the persisted definition/policy has the requested scope, so

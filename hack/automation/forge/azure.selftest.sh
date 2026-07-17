@@ -557,6 +557,74 @@ DRY_RUN=0
 check "forge usage: policy is canonical"        "match" \
     "$(grep -q 'pipeline-policy rss-local-only <configured-repo> develop "RSS LocalOnly Execution"' "${HERE}/../forge.sh" && echo match || echo nomatch)"
 
+# ---- _azure_branch_pr_merged ------------------------------------------------
+# true only when no active PR remains and at least one completed PR used the
+# source branch. Dry-run must print BOTH list shapes (active then completed).
+
+# Case BPM1: dry-run prints active + completed list commands; az not invoked.
+DRY_RUN=1
+az() { echo "SHOULD-NOT-RUN"; return 9; }
+out="$(_azure_branch_pr_merged feature/x)"; rc=$?
+DRY_RUN=0
+check "branch-pr-merged dry: zero" "zero" "$(zero "$rc")"
+check "branch-pr-merged dry: active list" "match" \
+    "$(printf '%s' "$out" | grep -q 'az repos pr list .*--status active' && echo match || echo nomatch)"
+check "branch-pr-merged dry: completed list" "match" \
+    "$(printf '%s' "$out" | grep -q 'az repos pr list .*--status completed' && echo match || echo nomatch)"
+check "branch-pr-merged dry: az not invoked" "clean" "$(has "$out" 'SHOULD-NOT-RUN')"
+
+# Case BPM2: active PR present -> false even if completed history exists.
+az() {
+    case "$*" in
+        *"--status active"*) printf '[{"pullRequestId":1}]\n' ;;
+        *"--status completed"*) printf '[{"pullRequestId":2}]\n' ;;
+        *) printf '[]\n' ;;
+    esac
+}
+out="$(_azure_branch_pr_merged feature/x)"; rc=$?
+check "branch-pr-merged active: zero" "zero" "$(zero "$rc")"
+check "branch-pr-merged active: false" "false" "$(printf '%s' "$out" | tr -d '\n')"
+
+# Case BPM3: no active, has completed -> true.
+az() {
+    case "$*" in
+        *"--status active"*) printf '[]\n' ;;
+        *"--status completed"*) printf '[{"pullRequestId":9}]\n' ;;
+        *) printf '[]\n' ;;
+    esac
+}
+out="$(_azure_branch_pr_merged feature/x)"; rc=$?
+check "branch-pr-merged completed: true" "true" "$(printf '%s' "$out" | tr -d '\n')"
+
+# Case BPM4: neither -> false.
+az() { printf '[]\n'; }
+out="$(_azure_branch_pr_merged feature/x)"; rc=$?
+check "branch-pr-merged empty: false" "false" "$(printf '%s' "$out" | tr -d '\n')"
+
+# Case BPM5/BPM6: github + gitlab dry-run shape gates (sourced offline).
+GITHUB_REPO_SLUG="acme/rss"
+# shellcheck source=/dev/null
+. "${HERE}/github.sh"
+DRY_RUN=1
+out="$(_github_branch_pr_merged feature/x)"; rc=$?
+DRY_RUN=0
+check "github branch-pr-merged dry: zero" "zero" "$(zero "$rc")"
+check "github branch-pr-merged dry: open" "match" \
+    "$(printf '%s' "$out" | grep -q 'gh pr list .*--state open' && echo match || echo nomatch)"
+check "github branch-pr-merged dry: merged" "match" \
+    "$(printf '%s' "$out" | grep -q 'gh pr list .*--state merged' && echo match || echo nomatch)"
+
+# shellcheck source=/dev/null
+. "${HERE}/gitlab.sh"
+DRY_RUN=1
+out="$(_gitlab_branch_pr_merged feature/x)"; rc=$?
+DRY_RUN=0
+check "gitlab branch-pr-merged dry: zero" "zero" "$(zero "$rc")"
+check "gitlab branch-pr-merged dry: opened" "match" \
+    "$(printf '%s' "$out" | grep -q 'glab mr list .*--opened' && echo match || echo nomatch)"
+check "gitlab branch-pr-merged dry: merged" "match" \
+    "$(printf '%s' "$out" | grep -q 'glab mr list .*--merged' && echo match || echo nomatch)"
+
 # Case YAML: the checked-in pipeline is only a typed LocalOnly carrier. No
 # contract ids, test names, or alternate cargo test/JUnit path may live here.
 pipeline_yaml="${HERE}/../../../azure-pipelines.yml"

@@ -75,6 +75,34 @@ _github_pr_mergeable() { # <pr> -> MERGEABLE|CONFLICTING|UNKNOWN
 
 _github_pr_web_url() { printf 'https://github.com/%s/pull/%s\n' "$(_gh_slug)" "$1"; }
 
+# branch-pr-merged: true when a merged PR used this head branch AND no open PR
+# still uses it (branch-name reuse / continue-after-merge stay false while open).
+_github_branch_pr_merged() { # <branch> -> true|false
+    local branch="$1"
+    case "${branch}" in
+        '')
+            echo "forge github: branch-pr-merged requires a branch name" >&2
+            return 64
+            ;;
+        refs/heads/*) branch="${branch#refs/heads/}" ;;
+    esac
+    if [ "${DRY_RUN}" = "1" ]; then
+        _dry gh pr list --repo "$(_gh_slug)" --head "${branch}" --state open --json number
+        _dry gh pr list --repo "$(_gh_slug)" --head "${branch}" --state merged --json number
+        return 0
+    fi
+    local open_out merged_out
+    open_out="$(gh pr list --repo "$(_gh_slug)" --head "${branch}" --state open --json number)" || return $?
+    if printf '%s' "${open_out}" | jq -e 'length > 0' >/dev/null; then
+        printf 'false\n'
+        return 0
+    fi
+    merged_out="$(gh pr list --repo "$(_gh_slug)" --head "${branch}" --state merged --json number)" || return $?
+    printf '%s' "${merged_out}" | jq -e 'length > 0' >/dev/null \
+        && printf 'true\n' \
+        || printf 'false\n'
+}
+
 # --- CI (has-ci=true) --------------------------------------------------------
 _github_ci_watch() { _dry gh pr checks "$1" --repo "$(_gh_slug)" --watch --interval 30 --fail-fast && return 0; gh pr checks "$1" --repo "$(_gh_slug)" --watch --interval 30 --fail-fast; }
 _github_ci_failed() {

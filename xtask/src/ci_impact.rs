@@ -55,6 +55,7 @@ const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/ops/202607082104-1642-consistency-dashboard-checklist.md",
     "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
     "docs/runbooks/202607081921-1633-cdc-outbox.md",
+    "docs/runbooks/202607082104-1642-consistency-ops-runbook-index.md",
     "docs/ops/localtx-proof-report.md",
     "docs/rules/localtx.md",
     "docs/spec/007-runtime-deployment-executable-plan/contracts/assembly-lock.schema.json",
@@ -2334,8 +2335,10 @@ fn governance_impact(path: &str) -> Option<GovernanceImpact> {
         ".cargo/config.toml"
             | "hack/cargo.sh"
             | "hack/cargo.selftest.sh"
+            | "hack/target-pool.py"
             | "hack/ci-local-supervisor.py"
             | "hack/tests/test_ci_local_supervisor.py"
+            | "hack/tests/test_target_pool.py"
     ) {
         Some(GovernanceImpact::CargoWrapper)
     } else {
@@ -3255,11 +3258,19 @@ mod tests {
             ),
             ("hack/cargo.sh", vec!["fast/meta", "cargo wrapper selftest"]),
             (
+                "hack/target-pool.py",
+                vec!["fast/meta", "cargo wrapper selftest"],
+            ),
+            (
                 "hack/ci-local-supervisor.py",
                 vec!["fast/meta", "cargo wrapper selftest"],
             ),
             (
                 "hack/tests/test_ci_local_supervisor.py",
+                vec!["fast/meta", "cargo wrapper selftest"],
+            ),
+            (
+                "hack/tests/test_target_pool.py",
                 vec!["fast/meta", "cargo wrapper selftest"],
             ),
         ] {

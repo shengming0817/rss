@@ -59,6 +59,34 @@ _gitlab_pr_diffstat()  {
     glab mr diff "$1" | awk '/^(\+\+\+|---)/{next} /^\+/{a++} /^-/{d++} END{print a+d}'
 }
 
+# branch-pr-merged: true when a merged MR used this source branch AND no opened
+# MR still uses it (branch-name reuse / continue-after-merge stay false while open).
+_gitlab_branch_pr_merged() { # <branch> -> true|false
+    local branch="$1"
+    case "${branch}" in
+        '')
+            echo "forge gitlab: branch-pr-merged requires a branch name" >&2
+            return 64
+            ;;
+        refs/heads/*) branch="${branch#refs/heads/}" ;;
+    esac
+    if [ "${DRY_RUN}" = "1" ]; then
+        _dry glab mr list --source-branch "${branch}" --opened -F json
+        _dry glab mr list --source-branch "${branch}" --merged -F json
+        return 0
+    fi
+    local open_out merged_out
+    open_out="$(glab mr list --source-branch "${branch}" --opened -F json)" || return $?
+    if printf '%s' "${open_out}" | jq -e 'length > 0' >/dev/null; then
+        printf 'false\n'
+        return 0
+    fi
+    merged_out="$(glab mr list --source-branch "${branch}" --merged -F json)" || return $?
+    printf '%s' "${merged_out}" | jq -e 'length > 0' >/dev/null \
+        && printf 'true\n' \
+        || printf 'false\n'
+}
+
 # --- CI (has-ci=true) --------------------------------------------------------
 _gitlab_ci_watch()  { if [ "${DRY_RUN}" = "1" ]; then printf 'glab ci status (branch via mr view)\n'; return 0; fi; glab ci status; }
 _gitlab_ci_failed() { _dry glab ci list --status failed && return 0; glab ci list --status failed; }

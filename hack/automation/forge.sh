@@ -104,6 +104,7 @@ usage: forge.sh [--dry-run] <verb> [args...]
          pr-set-labels <pr> --add a,b --remove c,d
          pr-state <pr> | pr-refs <pr> | pr-mergeable <pr> | pr-web-url <pr>
          pr-diff <pr> | pr-diffstat <pr> | pr-comments-json <pr>
+         branch-pr-merged <branch>   -> true|false (no open PR + has merged; squash-safe)
   ci   : ci-watch <pr> | ci-failed <pr> | ci-logs <args>   (no-op when has-ci=false)
          pipeline-create <name> <repo> <branch> <yaml> [queue-id]
          pipeline-run <name> <branch> <phase> <lint-mode> <base-ref> <with-nightly> <docker-wrapper> <agent-pool> [open]
