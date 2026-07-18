@@ -61,8 +61,9 @@ All captured UTF-8 values use `secure::SecretText`: private storage, opaque `Deb
 `Clone`/`Display`/serialization, and drop-time zeroization. Snapshot `Debug` and capture errors are
 closed and do not expose keys, presence, or values. Configuration material is runtime state: it is
 never serialized into AssemblyLock/RuntimePlan/DeploymentPlan, included directly in their
-fingerprints, or written to deployment evidence. Only the closed non-secret Internal listener auth
-decision (`mtls` or `serviceToken`) enters RuntimePlan; secret-only snapshot changes leave its
+fingerprints, or written to deployment evidence. Only closed non-secret listener selections enter
+RuntimePlan: Primary/Admin carry `rssAccessToken` or `federatedAccessToken`, Internal carries
+`mtls` or `serviceToken`, and Health is fixed to `noAuth`. Secret-only snapshot changes leave its
 fingerprint unchanged.
 
 `SecretText::expose` and `into_string` are explicit disclosure/ownership boundaries, not a claim

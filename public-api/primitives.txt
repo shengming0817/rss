@@ -35,10 +35,10 @@ impl core::marker::UnsafeUnpin for primitives::authplan::AuthRequirement
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::AuthRequirement
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::AuthRequirement
 #[non_exhaustive] pub enum primitives::authplan::AuthScheme
-pub primitives::authplan::AuthScheme::Jwt
-pub primitives::authplan::AuthScheme::JwtFromAssembly
+pub primitives::authplan::AuthScheme::FederatedAccessToken
 pub primitives::authplan::AuthScheme::Mtls
 pub primitives::authplan::AuthScheme::NoAuth
+pub primitives::authplan::AuthScheme::RssAccessToken
 pub primitives::authplan::AuthScheme::ServiceToken
 impl core::clone::Clone for primitives::authplan::AuthScheme
 pub fn primitives::authplan::AuthScheme::clone(&self) -> primitives::authplan::AuthScheme
@@ -78,9 +78,9 @@ impl core::marker::UnsafeUnpin for primitives::authplan::ListenerKind
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::ListenerKind
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::ListenerKind
 #[non_exhaustive] pub enum primitives::authplan::RequiredScheme
-pub primitives::authplan::RequiredScheme::Jwt
-pub primitives::authplan::RequiredScheme::JwtFromAssembly
+pub primitives::authplan::RequiredScheme::FederatedAccessToken
 pub primitives::authplan::RequiredScheme::Mtls
+pub primitives::authplan::RequiredScheme::RssAccessToken
 pub primitives::authplan::RequiredScheme::ServiceToken
 impl core::clone::Clone for primitives::authplan::RequiredScheme
 pub fn primitives::authplan::RequiredScheme::clone(&self) -> primitives::authplan::RequiredScheme
@@ -505,10 +505,10 @@ impl core::marker::UnsafeUnpin for primitives::authplan::AuthRequirement
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::AuthRequirement
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::AuthRequirement
 #[non_exhaustive] pub enum primitives::AuthScheme
-pub primitives::AuthScheme::Jwt
-pub primitives::AuthScheme::JwtFromAssembly
+pub primitives::AuthScheme::FederatedAccessToken
 pub primitives::AuthScheme::Mtls
 pub primitives::AuthScheme::NoAuth
+pub primitives::AuthScheme::RssAccessToken
 pub primitives::AuthScheme::ServiceToken
 impl core::clone::Clone for primitives::authplan::AuthScheme
 pub fn primitives::authplan::AuthScheme::clone(&self) -> primitives::authplan::AuthScheme
@@ -705,9 +705,9 @@ impl core::marker::UnsafeUnpin for primitives::healthz::ProbeNameError
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::ProbeNameError
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::ProbeNameError
 #[non_exhaustive] pub enum primitives::RequiredScheme
-pub primitives::RequiredScheme::Jwt
-pub primitives::RequiredScheme::JwtFromAssembly
+pub primitives::RequiredScheme::FederatedAccessToken
 pub primitives::RequiredScheme::Mtls
+pub primitives::RequiredScheme::RssAccessToken
 pub primitives::RequiredScheme::ServiceToken
 impl core::clone::Clone for primitives::authplan::RequiredScheme
 pub fn primitives::authplan::RequiredScheme::clone(&self) -> primitives::authplan::RequiredScheme

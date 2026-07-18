@@ -233,10 +233,15 @@ fn projection_maintenance_receipt(
     projection: &str,
 ) -> authn::ProjectionMaintenanceReceipt {
     let principal =
-        authn::test_support::principal(vocab::PrincipalKind::Service, "test-operator", None);
+        authn::test_support::service_principal(vocab::ServiceCallerDomain::MaintenanceOperator);
     let grants = authn::ProjectionMaintenanceGrantSet::new(vec![
-        authn::ProjectionMaintenanceGrant::new("test-operator", action, tenant, projection)
-            .unwrap(),
+        authn::ProjectionMaintenanceGrant::new(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+            action,
+            tenant,
+            projection,
+        )
+        .unwrap(),
     ])
     .unwrap();
     grants
@@ -14332,8 +14337,9 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
 -> TestResult {
     use consistency::PartitionKey;
     use eventexec::{
-        DlqStore as _, OperatorDlqCapability, OutboxExpiredResolutionOutcome,
-        OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket, VerifiedOperatorSubject,
+        AuthorizedDlqOperatorReceipt, DlqStore as _, OperatorDlqCapability,
+        OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest,
+        OutboxResolutionChangeTicket, VerifiedOperatorSubject,
     };
 
     let (_pg, store) = connect_pg().await?;
@@ -14390,7 +14396,11 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
     let dlq = store.dlq_without_payload_replay();
     let cap = OperatorDlqCapability::issue_for_authorized_operator();
     let ticket = OutboxResolutionChangeTicket::parse("CHG-1742")?;
-    let subject = VerifiedOperatorSubject::from_verified("verified-operator")?;
+    let subject = VerifiedOperatorSubject::from_authorized_receipt(
+        AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        ),
+    );
     let unexpired_before: (String, String) =
         sqlx::query_as("SELECT to_jsonb(o)::text, xmin::text FROM outbox AS o WHERE event_id = $1")
             .bind(&head_id)
@@ -14506,8 +14516,9 @@ async fn expired_outbox_compensation_requires_published_causation_and_resolution
 -> TestResult {
     use diport::EnvelopeCausationId;
     use eventexec::{
-        DlqStore as _, OperatorDlqCapability, OutboxExpiredResolutionOutcome,
-        OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket, VerifiedOperatorSubject,
+        AuthorizedDlqOperatorReceipt, DlqStore as _, OperatorDlqCapability,
+        OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest,
+        OutboxResolutionChangeTicket, VerifiedOperatorSubject,
     };
 
     let (_pg, store) = connect_pg().await?;
@@ -14564,7 +14575,11 @@ async fn expired_outbox_compensation_requires_published_causation_and_resolution
 
     let dlq = store.dlq_without_payload_replay();
     let ticket = OutboxResolutionChangeTicket::parse("CHG-1742-COMP")?;
-    let subject = VerifiedOperatorSubject::from_verified("verified-operator")?;
+    let subject = VerifiedOperatorSubject::from_authorized_receipt(
+        AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        ),
+    );
     let rejected = dlq
         .resolve_expired_outbox(OutboxExpiredResolutionRequest::compensated(
             tenant,
@@ -14609,7 +14624,11 @@ async fn expired_outbox_compensation_requires_published_causation_and_resolution
         let dlq = store.dlq_without_payload_replay();
         let event_id = IdemKey::parse(&concurrent_id).unwrap();
         let ticket = OutboxResolutionChangeTicket::parse("CHG-1742-CONCURRENT").unwrap();
-        let subject = VerifiedOperatorSubject::from_verified("verified-operator").unwrap();
+        let subject = VerifiedOperatorSubject::from_authorized_receipt(
+            AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            ),
+        );
         async move {
             dlq.resolve_expired_outbox(OutboxExpiredResolutionRequest::accepted_gap(
                 tenant, event_id, ticket, subject, cap,
@@ -21993,7 +22012,7 @@ fn config_tenant() -> TenantId {
 
 #[allow(clippy::unwrap_used)]
 fn config_maintenance_capability() -> ConfigValueMaintenanceCapability {
-    ConfigValueMaintenanceCapability::new("test-operator").unwrap()
+    ConfigValueMaintenanceCapability::new(vocab::ServiceCallerDomain::MaintenanceOperator)
 }
 
 /// 构造 ConfigEntry（经 `ConfigEntry::hydrate` 跨 crate pub funnel）。

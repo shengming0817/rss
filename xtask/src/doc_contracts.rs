@@ -9,6 +9,8 @@
 //! INVARIANT: OUTBOX-DELIVERY-SEMANTICS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_false_outbox_delivery_guarantees", anti_vacuity = "tests::scan_content_accepts_correct_and_scoped_delivery_semantics" }—— Outbox relay transport 只承诺 at-least-once；规则/spec、crash-matrix 说明与生产 rustdoc 不得把 CAS/lease fencing 误写成 broker at-most-once/exactly-once。负向扫描与 canonical 三 facet 完整性共同防止错误语义被 AI 复制或整段删除。
 //!
 //! INVARIANT: LOCALONLY-BUSINESS-EFFECT-SEMANTICS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_legacy_localonly_effect_semantics", anti_vacuity = "tests::scan_content_accepts_current_localonly_business_effect_semantics" }—— active 文档与生产 rustdoc 只使用 business-qualified 写/事务词汇；LocalOnly 证明业务持久化/outbox/publish 为零，但允许 provider-owned read-path transaction。负向语义扫描、显式 carrier 清单与 canonical facets 共同阻断旧 token/API 和“完全无事务/等同纯函数”的回流或整段删除。
+//!
+//! INVARIANT: TOKEN-PROFILE-RUSTDOC-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::token_profile_rustdoc_contract_is_required_and_rejects_legacy_semantics", anti_vacuity = "tests::workspace_token_profile_rustdoc_contract_is_exact" }—— 四个 profile trust-chain rustdoc carrier 以显式闭集守住 typed provider/binding、claim lifetime/tenant、authn funnel 与 trusted RawCredential profile 边界；缺文件、缺 anchor、旧 provider/future-work 语义和非 rustdoc bait 均 fail-closed。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -806,6 +808,7 @@ pub(crate) enum Rule {
     SagaTenantScope,
     OutboxDeliverySemantics,
     LocalOnlyBusinessEffects,
+    TokenProfileRustdoc,
     PostgresMigrationWatchdog,
     MigrationCarryover,
 }
@@ -815,6 +818,88 @@ struct ForbiddenPattern {
     rule: Rule,
     needle: &'static str,
     detail: &'static str,
+}
+
+const TOKEN_PROFILE_RUSTDOC_CONTRACTS: &[(&str, &[&[&str]])] = &[
+    (
+        "adapters/oidc/src/lib.rs",
+        &[
+            &["OidcProvider"],
+            &["ProfileBinding"],
+            &["AccessStaticKeySource"],
+            &["JwksKeySource"],
+            &["ServiceTokenKeySource"],
+        ],
+    ),
+    (
+        "adapters/oidc/src/claims.rs",
+        &[
+            &["iat"],
+            &["exp"],
+            &["token_use"],
+            &["maximum lifetime", "最大寿命"],
+            &["tenant"],
+            &["kind"],
+            &["jti"],
+        ],
+    ),
+    (
+        "crates/authn/src/lib.rs",
+        &[
+            &["JwtIssuer"],
+            &["verify_rss_access"],
+            &["verify_federated_access"],
+            &["verify_service_token"],
+        ],
+    ),
+    (
+        "crates/diport/src/pdp.rs",
+        &[&["RawCredential::profile"], &["TokenProfileMarker"]],
+    ),
+];
+
+const TOKEN_PROFILE_RUSTDOC_FORBIDDEN: &[&str] = &[
+    "`StaticKeySource`",
+    "#1109",
+    "生产接线留",
+    "真实 crypto verifier adapter 留",
+];
+
+fn scan_token_profile_rustdoc_carrier(path: &Path, content: &str) -> Vec<Finding> {
+    let Some((_, required_groups)) = TOKEN_PROFILE_RUSTDOC_CONTRACTS
+        .iter()
+        .find(|(carrier, _)| path == Path::new(carrier))
+    else {
+        return Vec::new();
+    };
+    let prose = rustdoc_prose_lines(content)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut findings = Vec::new();
+    for alternatives in *required_groups {
+        if !alternatives.iter().any(|anchor| prose.contains(anchor)) {
+            findings.push(finding(
+                Rule::TokenProfileRustdoc,
+                path.display().to_string(),
+                format!(
+                    "profile rustdoc missing required anchor group [{}]",
+                    alternatives.join(" | ")
+                ),
+            ));
+        }
+    }
+    for forbidden in TOKEN_PROFILE_RUSTDOC_FORBIDDEN {
+        if prose.contains(forbidden) {
+            findings.push(finding(
+                Rule::TokenProfileRustdoc,
+                path.display().to_string(),
+                format!("profile rustdoc retains forbidden legacy phrase `{forbidden}`"),
+            ));
+        }
+    }
+    findings
 }
 
 pub(crate) struct DocContracts;
@@ -924,6 +1009,18 @@ fn scan_docs(root: &Path) -> Result<(usize, usize, usize, String, Vec<Finding>)>
         let rel = path.strip_prefix(root).unwrap_or(path);
         findings.extend(scan_false_outbox_delivery_guarantees(rel, &content));
         findings.extend(scan_localonly_business_effect_semantics(rel, &content));
+    }
+    for (carrier, _) in TOKEN_PROFILE_RUSTDOC_CONTRACTS {
+        let path = root.join(carrier);
+        if !path.is_file() {
+            bail!("doc-contracts: token-profile rustdoc carrier {carrier} 缺失，fail-closed");
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("doc-contracts: 读 {carrier} 失败: {e}"))?;
+        findings.extend(scan_token_profile_rustdoc_carrier(
+            Path::new(carrier),
+            &content,
+        ));
     }
     let (carryover_summary, carryover_findings) = scan_carryover(root)?;
     findings.extend(carryover_findings);
@@ -4969,5 +5066,92 @@ distlock::Locker
                 .iter()
                 .all(|finding| finding.rule == Rule::SagaTenantScope)
         );
+    }
+
+    #[test]
+    fn token_profile_rustdoc_contract_is_required_and_rejects_legacy_semantics() {
+        let carriers = [
+            (
+                Path::new("adapters/oidc/src/lib.rs"),
+                "//! OidcProvider ProfileBinding AccessStaticKeySource JwksKeySource ServiceTokenKeySource\n",
+                "ProfileBinding",
+            ),
+            (
+                Path::new("adapters/oidc/src/claims.rs"),
+                "//! `iat` `exp` `token_use` maximum lifetime tenant kind `jti`\n",
+                "maximum lifetime",
+            ),
+            (
+                Path::new("crates/authn/src/lib.rs"),
+                "//! JwtIssuer verify_rss_access verify_federated_access verify_service_token\n",
+                "verify_federated_access",
+            ),
+            (
+                Path::new("crates/diport/src/pdp.rs"),
+                "//! RawCredential::profile TokenProfileMarker\n",
+                "RawCredential::profile",
+            ),
+        ];
+        for (path, source, removed) in carriers {
+            assert!(
+                scan_token_profile_rustdoc_carrier(path, source).is_empty(),
+                "canonical rustdoc carrier must pass: {}",
+                path.display()
+            );
+            let missing = source.replace(removed, "");
+            assert!(
+                scan_token_profile_rustdoc_carrier(path, &missing)
+                    .iter()
+                    .any(|finding| finding.rule == Rule::TokenProfileRustdoc),
+                "missing required anchor must fail: {}",
+                path.display()
+            );
+        }
+
+        for forbidden in [
+            "`StaticKeySource`",
+            "#1109",
+            "生产接线留 W",
+            "真实 crypto verifier adapter 留 W",
+        ] {
+            let source = format!(
+                "//! OidcProvider ProfileBinding AccessStaticKeySource JwksKeySource ServiceTokenKeySource {forbidden}\n"
+            );
+            assert!(
+                scan_token_profile_rustdoc_carrier(Path::new("adapters/oidc/src/lib.rs"), &source)
+                    .iter()
+                    .any(|finding| finding.rule == Rule::TokenProfileRustdoc),
+                "legacy rustdoc phrase must fail: {forbidden}"
+            );
+        }
+
+        let bait = "// OidcProvider ProfileBinding AccessStaticKeySource JwksKeySource ServiceTokenKeySource\n";
+        assert!(
+            scan_token_profile_rustdoc_carrier(Path::new("adapters/oidc/src/lib.rs"), bait)
+                .iter()
+                .any(|finding| finding.rule == Rule::TokenProfileRustdoc),
+            "non-rustdoc bait must not satisfy required anchors"
+        );
+    }
+
+    #[test]
+    fn workspace_token_profile_rustdoc_contract_is_exact() -> Result<()> {
+        let root = crate::workspace_root()?;
+        assert_eq!(
+            TOKEN_PROFILE_RUSTDOC_CONTRACTS.len(),
+            4,
+            "token-profile rustdoc carrier closure must remain exact"
+        );
+        for (carrier, _) in TOKEN_PROFILE_RUSTDOC_CONTRACTS {
+            let path = root.join(carrier);
+            assert!(path.is_file(), "missing rustdoc carrier {carrier}");
+            let content = std::fs::read_to_string(&path)?;
+            let findings = scan_token_profile_rustdoc_carrier(Path::new(carrier), &content);
+            assert!(
+                findings.is_empty(),
+                "workspace rustdoc carrier {carrier} drifted: {findings:?}"
+            );
+        }
+        Ok(())
     }
 }

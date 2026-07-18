@@ -959,13 +959,13 @@ fn finalized_router(
     ensure!(listener == ListenerKind::Primary);
     let authenticated = httpserve::finalize_primary_auth(
         routes,
-        AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt)?,
+        AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken)?,
         authorizer,
     )?;
     Ok(match principal {
         Some((kind, subject, tenant)) => authenticated
             .layer(axum::Extension(httpserve::Authenticated::new(
-                RequiredScheme::Jwt,
+                RequiredScheme::RssAccessToken,
                 kind,
                 subject,
                 Some(tenant),
@@ -2239,17 +2239,16 @@ impl RefreshTokenStore for BarrierRefreshStore {
 fn refresh_service(
     store: Box<DynRefreshTokenStore<'static>>,
 ) -> Result<Arc<RefreshService<SeedSigner>>> {
-    let issuer = authn::JwtIssuer::new(
+    let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
         Arc::new(SeedSigner),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
-        authn::JwtIssuerConfig {
-            key: diport::KeyId::new("journey-refresh-key"),
-            alg: authn::JwtAlg::Es256,
-            purpose: diport::SigningPurpose::new("journey-refresh-signing"),
-            issuer: "https://journey.local".to_owned(),
-            audience: "rss-journey".to_owned(),
-            ttl: Duration::from_secs(900),
-        },
+        authn::JwtIssuerConfig::rss_access(
+            diport::KeyId::new("journey-refresh-key"),
+            diport::SigningPurpose::new("journey-refresh-signing"),
+            "https://journey.local",
+            "rss-journey",
+            Duration::from_secs(900),
+        ),
     )?;
     Ok(Arc::new(RefreshService::new(
         store,
@@ -2797,7 +2796,7 @@ fn finalized_audit_router(
         .into_iter()
         .find(|(listener, _)| *listener == ListenerKind::Admin)
         .context("audit admin routes missing")?;
-    let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::Jwt)?;
+    let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::RssAccessToken)?;
     let router = httpserve::finalize_auth_with_audit_and_authorizer(
         admin,
         plan,
@@ -2822,7 +2821,7 @@ fn finalized_audit_router(
                 request
                     .extensions_mut()
                     .insert(httpserve::Authenticated::new(
-                        RequiredScheme::Jwt,
+                        RequiredScheme::RssAccessToken,
                         kind,
                         HAPPY_USER,
                         evidence_tenant,

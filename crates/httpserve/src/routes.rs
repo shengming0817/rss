@@ -19,6 +19,7 @@
 use crate::auth::{AuditSinkHandle, AuthAudit, RouteAuthorizer, enforce_layer};
 use crate::{
     PrimaryRouteAuthz, RouteGroupError, RoutePermission, RouteResourceScope, RouteTenantBinding,
+    ServiceCallerPolicy,
 };
 use axum::extract::FromRequestParts;
 use axum::handler::Handler;
@@ -905,7 +906,48 @@ impl ListenerRouter<Primary> {
     }
 }
 
-impl<L: NonPrimaryListener> ListenerRouter<L> {
+#[cfg(any(test, feature = "test-util"))]
+impl ListenerRouter<Internal> {
+    /// Test-only raw Internal mount with the same exact caller-policy carrier as production.
+    pub fn mount_internal_raw_for_test(
+        self,
+        route: TestRoute,
+        policy: ServiceCallerPolicy,
+        handler: axum::routing::MethodRouter,
+    ) -> Result<Self, RouteGroupError> {
+        let evidence = test_route_evidence(
+            route.method,
+            route.path,
+            route.contract_id,
+            HttpRouteAuth::ServiceOwned,
+            None,
+            false,
+        )?;
+        if !policy.matches_contract(evidence.contract_id()) {
+            return Err(RouteGroupError::InvalidServiceCallerPolicy);
+        }
+        let method = axum::http::Method::from_bytes(evidence.method().as_bytes())
+            .map_err(|_| invalid_method(evidence))?;
+        let path = relative_path(evidence, self.prefix, ListenerKind::Internal)?;
+        let mut mounted = self.mounted;
+        mounted.push_raw(evidence);
+        Ok(Self {
+            inner: self.inner.route(
+                path,
+                handler.layer(enforce_layer(
+                    Some(PrimaryRouteAuthz::ServiceCaller(policy)),
+                    method,
+                    evidence,
+                )),
+            ),
+            prefix: self.prefix,
+            mounted,
+            _l: PhantomData,
+        })
+    }
+}
+
+impl ListenerRouter<Admin> {
     /// Mount one complete generated endpoint. Raw paths, method routers, and metadata are not
     /// accepted by the production API.
     pub fn mount<C: HttpConsistencyClass>(
@@ -918,14 +960,50 @@ impl<L: NonPrimaryListener> ListenerRouter<L> {
             method,
             handler,
         } = endpoint.0;
-        let authz = nonprimary_authz::<C>(evidence, L::KIND)?;
-        let path = relative_path(evidence, self.prefix, L::KIND)?;
+        let authz = nonprimary_authz::<C>(evidence, ListenerKind::Admin)?;
+        let path = relative_path(evidence, self.prefix, ListenerKind::Admin)?;
         let mut mounted = self.mounted;
         mounted.push_generated(evidence, identity);
         Ok(Self {
             inner: self
                 .inner
                 .route(path, handler.layer(enforce_layer(authz, method, evidence))),
+            prefix: self.prefix,
+            mounted,
+            _l: PhantomData,
+        })
+    }
+}
+
+impl ListenerRouter<Internal> {
+    /// Mount one generated Internal endpoint with an exact non-empty caller policy.
+    pub fn mount<C: HttpConsistencyClass>(
+        self,
+        endpoint: GeneratedEndpoint<(), C>,
+        policy: ServiceCallerPolicy,
+    ) -> Result<Self, RouteGroupError> {
+        let Endpoint {
+            evidence,
+            identity,
+            method,
+            handler,
+        } = endpoint.0;
+        nonprimary_auth(evidence, ListenerKind::Internal)?;
+        if !policy.matches_contract(evidence.contract_id()) {
+            return Err(RouteGroupError::InvalidServiceCallerPolicy);
+        }
+        let path = relative_path(evidence, self.prefix, ListenerKind::Internal)?;
+        let mut mounted = self.mounted;
+        mounted.push_generated(evidence, identity);
+        Ok(Self {
+            inner: self.inner.route(
+                path,
+                handler.layer(enforce_layer(
+                    Some(PrimaryRouteAuthz::ServiceCaller(policy)),
+                    method,
+                    evidence,
+                )),
+            ),
             prefix: self.prefix,
             mounted,
             _l: PhantomData,
@@ -2110,16 +2188,11 @@ mod tests {
 
     #[test]
     fn nonprimary_mount_rejects_public_auth_with_route_context() {
-        fn assert_rejected<L: NonPrimaryListener>(prefix: &'static str, path: &'static str) {
-            let result =
-                UnfinalizedRoutes::empty().nest_group::<L, RouteGroupError>(prefix, |rb| {
-                    let endpoint = GeneratedEndpoint::new(
-                        test_binding(path, "test.public-nonprimary", vocab::HttpRouteAuth::Public),
-                        |_: ContractMarker<TestRouteMarker>| async { "ok" },
-                    )?;
-                    rb.mount(endpoint)
-                });
-
+        fn assert_rejected(
+            result: Result<UnfinalizedRoutes, RouteGroupError>,
+            path: &'static str,
+            expected_listener: ListenerKind,
+        ) {
             assert!(matches!(
                 result,
                 Err(RouteGroupError::InvalidAuth {
@@ -2128,12 +2201,72 @@ mod tests {
                     path: actual_path,
                     listener,
                     auth: vocab::HttpRouteAuth::Public,
-                }) if actual_path == path && listener == L::KIND
+                }) if actual_path == path && listener == expected_listener
             ));
         }
 
-        assert_rejected::<Admin>("/admin/v1", "/admin/v1/x");
-        assert_rejected::<Internal>("/internal/v1", "/internal/v1/x");
+        let admin = UnfinalizedRoutes::empty().nest_group::<Admin, RouteGroupError>(
+            "/admin/v1",
+            |router| {
+                let endpoint = GeneratedEndpoint::new(
+                    test_binding(
+                        "/admin/v1/x",
+                        "test.public-nonprimary",
+                        vocab::HttpRouteAuth::Public,
+                    ),
+                    |_: ContractMarker<TestRouteMarker>| async { "ok" },
+                )?;
+                router.mount(endpoint)
+            },
+        );
+        assert_rejected(admin, "/admin/v1/x", ListenerKind::Admin);
+
+        let internal = UnfinalizedRoutes::empty().nest_group::<Internal, RouteGroupError>(
+            "/internal/v1",
+            |router| {
+                let endpoint = GeneratedEndpoint::new(
+                    test_binding(
+                        "/internal/v1/x",
+                        "test.public-nonprimary",
+                        vocab::HttpRouteAuth::Public,
+                    ),
+                    |_: ContractMarker<TestRouteMarker>| async { "ok" },
+                )?;
+                router.mount(
+                    endpoint,
+                    ServiceCallerPolicy::exact(
+                        "test.public-nonprimary",
+                        vocab::ServiceCallerDomain::MaintenanceOperator,
+                    ),
+                )
+            },
+        );
+        assert_rejected(internal, "/internal/v1/x", ListenerKind::Internal);
+    }
+
+    #[test]
+    fn internal_mount_rejects_service_policy_for_another_contract() {
+        let result = UnfinalizedRoutes::empty().nest_group::<Internal, RouteGroupError>(
+            "/internal/v1",
+            |router| {
+                router.mount_internal_raw_for_test(
+                    TestRoute {
+                        method: axum::http::Method::GET,
+                        path: "/internal/v1/x",
+                        contract_id: "test.service-contract",
+                    },
+                    ServiceCallerPolicy::exact(
+                        "test.other-contract",
+                        vocab::ServiceCallerDomain::MaintenanceOperator,
+                    ),
+                    axum::routing::get(|| async { "ok" }),
+                )
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(RouteGroupError::InvalidServiceCallerPolicy)
+        ));
     }
 
     #[test]
@@ -2169,7 +2302,8 @@ mod tests {
             .expect("first group")
             .nest_group::<Internal, RouteGroupError>("/internal/v1", Ok)
             .expect("mixed group is recorded for finalization");
-        let plan = AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt).expect("plan");
+        let plan = AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::RssAccessToken)
+            .expect("plan");
 
         let result = finalize_auth(routes, plan);
 
@@ -2238,9 +2372,11 @@ mod tests {
                         rb.mount(endpoint)
                     })
                     .expect("nest ok");
-                let plan =
-                    primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
-                        .expect("plan");
+                let plan = primitives::AuthPlan::new(
+                    ListenerKind::Primary,
+                    primitives::AuthScheme::RssAccessToken,
+                )
+                .expect("plan");
                 let router = finalize_primary_auth(routes, plan, allow_authorizer())
                     .expect("finalize_auth")
                     .into_router_for_test();
@@ -2334,8 +2470,9 @@ mod tests {
         let routes = test_routes::<Admin>(|rb| {
             rb.mount_raw_for_test(admin_route("/list"), get(|| async { "ok" }))
         });
-        let plan = primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt)
-            .expect("plan");
+        let plan =
+            primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::RssAccessToken)
+                .expect("plan");
         let authed = finalize_auth(routes, plan).expect("finalize_auth");
         let router = authed.into_router_for_test();
 
@@ -2363,8 +2500,9 @@ mod tests {
                 rb.mount_raw_for_test(admin_route("/api/v1/audit/list"), get(|| async { "ok" }))
             })
             .expect("nest ok");
-        let plan = primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt)
-            .expect("plan");
+        let plan =
+            primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::RssAccessToken)
+                .expect("plan");
         let router = finalize_auth(routes, plan)
             .expect("finalize_auth")
             .into_router_for_test();
@@ -2388,8 +2526,9 @@ mod tests {
         let routes = test_routes::<Admin>(|rb| {
             rb.mount_raw_for_test(admin_route("/list"), get(|| async { "ok" }))
         });
-        let plan = primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt)
-            .expect("plan");
+        let plan =
+            primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::RssAccessToken)
+                .expect("plan");
         let authed: AuthenticatedRoutes = finalize_auth(routes, plan)
             .expect("finalize_auth")
             .layer(axum::middleware::from_fn(

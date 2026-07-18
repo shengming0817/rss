@@ -1,136 +1,202 @@
-use std::path::PathBuf;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context as _;
 use base64::Engine as _;
-use diport::{DynManagedResource, ManagedResource, ShutdownError};
-use oidc::JwksReadinessHandle;
-use oidc::OidcProvider;
+use diport::{
+    DynManagedResource, FederatedAccessProfile, ManagedResource, RssAccessProfile,
+    ServiceTokenProfile, ShutdownError, TokenProfileMarker,
+};
+use oidc::{AccessJwksKeyIsolation, IsolatedJwksKeySource, JwksReadinessHandle, OidcProvider};
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 use tokio_util::sync::CancellationToken;
 
 use crate::SystemClock;
-use crate::config::SnapshotConfig;
-use crate::phase::OperatorRuntimeCapability;
+use crate::config::{FederatedAccessTokenConfig, RssAccessTokenConfig, ServiceTokenConfig};
 
-const OIDC_JWKS_PATH_ENV: &str = "RSS_OIDC_JWKS_PATH";
-const OIDC_JWKS_REFRESH_INTERVAL_ENV: &str = "RSS_OIDC_JWKS_REFRESH_INTERVAL_SECS";
-pub(crate) const OIDC_JWKS_READY_PROBE_NAME: &str = "oidc_jwks_ready";
-const OIDC_JWKS_SOURCE_ID: &str = "primary-idp";
-const DEFAULT_OIDC_JWKS_REFRESH_INTERVAL_SECS: u64 = 60;
-const MIN_OIDC_JWKS_REFRESH_INTERVAL_SECS: u64 = 5;
-const MAX_OIDC_JWKS_REFRESH_INTERVAL_SECS: u64 = 3600;
+pub(crate) const RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME: &str = "rss_access_token_jwks_ready";
+pub(crate) const FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME: &str =
+    "federated_access_token_jwks_ready";
 
-/// Secret-safe classification of serving JWKS source failures.
-///
-/// The configured path is deliberately absent from every variant and message. Operators still
-/// retain the actionable source category instead of receiving one lossy catch-all error.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-enum RuntimeJwksLoadError {
-    #[error("{OIDC_JWKS_PATH_ENV} source is unreadable")]
-    Unreadable,
-    #[error("{OIDC_JWKS_PATH_ENV} source is malformed")]
-    Malformed,
-    #[error("{OIDC_JWKS_PATH_ENV} source contains no usable keys")]
-    NoUsableKeys,
-    #[error("{OIDC_JWKS_PATH_ENV} source setup failed")]
-    Setup,
+const RSS_ACCESS_TOKEN_JWKS_SOURCE_ID: &str = "rss-access-token";
+const FEDERATED_ACCESS_TOKEN_JWKS_SOURCE_ID: &str = "federated-access-token";
+const RSS_ACCESS_TOKEN_RESOURCE_NAME: &str = "rss_access_token_verifier";
+const FEDERATED_ACCESS_TOKEN_RESOURCE_NAME: &str = "federated_access_token_verifier";
+const SERVICE_TOKEN_RESOURCE_NAME: &str = "service_token_verifier";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccessProfile {
+    Rss,
+    Federated,
 }
 
-impl From<oidc::JwksError> for RuntimeJwksLoadError {
-    fn from(error: oidc::JwksError) -> Self {
-        match error {
-            oidc::JwksError::Unreadable => Self::Unreadable,
-            oidc::JwksError::Malformed => Self::Malformed,
-            oidc::JwksError::NoUsableKeys => Self::NoUsableKeys,
-            oidc::JwksError::ZeroInterval | oidc::JwksError::NoRuntime => Self::Setup,
-            _ => Self::Setup,
+impl AccessProfile {
+    const fn jwks_path_env(self) -> &'static str {
+        match self {
+            Self::Rss => "RSS_ACCESS_TOKEN_JWKS_PATH",
+            Self::Federated => "RSS_FEDERATED_ACCESS_TOKEN_JWKS_PATH",
         }
     }
 }
 
-pub(crate) struct RuntimeOidcProvider {
-    provider: Arc<OidcProvider>,
-    jwks_readiness: JwksReadinessHandle,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JwksFailureReason {
+    Unreadable,
+    Malformed,
+    NoUsableKeys,
+    InvalidKey,
+    KeyMaterialOverlap,
+    Setup,
 }
 
-pub(crate) struct PreparedRuntimeOidcProvider {
-    builder: oidc::VerifierConfigBuilder,
-    jwks_readiness: JwksReadinessHandle,
-    clock: Box<dyn diport::Clock>,
-}
-
-impl PreparedRuntimeOidcProvider {
-    pub(crate) fn finish(
-        self,
-        replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
-        replay_timeout: Duration,
-    ) -> anyhow::Result<RuntimeOidcProvider> {
-        let provider = finish_oidc_provider(
-            self.builder
-                .service_token_replay_store(replay_store, replay_timeout),
-            self.clock,
-        )?;
-        Ok(RuntimeOidcProvider {
-            provider: Arc::new(provider),
-            jwks_readiness: self.jwks_readiness,
+impl std::fmt::Display for JwksFailureReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Unreadable => "is unreadable",
+            Self::Malformed => "is malformed",
+            Self::NoUsableKeys => "contains no usable keys",
+            Self::InvalidKey => "contains a non-keyed or non-ES256 key",
+            Self::KeyMaterialOverlap => "reuses another active access profile key",
+            Self::Setup => "could not be initialized",
         })
     }
 }
 
-fn finish_oidc_provider(
-    builder: oidc::VerifierConfigBuilder,
-    clock: Box<dyn diport::Clock>,
-) -> anyhow::Result<OidcProvider> {
-    let config = builder
-        .build()
-        .map_err(|error| anyhow::anyhow!("invalid verifier config: {error}"))?;
-    Ok(OidcProvider::new(config, clock))
+/// Secret-safe, closed classification of profile-specific JWKS startup failures.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("{} {reason}", profile.jwks_path_env())]
+struct RuntimeJwksLoadError {
+    profile: AccessProfile,
+    reason: JwksFailureReason,
 }
 
-impl RuntimeOidcProvider {
-    pub(crate) fn provider(&self) -> Arc<OidcProvider> {
+impl RuntimeJwksLoadError {
+    fn from_oidc(profile: AccessProfile, error: oidc::JwksError) -> Self {
+        let reason = match error {
+            oidc::JwksError::Unreadable => JwksFailureReason::Unreadable,
+            oidc::JwksError::Malformed => JwksFailureReason::Malformed,
+            oidc::JwksError::NoUsableKeys => JwksFailureReason::NoUsableKeys,
+            oidc::JwksError::InvalidKey => JwksFailureReason::InvalidKey,
+            oidc::JwksError::KeyMaterialOverlap => JwksFailureReason::KeyMaterialOverlap,
+            oidc::JwksError::ZeroInterval | oidc::JwksError::NoRuntime => JwksFailureReason::Setup,
+            _ => JwksFailureReason::Setup,
+        };
+        Self { profile, reason }
+    }
+}
+
+/// A runtime access-token verifier whose marker fixes the accepted token profile.
+pub(crate) struct RuntimeAccessProvider<P: TokenProfileMarker> {
+    provider: Arc<OidcProvider<P>>,
+    jwks_readiness: ProfileJwksReadiness<P>,
+    resource_name: &'static str,
+}
+
+impl<P: TokenProfileMarker> RuntimeAccessProvider<P> {
+    pub(crate) fn provider(&self) -> Arc<OidcProvider<P>> {
         Arc::clone(&self.provider)
     }
 
-    pub(crate) fn jwks_readiness(&self) -> JwksReadinessHandle {
+    pub(crate) fn jwks_readiness(&self) -> ProfileJwksReadiness<P> {
         self.jwks_readiness.clone()
     }
 
     pub(crate) fn managed_resource(&self) -> Box<DynManagedResource<'static>> {
-        DynManagedResource::new_box(OidcProviderGuard(Arc::clone(&self.provider)))
+        DynManagedResource::new_box(OidcProviderGuard {
+            provider: Arc::clone(&self.provider),
+            resource_name: self.resource_name,
+        })
     }
 }
 
-struct OidcProviderGuard(Arc<OidcProvider>);
+/// Readiness remains bound to the same sealed profile marker as its provider.
+pub(crate) struct ProfileJwksReadiness<P: TokenProfileMarker> {
+    handle: JwksReadinessHandle,
+    profile: PhantomData<fn() -> P>,
+}
 
-impl ManagedResource for OidcProviderGuard {
+impl<P: TokenProfileMarker> ProfileJwksReadiness<P> {
+    fn new(handle: JwksReadinessHandle) -> Self {
+        Self {
+            handle,
+            profile: PhantomData,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_ready(&self) -> bool {
+        self.handle.is_ready()
+    }
+}
+
+impl<P: TokenProfileMarker> Clone for ProfileJwksReadiness<P> {
+    fn clone(&self) -> Self {
+        Self::new(self.handle.clone())
+    }
+}
+
+/// The service-token verifier is physically separate from both access-token verifiers.
+pub(crate) struct RuntimeServiceTokenProvider {
+    provider: Arc<OidcProvider<ServiceTokenProfile>>,
+}
+
+impl RuntimeServiceTokenProvider {
+    pub(crate) fn provider(&self) -> Arc<OidcProvider<ServiceTokenProfile>> {
+        Arc::clone(&self.provider)
+    }
+
+    pub(crate) fn managed_resource(&self) -> Box<DynManagedResource<'static>> {
+        DynManagedResource::new_box(OidcProviderGuard {
+            provider: Arc::clone(&self.provider),
+            resource_name: SERVICE_TOKEN_RESOURCE_NAME,
+        })
+    }
+}
+
+struct OidcProviderGuard<P: TokenProfileMarker> {
+    provider: Arc<OidcProvider<P>>,
+    resource_name: &'static str,
+}
+
+impl<P: TokenProfileMarker> ManagedResource for OidcProviderGuard<P> {
     fn name(&self) -> &str {
-        self.0.name()
+        self.resource_name
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        ManagedResource::shutdown(&*self.0).await
+        ManagedResource::shutdown(&*self.provider).await
     }
 }
 
-pub(crate) struct OidcJwksReadyProbe {
+/// Profile-specific readiness probe. The constructor fixes the exact public probe name.
+pub(crate) struct AccessTokenJwksReadyProbe {
     name: ProbeName,
     handle: JwksReadinessHandle,
 }
 
-impl OidcJwksReadyProbe {
+impl AccessTokenJwksReadyProbe {
     #[allow(clippy::expect_used)]
-    pub(crate) fn new(handle: JwksReadinessHandle) -> Self {
+    pub(crate) fn rss_access(readiness: ProfileJwksReadiness<RssAccessProfile>) -> Self {
         Self {
-            name: ProbeName::parse(OIDC_JWKS_READY_PROBE_NAME).expect("valid probe name const"),
-            handle,
+            name: ProbeName::parse(RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)
+                .expect("valid RSS access-token probe name"),
+            handle: readiness.handle,
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    pub(crate) fn federated_access(
+        readiness: ProfileJwksReadiness<FederatedAccessProfile>,
+    ) -> Self {
+        Self {
+            name: ProbeName::parse(FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)
+                .expect("valid federated access-token probe name"),
+            handle: readiness.handle,
         }
     }
 }
 
-impl bootstrap::HealthProbe for OidcJwksReadyProbe {
+impl bootstrap::HealthProbe for AccessTokenJwksReadyProbe {
     fn check(&self) -> HealthCheck {
         let (status, detail) = if self.handle.is_ready() {
             (HealthStatus::Healthy, "ready")
@@ -141,389 +207,308 @@ impl bootstrap::HealthProbe for OidcJwksReadyProbe {
     }
 }
 
-/// 从进程配置快照构造 serving 验签 `OidcProvider`（issuer / audience / 本地 JWKS 文件源）。
-///
-/// HTTP listener 的生产 key-source 必须是本地 JWKS 文件（外部 agent / init-container 经 TLS 拉取后写入只读挂载）；
-/// 静态 ES256 env 只保留给 operator CLI / 单测路径，不再作为 serving production fallback。
-pub(crate) fn prepare_runtime_oidc_provider(
-    config: SnapshotConfig<'_>,
-) -> anyhow::Result<PreparedRuntimeOidcProvider> {
-    prepare_runtime_oidc_provider_from_values(
-        config.value("RSS_OIDC_ISSUER"),
-        config.value("RSS_OIDC_AUDIENCE"),
-        config.value("RSS_OIDC_TRUSTED_KINDS"),
-        config.value(OIDC_JWKS_PATH_ENV),
-        config.value(OIDC_JWKS_REFRESH_INTERVAL_ENV),
+struct AccessProviderBuildContext<P: TokenProfileMarker> {
+    cancellation: CancellationToken,
+    isolation: Option<AccessJwksKeyIsolation<P>>,
+    clock: Box<dyn diport::Clock>,
+}
+
+impl<P: TokenProfileMarker> AccessProviderBuildContext<P> {
+    fn new(
+        cancellation: CancellationToken,
+        isolation: Option<AccessJwksKeyIsolation<P>>,
+        clock: Box<dyn diport::Clock>,
+    ) -> Self {
+        Self {
+            cancellation,
+            isolation,
+            clock,
+        }
+    }
+}
+
+/// Build the verifier for RSS-issued access tokens from only the RSS namespace.
+pub(crate) fn build_rss_access_provider(
+    config: &RssAccessTokenConfig,
+    cancellation: CancellationToken,
+    isolation: Option<AccessJwksKeyIsolation<RssAccessProfile>>,
+) -> anyhow::Result<RuntimeAccessProvider<RssAccessProfile>> {
+    build_rss_access_provider_from_values(
+        config.issuer(),
+        config.audience(),
+        config
+            .trusted_kinds()
+            .iter()
+            .copied()
+            .map(crate::config::AccessPrincipalKind::as_str),
+        config.jwks_path(),
+        config.jwks_refresh_interval(),
+        AccessProviderBuildContext::new(cancellation, isolation, Box::new(SystemClock)),
+    )
+}
+
+/// Build the verifier for federated access tokens from only the federated namespace.
+pub(crate) fn build_federated_access_provider(
+    config: &FederatedAccessTokenConfig,
+    cancellation: CancellationToken,
+    isolation: Option<AccessJwksKeyIsolation<FederatedAccessProfile>>,
+) -> anyhow::Result<RuntimeAccessProvider<FederatedAccessProfile>> {
+    build_federated_access_provider_from_values(
+        config.issuer(),
+        config.audience(),
+        config
+            .trusted_kinds()
+            .iter()
+            .copied()
+            .map(crate::config::AccessPrincipalKind::as_str),
+        config.jwks_path(),
+        config.jwks_refresh_interval(),
+        AccessProviderBuildContext::new(cancellation, isolation, Box::new(SystemClock)),
+    )
+}
+
+/// Build the service-token verifier from only the service-token namespace.
+pub(crate) fn build_service_token_provider(
+    config: &ServiceTokenConfig,
+    replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+    replay_timeout: Duration,
+) -> anyhow::Result<RuntimeServiceTokenProvider> {
+    build_service_token_provider_from_values(
+        config.issuer(),
+        config.audience(),
+        config.hs256_kid(),
+        config.hs256_secret(),
+        replay_store,
+        replay_timeout,
         Box::new(SystemClock),
     )
 }
 
-fn prepare_runtime_oidc_provider_from_values(
-    issuer: Option<&str>,
-    audience: Option<&str>,
-    trusted_kinds: Option<&str>,
-    jwks_path: Option<&str>,
-    refresh_interval: Option<&str>,
-    clock: Box<dyn diport::Clock>,
-) -> anyhow::Result<PreparedRuntimeOidcProvider> {
-    let issuer =
-        issuer.ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_ISSUER"))?;
-    let audience =
-        audience.ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_AUDIENCE"))?;
-    anyhow::ensure!(!issuer.trim().is_empty(), "oidc issuer must not be empty");
-    anyhow::ensure!(
-        !audience.trim().is_empty(),
-        "oidc audience must not be empty"
-    );
-    let trusted_kinds = trusted_kinds
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_TRUSTED_KINDS"))?;
-    let jwks_path = jwks_path
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {OIDC_JWKS_PATH_ENV}"))?;
-    let refresh_interval = oidc_jwks_refresh_interval_from(refresh_interval)?;
-    let jwks = oidc::JwksKeySource::load_and_watch(
-        OIDC_JWKS_SOURCE_ID,
-        PathBuf::from(jwks_path.trim()),
-        refresh_interval,
-        CancellationToken::new(),
-    )
-    .map_err(RuntimeJwksLoadError::from)?;
-    let jwks_readiness = jwks.readiness_handle();
-
-    let mut builder = oidc::VerifierConfigBuilder::new(issuer, audience).keys_jwks(jwks);
-    let mut trusted = 0usize;
-    for kind in trusted_kinds
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        builder = builder.trust_kind(kind);
-        trusted += 1;
-    }
-    if trusted == 0 {
-        anyhow::bail!(
-            "RSS_OIDC_TRUSTED_KINDS must list ≥1 trusted principal kind (else all JWTs 401)"
-        );
-    }
-    Ok(PreparedRuntimeOidcProvider {
-        builder,
+fn build_rss_access_provider_from_values<'a>(
+    issuer: &str,
+    audience: &str,
+    trusted_kinds: impl IntoIterator<Item = &'a str>,
+    jwks_path: &std::path::Path,
+    refresh_interval: Duration,
+    context: AccessProviderBuildContext<RssAccessProfile>,
+) -> anyhow::Result<RuntimeAccessProvider<RssAccessProfile>> {
+    let AccessProviderBuildContext {
+        cancellation,
+        isolation,
+        clock,
+    } = context;
+    let (builder, readiness) = match isolation {
+        Some(isolation) => {
+            let jwks = load_isolated_access_jwks(
+                AccessProfile::Rss,
+                RSS_ACCESS_TOKEN_JWKS_SOURCE_ID,
+                jwks_path,
+                refresh_interval,
+                cancellation,
+                isolation,
+            )?;
+            let readiness = jwks.readiness_handle();
+            let builder = oidc::VerifierConfigBuilder::<RssAccessProfile>::new(issuer, audience)
+                .keys_isolated_jwks(jwks);
+            (builder, readiness)
+        }
+        None => {
+            let jwks = load_access_jwks(
+                AccessProfile::Rss,
+                RSS_ACCESS_TOKEN_JWKS_SOURCE_ID,
+                jwks_path,
+                refresh_interval,
+                cancellation,
+            )?;
+            let readiness = jwks.readiness_handle();
+            let builder = oidc::VerifierConfigBuilder::<RssAccessProfile>::new(issuer, audience)
+                .keys_jwks(jwks);
+            (builder, readiness)
+        }
+    };
+    let jwks_readiness = ProfileJwksReadiness::<RssAccessProfile>::new(readiness);
+    let builder = trusted_kinds
+        .into_iter()
+        .fold(builder, |builder, kind| builder.trust_kind(kind));
+    let provider = finish_provider(builder.build(), clock)?;
+    Ok(RuntimeAccessProvider {
+        provider: Arc::new(provider),
         jwks_readiness,
-        clock,
+        resource_name: RSS_ACCESS_TOKEN_RESOURCE_NAME,
     })
 }
 
-#[cfg(test)]
-fn build_runtime_oidc_provider_from_values(
-    issuer: Option<&str>,
-    audience: Option<&str>,
-    trusted_kinds: Option<&str>,
-    jwks_path: Option<&str>,
-    refresh_interval: Option<&str>,
-    replay_store: Option<Arc<diport::DynServiceTokenReplayStore<'static>>>,
-    clock: Box<dyn diport::Clock>,
-) -> anyhow::Result<RuntimeOidcProvider> {
-    let prepared = prepare_runtime_oidc_provider_from_values(
-        issuer,
-        audience,
-        trusted_kinds,
-        jwks_path,
+fn build_federated_access_provider_from_values<'a>(
+    issuer: &str,
+    audience: &str,
+    trusted_kinds: impl IntoIterator<Item = &'a str>,
+    jwks_path: &std::path::Path,
+    refresh_interval: Duration,
+    context: AccessProviderBuildContext<FederatedAccessProfile>,
+) -> anyhow::Result<RuntimeAccessProvider<FederatedAccessProfile>> {
+    let AccessProviderBuildContext {
+        cancellation,
+        isolation,
+        clock,
+    } = context;
+    let (builder, readiness) = match isolation {
+        Some(isolation) => {
+            let jwks = load_isolated_access_jwks(
+                AccessProfile::Federated,
+                FEDERATED_ACCESS_TOKEN_JWKS_SOURCE_ID,
+                jwks_path,
+                refresh_interval,
+                cancellation,
+                isolation,
+            )?;
+            let readiness = jwks.readiness_handle();
+            let builder =
+                oidc::VerifierConfigBuilder::<FederatedAccessProfile>::new(issuer, audience)
+                    .keys_isolated_jwks(jwks);
+            (builder, readiness)
+        }
+        None => {
+            let jwks = load_access_jwks(
+                AccessProfile::Federated,
+                FEDERATED_ACCESS_TOKEN_JWKS_SOURCE_ID,
+                jwks_path,
+                refresh_interval,
+                cancellation,
+            )?;
+            let readiness = jwks.readiness_handle();
+            let builder =
+                oidc::VerifierConfigBuilder::<FederatedAccessProfile>::new(issuer, audience)
+                    .keys_jwks(jwks);
+            (builder, readiness)
+        }
+    };
+    let jwks_readiness = ProfileJwksReadiness::<FederatedAccessProfile>::new(readiness);
+    let builder = trusted_kinds
+        .into_iter()
+        .fold(builder, |builder, kind| builder.trust_kind(kind));
+    let provider = finish_provider(builder.build(), clock)?;
+    Ok(RuntimeAccessProvider {
+        provider: Arc::new(provider),
+        jwks_readiness,
+        resource_name: FEDERATED_ACCESS_TOKEN_RESOURCE_NAME,
+    })
+}
+
+fn load_access_jwks(
+    profile: AccessProfile,
+    source_id: &'static str,
+    path: &std::path::Path,
+    refresh_interval: Duration,
+    cancellation: CancellationToken,
+) -> Result<oidc::JwksKeySource, RuntimeJwksLoadError> {
+    oidc::JwksKeySource::load_and_watch(
+        source_id,
+        path.to_path_buf(),
         refresh_interval,
-        clock,
-    )?;
-    prepared.finish(
-        replay_store
-            .ok_or_else(|| anyhow::anyhow!("oidc service-token replay store is required"))?,
-        Duration::from_secs(5),
+        cancellation,
     )
+    .map_err(|error| RuntimeJwksLoadError::from_oidc(profile, error))
 }
 
-fn oidc_jwks_refresh_interval_from(raw: Option<&str>) -> anyhow::Result<Duration> {
-    let Some(raw) = raw else {
-        return Ok(Duration::from_secs(DEFAULT_OIDC_JWKS_REFRESH_INTERVAL_SECS));
-    };
-    let trimmed = raw.trim();
-    anyhow::ensure!(
-        !trimmed.is_empty(),
-        "{OIDC_JWKS_REFRESH_INTERVAL_ENV} must not be empty"
-    );
-    let secs = trimmed
-        .parse::<u64>()
-        .with_context(|| format!("{OIDC_JWKS_REFRESH_INTERVAL_ENV} must be seconds"))?;
-    anyhow::ensure!(
-        (MIN_OIDC_JWKS_REFRESH_INTERVAL_SECS..=MAX_OIDC_JWKS_REFRESH_INTERVAL_SECS).contains(&secs),
-        "{OIDC_JWKS_REFRESH_INTERVAL_ENV} must be in {MIN_OIDC_JWKS_REFRESH_INTERVAL_SECS}..={MAX_OIDC_JWKS_REFRESH_INTERVAL_SECS} seconds"
-    );
-    Ok(Duration::from_secs(secs))
-}
-
-/// 从 operator 配置快照构造验签 `OidcProvider`（issuer / audience / ES256·HS256 静态 key）。
-///
-/// - `RSS_OIDC_ISSUER` / `RSS_OIDC_AUDIENCE`：必填。
-/// - `RSS_OIDC_TRUSTED_KINDS`：**必填**——本 IdP 可 assert 的 principal kind 逗号分隔白名单（如 `user,admin,device`）。
-///   secure-by-default（OIDC-KIND-ALLOWLIST-01）：未配置则验签器剥离所有 kind → `Principal` 派生恒 `TokenInvalid`
-///   → JWT **全 401**（评审 F1 修复的生产失效根因），故构造期 fail-fast 拒空。
-/// - `RSS_OIDC_ES256_SEC1_B64URL`：JWT 路径 ES256 公钥，base64url(SEC1 未压缩点)，逗号分隔可多把（可选）。
-/// - `RSS_OIDC_HS256_SECRET_B64URL`：service-token 路径 HS256 密钥，base64url（可选）。
-/// - `RSS_OIDC_HS256_KID`：service-token 路径 key id；配置 HS256 secret 时必填。
-///
-/// Operator / maintenance CLI 与 serving 使用同一进程级配置代际，但仍保留独立的静态 key
-/// provider 语义；调用方必须显式提供不可伪造的快照能力、durable replay store 和有界
-/// deadline，不存在 ambient fallback 或 store-free HS256 配置。
-pub(crate) fn build_operator_provider(
-    config: SnapshotConfig<'_>,
-    _operator: OperatorRuntimeCapability<'_>,
-    replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
-    replay_timeout: Duration,
-) -> anyhow::Result<OidcProvider> {
-    build_provider_from_values(
-        StaticOidcEnvValues {
-            issuer: config.value("RSS_OIDC_ISSUER"),
-            audience: config.value("RSS_OIDC_AUDIENCE"),
-            trusted_kinds: config.value("RSS_OIDC_TRUSTED_KINDS"),
-            es256: config.value("RSS_OIDC_ES256_SEC1_B64URL"),
-            hs256: config.value("RSS_OIDC_HS256_SECRET_B64URL"),
-            hs256_kid: config.value("RSS_OIDC_HS256_KID"),
-        },
-        replay_store,
-        replay_timeout,
-        Box::new(SystemClock),
+fn load_isolated_access_jwks<P: TokenProfileMarker>(
+    profile: AccessProfile,
+    source_id: &'static str,
+    path: &std::path::Path,
+    refresh_interval: Duration,
+    cancellation: CancellationToken,
+    isolation: AccessJwksKeyIsolation<P>,
+) -> Result<IsolatedJwksKeySource<P>, RuntimeJwksLoadError> {
+    oidc::JwksKeySource::load_and_watch_isolated(
+        source_id,
+        path.to_path_buf(),
+        refresh_interval,
+        cancellation,
+        isolation,
     )
+    .map_err(|error| RuntimeJwksLoadError::from_oidc(profile, error))
 }
 
-struct StaticOidcEnvValues<'a> {
-    issuer: Option<&'a str>,
-    audience: Option<&'a str>,
-    trusted_kinds: Option<&'a str>,
-    es256: Option<&'a str>,
-    hs256: Option<&'a str>,
-    hs256_kid: Option<&'a str>,
-}
-
-fn build_provider_from_values(
-    values: StaticOidcEnvValues<'_>,
+fn build_service_token_provider_from_values(
+    issuer: &str,
+    audience: &str,
+    key_id: &str,
+    secret: &[u8],
     replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
     replay_timeout: Duration,
     clock: Box<dyn diport::Clock>,
-) -> anyhow::Result<OidcProvider> {
-    let issuer = values
-        .issuer
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_ISSUER"))?;
-    let audience = values
-        .audience
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_AUDIENCE"))?;
-    let trusted_kinds = values
-        .trusted_kinds
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_TRUSTED_KINDS"))?;
-    let key_profile = static_key_profile_from_values(
-        values.es256,
-        values.hs256,
-        values.hs256_kid,
-        replay_store,
-        replay_timeout,
-    )?;
-    provider_from_static_config(StaticOidcProviderConfig {
-        issuer,
-        audience,
-        trusted_kinds_csv: trusted_kinds,
-        key_profile,
-        clock,
+) -> anyhow::Result<RuntimeServiceTokenProvider> {
+    let keys = oidc::ServiceTokenKeySource::builder()
+        .add_hs256_secret(key_id, secret)
+        .map_err(|error| anyhow::anyhow!("invalid service-token key configuration: {error}"))?
+        .build();
+    let config = oidc::VerifierConfigBuilder::<ServiceTokenProfile>::new(issuer, audience)
+        .keys_hs256(keys)
+        .replay_store(replay_store, replay_timeout)
+        .build()
+        .map_err(|error| anyhow::anyhow!("invalid service-token verifier config: {error}"))?;
+    Ok(RuntimeServiceTokenProvider {
+        provider: Arc::new(OidcProvider::new(config, clock)),
     })
 }
 
-fn static_key_profile_from_values<'a>(
-    es256: Option<&'a str>,
-    hs256: Option<&'a str>,
-    hs256_kid: Option<&'a str>,
-    replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
-    replay_timeout: Duration,
-) -> anyhow::Result<StaticOidcKeyProfile<'a>> {
-    let service_token = |secret_b64, key_id| Hs256ServiceTokenProfile {
-        secret_b64,
-        key_id,
-        replay_store,
-        replay_timeout,
-    };
-    match (es256, hs256, hs256_kid) {
-        (Some(public_keys_b64), None, None) => Ok(StaticOidcKeyProfile::Es256 { public_keys_b64 }),
-        (None, Some(secret_b64), Some(key_id)) => Ok(StaticOidcKeyProfile::ServiceTokenHs256(
-            service_token(secret_b64, key_id),
-        )),
-        (Some(public_keys_b64), Some(secret_b64), Some(key_id)) => {
-            Ok(StaticOidcKeyProfile::Es256AndServiceTokenHs256 {
-                public_keys_b64,
-                service_token: service_token(secret_b64, key_id),
-            })
-        }
-        (_, Some(_), None) => {
-            anyhow::bail!("missing required env var: RSS_OIDC_HS256_KID")
-        }
-        (_, None, Some(_)) => {
-            anyhow::bail!("RSS_OIDC_HS256_KID requires RSS_OIDC_HS256_SECRET_B64URL")
-        }
-        (None, None, None) => {
-            anyhow::bail!("at least one static OIDC key profile is required")
-        }
-    }
+fn finish_provider<P: TokenProfileMarker>(
+    config: Result<oidc::VerifierConfig<P>, oidc::ConfigError>,
+    clock: Box<dyn diport::Clock>,
+) -> anyhow::Result<OidcProvider<P>> {
+    let config =
+        config.map_err(|error| anyhow::anyhow!("invalid access-token verifier config: {error}"))?;
+    Ok(OidcProvider::new(config, clock))
 }
 
-/// 静态 operator/test OIDC provider 的命名输入。
-///
-/// key source 必须经 [`StaticOidcKeyProfile`] 选择一个闭合 profile；serving 生产路径使用本地 JWKS
-/// [`prepare_runtime_oidc_provider`]，两条路径最终都经同一个 verifier 构建漏斗。
-pub struct StaticOidcProviderConfig<'a> {
+/// One exact-kid ES256 key for the strictly scoped RSS static verifier.
+pub struct KeyedEs256StaticKey<'a> {
+    pub key_id: &'a str,
+    pub sec1_b64url: &'a str,
+}
+
+/// Named inputs for non-serving RSS maintenance/tests. This profile cannot carry an HS key.
+pub struct RssAccessStaticProviderConfig<'a> {
     pub issuer: &'a str,
     pub audience: &'a str,
-    pub trusted_kinds_csv: &'a str,
-    pub key_profile: StaticOidcKeyProfile<'a>,
+    pub trusted_kinds: &'a [&'a str],
+    pub keys: &'a [KeyedEs256StaticKey<'a>],
     pub clock: Box<dyn diport::Clock>,
 }
 
-/// 静态 key source 的闭合 profile；无 key 状态无法构造。
-pub enum StaticOidcKeyProfile<'a> {
-    Es256 {
-        public_keys_b64: &'a str,
-    },
-    ServiceTokenHs256(Hs256ServiceTokenProfile<'a>),
-    Es256AndServiceTokenHs256 {
-        public_keys_b64: &'a str,
-        service_token: Hs256ServiceTokenProfile<'a>,
-    },
-}
-
-/// HS256 service-token 所需的 key 与 replay protection 原子配置。
-///
-/// replay store 和 deadline 不再是与 HS256 key 分离的可选参数，因此调用方无法表达“HS256 已启用但
-/// replay protection 缺失”的配置。
-///
-/// ```compile_fail
-/// use runtime::Hs256ServiceTokenProfile;
-///
-/// let _ = Hs256ServiceTokenProfile {
-///     secret_b64: "base64url-secret",
-///     key_id: "cell-a.svc-a",
-///     // replay_store 与 replay_timeout 是必填字段。
-/// };
-/// ```
-pub struct Hs256ServiceTokenProfile<'a> {
-    pub secret_b64: &'a str,
-    pub key_id: &'a str,
-    pub replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
-    pub replay_timeout: Duration,
-}
-
-/// 由命名静态 profile 装配 operator/test `OidcProvider`，纯函数且无 env 副作用。
-///
-/// - `trusted_kinds_csv`：逗号分隔 trusted principal kind（`.trust_kind` 白名单，OIDC-KIND-ALLOWLIST-01）；解析后
-///   **空集 fail-fast**——无 trusted kind 的 provider 验签 JWT 恒剥离 kind → 派生 `TokenInvalid` → 全 401（F1 根因）。
-/// - ES256 profile 接受逗号分隔 base64url(SEC1 未压缩点)；HS256 profile 将 secret/kid/replay
-///   store/deadline 绑定为一个值。
-pub fn provider_from_static_config(
-    config: StaticOidcProviderConfig<'_>,
-) -> anyhow::Result<OidcProvider> {
-    let StaticOidcProviderConfig {
-        issuer,
-        audience,
-        trusted_kinds_csv,
-        key_profile,
-        clock,
-    } = config;
-    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let mut keys = oidc::StaticKeySource::builder();
-    let replay = match key_profile {
-        StaticOidcKeyProfile::Es256 { public_keys_b64 } => {
-            keys = add_es256_keys(keys, &b64, public_keys_b64)?;
-            None
-        }
-        StaticOidcKeyProfile::ServiceTokenHs256(service_token) => {
-            let (next, replay) = add_service_token_key(keys, &b64, service_token)?;
-            keys = next;
-            Some(replay)
-        }
-        StaticOidcKeyProfile::Es256AndServiceTokenHs256 {
-            public_keys_b64,
-            service_token,
-        } => {
-            keys = add_es256_keys(keys, &b64, public_keys_b64)?;
-            let (next, replay) = add_service_token_key(keys, &b64, service_token)?;
-            keys = next;
-            Some(replay)
-        }
-    };
-
-    let mut builder = oidc::VerifierConfigBuilder::new(issuer, audience).keys(keys.build());
-    if let Some((replay_store, replay_timeout)) = replay {
-        builder = builder.service_token_replay_store(replay_store, replay_timeout);
-    }
-    let mut trusted = 0usize;
-    for kind in trusted_kinds_csv
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        builder = builder.trust_kind(kind);
-        trusted += 1;
-    }
-    if trusted == 0 {
-        anyhow::bail!(
-            "RSS_OIDC_TRUSTED_KINDS must list ≥1 trusted principal kind (else all JWTs 401)"
-        );
-    }
-    finish_oidc_provider(builder, clock)
-}
-
-fn add_es256_keys(
-    mut keys: oidc::StaticKeySourceBuilder,
-    b64: &base64::engine::general_purpose::GeneralPurpose,
-    public_keys_b64: &str,
-) -> anyhow::Result<oidc::StaticKeySourceBuilder> {
-    for part in public_keys_b64.split(',').filter(|part| !part.is_empty()) {
-        let sec1 = b64
-            .decode(part)
-            .context("RSS_OIDC_ES256_SEC1_B64URL not valid base64url")?;
-        keys = keys
-            .add_es256_sec1(&sec1)
-            .map_err(|error| anyhow::anyhow!("invalid ES256 key: {error}"))?;
-    }
-    Ok(keys)
-}
-
-fn add_service_token_key(
-    mut keys: oidc::StaticKeySourceBuilder,
-    b64: &base64::engine::general_purpose::GeneralPurpose,
-    profile: Hs256ServiceTokenProfile<'_>,
-) -> anyhow::Result<(
-    oidc::StaticKeySourceBuilder,
-    (Arc<diport::DynServiceTokenReplayStore<'static>>, Duration),
-)> {
-    let Hs256ServiceTokenProfile {
-        secret_b64,
-        key_id,
-        replay_store,
-        replay_timeout,
-    } = profile;
+/// Construct a keyed, RSS-only static verifier without reading process environment.
+pub fn rss_access_provider_from_static_config(
+    config: RssAccessStaticProviderConfig<'_>,
+) -> anyhow::Result<OidcProvider<RssAccessProfile>> {
     anyhow::ensure!(
-        !key_id.trim().is_empty(),
-        "missing required env var: RSS_OIDC_HS256_KID"
+        !config.trusted_kinds.is_empty(),
+        "RSS access static verifier must trust at least one principal kind"
     );
-    let secret = b64
-        .decode(secret_b64)
-        .context("RSS_OIDC_HS256_SECRET_B64URL not valid base64url")?;
-    keys = keys
-        .add_hs256_secret_with_kid(key_id, &secret)
-        .map_err(|error| anyhow::anyhow!("weak HS256 secret: {error}"))?;
-    Ok((keys, (replay_store, replay_timeout)))
+    let mut keys = oidc::AccessStaticKeySource::builder();
+    for key in config.keys {
+        let sec1 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(key.sec1_b64url)
+            .map_err(|_| anyhow::anyhow!("RSS access ES256 key is not valid base64url"))?;
+        keys = keys
+            .add_es256_sec1(key.key_id, &sec1)
+            .map_err(|error| anyhow::anyhow!("invalid RSS access ES256 key: {error}"))?;
+    }
+    let builder =
+        oidc::VerifierConfigBuilder::<RssAccessProfile>::new(config.issuer, config.audience)
+            .keys_static(keys.build());
+    let builder = config
+        .trusted_kinds
+        .iter()
+        .copied()
+        .fold(builder, |builder, kind| builder.trust_kind(kind));
+    finish_provider(builder.build(), config.clock)
 }
 
 #[cfg(test)]
 mod tests {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use p256::ecdsa::SigningKey;
+
     use super::*;
-
-    const B64: base64::engine::general_purpose::GeneralPurpose =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-    fn clk() -> Box<dyn diport::Clock> {
-        Box::new(crate::SystemClock)
-    }
 
     struct TestReplayStore;
 
@@ -557,515 +542,293 @@ mod tests {
         path
     }
 
-    fn hs256_jwks(secret: &[u8], kid: &str) -> String {
-        let key = B64.encode(secret);
-        format!(r#"{{"keys":[{{"kty":"oct","kid":"{kid}","alg":"HS256","k":"{key}"}}]}}"#)
+    #[allow(clippy::expect_used)]
+    fn es256_fixture(kid: &str) -> (String, String) {
+        es256_fixture_with_scalar(kid, [0x42_u8; 32])
     }
 
     #[allow(clippy::expect_used)]
-    fn tenant_binding(raw: &str) -> diport::ServiceTokenTenantBinding {
-        diport::ServiceTokenTenantBinding::new(vocab::TenantId::parse(raw).expect("tenant"))
+    fn es256_fixture_with_scalar(kid: &str, scalar: [u8; 32]) -> (String, String) {
+        let signing_key = SigningKey::from_slice(&scalar).expect("valid scalar");
+        let point = signing_key.verifying_key().to_encoded_point(false);
+        let x = URL_SAFE_NO_PAD.encode(point.x().expect("uncompressed point has x"));
+        let y = URL_SAFE_NO_PAD.encode(point.y().expect("uncompressed point has y"));
+        let jwks = format!(
+            r#"{{"keys":[{{"kty":"EC","kid":"{kid}","alg":"ES256","crv":"P-256","x":"{x}","y":"{y}"}}]}}"#
+        );
+        let sec1 = URL_SAFE_NO_PAD.encode(point.as_bytes());
+        (jwks, sec1)
     }
 
-    fn service_token_payload(jti: &str) -> String {
-        format!(
-            r#"{{"sub":"runtime-service","exp":4102444800,"iss":"https://issuer.test","aud":"rss-test","kind":"service","jti":"{jti}"}}"#
-        )
-    }
-
-    #[allow(clippy::expect_used)]
-    fn mint_hs256_bound_with_kid(
-        secret: &[u8],
-        kid: &str,
-        payload_json: &str,
-        tenant: &str,
-    ) -> String {
-        use hmac::{Hmac, Mac as _};
-        use sha2::Sha256;
-
-        let header = B64.encode(format!(r#"{{"alg":"HS256","kid":"{kid}"}}"#));
-        let body = B64.encode(payload_json.as_bytes());
-        let signing_input = format!("{header}.{body}");
-        let binding = tenant_binding(tenant);
-        let mac_input = diport::service_token_mac_input(signing_input.as_bytes(), &binding);
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
-        mac.update(&mac_input);
-        let tag = mac.finalize().into_bytes();
-        format!("{signing_input}.{}", B64.encode(tag))
+    fn hs256_jwks() -> String {
+        let key = URL_SAFE_NO_PAD.encode([0x44_u8; 32]);
+        format!(r#"{{"keys":[{{"kty":"oct","kid":"service","alg":"HS256","k":"{key}"}}]}}"#)
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn serving_oidc_snapshot_mapping_matches_explicit_values() {
-        let secret = [0x22u8; 32];
-        let jwks_path = write_temp_file(
-            "snapshot-runtime-oidc-jwks.json",
-            hs256_jwks(&secret, "svc-snapshot").as_bytes(),
-        );
-        let jwks_path = jwks_path.to_string_lossy();
-        let snapshot = crate::config::test_snapshot(&[
-            ("RSS_OIDC_ISSUER", "https://issuer.test"),
-            ("RSS_OIDC_AUDIENCE", "rss-test"),
-            ("RSS_OIDC_TRUSTED_KINDS", "service,user,admin"),
-            (OIDC_JWKS_PATH_ENV, jwks_path.as_ref()),
-            (OIDC_JWKS_REFRESH_INTERVAL_ENV, "5"),
-        ])
-        .expect("capture serving OIDC generation");
+    async fn rss_and_federated_build_independent_typed_jwks_providers() {
+        let (rss_jwks, _) = es256_fixture("rss-kid");
+        let (federated_jwks, _) = es256_fixture_with_scalar("federated-kid", [0x11_u8; 32]);
+        let rss_path = write_temp_file("rss-access-jwks.json", rss_jwks.as_bytes());
+        let federated_path =
+            write_temp_file("federated-access-jwks.json", federated_jwks.as_bytes());
+        let (rss_isolation, federated_isolation) =
+            oidc::AccessJwksKeyIsolationGeneration::new().into_bindings();
 
-        let runtime = prepare_runtime_oidc_provider(snapshot.view())
-            .and_then(|prepared| prepared.finish(replay_store(), Duration::from_secs(5)))
-            .expect("serving HS256 uses the explicitly wired durable replay store");
-        assert!(runtime.jwks_readiness().is_ready());
-        runtime
+        let rss = build_rss_access_provider_from_values(
+            "https://rss.issuer.test",
+            "rss-audience",
+            ["user", "device", "admin", "superAdmin"],
+            &rss_path,
+            Duration::from_secs(5),
+            AccessProviderBuildContext::new(
+                CancellationToken::new(),
+                Some(rss_isolation),
+                Box::new(SystemClock),
+            ),
+        )
+        .expect("RSS access provider");
+        let federated = build_federated_access_provider_from_values(
+            "https://federated.issuer.test",
+            "federated-audience",
+            ["user", "device"],
+            &federated_path,
+            Duration::from_secs(5),
+            AccessProviderBuildContext::new(
+                CancellationToken::new(),
+                Some(federated_isolation),
+                Box::new(SystemClock),
+            ),
+        )
+        .expect("federated access provider");
+
+        fn require_rss(_: &OidcProvider<RssAccessProfile>) {}
+        fn require_federated(_: &OidcProvider<FederatedAccessProfile>) {}
+        require_rss(rss.provider().as_ref());
+        require_federated(federated.provider().as_ref());
+        assert!(rss.jwks_readiness().is_ready());
+        assert!(federated.jwks_readiness().is_ready());
+        assert_eq!(
+            rss.managed_resource().name(),
+            RSS_ACCESS_TOKEN_RESOURCE_NAME
+        );
+        assert_eq!(
+            federated.managed_resource().name(),
+            FEDERATED_ACCESS_TOKEN_RESOURCE_NAME
+        );
+
+        rss.managed_resource()
+            .shutdown()
+            .await
+            .expect("shutdown RSS provider");
+        federated
             .managed_resource()
             .shutdown()
             .await
-            .expect("shutdown snapshot-backed OIDC provider");
-    }
-
-    #[test]
-    fn build_runtime_oidc_provider_from_values_missing_jwks_path_fails_fast() {
-        let result = build_runtime_oidc_provider_from_values(
-            Some("https://issuer.test"),
-            Some("rss-test"),
-            Some("service"),
-            None,
-            None,
-            None,
-            clk(),
-        );
-        assert!(
-            matches!(&result, Err(err) if err.to_string().contains(OIDC_JWKS_PATH_ENV)),
-            "runtime listener OIDC provider must require JWKS path"
-        );
-    }
-
-    #[tokio::test]
-    async fn build_runtime_oidc_provider_from_values_invalid_jwks_path_is_redacted() {
-        const SECRET_PATH_FRAGMENT: &str = "tenant-secret-missing-runtime-jwks.json";
-        let missing = unique_temp_path(SECRET_PATH_FRAGMENT);
-        let missing = missing.to_string_lossy();
-        let result = build_runtime_oidc_provider_from_values(
-            Some("https://issuer.test"),
-            Some("rss-test"),
-            Some("service,user,admin"),
-            Some(&missing),
-            None,
-            None,
-            clk(),
-        );
-        let error = result
-            .err()
-            .map(|error| format!("{error:#}"))
-            .unwrap_or_default();
-        assert!(
-            !error.is_empty(),
-            "bad JWKS path must fail during runtime OIDC provider construction"
-        );
-        assert!(
-            error.contains(OIDC_JWKS_PATH_ENV),
-            "redacted error must identify the invalid setting"
-        );
-        assert!(
-            !error.contains(SECRET_PATH_FRAGMENT),
-            "redacted error must not expose the configured path"
-        );
+            .expect("shutdown federated provider");
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn runtime_jwks_load_error_keeps_safe_typed_classification() {
-        let malformed = write_temp_file("secret-malformed-jwks.json", b"not json");
-        let empty = write_temp_file("secret-empty-jwks.json", br#"{"keys":[]}"#);
+    async fn active_access_profiles_reject_overlapping_initial_key_material() {
+        let (rss_jwks, _) = es256_fixture("rss-kid");
+        let (federated_jwks, _) = es256_fixture("federated-kid");
+        let rss_path = write_temp_file("isolated-rss-jwks.json", rss_jwks.as_bytes());
+        let federated_path =
+            write_temp_file("isolated-federated-jwks.json", federated_jwks.as_bytes());
+        let (rss_isolation, federated_isolation) =
+            oidc::AccessJwksKeyIsolationGeneration::new().into_bindings();
 
-        for (path, expected) in [
-            (malformed, RuntimeJwksLoadError::Malformed),
-            (empty, RuntimeJwksLoadError::NoUsableKeys),
-        ] {
-            let path = path.to_string_lossy();
-            let error = build_runtime_oidc_provider_from_values(
-                Some("https://issuer.test"),
-                Some("rss-test"),
-                Some("service"),
-                Some(&path),
-                None,
-                None,
-                clk(),
-            )
-            .err()
-            .expect("invalid JWKS source must fail");
-            assert_eq!(
-                error.downcast_ref::<RuntimeJwksLoadError>(),
-                Some(&expected)
-            );
-            let rendered = format!("{error:#}");
-            assert!(rendered.contains(OIDC_JWKS_PATH_ENV));
-            assert!(!rendered.contains(path.as_ref()));
-        }
-
-        let missing = unique_temp_path("secret-unreadable-jwks.json");
-        let missing = missing.to_string_lossy();
-        let error = build_runtime_oidc_provider_from_values(
-            Some("https://issuer.test"),
-            Some("rss-test"),
-            Some("service"),
-            Some(&missing),
-            None,
-            None,
-            clk(),
+        let rss = build_rss_access_provider_from_values(
+            "https://rss.issuer.test",
+            "rss-audience",
+            ["user"],
+            &rss_path,
+            Duration::from_secs(5),
+            AccessProviderBuildContext::new(
+                CancellationToken::new(),
+                Some(rss_isolation),
+                Box::new(SystemClock),
+            ),
+        )
+        .expect("RSS access provider");
+        let error = build_federated_access_provider_from_values(
+            "https://federated.issuer.test",
+            "federated-audience",
+            ["user"],
+            &federated_path,
+            Duration::from_secs(5),
+            AccessProviderBuildContext::new(
+                CancellationToken::new(),
+                Some(federated_isolation),
+                Box::new(SystemClock),
+            ),
         )
         .err()
-        .expect("unreadable JWKS source must fail");
-        assert_eq!(
-            error.downcast_ref::<RuntimeJwksLoadError>(),
-            Some(&RuntimeJwksLoadError::Unreadable)
-        );
-        assert!(!format!("{error:#}").contains(missing.as_ref()));
+        .expect("overlapping public key must reject federated provider");
+        let typed = error
+            .downcast_ref::<RuntimeJwksLoadError>()
+            .expect("typed runtime JWKS error");
+        assert_eq!(typed.profile, AccessProfile::Federated);
+        assert_eq!(typed.reason, JwksFailureReason::KeyMaterialOverlap);
+        assert!(!error.to_string().contains("rss-kid"));
+        assert!(!error.to_string().contains("federated-kid"));
+
+        rss.managed_resource()
+            .shutdown()
+            .await
+            .expect("shutdown RSS provider");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn access_jwks_rejects_hs_key_with_profile_specific_error() {
+        let path = write_temp_file("rss-access-hs-jwks.json", hs256_jwks().as_bytes());
+        let error = build_rss_access_provider_from_values(
+            "https://rss.issuer.test",
+            "rss-audience",
+            ["user"],
+            &path,
+            Duration::from_secs(5),
+            AccessProviderBuildContext::new(CancellationToken::new(), None, Box::new(SystemClock)),
+        )
+        .err()
+        .expect("HS key cannot enter access profile");
+        let typed = error
+            .downcast_ref::<RuntimeJwksLoadError>()
+            .expect("typed runtime JWKS error");
+        assert_eq!(typed.profile, AccessProfile::Rss);
+        assert_eq!(typed.reason, JwksFailureReason::InvalidKey);
+        assert!(error.to_string().contains("RSS_ACCESS_TOKEN_JWKS_PATH"));
+        assert!(!error.to_string().contains(path.to_string_lossy().as_ref()));
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn oidc_jwks_refresh_interval_is_range_checked() {
+    fn service_provider_uses_only_keyed_hs256_and_replay() {
+        let secret = [0x55_u8; 32];
+        let service = build_service_token_provider_from_values(
+            "https://service.issuer.test",
+            "service-audience",
+            "service-kid",
+            &secret,
+            replay_store(),
+            Duration::from_secs(5),
+            Box::new(SystemClock),
+        )
+        .expect("service-token provider");
+
+        fn require_service(_: &OidcProvider<ServiceTokenProfile>) {}
+        require_service(service.provider().as_ref());
         assert_eq!(
-            oidc_jwks_refresh_interval_from(None).expect("default"),
-            Duration::from_secs(DEFAULT_OIDC_JWKS_REFRESH_INTERVAL_SECS)
-        );
-        for raw in ["", "4", "3601", "not-seconds"] {
-            assert!(
-                oidc_jwks_refresh_interval_from(Some(raw)).is_err(),
-                "invalid refresh interval {raw:?} must fail"
-            );
-        }
-        assert_eq!(
-            oidc_jwks_refresh_interval_from(Some("5")).expect("min"),
-            Duration::from_secs(MIN_OIDC_JWKS_REFRESH_INTERVAL_SECS)
+            service.managed_resource().name(),
+            SERVICE_TOKEN_RESOURCE_NAME
         );
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn build_runtime_oidc_provider_from_valid_jwks_registers_ready_probe() {
-        let secret = [0x33u8; 32];
-        let jwks_path = write_temp_file(
-            "runtime-oidc-jwks.json",
-            hs256_jwks(&secret, "svc-1").as_bytes(),
+    async fn readiness_probe_names_are_profile_specific() {
+        let (rss_jwks, _) = es256_fixture("rss-kid");
+        let (federated_jwks, _) = es256_fixture_with_scalar("federated-kid", [0x11_u8; 32]);
+        let rss_path = write_temp_file("probe-rss-access-jwks.json", rss_jwks.as_bytes());
+        let federated_path = write_temp_file(
+            "probe-federated-access-jwks.json",
+            federated_jwks.as_bytes(),
         );
-        let jwks_path = jwks_path.to_string_lossy();
-        let runtime = build_runtime_oidc_provider_from_values(
-            Some("https://issuer.test"),
-            Some("rss-test"),
-            Some("service,user,admin"),
-            Some(&jwks_path),
-            None,
-            Some(replay_store()),
-            clk(),
-        )
-        .expect("valid runtime OIDC provider");
-
-        let probe = OidcJwksReadyProbe::new(runtime.jwks_readiness());
-        let check = bootstrap::HealthProbe::check(&probe);
-        assert_eq!(check.name().as_str(), OIDC_JWKS_READY_PROBE_NAME);
-        assert_eq!(check.status(), HealthStatus::Healthy);
-        assert_eq!(check.detail(), "ready");
-
-        let resource = runtime.managed_resource();
-        resource.shutdown().await.expect("shutdown oidc provider");
-    }
-
-    #[tokio::test(start_paused = true)]
-    #[allow(clippy::expect_used)]
-    async fn oidc_jwks_refresh_failure_marks_probe_unhealthy_and_keeps_last_good() {
-        const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
-        let secret = [0x44u8; 32];
-        let jwks_path = write_temp_file(
-            "runtime-oidc-jwks.json",
-            hs256_jwks(&secret, "svc-1").as_bytes(),
-        );
-        let jwks_path_display = jwks_path.to_string_lossy();
-        let runtime = build_runtime_oidc_provider_from_values(
-            Some("https://issuer.test"),
-            Some("rss-test"),
-            Some("service,user,admin"),
-            Some(&jwks_path_display),
-            Some("5"),
-            Some(replay_store()),
-            clk(),
-        )
-        .expect("valid runtime OIDC provider");
-
-        let before = mint_hs256_bound_with_kid(
-            &secret,
-            "svc-1",
-            &service_token_payload("nonce-before-degraded"),
-            TENANT,
-        );
-        diport::Pdp::verify(
-            runtime.provider.as_ref(),
-            &diport::RawCredential::service_token(before, tenant_binding(TENANT)),
-        )
-        .await
-        .expect("initial last-good key verifies service token");
-
-        std::fs::write(&jwks_path, b"not a jwks document").expect("corrupt jwks");
-        let mut degraded = false;
-        for _ in 0..10 {
-            tokio::time::advance(Duration::from_secs(MIN_OIDC_JWKS_REFRESH_INTERVAL_SECS)).await;
-            tokio::task::yield_now().await;
-            if !runtime.jwks_readiness().is_ready() {
-                degraded = true;
-                break;
-            }
-        }
-        assert!(degraded, "refresh failure should mark readiness degraded");
-
-        let probe = OidcJwksReadyProbe::new(runtime.jwks_readiness());
-        let check = bootstrap::HealthProbe::check(&probe);
-        assert_eq!(check.status(), HealthStatus::Unhealthy);
-        assert_eq!(check.detail(), "degraded");
-
-        let after = mint_hs256_bound_with_kid(
-            &secret,
-            "svc-1",
-            &service_token_payload("nonce-after-degraded"),
-            TENANT,
-        );
-        diport::Pdp::verify(
-            runtime.provider.as_ref(),
-            &diport::RawCredential::service_token(after, tenant_binding(TENANT)),
-        )
-        .await
-        .expect("refresh failure retains last-good keyset");
-
-        let resource = runtime.managed_resource();
-        resource.shutdown().await.expect("shutdown oidc provider");
-    }
-
-    #[test]
-    fn static_env_values_without_keys_fail_fast() {
-        let result = build_provider_from_values(
-            StaticOidcEnvValues {
-                issuer: Some("https://issuer.test"),
-                audience: Some("rss"),
-                trusted_kinds: Some("user"),
-                es256: None,
-                hs256: None,
-                hs256_kid: None,
-            },
-            replay_store(),
+        let (rss_isolation, federated_isolation) =
+            oidc::AccessJwksKeyIsolationGeneration::new().into_bindings();
+        let rss = build_rss_access_provider_from_values(
+            "https://rss.issuer.test",
+            "rss-audience",
+            ["user"],
+            &rss_path,
             Duration::from_secs(5),
-            clk(),
-        );
-        assert!(matches!(&result, Err(error) if error.to_string().contains("key profile")));
-    }
-
-    #[test]
-    fn static_profile_empty_trusted_kinds_fails_fast() {
-        // 评审 F1：无 trusted kind ⇒ JWT kind 被剥离 ⇒ 派生 TokenInvalid ⇒ 全 401，构造期 fail-fast 拒。
-        let secret = B64.encode([7u8; 32]);
-        let r = provider_from_static_config(StaticOidcProviderConfig {
-            issuer: "https://issuer.test",
-            audience: "rss",
-            trusted_kinds_csv: "  ,  ",
-            key_profile: StaticOidcKeyProfile::ServiceTokenHs256(Hs256ServiceTokenProfile {
-                secret_b64: &secret,
-                key_id: "cell-a.svc-a",
-                replay_store: replay_store(),
-                replay_timeout: Duration::from_secs(5),
-            }),
-            clock: clk(),
-        });
-        assert!(matches!(&r, Err(e) if e.to_string().contains("RSS_OIDC_TRUSTED_KINDS")));
-    }
-
-    #[test]
-    fn build_provider_from_values_missing_trusted_kinds_fails_fast() {
-        // issuer + audience 在、trusted kinds 缺 → fail-fast（F1 生产失效根因守）。
-        let result = build_provider_from_values(
-            StaticOidcEnvValues {
-                issuer: Some("https://issuer.test"),
-                audience: Some("rss"),
-                trusted_kinds: None,
-                es256: None,
-                hs256: None,
-                hs256_kid: None,
-            },
-            replay_store(),
+            AccessProviderBuildContext::new(
+                CancellationToken::new(),
+                Some(rss_isolation),
+                Box::new(SystemClock),
+            ),
+        )
+        .expect("RSS access provider");
+        let federated = build_federated_access_provider_from_values(
+            "https://federated.issuer.test",
+            "federated-audience",
+            ["user"],
+            &federated_path,
             Duration::from_secs(5),
-            clk(),
-        );
-        assert!(matches!(&result, Err(e) if e.to_string().contains("RSS_OIDC_TRUSTED_KINDS")));
-    }
+            AccessProviderBuildContext::new(
+                CancellationToken::new(),
+                Some(federated_isolation),
+                Box::new(SystemClock),
+            ),
+        )
+        .expect("federated access provider");
 
-    #[test]
-    fn build_provider_from_values_missing_issuer_fails_fast() {
-        // 显式 raw values 缺 RSS_OIDC_ISSUER → fail-fast（错误含变量名，不含值）。
-        // OidcProvider 无 Debug（不能 expect_err），用 matches! 既断言 Err 又锁错误文案。
-        let result = build_provider_from_values(
-            StaticOidcEnvValues {
-                issuer: None,
-                audience: None,
-                trusted_kinds: None,
-                es256: None,
-                hs256: None,
-                hs256_kid: None,
-            },
-            replay_store(),
-            Duration::from_secs(5),
-            clk(),
+        let rss_probe = AccessTokenJwksReadyProbe::rss_access(rss.jwks_readiness());
+        let federated_probe =
+            AccessTokenJwksReadyProbe::federated_access(federated.jwks_readiness());
+        let rss_check = bootstrap::HealthProbe::check(&rss_probe);
+        let federated_check = bootstrap::HealthProbe::check(&federated_probe);
+        assert_eq!(
+            rss_check.name().as_str(),
+            RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME
         );
-        assert!(matches!(&result, Err(e) if e.to_string().contains("RSS_OIDC_ISSUER")));
-    }
+        assert_eq!(
+            federated_check.name().as_str(),
+            FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME
+        );
+        assert_eq!(rss_check.status(), HealthStatus::Healthy);
+        assert_eq!(federated_check.status(), HealthStatus::Healthy);
 
-    #[test]
-    fn build_provider_from_values_missing_audience_fails_fast() {
-        // issuer 存在、audience 缺失 → fail-fast 命中 audience 那行（独立于 issuer 缺失路径）。
-        let result = build_provider_from_values(
-            StaticOidcEnvValues {
-                issuer: Some("https://issuer.test"),
-                audience: None,
-                trusted_kinds: None,
-                es256: None,
-                hs256: None,
-                hs256_kid: None,
-            },
-            replay_store(),
-            Duration::from_secs(5),
-            clk(),
-        );
-        assert!(matches!(&result, Err(e) if e.to_string().contains("RSS_OIDC_AUDIENCE")));
+        rss.managed_resource()
+            .shutdown()
+            .await
+            .expect("shutdown RSS provider");
+        federated
+            .managed_resource()
+            .shutdown()
+            .await
+            .expect("shutdown federated provider");
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn build_provider_from_values_happy_hs256() {
-        let secret = B64.encode([7u8; 32]);
-        build_provider_from_values(
-            StaticOidcEnvValues {
-                issuer: Some("https://issuer.test"),
-                audience: Some("rss"),
-                trusted_kinds: Some("user,admin"),
-                es256: None,
-                hs256: Some(&secret),
-                hs256_kid: Some("cell-a.svc-a"),
-            },
+    fn keyed_rss_static_provider_has_no_service_key_path() {
+        let (_, sec1) = es256_fixture("static-rss-kid");
+        let keys = [KeyedEs256StaticKey {
+            key_id: "static-rss-kid",
+            sec1_b64url: &sec1,
+        }];
+        let provider = rss_access_provider_from_static_config(RssAccessStaticProviderConfig {
+            issuer: "https://rss.issuer.test",
+            audience: "rss-audience",
+            trusted_kinds: &["user"],
+            keys: &keys,
+            clock: Box::new(SystemClock),
+        })
+        .expect("strict RSS static provider");
+        fn require_rss(_: &OidcProvider<RssAccessProfile>) {}
+        require_rss(&provider);
+    }
+
+    #[test]
+    fn service_secret_error_does_not_echo_secret() {
+        let secret = b"private";
+        let error = build_service_token_provider_from_values(
+            "https://service.issuer.test",
+            "service-audience",
+            "service-kid",
+            secret,
             replay_store(),
             Duration::from_secs(5),
-            clk(),
+            Box::new(SystemClock),
         )
-        .expect("issuer + aud + trusted kinds + hs256 key ⇒ 构造成功");
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn operator_provider_consumes_captured_snapshot_without_ambient_fallback() {
-        let secret = B64.encode([7u8; 32]);
-        let snapshot = crate::config::test_snapshot(&[
-            ("RSS_OIDC_ISSUER", "https://issuer.test"),
-            ("RSS_OIDC_AUDIENCE", "rss"),
-            ("RSS_OIDC_TRUSTED_KINDS", "user,admin"),
-            ("RSS_OIDC_HS256_SECRET_B64URL", &secret),
-            ("RSS_OIDC_HS256_KID", "cell-a.svc-a"),
-        ])
-        .expect("capture operator OIDC values");
-
-        let inputs = crate::phase::OperatorRuntimeInputs::new(
-            crate::phase::PreparedRuntimeInputs::new(snapshot, None),
-        );
-        build_operator_provider(
-            inputs.config(),
-            inputs.operator_capability(),
-            replay_store(),
-            Duration::from_secs(5),
-        )
-        .expect("operator provider must consume the captured generation");
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn build_provider_from_values_preserves_combined_static_profile() {
-        use p256::ecdsa::SigningKey;
-
-        let signing_key = SigningKey::from_slice(&[8u8; 32]).expect("signing key");
-        let public_keys_b64 = B64.encode(
-            signing_key
-                .verifying_key()
-                .to_encoded_point(false)
-                .as_bytes(),
-        );
-        let secret = B64.encode([7u8; 32]);
-        build_provider_from_values(
-            StaticOidcEnvValues {
-                issuer: Some("https://issuer.test"),
-                audience: Some("rss"),
-                trusted_kinds: Some("user,admin"),
-                es256: Some(&public_keys_b64),
-                hs256: Some(&secret),
-                hs256_kid: Some("cell-a.svc-a"),
-            },
-            replay_store(),
-            Duration::from_secs(5),
-            clk(),
-        )
-        .expect("combined ES256 JWT + HS256 service-token profile");
-    }
-
-    #[test]
-    fn static_es256_profile_bad_base64_fails_fast() {
-        // ES256 串非 base64url → fail-fast（误配在 setup 期暴露，非运行时静默）。
-        let bad = provider_from_static_config(StaticOidcProviderConfig {
-            issuer: "https://issuer.test",
-            audience: "rss",
-            trusted_kinds_csv: "user",
-            key_profile: StaticOidcKeyProfile::Es256 {
-                public_keys_b64: "!!not-b64!!",
-            },
-            clock: clk(),
-        });
-        assert!(bad.is_err());
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn static_service_token_profile_with_hs256_ok() {
-        let secret = B64.encode([7u8; 32]);
-        let p = provider_from_static_config(StaticOidcProviderConfig {
-            issuer: "https://issuer.test",
-            audience: "rss",
-            trusted_kinds_csv: "user",
-            key_profile: StaticOidcKeyProfile::ServiceTokenHs256(Hs256ServiceTokenProfile {
-                secret_b64: &secret,
-                key_id: "cell-a.svc-a",
-                replay_store: replay_store(),
-                replay_timeout: Duration::from_secs(5),
-            }),
-            clock: clk(),
-        });
-        assert!(
-            p.is_ok(),
-            "有效 HS256 key + issuer/aud + trusted kind ⇒ 构造成功"
-        );
-        let _ = p.expect("ok");
-    }
-
-    #[test]
-    fn static_env_values_hs256_without_kid_fail_fast() {
-        let secret = B64.encode([7u8; 32]);
-        let result = build_provider_from_values(
-            StaticOidcEnvValues {
-                issuer: Some("https://issuer.test"),
-                audience: Some("rss"),
-                trusted_kinds: Some("user"),
-                es256: None,
-                hs256: Some(&secret),
-                hs256_kid: None,
-            },
-            replay_store(),
-            Duration::from_secs(5),
-            clk(),
-        );
-        assert!(
-            matches!(&result, Err(error) if error.to_string().contains("RSS_OIDC_HS256_KID")),
-            "HS256 construction must require a key id"
-        );
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+        assert!(error.contains("invalid service-token key configuration"));
+        assert!(!error.contains("private"));
     }
 }

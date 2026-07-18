@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/ui/service_caller_string_fail.rs:10:40
+   |
+10 |     let _ = issuer.issue_service_token("arbitrary-service", binding);
+   |                    ------------------- ^^^^^^^^^^^^^^^^^^^ expected `ServiceCallerDomain`, found `&str`
+   |                    |
+   |                    arguments to this method are incorrect
+   |
+note: method defined here
+  --> src/mint.rs
+   |
+   |     pub async fn issue_service_token(
+   |                  ^^^^^^^^^^^^^^^^^^^

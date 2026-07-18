@@ -49,7 +49,7 @@
 
 **基础设施抽象（隐藏平台依赖）**
 
-`clock`（强制注入时间，禁直调 stdlib time）、`crypto`（KeyProvider/ValueTransformer 接口）、`auth`（AuthPlan + 5 种 ListenerAuth：None/JWT/MTLS/ServiceToken/JWTFromAssembly）、`healthz`（ProbeName typed）、`webhook`（HMAC-SHA256 签名纯计算）、`circuitbreaker`（三态熔断）、`lifecycle`（ContextCloser/ManagedResource）、`assembly`（FIFO 启动 LIFO 停止编排）、`wrapper`（contract↔可观测性绑定）、`fsm`（转换可达性）、`depgraph`（依赖图模型）、`metautil`（元数据大小限制共享源）、`observability`（Counter/Histogram/Provider 抽象）、`journey`（J-*.yaml 编目）、`verify`（verify 声明完整性检查）、`crypto`、`ctxkeys`（Cell 模型标识 typed key）。
+`clock`（强制注入时间，禁直调 stdlib time）、`crypto`（KeyProvider/ValueTransformer 接口）、`auth`（AuthPlan + 5 种 ListenerAuth：NoAuth/RssAccessToken/FederatedAccessToken/MTLS/ServiceToken）、`healthz`（ProbeName typed）、`webhook`（HMAC-SHA256 签名纯计算）、`circuitbreaker`（三态熔断）、`lifecycle`（ContextCloser/ManagedResource）、`assembly`（FIFO 启动 LIFO 停止编排）、`wrapper`（contract↔可观测性绑定）、`fsm`（转换可达性）、`depgraph`（依赖图模型）、`metautil`（元数据大小限制共享源）、`observability`（Counter/Histogram/Provider 抽象）、`journey`（J-*.yaml 编目）、`verify`（verify 声明完整性检查）、`crypto`、`ctxkeys`（Cell 模型标识 typed key）。
 
 ---
 

@@ -45,12 +45,12 @@
 
 > **决断（#1197，见 research.md R3）**：无 license-clean 成熟 rustls TLS provider + in-app HTTPS 拉 JWKS 是零信任生产规避的少数派 → 采纳 R3 次选**本地文件源 + 外部 agent 刷新**，in-app 零 HTTP/TLS provider。in-app HTTPS 直连外部标准 IdP = follow-up。
 
-- [x] T003.1 [US4] 先写测试（fake JWKS **文件源**，dev-only）：kid=k1 token 验签通过；轮转（重写文件 + reload）后 k2 通过、k1 移除→旧 token fail-closed；源不可读/空/畸形→构造期 fail-fast 拒；刷新失败保留 last-good + `oidc_jwks_ready=false`（degraded）；**无 in-app 网络 transport**（决断改文件源后，「裸 plain-HTTP 端点拒」转化为「零 in-app HTTP/TLS」，deny 守）—— ✅ 全绿
+- [x] T003.1 [US4] 先写测试（fake JWKS **文件源**，dev-only）：kid=k1 token 验签通过；轮转（重写文件 + reload）后 k2 通过、k1 移除→旧 token fail-closed；源不可读/空/畸形→构造期 fail-fast 拒；刷新失败保留 last-good + 对应 profile readiness=false（degraded）；**无 in-app 网络 transport**（决断改文件源后，「裸 plain-HTTP 端点拒」转化为「零 in-app HTTP/TLS」，deny 守）—— ✅ 全绿
 - [x] T003.2 [US4] research.md R3 决断 HTTP/TLS 栈：实测穷举 rustls provider 全生态（ring/aws-lc=OpenSSL 派生禁、rustls-rustcrypto=alpha、graviola=未审计、symcrypt=非纯 Rust）+ 零信任框架 key 分发范式 → 采纳本地文件源（次选，非兜底）；`cargo deny check` 绿（零新增 crypto/TLS provider）
 - [x] T003.2b [US4] 最终选型结论 + 部署约束回写 research.md R3 决断段 + spec.md FR-005/US4（本地文件源；写入方负责 TLS + 完整性；路径经文件权限/Secret RBAC 保护；应用只读 + fail-closed）
 - [x] T003.3 [US4] `jwks.rs`：`JwksKeySource`（本地文件源，经**闭合 `enum KeySource`** 接入，非新 trait——规避 trait_variant 白名单）：读 JWKS 文档（RFC 7517/7518，EC P-256→ES256 / oct→HS256）+ 按 kid 缓存 + 后台 poll 轮转 + fail-closed；`jws.rs` 加 kid 解析、`verify.rs` 按 kid 选候选；`lib.rs` 接入（`OidcProvider::new` 签名不变）
 - [x] T003.4 [US4] `OidcProvider::shutdown` 级联 `KeySource::shutdown` → `JwksKeySource` 停后台 poll 任务 + await 收敛（`ManagedResource` 真实关闭，对齐 ShutdownStack）；覆盖率 ≥80%；`nextest`/`clippy`/`fmt`/`deny`/`layer-deps`/`xtask verify --fast` 绿
-- [ ] T003.5 [US4] readiness probe `oidc_jwks_ready`（依赖可用性 probe，带 `_ready` 后缀，遵 observability.md §Readyz Probe）：**本 adapter 切片仅暴露 `JwksKeySource::is_ready()` 状态 + 刷新失败→degraded 测试**；probe **注册点** + verbose readyz 裁剪敏感字段 + tracing/metric 失败计数（评审 F6）= 组合根接线，下放 **T004**（probe 经 Domain::init/Registry 注册）
+- [ ] T003.5 [US4] profile readiness probes `rss_access_token_jwks_ready` / `federated_access_token_jwks_ready`（依赖可用性 probe，带 `_ready` 后缀，遵 observability.md §Readyz Probe）：**本 adapter 切片仅暴露 `JwksKeySource::is_ready()` 状态 + 刷新失败→degraded 测试**；probe **注册点** + verbose readyz 裁剪敏感字段 + tracing/metric 失败计数（评审 F6）= 组合根接线，下放 **T004**（probe 经 Domain::init/Registry 注册）
   - **T004 接线时补**（#254 review 派生，避免本切片速增未消费字段 YAGNI）：① `consecutive_failures` 累计计数（success 清零/failure 递增）供 verbose readyz 分级告警「刚降级 vs 连续失败数小时」；② poll 任务 panic watchdog（正常运行期 task 意外死亡时 `is_ready()` 不自动转 false，需 watch handle 状态）。本切片已为刷新失败记 `error_kind` 闭值标签（运维分流）。
 
 ### T004 [US3] PR-C · 组合根注入 + verify-bridge + 埋点 + e2e（启用生产认证·安全同批）

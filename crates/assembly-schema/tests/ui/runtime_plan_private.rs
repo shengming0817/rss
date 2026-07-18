@@ -20,7 +20,7 @@ fn forge(
         listener_plans: vec![ListenerPlan {
             id: "primary-main".to_owned(),
             kind: assembly_schema::AssemblyListenerKind::Primary,
-            auth: ListenerAuth::Jwt,
+            auth: ListenerAuth::RssAccessToken,
             domains: vec![AssemblyDomain::Identity],
         }],
         domain_plans: vec![DomainPlan {

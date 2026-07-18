@@ -31,7 +31,7 @@ impl diport::Clock for SystemClock {
 pub struct SharedRuntimeDeps {
     pg: PgRuntimeHandle,
     signer: Arc<vault::VaultSigner>,
-    _pdp: Arc<oidc::OidcProvider>,
+    _pdp: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
     audit_chain_key: MacKey,
 }
 
@@ -40,7 +40,7 @@ impl SharedRuntimeDeps {
     pub fn new(
         pg: PgRuntimeHandle,
         signer: Arc<vault::VaultSigner>,
-        pdp: Arc<oidc::OidcProvider>,
+        pdp: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
         audit_chain_key: MacKey,
     ) -> Self {
         require_pdp(pdp.as_ref());
@@ -89,14 +89,13 @@ mod domains {
                 deps.pg.for_domain(),
                 Arc::clone(&deps.signer),
                 Arc::new(SystemClock),
-                authn::JwtIssuerConfig {
-                    key: diport::KeyId::new(DEMO_JWT_KEY_ID),
-                    alg: authn::JwtAlg::Es256,
-                    purpose: diport::SigningPurpose::new("auth.jwt.access"),
-                    issuer: DEMO_JWT_ISSUER.to_owned(),
-                    audience: DEMO_JWT_AUDIENCE.to_owned(),
-                    ttl: DEMO_JWT_ACCESS_TTL,
-                },
+                authn::JwtIssuerConfig::rss_access(
+                    diport::KeyId::new(DEMO_JWT_KEY_ID),
+                    diport::SigningPurpose::new("auth.jwt.access"),
+                    DEMO_JWT_ISSUER,
+                    DEMO_JWT_AUDIENCE,
+                    DEMO_JWT_ACCESS_TTL,
+                ),
                 DEMO_SESSION_TTL,
                 DEMO_REFRESH_TTL,
                 Arc::new(blocklist),

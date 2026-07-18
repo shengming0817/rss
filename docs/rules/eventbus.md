@@ -478,7 +478,8 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
   `redrive-outbox` 与 `resolve-expired-outbox`。所有命令必须带 `--operator-service-token`、`--operator-tenant`、`--tenant`；授权由
   service token PDP 验证（`issuer/audience/已验证 kid/jti` 经长度分帧 SHA-256 成固定 digest，再由
   Postgres async replay store 单语句原子消费；raw 标识不落库，跨 CLI 进程防重放；存储失败 fail-closed）+
-  `RSS_DLQ_OPERATOR_GRANTS=subject|action|tenant` 精确 grant 共同决定。`list` 支持 `--source` / `--domain` /
+  typed `ServiceCallerDomain::MaintenanceOperator`（`sub=rss-maintenance-operator`）认证 +
+  `RSS_DLQ_OPERATOR_GRANTS=action|tenant` 精确 grant 共同决定。caller 不得由 grant 字符串选择。`list` 支持 `--source` / `--domain` /
   `--contract-id` / `--cursor` 精确收窄，filter 集合覆盖 `OutboxPartitionBlocked{tenant_id,domain,contract_id}`
   告警标签。审计 kind 固定为
   `dlq.maintenance`，action 固定为 `dlq.<action>.start|finish`。v1 不提供 destructive `skip` 或旧命令别名；

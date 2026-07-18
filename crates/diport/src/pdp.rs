@@ -1,9 +1,10 @@
-//! `Pdp` —— 验签 / 凭据决策 provider DI port（可替换：prod JWKS+crypto / test in-mem）。
+//! `Pdp` —— profile-typed 验签 / 凭据决策 provider DI port。
 //!
-//! 信任边界：authn 的 `verify→mint` bridge 经本 port 完成签名 / exp / MAC 校验，验签成功后才 seal 出
-//! `VerifiedJwt` / `VerifiedServiceToken`（`AUTHN-VERIFIEDJWT-SEAL-01` 的**生产端**闭环，#1158）。
-//! ADR-006 §3：保持内置 typed authplan + 预留本 `Pdp` 接缝；真实 crypto verifier adapter 留 #1109 W。
-//! httpserve 生产挂载亦留 #1109（ADR-006 §5 验签空窗——本 PR 不接线生产可达认证路径）。
+//! [`TokenProfile`] 是 listener 信任边界固定的穷尽闭值集；sealed [`TokenProfileMarker`] 将同一策略带入
+//! typed issuer 与 verifier。生产 runtime 以 exhaustive profile binding 同时选择
+//! `OidcProvider<P>`、required auth scheme 与 authn verification funnel。Provider 在解析 token 前先比较
+//! 可信 [`RawCredential::profile`] 与 marker，并在签名/MAC、时间窗、issuer/audience 以及 profile
+//! claims 全部校验成功后才构造 [`VerifiedClaims`]。authn 随后才能 seal 已验证 token 并派生主体。
 
 use dynosaur::dynosaur;
 use sha2::{Digest as _, Sha256};
@@ -37,8 +38,8 @@ pub enum PdpError {
     #[error("credential expired")]
     Expired,
     /// 凭据来源 / 路径不受信（**非**结构损坏）：`iss` 不匹配配置签发者；`aud` 不含配置受众；
-    /// alg-scheme 路径混淆（JWT 路径配 HS256 token / service-token 路径配 ES256 token，OIDC-ALG-KEYPATH-01）；
-    /// 未知 credential scheme。消费侧 → 401 `invalid_token`（verify 层纯认证，不发 403）。
+    /// token profile / algorithm 路径混淆（access profile 配 HS256 token / service-token profile 配
+    /// ES256 token，OIDC-ALG-KEYPATH-01）。消费侧 → 401 `invalid_token`（verify 层纯认证，不发 403）。
     #[error("credential issuer untrusted")]
     Untrusted,
     /// A required authentication provider could not complete the verification operation.
@@ -76,7 +77,7 @@ pub enum ServiceTokenReplayKeyError {
 /// INVARIANT: AUTHN-SERVICE-TOKEN-REPLAY-KEY-01 { level = "Hard", exec = "native-compile", source = "code", native = "private [u8; 32] field and named verified scope derivation" } — raw issuer/audience/kid/jti values cannot enter the replay store API. The v1 digest frames each
 /// exact string as `u64::to_be_bytes(len) || bytes` beneath a fixed domain tag.
 #[derive(Clone)]
-pub struct ServiceTokenReplayKey([u8; 32]);
+pub struct ServiceTokenReplayKey(sha2::digest::Output<Sha256>);
 
 impl ServiceTokenReplayKey {
     /// Derive the canonical SHA-256 replay key from verified scope components.
@@ -89,12 +90,12 @@ impl ServiceTokenReplayKey {
             digest.update(length.to_be_bytes());
             digest.update(component.as_bytes());
         }
-        Ok(Self(digest.finalize().into()))
+        Ok(Self(digest.finalize()))
     }
 
     /// Borrow the fixed-width digest for a storage adapter.
     pub fn digest_bytes(&self) -> &[u8; 32] {
-        &self.0
+        self.0.as_ref()
     }
 }
 
@@ -339,14 +340,193 @@ mod replay_key_tests {
     }
 }
 
-/// 凭据 scheme 标签——adapter 据此选验签路径（JWT 签名 vs service-token MAC）。闭值集，`#[non_exhaustive]`。
+/// Token verification profile fixed by the listener trust boundary.
+///
+/// This enum is intentionally exhaustive: every verifier, runtime binding, and policy consumer
+/// must handle all profiles explicitly when a new profile is introduced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum CredentialScheme {
-    /// 标准 JWT（`header.payload.sig`）。
-    Jwt,
-    /// 服务间 access token。
+pub enum TokenProfile {
+    /// RSS-issued user/device/admin access token.
+    RssAccess,
+    /// Access token issued by an independently trusted federation.
+    FederatedAccess,
+    /// RSS service-to-service token bound to the canonical tenant header.
     ServiceToken,
+}
+
+/// JOSE algorithm fixed by a [`TokenProfile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenAlgorithm {
+    /// ECDSA using P-256 and SHA-256.
+    Es256,
+    /// HMAC using SHA-256.
+    Hs256,
+}
+
+impl TokenAlgorithm {
+    /// Exact, case-sensitive JOSE `alg` value.
+    pub const fn jose_name(self) -> &'static str {
+        match self {
+            Self::Es256 => "ES256",
+            Self::Hs256 => "HS256",
+        }
+    }
+}
+
+/// Immutable protocol policy for one token profile.
+///
+/// All fields stay private so callers cannot synthesize a weaker policy. The value is obtained
+/// only from [`TokenProfile::policy`] or [`TokenProfileMarker::policy`]. RSS and federated access
+/// require exact `typ=at+jwt`, `token_use=access`, ES256, and at most 900 seconds; service tokens
+/// require exact `typ=rss-service+jwt`, `token_use=service`, HS256, and at most 300 seconds.
+/// Encoded token/header/payload/signature limits are inclusive and shared by all profiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenPolicy {
+    jose_typ: &'static str,
+    token_use: &'static str,
+    algorithm: TokenAlgorithm,
+    maximum_lifetime: Duration,
+    maximum_token_length: usize,
+    maximum_header_length: usize,
+    maximum_payload_length: usize,
+    maximum_signature_length: usize,
+}
+
+impl TokenPolicy {
+    /// Exact, case-sensitive protected-header `typ`.
+    pub const fn jose_typ(self) -> &'static str {
+        self.jose_typ
+    }
+
+    /// Exact, case-sensitive private `token_use` claim.
+    pub const fn token_use(self) -> &'static str {
+        self.token_use
+    }
+
+    /// Only accepted JOSE algorithm.
+    pub const fn algorithm(self) -> TokenAlgorithm {
+        self.algorithm
+    }
+
+    /// Maximum allowed `exp - iat` duration.
+    pub const fn maximum_lifetime(self) -> Duration {
+        self.maximum_lifetime
+    }
+
+    /// Maximum encoded token length, in bytes.
+    pub const fn maximum_token_length(self) -> usize {
+        self.maximum_token_length
+    }
+
+    /// Maximum encoded protected-header segment length, in bytes.
+    pub const fn maximum_header_length(self) -> usize {
+        self.maximum_header_length
+    }
+
+    /// Maximum encoded payload segment length, in bytes.
+    pub const fn maximum_payload_length(self) -> usize {
+        self.maximum_payload_length
+    }
+
+    /// Maximum encoded signature segment length, in bytes.
+    pub const fn maximum_signature_length(self) -> usize {
+        self.maximum_signature_length
+    }
+}
+
+const MAXIMUM_TOKEN_LENGTH: usize = 16 * 1024;
+const MAXIMUM_HEADER_LENGTH: usize = 4 * 1024;
+const MAXIMUM_PAYLOAD_LENGTH: usize = 12 * 1024;
+const MAXIMUM_SIGNATURE_LENGTH: usize = 1024;
+
+const RSS_ACCESS_POLICY: TokenPolicy = TokenPolicy {
+    jose_typ: "at+jwt",
+    token_use: "access",
+    algorithm: TokenAlgorithm::Es256,
+    maximum_lifetime: Duration::from_secs(900),
+    maximum_token_length: MAXIMUM_TOKEN_LENGTH,
+    maximum_header_length: MAXIMUM_HEADER_LENGTH,
+    maximum_payload_length: MAXIMUM_PAYLOAD_LENGTH,
+    maximum_signature_length: MAXIMUM_SIGNATURE_LENGTH,
+};
+
+const FEDERATED_ACCESS_POLICY: TokenPolicy = TokenPolicy {
+    jose_typ: "at+jwt",
+    token_use: "access",
+    algorithm: TokenAlgorithm::Es256,
+    maximum_lifetime: Duration::from_secs(900),
+    maximum_token_length: MAXIMUM_TOKEN_LENGTH,
+    maximum_header_length: MAXIMUM_HEADER_LENGTH,
+    maximum_payload_length: MAXIMUM_PAYLOAD_LENGTH,
+    maximum_signature_length: MAXIMUM_SIGNATURE_LENGTH,
+};
+
+const SERVICE_TOKEN_POLICY: TokenPolicy = TokenPolicy {
+    jose_typ: "rss-service+jwt",
+    token_use: "service",
+    algorithm: TokenAlgorithm::Hs256,
+    maximum_lifetime: Duration::from_secs(300),
+    maximum_token_length: MAXIMUM_TOKEN_LENGTH,
+    maximum_header_length: MAXIMUM_HEADER_LENGTH,
+    maximum_payload_length: MAXIMUM_PAYLOAD_LENGTH,
+    maximum_signature_length: MAXIMUM_SIGNATURE_LENGTH,
+};
+
+impl TokenProfile {
+    /// Return the immutable policy fixed for this profile.
+    pub const fn policy(self) -> TokenPolicy {
+        match self {
+            Self::RssAccess => RSS_ACCESS_POLICY,
+            Self::FederatedAccess => FEDERATED_ACCESS_POLICY,
+            Self::ServiceToken => SERVICE_TOKEN_POLICY,
+        }
+    }
+}
+
+/// Marker for RSS-issued access tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RssAccessProfile {}
+
+/// Marker for independently federated access tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FederatedAccessProfile {}
+
+/// Marker for RSS service-to-service tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceTokenProfile {}
+
+mod token_profile_sealed {
+    pub trait Sealed {}
+
+    impl Sealed for super::RssAccessProfile {}
+    impl Sealed for super::FederatedAccessProfile {}
+    impl Sealed for super::ServiceTokenProfile {}
+}
+
+/// Sealed type-level token profile.
+///
+/// External crates may use the three marker types as generic arguments but cannot implement this
+/// trait for another type, so a verifier or issuer cannot be instantiated with an invented policy.
+pub trait TokenProfileMarker: token_profile_sealed::Sealed + Send + Sync + Copy + 'static {
+    /// Runtime identity of this type-level profile.
+    const PROFILE: TokenProfile;
+
+    /// Immutable protocol policy of this type-level profile.
+    fn policy() -> TokenPolicy {
+        Self::PROFILE.policy()
+    }
+}
+
+impl TokenProfileMarker for RssAccessProfile {
+    const PROFILE: TokenProfile = TokenProfile::RssAccess;
+}
+
+impl TokenProfileMarker for FederatedAccessProfile {
+    const PROFILE: TokenProfile = TokenProfile::FederatedAccess;
+}
+
+impl TokenProfileMarker for ServiceTokenProfile {
+    const PROFILE: TokenProfile = TokenProfile::ServiceToken;
 }
 
 /// service-token 对 `X-Tenant-ID` header 的 MAC 绑定（闭合类型，非通用 signed-header bag）。
@@ -387,12 +567,12 @@ pub fn service_token_mac_input(
     input
 }
 
-/// 待验签原始凭据（零信任边界）：newtype funnel（私有字段，命名构造入口）。携带 scheme 标签 + 原始
-/// token 串——adapter 据 scheme 选验签路径。本层**不 parse、不验签**，只受控装箱传给 provider。
+/// 待验签原始凭据（零信任边界）：newtype funnel（私有字段，命名构造入口）。携带由可信 listener
+/// 固定的 profile + 原始 token 串。本层**不 parse、不验签**，只受控装箱传给 provider。
 #[derive(Clone, secure::Redact)]
 pub struct RawCredential {
     #[redact(sensitivity = public)]
-    scheme: CredentialScheme,
+    profile: TokenProfile,
     #[redact(sensitivity = secret)]
     token: String,
     #[redact(sensitivity = secret)]
@@ -400,31 +580,42 @@ pub struct RawCredential {
 }
 
 impl RawCredential {
-    /// 由原始 JWT 串构造待验签凭据。
-    pub fn jwt(raw: impl Into<String>) -> Self {
+    /// 由可信 RSS access listener 的原始 token 构造凭据。
+    pub fn rss_access(raw: impl Into<String>) -> Self {
         Self {
-            scheme: CredentialScheme::Jwt,
+            profile: TokenProfile::RssAccess,
             token: raw.into(),
             service_token_tenant: None,
         }
     }
+
+    /// 由可信 federated access listener 的原始 token 构造凭据。
+    pub fn federated_access(raw: impl Into<String>) -> Self {
+        Self {
+            profile: TokenProfile::FederatedAccess,
+            token: raw.into(),
+            service_token_tenant: None,
+        }
+    }
+
     /// 由原始 service-token 串构造待验签凭据。
     pub fn service_token(raw: impl Into<String>, binding: ServiceTokenTenantBinding) -> Self {
         Self {
-            scheme: CredentialScheme::ServiceToken,
+            profile: TokenProfile::ServiceToken,
             token: raw.into(),
             service_token_tenant: Some(binding),
         }
     }
-    /// 凭据 scheme（adapter 选验签路径）。
-    pub fn scheme(&self) -> CredentialScheme {
-        self.scheme
+
+    /// 由可信 listener 固定的 token profile。
+    pub fn profile(&self) -> TokenProfile {
+        self.profile
     }
     /// 借出原始 token 串（adapter 验签用）。
     pub fn token(&self) -> &str {
         &self.token
     }
-    /// service-token 绑定的 canonical tenant header；JWT 路径恒为 `None`。
+    /// service-token 绑定的 canonical tenant header；access profiles 恒为 `None`。
     pub fn service_token_tenant(&self) -> Option<&ServiceTokenTenantBinding> {
         self.service_token_tenant.as_ref()
     }
@@ -436,10 +627,11 @@ impl RawCredential {
 /// authn 据此 mint `Principal`（验签 = 信任原点，非 authn 旁路 re-parse）。
 ///
 /// PII 边界：`subject` / `tenant` / `kind` 全部经 `#[derive(secure::Redact)]` 脱敏
-/// （DIPORT-DTO-PII-DEBUG-REDACT-01）。
-/// `kind` 是 adapter 透传的**未类型化、未校验** `Option<String>`——观测面不信任未校验输入，故一律脱敏，
-/// 杜绝 adapter 误塞 PII（email / 设备指纹）经 `kind` 进日志。`kind`→`PrincipalKind` 的**策略**归 authn
-/// （非本层，保 ADR-005 category line）。字段集随消费域细化（`scopes` 等待 authz 消费方落地再加，pre-GA 可演进）。
+/// （DIPORT-DTO-PII-DEBUG-REDACT-01）。Production verifier construction follows full
+/// profile-specific validation: access `kind` is trusted and tenant semantics are enforced;
+/// service `kind=service`, non-empty `jti`, forbidden tenant claim, and tenant-bound MAC are
+/// enforced before this DTO is returned. `kind` remains an untyped string at this port boundary;
+/// authn owns its closed mapping to `PrincipalKind`.
 #[derive(Clone, secure::Redact)]
 pub struct VerifiedClaims {
     #[redact(sensitivity = pii)]
@@ -489,9 +681,11 @@ impl VerifiedClaims {
 // reason: base trait 的 Send+Sync 约束共享 provider；trait-variant 的 Send 只约束 async future，
 // 避免无必要的 Future: Sync。dynosaur `DynPdp` 承载运行期可替换 provider（#1828）。
 pub trait PdpLocal: Send + Sync {
-    /// 验签原始凭据（签名 / exp / MAC），成功返回可信 [`VerifiedClaims`]；失败 fail-closed（[`PdpError`]）。
+    /// 验签原始凭据，成功返回可信 [`VerifiedClaims`]；失败 fail-closed（[`PdpError`]）。
     ///
-    /// I/O：生产实现可能查 JWKS / 调外置引擎（async）。本 trait 只定义接缝，真实 crypto adapter 留 #1109 W。
+    /// 生产 `OidcProvider<P>` 实现先做 profile 与输入边界检查，再做 exact key selection、
+    /// 签名/tenant-bound MAC 和完整 profile claim 校验。JWKS key snapshot 与 service-token durable replay
+    /// consume 使该接缝保持 async。
     async fn verify(&self, raw: &RawCredential) -> Result<VerifiedClaims, PdpError>;
 }
 
@@ -517,9 +711,76 @@ mod smoke {
 
         let pdp: Arc<DynPdp> = DynPdp::new_arc(NoopPdp);
         assert_send_sync(&pdp);
-        let raw = RawCredential::jwt("h.e.s");
+        let raw = RawCredential::rss_access("h.e.s");
         let joined = tokio::spawn(async move { pdp.verify(&raw).await.is_ok() }).await;
         assert!(matches!(joined, Ok(true)));
+    }
+}
+
+#[cfg(test)]
+mod token_profile_tests {
+    use super::{
+        FederatedAccessProfile, RssAccessProfile, ServiceTokenProfile, TokenAlgorithm,
+        TokenProfile, TokenProfileMarker,
+    };
+
+    #[test]
+    fn profiles_have_exact_protocol_policies() {
+        let cases = [
+            (
+                TokenProfile::RssAccess,
+                "at+jwt",
+                "access",
+                TokenAlgorithm::Es256,
+                900,
+            ),
+            (
+                TokenProfile::FederatedAccess,
+                "at+jwt",
+                "access",
+                TokenAlgorithm::Es256,
+                900,
+            ),
+            (
+                TokenProfile::ServiceToken,
+                "rss-service+jwt",
+                "service",
+                TokenAlgorithm::Hs256,
+                300,
+            ),
+        ];
+
+        for (profile, jose_typ, token_use, algorithm, maximum_lifetime_secs) in cases {
+            let policy = profile.policy();
+            assert_eq!(policy.jose_typ(), jose_typ);
+            assert_eq!(policy.token_use(), token_use);
+            assert_eq!(policy.algorithm(), algorithm);
+            assert_eq!(
+                policy.maximum_lifetime(),
+                std::time::Duration::from_secs(maximum_lifetime_secs)
+            );
+            assert_eq!(policy.maximum_token_length(), 16 * 1024);
+            assert_eq!(policy.maximum_header_length(), 4 * 1024);
+            assert_eq!(policy.maximum_payload_length(), 12 * 1024);
+            assert_eq!(policy.maximum_signature_length(), 1024);
+        }
+    }
+
+    #[test]
+    fn marker_profiles_resolve_to_the_closed_runtime_profiles() {
+        assert_eq!(RssAccessProfile::PROFILE, TokenProfile::RssAccess);
+        assert_eq!(
+            FederatedAccessProfile::PROFILE,
+            TokenProfile::FederatedAccess
+        );
+        assert_eq!(ServiceTokenProfile::PROFILE, TokenProfile::ServiceToken);
+        assert_eq!(RssAccessProfile::policy(), TokenProfile::RssAccess.policy());
+    }
+
+    #[test]
+    fn jose_algorithm_names_are_exact_and_case_sensitive() {
+        assert_eq!(TokenAlgorithm::Es256.jose_name(), "ES256");
+        assert_eq!(TokenAlgorithm::Hs256.jose_name(), "HS256");
     }
 }
 
@@ -527,7 +788,7 @@ mod smoke {
 mod pii_debug {
     //! `RawCredential.token` / `VerifiedClaims.subject·tenant` Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（同 `signer.rs` 的 `pii_debug`）。
-    use super::{CredentialScheme, RawCredential, ServiceTokenTenantBinding, VerifiedClaims};
+    use super::{RawCredential, ServiceTokenTenantBinding, TokenProfile, VerifiedClaims};
     use vocab::tenant::TenantId;
 
     fn _assert_redact<T: secure::Redact>() {}
@@ -541,12 +802,22 @@ mod pii_debug {
 
     #[test]
     fn raw_credential_debug_redacts_token() {
-        let cred = RawCredential::jwt("secret.jwt.token");
-        assert_eq!(cred.scheme(), CredentialScheme::Jwt);
+        let cred = RawCredential::rss_access("secret.jwt.token");
+        assert_eq!(cred.profile(), TokenProfile::RssAccess);
         let dbg = format!("{cred:?}");
         assert!(!dbg.contains("secret.jwt.token"), "原始 token 泄漏: {dbg}");
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
-        assert!(dbg.contains("Jwt"), "scheme 应可见: {dbg}");
+        assert!(dbg.contains("RssAccess"), "profile 应可见: {dbg}");
+    }
+
+    #[test]
+    fn access_constructors_fix_distinct_profiles_without_tenant_binding() {
+        let rss = RawCredential::rss_access("rss.token");
+        let federated = RawCredential::federated_access("federated.token");
+        assert_eq!(rss.profile(), TokenProfile::RssAccess);
+        assert_eq!(federated.profile(), TokenProfile::FederatedAccess);
+        assert!(rss.service_token_tenant().is_none());
+        assert!(federated.service_token_tenant().is_none());
     }
 
     #[test]
@@ -560,7 +831,7 @@ mod pii_debug {
             "f47ac10b-58cc-4372-a567-0e02b2c3d479"
         );
         let cred = RawCredential::service_token("secret.service.token", binding.clone());
-        assert_eq!(cred.scheme(), CredentialScheme::ServiceToken);
+        assert_eq!(cred.profile(), TokenProfile::ServiceToken);
         assert_eq!(
             cred.service_token_tenant()
                 .expect("service-token has tenant binding")

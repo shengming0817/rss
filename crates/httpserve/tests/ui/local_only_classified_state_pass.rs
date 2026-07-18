@@ -38,9 +38,11 @@ fn main() {
         rb.mount(endpoint)
     })
     .unwrap();
-    let plan =
-        primitives::AuthPlan::new(primitives::ListenerKind::Admin, primitives::AuthScheme::Jwt)
-            .unwrap();
+    let plan = primitives::AuthPlan::new(
+        primitives::ListenerKind::Admin,
+        primitives::AuthScheme::RssAccessToken,
+    )
+    .unwrap();
     let _make = httpserve::finalize_auth(routes, plan)
         .unwrap()
         .into_make_service(httpserve::ServerRequestBudget::for_test());

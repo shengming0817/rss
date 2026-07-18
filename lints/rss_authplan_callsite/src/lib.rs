@@ -67,7 +67,7 @@ dylint_linting::declare_late_lint! {
     /// ### Example
     /// ```ignore
     /// // 域 crate（非组合根）：
-    /// let plan = primitives::authplan::AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt); // 触发
+    /// let plan = primitives::authplan::AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken); // 触发
     /// ```
     /// Use instead: 在 assembly / bin crate 的组合根中构造 AuthPlan，经 bootstrap option 注入其它 crate。
     pub RSS_AUTHPLAN_CALLSITE,

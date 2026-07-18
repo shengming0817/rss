@@ -46,10 +46,9 @@ pub(crate) use secret_config::EnvSecret;
 pub use distributed_runtime::DistributedRuntimeDeps;
 pub use domains::settings::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
 pub use infra::oidc::{
-    Hs256ServiceTokenProfile, StaticOidcKeyProfile, StaticOidcProviderConfig,
-    provider_from_static_config,
+    KeyedEs256StaticKey, RssAccessStaticProviderConfig, rss_access_provider_from_static_config,
 };
-pub use infra::vault::{is_oidc_jwks_export_command, run_oidc_jwks_export_command};
+pub use infra::vault::{is_rss_access_jwks_export_command, run_rss_access_jwks_export_command};
 pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 
 /// Explicit integration-only seams for exercising typed domain wiring with hermetic providers.
@@ -163,8 +162,9 @@ pub use phase::{OperatorRuntimeInputs, ServingRuntimeInputs};
 
 use bootstrap::DomainModuleResult;
 use infra::oidc::{
-    OIDC_JWKS_READY_PROBE_NAME, OidcJwksReadyProbe, build_operator_provider,
-    prepare_runtime_oidc_provider,
+    AccessTokenJwksReadyProbe, FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
+    RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME, RuntimeAccessProvider, RuntimeServiceTokenProvider,
+    build_federated_access_provider, build_rss_access_provider, build_service_token_provider,
 };
 use infra::pg::{
     PgRuntimeConfig, PgRuntimeConfigParts, build_pg_audit_maintenance_config,
@@ -184,9 +184,9 @@ use phase::{PreparedRuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
 #[cfg(test)]
 use config::DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV;
 use config::{
-    RuntimeConfigSnapshot, RuntimeServingConfig, RuntimeServingConfigParts, ServingConfigMapper,
-    SnapshotConfig, domain_transport_mtls_allow_set_env, domain_transport_required_domains_from,
-    domain_transport_url_env,
+    RuntimeConfigSnapshot, RuntimeServingConfig, RuntimeServingConfigParts, ServiceTokenConfig,
+    ServingConfigMapper, SnapshotConfig, domain_transport_mtls_allow_set_env,
+    domain_transport_required_domains_from, domain_transport_url_env,
 };
 
 use std::collections::BTreeMap;
@@ -205,13 +205,13 @@ use diport::{
     DynKeyProvider, DynManagedResource, KeyProvider, ManagedResource, RedactedBytes, ShutdownError,
 };
 use eventexec::{
-    DeadLetterId, DlqCursor, DlqEntrySummary, DlqInspectRequest, DlqInspectTarget, DlqListQuery,
-    DlqRedriveOutcome, DlqRedriveRequest, DlqReplayRequest, DlqStore, OperatorDlqCapability,
-    OperatorReconcileCapability, OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome,
-    OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket, ProjectionHarness, ProjectionId,
-    ProjectionReplayProjector, ProjectionSelector, ProjectionStop, ProjectionTargetRegistry,
-    ProjectionVersion, ReconcileOperatorStore, ReconcileTargetSummary, VerifiedOperatorSubject,
-    projection_runner_once,
+    AuthorizedDlqOperatorReceipt, DeadLetterId, DlqCursor, DlqEntrySummary, DlqInspectRequest,
+    DlqInspectTarget, DlqListQuery, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayRequest,
+    DlqStore, OperatorDlqCapability, OperatorReconcileCapability, OutboxExpiredResolutionKind,
+    OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket,
+    ProjectionHarness, ProjectionId, ProjectionReplayProjector, ProjectionSelector, ProjectionStop,
+    ProjectionTargetRegistry, ProjectionVersion, ReconcileOperatorStore, ReconcileTargetSummary,
+    VerifiedOperatorSubject, projection_runner_once,
 };
 use postgres::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
@@ -598,6 +598,17 @@ const SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME: &str = "service-token-replay-swe
 const SERVICE_TOKEN_REPLAY_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const SERVICE_TOKEN_REPLAY_STORE_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVICE_TOKEN_REPLAY_SWEEP_TIMEOUT: Duration = Duration::from_secs(25);
+
+fn build_operator_service_token_provider(
+    config: SnapshotConfig<'_>,
+    _operator: OperatorRuntimeCapability<'_>,
+    replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+) -> anyhow::Result<Arc<oidc::OidcProvider<diport::ServiceTokenProfile>>> {
+    let config =
+        ServiceTokenConfig::from_snapshot(config).context("parse service-token configuration")?;
+    build_service_token_provider(&config, replay_store, SERVICE_TOKEN_REPLAY_STORE_TIMEOUT)
+        .map(|runtime| runtime.provider())
+}
 
 /// `rss` binary 是否请求 PostgreSQL operator namespace；具体 subcommand 由 runner 精确校验。
 #[must_use]
@@ -1034,7 +1045,13 @@ async fn verified_service_maintenance_operator_subject(
         principal.kind() == vocab::PrincipalKind::Service,
         "{maintenance_context} operator must be a service principal"
     );
-    Ok(principal.audit_subject().to_owned())
+    anyhow::ensure!(
+        principal.service_caller_domain() == Some(vocab::ServiceCallerDomain::MaintenanceOperator),
+        "{maintenance_context} operator must be the maintenance operator"
+    );
+    Ok(vocab::ServiceCallerDomain::MaintenanceOperator
+        .as_str()
+        .to_owned())
 }
 
 async fn verified_projection_maintenance_operator_subject(
@@ -1052,6 +1069,10 @@ async fn verified_projection_maintenance_operator_subject(
     anyhow::ensure!(
         principal.kind() == vocab::PrincipalKind::Service,
         "projection maintenance operator must be a service principal"
+    );
+    anyhow::ensure!(
+        principal.service_caller_domain() == Some(vocab::ServiceCallerDomain::MaintenanceOperator),
+        "projection maintenance operator must be the maintenance operator"
     );
     Ok(principal)
 }
@@ -1087,25 +1108,21 @@ fn parse_projection_maintenance_grants(
         );
         let parts: Vec<&str> = entry.split('|').map(str::trim).collect();
         anyhow::ensure!(
-            parts.len() == 4,
-            "{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} entries must be subject|action|tenant|projection"
+            parts.len() == 3,
+            "{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} entries must be action|tenant|projection"
         );
-        let [subject, action, tenant, projection] = parts.as_slice() else {
+        let [action, tenant, projection] = parts.as_slice() else {
             unreachable!("len checked");
         };
-        anyhow::ensure!(
-            !subject.is_empty(),
-            "{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} subject must be non-empty"
-        );
         let action = ProjectionMaintenanceAction::parse(action)?.authorized_action();
         let tenant = vocab::TenantId::parse(tenant).with_context(|| {
             format!("{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
         })?;
         let projection = ProjectionId::parse(projection).with_context(|| {
                 format!("{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} projection must be canonical: {projection}")
-            })?;
+        })?;
         grants.push(authn::ProjectionMaintenanceGrant::new(
-            *subject,
+            vocab::ServiceCallerDomain::MaintenanceOperator,
             action,
             tenant,
             projection.as_str(),
@@ -1126,13 +1143,12 @@ fn load_projection_maintenance_grants_from_command_env(
     parse_projection_maintenance_grants(&raw)
 }
 
-async fn projection_maintenance_operator_receipt(
+async fn authenticate_projection_maintenance_operator(
     pg: &PgMaintenanceDeps,
     operator_pdp: &diport::DynPdp<'_>,
     parsed: &ProjectionCliArgs,
     resource_id: &str,
-    operator: OperatorRuntimeCapability<'_>,
-) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
+) -> anyhow::Result<authn::Principal> {
     let principal = match verified_projection_maintenance_operator_subject(
         &parsed.operator_service_token,
         parsed.operator_tenant,
@@ -1155,6 +1171,16 @@ async fn projection_maintenance_operator_receipt(
             return Err(err);
         }
     };
+    Ok(principal)
+}
+
+async fn projection_maintenance_operator_receipt(
+    pg: &PgMaintenanceDeps,
+    parsed: &ProjectionCliArgs,
+    resource_id: &str,
+    principal: authn::Principal,
+    operator: OperatorRuntimeCapability<'_>,
+) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
     let subject = principal.audit_subject().to_owned();
     let grants = match load_projection_maintenance_grants_from_command_env(operator) {
         Ok(grants) => grants,
@@ -1564,11 +1590,10 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
         parsed: &ProjectionCliArgs,
         resource_id: &str,
     ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
-        let provider = match build_operator_provider(
+        let provider = match build_operator_service_token_provider(
             self.config,
             self.operator,
             session.service_token_replay_store(),
-            SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
         ) {
             Ok(provider) => provider,
             Err(err) => {
@@ -1585,11 +1610,18 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
                 return Err(err).context("projection maintenance operator verifier");
             }
         };
-        projection_maintenance_operator_receipt(
+        let principal = authenticate_projection_maintenance_operator(
             session,
-            diport::DynPdp::from_ref(&provider),
+            diport::DynPdp::from_ref(provider.as_ref()),
             parsed,
             resource_id,
+        )
+        .await?;
+        projection_maintenance_operator_receipt(
+            session,
+            parsed,
+            resource_id,
+            principal,
             self.operator,
         )
         .await
@@ -1655,7 +1687,7 @@ where
             return Err(err);
         }
     };
-    let operator_subject = receipt.operator_subject().to_owned();
+    let operator_subject = receipt.operator_caller().as_str().to_owned();
     let command_result = runtime
         .run_projection_command(&session, &registry, &parsed, &receipt)
         .await;
@@ -1715,7 +1747,6 @@ struct AuditLedgerVerifyArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AuditLedgerVerifyGrant {
-    subject: String,
     tenant: vocab::TenantId,
 }
 
@@ -1813,18 +1844,13 @@ fn parse_audit_ledger_verify_grants(raw: &str) -> anyhow::Result<Vec<AuditLedger
         );
         let parts: Vec<&str> = entry.split('|').map(str::trim).collect();
         anyhow::ensure!(
-            parts.len() == 2,
-            "{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} entries must be subject|tenant"
+            parts.len() == 1,
+            "{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} entries must be tenant"
         );
-        let [subject, tenant] = parts.as_slice() else {
+        let [tenant] = parts.as_slice() else {
             unreachable!("len checked");
         };
-        anyhow::ensure!(
-            !subject.is_empty(),
-            "{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} subject must be non-empty"
-        );
         grants.push(AuditLedgerVerifyGrant {
-            subject: (*subject).to_owned(),
             tenant: vocab::TenantId::parse(tenant).with_context(|| {
                 format!("{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
             })?,
@@ -1846,13 +1872,10 @@ fn load_audit_ledger_verify_grants_from_command_env(
 }
 
 fn authorize_audit_ledger_verify_operator(
-    operator_subject: &str,
     parsed: &AuditLedgerVerifyArgs,
     grants: &[AuditLedgerVerifyGrant],
 ) -> anyhow::Result<()> {
-    let allowed = grants
-        .iter()
-        .any(|grant| grant.subject == operator_subject && grant.tenant == parsed.tenant);
+    let allowed = grants.iter().any(|grant| grant.tenant == parsed.tenant);
     anyhow::ensure!(
         allowed,
         "audit ledger verify operator is not authorized for tenant={}",
@@ -1891,12 +1914,11 @@ async fn record_audit_ledger_verify_finish_audit(
     .context("record audit ledger verify finish audit")
 }
 
-async fn audit_ledger_verify_operator_subject(
+async fn authenticate_audit_ledger_verify_operator(
     pg: &PgMaintenanceDeps,
     operator_pdp: &diport::DynPdp<'_>,
     parsed: &AuditLedgerVerifyArgs,
     resource_id: &str,
-    operator: OperatorRuntimeCapability<'_>,
 ) -> anyhow::Result<String> {
     let subject = match verified_audit_ledger_verify_operator_subject(
         &parsed.operator_service_token,
@@ -1919,6 +1941,16 @@ async fn audit_ledger_verify_operator_subject(
             return Err(err);
         }
     };
+    Ok(subject)
+}
+
+async fn audit_ledger_verify_operator_subject(
+    pg: &PgMaintenanceDeps,
+    parsed: &AuditLedgerVerifyArgs,
+    resource_id: &str,
+    subject: String,
+    operator: OperatorRuntimeCapability<'_>,
+) -> anyhow::Result<String> {
     let grants = match load_audit_ledger_verify_grants_from_command_env(operator) {
         Ok(grants) => grants,
         Err(err) => {
@@ -1934,7 +1966,7 @@ async fn audit_ledger_verify_operator_subject(
             return Err(err);
         }
     };
-    if let Err(err) = authorize_audit_ledger_verify_operator(&subject, parsed, &grants) {
+    if let Err(err) = authorize_audit_ledger_verify_operator(parsed, &grants) {
         record_audit_ledger_verify_finish_audit(
             pg,
             &subject,
@@ -2023,11 +2055,10 @@ impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime<'_> {
         parsed: &AuditLedgerVerifyArgs,
         resource_id: &str,
     ) -> anyhow::Result<String> {
-        let provider = match build_operator_provider(
+        let provider = match build_operator_service_token_provider(
             self.config,
             self.operator,
             session.service_token_replay_store(),
-            SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
         ) {
             Ok(provider) => provider,
             Err(err) => {
@@ -2043,14 +2074,15 @@ impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime<'_> {
                 return Err(err).context("audit ledger verify operator verifier");
             }
         };
-        audit_ledger_verify_operator_subject(
+        let subject = authenticate_audit_ledger_verify_operator(
             session,
-            diport::DynPdp::from_ref(&provider),
+            diport::DynPdp::from_ref(provider.as_ref()),
             parsed,
             resource_id,
-            self.operator,
         )
-        .await
+        .await?;
+        audit_ledger_verify_operator_subject(session, parsed, resource_id, subject, self.operator)
+            .await
     }
 
     async fn verify_tenant(
@@ -2247,7 +2279,6 @@ impl DlqCliCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DlqMaintenanceGrant {
-    subject: String,
     action: DlqMaintenanceAction,
     tenant: vocab::TenantId,
 }
@@ -2679,18 +2710,13 @@ fn parse_dlq_operator_grants(raw: &str) -> anyhow::Result<Vec<DlqMaintenanceGran
         );
         let parts: Vec<_> = entry.split('|').map(str::trim).collect();
         anyhow::ensure!(
-            parts.len() == 3,
-            "{DLQ_OPERATOR_GRANTS_ENV} entries must be subject|action|tenant"
+            parts.len() == 2,
+            "{DLQ_OPERATOR_GRANTS_ENV} entries must be action|tenant"
         );
-        let [subject, action, tenant] = parts.as_slice() else {
+        let [action, tenant] = parts.as_slice() else {
             unreachable!("len checked");
         };
-        anyhow::ensure!(
-            !subject.is_empty(),
-            "{DLQ_OPERATOR_GRANTS_ENV} subject must be non-empty"
-        );
         grants.push(DlqMaintenanceGrant {
-            subject: (*subject).to_owned(),
             action: DlqMaintenanceAction::parse(action)?,
             tenant: vocab::TenantId::parse(tenant).with_context(|| {
                 format!("{DLQ_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
@@ -2713,14 +2739,13 @@ fn load_dlq_operator_grants_from_command_env(
 }
 
 fn authorize_dlq_operator(
-    operator_subject: &str,
     parsed: &DlqCliArgs,
     grants: &[DlqMaintenanceGrant],
 ) -> anyhow::Result<()> {
     let action = parsed.command.action();
-    let allowed = grants.iter().any(|grant| {
-        grant.subject == operator_subject && grant.action == action && grant.tenant == parsed.tenant
-    });
+    let allowed = grants
+        .iter()
+        .any(|grant| grant.action == action && grant.tenant == parsed.tenant);
     anyhow::ensure!(
         allowed,
         "DLQ operator is not authorized for action={} tenant={}",
@@ -2781,18 +2806,23 @@ fn dlq_command_resource_id(parsed: &DlqCliArgs) -> String {
     )
 }
 
-async fn authenticate_dlq_operator_subject(
+async fn authenticate_dlq_operator_principal(
     service_token: &str,
     operator_tenant: vocab::TenantId,
     pdp: &diport::DynPdp<'_>,
-) -> anyhow::Result<String> {
-    verified_service_maintenance_operator_subject(
+) -> anyhow::Result<authn::Principal> {
+    let (_token, principal) = authn::verify_service_token(
         service_token,
-        operator_tenant,
+        diport::ServiceTokenTenantBinding::new(operator_tenant),
         pdp,
-        "DLQ maintenance",
     )
     .await
+    .context("verify DLQ maintenance operator service token")?;
+    anyhow::ensure!(
+        principal.service_caller_domain() == Some(vocab::ServiceCallerDomain::MaintenanceOperator),
+        "DLQ maintenance operator must be the maintenance operator"
+    );
+    Ok(principal)
 }
 
 async fn record_dlq_maintenance_finish_audit(
@@ -2807,21 +2837,20 @@ async fn record_dlq_maintenance_finish_audit(
         .context("record DLQ maintenance finish audit")
 }
 
-async fn dlq_operator_subject(
+async fn authenticate_dlq_operator(
     pg: &PgMaintenanceDeps,
     operator_pdp: &diport::DynPdp<'_>,
     parsed: &DlqCliArgs,
     resource_id: &str,
-    operator: OperatorRuntimeCapability<'_>,
-) -> anyhow::Result<String> {
-    let subject = match authenticate_dlq_operator_subject(
+) -> anyhow::Result<authn::Principal> {
+    let principal = match authenticate_dlq_operator_principal(
         &parsed.operator_service_token,
         parsed.operator_tenant,
         operator_pdp,
     )
     .await
     {
-        Ok(subject) => subject,
+        Ok(principal) => principal,
         Err(err) => {
             record_dlq_maintenance_finish_audit(
                 pg,
@@ -2836,6 +2865,17 @@ async fn dlq_operator_subject(
             return Err(err);
         }
     };
+    Ok(principal)
+}
+
+async fn dlq_operator_receipt(
+    pg: &PgMaintenanceDeps,
+    parsed: &DlqCliArgs,
+    resource_id: &str,
+    principal: authn::Principal,
+    operator: OperatorRuntimeCapability<'_>,
+) -> anyhow::Result<AuthorizedDlqOperatorReceipt> {
+    let subject = principal.audit_subject().to_owned();
     let grants = match load_dlq_operator_grants_from_command_env(operator) {
         Ok(grants) => grants,
         Err(err) => {
@@ -2852,7 +2892,7 @@ async fn dlq_operator_subject(
             return Err(err);
         }
     };
-    if let Err(err) = authorize_dlq_operator(&subject, parsed, &grants) {
+    if let Err(err) = authorize_dlq_operator(parsed, &grants) {
         record_dlq_maintenance_finish_audit(
             pg,
             &subject,
@@ -2865,17 +2905,11 @@ async fn dlq_operator_subject(
         .await?;
         return Err(err);
     }
-    Ok(subject)
-}
-
-/// The single bridge from an authenticated + exactly authorized DLQ principal to the typed
-/// terminal-resolution witness. Callers must invoke this only after `dlq_operator_subject` has
-/// completed service-token verification and the exact action/tenant grant check.
-fn verified_dlq_operator_subject(
-    operator_subject: &str,
-) -> anyhow::Result<VerifiedOperatorSubject> {
-    VerifiedOperatorSubject::from_verified(operator_subject)
-        .context("verified DLQ operator subject is invalid")
+    let caller = principal
+        .service_caller_domain()
+        .filter(|caller| *caller == vocab::ServiceCallerDomain::MaintenanceOperator)
+        .ok_or_else(|| anyhow::anyhow!("DLQ operator caller binding lost"))?;
+    Ok(AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(caller))
 }
 
 fn dlq_summary_json_line(summary: &DlqEntrySummary) -> anyhow::Result<String> {
@@ -3121,7 +3155,7 @@ trait DlqControlRuntime {
         session: &Self::Session,
         parsed: &DlqCliArgs,
         resource_id: &str,
-    ) -> anyhow::Result<String>;
+    ) -> anyhow::Result<VerifiedOperatorSubject>;
 
     fn dlq_store(
         &self,
@@ -3166,12 +3200,11 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
         session: &Self::Session,
         parsed: &DlqCliArgs,
         resource_id: &str,
-    ) -> anyhow::Result<String> {
-        let provider = match build_operator_provider(
+    ) -> anyhow::Result<VerifiedOperatorSubject> {
+        let provider = match build_operator_service_token_provider(
             self.config,
             self.operator,
             session.service_token_replay_store(),
-            SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
         ) {
             Ok(provider) => provider,
             Err(err) => {
@@ -3188,14 +3221,16 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
                 return Err(err).context("DLQ maintenance operator verifier");
             }
         };
-        dlq_operator_subject(
+        let principal = authenticate_dlq_operator(
             session,
-            diport::DynPdp::from_ref(&provider),
+            diport::DynPdp::from_ref(provider.as_ref()),
             parsed,
             resource_id,
-            self.operator,
         )
-        .await
+        .await?;
+        let receipt =
+            dlq_operator_receipt(session, parsed, resource_id, principal, self.operator).await?;
+        Ok(VerifiedOperatorSubject::from_authorized_receipt(receipt))
     }
 
     fn dlq_store(
@@ -3252,17 +3287,9 @@ where
         }
     };
     let capability = issue_authorized_dlq_capability();
-    // This wrapper is deliberately created only after service-token verification and exact
-    // action/tenant grant authorization have both succeeded in `operator_subject`.
-    let verified_operator_subject = verified_dlq_operator_subject(&operator_subject);
-    let command_result = match (
-        verified_operator_subject,
-        runtime.dlq_store(&session, &parsed.command),
-    ) {
-        (Ok(operator_subject), Ok(store)) => {
-            run_dlq_command_inner(&store, &parsed, capability, &operator_subject).await
-        }
-        (Err(err), _) | (_, Err(err)) => Err(err),
+    let command_result = match runtime.dlq_store(&session, &parsed.command) {
+        Ok(store) => run_dlq_command_inner(&store, &parsed, capability, &operator_subject).await,
+        Err(err) => Err(err),
     };
     let finish_outcome = match &command_result {
         Ok(DlqCommandOutcome::Completed) => MaintenanceAuditOutcome::Success,
@@ -3275,7 +3302,7 @@ where
     let audit_result = runtime
         .record_dlq_maintenance_audit(
             &session,
-            &operator_subject,
+            operator_subject.as_str(),
             &finish_action,
             finish_outcome,
             &resource_id,
@@ -3356,7 +3383,6 @@ struct ReconcileTargetCliArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReconcileMaintenanceGrant {
-    subject: String,
     action: ReconcileMaintenanceAction,
     tenant: vocab::TenantId,
 }
@@ -3440,18 +3466,13 @@ fn parse_reconcile_operator_grants(raw: &str) -> anyhow::Result<Vec<ReconcileMai
     for entry in raw.split(',') {
         let parts: Vec<_> = entry.split('|').map(str::trim).collect();
         anyhow::ensure!(
-            parts.len() == 3,
-            "{RECONCILE_OPERATOR_GRANTS_ENV} entries must be subject|action|tenant"
+            parts.len() == 2,
+            "{RECONCILE_OPERATOR_GRANTS_ENV} entries must be action|tenant"
         );
-        let [subject, action, tenant] = parts.as_slice() else {
+        let [action, tenant] = parts.as_slice() else {
             unreachable!("length checked");
         };
-        anyhow::ensure!(
-            !subject.is_empty(),
-            "{RECONCILE_OPERATOR_GRANTS_ENV} subject must be non-empty"
-        );
         grants.push(ReconcileMaintenanceGrant {
-            subject: (*subject).to_owned(),
             action: ReconcileMaintenanceAction::parse(action)?,
             tenant: vocab::TenantId::parse(tenant).with_context(|| {
                 format!("{RECONCILE_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
@@ -3470,16 +3491,13 @@ fn load_reconcile_operator_grants_from_command_env(
 }
 
 fn authorize_reconcile_operator(
-    subject: &str,
     parsed: &ReconcileTargetCliArgs,
     grants: &[ReconcileMaintenanceGrant],
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        grants.iter().any(|grant| {
-            grant.subject == subject
-                && grant.action == parsed.action
-                && grant.tenant == parsed.tenant
-        }),
+        grants
+            .iter()
+            .any(|grant| grant.action == parsed.action && grant.tenant == parsed.tenant),
         "reconcile target operator is not authorized for action={} tenant={}",
         parsed.action.as_str(),
         parsed.tenant
@@ -3545,11 +3563,11 @@ pub async fn run_reconcile_target_command(
     args: &[String],
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
+    let config = runtime_inputs.config();
     let parsed = parse_reconcile_target_args(args)?;
     let resource_id = format!("tenant={} target_id={}", parsed.tenant, parsed.target_id);
     let start_action = format!("reconcile.target.{}.start", parsed.action.as_str());
     let finish_action = format!("reconcile.target.{}.finish", parsed.action.as_str());
-    let config = runtime_inputs.config();
     let pg = PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(config)?)
         .await
         .context("setup postgres maintenance deps")?;
@@ -3566,11 +3584,10 @@ pub async fn run_reconcile_target_command(
         return Err(error);
     }
     let operator = runtime_inputs.operator_capability();
-    let provider = match build_operator_provider(
+    let provider = match build_operator_service_token_provider(
         config,
         operator,
         pg.service_token_replay_store(),
-        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
     ) {
         Ok(provider) => provider,
         Err(error) => {
@@ -3591,7 +3608,7 @@ pub async fn run_reconcile_target_command(
     let subject = match verified_service_maintenance_operator_subject(
         &parsed.operator_service_token,
         parsed.operator_tenant,
-        diport::DynPdp::from_ref(&provider),
+        diport::DynPdp::from_ref(provider.as_ref()),
         "reconcile target maintenance",
     )
     .await
@@ -3613,7 +3630,7 @@ pub async fn run_reconcile_target_command(
         }
     };
     let authorization = load_reconcile_operator_grants_from_command_env(operator)
-        .and_then(|grants| authorize_reconcile_operator(&subject, &parsed, &grants));
+        .and_then(|grants| authorize_reconcile_operator(&parsed, &grants));
     if let Err(error) = authorization {
         record_reconcile_audit(
             &pg,
@@ -3800,11 +3817,10 @@ async fn settings_config_value_maintenance_operator_subject(
     parsed: &SettingsConfigValueMaintenanceArgs,
     resource_id: &str,
 ) -> anyhow::Result<String> {
-    let operator_provider = match build_operator_provider(
+    let operator_provider = match build_operator_service_token_provider(
         config,
         operator,
         pg.service_token_replay_store(),
-        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
     ) {
         Ok(provider) => provider,
         Err(err) => {
@@ -3820,7 +3836,7 @@ async fn settings_config_value_maintenance_operator_subject(
             return Err(err).context("settings config value maintenance operator verifier");
         }
     };
-    let operator_pdp = diport::DynPdp::from_ref(&operator_provider);
+    let operator_pdp = diport::DynPdp::from_ref(operator_provider.as_ref());
     match verified_config_value_maintenance_operator_subject(
         &parsed.operator_service_token,
         parsed.operator_tenant,
@@ -3903,10 +3919,10 @@ pub async fn run_settings_config_value_maintenance(
     args: &[String],
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
+    let config = runtime_inputs.config();
     let parsed = parse_settings_config_value_maintenance_args(args)?;
     let options = parsed.options.clone();
     let resource_id = settings_config_value_maintenance_resource_id(&options);
-    let config = runtime_inputs.config();
     let pg = PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(config)?)
         .await
         .context("setup postgres maintenance deps")?;
@@ -3933,9 +3949,9 @@ pub async fn run_settings_config_value_maintenance(
             return Err(err);
         }
     };
-    let capability =
-        ConfigValueMaintenanceCapability::from_verified_service_subject(operator_subject.clone())
-            .context("settings config value maintenance operator subject")?;
+    let capability = ConfigValueMaintenanceCapability::from_verified_service_caller(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+    );
     let protection = match settings_config_value_maintenance_protection(
         &pg,
         &operator_subject,
@@ -4445,7 +4461,7 @@ struct RuntimeModuleAssemblyInputs {
     service_token_replay_sweeper_module: DomainModuleResult,
     s3_canary_module: DomainModuleResult,
     provider_module: DomainModuleResult,
-    oidc_resource: Box<DynManagedResource<'static>>,
+    token_verifier_resources: Vec<Box<DynManagedResource<'static>>>,
     domain_transport_module: DomainModuleResult,
     event_module: DomainModuleResult,
     dlx_lifecycle_module: DomainModuleResult,
@@ -4469,7 +4485,7 @@ fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> Domai
     module.merge(inputs.service_token_replay_sweeper_module);
     module.merge(inputs.s3_canary_module);
     module.merge(inputs.provider_module);
-    module.resources.push(inputs.oidc_resource);
+    module.resources.extend(inputs.token_verifier_resources);
     module.merge(inputs.domain_transport_module);
     module.merge(inputs.event_module);
     module.merge(inputs.dlx_lifecycle_module);
@@ -4558,14 +4574,6 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
     );
     drop(runtime_plan);
 
-    // Fail every OIDC/JWKS configuration or source error before the forward-only PG migration.
-    // The prepared value cannot authenticate until the owner-only durable store is injected.
-    let prepared_runtime_oidc = phase_result(
-        RuntimePhase::BuildProvider,
-        prepare_runtime_oidc_provider(runtime_inputs.config())
-            .context("preflight runtime OIDC provider"),
-    )?;
-
     // BuildInfra phase: provider bundles, topology config, shared deps, and metrics exporter.
     let (
         pg_owner,
@@ -4578,11 +4586,15 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         pg_readiness_period,
         redis_readiness_period,
         _command_idempotency_keyring,
+        token_profiles,
+        runtime_rss_access,
+        runtime_federated_access,
     ) = phase_result(
         RuntimePhase::BuildInfra,
         async {
             let config = runtime_inputs.config();
             let RuntimeServingConfigParts {
+                token_profiles,
                 event_transport,
                 event_worker,
                 dlx_worker,
@@ -4594,6 +4606,37 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
             } = RuntimeServingConfig::from_snapshot(config)
                 .context("build snapshot-backed serving config")?
                 .into_parts();
+            // Load every selected access JWKS before the forward-only PG migration. Service-token
+            // construction remains blocked on the owner-only durable replay store and is completed
+            // immediately after PG setup.
+            let (rss_key_isolation, federated_key_isolation) =
+                if token_profiles.rss_access().is_some()
+                    && token_profiles.federated_access().is_some()
+                {
+                    let generation = oidc::AccessJwksKeyIsolationGeneration::new();
+                    let (rss, federated) = generation.into_bindings();
+                    (Some(rss), Some(federated))
+                } else {
+                    (None, None)
+                };
+            let runtime_rss_access = token_profiles
+                .rss_access()
+                .map(|config| {
+                    build_rss_access_provider(config, CancellationToken::new(), rss_key_isolation)
+                        .context("build RSS access-token verifier")
+                })
+                .transpose()?;
+            let runtime_federated_access = token_profiles
+                .federated_access()
+                .map(|config| {
+                    build_federated_access_provider(
+                        config,
+                        CancellationToken::new(),
+                        federated_key_isolation,
+                    )
+                    .context("build federated access-token verifier")
+                })
+                .transpose()?;
             let pg_config = PgRuntimeConfig::from_snapshot(config)
                 .context("build snapshot-backed postgres config")?;
             let redis_config = RedisRuntimeConfig::from_snapshot(config)
@@ -4795,18 +4838,36 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
                 pg_readiness_period,
                 redis_readiness_period,
                 command_idempotency_keyring,
+                token_profiles,
+                runtime_rss_access,
+                runtime_federated_access,
             ))
         }
         .await,
     )?;
 
-    let runtime_oidc = prepared_runtime_oidc
-        .finish(
-            pg_owner.service_token_replay_store(),
-            SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
-        )
-        .context("inject durable replay store into runtime OIDC provider")?;
-    let provider = runtime_oidc.provider();
+    let runtime_service_token = token_profiles
+        .service_token()
+        .map(|config| {
+            build_service_token_provider(
+                config,
+                pg_owner.service_token_replay_store(),
+                SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+            )
+            .context("build service-token verifier with durable replay")
+        })
+        .transpose()?;
+    let token_provider_bindings = routes::TokenProviderBindings::new(
+        runtime_rss_access
+            .as_ref()
+            .map(RuntimeAccessProvider::provider),
+        runtime_federated_access
+            .as_ref()
+            .map(RuntimeAccessProvider::provider),
+        runtime_service_token
+            .as_ref()
+            .map(RuntimeServiceTokenProvider::provider),
+    );
 
     // WireDomains phase: domain roots, registry/module outputs, probes, workers, and event transport.
     let (mut registry, pg_readiness_period, domain_module) = phase_result(
@@ -4844,7 +4905,16 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
             let provider_module = crate::provider_output::build_provider_module(&deps);
             validate_provider_output_evidence()
                 .context("validate runtime provider-output evidence")?;
-            let oidc_resource = runtime_oidc.managed_resource();
+            let mut token_verifier_resources = Vec::new();
+            if let Some(provider) = runtime_rss_access.as_ref() {
+                token_verifier_resources.push(provider.managed_resource());
+            }
+            if let Some(provider) = runtime_federated_access.as_ref() {
+                token_verifier_resources.push(provider.managed_resource());
+            }
+            if let Some(provider) = runtime_service_token.as_ref() {
+                token_verifier_resources.push(provider.managed_resource());
+            }
             // 框架归属 RLS 能力门 readyz 兜底探针（须先于 take_health_reporter）：把启动期 verify_rls_capability
             // 的结果显式暴露到 readyz（启动已 fail-fast，故进程在跑时恒 ready；运维可见 + 周期再核验接线点）。
             let rls_probe_name =
@@ -4864,14 +4934,30 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
                     Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
                 )
                 .context("register redis_ready probe")?;
-            let oidc_jwks_probe_name = ProbeName::parse(OIDC_JWKS_READY_PROBE_NAME)
-                .context("parse oidc_jwks_ready probe name")?;
-            registry
-                .probe(
-                    oidc_jwks_probe_name,
-                    Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness())),
-                )
-                .context("register oidc_jwks_ready probe")?;
+            if let Some(provider) = runtime_rss_access.as_ref() {
+                let name = ProbeName::parse(RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)
+                    .context("parse RSS access-token JWKS probe name")?;
+                registry
+                    .probe(
+                        name,
+                        Box::new(AccessTokenJwksReadyProbe::rss_access(
+                            provider.jwks_readiness(),
+                        )),
+                    )
+                    .context("register RSS access-token JWKS readiness probe")?;
+            }
+            if let Some(provider) = runtime_federated_access.as_ref() {
+                let name = ProbeName::parse(FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)
+                    .context("parse federated access-token JWKS probe name")?;
+                registry
+                    .probe(
+                        name,
+                        Box::new(AccessTokenJwksReadyProbe::federated_access(
+                            provider.jwks_readiness(),
+                        )),
+                    )
+                    .context("register federated access-token JWKS readiness probe")?;
+            }
 
             // 事件传输接线（#1251）：topology-gated durable AMQP/Redis + outbox relay + consumer workers。
             // Demo 拓扑已在构造 SharedRuntimeDeps 前 fail-fast；production runtime 不走 in-memory path。
@@ -4912,7 +4998,7 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
                 service_token_replay_sweeper_module,
                 s3_canary_module,
                 provider_module,
-                oidc_resource,
+                token_verifier_resources,
                 domain_transport_module,
                 event_module,
                 dlx_lifecycle_module,
@@ -4956,8 +5042,9 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
             let auth_audit_clock: Arc<dyn diport::Clock> = Arc::new(SystemClock);
             let mut listeners = assemble_authed_routers(
                 runtime_inputs.config(),
+                &token_profiles,
                 &mut registry,
-                provider,
+                &token_provider_bindings,
                 auth_audit_sink,
                 auth_audit_clock,
             )
@@ -4997,7 +5084,8 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::{AssembledListener, assemble_authed_routers};
+    use crate::config::{AccessTokenProfileSelection, InternalAuthSelection};
+    use crate::routes::AssembledListener;
 
     use audit::ports::TenantRepoScope as AuditTenantRepoScope;
     use axum::http::Method;
@@ -5201,10 +5289,10 @@ mod tests {
             [
                 "phase-order: build_provider -> build_infra -> wire_domains -> finalize -> launch",
                 "module-probes: configs_ready, keyprovider_ready, session_sweeper, service_token_replay_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
-                "module-resources: redis, s3, vault-secret-resolver, vault-key-provider, oidc-jwks, domain-http-transport, identity-pub, identity-sub, settings-pub, settings-sub, postgres-dlx-lifecycle",
+                "module-resources: redis, s3, vault-secret-resolver, vault-key-provider, rss_access_token_verifier, federated_access_token_verifier, service_token_verifier, domain-http-transport, identity-pub, identity-sub, settings-pub, settings-sub, postgres-dlx-lifecycle",
                 "module-workers: keyprovider-readiness-sampler, session-sweeper, service-token-replay-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, dlx-lifecycle, dlx-archive-readiness, redis-readiness-sampler",
-                "readyz-probes-before-reporter: rls_ready, redis_ready, oidc_jwks_ready, configs_ready, keyprovider_ready, session_sweeper, service_token_replay_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
-                "reporter-probe-count: 21",
+                "readyz-probes-before-reporter: rls_ready, redis_ready, rss_access_token_jwks_ready, federated_access_token_jwks_ready, configs_ready, keyprovider_ready, session_sweeper, service_token_replay_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
+                "reporter-probe-count: 22",
                 "registry-probe-count-after-take: 0",
             ]
             .join("\n")
@@ -5221,7 +5309,8 @@ mod tests {
         for name in [
             RLS_READY_PROBE_NAME,
             REDIS_READY_PROBE_NAME,
-            OIDC_JWKS_READY_PROBE_NAME,
+            RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
+            FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
         ] {
             register_probe(&mut registry, name);
         }
@@ -5282,7 +5371,11 @@ mod tests {
                 &["redis", "s3", "vault-secret-resolver", "vault-key-provider"],
                 &[],
             ),
-            oidc_resource: harness_resource("oidc-jwks"),
+            token_verifier_resources: vec![
+                harness_resource("rss_access_token_verifier"),
+                harness_resource("federated_access_token_verifier"),
+                harness_resource("service_token_verifier"),
+            ],
             domain_transport_module: harness_module(
                 &[DOMAIN_TRANSPORT_READY_PROBE_NAME],
                 &["domain-http-transport"],
@@ -5890,17 +5983,16 @@ mod tests {
             binding_provider,
         ));
         let issuer = Arc::new(
-            authn::JwtIssuer::new(
+            authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
                 Arc::new(TestSigner),
                 Box::new(SystemClock),
-                authn::JwtIssuerConfig {
-                    key: diport::KeyId::new("runtime-test-key"),
-                    alg: authn::JwtAlg::Es256,
-                    purpose: diport::SigningPurpose::new("runtime-test"),
-                    issuer: "https://issuer.test".to_string(),
-                    audience: "rss-test".to_string(),
-                    ttl: Duration::from_secs(900),
-                },
+                authn::JwtIssuerConfig::rss_access(
+                    diport::KeyId::new("runtime-test-key"),
+                    diport::SigningPurpose::new("runtime-test"),
+                    "https://issuer.test",
+                    "rss-test",
+                    Duration::from_secs(900),
+                ),
             )
             .expect("jwt issuer"),
         );
@@ -6012,21 +6104,32 @@ mod tests {
         .expect("append audit record");
     }
 
+    struct RuntimeTestClock;
+
+    impl diport::Clock for RuntimeTestClock {
+        fn now(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_000)
+        }
+    }
+
+    // Static P-256 scalar and closed verifier inputs are compile-time test fixtures.
     #[allow(clippy::expect_used)]
-    fn runtime_test_provider() -> Arc<OidcProvider> {
+    fn runtime_test_provider() -> Arc<OidcProvider<diport::RssAccessProfile>> {
         use p256::ecdsa::SigningKey;
 
         let key = SigningKey::from_slice(&[7u8; 32]).expect("signing key");
-        let public_keys_b64 = B64.encode(key.verifying_key().to_encoded_point(false).as_bytes());
+        let public_key_b64 = B64.encode(key.verifying_key().to_encoded_point(false).as_bytes());
+        let keys = [KeyedEs256StaticKey {
+            key_id: "runtime-test-rss",
+            sec1_b64url: &public_key_b64,
+        }];
         Arc::new(
-            provider_from_static_config(StaticOidcProviderConfig {
+            rss_access_provider_from_static_config(RssAccessStaticProviderConfig {
                 issuer: "https://issuer.test",
                 audience: "rss-test",
-                trusted_kinds_csv: "admin,superAdmin",
-                key_profile: StaticOidcKeyProfile::Es256 {
-                    public_keys_b64: &public_keys_b64,
-                },
-                clock: Box::new(SystemClock),
+                trusted_kinds: &["admin", "superAdmin"],
+                keys: &keys,
+                clock: Box::new(RuntimeTestClock),
             })
             .expect("provider"),
         )
@@ -6037,12 +6140,12 @@ mod tests {
         use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 
         let key = SigningKey::from_slice(&[7u8; 32]).expect("signing key");
-        let header = B64.encode(br#"{"alg":"ES256"}"#);
+        let header = B64.encode(br#"{"alg":"ES256","typ":"at+jwt","kid":"runtime-test-rss"}"#);
         let tenant_claim = tenant
             .map(|tenant| format!(r#","tenant_id":"{tenant}""#))
             .unwrap_or_default();
         let payload = format!(
-            r#"{{"sub":"11111111-2222-4333-8444-555555555555","exp":4102444800,"iss":"https://issuer.test","aud":"rss-test","kind":"{kind}"{tenant_claim}}}"#
+            r#"{{"sub":"11111111-2222-4333-8444-555555555555","iat":4102443900,"exp":4102444800,"iss":"https://issuer.test","aud":"rss-test","token_use":"access","kind":"{kind}"{tenant_claim}}}"#
         );
         let body = B64.encode(payload.as_bytes());
         let signing_input = format!("{header}.{body}");
@@ -6079,13 +6182,20 @@ mod tests {
         );
         let domains: [&dyn bootstrap::Domain; 2] = [&identity_domain, &audit_domain];
         let mut registry = bootstrap::compose(&domains)?;
-        let runtime_config = crate::config::test_snapshot(&[])?;
-        let app = extract_admin_router(assemble_authed_routers(
-            runtime_config.view(),
+        let providers =
+            routes::TokenProviderBindings::new(Some(runtime_test_provider()), None, None);
+        let app = extract_admin_router(routes::assemble_authed_routers_with_bindings(
             &mut registry,
-            runtime_test_provider(),
-            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-            Arc::new(SystemClock),
+            &providers,
+            routes::RouteAssemblyContext {
+                audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+                audit_clock: Arc::new(SystemClock),
+                primary: AccessTokenProfileSelection::RssAccess,
+                admin: AccessTokenProfileSelection::RssAccess,
+                internal: InternalAuthSelection::Mtls,
+                internal_mtls_allow_set: Some("spiffe://example.org/ns/rss/sa/internal"),
+                spiffe_endpoint: Some("unix:///run/spire/test.sock"),
+            },
         )?)?;
 
         let scoped_response = app
@@ -6166,7 +6276,7 @@ mod tests {
     const PROJECTION_FIXTURE_TENANT: &str = "00000000-0000-4000-8000-000000000002";
     const PROJECTION_FIXTURE_ID: &str = "audit.session-projection";
     const PROJECTION_FIXTURE_VERSION: &str = "v2";
-    const PROJECTION_FIXTURE_OPERATOR: &str = "verified-projection-operator";
+    const PROJECTION_FIXTURE_OPERATOR: &str = "rss-maintenance-operator";
 
     struct NoopProjectionReplayTarget;
 
@@ -6288,14 +6398,14 @@ mod tests {
     }
 
     fn fake_projection_receipt(
-        subject: &str,
+        _subject: &str,
         parsed: &ProjectionCliArgs,
     ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
         let principal =
-            authn::test_support::principal(vocab::PrincipalKind::Service, subject, None);
+            authn::test_support::service_principal(vocab::ServiceCallerDomain::MaintenanceOperator);
         let grants = authn::ProjectionMaintenanceGrantSet::new(vec![
             authn::ProjectionMaintenanceGrant::new(
-                subject,
+                vocab::ServiceCallerDomain::MaintenanceOperator,
                 parsed.command.action().authorized_action(),
                 parsed.selector.tenant(),
                 parsed.selector.projection().as_str(),
@@ -6400,7 +6510,7 @@ mod tests {
         ) -> anyhow::Result<()> {
             let record = FakeProjectionCommandRecord {
                 action: parsed.command.action(),
-                operator_subject: receipt.operator_subject().to_owned(),
+                operator_subject: receipt.operator_caller().as_str().to_owned(),
                 registry_has_targets: registry.has_registered_targets(),
             };
             match self.commands.lock() {
@@ -7034,13 +7144,10 @@ mod tests {
             "v2",
         ]))?;
         let grants = parse_projection_maintenance_grants(
-            "verified-operator|status|00000000-0000-4000-8000-000000000002|audit.session-projection",
+            "status|00000000-0000-4000-8000-000000000002|audit.session-projection",
         )?;
-        let principal = authn::test_support::principal(
-            vocab::PrincipalKind::Service,
-            "verified-operator",
-            None,
-        );
+        let principal =
+            authn::test_support::service_principal(vocab::ServiceCallerDomain::MaintenanceOperator);
         grants.authorize(
             &principal,
             parsed.command.action().authorized_action(),
@@ -7049,7 +7156,7 @@ mod tests {
         )?;
 
         let replay_grants = parse_projection_maintenance_grants(
-            "verified-operator|replay|00000000-0000-4000-8000-000000000002|audit.session-projection",
+            "replay|00000000-0000-4000-8000-000000000002|audit.session-projection",
         )?;
         assert!(
             replay_grants
@@ -7062,7 +7169,7 @@ mod tests {
                 .is_err()
         );
         let wrong_tenant_grants = parse_projection_maintenance_grants(
-            "verified-operator|status|00000000-0000-4000-8000-000000000003|audit.session-projection",
+            "status|00000000-0000-4000-8000-000000000003|audit.session-projection",
         )?;
         assert!(
             wrong_tenant_grants
@@ -7691,40 +7798,15 @@ mod tests {
     }
 
     #[test]
-    fn audit_ledger_verify_grants_authorize_exact_subject_and_tenant() -> anyhow::Result<()> {
+    fn audit_ledger_verify_grants_authorize_exact_tenant() -> anyhow::Result<()> {
         let parsed = parse_audit_ledger_verify_args(&audit_ledger_verify_args(&[]))?;
-        let grants = parse_audit_ledger_verify_grants(&format!(
-            "{}|{}",
-            AUDIT_LEDGER_FIXTURE_OPERATOR, AUDIT_LEDGER_FIXTURE_TENANT
-        ))?;
-        authorize_audit_ledger_verify_operator(AUDIT_LEDGER_FIXTURE_OPERATOR, &parsed, &grants)?;
+        let grants = parse_audit_ledger_verify_grants(AUDIT_LEDGER_FIXTURE_TENANT)?;
+        authorize_audit_ledger_verify_operator(&parsed, &grants)?;
 
-        let wrong_subject = parse_audit_ledger_verify_grants(&format!(
-            "other-operator|{}",
-            AUDIT_LEDGER_FIXTURE_TENANT
-        ))?;
-        assert!(
-            authorize_audit_ledger_verify_operator(
-                AUDIT_LEDGER_FIXTURE_OPERATOR,
-                &parsed,
-                &wrong_subject
-            )
-            .is_err()
-        );
-        let wrong_tenant = parse_audit_ledger_verify_grants(&format!(
-            "{}|{}",
-            AUDIT_LEDGER_FIXTURE_OPERATOR, AUDIT_LEDGER_FIXTURE_OTHER_TENANT
-        ))?;
-        assert!(
-            authorize_audit_ledger_verify_operator(
-                AUDIT_LEDGER_FIXTURE_OPERATOR,
-                &parsed,
-                &wrong_tenant
-            )
-            .is_err()
-        );
+        let wrong_tenant = parse_audit_ledger_verify_grants(AUDIT_LEDGER_FIXTURE_OTHER_TENANT)?;
+        assert!(authorize_audit_ledger_verify_operator(&parsed, &wrong_tenant).is_err());
         assert!(parse_audit_ledger_verify_grants("").is_err());
-        assert!(parse_audit_ledger_verify_grants("operator-only").is_err());
+        assert!(parse_audit_ledger_verify_grants("operator|tenant").is_err());
         assert!(parse_audit_ledger_verify_grants("operator|not-a-tenant").is_err());
         Ok(())
     }
@@ -7826,7 +7908,7 @@ mod tests {
     const DLQ_FIXTURE_OPERATOR_TENANT: &str = "00000000-0000-4000-8000-000000000001";
     const DLQ_FIXTURE_TENANT: &str = "00000000-0000-4000-8000-000000000002";
     const DLQ_FIXTURE_OTHER_TENANT: &str = "00000000-0000-4000-8000-000000000003";
-    const DLQ_FIXTURE_OPERATOR: &str = "verified-dlq-operator";
+    const DLQ_FIXTURE_OPERATOR: &str = "rss-maintenance-operator";
     const DLQ_FIXTURE_DEAD_LETTER_ID: &str = "11111111-1111-4111-8111-111111111111";
     const DLQ_FIXTURE_REPLAY_ID: &str = "evt-dlq-replay";
     const DLQ_FIXTURE_EVENT_ID: &str = "evt-outbox-dlx";
@@ -7882,7 +7964,7 @@ mod tests {
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum FakeDlqOperator {
-        Verified(&'static str),
+        Verified,
         AuthFailure,
         GrantFailure,
     }
@@ -8026,7 +8108,7 @@ mod tests {
 
     impl FakeDlqControlRuntime {
         fn verified(store_mode: FakeDlqStoreMode) -> Self {
-            Self::new(FakeDlqOperator::Verified(DLQ_FIXTURE_OPERATOR), store_mode)
+            Self::new(FakeDlqOperator::Verified, store_mode)
         }
 
         fn auth_failure() -> Self {
@@ -8112,9 +8194,13 @@ mod tests {
             session: &Self::Session,
             parsed: &DlqCliArgs,
             resource_id: &str,
-        ) -> anyhow::Result<String> {
+        ) -> anyhow::Result<VerifiedOperatorSubject> {
             match self.operator {
-                FakeDlqOperator::Verified(subject) => Ok(subject.to_owned()),
+                FakeDlqOperator::Verified => Ok(VerifiedOperatorSubject::from_authorized_receipt(
+                    AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
+                        vocab::ServiceCallerDomain::MaintenanceOperator,
+                    ),
+                )),
                 FakeDlqOperator::AuthFailure => {
                     self.record_dlq_maintenance_audit(
                         session,
@@ -8473,25 +8559,20 @@ mod tests {
     }
 
     #[test]
-    fn dlq_operator_grants_authorize_exact_subject_action_and_tenant() -> anyhow::Result<()> {
+    fn dlq_operator_grants_authorize_exact_action_and_tenant() -> anyhow::Result<()> {
         let parsed = parse_dlq_args(&dlq_control_args(
             "redrive-outbox",
             &["--event-id", DLQ_FIXTURE_EVENT_ID],
         ))?;
-        let grants = parse_dlq_operator_grants(&format!(
-            "{DLQ_FIXTURE_OPERATOR}|redrive-outbox|{DLQ_FIXTURE_TENANT}"
-        ))?;
-        authorize_dlq_operator(DLQ_FIXTURE_OPERATOR, &parsed, &grants)?;
+        let grants = parse_dlq_operator_grants(&format!("redrive-outbox|{DLQ_FIXTURE_TENANT}"))?;
+        authorize_dlq_operator(&parsed, &grants)?;
 
-        let wrong_action = parse_dlq_operator_grants(&format!(
-            "{DLQ_FIXTURE_OPERATOR}|list|{DLQ_FIXTURE_TENANT}"
-        ))?;
-        assert!(authorize_dlq_operator(DLQ_FIXTURE_OPERATOR, &parsed, &wrong_action).is_err());
+        let wrong_action = parse_dlq_operator_grants(&format!("list|{DLQ_FIXTURE_TENANT}"))?;
+        assert!(authorize_dlq_operator(&parsed, &wrong_action).is_err());
 
-        let wrong_tenant = parse_dlq_operator_grants(&format!(
-            "{DLQ_FIXTURE_OPERATOR}|redrive-outbox|{DLQ_FIXTURE_OTHER_TENANT}"
-        ))?;
-        assert!(authorize_dlq_operator(DLQ_FIXTURE_OPERATOR, &parsed, &wrong_tenant).is_err());
+        let wrong_tenant =
+            parse_dlq_operator_grants(&format!("redrive-outbox|{DLQ_FIXTURE_OTHER_TENANT}"))?;
+        assert!(authorize_dlq_operator(&parsed, &wrong_tenant).is_err());
 
         let resolution = parse_dlq_args(&dlq_control_args(
             "resolve-expired-outbox",
@@ -8504,11 +8585,10 @@ mod tests {
                 "accepted_gap",
             ],
         ))?;
-        let resolution_grant = parse_dlq_operator_grants(&format!(
-            "{DLQ_FIXTURE_OPERATOR}|resolve-expired-outbox|{DLQ_FIXTURE_TENANT}"
-        ))?;
-        authorize_dlq_operator(DLQ_FIXTURE_OPERATOR, &resolution, &resolution_grant)?;
-        assert!(authorize_dlq_operator(DLQ_FIXTURE_OPERATOR, &resolution, &grants).is_err());
+        let resolution_grant =
+            parse_dlq_operator_grants(&format!("resolve-expired-outbox|{DLQ_FIXTURE_TENANT}"))?;
+        authorize_dlq_operator(&resolution, &resolution_grant)?;
+        assert!(authorize_dlq_operator(&resolution, &grants).is_err());
 
         assert!(parse_dlq_operator_grants("").is_err());
         assert!(parse_dlq_operator_grants("subject|skip|tenant").is_err());
@@ -8531,17 +8611,17 @@ mod tests {
             "--target-id",
             target,
         ]))?;
-        let grants = parse_reconcile_operator_grants(&format!("operator|resume|{tenant}"))?;
-        authorize_reconcile_operator("operator", &parsed, &grants)?;
+        let grants = parse_reconcile_operator_grants(&format!("resume|{tenant}"))?;
+        authorize_reconcile_operator(&parsed, &grants)?;
         assert!(
             authorize_reconcile_operator(
-                "other",
                 &parsed,
-                &parse_reconcile_operator_grants(&format!("other|inspect|{tenant}"))?,
+                &parse_reconcile_operator_grants(&format!("inspect|{tenant}"))?,
             )
             .is_err()
         );
-        assert!(parse_reconcile_operator_grants("operator|resume|not-a-uuid").is_err());
+        assert!(parse_reconcile_operator_grants("operator|resume|tenant").is_err());
+        assert!(parse_reconcile_operator_grants("resume|not-a-uuid").is_err());
         Ok(())
     }
 
@@ -8608,20 +8688,19 @@ mod tests {
             .expect("production DLQ operator_subject source slice");
 
         assert!(
-            function.contains("build_operator_provider(")
+            function.contains("build_operator_service_token_provider(")
                 && function.contains("self.config,")
                 && function.contains("self.operator,")
-                && function.contains("session.service_token_replay_store()")
-                && function.contains("SERVICE_TOKEN_REPLAY_STORE_TIMEOUT"),
-            "DLQ operator verifier must consume the captured snapshot and inject the durable PG service-token replay store with a bounded timeout"
+                && function.contains("session.service_token_replay_store()"),
+            "DLQ operator verifier must consume the captured operator capability and inject the durable PG service-token replay store"
         );
         assert!(
             !function.contains("std::env"),
             "DLQ operator verifier must not revive ambient configuration"
         );
         assert!(
-            !function.contains("build_provider_with_replay_store"),
-            "DLQ operator verifier must not have an ambient or capability-free construction path"
+            !function.contains("VerifierConfigBuilder"),
+            "DLQ operator verifier must use the typed runtime builder instead of rebuilding verifier policy"
         );
         assert!(
             source
@@ -8632,20 +8711,19 @@ mod tests {
                         .next()
                 })
                 .is_some_and(|function| {
-                    function.contains("build_operator_provider")
+                    function.contains("build_operator_service_token_provider")
                         && function.contains("config,")
                         && function.contains("operator,")
                         && function.contains("pg.service_token_replay_store()")
-                        && function.contains("SERVICE_TOKEN_REPLAY_STORE_TIMEOUT")
                         && !function.contains("std::env")
                 }),
             "settings config maintenance must consume the snapshot capability and inject the durable replay store"
         );
         assert!(
-            source.contains("prepare_runtime_oidc_provider(runtime_inputs.config())")
+            source.contains("build_service_token_provider(")
                 && source.contains("pg_owner.service_token_replay_store(),")
                 && source.contains("SERVICE_TOKEN_REPLAY_STORE_TIMEOUT"),
-            "serving OIDC must preflight before migration and receive the owner replay store with an explicit bounded timeout"
+            "serving typed service-token verifier must receive the owner replay store with an explicit bounded timeout"
         );
     }
 
@@ -9149,7 +9227,7 @@ mod tests {
     async fn settings_config_value_maintenance_operator_subject_comes_from_verified_service_token()
     -> anyhow::Result<()> {
         let pdp = stub_pdp(Ok(diport::VerifiedClaims::new(
-            "verified-operator",
+            vocab::ServiceCallerDomain::MaintenanceOperator.as_str(),
             None,
             Some("ignored".to_owned()),
         )));
@@ -9160,7 +9238,10 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(subject, "verified-operator");
+        assert_eq!(
+            subject,
+            vocab::ServiceCallerDomain::MaintenanceOperator.as_str()
+        );
         Ok(())
     }
 
@@ -9491,8 +9572,8 @@ mod tests {
 
         let err = run(inputs)
             .await
-            .expect_err("missing OIDC config must fail before launch handoff");
-        assert!(format!("{err:#}").contains("preflight runtime OIDC provider"));
+            .expect_err("missing token profile config must fail before launch handoff");
+        assert!(format!("{err:#}").contains("build RuntimePlan"));
         assert!(
             shutdown_witness.shutdown().is_err(),
             "pre-handoff failure must explicitly shut down the shared provider"

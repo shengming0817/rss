@@ -12,5 +12,5 @@ fn load_dlq_operator_grants_from_command_env(_operator: OperatorRuntimeCapabilit
 fn load_reconcile_operator_grants_from_command_env(_operator: OperatorRuntimeCapability<'_>) { let _ = std::env::var(RECONCILE_OPERATOR_GRANTS_ENV); }
 fn projection_maintenance_operator_receipt(operator: OperatorRuntimeCapability<'_>) { load_projection_maintenance_grants_from_command_env(operator); }
 fn audit_ledger_verify_operator_subject(operator: OperatorRuntimeCapability<'_>) { load_audit_ledger_verify_grants_from_command_env(operator); }
-fn dlq_operator_subject(operator: OperatorRuntimeCapability<'_>) { load_dlq_operator_grants_from_command_env(operator); }
+fn dlq_operator_receipt(operator: OperatorRuntimeCapability<'_>) { load_dlq_operator_grants_from_command_env(operator); }
 fn run_reconcile_target_command(runtime_inputs: &OperatorRuntimeInputs) { load_reconcile_operator_grants_from_command_env(runtime_inputs.operator_capability()); }

@@ -337,7 +337,8 @@ mod tests {
             "pub fn authn::VerifiedServiceToken::raw(&self) -> &str",
             "pub fn authn::Principal::from_verified_jwt(&authn::VerifiedJwt)",
             "pub fn authn::Principal::from_verified_service_token(&authn::VerifiedServiceToken)",
-            "pub async fn authn::verify_jwt",
+            "pub async fn authn::verify_rss_access",
+            "pub async fn authn::verify_federated_access",
             "pub async fn authn::verify_service_token",
         ] {
             assert!(

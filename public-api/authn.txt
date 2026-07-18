@@ -77,34 +77,13 @@ impl<'a> core::marker::Unpin for authn::JwtAccessPrincipal<'a>
 impl<'a> core::marker::UnsafeUnpin for authn::JwtAccessPrincipal<'a>
 impl<'a> core::panic::unwind_safe::RefUnwindSafe for authn::JwtAccessPrincipal<'a>
 impl<'a> core::panic::unwind_safe::UnwindSafe for authn::JwtAccessPrincipal<'a>
-pub enum authn::JwtAlg
-pub authn::JwtAlg::Es256
-pub authn::JwtAlg::Hs256
-impl core::clone::Clone for authn::JwtAlg
-pub fn authn::JwtAlg::clone(&self) -> authn::JwtAlg
-impl core::cmp::Eq for authn::JwtAlg
-impl core::cmp::PartialEq for authn::JwtAlg
-pub fn authn::JwtAlg::eq(&self, &authn::JwtAlg) -> bool
-impl core::fmt::Debug for authn::JwtAlg
-pub fn authn::JwtAlg::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for authn::JwtAlg
-impl core::marker::StructuralPartialEq for authn::JwtAlg
-impl core::marker::Freeze for authn::JwtAlg
-impl core::marker::Send for authn::JwtAlg
-impl core::marker::Sync for authn::JwtAlg
-impl core::marker::Unpin for authn::JwtAlg
-impl core::marker::UnsafeUnpin for authn::JwtAlg
-impl core::panic::unwind_safe::RefUnwindSafe for authn::JwtAlg
-impl core::panic::unwind_safe::UnwindSafe for authn::JwtAlg
 #[non_exhaustive] pub enum authn::JwtIssueError
-pub authn::JwtIssueError::AlgKindMismatch
 pub authn::JwtIssueError::ClaimsEncode(serde_json::error::Error)
 pub authn::JwtIssueError::ClockBeforeEpoch
 pub authn::JwtIssueError::EmptySubject
 pub authn::JwtIssueError::ExpiryOverflow
 pub authn::JwtIssueError::InvalidConfig
 pub authn::JwtIssueError::KindNotIssuable
-pub authn::JwtIssueError::MissingServiceTokenTenantBinding
 pub authn::JwtIssueError::Sign(diport::signer::SignerError)
 impl core::error::Error for authn::JwtIssueError
 pub fn authn::JwtIssueError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
@@ -168,7 +147,6 @@ impl core::panic::unwind_safe::UnwindSafe for authn::ProjectionMaintenanceAction
 #[non_exhaustive] pub enum authn::ProjectionMaintenanceGrantError
 pub authn::ProjectionMaintenanceGrantError::EmptyProjection
 pub authn::ProjectionMaintenanceGrantError::EmptySet
-pub authn::ProjectionMaintenanceGrantError::EmptySubject
 pub authn::ProjectionMaintenanceGrantError::Forbidden
 impl core::error::Error for authn::ProjectionMaintenanceGrantError
 impl core::fmt::Debug for authn::ProjectionMaintenanceGrantError
@@ -231,32 +209,32 @@ impl core::marker::Unpin for authn::Jwt
 impl core::marker::UnsafeUnpin for authn::Jwt
 impl core::panic::unwind_safe::RefUnwindSafe for authn::Jwt
 impl core::panic::unwind_safe::UnwindSafe for authn::Jwt
-pub struct authn::JwtIssuer<S>
-impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'static> authn::JwtIssuer<S>
-pub async fn authn::JwtIssuer<S>::issue_access(&self, authn::JwtAccessPrincipal<'_>) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
-pub async fn authn::JwtIssuer<S>::issue_service_token(&self, &str, diport::pdp::ServiceTokenTenantBinding) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
-pub fn authn::JwtIssuer<S>::new(alloc::sync::Arc<S>, alloc::boxed::Box<dyn diport::clock::Clock>, authn::JwtIssuerConfig) -> core::result::Result<Self, authn::JwtIssueError>
-impl<S> core::marker::Freeze for authn::JwtIssuer<S>
-impl<S> core::marker::Send for authn::JwtIssuer<S> where S: core::marker::Sync + core::marker::Send
-impl<S> core::marker::Sync for authn::JwtIssuer<S> where S: core::marker::Sync + core::marker::Send
-impl<S> core::marker::Unpin for authn::JwtIssuer<S>
-impl<S> core::marker::UnsafeUnpin for authn::JwtIssuer<S>
-impl<S> !core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssuer<S>
-impl<S> !core::panic::unwind_safe::UnwindSafe for authn::JwtIssuer<S>
-pub struct authn::JwtIssuerConfig
-pub authn::JwtIssuerConfig::alg: authn::JwtAlg
-pub authn::JwtIssuerConfig::audience: alloc::string::String
-pub authn::JwtIssuerConfig::issuer: alloc::string::String
-pub authn::JwtIssuerConfig::key: diport::signer::KeyId
-pub authn::JwtIssuerConfig::purpose: diport::signer::SigningPurpose
-pub authn::JwtIssuerConfig::ttl: core::time::Duration
-impl core::marker::Freeze for authn::JwtIssuerConfig
-impl core::marker::Send for authn::JwtIssuerConfig
-impl core::marker::Sync for authn::JwtIssuerConfig
-impl core::marker::Unpin for authn::JwtIssuerConfig
-impl core::marker::UnsafeUnpin for authn::JwtIssuerConfig
-impl core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssuerConfig
-impl core::panic::unwind_safe::UnwindSafe for authn::JwtIssuerConfig
+pub struct authn::JwtIssuer<P: diport::pdp::TokenProfileMarker, S>
+impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'static> authn::JwtIssuer<diport::pdp::RssAccessProfile, S>
+pub async fn authn::JwtIssuer<diport::pdp::RssAccessProfile, S>::issue_access(&self, authn::JwtAccessPrincipal<'_>) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
+pub fn authn::JwtIssuer<diport::pdp::RssAccessProfile, S>::new(alloc::sync::Arc<S>, alloc::boxed::Box<dyn diport::clock::Clock>, authn::JwtIssuerConfig<diport::pdp::RssAccessProfile>) -> core::result::Result<Self, authn::JwtIssueError>
+impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'static> authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>
+pub async fn authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>::issue_service_token(&self, vocab::service::ServiceCallerDomain, diport::pdp::ServiceTokenTenantBinding) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
+pub fn authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>::new(alloc::sync::Arc<S>, alloc::boxed::Box<dyn diport::clock::Clock>, authn::JwtIssuerConfig<diport::pdp::ServiceTokenProfile>) -> core::result::Result<Self, authn::JwtIssueError>
+impl<P, S> core::marker::Freeze for authn::JwtIssuer<P, S>
+impl<P, S> core::marker::Send for authn::JwtIssuer<P, S> where S: core::marker::Sync + core::marker::Send
+impl<P, S> core::marker::Sync for authn::JwtIssuer<P, S> where S: core::marker::Sync + core::marker::Send
+impl<P, S> core::marker::Unpin for authn::JwtIssuer<P, S>
+impl<P, S> core::marker::UnsafeUnpin for authn::JwtIssuer<P, S>
+impl<P, S> !core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssuer<P, S>
+impl<P, S> !core::panic::unwind_safe::UnwindSafe for authn::JwtIssuer<P, S>
+pub struct authn::JwtIssuerConfig<P: diport::pdp::TokenProfileMarker>
+impl authn::JwtIssuerConfig<diport::pdp::RssAccessProfile>
+pub fn authn::JwtIssuerConfig<diport::pdp::RssAccessProfile>::rss_access(diport::signer::KeyId, diport::signer::SigningPurpose, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::time::Duration) -> Self
+impl authn::JwtIssuerConfig<diport::pdp::ServiceTokenProfile>
+pub fn authn::JwtIssuerConfig<diport::pdp::ServiceTokenProfile>::service_token(diport::signer::KeyId, diport::signer::SigningPurpose, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::time::Duration) -> Self
+impl<P> core::marker::Freeze for authn::JwtIssuerConfig<P>
+impl<P> core::marker::Send for authn::JwtIssuerConfig<P>
+impl<P> core::marker::Sync for authn::JwtIssuerConfig<P>
+impl<P> core::marker::Unpin for authn::JwtIssuerConfig<P>
+impl<P> core::marker::UnsafeUnpin for authn::JwtIssuerConfig<P>
+impl<P> core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssuerConfig<P>
+impl<P> core::panic::unwind_safe::UnwindSafe for authn::JwtIssuerConfig<P>
 pub struct authn::MintedJwt
 impl authn::MintedJwt
 pub fn authn::MintedJwt::as_str(&self) -> &str
@@ -360,6 +338,7 @@ pub fn authn::Principal::from_verified_service_token(&authn::VerifiedServiceToke
 pub fn authn::Principal::kind(&self) -> vocab::principal::PrincipalKind
 pub fn authn::Principal::matches_subject(&self, &str) -> bool
 pub fn authn::Principal::row_visibility(&self, &runctx::ctx::AppCtx) -> core::result::Result<vocab::tenant::RowVisibility, runctx::local::MissingCtx>
+pub fn authn::Principal::service_caller_domain(&self) -> core::option::Option<vocab::service::ServiceCallerDomain>
 pub fn authn::Principal::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
 impl authn::Principal
 pub fn authn::Principal::cross_tenant_audit_grant(&self, &runctx::ctx::AppCtx, &dyn diport::clock::Clock, &authn::CrossTenantAuditContext) -> core::result::Result<authn::CrossTenantAuditGrant, authn::CrossTenantGrantError>
@@ -375,7 +354,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for authn::Principal
 impl core::panic::unwind_safe::UnwindSafe for authn::Principal
 pub struct authn::ProjectionMaintenanceGrant
 impl authn::ProjectionMaintenanceGrant
-pub fn authn::ProjectionMaintenanceGrant::new(impl core::convert::Into<alloc::string::String>, authn::ProjectionMaintenanceAction, vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, authn::ProjectionMaintenanceGrantError>
+pub fn authn::ProjectionMaintenanceGrant::new(vocab::service::ServiceCallerDomain, authn::ProjectionMaintenanceAction, vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, authn::ProjectionMaintenanceGrantError>
 impl core::cmp::Eq for authn::ProjectionMaintenanceGrant
 impl core::cmp::PartialEq for authn::ProjectionMaintenanceGrant
 pub fn authn::ProjectionMaintenanceGrant::eq(&self, &authn::ProjectionMaintenanceGrant) -> bool
@@ -403,7 +382,7 @@ impl core::panic::unwind_safe::UnwindSafe for authn::ProjectionMaintenanceGrantS
 pub struct authn::ProjectionMaintenanceReceipt
 impl authn::ProjectionMaintenanceReceipt
 pub fn authn::ProjectionMaintenanceReceipt::authorizes(&self, authn::ProjectionMaintenanceAction, vocab::tenant::TenantId, &str) -> bool
-pub fn authn::ProjectionMaintenanceReceipt::operator_subject(&self) -> &str
+pub const fn authn::ProjectionMaintenanceReceipt::operator_caller(&self) -> vocab::service::ServiceCallerDomain
 impl core::fmt::Debug for authn::ProjectionMaintenanceReceipt
 pub fn authn::ProjectionMaintenanceReceipt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Freeze for authn::ProjectionMaintenanceReceipt
@@ -523,6 +502,7 @@ impl core::marker::UnsafeUnpin for authn::VerifiedServiceToken
 impl core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedServiceToken
 impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedServiceToken
 pub fn authn::app_ctx(alloc::sync::Arc<authn::Principal>) -> core::option::Option<runctx::ctx::AppCtx>
-pub async fn authn::verify_jwt(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedJwt, authn::Principal), authn::AuthnError>
+pub async fn authn::verify_federated_access(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedJwt, authn::Principal), authn::AuthnError>
 pub fn authn::verify_mtls_peer(authn::SpiffeId, &authn::MtlsAllowSet) -> core::result::Result<authn::VerifiedMtlsPeer, authn::MtlsIdentityError>
+pub async fn authn::verify_rss_access(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedJwt, authn::Principal), authn::AuthnError>
 pub async fn authn::verify_service_token(&str, diport::pdp::ServiceTokenTenantBinding, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedServiceToken, authn::Principal), authn::AuthnError>

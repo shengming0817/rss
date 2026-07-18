@@ -6,7 +6,7 @@
 
 | 类型 | 形态 | 说明 |
 |------|------|------|
-| `RawCredential` | `{ scheme, token bytes }`，构造 `RawCredential::jwt(raw)` / `::service_token(raw)` | 入站凭据，adapter verify 入参 |
+| `RawCredential` | 私有 `{ profile, token, service tenant binding }`；仅 authn funnel 可按 RSS/Federated/Service 构造 | 入站凭据，typed adapter verify 入参 |
 | `VerifiedClaims` | 私有 `{ subject: String, tenant: Option<String>, kind: Option<String> }`，构造 `VerifiedClaims::new(...)`，访问器 `subject()/tenant()/kind()`，Debug 脱敏 | 验签产物；adapter **唯一构造入口**（验签成功后）；kind 透传不校验 |
 | `PdpError` | `#[non_exhaustive] enum { InvalidSignature, Expired, Untrusted }`，不携 source | fail-closed 三变体（纯 taxonomy） |
 | `Pdp` / `DynPdp` | `async fn verify(&self, raw: &RawCredential) -> Result<VerifiedClaims, PdpError>` | dynosaur dyn port；组合根注入 `Box<DynPdp>` |

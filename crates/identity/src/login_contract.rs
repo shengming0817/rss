@@ -66,17 +66,16 @@ impl diport::Signer for ContractSigner {
 
 fn make_refresh_svc() -> Arc<RefreshService<ContractSigner>> {
     #[allow(clippy::expect_used)]
-    let issuer = authn::JwtIssuer::new(
+    let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
         Arc::new(ContractSigner),
         clock(),
-        authn::JwtIssuerConfig {
-            key: diport::KeyId::new("contract-test-key"),
-            alg: authn::JwtAlg::Es256,
-            purpose: diport::SigningPurpose::new("auth.jwt.access"),
-            issuer: "https://test.example".to_string(),
-            audience: "test-audience".to_string(),
-            ttl: Duration::from_secs(900),
-        },
+        authn::JwtIssuerConfig::rss_access(
+            diport::KeyId::new("contract-test-key"),
+            diport::SigningPurpose::new("auth.jwt.access"),
+            "https://test.example",
+            "test-audience",
+            Duration::from_secs(900),
+        ),
     )
     .expect("valid jwt issuer config");
     Arc::new(RefreshService::new(
@@ -195,5 +194,25 @@ async fn login_invalid_tenant_header_is_validation_error() -> Result<(), Box<dyn
     )
     .await?;
     resp.ensure_error(StatusCode::BAD_REQUEST, "ERR_CORE_VALIDATION")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn login_duplicate_tenant_headers_are_validation_errors()
+-> Result<(), Box<dyn std::error::Error>> {
+    for second in [CANON_TENANT, "11111111-1111-4111-8111-111111111111"] {
+        let resp = testkit::call(
+            login_router(),
+            ContractRequest::post(SPEC.route.path())
+                .header("X-Tenant-ID", CANON_TENANT)
+                .header("X-Tenant-ID", second)
+                .json(&IdentityLoginRequest {
+                    username: SEED_USER.to_string(),
+                    password: SEED_PASSWORD.to_string(),
+                }),
+        )
+        .await?;
+        resp.ensure_error(StatusCode::BAD_REQUEST, "ERR_CORE_VALIDATION")?;
+    }
     Ok(())
 }

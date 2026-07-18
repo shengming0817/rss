@@ -1,19 +1,28 @@
-//! oidc adapter —— RSS workspace（#1195 / 1109-A1 真 crypto 验签切片）。
+//! Profile-typed JWT verifier adapter.
 //!
-//! 单一 `OidcProvider`：
-//! - 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-04）。
-//! - `backend` feature 开时增补 `impl diport::Pdp`（RustCrypto 验签 + durable replay consume → `VerifiedClaims`）。
+//! [`OidcProvider<P>`] binds one sealed token profile to one verifier configuration. Production
+//! runtime composition wraps it in the exhaustive `ProfileBinding` enum and derives the matching
+//! authn funnel from that same variant, so a listener cannot select a profile from untrusted token
+//! data.
+//! Before parsing a compact token, the provider checks that [`diport::RawCredential::profile`]
+//! matches `P`.
 //!
-//! feature-off（default build）：空壳编译、freeze smoke 类型断言仍有效；不引入任何 crypto dep。
-//! feature-on（`--features backend`）：持有注入的 `VerifierConfig`（issuer / audience / [`StaticKeySource`] /
-//! 可配置 tenant·kind claim 名 / kind allowlist / leeway）+ **注入的 `diport::Clock`**（exp/nbf 校验取注入时钟，
-//! 禁系统时钟，rust-standards「Clock 构造器位置参」护栏）。验签链：三段解析 → SupportedAlg 白名单 → alg-key
-//! 路径隔离闸（JWT=ES256 / ServiceToken=HS256）→ 签名/MAC 校验（p256 / hmac+sha2 常数时间）→ exp/nbf/iss/aud →
-//! 映射 claims。**key 在构造期注入**（无 live JWKS-over-HTTP discovery）——JWKS 拉取 + 轮转 = follow-up
-//! （#1109/T003，`StaticKeySource` 构造器签名为此留稳）。
+//! With `backend` enabled, access profiles accept keyed ES256 material from
+//! [`AccessStaticKeySource`], [`JwksKeySource`], or [`IsolatedJwksKeySource`]. The service-token
+//! profile accepts keyed HS256 material only from [`ServiceTokenKeySource`] and requires a durable
+//! replay store. RSS and federated access providers therefore have no HS256 builder method, while
+//! the service-token provider has no ES256 or JWKS builder method.
 //!
-//! ADR-006 §5：本 PR 仅 crate 交付、**不**接入任何生产可达 httpserve 认证路径（验签空窗保护；组合根接线 +
-//! authn 验签桥 = #1109/T004 安全同批门）。crate 保持 `forbid(unsafe_code)`（继承 workspace lints）。
+//! Verification is fail-closed and ordered as follows: encoded-size and compact-JWS checks;
+//! exact protected `alg`/`typ`/`kid` validation; exact-`kid` key selection; signature or
+//! tenant-bound MAC verification; required time, issuer, audience, `token_use`, principal-kind,
+//! and tenant semantics; finally service-token `jti` replay consumption. JWKS refreshes publish an
+//! all-or-nothing last-good snapshot and expose readiness through the runtime resource graph.
+//!
+//! Without `backend`, the provider remains a crypto-free type shell used by adapter-port compile
+//! checks.
+
+#![deny(rustdoc::broken_intra_doc_links)]
 
 #[cfg(feature = "backend")]
 mod claims;
@@ -28,44 +37,57 @@ mod verify;
 
 #[cfg(feature = "backend")]
 pub use config::{
-    ConfigError, StaticKeySource, StaticKeySourceBuilder, VerifierConfig, VerifierConfigBuilder,
+    AccessStaticKeySource, AccessStaticKeySourceBuilder, ConfigError, ServiceTokenKeySource,
+    ServiceTokenKeySourceBuilder, VerifierConfig, VerifierConfigBuilder,
 };
 #[cfg(feature = "backend")]
-pub use jwks::{JwksError, JwksKeySource, JwksReadinessHandle};
+pub use jwks::{
+    AccessJwksKeyIsolation, AccessJwksKeyIsolationGeneration, IsolatedJwksKeySource, JwksError,
+    JwksKeySource, JwksReadinessHandle,
+};
 
-use diport::{ManagedResource, ShutdownError};
+use std::marker::PhantomData;
+
+use diport::{ManagedResource, ShutdownError, TokenProfileMarker};
 
 /// OIDC JWT / service-token 验签 adapter（sealed-marker）。
 ///
 /// `backend` feature 关时为空壳（仅供 freeze smoke 类型断言）；开时持有验签配置 + 注入时钟。key
 /// 构造期注入；service-token 验签还会异步调用配置中注入的 durable replay-store port。
-pub struct OidcProvider {
+pub struct OidcProvider<P: TokenProfileMarker> {
     #[cfg(feature = "backend")]
-    config: config::VerifierConfig,
+    config: config::VerifierConfig<P>,
     #[cfg(feature = "backend")]
     clock: Box<dyn diport::Clock>,
+    profile: PhantomData<fn() -> P>,
 }
 
 #[cfg(feature = "backend")]
-impl OidcProvider {
-    /// 由验签配置 + 注入时钟构造（组合根 / 测试经 [`VerifierConfigBuilder`] + [`StaticKeySource`] 注入）。
+impl<P: TokenProfileMarker> OidcProvider<P> {
+    /// 由验签配置 + 注入时钟构造。
     ///
-    /// `clock` 是**必填构造器位置参**（非 `Option`、非默认系统时钟）——rust-standards §工程护栏「Clock 是
-    /// 构造器位置参；禁止默认取系统时钟」。fail-fast 校验集中在 builder `build()`，本构造只接受已校验的
-    /// `VerifierConfig`（字段私有、唯一构造入口是 builder），故 infallible。
-    pub fn new(config: config::VerifierConfig, clock: Box<dyn diport::Clock>) -> Self {
-        Self { config, clock }
+    /// 组合根与测试经 [`VerifierConfigBuilder`] 配置 profile-specific key source：
+    /// access 使用 [`AccessStaticKeySource`] / [`JwksKeySource`] /
+    /// [`IsolatedJwksKeySource`]，service-token 使用 [`ServiceTokenKeySource`]。`clock`
+    /// 是必填位置参数；fail-fast 校验集中在 builder `build()`，本构造只接受字段私有的已校验
+    /// [`VerifierConfig`]，故为 infallible。
+    pub fn new(config: config::VerifierConfig<P>, clock: Box<dyn diport::Clock>) -> Self {
+        Self {
+            config,
+            clock,
+            profile: PhantomData,
+        }
     }
 }
 
-impl ManagedResource for OidcProvider {
+impl<P: TokenProfileMarker> ManagedResource for OidcProvider<P> {
     fn name(&self) -> &str {
         "oidc"
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         // 级联关闭 key 源：静态源 no-op（key 构造期注入、无句柄）；JWKS 文件源停后台 poll 刷新任务 + await
-        // 收敛（#1109/T003）。OidcProvider 是组合根注册的唯一 ManagedResource，关闭经此下沉到 key source。
+        // 收敛。OidcProvider 是组合根注册的 ManagedResource，关闭经此下沉到 key source。
         #[cfg(feature = "backend")]
         {
             self.config.keys().shutdown().await
@@ -79,7 +101,7 @@ impl ManagedResource for OidcProvider {
 }
 
 #[cfg(feature = "backend")]
-impl diport::Pdp for OidcProvider {
+impl<P: TokenProfileMarker> diport::Pdp for OidcProvider<P> {
     async fn verify(
         &self,
         raw: &diport::RawCredential,
@@ -102,7 +124,7 @@ mod smoke {
 
     #[test]
     fn impls_managed_resource() {
-        assert_managed_resource(PhantomData::<super::OidcProvider>);
+        assert_managed_resource(PhantomData::<super::OidcProvider<diport::RssAccessProfile>>);
     }
 
     #[cfg(feature = "backend")]
@@ -111,6 +133,6 @@ mod smoke {
     #[cfg(feature = "backend")]
     #[test]
     fn impls_pdp() {
-        assert_pdp(PhantomData::<super::OidcProvider>);
+        assert_pdp(PhantomData::<super::OidcProvider<diport::RssAccessProfile>>);
     }
 }

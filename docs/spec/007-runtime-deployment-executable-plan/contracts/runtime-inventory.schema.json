@@ -20,7 +20,7 @@
     "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "assemblyDomain": { "type": "string", "enum": ["identity", "settings", "audit", "contractreg", "syshealth"] },
     "listenerKind": { "type": "string", "enum": ["primary", "internal", "health", "admin"] },
-    "authScheme": { "type": "string", "enum": ["noAuth", "jwt", "mtls", "serviceToken", "jwtFromAssembly"] },
+    "authScheme": { "type": "string", "enum": ["noAuth", "rssAccessToken", "federatedAccessToken", "mtls", "serviceToken"] },
     "buildIdentity": { "type": "object", "additionalProperties": false, "required": ["sourceSha", "imageDigest"], "properties": { "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" }, "imageDigest": { "$ref": "#/definitions/sha256" } } },
     "endpoint": {
       "type": "object", "additionalProperties": false, "required": ["scheme", "host", "port"],

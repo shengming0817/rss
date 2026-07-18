@@ -71,6 +71,19 @@ pub(crate) enum Rule {
     ProductionSecurityJwksCloseout,
     /// production security closeout 必须有 SPIFFE/mTLS 证据且不得保留 service-token 迁移口。
     ProductionSecuritySpiffeCloseout,
+    /// production token profiles must each be built and wired on the `run()`-reachable path.
+    ///
+    /// INVARIANT: TOKEN-PROFILE-ASSEMBLY-01 { level = "Medium", exec = "verify", source = "code" } —
+    /// RSS/Federated/Service providers, closed listener bindings, and profile-specific JWKS
+    /// resources/probes are structural assembly facts. AST reachability plus mutation fixtures
+    /// reject missing and bait-only evidence.
+    TokenProfileTrustChain,
+    /// Generic/legacy token configuration and the old shared JWKS probe are forbidden.
+    TokenProfileLegacySurface,
+    /// Access and service key sources must not be assembled by one mixed provider.
+    TokenProfileKeyIsolation,
+    /// Scheme and provider must not be independently supplied to the verification bridge.
+    TokenProfileBinding,
     /// runtime 的 active PDP 必须绑定 exact active persistent replay-store provider。
     PdpReplayStoreCapability,
     /// domain/topology required capability 必须有 active persistent provider 或 exact Cargo dependency 事实。
@@ -1311,7 +1324,7 @@ fn validate_production_security_closeout(a: &DiscoveredAssembly, findings: &mut 
         findings.push(finding(
             Rule::ProductionSecurityJwksCloseout,
             &a.manifest_label,
-            "source=rust-ast-run-reachable profile=production gate=jwks 必须在 run() 可达路径有 JwksKeySource::load_and_watch + VerifierConfigBuilder::keys_jwks + runtime_oidc.managed_resource + oidc_jwks_ready probe 注册证据",
+            "source=rust-ast-run-reachable profile=production gate=jwks 必须在 run() 可达路径有 profile-specific JwksKeySource::load_and_watch + typed VerifierConfigBuilder::keys_jwks + verifier managed resource + profile-specific JWKS readiness probe 注册证据",
         ));
     }
     if !evidence.has_spiffe_closeout() {
@@ -1319,6 +1332,120 @@ fn validate_production_security_closeout(a: &DiscoveredAssembly, findings: &mut 
             Rule::ProductionSecuritySpiffeCloseout,
             &a.manifest_label,
             "source=rust-ast-run-reachable profile=production gate=spiffe-mtls 必须在 run() 可达路径有 MtlsServerConfig::from_spire + DomainHttpTransport::from_spire + domain_transport_ready probe 证据，且不得保留 Internal service-token migration env 常量",
+        ));
+    }
+    validate_token_profile_trust_chain(a, &evidence, findings);
+}
+
+fn validate_token_profile_trust_chain(
+    a: &DiscoveredAssembly,
+    evidence: &SecurityCloseoutEvidence,
+    findings: &mut Vec<Finding>,
+) {
+    // INVARIANT: TOKEN-PROFILE-ASSEMBLY-01 { level = "Medium", exec = "verify", source = "code" } —
+    // typed construction alone does not prove that all three exclusive profiles are reachable from
+    // the production entrypoint. This gate consumes AST facts only from the free `run()` call graph;
+    // comments, strings, dead helpers, and cfg(test) modules cannot satisfy it.
+    let mut missing = Vec::new();
+    for (present, fact) in [
+        (
+            evidence.rss_access_provider_build,
+            "build_rss_access_provider",
+        ),
+        (
+            evidence.federated_access_provider_build,
+            "build_federated_access_provider",
+        ),
+        (
+            evidence.service_token_provider_build,
+            "build_service_token_provider",
+        ),
+        (evidence.rss_access_binding, "ProfileBinding::RssAccess"),
+        (
+            evidence.federated_access_binding,
+            "ProfileBinding::FederatedAccess",
+        ),
+        (
+            evidence.service_token_binding,
+            "ProfileBinding::ServiceToken",
+        ),
+        (
+            evidence.rss_access_jwks_probe,
+            "AccessTokenJwksReadyProbe::rss_access",
+        ),
+        (
+            evidence.federated_access_jwks_probe,
+            "AccessTokenJwksReadyProbe::federated_access",
+        ),
+        (
+            evidence.rss_access_probe_name,
+            "RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME",
+        ),
+        (
+            evidence.federated_access_probe_name,
+            "FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME",
+        ),
+        (
+            evidence.rss_access_resource_name,
+            "RSS_ACCESS_TOKEN_RESOURCE_NAME",
+        ),
+        (
+            evidence.federated_access_resource_name,
+            "FEDERATED_ACCESS_TOKEN_RESOURCE_NAME",
+        ),
+        (
+            evidence.service_token_resource_name,
+            "SERVICE_TOKEN_RESOURCE_NAME",
+        ),
+        (
+            evidence.profile_managed_resource_calls >= 3,
+            "three profile managed_resource registrations",
+        ),
+        (
+            evidence.rss_access_reaches_verify_bridge(),
+            "ProfileBinding::RssAccess -> apply_verify_bridge",
+        ),
+        (
+            evidence.federated_access_reaches_verify_bridge(),
+            "ProfileBinding::FederatedAccess -> apply_verify_bridge",
+        ),
+        (
+            evidence.service_token_reaches_verify_bridge(),
+            "ProfileBinding::ServiceToken -> apply_verify_bridge",
+        ),
+    ] {
+        if !present {
+            missing.push(fact);
+        }
+    }
+    if !missing.is_empty() {
+        findings.push(finding(
+            Rule::TokenProfileTrustChain,
+            &a.manifest_label,
+            format!(
+                "source=rust-ast-run-reachable profile=production token profile trust chain incomplete; missing={missing:?}"
+            ),
+        ));
+    }
+    if evidence.legacy_token_surface {
+        findings.push(finding(
+            Rule::TokenProfileLegacySurface,
+            &a.manifest_label,
+            "source=production-rust legacy/generic token env, shared OIDC provider/probe, or old collapse helper is forbidden",
+        ));
+    }
+    if evidence.mixed_key_provider {
+        findings.push(finding(
+            Rule::TokenProfileKeyIsolation,
+            &a.manifest_label,
+            "source=rust-ast production assembly must not use generic StaticKeySource, `.keys(...)`, or combine ES256 and HS256 key APIs",
+        ));
+    }
+    if evidence.split_scheme_provider_binding {
+        findings.push(finding(
+            Rule::TokenProfileBinding,
+            &a.manifest_label,
+            "source=rust-ast provider and scheme/profile must be carried by one ProfileBinding; apply_verify_bridge accepts exactly (routes, binding)",
         ));
     }
 }
@@ -1485,6 +1612,35 @@ struct SecurityCloseoutEvidence {
     domain_transport_from_spire: bool,
     domain_transport_ready_probe: bool,
     legacy_service_token_migration: bool,
+    rss_access_provider_build: bool,
+    federated_access_provider_build: bool,
+    service_token_provider_build: bool,
+    rss_access_binding: bool,
+    federated_access_binding: bool,
+    service_token_binding: bool,
+    rss_access_jwks_probe: bool,
+    federated_access_jwks_probe: bool,
+    rss_access_probe_name: bool,
+    federated_access_probe_name: bool,
+    rss_access_resource_name: bool,
+    federated_access_resource_name: bool,
+    service_token_resource_name: bool,
+    profile_managed_resource_calls: usize,
+    rss_access_bound_to_verify_bridge: bool,
+    federated_access_bound_to_verify_bridge: bool,
+    service_token_bound_to_verify_bridge: bool,
+    rss_access_packed_in_profile_carrier: bool,
+    federated_access_packed_in_profile_carrier: bool,
+    service_token_packed_in_profile_carrier: bool,
+    typed_primary_access_binding_carrier_call: bool,
+    typed_admin_access_binding_carrier_call: bool,
+    typed_service_binding_carrier_call: bool,
+    exact_access_binding_mapping: bool,
+    exact_service_binding_mapping: bool,
+    profile_carrier_bound_to_verify_bridge: bool,
+    legacy_token_surface: bool,
+    mixed_key_provider: bool,
+    split_scheme_provider_binding: bool,
 }
 
 impl SecurityCloseoutEvidence {
@@ -1500,6 +1656,42 @@ impl SecurityCloseoutEvidence {
         self.domain_transport_from_spire |= other.domain_transport_from_spire;
         self.domain_transport_ready_probe |= other.domain_transport_ready_probe;
         self.legacy_service_token_migration |= other.legacy_service_token_migration;
+        self.rss_access_provider_build |= other.rss_access_provider_build;
+        self.federated_access_provider_build |= other.federated_access_provider_build;
+        self.service_token_provider_build |= other.service_token_provider_build;
+        self.rss_access_binding |= other.rss_access_binding;
+        self.federated_access_binding |= other.federated_access_binding;
+        self.service_token_binding |= other.service_token_binding;
+        self.rss_access_jwks_probe |= other.rss_access_jwks_probe;
+        self.federated_access_jwks_probe |= other.federated_access_jwks_probe;
+        self.rss_access_probe_name |= other.rss_access_probe_name;
+        self.federated_access_probe_name |= other.federated_access_probe_name;
+        self.rss_access_resource_name |= other.rss_access_resource_name;
+        self.federated_access_resource_name |= other.federated_access_resource_name;
+        self.service_token_resource_name |= other.service_token_resource_name;
+        self.profile_managed_resource_calls = self
+            .profile_managed_resource_calls
+            .saturating_add(other.profile_managed_resource_calls);
+        self.rss_access_bound_to_verify_bridge |= other.rss_access_bound_to_verify_bridge;
+        self.federated_access_bound_to_verify_bridge |=
+            other.federated_access_bound_to_verify_bridge;
+        self.service_token_bound_to_verify_bridge |= other.service_token_bound_to_verify_bridge;
+        self.rss_access_packed_in_profile_carrier |= other.rss_access_packed_in_profile_carrier;
+        self.federated_access_packed_in_profile_carrier |=
+            other.federated_access_packed_in_profile_carrier;
+        self.service_token_packed_in_profile_carrier |=
+            other.service_token_packed_in_profile_carrier;
+        self.typed_primary_access_binding_carrier_call |=
+            other.typed_primary_access_binding_carrier_call;
+        self.typed_admin_access_binding_carrier_call |=
+            other.typed_admin_access_binding_carrier_call;
+        self.typed_service_binding_carrier_call |= other.typed_service_binding_carrier_call;
+        self.exact_access_binding_mapping |= other.exact_access_binding_mapping;
+        self.exact_service_binding_mapping |= other.exact_service_binding_mapping;
+        self.profile_carrier_bound_to_verify_bridge |= other.profile_carrier_bound_to_verify_bridge;
+        self.legacy_token_surface |= other.legacy_token_surface;
+        self.mixed_key_provider |= other.mixed_key_provider;
+        self.split_scheme_provider_binding |= other.split_scheme_provider_binding;
     }
 
     fn has_jwks_closeout(&self) -> bool {
@@ -1518,6 +1710,32 @@ impl SecurityCloseoutEvidence {
             && self.domain_transport_ready_probe
             && !self.legacy_service_token_migration
     }
+
+    fn rss_access_reaches_verify_bridge(&self) -> bool {
+        self.rss_access_bound_to_verify_bridge
+            || (self.profile_carrier_bound_to_verify_bridge
+                && (self.rss_access_packed_in_profile_carrier
+                    || (self.typed_primary_access_binding_carrier_call
+                        && self.typed_admin_access_binding_carrier_call
+                        && self.exact_access_binding_mapping)))
+    }
+
+    fn federated_access_reaches_verify_bridge(&self) -> bool {
+        self.federated_access_bound_to_verify_bridge
+            || (self.profile_carrier_bound_to_verify_bridge
+                && (self.federated_access_packed_in_profile_carrier
+                    || (self.typed_primary_access_binding_carrier_call
+                        && self.typed_admin_access_binding_carrier_call
+                        && self.exact_access_binding_mapping)))
+    }
+
+    fn service_token_reaches_verify_bridge(&self) -> bool {
+        self.service_token_bound_to_verify_bridge
+            || (self.profile_carrier_bound_to_verify_bridge
+                && (self.service_token_packed_in_profile_carrier
+                    || (self.typed_service_binding_carrier_call
+                        && self.exact_service_binding_mapping)))
+    }
 }
 
 fn security_closeout_evidence_from_sources(dir: &Path) -> Result<SecurityCloseoutEvidence> {
@@ -1533,20 +1751,62 @@ fn security_closeout_evidence_from_sources(dir: &Path) -> Result<SecurityCloseou
         let content = std::fs::read_to_string(&path)?;
         let file = syn::parse_file(&content)
             .with_context(|| format!("parse rust source {}", path.display()))?;
-        program.merge(file_security_closeout_program(&file));
+        let mut file_program = file_security_closeout_program(&file);
+        file_program.legacy_token_surface |= source_contains_legacy_token_surface(&content);
+        program.merge(file_program);
     }
     Ok(program.reachable_evidence_from_run())
+}
+
+fn source_contains_legacy_token_surface(source: &str) -> bool {
+    // Intentionally scan raw source rather than string literals alone: the destructive migration
+    // requires the old vocabulary to disappear, and comments/cfg(test) must not preserve bait that
+    // makes grep-based reviews ambiguous.
+    const FORBIDDEN: &[&str] = &[
+        "RSS_JWT_",
+        "RSS_OIDC_",
+        "OIDC_JWKS_READY_PROBE_NAME",
+        "oidc_jwks_ready",
+        "OidcJwksReadyProbe",
+        "RuntimeOidcProvider",
+        "PreparedRuntimeOidcProvider",
+        "build_runtime_oidc_provider",
+        "required_scheme_for_auth_scheme",
+    ];
+    FORBIDDEN.iter().any(|needle| source.contains(needle))
 }
 
 #[derive(Default)]
 struct SecurityCloseoutProgram {
     functions: BTreeMap<String, SecurityFunctionEvidence>,
+    access_binding_definitions: usize,
+    exact_access_binding_definitions: usize,
+    service_binding_definitions: usize,
+    exact_service_binding_definitions: usize,
     legacy_service_token_migration: bool,
+    legacy_token_surface: bool,
+    mixed_key_provider: bool,
+    split_scheme_provider_binding: bool,
 }
 
 impl SecurityCloseoutProgram {
     fn merge(&mut self, other: Self) {
+        self.access_binding_definitions = self
+            .access_binding_definitions
+            .saturating_add(other.access_binding_definitions);
+        self.exact_access_binding_definitions = self
+            .exact_access_binding_definitions
+            .saturating_add(other.exact_access_binding_definitions);
+        self.service_binding_definitions = self
+            .service_binding_definitions
+            .saturating_add(other.service_binding_definitions);
+        self.exact_service_binding_definitions = self
+            .exact_service_binding_definitions
+            .saturating_add(other.exact_service_binding_definitions);
         self.legacy_service_token_migration |= other.legacy_service_token_migration;
+        self.legacy_token_surface |= other.legacy_token_surface;
+        self.mixed_key_provider |= other.mixed_key_provider;
+        self.split_scheme_provider_binding |= other.split_scheme_provider_binding;
         for (name, info) in other.functions {
             self.functions.entry(name).or_default().merge(info);
         }
@@ -1555,6 +1815,9 @@ impl SecurityCloseoutProgram {
     fn reachable_evidence_from_run(&self) -> SecurityCloseoutEvidence {
         let mut out = SecurityCloseoutEvidence {
             legacy_service_token_migration: self.legacy_service_token_migration,
+            legacy_token_surface: self.legacy_token_surface,
+            mixed_key_provider: self.mixed_key_provider,
+            split_scheme_provider_binding: self.split_scheme_provider_binding,
             ..SecurityCloseoutEvidence::default()
         };
         let mut seen = BTreeSet::new();
@@ -1569,7 +1832,14 @@ impl SecurityCloseoutProgram {
             out.merge(info.evidence.clone());
             stack.extend(info.calls.iter().cloned());
         }
+        out.exact_access_binding_mapping =
+            self.access_binding_definitions == 1 && self.exact_access_binding_definitions == 1;
+        out.exact_service_binding_mapping =
+            self.service_binding_definitions == 1 && self.exact_service_binding_definitions == 1;
         out.legacy_service_token_migration = self.legacy_service_token_migration;
+        out.legacy_token_surface = self.legacy_token_surface;
+        out.mixed_key_provider = self.mixed_key_provider;
+        out.split_scheme_provider_binding = self.split_scheme_provider_binding;
         out
     }
 }
@@ -1598,6 +1868,35 @@ struct SecurityCloseoutVisitor {
     program: SecurityCloseoutProgram,
     function_stack: Vec<String>,
     impl_stack: Vec<String>,
+    function_key_apis: Vec<(bool, bool)>,
+    profile_binding_locals: Vec<BTreeMap<String, TokenProfileBridgeKind>>,
+    profile_carrier_bindings: Vec<BTreeSet<String>>,
+    typed_token_provider_bindings: Vec<BTreeSet<String>>,
+    typed_route_assembly_contexts: Vec<BTreeSet<String>>,
+    route_assembly_selections: Vec<BTreeMap<String, RouteAssemblySelectionKind>>,
+    listener_arms: Vec<Option<ListenerSelectionKind>>,
+    internal_selection_matches: Vec<bool>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TokenProfileBridgeKind {
+    RssAccess,
+    FederatedAccess,
+    ServiceToken,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RouteAssemblySelectionKind {
+    Primary,
+    Admin,
+    Internal,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListenerSelectionKind {
+    Primary,
+    Admin,
+    InternalServiceToken,
 }
 
 impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
@@ -1614,7 +1913,19 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         }
         self.function_stack
             .push(format!("free::{}", node.sig.ident));
+        self.function_key_apis.push((false, false));
+        self.profile_binding_locals.push(BTreeMap::new());
+        self.typed_token_provider_bindings
+            .push(token_provider_binding_parameters(&node.sig));
+        self.typed_route_assembly_contexts
+            .push(route_assembly_context_parameters(&node.sig));
+        self.route_assembly_selections.push(BTreeMap::new());
         syn::visit::visit_item_fn(self, node);
+        self.route_assembly_selections.pop();
+        self.typed_route_assembly_contexts.pop();
+        self.typed_token_provider_bindings.pop();
+        self.profile_binding_locals.pop();
+        self.finish_function_key_apis();
         self.function_stack.pop();
     }
 
@@ -1641,12 +1952,49 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         if has_cfg_test(&node.attrs) {
             return;
         }
-        let Some(owner) = self.impl_stack.last() else {
+        let Some(owner) = self.impl_stack.last().cloned() else {
             return;
         };
+        if owner == "TokenProviderBindings" {
+            match node.sig.ident.to_string().as_str() {
+                "access_binding" => {
+                    self.program.access_binding_definitions =
+                        self.program.access_binding_definitions.saturating_add(1);
+                    if exact_access_binding_definition(node) {
+                        self.program.exact_access_binding_definitions = self
+                            .program
+                            .exact_access_binding_definitions
+                            .saturating_add(1);
+                    }
+                }
+                "service_binding" => {
+                    self.program.service_binding_definitions =
+                        self.program.service_binding_definitions.saturating_add(1);
+                    if exact_service_binding_definition(node) {
+                        self.program.exact_service_binding_definitions = self
+                            .program
+                            .exact_service_binding_definitions
+                            .saturating_add(1);
+                    }
+                }
+                _ => {}
+            }
+        }
         self.function_stack
             .push(format!("{owner}::{}", node.sig.ident));
+        self.function_key_apis.push((false, false));
+        self.profile_binding_locals.push(BTreeMap::new());
+        self.typed_token_provider_bindings
+            .push(token_provider_binding_parameters(&node.sig));
+        self.typed_route_assembly_contexts
+            .push(route_assembly_context_parameters(&node.sig));
+        self.route_assembly_selections.push(BTreeMap::new());
         syn::visit::visit_impl_item_fn(self, node);
+        self.route_assembly_selections.pop();
+        self.typed_route_assembly_contexts.pop();
+        self.typed_token_provider_bindings.pop();
+        self.profile_binding_locals.pop();
+        self.finish_function_key_apis();
         self.function_stack.pop();
     }
 
@@ -1665,8 +2013,42 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
             if let Some(identity) = self.path_call_identity(node.func.as_ref()) {
                 self.record_call(&identity);
             }
+            if call == "Token"
+                && call_path_contains_segment(node.func.as_ref(), "ListenerAuthBinding")
+                && node.args.len() == 1
+                && let Some(binding) = node.args.first()
+            {
+                self.record_profile_carrier_input(binding);
+            }
             if call == "build_runtime_oidc_provider" {
                 self.record_evidence(|e| e.runtime_oidc_provider_build = true);
+            }
+            match call.as_str() {
+                "build_rss_access_provider" => {
+                    self.record_evidence(|e| {
+                        e.runtime_oidc_provider_build = true;
+                        e.rss_access_provider_build = true;
+                    });
+                }
+                "build_federated_access_provider" => {
+                    self.record_evidence(|e| {
+                        e.runtime_oidc_provider_build = true;
+                        e.federated_access_provider_build = true;
+                    });
+                }
+                "build_service_token_provider" => {
+                    self.record_evidence(|e| e.service_token_provider_build = true);
+                }
+                "apply_verify_bridge" => {
+                    if node.args.len() == 2 {
+                        if let Some(binding) = node.args.iter().nth(1) {
+                            self.record_profile_bridge(binding);
+                        }
+                    } else {
+                        self.program.split_scheme_provider_binding = true;
+                    }
+                }
+                _ => {}
             }
         }
         if call_path_ends_with(node.func.as_ref(), "load_and_watch")
@@ -1678,6 +2060,22 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
             && call_path_contains_segment(node.func.as_ref(), "OidcJwksReadyProbe")
         {
             self.record_evidence(|e| e.jwks_ready_probe = true);
+        }
+        if call_path_ends_with(node.func.as_ref(), "rss_access")
+            && call_path_contains_segment(node.func.as_ref(), "AccessTokenJwksReadyProbe")
+        {
+            self.record_evidence(|e| {
+                e.jwks_ready_probe = true;
+                e.rss_access_jwks_probe = true;
+            });
+        }
+        if call_path_ends_with(node.func.as_ref(), "federated_access")
+            && call_path_contains_segment(node.func.as_ref(), "AccessTokenJwksReadyProbe")
+        {
+            self.record_evidence(|e| {
+                e.jwks_ready_probe = true;
+                e.federated_access_jwks_probe = true;
+            });
         }
         if call_path_ends_with(node.func.as_ref(), "from_spire")
             && call_path_contains_segment(node.func.as_ref(), "MtlsServerConfig")
@@ -1692,6 +2090,61 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         syn::visit::visit_expr_call(self, node);
     }
 
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if let Some(selections) =
+            route_assembly_context_destructure(node, self.typed_route_assembly_contexts.last())
+            && let Some(current) = self.route_assembly_selections.last_mut()
+        {
+            current.extend(selections);
+        }
+        let local_binding = match (&node.pat, &node.init) {
+            (syn::Pat::Ident(pattern), Some(init)) => self
+                .profile_binding_kind(init.expr.as_ref())
+                .map(|kind| (pattern.ident.to_string(), kind)),
+            _ => None,
+        };
+        if let (Some(locals), Some((name, kind))) =
+            (self.profile_binding_locals.last_mut(), local_binding)
+        {
+            locals.insert(name, kind);
+        }
+        syn::visit::visit_local(self, node);
+    }
+
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        let listener = listener_selection_pattern_kind(
+            &node.pat,
+            self.internal_selection_matches
+                .last()
+                .copied()
+                .unwrap_or(false),
+        );
+        self.listener_arms.push(listener);
+        let carrier = profile_carrier_binding(&node.pat);
+        if let Some(binding) = carrier.as_ref() {
+            self.profile_carrier_bindings
+                .push(BTreeSet::from([binding.clone()]));
+        }
+        syn::visit::visit_arm(self, node);
+        if carrier.is_some() {
+            self.profile_carrier_bindings.pop();
+        }
+        self.listener_arms.pop();
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        let internal_match =
+            simple_path_ident(ungroup_profile_expression(node.expr.as_ref())).and_then(|name| {
+                self.route_assembly_selections
+                    .last()
+                    .and_then(|selections| selections.get(&name))
+                    .copied()
+            }) == Some(RouteAssemblySelectionKind::Internal);
+        self.internal_selection_matches.push(internal_match);
+        syn::visit::visit_expr_match(self, node);
+        self.internal_selection_matches.pop();
+    }
+
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let method = node.method.to_string();
         if let Some(owner) = self.method_receiver_owner(&node.receiver) {
@@ -1699,12 +2152,26 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         }
         if node.method == "keys_jwks" {
             self.record_evidence(|e| e.jwks_keys_jwks = true);
+            self.record_key_api(true, false);
+        }
+        if node.method == "keys_static" || node.method == "add_es256_sec1" {
+            self.record_key_api(true, false);
+        }
+        if node.method == "keys_hs256" || node.method == "add_hs256_secret" {
+            self.record_key_api(false, true);
+        }
+        if node.method == "keys" {
+            self.program.mixed_key_provider = true;
         }
         if node.method == "provider" {
             self.record_evidence(|e| e.runtime_oidc_provider_handle = true);
         }
         if node.method == "managed_resource" {
-            self.record_evidence(|e| e.runtime_oidc_managed_resource = true);
+            self.record_evidence(|e| {
+                e.runtime_oidc_managed_resource = true;
+                e.profile_managed_resource_calls =
+                    e.profile_managed_resource_calls.saturating_add(1);
+            });
         }
         if node.method == "probe" {
             self.record_evidence(|e| e.jwks_probe_registered = true);
@@ -1716,12 +2183,59 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         if path_contains_segment(&node.path, "DOMAIN_TRANSPORT_READY_PROBE_NAME") {
             self.record_evidence(|e| e.domain_transport_ready_probe = true);
         }
+        if path_contains_segment(&node.path, "RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME") {
+            self.record_evidence(|e| e.rss_access_probe_name = true);
+        }
+        if path_contains_segment(&node.path, "FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME") {
+            self.record_evidence(|e| e.federated_access_probe_name = true);
+        }
+        if path_contains_segment(&node.path, "RSS_ACCESS_TOKEN_RESOURCE_NAME") {
+            self.record_evidence(|e| e.rss_access_resource_name = true);
+        }
+        if path_contains_segment(&node.path, "FEDERATED_ACCESS_TOKEN_RESOURCE_NAME") {
+            self.record_evidence(|e| e.federated_access_resource_name = true);
+        }
+        if path_contains_segment(&node.path, "SERVICE_TOKEN_RESOURCE_NAME") {
+            self.record_evidence(|e| e.service_token_resource_name = true);
+        }
+        if path_ends_with(&node.path, "RssAccess")
+            && path_contains_segment(&node.path, "ProfileBinding")
+        {
+            self.record_evidence(|e| e.rss_access_binding = true);
+        }
+        if path_ends_with(&node.path, "FederatedAccess")
+            && path_contains_segment(&node.path, "ProfileBinding")
+        {
+            self.record_evidence(|e| e.federated_access_binding = true);
+        }
+        if path_ends_with(&node.path, "ServiceToken")
+            && path_contains_segment(&node.path, "ProfileBinding")
+        {
+            self.record_evidence(|e| e.service_token_binding = true);
+        }
+        if path_contains_segment(&node.path, "StaticKeySource") {
+            self.program.mixed_key_provider = true;
+        }
         if path_contains_segment_matching(&node.path, |segment| {
             segment.contains("INTERNAL_SERVICE_TOKEN_MIGRATION")
         }) {
             self.program.legacy_service_token_migration = true;
         }
         syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+        for segment in &node.path.segments {
+            if segment.ident == "StaticKeySource" {
+                self.program.mixed_key_provider = true;
+            }
+            if segment.ident == "OidcProvider"
+                && matches!(segment.arguments, syn::PathArguments::None)
+            {
+                self.program.split_scheme_provider_binding = true;
+            }
+        }
+        syn::visit::visit_type_path(self, node);
     }
 }
 
@@ -1744,6 +2258,144 @@ impl SecurityCloseoutVisitor {
     fn record_evidence(&mut self, f: impl FnOnce(&mut SecurityCloseoutEvidence)) {
         if let Some(info) = self.current_info_mut() {
             f(&mut info.evidence);
+        }
+    }
+
+    fn record_profile_bridge(&mut self, binding: &syn::Expr) {
+        if let Some(kind) = self.profile_binding_kind(binding) {
+            self.record_evidence(|evidence| match kind {
+                TokenProfileBridgeKind::RssAccess => {
+                    evidence.rss_access_bound_to_verify_bridge = true;
+                }
+                TokenProfileBridgeKind::FederatedAccess => {
+                    evidence.federated_access_bound_to_verify_bridge = true;
+                }
+                TokenProfileBridgeKind::ServiceToken => {
+                    evidence.service_token_bound_to_verify_bridge = true;
+                }
+            });
+            return;
+        }
+
+        let Some(name) = simple_path_ident(binding) else {
+            return;
+        };
+        if self
+            .profile_carrier_bindings
+            .iter()
+            .rev()
+            .any(|bindings| bindings.contains(&name))
+        {
+            // `ListenerAuthBinding::Token(profile)` is a closed carrier whose payload type is
+            // `ProfileBinding`. The match arm moves that exact payload into the only token verify
+            // bridge, so every exhaustive ProfileBinding variant that reaches the carrier has a
+            // binding→bridge path.
+            self.record_evidence(|evidence| {
+                evidence.profile_carrier_bound_to_verify_bridge = true;
+            });
+        }
+    }
+
+    fn record_profile_carrier_input(&mut self, binding: &syn::Expr) {
+        let binding = ungroup_profile_expression(binding);
+        if let Some(kind) = self.profile_binding_kind(binding) {
+            self.record_evidence(|evidence| match kind {
+                TokenProfileBridgeKind::RssAccess => {
+                    evidence.rss_access_packed_in_profile_carrier = true;
+                }
+                TokenProfileBridgeKind::FederatedAccess => {
+                    evidence.federated_access_packed_in_profile_carrier = true;
+                }
+                TokenProfileBridgeKind::ServiceToken => {
+                    evidence.service_token_packed_in_profile_carrier = true;
+                }
+            });
+            return;
+        }
+        let syn::Expr::MethodCall(call) = binding else {
+            return;
+        };
+        if !self.receiver_is_typed_token_provider(call.receiver.as_ref()) {
+            return;
+        }
+        match call.method.to_string().as_str() {
+            "access_binding" if call.args.len() == 1 => {
+                let Some(selection) = call
+                    .args
+                    .first()
+                    .and_then(|argument| simple_path_ident(ungroup_profile_expression(argument)))
+                else {
+                    return;
+                };
+                let selected_kind = self
+                    .route_assembly_selections
+                    .last()
+                    .and_then(|selections| selections.get(&selection))
+                    .copied();
+                let listener_kind = self.listener_arms.last().copied().flatten();
+                self.record_evidence(|evidence| match (listener_kind, selected_kind) {
+                    (
+                        Some(ListenerSelectionKind::Primary),
+                        Some(RouteAssemblySelectionKind::Primary),
+                    ) => evidence.typed_primary_access_binding_carrier_call = true,
+                    (
+                        Some(ListenerSelectionKind::Admin),
+                        Some(RouteAssemblySelectionKind::Admin),
+                    ) => evidence.typed_admin_access_binding_carrier_call = true,
+                    _ => {}
+                });
+            }
+            "service_binding" => {
+                let exact_service_selection = call.args.is_empty()
+                    && self.listener_arms.last().copied().flatten()
+                        == Some(ListenerSelectionKind::InternalServiceToken);
+                self.record_evidence(|evidence| {
+                    evidence.typed_service_binding_carrier_call = exact_service_selection;
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn profile_binding_kind(&self, expression: &syn::Expr) -> Option<TokenProfileBridgeKind> {
+        let expression = ungroup_profile_expression(expression);
+        if let syn::Expr::Call(call) = expression
+            && let syn::Expr::Path(path) = call.func.as_ref()
+            && path_contains_segment(&path.path, "ProfileBinding")
+        {
+            return match path.path.segments.last()?.ident.to_string().as_str() {
+                "RssAccess" => Some(TokenProfileBridgeKind::RssAccess),
+                "FederatedAccess" => Some(TokenProfileBridgeKind::FederatedAccess),
+                "ServiceToken" => Some(TokenProfileBridgeKind::ServiceToken),
+                _ => None,
+            };
+        }
+        let name = simple_path_ident(expression)?;
+        self.profile_binding_locals
+            .last()
+            .and_then(|locals| locals.get(&name))
+            .copied()
+    }
+
+    fn record_key_api(&mut self, es256: bool, hs256: bool) {
+        if let Some((used_es256, used_hs256)) = self.function_key_apis.last_mut() {
+            *used_es256 |= es256;
+            *used_hs256 |= hs256;
+        }
+    }
+
+    fn receiver_is_typed_token_provider(&self, receiver: &syn::Expr) -> bool {
+        let Some(name) = simple_path_ident(ungroup_profile_expression(receiver)) else {
+            return false;
+        };
+        self.typed_token_provider_bindings
+            .last()
+            .is_some_and(|bindings| bindings.contains(&name))
+    }
+
+    fn finish_function_key_apis(&mut self) {
+        if let Some((used_es256, used_hs256)) = self.function_key_apis.pop() {
+            self.program.mixed_key_provider |= used_es256 && used_hs256;
         }
     }
 
@@ -1796,6 +2448,352 @@ impl SecurityCloseoutVisitor {
     }
 }
 
+fn token_provider_binding_parameters(signature: &syn::Signature) -> BTreeSet<String> {
+    signature
+        .inputs
+        .iter()
+        .filter_map(|input| {
+            let syn::FnArg::Typed(argument) = input else {
+                return None;
+            };
+            if !type_contains_ident(argument.ty.as_ref(), "TokenProviderBindings") {
+                return None;
+            }
+            let syn::Pat::Ident(pattern) = argument.pat.as_ref() else {
+                return None;
+            };
+            Some(pattern.ident.to_string())
+        })
+        .collect()
+}
+
+fn route_assembly_context_parameters(signature: &syn::Signature) -> BTreeSet<String> {
+    signature
+        .inputs
+        .iter()
+        .filter_map(|input| {
+            let syn::FnArg::Typed(argument) = input else {
+                return None;
+            };
+            if !type_contains_ident(argument.ty.as_ref(), "RouteAssemblyContext") {
+                return None;
+            }
+            let syn::Pat::Ident(pattern) = argument.pat.as_ref() else {
+                return None;
+            };
+            Some(pattern.ident.to_string())
+        })
+        .collect()
+}
+
+fn route_assembly_context_destructure(
+    local: &syn::Local,
+    typed_contexts: Option<&BTreeSet<String>>,
+) -> Option<BTreeMap<String, RouteAssemblySelectionKind>> {
+    let init = local.init.as_ref()?;
+    let source = simple_path_ident(ungroup_profile_expression(init.expr.as_ref()))?;
+    if !typed_contexts.is_some_and(|contexts| contexts.contains(&source)) {
+        return None;
+    }
+    let syn::Pat::Struct(pattern) = &local.pat else {
+        return None;
+    };
+    if !path_contains_segment(&pattern.path, "RouteAssemblyContext") || pattern.rest.is_some() {
+        return None;
+    }
+    let mut selections = BTreeMap::new();
+    for field in &pattern.fields {
+        let syn::Member::Named(member) = &field.member else {
+            continue;
+        };
+        let kind = match member.to_string().as_str() {
+            "primary" => RouteAssemblySelectionKind::Primary,
+            "admin" => RouteAssemblySelectionKind::Admin,
+            "internal" => RouteAssemblySelectionKind::Internal,
+            _ => continue,
+        };
+        let syn::Pat::Ident(binding) = field.pat.as_ref() else {
+            return None;
+        };
+        if selections.insert(binding.ident.to_string(), kind).is_some() {
+            return None;
+        }
+    }
+    let observed = selections.values().copied().collect::<BTreeSet<_>>();
+    (observed
+        == BTreeSet::from([
+            RouteAssemblySelectionKind::Primary,
+            RouteAssemblySelectionKind::Admin,
+            RouteAssemblySelectionKind::Internal,
+        ]))
+    .then_some(selections)
+}
+
+fn listener_selection_pattern_kind(
+    pattern: &syn::Pat,
+    internal_selection_match: bool,
+) -> Option<ListenerSelectionKind> {
+    let syn::Pat::Path(path) = pattern else {
+        return None;
+    };
+    match path.path.segments.last()?.ident.to_string().as_str() {
+        "Primary" if path_contains_segment(&path.path, "ListenerKind") => {
+            Some(ListenerSelectionKind::Primary)
+        }
+        "Admin" if path_contains_segment(&path.path, "ListenerKind") => {
+            Some(ListenerSelectionKind::Admin)
+        }
+        "ServiceToken"
+            if internal_selection_match
+                && path_contains_segment(&path.path, "InternalAuthSelection") =>
+        {
+            Some(ListenerSelectionKind::InternalServiceToken)
+        }
+        _ => None,
+    }
+}
+
+fn exact_access_binding_definition(function: &syn::ImplItemFn) -> bool {
+    if function.sig.receiver().is_none()
+        || !return_type_contains_ident(&function.sig.output, "ProfileBinding")
+    {
+        return false;
+    }
+    let mut selection_names = function.sig.inputs.iter().filter_map(|input| {
+        let syn::FnArg::Typed(argument) = input else {
+            return None;
+        };
+        if !type_contains_ident(argument.ty.as_ref(), "AccessTokenProfileSelection") {
+            return None;
+        }
+        let syn::Pat::Ident(pattern) = argument.pat.as_ref() else {
+            return None;
+        };
+        Some(pattern.ident.to_string())
+    });
+    let Some(selection) = selection_names.next() else {
+        return false;
+    };
+    if selection_names.next().is_some() {
+        return false;
+    }
+    let Some(syn::Expr::Match(mapping)) = sole_block_expression(&function.block) else {
+        return false;
+    };
+    if simple_path_ident(ungroup_profile_expression(mapping.expr.as_ref())).as_deref()
+        != Some(selection.as_str())
+        || mapping.arms.len() != 2
+    {
+        return false;
+    }
+
+    let mut observed = BTreeSet::new();
+    for arm in &mapping.arms {
+        if arm.guard.is_some() || matches!(arm.body.as_ref(), syn::Expr::Block(_)) {
+            return false;
+        }
+        let Some(kind) = access_selection_pattern_kind(&arm.pat) else {
+            return false;
+        };
+        if !profile_mapping_expression_is_exact(arm.body.as_ref(), kind) {
+            return false;
+        }
+        observed.insert(kind);
+    }
+    observed
+        == BTreeSet::from([
+            TokenProfileBridgeKind::RssAccess,
+            TokenProfileBridgeKind::FederatedAccess,
+        ])
+}
+
+fn exact_service_binding_definition(function: &syn::ImplItemFn) -> bool {
+    if function.sig.receiver().is_none()
+        || function
+            .sig
+            .inputs
+            .iter()
+            .any(|input| matches!(input, syn::FnArg::Typed(_)))
+        || !return_type_contains_ident(&function.sig.output, "ProfileBinding")
+    {
+        return false;
+    }
+    let Some(expression) = sole_block_expression(&function.block) else {
+        return false;
+    };
+    !matches!(expression, syn::Expr::Block(_))
+        && profile_mapping_expression_is_exact(expression, TokenProfileBridgeKind::ServiceToken)
+}
+
+fn sole_block_expression(block: &syn::Block) -> Option<&syn::Expr> {
+    match block.stmts.as_slice() {
+        [syn::Stmt::Expr(expression, None)] => Some(expression),
+        _ => None,
+    }
+}
+
+fn access_selection_pattern_kind(pattern: &syn::Pat) -> Option<TokenProfileBridgeKind> {
+    let syn::Pat::Path(path) = pattern else {
+        return None;
+    };
+    if !path_contains_segment(&path.path, "AccessTokenProfileSelection") {
+        return None;
+    }
+    match path.path.segments.last()?.ident.to_string().as_str() {
+        "RssAccess" => Some(TokenProfileBridgeKind::RssAccess),
+        "FederatedAccess" => Some(TokenProfileBridgeKind::FederatedAccess),
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct ProfileMappingExpressionEvidence {
+    rss_fields: usize,
+    federated_fields: usize,
+    service_fields: usize,
+    rss_variants: usize,
+    federated_variants: usize,
+    service_variants: usize,
+}
+
+impl ProfileMappingExpressionEvidence {
+    fn is_exact(&self, expected: TokenProfileBridgeKind) -> bool {
+        let fields = [self.rss_fields, self.federated_fields, self.service_fields];
+        let variants = [
+            self.rss_variants,
+            self.federated_variants,
+            self.service_variants,
+        ];
+        let index = match expected {
+            TokenProfileBridgeKind::RssAccess => 0,
+            TokenProfileBridgeKind::FederatedAccess => 1,
+            TokenProfileBridgeKind::ServiceToken => 2,
+        };
+        fields[index] == 1
+            && variants[index] == 1
+            && fields.iter().sum::<usize>() == 1
+            && variants.iter().sum::<usize>() == 1
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ProfileMappingExpressionEvidence {
+    fn visit_expr_field(&mut self, node: &'ast syn::ExprField) {
+        if matches!(node.base.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self")) {
+            let name = match &node.member {
+                syn::Member::Named(name) => name.to_string(),
+                syn::Member::Unnamed(_) => String::new(),
+            };
+            match name.as_str() {
+                "rss_access" => self.rss_fields = self.rss_fields.saturating_add(1),
+                "federated_access" => {
+                    self.federated_fields = self.federated_fields.saturating_add(1);
+                }
+                "service_token" => {
+                    self.service_fields = self.service_fields.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+        syn::visit::visit_expr_field(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if path_contains_segment(&node.path, "ProfileBinding") {
+            match node
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+            {
+                Some(name) if name == "RssAccess" => {
+                    self.rss_variants = self.rss_variants.saturating_add(1);
+                }
+                Some(name) if name == "FederatedAccess" => {
+                    self.federated_variants = self.federated_variants.saturating_add(1);
+                }
+                Some(name) if name == "ServiceToken" => {
+                    self.service_variants = self.service_variants.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+}
+
+fn profile_mapping_expression_is_exact(
+    expression: &syn::Expr,
+    expected: TokenProfileBridgeKind,
+) -> bool {
+    let mut evidence = ProfileMappingExpressionEvidence::default();
+    syn::visit::Visit::visit_expr(&mut evidence, expression);
+    evidence.is_exact(expected)
+}
+
+fn return_type_contains_ident(output: &syn::ReturnType, expected: &str) -> bool {
+    let syn::ReturnType::Type(_, ty) = output else {
+        return false;
+    };
+    type_contains_ident(ty.as_ref(), expected)
+}
+
+fn type_contains_ident(ty: &syn::Type, expected: &str) -> bool {
+    struct TypeIdentVisitor<'a> {
+        expected: &'a str,
+        found: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for TypeIdentVisitor<'_> {
+        fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+            self.found |= node
+                .path
+                .segments
+                .iter()
+                .any(|segment| segment.ident == self.expected);
+            if !self.found {
+                syn::visit::visit_type_path(self, node);
+            }
+        }
+    }
+    let mut visitor = TypeIdentVisitor {
+        expected,
+        found: false,
+    };
+    syn::visit::Visit::visit_type(&mut visitor, ty);
+    visitor.found
+}
+
+fn ungroup_profile_expression(expression: &syn::Expr) -> &syn::Expr {
+    match expression {
+        syn::Expr::Group(group) => ungroup_profile_expression(group.expr.as_ref()),
+        syn::Expr::Paren(paren) => ungroup_profile_expression(paren.expr.as_ref()),
+        syn::Expr::Try(try_expression) => ungroup_profile_expression(try_expression.expr.as_ref()),
+        _ => expression,
+    }
+}
+
+fn simple_path_ident(expression: &syn::Expr) -> Option<String> {
+    let syn::Expr::Path(path) = expression else {
+        return None;
+    };
+    path.path.get_ident().map(ToString::to_string)
+}
+
+fn profile_carrier_binding(pattern: &syn::Pat) -> Option<String> {
+    let syn::Pat::TupleStruct(tuple) = pattern else {
+        return None;
+    };
+    if !path_ends_with(&tuple.path, "Token")
+        || !path_contains_segment(&tuple.path, "ListenerAuthBinding")
+        || tuple.elems.len() != 1
+    {
+        return None;
+    }
+    let syn::Pat::Ident(binding) = tuple.elems.first()? else {
+        return None;
+    };
+    Some(binding.ident.to_string())
+}
+
 fn call_path_ends_with(func: &syn::Expr, segment: &str) -> bool {
     matches!(
         func,
@@ -1825,6 +2823,12 @@ fn call_path_contains_segment(func: &syn::Expr, segment: &str) -> bool {
 
 fn path_contains_segment(path: &syn::Path, segment: &str) -> bool {
     path_contains_segment_matching(path, |actual| actual == segment)
+}
+
+fn path_ends_with(path: &syn::Path, segment: &str) -> bool {
+    path.segments
+        .last()
+        .is_some_and(|actual| actual.ident == segment)
 }
 
 fn path_contains_segment_matching(path: &syn::Path, f: impl Fn(&str) -> bool) -> bool {
@@ -3041,17 +4045,34 @@ fn wire_domain_transport_from() {
 "#;
 
     const SECURITY_CLOSEOUT_RUN_PATH_SOURCE: &str = r#"
-fn build_runtime_oidc_provider() {
+fn build_rss_access_provider() {
     let jwks = oidc::JwksKeySource::load_and_watch(
-        "primary-idp",
-        "/etc/rss/oidc-jwks.json",
+        "rss-access",
+        "/etc/rss/rss-access-jwks.json",
         std::time::Duration::from_secs(60),
         tokio_util::sync::CancellationToken::new(),
     ).unwrap();
-    let readiness = jwks.readiness_handle();
-    let _config = oidc::VerifierConfigBuilder::new("https://issuer", "rss")
+    let _config = oidc::VerifierConfigBuilder::<RssAccessProfile>::new("https://rss", "rss")
         .keys_jwks(jwks);
-    RuntimeOidcProvider { readiness }
+    RuntimeAccessProvider { resource_name: RSS_ACCESS_TOKEN_RESOURCE_NAME }
+}
+
+fn build_federated_access_provider() {
+    let jwks = oidc::JwksKeySource::load_and_watch(
+        "federated-access",
+        "/etc/rss/federated-access-jwks.json",
+        std::time::Duration::from_secs(60),
+        tokio_util::sync::CancellationToken::new(),
+    ).unwrap();
+    let _config = oidc::VerifierConfigBuilder::<FederatedAccessProfile>::new("https://federated", "federated")
+        .keys_jwks(jwks);
+    RuntimeAccessProvider { resource_name: FEDERATED_ACCESS_TOKEN_RESOURCE_NAME }
+}
+
+fn build_service_token_provider() {
+    let _config = oidc::VerifierConfigBuilder::<ServiceTokenProfile>::new("https://service", "service")
+        .keys_hs256(service_keys);
+    RuntimeServiceTokenProvider { resource_name: SERVICE_TOKEN_RESOURCE_NAME }
 }
 
 fn mtls_config_from_env() {
@@ -3065,13 +4086,29 @@ fn wire_domain_transport_from() {
 }
 
 fn run_startup() {
-    let runtime_oidc = build_runtime_oidc_provider();
-    let provider = runtime_oidc.provider();
-    module.resources.push(runtime_oidc.managed_resource());
+    let rss_access = build_rss_access_provider();
+    let federated_access = build_federated_access_provider();
+    let service_token = build_service_token_provider();
+    let rss_provider = rss_access.provider();
+    let federated_provider = federated_access.provider();
+    let service_provider = service_token.provider();
+    module.resources.push(rss_access.managed_resource());
+    module.resources.push(federated_access.managed_resource());
+    module.resources.push(service_token.managed_resource());
     registry.probe(
-        oidc_jwks_probe_name,
-        Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness())),
+        RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
+        Box::new(AccessTokenJwksReadyProbe::rss_access(rss_access.jwks_readiness())),
     ).unwrap();
+    registry.probe(
+        FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
+        Box::new(AccessTokenJwksReadyProbe::federated_access(federated_access.jwks_readiness())),
+    ).unwrap();
+    let rss_binding = ProfileBinding::RssAccess(rss_provider);
+    let federated_binding = ProfileBinding::FederatedAccess(federated_provider);
+    let service_binding = ProfileBinding::ServiceToken(service_provider);
+    let _ = apply_verify_bridge(routes, rss_binding);
+    let _ = apply_verify_bridge(routes, federated_binding);
+    let _ = apply_verify_bridge(routes, service_binding);
     let domain_transport = wire_domain_transport_from();
     module.merge(domain_transport.module_result().unwrap());
     let _ = mtls_config_from_env();
@@ -3080,7 +4117,7 @@ fn run_startup() {
     let cfg = ();
     let distributed = wire_distributed(deps);
     let _ = wire_event_transport(&pg, distributed, subscribers, cfg);
-    let _ = assemble_authed_routers(provider);
+    let _ = assemble_authed_routers();
 }
 
 fn run() {
@@ -3088,49 +4125,97 @@ fn run() {
 }
 "#;
 
-    const SECURITY_CLOSEOUT_RUN_TO_LAUNCH_SOURCE: &str = r#"
-fn build_runtime_oidc_provider() {
-    let jwks = oidc::JwksKeySource::load_and_watch(
-        "primary-idp",
-        "/etc/rss/oidc-jwks.json",
-        std::time::Duration::from_secs(60),
-        tokio_util::sync::CancellationToken::new(),
-    ).unwrap();
-    let readiness = jwks.readiness_handle();
-    let _config = oidc::VerifierConfigBuilder::new("https://issuer", "rss")
-        .keys_jwks(jwks);
-    RuntimeOidcProvider { readiness }
+    const PROFILE_BINDING_MAPPING_SOURCE: &str = r#"
+struct TokenProviderBindings {
+    rss_access: Provider,
+    federated_access: Provider,
+    service_token: Provider,
 }
 
-fn wire_domain_transport_from() {
-    let transport = httpd::DomainHttpTransport::from_spire(targets, endpoint.as_deref());
-    let _ = DOMAIN_TRANSPORT_READY_PROBE_NAME;
-    transport
+impl TokenProviderBindings {
+    fn access_binding(
+        &self,
+        selection: AccessTokenProfileSelection,
+    ) -> ProfileBinding {
+        match selection {
+            AccessTokenProfileSelection::RssAccess => self
+                .rss_access
+                .map(|provider| ProfileBinding::RssAccess(provider)),
+            AccessTokenProfileSelection::FederatedAccess => self
+                .federated_access
+                .map(|provider| ProfileBinding::FederatedAccess(provider)),
+        }
+    }
+
+    fn service_binding(&self) -> ProfileBinding {
+        self.service_token
+            .map(|provider| ProfileBinding::ServiceToken(provider))
+    }
 }
 
-fn run_startup() {
-    let runtime_oidc = build_runtime_oidc_provider();
-    let provider = runtime_oidc.provider();
-    module.resources.push(runtime_oidc.managed_resource());
-    registry.probe(
-        oidc_jwks_probe_name,
-        Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness())),
-    ).unwrap();
-    let domain_transport = wire_domain_transport_from();
-    module.merge(domain_transport.module_result().unwrap());
-    let pg = ();
-    let subscribers = Vec::new();
-    let cfg = ();
-    let distributed = wire_distributed(deps);
-    let _ = wire_event_transport(&pg, distributed, subscribers, cfg);
-    let _ = assemble_authed_routers(provider);
-    launch();
+fn apply_verify_bridge(routes: Routes, binding: ProfileBinding) {
+    match binding {
+        ProfileBinding::RssAccess(provider) => verify_rss(routes, provider),
+        ProfileBinding::FederatedAccess(provider) => verify_federated(routes, provider),
+        ProfileBinding::ServiceToken(provider) => verify_service(routes, provider),
+    }
+}
+
+fn assemble(
+    providers: &TokenProviderBindings,
+    context: RouteAssemblyContext,
+) {
+    let RouteAssemblyContext {
+        primary,
+        admin,
+        internal,
+    } = context;
+    let binding = match listener {
+        ListenerKind::Primary => {
+            ListenerAuthBinding::Token(providers.access_binding(primary))
+        }
+        ListenerKind::Admin => {
+            ListenerAuthBinding::Token(providers.access_binding(admin))
+        }
+        ListenerKind::Internal => match internal {
+            InternalAuthSelection::Mtls => ListenerAuthBinding::Mtls,
+            InternalAuthSelection::ServiceToken => {
+                ListenerAuthBinding::Token(providers.service_binding())
+            }
+        },
+    };
+    match binding {
+        ListenerAuthBinding::Token(profile) => apply_verify_bridge(routes, profile),
+        ListenerAuthBinding::Mtls => apply_mtls_verify_bridge(routes),
+    }
 }
 
 fn run() {
-    run_startup();
+    assemble(&providers, context);
 }
 "#;
+
+    fn security_closeout_run_to_launch_source() -> String {
+        SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+            "    let _ = assemble_authed_routers();",
+            "    let _ = assemble_authed_routers();\n    launch();",
+        )
+    }
+
+    fn security_closeout_only_rss_carrier_source() -> String {
+        SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+            r#"    let _ = apply_verify_bridge(routes, rss_binding);
+    let _ = apply_verify_bridge(routes, federated_binding);
+    let _ = apply_verify_bridge(routes, service_binding);"#,
+            r#"    let binding = ListenerAuthBinding::Token(rss_binding);
+    let _ = match binding {
+        ListenerAuthBinding::Token(profile) => apply_verify_bridge(routes, profile),
+        ListenerAuthBinding::Mtls => apply_mtls_verify_bridge(routes),
+    };
+    drop(federated_binding);
+    drop(service_binding);"#,
+        )
+    }
 
     fn security_closeout_lifecycle_owner_source() -> String {
         SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
@@ -4070,6 +5155,381 @@ mod tests {
     }
 
     #[test]
+    fn token_profile_trust_chain_rejects_each_missing_runtime_fact() -> anyhow::Result<()> {
+        for (case, mutated) in [
+            (
+                "rss-provider",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replacen(
+                    "build_rss_access_provider()",
+                    "missing_rss_provider()",
+                    2,
+                ),
+            ),
+            (
+                "federated-provider",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replacen(
+                    "build_federated_access_provider()",
+                    "missing_federated_provider()",
+                    2,
+                ),
+            ),
+            (
+                "service-provider",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replacen(
+                    "build_service_token_provider()",
+                    "missing_service_provider()",
+                    2,
+                ),
+            ),
+            (
+                "rss-binding",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE
+                    .replace("ProfileBinding::RssAccess", "WrongBinding::RssAccess"),
+            ),
+            (
+                "federated-binding",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+                    "ProfileBinding::FederatedAccess",
+                    "WrongBinding::FederatedAccess",
+                ),
+            ),
+            (
+                "service-binding",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE
+                    .replace("ProfileBinding::ServiceToken", "WrongBinding::ServiceToken"),
+            ),
+            (
+                "rss-probe",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+                    "AccessTokenJwksReadyProbe::rss_access",
+                    "WrongProbe::rss_access",
+                ),
+            ),
+            (
+                "federated-probe",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+                    "AccessTokenJwksReadyProbe::federated_access",
+                    "WrongProbe::federated_access",
+                ),
+            ),
+            (
+                "rss-probe-name",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+                    "RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME",
+                    "WRONG_RSS_PROBE_NAME",
+                ),
+            ),
+            (
+                "federated-probe-name",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+                    "FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME",
+                    "WRONG_FEDERATED_PROBE_NAME",
+                ),
+            ),
+            (
+                "rss-resource",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE
+                    .replace("RSS_ACCESS_TOKEN_RESOURCE_NAME", "WRONG_RSS_RESOURCE_NAME"),
+            ),
+            (
+                "federated-resource",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+                    "FEDERATED_ACCESS_TOKEN_RESOURCE_NAME",
+                    "WRONG_FEDERATED_RESOURCE_NAME",
+                ),
+            ),
+            (
+                "service-resource",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE
+                    .replace("SERVICE_TOKEN_RESOURCE_NAME", "WRONG_SERVICE_RESOURCE_NAME"),
+            ),
+            (
+                "resource-registration",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replacen(
+                    "module.resources.push(rss_access.managed_resource());",
+                    "",
+                    1,
+                ),
+            ),
+        ] {
+            let root = unique_tmp(&format!("assembly-token-profile-{case}"));
+            write_assembly(
+                &root,
+                &production_security_manifest("production", true, true, true),
+                CARGO_SECURITY_BACKEND,
+            )?;
+            write_runtime_src(&root, "lib.rs", &mutated)?;
+            let (_count, findings) = validate_root(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::TokenProfileTrustChain),
+                "missing {case} must fail token-profile trust-chain validation: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn token_profile_gate_rejects_legacy_mixed_and_split_surfaces() -> anyhow::Result<()> {
+        for (case, mutation, expected) in [
+            (
+                "legacy-env",
+                format!(
+                    "{SECURITY_CLOSEOUT_RUN_PATH_SOURCE}\nconst LEGACY: &str = \"RSS_OIDC_ISSUER\";"
+                ),
+                Rule::TokenProfileLegacySurface,
+            ),
+            (
+                "old-probe-comment",
+                format!(
+                    "{SECURITY_CLOSEOUT_RUN_PATH_SOURCE}\n// OIDC_JWKS_READY_PROBE_NAME = oidc_jwks_ready"
+                ),
+                Rule::TokenProfileLegacySurface,
+            ),
+            (
+                "mixed-key-provider",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE
+                    .replace(".keys_hs256(service_keys)", ".keys(service_keys)"),
+                Rule::TokenProfileKeyIsolation,
+            ),
+            (
+                "split-provider-scheme",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replacen(
+                    "apply_verify_bridge(routes, rss_binding)",
+                    "apply_verify_bridge(routes, rss_provider, RequiredScheme::RssAccessToken)",
+                    1,
+                ),
+                Rule::TokenProfileBinding,
+            ),
+            (
+                "generic-provider-type",
+                format!(
+                    "{SECURITY_CLOSEOUT_RUN_PATH_SOURCE}\nfn bad(provider: Arc<OidcProvider>) {{ drop(provider); }}"
+                ),
+                Rule::TokenProfileBinding,
+            ),
+        ] {
+            let root = unique_tmp(&format!("assembly-token-profile-{case}"));
+            write_assembly(
+                &root,
+                &production_security_manifest("production", true, true, true),
+                CARGO_SECURITY_BACKEND,
+            )?;
+            write_runtime_src(&root, "lib.rs", &mutation)?;
+            let (_count, findings) = validate_root(&root)?;
+            assert!(
+                findings.iter().any(|finding| finding.rule == expected),
+                "{case} must fail with {expected:?}: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn token_profile_trust_chain_rejects_bindings_discarded_before_bridge() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-token-profile-discarded-bindings");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let source = security_closeout_only_rss_carrier_source();
+        write_runtime_src(&root, "lib.rs", &source)?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::TokenProfileTrustChain),
+            "three constructors with only RSS entering the bridge must fail: {findings:?}"
+        );
+        Ok(())
+    }
+
+    fn profile_binding_mapping_evidence(
+        case: &str,
+        source: &str,
+    ) -> anyhow::Result<SecurityCloseoutEvidence> {
+        let root = unique_tmp(&format!("assembly-profile-binding-mapping-{case}"));
+        write_runtime_src(&root, "lib.rs", source)?;
+        security_closeout_evidence_from_sources(&root.join("assemblies/runtime"))
+    }
+
+    #[test]
+    fn token_profile_carrier_requires_exact_typed_mapping() -> anyhow::Result<()> {
+        let green = profile_binding_mapping_evidence("green", PROFILE_BINDING_MAPPING_SOURCE)?;
+        assert!(green.rss_access_reaches_verify_bridge());
+        assert!(green.federated_access_reaches_verify_bridge());
+        assert!(green.service_token_reaches_verify_bridge());
+
+        let swapped = PROFILE_BINDING_MAPPING_SOURCE
+            .replacen(
+                "ProfileBinding::RssAccess(provider)),",
+                "ProfileBinding::__SwapPlaceholder(provider)),",
+                1,
+            )
+            .replacen(
+                "ProfileBinding::FederatedAccess(provider)),",
+                "ProfileBinding::RssAccess(provider)),",
+                1,
+            )
+            .replacen(
+                "ProfileBinding::__SwapPlaceholder(provider)),",
+                "ProfileBinding::FederatedAccess(provider)),",
+                1,
+            );
+        let wildcard = PROFILE_BINDING_MAPPING_SOURCE.replace(
+            "AccessTokenProfileSelection::FederatedAccess => self",
+            "_ => self",
+        );
+        let alias = PROFILE_BINDING_MAPPING_SOURCE.replace(
+            r#"AccessTokenProfileSelection::RssAccess => self
+                .rss_access
+                .map(|provider| ProfileBinding::RssAccess(provider)),"#,
+            r#"AccessTokenProfileSelection::RssAccess => {
+                let alias = self
+                    .rss_access
+                    .map(|provider| ProfileBinding::RssAccess(provider));
+                alias
+            },"#,
+        );
+        let wrong_receiver = PROFILE_BINDING_MAPPING_SOURCE.replace(
+            "providers.access_binding(primary)",
+            "decoy.access_binding(primary)",
+        );
+        let hardcoded = PROFILE_BINDING_MAPPING_SOURCE.replace(
+            "providers.access_binding(primary)",
+            "providers.access_binding(AccessTokenProfileSelection::RssAccess)",
+        );
+        let swapped_selection = PROFILE_BINDING_MAPPING_SOURCE
+            .replace(
+                "providers.access_binding(primary)",
+                "providers.access_binding(__PrimaryPlaceholder)",
+            )
+            .replace(
+                "providers.access_binding(admin)",
+                "providers.access_binding(primary)",
+            )
+            .replace(
+                "providers.access_binding(__PrimaryPlaceholder)",
+                "providers.access_binding(admin)",
+            );
+        let selection_alias = PROFILE_BINDING_MAPPING_SOURCE
+            .replace(
+                "let binding = match listener {",
+                "let selected = primary;\n    let binding = match listener {",
+            )
+            .replace(
+                "providers.access_binding(primary)",
+                "providers.access_binding(selected)",
+            );
+        let listener_wildcard =
+            PROFILE_BINDING_MAPPING_SOURCE.replace("ListenerKind::Admin => {", "_ => {");
+        let service_mismatch = PROFILE_BINDING_MAPPING_SOURCE.replacen(
+            "ProfileBinding::ServiceToken(provider))",
+            "ProfileBinding::RssAccess(provider))",
+            1,
+        );
+
+        for (case, source) in [
+            ("swapped", swapped),
+            ("wildcard", wildcard),
+            ("alias", alias),
+            ("wrong-receiver", wrong_receiver),
+            ("hardcoded-selection", hardcoded),
+            ("swapped-selection", swapped_selection),
+            ("selection-alias", selection_alias),
+            ("listener-wildcard", listener_wildcard),
+        ] {
+            let evidence = profile_binding_mapping_evidence(case, &source)?;
+            assert!(
+                !evidence.rss_access_reaches_verify_bridge()
+                    || !evidence.federated_access_reaches_verify_bridge(),
+                "{case} must not certify both access-profile mappings"
+            );
+        }
+        let service = profile_binding_mapping_evidence("service-mismatch", &service_mismatch)?;
+        assert!(
+            !service.service_token_reaches_verify_bridge(),
+            "service binding must map the service provider field to ServiceToken"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn token_profile_trust_chain_ignores_dead_profile_bridge_bait() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-token-profile-dead-bridge-bait");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let source = security_closeout_only_rss_carrier_source();
+        let source = format!(
+            r#"{source}
+fn dead_bridge_bait(federated_binding: ProfileBinding, service_binding: ProfileBinding) {{
+    let _ = apply_verify_bridge(routes, federated_binding);
+    let _ = apply_verify_bridge(routes, service_binding);
+}}
+"#
+        );
+        write_runtime_src(&root, "lib.rs", &source)?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::TokenProfileTrustChain),
+            "dead helper bridge calls must not associate discarded production bindings: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn token_profile_trust_chain_ignores_comment_string_and_cfg_test_bait() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-token-profile-bait");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let bait = format!(
+            r#"
+{SECURITY_CLOSEOUT_SPIFFE_ONLY_SOURCE}
+// build_rss_access_provider build_federated_access_provider build_service_token_provider
+const BAIT: &str = "ProfileBinding::RssAccess ProfileBinding::FederatedAccess ProfileBinding::ServiceToken AccessTokenJwksReadyProbe::rss_access AccessTokenJwksReadyProbe::federated_access";
+#[cfg(test)]
+fn run() {{
+    let rss = build_rss_access_provider();
+    let fed = build_federated_access_provider();
+    let service = build_service_token_provider();
+    module.resources.push(rss.managed_resource());
+    module.resources.push(fed.managed_resource());
+    module.resources.push(service.managed_resource());
+    registry.probe(RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME, AccessTokenJwksReadyProbe::rss_access(rss.jwks_readiness()));
+    registry.probe(FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME, AccessTokenJwksReadyProbe::federated_access(fed.jwks_readiness()));
+    let _ = RSS_ACCESS_TOKEN_RESOURCE_NAME;
+    let _ = FEDERATED_ACCESS_TOKEN_RESOURCE_NAME;
+    let _ = SERVICE_TOKEN_RESOURCE_NAME;
+    let _ = apply_verify_bridge(routes, ProfileBinding::RssAccess(rss.provider()));
+    let _ = apply_verify_bridge(routes, ProfileBinding::FederatedAccess(fed.provider()));
+    let _ = apply_verify_bridge(routes, ProfileBinding::ServiceToken(service.provider()));
+}}
+"#
+        );
+        write_runtime_src(&root, "lib.rs", &bait)?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::TokenProfileTrustChain),
+            "comment/string/cfg(test) facts must not satisfy token-profile trust chain: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn production_security_closeout_full_fixture_passes() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-production-security-green");
         write_assembly(
@@ -4092,7 +5552,7 @@ mod tests {
             &production_security_manifest("production", true, true, true),
             CARGO_SECURITY_BACKEND,
         )?;
-        write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_RUN_TO_LAUNCH_SOURCE)?;
+        write_runtime_src(&root, "lib.rs", &security_closeout_run_to_launch_source())?;
         write_runtime_src(&root, "launch.rs", SECURITY_CLOSEOUT_LAUNCH_SOURCE)?;
 
         let (_count, findings) = validate_root(&root)?;

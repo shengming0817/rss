@@ -10,7 +10,7 @@ use primitives::authplan::{AuthPlan, AuthScheme, ListenerKind};
 
 fn main() {
     // R1：非组合根 crate 调 AuthPlan::new → 触发。
-    let _plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt);
+    let _plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken);
 
     // R2（别名绕过闭合）：函数项别名引用即触发（path 解析到同一 DefId）；后续 `new_fn(...)` 调本地绑定不再触发。
     let new_fn = AuthPlan::new;
@@ -35,5 +35,5 @@ fn other_primitives_fn() {
 
 #[allow(rss_authplan_callsite)] // reason: UI fixture 验证逃生门
 fn allowed_by_attr() {
-    let _plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt);
+    let _plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken);
 }

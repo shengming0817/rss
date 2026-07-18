@@ -17,14 +17,16 @@
 //! ref: maxlambrecht/rust-spiffe（`JwtSource`：本地缓存 JWK bundle + 自动刷新 + 按 kid 查找 + 离线验签）；
 //! RFC 7517（JWK / JWK Set）；RFC 7518 §6.2（EC `crv`/`x`/`y`）、§6.4（oct `k`）。
 
+use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use diport::ShutdownError;
+use diport::{FederatedAccessProfile, RssAccessProfile, ShutdownError, TokenProfileMarker};
 use p256::ecdsa::VerifyingKey;
 use serde::Deserialize;
 use tokio::runtime::Handle;
@@ -32,7 +34,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{KeyEntry, KeySet, MIN_HS256_SECRET_BYTES};
+use crate::config::{KeyEntry, KeySet};
 use crate::verify::LOG_TARGET;
 
 /// JWKS 文档体积上界（字节）。JWKS 是小文档（数把 key 的 `x`/`y`/`k` base64url），256 KiB 远超正常上限；
@@ -52,6 +54,12 @@ pub enum JwksError {
     /// JWKS 文档解析后无任何可用 key（全部 key 不符 ES256/HS256 白名单或格式非法）。
     #[error("jwks document contains no usable keys")]
     NoUsableKeys,
+    /// A snapshot key is not a keyed ES256 P-256 public key.
+    #[error("jwks document contains an invalid access-profile key")]
+    InvalidKey,
+    /// RSS and federated access profiles must never trust the same normalized ES256 public key.
+    #[error("access-profile jwks key material overlaps another active profile")]
+    KeyMaterialOverlap,
     /// 刷新间隔为零（`tokio::time::interval` 要求 period > 0；零间隔是误配，构造期拒）。
     #[error("jwks refresh interval must be greater than zero")]
     ZeroInterval,
@@ -68,6 +76,8 @@ impl JwksError {
             JwksError::Unreadable => "unreadable",
             JwksError::Malformed => "malformed",
             JwksError::NoUsableKeys => "no_usable_keys",
+            JwksError::InvalidKey => "invalid_key",
+            JwksError::KeyMaterialOverlap => "key_material_overlap",
             JwksError::ZeroInterval => "zero_interval",
             JwksError::NoRuntime => "no_runtime",
         }
@@ -143,6 +153,175 @@ impl JwksSnapshotStore {
     }
 }
 
+type Es256KeyFingerprint = [u8; 32];
+
+#[derive(Clone, Copy)]
+enum AccessProfileSlot {
+    Rss,
+    Federated,
+}
+
+#[derive(Default)]
+struct AccessProfileKeyIsolationState {
+    rss: HashSet<Es256KeyFingerprint>,
+    federated: HashSet<Es256KeyFingerprint>,
+}
+
+struct AccessProfileKeyIsolationCore {
+    state: StdMutex<AccessProfileKeyIsolationState>,
+}
+
+impl AccessProfileKeyIsolationCore {
+    fn new() -> Self {
+        Self {
+            state: StdMutex::new(AccessProfileKeyIsolationState::default()),
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, AccessProfileKeyIsolationState> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            tracing::error!(
+                target: LOG_TARGET,
+                resource = LOG_TARGET,
+                reason = "access_profile_key_isolation_lock_poisoned",
+                "access-profile key isolation lock poisoned; recovering fail-closed state"
+            );
+            poisoned.into_inner()
+        })
+    }
+}
+
+/// One startup-generation owner for the RSS/federated access-key isolation boundary.
+///
+/// The fields are private and the two typed bindings are created together, so a composition root
+/// cannot accidentally place both profiles in unrelated isolation domains.
+pub struct AccessJwksKeyIsolationGeneration {
+    core: Arc<AccessProfileKeyIsolationCore>,
+}
+
+impl AccessJwksKeyIsolationGeneration {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            core: Arc::new(AccessProfileKeyIsolationCore::new()),
+        }
+    }
+
+    /// Consume this generation into the only RSS/federated binding pair it can mint.
+    #[must_use]
+    pub fn into_bindings(
+        self,
+    ) -> (
+        AccessJwksKeyIsolation<RssAccessProfile>,
+        AccessJwksKeyIsolation<FederatedAccessProfile>,
+    ) {
+        let rss = AccessJwksKeyIsolation::new(Arc::clone(&self.core), AccessProfileSlot::Rss);
+        let federated = AccessJwksKeyIsolation::new(self.core, AccessProfileSlot::Federated);
+        (rss, federated)
+    }
+}
+
+impl Default for AccessJwksKeyIsolationGeneration {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Opaque, marker-bound capability to join one access JWKS source to an isolation generation.
+pub struct AccessJwksKeyIsolation<P: TokenProfileMarker> {
+    lease: IsolationLease,
+    profile: PhantomData<fn() -> P>,
+}
+
+impl<P: TokenProfileMarker> AccessJwksKeyIsolation<P> {
+    fn new(core: Arc<AccessProfileKeyIsolationCore>, slot: AccessProfileSlot) -> Self {
+        Self {
+            lease: IsolationLease { core, slot },
+            profile: PhantomData,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct IsolationLease {
+    core: Arc<AccessProfileKeyIsolationCore>,
+    slot: AccessProfileSlot,
+}
+
+impl IsolationLease {
+    fn register_initial(&self, set: &KeySet) -> Result<(), JwksError> {
+        let candidate = set.es256_fingerprints();
+        let mut state = self.core.state();
+        self.reject_overlap(&state, &candidate)?;
+        *self.current_mut(&mut state) = candidate;
+        Ok(())
+    }
+
+    /// The shared isolation lock covers both the overlap decision and the snapshot/state update.
+    /// Concurrent RSS/federated refreshes therefore cannot both accept the same candidate key.
+    fn replace_if_disjoint(
+        &self,
+        snapshot: &JwksSnapshotStore,
+        set: KeySet,
+    ) -> Result<(), JwksError> {
+        let candidate = set.es256_fingerprints();
+        let mut state = self.core.state();
+        self.reject_overlap(&state, &candidate)?;
+        snapshot.replace(set);
+        *self.current_mut(&mut state) = candidate;
+        Ok(())
+    }
+
+    fn reject_overlap(
+        &self,
+        state: &AccessProfileKeyIsolationState,
+        candidate: &HashSet<Es256KeyFingerprint>,
+    ) -> Result<(), JwksError> {
+        if candidate.is_disjoint(self.peer(state)) {
+            Ok(())
+        } else {
+            Err(JwksError::KeyMaterialOverlap)
+        }
+    }
+
+    fn peer<'a>(
+        &self,
+        state: &'a AccessProfileKeyIsolationState,
+    ) -> &'a HashSet<Es256KeyFingerprint> {
+        match self.slot {
+            AccessProfileSlot::Rss => &state.federated,
+            AccessProfileSlot::Federated => &state.rss,
+        }
+    }
+
+    fn current_mut<'a>(
+        &self,
+        state: &'a mut AccessProfileKeyIsolationState,
+    ) -> &'a mut HashSet<Es256KeyFingerprint> {
+        match self.slot {
+            AccessProfileSlot::Rss => &mut state.rss,
+            AccessProfileSlot::Federated => &mut state.federated,
+        }
+    }
+}
+
+/// A JWKS source whose isolation capability remains tied to the verifier profile until builder
+/// consumption. It cannot be passed to the other profile's typed builder.
+pub struct IsolatedJwksKeySource<P: TokenProfileMarker> {
+    inner: JwksKeySource,
+    profile: PhantomData<fn() -> P>,
+}
+
+impl<P: TokenProfileMarker> IsolatedJwksKeySource<P> {
+    pub fn readiness_handle(&self) -> JwksReadinessHandle {
+        self.inner.readiness_handle()
+    }
+
+    pub(crate) fn into_inner(self) -> JwksKeySource {
+        self.inner
+    }
+}
+
 /// **本地文件** JWKS key 源（**仅文件路径，不做任何 in-app HTTP/TLS 拉取**——见模块文档；in-app HTTPS 直连
 /// 远程 IdP = follow-up）。持当前快照（后台刷新原子换出）+ readiness 标志 + 刷新任务句柄。
 ///
@@ -159,8 +338,10 @@ pub struct JwksKeySource {
     path: PathBuf,
     /// 当前验签 key 快照（读侧 clone `Arc`；刷新侧整体换出；poison recovery 经 [`JwksSnapshotStore`] 单源）。
     snapshot: Arc<JwksSnapshotStore>,
-    /// 上次刷新是否成功（FR-005 `oidc_jwks_ready` 信号源；probe 注册 = #1109/T004）。
+    /// 上次刷新是否成功（profile-specific access-token JWKS readiness 信号源）。
     ready: Arc<AtomicBool>,
+    /// Present only when both access profiles are active in the same runtime generation.
+    isolation: Option<IsolationLease>,
     /// 刷新任务取消信号（`shutdown` 触发；幂等——ShutdownStack 阶段 1 可能已 cancel）。
     token: CancellationToken,
     /// 后台 poll 任务句柄（`shutdown` 取走 + await 收敛；`tokio::sync::Mutex` 供 `&self` 异步关闭）。
@@ -203,6 +384,37 @@ impl JwksKeySource {
         refresh_interval: Duration,
         token: CancellationToken,
     ) -> Result<Self, JwksError> {
+        Self::load_and_watch_inner(source_id, path, refresh_interval, token, None)
+    }
+
+    /// Load a JWKS source bound to one side of a shared RSS/federated key-isolation generation.
+    pub fn load_and_watch_isolated<P: TokenProfileMarker>(
+        source_id: impl Into<Arc<str>>,
+        path: impl Into<PathBuf>,
+        refresh_interval: Duration,
+        token: CancellationToken,
+        isolation: AccessJwksKeyIsolation<P>,
+    ) -> Result<IsolatedJwksKeySource<P>, JwksError> {
+        let inner = Self::load_and_watch_inner(
+            source_id,
+            path,
+            refresh_interval,
+            token,
+            Some(isolation.lease),
+        )?;
+        Ok(IsolatedJwksKeySource {
+            inner,
+            profile: PhantomData,
+        })
+    }
+
+    fn load_and_watch_inner(
+        source_id: impl Into<Arc<str>>,
+        path: impl Into<PathBuf>,
+        refresh_interval: Duration,
+        token: CancellationToken,
+        isolation: Option<IsolationLease>,
+    ) -> Result<Self, JwksError> {
         // 非 tokio runtime → 构造期 typed fail-fast（spawn_poll 内 tokio::spawn 否则运行期 panic）。
         if Handle::try_current().is_err() {
             return Err(JwksError::NoRuntime);
@@ -214,6 +426,9 @@ impl JwksKeySource {
         let path = path.into();
         let initial = read_and_parse(&path)?; // 初始 fail-fast（含非空校验）。
         let snapshot = Arc::new(JwksSnapshotStore::new(initial));
+        if let Some(lease) = isolation.as_ref() {
+            lease.register_initial(&snapshot.snapshot())?;
+        }
         let ready = Arc::new(AtomicBool::new(true));
         let handle = spawn_poll(
             Arc::clone(&source_id),
@@ -222,12 +437,14 @@ impl JwksKeySource {
             Arc::clone(&snapshot),
             Arc::clone(&ready),
             token.clone(),
+            isolation.clone(),
         );
         Ok(Self {
             source_id,
             path,
             snapshot,
             ready,
+            isolation,
             token,
             handle: Mutex::new(Some(handle)),
         })
@@ -247,7 +464,7 @@ impl JwksKeySource {
         self.snapshot.snapshot()
     }
 
-    /// 上次刷新是否成功（FR-005 `oidc_jwks_ready` readiness 信号；degraded = 源刷新失败但仍持 last-good 快照）。
+    /// 上次刷新是否成功（profile-specific readiness；degraded = 源刷新失败但仍持 last-good 快照）。
     /// `pub`：供**组合根（#1109/T004）**跨 crate 注册 readiness probe 消费——本 adapter 切片仅暴露状态、不接
     /// httpserve（probe 注册 + verbose readyz + 失败计数 = T004）。acquire-release 与 [`refresh`] 写侧配对、跨线程可见。
     pub fn is_ready(&self) -> bool {
@@ -258,7 +475,13 @@ impl JwksKeySource {
     /// `pub`：供**组合根（#1109/T004）** SIGHUP 类按需重载消费（本切片暂无 in-crate 生产调用方，故 `pub` 而非
     /// `pub(crate)`——`pub(crate)` 在无 in-crate 调用方时触发 dead-code，且 T004 跨 crate 须 `pub`）/ 测试驱动轮转。
     pub fn reload(&self) -> bool {
-        refresh(&self.source_id, &self.path, &self.snapshot, &self.ready);
+        refresh(
+            &self.source_id,
+            &self.path,
+            &self.snapshot,
+            &self.ready,
+            self.isolation.as_ref(),
+        );
         self.is_ready()
     }
 
@@ -296,6 +519,7 @@ fn spawn_poll(
     snapshot: Arc<JwksSnapshotStore>,
     ready: Arc<AtomicBool>,
     token: CancellationToken,
+    isolation: Option<IsolationLease>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(period);
@@ -306,7 +530,9 @@ fn spawn_poll(
             tokio::select! {
                 biased;
                 () = token.cancelled() => break,
-                _ = ticker.tick() => refresh(&source_id, &path, &snapshot, &ready),
+                _ = ticker.tick() => {
+                    refresh(&source_id, &path, &snapshot, &ready, isolation.as_ref())
+                },
             }
         }
         tracing::debug!(
@@ -325,17 +551,36 @@ fn spawn_poll(
 // false-positive，拆 helper 只搬走 tracing 调用、不增可读性。item-level carve-out（error-handling.md §Carve-out）。
 // 本 PR（#1274/#1272）随 workspace 门绿顺带收口此预存阻塞，不改 refresh 行为。
 #[allow(clippy::cognitive_complexity)]
-fn refresh(source_id: &str, path: &Path, snapshot: &JwksSnapshotStore, ready: &AtomicBool) {
+fn refresh(
+    source_id: &str,
+    path: &Path,
+    snapshot: &JwksSnapshotStore,
+    ready: &AtomicBool,
+    isolation: Option<&IsolationLease>,
+) {
     match read_and_parse(path) {
-        Ok(set) => apply_fresh(source_id, snapshot, ready, set),
+        Ok(set) => match apply_fresh(source_id, snapshot, ready, isolation, set) {
+            Ok(()) => {}
+            Err(error) => mark_degraded(source_id, ready, &error),
+        },
         Err(e) => mark_degraded(source_id, ready, &e),
     }
 }
 
 /// 解析成功：原子换出快照 + `ready=true`（degraded 复位）。
 /// 从 [`refresh`] 抽出（tracing 宏膨胀使 `refresh` cognitive_complexity 触阈，拆分而非 carve-out）。
-fn apply_fresh(source_id: &str, snapshot: &JwksSnapshotStore, ready: &AtomicBool, set: KeySet) {
-    snapshot.replace(set);
+fn apply_fresh(
+    source_id: &str,
+    snapshot: &JwksSnapshotStore,
+    ready: &AtomicBool,
+    isolation: Option<&IsolationLease>,
+    set: KeySet,
+) -> Result<(), JwksError> {
+    if let Some(lease) = isolation {
+        lease.replace_if_disjoint(snapshot, set)?;
+    } else {
+        snapshot.replace(set);
+    }
     ready.store(true, Ordering::Release);
     tracing::debug!(
         target: LOG_TARGET,
@@ -343,6 +588,7 @@ fn apply_fresh(source_id: &str, snapshot: &JwksSnapshotStore, ready: &AtomicBool
         source_id = source_id,
         "jwks snapshot refreshed"
     );
+    Ok(())
 }
 
 /// 解析失败：保留 last-good 快照（不清空 → 不宽放、不误拒已签发合法 token），标 degraded 供 readiness。
@@ -399,38 +645,28 @@ struct Jwk {
     x: Option<String>,
     #[serde(default)]
     y: Option<String>,
-    #[serde(default)]
-    k: Option<String>,
 }
 
-/// 解析 JWKS 文档 → [`KeySet`]。仅 EC P-256（→ ES256）/ oct（→ HS256）入集（OIDC-ALG-WHITELIST-01 同源）；
-/// 其它 kty / 格式非法的 key **逐个跳过**（不污染快照、不整体失败——单 key 坏不应拖垮整组轮转）。
+/// 解析 access-profile JWKS 文档。每一把 key 都必须是带非空 `kid` 的 ES256/P-256 公钥；
+/// HS key、缺/空 kid、错误曲线或畸形 key 会拒绝整个快照。
 fn parse_jwks(bytes: &[u8]) -> Result<KeySet, JwksError> {
     let doc: JwksDoc = serde_json::from_slice(bytes).map_err(|_| JwksError::Malformed)?;
-    let mut es256 = Vec::new();
-    let mut hs256 = Vec::new();
-    for jwk in &doc.keys {
-        match jwk.kty.as_str() {
-            "EC" => {
-                if let Some(entry) = parse_ec_p256(jwk) {
-                    es256.push(entry);
-                }
-            }
-            "oct" => {
-                if let Some(entry) = parse_oct(jwk) {
-                    hs256.push(entry);
-                }
-            }
-            // reason: RSA(`RSA`)/OKP/未知 kty 不在 ES256/HS256 白名单——跳过，绝不引入新算法面（alg-confusion 前移）。
-            _ => {}
-        }
+    if doc.keys.is_empty() {
+        return Err(JwksError::NoUsableKeys);
     }
-    Ok(KeySet::new(es256, hs256))
+    let mut es256 = Vec::new();
+    for jwk in &doc.keys {
+        if jwk.kty != "EC" {
+            return Err(JwksError::InvalidKey);
+        }
+        es256.push(parse_ec_p256(jwk).ok_or(JwksError::InvalidKey)?);
+    }
+    Ok(KeySet::access(es256))
 }
 
 /// 强制 JWKS key 携带非空 `kid`（**安全不变式**，#254 review F1）：JWKS entry 必须 kid-tagged，使
 /// [`crate::config`] `entry_matches` 的「untagged=通配候选」规则**只**适用于 operator 注入的静态 key
-/// （[`crate::config::StaticKeySource`]，无 kid 概念、operator 受信）——动态 JWKS key 一律精确 kid 匹配 +
+/// （[`crate::config::AccessStaticKeySource`]，无 kid 概念、operator 受信）——动态 JWKS key 一律精确 kid 匹配 +
 /// fail-closed（spec FR-005：JWKS `kid` 缺失/未知必须拒，绝不让无-kid JWK 变成任意 token 的通配候选）。
 /// 无 kid / 空 kid → `None`（该 key 跳过）。
 fn require_kid(jwk: &Jwk) -> Option<String> {
@@ -443,7 +679,7 @@ fn require_kid(jwk: &Jwk) -> Option<String> {
 
 /// EC JWK → ES256 公钥 entry。**必须带 `kid`**（无 kid → 跳过，见 [`require_kid`]，安全不变式）；仅 P-256
 /// （`crv:"P-256"`）；`x`/`y` base64url decode 后拼 SEC1 未压缩点 `0x04||x||y`（与
-/// [`crate::config::StaticKeySourceBuilder::add_es256_sec1`] 同形）；`from_sec1_bytes` 做 on-curve 校验
+/// [`crate::config::AccessStaticKeySourceBuilder::add_es256_sec1`] 同形）；`from_sec1_bytes` 做 on-curve 校验
 /// （拒非曲线点）。任一不符 → `None`（跳过）。
 ///
 /// **`alg` 缺省即推断 ES256（有意设计）**：`alg` 是 JWK 可选字段（RFC 7517 §4.4），缺省时由 `kty=EC + crv=P-256`
@@ -467,27 +703,7 @@ fn parse_ec_p256(jwk: &Jwk) -> Option<KeyEntry<VerifyingKey>> {
     sec1.extend_from_slice(&x);
     sec1.extend_from_slice(&y);
     let key = VerifyingKey::from_sec1_bytes(&sec1).ok()?;
-    Some(KeyEntry {
-        kid: Some(kid),
-        key,
-    })
-}
-
-/// oct JWK → HS256 密钥 entry。**必须带 `kid`**（见 [`require_kid`]）；若声明 `alg` 须为 `HS256`；`k` base64url
-/// decode；< 32 bytes（弱 MAC key，含空）跳过（与 [`crate::config`] `MIN_HS256_SECRET_BYTES` 同源约束）。
-fn parse_oct(jwk: &Jwk) -> Option<KeyEntry<Vec<u8>>> {
-    let kid = require_kid(jwk)?;
-    if matches!(jwk.alg.as_deref(), Some(alg) if alg != "HS256") {
-        return None;
-    }
-    let secret = decode_b64(jwk.k.as_deref()?)?;
-    if secret.len() < MIN_HS256_SECRET_BYTES {
-        return None;
-    }
-    Some(KeyEntry {
-        kid: Some(kid),
-        key: secret,
-    })
+    Some(KeyEntry { kid, key })
 }
 
 /// base64url（URL_SAFE_NO_PAD，RFC 7515 §2）解码；失败 → `None`。
@@ -499,7 +715,6 @@ fn decode_b64(s: &str) -> Option<Vec<u8>> {
 mod tests {
     //! JWKS 解析矩阵 + 文件源加载 / 轮转 / fail-closed / degraded / shutdown。
     //! 测试 expect/unwrap carve-out 按 error-handling.md §Carve-out 用 **item-level** `#[allow]` 逐 fn 标注。
-    use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -516,24 +731,7 @@ mod tests {
     const NOW: i64 = 1_700_000_000;
     const SK1_BYTES: [u8; 32] = [0x42; 32];
     const SK2_BYTES: [u8; 32] = [0x11; 32];
-
-    struct NoopReplayStore;
-
-    impl diport::ServiceTokenReplayStore for NoopReplayStore {
-        async fn check_and_record(
-            &self,
-            _key: &diport::ServiceTokenReplayKey,
-            _expires_at: std::time::SystemTime,
-            _deadline: diport::ServiceTokenReplayDeadline,
-        ) -> Result<diport::ServiceTokenReplayDisposition, diport::ServiceTokenReplayStoreError>
-        {
-            Ok(diport::ServiceTokenReplayDisposition::Recorded)
-        }
-    }
-
-    fn replay_store() -> Arc<diport::DynServiceTokenReplayStore<'static>> {
-        diport::DynServiceTokenReplayStore::new_arc(NoopReplayStore)
-    }
+    const SK3_BYTES: [u8; 32] = [0x22; 32];
 
     /// 确定性 tracing 捕获（JWKS poison recovery 回归测试用）。仅包住本测试触发的新 callsite，避免与
     /// `verify.rs` 的全局 subscriber fixture 争抢全局状态。
@@ -650,13 +848,16 @@ mod tests {
     }
 
     fn payload(exp: i64) -> String {
-        format!(r#"{{"sub":"alice","exp":{exp},"iss":"{ISS}","aud":"{AUD}"}}"#)
+        let iat = exp.saturating_sub(600);
+        format!(
+            r#"{{"sub":"alice","iat":{iat},"exp":{exp},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user","tenant_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}}"#
+        )
     }
 
     /// 用 ES256 私钥签发带 kid 的 JWT。
     fn mint_es256_kid(signing: &SigningKey, kid: &str, payload_json: &str) -> String {
-        let header =
-            URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"ES256","kid":"{kid}"}}"#).as_bytes());
+        let header = URL_SAFE_NO_PAD
+            .encode(format!(r#"{{"alg":"ES256","typ":"at+jwt","kid":"{kid}"}}"#).as_bytes());
         let body = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         let signing_input = format!("{header}.{body}");
         let sig: Signature = signing.sign(signing_input.as_bytes());
@@ -697,7 +898,7 @@ mod tests {
 
         let logged = capture::collect(|| {
             let snap = store.snapshot();
-            assert_eq!(snap.es256_candidates(Some("k1")).count(), 1);
+            assert_eq!(snap.es256_candidates("k1").count(), 1);
         });
 
         assert!(logged.contains("jwks_snapshot_lock_poisoned"));
@@ -724,8 +925,8 @@ mod tests {
         );
         let reread_logged = capture::collect(|| {
             let snap = store.snapshot();
-            assert_eq!(snap.es256_candidates(Some("k2")).count(), 1);
-            assert_eq!(snap.es256_candidates(Some("k1")).count(), 0);
+            assert_eq!(snap.es256_candidates("k2").count(), 1);
+            assert_eq!(snap.es256_candidates("k1").count(), 0);
         });
         assert!(!reread_logged.contains("jwks_snapshot_lock_poisoned"));
     }
@@ -737,26 +938,26 @@ mod tests {
         let doc = jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "k1")]);
         let set = parse_jwks(doc.as_bytes()).expect("valid jwks");
         // tagged k1：仅 token kid=k1 命中；k2 / 无 kid 不命中（不盲扫 tagged key）。
-        assert_eq!(set.es256_candidates(Some("k1")).count(), 1);
-        assert_eq!(set.es256_candidates(Some("k2")).count(), 0);
-        assert_eq!(set.es256_candidates(None).count(), 0);
-        assert_eq!(set.hs256_candidates(Some("k1")).count(), 0);
+        assert_eq!(set.es256_candidates("k1").count(), 1);
+        assert_eq!(set.es256_candidates("k2").count(), 0);
+        assert_eq!(set.es256_candidates("").count(), 0);
+        assert_eq!(set.hs256_candidates("k1").count(), 0);
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn parse_valid_oct_jwk() {
+    fn parse_rejects_oct_jwk() {
         let secret = [0x33u8; 32];
         let doc = jwks_doc(&[oct_jwk(&secret, "svc-1")]);
-        let set = parse_jwks(doc.as_bytes()).expect("valid jwks");
-        assert_eq!(set.hs256_candidates(Some("svc-1")).count(), 1);
-        assert_eq!(set.es256_candidates(Some("svc-1")).count(), 0);
+        assert!(matches!(
+            parse_jwks(doc.as_bytes()),
+            Err(JwksError::InvalidKey)
+        ));
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn parse_skips_invalid_keys() {
-        // 非 P-256 crv / 短 x / 弱 oct / 未知 kty / alg 失配 → 全跳过；其中混一把合法 EC → 仅它入集。
+    fn parse_rejects_snapshot_containing_invalid_key() {
         let good = ec_jwk(&sk(&SK1_BYTES), "good");
         let wrong_crv = r#"{"kty":"EC","crv":"P-384","kid":"a","x":"AAAA","y":"AAAA"}"#.to_string();
         let short_xy = r#"{"kty":"EC","crv":"P-256","kid":"b","x":"AAAA","y":"AAAA"}"#.to_string();
@@ -773,10 +974,10 @@ mod tests {
             unknown_kty,
             alg_mismatch,
         ]);
-        let set = parse_jwks(doc.as_bytes()).expect("valid jwks json");
-        assert_eq!(set.es256_len(), 1, "仅 good 入集");
-        assert_eq!(set.hs256_len(), 0);
-        assert_eq!(set.es256_candidates(Some("good")).count(), 1);
+        assert!(matches!(
+            parse_jwks(doc.as_bytes()),
+            Err(JwksError::InvalidKey)
+        ));
     }
 
     #[test]
@@ -790,10 +991,11 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn parse_empty_keys_yields_empty_set() {
-        // 合法 JSON 但无可用 key → 空集（read_and_parse 会据此 NoUsableKeys）。
-        let set = parse_jwks(br#"{"keys":[]}"#).expect("valid empty jwks");
-        assert!(set.is_empty());
+    fn parse_empty_keys_is_rejected() {
+        assert!(matches!(
+            parse_jwks(br#"{"keys":[]}"#),
+            Err(JwksError::NoUsableKeys)
+        ));
     }
 
     // ── 构造期 fail-fast ────────────────────────────────────────────────────────
@@ -857,15 +1059,15 @@ mod tests {
             CancellationToken::new(),
         )
         .expect("initial load");
-        assert_eq!(src.snapshot().es256_candidates(Some("k1")).count(), 1);
+        assert_eq!(src.snapshot().es256_candidates("k1").count(), 1);
 
         // 轮转：换成 k2。
         tmp.rewrite(&jwks_doc(&[ec_jwk(&sk(&SK2_BYTES), "k2")]));
         assert!(src.reload(), "reload 应成功 → ready");
         let snap = src.snapshot();
-        assert_eq!(snap.es256_candidates(Some("k2")).count(), 1, "新 kid 入集");
+        assert_eq!(snap.es256_candidates("k2").count(), 1, "新 kid 入集");
         assert_eq!(
-            snap.es256_candidates(Some("k1")).count(),
+            snap.es256_candidates("k1").count(),
             0,
             "旧 kid 轮转出快照（fail-closed）"
         );
@@ -892,7 +1094,7 @@ mod tests {
         assert!(!src.is_ready());
         // last-good 保留：k1 仍在快照（不宽放、不清空）。
         assert_eq!(
-            src.snapshot().es256_candidates(Some("k1")).count(),
+            src.snapshot().es256_candidates("k1").count(),
             1,
             "degraded 应保留 last-good 快照"
         );
@@ -914,11 +1116,211 @@ mod tests {
         tmp.rewrite(r#"{"keys":[]}"#);
         assert!(!src.reload(), "空集刷新视为失败");
         assert_eq!(
-            src.snapshot().es256_candidates(Some("k1")).count(),
+            src.snapshot().es256_candidates("k1").count(),
             1,
             "空集不得换出 last-good"
         );
         src.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn isolated_initial_load_rejects_same_key_from_different_paths() {
+        let rss_file = TempJwks::new(&jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "rss-kid")]));
+        let federated_file = TempJwks::new(&jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "federated-kid")]));
+        let (rss_isolation, federated_isolation) =
+            AccessJwksKeyIsolationGeneration::new().into_bindings();
+
+        let rss = JwksKeySource::load_and_watch_isolated(
+            "rss-access",
+            rss_file.path(),
+            Duration::from_secs(3600),
+            CancellationToken::new(),
+            rss_isolation,
+        )
+        .expect("first profile claims its initial key set");
+        let error = JwksKeySource::load_and_watch_isolated(
+            "federated-access",
+            federated_file.path(),
+            Duration::from_secs(3600),
+            CancellationToken::new(),
+            federated_isolation,
+        )
+        .err()
+        .expect("same normalized public key must be rejected despite path and kid differences");
+
+        assert!(matches!(error, JwksError::KeyMaterialOverlap));
+        assert!(!error.to_string().contains("rss-kid"));
+        assert!(!error.to_string().contains("federated-kid"));
+        assert!(rss.inner.is_ready());
+        assert_eq!(rss.inner.snapshot().es256_candidates("rss-kid").count(), 1);
+        rss.inner.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn isolated_refresh_rejects_overlap_in_both_directions_and_retains_last_good() {
+        let rss_file = TempJwks::new(&jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "rss-a")]));
+        let federated_file = TempJwks::new(&jwks_doc(&[ec_jwk(&sk(&SK2_BYTES), "federated-b")]));
+        let (rss_isolation, federated_isolation) =
+            AccessJwksKeyIsolationGeneration::new().into_bindings();
+        let rss = JwksKeySource::load_and_watch_isolated(
+            "rss-access",
+            rss_file.path(),
+            Duration::from_secs(3600),
+            CancellationToken::new(),
+            rss_isolation,
+        )
+        .expect("RSS initial load");
+        let federated = JwksKeySource::load_and_watch_isolated(
+            "federated-access",
+            federated_file.path(),
+            Duration::from_secs(3600),
+            CancellationToken::new(),
+            federated_isolation,
+        )
+        .expect("federated initial load");
+        let rss_readiness = rss.readiness_handle();
+        let federated_readiness = federated.readiness_handle();
+
+        rss_file.rewrite(&jwks_doc(&[ec_jwk(&sk(&SK2_BYTES), "rss-overlap")]));
+        let logged = capture::collect(|| {
+            assert!(
+                !rss.inner.reload(),
+                "RSS refresh into federated key rejects"
+            );
+        });
+        assert!(logged.contains("key_material_overlap"));
+        assert!(!logged.contains("rss-overlap"));
+        assert!(!rss_readiness.is_ready());
+        assert!(federated_readiness.is_ready());
+        assert_eq!(
+            rss.inner.snapshot().es256_candidates("rss-a").count(),
+            1,
+            "RSS last-good remains active"
+        );
+        assert_eq!(
+            rss.inner.snapshot().es256_candidates("rss-overlap").count(),
+            0
+        );
+
+        rss_file.rewrite(&jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "rss-a")]));
+        assert!(rss.inner.reload(), "RSS can recover with a disjoint set");
+        federated_file.rewrite(&jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "federated-overlap")]));
+        assert!(
+            !federated.inner.reload(),
+            "federated refresh into RSS key rejects"
+        );
+        assert!(rss_readiness.is_ready());
+        assert!(!federated_readiness.is_ready());
+        assert_eq!(
+            federated
+                .inner
+                .snapshot()
+                .es256_candidates("federated-b")
+                .count(),
+            1,
+            "federated last-good remains active"
+        );
+        assert_eq!(
+            federated
+                .inner
+                .snapshot()
+                .es256_candidates("federated-overlap")
+                .count(),
+            0
+        );
+
+        rss.inner.shutdown().await.expect("shutdown RSS");
+        federated
+            .inner
+            .shutdown()
+            .await
+            .expect("shutdown federated");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::expect_used)]
+    async fn concurrent_isolated_refreshes_cannot_both_claim_the_same_key() {
+        let rss_file = TempJwks::new(&jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "rss-a")]));
+        let federated_file = TempJwks::new(&jwks_doc(&[ec_jwk(&sk(&SK2_BYTES), "federated-b")]));
+        let (rss_isolation, federated_isolation) =
+            AccessJwksKeyIsolationGeneration::new().into_bindings();
+        let rss = JwksKeySource::load_and_watch_isolated(
+            "rss-access",
+            rss_file.path(),
+            Duration::from_secs(3600),
+            CancellationToken::new(),
+            rss_isolation,
+        )
+        .expect("RSS initial load");
+        let federated = JwksKeySource::load_and_watch_isolated(
+            "federated-access",
+            federated_file.path(),
+            Duration::from_secs(3600),
+            CancellationToken::new(),
+            federated_isolation,
+        )
+        .expect("federated initial load");
+        rss_file.rewrite(&jwks_doc(&[ec_jwk(&sk(&SK3_BYTES), "rss-c")]));
+        federated_file.rewrite(&jwks_doc(&[ec_jwk(&sk(&SK3_BYTES), "federated-c")]));
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (rss_accepted, federated_accepted) = std::thread::scope(|scope| {
+            let rss_barrier = Arc::clone(&barrier);
+            let rss_source = &rss.inner;
+            let rss_refresh = scope.spawn(move || {
+                rss_barrier.wait();
+                rss_source.reload()
+            });
+            let federated_barrier = Arc::clone(&barrier);
+            let federated_source = &federated.inner;
+            let federated_refresh = scope.spawn(move || {
+                federated_barrier.wait();
+                federated_source.reload()
+            });
+            (
+                rss_refresh.join().expect("RSS refresh thread"),
+                federated_refresh.join().expect("federated refresh thread"),
+            )
+        });
+
+        assert_ne!(
+            rss_accepted, federated_accepted,
+            "shared critical section must admit exactly one candidate"
+        );
+        if rss_accepted {
+            assert_eq!(rss.inner.snapshot().es256_candidates("rss-c").count(), 1);
+            assert_eq!(
+                federated
+                    .inner
+                    .snapshot()
+                    .es256_candidates("federated-b")
+                    .count(),
+                1
+            );
+            assert!(rss.inner.is_ready());
+            assert!(!federated.inner.is_ready());
+        } else {
+            assert_eq!(rss.inner.snapshot().es256_candidates("rss-a").count(), 1);
+            assert_eq!(
+                federated
+                    .inner
+                    .snapshot()
+                    .es256_candidates("federated-c")
+                    .count(),
+                1
+            );
+            assert!(!rss.inner.is_ready());
+            assert!(federated.inner.is_ready());
+        }
+
+        rss.inner.shutdown().await.expect("shutdown RSS");
+        federated
+            .inner
+            .shutdown()
+            .await
+            .expect("shutdown federated");
     }
 
     // ── 端到端①：JWKS 源 + 带 kid token 经完整 verify 路径通过；未知 kid fail-closed ──────────
@@ -933,24 +1335,32 @@ mod tests {
             CancellationToken::new(),
         )
         .expect("initial load");
-        let config = VerifierConfigBuilder::new(ISS, AUD)
+        let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_jwks(src)
-            .service_token_replay_store(replay_store(), Duration::from_secs(5))
+            .trust_kind("user")
             .build()
             .expect("config");
 
         // 命中 kid=k1 → 通过完整 scheme dispatch → kid 候选 → 签名 → claim 校验。
-        let tok_k1 = mint_es256_kid(&sk(&SK1_BYTES), "k1", &payload(NOW + 3600));
+        let tok_k1 = mint_es256_kid(&sk(&SK1_BYTES), "k1", &payload(NOW + 600));
         assert!(
-            verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok_k1))
-                .await
-                .is_ok(),
+            verify_credential(
+                &config,
+                &FixedClock(NOW),
+                &RawCredential::rss_access(tok_k1)
+            )
+            .await
+            .is_ok(),
             "k1 token 应通过"
         );
         // 未知 kid（不在快照）→ 无候选 → 签名 key 不在受信集 → Untrusted（即便用同一把 sk1 签发）。
-        let tok_unknown = mint_es256_kid(&sk(&SK1_BYTES), "not-in-jwks", &payload(NOW + 3600));
-        let r =
-            verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok_unknown)).await;
+        let tok_unknown = mint_es256_kid(&sk(&SK1_BYTES), "not-in-jwks", &payload(NOW + 600));
+        let r = verify_credential(
+            &config,
+            &FixedClock(NOW),
+            &RawCredential::rss_access(tok_unknown),
+        )
+        .await;
         assert!(
             matches!(r, Err(PdpError::Untrusted)),
             "未知 kid 应 fail-closed (Untrusted): {r:?}"
@@ -972,25 +1382,34 @@ mod tests {
         // 轮转源到 k2（在移入 config 前 reload，使快照 = k2）。
         tmp.rewrite(&jwks_doc(&[ec_jwk(&sk(&SK2_BYTES), "k2")]));
         assert!(src.reload(), "reload 成功");
-        let config = VerifierConfigBuilder::new(ISS, AUD)
+        let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_jwks(src)
-            .service_token_replay_store(replay_store(), Duration::from_secs(5))
+            .trust_kind("user")
             .build()
             .expect("config");
 
         // 旧 k1 token（kid 已轮转出快照）→ 无候选 → fail-closed (Untrusted，spec SC-005 / 验收场景②)。
-        let tok_k1 = mint_es256_kid(&sk(&SK1_BYTES), "k1", &payload(NOW + 3600));
-        let r_old = verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok_k1)).await;
+        let tok_k1 = mint_es256_kid(&sk(&SK1_BYTES), "k1", &payload(NOW + 600));
+        let r_old = verify_credential(
+            &config,
+            &FixedClock(NOW),
+            &RawCredential::rss_access(tok_k1),
+        )
+        .await;
         assert!(
             matches!(r_old, Err(PdpError::Untrusted)),
             "旧 kid 轮转后应 fail-closed (Untrusted): {r_old:?}"
         );
         // 新 k2 token → 通过。
-        let tok_k2 = mint_es256_kid(&sk(&SK2_BYTES), "k2", &payload(NOW + 3600));
+        let tok_k2 = mint_es256_kid(&sk(&SK2_BYTES), "k2", &payload(NOW + 600));
         assert!(
-            verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok_k2))
-                .await
-                .is_ok(),
+            verify_credential(
+                &config,
+                &FixedClock(NOW),
+                &RawCredential::rss_access(tok_k2)
+            )
+            .await
+            .is_ok(),
             "k2 token 应通过"
         );
     }
@@ -1026,7 +1445,7 @@ mod tests {
             CancellationToken::new(),
         )
         .expect("initial load");
-        assert_eq!(src.snapshot().es256_candidates(Some("k1")).count(), 1);
+        assert_eq!(src.snapshot().es256_candidates("k1").count(), 1);
 
         // 文件轮转到 k2，推进时间驱动后台 poll tick。有界循环 advance+yield（不依赖单次 tick 的调度时序、
         // 不挂死）：后台任务须先消费构造期立即 tick、再在 interval 到点触发 refresh。
@@ -1035,7 +1454,7 @@ mod tests {
         for _ in 0..10 {
             tokio::time::advance(interval).await;
             tokio::task::yield_now().await;
-            if src.snapshot().es256_candidates(Some("k2")).count() == 1 {
+            if src.snapshot().es256_candidates("k2").count() == 1 {
                 rotated = true;
                 break;
             }
@@ -1043,7 +1462,7 @@ mod tests {
         assert!(rotated, "后台 poll 应在数个 interval 内换出 k2");
         let snap = src.snapshot();
         assert_eq!(
-            snap.es256_candidates(Some("k1")).count(),
+            snap.es256_candidates("k1").count(),
             0,
             "后台 poll 应轮转出旧 kid k1（fail-closed）"
         );
@@ -1051,56 +1470,39 @@ mod tests {
         src.shutdown().await.expect("shutdown");
     }
 
-    // ── 多 kty 隔离：EC kid 不被 hs256 候选、oct kid 不被 es256 候选 ─────────────────
+    // ── Access JWKS must never contain symmetric keys ─────────────────────────
     #[test]
     #[allow(clippy::expect_used)]
-    fn parse_multi_kty_kid_isolation() {
+    fn parse_rejects_any_oct_key_in_access_snapshot() {
         let doc = jwks_doc(&[
             ec_jwk(&sk(&SK1_BYTES), "ec-1"),
             oct_jwk(&[0x55u8; 32], "oct-1"),
         ]);
-        let set = parse_jwks(doc.as_bytes()).expect("valid jwks");
-        assert_eq!(set.es256_len(), 1);
-        assert_eq!(set.hs256_len(), 1);
-        // 跨 kty kid 不交叉命中（路径隔离 + kid 过滤双闸）。
-        assert_eq!(set.es256_candidates(Some("ec-1")).count(), 1);
-        assert_eq!(set.es256_candidates(Some("oct-1")).count(), 0);
-        assert_eq!(set.hs256_candidates(Some("oct-1")).count(), 1);
-        assert_eq!(set.hs256_candidates(Some("ec-1")).count(), 0);
+        assert!(matches!(
+            parse_jwks(doc.as_bytes()),
+            Err(JwksError::InvalidKey)
+        ));
     }
 
-    // ── 安全（#254 F1）：JWKS 中无 kid 的 JWK 被跳过——不得变成任意 token 的通配候选 ──────────────
+    // ── Keyed snapshots are all-or-nothing ────────────────────────────────────
     #[test]
     #[allow(clippy::expect_used)]
-    fn parse_jwks_skips_kidless_jwk() {
-        // EC JWK 缺 kid 字段（RFC 合法但安全上不可接受）→ require_kid 跳过 → 不入集（绝不 untagged 通配）。
+    fn parse_jwks_rejects_kidless_or_empty_kid_snapshot() {
         let vk = sk(&SK1_BYTES).verifying_key().to_encoded_point(false);
         let x = URL_SAFE_NO_PAD.encode(vk.x().expect("x"));
         let y = URL_SAFE_NO_PAD.encode(vk.y().expect("y"));
         let no_kid = format!(r#"{{"kty":"EC","crv":"P-256","alg":"ES256","x":"{x}","y":"{y}"}}"#);
-        // 空 kid 同样跳过。
         let empty_kid =
             format!(r#"{{"kty":"EC","crv":"P-256","kid":"","alg":"ES256","x":"{x}","y":"{y}"}}"#);
-        // 混一把合法 kid'd key（good）+ 无 kid + 空 kid + 无 kid 的 oct。
         let good = ec_jwk(&sk(&SK2_BYTES), "good");
-        let kidless_oct =
-            r#"{"kty":"oct","alg":"HS256","k":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#
-                .to_string();
-        let set = parse_jwks(jwks_doc(&[good, no_kid, empty_kid, kidless_oct]).as_bytes())
-            .expect("valid jwks");
-        assert_eq!(
-            set.es256_len(),
-            1,
-            "仅 good（带 kid）入集，无 kid/空 kid 跳过"
-        );
-        assert_eq!(set.hs256_len(), 0, "无 kid 的 oct 跳过");
-        // 无 kid token → 无候选（JWKS 快照永无 untagged entry → fail-closed）。
-        assert_eq!(
-            set.es256_candidates(None).count(),
-            0,
-            "JWKS 无 untagged，无 kid token 无候选（fail-closed）"
-        );
-        assert_eq!(set.es256_candidates(Some("good")).count(), 1);
+        assert!(matches!(
+            parse_jwks(jwks_doc(&[good.clone(), no_kid]).as_bytes()),
+            Err(JwksError::InvalidKey)
+        ));
+        assert!(matches!(
+            parse_jwks(jwks_doc(&[good, empty_kid]).as_bytes()),
+            Err(JwksError::InvalidKey)
+        ));
     }
 
     // ── 安全端到端（#254 F1）：JWKS 源 + 无 kid token → Untrusted（不被任意通配 key 验签）──────────
@@ -1115,21 +1517,21 @@ mod tests {
             CancellationToken::new(),
         )
         .expect("initial load");
-        let config = VerifierConfigBuilder::new(ISS, AUD)
+        let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_jwks(src)
-            .service_token_replay_store(replay_store(), Duration::from_secs(5))
+            .trust_kind("user")
             .build()
             .expect("config");
-        // 无 kid 的 token（用 k1 私钥签发，但 header 不带 kid）→ JWKS 快照无 untagged → 无候选 → Untrusted。
-        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256"}"#);
-        let body = URL_SAFE_NO_PAD.encode(payload(NOW + 3600).as_bytes());
+        // 缺 `kid` 在 protected-header 结构边界直接拒绝。
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","typ":"at+jwt"}"#);
+        let body = URL_SAFE_NO_PAD.encode(payload(NOW + 600).as_bytes());
         let signing_input = format!("{header}.{body}");
         let sig: Signature = sk(&SK1_BYTES).sign(signing_input.as_bytes());
         let tok = format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()));
-        let r = verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok)).await;
+        let r = verify_credential(&config, &FixedClock(NOW), &RawCredential::rss_access(tok)).await;
         assert!(
-            matches!(r, Err(PdpError::Untrusted)),
-            "JWKS 无 kid token 应 fail-closed (Untrusted): {r:?}"
+            matches!(r, Err(PdpError::InvalidSignature)),
+            "JWKS 无 kid token 应 fail-closed: {r:?}"
         );
     }
 
@@ -1137,9 +1539,10 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn conflicting_key_sources_rejected() {
-        use crate::config::{ConfigError, StaticKeySource};
-        let static_keys = StaticKeySource::builder()
+        use crate::config::{AccessStaticKeySource, ConfigError};
+        let static_keys = AccessStaticKeySource::builder()
             .add_es256_sec1(
+                "static-k1",
                 sk(&SK1_BYTES)
                     .verifying_key()
                     .to_encoded_point(false)
@@ -1156,8 +1559,8 @@ mod tests {
         )
         .expect("jwks load");
         // 先静态后 JWKS → 二次设置 → build 拒（覆盖的 jwks 经 Drop 兜底取消任务）。
-        let r = VerifierConfigBuilder::new(ISS, AUD)
-            .keys(static_keys)
+        let r = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
+            .keys_static(static_keys)
             .keys_jwks(jwks)
             .build();
         // VerifierConfig 无 Debug（domain 封装），不格式化 Ok 变体。
@@ -1180,12 +1583,12 @@ mod tests {
         let handle = src.readiness_handle();
         assert_eq!(handle.source_id(), "primary-idp");
         assert!(handle.is_ready());
-        let _config = VerifierConfigBuilder::new(ISS, AUD)
+        let _config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_jwks(src)
-            .service_token_replay_store(replay_store(), Duration::from_secs(5))
+            .trust_kind("user")
             .build()
             .expect("config");
-        // src 已 move 进 config，句柄仍读共享 ready（组合根据此注册 oidc_jwks_ready probe）。
+        // src 已 move 进 config，句柄仍读共享 ready（组合根据此注册 profile-specific probe）。
         assert!(handle.is_ready(), "move 后句柄仍反映 readiness");
     }
 

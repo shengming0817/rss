@@ -38,9 +38,10 @@ mod internal;
 pub mod ports;
 
 pub use application::{
-    ChangePasswordError, IdentityDomain, IdentityDomainDeps, LoginError, LoginService,
-    PolicyManageError, PolicyManageService, RbacAdminError, RbacAdminService, RefreshBundle,
-    RefreshError, RefreshPrincipal, RefreshService,
+    ChangePasswordError, FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain,
+    IdentityDomainDeps, LoginError, LoginService, PolicyManageError, PolicyManageService,
+    RbacAdminError, RbacAdminService, RefreshBundle, RefreshError, RefreshPrincipal,
+    RefreshService,
 };
 /// Demo/journey 首发 token 装配（seed-login/test 门控；生产经组合根注入 vault `Signer`，#1252）。
 #[cfg(any(test, feature = "seed-login"))]

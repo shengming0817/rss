@@ -2142,7 +2142,7 @@ mod tests {
         };
         let authenticated = principal.as_ref().map(|principal| {
             httpserve::Authenticated::new(
-                primitives::RequiredScheme::Jwt,
+                primitives::RequiredScheme::RssAccessToken,
                 principal.kind(),
                 CANON_SUBJECT,
                 principal.tenant(),
@@ -2278,12 +2278,13 @@ mod tests {
             &::generated::http::audit_v1::list_entries::ROUTE,
         )
         .expect("audit list route is mounted in finalized routes");
-        let plan = primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt)
-            .expect("admin jwt plan");
+        let plan =
+            primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::RssAccessToken)
+                .expect("admin jwt plan");
         let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
         let bridge_principal = principal(vocab::PrincipalKind::Admin, evidence_tenant);
         let authenticated = httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_SUBJECT,
             evidence_tenant,
@@ -2969,8 +2970,11 @@ mod tests {
                 .into_iter()
                 .find(|(listener, _)| matches!(listener, ListenerKind::Admin))
                 .expect("admin routes");
-            let plan = primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt)
-                .expect("admin jwt plan");
+            let plan = primitives::AuthPlan::new(
+                ListenerKind::Admin,
+                primitives::AuthScheme::RssAccessToken,
+            )
+            .expect("admin jwt plan");
             let principal_for_bridge = principal.clone();
             let router = httpserve::finalize_auth_with_audit_and_authorizer(
                 admin,
@@ -2985,7 +2989,7 @@ mod tests {
                     let principal = principal_for_bridge.clone();
                     async move {
                         req.extensions_mut().insert(httpserve::Authenticated::new(
-                            primitives::RequiredScheme::Jwt,
+                            primitives::RequiredScheme::RssAccessToken,
                             vocab::PrincipalKind::SuperAdmin,
                             CANON_SUBJECT,
                             None,

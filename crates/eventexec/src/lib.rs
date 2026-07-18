@@ -48,13 +48,13 @@ pub use relay_metrics::{MetricsOutboxMetrics, OutboxMetricScope, OutboxMetrics, 
 
 pub mod dlq;
 pub use dlq::{
-    DeadLetterId, DlqCursor, DlqEntryKind, DlqEntrySummary, DlqError, DlqInspectRequest,
-    DlqInspectTarget, DlqListQuery, DlqListResult, DlqMutationKind, DlqMutationMetricOutcome,
-    DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome, DlqReplayRequest, DlqStore,
-    OperatorDlqCapability, OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome,
-    OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket, VerifiedOperatorSubject,
-    record_dlq_mutation_error, record_dlq_outbox_redrive, record_dlq_replay,
-    record_outbox_expired_resolution,
+    AuthorizedDlqOperatorReceipt, DeadLetterId, DlqCursor, DlqEntryKind, DlqEntrySummary, DlqError,
+    DlqInspectRequest, DlqInspectTarget, DlqListQuery, DlqListResult, DlqMutationKind,
+    DlqMutationMetricOutcome, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome,
+    DlqReplayRequest, DlqStore, OperatorDlqCapability, OutboxExpiredResolutionKind,
+    OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket,
+    VerifiedOperatorSubject, record_dlq_mutation_error, record_dlq_outbox_redrive,
+    record_dlq_replay, record_outbox_expired_resolution,
 };
 
 pub mod dlx_lifecycle;

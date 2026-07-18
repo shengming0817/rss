@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "assemblyFingerprint": "sha256:ea53e592ba3586de1bc057d557fe95dc134c9c7650467f76c76b40b167d7b07e",
-  "runtimePlanFingerprint": "sha256:996fa2c0b1286a277c96d7167c90756e4c3accf998d43c524bab8c17bcd5e0ef",
+  "runtimePlanFingerprint": "sha256:fdfb411c69b044956912982af4f0827298a721936bf64f917a14c9b941ca86c9",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
@@ -88,7 +88,7 @@
     {
       "id": "admin-main",
       "kind": "admin",
-      "auth": "jwt",
+      "auth": "rssAccessToken",
       "domains": ["audit"]
     },
     {
@@ -106,7 +106,7 @@
     {
       "id": "primary-main",
       "kind": "primary",
-      "auth": "jwt",
+      "auth": "rssAccessToken",
       "domains": ["settings", "identity"]
     }
   ],

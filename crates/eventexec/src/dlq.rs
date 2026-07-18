@@ -505,18 +505,31 @@ impl OutboxResolutionChangeTicket {
     }
 }
 
-/// Operator subject already verified by the maintenance authentication boundary.
+/// Private-field typed receipt that a service caller passed authentication and the exact DLQ
+/// action/tenant grant check. Its public constructor is exact-callsite-gated by the
+/// `rss_dlq_operator_callsite` Medium dylint at the runtime trust boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedOperatorSubject(String);
+pub struct AuthorizedDlqOperatorReceipt {
+    caller: vocab::ServiceCallerDomain,
+}
+
+impl AuthorizedDlqOperatorReceipt {
+    pub const fn from_authenticated_and_authorized(caller: vocab::ServiceCallerDomain) -> Self {
+        Self { caller }
+    }
+}
+
+/// Operator subject derived only by consuming an authorized receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedOperatorSubject(vocab::ServiceCallerDomain);
 
 impl VerifiedOperatorSubject {
-    /// Construct only after service-token verification and exact grant authorization succeed.
-    pub fn from_verified(raw: &str) -> Result<Self, DlqError> {
-        parse_resolution_text(raw, 256).map(Self)
+    pub const fn from_authorized_receipt(receipt: AuthorizedDlqOperatorReceipt) -> Self {
+        Self(receipt.caller)
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -1229,8 +1242,11 @@ mod tests {
         let event_id = IdemKey::parse("evt-blocked").expect("canonical event id");
         let evidence = IdemKey::parse("evt-compensation").expect("canonical evidence id");
         let ticket = OutboxResolutionChangeTicket::parse("CHG-1742").expect("valid ticket");
-        let subject =
-            VerifiedOperatorSubject::from_verified("operator:alice").expect("verified subject");
+        let subject = VerifiedOperatorSubject::from_authorized_receipt(
+            AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            ),
+        );
         let capability = OperatorDlqCapability::issue_for_authorized_operator();
 
         let accepted = OutboxExpiredResolutionRequest::accepted_gap(

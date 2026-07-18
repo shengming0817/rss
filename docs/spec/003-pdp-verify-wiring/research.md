@@ -64,7 +64,7 @@
 
 **采纳 = R3 次选「本地受信 sidecar / 文件源」**（非兜底）：`JwksKeySource`（`adapters/oidc/src/jwks.rs`）从受 OS 文件权限 / k8s Secret RBAC / 挂载 namespace 隔离保护的**本地路径**读 JWKS 文档（外部 agent / init-container / controller 经**各自的** TLS 拉取 + 轮转后写入），解析成 kid 索引的 `KeySet` 快照 + 后台 poll 周期重载 + fail-closed + `ManagedResource` 真实关闭刷新句柄。**in-app 零 HTTP/TLS provider** ⇒ 零供应链风险；传输完整性重定位到 infra 层（机器强制，非部署约定），不触及 F2 否决的 plain-HTTP-over-network 威胁面。**in-app HTTPS（标准外部 IdP 直连）= follow-up**：待成熟 license-clean provider（graviola 1.0+审计）出现，复用本 PR 的 `KeySet`/`enum KeySource`/poll seam，仅换 transport。
 
-部署约束（回写 quickstart，T003.2b）：JWKS 文档路径的写入方负责 TLS 拉取 + 完整性；路径须经文件权限 / Secret RBAC 保护（应用只读）；应用对源不可读/畸形/空 fail-closed，刷新失败保留 last-good + `oidc_jwks_ready=false`（degraded）。
+部署约束（回写 quickstart，T003.2b）：每个 access profile 的 JWKS 文档路径必须独占；写入方负责 TLS 拉取 + 完整性；路径须经文件权限 / Secret RBAC 保护（应用只读）；应用对源不可读/畸形/空 fail-closed，刷新失败保留 last-good + 对应 profile readiness=false（degraded）。
 
 ## R4. key 管理范式
 

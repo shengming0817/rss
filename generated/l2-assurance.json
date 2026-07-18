@@ -248,7 +248,7 @@
                 "wire": {
                   "kind": "rust-symbol",
                   "path": "composition/identity/src/lib.rs",
-                  "symbol": "wire"
+                  "symbol": "common_identity_services"
                 },
                 "serviceConstructor": "PolicyManageService::new",
                 "providerFactory": "PgDomainDeps::policy_lifecycle"
@@ -402,7 +402,7 @@
                 "wire": {
                   "kind": "rust-symbol",
                   "path": "composition/identity/src/lib.rs",
-                  "symbol": "wire"
+                  "symbol": "common_identity_services"
                 },
                 "serviceConstructor": "PolicyManageService::new",
                 "providerFactory": "PgDomainDeps::policy_lifecycle"
@@ -556,7 +556,7 @@
                 "wire": {
                   "kind": "rust-symbol",
                   "path": "composition/identity/src/lib.rs",
-                  "symbol": "wire"
+                  "symbol": "common_identity_services"
                 },
                 "serviceConstructor": "PolicyManageService::new",
                 "providerFactory": "PgDomainDeps::policy_lifecycle"
@@ -941,7 +941,7 @@
                 "wire": {
                   "kind": "rust-symbol",
                   "path": "composition/identity/src/lib.rs",
-                  "symbol": "wire"
+                  "symbol": "common_identity_services"
                 },
                 "serviceConstructor": "RbacAdminService::new",
                 "providerFactory": "PgDomainDeps::role_binding_lifecycle"
@@ -1095,7 +1095,7 @@
                 "wire": {
                   "kind": "rust-symbol",
                   "path": "composition/identity/src/lib.rs",
-                  "symbol": "wire"
+                  "symbol": "common_identity_services"
                 },
                 "serviceConstructor": "RbacAdminService::new",
                 "providerFactory": "PgDomainDeps::role_binding_lifecycle"

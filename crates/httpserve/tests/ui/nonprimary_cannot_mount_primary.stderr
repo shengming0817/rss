@@ -1,11 +1,14 @@
-error[E0308]: mismatched types
+error[E0061]: this method takes 2 arguments but 1 argument was supplied
+  --> tests/ui/nonprimary_cannot_mount_primary.rs:34:73
+   |
+34 |     let _internal = unfinalized_for_test::<httpserve::Internal>(|rb| rb.mount(endpoint()));
+   |                                                                         ^^^^^------------ argument #2 of type `ServiceCallerPolicy` is missing
+   |
+note: expected `GeneratedEndpoint<(), _>`, found `GeneratedPrimaryEndpoint<(), LocalOnly>`
   --> tests/ui/nonprimary_cannot_mount_primary.rs:34:79
    |
 34 |     let _internal = unfinalized_for_test::<httpserve::Internal>(|rb| rb.mount(endpoint()));
-   |                                                                         ----- ^^^^^^^^^^ expected `GeneratedEndpoint<(), _>`, found `GeneratedPrimaryEndpoint<(), LocalOnly>`
-   |                                                                         |
-   |                                                                         arguments to this method are incorrect
-   |
+   |                                                                               ^^^^^^^^^^
    = note: expected struct `GeneratedEndpoint<(), _>`
               found struct `GeneratedPrimaryEndpoint<(), vocab::http::LocalOnly>`
 note: method defined here
@@ -13,6 +16,11 @@ note: method defined here
    |
    |     pub fn mount<C: HttpConsistencyClass>(
    |            ^^^^^
+help: provide the argument
+   |
+34 -     let _internal = unfinalized_for_test::<httpserve::Internal>(|rb| rb.mount(endpoint()));
+34 +     let _internal = unfinalized_for_test::<httpserve::Internal>(|rb| rb.mount(/* endpoint */, /* ServiceCallerPolicy */));
+   |
 
 error[E0308]: mismatched types
   --> tests/ui/nonprimary_cannot_mount_primary.rs:35:73
@@ -30,16 +38,13 @@ note: method defined here
    |     pub fn mount<C: HttpConsistencyClass>(
    |            ^^^^^
 
-error[E0599]: the method `mount` exists for struct `ListenerRouter<Health>`, but its trait bounds were not satisfied
+error[E0599]: no method named `mount` found for struct `ListenerRouter<Health>` in the current scope
   --> tests/ui/nonprimary_cannot_mount_primary.rs:36:69
    |
 36 |     let _health = unfinalized_for_test::<httpserve::Health>(|rb| rb.mount(endpoint()));
-   |                                                                     ^^^^^ method cannot be called on `ListenerRouter<Health>` due to unsatisfied trait bounds
+   |                                                                     ^^^^^ method not found in `ListenerRouter<Health>`
    |
-  ::: src/routes.rs
-   |
-   | pub struct Health;
-   | ----------------- doesn't satisfy `Health: NonPrimaryListener`
-   |
-   = note: the following trait bounds were not satisfied:
-           `Health: NonPrimaryListener`
+   = note: the method was found for
+           - `ListenerRouter<Primary>`
+           - `ListenerRouter<httpserve::Admin>`
+           - `ListenerRouter<httpserve::Internal>`

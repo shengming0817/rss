@@ -9,6 +9,6 @@ use primitives::authplan::{AuthPlan, AuthScheme, ListenerKind};
 
 fn main() {
     // G：primitives crate 内部（或以其 crate 名编译的 fixture）调 AuthPlan::new / none 不触发（合法豁免）。
-    let _plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt);
+    let _plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken);
     let _plan2 = AuthPlan::none(ListenerKind::Primary);
 }

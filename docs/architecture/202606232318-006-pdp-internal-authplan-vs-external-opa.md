@@ -9,7 +9,8 @@
 
 > **Closeout addendum（#1584 / #1586）**：`diport::Pdp`、`RawCredential`、`VerifiedClaims`、
 > `PdpError`、`authn::VerifiedJwt` / `VerifiedServiceToken` 以及 authn-owned
-> `verify_jwt` / `verify_service_token` verify→mint bridge 已落地；`rss_pdp_impl_adapter_only`
+> `verify_rss_access` / `verify_federated_access` / `verify_service_token` verify→mint bridge
+> 已落地；`rss_pdp_impl_adapter_only`
 > 已注册为 dylint gate。下文把 `Pdp` port / verified newtype 描述为 future 的段落保留为
 > 2026-06-23 历史裁决背景，不再代表当前 AuthZ closeout 状态。是否引外置 OPA 的切换判据仍有效。
 > 开源授权对标边界由
@@ -22,12 +23,12 @@
 
 RSS 当前授权侧分两段：
 
-- **`primitives::authplan`（引擎层，纯值类型）**：`AuthScheme`（`NoAuth`/`Jwt`/`Mtls`/`ServiceToken`/`JwtFromAssembly` 闭值集）+ `ListenerKind` + `AuthPlan` + `RequiredScheme` + `AuthRequirement`，经 `resolve_requirement` 纯函数按优先级（route opt-out → listener plan → fail-fast deny）算最终裁决。**仅纯数据 + 纯决策计算，无 I/O、无网络**（`crates/primitives/src/authplan.rs` 头注释明示）。
-- **`authn`（服务层）**：承载 PDP / 会话 / Principal / jwt。`authn` 自身**不验签、不校验 exp**——`Jwt::parse` / `from_verified_jwt` / `from_verified_service_token(&AccessToken)` 只做结构化解码与 claims→Principal 映射；签名 / MAC / 过期校验**显式延后给「未来 `diport::Pdp`」**（`crates/authn/src/lib.rs` 注释 + issue **#1109** 预留 `VerifiedJwt` newtype「仅 Pdp 验签后 mint」）。
+- **`primitives::authplan`（引擎层，纯值类型）**：`AuthScheme`（`NoAuth`/`RssAccessToken`/`FederatedAccessToken`/`Mtls`/`ServiceToken` 闭值集）+ `ListenerKind` + `AuthPlan` + `RequiredScheme` + `AuthRequirement`，经 `resolve_requirement` 纯函数按优先级（route opt-out → listener plan → fail-fast deny）算最终裁决。**仅纯数据 + 纯决策计算，无 I/O、无网络**（`crates/primitives/src/authplan.rs` 头注释明示）。
+- **`authn`（服务层）**：承载会话、Principal 与 profile-specific 认证 funnel。签名 / MAC / lifetime / claims 校验由 typed `diport::Pdp` provider 完成；`authn` 只接受带可信 profile 的 `RawCredential`，再把验证结果投影为 Principal。RSS/Federated/Service 三种 credential 构造入口与 verifier 路径互斥，不存在 generic JWT 入口。
 
-`diport` 现有 provider-agnostic infra port 为 `AuditSink` / `Clock` / `ManagedResource` / `Publisher` / `RateLimiter` / `Signer` / `Subscriber`（+ `SubscribeInitializer`）——**无 `Pdp`**。
+`diport` 现有 provider-agnostic infra port 包含 `Pdp`；具体 OIDC adapter 仍通过 sealed profile marker 与 typed provider 绑定信任域，不把策略退化为自由字符串或可混用 provider。
 
-**待裁决**：RSS 是现在就引入**外置 PDP**（OPA + Rego sidecar，策略当数据、运行期可换），还是**保持内置 typed authplan** 并按 DI 范式**预留** `diport::Pdp` 接缝按需再外置。这是 deep-research（Feature #1131）识别的 Phase-0 零信任决策，阻塞 W 阶段域 body 硬化（域行为依赖授权接缝定型）。
+**历史裁决问题（已决）**：RSS 是引入**外置 PDP**（OPA + Rego sidecar，策略当数据、运行期可换），还是**保持内置 typed authplan** 并按 DI 范式提供 `diport::Pdp` 接缝按需再外置。该问题已由本 ADR 选择后者；下文保留当时的决策依据。
 
 ---
 

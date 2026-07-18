@@ -4,7 +4,8 @@
 //!
 //! INVARIANT: PDP-IMPL-ADAPTER-ONLY-01 { level = "Medium", exec = "verify", source = "dylint" }（T004.6 / #1198 / ADR-006 §5 安全同批门信任根分线）
 //!
-//! 背景：`Pdp` 是认证决策的**信任原点**（验签 = 信任原点，`authn::verify_jwt` 经其铸 `VerifiedClaims`）。
+//! 背景：`Pdp` 是认证决策的**信任原点**（验签 = 信任原点，authn 的 profile-specific verify funnels
+//! 经其铸 `VerifiedClaims`）。
 //! 既有 `rss_diport_impl_allowlist`（DIPORT-IMPL-ALLOWLIST-01）放行 `adapters` / `bins` / `assemblies` impl
 //! **任一** DI port，`deny.toml` oidc/memory wrapper 只拦「依赖 stub adapter crate」——二者都**拦不住**组合根
 //! （bins/assemblies，在 allowlist 内）**内联** 一个 always-allow `impl Pdp`（恒返回伪 `VerifiedClaims`）绕过真

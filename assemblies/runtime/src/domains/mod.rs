@@ -22,10 +22,11 @@ impl DomainModuleInputs {
     pub(crate) fn from_snapshot(
         mapper: &ServingConfigMapper<'_>,
         keyprovider_readiness_interval: settings_composition::KeyProviderReadinessInterval,
+        identity_token_profile: identity::IdentityTokenProfileInput,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             settings: settings::SettingsModuleInput::new(keyprovider_readiness_interval),
-            identity: identity::IdentityModuleInput::from_mapper(mapper)?,
+            identity: identity::IdentityModuleInput::from_mapper(mapper, identity_token_profile)?,
             audit: audit::AuditModuleInput::from_mapper(mapper)?,
         })
     }

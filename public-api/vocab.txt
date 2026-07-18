@@ -180,6 +180,27 @@ impl core::marker::Unpin for vocab::contract::binding::ContractBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::ContractBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::ContractBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::ContractBinding
+pub struct vocab::contract::binding::EventFactBinding
+impl vocab::contract::binding::EventFactBinding
+pub const fn vocab::contract::binding::EventFactBinding::contract(&self) -> vocab::contract::binding::ContractBinding
+pub const fn vocab::contract::binding::EventFactBinding::from_static(vocab::contract::binding::ContractBinding, &'static str) -> Self
+pub const fn vocab::contract::binding::EventFactBinding::topic(&self) -> &'static str
+impl core::clone::Clone for vocab::contract::binding::EventFactBinding
+pub fn vocab::contract::binding::EventFactBinding::clone(&self) -> vocab::contract::binding::EventFactBinding
+impl core::cmp::Eq for vocab::contract::binding::EventFactBinding
+impl core::cmp::PartialEq for vocab::contract::binding::EventFactBinding
+pub fn vocab::contract::binding::EventFactBinding::eq(&self, &vocab::contract::binding::EventFactBinding) -> bool
+impl core::fmt::Debug for vocab::contract::binding::EventFactBinding
+pub fn vocab::contract::binding::EventFactBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::contract::binding::EventFactBinding
+impl core::marker::StructuralPartialEq for vocab::contract::binding::EventFactBinding
+impl core::marker::Freeze for vocab::contract::binding::EventFactBinding
+impl core::marker::Send for vocab::contract::binding::EventFactBinding
+impl core::marker::Sync for vocab::contract::binding::EventFactBinding
+impl core::marker::Unpin for vocab::contract::binding::EventFactBinding
+impl core::marker::UnsafeUnpin for vocab::contract::binding::EventFactBinding
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::EventFactBinding
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::EventFactBinding
 pub struct vocab::contract::binding::ProjectionInputBinding
 impl vocab::contract::binding::ProjectionInputBinding
 pub const fn vocab::contract::binding::ProjectionInputBinding::contract(&self) -> vocab::contract::binding::ContractBinding
@@ -279,6 +300,8 @@ impl core::marker::Unpin for vocab::contract::binding::SagaStepBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaStepBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaStepBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaStepBinding
+pub trait vocab::contract::binding::GeneratedEventPayload
+pub const vocab::contract::binding::GeneratedEventPayload::FACT: vocab::contract::binding::EventFactBinding
 pub trait vocab::contract::binding::SagaStepOutputBinding
 pub const vocab::contract::binding::SagaStepOutputBinding::BINDING: vocab::contract::binding::SagaStepBinding
 pub mod vocab::contract::owner
@@ -643,6 +666,7 @@ impl core::marker::StructuralPartialEq for vocab::http::DeviceLatent
 impl vocab::http::HttpConsistencyClass for vocab::http::DeviceLatent
 pub const vocab::http::DeviceLatent::LEVEL: vocab::http::HttpConsistencyLevel
 impl vocab::http::NonLocalHttpConsistency for vocab::http::DeviceLatent
+impl vocab::http::NonProducerHttpConsistency for vocab::http::DeviceLatent
 impl core::marker::Freeze for vocab::http::DeviceLatent
 impl core::marker::Send for vocab::http::DeviceLatent
 impl core::marker::Sync for vocab::http::DeviceLatent
@@ -692,6 +716,43 @@ impl core::marker::Unpin for vocab::http::HttpEffectProfile
 impl core::marker::UnsafeUnpin for vocab::http::HttpEffectProfile
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpEffectProfile
 impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpEffectProfile
+pub struct vocab::http::HttpProducerBinding<M>
+impl<M> vocab::http::HttpProducerBinding<M>
+pub const fn vocab::http::HttpProducerBinding<M>::emitted_facts(&self) -> &'static [vocab::contract::binding::ContractBinding]
+pub const fn vocab::http::HttpProducerBinding<M>::evidence(&self) -> vocab::http::HttpProducerEvidence
+pub const fn vocab::http::HttpProducerBinding<M>::from_static(vocab::http::HttpRouteBinding<M, vocab::http::OutboxFact>, &'static [vocab::contract::binding::ContractBinding]) -> Self
+pub const fn vocab::http::HttpProducerBinding<M>::route(&self) -> vocab::http::HttpRouteBinding<M, vocab::http::OutboxFact>
+pub const fn vocab::http::HttpProducerBinding<M>::route_evidence(&self) -> vocab::http::HttpRouteEvidence
+impl<M> core::clone::Clone for vocab::http::HttpProducerBinding<M>
+pub fn vocab::http::HttpProducerBinding<M>::clone(&self) -> Self
+impl<M> core::marker::Copy for vocab::http::HttpProducerBinding<M>
+impl<M> core::marker::Freeze for vocab::http::HttpProducerBinding<M>
+impl<M> core::marker::Send for vocab::http::HttpProducerBinding<M>
+impl<M> core::marker::Sync for vocab::http::HttpProducerBinding<M>
+impl<M> core::marker::Unpin for vocab::http::HttpProducerBinding<M>
+impl<M> core::marker::UnsafeUnpin for vocab::http::HttpProducerBinding<M>
+impl<M> core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpProducerBinding<M>
+impl<M> core::panic::unwind_safe::UnwindSafe for vocab::http::HttpProducerBinding<M>
+pub struct vocab::http::HttpProducerEvidence
+impl vocab::http::HttpProducerEvidence
+pub const fn vocab::http::HttpProducerEvidence::emitted_facts(&self) -> &'static [vocab::contract::binding::ContractBinding]
+pub const fn vocab::http::HttpProducerEvidence::route(&self) -> vocab::http::HttpRouteEvidence
+impl core::clone::Clone for vocab::http::HttpProducerEvidence
+pub fn vocab::http::HttpProducerEvidence::clone(&self) -> vocab::http::HttpProducerEvidence
+impl core::cmp::Eq for vocab::http::HttpProducerEvidence
+impl core::cmp::PartialEq for vocab::http::HttpProducerEvidence
+pub fn vocab::http::HttpProducerEvidence::eq(&self, &vocab::http::HttpProducerEvidence) -> bool
+impl core::fmt::Debug for vocab::http::HttpProducerEvidence
+pub fn vocab::http::HttpProducerEvidence::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpProducerEvidence
+impl core::marker::StructuralPartialEq for vocab::http::HttpProducerEvidence
+impl core::marker::Freeze for vocab::http::HttpProducerEvidence
+impl core::marker::Send for vocab::http::HttpProducerEvidence
+impl core::marker::Sync for vocab::http::HttpProducerEvidence
+impl core::marker::Unpin for vocab::http::HttpProducerEvidence
+impl core::marker::UnsafeUnpin for vocab::http::HttpProducerEvidence
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpProducerEvidence
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpProducerEvidence
 pub struct vocab::http::HttpRouteBinding<M, C>
 impl<M, C: vocab::http::HttpConsistencyClass> vocab::http::HttpRouteBinding<M, C>
 pub const fn vocab::http::HttpRouteBinding<M, C>::evidence(&self) -> vocab::http::HttpRouteEvidence
@@ -769,6 +830,7 @@ impl core::marker::Copy for vocab::http::LocalOnly
 impl core::marker::StructuralPartialEq for vocab::http::LocalOnly
 impl vocab::http::HttpConsistencyClass for vocab::http::LocalOnly
 pub const vocab::http::LocalOnly::LEVEL: vocab::http::HttpConsistencyLevel
+impl vocab::http::NonProducerHttpConsistency for vocab::http::LocalOnly
 impl core::marker::Freeze for vocab::http::LocalOnly
 impl core::marker::Send for vocab::http::LocalOnly
 impl core::marker::Sync for vocab::http::LocalOnly
@@ -789,6 +851,7 @@ impl core::marker::StructuralPartialEq for vocab::http::LocalTx
 impl vocab::http::HttpConsistencyClass for vocab::http::LocalTx
 pub const vocab::http::LocalTx::LEVEL: vocab::http::HttpConsistencyLevel
 impl vocab::http::NonLocalHttpConsistency for vocab::http::LocalTx
+impl vocab::http::NonProducerHttpConsistency for vocab::http::LocalTx
 impl core::marker::Freeze for vocab::http::LocalTx
 impl core::marker::Send for vocab::http::LocalTx
 impl core::marker::Sync for vocab::http::LocalTx
@@ -829,6 +892,7 @@ impl core::marker::StructuralPartialEq for vocab::http::WorkflowEventual
 impl vocab::http::HttpConsistencyClass for vocab::http::WorkflowEventual
 pub const vocab::http::WorkflowEventual::LEVEL: vocab::http::HttpConsistencyLevel
 impl vocab::http::NonLocalHttpConsistency for vocab::http::WorkflowEventual
+impl vocab::http::NonProducerHttpConsistency for vocab::http::WorkflowEventual
 impl core::marker::Freeze for vocab::http::WorkflowEventual
 impl core::marker::Send for vocab::http::WorkflowEventual
 impl core::marker::Sync for vocab::http::WorkflowEventual
@@ -853,6 +917,11 @@ impl vocab::http::NonLocalHttpConsistency for vocab::http::DeviceLatent
 impl vocab::http::NonLocalHttpConsistency for vocab::http::LocalTx
 impl vocab::http::NonLocalHttpConsistency for vocab::http::OutboxFact
 impl vocab::http::NonLocalHttpConsistency for vocab::http::WorkflowEventual
+pub trait vocab::http::NonProducerHttpConsistency: vocab::http::HttpConsistencyClass + vocab::http::consistency_sealed::NonProducerHttpConsistency
+impl vocab::http::NonProducerHttpConsistency for vocab::http::DeviceLatent
+impl vocab::http::NonProducerHttpConsistency for vocab::http::LocalOnly
+impl vocab::http::NonProducerHttpConsistency for vocab::http::LocalTx
+impl vocab::http::NonProducerHttpConsistency for vocab::http::WorkflowEventual
 pub mod vocab::principal
 #[non_exhaustive] pub enum vocab::principal::PrincipalKind
 pub vocab::principal::PrincipalKind::Admin
@@ -987,6 +1056,28 @@ impl core::marker::Unpin for vocab::query::Limit
 impl core::marker::UnsafeUnpin for vocab::query::Limit
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::Limit
 impl core::panic::unwind_safe::UnwindSafe for vocab::query::Limit
+pub mod vocab::service
+pub enum vocab::service::ServiceCallerDomain
+pub vocab::service::ServiceCallerDomain::MaintenanceOperator
+impl vocab::service::ServiceCallerDomain
+pub const fn vocab::service::ServiceCallerDomain::as_str(self) -> &'static str
+pub fn vocab::service::ServiceCallerDomain::from_subject(&str) -> core::option::Option<Self>
+impl core::clone::Clone for vocab::service::ServiceCallerDomain
+pub fn vocab::service::ServiceCallerDomain::clone(&self) -> vocab::service::ServiceCallerDomain
+impl core::cmp::Eq for vocab::service::ServiceCallerDomain
+impl core::cmp::PartialEq for vocab::service::ServiceCallerDomain
+pub fn vocab::service::ServiceCallerDomain::eq(&self, &vocab::service::ServiceCallerDomain) -> bool
+impl core::fmt::Debug for vocab::service::ServiceCallerDomain
+pub fn vocab::service::ServiceCallerDomain::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::service::ServiceCallerDomain
+impl core::marker::StructuralPartialEq for vocab::service::ServiceCallerDomain
+impl core::marker::Freeze for vocab::service::ServiceCallerDomain
+impl core::marker::Send for vocab::service::ServiceCallerDomain
+impl core::marker::Sync for vocab::service::ServiceCallerDomain
+impl core::marker::Unpin for vocab::service::ServiceCallerDomain
+impl core::marker::UnsafeUnpin for vocab::service::ServiceCallerDomain
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::service::ServiceCallerDomain
+impl core::panic::unwind_safe::UnwindSafe for vocab::service::ServiceCallerDomain
 pub mod vocab::tenant
 #[non_exhaustive] pub enum vocab::tenant::RowScope
 pub vocab::tenant::RowScope::All
@@ -1632,6 +1723,27 @@ impl core::marker::Unpin for vocab::tenant::ScopedTenant
 impl core::marker::UnsafeUnpin for vocab::tenant::ScopedTenant
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::ScopedTenant
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::ScopedTenant
+pub enum vocab::ServiceCallerDomain
+pub vocab::ServiceCallerDomain::MaintenanceOperator
+impl vocab::service::ServiceCallerDomain
+pub const fn vocab::service::ServiceCallerDomain::as_str(self) -> &'static str
+pub fn vocab::service::ServiceCallerDomain::from_subject(&str) -> core::option::Option<Self>
+impl core::clone::Clone for vocab::service::ServiceCallerDomain
+pub fn vocab::service::ServiceCallerDomain::clone(&self) -> vocab::service::ServiceCallerDomain
+impl core::cmp::Eq for vocab::service::ServiceCallerDomain
+impl core::cmp::PartialEq for vocab::service::ServiceCallerDomain
+pub fn vocab::service::ServiceCallerDomain::eq(&self, &vocab::service::ServiceCallerDomain) -> bool
+impl core::fmt::Debug for vocab::service::ServiceCallerDomain
+pub fn vocab::service::ServiceCallerDomain::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::service::ServiceCallerDomain
+impl core::marker::StructuralPartialEq for vocab::service::ServiceCallerDomain
+impl core::marker::Freeze for vocab::service::ServiceCallerDomain
+impl core::marker::Send for vocab::service::ServiceCallerDomain
+impl core::marker::Sync for vocab::service::ServiceCallerDomain
+impl core::marker::Unpin for vocab::service::ServiceCallerDomain
+impl core::marker::UnsafeUnpin for vocab::service::ServiceCallerDomain
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::service::ServiceCallerDomain
+impl core::panic::unwind_safe::UnwindSafe for vocab::service::ServiceCallerDomain
 #[non_exhaustive] pub enum vocab::TenantIdError
 pub vocab::TenantIdError::Empty
 pub vocab::TenantIdError::Format
@@ -1811,6 +1923,27 @@ impl core::marker::Unpin for vocab::epoch::Epoch
 impl core::marker::UnsafeUnpin for vocab::epoch::Epoch
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::epoch::Epoch
 impl core::panic::unwind_safe::UnwindSafe for vocab::epoch::Epoch
+pub struct vocab::EventFactBinding
+impl vocab::contract::binding::EventFactBinding
+pub const fn vocab::contract::binding::EventFactBinding::contract(&self) -> vocab::contract::binding::ContractBinding
+pub const fn vocab::contract::binding::EventFactBinding::from_static(vocab::contract::binding::ContractBinding, &'static str) -> Self
+pub const fn vocab::contract::binding::EventFactBinding::topic(&self) -> &'static str
+impl core::clone::Clone for vocab::contract::binding::EventFactBinding
+pub fn vocab::contract::binding::EventFactBinding::clone(&self) -> vocab::contract::binding::EventFactBinding
+impl core::cmp::Eq for vocab::contract::binding::EventFactBinding
+impl core::cmp::PartialEq for vocab::contract::binding::EventFactBinding
+pub fn vocab::contract::binding::EventFactBinding::eq(&self, &vocab::contract::binding::EventFactBinding) -> bool
+impl core::fmt::Debug for vocab::contract::binding::EventFactBinding
+pub fn vocab::contract::binding::EventFactBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::contract::binding::EventFactBinding
+impl core::marker::StructuralPartialEq for vocab::contract::binding::EventFactBinding
+impl core::marker::Freeze for vocab::contract::binding::EventFactBinding
+impl core::marker::Send for vocab::contract::binding::EventFactBinding
+impl core::marker::Sync for vocab::contract::binding::EventFactBinding
+impl core::marker::Unpin for vocab::contract::binding::EventFactBinding
+impl core::marker::UnsafeUnpin for vocab::contract::binding::EventFactBinding
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::EventFactBinding
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::EventFactBinding
 pub struct vocab::HttpContractOwner(_)
 impl vocab::http::HttpContractOwner
 pub const fn vocab::http::HttpContractOwner::domain(&'static str) -> Self
@@ -2086,5 +2219,7 @@ pub const vocab::IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION: vocab::authz::Rout
 pub const vocab::IDENTITY_PROFILE_SUBJECT_FIELD_OBLIGATION: &str
 pub const vocab::IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION: &str
 pub const vocab::POLICY_MANAGE_PERMISSION_PREFIX: &str
+pub trait vocab::GeneratedEventPayload
+pub const vocab::GeneratedEventPayload::FACT: vocab::contract::binding::EventFactBinding
 pub trait vocab::SagaStepOutputBinding
 pub const vocab::SagaStepOutputBinding::BINDING: vocab::contract::binding::SagaStepBinding

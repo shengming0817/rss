@@ -36,15 +36,17 @@ horizon；RSS 明确增加两个持久化绝对 deadline，防止 receipt 过期
 
 必须先确认：
 
-- operator service token 可被 PDP 验证。
+- operator service token 可被 PDP 验证，且其闭值 caller 必须是
+  `ServiceCallerDomain::MaintenanceOperator`（canonical `sub=rss-maintenance-operator`）。
 - operator service token 的 `issuer/audience/已验证 kid/jti` 会被长度分帧并 SHA-256；Postgres
   `service_token_replay_keys` 只持久化固定 32-byte digest。同一 scope 的 token 跨 CLI 进程重放会被拒绝，
   replay store 不可用时认证 fail-closed。
 - 命令带 `--operator-service-token`、`--operator-tenant`、`--tenant`。
-- 环境变量 `RSS_DLQ_OPERATOR_GRANTS` 包含精确 grant：`subject|action|tenant`。
+- 环境变量 `RSS_DLQ_OPERATOR_GRANTS` 包含精确 grant：`action|tenant`。caller 已由上述 typed
+  service-token 认证前置，不再从配置字符串选择。
 - 仅 `replay-dead-letter` 需要 DLQ payload 解密依赖：`RSS_DLX_PAYLOAD_KEY_NAME`、`RSS_VAULT_ADDR`、`RSS_VAULT_TOKEN`、`RSS_VAULT_TRANSIT_MOUNT`。`list`、`inspect` 与 `redrive-outbox` 不依赖 payload key provider。
 - `resolve-expired-outbox` 不读 payload，但需要精确的
-  `subject|resolve-expired-outbox|tenant` grant、变更工单号，以及策略所要求的 evidence。
+  `resolve-expired-outbox|tenant` grant、变更工单号，以及策略所要求的 evidence。
 - CLI 必须走离线、connect-only 的 `PgRuntimeDeps::connect_maintenance` 连接；它绝不执行 migration。长期 serving role
   `rss_app` 没有 `rss_outbox_redrive(text,uuid)` EXECUTE；不要把 migrator 凭据注入 server serving pool。
 
@@ -61,7 +63,7 @@ horizon；RSS 明确增加两个持久化绝对 deadline，防止 receipt 过期
 export TOKEN='<operator-service-token>'
 export OPERATOR_TENANT='00000000-0000-4000-8000-000000000001'
 export TENANT='00000000-0000-4000-8000-000000000002'
-export RSS_DLQ_OPERATOR_GRANTS="ops-subject|list|$TENANT"
+export RSS_DLQ_OPERATOR_GRANTS="list|$TENANT"
 
 rss dlq list \
   --operator-service-token "$TOKEN" \
@@ -110,7 +112,7 @@ rss dlq redrive-outbox \
 结清已过 same-ID deadline 的 outbox DLX 队头：
 
 ```bash
-export RSS_DLQ_OPERATOR_GRANTS="ops-subject|resolve-expired-outbox|$TENANT"
+export RSS_DLQ_OPERATOR_GRANTS="resolve-expired-outbox|$TENANT"
 
 # 业务确认接受缺口：evidence 严格禁止。
 rss dlq resolve-expired-outbox \
@@ -148,7 +150,7 @@ export OPERATOR_TENANT='<operator-tenant-uuid>'
 export TENANT='<tenant-uuid-from-alert-label>'
 export DOMAIN='<domain-from-alert-label>'
 export CONTRACT_ID='<contract_id-from-alert-label>'
-export RSS_DLQ_OPERATOR_GRANTS="ops-subject|list|$TENANT,ops-subject|inspect|$TENANT,ops-subject|redrive-outbox|$TENANT"
+export RSS_DLQ_OPERATOR_GRANTS="list|$TENANT,inspect|$TENANT,redrive-outbox|$TENANT"
 ```
 
 2. 找当前 tenant/domain/contract 的 outbox DLX 队头候选：

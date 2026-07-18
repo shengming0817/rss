@@ -13,12 +13,13 @@
 #![cfg(feature = "integration")]
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B64_URL};
+use diport::Clock as _;
 use generated::event::settings_v1::TOPIC as SETTINGS_VERSION_CHANGED_TOPIC;
 use generated::http::identity_v1::login::SPEC as LOGIN_SPEC;
 use generated::http::identity_v1::refresh::SPEC as REFRESH_SPEC;
@@ -58,7 +59,6 @@ const TEST_READ_PASSWORD: &str = "rss_app_read_test_pw";
 const ADMIN_ROLE: &str = "tenant-admin";
 const OPERATOR_ROLE: &str = "operator";
 const TARGET_SUBJECT: &str = "bob@example.test";
-const JWT_EXP_FAR_FUTURE: i64 = 4_102_444_800; // 2100-01-01T00:00:00Z.
 const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
 const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
 
@@ -130,29 +130,38 @@ fn sec1(sk: &SigningKey) -> Vec<u8> {
 }
 
 fn mint_es256(sk: &SigningKey, payload: &str) -> String {
-    let header = B64_URL.encode(br#"{"alg":"ES256"}"#);
+    let header = B64_URL.encode(br#"{"alg":"ES256","typ":"at+jwt","kid":"rss-jwt-es256"}"#);
     let body = B64_URL.encode(payload.as_bytes());
     let signing_input = format!("{header}.{body}");
     let sig: Signature = sk.sign(signing_input.as_bytes());
     format!("{signing_input}.{}", B64_URL.encode(sig.to_bytes()))
 }
 
+fn access_jwt(kind: &str) -> String {
+    let iat = SystemClock
+        .now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let payload = serde_json::json!({
+        "sub": CANON_USER,
+        "iat": iat,
+        "exp": iat + 900,
+        "iss": "https://issuer.test",
+        "aud": "rss",
+        "kind": kind,
+        "tenant_id": CANON_TENANT,
+        "token_use": "access",
+    });
+    mint_es256(&sk_jwt(), &payload.to_string())
+}
+
 fn admin_jwt() -> String {
-    mint_es256(
-        &sk_jwt(),
-        &format!(
-            r#"{{"sub":"{CANON_USER}","exp":{JWT_EXP_FAR_FUTURE},"iss":"https://issuer.test","aud":"rss","kind":"admin","tenant_id":"{CANON_TENANT}"}}"#
-        ),
-    )
+    access_jwt("admin")
 }
 
 fn operator_jwt() -> String {
-    mint_es256(
-        &sk_jwt(),
-        &format!(
-            r#"{{"sub":"{CANON_USER}","exp":{JWT_EXP_FAR_FUTURE},"iss":"https://issuer.test","aud":"rss","kind":"user","tenant_id":"{CANON_TENANT}"}}"#
-        ),
-    )
+    access_jwt("user")
 }
 
 /// wiremock Transit `/sign` 响应器：解 `{"input": base64std(signing_input)}` → 用 `sk` 对 signing-input
@@ -285,15 +294,18 @@ async fn assertion_pool(
     Ok(pool)
 }
 
-fn test_provider() -> oidc::OidcProvider {
+fn test_provider() -> oidc::OidcProvider<diport::RssAccessProfile> {
+    let public_key = B64_URL.encode(sec1(&sk_jwt()));
+    let keys = [runtime::KeyedEs256StaticKey {
+        key_id: "rss-jwt-es256",
+        sec1_b64url: &public_key,
+    }];
     #[allow(clippy::expect_used)]
-    runtime::provider_from_static_config(runtime::StaticOidcProviderConfig {
+    runtime::rss_access_provider_from_static_config(runtime::RssAccessStaticProviderConfig {
         issuer: "https://issuer.test",
         audience: "rss",
-        trusted_kinds_csv: "user,admin",
-        key_profile: runtime::StaticOidcKeyProfile::Es256 {
-            public_keys_b64: &B64_URL.encode(sec1(&sk_jwt())),
-        },
+        trusted_kinds: &["user", "admin"],
+        keys: &keys,
         clock: Box::new(SystemClock),
     })
     .expect("test provider")
@@ -304,10 +316,10 @@ fn identity_test_values(vault_addr: &str) -> IdentityTestValues {
         vault_addr: vault_addr.to_owned(),
         vault_token: "test-token".to_string(),
         vault_transit_mount: "transit".to_string(),
-        jwt_issuer: "https://issuer.test".to_string(),
-        jwt_audience: "rss".to_string(),
-        jwt_key_id: "rss-jwt-es256".to_string(),
-        jwt_access_ttl: Duration::from_secs(900),
+        access_token_issuer: "https://issuer.test".to_string(),
+        access_token_audience: "rss".to_string(),
+        access_token_key_id: "rss-jwt-es256".to_string(),
+        access_token_ttl: Duration::from_secs(900),
         session_ttl: Duration::from_secs(3_600),
         refresh_ttl: Duration::from_secs(2_592_000),
         vault_allow_http: true,
@@ -452,7 +464,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
-        None,
+        "mtls",
         None,
         None,
     )? {
@@ -679,7 +691,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
-        None,
+        "mtls",
         None,
         None,
     )? {

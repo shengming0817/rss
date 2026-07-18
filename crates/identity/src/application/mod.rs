@@ -78,8 +78,9 @@ use ::generated::http::{
     settings_v6::SPEC as SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
 };
 use ::httpserve::{
-    AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, Primary, ProducerMarker,
-    ResourceProjection, RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
+    AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, ListenerRouter, Primary,
+    ProducerMarker, ResourceProjection, RouteAuthorizationDecision, RouteAuthorizationRequest,
+    RouteAuthorizer,
 };
 use axum::Json;
 use axum::body::{Body, Bytes, to_bytes};
@@ -679,7 +680,7 @@ fn access_principal_from_refresh_record<'a>(
 /// ref: ory/fosite handler/oauth2/flow_refresh.go@master（先生成 token 再事务内 Rotate/Create）。
 pub struct RefreshService<S> {
     store: Box<crate::ports::DynRefreshTokenStore<'static>>,
-    issuer: std::sync::Arc<authn::JwtIssuer<S>>,
+    issuer: std::sync::Arc<authn::JwtIssuer<diport::RssAccessProfile, S>>,
     clock: Box<dyn diport::Clock>,
     refresh_ttl: Duration,
 }
@@ -688,7 +689,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     /// 组合根构造：4 必填依赖位置参（缺失即编译错误）。
     pub fn new(
         store: Box<crate::ports::DynRefreshTokenStore<'static>>,
-        issuer: std::sync::Arc<authn::JwtIssuer<S>>,
+        issuer: std::sync::Arc<authn::JwtIssuer<diport::RssAccessProfile, S>>,
         clock: Box<dyn diport::Clock>,
         refresh_ttl: Duration,
     ) -> Self {
@@ -936,17 +937,16 @@ pub fn seed_refresh_service(
     mk_clock: impl Fn() -> Box<dyn diport::Clock>,
     refresh_ttl: Duration,
 ) -> Arc<RefreshService<SeedSigner>> {
-    let issuer = authn::JwtIssuer::new(
+    let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
         Arc::new(SeedSigner),
         mk_clock(),
-        authn::JwtIssuerConfig {
-            key: diport::KeyId::new("seed-jwt-key"),
-            alg: authn::JwtAlg::Es256,
-            purpose: diport::SigningPurpose::new(SEED_JWT_PURPOSE),
-            issuer: "https://seed.local".to_string(),
-            audience: "rss-seed".to_string(),
-            ttl: Duration::from_secs(900),
-        },
+        authn::JwtIssuerConfig::rss_access(
+            diport::KeyId::new("seed-jwt-key"),
+            diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+            "https://seed.local",
+            "rss-seed",
+            Duration::from_secs(900),
+        ),
     )
     // reason: const config（非空 iss/aud/key、ttl>0）⇒ JwtIssuer::new 不可能失败。
     .expect("seed jwt issuer config is valid");
@@ -985,12 +985,8 @@ async fn parse_tenant_and_body(
 ) -> Result<(TenantId, Bytes), Response> {
     let tenant_header =
         tenant_header_name(spec).map_err(|_| httpserve::error::internal_error(request_id))?;
-    let tenant = req
-        .headers()
-        .get(tenant_header)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| TenantId::parse(s).ok())
-        .ok_or_else(|| httpserve::error::validation_bad_request(request_id))?;
+    let tenant = httpserve::exact_tenant_header(req.headers(), tenant_header)
+        .map_err(|_| httpserve::error::validation_bad_request(request_id))?;
     let (_, body) = req.into_parts();
     let body = to_bytes(body, MAX_LOGIN_BODY_BYTES)
         .await
@@ -1012,13 +1008,41 @@ async fn login_handler<S: diport::Signer + Send + Sync + 'static>(
 }
 
 #[cfg(test)]
+#[derive(Clone)]
+struct PublicRouteTestAuthorizer;
+
+#[cfg(test)]
+impl RouteAuthorizer for PublicRouteTestAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        _request: RouteAuthorizationRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RouteAuthorizationDecision> + Send + 'a>>
+    {
+        Box::pin(async { RouteAuthorizationDecision::Deny })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
 pub(crate) fn login_router_for_test<S: diport::Signer + Send + Sync + 'static>(
     service: Arc<LoginService<S>>,
 ) -> axum::Router {
-    axum::Router::new().route(
-        LOGIN_HTTP_SPEC.route.path(),
-        post(login_handler::<S>).with_state(service),
+    let routes = httpserve::UnfinalizedRoutes::empty()
+        .nest_group::<Primary, KernelError>(LOGIN_ROUTE_PREFIX, |router| {
+            Ok(router.mount(
+                GeneratedPrimaryEndpoint::new_producer(LOGIN_PRODUCER, login_handler::<S>)?
+                    .with_state(service),
+            )?)
+        })
+        .expect("login test route uses generated production mount");
+    let plan = primitives::AuthPlan::new(
+        ListenerKind::Primary,
+        primitives::AuthScheme::RssAccessToken,
     )
+    .expect("valid Primary access-token plan");
+    httpserve::finalize_primary_auth(routes, plan, Arc::new(PublicRouteTestAuthorizer))
+        .expect("public login test route finalizes")
+        .into_router_for_test()
 }
 
 #[cfg(test)]
@@ -2704,14 +2728,95 @@ pub struct IdentityDomainDeps<S> {
     pub clock: Arc<dyn Clock>,
 }
 
-pub struct IdentityDomain<S> {
-    login: Arc<LoginService<S>>,
-    refresh: Arc<RefreshService<S>>,
+/// Identity dependencies that remain valid when the Primary listener trusts only federated access
+/// tokens and therefore cannot expose RSS-local session issuance or mutation routes.
+pub struct FederatedIdentityDomainDeps {
+    pub rbac_admin: Arc<RbacAdminService>,
+    pub policy_manage: Arc<PolicyManageService>,
+    pub roles: Arc<DynRoleReadRepo<'static>>,
+    pub binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
+    pub policies: Arc<DynPolicyRepo<'static>>,
+    pub resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
+    pub clock: Arc<dyn Clock>,
+}
+
+struct IdentityCommonDomain {
     rbac_admin: Arc<RbacAdminService>,
     policy_manage: Arc<PolicyManageService>,
     roles: Arc<DynRoleReadRepo<'static>>,
     policies: Arc<DynPolicyRepo<'static>>,
     authorizer: Arc<ContractAuthorizer>,
+}
+
+impl IdentityCommonDomain {
+    fn new(
+        rbac_admin: Arc<RbacAdminService>,
+        policy_manage: Arc<PolicyManageService>,
+        roles: Arc<DynRoleReadRepo<'static>>,
+        binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
+        policies: Arc<DynPolicyRepo<'static>>,
+        resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        let authorizer = Arc::new(ContractAuthorizer::new(
+            Arc::clone(&roles),
+            binding_reads,
+            Arc::clone(&policies),
+            resource_attribute_reads,
+            clock,
+        ));
+        Self {
+            rbac_admin,
+            policy_manage,
+            roles,
+            policies,
+            authorizer,
+        }
+    }
+
+    fn register_authorizer(&self, registry: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
+        let authorizer: Arc<dyn RouteAuthorizer> = self.authorizer.clone();
+        registry.register_primary_authorizer(authorizer)
+    }
+
+    fn route_state(&self) -> CommonIdentityRouteState {
+        CommonIdentityRouteState {
+            rbac_assign: RbacHandlerState {
+                service: Arc::clone(&self.rbac_admin),
+            },
+            policies_create: PolicyManageHandlerState {
+                service: Arc::clone(&self.policy_manage),
+                authorizer: Arc::clone(&self.authorizer),
+            },
+            policies_get: PolicyQueryService {
+                policies: Arc::clone(&self.policies),
+            },
+            roles_list: RolesListHandlerState {
+                roles: Arc::clone(&self.roles),
+            },
+        }
+    }
+}
+
+struct CommonIdentityRouteState {
+    rbac_assign: RbacHandlerState,
+    policies_create: PolicyManageHandlerState,
+    policies_get: PolicyQueryService,
+    roles_list: RolesListHandlerState,
+}
+
+pub struct IdentityDomain<S> {
+    login: Arc<LoginService<S>>,
+    refresh: Arc<RefreshService<S>>,
+    common: IdentityCommonDomain,
+}
+
+/// Identity domain surface for a Primary listener fixed to `FederatedAccessToken`.
+///
+/// The type has no signer, issuer, refresh store, or login service field, making local RSS session
+/// issuance and mutation routes structurally unavailable in this profile.
+pub struct FederatedIdentityDomain {
+    common: IdentityCommonDomain,
 }
 
 impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
@@ -2727,48 +2832,105 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
             resource_attribute_reads,
             clock,
         } = deps;
-        let authorizer = Arc::new(ContractAuthorizer::new(
-            Arc::clone(&roles),
-            binding_reads,
-            Arc::clone(&policies),
-            resource_attribute_reads,
-            clock,
-        ));
         Self {
             login,
             refresh,
-            rbac_admin,
-            policy_manage,
-            roles,
-            policies,
-            authorizer,
+            common: IdentityCommonDomain::new(
+                rbac_admin,
+                policy_manage,
+                roles,
+                binding_reads,
+                policies,
+                resource_attribute_reads,
+                clock,
+            ),
         }
     }
 }
 
+impl FederatedIdentityDomain {
+    pub fn new(deps: FederatedIdentityDomainDeps) -> Self {
+        let FederatedIdentityDomainDeps {
+            rbac_admin,
+            policy_manage,
+            roles,
+            binding_reads,
+            policies,
+            resource_attribute_reads,
+            clock,
+        } = deps;
+        Self {
+            common: IdentityCommonDomain::new(
+                rbac_admin,
+                policy_manage,
+                roles,
+                binding_reads,
+                policies,
+                resource_attribute_reads,
+                clock,
+            ),
+        }
+    }
+}
+
+fn mount_common_identity_routes(
+    rb: ListenerRouter<Primary>,
+    state: CommonIdentityRouteState,
+) -> Result<ListenerRouter<Primary>, KernelError> {
+    let rbac_revoke = state.rbac_assign.clone();
+    let policies_update = state.policies_create.clone();
+    let policies_deactivate = state.policies_create.clone();
+    let policies_get = state.policies_get;
+    let policies_list = policies_get.clone();
+    let roles_list = state.roles_list;
+    let rb = rb.mount(
+        GeneratedPrimaryEndpoint::new_producer(ROLES_ASSIGN_PRODUCER, roles_assign_handler)?
+            .with_state(state.rbac_assign),
+    )?;
+    let rb = rb.mount(
+        GeneratedPrimaryEndpoint::new_producer(ROLES_REVOKE_PRODUCER, roles_revoke_handler)?
+            .with_state(rbac_revoke),
+    )?;
+    let rb = rb.mount(
+        GeneratedPrimaryEndpoint::new(ROLES_LIST_HTTP_ROUTE, roles_list_handler)?
+            .with_classified_state(roles_list),
+    )?;
+    let rb = rb.mount(
+        GeneratedPrimaryEndpoint::new_producer(POLICIES_CREATE_PRODUCER, policies_create_handler)?
+            .with_state(state.policies_create),
+    )?;
+    let rb = rb.mount(
+        GeneratedPrimaryEndpoint::new_producer(POLICIES_UPDATE_PRODUCER, policies_update_handler)?
+            .with_state(policies_update),
+    )?;
+    let rb = rb.mount(
+        GeneratedPrimaryEndpoint::new_producer(
+            POLICIES_DEACTIVATE_PRODUCER,
+            policies_deactivate_handler,
+        )?
+        .with_state(policies_deactivate),
+    )?;
+    let rb = rb.mount(
+        GeneratedPrimaryEndpoint::new(POLICIES_GET_HTTP_ROUTE, policies_get_handler)?
+            .with_classified_state(policies_get),
+    )?;
+    let rb = rb.mount(
+        GeneratedPrimaryEndpoint::new(POLICIES_LIST_HTTP_ROUTE, policies_list_handler)?
+            .with_classified_state(policies_list),
+    )?;
+    rb.mount(GeneratedPrimaryEndpoint::new(
+        PROFILE_HTTP_ROUTE,
+        profile_handler,
+    )?)
+    .map_err(Into::into)
+}
+
 impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for IdentityDomain<S> {
     fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
-        let primary_authorizer: Arc<dyn RouteAuthorizer> = self.authorizer.clone();
-        reg.register_primary_authorizer(primary_authorizer)?;
+        self.common.register_authorizer(reg)?;
         let login = Arc::clone(&self.login);
         let refresh = Arc::clone(&self.refresh);
-        let rbac_assign = RbacHandlerState {
-            service: Arc::clone(&self.rbac_admin),
-        };
-        let rbac_revoke = rbac_assign.clone();
-        let policies_create = PolicyManageHandlerState {
-            service: Arc::clone(&self.policy_manage),
-            authorizer: Arc::clone(&self.authorizer),
-        };
-        let policies_update = policies_create.clone();
-        let policies_deactivate = policies_create.clone();
-        let policies_get = PolicyQueryService {
-            policies: Arc::clone(&self.policies),
-        };
-        let policies_list = policies_get.clone();
-        let roles = RolesListHandlerState {
-            roles: Arc::clone(&self.roles),
-        };
+        let common = self.common.route_state();
         let password = SelfServiceHandlerState {
             service: Arc::clone(&self.login),
         };
@@ -2782,57 +2944,7 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
                 GeneratedPrimaryEndpoint::new(REFRESH_HTTP_ROUTE, refresh_handler::<S>)?
                     .with_state(refresh),
             )?;
-            let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new_producer(
-                    ROLES_ASSIGN_PRODUCER,
-                    roles_assign_handler,
-                )?
-                .with_state(rbac_assign),
-            )?;
-            let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new_producer(
-                    ROLES_REVOKE_PRODUCER,
-                    roles_revoke_handler,
-                )?
-                .with_state(rbac_revoke),
-            )?;
-            let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(ROLES_LIST_HTTP_ROUTE, roles_list_handler)?
-                    .with_classified_state(roles),
-            )?;
-            let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new_producer(
-                    POLICIES_CREATE_PRODUCER,
-                    policies_create_handler,
-                )?
-                .with_state(policies_create),
-            )?;
-            let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new_producer(
-                    POLICIES_UPDATE_PRODUCER,
-                    policies_update_handler,
-                )?
-                .with_state(policies_update),
-            )?;
-            let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new_producer(
-                    POLICIES_DEACTIVATE_PRODUCER,
-                    policies_deactivate_handler,
-                )?
-                .with_state(policies_deactivate),
-            )?;
-            let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(POLICIES_GET_HTTP_ROUTE, policies_get_handler)?
-                    .with_classified_state(policies_get),
-            )?;
-            let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(POLICIES_LIST_HTTP_ROUTE, policies_list_handler)?
-                    .with_classified_state(policies_list),
-            )?;
-            let rb = rb.mount(GeneratedPrimaryEndpoint::new(
-                PROFILE_HTTP_ROUTE,
-                profile_handler,
-            )?)?;
+            let rb = mount_common_identity_routes(rb, common)?;
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(
                     PASSWORD_CHANGE_HTTP_ROUTE,
@@ -2847,6 +2959,16 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
             Ok(rb)
         })?;
         Ok(())
+    }
+}
+
+impl ::bootstrap::Domain for FederatedIdentityDomain {
+    fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
+        self.common.register_authorizer(reg)?;
+        let common = self.common.route_state();
+        reg.route_group::<Primary>(LOGIN_ROUTE_PREFIX, move |rb| {
+            mount_common_identity_routes(rb, common)
+        })
     }
 }
 
@@ -3359,6 +3481,31 @@ mod tests {
         })
     }
 
+    fn seed_federated_domain(now_secs: u64) -> FederatedIdentityDomain {
+        let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let roles_for_list = Arc::from(DynRoleReadRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let binding_provider = crate::internal::mem::InMemRoleBindingLifecycle::new();
+        let rbac_admin = Arc::new(RbacAdminService::new(
+            roles_for_admin,
+            Arc::from(DynRoleBindingLifecycle::new_box(binding_provider.clone())),
+            make_clock(now_secs),
+        ));
+        let (policy_manage, policies) = empty_policy_manage(now_secs);
+        FederatedIdentityDomain::new(FederatedIdentityDomainDeps {
+            rbac_admin,
+            policy_manage,
+            roles: roles_for_list,
+            binding_reads: Arc::from(DynRoleBindingReadRepo::new_box(binding_provider)),
+            policies,
+            resource_attribute_reads: empty_resource_attribute_repo(),
+            clock: make_shared_clock(now_secs),
+        })
+    }
+
     #[allow(clippy::expect_used)]
     fn finalized_profile_router(
         capture: CapturingSessionLifecycle,
@@ -3387,8 +3534,11 @@ mod tests {
             &::generated::http::identity_v1::profile::ROUTE,
         )
         .expect("identity profile route is mounted in finalized routes");
-        let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
-            .expect("Primary JWT auth plan");
+        let plan = primitives::AuthPlan::new(
+            ListenerKind::Primary,
+            primitives::AuthScheme::RssAccessToken,
+        )
+        .expect("Primary JWT auth plan");
         let router = ::httpserve::finalize_primary_auth_with_audit(
             routes,
             plan,
@@ -3410,7 +3560,7 @@ mod tests {
     ) -> (axum::Router, ::testkit::local_only::LocalOnlyObservers) {
         let router = if let Some((kind, subject)) = authenticated {
             router.layer(axum::Extension(httpserve::Authenticated::new(
-                primitives::RequiredScheme::Jwt,
+                primitives::RequiredScheme::RssAccessToken,
                 kind,
                 subject,
                 Some(tid(CANON_TENANT)),
@@ -3849,8 +3999,11 @@ mod tests {
             &::generated::http::identity_v1::roles_list::ROUTE,
         )
         .expect("identity roles-list LocalOnly state is mounted");
-        let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
-            .expect("Primary JWT auth plan");
+        let plan = primitives::AuthPlan::new(
+            ListenerKind::Primary,
+            primitives::AuthScheme::RssAccessToken,
+        )
+        .expect("Primary JWT auth plan");
         let router = ::httpserve::finalize_primary_auth_with_audit(
             routes,
             plan,
@@ -3904,8 +4057,11 @@ mod tests {
             &::generated::http::identity_v1::policies_get::ROUTE,
         )
         .expect("identity policies-get LocalOnly state is mounted");
-        let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
-            .expect("Primary JWT auth plan");
+        let plan = primitives::AuthPlan::new(
+            ListenerKind::Primary,
+            primitives::AuthScheme::RssAccessToken,
+        )
+        .expect("Primary JWT auth plan");
         let router = ::httpserve::finalize_primary_auth_with_audit(
             routes,
             plan,
@@ -3959,8 +4115,11 @@ mod tests {
             &::generated::http::identity_v1::policies_list::ROUTE,
         )
         .expect("identity policies-list LocalOnly state is mounted");
-        let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
-            .expect("Primary JWT auth plan");
+        let plan = primitives::AuthPlan::new(
+            ListenerKind::Primary,
+            primitives::AuthScheme::RssAccessToken,
+        )
+        .expect("Primary JWT auth plan");
         let router = ::httpserve::finalize_primary_auth_with_audit(
             routes,
             plan,
@@ -4000,7 +4159,7 @@ mod tests {
             resource_attribute_reads: repo.resource_attribute_reads,
             clock: make_shared_clock(1_000),
         });
-        let authorizer = Arc::clone(&domain.authorizer);
+        let authorizer = Arc::clone(&domain.common.authorizer);
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
         let mut finalized = registry
             .finalize_routes()
@@ -5041,6 +5200,39 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
+    fn federated_identity_domain_excludes_all_local_session_routes() {
+        let domain = seed_federated_domain(1_000);
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose federated identity");
+        let mut finalized = registry
+            .finalize_routes()
+            .expect("finalize federated identity routes");
+        let (listener, routes) = finalized.pop().expect("federated Primary routes");
+        assert_eq!(listener, ListenerKind::Primary);
+        let evidence = routes.route_evidence();
+
+        for local_session_contract in [
+            LOGIN_HTTP_SPEC.route.contract_id(),
+            REFRESH_HTTP_SPEC.route.contract_id(),
+            PASSWORD_CHANGE_HTTP_SPEC.route.contract_id(),
+            LOGOUT_HTTP_SPEC.route.contract_id(),
+        ] {
+            assert!(
+                evidence
+                    .iter()
+                    .all(|route| route.contract_id() != local_session_contract),
+                "{local_session_contract} must be structurally absent for federated Primary"
+            );
+        }
+        assert!(
+            evidence
+                .iter()
+                .any(|route| route.contract_id() == PROFILE_HTTP_SPEC.route.contract_id()),
+            "non-session identity routes remain mounted"
+        );
+    }
+
+    #[test]
     fn login_service_and_erased_deps_are_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
 
@@ -5113,8 +5305,11 @@ mod tests {
         assert_eq!(finalized.len(), 1, "identity owns one Primary listener");
         let (listener, routes) = finalized.pop().expect("identity Primary routes");
         assert_eq!(listener, ListenerKind::Primary);
-        let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
-            .expect("Primary JWT auth plan");
+        let plan = primitives::AuthPlan::new(
+            ListenerKind::Primary,
+            primitives::AuthScheme::RssAccessToken,
+        )
+        .expect("Primary JWT auth plan");
         let router = httpserve::finalize_primary_auth(routes, plan, authorizer)
             .expect("finalize Primary auth")
             .into_router_for_test();
@@ -6813,7 +7008,7 @@ mod tests {
             auth_sink.clone(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -6883,7 +7078,7 @@ mod tests {
             auth_sink.clone(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -6950,7 +7145,7 @@ mod tests {
             auth_sink.clone(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -7019,7 +7214,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -7095,7 +7290,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -7171,7 +7366,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -7245,7 +7440,7 @@ mod tests {
             );
         let missing_permission_router =
             missing_permission_router.layer(::axum::Extension(httpserve::Authenticated::new(
-                primitives::RequiredScheme::Jwt,
+                primitives::RequiredScheme::RssAccessToken,
                 vocab::PrincipalKind::Admin,
                 CANON_USER,
                 Some(tid(CANON_TENANT)),
@@ -7293,7 +7488,7 @@ mod tests {
         let other_tenant = tid("00000000-0000-4000-8000-000000000abc");
         let cross_tenant_router =
             cross_tenant_router.layer(::axum::Extension(httpserve::Authenticated::new(
-                primitives::RequiredScheme::Jwt,
+                primitives::RequiredScheme::RssAccessToken,
                 vocab::PrincipalKind::Admin,
                 CANON_USER,
                 Some(other_tenant),
@@ -7347,7 +7542,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let roles_router = roles_router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -7373,7 +7568,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let get_router = get_router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -7399,7 +7594,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let list_router = list_router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -7469,7 +7664,7 @@ mod tests {
                         >::from_governed(&proof),
                     );
                     let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-                        primitives::RequiredScheme::Jwt,
+                        primitives::RequiredScheme::RssAccessToken,
                         vocab::PrincipalKind::Admin,
                         CANON_USER,
                         Some(tid(CANON_TENANT)),
@@ -7498,7 +7693,7 @@ mod tests {
                         >::from_governed(&proof),
                     );
                     let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-                        primitives::RequiredScheme::Jwt,
+                        primitives::RequiredScheme::RssAccessToken,
                         vocab::PrincipalKind::Admin,
                         CANON_USER,
                         Some(tid(CANON_TENANT)),
@@ -7527,7 +7722,7 @@ mod tests {
                         >::from_governed(&proof),
                     );
                     let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-                        primitives::RequiredScheme::Jwt,
+                        primitives::RequiredScheme::RssAccessToken,
                         vocab::PrincipalKind::Admin,
                         CANON_USER,
                         Some(tid(CANON_TENANT)),
@@ -7659,7 +7854,7 @@ mod tests {
         let auth_sink = RecordingAuthAuditSink::default();
         let (router, proof) = self::finalized_profile_router(capture, &[], auth_sink.clone());
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::User,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -8275,18 +8470,19 @@ mod tests {
 
     /// 构造用于 RefreshService 测试的 JwtIssuer（ES256，User kind）。
     #[allow(clippy::expect_used)]
-    fn make_jwt_issuer(clock: Box<dyn diport::Clock>) -> authn::JwtIssuer<TestSigner> {
-        authn::JwtIssuer::new(
+    fn make_jwt_issuer(
+        clock: Box<dyn diport::Clock>,
+    ) -> authn::JwtIssuer<diport::RssAccessProfile, TestSigner> {
+        authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
             std::sync::Arc::new(TestSigner),
             clock,
-            authn::JwtIssuerConfig {
-                key: diport::KeyId::new("test-key"),
-                alg: authn::JwtAlg::Es256,
-                purpose: diport::SigningPurpose::new(SEED_JWT_PURPOSE),
-                issuer: "https://test.example".to_string(),
-                audience: "test-audience".to_string(),
-                ttl: Duration::from_secs(900),
-            },
+            authn::JwtIssuerConfig::rss_access(
+                diport::KeyId::new("test-key"),
+                diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+                "https://test.example",
+                "test-audience",
+                Duration::from_secs(900),
+            ),
         )
         .expect("valid jwt issuer config")
     }
@@ -8905,17 +9101,16 @@ mod tests {
         let probe = store.clone(); // Arc 共享视图：rotate 后查旧 token 状态
         let ta = tid(CANON_TENANT);
 
-        let issuer = authn::JwtIssuer::new(
+        let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
             std::sync::Arc::new(FailingSigner),
             make_clock(1_700_000_000),
-            authn::JwtIssuerConfig {
-                key: diport::KeyId::new("test-key"),
-                alg: authn::JwtAlg::Es256,
-                purpose: diport::SigningPurpose::new(SEED_JWT_PURPOSE),
-                issuer: "https://test.example".to_string(),
-                audience: "test-audience".to_string(),
-                ttl: Duration::from_secs(900),
-            },
+            authn::JwtIssuerConfig::rss_access(
+                diport::KeyId::new("test-key"),
+                diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+                "https://test.example",
+                "test-audience",
+                Duration::from_secs(900),
+            ),
         )
         .expect("valid jwt issuer config");
         let svc = RefreshService::new(
@@ -8992,6 +9187,29 @@ mod tests {
             resp.data.access_expires_at > 0,
             "access_expires_at > 0（JWT 含有效期）"
         );
+
+        let mut segments = resp.data.access_token.split('.');
+        let header = segments.next().expect("JWT header");
+        let payload = segments.next().expect("JWT payload");
+        assert!(segments.next().is_some(), "JWT signature");
+        assert!(segments.next().is_none(), "exact compact JWT segments");
+        let header: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(header)
+                .expect("decode JWT header"),
+        )
+        .expect("parse JWT header");
+        let payload: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(payload)
+                .expect("decode JWT payload"),
+        )
+        .expect("parse JWT payload");
+        assert_eq!(header["typ"], "at+jwt");
+        assert_eq!(header["alg"], "ES256");
+        assert_eq!(payload["token_use"], "access");
+        assert_eq!(payload["kind"], "user");
+        assert_eq!(payload["tenant_id"], CANON_TENANT);
     }
 
     // ── 测试 H-Login-1：login_handler HTTP 级契约测试（F3）─────────────────────────
@@ -9034,6 +9252,32 @@ mod tests {
             "access_expires_at > 0（JWT 含有效期）"
         );
         assert_eq!(capture.count(), 1, "co-tx 写应恰一次");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn login_handler_duplicate_tenant_headers_reject_before_service_write()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use testkit::ContractRequest;
+
+        let capture = CapturingSessionLifecycle::default();
+        let svc = Arc::new(seed_service(&capture, 1_700_000_000, 3_600));
+        let router = login_router_for_test(svc);
+        let resp = testkit::call(
+            router,
+            ContractRequest::post(LOGIN_HTTP_SPEC.route.path())
+                .header("X-Tenant-ID", CANON_TENANT)
+                .header("X-Tenant-ID", CANON_TENANT)
+                .json(&IdentityLoginRequest {
+                    username: "alice".to_string(),
+                    password: "correct-horse".to_string(),
+                }),
+        )
+        .await?;
+
+        resp.ensure_error(axum::http::StatusCode::BAD_REQUEST, "ERR_CORE_VALIDATION")?;
+        assert_eq!(capture.count(), 0, "login service write must not run");
         Ok(())
     }
 
@@ -9136,6 +9380,89 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
+    async fn refresh_handler_duplicate_tenant_headers_return_400()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use testkit::ContractRequest;
+
+        for second in [CANON_TENANT, "11111111-1111-4111-8111-111111111111"] {
+            let svc = Arc::new(make_refresh_svc(
+                crate::internal::mem::InMemRefreshTokenStore::new(),
+                make_clock(1_700_000_000),
+                Duration::from_secs(3_600),
+            ));
+            let router = refresh_router_for_test(svc);
+            let resp = testkit::call(
+                router,
+                ContractRequest::post(REFRESH_HTTP_SPEC.route.path())
+                    .header("X-Tenant-ID", CANON_TENANT)
+                    .header("X-Tenant-ID", second)
+                    .json(&IdentityRefreshRequest {
+                        refresh_token: "not-reached".to_owned(),
+                    }),
+            )
+            .await?;
+            resp.ensure_error(axum::http::StatusCode::BAD_REQUEST, "ERR_CORE_VALIDATION")?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_handler_duplicate_tenant_header_rejects_before_store_lookup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::ports::DynRefreshTokenStore;
+        use testkit::ContractRequest;
+
+        mockall::mock! {
+            HeaderBoundaryStore {}
+            impl RefreshTokenStore for HeaderBoundaryStore {
+                async fn insert(&self, scope: TenantRepoScope, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+                async fn find_by_hash(
+                    &self,
+                    scope: TenantRepoScope,
+                    hash: RefreshTokenHash,
+                ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
+                async fn rotate(
+                    &self,
+                    scope: TenantRepoScope,
+                    mutation: crate::ports::RefreshRotationMutation,
+                ) -> Result<bool, IdentityError>;
+                async fn revoke_lineage(
+                    &self,
+                    scope: TenantRepoScope,
+                    lineage_id: RefreshTokenId,
+                ) -> Result<(), IdentityError>;
+            }
+        }
+
+        let mut store = MockHeaderBoundaryStore::new();
+        store.expect_insert().times(0);
+        store.expect_find_by_hash().times(0);
+        store.expect_rotate().times(0);
+        store.expect_revoke_lineage().times(0);
+        let svc = Arc::new(RefreshService::new(
+            DynRefreshTokenStore::new_box(store),
+            Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        ));
+        let router = refresh_router_for_test(svc);
+        let resp = testkit::call(
+            router,
+            ContractRequest::post(REFRESH_HTTP_SPEC.route.path())
+                .header("X-Tenant-ID", CANON_TENANT)
+                .header("X-Tenant-ID", CANON_TENANT)
+                .json(&IdentityRefreshRequest {
+                    refresh_token: "not-reached".to_owned(),
+                }),
+        )
+        .await?;
+        resp.ensure_error(axum::http::StatusCode::BAD_REQUEST, "ERR_CORE_VALIDATION")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn refresh_handler_bad_body_returns_400() -> Result<(), Box<dyn std::error::Error>> {
         use testkit::ContractRequest;
 
@@ -9227,17 +9554,16 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn login_failing_signer_no_session_on_token_issue_failure() {
         // 构造 RefreshService<FailingSigner>（issue_initial 必然失败）。
-        let issuer = authn::JwtIssuer::new(
+        let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
             std::sync::Arc::new(FailingSigner),
             make_clock(1_700_000_000),
-            authn::JwtIssuerConfig {
-                key: diport::KeyId::new("test-key"),
-                alg: authn::JwtAlg::Es256,
-                purpose: diport::SigningPurpose::new(SEED_JWT_PURPOSE),
-                issuer: "https://test.example".to_string(),
-                audience: "test-audience".to_string(),
-                ttl: Duration::from_secs(900),
-            },
+            authn::JwtIssuerConfig::rss_access(
+                diport::KeyId::new("test-key"),
+                diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+                "https://test.example",
+                "test-audience",
+                Duration::from_secs(900),
+            ),
         )
         .expect("valid jwt issuer config");
 

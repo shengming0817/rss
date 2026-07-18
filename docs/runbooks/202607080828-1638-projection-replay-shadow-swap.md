@@ -5,8 +5,10 @@
 ## 前置条件
 
 - 使用维护/迁移 Postgres 配置运行 CLI；命令会执行 migration 并写 `auth_audit_events`。
-- operator 必须用 service token 通过生产 PDP 验证：`--operator-service-token` + `--operator-tenant`。
-- operator 必须被显式授权到目标 action/tenant/projection：`RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS=subject|action|tenant|projection`，多条用逗号分隔；`action` 只能是 `status`、`replay`、`swap`。
+- operator 必须用 service token 通过生产 PDP 验证：`--operator-service-token` + `--operator-tenant`；
+  typed caller 必须是 `ServiceCallerDomain::MaintenanceOperator`
+  （canonical `sub=rss-maintenance-operator`）。
+- operator 必须被显式授权到目标 action/tenant/projection：`RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS=action|tenant|projection`，多条用逗号分隔；`action` 只能是 `status`、`replay`、`swap`，caller 不从配置字符串选择。
 - projection id 必须来自 `generated::event::PROJECTION_INPUTS` 对应的 runtime registry；未知 id fail-closed。
 - `replay`/`swap` 还要求当前 binary 至少注册一个 production projection target；只有 unsupported marker 的 runtime 会 fail-closed。`status` 仍可读取 active pointer 和 high-water。
 - replay DLQ 复用 `dead_letter`，需要 Vault transit DLQ 配置：`RSS_DLX_PAYLOAD_KEY_NAME`、`RSS_VAULT_ADDR`、`RSS_VAULT_TOKEN`、`RSS_VAULT_TRANSIT_MOUNT`。
@@ -18,8 +20,8 @@
 |---|---|---|
 | Postgres migrator | `RSS_PG_HOST`, `RSS_PG_PORT`, `RSS_PG_DATABASE`, `RSS_PG_MIGRATOR_USERNAME`, `RSS_PG_MIGRATOR_PASSWORD` | 维护 CLI 用 migrator 身份 setup maintenance deps；缺失时报对应 env 名。 |
 | Postgres TLS | `RSS_PG_SSL_MODE`, `RSS_PG_SSL_ROOT_CERT_PATH` | 可选；未配置时默认 `verify-full`。本地无 TLS 只能显式降级。 |
-| Service-token verifier | `RSS_OIDC_ISSUER`, `RSS_OIDC_AUDIENCE`, `RSS_OIDC_TRUSTED_KINDS`, `RSS_OIDC_HS256_SECRET_B64URL`, `RSS_OIDC_HS256_KID` | projection CLI 验证 `--operator-service-token`；缺 issuer/audience/trusted kinds/key 会 fail-fast。 |
-| Projection authorization | `RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS` | 精确四元组 `subject|action|tenant|projection`；无 wildcard、无隐式 service principal 超权。 |
+| Service-token verifier | `RSS_SERVICE_TOKEN_ISSUER`, `RSS_SERVICE_TOKEN_AUDIENCE`, `RSS_SERVICE_TOKEN_HS256_SECRET_B64URL`, `RSS_SERVICE_TOKEN_HS256_KID` | projection CLI 验证 `--operator-service-token`；缺 issuer/audience/key 会 fail-fast。 |
+| Projection authorization | `RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS` | typed maintenance caller 认证后的精确三元组 `action|tenant|projection`；无 caller 字符串、无 wildcard。 |
 | Projection DLQ Vault | `RSS_DLX_PAYLOAD_KEY_NAME`, `RSS_VAULT_ADDR`, `RSS_VAULT_TOKEN`, `RSS_VAULT_TRANSIT_MOUNT` | replay 遇 poison 会写 projection DLQ；缺失会在构造 DLQ payload protector 时失败。 |
 | Vault TLS | `RSS_VAULT_CA_CERT_PEM_PATH` | 可选；私有 CA 时配置 PEM bundle。 |
 

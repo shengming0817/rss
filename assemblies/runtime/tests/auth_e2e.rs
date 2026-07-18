@@ -31,11 +31,14 @@ use httpserve::{
 };
 use oidc::OidcProvider;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
-use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut};
-use runtime::auth_bridge::apply_verify_bridge;
+use primitives::{AuthPlan, AuthScheme, ListenerKind, RouteAuthOptOut};
+use runtime::auth_bridge::{
+    apply_federated_access_verify_bridge_for_test, apply_mtls_verify_bridge_for_test,
+    apply_rss_access_pdp_bridge_for_test, apply_rss_access_verify_bridge_for_test,
+    apply_service_token_pdp_bridge_for_test, apply_service_token_verify_bridge_for_test,
+};
 use runtime::{
-    Hs256ServiceTokenProfile, StaticOidcKeyProfile, StaticOidcProviderConfig,
-    provider_from_static_config,
+    KeyedEs256StaticKey, RssAccessStaticProviderConfig, rss_access_provider_from_static_config,
 };
 use tokio::sync::Notify;
 use tower::ServiceExt as _;
@@ -48,6 +51,11 @@ const ISS: &str = "https://issuer.test";
 const AUD: &str = "rss-test";
 const NOW: i64 = 1_700_000_000;
 const HS_KID: &str = "cell-a.svc-a";
+const RSS_KID: &str = "runtime-e2e-jwt-key";
+const FEDERATED_ISS: &str = "https://federated.issuer.test";
+const FEDERATED_AUD: &str = "federated-test";
+const FEDERATED_KID: &str = "runtime-e2e-federated-key";
+const SERVICE_CALLER_ALLOWED: &str = "rss-maintenance-operator";
 
 #[allow(clippy::expect_used)]
 fn test_routes<L: httpserve::Listener>(
@@ -149,6 +157,11 @@ fn sk_other() -> SigningKey {
     let bytes: [u8; 32] = std::array::from_fn(|i| (i + 100) as u8);
     SigningKey::from_slice(&bytes).expect("valid P-256 scalar")
 }
+
+#[allow(clippy::expect_used)]
+fn sk_federated() -> SigningKey {
+    SigningKey::from_slice(&[0x31; 32]).expect("valid federated test scalar")
+}
 fn sec1(sk: &SigningKey) -> Vec<u8> {
     sk.verifying_key()
         .to_encoded_point(false)
@@ -173,19 +186,42 @@ impl diport::Signer for P256JwtSigner {
     }
 }
 
+#[derive(Clone)]
+struct HmacJwtSigner {
+    secret: Vec<u8>,
+}
+
+impl diport::Signer for HmacJwtSigner {
+    async fn sign(
+        &self,
+        request: diport::SignRequest,
+    ) -> Result<diport::Signature, diport::SignerError> {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.secret).map_err(diport::SignerError::new)?;
+        mac.update(request.message.as_bytes());
+        Ok(diport::Signature::new(mac.finalize().into_bytes().to_vec()))
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::SignerError> {
+        Ok(())
+    }
+}
+
 #[allow(clippy::expect_used)]
 fn production_access_jwt(principal: authn::JwtAccessPrincipal<'_>) -> String {
-    let issuer = authn::JwtIssuer::new(
+    let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
         Arc::new(P256JwtSigner),
         Box::new(FixedClock(NOW)),
-        authn::JwtIssuerConfig {
-            key: diport::KeyId::new("runtime-e2e-jwt-key"),
-            alg: authn::JwtAlg::Es256,
-            purpose: diport::SigningPurpose::new("auth.jwt.access"),
-            issuer: ISS.to_string(),
-            audience: AUD.to_string(),
-            ttl: Duration::from_secs(3600),
-        },
+        authn::JwtIssuerConfig::rss_access(
+            diport::KeyId::new(RSS_KID),
+            diport::SigningPurpose::new("auth.rss-access"),
+            ISS,
+            AUD,
+            Duration::from_secs(900),
+        ),
     )
     .expect("runtime e2e jwt issuer config");
     futures::executor::block_on(issuer.issue_access(principal))
@@ -197,6 +233,31 @@ fn production_access_jwt(principal: authn::JwtAccessPrincipal<'_>) -> String {
 #[allow(clippy::expect_used)]
 fn production_tenant() -> vocab::TenantId {
     vocab::TenantId::parse(TENANT).expect("canonical tenant")
+}
+
+#[allow(clippy::expect_used)]
+fn production_service_token(secret: &[u8]) -> String {
+    let issuer = authn::JwtIssuer::<diport::ServiceTokenProfile, _>::new(
+        Arc::new(HmacJwtSigner {
+            secret: secret.to_vec(),
+        }),
+        Box::new(FixedClock(NOW)),
+        authn::JwtIssuerConfig::service_token(
+            diport::KeyId::new(HS_KID),
+            diport::SigningPurpose::new("auth.service-token"),
+            ISS,
+            AUD,
+            Duration::from_secs(300),
+        ),
+    )
+    .expect("runtime e2e service-token issuer config");
+    futures::executor::block_on(issuer.issue_service_token(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+        diport::ServiceTokenTenantBinding::new(production_tenant()),
+    ))
+    .expect("runtime e2e production service token")
+    .as_str()
+    .to_owned()
 }
 
 fn production_super_admin_jwt() -> String {
@@ -225,7 +286,9 @@ fn production_admin_jwt() -> String {
 }
 
 fn mint_es256(sk: &SigningKey, payload: &str) -> String {
-    let header = B64.encode(br#"{"alg":"ES256"}"#);
+    let header = B64.encode(format!(
+        r#"{{"alg":"ES256","typ":"at+jwt","kid":"{RSS_KID}"}}"#
+    ));
     let body = B64.encode(payload.as_bytes());
     let signing_input = format!("{header}.{body}");
     let sig: Signature = sk.sign(signing_input.as_bytes());
@@ -235,7 +298,9 @@ fn mint_es256(sk: &SigningKey, payload: &str) -> String {
 fn mint_hs256(secret: &[u8], payload: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let header = B64.encode(format!(r#"{{"alg":"HS256","kid":"{HS_KID}"}}"#));
+    let header = B64.encode(format!(
+        r#"{{"alg":"HS256","typ":"rss-service+jwt","kid":"{HS_KID}"}}"#
+    ));
     let body = B64.encode(payload.as_bytes());
     let signing_input = format!("{header}.{body}");
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
@@ -249,7 +314,9 @@ fn mint_hs256(secret: &[u8], payload: &str) -> String {
 fn mint_hs256_bound(secret: &[u8], payload: &str, tenant: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let header = B64.encode(format!(r#"{{"alg":"HS256","kid":"{HS_KID}"}}"#));
+    let header = B64.encode(format!(
+        r#"{{"alg":"HS256","typ":"rss-service+jwt","kid":"{HS_KID}"}}"#
+    ));
     let body = B64.encode(payload.as_bytes());
     let signing_input = format!("{header}.{body}");
     let binding = diport::ServiceTokenTenantBinding::new(
@@ -273,59 +340,87 @@ fn mint_alg_none(payload: &str) -> String {
 }
 /// superAdmin JWT payload（无需 tenant claim；trust_kind("superAdmin") 时 kind 透传）。
 fn super_admin_payload(exp: i64, iss: &str, aud: &str) -> String {
-    format!(r#"{{"sub":"alice","exp":{exp},"iss":"{iss}","aud":"{aud}","kind":"superAdmin"}}"#)
+    format!(
+        r#"{{"sub":"alice","iat":{},"exp":{exp},"iss":"{iss}","aud":"{aud}","token_use":"access","kind":"superAdmin"}}"#,
+        exp - 900
+    )
 }
 fn super_admin_jwt(sk: &SigningKey, exp: i64, iss: &str, aud: &str) -> String {
     mint_es256(sk, &super_admin_payload(exp, iss, aud))
 }
 
+fn federated_super_admin_jwt() -> String {
+    let header = B64.encode(format!(
+        r#"{{"alg":"ES256","typ":"at+jwt","kid":"{FEDERATED_KID}"}}"#
+    ));
+    let body = B64.encode(super_admin_payload(NOW + 900, FEDERATED_ISS, FEDERATED_AUD).as_bytes());
+    let signing_input = format!("{header}.{body}");
+    let signature: Signature = sk_federated().sign(signing_input.as_bytes());
+    format!("{signing_input}.{}", B64.encode(signature.to_bytes()))
+}
+
 fn service_token_payload(exp: i64, sub: &str) -> String {
     format!(
-        r#"{{"sub":"{sub}","exp":{exp},"iss":"{ISS}","aud":"{AUD}","jti":"mtls-exact-match-{sub}-{exp}"}}"#
+        r#"{{"sub":"{sub}","iat":{},"exp":{exp},"iss":"{ISS}","aud":"{AUD}","token_use":"service","kind":"service","jti":"mtls-exact-match-{sub}-{exp}"}}"#,
+        exp - 300
     )
 }
 
 // ── provider 构造：经 static operator/test profile（真 RustCrypto 验签 + FixedClock）─────────────
 #[allow(clippy::expect_used)]
-fn es256_provider() -> OidcProvider {
+fn es256_provider() -> OidcProvider<diport::RssAccessProfile> {
     let es256_b64 = B64.encode(sec1(&sk_jwt()));
+    let keys = [KeyedEs256StaticKey {
+        key_id: RSS_KID,
+        sec1_b64url: &es256_b64,
+    }];
     // trust superAdmin（无 tenant 路径）+ user/device/admin（带 tenant 路径），覆盖跨租户 + 全 scoped kind。
-    provider_from_static_config(StaticOidcProviderConfig {
+    rss_access_provider_from_static_config(RssAccessStaticProviderConfig {
         issuer: ISS,
         audience: AUD,
-        trusted_kinds_csv: "superAdmin,user,device,admin",
-        key_profile: StaticOidcKeyProfile::Es256 {
-            public_keys_b64: &es256_b64,
-        },
+        trusted_kinds: &["superAdmin", "user", "device", "admin"],
+        keys: &keys,
         clock: Box::new(FixedClock(NOW)),
     })
     .expect("es256 production provider")
 }
+
 #[allow(clippy::expect_used)]
-fn hs256_provider() -> (OidcProvider, Vec<u8>) {
+fn federated_es256_provider() -> OidcProvider<diport::FederatedAccessProfile> {
+    let keys = oidc::AccessStaticKeySource::builder()
+        .add_es256_sec1(FEDERATED_KID, &sec1(&sk_federated()))
+        .expect("federated keyed ES256 public key")
+        .build();
+    let config = oidc::VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
+        FEDERATED_ISS,
+        FEDERATED_AUD,
+    )
+    .keys_static(keys)
+    .trust_kind("superAdmin")
+    .build()
+    .expect("federated verifier config");
+    OidcProvider::new(config, Box::new(FixedClock(NOW)))
+}
+#[allow(clippy::expect_used)]
+fn hs256_provider() -> (OidcProvider<diport::ServiceTokenProfile>, Vec<u8>) {
     let secret = vec![9u8; 32];
-    let hs_b64 = B64.encode(&secret);
-    // service-token 忽略 kind，trusted-kinds 仅为满足 builder ≥1 约束。
-    let provider = provider_from_static_config(StaticOidcProviderConfig {
-        issuer: ISS,
-        audience: AUD,
-        trusted_kinds_csv: "user",
-        key_profile: StaticOidcKeyProfile::ServiceTokenHs256(Hs256ServiceTokenProfile {
-            secret_b64: &hs_b64,
-            key_id: HS_KID,
-            replay_store: replay_store(),
-            replay_timeout: Duration::from_secs(5),
-        }),
-        clock: Box::new(FixedClock(NOW)),
-    })
-    .expect("hs256 production provider");
+    let keys = oidc::ServiceTokenKeySource::builder()
+        .add_hs256_secret(HS_KID, &secret)
+        .expect("keyed service-token secret")
+        .build();
+    let config = oidc::VerifierConfigBuilder::<diport::ServiceTokenProfile>::new(ISS, AUD)
+        .keys_hs256(keys)
+        .replay_store(replay_store(), Duration::from_secs(5))
+        .build()
+        .expect("service-token verifier config");
+    let provider = OidcProvider::new(config, Box::new(FixedClock(NOW)));
     (provider, secret)
 }
 
 // ── router 装配（Primary/Jwt：Require /protected + Public /public） ────────────────
-/// `bridge = None` ⇒ 不挂验签桥（回归用例）；`Some(scheme)` ⇒ 挂 es256_provider 桥（用 `scheme` 验证）。
+/// `with_bridge = false` ⇒ 不挂验签桥（回归用例）；`true` ⇒ 挂 RSS access typed bridge。
 #[allow(clippy::expect_used)]
-fn jwt_router(bridge: Option<RequiredScheme>) -> httpserve::AuthenticatedRoutes {
+fn jwt_router(with_bridge: bool) -> httpserve::AuthenticatedRoutes {
     // typed Primary builder（`ListenerRouter::new` 是 pub(crate)，外部测试经 `unfinalized_for_test` 构造 funnel 输入）。
     let routes = test_routes::<httpserve::Primary>(|rb| {
         let rb = rb.mount_primary_raw_for_test(
@@ -350,13 +445,43 @@ fn jwt_router(bridge: Option<RequiredScheme>) -> httpserve::AuthenticatedRoutes 
             get(|| async { "pub" }),
         )
     });
-    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
+    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).expect("plan");
     let authed =
         httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
-    match bridge {
-        Some(scheme) => apply_verify_bridge(authed, Arc::new(es256_provider()), scheme),
-        None => authed,
+    if with_bridge {
+        apply_rss_access_verify_bridge_for_test(authed, Arc::new(es256_provider()))
+    } else {
+        authed
     }
+}
+
+#[allow(clippy::expect_used)]
+fn federated_router_with_calls(handler_calls: Arc<AtomicUsize>) -> httpserve::AuthenticatedRoutes {
+    let routes = test_routes::<httpserve::Primary>(|router| {
+        router.mount_primary_raw_for_test(
+            PrimaryRoute::permission(
+                Method::GET,
+                "/federated",
+                "test.federated",
+                RoutePermission {
+                    permission: vocab::RoutePermissionId::IdentityPolicyRead,
+                    scope: RouteResourceScope::None,
+                },
+            ),
+            get(move || {
+                let handler_calls = Arc::clone(&handler_calls);
+                async move {
+                    handler_calls.fetch_add(1, Ordering::AcqRel);
+                    "federated"
+                }
+            }),
+        )
+    });
+    let plan =
+        AuthPlan::new(ListenerKind::Primary, AuthScheme::FederatedAccessToken).expect("plan");
+    let authed =
+        httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
+    apply_federated_access_verify_bridge_for_test(authed, Arc::new(federated_es256_provider()))
 }
 
 #[derive(Clone)]
@@ -366,7 +491,7 @@ impl Pdp for YieldingPdp {
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
         tokio::task::yield_now().await;
         Ok(VerifiedClaims::new(
-            "async-subject-secret",
+            SERVICE_CALLER_ALLOWED,
             None,
             Some("superAdmin".to_string()),
         ))
@@ -379,6 +504,18 @@ struct YieldingErrorPdp;
 impl Pdp for YieldingErrorPdp {
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
         tokio::task::yield_now().await;
+        Err(PdpError::Untrusted)
+    }
+}
+
+#[derive(Clone)]
+struct CountingPdp {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Pdp for CountingPdp {
+    async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
         Err(PdpError::Untrusted)
     }
 }
@@ -416,7 +553,7 @@ impl Pdp for PendingPdp {
 }
 
 #[allow(clippy::expect_used)]
-fn jwt_router_with_pdp<P>(provider: Arc<P>) -> httpserve::AuthenticatedRoutes
+fn jwt_router_with_pdp<P>(provider: P) -> httpserve::AuthenticatedRoutes
 where
     P: Pdp + Send + Sync + 'static,
 {
@@ -425,7 +562,7 @@ where
 
 #[allow(clippy::expect_used)]
 fn jwt_router_with_pdp_and_calls<P>(
-    provider: Arc<P>,
+    provider: P,
     handler_calls: Arc<AtomicUsize>,
 ) -> httpserve::AuthenticatedRoutes
 where
@@ -452,34 +589,102 @@ where
             }),
         )
     });
-    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
+    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).expect("plan");
     let authed =
         httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
-    apply_verify_bridge(authed, provider, RequiredScheme::Jwt)
+    apply_rss_access_pdp_bridge_for_test(authed, provider)
 }
 
 #[allow(clippy::expect_used)]
-fn service_token_router_with_pdp<P>(provider: Arc<P>) -> httpserve::AuthenticatedRoutes
+fn public_router_with_counters(
+    pdp_calls: Arc<AtomicUsize>,
+    handler_calls: Arc<AtomicUsize>,
+) -> httpserve::AuthenticatedRoutes {
+    let routes = test_routes::<httpserve::Primary>(|router| {
+        router.mount_primary_raw_for_test(
+            PrimaryRoute::opt_out(
+                Method::GET,
+                "/public",
+                "test.public.boundary",
+                RouteAuthOptOut::Public,
+            ),
+            get(move || {
+                let handler_calls = Arc::clone(&handler_calls);
+                async move {
+                    handler_calls.fetch_add(1, Ordering::AcqRel);
+                    "public"
+                }
+            }),
+        )
+    });
+    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).expect("plan");
+    let authed =
+        httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
+    apply_rss_access_pdp_bridge_for_test(authed, CountingPdp { calls: pdp_calls })
+}
+
+#[allow(clippy::expect_used)]
+fn service_token_router_with_pdp<P>(provider: P) -> httpserve::AuthenticatedRoutes
 where
     P: Pdp + Send + Sync + 'static,
 {
     let routes = test_routes::<httpserve::Internal>(|rb| {
-        rb.mount_raw_for_test(
+        rb.mount_internal_raw_for_test(
             Route {
                 method: Method::GET,
                 path: "/svc",
                 contract_id: "test.svc",
             },
+            httpserve::ServiceCallerPolicy::exact(
+                "test.svc",
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            ),
             get(|| async { "ok" }),
         )
     });
     let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
     let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
-    apply_verify_bridge(authed, provider, RequiredScheme::ServiceToken)
+    apply_service_token_pdp_bridge_for_test(authed, provider)
+}
+
+#[allow(clippy::expect_used)]
+fn service_token_router_with_policy_and_calls(
+    provider: OidcProvider<diport::ServiceTokenProfile>,
+    policy: Option<httpserve::ServiceCallerPolicy>,
+    handler_calls: Arc<AtomicUsize>,
+) -> httpserve::AuthenticatedRoutes {
+    let routes = test_routes::<httpserve::Internal>(|router| {
+        let route = Route {
+            method: Method::GET,
+            path: "/svc-policy",
+            contract_id: "test.svc.policy",
+        };
+        let handler = get(move || {
+            let handler_calls = Arc::clone(&handler_calls);
+            async move {
+                handler_calls.fetch_add(1, Ordering::AcqRel);
+                "ok"
+            }
+        });
+        match policy {
+            Some(policy) => router.mount_internal_raw_for_test(route, policy, handler),
+            None => router.mount_raw_for_test(route, handler),
+        }
+    });
+    let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
+    let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
+    apply_service_token_verify_bridge_for_test(authed, Arc::new(provider))
 }
 
 #[allow(clippy::expect_used)]
 fn mtls_authed_routes() -> httpserve::AuthenticatedRoutes {
+    mtls_authed_routes_with_calls(Arc::new(AtomicUsize::new(0)))
+}
+
+#[allow(clippy::expect_used)]
+fn mtls_authed_routes_with_calls(
+    handler_calls: Arc<AtomicUsize>,
+) -> httpserve::AuthenticatedRoutes {
     let routes = test_routes::<httpserve::Primary>(|rb| {
         rb.mount_primary_raw_for_test(
             PrimaryRoute::permission(
@@ -491,7 +696,13 @@ fn mtls_authed_routes() -> httpserve::AuthenticatedRoutes {
                     scope: RouteResourceScope::None,
                 },
             ),
-            get(|| async { "ok" }),
+            get(move || {
+                let handler_calls = Arc::clone(&handler_calls);
+                async move {
+                    handler_calls.fetch_add(1, Ordering::AcqRel);
+                    "ok"
+                }
+            }),
         )
     });
     let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Mtls).expect("plan");
@@ -500,18 +711,22 @@ fn mtls_authed_routes() -> httpserve::AuthenticatedRoutes {
 
 fn mtls_router() -> httpserve::AuthenticatedRoutes {
     let authed = mtls_authed_routes();
-    apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Mtls)
+    apply_mtls_verify_bridge_for_test(authed)
 }
 
 #[allow(clippy::expect_used)]
 fn internal_mtls_routes() -> httpserve::UnfinalizedRoutes {
     test_routes::<httpserve::Internal>(|rb| {
-        rb.mount_raw_for_test(
+        rb.mount_internal_raw_for_test(
             Route {
                 method: Method::GET,
                 path: "/svc",
                 contract_id: "test.internal.mtls",
             },
+            httpserve::ServiceCallerPolicy::exact(
+                "test.internal.mtls",
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            ),
             get(|| async { "ok" }),
         )
     })
@@ -521,7 +736,7 @@ fn internal_mtls_routes() -> httpserve::UnfinalizedRoutes {
 fn internal_mtls_router_without_authorizer() -> httpserve::AuthenticatedRoutes {
     let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::Mtls).expect("plan");
     let authed = httpserve::finalize_auth(internal_mtls_routes(), plan).expect("finalize_auth");
-    apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Mtls)
+    apply_mtls_verify_bridge_for_test(authed)
 }
 
 #[allow(clippy::expect_used)]
@@ -537,7 +752,7 @@ fn internal_mtls_router_with_authorizer(
         authorizer,
     )
     .expect("finalize_auth_with_authorizer");
-    apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Mtls)
+    apply_mtls_verify_bridge_for_test(authed)
 }
 
 #[allow(clippy::expect_used)]
@@ -545,12 +760,16 @@ fn internal_mtls_scope_router_with_authorizer(
     authorizer: Arc<dyn RouteAuthorizer>,
 ) -> httpserve::AuthenticatedRoutes {
     let routes = test_routes::<httpserve::Internal>(|rb| {
-        rb.mount_raw_for_test(
+        rb.mount_internal_raw_for_test(
             Route {
                 method: Method::GET,
                 path: "/scope",
                 contract_id: "test.internal.mtls.scope",
             },
+            httpserve::ServiceCallerPolicy::exact(
+                "test.internal.mtls.scope",
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            ),
             get(scope_probe),
         )
     });
@@ -563,7 +782,7 @@ fn internal_mtls_scope_router_with_authorizer(
         authorizer,
     )
     .expect("finalize_auth_with_authorizer");
-    apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Mtls)
+    apply_mtls_verify_bridge_for_test(authed)
 }
 
 #[allow(clippy::expect_used)]
@@ -590,7 +809,7 @@ fn jwt_router_with_audit(sink: RecordingAuditSink) -> httpserve::AuthenticatedRo
             get(|| async { "ok" }),
         )
     });
-    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
+    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).expect("plan");
     let authed = httpserve::finalize_primary_auth_with_audit(
         routes,
         plan,
@@ -599,7 +818,7 @@ fn jwt_router_with_audit(sink: RecordingAuditSink) -> httpserve::AuthenticatedRo
         allow_authorizer(),
     )
     .expect("finalize_auth_with_audit");
-    apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Jwt)
+    apply_rss_access_verify_bridge_for_test(authed, Arc::new(es256_provider()))
 }
 
 #[allow(clippy::unwrap_used)]
@@ -674,6 +893,24 @@ async fn status_with_request_id(
     .await
 }
 
+#[allow(clippy::unwrap_used)]
+async fn status_with_authorization_values<'a>(
+    app: httpserve::AuthenticatedRoutes,
+    uri: &str,
+    values: impl IntoIterator<Item = &'a str>,
+) -> StatusCode {
+    let mut builder = axum::http::Request::builder().method(Method::GET).uri(uri);
+    for value in values {
+        builder = builder.header(header::AUTHORIZATION, value);
+    }
+    let response = app
+        .into_router_for_test()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    response.status()
+}
+
 // ── BODYLIMIT-BEFORE-AUTH-01 tripwire ───────────────────────────────────────────
 /// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 { level = "Medium", exec = "verify", source = "code" }tripwire：
 /// JWT-scheme listener + 超大 Content-Length + 无 Authorization → 413（非 401）。
@@ -681,12 +918,11 @@ async fn status_with_request_id(
 #[tokio::test]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 async fn body_limit_blocks_before_jwt_auth_tripwire() {
-    let authed =
-        jwt_router(Some(RequiredScheme::Jwt)).with_edge_hardening(httpserve::EdgeHardening {
-            // reason: 10 is a known non-zero constant; unwrap is infallible.
-            body_limit: httpserve::BodyLimit::new(std::num::NonZeroUsize::new(10).unwrap()), // 极小上限（10 bytes）
-            headers: httpserve::SecurityHeaders::default(),
-        });
+    let authed = jwt_router(true).with_edge_hardening(httpserve::EdgeHardening {
+        // reason: 10 is a known non-zero constant; unwrap is infallible.
+        body_limit: httpserve::BodyLimit::new(std::num::NonZeroUsize::new(10).unwrap()), // 极小上限（10 bytes）
+        headers: httpserve::SecurityHeaders::default(),
+    });
 
     let req = axum::http::Request::builder()
         .method(Method::GET)
@@ -736,7 +972,7 @@ impl diport::RateLimiter for AlwaysLimitedRateLimiter {
 async fn rate_limit_blocks_before_jwt_auth_tripwire() {
     let limiter = Arc::new(AlwaysLimitedRateLimiter);
     // 在 verify-bridge 后叠 rate-limit（对应 assemble_authed_routers 中的叠加顺序）。
-    let authed = jwt_router(Some(RequiredScheme::Jwt)).layer(axum::middleware::from_fn_with_state(
+    let authed = jwt_router(true).layer(axum::middleware::from_fn_with_state(
         Arc::clone(&limiter),
         httpserve::rate_limit::<AlwaysLimitedRateLimiter>,
     ));
@@ -768,7 +1004,7 @@ async fn valid_jwt_is_200() {
     let token = production_super_admin_jwt();
     assert_eq!(
         status(
-            jwt_router(Some(RequiredScheme::Jwt)),
+            jwt_router(true),
             "/protected",
             Some(&format!("Bearer {token}"))
         )
@@ -779,12 +1015,58 @@ async fn valid_jwt_is_200() {
 }
 
 #[tokio::test]
+async fn valid_federated_access_token_is_200_on_federated_listener() {
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let token = federated_super_admin_jwt();
+    let status = status(
+        federated_router_with_calls(Arc::clone(&handler_calls)),
+        "/federated",
+        Some(&format!("Bearer {token}")),
+    )
+    .await;
+    assert_eq!(
+        (status, handler_calls.load(Ordering::Acquire)),
+        (StatusCode::OK, 1)
+    );
+}
+
+#[tokio::test]
+async fn rss_access_token_is_rejected_by_federated_listener_before_handler() {
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let token = production_super_admin_jwt();
+    let status = status(
+        federated_router_with_calls(Arc::clone(&handler_calls)),
+        "/federated",
+        Some(&format!("Bearer {token}")),
+    )
+    .await;
+    assert_eq!(
+        (status, handler_calls.load(Ordering::Acquire)),
+        (StatusCode::UNAUTHORIZED, 0)
+    );
+}
+
+#[tokio::test]
+async fn federated_access_token_is_rejected_by_rss_listener() {
+    let token = federated_super_admin_jwt();
+    assert_eq!(
+        status(
+            jwt_router(true),
+            "/protected",
+            Some(&format!("Bearer {token}"))
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
 async fn user_jwt_with_tenant_via_production_builder_is_200() {
     // 评审 F2：经生产 builder（trusted-kind 注入）+ user kind + tenant → 200。若 F1 trusted-kind 缺失则 401 FAIL。
     let token = production_user_jwt();
     assert_eq!(
         status(
-            jwt_router(Some(RequiredScheme::Jwt)),
+            jwt_router(true),
             "/protected",
             Some(&format!("Bearer {token}"))
         )
@@ -871,10 +1153,10 @@ fn jwt_router_with_scope_probe() -> httpserve::AuthenticatedRoutes {
             get(scope_probe),
         )
     });
-    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
+    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).expect("plan");
     let authed =
         httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
-    apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Jwt)
+    apply_rss_access_verify_bridge_for_test(authed, Arc::new(es256_provider()))
 }
 
 /// oneshot 取回 (status, body)（scope 探针断言响应体）。
@@ -1018,7 +1300,7 @@ async fn lowercase_bearer_scheme_is_200() {
     let token = production_super_admin_jwt();
     assert_eq!(
         status(
-            jwt_router(Some(RequiredScheme::Jwt)),
+            jwt_router(true),
             "/protected",
             Some(&format!("bearer {token}"))
         )
@@ -1034,7 +1316,7 @@ async fn uppercase_bearer_scheme_is_200() {
     let token = production_super_admin_jwt();
     assert_eq!(
         status(
-            jwt_router(Some(RequiredScheme::Jwt)),
+            jwt_router(true),
             "/protected",
             Some(&format!("BEARER {token}"))
         )
@@ -1049,7 +1331,7 @@ async fn yielding_pdp_valid_jwt_is_200() {
     let token = production_super_admin_jwt();
     assert_eq!(
         status(
-            jwt_router_with_pdp(Arc::new(YieldingPdp)),
+            jwt_router_with_pdp(YieldingPdp),
             "/protected",
             Some(&format!("Bearer {token}")),
         )
@@ -1063,7 +1345,7 @@ async fn yielding_pdp_valid_jwt_is_200() {
 async fn yielding_pdp_valid_service_token_is_200() {
     assert_eq!(
         status_with_tenant(
-            service_token_router_with_pdp(Arc::new(YieldingPdp)),
+            service_token_router_with_pdp(YieldingPdp),
             "/svc",
             Some("Bearer yielding-service-token"),
             Some(TENANT),
@@ -1078,7 +1360,7 @@ async fn yielding_pdp_valid_service_token_is_200() {
 async fn yielding_pdp_error_is_401_and_never_runs_handler() {
     let token = production_super_admin_jwt();
     let handler_calls = Arc::new(AtomicUsize::new(0));
-    let app = jwt_router_with_pdp_and_calls(Arc::new(YieldingErrorPdp), Arc::clone(&handler_calls));
+    let app = jwt_router_with_pdp_and_calls(YieldingErrorPdp, Arc::clone(&handler_calls));
 
     assert_eq!(
         status(app, "/protected", Some(&format!("Bearer {token}")),).await,
@@ -1098,10 +1380,10 @@ async fn server_budget_times_out_pending_pdp_as_503_and_drops_verifier() {
     let dropped = Arc::new(AtomicBool::new(false));
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let app = jwt_router_with_pdp_and_calls(
-        Arc::new(PendingPdp {
+        PendingPdp {
             entered,
             dropped: Arc::clone(&dropped),
-        }),
+        },
         Arc::clone(&handler_calls),
     );
     let budget = httpserve::ServerRequestBudget::from_millis(
@@ -1143,10 +1425,10 @@ async fn cancelling_request_drops_inflight_verifier_without_authorizing() {
     let dropped = Arc::new(AtomicBool::new(false));
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let app = jwt_router_with_pdp_and_calls(
-        Arc::new(PendingPdp {
+        PendingPdp {
             entered: Arc::clone(&entered),
             dropped: Arc::clone(&dropped),
-        }),
+        },
         Arc::clone(&handler_calls),
     );
     let request =
@@ -1177,17 +1459,54 @@ async fn cancelling_request_drops_inflight_verifier_without_authorizing() {
 #[tokio::test]
 async fn no_token_require_is_401() {
     assert_eq!(
-        status(jwt_router(Some(RequiredScheme::Jwt)), "/protected", None).await,
+        status(jwt_router(true), "/protected", None).await,
         StatusCode::UNAUTHORIZED
     );
 }
+
+#[tokio::test]
+async fn duplicate_authorization_with_same_value_is_401_and_never_runs_handler() {
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let app = jwt_router_with_pdp_and_calls(YieldingPdp, Arc::clone(&handler_calls));
+    let authorization = format!("Bearer {}", production_super_admin_jwt());
+
+    let status = status_with_authorization_values(
+        app,
+        "/protected",
+        [authorization.as_str(), authorization.as_str()],
+    )
+    .await;
+    assert_eq!(
+        (status, handler_calls.load(Ordering::Acquire)),
+        (StatusCode::UNAUTHORIZED, 0)
+    );
+}
+
+#[tokio::test]
+async fn duplicate_authorization_with_different_values_is_401_and_never_runs_handler() {
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let app = jwt_router_with_pdp_and_calls(YieldingPdp, Arc::clone(&handler_calls));
+    let accepted_first = format!("Bearer {}", production_super_admin_jwt());
+
+    let status = status_with_authorization_values(
+        app,
+        "/protected",
+        [accepted_first.as_str(), "Bearer ignored-second"],
+    )
+    .await;
+    assert_eq!(
+        (status, handler_calls.load(Ordering::Acquire)),
+        (StatusCode::UNAUTHORIZED, 0)
+    );
+}
+
 #[tokio::test]
 async fn bad_signature_is_401() {
     // 用不在 provider 信任集的 key 签 → InvalidSignature → 无证据 → enforce 401。
-    let token = super_admin_jwt(&sk_other(), NOW + 3600, ISS, AUD);
+    let token = super_admin_jwt(&sk_other(), NOW + 900, ISS, AUD);
     assert_eq!(
         status(
-            jwt_router(Some(RequiredScheme::Jwt)),
+            jwt_router(true),
             "/protected",
             Some(&format!("Bearer {token}"))
         )
@@ -1200,7 +1519,7 @@ async fn expired_is_401() {
     let token = super_admin_jwt(&sk_jwt(), NOW - 3600, ISS, AUD);
     assert_eq!(
         status(
-            jwt_router(Some(RequiredScheme::Jwt)),
+            jwt_router(true),
             "/protected",
             Some(&format!("Bearer {token}"))
         )
@@ -1210,10 +1529,10 @@ async fn expired_is_401() {
 }
 #[tokio::test]
 async fn wrong_audience_is_401() {
-    let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, "wrong-aud");
+    let token = super_admin_jwt(&sk_jwt(), NOW + 900, ISS, "wrong-aud");
     assert_eq!(
         status(
-            jwt_router(Some(RequiredScheme::Jwt)),
+            jwt_router(true),
             "/protected",
             Some(&format!("Bearer {token}"))
         )
@@ -1223,10 +1542,10 @@ async fn wrong_audience_is_401() {
 }
 #[tokio::test]
 async fn wrong_issuer_is_401() {
-    let token = super_admin_jwt(&sk_jwt(), NOW + 3600, "https://evil.issuer", AUD);
+    let token = super_admin_jwt(&sk_jwt(), NOW + 900, "https://evil.issuer", AUD);
     assert_eq!(
         status(
-            jwt_router(Some(RequiredScheme::Jwt)),
+            jwt_router(true),
             "/protected",
             Some(&format!("Bearer {token}"))
         )
@@ -1238,10 +1557,10 @@ async fn wrong_issuer_is_401() {
 #[tokio::test]
 async fn alg_none_is_401() {
     // alg:none 攻击：空签名段，验签器按 alg 白名单拒（组合根全链路覆盖）。
-    let token = mint_alg_none(&super_admin_payload(NOW + 3600, ISS, AUD));
+    let token = mint_alg_none(&super_admin_payload(NOW + 900, ISS, AUD));
     assert_eq!(
         status(
-            jwt_router(Some(RequiredScheme::Jwt)),
+            jwt_router(true),
             "/protected",
             Some(&format!("Bearer {token}"))
         )
@@ -1253,10 +1572,10 @@ async fn alg_none_is_401() {
 #[tokio::test]
 async fn hs256_token_on_jwt_listener_is_401() {
     // scheme confusion：向 JWT(ES256) listener 提交 HS256 token → ES256 路径验签失败 → 401。
-    let token = mint_hs256(&[9u8; 32], &super_admin_payload(NOW + 3600, ISS, AUD));
+    let token = mint_hs256(&[9u8; 32], &super_admin_payload(NOW + 900, ISS, AUD));
     assert_eq!(
         status(
-            jwt_router(Some(RequiredScheme::Jwt)),
+            jwt_router(true),
             "/protected",
             Some(&format!("Bearer {token}"))
         )
@@ -1267,28 +1586,33 @@ async fn hs256_token_on_jwt_listener_is_401() {
 }
 #[tokio::test]
 async fn jwt_evidence_cannot_satisfy_require_mtls() {
-    // RequiredScheme::Mtls 不读取 bearer token；JWT 不能跨 scheme 放行。
+    // A valid RSS token is verified and mints RSS evidence, which cannot satisfy Require(Mtls).
     let token = production_super_admin_jwt();
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let app = apply_rss_access_verify_bridge_for_test(
+        mtls_authed_routes_with_calls(Arc::clone(&handler_calls)),
+        Arc::new(es256_provider()),
+    );
     assert_eq!(
-        status(
-            mtls_router(),
-            "/protected",
-            Some(&format!("Bearer {token}"))
-        )
-        .await,
+        status(app, "/protected", Some(&format!("Bearer {token}"))).await,
         StatusCode::UNAUTHORIZED,
         "JWT evidence 不得通过 Require(Mtls)"
     );
+    assert_eq!(handler_calls.load(Ordering::Acquire), 0);
 }
 
 #[tokio::test]
 async fn service_token_evidence_cannot_satisfy_require_mtls() {
     let (provider, secret) = hs256_provider();
-    let token = mint_hs256_bound(&secret, &service_token_payload(NOW + 3600, "svc-a"), TENANT);
-    let app = apply_verify_bridge(
-        mtls_authed_routes(),
+    let token = mint_hs256_bound(
+        &secret,
+        &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
+        TENANT,
+    );
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let app = apply_service_token_verify_bridge_for_test(
+        mtls_authed_routes_with_calls(Arc::clone(&handler_calls)),
         Arc::new(provider),
-        RequiredScheme::ServiceToken,
     );
 
     assert_eq!(
@@ -1302,6 +1626,7 @@ async fn service_token_evidence_cannot_satisfy_require_mtls() {
         StatusCode::UNAUTHORIZED,
         "ServiceToken evidence 不得通过 Require(Mtls)"
     );
+    assert_eq!(handler_calls.load(Ordering::Acquire), 0);
 }
 
 #[tokio::test]
@@ -1402,7 +1727,7 @@ async fn no_bridge_require_still_401_even_with_valid_jwt() {
     let token = production_super_admin_jwt();
     assert_eq!(
         status(
-            jwt_router(None),
+            jwt_router(false),
             "/protected",
             Some(&format!("Bearer {token}"))
         )
@@ -1416,9 +1741,88 @@ async fn no_bridge_require_still_401_even_with_valid_jwt() {
 #[tokio::test]
 async fn public_route_no_token_is_200() {
     assert_eq!(
-        status(jwt_router(Some(RequiredScheme::Jwt)), "/public", None).await,
+        status(jwt_router(true), "/public", None).await,
         StatusCode::OK,
         "Public(opt_out) 路由无 token 仍放行（bridge 不短路）"
+    );
+}
+
+#[tokio::test]
+async fn public_route_absent_authorization_is_anonymous_and_reaches_handler() {
+    let pdp_calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let status = status(
+        public_router_with_counters(Arc::clone(&pdp_calls), Arc::clone(&handler_calls)),
+        "/public",
+        None,
+    )
+    .await;
+    assert_eq!(
+        (
+            status,
+            pdp_calls.load(Ordering::Acquire),
+            handler_calls.load(Ordering::Acquire)
+        ),
+        (StatusCode::OK, 0, 1)
+    );
+}
+
+#[tokio::test]
+async fn public_route_structurally_bad_authorization_is_401_before_pdp_or_handler() {
+    let oversized = format!(
+        "Bearer {}",
+        "a".repeat(
+            diport::TokenProfile::RssAccess
+                .policy()
+                .maximum_token_length()
+                + 1
+        )
+    );
+    let cases = [
+        vec!["Bearer"],
+        vec!["Bearer "],
+        vec!["Basic dXNlcjpwYXNz"],
+        vec!["Bearer duplicate", "Bearer duplicate"],
+        vec!["Bearer first", "Bearer second"],
+        vec![oversized.as_str()],
+    ];
+    for authorization_values in cases {
+        let pdp_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let status = status_with_authorization_values(
+            public_router_with_counters(Arc::clone(&pdp_calls), Arc::clone(&handler_calls)),
+            "/public",
+            authorization_values,
+        )
+        .await;
+        assert_eq!(
+            (
+                status,
+                pdp_calls.load(Ordering::Acquire),
+                handler_calls.load(Ordering::Acquire)
+            ),
+            (StatusCode::UNAUTHORIZED, 0, 0)
+        );
+    }
+}
+
+#[tokio::test]
+async fn public_route_structurally_valid_untrusted_bearer_still_reaches_handler() {
+    let pdp_calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let status = status(
+        public_router_with_counters(Arc::clone(&pdp_calls), Arc::clone(&handler_calls)),
+        "/public",
+        Some("Bearer structured.but.untrusted"),
+    )
+    .await;
+    assert_eq!(
+        (
+            status,
+            pdp_calls.load(Ordering::Acquire),
+            handler_calls.load(Ordering::Acquire)
+        ),
+        (StatusCode::OK, 1, 1)
     );
 }
 
@@ -1429,17 +1833,94 @@ async fn service_token_hs256_is_200() {
     let (provider, secret) = hs256_provider();
     let token = mint_hs256_bound(
         &secret,
-        &format!(
-            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}","jti":"nonce-svc-ok"}}"#,
-            NOW + 3600
-        ),
+        &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
         TENANT,
     );
-    let app = service_token_router_with_pdp(Arc::new(provider));
+    let app = service_token_router_with_pdp(provider);
     assert_eq!(
         status_with_tenant(app, "/svc", Some(&format!("Bearer {token}")), Some(TENANT)).await,
         StatusCode::OK,
         "有效 HS256 service-token + matching X-Tenant-ID → 证据注入放行 200"
+    );
+}
+
+#[tokio::test]
+async fn service_caller_policy_allows_the_exact_verified_caller() {
+    let (provider, secret) = hs256_provider();
+    let token = production_service_token(&secret);
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let app = service_token_router_with_policy_and_calls(
+        provider,
+        Some(httpserve::ServiceCallerPolicy::exact(
+            "test.svc.policy",
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        )),
+        Arc::clone(&handler_calls),
+    );
+    let status = status_with_tenant(
+        app,
+        "/svc-policy",
+        Some(&format!("Bearer {token}")),
+        Some(TENANT),
+    )
+    .await;
+    assert_eq!(
+        (status, handler_calls.load(Ordering::Acquire)),
+        (StatusCode::OK, 1)
+    );
+}
+
+#[tokio::test]
+async fn service_token_route_without_caller_policy_fails_closed_before_handler() {
+    let (provider, secret) = hs256_provider();
+    let token = mint_hs256_bound(
+        &secret,
+        &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
+        TENANT,
+    );
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let app =
+        service_token_router_with_policy_and_calls(provider, None, Arc::clone(&handler_calls));
+    let status = status_with_tenant(
+        app,
+        "/svc-policy",
+        Some(&format!("Bearer {token}")),
+        Some(TENANT),
+    )
+    .await;
+    assert_eq!(
+        (status, handler_calls.load(Ordering::Acquire)),
+        (StatusCode::FORBIDDEN, 0)
+    );
+}
+
+#[tokio::test]
+async fn signed_service_token_with_subject_outside_closed_caller_set_is_401() {
+    let (provider, secret) = hs256_provider();
+    let token = mint_hs256_bound(
+        &secret,
+        &service_token_payload(NOW + 300, "arbitrary-service"),
+        TENANT,
+    );
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let app = service_token_router_with_policy_and_calls(
+        provider,
+        Some(httpserve::ServiceCallerPolicy::exact(
+            "test.svc.policy",
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        )),
+        Arc::clone(&handler_calls),
+    );
+    let status = status_with_tenant(
+        app,
+        "/svc-policy",
+        Some(&format!("Bearer {token}")),
+        Some(TENANT),
+    )
+    .await;
+    assert_eq!(
+        (status, handler_calls.load(Ordering::Acquire)),
+        (StatusCode::UNAUTHORIZED, 0)
     );
 }
 
@@ -1449,20 +1930,21 @@ async fn service_token_missing_or_wrong_tenant_header_is_401() {
     let (provider, secret) = hs256_provider();
     let token = mint_hs256_bound(
         &secret,
-        &format!(
-            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}","jti":"nonce-svc-tenant"}}"#,
-            NOW + 3600
-        ),
+        &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
         TENANT,
     );
     let make_authed = || {
         let routes = test_routes::<httpserve::Internal>(|rb| {
-            rb.mount_raw_for_test(
+            rb.mount_internal_raw_for_test(
                 Route {
                     method: Method::GET,
                     path: "/svc",
                     contract_id: "test.svc",
                 },
+                httpserve::ServiceCallerPolicy::exact(
+                    "test.svc",
+                    vocab::ServiceCallerDomain::MaintenanceOperator,
+                ),
                 get(|| async { "ok" }),
             )
         });
@@ -1473,7 +1955,7 @@ async fn service_token_missing_or_wrong_tenant_header_is_401() {
     let bearer = format!("Bearer {token}");
     assert_eq!(
         status_with_tenant(
-            apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken),
+            apply_service_token_verify_bridge_for_test(authed, Arc::new(provider)),
             "/svc",
             Some(&bearer),
             None,
@@ -1487,7 +1969,7 @@ async fn service_token_missing_or_wrong_tenant_header_is_401() {
     let authed = make_authed();
     assert_eq!(
         status_with_tenant(
-            apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken),
+            apply_service_token_verify_bridge_for_test(authed, Arc::new(provider)),
             "/svc",
             Some(&bearer),
             Some(OTHER_TENANT),
@@ -1504,25 +1986,26 @@ async fn service_token_duplicate_tenant_header_is_401() {
     let (provider, secret) = hs256_provider();
     let token = mint_hs256_bound(
         &secret,
-        &format!(
-            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}","jti":"nonce-svc-duplicate-header"}}"#,
-            NOW + 3600
-        ),
+        &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
         TENANT,
     );
     let routes = test_routes::<httpserve::Internal>(|rb| {
-        rb.mount_raw_for_test(
+        rb.mount_internal_raw_for_test(
             Route {
                 method: Method::GET,
                 path: "/svc",
                 contract_id: "test.svc",
             },
+            httpserve::ServiceCallerPolicy::exact(
+                "test.svc",
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            ),
             get(|| async { "ok" }),
         )
     });
     let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
     let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
-    let app = apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken);
+    let app = apply_service_token_verify_bridge_for_test(authed, Arc::new(provider));
     assert_eq!(
         status_with_tenant_values(
             app,
@@ -1543,25 +2026,26 @@ async fn service_token_establishes_scope_from_mac_bound_tenant() {
     let (provider, secret) = hs256_provider();
     let token = mint_hs256_bound(
         &secret,
-        &format!(
-            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}","jti":"nonce-svc-scope"}}"#,
-            NOW + 3600
-        ),
+        &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
         TENANT,
     );
     let routes = test_routes::<httpserve::Internal>(|rb| {
-        rb.mount_raw_for_test(
+        rb.mount_internal_raw_for_test(
             Route {
                 method: Method::GET,
                 path: "/scope",
                 contract_id: "test.svc.scope",
             },
+            httpserve::ServiceCallerPolicy::exact(
+                "test.svc.scope",
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            ),
             get(scope_probe),
         )
     });
     let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
     let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
-    let app = apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken);
+    let app = apply_service_token_verify_bridge_for_test(authed, Arc::new(provider));
     let (status, body) = body_of_with_tenant(
         app,
         "/scope",
@@ -1661,7 +2145,7 @@ fn tracing_allow_logs_decision_and_kind_no_pii() {
     let request_id = "trace-allow-super-admin";
     let start = trace_len();
     let st = block_on_current_thread(status_with_request_id(
-        jwt_router(Some(RequiredScheme::Jwt)),
+        jwt_router(true),
         "/protected",
         Some(&format!("Bearer {token}")),
         request_id,
@@ -1698,7 +2182,7 @@ fn tracing_yielding_provider_error_keeps_span_and_redacts_pii() {
     let request_id = "trace-yielding-provider-error";
     let start = trace_len();
     let st = block_on_current_thread(status_with_tenant_values_and_request_id(
-        jwt_router_with_pdp(Arc::new(YieldingErrorPdp)),
+        jwt_router_with_pdp(YieldingErrorPdp),
         "/protected",
         Some(&format!("Bearer {token}")),
         [tenant],
@@ -1730,7 +2214,7 @@ fn provider_outage_returns_existing_503_envelope_and_redacts_pii() {
     let request_id = "trace-provider-unavailable";
     let start = trace_len();
     let response = block_on_current_thread(async {
-        jwt_router_with_pdp(Arc::new(ProviderUnavailablePdp))
+        jwt_router_with_pdp(ProviderUnavailablePdp)
             .into_router_for_test()
             .oneshot(
                 axum::http::Request::builder()
@@ -1786,10 +2270,10 @@ fn tracing_server_budget_timeout_uses_closed_reason_and_redacts_pii() {
     let tenant = "timeout-tenant-canary";
     let request_id = "trace-server-budget-timeout";
     let dropped = Arc::new(AtomicBool::new(false));
-    let app = jwt_router_with_pdp(Arc::new(PendingPdp {
+    let app = jwt_router_with_pdp(PendingPdp {
         entered: Arc::new(Notify::new()),
         dropped: Arc::clone(&dropped),
-    }));
+    });
     let budget = httpserve::ServerRequestBudget::from_millis(
         NonZeroU64::new(20).expect("non-zero test budget"),
     );
@@ -1841,24 +2325,24 @@ fn tracing_server_budget_timeout_uses_closed_reason_and_redacts_pii() {
 fn tracing_deny_logs_per_variant_reason_no_pii() {
     let _capture_guard = tracing_capture_lock().lock().unwrap();
     ensure_global_trace_capture();
-    // 验签通过（sk_jwt 签 + 正确 iss/aud/exp + kind=user 受信）但**无 tenant_id claim** → PDP 透传 tenant=None
-    // → authn `derive_from_claims` 派生失败（user 需 tenant）→ PrincipalInvalid（非 PDP 签名失败）。
-    let principal_invalid_jwt = mint_es256(
+    // 签名正确但 scoped kind 缺 tenant_id：typed verifier 在铸 Principal 前拒绝为 TokenInvalid。
+    let scoped_tenant_invalid_jwt = mint_es256(
         &sk_jwt(),
         &format!(
-            r#"{{"sub":"alice","exp":{},"iss":"{ISS}","aud":"{AUD}","kind":"user"}}"#,
-            NOW + 3600
+            r#"{{"sub":"alice","iat":{},"exp":{},"iss":"{ISS}","aud":"{AUD}","token_use":"access","kind":"user"}}"#,
+            NOW,
+            NOW + 900
         ),
     );
     for (token, want_reason, want_variant, label) in [
         (
-            super_admin_jwt(&sk_other(), NOW + 3600, ISS, AUD),
+            super_admin_jwt(&sk_other(), NOW + 900, ISS, AUD),
             "signature_invalid",
             "TokenInvalid",
             "坏签名→InvalidSignature",
         ),
         (
-            super_admin_jwt(&sk_jwt(), NOW + 3600, "https://evil.issuer", AUD),
+            super_admin_jwt(&sk_jwt(), NOW + 900, "https://evil.issuer", AUD),
             "untrusted",
             "TokenUntrusted",
             "错 issuer→Untrusted",
@@ -1870,16 +2354,16 @@ fn tracing_deny_logs_per_variant_reason_no_pii() {
             "过期→Expired",
         ),
         (
-            principal_invalid_jwt.clone(),
-            "principal_invalid",
-            "PrincipalInvalid",
-            "验签通过缺 tenant→PrincipalInvalid",
+            scoped_tenant_invalid_jwt.clone(),
+            "signature_invalid",
+            "TokenInvalid",
+            "scoped token 缺 tenant→TokenInvalid",
         ),
     ] {
         let request_id = format!("trace-deny-{want_reason}");
         let start = trace_len();
         let st = block_on_current_thread(status_with_request_id(
-            jwt_router(Some(RequiredScheme::Jwt)),
+            jwt_router(true),
             "/protected",
             Some(&format!("Bearer {token}")),
             &request_id,
@@ -1919,25 +2403,26 @@ fn tracing_service_token_binding_error_has_distinct_reason_no_pii() {
     let (provider, secret) = hs256_provider();
     let token = mint_hs256_bound(
         &secret,
-        &format!(
-            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}","jti":"nonce-svc-tracing"}}"#,
-            NOW + 3600
-        ),
+        &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
         TENANT,
     );
     let routes = test_routes::<httpserve::Internal>(|rb| {
-        rb.mount_raw_for_test(
+        rb.mount_internal_raw_for_test(
             Route {
                 method: Method::GET,
                 path: "/svc",
                 contract_id: "test.svc",
             },
+            httpserve::ServiceCallerPolicy::exact(
+                "test.svc",
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            ),
             get(|| async { "ok" }),
         )
     });
     let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
     let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
-    let app = apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken);
+    let app = apply_service_token_verify_bridge_for_test(authed, Arc::new(provider));
 
     let request_id = "trace-service-token-binding";
     let start = trace_len();

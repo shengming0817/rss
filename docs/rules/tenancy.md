@@ -43,14 +43,16 @@ admin 池未配置时返回 501 `ERR_CORE_NOT_IMPLEMENTED`；配置不完整或�
 
 `rss audit-ledger verify` 是同一只读 admin capability 的 operator full-chain verify 入口。它只接受
 `--tenant <uuid>` 单租户目标，operator 身份来自 tenant-bound service-token，并额外要求
-`RSS_AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS=subject|tenant,...` 精确匹配验出的 service subject 与目标 tenant。
+验出的 closed caller 必须是 `ServiceCallerDomain::MaintenanceOperator`
+（`sub=rss-maintenance-operator`）；`RSS_AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS=tenant,...`
+只精确匹配目标 tenant，不接受 caller/subject 字符串。
 命令不接受 `--all-tenants` 或 `--namespace`：audit ledger 当前 schema 无 namespace 列，接受该 flag 会让
 调用方误以为存在 namespace 隔离；全租户枚举也不在 `rss_audit_admin` capability 内。start/finish 必须写
 `auth_audit_events`，`resource_kind="audit.ledger.verify"`。
 
 ## Tenant source（认证通道，非 request body）
 
-tenant scope 只能来自**声明过且已认证的入口**：JWT tenant claim（→ ctx）或 service-token MAC-bound
+tenant scope 只能来自**声明过且已认证的入口**：listener-fixed RSS/Federated Access verified tenant claim（→ ctx）或 service-token MAC-bound
 canonical `X-Tenant-ID`（→ ctx）。`INVARIANT: TENANCY-SERVICE-IDENTITY-SCOPE-01`：
 service-token MAC-bound tenant scope is the only service identity tenant assertion。mTLS/SPIFFE service identity is not a tenant source；
 `VerifiedMtlsPeer` / SPIFFE-ID 只证明 workload service principal，并经 exact SPIFFE allow-set /
@@ -77,10 +79,13 @@ service-token tenant MAC 仍按上一节治理。
 
 ## Principal claim source
 
-生产 access JWT 只能经 `authn::JwtAccessPrincipal` typed issuer 签发。User / Device / Admin variant
+生产 RSS Access token 只能经 `JwtIssuer<RssAccessProfile>` typed issuer 签发；Federated Access 只有 typed
+verifier，没有 issuer。User / Device / Admin variant
 必须携带 `TenantId` 并写入 `tenant_id` claim；SuperAdmin variant 不暴露 tenant 字段，签出的
-`superAdmin` JWT 没有 ambient tenant，也不会直接产生 `RowScope::All`。service-token 不进入 access
-issuer，单独走 tenant-bound HS256 service-token 路径，并把 canonical `X-Tenant-ID` 纳入 MAC 输入。
+`superAdmin` access token 没有 ambient tenant，也不会直接产生 `RowScope::All`。service-token 不进入
+access issuer，单独走 tenant-bound HS256 Service Token profile，并把 canonical `X-Tenant-ID` 纳入 MAC
+输入。RSS/Federated Access 的 User/Device/Admin 缺 `tenant_id` 必须拒绝，SuperAdmin 携 tenant claim 也必须
+拒绝；listener profile、issuer、audience 与 ES256 key source 共同决定 trust domain。
 
 JWT tenant claim 在 auth 边界解析并写入 context。service principal 无 tenant。
 service-token principal 自身同样无 tenant；只有验签通过的 service-token MAC-bound canonical

@@ -5,9 +5,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine as _;
+use p256::ecdsa::signature::Signer as _;
+use p256::ecdsa::{Signature, SigningKey};
+use tokio_util::sync::CancellationToken;
+
 use crate::config::{
-    CapturedConfigValue, RuntimeConfigKey, RuntimeConfigSnapshot, RuntimeConfigSource,
-    RuntimeServingConfig, ServingConfigMapper, WorkerRuntimeConfig,
+    AccessPrincipalKind, AccessTokenProfileSelection, CapturedConfigValue, InternalAuthSelection,
+    RuntimeConfigKey, RuntimeConfigSnapshot, RuntimeConfigSource, RuntimeServingConfig,
+    ServiceTokenConfig, ServingConfigMapper, TokenProfilesConfig, WorkerRuntimeConfig,
 };
 
 #[derive(Clone)]
@@ -150,7 +156,7 @@ fn worker_runtime_config_uses_one_snapshot_generation_for_every_interval() {
 }
 
 fn complete_shared_serving_values() -> Vec<(String, String)> {
-    [
+    let mut values = [
         ("RSS_TOPOLOGY", "durable-shared"),
         ("RSS_AMQP_URL", "amqps://user:pass@broker.test/rss"),
         (
@@ -168,10 +174,15 @@ fn complete_shared_serving_values() -> Vec<(String, String)> {
             "RSS_AUDIT_CHAIN_KEY_B64URL",
             "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
         ),
-        ("RSS_JWT_ISSUER", "https://issuer.test"),
-        ("RSS_JWT_AUDIENCE", "rss"),
-        ("RSS_JWT_ES256_KEY_ID", "runtime-es256"),
-        ("RSS_JWT_ACCESS_TTL_SECS", "900"),
+        ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+        ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+        ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ("RSS_ACCESS_TOKEN_ISSUER", "https://issuer.test"),
+        ("RSS_ACCESS_TOKEN_AUDIENCE", "rss"),
+        ("RSS_ACCESS_TOKEN_ES256_KEY_ID", "runtime-es256"),
+        ("RSS_ACCESS_TOKEN_TTL_SECS", "900"),
+        ("RSS_ACCESS_TOKEN_TRUSTED_KINDS", "user,admin"),
+        ("RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS", "60"),
         ("RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS", "identity"),
         ("RSS_DOMAIN_TRANSPORT_URL", "https://gateway.internal/rpc"),
         (
@@ -189,7 +200,12 @@ fn complete_shared_serving_values() -> Vec<(String, String)> {
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value.to_owned()))
-    .collect()
+    .collect::<Vec<_>>();
+    values.push((
+        "RSS_ACCESS_TOKEN_JWKS_PATH".to_owned(),
+        format!("{}/src/config.rs", env!("CARGO_MANIFEST_DIR")),
+    ));
+    values
 }
 
 fn replace_serving_value(values: &mut [(String, String)], key: &str, value: &str) {
@@ -198,6 +214,13 @@ fn replace_serving_value(values: &mut [(String, String)], key: &str, value: &str
         .find(|(candidate, _)| candidate == key)
         .expect("serving fixture key")
         .1 = value.to_owned();
+}
+
+fn select_federated_for_both_external_listeners(values: &mut Vec<(String, String)>) {
+    replace_serving_value(values, "RSS_PRIMARY_TOKEN_PROFILE", "federated-access");
+    replace_serving_value(values, "RSS_ADMIN_TOKEN_PROFILE", "federated-access");
+    values.retain(|(key, _)| !key.starts_with("RSS_ACCESS_TOKEN_"));
+    add_federated_access_profile(values);
 }
 
 #[test]
@@ -251,6 +274,34 @@ fn runtime_config_serving_event_domain_dlx_and_worker_inputs_share_one_captured_
             "{key} must be captured once and never reopened by typed mapping"
         );
     }
+}
+
+#[test]
+fn complete_serving_config_accepts_federated_primary_and_admin_without_local_rss_issuer() {
+    let mut values = complete_shared_serving_values();
+    select_federated_for_both_external_listeners(&mut values);
+    let snapshot = RuntimeConfigSnapshot::capture_test(FakeSource::new(
+        values
+            .into_iter()
+            .map(|(key, value)| (key, FakeValue::Present(value))),
+    ))
+    .expect("capture complete federated serving generation");
+
+    let parts = RuntimeServingConfig::from_snapshot(snapshot.view())
+        .expect("federated-only serving config")
+        .into_parts();
+
+    assert_eq!(
+        parts.token_profiles.primary(),
+        AccessTokenProfileSelection::FederatedAccess
+    );
+    assert_eq!(
+        parts.token_profiles.admin(),
+        AccessTokenProfileSelection::FederatedAccess
+    );
+    assert!(parts.token_profiles.rss_access().is_none());
+    assert!(parts.token_profiles.federated_access().is_some());
+    assert!(parts.domain_modules.identity.is_federated_access());
 }
 
 #[test]
@@ -722,8 +773,9 @@ fn snapshot_capability_reuses_one_generation_for_serving_decisions() {
     let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
     let config = snapshot.view();
 
-    let scheme = crate::routes::auth_scheme(config, primitives::ListenerKind::Internal)
-        .expect("generation-one auth scheme");
+    let scheme = super::config::InternalAuthSelection::parse(config)
+        .expect("generation-one internal auth selection")
+        .auth_scheme();
     let addr = crate::listeners::listener_addr_for_scheme_at(
         config,
         primitives::ListenerKind::Internal,
@@ -766,5 +818,672 @@ fn runtime_config_invalid_required_domains_are_deferred_to_the_existing_builder(
     assert_eq!(
         error.to_string(),
         "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS must not contain empty entries"
+    );
+}
+
+fn rss_token_profile_values() -> Vec<(String, String)> {
+    vec![
+        (
+            "RSS_PRIMARY_TOKEN_PROFILE".to_owned(),
+            "rss-access".to_owned(),
+        ),
+        (
+            "RSS_ADMIN_TOKEN_PROFILE".to_owned(),
+            "rss-access".to_owned(),
+        ),
+        ("RSS_INTERNAL_AUTH_SCHEME".to_owned(), "mtls".to_owned()),
+        (
+            "RSS_ACCESS_TOKEN_ISSUER".to_owned(),
+            "https://rss.issuer.test".to_owned(),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_AUDIENCE".to_owned(),
+            "rss-access-audience".to_owned(),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_ES256_KEY_ID".to_owned(),
+            "rss-access-es256".to_owned(),
+        ),
+        ("RSS_ACCESS_TOKEN_TTL_SECS".to_owned(), "900".to_owned()),
+        (
+            "RSS_ACCESS_TOKEN_TRUSTED_KINDS".to_owned(),
+            "user,device,admin,superAdmin".to_owned(),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_JWKS_PATH".to_owned(),
+            format!("{}/src/config.rs", env!("CARGO_MANIFEST_DIR")),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS".to_owned(),
+            "60".to_owned(),
+        ),
+    ]
+}
+
+fn add_federated_access_profile(values: &mut Vec<(String, String)>) {
+    values.extend([
+        (
+            "RSS_FEDERATED_ACCESS_TOKEN_ISSUER".to_owned(),
+            "https://federated.issuer.test".to_owned(),
+        ),
+        (
+            "RSS_FEDERATED_ACCESS_TOKEN_AUDIENCE".to_owned(),
+            "federated-access-audience".to_owned(),
+        ),
+        (
+            "RSS_FEDERATED_ACCESS_TOKEN_TRUSTED_KINDS".to_owned(),
+            "user,device,admin".to_owned(),
+        ),
+        (
+            "RSS_FEDERATED_ACCESS_TOKEN_JWKS_PATH".to_owned(),
+            format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR")),
+        ),
+        (
+            "RSS_FEDERATED_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS".to_owned(),
+            "120".to_owned(),
+        ),
+    ]);
+}
+
+fn add_service_token_profile(values: &mut Vec<(String, String)>) {
+    values.extend([
+        (
+            "RSS_SERVICE_TOKEN_ISSUER".to_owned(),
+            "https://service.issuer.test".to_owned(),
+        ),
+        (
+            "RSS_SERVICE_TOKEN_AUDIENCE".to_owned(),
+            "service-token-audience".to_owned(),
+        ),
+        (
+            "RSS_SERVICE_TOKEN_HS256_KID".to_owned(),
+            "service-hs256".to_owned(),
+        ),
+        (
+            "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL".to_owned(),
+            "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo".to_owned(),
+        ),
+    ]);
+}
+
+fn token_profiles_from(
+    values: impl IntoIterator<Item = (String, String)>,
+) -> anyhow::Result<TokenProfilesConfig> {
+    let snapshot = RuntimeConfigSnapshot::capture_test(FakeSource::new(
+        values
+            .into_iter()
+            .map(|(key, value)| (key, FakeValue::Present(value))),
+    ))
+    .expect("capture token profile config");
+    TokenProfilesConfig::from_snapshot(snapshot.view())
+}
+
+fn service_token_config_from(
+    values: impl IntoIterator<Item = (String, String)>,
+) -> anyhow::Result<ServiceTokenConfig> {
+    let snapshot = RuntimeConfigSnapshot::capture_test(FakeSource::new(
+        values
+            .into_iter()
+            .map(|(key, value)| (key, FakeValue::Present(value))),
+    ))
+    .expect("capture service-token config");
+    ServiceTokenConfig::from_snapshot(snapshot.view())
+}
+
+fn service_token_env_example_values() -> Vec<(String, String)> {
+    const PREFIX: &str = "RSS_SERVICE_TOKEN_";
+    include_str!("../../../deploy/.env.example")
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            key.starts_with(PREFIX)
+                .then(|| (key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
+static CONFIG_TEMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn unique_config_temp_dir(name: &str) -> std::path::PathBuf {
+    let sequence = CONFIG_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "rss-runtime-config-{}-{sequence}-{name}",
+        std::process::id()
+    ))
+}
+
+fn valid_es256_jwks(kid: &str, scalar: [u8; 32]) -> String {
+    let signing_key = SigningKey::from_slice(&scalar).expect("valid test scalar");
+    let point = signing_key.verifying_key().to_encoded_point(false);
+    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(point.x().expect("uncompressed point has x"));
+    let y = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(point.y().expect("uncompressed point has y"));
+    format!(
+        r#"{{"keys":[{{"kty":"EC","kid":"{kid}","alg":"ES256","crv":"P-256","x":"{x}","y":"{y}"}}]}}"#
+    )
+}
+
+fn mint_es256_access_token(
+    signing_key: &SigningKey,
+    kid: &str,
+    issuer: &str,
+    audience: &str,
+    now: i64,
+) -> String {
+    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(format!(r#"{{"alg":"ES256","typ":"at+jwt","kid":"{kid}"}}"#));
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(
+        r#"{{"sub":"config-test","iat":{now},"exp":{},"token_use":"access","iss":"{issuer}","aud":"{audience}","kind":"superAdmin"}}"#,
+        now + 600
+    ));
+    let signing_input = format!("{header}.{payload}");
+    let signature: Signature = signing_key.sign(signing_input.as_bytes());
+    format!(
+        "{signing_input}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes())
+    )
+}
+
+struct ConfigTestClock(std::time::SystemTime);
+
+impl diport::Clock for ConfigTestClock {
+    fn now(&self) -> std::time::SystemTime {
+        self.0
+    }
+}
+
+#[test]
+fn deploy_env_example_service_token_namespace_satisfies_the_production_parser() {
+    let values = service_token_env_example_values();
+    assert_eq!(values.len(), 4, "fixture must contain the closed namespace");
+    service_token_config_from(values)
+        .expect("deploy service-token fixture must be production-valid");
+}
+
+#[test]
+fn deploy_env_example_service_token_secret_contract_rejects_31_bytes() {
+    let mut values = service_token_env_example_values();
+    replace_serving_value(
+        &mut values,
+        "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL",
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x5a_u8; 31]),
+    );
+    let error = service_token_config_from(values)
+        .err()
+        .expect("31-byte HS256 key must reject");
+    assert!(
+        error.to_string().contains("32..=128 bytes"),
+        "unexpected error: {error}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn access_jwks_watches_the_lexical_operator_path_across_atomic_symlink_swap() {
+    use std::os::unix::fs::symlink;
+
+    let directory = unique_config_temp_dir("jwks-swap");
+    std::fs::create_dir(&directory).expect("create temp directory");
+    let first = directory.join("first.json");
+    let second = directory.join("second.json");
+    let current = directory.join("current.json");
+    let replacement = directory.join("replacement.json");
+    std::fs::write(&first, valid_es256_jwks("first", [0x41; 32])).expect("write first JWKS");
+    std::fs::write(&second, valid_es256_jwks("second", [0x42; 32])).expect("write second JWKS");
+    symlink(&first, &current).expect("create initial JWKS link");
+
+    let mut values = rss_token_profile_values();
+    replace_serving_value(
+        &mut values,
+        "RSS_ACCESS_TOKEN_JWKS_PATH",
+        current.to_str().expect("UTF-8 temp path"),
+    );
+    let config = token_profiles_from(values).expect("parse RSS profile");
+    let configured_path = config
+        .rss_access()
+        .expect("active RSS profile")
+        .jwks_path()
+        .to_owned();
+    let source = oidc::JwksKeySource::load_and_watch(
+        "rss-access-test",
+        configured_path,
+        std::time::Duration::from_secs(3_600),
+        CancellationToken::new(),
+    )
+    .expect("load initial JWKS");
+
+    symlink(&second, &replacement).expect("create replacement JWKS link");
+    std::fs::rename(&replacement, &current).expect("atomically replace JWKS link");
+    std::fs::remove_file(&first).expect("remove old target");
+
+    assert!(
+        source.reload(),
+        "reload must follow the stable lexical mount path to the new target"
+    );
+    assert!(source.is_ready(), "successful swap must remain ready");
+
+    const ISSUER: &str = "https://rss.issuer.test";
+    const AUDIENCE: &str = "rss-access-audience";
+    let now = 1_700_000_000_i64;
+    let verifier = oidc::VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISSUER, AUDIENCE)
+        .keys_jwks(source)
+        .trust_kind("superAdmin")
+        .build()
+        .expect("build swapped verifier");
+    let provider = oidc::OidcProvider::new(
+        verifier,
+        Box::new(ConfigTestClock(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(now as u64),
+        )),
+    );
+    let pdp = diport::DynPdp::new_arc(provider);
+    let old_token = mint_es256_access_token(
+        &SigningKey::from_slice(&[0x41; 32]).expect("old signing key"),
+        "first",
+        ISSUER,
+        AUDIENCE,
+        now,
+    );
+    let new_token = mint_es256_access_token(
+        &SigningKey::from_slice(&[0x42; 32]).expect("new signing key"),
+        "second",
+        ISSUER,
+        AUDIENCE,
+        now,
+    );
+    assert!(
+        authn::verify_rss_access(&old_token, &pdp).await.is_err(),
+        "the old target key must leave the trusted snapshot"
+    );
+    assert!(
+        authn::verify_rss_access(&new_token, &pdp).await.is_ok(),
+        "the replacement target key must enter the trusted snapshot"
+    );
+    drop(pdp);
+    std::fs::remove_dir_all(directory).expect("remove temp directory");
+}
+
+#[cfg(unix)]
+#[test]
+fn access_profiles_reject_two_lexical_paths_with_the_same_startup_identity() {
+    use std::os::unix::fs::symlink;
+
+    let directory = unique_config_temp_dir("jwks-alias");
+    std::fs::create_dir(&directory).expect("create temp directory");
+    let target = directory.join("shared.json");
+    let rss_link = directory.join("rss.json");
+    let federated_link = directory.join("federated.json");
+    std::fs::write(&target, "{}").expect("write shared target");
+    symlink(&target, &rss_link).expect("create RSS link");
+    symlink(&target, &federated_link).expect("create federated link");
+
+    let mut values = rss_token_profile_values();
+    replace_serving_value(&mut values, "RSS_ADMIN_TOKEN_PROFILE", "federated-access");
+    replace_serving_value(
+        &mut values,
+        "RSS_ACCESS_TOKEN_JWKS_PATH",
+        rss_link.to_str().expect("UTF-8 RSS path"),
+    );
+    add_federated_access_profile(&mut values);
+    replace_serving_value(
+        &mut values,
+        "RSS_FEDERATED_ACCESS_TOKEN_JWKS_PATH",
+        federated_link.to_str().expect("UTF-8 federated path"),
+    );
+    let error = token_profiles_from(values).expect_err("same startup identity must reject");
+    assert!(
+        error
+            .to_string()
+            .contains("canonical JWKS paths must be distinct"),
+        "unexpected error: {error}"
+    );
+    std::fs::remove_dir_all(directory).expect("remove temp directory");
+}
+
+#[test]
+fn token_profile_config_requires_closed_listener_selections_and_fixes_health_to_no_auth() {
+    let config = token_profiles_from(rss_token_profile_values()).expect("valid RSS profile config");
+
+    assert_eq!(config.primary(), AccessTokenProfileSelection::RssAccess);
+    assert_eq!(config.admin(), AccessTokenProfileSelection::RssAccess);
+    assert_eq!(config.internal(), InternalAuthSelection::Mtls);
+    assert_eq!(
+        config.primary().auth_scheme(),
+        primitives::AuthScheme::RssAccessToken
+    );
+    assert_eq!(
+        config.internal().auth_scheme(),
+        primitives::AuthScheme::Mtls
+    );
+    assert_eq!(
+        TokenProfilesConfig::health_auth_scheme(),
+        primitives::AuthScheme::NoAuth
+    );
+
+    let rss = config.rss_access().expect("RSS profile is active");
+    assert_eq!(rss.issuer(), "https://rss.issuer.test");
+    assert_eq!(rss.audience(), "rss-access-audience");
+    assert_eq!(rss.es256_key_id(), "rss-access-es256");
+    assert_eq!(rss.ttl(), std::time::Duration::from_secs(900));
+    assert_eq!(
+        rss.jwks_refresh_interval(),
+        std::time::Duration::from_secs(60)
+    );
+    assert_eq!(
+        rss.trusted_kinds()
+            .iter()
+            .copied()
+            .map(AccessPrincipalKind::as_str)
+            .collect::<Vec<_>>(),
+        ["user", "device", "admin", "superAdmin"]
+    );
+    assert!(config.federated_access().is_none());
+    assert!(config.service_token().is_none());
+}
+
+#[test]
+fn token_profile_config_rejects_missing_and_invalid_required_selections() {
+    let cases = [
+        (
+            "missing primary",
+            "RSS_PRIMARY_TOKEN_PROFILE",
+            None,
+            "missing required env var: RSS_PRIMARY_TOKEN_PROFILE",
+        ),
+        (
+            "invalid admin",
+            "RSS_ADMIN_TOKEN_PROFILE",
+            Some("jwt"),
+            "RSS_ADMIN_TOKEN_PROFILE must be exactly rss-access or federated-access",
+        ),
+        (
+            "missing internal",
+            "RSS_INTERNAL_AUTH_SCHEME",
+            None,
+            "missing required env var: RSS_INTERNAL_AUTH_SCHEME",
+        ),
+        (
+            "invalid internal",
+            "RSS_INTERNAL_AUTH_SCHEME",
+            Some("service"),
+            "RSS_INTERNAL_AUTH_SCHEME must be exactly mtls or service-token",
+        ),
+    ];
+    for (case, key, replacement, expected) in cases {
+        let mut values = rss_token_profile_values();
+        values.retain(|(candidate, _)| candidate != key);
+        if let Some(replacement) = replacement {
+            values.push((key.to_owned(), replacement.to_owned()));
+        }
+        let error = token_profiles_from(values).expect_err(case);
+        assert_eq!(error.to_string(), expected, "{case}");
+    }
+}
+
+#[test]
+fn token_profile_config_enforces_rss_ttl_and_jwks_refresh_bounds() {
+    let cases = [
+        ("RSS_ACCESS_TOKEN_TTL_SECS", "0", "1..=900"),
+        ("RSS_ACCESS_TOKEN_TTL_SECS", "901", "1..=900"),
+        (
+            "RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+            "4",
+            "5..=3600",
+        ),
+        (
+            "RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+            "3601",
+            "5..=3600",
+        ),
+    ];
+    for (key, value, expected) in cases {
+        let mut values = rss_token_profile_values();
+        replace_serving_value(&mut values, key, value);
+        let error = token_profiles_from(values).expect_err(key);
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+
+    for ttl in ["1", "900"] {
+        let mut values = rss_token_profile_values();
+        replace_serving_value(&mut values, "RSS_ACCESS_TOKEN_TTL_SECS", ttl);
+        token_profiles_from(values).expect("TTL boundary must be accepted");
+    }
+}
+
+#[test]
+fn token_profile_config_rejects_any_orphan_profile_namespace() {
+    let mut inactive_federated = rss_token_profile_values();
+    inactive_federated.push((
+        "RSS_FEDERATED_ACCESS_TOKEN_ISSUER".to_owned(),
+        "https://orphan.test".to_owned(),
+    ));
+    let error = token_profiles_from(inactive_federated).expect_err("orphan federated config");
+    assert!(
+        error
+            .to_string()
+            .contains("orphan token profile configuration: RSS_FEDERATED_ACCESS_TOKEN_*"),
+        "{error}"
+    );
+
+    let mut inactive_service = rss_token_profile_values();
+    inactive_service.push((
+        "RSS_SERVICE_TOKEN_HS256_KID".to_owned(),
+        "orphan".to_owned(),
+    ));
+    let error = token_profiles_from(inactive_service).expect_err("orphan service config");
+    assert!(
+        error
+            .to_string()
+            .contains("orphan token profile configuration: RSS_SERVICE_TOKEN_*"),
+        "{error}"
+    );
+}
+
+#[test]
+fn token_profile_config_accepts_distinct_active_profiles_and_service_token() {
+    let mut values = rss_token_profile_values();
+    replace_serving_value(&mut values, "RSS_ADMIN_TOKEN_PROFILE", "federated-access");
+    replace_serving_value(&mut values, "RSS_INTERNAL_AUTH_SCHEME", "service-token");
+    add_federated_access_profile(&mut values);
+    add_service_token_profile(&mut values);
+
+    let config = token_profiles_from(values).expect("three distinct profiles");
+    assert_eq!(config.admin(), AccessTokenProfileSelection::FederatedAccess);
+    assert_eq!(config.internal(), InternalAuthSelection::ServiceToken);
+    let federated = config
+        .federated_access()
+        .expect("federated profile is active");
+    assert_eq!(federated.issuer(), "https://federated.issuer.test");
+    assert_eq!(federated.audience(), "federated-access-audience");
+    assert_eq!(
+        federated.jwks_refresh_interval(),
+        std::time::Duration::from_secs(120)
+    );
+    assert_eq!(
+        federated
+            .trusted_kinds()
+            .iter()
+            .copied()
+            .map(AccessPrincipalKind::as_str)
+            .collect::<Vec<_>>(),
+        ["user", "device", "admin"]
+    );
+    let service = config.service_token().expect("service profile is active");
+    assert_eq!(service.issuer(), "https://service.issuer.test");
+    assert_eq!(service.audience(), "service-token-audience");
+    assert_eq!(service.hs256_kid(), "service-hs256");
+    assert_eq!(service.hs256_secret(), &[b'Z'; 32]);
+}
+
+#[test]
+fn token_profile_config_accepts_every_valid_primary_admin_activation_combination() {
+    let mut federated_only = rss_token_profile_values();
+    select_federated_for_both_external_listeners(&mut federated_only);
+
+    let mut rss_primary_federated_admin = rss_token_profile_values();
+    replace_serving_value(
+        &mut rss_primary_federated_admin,
+        "RSS_ADMIN_TOKEN_PROFILE",
+        "federated-access",
+    );
+    add_federated_access_profile(&mut rss_primary_federated_admin);
+
+    for (case, values) in [
+        ("federated/federated", federated_only),
+        ("rss/federated", rss_primary_federated_admin),
+        ("rss/rss", rss_token_profile_values()),
+    ] {
+        let result = token_profiles_from(values);
+        let failure = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(result.is_ok(), "{case} must start: {failure}");
+    }
+}
+
+#[test]
+fn token_profile_config_rejects_federated_primary_with_rss_admin() {
+    let mut values = rss_token_profile_values();
+    replace_serving_value(&mut values, "RSS_PRIMARY_TOKEN_PROFILE", "federated-access");
+    add_federated_access_profile(&mut values);
+
+    let error = token_profiles_from(values).expect_err("split identity authority must reject");
+    assert!(
+        error
+            .to_string()
+            .contains("federated Primary requires federated Admin"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn token_profile_config_rejects_cross_profile_trust_overlap() {
+    let cases = [
+        (
+            "RSS_FEDERATED_ACCESS_TOKEN_ISSUER",
+            "https://rss.issuer.test",
+            "issuers must be distinct",
+        ),
+        (
+            "RSS_FEDERATED_ACCESS_TOKEN_AUDIENCE",
+            "rss-access-audience",
+            "audiences must be distinct",
+        ),
+        (
+            "RSS_FEDERATED_ACCESS_TOKEN_JWKS_PATH",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/config.rs"),
+            "canonical JWKS paths must be distinct",
+        ),
+        (
+            "RSS_SERVICE_TOKEN_ISSUER",
+            "https://rss.issuer.test",
+            "Service Token issuer must be distinct",
+        ),
+        (
+            "RSS_SERVICE_TOKEN_AUDIENCE",
+            "federated-access-audience",
+            "Service Token audience must be distinct",
+        ),
+    ];
+    for (key, value, expected) in cases {
+        let mut values = rss_token_profile_values();
+        replace_serving_value(&mut values, "RSS_ADMIN_TOKEN_PROFILE", "federated-access");
+        replace_serving_value(&mut values, "RSS_INTERNAL_AUTH_SCHEME", "service-token");
+        add_federated_access_profile(&mut values);
+        add_service_token_profile(&mut values);
+        replace_serving_value(&mut values, key, value);
+
+        let error = token_profiles_from(values).expect_err(key);
+        assert!(error.to_string().contains(expected), "{key}: {error}");
+    }
+}
+
+#[test]
+fn token_profile_config_rejects_legacy_env_instead_of_dual_reading_it() {
+    let legacy = |family: &str, suffix: &str| format!("RSS_{family}_{suffix}");
+    let values = [
+        (
+            "RSS_PRIMARY_TOKEN_PROFILE".to_owned(),
+            "rss-access".to_owned(),
+        ),
+        (
+            "RSS_ADMIN_TOKEN_PROFILE".to_owned(),
+            "rss-access".to_owned(),
+        ),
+        ("RSS_INTERNAL_AUTH_SCHEME".to_owned(), "mtls".to_owned()),
+        (
+            legacy("JWT", "ISSUER"),
+            "https://legacy.issuer.test".to_owned(),
+        ),
+        (legacy("JWT", "AUDIENCE"), "legacy".to_owned()),
+        (legacy("JWT", "ES256_KEY_ID"), "legacy-key".to_owned()),
+        (legacy("JWT", "ACCESS_TTL_SECS"), "900".to_owned()),
+        (
+            legacy("OIDC", "ISSUER"),
+            "https://legacy.issuer.test".to_owned(),
+        ),
+        (legacy("OIDC", "AUDIENCE"), "legacy".to_owned()),
+        (legacy("OIDC", "TRUSTED_KINDS"), "user".to_owned()),
+        (
+            legacy("OIDC", "JWKS_PATH"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/config.rs").to_owned(),
+        ),
+    ];
+    let source = FakeSource::new(
+        values
+            .into_iter()
+            .map(|(key, value)| (key, FakeValue::Present(value))),
+    );
+    let reads = read_log(&source);
+    let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture");
+    let error =
+        TokenProfilesConfig::from_snapshot(snapshot.view()).expect_err("no legacy dual-read");
+    assert_eq!(
+        error.to_string(),
+        "missing required env var: RSS_ACCESS_TOKEN_ISSUER"
+    );
+    let reads = reads.lock().expect("read log");
+    let jwt_prefix = legacy("JWT", "");
+    let oidc_prefix = legacy("OIDC", "");
+    assert!(
+        reads
+            .iter()
+            .all(|key| !key.starts_with(&jwt_prefix) && !key.starts_with(&oidc_prefix))
+    );
+}
+
+#[test]
+fn token_profile_config_rejects_invalid_kind_and_service_secret() {
+    let mut values = rss_token_profile_values();
+    replace_serving_value(
+        &mut values,
+        "RSS_ACCESS_TOKEN_TRUSTED_KINDS",
+        "user,service",
+    );
+    let error = token_profiles_from(values).expect_err("service kind in access profile");
+    assert!(
+        error.to_string().contains(
+            "RSS_ACCESS_TOKEN_TRUSTED_KINDS entries must be exactly user, device, admin, or superAdmin"
+        ),
+        "{error}"
+    );
+
+    let mut values = rss_token_profile_values();
+    replace_serving_value(&mut values, "RSS_INTERNAL_AUTH_SCHEME", "service-token");
+    add_service_token_profile(&mut values);
+    replace_serving_value(
+        &mut values,
+        "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL",
+        "short",
+    );
+    let error = token_profiles_from(values).expect_err("weak service secret");
+    assert!(
+        error
+            .to_string()
+            .contains("RSS_SERVICE_TOKEN_HS256_SECRET_B64URL"),
+        "{error}"
     );
 }

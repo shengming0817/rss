@@ -1,6 +1,6 @@
 fn main() {
     let _receipt = authn::ProjectionMaintenanceReceipt {
-        operator_subject: "forged".into(),
+        operator_caller: vocab::ServiceCallerDomain::MaintenanceOperator,
         action: authn::ProjectionMaintenanceAction::Replay,
         tenant: vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
         projection: "audit.session-projection".into(),

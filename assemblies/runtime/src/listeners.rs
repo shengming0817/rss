@@ -177,7 +177,6 @@ fn enforce_internal_service_token_loopback_only(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN, auth_scheme_from_value};
     use crate::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
 
     use std::time::Duration;
@@ -187,6 +186,9 @@ mod tests {
     use postgres::PgDbReadiness;
     use primitives::{HealthCheck, HealthStatus, ProbeName};
     use tower::ServiceExt as _;
+
+    const INTERNAL_AUTH_MTLS: &str = "mtls";
+    const INTERNAL_AUTH_SERVICE_TOKEN: &str = "service-token";
 
     #[allow(clippy::expect_used)]
     fn test_reporter() -> Arc<bootstrap::HealthReporter> {
@@ -231,8 +233,16 @@ mod tests {
         raw_plaintext_policy: Option<&str>,
         now: SystemTime,
     ) -> anyhow::Result<SocketAddr> {
-        let scheme = auth_scheme_from_value(listener, internal_auth_scheme)
-            .context("resolve test listener auth scheme")?;
+        let scheme = match listener {
+            ListenerKind::Primary | ListenerKind::Admin => AuthScheme::RssAccessToken,
+            ListenerKind::Internal => match internal_auth_scheme {
+                Some(INTERNAL_AUTH_MTLS) => AuthScheme::Mtls,
+                Some(INTERNAL_AUTH_SERVICE_TOKEN) => AuthScheme::ServiceToken,
+                _ => anyhow::bail!("test Internal listener requires an explicit auth scheme"),
+            },
+            ListenerKind::Health => AuthScheme::NoAuth,
+            _ => anyhow::bail!("unknown test listener"),
+        };
         listener_addr_for_scheme_from_values(
             listener,
             scheme,
@@ -396,8 +406,13 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn internal_mtls_listener_is_not_plaintext() {
-        let addr = listener_addr_from(ListenerKind::Internal, None, Some("0.0.0.0:8081"), None)
-            .expect("default Internal listener is mTLS and not gated as plaintext");
+        let addr = listener_addr_from(
+            ListenerKind::Internal,
+            Some(INTERNAL_AUTH_MTLS),
+            Some("0.0.0.0:8081"),
+            None,
+        )
+        .expect("explicit Internal mTLS listener is not gated as plaintext");
         assert!(addr.ip().is_unspecified());
     }
 
@@ -421,7 +436,7 @@ mod tests {
     fn internal_service_token_listener_is_plaintext_and_requires_opt_in() {
         let err = listener_addr_from(
             ListenerKind::Internal,
-            Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN),
+            Some(INTERNAL_AUTH_SERVICE_TOKEN),
             Some("0.0.0.0:8081"),
             None,
         )
@@ -438,7 +453,7 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
         let err = listener_addr_from_at(
             ListenerKind::Internal,
-            Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN),
+            Some(INTERNAL_AUTH_SERVICE_TOKEN),
             Some("0.0.0.0:8081"),
             Some("dev-container"),
             now,
@@ -456,7 +471,7 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
         let addr = listener_addr_from_at(
             ListenerKind::Internal,
-            Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN),
+            Some(INTERNAL_AUTH_SERVICE_TOKEN),
             Some("127.0.0.1:8081"),
             Some("true"),
             now,

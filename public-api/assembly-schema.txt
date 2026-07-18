@@ -290,9 +290,10 @@ impl core::marker::UnsafeUnpin for assembly_schema::LifecycleChannel
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::LifecycleChannel
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::LifecycleChannel
 pub enum assembly_schema::ListenerAuth
-pub assembly_schema::ListenerAuth::Jwt
+pub assembly_schema::ListenerAuth::FederatedAccessToken
 pub assembly_schema::ListenerAuth::Mtls
 pub assembly_schema::ListenerAuth::NoAuth
+pub assembly_schema::ListenerAuth::RssAccessToken
 pub assembly_schema::ListenerAuth::ServiceToken
 impl core::clone::Clone for assembly_schema::ListenerAuth
 pub fn assembly_schema::ListenerAuth::clone(&self) -> assembly_schema::ListenerAuth

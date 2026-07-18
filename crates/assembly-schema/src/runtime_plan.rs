@@ -394,7 +394,8 @@ impl PlacementPlan {
 #[serde(rename_all = "camelCase")]
 pub enum ListenerAuth {
     NoAuth,
-    Jwt,
+    RssAccessToken,
+    FederatedAccessToken,
     Mtls,
     ServiceToken,
 }
@@ -878,7 +879,10 @@ fn validate_listeners(
             )));
         }
         match (listener.kind, listener.auth) {
-            (AssemblyListenerKind::Primary | AssemblyListenerKind::Admin, ListenerAuth::Jwt)
+            (
+                AssemblyListenerKind::Primary | AssemblyListenerKind::Admin,
+                ListenerAuth::RssAccessToken | ListenerAuth::FederatedAccessToken,
+            )
             | (AssemblyListenerKind::Health, ListenerAuth::NoAuth)
             | (AssemblyListenerKind::Internal, ListenerAuth::Mtls | ListenerAuth::ServiceToken) => {
             }

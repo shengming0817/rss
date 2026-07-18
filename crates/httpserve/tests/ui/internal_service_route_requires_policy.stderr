@@ -1,0 +1,15 @@
+error[E0061]: this method takes 2 arguments but 1 argument was supplied
+  --> tests/ui/internal_service_route_requires_policy.rs:29:73
+   |
+29 |     let _ = unfinalized_for_test::<httpserve::Internal>(|router| router.mount(endpoint));
+   |                                                                         ^^^^^---------- argument #2 of type `ServiceCallerPolicy` is missing
+   |
+note: method defined here
+  --> src/routes.rs
+   |
+   |     pub fn mount<C: HttpConsistencyClass>(
+   |            ^^^^^
+help: provide the argument
+   |
+29 |     let _ = unfinalized_for_test::<httpserve::Internal>(|router| router.mount(endpoint, /* ServiceCallerPolicy */));
+   |                                                                                       +++++++++++++++++++++++++++

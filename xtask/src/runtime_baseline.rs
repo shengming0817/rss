@@ -489,7 +489,7 @@ impl RunRuntimeConfigWiring {
     }
 
     fn is_canonical(&self) -> bool {
-        let serving_sinks_are_canonical = SERVING_RUNTIME_PART_FIELDS.iter().all(|field| {
+        let serving_sinks_are_canonical = SERVING_RUNTIME_SINK_FIELDS.iter().all(|field| {
             self.serving_sink_calls.get(*field) == Some(&1)
                 && self.canonical_serving_sink_calls.get(*field) == Some(&1)
         });
@@ -505,7 +505,7 @@ impl RunRuntimeConfigWiring {
             && serving_sinks_are_canonical
             && self.pg_setup_after_serving_config == 1;
         self.runtime_inputs_calls == 0
-            && self.runtime_inputs_config_calls == 4 + self.runtime_plan_calls
+            && self.runtime_inputs_config_calls == 3 + self.runtime_plan_calls
             && self.runtime_plan_calls <= 1
             && self.runtime_plan_calls == self.canonical_runtime_plan_calls
             && self.config_view_bindings == 1
@@ -927,6 +927,18 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
 }
 
 const SERVING_RUNTIME_PART_FIELDS: &[&str] = &[
+    "token_profiles",
+    "event_transport",
+    "event_worker",
+    "dlx_worker",
+    "distributed_worker",
+    "domain_transport",
+    "domain_modules",
+    "audit_consumer_key",
+    "session_sweep_interval",
+];
+
+const SERVING_RUNTIME_SINK_FIELDS: &[&str] = &[
     "event_transport",
     "event_worker",
     "dlx_worker",
@@ -2207,9 +2219,9 @@ const RSS_COMMAND_FAMILIES: &[(&str, Option<&str>, Option<&str>)] = &[
         Some("run_settings_config_value_maintenance"),
     ),
     (
-        "OidcJwksExport",
-        Some("is_oidc_jwks_export_command"),
-        Some("run_oidc_jwks_export_command"),
+        "RssAccessJwksExport",
+        Some("is_rss_access_jwks_export_command"),
+        Some("run_rss_access_jwks_export_command"),
     ),
 ];
 
@@ -2732,16 +2744,16 @@ fn runtime_profile_inputs_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
                 findings.push(finding(
                     Rule::ForbiddenWiring,
                     RUNTIME_VAULT_PATH,
-                    format!("OIDC operator profile gate 无法解析 Rust: {error}"),
+                    format!("RSS access JWKS operator profile gate 无法解析 Rust: {error}"),
                 ));
                 return Ok(findings);
             }
         };
-        if !oidc_operator_signature_is_exact(&vault_file) {
+        if !rss_access_jwks_operator_signature_is_exact(&vault_file) {
             findings.push(finding(
                 Rule::ForbiddenWiring,
                 RUNTIME_VAULT_PATH,
-                "run_oidc_jwks_export_command must accept the exact &[String] and &crate::OperatorRuntimeInputs inputs; serving inputs and ambient configuration are forbidden",
+                "run_rss_access_jwks_export_command must accept the exact &[String] and &crate::OperatorRuntimeInputs inputs; serving inputs and ambient configuration are forbidden",
             ));
         }
     }
@@ -2797,13 +2809,13 @@ fn runtime_profile_input_structs_are_exact(file: &syn::File) -> bool {
     )
 }
 
-fn oidc_operator_signature_is_exact(file: &syn::File) -> bool {
+fn rss_access_jwks_operator_signature_is_exact(file: &syn::File) -> bool {
     let functions = file
         .items
         .iter()
         .filter_map(|item| match item {
             syn::Item::Fn(function)
-                if function.sig.ident == "run_oidc_jwks_export_command"
+                if function.sig.ident == "run_rss_access_jwks_export_command"
                     && attrs_may_be_production(&function.attrs) =>
             {
                 Some(function)
@@ -9891,14 +9903,19 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "plan::RuntimePlan::bundled(runtime_inputs.config()).context(",
     },
     AnchorSpec {
-        id: "run.provider.oidc",
-        path: RUNTIME_LIB_PATH,
-        pattern: "prepare_runtime_oidc_provider(runtime_inputs.config())",
-    },
-    AnchorSpec {
         id: "run.config.serving",
         path: RUNTIME_LIB_PATH,
         pattern: "RuntimeServingConfig::from_snapshot(config)",
+    },
+    AnchorSpec {
+        id: "run.provider.rss-access",
+        path: RUNTIME_LIB_PATH,
+        pattern: "build_rss_access_provider(",
+    },
+    AnchorSpec {
+        id: "run.provider.federated-access",
+        path: RUNTIME_LIB_PATH,
+        pattern: "build_federated_access_provider(",
     },
     AnchorSpec {
         id: "run.config.s3",
@@ -9936,6 +9953,11 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "let deps = SharedRuntimeDeps {",
     },
     AnchorSpec {
+        id: "run.provider.service-token",
+        path: RUNTIME_LIB_PATH,
+        pattern: "build_service_token_provider(",
+    },
+    AnchorSpec {
         id: "run.wire.generated-domains",
         path: RUNTIME_LIB_PATH,
         pattern: "modules_gen::wire_domains(&deps, domain_modules)",
@@ -9966,14 +9988,39 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "let provider_module = crate::provider_output::build_provider_module(&deps)",
     },
     AnchorSpec {
-        id: "run.resources.oidc",
+        id: "run.resources.rss-access-token",
         path: RUNTIME_LIB_PATH,
-        pattern: "let oidc_resource = runtime_oidc.managed_resource()",
+        pattern: "if let Some(provider) = runtime_rss_access.as_ref() {\n                token_verifier_resources.push(provider.managed_resource());\n            }",
     },
     AnchorSpec {
-        id: "run.probe.oidc-jwks",
+        id: "run.resources.federated-access-token",
         path: RUNTIME_LIB_PATH,
-        pattern: "Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness()))",
+        pattern: "if let Some(provider) = runtime_federated_access.as_ref() {\n                token_verifier_resources.push(provider.managed_resource());\n            }",
+    },
+    AnchorSpec {
+        id: "run.resources.service-token",
+        path: RUNTIME_LIB_PATH,
+        pattern: "if let Some(provider) = runtime_service_token.as_ref() {\n                token_verifier_resources.push(provider.managed_resource());\n            }",
+    },
+    AnchorSpec {
+        id: "run.probe.rss-access-token-jwks-name",
+        path: RUNTIME_LIB_PATH,
+        pattern: "ProbeName::parse(RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)",
+    },
+    AnchorSpec {
+        id: "run.probe.rss-access-token-jwks",
+        path: RUNTIME_LIB_PATH,
+        pattern: "Box::new(AccessTokenJwksReadyProbe::rss_access(",
+    },
+    AnchorSpec {
+        id: "run.probe.federated-access-token-jwks-name",
+        path: RUNTIME_LIB_PATH,
+        pattern: "ProbeName::parse(FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)",
+    },
+    AnchorSpec {
+        id: "run.probe.federated-access-token-jwks",
+        path: RUNTIME_LIB_PATH,
+        pattern: "Box::new(AccessTokenJwksReadyProbe::federated_access(",
     },
     AnchorSpec {
         id: "run.module.input.domain-transport",
@@ -10669,16 +10716,20 @@ pub struct OperatorRuntimeInputs {
             );
         }
 
-        let oidc = r#"
-pub async fn run_oidc_jwks_export_command(
+        let rss_access_jwks = r#"
+pub async fn run_rss_access_jwks_export_command(
     args: &[String],
     runtime_inputs: &crate::OperatorRuntimeInputs,
 ) -> anyhow::Result<()> { todo!() }
 "#;
-        assert!(oidc_operator_signature_is_exact(&syn::parse_file(oidc)?));
-        assert!(!oidc_operator_signature_is_exact(&syn::parse_file(
-            &oidc.replace("OperatorRuntimeInputs", "ServingRuntimeInputs")
-        )?));
+        assert!(rss_access_jwks_operator_signature_is_exact(
+            &syn::parse_file(rss_access_jwks)?
+        ));
+        assert!(!rss_access_jwks_operator_signature_is_exact(
+            &syn::parse_file(
+                &rss_access_jwks.replace("OperatorRuntimeInputs", "ServingRuntimeInputs")
+            )?
+        ));
         Ok(())
     }
 
@@ -10693,7 +10744,7 @@ pub async fn run_oidc_jwks_export_command(
         );
         let startup = startup.replace(
             "    let config = runtime_inputs.config();",
-            "    prepare_runtime_oidc_provider(runtime_inputs.config());\n    finish(pg_owner.service_token_replay_store());\n    assemble_authed_routers(runtime_inputs.config());\n    launch(runtime_inputs.config());\n    let config = runtime_inputs.config();",
+            "    finish(pg_owner.service_token_replay_store());\n    assemble_authed_routers(runtime_inputs.config());\n    launch(runtime_inputs.config());\n    let config = runtime_inputs.config();",
         );
         format!(
             r#"{startup}
@@ -12232,32 +12283,44 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
 
     #[test]
     fn runtime_baseline_provider_anchor_requires_real_provider_call() -> Result<()> {
-        let root = fixture_root("runtime-baseline-provider-anchor-real-call")?;
-        let mut lines = Vec::new();
-        for anchor in RUNTIME_ANCHORS
-            .iter()
-            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH && anchor.id.starts_with("run."))
-        {
-            if anchor.id == "run.provider.oidc" {
-                lines.push("phase_result(RuntimePhase::BuildProvider, Ok::<_, anyhow::Error>(()))");
-            } else {
-                lines.push(anchor.pattern);
+        for provider_id in [
+            "run.provider.rss-access",
+            "run.provider.federated-access",
+            "run.provider.service-token",
+        ] {
+            let root = fixture_root(&format!(
+                "runtime-baseline-provider-anchor-real-call-{}",
+                provider_id.replace('.', "-")
+            ))?;
+            let mut lines = Vec::new();
+            for anchor in RUNTIME_ANCHORS
+                .iter()
+                .filter(|anchor| anchor.path == RUNTIME_LIB_PATH && anchor.id.starts_with("run."))
+            {
+                if anchor.id == provider_id {
+                    lines.push(
+                        "phase_result(RuntimePhase::BuildProvider, Ok::<_, anyhow::Error>(()))",
+                    );
+                } else {
+                    lines.push(anchor.pattern);
+                }
+                if anchor.id == "run.shared-deps" {
+                    lines.push("}");
+                }
             }
-            if anchor.id == "run.shared-deps" {
-                lines.push("}");
-            }
+            write(
+                &root.join(RUNTIME_LIB_PATH),
+                &format!("async fn run_startup() {{\n{}\n}}\n", lines.join("\n")),
+            )?;
+            let report = collect_report(&root)?;
+            assert!(
+                report.findings.iter().any(|finding| {
+                    finding.rule == Rule::MissingAnchor && finding.detail.contains(provider_id)
+                }),
+                "provider phase marker alone must not satisfy {provider_id}: {:?}",
+                report.findings
+            );
         }
-        write(
-            &root.join(RUNTIME_LIB_PATH),
-            &format!("async fn run_startup() {{\n{}\n}}\n", lines.join("\n")),
-        )?;
-        let report = collect_report(&root)?;
-        assert!(
-            report.findings.iter().any(|f| {
-                f.rule == Rule::MissingAnchor && f.detail.contains("run.provider.oidc")
-            }),
-            "provider phase marker alone must not satisfy the real provider construction anchor"
-        );
         Ok(())
     }
 
@@ -12269,17 +12332,17 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
             .iter()
             .find(|anchor| anchor.id == "run.plan.load")
             .context("plan anchor")?;
-        let oidc = RUNTIME_ANCHORS
+        let rss_access = RUNTIME_ANCHORS
             .iter()
-            .find(|anchor| anchor.id == "run.provider.oidc")
-            .context("oidc anchor")?;
-        lines.push(oidc.pattern);
+            .find(|anchor| anchor.id == "run.provider.rss-access")
+            .context("RSS access provider anchor")?;
+        lines.push(rss_access.pattern);
         lines.push(plan.pattern);
         for anchor in RUNTIME_ANCHORS
             .iter()
             .filter(|anchor| anchor.path == RUNTIME_LIB_PATH && anchor.id.starts_with("run."))
         {
-            if matches!(anchor.id, "run.plan.load" | "run.provider.oidc") {
+            if matches!(anchor.id, "run.plan.load" | "run.provider.rss-access") {
                 continue;
             }
             lines.push(anchor.pattern);
@@ -12294,10 +12357,51 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
         let report = collect_report(&root)?;
         assert!(
             report.findings.iter().any(|f| {
-                f.rule == Rule::MissingAnchor && f.detail.contains("run.provider.oidc")
+                f.rule == Rule::MissingAnchor && f.detail.contains("run.provider.rss-access")
             }),
             "plan load anchor must precede provider construction"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_token_profile_anchors_reject_missing_and_bait_only_evidence() -> Result<()> {
+        for anchor_id in [
+            "run.provider.rss-access",
+            "run.provider.federated-access",
+            "run.provider.service-token",
+            "run.resources.rss-access-token",
+            "run.resources.federated-access-token",
+            "run.resources.service-token",
+            "run.probe.rss-access-token-jwks-name",
+            "run.probe.rss-access-token-jwks",
+            "run.probe.federated-access-token-jwks-name",
+            "run.probe.federated-access-token-jwks",
+        ] {
+            let root = fixture_root(&format!(
+                "runtime-token-profile-anchor-{}",
+                anchor_id.replace('.', "-")
+            ))?;
+            let anchor = RUNTIME_ANCHORS
+                .iter()
+                .find(|anchor| anchor.id == anchor_id)
+                .with_context(|| format!("missing test anchor {anchor_id}"))?;
+            let source = format!(
+                "{}\n// bait-only: {}\nconst TOKEN_PROFILE_BAIT: &str = {:?};\n",
+                runtime_lib_fixture(Some(anchor_id)),
+                anchor.pattern.replace('\n', " "),
+                anchor.pattern,
+            );
+            write(&root.join(RUNTIME_LIB_PATH), &source)?;
+            let report = collect_report(&root)?;
+            assert!(
+                report.findings.iter().any(|finding| {
+                    finding.rule == Rule::MissingAnchor && finding.detail.contains(anchor_id)
+                }),
+                "comment/string bait must not satisfy {anchor_id}: {:?}",
+                report.findings
+            );
+        }
         Ok(())
     }
 
@@ -12410,6 +12514,7 @@ pub async fn run_settings_config_value_maintenance(
 pub async fn run(mut runtime_inputs: RuntimeInputs) {
     let config = runtime_inputs.config();
     let RuntimeServingConfigParts {
+        token_profiles,
         event_transport,
         event_worker,
         dlx_worker,
@@ -12543,6 +12648,7 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
         );
 
         let serving_mapping = r#"    let RuntimeServingConfigParts {
+        token_profiles,
         event_transport,
         event_worker,
         dlx_worker,
@@ -13332,11 +13438,11 @@ pub async fn run(runtime_inputs: ServingRuntimeInputs) -> anyhow::Result<()> {
 }
 
 async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Result<()> {
-    build_runtime_oidc_provider(runtime_inputs.config());
     assemble_authed_routers(runtime_inputs.config());
     launch(runtime_inputs.config());
     let config = runtime_inputs.config();
     let RuntimeServingConfigParts {
+        token_profiles,
         event_transport,
         event_worker,
         dlx_worker,
@@ -13546,7 +13652,7 @@ enum OperatorCommand {
     Dlq,
     ReconcileTarget,
     SettingsConfigValueMaintenance,
-    OidcJwksExport,
+    RssAccessJwksExport,
 }
 
 fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
@@ -13568,8 +13674,8 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
     if runtime::is_settings_config_value_maintenance_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::SettingsConfigValueMaintenance));
     }
-    if runtime::is_oidc_jwks_export_command(args) {
-        return Ok(CommandFamily::Operator(OperatorCommand::OidcJwksExport));
+    if runtime::is_rss_access_jwks_export_command(args) {
+        return Ok(CommandFamily::Operator(OperatorCommand::RssAccessJwksExport));
     }
     anyhow::ensure!(args.is_empty(), "unknown rss command: {args:?}");
     Ok(CommandFamily::Serving)
@@ -13590,7 +13696,7 @@ async fn main() -> anyhow::Result<()> {
         OperatorCommand::Dlq => runtime::run_dlq_control_command(&args, &runtime_inputs).await,
         OperatorCommand::ReconcileTarget => runtime::run_reconcile_target_command(&args, &runtime_inputs).await,
         OperatorCommand::SettingsConfigValueMaintenance => runtime::run_settings_config_value_maintenance(&args, &runtime_inputs).await,
-        OperatorCommand::OidcJwksExport => runtime::run_oidc_jwks_export_command(&args, &runtime_inputs).await,
+        OperatorCommand::RssAccessJwksExport => runtime::run_rss_access_jwks_export_command(&args, &runtime_inputs).await,
     };
     runtime::shutdown_operator_runtime(runtime_inputs).await?;
     operator_result

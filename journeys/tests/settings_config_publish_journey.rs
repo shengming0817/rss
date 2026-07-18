@@ -136,11 +136,11 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
     let tenant = TenantId::parse(CANON_TENANT)?;
     let router = httpserve::finalize_primary_auth(
         routes,
-        AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt)?,
+        AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken)?,
         Arc::new(AllowAuthorizer),
     )?
     .layer(axum::Extension(httpserve::Authenticated::new(
-        RequiredScheme::Jwt,
+        RequiredScheme::RssAccessToken,
         PrincipalKind::Admin,
         "settings-route-journey",
         Some(tenant),

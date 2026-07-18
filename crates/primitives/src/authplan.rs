@@ -12,11 +12,12 @@
 pub enum AuthScheme {
     /// 显式无认证（`AuthNone`；与「未配置」从类型层区分）。
     NoAuth,
-    Jwt,
+    /// RSS-issued access token, verified under the RSS access trust profile.
+    RssAccessToken,
     Mtls,
     ServiceToken,
-    /// 从组合根装配注入的 JWT 校验器。
-    JwtFromAssembly,
+    /// Independently issued access token, verified under the federated trust profile.
+    FederatedAccessToken,
 }
 
 /// 标准 listener 种类（闭值集；决定 route-level opt-out 是否可降级）。runtime-api.md §Listener。
@@ -66,10 +67,10 @@ fn is_control_plane(listener: ListenerKind) -> bool {
 /// 将 `AuthScheme` 映射到 `RequiredScheme`；`NoAuth` 返回 `None`（无认证要求）。
 fn require_scheme(scheme: AuthScheme) -> Option<RequiredScheme> {
     match scheme {
-        AuthScheme::Jwt => Some(RequiredScheme::Jwt),
+        AuthScheme::RssAccessToken => Some(RequiredScheme::RssAccessToken),
         AuthScheme::Mtls => Some(RequiredScheme::Mtls),
         AuthScheme::ServiceToken => Some(RequiredScheme::ServiceToken),
-        AuthScheme::JwtFromAssembly => Some(RequiredScheme::JwtFromAssembly),
+        AuthScheme::FederatedAccessToken => Some(RequiredScheme::FederatedAccessToken),
         AuthScheme::NoAuth => None,
     }
 }
@@ -103,10 +104,10 @@ impl AuthPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RequiredScheme {
-    Jwt,
+    RssAccessToken,
     Mtls,
     ServiceToken,
-    JwtFromAssembly,
+    FederatedAccessToken,
 }
 
 /// 最终认证裁决（纯值；优先级求值结果）。runtime-api.md §Auth plan 优先级。
@@ -182,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_plan_new_internal_jwt_ok() {
+    fn auth_plan_new_internal_service_token_ok() {
         assert!(AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).is_ok());
     }
 
@@ -201,9 +202,9 @@ mod tests {
 
     // ── resolve_requirement ───────────────────────────────────────────────────
 
-    fn primary_jwt_plan() -> AuthPlan {
+    fn primary_rss_access_plan() -> AuthPlan {
         #[allow(clippy::unwrap_used)]
-        AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap()
+        AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap()
     }
 
     fn primary_no_auth_plan() -> AuthPlan {
@@ -216,15 +217,15 @@ mod tests {
         AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).unwrap()
     }
 
-    fn admin_jwt_plan() -> AuthPlan {
+    fn admin_rss_access_plan() -> AuthPlan {
         #[allow(clippy::unwrap_used)]
-        AuthPlan::new(ListenerKind::Admin, AuthScheme::Jwt).unwrap()
+        AuthPlan::new(ListenerKind::Admin, AuthScheme::RssAccessToken).unwrap()
     }
 
     // Primary + Public opt-out → Allow
     #[test]
     fn resolve_primary_public_opt_out_allows() {
-        let req = resolve_requirement(primary_jwt_plan(), Some(RouteAuthOptOut::Public));
+        let req = resolve_requirement(primary_rss_access_plan(), Some(RouteAuthOptOut::Public));
         assert_eq!(req, AuthRequirement::Allow);
     }
 
@@ -232,7 +233,7 @@ mod tests {
     #[test]
     fn resolve_primary_password_reset_exempt_allows() {
         let req = resolve_requirement(
-            primary_jwt_plan(),
+            primary_rss_access_plan(),
             Some(RouteAuthOptOut::PasswordResetExempt),
         );
         assert_eq!(req, AuthRequirement::Allow);
@@ -248,7 +249,7 @@ mod tests {
     // Admin + opt-out → Deny（控制面 opt-out 是非法配置，fail-fast 拒整条路由）
     #[test]
     fn resolve_admin_opt_out_is_deny() {
-        let req = resolve_requirement(admin_jwt_plan(), Some(RouteAuthOptOut::Public));
+        let req = resolve_requirement(admin_rss_access_plan(), Some(RouteAuthOptOut::Public));
         assert_eq!(req, AuthRequirement::Deny);
     }
 
@@ -259,11 +260,14 @@ mod tests {
         assert_eq!(req, AuthRequirement::Allow);
     }
 
-    // No opt-out + JWT scheme → Require(Jwt)
+    // No opt-out + RSS access scheme → Require(RssAccessToken)
     #[test]
-    fn resolve_no_opt_out_jwt_scheme_requires() {
-        let req = resolve_requirement(primary_jwt_plan(), None);
-        assert_eq!(req, AuthRequirement::Require(RequiredScheme::Jwt));
+    fn resolve_no_opt_out_rss_access_scheme_requires() {
+        let req = resolve_requirement(primary_rss_access_plan(), None);
+        assert_eq!(
+            req,
+            AuthRequirement::Require(RequiredScheme::RssAccessToken)
+        );
     }
 
     // No opt-out + ServiceToken → Require(ServiceToken)
@@ -282,15 +286,15 @@ mod tests {
         assert_eq!(req, AuthRequirement::Require(RequiredScheme::Mtls));
     }
 
-    // No opt-out + JwtFromAssembly → Require(JwtFromAssembly)
+    // No opt-out + federated access → Require(FederatedAccessToken)
     #[test]
-    fn resolve_no_opt_out_jwt_from_assembly_requires() {
+    fn resolve_no_opt_out_federated_access_requires() {
         #[allow(clippy::unwrap_used)]
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::JwtFromAssembly).unwrap();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::FederatedAccessToken).unwrap();
         let req = resolve_requirement(plan, None);
         assert_eq!(
             req,
-            AuthRequirement::Require(RequiredScheme::JwtFromAssembly)
+            AuthRequirement::Require(RequiredScheme::FederatedAccessToken)
         );
     }
 

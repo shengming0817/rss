@@ -27,6 +27,7 @@ fn ui() {
     t.compile_fail("tests/ui/cannot_bind_unfinalized.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated.rs");
     t.compile_fail("tests/ui/nonprimary_cannot_mount_primary.rs");
+    t.compile_fail("tests/ui/internal_service_route_requires_policy.rs");
     t.compile_fail("tests/ui/primary_cannot_mount_nonprimary.rs");
     t.compile_fail("tests/ui/cannot_construct_listener_router.rs");
     t.compile_fail("tests/ui/cannot_impl_listener_for_external.rs");

@@ -250,32 +250,18 @@ impl Default for ConfigValueMaintenanceOptions {
 /// 必须持有该 capability，避免普通读写路径复用 legacy plaintext backfill/rewrap 入口。
 #[derive(Debug, Clone)]
 pub struct ConfigValueMaintenanceCapability {
-    operator_subject: Box<str>,
+    _operator_caller: vocab::ServiceCallerDomain,
 }
 
 impl ConfigValueMaintenanceCapability {
-    pub fn from_verified_service_subject(
-        operator_subject: impl Into<String>,
-    ) -> Result<Self, ConfigRepoError> {
-        Self::new(operator_subject)
+    pub const fn from_verified_service_caller(operator_caller: vocab::ServiceCallerDomain) -> Self {
+        Self::new(operator_caller)
     }
 
-    pub(crate) fn new(operator_subject: impl Into<String>) -> Result<Self, ConfigRepoError> {
-        let operator_subject = operator_subject.into();
-        let operator_subject = operator_subject.trim();
-        if operator_subject.is_empty() {
-            return Err(protection_auth_message(
-                "config value maintenance operator subject must be non-empty",
-            ));
+    pub(crate) const fn new(operator_caller: vocab::ServiceCallerDomain) -> Self {
+        Self {
+            _operator_caller: operator_caller,
         }
-        Ok(Self {
-            operator_subject: operator_subject.into(),
-        })
-    }
-
-    #[must_use]
-    pub fn operator_subject(&self) -> &str {
-        &self.operator_subject
     }
 }
 
@@ -850,8 +836,6 @@ impl PgConfigValueMaintenance {
                         report.failed += 1;
                         tracing::warn!(
                             error = %secure::redact_error(&err),
-                            operator_subject = self.capability.operator_subject(),
-                            tenant_id = row.tenant_id,
                             config_key = row.config_key,
                             version = row.version,
                             "config value backfill row failed"
@@ -897,8 +881,6 @@ impl PgConfigValueMaintenance {
                     report.selected += 1;
                     report.failed += 1;
                     tracing::warn!(
-                        operator_subject = self.capability.operator_subject(),
-                        tenant_id = row.tenant_id,
                         config_key = row.config_key,
                         version = row.version,
                         "config value rewrap row missing key_id"
@@ -912,11 +894,8 @@ impl PgConfigValueMaintenance {
                     report.selected += 1;
                     report.failed += 1;
                     tracing::warn!(
-                        operator_subject = self.capability.operator_subject(),
-                        tenant_id = row.tenant_id,
                         config_key = row.config_key,
                         version = row.version,
-                        key_id = raw_key_ref,
                         "config value rewrap row invalid key_id"
                     );
                     if maintenance_capacity(options, report.selected) == 0 {
@@ -938,8 +917,6 @@ impl PgConfigValueMaintenance {
                         report.failed += 1;
                         tracing::warn!(
                             error = %secure::redact_error(&err),
-                            operator_subject = self.capability.operator_subject(),
-                            tenant_id = row.tenant_id,
                             config_key = row.config_key,
                             version = row.version,
                             "config value rewrap row failed"

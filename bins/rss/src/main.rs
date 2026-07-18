@@ -15,7 +15,7 @@ enum OperatorCommand {
     Dlq,
     ReconcileTarget,
     SettingsConfigValueMaintenance,
-    OidcJwksExport,
+    RssAccessJwksExport,
 }
 
 fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
@@ -39,8 +39,10 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
             OperatorCommand::SettingsConfigValueMaintenance,
         ));
     }
-    if runtime::is_oidc_jwks_export_command(args) {
-        return Ok(CommandFamily::Operator(OperatorCommand::OidcJwksExport));
+    if runtime::is_rss_access_jwks_export_command(args) {
+        return Ok(CommandFamily::Operator(
+            OperatorCommand::RssAccessJwksExport,
+        ));
     }
     anyhow::ensure!(args.is_empty(), "unknown rss command: {args:?}");
     Ok(CommandFamily::Serving)
@@ -71,8 +73,8 @@ async fn main() -> anyhow::Result<()> {
         OperatorCommand::SettingsConfigValueMaintenance => {
             runtime::run_settings_config_value_maintenance(&args, &runtime_inputs).await
         }
-        OperatorCommand::OidcJwksExport => {
-            runtime::run_oidc_jwks_export_command(&args, &runtime_inputs).await
+        OperatorCommand::RssAccessJwksExport => {
+            runtime::run_rss_access_jwks_export_command(&args, &runtime_inputs).await
         }
     };
     runtime::shutdown_operator_runtime(runtime_inputs).await?;

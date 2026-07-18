@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use bootstrap::DomainBinding;
-use identity_composition::IdentityModuleDeps;
+use identity_composition::{FederatedIdentityModuleDeps, IdentityModuleDeps};
 use postgres::{PgDomainDeps, caps};
 
 use crate::config::{ServingConfigMapper, SnapshotConfig};
@@ -17,27 +17,47 @@ use crate::{SharedRuntimeDeps, SystemClock};
 const DEFAULT_IDENTITY_SESSION_TTL_SECS: u64 = 3_600;
 const MAX_IDENTITY_SESSION_TTL_SECS: u64 = 90 * 24 * 60 * 60;
 const IDENTITY_SESSION_TTL_ENV: &str = "RSS_IDENTITY_SESSION_TTL_SECS";
-const JWT_ISSUER_ENV: &str = "RSS_JWT_ISSUER";
-const JWT_AUDIENCE_ENV: &str = "RSS_JWT_AUDIENCE";
-const JWT_KEY_ID_ENV: &str = "RSS_JWT_ES256_KEY_ID";
-const JWT_ACCESS_TTL_ENV: &str = "RSS_JWT_ACCESS_TTL_SECS";
 const REFRESH_TTL_ENV: &str = "RSS_REFRESH_TTL_SECS";
 pub(crate) const PASSWORD_BLOCKLIST_PATH_ENV: &str = "RSS_PASSWORD_BLOCKLIST_PATH";
 const DEFAULT_REFRESH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const MAX_REFRESH_TTL_SECS: u64 = 365 * 24 * 60 * 60;
-const JWT_SIGNING_PURPOSE: &str = "auth.jwt.access";
+pub(crate) enum IdentityTokenProfileInput {
+    RssAccess(authn::JwtIssuerConfig<diport::RssAccessProfile>),
+    FederatedAccess,
+}
 
-pub(crate) struct IdentityModuleInput {
+impl IdentityTokenProfileInput {
+    pub(crate) fn rss_access(issuer: authn::JwtIssuerConfig<diport::RssAccessProfile>) -> Self {
+        Self::RssAccess(issuer)
+    }
+
+    pub(crate) const fn federated_access() -> Self {
+        Self::FederatedAccess
+    }
+}
+
+pub(crate) struct RssLocalSessionInput {
     signer: Arc<vault::VaultSigner>,
-    jwt: authn::JwtIssuerConfig,
+    rss_access_issuer: authn::JwtIssuerConfig<diport::RssAccessProfile>,
     session_ttl: Duration,
     refresh_ttl: Duration,
 }
 
+pub(crate) enum IdentityModuleInput {
+    RssAccess(RssLocalSessionInput),
+    FederatedAccess,
+}
+
 impl IdentityModuleInput {
-    pub(crate) fn from_mapper(mapper: &ServingConfigMapper<'_>) -> anyhow::Result<Self> {
+    pub(crate) fn from_mapper(
+        mapper: &ServingConfigMapper<'_>,
+        token_profile: IdentityTokenProfileInput,
+    ) -> anyhow::Result<Self> {
+        let IdentityTokenProfileInput::RssAccess(rss_access_issuer) = token_profile else {
+            return Ok(Self::FederatedAccess);
+        };
         let config = mapper.config();
-        // Preserve the fail-fast contract: bounded lifetimes first, then Vault, then JWT policy.
+        // Preserve the fail-fast contract: bounded lifetimes first, then Vault, then RSS access policy.
         let session_ttl = Duration::from_secs(identity_session_ttl_secs(
             config.value(IDENTITY_SESSION_TTL_ENV),
         )?);
@@ -46,18 +66,12 @@ impl IdentityModuleInput {
             |name| config.value(name).map(str::to_owned),
             false,
         )?);
-        let jwt = build_jwt_issuer_config(
-            config.value(JWT_ISSUER_ENV),
-            config.value(JWT_AUDIENCE_ENV),
-            config.value(JWT_KEY_ID_ENV),
-            config.value(JWT_ACCESS_TTL_ENV),
-        )?;
-        Ok(Self {
+        Ok(Self::RssAccess(RssLocalSessionInput {
             signer,
-            jwt,
+            rss_access_issuer,
             session_ttl,
             refresh_ttl,
-        })
+        }))
     }
 
     #[cfg(any(test, feature = "integration"))]
@@ -69,8 +83,12 @@ impl IdentityModuleInput {
         )?;
         validate_explicit_ttl(values.refresh_ttl, REFRESH_TTL_ENV, MAX_REFRESH_TTL_SECS)?;
         anyhow::ensure!(
-            !values.jwt_access_ttl.is_zero(),
-            "{JWT_ACCESS_TTL_ENV} must be > 0"
+            !values.access_token_ttl.is_zero(),
+            "RSS access-token TTL must be > 0"
+        );
+        anyhow::ensure!(
+            values.access_token_ttl <= diport::TokenProfile::RssAccess.policy().maximum_lifetime(),
+            "RSS access-token TTL exceeds the profile maximum lifetime"
         );
 
         let signer = Arc::new(build_vault_signer_with(
@@ -82,20 +100,24 @@ impl IdentityModuleInput {
             },
             values.vault_allow_http,
         )?);
-        let jwt = authn::JwtIssuerConfig {
-            key: diport::KeyId::new(values.jwt_key_id),
-            alg: authn::JwtAlg::Es256,
-            purpose: diport::SigningPurpose::new(JWT_SIGNING_PURPOSE),
-            issuer: values.jwt_issuer,
-            audience: values.jwt_audience,
-            ttl: values.jwt_access_ttl,
-        };
-        Ok(Self {
+        let rss_access_issuer = authn::JwtIssuerConfig::rss_access(
+            diport::KeyId::new(values.access_token_key_id),
+            diport::SigningPurpose::new("auth.rss-access"),
+            values.access_token_issuer,
+            values.access_token_audience,
+            values.access_token_ttl,
+        );
+        Ok(Self::RssAccess(RssLocalSessionInput {
             signer,
-            jwt,
+            rss_access_issuer,
             session_ttl: values.session_ttl,
             refresh_ttl: values.refresh_ttl,
-        })
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn is_federated_access(&self) -> bool {
+        matches!(self, Self::FederatedAccess)
     }
 }
 
@@ -106,10 +128,10 @@ pub struct IdentityTestValues {
     pub vault_addr: String,
     pub vault_token: String,
     pub vault_transit_mount: String,
-    pub jwt_issuer: String,
-    pub jwt_audience: String,
-    pub jwt_key_id: String,
-    pub jwt_access_ttl: Duration,
+    pub access_token_issuer: String,
+    pub access_token_audience: String,
+    pub access_token_key_id: String,
+    pub access_token_ttl: Duration,
     pub session_ttl: Duration,
     pub refresh_ttl: Duration,
     pub vault_allow_http: bool,
@@ -119,17 +141,30 @@ pub struct IdentityTestValues {
 ///
 /// # Errors
 ///
-/// Returns an error when required JWT or Vault configuration is absent or invalid, session or
-/// refresh TTLs violate their bounds, or identity composition fails.
+/// Returns an error when RSS Primary requires local-session configuration and that configuration
+/// is absent or invalid, or when the profile-specific identity composition fails.
 pub async fn module(
     deps: &SharedRuntimeDeps,
     input: IdentityModuleInput,
 ) -> anyhow::Result<DomainBinding> {
-    wire_configured(
+    wire_with_profile(
         deps.pg.for_domain(),
         Arc::clone(&deps.password_blocklist),
         input,
     )
+}
+
+fn wire_with_profile(
+    pg: PgDomainDeps<caps::Identity>,
+    blocklist: Arc<secure::DigestPasswordBlocklist>,
+    input: IdentityModuleInput,
+) -> anyhow::Result<DomainBinding> {
+    match input {
+        IdentityModuleInput::RssAccess(input) => wire_rss_access(pg, blocklist, input),
+        IdentityModuleInput::FederatedAccess => identity_composition::wire_federated(
+            FederatedIdentityModuleDeps::new(pg, Arc::new(SystemClock)),
+        ),
+    }
 }
 
 /// Load the immutable password policy provider from the captured process generation.
@@ -181,41 +216,14 @@ fn refresh_ttl_secs(raw: Option<&str>) -> anyhow::Result<u64> {
     }
 }
 
-fn build_jwt_issuer_config(
-    issuer: Option<&str>,
-    audience: Option<&str>,
-    key_id: Option<&str>,
-    ttl_secs: Option<&str>,
-) -> anyhow::Result<authn::JwtIssuerConfig> {
-    let issuer =
-        issuer.ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_ISSUER_ENV}"))?;
-    let audience =
-        audience.ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_AUDIENCE_ENV}"))?;
-    let key_id =
-        key_id.ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_KEY_ID_ENV}"))?;
-    let ttl_secs = ttl_secs
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_ACCESS_TTL_ENV}"))?
-        .parse::<u64>()
-        .with_context(|| format!("{JWT_ACCESS_TTL_ENV} must be an integer seconds value"))?;
-    anyhow::ensure!(ttl_secs > 0, "{JWT_ACCESS_TTL_ENV} must be > 0");
-    Ok(authn::JwtIssuerConfig {
-        key: diport::KeyId::new(key_id.to_owned()),
-        alg: authn::JwtAlg::Es256,
-        purpose: diport::SigningPurpose::new(JWT_SIGNING_PURPOSE),
-        issuer: issuer.to_owned(),
-        audience: audience.to_owned(),
-        ttl: Duration::from_secs(ttl_secs),
-    })
-}
-
-fn wire_configured(
+fn wire_rss_access(
     pg: PgDomainDeps<caps::Identity>,
     blocklist: Arc<secure::DigestPasswordBlocklist>,
-    input: IdentityModuleInput,
+    input: RssLocalSessionInput,
 ) -> anyhow::Result<DomainBinding> {
-    let IdentityModuleInput {
+    let RssLocalSessionInput {
         signer,
-        jwt,
+        rss_access_issuer,
         session_ttl,
         refresh_ttl,
     } = input;
@@ -223,7 +231,7 @@ fn wire_configured(
         pg,
         signer,
         Arc::new(SystemClock),
-        jwt,
+        rss_access_issuer,
         session_ttl,
         refresh_ttl,
         blocklist,
@@ -247,7 +255,7 @@ fn wire_configured_from_test_values(
     blocklist: Arc<secure::DigestPasswordBlocklist>,
     values: IdentityTestValues,
 ) -> anyhow::Result<DomainBinding> {
-    wire_configured(
+    wire_with_profile(
         pg,
         blocklist,
         IdentityModuleInput::from_test_values(values)?,
@@ -293,10 +301,10 @@ pub(crate) mod tests {
             vault_addr: "http://127.0.0.1:1".to_string(),
             vault_token: "module-test-token".to_string(),
             vault_transit_mount: "transit".to_string(),
-            jwt_issuer: "https://issuer.test".to_string(),
-            jwt_audience: "rss".to_string(),
-            jwt_key_id: "module-test-es256".to_string(),
-            jwt_access_ttl: Duration::from_secs(900),
+            access_token_issuer: "https://issuer.test".to_string(),
+            access_token_audience: "rss".to_string(),
+            access_token_key_id: "module-test-es256".to_string(),
+            access_token_ttl: Duration::from_secs(900),
             session_ttl: Duration::from_secs(DEFAULT_IDENTITY_SESSION_TTL_SECS),
             refresh_ttl: Duration::from_secs(2_592_000),
             vault_allow_http: true,
@@ -304,7 +312,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn test_binding(input: IdentityModuleInput) -> anyhow::Result<DomainBinding> {
-        wire_configured(
+        wire_with_profile(
             postgres::PgRuntimeHandle::for_module_test().for_domain(),
             test_blocklist(),
             input,
@@ -365,39 +373,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn jwt_issuer_config_requires_every_field_and_positive_ttl() {
-        for missing in [JWT_ISSUER_ENV, JWT_AUDIENCE_ENV, JWT_KEY_ID_ENV] {
-            let result = build_jwt_issuer_config(
-                (missing != JWT_ISSUER_ENV).then_some("https://issuer.test"),
-                (missing != JWT_AUDIENCE_ENV).then_some("rss"),
-                (missing != JWT_KEY_ID_ENV).then_some("my-es256-key"),
-                Some("3600"),
-            );
-            assert!(
-                matches!(&result, Err(error) if format!("{error:#}").contains(missing)),
-                "missing {missing} must be named in the error"
-            );
-        }
-
-        let result = build_jwt_issuer_config(
-            Some("https://issuer.test"),
-            Some("rss"),
-            Some("my-es256-key"),
-            Some("0"),
-        );
-        assert!(matches!(&result, Err(error) if error.to_string().contains("must be > 0")));
-    }
-
-    #[test]
-    fn jwt_issuer_config_accepts_complete_configuration() {
-        assert!(
-            build_jwt_issuer_config(
-                Some("https://issuer.test"),
-                Some("rss"),
-                Some("my-es256-key"),
-                Some("3600"),
-            )
-            .is_ok()
-        );
+    #[allow(clippy::expect_used)]
+    fn federated_profile_does_not_read_or_construct_local_rss_session_inputs() {
+        let snapshot = crate::config::test_snapshot(&[]).expect("empty captured generation");
+        let mapper = ServingConfigMapper::for_test(snapshot.view());
+        let input = IdentityModuleInput::from_mapper(
+            &mapper,
+            IdentityTokenProfileInput::federated_access(),
+        )
+        .expect("federated identity needs no local RSS issuer or Vault signer");
+        assert!(matches!(input, IdentityModuleInput::FederatedAccess));
     }
 }

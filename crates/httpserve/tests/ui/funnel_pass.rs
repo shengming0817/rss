@@ -58,9 +58,11 @@ fn main() {
         )
     })
     .unwrap();
-    let plan =
-        primitives::AuthPlan::new(primitives::ListenerKind::Admin, primitives::AuthScheme::Jwt)
-            .unwrap();
+    let plan = primitives::AuthPlan::new(
+        primitives::ListenerKind::Admin,
+        primitives::AuthScheme::RssAccessToken,
+    )
+    .unwrap();
     let authed = httpserve::finalize_auth(routes, plan).unwrap();
     let _make = authed.into_make_service(httpserve::ServerRequestBudget::for_test());
 }

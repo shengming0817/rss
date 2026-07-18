@@ -13,7 +13,7 @@
 //!
 //! INVARIANT: AUTH-EVIDENCE-REQUIRE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `Require(required)` 路由仅在请求携 [`Authenticated`] 证据、其
 //! `principal_kind` 非 `Anonymous`、**且 `scheme()` exact-match `required`** 时放行；缺证据 / `Anonymous` 证据 /
-//! 方案不匹配（如 Jwt 证据撞 `Require(Mtls)`）→ fail-closed 401（`Anonymous` = 「已知未认证」；匿名可达路由走
+//! 方案不匹配（如 RSS access 证据撞 `Require(Mtls)`）→ fail-closed 401（`Anonymous` = 「已知未认证」；匿名可达路由走
 //! generated Public evidence，非 Require）。认证证据由组合根验签桥（外层 `.layer()`）在凭据校验通过后注入，
 //! httpserve 自身不构造、不验签（finalize_auth 签名冻结，无 verifier 参）；本 crate 单独 merge 无注入方 →
 //! 所有 Require 路由仍 401，零端点放开（Medium，单测 + tests/runtime.rs 集成测试守）。
@@ -36,7 +36,7 @@ use std::task::{Context, Poll};
 
 use axum::body::Body;
 use axum::extract::{FromRequestParts, RawPathParams, Request};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
 use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError};
 use primitives::{AuthRequirement, RequiredScheme, RouteAuthOptOut, resolve_requirement};
@@ -47,9 +47,59 @@ use vocab::{PrincipalKind, ProjectionField, RoutePermissionId, TenantId};
 use crate::middleware::RequestId;
 use crate::{PrimaryRouteAuthz, RoutePermission, RouteResourceScope, RouteTenantBinding};
 
+const BEARER_SCHEME: &[u8] = b"Bearer";
+const BEARER_PREFIX_LENGTH: usize = BEARER_SCHEME.len() + 1;
+
 /// service-token tenant header binding 解析错误（不携 header 值，避免 PII 进入日志）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServiceTokenTenantBindingError;
+
+/// Closed failure reason for an exact-one canonical tenant header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TenantHeaderError {
+    /// More than one field value was supplied, even if byte-identical.
+    #[error("duplicate tenant header")]
+    Duplicate,
+    /// The field is missing, oversized, non-UTF-8, or not a canonical tenant identifier.
+    #[error("malformed tenant header")]
+    Malformed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TenantBindingParseError {
+    Duplicate,
+    Invalid,
+}
+
+/// Parse one canonical tenant header through a byte-bounded, exact-one trust boundary.
+///
+/// A canonical hyphenated UUID is exactly 36 ASCII bytes. The byte boundary is checked before
+/// UTF-8 conversion or UUID parsing.
+pub fn exact_tenant_header(headers: &HeaderMap, name: &str) -> Result<TenantId, TenantHeaderError> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next().ok_or(TenantHeaderError::Malformed)?;
+    if values.next().is_some() {
+        return Err(TenantHeaderError::Duplicate);
+    }
+    if value.as_bytes().len() != 36 {
+        return Err(TenantHeaderError::Malformed);
+    }
+    let raw = value.to_str().map_err(|_| TenantHeaderError::Malformed)?;
+    TenantId::parse(raw).map_err(|_| TenantHeaderError::Malformed)
+}
+
+fn parse_service_token_tenant_binding(
+    headers: &HeaderMap,
+) -> Result<(diport::ServiceTokenTenantBinding, TenantId), TenantBindingParseError> {
+    let tenant =
+        exact_tenant_header(headers, diport::SERVICE_TOKEN_TENANT_HEADER).map_err(|error| {
+            match error {
+                TenantHeaderError::Duplicate => TenantBindingParseError::Duplicate,
+                TenantHeaderError::Malformed => TenantBindingParseError::Invalid,
+            }
+        })?;
+    Ok((diport::ServiceTokenTenantBinding::new(tenant), tenant))
+}
 
 /// 从请求 header 生成 service-token MAC tenant binding。
 ///
@@ -57,17 +107,128 @@ pub struct ServiceTokenTenantBindingError;
 pub fn service_token_tenant_binding(
     headers: &HeaderMap,
 ) -> Result<(diport::ServiceTokenTenantBinding, TenantId), ServiceTokenTenantBindingError> {
-    let mut values = headers.get_all(diport::SERVICE_TOKEN_TENANT_HEADER).iter();
-    let raw = values
-        .next()
-        .ok_or(ServiceTokenTenantBindingError)?
-        .to_str()
-        .map_err(|_| ServiceTokenTenantBindingError)?;
-    if values.next().is_some() {
-        return Err(ServiceTokenTenantBindingError);
+    parse_service_token_tenant_binding(headers).map_err(|_| ServiceTokenTenantBindingError)
+}
+
+/// Closed rejection reason for bearer credential extraction.
+///
+/// The variants deliberately carry no request data, preventing credentials and tenant identifiers
+/// from entering logs, metrics, or error responses through this error value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BearerCredentialError {
+    /// More than one value was supplied for an exact-one authentication header.
+    #[error("duplicate authentication header")]
+    Duplicate,
+    /// The credential or required service-token tenant binding is malformed or missing.
+    #[error("malformed bearer credential")]
+    Malformed,
+    /// The authorization scheme is not Bearer.
+    #[error("unsupported authorization scheme")]
+    UnsupportedScheme,
+    /// The encoded credential exceeds its profile's hard byte boundary.
+    #[error("bearer credential exceeds profile limit")]
+    TooLarge,
+}
+
+/// Bounded bearer input extracted at the HTTP trust boundary.
+///
+/// Fields are private and there is no public constructor: callers can only obtain this value after
+/// exact-one header validation and profile-specific size checks. Converting the bounded input into
+/// a [`diport::RawCredential`] remains owned by the authn funnel.
+pub struct ExtractedBearerCredential {
+    profile: diport::TokenProfile,
+    token: String,
+    service_tenant: Option<(diport::ServiceTokenTenantBinding, TenantId)>,
+}
+
+impl ExtractedBearerCredential {
+    /// Consume the boundary value into the authn funnel inputs.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        diport::TokenProfile,
+        String,
+        Option<(diport::ServiceTokenTenantBinding, TenantId)>,
+    ) {
+        (self.profile, self.token, self.service_tenant)
     }
-    let tenant = TenantId::parse(raw).map_err(|_| ServiceTokenTenantBindingError)?;
-    Ok((diport::ServiceTokenTenantBinding::new(tenant), tenant))
+}
+
+/// Extract a bearer credential for the listener-fixed token profile.
+///
+/// The profile is a trusted runtime binding. It is never inferred from attacker-controlled token
+/// headers, claims, or auxiliary HTTP headers. Authorization is exact-one: duplicate values are
+/// rejected even when byte-identical.
+pub fn extract_bearer_credential(
+    headers: &HeaderMap,
+    profile: diport::TokenProfile,
+) -> Result<Option<ExtractedBearerCredential>, BearerCredentialError> {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(BearerCredentialError::Duplicate);
+    }
+
+    let policy = profile.policy();
+    let value_bytes = value.as_bytes();
+    // "Bearer " is seven ASCII bytes. This preflight happens before UTF-8 conversion and bounds
+    // the complete header value while still accepting a raw token exactly at the profile limit.
+    if value_bytes.len()
+        > policy
+            .maximum_token_length()
+            .saturating_add(BEARER_PREFIX_LENGTH)
+    {
+        return Err(BearerCredentialError::TooLarge);
+    }
+
+    let separator = value_bytes
+        .iter()
+        .position(|byte| *byte == b' ')
+        .ok_or(BearerCredentialError::Malformed)?;
+    let (scheme, token_with_separator) = value_bytes.split_at(separator);
+    if !scheme.eq_ignore_ascii_case(BEARER_SCHEME) {
+        return Err(BearerCredentialError::UnsupportedScheme);
+    }
+    let token_bytes = token_with_separator
+        .get(1..)
+        .ok_or(BearerCredentialError::Malformed)?;
+    if token_bytes.is_empty() || token_bytes.iter().any(u8::is_ascii_whitespace) {
+        return Err(BearerCredentialError::Malformed);
+    }
+    if token_bytes.len() > policy.maximum_token_length() {
+        return Err(BearerCredentialError::TooLarge);
+    }
+    let raw = value
+        .to_str()
+        .map_err(|_| BearerCredentialError::Malformed)?;
+    let token = raw
+        .get(BEARER_PREFIX_LENGTH..)
+        .ok_or(BearerCredentialError::Malformed)?;
+
+    let service_tenant = match profile {
+        diport::TokenProfile::RssAccess | diport::TokenProfile::FederatedAccess => None,
+        diport::TokenProfile::ServiceToken => {
+            let parts = match parse_service_token_tenant_binding(headers) {
+                Ok(parts) => parts,
+                Err(TenantBindingParseError::Duplicate) => {
+                    return Err(BearerCredentialError::Duplicate);
+                }
+                Err(TenantBindingParseError::Invalid) => {
+                    return Err(BearerCredentialError::Malformed);
+                }
+            };
+            Some(parts)
+        }
+    };
+
+    Ok(Some(ExtractedBearerCredential {
+        profile,
+        token: token.to_owned(),
+        service_tenant,
+    }))
 }
 
 /// 短路 helper：将已构造的错误响应包装成 `Pin<Box<dyn Future<...>>>` 供 `call` 直接返回。
@@ -399,6 +560,7 @@ pub struct Authenticated {
     principal_kind: PrincipalKind,
     principal_id: String,
     tenant_id: Option<TenantId>,
+    service_caller: Option<vocab::ServiceCallerDomain>,
 }
 
 /// Caller-supplied fields for an audit event whose principal identity must come from verified
@@ -433,6 +595,18 @@ impl Authenticated {
             principal_kind,
             principal_id: principal_id.into(),
             tenant_id,
+            service_caller: None,
+        }
+    }
+
+    /// Construct service-token evidence with its verified closed caller domain.
+    pub fn new_service(tenant_id: TenantId, caller: vocab::ServiceCallerDomain) -> Self {
+        Self {
+            scheme: RequiredScheme::ServiceToken,
+            principal_kind: PrincipalKind::Service,
+            principal_id: caller.as_str().to_owned(),
+            tenant_id: Some(tenant_id),
+            service_caller: Some(caller),
         }
     }
 
@@ -455,6 +629,11 @@ impl Authenticated {
     /// 已认证主体租户；跨租户主体（service / super-admin）可能为 `None`。
     pub fn tenant_id(&self) -> Option<TenantId> {
         self.tenant_id
+    }
+
+    /// Verified closed service caller, present only for service-token evidence.
+    pub(crate) fn service_caller_domain(&self) -> Option<vocab::ServiceCallerDomain> {
+        self.service_caller
     }
 
     /// Bind verified principal identity to caller-supplied operation fields without exposing that
@@ -700,7 +879,7 @@ fn enforce_declared_success_status(
 ///
 /// `evidence_scheme` = 请求所携 [`Authenticated`] 证据的已验证方案（无证据 / `Anonymous` 证据 → `None`，见 `call`）。
 /// `Require(required)` 仅在 `evidence_scheme == Some(required)`（证据存在且**方案 exact-match**）时放行；无证据或
-/// 方案不匹配（如 Jwt 证据撞 `Require(Mtls)`）→ fail-closed 401（AUTH-EVIDENCE-REQUIRE-01，杜绝 scheme 混淆）。
+/// 方案不匹配（如 RSS access 证据撞 `Require(Mtls)`）→ fail-closed 401（AUTH-EVIDENCE-REQUIRE-01，杜绝 scheme 混淆）。
 /// `Deny` / wildcard 永远 403，证据不参与（fail-closed 不可降级）。
 fn decide_auth(
     requirement: AuthRequirement,
@@ -814,14 +993,23 @@ fn reject_response<E>(decision: AuthDecision, rid: &str) -> DenyFuture<E> {
 fn route_opt_out(authz: &Option<PrimaryRouteAuthz>) -> Option<RouteAuthOptOut> {
     match authz {
         Some(PrimaryRouteAuthz::OptOut(opt_out)) => Some(*opt_out),
-        Some(PrimaryRouteAuthz::Permission(_)) | None => None,
+        Some(PrimaryRouteAuthz::Permission(_) | PrimaryRouteAuthz::ServiceCaller(_)) | None => None,
     }
 }
 
 fn route_permission(authz: &Option<PrimaryRouteAuthz>) -> Option<RoutePermission> {
     match authz {
         Some(PrimaryRouteAuthz::Permission(permission)) => Some(*permission),
-        Some(PrimaryRouteAuthz::OptOut(_)) | None => None,
+        Some(PrimaryRouteAuthz::OptOut(_) | PrimaryRouteAuthz::ServiceCaller(_)) | None => None,
+    }
+}
+
+fn route_service_caller_policy(
+    authz: &Option<PrimaryRouteAuthz>,
+) -> Option<crate::ServiceCallerPolicy> {
+    match authz {
+        Some(PrimaryRouteAuthz::ServiceCaller(policy)) => Some(*policy),
+        Some(PrimaryRouteAuthz::Permission(_) | PrimaryRouteAuthz::OptOut(_)) | None => None,
     }
 }
 
@@ -908,6 +1096,21 @@ async fn authorize_mtls_route(
     authorizer.authorize(request).await.projection().is_some()
 }
 
+fn authorize_service_route(
+    meta: &RouteMeta,
+    evidence: &Authenticated,
+    policy: Option<crate::ServiceCallerPolicy>,
+) -> bool {
+    let Some(policy) = policy else {
+        return false;
+    };
+    policy.matches_contract(meta.contract_id())
+        && evidence.principal_kind() == PrincipalKind::Service
+        && evidence
+            .service_caller_domain()
+            .is_some_and(|caller| policy.allows(caller))
+}
+
 impl<S> Service<Request> for EnforceService<S>
 where
     S: Service<Request, Response = Response> + Clone + Send + 'static,
@@ -935,7 +1138,7 @@ where
         // 验签桥（组合根外层 layer）校验通过后注入的认证证据；enforce 据其**已验证方案**放行 Require 路由。
         // fail-closed 防御纵深：`Anonymous` 证据视同无证据（→ None）——绝不过 Require（即便验签桥误注入；
         // 匿名可达路由经 generated Public evidence 而非 Require）。方案 exact-match 由 reject_if_needed 比对，
-        // 杜绝 scheme 混淆（如 Jwt 证据撞 Require(Mtls)）。AUTH-EVIDENCE-REQUIRE-01。
+        // 杜绝 scheme 混淆（如 RSS access 证据撞 Require(Mtls)）。AUTH-EVIDENCE-REQUIRE-01。
         let evidence = req.extensions().get::<Authenticated>().cloned();
         let evidence_scheme = req
             .extensions()
@@ -971,6 +1174,10 @@ where
         let is_require = matches!(requirement, AuthRequirement::Require(_));
         let requires_mtls_route_authz =
             matches!(requirement, AuthRequirement::Require(RequiredScheme::Mtls));
+        let requires_service_route_authz = matches!(
+            requirement,
+            AuthRequirement::Require(RequiredScheme::ServiceToken)
+        );
 
         let decision = decide_auth(requirement, evidence_scheme);
         log_auth_decision(decision, meta.contract_id(), evidence.as_ref());
@@ -992,6 +1199,7 @@ where
             });
         }
         let permission = route_permission(&authz);
+        let service_caller_policy = route_service_caller_policy(&authz);
         let route_authorizer = req.extensions().get::<Arc<dyn RouteAuthorizer>>().cloned();
         let ambient_binding_matches =
             req.extensions()
@@ -1058,6 +1266,30 @@ where
                 };
                 if let Some(authorized) = authorized {
                     req.extensions_mut().insert(authorized);
+                }
+            } else if requires_service_route_authz {
+                let Some(evidence_ref) = evidence.as_ref() else {
+                    return reject_response(AuthDecision::Deny, &rid).await;
+                };
+                if !authorize_service_route(&meta, evidence_ref, service_caller_policy) {
+                    if let Err(error) = record_auth_audit(
+                        audit,
+                        AuthDecision::Deny,
+                        meta.contract_id(),
+                        rid.clone(),
+                        evidence.clone(),
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            contract_id = meta.contract_id(),
+                            authz.decision = AuthDecision::Deny.as_label(),
+                            error = %error,
+                            "auth audit record failed before service caller reject"
+                        );
+                        return Ok(crate::error::internal_error(&rid));
+                    }
+                    return reject_response(AuthDecision::Deny, &rid).await;
                 }
             } else if requires_mtls_route_authz {
                 let Some(evidence_ref) = evidence.as_ref() else {
@@ -1190,6 +1422,227 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
+    fn service_route_authorization_binds_verified_caller_to_exact_contract() {
+        let tenant = TenantId::parse(TEST_TENANT).expect("tenant fixture");
+        let evidence =
+            Authenticated::new_service(tenant, vocab::ServiceCallerDomain::MaintenanceOperator);
+        let meta = RouteMeta {
+            evidence: TEST_EVIDENCE,
+            method: Method::GET,
+        };
+
+        assert!(authorize_service_route(
+            &meta,
+            &evidence,
+            Some(crate::ServiceCallerPolicy::exact(
+                TEST_CONTRACT,
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            )),
+        ));
+        assert!(!authorize_service_route(
+            &meta,
+            &evidence,
+            Some(crate::ServiceCallerPolicy::exact(
+                "test.other-contract",
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            )),
+        ));
+    }
+
+    fn bearer_headers(value: axum::http::HeaderValue) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, value);
+        headers
+    }
+
+    #[test]
+    fn bearer_credential_rejects_missing_malformed_and_unsupported_inputs() {
+        let missing = HeaderMap::new();
+        assert_eq!(
+            extract_bearer_credential(&missing, diport::TokenProfile::RssAccess)
+                .map(|credential| credential.is_none()),
+            Ok(true)
+        );
+
+        for malformed in ["Bearer", "Bearer ", "Bearer  token", "Bearer token extra"] {
+            let headers = bearer_headers(axum::http::HeaderValue::from_static(malformed));
+            assert_eq!(
+                extract_bearer_credential(&headers, diport::TokenProfile::RssAccess).map(|_| ()),
+                Err(BearerCredentialError::Malformed),
+                "input must be malformed: {malformed:?}"
+            );
+        }
+
+        let unsupported =
+            bearer_headers(axum::http::HeaderValue::from_static("Basic dXNlcjpwYXNz"));
+        assert_eq!(
+            extract_bearer_credential(&unsupported, diport::TokenProfile::RssAccess).map(|_| ()),
+            Err(BearerCredentialError::UnsupportedScheme)
+        );
+    }
+
+    #[test]
+    fn bearer_credential_rejects_duplicate_authorization_values() {
+        for second in ["Bearer first", "Bearer second"] {
+            let mut headers = HeaderMap::new();
+            headers.append(
+                header::AUTHORIZATION,
+                axum::http::HeaderValue::from_static("Bearer first"),
+            );
+            headers.append(
+                header::AUTHORIZATION,
+                axum::http::HeaderValue::from_static(second),
+            );
+            assert_eq!(
+                extract_bearer_credential(&headers, diport::TokenProfile::RssAccess).map(|_| ()),
+                Err(BearerCredentialError::Duplicate)
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn bearer_credential_uses_listener_profile_and_accepts_case_insensitive_scheme() {
+        for (profile, scheme) in [
+            (diport::TokenProfile::RssAccess, "bearer"),
+            (diport::TokenProfile::FederatedAccess, "BEARER"),
+            (diport::TokenProfile::ServiceToken, "BeArEr"),
+        ] {
+            let value = format!("{scheme} opaque.token.value");
+            let mut headers = bearer_headers(
+                axum::http::HeaderValue::from_str(&value)
+                    .expect("test authorization value is valid"),
+            );
+            if profile == diport::TokenProfile::ServiceToken {
+                headers.insert(
+                    diport::SERVICE_TOKEN_TENANT_HEADER,
+                    axum::http::HeaderValue::from_static(TEST_TENANT),
+                );
+            }
+
+            let credential = extract_bearer_credential(&headers, profile)
+                .expect("valid profile-specific credential")
+                .expect("credential must be present");
+            let (actual_profile, token, service_tenant) = credential.into_parts();
+            assert_eq!(actual_profile, profile);
+            assert_eq!(token, "opaque.token.value");
+            assert_eq!(
+                service_tenant.is_some(),
+                profile == diport::TokenProfile::ServiceToken
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn bearer_credential_accepts_profile_limit_and_rejects_limit_plus_one() {
+        let limit = diport::TokenProfile::RssAccess
+            .policy()
+            .maximum_token_length();
+        for (token_length, expected) in [
+            (limit, Ok(())),
+            (
+                limit.saturating_add(1),
+                Err(BearerCredentialError::TooLarge),
+            ),
+        ] {
+            let value = format!("Bearer {}", "a".repeat(token_length));
+            let headers = bearer_headers(
+                axum::http::HeaderValue::from_str(&value)
+                    .expect("bounded test authorization value is valid"),
+            );
+            assert_eq!(
+                extract_bearer_credential(&headers, diport::TokenProfile::RssAccess).map(|_| ()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn bearer_credential_size_check_precedes_utf8_conversion() {
+        let limit = diport::TokenProfile::RssAccess
+            .policy()
+            .maximum_token_length();
+        let mut value = b"Bearer ".to_vec();
+        value.extend(std::iter::repeat_n(0x80, limit.saturating_add(1)));
+        let headers = bearer_headers(
+            axum::http::HeaderValue::from_bytes(&value)
+                .expect("HTTP permits obs-text bytes in a field value"),
+        );
+
+        assert_eq!(
+            extract_bearer_credential(&headers, diport::TokenProfile::RssAccess).map(|_| ()),
+            Err(BearerCredentialError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn service_bearer_credential_requires_exact_one_canonical_tenant_header() {
+        let base = bearer_headers(axum::http::HeaderValue::from_static("Bearer service.token"));
+        assert_eq!(
+            extract_bearer_credential(&base, diport::TokenProfile::ServiceToken).map(|_| ()),
+            Err(BearerCredentialError::Malformed)
+        );
+
+        for second in [TEST_TENANT, "11111111-1111-4111-8111-111111111111"] {
+            let mut headers = base.clone();
+            headers.append(
+                diport::SERVICE_TOKEN_TENANT_HEADER,
+                axum::http::HeaderValue::from_static(TEST_TENANT),
+            );
+            headers.append(
+                diport::SERVICE_TOKEN_TENANT_HEADER,
+                axum::http::HeaderValue::from_static(second),
+            );
+            assert_eq!(
+                extract_bearer_credential(&headers, diport::TokenProfile::ServiceToken).map(|_| ()),
+                Err(BearerCredentialError::Duplicate)
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn exact_tenant_header_rejects_duplicate_oversized_and_non_utf8_values() {
+        let mut duplicate = HeaderMap::new();
+        duplicate.append(
+            "x-tenant-id",
+            axum::http::HeaderValue::from_static(TEST_TENANT),
+        );
+        duplicate.append(
+            "x-tenant-id",
+            axum::http::HeaderValue::from_static(TEST_TENANT),
+        );
+        assert_eq!(
+            exact_tenant_header(&duplicate, "x-tenant-id"),
+            Err(TenantHeaderError::Duplicate)
+        );
+
+        let oversized = bearer_headers(axum::http::HeaderValue::from_static("Bearer token"));
+        let mut oversized = oversized;
+        oversized.insert(
+            "x-tenant-id",
+            axum::http::HeaderValue::from_str(&"a".repeat(37)).expect("valid header bytes"),
+        );
+        assert_eq!(
+            exact_tenant_header(&oversized, "x-tenant-id"),
+            Err(TenantHeaderError::Malformed)
+        );
+
+        let mut non_utf8 = HeaderMap::new();
+        non_utf8.insert(
+            "x-tenant-id",
+            axum::http::HeaderValue::from_bytes(&[0x80; 36]).expect("HTTP permits obs-text bytes"),
+        );
+        assert_eq!(
+            exact_tenant_header(&non_utf8, "x-tenant-id"),
+            Err(TenantHeaderError::Malformed)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
     fn declared_response_status_policy_is_closed_by_http_class() {
         let cases = [
             (100, false),
@@ -1273,7 +1726,7 @@ mod tests {
             seen: Arc::new(Mutex::new(Vec::new())),
         });
         let authorizer: Arc<dyn RouteAuthorizer> = authorizer_impl.clone();
-        let evidence = authed(RequiredScheme::Jwt, PrincipalKind::Admin);
+        let evidence = authed(RequiredScheme::RssAccessToken, PrincipalKind::Admin);
 
         let subject = authorize_subject_for_permission(
             Some(authorizer),
@@ -1412,7 +1865,7 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
     async fn public_opt_out_with_jwt_plan_is_200() {
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router(Some(RouteAuthOptOut::Public), Some(plan));
         let req = Request::builder()
             .method(Method::GET)
@@ -1426,7 +1879,7 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
     async fn require_without_auth_header_is_401() {
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router(None, Some(plan));
         let req = Request::builder()
             .method(Method::GET)
@@ -1440,8 +1893,8 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
     async fn require_with_authenticated_evidence_is_200() {
-        // AUTH-EVIDENCE-REQUIRE-01：Require(Jwt) + 请求携 Authenticated 证据 → 放行 200。
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        // AUTH-EVIDENCE-REQUIRE-01：Require(RssAccessToken) + 请求携 Authenticated 证据 → 放行 200。
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router(None, Some(plan));
         let mut req = Request::builder()
             .method(Method::GET)
@@ -1450,7 +1903,7 @@ mod tests {
             .unwrap();
         // 验签桥范式：外层 layer 校验通过后注入证据；此处直接 insert 模拟该接缝。
         req.extensions_mut()
-            .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
@@ -1458,8 +1911,8 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
     async fn require_with_mismatched_scheme_is_401() {
-        // AUTH-EVIDENCE-REQUIRE-01 scheme exact-match：Require(Jwt) 路由 + Mtls 方案证据 → scheme 不匹配 → 401。
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        // AUTH-EVIDENCE-REQUIRE-01 scheme exact-match：Require(RssAccessToken) 路由 + Mtls 方案证据 → scheme 不匹配 → 401。
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router(None, Some(plan));
         let mut req = Request::builder()
             .method(Method::GET)
@@ -1476,15 +1929,17 @@ mod tests {
     #[tokio::test]
     async fn require_with_anonymous_evidence_is_401() {
         // AUTH-EVIDENCE-REQUIRE-01 fail-closed 防御纵深：`Anonymous` 证据视同无证据 → 仍 401。
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router(None, Some(plan));
         let mut req = Request::builder()
             .method(Method::GET)
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut()
-            .insert(authed(RequiredScheme::Jwt, PrincipalKind::Anonymous));
+        req.extensions_mut().insert(authed(
+            RequiredScheme::RssAccessToken,
+            PrincipalKind::Anonymous,
+        ));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
@@ -1500,7 +1955,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         req.extensions_mut()
-            .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
@@ -1509,7 +1964,7 @@ mod tests {
     #[tokio::test]
     async fn allow_records_success_audit_event() {
         let sink = RecordingAuditSink::new();
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router_with_audit(None, Some(plan), sink.clone());
         let mut req = Request::builder()
             .method(Method::GET)
@@ -1517,7 +1972,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         req.extensions_mut()
-            .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
@@ -1537,7 +1992,7 @@ mod tests {
     #[tokio::test]
     async fn require_without_evidence_does_not_forge_audit_event() {
         let sink = RecordingAuditSink::new();
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router_with_audit(None, Some(plan), sink.clone());
         let req = Request::builder()
             .method(Method::GET)
@@ -1553,7 +2008,7 @@ mod tests {
     #[tokio::test]
     async fn tenantless_authenticated_evidence_still_records_audit_event() {
         let sink = RecordingAuditSink::new();
-        let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).unwrap();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router_with_audit(None, Some(plan), sink.clone());
         let mut req = Request::builder()
             .method(Method::GET)
@@ -1561,8 +2016,8 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         req.extensions_mut().insert(tenantless_authed(
-            RequiredScheme::ServiceToken,
-            PrincipalKind::Service,
+            RequiredScheme::RssAccessToken,
+            PrincipalKind::SuperAdmin,
         ));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1570,7 +2025,7 @@ mod tests {
         let events = sink.events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].principal_id, "platform-principal-1");
-        assert_eq!(events[0].principal_kind, PrincipalKind::Service);
+        assert_eq!(events[0].principal_kind, PrincipalKind::SuperAdmin);
         assert_eq!(events[0].tenant_id, None);
         assert_eq!(events[0].outcome, AuditOutcome::Success);
     }
@@ -1579,7 +2034,7 @@ mod tests {
     #[tokio::test]
     async fn require_scheme_mismatch_records_unauthorized_audit_event() {
         let sink = RecordingAuditSink::new();
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router_with_audit(None, Some(plan), sink.clone());
         let mut req = Request::builder()
             .method(Method::GET)
@@ -1613,7 +2068,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         req.extensions_mut()
-            .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
@@ -1631,7 +2086,7 @@ mod tests {
     #[tokio::test]
     async fn allow_audit_failure_fails_closed_500() {
         let sink = RecordingAuditSink::failing();
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router_with_audit(None, Some(plan), sink);
         let mut req = Request::builder()
             .method(Method::GET)
@@ -1639,7 +2094,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         req.extensions_mut()
-            .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -1655,7 +2110,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         req.extensions_mut()
-            .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -1665,7 +2120,7 @@ mod tests {
     async fn require_with_auth_header_is_fail_closed_401() {
         // fail-closed：httpserve 不验签——裸 Authorization header 非证据，仅请求携 Authenticated
         // extension（验签桥注入）才放行，故带 header 仍 401。
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router(None, Some(plan));
         let req = Request::builder()
             .method(Method::GET)
@@ -1681,7 +2136,7 @@ mod tests {
     #[tokio::test]
     async fn require_with_empty_auth_header_is_401() {
         // F1 fail-closed：空 Authorization header 也一律 401。
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router(None, Some(plan));
         let req = Request::builder()
             .method(Method::GET)
@@ -1697,7 +2152,7 @@ mod tests {
     #[tokio::test]
     async fn require_with_whitespace_auth_header_is_401() {
         // F1 fail-closed：纯空白 Authorization header 也一律 401。
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
         let router = build_router(None, Some(plan));
         let req = Request::builder()
             .method(Method::GET)

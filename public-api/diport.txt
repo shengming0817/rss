@@ -2382,25 +2382,26 @@ pub async fn diport::outbox_emitter::OutboxEmitterLocal::emit(&self, consistency
 impl<TraitVariantBlanketType: diport::outbox_emitter::OutboxEmitter> diport::outbox_emitter::OutboxEmitterLocal for TraitVariantBlanketType
 pub async fn TraitVariantBlanketType::emit(&self, consistency::outbox::EventEntry, diport::outbox_emitter::OutboxEnvelopeParts) -> core::result::Result<(), diport::outbox_emitter::OutboxEmitError>
 pub mod diport::pdp
-#[non_exhaustive] pub enum diport::pdp::CredentialScheme
-pub diport::pdp::CredentialScheme::Jwt
-pub diport::pdp::CredentialScheme::ServiceToken
-impl core::clone::Clone for diport::pdp::CredentialScheme
-pub fn diport::pdp::CredentialScheme::clone(&self) -> diport::pdp::CredentialScheme
-impl core::cmp::Eq for diport::pdp::CredentialScheme
-impl core::cmp::PartialEq for diport::pdp::CredentialScheme
-pub fn diport::pdp::CredentialScheme::eq(&self, &diport::pdp::CredentialScheme) -> bool
-impl core::fmt::Debug for diport::pdp::CredentialScheme
-pub fn diport::pdp::CredentialScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for diport::pdp::CredentialScheme
-impl core::marker::StructuralPartialEq for diport::pdp::CredentialScheme
-impl core::marker::Freeze for diport::pdp::CredentialScheme
-impl core::marker::Send for diport::pdp::CredentialScheme
-impl core::marker::Sync for diport::pdp::CredentialScheme
-impl core::marker::Unpin for diport::pdp::CredentialScheme
-impl core::marker::UnsafeUnpin for diport::pdp::CredentialScheme
-impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::CredentialScheme
-impl core::panic::unwind_safe::UnwindSafe for diport::pdp::CredentialScheme
+pub enum diport::pdp::FederatedAccessProfile
+impl core::clone::Clone for diport::pdp::FederatedAccessProfile
+pub fn diport::pdp::FederatedAccessProfile::clone(&self) -> diport::pdp::FederatedAccessProfile
+impl core::cmp::Eq for diport::pdp::FederatedAccessProfile
+impl core::cmp::PartialEq for diport::pdp::FederatedAccessProfile
+pub fn diport::pdp::FederatedAccessProfile::eq(&self, &diport::pdp::FederatedAccessProfile) -> bool
+impl core::fmt::Debug for diport::pdp::FederatedAccessProfile
+pub fn diport::pdp::FederatedAccessProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::FederatedAccessProfile
+impl core::marker::StructuralPartialEq for diport::pdp::FederatedAccessProfile
+impl diport::pdp::TokenProfileMarker for diport::pdp::FederatedAccessProfile
+pub const diport::pdp::FederatedAccessProfile::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::FederatedAccessProfile::policy() -> diport::pdp::TokenPolicy
+impl core::marker::Freeze for diport::pdp::FederatedAccessProfile
+impl core::marker::Send for diport::pdp::FederatedAccessProfile
+impl core::marker::Sync for diport::pdp::FederatedAccessProfile
+impl core::marker::Unpin for diport::pdp::FederatedAccessProfile
+impl core::marker::UnsafeUnpin for diport::pdp::FederatedAccessProfile
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::FederatedAccessProfile
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::FederatedAccessProfile
 #[non_exhaustive] pub enum diport::pdp::PdpError
 pub diport::pdp::PdpError::Expired
 pub diport::pdp::PdpError::InvalidSignature
@@ -2420,6 +2421,46 @@ impl core::marker::Unpin for diport::pdp::PdpError
 impl core::marker::UnsafeUnpin for diport::pdp::PdpError
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::PdpError
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::PdpError
+pub enum diport::pdp::RssAccessProfile
+impl core::clone::Clone for diport::pdp::RssAccessProfile
+pub fn diport::pdp::RssAccessProfile::clone(&self) -> diport::pdp::RssAccessProfile
+impl core::cmp::Eq for diport::pdp::RssAccessProfile
+impl core::cmp::PartialEq for diport::pdp::RssAccessProfile
+pub fn diport::pdp::RssAccessProfile::eq(&self, &diport::pdp::RssAccessProfile) -> bool
+impl core::fmt::Debug for diport::pdp::RssAccessProfile
+pub fn diport::pdp::RssAccessProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::RssAccessProfile
+impl core::marker::StructuralPartialEq for diport::pdp::RssAccessProfile
+impl diport::pdp::TokenProfileMarker for diport::pdp::RssAccessProfile
+pub const diport::pdp::RssAccessProfile::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::RssAccessProfile::policy() -> diport::pdp::TokenPolicy
+impl core::marker::Freeze for diport::pdp::RssAccessProfile
+impl core::marker::Send for diport::pdp::RssAccessProfile
+impl core::marker::Sync for diport::pdp::RssAccessProfile
+impl core::marker::Unpin for diport::pdp::RssAccessProfile
+impl core::marker::UnsafeUnpin for diport::pdp::RssAccessProfile
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::RssAccessProfile
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::RssAccessProfile
+pub enum diport::pdp::ServiceTokenProfile
+impl core::clone::Clone for diport::pdp::ServiceTokenProfile
+pub fn diport::pdp::ServiceTokenProfile::clone(&self) -> diport::pdp::ServiceTokenProfile
+impl core::cmp::Eq for diport::pdp::ServiceTokenProfile
+impl core::cmp::PartialEq for diport::pdp::ServiceTokenProfile
+pub fn diport::pdp::ServiceTokenProfile::eq(&self, &diport::pdp::ServiceTokenProfile) -> bool
+impl core::fmt::Debug for diport::pdp::ServiceTokenProfile
+pub fn diport::pdp::ServiceTokenProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::ServiceTokenProfile
+impl core::marker::StructuralPartialEq for diport::pdp::ServiceTokenProfile
+impl diport::pdp::TokenProfileMarker for diport::pdp::ServiceTokenProfile
+pub const diport::pdp::ServiceTokenProfile::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::ServiceTokenProfile::policy() -> diport::pdp::TokenPolicy
+impl core::marker::Freeze for diport::pdp::ServiceTokenProfile
+impl core::marker::Send for diport::pdp::ServiceTokenProfile
+impl core::marker::Sync for diport::pdp::ServiceTokenProfile
+impl core::marker::Unpin for diport::pdp::ServiceTokenProfile
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenProfile
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenProfile
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenProfile
 pub enum diport::pdp::ServiceTokenReplayDeadlineError
 pub diport::pdp::ServiceTokenReplayDeadlineError::Elapsed
 pub diport::pdp::ServiceTokenReplayDeadlineError::Overflow
@@ -2497,6 +2538,49 @@ impl core::marker::Unpin for diport::pdp::ServiceTokenReplayStoreError
 impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayStoreError
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayStoreError
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayStoreError
+pub enum diport::pdp::TokenAlgorithm
+pub diport::pdp::TokenAlgorithm::Es256
+pub diport::pdp::TokenAlgorithm::Hs256
+impl diport::pdp::TokenAlgorithm
+pub const fn diport::pdp::TokenAlgorithm::jose_name(self) -> &'static str
+impl core::clone::Clone for diport::pdp::TokenAlgorithm
+pub fn diport::pdp::TokenAlgorithm::clone(&self) -> diport::pdp::TokenAlgorithm
+impl core::cmp::Eq for diport::pdp::TokenAlgorithm
+impl core::cmp::PartialEq for diport::pdp::TokenAlgorithm
+pub fn diport::pdp::TokenAlgorithm::eq(&self, &diport::pdp::TokenAlgorithm) -> bool
+impl core::fmt::Debug for diport::pdp::TokenAlgorithm
+pub fn diport::pdp::TokenAlgorithm::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::TokenAlgorithm
+impl core::marker::StructuralPartialEq for diport::pdp::TokenAlgorithm
+impl core::marker::Freeze for diport::pdp::TokenAlgorithm
+impl core::marker::Send for diport::pdp::TokenAlgorithm
+impl core::marker::Sync for diport::pdp::TokenAlgorithm
+impl core::marker::Unpin for diport::pdp::TokenAlgorithm
+impl core::marker::UnsafeUnpin for diport::pdp::TokenAlgorithm
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::TokenAlgorithm
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::TokenAlgorithm
+pub enum diport::pdp::TokenProfile
+pub diport::pdp::TokenProfile::FederatedAccess
+pub diport::pdp::TokenProfile::RssAccess
+pub diport::pdp::TokenProfile::ServiceToken
+impl diport::pdp::TokenProfile
+pub const fn diport::pdp::TokenProfile::policy(self) -> diport::pdp::TokenPolicy
+impl core::clone::Clone for diport::pdp::TokenProfile
+pub fn diport::pdp::TokenProfile::clone(&self) -> diport::pdp::TokenProfile
+impl core::cmp::Eq for diport::pdp::TokenProfile
+impl core::cmp::PartialEq for diport::pdp::TokenProfile
+pub fn diport::pdp::TokenProfile::eq(&self, &diport::pdp::TokenProfile) -> bool
+impl core::fmt::Debug for diport::pdp::TokenProfile
+pub fn diport::pdp::TokenProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::TokenProfile
+impl core::marker::StructuralPartialEq for diport::pdp::TokenProfile
+impl core::marker::Freeze for diport::pdp::TokenProfile
+impl core::marker::Send for diport::pdp::TokenProfile
+impl core::marker::Sync for diport::pdp::TokenProfile
+impl core::marker::Unpin for diport::pdp::TokenProfile
+impl core::marker::UnsafeUnpin for diport::pdp::TokenProfile
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::TokenProfile
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::TokenProfile
 #[repr(transparent)] pub struct diport::pdp::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynPdp<'dynosaur_struct>
 pub const fn diport::DynPdp<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::pdp::Pdp + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>>
@@ -2553,8 +2637,9 @@ impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynS
 impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynServiceTokenReplayStore<'dynosaur_struct>
 pub struct diport::pdp::RawCredential
 impl diport::pdp::RawCredential
-pub fn diport::pdp::RawCredential::jwt(impl core::convert::Into<alloc::string::String>) -> Self
-pub fn diport::pdp::RawCredential::scheme(&self) -> diport::pdp::CredentialScheme
+pub fn diport::pdp::RawCredential::federated_access(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn diport::pdp::RawCredential::profile(&self) -> diport::pdp::TokenProfile
+pub fn diport::pdp::RawCredential::rss_access(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn diport::pdp::RawCredential::service_token(impl core::convert::Into<alloc::string::String>, diport::pdp::ServiceTokenTenantBinding) -> Self
 pub fn diport::pdp::RawCredential::service_token_tenant(&self) -> core::option::Option<&diport::pdp::ServiceTokenTenantBinding>
 pub fn diport::pdp::RawCredential::token(&self) -> &str
@@ -2636,6 +2721,32 @@ impl core::marker::Unpin for diport::pdp::ServiceTokenTenantBinding
 impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenTenantBinding
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenTenantBinding
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenTenantBinding
+pub struct diport::pdp::TokenPolicy
+impl diport::pdp::TokenPolicy
+pub const fn diport::pdp::TokenPolicy::algorithm(self) -> diport::pdp::TokenAlgorithm
+pub const fn diport::pdp::TokenPolicy::jose_typ(self) -> &'static str
+pub const fn diport::pdp::TokenPolicy::maximum_header_length(self) -> usize
+pub const fn diport::pdp::TokenPolicy::maximum_lifetime(self) -> core::time::Duration
+pub const fn diport::pdp::TokenPolicy::maximum_payload_length(self) -> usize
+pub const fn diport::pdp::TokenPolicy::maximum_signature_length(self) -> usize
+pub const fn diport::pdp::TokenPolicy::maximum_token_length(self) -> usize
+pub const fn diport::pdp::TokenPolicy::token_use(self) -> &'static str
+impl core::clone::Clone for diport::pdp::TokenPolicy
+pub fn diport::pdp::TokenPolicy::clone(&self) -> diport::pdp::TokenPolicy
+impl core::cmp::Eq for diport::pdp::TokenPolicy
+impl core::cmp::PartialEq for diport::pdp::TokenPolicy
+pub fn diport::pdp::TokenPolicy::eq(&self, &diport::pdp::TokenPolicy) -> bool
+impl core::fmt::Debug for diport::pdp::TokenPolicy
+pub fn diport::pdp::TokenPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::TokenPolicy
+impl core::marker::StructuralPartialEq for diport::pdp::TokenPolicy
+impl core::marker::Freeze for diport::pdp::TokenPolicy
+impl core::marker::Send for diport::pdp::TokenPolicy
+impl core::marker::Sync for diport::pdp::TokenPolicy
+impl core::marker::Unpin for diport::pdp::TokenPolicy
+impl core::marker::UnsafeUnpin for diport::pdp::TokenPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::TokenPolicy
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::TokenPolicy
 pub struct diport::pdp::VerifiedClaims
 impl diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::kind(&self) -> core::option::Option<&str>
@@ -2685,6 +2796,18 @@ pub trait diport::pdp::ServiceTokenReplayStoreLocal: core::marker::Send + core::
 pub async fn diport::pdp::ServiceTokenReplayStoreLocal::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>
 impl<TraitVariantBlanketType: diport::pdp::ServiceTokenReplayStore> diport::pdp::ServiceTokenReplayStoreLocal for TraitVariantBlanketType
 pub async fn TraitVariantBlanketType::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>
+pub trait diport::pdp::TokenProfileMarker: diport::pdp::token_profile_sealed::Sealed + core::marker::Send + core::marker::Sync + core::marker::Copy + 'static
+pub const diport::pdp::TokenProfileMarker::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::TokenProfileMarker::policy() -> diport::pdp::TokenPolicy
+impl diport::pdp::TokenProfileMarker for diport::pdp::FederatedAccessProfile
+pub const diport::pdp::FederatedAccessProfile::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::FederatedAccessProfile::policy() -> diport::pdp::TokenPolicy
+impl diport::pdp::TokenProfileMarker for diport::pdp::RssAccessProfile
+pub const diport::pdp::RssAccessProfile::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::RssAccessProfile::policy() -> diport::pdp::TokenPolicy
+impl diport::pdp::TokenProfileMarker for diport::pdp::ServiceTokenProfile
+pub const diport::pdp::ServiceTokenProfile::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::ServiceTokenProfile::policy() -> diport::pdp::TokenPolicy
 pub fn diport::pdp::service_token_mac_input(&[u8], &diport::pdp::ServiceTokenTenantBinding) -> alloc::vec::Vec<u8>
 pub mod diport::publisher
 pub enum diport::publisher::PublishErrorKind
@@ -3956,25 +4079,6 @@ impl core::marker::Unpin for diport::revocation_store::CertSerialError
 impl core::marker::UnsafeUnpin for diport::revocation_store::CertSerialError
 impl core::panic::unwind_safe::RefUnwindSafe for diport::revocation_store::CertSerialError
 impl core::panic::unwind_safe::UnwindSafe for diport::revocation_store::CertSerialError
-#[non_exhaustive] pub enum diport::CredentialScheme
-pub diport::CredentialScheme::Jwt
-pub diport::CredentialScheme::ServiceToken
-impl core::clone::Clone for diport::pdp::CredentialScheme
-pub fn diport::pdp::CredentialScheme::clone(&self) -> diport::pdp::CredentialScheme
-impl core::cmp::Eq for diport::pdp::CredentialScheme
-impl core::cmp::PartialEq for diport::pdp::CredentialScheme
-pub fn diport::pdp::CredentialScheme::eq(&self, &diport::pdp::CredentialScheme) -> bool
-impl core::fmt::Debug for diport::pdp::CredentialScheme
-pub fn diport::pdp::CredentialScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for diport::pdp::CredentialScheme
-impl core::marker::StructuralPartialEq for diport::pdp::CredentialScheme
-impl core::marker::Freeze for diport::pdp::CredentialScheme
-impl core::marker::Send for diport::pdp::CredentialScheme
-impl core::marker::Sync for diport::pdp::CredentialScheme
-impl core::marker::Unpin for diport::pdp::CredentialScheme
-impl core::marker::UnsafeUnpin for diport::pdp::CredentialScheme
-impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::CredentialScheme
-impl core::panic::unwind_safe::UnwindSafe for diport::pdp::CredentialScheme
 pub enum diport::DeadLetterProvenance
 pub diport::DeadLetterProvenance::Consumer
 pub diport::DeadLetterProvenance::Consumer::consumer_domain: alloc::string::String
@@ -4213,6 +4317,26 @@ impl core::marker::Unpin for diport::outbox_emitter::EnvelopeIdentityError
 impl core::marker::UnsafeUnpin for diport::outbox_emitter::EnvelopeIdentityError
 impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::EnvelopeIdentityError
 impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::EnvelopeIdentityError
+pub enum diport::FederatedAccessProfile
+impl core::clone::Clone for diport::pdp::FederatedAccessProfile
+pub fn diport::pdp::FederatedAccessProfile::clone(&self) -> diport::pdp::FederatedAccessProfile
+impl core::cmp::Eq for diport::pdp::FederatedAccessProfile
+impl core::cmp::PartialEq for diport::pdp::FederatedAccessProfile
+pub fn diport::pdp::FederatedAccessProfile::eq(&self, &diport::pdp::FederatedAccessProfile) -> bool
+impl core::fmt::Debug for diport::pdp::FederatedAccessProfile
+pub fn diport::pdp::FederatedAccessProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::FederatedAccessProfile
+impl core::marker::StructuralPartialEq for diport::pdp::FederatedAccessProfile
+impl diport::pdp::TokenProfileMarker for diport::pdp::FederatedAccessProfile
+pub const diport::pdp::FederatedAccessProfile::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::FederatedAccessProfile::policy() -> diport::pdp::TokenPolicy
+impl core::marker::Freeze for diport::pdp::FederatedAccessProfile
+impl core::marker::Send for diport::pdp::FederatedAccessProfile
+impl core::marker::Sync for diport::pdp::FederatedAccessProfile
+impl core::marker::Unpin for diport::pdp::FederatedAccessProfile
+impl core::marker::UnsafeUnpin for diport::pdp::FederatedAccessProfile
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::FederatedAccessProfile
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::FederatedAccessProfile
 #[non_exhaustive] pub enum diport::KeyParseError
 pub diport::KeyParseError::Empty
 pub diport::KeyParseError::Malformed
@@ -4444,6 +4568,26 @@ impl core::marker::Unpin for diport::dlx_lifecycle::ReceiptCasOutcome
 impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::ReceiptCasOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ReceiptCasOutcome
 impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ReceiptCasOutcome
+pub enum diport::RssAccessProfile
+impl core::clone::Clone for diport::pdp::RssAccessProfile
+pub fn diport::pdp::RssAccessProfile::clone(&self) -> diport::pdp::RssAccessProfile
+impl core::cmp::Eq for diport::pdp::RssAccessProfile
+impl core::cmp::PartialEq for diport::pdp::RssAccessProfile
+pub fn diport::pdp::RssAccessProfile::eq(&self, &diport::pdp::RssAccessProfile) -> bool
+impl core::fmt::Debug for diport::pdp::RssAccessProfile
+pub fn diport::pdp::RssAccessProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::RssAccessProfile
+impl core::marker::StructuralPartialEq for diport::pdp::RssAccessProfile
+impl diport::pdp::TokenProfileMarker for diport::pdp::RssAccessProfile
+pub const diport::pdp::RssAccessProfile::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::RssAccessProfile::policy() -> diport::pdp::TokenPolicy
+impl core::marker::Freeze for diport::pdp::RssAccessProfile
+impl core::marker::Send for diport::pdp::RssAccessProfile
+impl core::marker::Sync for diport::pdp::RssAccessProfile
+impl core::marker::Unpin for diport::pdp::RssAccessProfile
+impl core::marker::UnsafeUnpin for diport::pdp::RssAccessProfile
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::RssAccessProfile
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::RssAccessProfile
 #[non_exhaustive] pub enum diport::SagaContractIdError
 pub diport::SagaContractIdError::Empty
 pub diport::SagaContractIdError::Format
@@ -4546,6 +4690,26 @@ impl core::marker::Unpin for diport::secret_resolver::SecretResolverError
 impl core::marker::UnsafeUnpin for diport::secret_resolver::SecretResolverError
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::secret_resolver::SecretResolverError
 impl !core::panic::unwind_safe::UnwindSafe for diport::secret_resolver::SecretResolverError
+pub enum diport::ServiceTokenProfile
+impl core::clone::Clone for diport::pdp::ServiceTokenProfile
+pub fn diport::pdp::ServiceTokenProfile::clone(&self) -> diport::pdp::ServiceTokenProfile
+impl core::cmp::Eq for diport::pdp::ServiceTokenProfile
+impl core::cmp::PartialEq for diport::pdp::ServiceTokenProfile
+pub fn diport::pdp::ServiceTokenProfile::eq(&self, &diport::pdp::ServiceTokenProfile) -> bool
+impl core::fmt::Debug for diport::pdp::ServiceTokenProfile
+pub fn diport::pdp::ServiceTokenProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::ServiceTokenProfile
+impl core::marker::StructuralPartialEq for diport::pdp::ServiceTokenProfile
+impl diport::pdp::TokenProfileMarker for diport::pdp::ServiceTokenProfile
+pub const diport::pdp::ServiceTokenProfile::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::ServiceTokenProfile::policy() -> diport::pdp::TokenPolicy
+impl core::marker::Freeze for diport::pdp::ServiceTokenProfile
+impl core::marker::Send for diport::pdp::ServiceTokenProfile
+impl core::marker::Sync for diport::pdp::ServiceTokenProfile
+impl core::marker::Unpin for diport::pdp::ServiceTokenProfile
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenProfile
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenProfile
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenProfile
 pub enum diport::ServiceTokenReplayDeadlineError
 pub diport::ServiceTokenReplayDeadlineError::Elapsed
 pub diport::ServiceTokenReplayDeadlineError::Overflow
@@ -4623,6 +4787,49 @@ impl core::marker::Unpin for diport::pdp::ServiceTokenReplayStoreError
 impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayStoreError
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayStoreError
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayStoreError
+pub enum diport::TokenAlgorithm
+pub diport::TokenAlgorithm::Es256
+pub diport::TokenAlgorithm::Hs256
+impl diport::pdp::TokenAlgorithm
+pub const fn diport::pdp::TokenAlgorithm::jose_name(self) -> &'static str
+impl core::clone::Clone for diport::pdp::TokenAlgorithm
+pub fn diport::pdp::TokenAlgorithm::clone(&self) -> diport::pdp::TokenAlgorithm
+impl core::cmp::Eq for diport::pdp::TokenAlgorithm
+impl core::cmp::PartialEq for diport::pdp::TokenAlgorithm
+pub fn diport::pdp::TokenAlgorithm::eq(&self, &diport::pdp::TokenAlgorithm) -> bool
+impl core::fmt::Debug for diport::pdp::TokenAlgorithm
+pub fn diport::pdp::TokenAlgorithm::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::TokenAlgorithm
+impl core::marker::StructuralPartialEq for diport::pdp::TokenAlgorithm
+impl core::marker::Freeze for diport::pdp::TokenAlgorithm
+impl core::marker::Send for diport::pdp::TokenAlgorithm
+impl core::marker::Sync for diport::pdp::TokenAlgorithm
+impl core::marker::Unpin for diport::pdp::TokenAlgorithm
+impl core::marker::UnsafeUnpin for diport::pdp::TokenAlgorithm
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::TokenAlgorithm
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::TokenAlgorithm
+pub enum diport::TokenProfile
+pub diport::TokenProfile::FederatedAccess
+pub diport::TokenProfile::RssAccess
+pub diport::TokenProfile::ServiceToken
+impl diport::pdp::TokenProfile
+pub const fn diport::pdp::TokenProfile::policy(self) -> diport::pdp::TokenPolicy
+impl core::clone::Clone for diport::pdp::TokenProfile
+pub fn diport::pdp::TokenProfile::clone(&self) -> diport::pdp::TokenProfile
+impl core::cmp::Eq for diport::pdp::TokenProfile
+impl core::cmp::PartialEq for diport::pdp::TokenProfile
+pub fn diport::pdp::TokenProfile::eq(&self, &diport::pdp::TokenProfile) -> bool
+impl core::fmt::Debug for diport::pdp::TokenProfile
+pub fn diport::pdp::TokenProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::TokenProfile
+impl core::marker::StructuralPartialEq for diport::pdp::TokenProfile
+impl core::marker::Freeze for diport::pdp::TokenProfile
+impl core::marker::Send for diport::pdp::TokenProfile
+impl core::marker::Sync for diport::pdp::TokenProfile
+impl core::marker::Unpin for diport::pdp::TokenProfile
+impl core::marker::UnsafeUnpin for diport::pdp::TokenProfile
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::TokenProfile
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::TokenProfile
 #[non_exhaustive] pub enum diport::WriteOutcome
 pub diport::WriteOutcome::Committed
 pub diport::WriteOutcome::Fenced
@@ -6632,8 +6839,9 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::rate_limiter::RateLimit
 impl core::panic::unwind_safe::UnwindSafe for diport::rate_limiter::RateLimitKey
 pub struct diport::RawCredential
 impl diport::pdp::RawCredential
-pub fn diport::pdp::RawCredential::jwt(impl core::convert::Into<alloc::string::String>) -> Self
-pub fn diport::pdp::RawCredential::scheme(&self) -> diport::pdp::CredentialScheme
+pub fn diport::pdp::RawCredential::federated_access(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn diport::pdp::RawCredential::profile(&self) -> diport::pdp::TokenProfile
+pub fn diport::pdp::RawCredential::rss_access(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn diport::pdp::RawCredential::service_token(impl core::convert::Into<alloc::string::String>, diport::pdp::ServiceTokenTenantBinding) -> Self
 pub fn diport::pdp::RawCredential::service_token_tenant(&self) -> core::option::Option<&diport::pdp::ServiceTokenTenantBinding>
 pub fn diport::pdp::RawCredential::token(&self) -> &str
@@ -7058,6 +7266,32 @@ impl core::marker::Unpin for diport::subscriber::SubscriberError
 impl core::marker::UnsafeUnpin for diport::subscriber::SubscriberError
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::subscriber::SubscriberError
 impl !core::panic::unwind_safe::UnwindSafe for diport::subscriber::SubscriberError
+pub struct diport::TokenPolicy
+impl diport::pdp::TokenPolicy
+pub const fn diport::pdp::TokenPolicy::algorithm(self) -> diport::pdp::TokenAlgorithm
+pub const fn diport::pdp::TokenPolicy::jose_typ(self) -> &'static str
+pub const fn diport::pdp::TokenPolicy::maximum_header_length(self) -> usize
+pub const fn diport::pdp::TokenPolicy::maximum_lifetime(self) -> core::time::Duration
+pub const fn diport::pdp::TokenPolicy::maximum_payload_length(self) -> usize
+pub const fn diport::pdp::TokenPolicy::maximum_signature_length(self) -> usize
+pub const fn diport::pdp::TokenPolicy::maximum_token_length(self) -> usize
+pub const fn diport::pdp::TokenPolicy::token_use(self) -> &'static str
+impl core::clone::Clone for diport::pdp::TokenPolicy
+pub fn diport::pdp::TokenPolicy::clone(&self) -> diport::pdp::TokenPolicy
+impl core::cmp::Eq for diport::pdp::TokenPolicy
+impl core::cmp::PartialEq for diport::pdp::TokenPolicy
+pub fn diport::pdp::TokenPolicy::eq(&self, &diport::pdp::TokenPolicy) -> bool
+impl core::fmt::Debug for diport::pdp::TokenPolicy
+pub fn diport::pdp::TokenPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::TokenPolicy
+impl core::marker::StructuralPartialEq for diport::pdp::TokenPolicy
+impl core::marker::Freeze for diport::pdp::TokenPolicy
+impl core::marker::Send for diport::pdp::TokenPolicy
+impl core::marker::Sync for diport::pdp::TokenPolicy
+impl core::marker::Unpin for diport::pdp::TokenPolicy
+impl core::marker::UnsafeUnpin for diport::pdp::TokenPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::TokenPolicy
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::TokenPolicy
 pub struct diport::Topic(_)
 impl diport::publisher::Topic
 pub fn diport::publisher::Topic::as_str(&self) -> &str
@@ -7659,6 +7893,18 @@ pub fn alloc::boxed::Box<diport::DynSubscriber<'dynosaur_struct>>::subscribe(&se
 impl<'dynosaur_struct> diport::subscriber::Subscriber for diport::DynSubscriber<'dynosaur_struct>
 pub fn diport::DynSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::DynSubscriber<'dynosaur_struct>::subscribe(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::subscriber::MessageStream, diport::subscriber::SubscriberError>> + core::marker::Send
+pub trait diport::TokenProfileMarker: diport::pdp::token_profile_sealed::Sealed + core::marker::Send + core::marker::Sync + core::marker::Copy + 'static
+pub const diport::TokenProfileMarker::PROFILE: diport::pdp::TokenProfile
+pub fn diport::TokenProfileMarker::policy() -> diport::pdp::TokenPolicy
+impl diport::pdp::TokenProfileMarker for diport::pdp::FederatedAccessProfile
+pub const diport::pdp::FederatedAccessProfile::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::FederatedAccessProfile::policy() -> diport::pdp::TokenPolicy
+impl diport::pdp::TokenProfileMarker for diport::pdp::RssAccessProfile
+pub const diport::pdp::RssAccessProfile::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::RssAccessProfile::policy() -> diport::pdp::TokenPolicy
+impl diport::pdp::TokenProfileMarker for diport::pdp::ServiceTokenProfile
+pub const diport::pdp::ServiceTokenProfile::PROFILE: diport::pdp::TokenProfile
+pub fn diport::pdp::ServiceTokenProfile::policy() -> diport::pdp::TokenPolicy
 pub fn diport::service_token_mac_input(&[u8], &diport::pdp::ServiceTokenTenantBinding) -> alloc::vec::Vec<u8>
 pub type diport::DeliveryStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = diport::acker::Delivery> + core::marker::Send)>>
 pub type diport::MessageStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = diport::subscriber::Message> + core::marker::Send)>>

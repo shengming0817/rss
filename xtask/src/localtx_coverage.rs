@@ -11,7 +11,7 @@ use crate::contract::manifest::{
     LocalTxCommitUnknown, LocalTxModel, LocalTxRetry,
 };
 use crate::diagnostic::{self, GovernanceCheck, finding};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,8 +20,8 @@ use std::process::Stdio;
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Expr, ExprCall, ExprMethodCall, File, GenericArgument, Item, ItemConst, ItemFn,
-    Meta, PathArguments, Stmt, Type, UseTree,
+    Attribute, Expr, ExprCall, ExprMethodCall, File, FnArg, GenericArgument, Item, ItemConst,
+    ItemFn, Meta, PathArguments, Stmt, Type, UseTree,
 };
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
@@ -2792,6 +2792,15 @@ struct FileUnit {
     backend_profile_rejection: Option<String>,
 }
 
+#[derive(Clone)]
+struct RouteMountHelper {
+    function: ItemFn,
+    module: Vec<String>,
+    resolver: Resolver,
+    reachability: Reachability,
+    attribute_safe: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Reachability {
     prod: bool,
@@ -3307,8 +3316,68 @@ fn module_path_attribute(attrs: &[Attribute]) -> Result<Option<PathBuf>> {
     Ok(found)
 }
 
+fn collect_route_mount_helpers(
+    items: &[Item],
+    module: &mut Vec<String>,
+    resolvers: &BTreeMap<String, Resolver>,
+    reachability: Reachability,
+    attribute_safe: bool,
+    helpers: &mut BTreeMap<String, RouteMountHelper>,
+) -> Result<()> {
+    let resolver = resolver_for(resolvers, module).context("route helper resolver is missing")?;
+    for item in items {
+        match item {
+            Item::Fn(function) => {
+                let function_reachability = reachability.with_attrs(&function.attrs);
+                let function_attribute_safe =
+                    attribute_safe && attrs_safe_for_evidence(&function.attrs);
+                if function_reachability.prod
+                    && !function_reachability.unknown
+                    && function_attribute_safe
+                    && !is_test_with_resolver(&function.attrs, resolver)
+                {
+                    let identity = function_identity(module, &function.sig.ident.to_string());
+                    ensure!(
+                        helpers
+                            .insert(
+                                identity.clone(),
+                                RouteMountHelper {
+                                    function: function.clone(),
+                                    module: module.clone(),
+                                    resolver: resolver.clone(),
+                                    reachability: function_reachability,
+                                    attribute_safe: function_attribute_safe,
+                                },
+                            )
+                            .is_none(),
+                        "duplicate route mount helper identity `{identity}`"
+                    );
+                }
+            }
+            Item::Mod(item) => {
+                let Some((_, nested)) = &item.content else {
+                    continue;
+                };
+                module.push(item.ident.to_string());
+                collect_route_mount_helpers(
+                    nested,
+                    module,
+                    resolvers,
+                    reachability.with_attrs(&item.attrs),
+                    attribute_safe && attrs_safe_for_evidence(&item.attrs),
+                    helpers,
+                )?;
+                module.pop();
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn scan_units(owner: &str, units: &[FileUnit], evidence: &mut OwnerEvidence) -> Result<()> {
     let mut handlers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut route_helpers = BTreeMap::new();
     for unit in units {
         if unit.reachability.prod && !unit.reachability.unknown {
             evidence
@@ -3324,6 +3393,15 @@ fn scan_units(owner: &str, units: &[FileUnit], evidence: &mut OwnerEvidence) -> 
             item_scope: Vec::new(),
         };
         collector.visit_file(&unit.syntax);
+        let mut helper_module = unit.module.clone();
+        collect_route_mount_helpers(
+            &unit.syntax.items,
+            &mut helper_module,
+            &unit.resolvers,
+            unit.reachability,
+            true,
+            &mut route_helpers,
+        )?;
     }
     for unit in units {
         let resolver = resolver_for(&unit.resolvers, &unit.module)
@@ -3336,6 +3414,7 @@ fn scan_units(owner: &str, units: &[FileUnit], evidence: &mut OwnerEvidence) -> 
             resolvers: &unit.resolvers,
             resolver_stack: vec![resolver],
             handlers: &handlers,
+            route_helpers: &route_helpers,
             evidence,
             reachability: unit.reachability,
             in_test_function: false,
@@ -3946,6 +4025,7 @@ struct SourceScanner<'a> {
     resolvers: &'a BTreeMap<String, Resolver>,
     resolver_stack: Vec<Resolver>,
     handlers: &'a BTreeMap<String, BTreeSet<String>>,
+    route_helpers: &'a BTreeMap<String, RouteMountHelper>,
     evidence: &'a mut OwnerEvidence,
     reachability: Reachability,
     in_test_function: bool,
@@ -4154,15 +4234,15 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
             && let Some(registry) = self.domain_init_router.as_deref()
         {
             self.domain_init_body_pending = false;
-            let mounts = direct_serving_route_mounts(
-                node,
-                registry,
-                &resolver,
-                &self.module,
-                self.handlers,
-                self.reachability,
-                self.attribute_safe,
-            );
+            let context = ServingMountContext {
+                resolver: &resolver,
+                module: &self.module,
+                handlers: self.handlers,
+                route_helpers: self.route_helpers,
+                reachability: self.reachability,
+                attribute_safe: self.attribute_safe,
+            };
+            let mounts = direct_serving_route_mounts(node, registry, &context);
             if !mounts.is_empty() {
                 self.evidence.routes.extend(mounts.keys().cloned());
                 for (key, mounts) in mounts {
@@ -4294,14 +4374,19 @@ fn canonical_serving_router(
     .then(|| binding.ident.to_string())
 }
 
+struct ServingMountContext<'a> {
+    resolver: &'a Resolver,
+    module: &'a [String],
+    handlers: &'a BTreeMap<String, BTreeSet<String>>,
+    route_helpers: &'a BTreeMap<String, RouteMountHelper>,
+    reachability: Reachability,
+    attribute_safe: bool,
+}
+
 fn direct_serving_route_mounts(
     block: &syn::Block,
     registry: &str,
-    resolver: &Resolver,
-    module: &[String],
-    handlers: &BTreeMap<String, BTreeSet<String>>,
-    reachability: Reachability,
-    attribute_safe: bool,
+    context: &ServingMountContext<'_>,
 ) -> BTreeMap<String, BTreeSet<ResolvedRouteMount>> {
     let mut routes = BTreeMap::<String, BTreeSet<ResolvedRouteMount>>::new();
     for statement in &block.stmts {
@@ -4309,7 +4394,7 @@ fn direct_serving_route_mounts(
             continue;
         };
         let Some((call, call_reachability, call_attribute_safe)) =
-            direct_method_call(expr, reachability, attribute_safe)
+            direct_method_call(expr, context.reachability, context.attribute_safe)
         else {
             continue;
         };
@@ -4338,7 +4423,8 @@ fn direct_serving_route_mounts(
                 _ => None,
             })
             .collect();
-        let mut closure_resolver = resolver_with_items(resolver.clone(), &items, module);
+        let mut closure_resolver =
+            resolver_with_items(context.resolver.clone(), &items, context.module);
         if body
             .block
             .stmts
@@ -4351,15 +4437,88 @@ fn direct_serving_route_mounts(
             &body.block,
             &router,
             &closure_resolver,
-            module,
-            handlers,
+            context.module,
+            context.handlers,
             call_reachability.with_attrs(&register.attrs),
             call_attribute_safe && attrs_safe_for_evidence(&register.attrs),
         ) {
             routes.entry(key).or_default().extend(states);
         }
+        for (key, states) in mounted_route_helper_states(
+            &body.block,
+            &router,
+            &closure_resolver,
+            context.module,
+            context.handlers,
+            context.route_helpers,
+        ) {
+            routes.entry(key).or_default().extend(states);
+        }
     }
     routes
+}
+
+fn mounted_route_helper_states(
+    closure: &syn::Block,
+    router: &str,
+    resolver: &Resolver,
+    module: &[String],
+    handlers: &BTreeMap<String, BTreeSet<String>>,
+    route_helpers: &BTreeMap<String, RouteMountHelper>,
+) -> BTreeMap<String, BTreeSet<ResolvedRouteMount>> {
+    let Some(Stmt::Expr(tail, None)) = closure.stmts.last() else {
+        return BTreeMap::new();
+    };
+    let Expr::Call(call) = peel_expr(tail) else {
+        return BTreeMap::new();
+    };
+    if call.args.first().and_then(simple_ident).as_deref() != Some(router) {
+        return BTreeMap::new();
+    }
+    let Some(identity) = handler_identity(&call.func, module, resolver) else {
+        return BTreeMap::new();
+    };
+    let Some(helper) = route_helpers.get(&identity) else {
+        return BTreeMap::new();
+    };
+    if helper.module != module
+        || !helper.reachability.prod
+        || helper.reachability.unknown
+        || !helper.attribute_safe
+        || helper.function.sig.inputs.len() != call.args.len()
+        || helper
+            .function
+            .block
+            .stmts
+            .iter()
+            .any(|statement| matches!(statement, Stmt::Item(_) | Stmt::Macro(_)))
+    {
+        return BTreeMap::new();
+    }
+    let Some(FnArg::Typed(first)) = helper.function.sig.inputs.first() else {
+        return BTreeMap::new();
+    };
+    let Some(helper_router) = simple_pattern_ident(&first.pat) else {
+        return BTreeMap::new();
+    };
+    let Type::Path(router_type) = first.ty.as_ref() else {
+        return BTreeMap::new();
+    };
+    if !matches!(
+        canonical_segments(&router_type.path, &helper.resolver).as_deref(),
+        Some([root, listener]) if root == "httpserve" && listener == "ListenerRouter"
+    ) {
+        return BTreeMap::new();
+    }
+    mounted_route_states(
+        &helper.function.block,
+        &helper_router,
+        &helper.resolver,
+        &helper.module,
+        handlers,
+        helper.reachability,
+        helper.attribute_safe,
+    )
 }
 
 fn direct_method_call(
@@ -6167,6 +6326,85 @@ mod tests {
         assert_ne!(mounted.handler, "correct_handler");
         Ok(())
     }
+
+    fn helper_mount_source(
+        helper_attribute: &str,
+        helper_router: &str,
+        closure_tail: &str,
+    ) -> String {
+        format!(
+            r#"
+            use ::generated::http::demo_v1::write::ROUTE as WRITE_ROUTE;
+            use ::httpserve::{{
+                ContractMarker,
+                GeneratedPrimaryEndpoint as Endpoint,
+            }};
+            fn handler(_: ContractMarker<::generated::http::demo_v1::write::RouteMarker>) {{}}
+            {helper_attribute}
+            fn mount_common(
+                rb: {helper_router},
+            ) -> Result<{helper_router}, ::httpserve::Error> {{
+                let endpoint = Endpoint::new(WRITE_ROUTE, handler)?;
+                Ok(rb.mount(endpoint)?)
+            }}
+            struct Demo;
+            impl ::bootstrap::Domain for Demo {{
+                fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), ::httpserve::Error> {{
+                    reg.route_group(|rb| {{ {closure_tail} }})?;
+                    Ok(())
+                }}
+            }}
+            #[cfg(test)] mod tests {{
+                #[test] fn covered() {{
+                    const _: ::vocab::HttpRouteBinding<
+                        ::generated::http::demo_v1::write::RouteMarker,
+                        ::vocab::http::LocalTx,
+                    > = ::generated::http::demo_v1::write::ROUTE;
+                }}
+            }}
+            "#
+        )
+    }
+
+    #[test]
+    fn canonical_mount_helper_is_typed_live_and_fail_closed() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("canonical-route-helper")?;
+        let source = temp.path.join("crates/demo/src/lib.rs");
+        let router = "::httpserve::ListenerRouter<()>";
+        fs::write(&source, helper_mount_source("", router, "mount_common(rb)"))?;
+        let evidence =
+            canonical_serving_evidence(&temp.path, ServingEvidenceSource::Domain("demo"))?;
+        assert!(evidence.mounts.contains_key("demo_v1::write"));
+
+        for (label, mutated) in [
+            (
+                "test-only helper",
+                helper_mount_source("#[cfg(test)]", router, "mount_common(rb)"),
+            ),
+            (
+                "wrong router type",
+                helper_mount_source("", "FakeRouter", "mount_common(rb)"),
+            ),
+            (
+                "wrong router argument",
+                helper_mount_source("", router, "mount_common(decoy_rb)"),
+            ),
+            (
+                "non-tail helper call",
+                helper_mount_source("", router, "let _discarded = mount_common(rb); Ok(rb)"),
+            ),
+        ] {
+            fs::write(&source, mutated)?;
+            let evidence =
+                canonical_serving_evidence(&temp.path, ServingEvidenceSource::Domain("demo"))?;
+            assert!(
+                !evidence.mounts.contains_key("demo_v1::write"),
+                "{label} must not satisfy canonical mount evidence"
+            );
+        }
+        Ok(())
+    }
+
     use std::fs;
     use std::path::PathBuf;
 

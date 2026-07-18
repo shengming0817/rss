@@ -41,7 +41,9 @@ Required fields:
 
 - `schemaVersion`, upstream `assemblyFingerprint`, and `runtimePlanFingerprint`.
 - `providerPlans`: stable set of typed constructors and output channels.
-- `listenerPlans`: stable listener identities plus declared domain/auth facts.
+- `listenerPlans`: stable listener identities plus declared domain/auth facts; external listeners
+  carry the exact closed `rssAccessToken` or `federatedAccessToken` trust profile rather than a
+  generic JWT category.
 - `domainPlans`: declaration-ordered domains and lifecycle phases.
 - `placementPlans`: stable domain-to-workload placements.
 

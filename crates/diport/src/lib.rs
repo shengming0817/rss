@@ -175,12 +175,13 @@ pub use outbox_emitter::{
     OutboxActor, OutboxEmitError, OutboxEmitErrorKind, OutboxEmitter, OutboxEnvelopeParts,
 };
 pub use pdp::{
-    CredentialScheme, DynPdp, DynServiceTokenReplayStore, Pdp, PdpError, RawCredential,
-    SERVICE_TOKEN_TENANT_HEADER, SERVICE_TOKEN_TENANT_MAC_NAME, ServiceTokenReplayDeadline,
-    ServiceTokenReplayDeadlineError, ServiceTokenReplayDisposition, ServiceTokenReplayKey,
-    ServiceTokenReplayKeyError, ServiceTokenReplayScope, ServiceTokenReplayStore,
-    ServiceTokenReplayStoreError, ServiceTokenTenantBinding, VerifiedClaims,
-    service_token_mac_input,
+    DynPdp, DynServiceTokenReplayStore, FederatedAccessProfile, Pdp, PdpError, RawCredential,
+    RssAccessProfile, SERVICE_TOKEN_TENANT_HEADER, SERVICE_TOKEN_TENANT_MAC_NAME,
+    ServiceTokenProfile, ServiceTokenReplayDeadline, ServiceTokenReplayDeadlineError,
+    ServiceTokenReplayDisposition, ServiceTokenReplayKey, ServiceTokenReplayKeyError,
+    ServiceTokenReplayScope, ServiceTokenReplayStore, ServiceTokenReplayStoreError,
+    ServiceTokenTenantBinding, TokenAlgorithm, TokenPolicy, TokenProfile, TokenProfileMarker,
+    VerifiedClaims, service_token_mac_input,
 };
 pub use publisher::{
     DynPublisher, PublishErrorKind, PublishRequest, Publisher, PublisherError, Topic,

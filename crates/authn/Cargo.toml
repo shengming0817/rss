@@ -35,6 +35,7 @@ serde_json = { workspace = true }
 spiffe = { workspace = true }
 
 [dev-dependencies]
+vocab = { path = "../vocab" }
 # 表驱动单测（row_visibility / Jwt::parse 等）。
 rstest = { workspace = true }
 # test-support：单测经 runctx::test_support::app_ctx 构造 AppCtx（仅 authn 自测启用，不进生产构建）。

@@ -1886,8 +1886,11 @@ mod tests {
             &::generated::http::settings_v4::ROUTE,
         )
         .expect("settings config-get is mounted with classified read state");
-        let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
-            .expect("Primary JWT auth plan");
+        let plan = primitives::AuthPlan::new(
+            ListenerKind::Primary,
+            primitives::AuthScheme::RssAccessToken,
+        )
+        .expect("Primary JWT auth plan");
         let router = ::httpserve::finalize_primary_auth_with_audit(
             routes,
             plan,
@@ -1906,7 +1909,7 @@ mod tests {
         tenant_id: Option<TenantId>,
     ) -> axum::Router {
         router.layer(axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             principal_kind,
             "settings-config-get-subject",
             tenant_id,
@@ -2108,7 +2111,7 @@ mod tests {
             Arc::new(authorizer.clone()),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+            primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::Admin,
             "settings-config-get-subject",
             Some(tenant()),

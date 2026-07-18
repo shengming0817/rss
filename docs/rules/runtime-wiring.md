@@ -11,7 +11,7 @@ INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source
 - `cargo xtask runtime-deps guard` discovers every `SharedRuntimeDeps` under `assemblies/*/src` with `syn` and fails if a carrier is missing, unnamed, empty, or contains a disallowed field type. New assemblies are covered automatically; an empty discovery set fails closed.
 - The allowlist source is `xtask/runtime-deps-guard.toml`. Missing, malformed, or schema-invalid config fails closed; there is no hardcoded fallback.
 - `allowedRoots` may name adapter crate roots that exist at `adapters/<root>/Cargo.toml`, or basis/engine/DI-infra crate roots from `xtask/src/layers.rs`. Domain roots, service roots, `std`, `core`, `alloc`, and broad `distributed` are forbidden.
-- `exactExceptions` is intentionally closed. The current set is exactly `Arc<secure::DigestPasswordBlocklist>`, `Arc<dyn distributed::DomainTransport>`, `Arc<oidc::OidcProvider>`, and `Arc<vault::VaultSigner>`; it does not allow an entire root or any other wrapper/bound. The password digest set is a concrete immutable `secure` value; loading stays in the crypto adapter and does not widen this exception to a provider trait or adapter-owned alias.
+- `exactExceptions` is intentionally closed. The current set is exactly `Arc<secure::DigestPasswordBlocklist>`, `Arc<dyn distributed::DomainTransport>`, the three concrete typed `Arc<oidc::OidcProvider<P>>` profile instantiations, and `Arc<vault::VaultSigner>`; it does not allow a generic/mixed provider, an entire root, or any other wrapper/bound. The password digest set is a concrete immutable `secure` value; loading stays in the crypto adapter and does not widen this exception to a provider trait or adapter-owned alias.
 
 ## Extension Flow
 

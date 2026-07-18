@@ -1,0 +1,27 @@
+warning: RawCredential constructors may only be referenced by the typed authn verification funnel
+  --> $DIR/disallowed.rs:6:16
+   |
+LL |     let _rss = RawCredential::rss_access("rss.token");
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: call `authn::verify_rss_access`, `authn::verify_federated_access`, or `authn::verify_service_token`; do not label raw token bytes in this crate
+   = note: `#[warn(rss_raw_credential_callsite)]` on by default
+
+warning: RawCredential constructors may only be referenced by the typed authn verification funnel
+  --> $DIR/disallowed.rs:7:33
+   |
+LL |     let federated_constructor = RawCredential::federated_access;
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: call `authn::verify_rss_access`, `authn::verify_federated_access`, or `authn::verify_service_token`; do not label raw token bytes in this crate
+
+warning: RawCredential constructors may only be referenced by the typed authn verification funnel
+  --> $DIR/disallowed.rs:10:9
+   |
+LL |         RawCredential::service_token;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: call `authn::verify_rss_access`, `authn::verify_federated_access`, or `authn::verify_service_token`; do not label raw token bytes in this crate
+
+warning: 3 warnings emitted
+

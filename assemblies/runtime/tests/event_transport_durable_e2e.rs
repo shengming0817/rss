@@ -24,7 +24,7 @@ use audit::ports::{
     AuditChainHasher, AuditListTenantAppend, AuditListTenantAppender, DynAuditReadRepo,
 };
 use audit::{AuditDomain, InMemAuditRepo};
-use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
+use consistency::{EventEntry, IdemKey};
 use diport::{
     DynKeyProvider, EncryptOutput, EnvelopeMetadata, EnvelopeSubjectId, KeyName, KeyProvider,
     KeyProviderError, KeyRef, KeyVersion, MessageId, OpaqueActorId, OutboxActor, PublishRequest,
@@ -489,11 +489,7 @@ fn policy_updated_entry_and_envelope(
         tenant_id: tenant.to_string(),
         occurred_at: i64::try_from(NOW_SECS)?,
     };
-    let entry = EventEntry::new(
-        EventTopic::parse(policy_updated::TOPIC)?,
-        IdemKey::parse(event_id)?,
-        OutboxPayload::from_reviewed_event_bytes(serde_json::to_vec(&payload)?),
-    );
+    let entry = EventEntry::from_generated_payload(&payload, IdemKey::parse(event_id)?)?;
     let actor = OutboxActor::scoped(
         vocab::PrincipalKind::Admin,
         OpaqueActorId::from_opaque(CANON_USER)?,

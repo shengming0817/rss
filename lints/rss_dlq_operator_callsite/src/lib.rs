@@ -25,12 +25,12 @@ const ALLOWED_RUNTIME_FUNCTIONS: &[&str] = &[
     "issue_authorized_dlq_capability",
     "issue_authorized_reconcile_capability",
 ];
-const ALLOWED_RUNTIME_SUBJECT_FUNCTION: &str = "verified_dlq_operator_subject";
+const ALLOWED_RUNTIME_RECEIPT_FUNCTION: &str = "dlq_operator_receipt";
 
 #[derive(Clone, Copy)]
 enum Funnel {
     Capability,
-    VerifiedSubject,
+    AuthorizedReceipt,
 }
 
 dylint_linting::declare_late_lint! {
@@ -76,8 +76,10 @@ fn guarded_funnel(cx: &LateContext<'_>, did: DefId) -> Option<Funnel> {
     }
     match cx.tcx.item_name(did).as_str() {
         "issue_for_authorized_operator" => Some(Funnel::Capability),
-        "from_verified" if impl_self_type_named(cx, did, "VerifiedOperatorSubject") => {
-            Some(Funnel::VerifiedSubject)
+        "from_authenticated_and_authorized"
+            if impl_self_type_named(cx, did, "AuthorizedDlqOperatorReceipt") =>
+        {
+            Some(Funnel::AuthorizedReceipt)
         }
         _ => None,
     }
@@ -93,7 +95,9 @@ fn impl_self_type_named(cx: &LateContext<'_>, did: DefId, expected: &str) -> boo
 
 fn caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId, funnel: Funnel) -> bool {
     let crate_name = cx.tcx.crate_name(LOCAL_CRATE);
-    if ALLOWED_CALLER_CRATES.contains(&crate_name.as_str()) {
+    if matches!(funnel, Funnel::Capability)
+        && ALLOWED_CALLER_CRATES.contains(&crate_name.as_str())
+    {
         return true;
     }
     if crate_name.as_str() != "runtime" {
@@ -108,9 +112,9 @@ fn caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId, funnel: Funnel) -> boo
             ALLOWED_RUNTIME_FUNCTIONS.contains(&item_name.as_str())
                 && ALLOWED_RUNTIME_FUNCTIONS.contains(&def_path.as_str())
         }
-        Funnel::VerifiedSubject => {
-            item_name.as_str() == ALLOWED_RUNTIME_SUBJECT_FUNCTION
-                && def_path == ALLOWED_RUNTIME_SUBJECT_FUNCTION
+        Funnel::AuthorizedReceipt => {
+            item_name.as_str() == ALLOWED_RUNTIME_RECEIPT_FUNCTION
+                && def_path == ALLOWED_RUNTIME_RECEIPT_FUNCTION
         }
     }
 }
@@ -121,9 +125,9 @@ fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span, funnel: Funnel) {
             "operator capability 仅 admin/PDP 边界可签发：`issue_for_authorized_operator` 不得在此 crate 调用",
             "在 allowlist 的 admin/PDP 授权路径中签发 capability；runtime CLI 仅允许精确的 authenticated+authorized wrapper，其它 crate 经请求 DTO 接收",
         ),
-        Funnel::VerifiedSubject => (
-            "verified operator subject 仅认证/PDP 边界可构造：`from_verified` 不得在此调用",
-            "httpserve 只能在完成认证/PDP 后构造；runtime 只能经 top-level `verified_dlq_operator_subject` wrapper 构造",
+        Funnel::AuthorizedReceipt => (
+            "authorized DLQ operator receipt 仅认证/PDP 边界可构造：`from_authenticated_and_authorized` 不得在此调用",
+            "仅 runtime 可在完成 service-token 验证与精确 action/tenant grant 授权后，经 top-level `dlq_operator_receipt` wrapper 构造 private-field typed receipt",
         ),
     };
     span_lint_hir_and_then(
@@ -144,7 +148,7 @@ fn ui_disallowed() {
 }
 
 #[test]
-fn ui_httpserve_allowed() {
+fn ui_httpserve_capability_allowed_but_verified_subject_disallowed() {
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "httpserve");
 }
 

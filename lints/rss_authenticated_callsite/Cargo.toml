@@ -3,7 +3,7 @@ name = "rss_authenticated_callsite"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "RSS 治理：限定认证证据与审计 subject funnel 仅组合根（assembly / bin crate）可调用（callsite-allowlist）"
+description = "RSS 治理：限定认证证据、主体降维与 verified maintenance capability funnel 仅 runtime 组合根可调用"
 
 [lib]
 crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_test_example 经此暴露 dev-dep httpserve / vocab）
@@ -37,6 +37,7 @@ httpserve = { path = "../../crates/httpserve" }
 authn = { path = "../../crates/authn" }
 vocab = { path = "../../crates/vocab" }
 primitives = { path = "../../crates/primitives" }
+postgres = { path = "../../adapters/postgres", features = ["domain-settings"] }
 
 [package.metadata.rust-analyzer]
 rustc_private = true

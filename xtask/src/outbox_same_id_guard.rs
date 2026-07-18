@@ -148,9 +148,12 @@ const CARRIERS: &[Carrier] = &[
     },
     Carrier {
         path: "crates/eventexec/src/dlq.rs",
-        purpose: "typed resolution request, closed resolution kind/outcome, and verified subject witness",
+        purpose: "typed resolution request, closed resolution kind/outcome, and authorized operator receipt",
         anchors: &[
-            "pub struct VerifiedOperatorSubject(String)",
+            "pub struct AuthorizedDlqOperatorReceipt",
+            "pub const fn from_authenticated_and_authorized(",
+            "pub struct VerifiedOperatorSubject(vocab::ServiceCallerDomain)",
+            "pub const fn from_authorized_receipt(receipt: AuthorizedDlqOperatorReceipt)",
             "pub struct OutboxExpiredResolutionRequest",
             "pub enum OutboxExpiredResolutionKind",
             "Self::AcceptedGap => \"accepted_gap\"",
@@ -161,12 +164,13 @@ const CARRIERS: &[Carrier] = &[
     },
     Carrier {
         path: "assemblies/runtime/src/lib.rs",
-        purpose: "operator CLI exposes terminal resolution only after the exact verified-subject wrapper",
+        purpose: "operator CLI exposes terminal resolution only after authentication and exact grant mint a typed receipt",
         anchors: &[
             "\"resolve-expired-outbox\" =>",
-            "fn verified_dlq_operator_subject(",
-            "VerifiedOperatorSubject::from_verified(operator_subject)",
-            "let verified_operator_subject = verified_dlq_operator_subject(&operator_subject);",
+            "async fn dlq_operator_receipt(",
+            "AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(caller)",
+            "dlq_operator_receipt(session, parsed, resource_id, principal, self.operator).await?",
+            "VerifiedOperatorSubject::from_authorized_receipt(receipt)",
         ],
     },
     Carrier {
@@ -195,20 +199,21 @@ const CARRIERS: &[Carrier] = &[
     },
     Carrier {
         path: "lints/rss_dlq_operator_callsite/src/lib.rs",
-        purpose: "verified operator subject construction remains at the auth/PDP boundary",
+        purpose: "authorized operator receipt construction remains at the auth/PDP boundary",
         anchors: &[
-            "ALLOWED_RUNTIME_SUBJECT_FUNCTION: &str = \"verified_dlq_operator_subject\"",
-            "impl_self_type_named(cx, did, \"VerifiedOperatorSubject\")",
-            "Funnel::VerifiedSubject",
-            "def_path == ALLOWED_RUNTIME_SUBJECT_FUNCTION",
+            "ALLOWED_RUNTIME_RECEIPT_FUNCTION: &str = \"dlq_operator_receipt\"",
+            "impl_self_type_named(cx, did, \"AuthorizedDlqOperatorReceipt\")",
+            "Funnel::AuthorizedReceipt",
+            "def_path == ALLOWED_RUNTIME_RECEIPT_FUNCTION",
         ],
     },
     Carrier {
         path: "lints/rss_dlq_operator_callsite/ui/runtime.rs",
         purpose: "UI red/green locks the exact runtime wrapper and rejects direct or nested forgery",
         anchors: &[
-            "fn verified_dlq_operator_subject(",
-            "let _subject = eventexec::VerifiedOperatorSubject::from_verified(\"operator:mallory\")",
+            "fn dlq_operator_receipt(",
+            "let _receipt = eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(",
+            "vocab::ServiceCallerDomain::MaintenanceOperator",
             "mod nested_runtime_module",
         ],
     },
@@ -216,7 +221,7 @@ const CARRIERS: &[Carrier] = &[
         path: "lints/rss_dlq_operator_callsite/ui/runtime.stderr",
         purpose: "UI golden proves both direct and same-named nested runtime calls are rejected",
         anchors: &[
-            "verified operator subject 仅认证/PDP 边界可构造",
+            "authorized DLQ operator receipt 仅认证/PDP 边界可构造",
             "runtime.rs:28:20",
             "runtime.rs:44:9",
             "warning: 4 warnings emitted",

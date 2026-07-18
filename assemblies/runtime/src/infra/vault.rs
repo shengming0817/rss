@@ -257,7 +257,7 @@ pub(crate) const VAULT_TRANSIT_MOUNT_ENV: &str = "RSS_VAULT_TRANSIT_MOUNT";
 pub(crate) const SETTINGS_CONFIG_VALUE_KEY_NAME_ENV: &str = "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME";
 /// Optional PEM CA cert path for private/dev Vault HTTPS endpoints.
 pub(crate) const VAULT_CA_CERT_PEM_PATH_ENV: &str = "RSS_VAULT_CA_CERT_PEM_PATH";
-const JWT_KEY_ID_ENV: &str = "RSS_JWT_ES256_KEY_ID";
+const RSS_ACCESS_TOKEN_KEY_ID_ENV: &str = "RSS_ACCESS_TOKEN_ES256_KEY_ID";
 
 /// 从注入的配置读取器构造 vault `VaultSigner`（Transit ES256 签 access JWT）。
 ///
@@ -299,22 +299,24 @@ pub(crate) fn build_vault_signer_with(
     .map_err(|e| anyhow::anyhow!("vault signer config error: {e}"))
 }
 
-const OIDC_JWKS_CLI: &str = "oidc-jwks";
-const OIDC_JWKS_EXPORT_VAULT_TRANSIT_CLI: &str = "export-vault-transit";
-const OIDC_JWKS_PATH_ENV: &str = "RSS_OIDC_JWKS_PATH";
+const RSS_ACCESS_JWKS_CLI: &str = "rss-access-jwks";
+const RSS_ACCESS_JWKS_EXPORT_VAULT_TRANSIT_CLI: &str = "export-vault-transit";
+const RSS_ACCESS_TOKEN_JWKS_PATH_ENV: &str = "RSS_ACCESS_TOKEN_JWKS_PATH";
 
-pub fn is_oidc_jwks_export_command(args: &[String]) -> bool {
+pub fn is_rss_access_jwks_export_command(args: &[String]) -> bool {
     matches!(
         args,
-        [cmd, sub, ..] if cmd == OIDC_JWKS_CLI && sub == OIDC_JWKS_EXPORT_VAULT_TRANSIT_CLI
+        [cmd, sub, ..]
+            if cmd == RSS_ACCESS_JWKS_CLI
+                && sub == RSS_ACCESS_JWKS_EXPORT_VAULT_TRANSIT_CLI
     )
 }
 
-pub async fn run_oidc_jwks_export_command(
+pub async fn run_rss_access_jwks_export_command(
     args: &[String],
     runtime_inputs: &crate::OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
-    run_oidc_jwks_export_command_from(
+    run_rss_access_jwks_export_command_from(
         args,
         |name| runtime_inputs.config().value(name).map(str::to_owned),
         false,
@@ -322,24 +324,25 @@ pub async fn run_oidc_jwks_export_command(
     .await
 }
 
-async fn run_oidc_jwks_export_command_from(
+async fn run_rss_access_jwks_export_command_from(
     args: &[String],
     get: impl Fn(&str) -> Option<String>,
     allow_http: bool,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        is_oidc_jwks_export_command(args),
-        "usage: rss oidc-jwks export-vault-transit [--out <path>]"
+        is_rss_access_jwks_export_command(args),
+        "usage: rss rss-access-jwks export-vault-transit [--out <path>]"
     );
-    let out = oidc_jwks_export_output_path(args, &get)?;
+    let out = rss_access_jwks_export_output_path(args, &get)?;
     let addr = get(VAULT_ADDR_ENV)
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_ADDR_ENV}"))?;
     let token = get(VAULT_TOKEN_ENV)
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TOKEN_ENV}"))?;
     let mount = get(VAULT_TRANSIT_MOUNT_ENV)
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TRANSIT_MOUNT_ENV}"))?;
-    let key_id = get(JWT_KEY_ID_ENV)
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_KEY_ID_ENV}"))?;
+    let key_id = get(RSS_ACCESS_TOKEN_KEY_ID_ENV).ok_or_else(|| {
+        anyhow::anyhow!("missing required env var: {RSS_ACCESS_TOKEN_KEY_ID_ENV}")
+    })?;
     let client = build_vault_tls_client_from(&get)?;
     let url = vault_transit_key_metadata_url(&addr, &mount, &key_id, allow_http)?;
     let response = client
@@ -358,11 +361,12 @@ async fn run_oidc_jwks_export_command_from(
         status.is_success(),
         "Vault Transit key metadata request returned non-success status"
     );
-    let jwks = vault_transit_key_response_to_oidc_jwks(key_id.trim(), &body)?;
-    write_jwks_atomic(&out, &jwks).with_context(|| format!("write OIDC JWKS to {}", out.display()))
+    let jwks = vault_transit_key_response_to_rss_access_jwks(key_id.trim(), &body)?;
+    write_jwks_atomic(&out, &jwks)
+        .with_context(|| format!("write RSS access-token JWKS to {}", out.display()))
 }
 
-fn oidc_jwks_export_output_path(
+fn rss_access_jwks_export_output_path(
     args: &[String],
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<PathBuf> {
@@ -371,6 +375,7 @@ fn oidc_jwks_export_output_path(
     while index < args.len() {
         match args[index].as_str() {
             "--out" => {
+                anyhow::ensure!(out.is_none(), "--out may only be specified once");
                 index += 1;
                 let value = args
                     .get(index)
@@ -378,16 +383,20 @@ fn oidc_jwks_export_output_path(
                 anyhow::ensure!(!value.trim().is_empty(), "--out requires a non-empty path");
                 out = Some(PathBuf::from(value.trim()));
             }
-            other => anyhow::bail!("unknown oidc-jwks export-vault-transit argument: {other}"),
+            other => {
+                anyhow::bail!("unknown rss-access-jwks export-vault-transit argument: {other}")
+            }
         }
         index += 1;
     }
     if let Some(out) = out {
         return Ok(out);
     }
-    let path = get(OIDC_JWKS_PATH_ENV)
+    let path = get(RSS_ACCESS_TOKEN_JWKS_PATH_ENV)
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {OIDC_JWKS_PATH_ENV}"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("missing required env var: {RSS_ACCESS_TOKEN_JWKS_PATH_ENV}")
+        })?;
     Ok(PathBuf::from(path.trim()))
 }
 
@@ -404,7 +413,7 @@ fn vault_transit_key_metadata_url(
         _ => anyhow::bail!("Vault base URL must use https"),
     }
     let mount_segments = vault_path_segments(mount, VAULT_TRANSIT_MOUNT_ENV)?;
-    let key_segments = vault_path_segments(key_id, JWT_KEY_ID_ENV)?;
+    let key_segments = vault_path_segments(key_id, RSS_ACCESS_TOKEN_KEY_ID_ENV)?;
     {
         let mut segments = url
             .path_segments_mut()
@@ -449,11 +458,14 @@ struct VaultTransitKeyVersion {
     public_key: Option<String>,
 }
 
-fn vault_transit_key_response_to_oidc_jwks(kid: &str, body: &[u8]) -> anyhow::Result<Vec<u8>> {
+fn vault_transit_key_response_to_rss_access_jwks(
+    kid: &str,
+    body: &[u8],
+) -> anyhow::Result<Vec<u8>> {
     let response: VaultTransitKeyResponse =
         serde_json::from_slice(body).context("parse Vault Transit key metadata response")?;
     let public_key_pem = current_vault_public_key(&response.data)?;
-    es256_public_key_pem_to_jwks(kid, public_key_pem)
+    es256_public_key_pem_to_rss_access_jwks(kid, public_key_pem)
 }
 
 fn current_vault_public_key(data: &VaultTransitKeyData) -> anyhow::Result<&str> {
@@ -474,7 +486,10 @@ fn current_vault_public_key(data: &VaultTransitKeyData) -> anyhow::Result<&str> 
         .ok_or_else(|| anyhow::anyhow!("Vault Transit current key version is missing public_key"))
 }
 
-fn es256_public_key_pem_to_jwks(kid: &str, public_key_pem: &str) -> anyhow::Result<Vec<u8>> {
+fn es256_public_key_pem_to_rss_access_jwks(
+    kid: &str,
+    public_key_pem: &str,
+) -> anyhow::Result<Vec<u8>> {
     use p256::elliptic_curve::sec1::ToEncodedPoint as _;
     use p256::pkcs8::DecodePublicKey as _;
 
@@ -499,22 +514,26 @@ fn es256_public_key_pem_to_jwks(kid: &str, public_key_pem: &str) -> anyhow::Resu
             "y": b64.encode(y)
         }]
     });
-    serde_json::to_vec_pretty(&jwks).context("serialize OIDC JWKS")
+    serde_json::to_vec_pretty(&jwks).context("serialize RSS access-token JWKS")
 }
 
 fn write_jwks_atomic(path: &Path, jwks: &[u8]) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("OIDC JWKS output path must have a parent directory"))?;
-    fs::create_dir_all(parent).context("create OIDC JWKS output directory")?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("RSS access-token JWKS output path must have a parent directory")
+        })?;
+    fs::create_dir_all(parent).context("create RSS access-token JWKS output directory")?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("OIDC JWKS output path must end in a file name"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("RSS access-token JWKS output path must end in a file name")
+        })?;
     let tmp = parent.join(format!(".{file_name}.tmp"));
-    fs::write(&tmp, jwks).context("write temporary OIDC JWKS")?;
-    fs::rename(&tmp, path).context("rename temporary OIDC JWKS into place")
+    fs::write(&tmp, jwks).context("write temporary RSS access-token JWKS")?;
+    fs::rename(&tmp, path).context("rename temporary RSS access-token JWKS into place")
 }
 
 #[cfg(test)]
@@ -848,6 +867,39 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
+    fn rss_access_jwks_export_command_and_profile_path_are_exact() {
+        let command = vec![
+            RSS_ACCESS_JWKS_CLI.to_owned(),
+            RSS_ACCESS_JWKS_EXPORT_VAULT_TRANSIT_CLI.to_owned(),
+        ];
+        assert!(is_rss_access_jwks_export_command(&command));
+        assert!(!is_rss_access_jwks_export_command(&[
+            RSS_ACCESS_JWKS_CLI.to_owned()
+        ]));
+
+        let expected = std::path::PathBuf::from("/run/rss/rss-access.json");
+        let path = rss_access_jwks_export_output_path(&command, |name| {
+            (name == RSS_ACCESS_TOKEN_JWKS_PATH_ENV).then(|| expected.display().to_string())
+        })
+        .expect("profile-specific output path");
+        assert_eq!(path, expected);
+    }
+
+    #[test]
+    fn rss_access_jwks_export_rejects_duplicate_output_override() {
+        let command = vec![
+            RSS_ACCESS_JWKS_CLI.to_owned(),
+            RSS_ACCESS_JWKS_EXPORT_VAULT_TRANSIT_CLI.to_owned(),
+            "--out".to_owned(),
+            "/run/rss/first.json".to_owned(),
+            "--out".to_owned(),
+            "/run/rss/second.json".to_owned(),
+        ];
+        assert!(rss_access_jwks_export_output_path(&command, |_| None).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
     fn vault_transit_public_key_exports_es256_jwks_with_signing_kid() {
         use p256::ecdsa::SigningKey;
         use p256::pkcs8::{EncodePublicKey, LineEnding};
@@ -866,14 +918,14 @@ mod tests {
             }
         });
 
-        let jwks = vault_transit_key_response_to_oidc_jwks(
-            "rss-jwt-es256",
+        let jwks = vault_transit_key_response_to_rss_access_jwks(
+            "rss-access-es256",
             serde_json::to_vec(&raw).expect("json bytes").as_slice(),
         )
         .expect("vault public key exports to JWKS");
         let doc: serde_json::Value = serde_json::from_slice(&jwks).expect("valid jwks json");
         let key = &doc["keys"][0];
-        assert_eq!(key["kid"], "rss-jwt-es256");
+        assert_eq!(key["kid"], "rss-access-es256");
         assert_eq!(key["kty"], "EC");
         assert_eq!(key["crv"], "P-256");
         assert_eq!(key["alg"], "ES256");
@@ -888,7 +940,8 @@ mod tests {
     #[test]
     fn vault_transit_public_key_export_rejects_missing_current_public_key() -> anyhow::Result<()> {
         let raw = br#"{"data":{"latest_version":1,"keys":{"1":{}}}}"#;
-        let Err(err) = vault_transit_key_response_to_oidc_jwks("rss-jwt-es256", raw) else {
+        let Err(err) = vault_transit_key_response_to_rss_access_jwks("rss-access-es256", raw)
+        else {
             anyhow::bail!("missing current public key must fail");
         };
         assert!(

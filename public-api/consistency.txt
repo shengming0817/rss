@@ -586,6 +586,56 @@ pub use consistency::localtx::LocalTxBoundary
 pub use consistency::localtx::LocalTxCommitUnknown
 pub use consistency::localtx::LocalTxModel
 pub use consistency::localtx::LocalTxRetry
+pub enum consistency::localtx::LocalTxDeadlineStage
+pub consistency::localtx::LocalTxDeadlineStage::Acquire
+pub consistency::localtx::LocalTxDeadlineStage::Backoff
+pub consistency::localtx::LocalTxDeadlineStage::Begin
+pub consistency::localtx::LocalTxDeadlineStage::Commit
+pub consistency::localtx::LocalTxDeadlineStage::Operation
+pub consistency::localtx::LocalTxDeadlineStage::Rollback
+pub consistency::localtx::LocalTxDeadlineStage::Setup
+impl consistency::localtx::LocalTxDeadlineStage
+pub const consistency::localtx::LocalTxDeadlineStage::ALL: &'static [Self]
+pub const fn consistency::localtx::LocalTxDeadlineStage::as_label(self) -> &'static str
+impl core::clone::Clone for consistency::localtx::LocalTxDeadlineStage
+pub fn consistency::localtx::LocalTxDeadlineStage::clone(&self) -> consistency::localtx::LocalTxDeadlineStage
+impl core::cmp::Eq for consistency::localtx::LocalTxDeadlineStage
+impl core::cmp::PartialEq for consistency::localtx::LocalTxDeadlineStage
+pub fn consistency::localtx::LocalTxDeadlineStage::eq(&self, &consistency::localtx::LocalTxDeadlineStage) -> bool
+impl core::fmt::Debug for consistency::localtx::LocalTxDeadlineStage
+pub fn consistency::localtx::LocalTxDeadlineStage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::localtx::LocalTxDeadlineStage
+impl core::marker::StructuralPartialEq for consistency::localtx::LocalTxDeadlineStage
+impl core::marker::Freeze for consistency::localtx::LocalTxDeadlineStage
+impl core::marker::Send for consistency::localtx::LocalTxDeadlineStage
+impl core::marker::Sync for consistency::localtx::LocalTxDeadlineStage
+impl core::marker::Unpin for consistency::localtx::LocalTxDeadlineStage
+impl core::marker::UnsafeUnpin for consistency::localtx::LocalTxDeadlineStage
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::localtx::LocalTxDeadlineStage
+impl core::panic::unwind_safe::UnwindSafe for consistency::localtx::LocalTxDeadlineStage
+#[non_exhaustive] pub enum consistency::localtx::LocalTxExecutionBudgetError
+pub consistency::localtx::LocalTxExecutionBudgetError::SettlementReserveRange
+pub consistency::localtx::LocalTxExecutionBudgetError::ZeroSettlementReserve
+pub consistency::localtx::LocalTxExecutionBudgetError::ZeroTotal
+impl core::clone::Clone for consistency::localtx::LocalTxExecutionBudgetError
+pub fn consistency::localtx::LocalTxExecutionBudgetError::clone(&self) -> consistency::localtx::LocalTxExecutionBudgetError
+impl core::cmp::Eq for consistency::localtx::LocalTxExecutionBudgetError
+impl core::cmp::PartialEq for consistency::localtx::LocalTxExecutionBudgetError
+pub fn consistency::localtx::LocalTxExecutionBudgetError::eq(&self, &consistency::localtx::LocalTxExecutionBudgetError) -> bool
+impl core::error::Error for consistency::localtx::LocalTxExecutionBudgetError
+impl core::fmt::Debug for consistency::localtx::LocalTxExecutionBudgetError
+pub fn consistency::localtx::LocalTxExecutionBudgetError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::localtx::LocalTxExecutionBudgetError
+pub fn consistency::localtx::LocalTxExecutionBudgetError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::localtx::LocalTxExecutionBudgetError
+impl core::marker::StructuralPartialEq for consistency::localtx::LocalTxExecutionBudgetError
+impl core::marker::Freeze for consistency::localtx::LocalTxExecutionBudgetError
+impl core::marker::Send for consistency::localtx::LocalTxExecutionBudgetError
+impl core::marker::Sync for consistency::localtx::LocalTxExecutionBudgetError
+impl core::marker::Unpin for consistency::localtx::LocalTxExecutionBudgetError
+impl core::marker::UnsafeUnpin for consistency::localtx::LocalTxExecutionBudgetError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::localtx::LocalTxExecutionBudgetError
+impl core::panic::unwind_safe::UnwindSafe for consistency::localtx::LocalTxExecutionBudgetError
 pub enum consistency::localtx::LocalTxFinalStatus
 pub consistency::localtx::LocalTxFinalStatus::CommitUnknown
 pub consistency::localtx::LocalTxFinalStatus::Committed
@@ -610,6 +660,31 @@ impl core::marker::Unpin for consistency::localtx::LocalTxFinalStatus
 impl core::marker::UnsafeUnpin for consistency::localtx::LocalTxFinalStatus
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::localtx::LocalTxFinalStatus
 impl core::panic::unwind_safe::UnwindSafe for consistency::localtx::LocalTxFinalStatus
+pub struct consistency::localtx::LocalTxExecutionBudget
+impl consistency::localtx::LocalTxExecutionBudget
+pub const consistency::localtx::LocalTxExecutionBudget::DEFAULT: Self
+pub fn consistency::localtx::LocalTxExecutionBudget::new(core::time::Duration, core::time::Duration) -> core::result::Result<Self, consistency::localtx::LocalTxExecutionBudgetError>
+pub fn consistency::localtx::LocalTxExecutionBudget::operation(self) -> core::time::Duration
+pub const fn consistency::localtx::LocalTxExecutionBudget::settlement_reserve(self) -> core::time::Duration
+pub const fn consistency::localtx::LocalTxExecutionBudget::total(self) -> core::time::Duration
+impl core::clone::Clone for consistency::localtx::LocalTxExecutionBudget
+pub fn consistency::localtx::LocalTxExecutionBudget::clone(&self) -> consistency::localtx::LocalTxExecutionBudget
+impl core::cmp::Eq for consistency::localtx::LocalTxExecutionBudget
+impl core::cmp::PartialEq for consistency::localtx::LocalTxExecutionBudget
+pub fn consistency::localtx::LocalTxExecutionBudget::eq(&self, &consistency::localtx::LocalTxExecutionBudget) -> bool
+impl core::default::Default for consistency::localtx::LocalTxExecutionBudget
+pub fn consistency::localtx::LocalTxExecutionBudget::default() -> Self
+impl core::fmt::Debug for consistency::localtx::LocalTxExecutionBudget
+pub fn consistency::localtx::LocalTxExecutionBudget::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::localtx::LocalTxExecutionBudget
+impl core::marker::StructuralPartialEq for consistency::localtx::LocalTxExecutionBudget
+impl core::marker::Freeze for consistency::localtx::LocalTxExecutionBudget
+impl core::marker::Send for consistency::localtx::LocalTxExecutionBudget
+impl core::marker::Sync for consistency::localtx::LocalTxExecutionBudget
+impl core::marker::Unpin for consistency::localtx::LocalTxExecutionBudget
+impl core::marker::UnsafeUnpin for consistency::localtx::LocalTxExecutionBudget
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::localtx::LocalTxExecutionBudget
+impl core::panic::unwind_safe::UnwindSafe for consistency::localtx::LocalTxExecutionBudget
 pub mod consistency::outbox
 #[non_exhaustive] pub enum consistency::outbox::Disposition
 pub consistency::outbox::Disposition::Ack
@@ -793,6 +868,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::BacklogSam
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::BacklogSample
 pub struct consistency::outbox::EventEntry
 impl consistency::outbox::EventEntry
+pub fn consistency::outbox::EventEntry::from_generated_payload<P>(&P, consistency::idempotency::IdemKey) -> core::result::Result<Self, serde_json::error::Error> where P: vocab::contract::binding::GeneratedEventPayload + serde_core::ser::Serialize
+pub fn consistency::outbox::EventEntry::generated_fact(&self) -> core::option::Option<vocab::contract::binding::EventFactBinding>
 pub fn consistency::outbox::EventEntry::idem_key(&self) -> &consistency::idempotency::IdemKey
 pub fn consistency::outbox::EventEntry::new(consistency::outbox::EventTopic, consistency::idempotency::IdemKey, consistency::outbox::OutboxPayload) -> Self
 pub fn consistency::outbox::EventEntry::payload(&self) -> &[u8]
@@ -2079,6 +2156,25 @@ pub const consistency::saga::SagaStep::BINDING: vocab::contract::binding::SagaSt
 pub fn consistency::saga::SagaStep::compensate(&self, consistency::saga::SagaStepCtx) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::CompensationOutcome, consistency::error::EngineError>> + core::marker::Send
 pub fn consistency::saga::SagaStep::execute(&self, consistency::saga::SagaStepCtx) -> impl core::future::future::Future<Output = core::result::Result<Self::Output, consistency::error::EngineError>> + core::marker::Send
 pub mod consistency::tx_retry
+pub enum consistency::tx_retry::TxRetryBackoff
+pub consistency::tx_retry::TxRetryBackoff::Continue
+pub consistency::tx_retry::TxRetryBackoff::Exhausted
+impl core::clone::Clone for consistency::tx_retry::TxRetryBackoff
+pub fn consistency::tx_retry::TxRetryBackoff::clone(&self) -> consistency::tx_retry::TxRetryBackoff
+impl core::cmp::Eq for consistency::tx_retry::TxRetryBackoff
+impl core::cmp::PartialEq for consistency::tx_retry::TxRetryBackoff
+pub fn consistency::tx_retry::TxRetryBackoff::eq(&self, &consistency::tx_retry::TxRetryBackoff) -> bool
+impl core::fmt::Debug for consistency::tx_retry::TxRetryBackoff
+pub fn consistency::tx_retry::TxRetryBackoff::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::tx_retry::TxRetryBackoff
+impl core::marker::StructuralPartialEq for consistency::tx_retry::TxRetryBackoff
+impl core::marker::Freeze for consistency::tx_retry::TxRetryBackoff
+impl core::marker::Send for consistency::tx_retry::TxRetryBackoff
+impl core::marker::Sync for consistency::tx_retry::TxRetryBackoff
+impl core::marker::Unpin for consistency::tx_retry::TxRetryBackoff
+impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryBackoff
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryBackoff
+impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryBackoff
 pub enum consistency::tx_retry::TxRetryClass
 pub consistency::tx_retry::TxRetryClass::Conflict
 pub consistency::tx_retry::TxRetryClass::OwnershipLost
@@ -2193,7 +2289,7 @@ impl core::marker::Unpin for consistency::tx_retry::TxRetryReport
 impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryReport
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryReport
 impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryReport
-pub async fn consistency::tx_retry::run_tx_retry<T, E, Op, OpFut, Classify, Sleep, SleepFut>(consistency::tx_retry::TxRetryPolicy, Op, Classify, Sleep) -> (core::result::Result<T, E>, consistency::tx_retry::TxRetryReport) where Op: core::ops::function::FnMut(u32) -> OpFut, OpFut: core::future::future::Future<Output = core::result::Result<T, E>>, Classify: core::ops::function::Fn(&E) -> consistency::tx_retry::TxRetryClass, Sleep: core::ops::function::FnMut(core::time::Duration) -> SleepFut, SleepFut: core::future::future::Future<Output = ()>
+pub async fn consistency::tx_retry::run_tx_retry<T, E, Op, OpFut, Classify, Sleep, SleepFut>(consistency::tx_retry::TxRetryPolicy, Op, Classify, Sleep) -> (core::result::Result<T, E>, consistency::tx_retry::TxRetryReport) where Op: core::ops::function::FnMut(u32) -> OpFut, OpFut: core::future::future::Future<Output = core::result::Result<T, E>>, Classify: core::ops::function::Fn(&E) -> consistency::tx_retry::TxRetryClass, Sleep: core::ops::function::FnMut(core::time::Duration) -> SleepFut, SleepFut: core::future::future::Future<Output = consistency::tx_retry::TxRetryBackoff>
 #[non_exhaustive] pub enum consistency::CommandAttemptError
 pub consistency::CommandAttemptError::Zero
 impl core::clone::Clone for consistency::command_journal::CommandAttemptError
@@ -2612,6 +2708,56 @@ impl core::marker::Unpin for consistency::idempotency::LeaseOutcome
 impl core::marker::UnsafeUnpin for consistency::idempotency::LeaseOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::LeaseOutcome
 impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::LeaseOutcome
+pub enum consistency::LocalTxDeadlineStage
+pub consistency::LocalTxDeadlineStage::Acquire
+pub consistency::LocalTxDeadlineStage::Backoff
+pub consistency::LocalTxDeadlineStage::Begin
+pub consistency::LocalTxDeadlineStage::Commit
+pub consistency::LocalTxDeadlineStage::Operation
+pub consistency::LocalTxDeadlineStage::Rollback
+pub consistency::LocalTxDeadlineStage::Setup
+impl consistency::localtx::LocalTxDeadlineStage
+pub const consistency::localtx::LocalTxDeadlineStage::ALL: &'static [Self]
+pub const fn consistency::localtx::LocalTxDeadlineStage::as_label(self) -> &'static str
+impl core::clone::Clone for consistency::localtx::LocalTxDeadlineStage
+pub fn consistency::localtx::LocalTxDeadlineStage::clone(&self) -> consistency::localtx::LocalTxDeadlineStage
+impl core::cmp::Eq for consistency::localtx::LocalTxDeadlineStage
+impl core::cmp::PartialEq for consistency::localtx::LocalTxDeadlineStage
+pub fn consistency::localtx::LocalTxDeadlineStage::eq(&self, &consistency::localtx::LocalTxDeadlineStage) -> bool
+impl core::fmt::Debug for consistency::localtx::LocalTxDeadlineStage
+pub fn consistency::localtx::LocalTxDeadlineStage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::localtx::LocalTxDeadlineStage
+impl core::marker::StructuralPartialEq for consistency::localtx::LocalTxDeadlineStage
+impl core::marker::Freeze for consistency::localtx::LocalTxDeadlineStage
+impl core::marker::Send for consistency::localtx::LocalTxDeadlineStage
+impl core::marker::Sync for consistency::localtx::LocalTxDeadlineStage
+impl core::marker::Unpin for consistency::localtx::LocalTxDeadlineStage
+impl core::marker::UnsafeUnpin for consistency::localtx::LocalTxDeadlineStage
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::localtx::LocalTxDeadlineStage
+impl core::panic::unwind_safe::UnwindSafe for consistency::localtx::LocalTxDeadlineStage
+#[non_exhaustive] pub enum consistency::LocalTxExecutionBudgetError
+pub consistency::LocalTxExecutionBudgetError::SettlementReserveRange
+pub consistency::LocalTxExecutionBudgetError::ZeroSettlementReserve
+pub consistency::LocalTxExecutionBudgetError::ZeroTotal
+impl core::clone::Clone for consistency::localtx::LocalTxExecutionBudgetError
+pub fn consistency::localtx::LocalTxExecutionBudgetError::clone(&self) -> consistency::localtx::LocalTxExecutionBudgetError
+impl core::cmp::Eq for consistency::localtx::LocalTxExecutionBudgetError
+impl core::cmp::PartialEq for consistency::localtx::LocalTxExecutionBudgetError
+pub fn consistency::localtx::LocalTxExecutionBudgetError::eq(&self, &consistency::localtx::LocalTxExecutionBudgetError) -> bool
+impl core::error::Error for consistency::localtx::LocalTxExecutionBudgetError
+impl core::fmt::Debug for consistency::localtx::LocalTxExecutionBudgetError
+pub fn consistency::localtx::LocalTxExecutionBudgetError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::localtx::LocalTxExecutionBudgetError
+pub fn consistency::localtx::LocalTxExecutionBudgetError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::localtx::LocalTxExecutionBudgetError
+impl core::marker::StructuralPartialEq for consistency::localtx::LocalTxExecutionBudgetError
+impl core::marker::Freeze for consistency::localtx::LocalTxExecutionBudgetError
+impl core::marker::Send for consistency::localtx::LocalTxExecutionBudgetError
+impl core::marker::Sync for consistency::localtx::LocalTxExecutionBudgetError
+impl core::marker::Unpin for consistency::localtx::LocalTxExecutionBudgetError
+impl core::marker::UnsafeUnpin for consistency::localtx::LocalTxExecutionBudgetError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::localtx::LocalTxExecutionBudgetError
+impl core::panic::unwind_safe::UnwindSafe for consistency::localtx::LocalTxExecutionBudgetError
 pub enum consistency::LocalTxFinalStatus
 pub consistency::LocalTxFinalStatus::CommitUnknown
 pub consistency::LocalTxFinalStatus::Committed
@@ -3147,6 +3293,25 @@ impl core::marker::Unpin for consistency::outbox::StoredOutboxEntryError
 impl core::marker::UnsafeUnpin for consistency::outbox::StoredOutboxEntryError
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::StoredOutboxEntryError
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::StoredOutboxEntryError
+pub enum consistency::TxRetryBackoff
+pub consistency::TxRetryBackoff::Continue
+pub consistency::TxRetryBackoff::Exhausted
+impl core::clone::Clone for consistency::tx_retry::TxRetryBackoff
+pub fn consistency::tx_retry::TxRetryBackoff::clone(&self) -> consistency::tx_retry::TxRetryBackoff
+impl core::cmp::Eq for consistency::tx_retry::TxRetryBackoff
+impl core::cmp::PartialEq for consistency::tx_retry::TxRetryBackoff
+pub fn consistency::tx_retry::TxRetryBackoff::eq(&self, &consistency::tx_retry::TxRetryBackoff) -> bool
+impl core::fmt::Debug for consistency::tx_retry::TxRetryBackoff
+pub fn consistency::tx_retry::TxRetryBackoff::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::tx_retry::TxRetryBackoff
+impl core::marker::StructuralPartialEq for consistency::tx_retry::TxRetryBackoff
+impl core::marker::Freeze for consistency::tx_retry::TxRetryBackoff
+impl core::marker::Send for consistency::tx_retry::TxRetryBackoff
+impl core::marker::Sync for consistency::tx_retry::TxRetryBackoff
+impl core::marker::Unpin for consistency::tx_retry::TxRetryBackoff
+impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryBackoff
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryBackoff
+impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryBackoff
 pub enum consistency::TxRetryClass
 pub consistency::TxRetryClass::Conflict
 pub consistency::TxRetryClass::OwnershipLost
@@ -3480,6 +3645,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::EntityI
 impl core::panic::unwind_safe::UnwindSafe for consistency::reconcile::EntityId
 pub struct consistency::EventEntry
 impl consistency::outbox::EventEntry
+pub fn consistency::outbox::EventEntry::from_generated_payload<P>(&P, consistency::idempotency::IdemKey) -> core::result::Result<Self, serde_json::error::Error> where P: vocab::contract::binding::GeneratedEventPayload + serde_core::ser::Serialize
+pub fn consistency::outbox::EventEntry::generated_fact(&self) -> core::option::Option<vocab::contract::binding::EventFactBinding>
 pub fn consistency::outbox::EventEntry::idem_key(&self) -> &consistency::idempotency::IdemKey
 pub fn consistency::outbox::EventEntry::new(consistency::outbox::EventTopic, consistency::idempotency::IdemKey, consistency::outbox::OutboxPayload) -> Self
 pub fn consistency::outbox::EventEntry::payload(&self) -> &[u8]
@@ -3642,6 +3809,31 @@ impl core::marker::Unpin for consistency::idempotency::LeaseToken
 impl core::marker::UnsafeUnpin for consistency::idempotency::LeaseToken
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::LeaseToken
 impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::LeaseToken
+pub struct consistency::LocalTxExecutionBudget
+impl consistency::localtx::LocalTxExecutionBudget
+pub const consistency::localtx::LocalTxExecutionBudget::DEFAULT: Self
+pub fn consistency::localtx::LocalTxExecutionBudget::new(core::time::Duration, core::time::Duration) -> core::result::Result<Self, consistency::localtx::LocalTxExecutionBudgetError>
+pub fn consistency::localtx::LocalTxExecutionBudget::operation(self) -> core::time::Duration
+pub const fn consistency::localtx::LocalTxExecutionBudget::settlement_reserve(self) -> core::time::Duration
+pub const fn consistency::localtx::LocalTxExecutionBudget::total(self) -> core::time::Duration
+impl core::clone::Clone for consistency::localtx::LocalTxExecutionBudget
+pub fn consistency::localtx::LocalTxExecutionBudget::clone(&self) -> consistency::localtx::LocalTxExecutionBudget
+impl core::cmp::Eq for consistency::localtx::LocalTxExecutionBudget
+impl core::cmp::PartialEq for consistency::localtx::LocalTxExecutionBudget
+pub fn consistency::localtx::LocalTxExecutionBudget::eq(&self, &consistency::localtx::LocalTxExecutionBudget) -> bool
+impl core::default::Default for consistency::localtx::LocalTxExecutionBudget
+pub fn consistency::localtx::LocalTxExecutionBudget::default() -> Self
+impl core::fmt::Debug for consistency::localtx::LocalTxExecutionBudget
+pub fn consistency::localtx::LocalTxExecutionBudget::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::localtx::LocalTxExecutionBudget
+impl core::marker::StructuralPartialEq for consistency::localtx::LocalTxExecutionBudget
+impl core::marker::Freeze for consistency::localtx::LocalTxExecutionBudget
+impl core::marker::Send for consistency::localtx::LocalTxExecutionBudget
+impl core::marker::Sync for consistency::localtx::LocalTxExecutionBudget
+impl core::marker::Unpin for consistency::localtx::LocalTxExecutionBudget
+impl core::marker::UnsafeUnpin for consistency::localtx::LocalTxExecutionBudget
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::localtx::LocalTxExecutionBudget
+impl core::panic::unwind_safe::UnwindSafe for consistency::localtx::LocalTxExecutionBudget
 pub struct consistency::Lsn(_)
 impl consistency::projection::Lsn
 pub fn consistency::projection::Lsn::get(&self) -> u64
@@ -4370,4 +4562,4 @@ pub fn consistency::SagaStep::execute(&self, consistency::saga::SagaStepCtx) -> 
 pub trait consistency::SerialInOrderGuarantor: consistency::projection::sealed::Sealed + core::marker::Copy
 impl consistency::projection::SerialInOrderGuarantor for consistency::projection::SerialInOrder
 pub fn consistency::is_canonical_topic_name(&str) -> bool
-pub async fn consistency::run_tx_retry<T, E, Op, OpFut, Classify, Sleep, SleepFut>(consistency::tx_retry::TxRetryPolicy, Op, Classify, Sleep) -> (core::result::Result<T, E>, consistency::tx_retry::TxRetryReport) where Op: core::ops::function::FnMut(u32) -> OpFut, OpFut: core::future::future::Future<Output = core::result::Result<T, E>>, Classify: core::ops::function::Fn(&E) -> consistency::tx_retry::TxRetryClass, Sleep: core::ops::function::FnMut(core::time::Duration) -> SleepFut, SleepFut: core::future::future::Future<Output = ()>
+pub async fn consistency::run_tx_retry<T, E, Op, OpFut, Classify, Sleep, SleepFut>(consistency::tx_retry::TxRetryPolicy, Op, Classify, Sleep) -> (core::result::Result<T, E>, consistency::tx_retry::TxRetryReport) where Op: core::ops::function::FnMut(u32) -> OpFut, OpFut: core::future::future::Future<Output = core::result::Result<T, E>>, Classify: core::ops::function::Fn(&E) -> consistency::tx_retry::TxRetryClass, Sleep: core::ops::function::FnMut(core::time::Duration) -> SleepFut, SleepFut: core::future::future::Future<Output = consistency::tx_retry::TxRetryBackoff>

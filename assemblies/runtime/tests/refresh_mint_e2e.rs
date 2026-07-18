@@ -28,9 +28,11 @@ use httpserve::{
 };
 use oidc::OidcProvider;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
-use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme};
-use runtime::auth_bridge::apply_verify_bridge;
-use runtime::{StaticOidcKeyProfile, StaticOidcProviderConfig, provider_from_static_config};
+use primitives::{AuthPlan, AuthScheme, ListenerKind};
+use runtime::auth_bridge::apply_rss_access_verify_bridge_for_test;
+use runtime::{
+    KeyedEs256StaticKey, RssAccessStaticProviderConfig, rss_access_provider_from_static_config,
+};
 use tower::ServiceExt as _;
 use vault::VaultSigner;
 use wiremock::matchers::{body_partial_json, method as match_method};
@@ -122,9 +124,9 @@ impl Respond for TransitSignResponder {
     }
 }
 
-/// 经 `new_allow_http`（mock 是 http）+ 注入 mock URI 构造 `JwtIssuer<VaultSigner>`（ES256，FixedClock）。
+/// 经 `new_allow_http`（mock 是 http）+ 注入 mock URI 构造 RSS access issuer（ES256，FixedClock）。
 #[allow(clippy::expect_used)]
-fn vault_jwt_issuer(vault_uri: &str) -> authn::JwtIssuer<VaultSigner> {
+fn vault_jwt_issuer(vault_uri: &str) -> authn::JwtIssuer<diport::RssAccessProfile, VaultSigner> {
     let signer = VaultSigner::new_allow_http(
         reqwest::Client::new(),
         vault_uri,
@@ -134,32 +136,34 @@ fn vault_jwt_issuer(vault_uri: &str) -> authn::JwtIssuer<VaultSigner> {
         vault::SignatureMarshaling::Jws,
     )
     .expect("vault signer (dev http)");
-    authn::JwtIssuer::new(
+    authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
         Arc::new(signer),
         Box::new(FixedClock(NOW)),
-        authn::JwtIssuerConfig {
-            key: diport::KeyId::new(KEY_ID),
-            alg: authn::JwtAlg::Es256,
-            purpose: diport::SigningPurpose::new("auth.jwt.access"),
-            issuer: ISS.to_string(),
-            audience: AUD.to_string(),
-            ttl: Duration::from_secs(TTL_SECS),
-        },
+        authn::JwtIssuerConfig::rss_access(
+            diport::KeyId::new(KEY_ID),
+            diport::SigningPurpose::new("auth.rss-access"),
+            ISS,
+            AUD,
+            Duration::from_secs(TTL_SECS),
+        ),
     )
     .expect("jwt issuer config")
 }
 
 /// 真 `OidcProvider`（经静态 profile 装配），信任指定 kind + mock 私钥对应的 ES256 公钥。
 #[allow(clippy::expect_used)]
-fn oidc_provider(trusted_kinds: &str) -> OidcProvider {
+fn oidc_provider(trusted_kinds: &str) -> OidcProvider<diport::RssAccessProfile> {
     let es256_b64 = B64_URL.encode(sec1(&sk_jwt()));
-    provider_from_static_config(StaticOidcProviderConfig {
+    let keys = [KeyedEs256StaticKey {
+        key_id: KEY_ID,
+        sec1_b64url: &es256_b64,
+    }];
+    let trusted_kinds = trusted_kinds.split(',').collect::<Vec<_>>();
+    rss_access_provider_from_static_config(RssAccessStaticProviderConfig {
         issuer: ISS,
         audience: AUD,
-        trusted_kinds_csv: trusted_kinds,
-        key_profile: StaticOidcKeyProfile::Es256 {
-            public_keys_b64: &es256_b64,
-        },
+        trusted_kinds: &trusted_kinds,
+        keys: &keys,
         clock: Box::new(FixedClock(NOW)),
     })
     .expect("es256 production provider")
@@ -182,14 +186,11 @@ async fn verify_status(token: &str, trusted_kinds: &str) -> StatusCode {
             get(|| async { "ok" }),
         )
     });
-    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
+    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).expect("plan");
     let authed =
         httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
-    let app = apply_verify_bridge(
-        authed,
-        Arc::new(oidc_provider(trusted_kinds)),
-        RequiredScheme::Jwt,
-    );
+    let app =
+        apply_rss_access_verify_bridge_for_test(authed, Arc::new(oidc_provider(trusted_kinds)));
     let req = axum::http::Request::builder()
         .method(Method::GET)
         .uri("/protected")

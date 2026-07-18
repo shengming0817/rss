@@ -27,6 +27,7 @@ dylint_linting = "6.0.1"
 [dev-dependencies]
 dylint_testing = "6.0.1"
 eventexec = { path = "../../crates/eventexec" }
+vocab = { path = "../../crates/vocab" }
 
 [package.metadata.rust-analyzer]
 rustc_private = true

@@ -1,117 +1,122 @@
-//! authn JWT 签发（mint/sign）：claims 组装 + ES256/HS256 紧凑 JWS 序列化，复用 `diport::Signer` + 注入 `Clock`。
+//! Profile-typed JWT signing for RSS access and service tokens.
 //!
-//! 与验签侧对称：验签经 [`crate::verify_jwt`]（结构闸 + `Principal` 派生）+ `diport::Pdp`（真验签留
-//! `adapters/oidc`，#1109）；mint 经本模块组装紧凑 JWS、把**签名字节**委托注入的 `diport::Signer`。authn 自身
-//! **零 crypto、零 I/O**：claims/header 组装、base64url、signing-input 拼装是纯函数，唯一外部动作是
-//! `await signer.sign()`——与 verify→mint bridge `await pdp.verify()` 同范式。真实 JWS-兼容 signer adapter
-//! （ES256 定长 r‖s / HS256 HMAC）+ httpserve 接线留 W（softca 输出 DER ≠ JWS r‖s，不可复用，#1314 计划）。
+//! The token profile is a sealed type parameter owned by `diport`. Algorithm, protected-header
+//! `typ`, private `token_use`, and maximum lifetime all come from that single policy. RSS access
+//! and service-token issuers expose disjoint issue methods; federated access has no mint
+//! constructor because RSS only verifies tokens from that trust domain.
 //!
-//! ref: RFC 7515 §7.1（JWS Compact Serialization：`base64url(header)."."base64url(payload)` 为 signing
-//! input，签名段 base64url 无填充——[`JwtIssuer::issue_access`] 直接实现，与 `adapters/oidc/src/jws.rs` 验签侧同
-//! RFC 反方向：mint=组装 / verify=解析）；RFC 7519（JWT registered claims：sub/exp/iat/iss/aud）；
-//! Keats/jsonwebtoken `src/encoding.rs`（`encode(&Header,&claims,&EncodingKey)`：serialize→base64url→拼
-//! signing input→签名→拼签名段，同形工业 mint；RSS **不依赖**——手写 base64+serde_json + 委托 `diport::Signer`）。
-//! alg 闭枚举 [`JwtAlg`] 是 OIDC-ALG-WHITELIST-01 的 mint 侧镜像（alg=none / RS256 类型层不可 mint）。
+//! ref: RFC 7515 §7.1 (JWS Compact Serialization), RFC 7519 (registered claims), RFC 8725
+//! §3.11–§3.12 (explicit typing and mutually exclusive validation rules), RFC 9068 §2.1
+//! (`at+jwt` access-token type).
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use base64::Engine;
-use vocab::PrincipalKind;
+use base64::Engine as _;
+use diport::{RssAccessProfile, ServiceTokenProfile, TokenProfileMarker as _};
+use vocab::ServiceCallerDomain;
 use vocab::tenant::TenantId;
 
-// kind claim 串单源（验签侧 `derive_from_claims` 与 mint 侧 `kind_claim` 共用，防 round-trip 漂移）。
 use super::{KIND_ADMIN, KIND_DEVICE, KIND_SERVICE, KIND_SUPER_ADMIN, KIND_USER};
 
-/// 统一 base64url 引擎（无填充，RFC 7515 §2 / RFC 4648 §5；与验签侧 `decode_claims` / oidc 同形，
-/// header/payload/signature 三段均经此编码）。
 const B64_URL: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-/// JOSE `alg`（签名算法）闭枚举——mint 侧 alg 白名单。
+/// Configuration for exactly one type-level token profile.
 ///
-/// 对称 `adapters/oidc/src/jws.rs` 验签侧 `SupportedAlg`：ES256（JWT 路径）/ HS256（service-token 路径）。
-/// `alg=none` / RS256 等**类型层不可表达**（闭枚举 = mint 侧白名单）。pre-GA 允许与验签侧 2-variant 枚举
-/// 重复（CLAUDE.md domain-patterns：同形不强行共享 Rust 类型）。
-///
-/// INVARIANT: OIDC-ALG-WHITELIST-MINT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（Hard，类型层；alg=none/RS256 不可 mint，anti-vacuity：
-/// `jwt_alg_jose_strings` 锁 JOSE 串）。alg↔purpose↔key 三者一致性（OIDC-ALG-KEYPATH-01）由**组合根**接线
-/// 时保证 + signer adapter 自身 fail-closed（purpose allowlist + key 精确匹配，如 softca）承载——authn 无法
-/// 在类型层守（`SigningPurpose` 是 adapter 定义的 opaque 值，非 authn 词汇），故该 Hard 强制层属 wiring/W。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JwtAlg {
-    /// ECDSA P-256 + SHA-256（JOSE `ES256`）。
-    Es256,
-    /// HMAC-SHA-256（JOSE `HS256`）。
-    Hs256,
+/// Fields are private so callers cannot substitute an algorithm or token marker. There is no
+/// constructor for `JwtIssuerConfig<FederatedAccessProfile>`.
+pub struct JwtIssuerConfig<P: diport::TokenProfileMarker> {
+    key: diport::KeyId,
+    purpose: diport::SigningPurpose,
+    issuer: String,
+    audience: String,
+    ttl: Duration,
+    _profile: PhantomData<fn() -> P>,
 }
 
-impl JwtAlg {
-    /// JOSE protected header `alg` 字面量。
-    fn as_jose(self) -> &'static str {
-        match self {
-            JwtAlg::Es256 => "ES256",
-            JwtAlg::Hs256 => "HS256",
+impl JwtIssuerConfig<RssAccessProfile> {
+    /// Configure an RSS access-token issuer. Validation occurs in [`JwtIssuer::new`].
+    pub fn rss_access(
+        key: diport::KeyId,
+        purpose: diport::SigningPurpose,
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        ttl: Duration,
+    ) -> Self {
+        Self::from_parts(key, purpose, issuer.into(), audience.into(), ttl)
+    }
+}
+
+impl JwtIssuerConfig<ServiceTokenProfile> {
+    /// Configure an RSS service-token issuer. Validation occurs in [`JwtIssuer::new`].
+    pub fn service_token(
+        key: diport::KeyId,
+        purpose: diport::SigningPurpose,
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        ttl: Duration,
+    ) -> Self {
+        Self::from_parts(key, purpose, issuer.into(), audience.into(), ttl)
+    }
+}
+
+impl<P: diport::TokenProfileMarker> JwtIssuerConfig<P> {
+    fn from_parts(
+        key: diport::KeyId,
+        purpose: diport::SigningPurpose,
+        issuer: String,
+        audience: String,
+        ttl: Duration,
+    ) -> Self {
+        Self {
+            key,
+            purpose,
+            issuer,
+            audience,
+            ttl,
+            _profile: PhantomData,
         }
     }
 }
 
-/// JWT 签发配置（per-issuer；组合根构造）。
+/// A tenant-aware principal that may be minted as an RSS access token.
 ///
-/// 非服务依赖的签名 / 整形配置；服务依赖（signer / clock）走 [`JwtIssuer::new`] 必填位置参。`key` / `alg` /
-/// `purpose` 须由组合根按 OIDC-ALG-KEYPATH-01 一致接线（ES256 ↔ jwt-purpose ↔ ES256-key）。
-pub struct JwtIssuerConfig {
-    /// 签名 key 标识（组合根注入，禁默认取系统）。
-    pub key: diport::KeyId,
-    /// 签名算法（决定 header `alg`，须与 `purpose` 一致）。
-    pub alg: JwtAlg,
-    /// 签名用途（fail-closed 归因；provider 据此 + key 校验）。
-    pub purpose: diport::SigningPurpose,
-    /// `iss` claim。
-    pub issuer: String,
-    /// `aud` claim。
-    pub audience: String,
-    /// token 有效期（`exp = iat + ttl`）。
-    pub ttl: Duration,
-}
-
-/// 可签发为 JWT access token 的主体。
+/// User, device, and admin variants require a tenant at construction. Super-admin deliberately
+/// has no tenant field, so an ambient tenant claim cannot be attached to it.
 ///
-/// scoped 主体（user/device/admin）在类型层强制携带 [`TenantId`]；跨租户 super-admin variant 不暴露
-/// tenant 字段，因而「给 super-admin access JWT 签 ambient tenant」在调用点不可表达。service-token 走
-/// [`JwtIssuer::issue_service_token`]，不进入本 enum。
-///
-/// INVARIANT: JWT-ACCESS-PRINCIPAL-TYPED-01 { level = "Hard", exec = "native-compile", source = "code", native = "typed function choice / input struct field exclusion" }
+/// INVARIANT: JWT-ACCESS-PRINCIPAL-TYPED-01 { level = "Hard", exec = "native-compile", source = "code", native = "typed function choice / input field exclusion" }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum JwtAccessPrincipal<'a> {
-    /// 租户内用户主体。
+    /// Tenant-scoped user.
     User { subject: &'a str, tenant: TenantId },
-    /// 租户内设备主体。
+    /// Tenant-scoped device.
     Device { subject: &'a str, tenant: TenantId },
-    /// 租户内管理员主体。
+    /// Tenant-scoped administrator.
     Admin { subject: &'a str, tenant: TenantId },
-    /// 跨租户 super-admin 主体；JWT 不携带 ambient tenant。
+    /// Cross-tenant super-administrator.
     SuperAdmin { subject: &'a str },
 }
 
 impl std::fmt::Debug for JwtAccessPrincipal<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::User { tenant, .. } => f
+            Self::User { tenant, .. } => formatter
                 .debug_struct("User")
                 .field("subject", &"<redacted>")
                 .field("tenant", tenant)
                 .finish(),
-            Self::Device { tenant, .. } => f
+            Self::Device { tenant, .. } => formatter
                 .debug_struct("Device")
                 .field("subject", &"<redacted>")
                 .field("tenant", tenant)
                 .finish(),
-            Self::Admin { tenant, .. } => f
+            Self::Admin { tenant, .. } => formatter
                 .debug_struct("Admin")
                 .field("subject", &"<redacted>")
                 .field("tenant", tenant)
                 .finish(),
-            Self::SuperAdmin { .. } => f
+            Self::SuperAdmin { .. } => formatter
                 .debug_struct("SuperAdmin")
                 .field("subject", &"<redacted>")
                 .finish(),
@@ -138,90 +143,71 @@ impl<'a> JwtAccessPrincipal<'a> {
         }
     }
 
-    fn kind(self) -> PrincipalKind {
+    fn kind_claim(self) -> &'static str {
         match self {
-            Self::User { .. } => PrincipalKind::User,
-            Self::Device { .. } => PrincipalKind::Device,
-            Self::Admin { .. } => PrincipalKind::Admin,
-            Self::SuperAdmin { .. } => PrincipalKind::SuperAdmin,
+            Self::User { .. } => KIND_USER,
+            Self::Device { .. } => KIND_DEVICE,
+            Self::Admin { .. } => KIND_ADMIN,
+            Self::SuperAdmin { .. } => KIND_SUPER_ADMIN,
         }
     }
 }
 
-/// 已签发 JWT（typed 输出 newtype；私有内容；`Debug` 脱敏；不 derive `Serialize`）。
-///
-/// 唯一 access-token mint 点 = [`JwtIssuer::issue_access`]（`pub(crate)` 构造 funnel）。同 [`crate::AccessToken`] / [`crate::Jwt`]
-/// 脱敏范式：bearer 凭据不进 `Debug` / tracing。携带 `exp`（= JWT `exp` claim，权威单源）供下游 wire 回带
-/// `accessExpiresAt`——与 token 内 claim 同一次时钟计算，杜绝 wire 值与 claim 漂移。
+/// A signed compact JWS with its authoritative `exp` value.
 pub struct MintedJwt {
     raw: String,
     expires_at: i64,
 }
 
 impl std::fmt::Debug for MintedJwt {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("MintedJwt(<redacted>)")
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("MintedJwt(<redacted>)")
     }
 }
 
 impl MintedJwt {
-    /// 受控构造（生产唯一调用方 = [`JwtIssuer::issue_access`] / [`JwtIssuer::issue_service_token`]）。
-    /// `expires_at` = JWT `exp`（epoch 秒）。
-    pub(crate) fn new(raw: String, expires_at: i64) -> Self {
+    fn new(raw: String, expires_at: i64) -> Self {
         Self { raw, expires_at }
     }
 
-    /// 取紧凑 JWS 串引用。
+    /// Borrow the compact JWS.
     pub fn as_str(&self) -> &str {
         &self.raw
     }
 
-    /// JWT `exp`（UNIX epoch 秒）——与紧凑串内 `exp` claim 同源同值。
+    /// Return the JWT `exp` value in UNIX epoch seconds.
     pub fn expires_at(&self) -> i64 {
         self.expires_at
     }
 }
 
-/// JWT 签发错误（库枚举；`thiserror`；message 为 const 静态字面量，runtime 数据只进 `#[source]`）。
+/// Fail-closed JWT issue errors. Messages contain no token, subject, tenant, key, or token id.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum JwtIssueError {
-    /// 签发器配置非法（空 `issuer` / 空 `audience` / `ttl == 0`）——构造期 fail-fast（对称验签侧
-    /// `VerifierConfigBuilder::build` 拒空 iss/aud）。杜绝签发无签发者绑定（`iss=""`）/ 即时过期的弱 token。
+    /// Issuer, audience, key id, purpose, or TTL violates the selected profile.
     #[error("jwt issuer config is invalid")]
     InvalidConfig,
-    /// subject 为空——不签发匿名 token（fail-closed，对称验签侧空 subject 拒绝）。
+    /// An empty subject cannot be signed.
     #[error("jwt subject must not be empty")]
     EmptySubject,
-    /// 该 `PrincipalKind` 不可签发为 JWT（如 `Anonymous` 及未来不可签发 kind）。
-    #[error("principal kind is not issuable as a jwt")]
+    /// A dynamically loaded principal kind cannot be represented by [`JwtAccessPrincipal`].
+    #[error("principal kind is not issuable as an access token")]
     KindNotIssuable,
-    /// 签名算法与 principal kind 的 scheme 错配（ES256 限 user/device/admin/super、HS256 限 service）——
-    /// fail-closed，杜绝签发语义与验签 scheme 分裂的凭据（验签侧 `verify_credential` 把 scheme 锁到 alg）。
-    #[error("jwt alg does not match principal kind scheme")]
-    AlgKindMismatch,
-    /// service-token 必须绑定 `X-Tenant-ID` 后签发。
-    #[error("service-token requires tenant header binding")]
-    MissingServiceTokenTenantBinding,
-    /// 注入 `Clock` 早于 UNIX epoch（不可能的系统态）——fail-closed，不签发。
+    /// The injected clock is before the UNIX epoch.
     #[error("clock is before unix epoch")]
     ClockBeforeEpoch,
-    /// `iat` / `ttl` / `exp` 计算溢出 i64——fail-closed。
+    /// Timestamp conversion or expiry arithmetic overflowed.
     #[error("jwt expiry computation overflowed")]
     ExpiryOverflow,
-    /// claims / header JSON 序列化失败（不应发生；fail-closed）。
+    /// Protected header or claims encoding failed.
     #[error("jwt claims serialization failed")]
     ClaimsEncode(#[source] serde_json::Error),
-    /// 注入 `Signer` 签名失败（`SignerError` 已脱敏 source）。
+    /// The injected signer rejected the operation.
     #[error("jwt signing failed")]
     Sign(#[source] diport::SignerError),
 }
 
-/// JOSE protected header（私有 mint DTO；只 `Serialize`；不 derive `Debug`——瞬态、不进 tracing）。
-///
-/// `kid` = 签名 key 标识：验签侧 JWKS 源据 `kid` 选 key，**无 `kid` token 在 JWKS 源 fail-closed 拒签**
-/// （`adapters/oidc/src/jwks.rs` `end_to_end_jwks_no_kid_token_fail_closed`）。对齐 `jsonwebtoken::Header`
-/// 把 `kid` 作 header 一等字段。
 #[derive(serde::Serialize)]
 struct JoseHeader<'a> {
     alg: &'static str,
@@ -229,96 +215,131 @@ struct JoseHeader<'a> {
     typ: &'static str,
 }
 
-/// JWT payload claims（私有 mint DTO；只 `Serialize`，借用零拷贝；不 derive `Debug`——含 subject/tenant PII）。
-///
-/// claim 名与 `adapters/oidc` 验签侧默认对齐：`sub`/`iat`/`exp`/`iss`/`aud` 固定（RFC 7519 注册名），
-/// `tenant_id`/`kind` = oidc `config.tenant_claim()` / `config.kind_claim()` 默认名（R1：两侧 claim 名单源
-/// 由 login-wiring issue 的集成测试守，本轮无真验签联测）。
+/// Access claims include a tenant only for the three tenant-scoped variants.
 #[derive(serde::Serialize)]
-struct MintClaims<'a> {
+struct AccessClaims<'a> {
     sub: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    jti: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tenant_id: Option<&'a str>,
-    kind: &'a str,
+    tenant_id: Option<String>,
+    kind: &'static str,
+    token_use: &'static str,
     iat: i64,
     exp: i64,
     iss: &'a str,
     aud: &'a str,
 }
 
-/// `PrincipalKind` → JWT `kind` claim 串单一漏斗（复用验签侧 `KIND_*` 常量，杜绝 round-trip 漂移）。
-///
-/// `Anonymous`（及未来不可签发 kind）→ [`JwtIssueError::KindNotIssuable`]（fail-closed）。`PrincipalKind` 为
-/// 跨 crate `#[non_exhaustive]`，`_` 臂兜底拒绝——新增可签发 kind 须在此显式加臂（对称
-/// `Principal::row_visibility` 的 fail-closed `_`）。
-///
-/// **mint↔verify 路径分流（注意）**：`Service` 签发的是 **service-token**（配 HS256），其验签经
-/// `verify_service_token` → `from_verified_service_token`（**固定** `kind=Service`、**不读** `kind` claim）；
-/// 而 `verify_jwt` → `derive_from_claims` **拒绝** `kind="service"`（落 `_` 臂 → `PrincipalInvalid`）。故
-/// `Service` token 不可走 JWT 验签路径——这是有意的 scheme 隔离（`CredentialScheme::Jwt` vs `ServiceToken`），
-/// 非缺陷。`User/Device/Admin/SuperAdmin`（配 ES256）走 `verify_jwt`。
-fn kind_claim(kind: PrincipalKind) -> Result<&'static str, JwtIssueError> {
-    match kind {
-        PrincipalKind::User => Ok(KIND_USER),
-        PrincipalKind::Device => Ok(KIND_DEVICE),
-        PrincipalKind::Admin => Ok(KIND_ADMIN),
-        PrincipalKind::SuperAdmin => Ok(KIND_SUPER_ADMIN),
-        PrincipalKind::Service => Ok(KIND_SERVICE),
-        PrincipalKind::Anonymous => Err(JwtIssueError::KindNotIssuable),
-        _ => Err(JwtIssueError::KindNotIssuable),
-    }
+/// Service claims intentionally have no tenant field; tenant context is only in the MAC input.
+#[derive(serde::Serialize)]
+struct ServiceClaims<'a> {
+    sub: &'a str,
+    jti: String,
+    kind: &'static str,
+    token_use: &'static str,
+    iat: i64,
+    exp: i64,
+    iss: &'a str,
+    aud: &'a str,
 }
 
-/// alg↔kind scheme 一致性：ES256 = JWT 路径（user/device/admin/super）、HS256 = service-token 路径（service）。
-/// 对齐验签侧 `verify_credential` 的 scheme→alg 锁（`CredentialScheme::Jwt`→ES256 / `ServiceToken`→HS256）——
-/// 错配（如 HS256 签 user、ES256 签 service）产出签发语义与验签 scheme 分裂的凭据，mint 侧 fail-closed 拒签。
-fn alg_allows_kind(alg: JwtAlg, kind: PrincipalKind) -> bool {
-    match alg {
-        JwtAlg::Es256 => matches!(
-            kind,
-            PrincipalKind::User
-                | PrincipalKind::Device
-                | PrincipalKind::Admin
-                | PrincipalKind::SuperAdmin
-        ),
-        JwtAlg::Hs256 => matches!(kind, PrincipalKind::Service),
-    }
+enum MessageBinding<'a> {
+    Access,
+    Service(&'a diport::ServiceTokenTenantBinding),
 }
 
-/// JWT 签发器（authn-owned；CONSUMES `diport::Signer` + `diport::Clock`，不新建 DI port）。
+/// A JWT issuer whose public capabilities are fixed by the sealed profile marker.
 ///
-/// 组装 claims（sub/tenant/kind/iat/exp/iss/aud）+ ES256/HS256 紧凑 JWS，签名委托注入的 `Signer`。authn 零
-/// crypto / 零 I/O（签名委托 port；组装是纯计算）。必填依赖经构造器位置参（缺失即编译错误，rust-standards
-/// §工程护栏）；`Clock` 注入（禁默认系统时钟）。
-///
-/// **泛型静态分发 `Arc<S>`（INVARIANT: DIPORT-ASYNC-ARC-SEND-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）**：async DI port 的 dynosaur `DynSigner`
-/// 是 Send 但**非 Sync**，`Box<DynSigner>` 持有者不 Sync ⇒ 无法作 `Arc<JwtIssuer>` 共享 handler state、
-/// `issue().await` future 不 Send（axum handler 要求 Send future）。故签发器经**泛型** `S: Signer + Send +
-/// Sync + 'static` + `Arc<S>` 注入（零运行期成本、provider 仍可互换）——`JwtIssuer<S>` 随 `S` 为 Send + Sync，
-/// `issue().await` 为 Send，可作共享登录服务状态；组合根仍持 `Arc<S>` 句柄供 `ShutdownStack` 编排关闭（不被 move 走）。
-pub struct JwtIssuer<S> {
+/// INVARIANT: AUTHN-TOKEN-PROFILE-MINT-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed profile marker and disjoint inherent impls" }
+pub struct JwtIssuer<P: diport::TokenProfileMarker, S> {
     signer: Arc<S>,
     clock: Box<dyn diport::Clock>,
-    config: JwtIssuerConfig,
+    config: JwtIssuerConfig<P>,
 }
 
-impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
-    /// 组合根构造：`signer`（`Arc<S>` 静态分发）/ `clock` 必填位置参 + [`JwtIssuerConfig`]。
-    ///
-    /// 构造期 fail-fast（对称 oidc 验签侧 `VerifierConfigBuilder::build`）：空 `issuer` / 空 `audience` /
-    /// 空 `key`（JOSE `kid` 来源，无 kid token 在 JWKS 源 fail-closed 拒签）/ `ttl == 0` →
-    /// [`JwtIssueError::InvalidConfig`]——杜绝签发无签发者绑定 / 无 kid / 即时过期的弱 token。
+impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<RssAccessProfile, S> {
+    /// Construct an RSS access issuer. `0 < ttl <= 900s` is enforced before issuance.
     pub fn new(
         signer: Arc<S>,
         clock: Box<dyn diport::Clock>,
-        config: JwtIssuerConfig,
+        config: JwtIssuerConfig<RssAccessProfile>,
     ) -> Result<Self, JwtIssueError> {
+        Self::validated_new(signer, clock, config)
+    }
+
+    /// Sign an RSS access token with exact `typ=at+jwt`, `token_use=access`, and ES256.
+    pub async fn issue_access(
+        &self,
+        principal: JwtAccessPrincipal<'_>,
+    ) -> Result<MintedJwt, JwtIssueError> {
+        let subject = principal.subject();
+        if subject.is_empty() {
+            return Err(JwtIssueError::EmptySubject);
+        }
+        let (iat, exp) = self.time_claims()?;
+        let claims = AccessClaims {
+            sub: subject,
+            tenant_id: principal.tenant().map(|tenant| tenant.to_string()),
+            kind: principal.kind_claim(),
+            token_use: RssAccessProfile::policy().token_use(),
+            iat,
+            exp,
+            iss: &self.config.issuer,
+            aud: &self.config.audience,
+        };
+        self.sign_claims(&claims, exp, MessageBinding::Access).await
+    }
+}
+
+impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<ServiceTokenProfile, S> {
+    /// Construct a service-token issuer. `0 < ttl <= 300s` is enforced before issuance.
+    pub fn new(
+        signer: Arc<S>,
+        clock: Box<dyn diport::Clock>,
+        config: JwtIssuerConfig<ServiceTokenProfile>,
+    ) -> Result<Self, JwtIssueError> {
+        Self::validated_new(signer, clock, config)
+    }
+
+    /// Sign a tenant-header-bound service token with exact service profile markers.
+    pub async fn issue_service_token(
+        &self,
+        caller: ServiceCallerDomain,
+        binding: diport::ServiceTokenTenantBinding,
+    ) -> Result<MintedJwt, JwtIssueError> {
+        let subject = caller.as_str();
+        let (iat, exp) = self.time_claims()?;
+        let claims = ServiceClaims {
+            sub: subject,
+            jti: uuid::Uuid::new_v4().to_string(),
+            kind: KIND_SERVICE,
+            token_use: ServiceTokenProfile::policy().token_use(),
+            iat,
+            exp,
+            iss: &self.config.issuer,
+            aud: &self.config.audience,
+        };
+        self.sign_claims(&claims, exp, MessageBinding::Service(&binding))
+            .await
+    }
+}
+
+impl<P, S> JwtIssuer<P, S>
+where
+    P: diport::TokenProfileMarker,
+    S: diport::Signer + Send + Sync + 'static,
+{
+    fn validated_new(
+        signer: Arc<S>,
+        clock: Box<dyn diport::Clock>,
+        config: JwtIssuerConfig<P>,
+    ) -> Result<Self, JwtIssueError> {
+        let policy = P::policy();
         if config.issuer.is_empty()
             || config.audience.is_empty()
             || config.key.as_str().is_empty()
+            || config.purpose.as_str().is_empty()
             || config.ttl.is_zero()
+            || config.ttl > policy.maximum_lifetime()
         {
             return Err(JwtIssueError::InvalidConfig);
         }
@@ -329,105 +350,43 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
         })
     }
 
-    /// 计算 `(iat, exp)`（注入 `Clock`；fail-closed：clock < epoch / i64 溢出）。
     fn time_claims(&self) -> Result<(i64, i64), JwtIssueError> {
-        let secs = self
+        let now = self
             .clock
             .now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| JwtIssueError::ClockBeforeEpoch)?
             .as_secs();
-        let iat = i64::try_from(secs).map_err(|_| JwtIssueError::ExpiryOverflow)?;
+        let iat = i64::try_from(now).map_err(|_| JwtIssueError::ExpiryOverflow)?;
         let ttl =
             i64::try_from(self.config.ttl.as_secs()).map_err(|_| JwtIssueError::ExpiryOverflow)?;
         let exp = iat.checked_add(ttl).ok_or(JwtIssueError::ExpiryOverflow)?;
         Ok((iat, exp))
     }
 
-    /// 组装 access-token claims → 紧凑 JWS → 委托签名 → typed [`MintedJwt`]。
-    ///
-    /// per-call typed 入参：[`JwtAccessPrincipal`] 把 scoped tenant 必填和 super-admin 无 tenant 上移到类型层。
-    /// **所有 fail-closed 校验（subject/kind/clock/overflow）在签名之前**——失败短路、signer 不被调用、
-    /// 绝不返回半成品 token。service-token 不经本方法，须走 [`Self::issue_service_token`]。
-    pub async fn issue_access(
+    async fn sign_claims<C: serde::Serialize>(
         &self,
-        principal: JwtAccessPrincipal<'_>,
+        claims: &C,
+        expires_at: i64,
+        binding: MessageBinding<'_>,
     ) -> Result<MintedJwt, JwtIssueError> {
-        self.issue_inner(
-            principal.subject(),
-            principal.tenant().map(|tenant| tenant.to_string()),
-            principal.kind(),
-            None,
-        )
-        .await
-    }
-
-    /// 组装 tenant-bound HS256 service-token。
-    pub async fn issue_service_token(
-        &self,
-        subject: &str,
-        binding: diport::ServiceTokenTenantBinding,
-    ) -> Result<MintedJwt, JwtIssueError> {
-        self.issue_inner(subject, None, PrincipalKind::Service, Some(binding))
-            .await
-    }
-
-    async fn issue_inner(
-        &self,
-        subject: &str,
-        tenant_claim: Option<String>,
-        kind: PrincipalKind,
-        service_token_binding: Option<diport::ServiceTokenTenantBinding>,
-    ) -> Result<MintedJwt, JwtIssueError> {
-        // 1) 输入 fail-closed（对称验签侧 `derive_from_claims`：空 subject / 不可签发 kind）。
-        if subject.is_empty() {
-            return Err(JwtIssueError::EmptySubject);
-        }
-        let kind_str = kind_claim(kind)?;
-        // alg↔kind scheme 一致性 fail-closed（OIDC-ALG-KEYPATH-01 mint 镜像）：错配 mint 会产出签发语义与
-        // 验签 scheme 分裂的凭据（验签侧 `verify_credential` 把 Jwt→ES256 / ServiceToken→HS256 锁死）。
-        if !alg_allows_kind(self.config.alg, kind) {
-            return Err(JwtIssueError::AlgKindMismatch);
-        }
-        if matches!(kind, PrincipalKind::Service) && service_token_binding.is_none() {
-            return Err(JwtIssueError::MissingServiceTokenTenantBinding);
-        }
-
-        // 2) iat / exp（注入 Clock，fail-closed）。
-        let (iat, exp) = self.time_claims()?;
-
-        // 3) 纯组装 header + claims → base64url（B64_URL，与验签侧 / oidc 同引擎）。
+        let policy = P::policy();
         let header = JoseHeader {
-            alg: self.config.alg.as_jose(),
-            // kid = 签名 key 标识（验签侧 JWKS 源据此选 key；无 kid token 在 JWKS 源 fail-closed 拒签）。
+            alg: policy.algorithm().jose_name(),
             kid: self.config.key.as_str(),
-            typ: "JWT",
-        };
-        let claims = MintClaims {
-            sub: subject,
-            jti: service_token_binding
-                .as_ref()
-                .map(|_| uuid::Uuid::new_v4().to_string()),
-            tenant_id: tenant_claim.as_deref(),
-            kind: kind_str,
-            iat,
-            exp,
-            iss: &self.config.issuer,
-            aud: &self.config.audience,
+            typ: policy.jose_typ(),
         };
         let header_b64 =
             B64_URL.encode(serde_json::to_vec(&header).map_err(JwtIssueError::ClaimsEncode)?);
         let payload_b64 =
-            B64_URL.encode(serde_json::to_vec(&claims).map_err(JwtIssueError::ClaimsEncode)?);
-        // JWS Signing Input（RFC 7515 §5.1）：base64url(header)."."base64url(payload)。
+            B64_URL.encode(serde_json::to_vec(claims).map_err(JwtIssueError::ClaimsEncode)?);
         let signing_input = format!("{header_b64}.{payload_b64}");
-        let message = match service_token_binding.as_ref() {
-            Some(binding) => diport::service_token_mac_input(signing_input.as_bytes(), binding),
-            None => signing_input.as_bytes().to_vec(),
+        let message = match binding {
+            MessageBinding::Access => signing_input.as_bytes().to_vec(),
+            MessageBinding::Service(binding) => {
+                diport::service_token_mac_input(signing_input.as_bytes(), binding)
+            }
         };
-
-        // 4) 委托签名（唯一非纯步；fail 传播，绝不返回半成品 token）。签名失败 / 关键路径 tracing span 待
-        //    httpserve 接线补（无生产调用方前不埋空转 span，同 verify→mint bridge #1109 deferral）。
         let signature = self
             .signer
             .sign(diport::SignRequest {
@@ -437,39 +396,31 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
             })
             .await
             .map_err(JwtIssueError::Sign)?;
-
-        // 5) 紧凑序列化：signing_input "." base64url(signature)。`exp` 与 claim 同源（time_claims 一次计算）。
         let signature_b64 = B64_URL.encode(signature.as_bytes());
         Ok(MintedJwt::new(
             format!("{signing_input}.{signature_b64}"),
-            exp,
+            expires_at,
         ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    //! mint 单测：紧凑 JWS 结构、各 alg、exp 边界、全部 fail-closed 路径（signer 不被调用 = anti-vacuity）、
-    //! 输出脱敏、错误 message const + source 脱敏。替身 `RecordingSigner` / `TestClock` 自包含（CLAUDE.md：
-    //! 单测不依赖 adapter crate）。
     use super::*;
     use diport::{KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
 
-    /// 测试用 canonical 租户（`TenantId::parse` 接受形态）。
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
-    /// 固定签发时刻（UNIX 秒），便于断言 iat / exp。
     const NOW_SECS: u64 = 1_700_000_000;
-    /// 替身签名的确定输出字节（mint 不验 crypto，只断言 base64url 透传）。
-    const SIG_BYTES: &[u8] = b"deterministic-signature-bytes";
+    const SIG_BYTES: &[u8] = b"deterministic-signature";
 
-    /// 记录型签名替身：捕获最近一次 `SignRequest`、可配 Ok(确定字节) / Err。克隆共享句柄供注入后断言。
     #[derive(Clone)]
     struct RecordingSigner {
         captured: Arc<Mutex<Option<SignRequest>>>,
         fail: bool,
     }
+
     impl RecordingSigner {
         fn ok() -> Self {
             Self {
@@ -477,36 +428,41 @@ mod tests {
                 fail: false,
             }
         }
+
         fn failing() -> Self {
             Self {
                 fail: true,
                 ..Self::ok()
             }
         }
+
         fn captured(&self) -> Option<SignRequest> {
-            // reason: test-only stub——poison 取 inner 比再 panic 更利诊断。
             self.captured
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(|error| error.into_inner())
                 .clone()
         }
     }
+
     impl Signer for RecordingSigner {
         async fn sign(&self, request: SignRequest) -> Result<Signature, SignerError> {
-            *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = Some(request);
+            *self
+                .captured
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(request);
             if self.fail {
-                // reason: 模拟 provider 签名失败 → issue 须传播 Err、绝不返回半成品 token。
-                return Err(SignerError::new(std::io::Error::other("test-sign-fail")));
+                return Err(SignerError::new(std::io::Error::other("test failure")));
             }
             Ok(Signature::new(SIG_BYTES.to_vec()))
         }
+
         async fn shutdown(&self) -> Result<(), SignerError> {
             Ok(())
         }
     }
 
-    /// 确定性测试时钟（impl `diport::Clock`，不取系统时钟）。
     struct TestClock(SystemTime);
+
     impl diport::Clock for TestClock {
         fn now(&self) -> SystemTime {
             self.0
@@ -526,588 +482,307 @@ mod tests {
         diport::ServiceTokenTenantBinding::new(tenant())
     }
 
-    /// 合法默认配置（key/alg/purpose/iss/aud/ttl）；validation 测试经 struct-update 注入非法字段。
-    fn config_with(alg: JwtAlg, purpose: &str, ttl: Duration) -> JwtIssuerConfig {
-        JwtIssuerConfig {
-            key: KeyId::new("test-key"),
-            alg,
-            purpose: SigningPurpose::new(purpose),
-            issuer: "https://issuer.test".to_string(),
-            audience: "rss-api".to_string(),
+    fn rss_config(ttl: Duration) -> JwtIssuerConfig<RssAccessProfile> {
+        JwtIssuerConfig::rss_access(
+            KeyId::new("rss-kid"),
+            SigningPurpose::new("auth.rss-access"),
+            "https://rss.example",
+            "rss-api",
             ttl,
-        }
+        )
     }
 
-    /// 注入替身 signer（`Arc<S>` 静态分发）/ clock 构造 issuer（透传 `new` 的 Result，validation 测试用）。
-    fn try_issuer(
-        signer: RecordingSigner,
-        clock: SystemTime,
-        config: JwtIssuerConfig,
-    ) -> Result<JwtIssuer<RecordingSigner>, JwtIssueError> {
-        JwtIssuer::new(Arc::new(signer), Box::new(TestClock(clock)), config)
+    fn service_config(ttl: Duration) -> JwtIssuerConfig<ServiceTokenProfile> {
+        JwtIssuerConfig::service_token(
+            KeyId::new("service-kid"),
+            SigningPurpose::new("auth.service-token"),
+            "https://service.rss.example",
+            "rss-internal",
+            ttl,
+        )
     }
 
-    /// 合法配置构造 issuer（happy-path 测试用；config 合法故 unwrap）。
     #[allow(clippy::expect_used)]
-    fn issuer_with(
+    fn rss_issuer(
         signer: RecordingSigner,
         clock: SystemTime,
-        alg: JwtAlg,
-        purpose: &str,
         ttl: Duration,
-    ) -> JwtIssuer<RecordingSigner> {
-        try_issuer(signer, clock, config_with(alg, purpose, ttl)).expect("valid config")
+    ) -> JwtIssuer<RssAccessProfile, RecordingSigner> {
+        JwtIssuer::<RssAccessProfile, _>::new(
+            Arc::new(signer),
+            Box::new(TestClock(clock)),
+            rss_config(ttl),
+        )
+        .expect("valid RSS issuer")
     }
 
     #[allow(clippy::expect_used)]
-    fn decode_segment(seg: &str) -> serde_json::Value {
-        let bytes = B64_URL.decode(seg).expect("base64url segment");
-        serde_json::from_slice(&bytes).expect("json segment")
+    fn service_issuer(
+        signer: RecordingSigner,
+        ttl: Duration,
+    ) -> JwtIssuer<ServiceTokenProfile, RecordingSigner> {
+        JwtIssuer::<ServiceTokenProfile, _>::new(
+            Arc::new(signer),
+            Box::new(TestClock(now_time())),
+            service_config(ttl),
+        )
+        .expect("valid service issuer")
     }
 
-    fn segments(jwt: &MintedJwt) -> Vec<String> {
-        jwt.as_str().split('.').map(str::to_owned).collect()
+    #[allow(clippy::expect_used)]
+    fn decode_segment(segment: &str) -> serde_json::Value {
+        let bytes = B64_URL.decode(segment).expect("base64url segment");
+        serde_json::from_slice(&bytes).expect("JSON segment")
+    }
+
+    fn segments(jwt: &MintedJwt) -> Vec<&str> {
+        jwt.as_str().split('.').collect()
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn issue_happy_path_produces_three_segment_jwt() {
-        let issuer = issuer_with(
-            RecordingSigner::ok(),
-            now_time(),
-            JwtAlg::Es256,
-            "auth.jwt.access",
-            Duration::from_secs(3600),
-        );
-        let jwt = issuer
+    async fn rss_access_emits_exact_profile_markers_and_tenant() {
+        let jwt = rss_issuer(RecordingSigner::ok(), now_time(), Duration::from_secs(900))
             .issue_access(JwtAccessPrincipal::User {
                 subject: "user-123",
                 tenant: tenant(),
             })
             .await
-            .expect("issue ok");
-
+            .expect("issue access");
         let parts = segments(&jwt);
-        assert_eq!(parts.len(), 3, "紧凑 JWS 三段 header.payload.signature");
-
-        let header = decode_segment(&parts[0]);
-        assert_eq!(header["alg"], "ES256");
-        assert_eq!(header["typ"], "JWT");
-        // F1：kid = 签名 key（验签侧 JWKS 源据此选 key；无 kid 在 JWKS 源 fail-closed 拒签）。
-        assert_eq!(header["kid"], "test-key");
-
-        let claims = decode_segment(&parts[1]);
-        assert_eq!(claims["sub"], "user-123");
+        assert_eq!(parts.len(), 3);
+        let header = decode_segment(parts[0]);
+        let claims = decode_segment(parts[1]);
+        assert_eq!(
+            (
+                header["alg"].as_str(),
+                header["typ"].as_str(),
+                header["kid"].as_str()
+            ),
+            (Some("ES256"), Some("at+jwt"), Some("rss-kid"))
+        );
+        assert_eq!(claims["token_use"], "access");
         assert_eq!(claims["kind"], "user");
         assert_eq!(claims["tenant_id"], CANON_TENANT);
-        assert_eq!(claims["iss"], "https://issuer.test");
-        assert_eq!(claims["aud"], "rss-api");
         assert_eq!(claims["iat"].as_u64(), Some(NOW_SECS));
-        assert_eq!(claims["exp"].as_u64(), Some(NOW_SECS + 3600));
-
-        assert_eq!(
-            parts[2],
-            B64_URL.encode(SIG_BYTES),
-            "签名段 = base64url(确定字节)"
-        );
+        assert_eq!(claims["exp"].as_u64(), Some(NOW_SECS + 900));
+        assert_eq!(jwt.expires_at(), (NOW_SECS + 900) as i64);
+        assert_eq!(parts[2], B64_URL.encode(SIG_BYTES));
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn issue_access_device_requires_typed_tenant() {
-        let issuer = issuer_with(
-            RecordingSigner::ok(),
-            now_time(),
-            JwtAlg::Es256,
-            "auth.jwt.access",
-            Duration::from_secs(3600),
-        );
-        let jwt = issuer
-            .issue_access(JwtAccessPrincipal::Device {
-                subject: "device-123",
-                tenant: tenant(),
-            })
-            .await
-            .expect("device access issue ok");
-
-        let claims = decode_segment(&segments(&jwt)[1]);
-        assert_eq!(claims["sub"], "device-123");
-        assert_eq!(claims["kind"], "device");
-        assert_eq!(claims["tenant_id"], CANON_TENANT);
-    }
-
-    #[test]
-    fn jwt_access_principal_debug_redacts_subject() {
-        let debug = format!(
-            "{:?}",
-            JwtAccessPrincipal::Device {
-                subject: "device-secret-subject",
-                tenant: tenant(),
-            }
-        );
-
-        assert!(debug.contains("<redacted>"));
-        assert!(
-            !debug.contains("device-secret-subject"),
-            "Debug must not leak JWT subject"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_access_super_admin_cannot_carry_tenant() {
-        let issuer = issuer_with(
-            RecordingSigner::ok(),
-            now_time(),
-            JwtAlg::Es256,
-            "auth.jwt.access",
-            Duration::from_secs(3600),
-        );
-        let jwt = issuer
-            .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "root" })
-            .await
-            .expect("super-admin access issue ok");
-
-        let claims = decode_segment(&segments(&jwt)[1]);
-        assert_eq!(claims["sub"], "root");
-        assert_eq!(claims["kind"], "superAdmin");
-        assert!(
-            claims.get("tenant_id").is_none(),
-            "typed super-admin access principal has no tenant field to serialize"
-        );
-    }
-
-    #[test]
-    fn new_rejects_invalid_config() {
-        // 构造期 fail-fast：空 issuer / audience / key（kid 来源）/ ttl=0 → InvalidConfig（对称 oidc 验签侧 build）。
-        let cases: [(&str, JwtIssuerConfig); 4] = [
-            (
-                "empty issuer",
-                JwtIssuerConfig {
-                    issuer: String::new(),
-                    ..config_with(JwtAlg::Es256, "p", Duration::from_secs(3600))
-                },
-            ),
-            (
-                "empty audience",
-                JwtIssuerConfig {
-                    audience: String::new(),
-                    ..config_with(JwtAlg::Es256, "p", Duration::from_secs(3600))
-                },
-            ),
-            (
-                "empty key (kid)",
-                JwtIssuerConfig {
-                    key: KeyId::new(""),
-                    ..config_with(JwtAlg::Es256, "p", Duration::from_secs(3600))
-                },
-            ),
-            ("zero ttl", config_with(JwtAlg::Es256, "p", Duration::ZERO)),
-        ];
-        for (name, config) in cases {
-            let result = try_issuer(RecordingSigner::ok(), now_time(), config);
-            assert!(
-                matches!(result, Err(JwtIssueError::InvalidConfig)),
-                "{name} 须构造期 fail-fast"
-            );
-        }
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_access_super_admin_omits_tenant_claim() {
-        let issuer = issuer_with(
-            RecordingSigner::ok(),
-            now_time(),
-            JwtAlg::Es256,
-            "p",
-            Duration::from_secs(3600),
-        );
-        let jwt = issuer
-            .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "subject" })
-            .await
-            .expect("issue ok");
-        let claims = decode_segment(&segments(&jwt)[1]);
-        assert!(
-            claims.get("tenant_id").is_none(),
-            "super-admin 跨租户须省略 tenant claim"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_rejects_alg_kind_scheme_mismatch() {
-        // F2：ES256 限 user/device/admin/super、HS256 限 service；错配 fail-closed、signer 不被调用
-        // （验签侧 `verify_credential` 把 Jwt→ES256 / ServiceToken→HS256 锁死）。
-        for (alg, principal) in [
-            (
-                JwtAlg::Hs256,
-                JwtAccessPrincipal::User {
-                    subject: "subject",
-                    tenant: tenant(),
-                },
-            ), // HS256 签 jwt kind → 错配
-            (
-                JwtAlg::Hs256,
-                JwtAccessPrincipal::Admin {
-                    subject: "subject",
-                    tenant: tenant(),
-                },
-            ),
-        ] {
-            let signer = RecordingSigner::ok();
-            let issuer = issuer_with(
-                signer.clone(),
-                now_time(),
-                alg,
-                "p",
-                Duration::from_secs(3600),
-            );
-            let err = issuer
-                .issue_access(principal)
-                .await
-                .expect_err("alg↔kind 错配须 fail-closed");
-            assert!(
-                matches!(err, JwtIssueError::AlgKindMismatch),
-                "alg={alg:?} principal={principal:?}"
-            );
-            assert!(
-                signer.captured().is_none(),
-                "alg={alg:?} principal={principal:?} signer 不被调用"
-            );
-        }
-
-        let signer = RecordingSigner::ok();
-        let issuer = issuer_with(
-            signer.clone(),
-            now_time(),
-            JwtAlg::Es256,
-            "p",
-            Duration::from_secs(3600),
-        );
-        let err = issuer
-            .issue_service_token("svc", tenant_binding())
-            .await
-            .expect_err("ES256 签 service-token kind 须错配");
-        assert!(matches!(err, JwtIssueError::AlgKindMismatch));
-        assert!(signer.captured().is_none());
-    }
-
-    #[test]
-    fn issuer_and_issue_future_are_send_sync() {
-        // F3（DIPORT-ASYNC-ARC-SEND-01 mint 落地）：JwtIssuer<S> 可作共享 handler state（Arc<JwtIssuer>
-        // 需 Send+Sync），且 issue().await future 须 Send（axum handler 要求）。`Box<DynSigner>`（非 Sync）
-        // 持有者会破此断言——anti-vacuity。
-        fn assert_send<T: Send>(_: T) {}
-        fn assert_send_sync<T: Send + Sync>(_: &T) {}
-        let issuer = issuer_with(
-            RecordingSigner::ok(),
-            now_time(),
-            JwtAlg::Es256,
-            "p",
-            Duration::from_secs(3600),
-        );
-        assert_send_sync(&issuer);
-        assert_send(issuer.issue_access(JwtAccessPrincipal::SuperAdmin { subject: "u" }));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_passes_signing_input_key_purpose_to_signer() {
-        let signer = RecordingSigner::ok();
-        let issuer = issuer_with(
-            signer.clone(),
-            now_time(),
-            JwtAlg::Es256,
-            "auth.jwt.access",
-            Duration::from_secs(3600),
-        );
-        let jwt = issuer
-            .issue_access(JwtAccessPrincipal::User {
-                subject: "user-123",
-                tenant: tenant(),
-            })
-            .await
-            .expect("issue ok");
-
-        let captured = signer.captured().expect("signer 被调用一次");
-        assert_eq!(captured.key.as_str(), "test-key");
-        assert_eq!(captured.purpose.as_str(), "auth.jwt.access");
-        // 签名 message == signing input == 段0.段1
-        let parts = segments(&jwt);
-        let expected_input = format!("{}.{}", parts[0], parts[1]);
-        assert_eq!(captured.message.as_bytes(), expected_input.as_bytes());
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_es256_header_alg_and_purpose() {
-        let signer = RecordingSigner::ok();
-        let issuer = issuer_with(
-            signer.clone(),
-            now_time(),
-            JwtAlg::Es256,
-            "auth.jwt.es256",
-            Duration::from_secs(3600),
-        );
-        let jwt = issuer
-            .issue_access(JwtAccessPrincipal::User {
-                subject: "u",
-                tenant: tenant(),
-            })
-            .await
-            .expect("issue ok");
-        let header = decode_segment(&segments(&jwt)[0]);
-        assert_eq!(header["alg"], "ES256");
-        assert_eq!(
-            signer.captured().expect("called").purpose.as_str(),
-            "auth.jwt.es256",
-            "ES256 路径 purpose 透传（OIDC-ALG-KEYPATH-01 镜像）"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_hs256_header_alg_and_purpose() {
-        let signer = RecordingSigner::ok();
-        let issuer = issuer_with(
-            signer.clone(),
-            now_time(),
-            JwtAlg::Hs256,
-            "auth.svc.hs256",
-            Duration::from_secs(3600),
-        );
-        // service-token 路径：跨租户、无 tenant claim。
-        let jwt = issuer
-            .issue_service_token("svc-acct", tenant_binding())
-            .await
-            .expect("issue ok");
-        let header = decode_segment(&segments(&jwt)[0]);
-        assert_eq!(header["alg"], "HS256");
-        let captured = signer.captured().expect("called");
-        assert_eq!(captured.purpose.as_str(), "auth.svc.hs256");
-        let parts = segments(&jwt);
-        let expected_jws_input = format!("{}.{}", parts[0], parts[1]);
-        let expected_mac_input = format!("{expected_jws_input}\nx-tenant-id:{CANON_TENANT}");
-        assert_eq!(
-            captured.message.as_bytes(),
-            expected_mac_input.as_bytes(),
-            "HS256 service-token 签名输入须绑定 canonical X-Tenant-ID"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_exp_is_iat_plus_ttl() {
-        let issuer = issuer_with(
-            RecordingSigner::ok(),
-            now_time(),
-            JwtAlg::Es256,
-            "p",
-            Duration::from_secs(1800),
-        );
-        let jwt = issuer
-            .issue_access(JwtAccessPrincipal::User {
-                subject: "u",
-                tenant: tenant(),
-            })
-            .await
-            .expect("issue ok");
-        let claims = decode_segment(&segments(&jwt)[1]);
-        assert_eq!(claims["iat"].as_u64(), Some(NOW_SECS));
-        assert_eq!(claims["exp"].as_u64(), Some(NOW_SECS + 1800));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_fails_closed_clock_before_epoch() {
-        let signer = RecordingSigner::ok();
-        let before = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
-        let issuer = issuer_with(
-            signer.clone(),
-            before,
-            JwtAlg::Es256,
-            "p",
-            Duration::from_secs(3600),
-        );
-        let err = issuer
-            .issue_access(JwtAccessPrincipal::User {
-                subject: "u",
-                tenant: tenant(),
-            })
-            .await
-            .expect_err("clock < epoch 须 fail-closed");
-        assert!(matches!(err, JwtIssueError::ClockBeforeEpoch));
-        assert!(signer.captured().is_none(), "签名前短路，signer 不被调用");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_fails_closed_on_expiry_overflow() {
-        let signer = RecordingSigner::ok();
-        // ttl 秒数超出 i64 → i64::try_from 失败 → ExpiryOverflow（不触 SystemTime 溢出 panic）。
-        let issuer = issuer_with(
-            signer.clone(),
-            now_time(),
-            JwtAlg::Es256,
-            "p",
-            Duration::from_secs(u64::MAX),
-        );
-        let err = issuer
-            .issue_access(JwtAccessPrincipal::User {
-                subject: "u",
-                tenant: tenant(),
-            })
-            .await
-            .expect_err("exp 溢出须 fail-closed");
-        assert!(matches!(err, JwtIssueError::ExpiryOverflow));
-        assert!(signer.captured().is_none());
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_propagates_signer_failure() {
-        let issuer = issuer_with(
-            RecordingSigner::failing(),
-            now_time(),
-            JwtAlg::Es256,
-            "p",
-            Duration::from_secs(3600),
-        );
-        let err = issuer
-            .issue_access(JwtAccessPrincipal::User {
-                subject: "u",
-                tenant: tenant(),
-            })
-            .await
-            .expect_err("signer 失败须传播");
-        assert!(matches!(err, JwtIssueError::Sign(_)));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_super_admin_omits_tenant_claim() {
-        let issuer = issuer_with(
-            RecordingSigner::ok(),
-            now_time(),
-            JwtAlg::Es256,
-            "p",
-            Duration::from_secs(3600),
-        );
-        // super-admin 跨租户：无 tenant claim。
-        let jwt = issuer
-            .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "root" })
-            .await
-            .expect("issue ok");
-        let claims = decode_segment(&segments(&jwt)[1]);
-        assert!(
-            claims.get("tenant_id").is_none(),
-            "super-admin 省略 tenant claim"
-        );
-        assert_eq!(claims["kind"], "superAdmin");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_scoped_kinds_include_tenant() {
-        for (principal, expected_kind) in [
+    async fn scoped_access_kinds_require_tenant_and_super_admin_omits_it() {
+        for (principal, expected_kind, expects_tenant) in [
             (
                 JwtAccessPrincipal::User {
-                    subject: "subject",
+                    subject: "u",
                     tenant: tenant(),
                 },
                 "user",
+                true,
             ),
             (
                 JwtAccessPrincipal::Device {
-                    subject: "subject",
+                    subject: "d",
                     tenant: tenant(),
                 },
                 "device",
+                true,
             ),
             (
                 JwtAccessPrincipal::Admin {
-                    subject: "subject",
+                    subject: "a",
                     tenant: tenant(),
                 },
                 "admin",
+                true,
+            ),
+            (
+                JwtAccessPrincipal::SuperAdmin { subject: "root" },
+                "superAdmin",
+                false,
             ),
         ] {
-            let issuer = issuer_with(
-                RecordingSigner::ok(),
-                now_time(),
-                JwtAlg::Es256,
-                "p",
-                Duration::from_secs(3600),
-            );
-            let jwt = issuer.issue_access(principal).await.expect("issue ok");
-            let claims = decode_segment(&segments(&jwt)[1]);
-            assert_eq!(claims["tenant_id"], CANON_TENANT, "principal={principal:?}");
-            assert_eq!(claims["kind"], expected_kind, "principal={principal:?}");
+            let jwt = rss_issuer(RecordingSigner::ok(), now_time(), Duration::from_secs(1))
+                .issue_access(principal)
+                .await
+                .expect("issue access");
+            let claims = decode_segment(segments(&jwt)[1]);
+            assert_eq!(claims["kind"], expected_kind);
+            assert_eq!(claims.get("tenant_id").is_some(), expects_tenant);
         }
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn issue_fails_closed_on_empty_subject() {
+    async fn service_token_emits_exact_markers_jti_and_no_tenant_claim() {
         let signer = RecordingSigner::ok();
-        let issuer = issuer_with(
-            signer.clone(),
-            now_time(),
-            JwtAlg::Es256,
-            "p",
-            Duration::from_secs(3600),
-        );
-        let err = issuer
-            .issue_access(JwtAccessPrincipal::User {
-                subject: "",
-                tenant: tenant(),
-            })
+        let jwt = service_issuer(signer.clone(), Duration::from_secs(300))
+            .issue_service_token(
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+                tenant_binding(),
+            )
             .await
-            .expect_err("空 subject 须 fail-closed");
-        assert!(matches!(err, JwtIssueError::EmptySubject));
-        assert!(signer.captured().is_none());
+            .expect("issue service token");
+        let parts = segments(&jwt);
+        let header = decode_segment(parts[0]);
+        let claims = decode_segment(parts[1]);
+        assert_eq!(
+            (
+                header["alg"].as_str(),
+                header["typ"].as_str(),
+                header["kid"].as_str()
+            ),
+            (Some("HS256"), Some("rss-service+jwt"), Some("service-kid"))
+        );
+        assert_eq!(claims["token_use"], "service");
+        assert_eq!(claims["kind"], "service");
+        assert!(
+            claims["jti"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+        assert!(claims.get("tenant_id").is_none());
+
+        let expected_signing_input = format!("{}.{}", parts[0], parts[1]);
+        let expected_message = format!("{expected_signing_input}\nx-tenant-id:{CANON_TENANT}");
+        let captured = signer.captured().expect("signer called");
+        assert_eq!(captured.message.as_bytes(), expected_message.as_bytes());
+        assert_eq!(captured.key.as_str(), "service-kid");
     }
 
     #[test]
-    fn kind_claim_fails_closed_on_anonymous_kind() {
-        assert!(matches!(
-            kind_claim(PrincipalKind::Anonymous),
-            Err(JwtIssueError::KindNotIssuable)
-        ));
+    fn profile_ttl_boundaries_fail_closed_at_construction() {
+        for ttl in [Duration::ZERO, Duration::from_secs(901)] {
+            assert!(matches!(
+                JwtIssuer::<RssAccessProfile, _>::new(
+                    Arc::new(RecordingSigner::ok()),
+                    Box::new(TestClock(now_time())),
+                    rss_config(ttl),
+                ),
+                Err(JwtIssueError::InvalidConfig)
+            ));
+        }
+        for ttl in [Duration::ZERO, Duration::from_secs(301)] {
+            assert!(matches!(
+                JwtIssuer::<ServiceTokenProfile, _>::new(
+                    Arc::new(RecordingSigner::ok()),
+                    Box::new(TestClock(now_time())),
+                    service_config(ttl),
+                ),
+                Err(JwtIssueError::InvalidConfig)
+            ));
+        }
+        assert!(
+            JwtIssuer::<RssAccessProfile, _>::new(
+                Arc::new(RecordingSigner::ok()),
+                Box::new(TestClock(now_time())),
+                rss_config(Duration::from_secs(900)),
+            )
+            .is_ok()
+        );
+        assert!(
+            JwtIssuer::<ServiceTokenProfile, _>::new(
+                Arc::new(RecordingSigner::ok()),
+                Box::new(TestClock(now_time())),
+                service_config(Duration::from_secs(300)),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn empty_profile_config_values_are_rejected() {
+        let rss_cases = [
+            JwtIssuerConfig::rss_access(
+                KeyId::new(""),
+                SigningPurpose::new("purpose"),
+                "iss",
+                "aud",
+                Duration::from_secs(1),
+            ),
+            JwtIssuerConfig::rss_access(
+                KeyId::new("kid"),
+                SigningPurpose::new(""),
+                "iss",
+                "aud",
+                Duration::from_secs(1),
+            ),
+            JwtIssuerConfig::rss_access(
+                KeyId::new("kid"),
+                SigningPurpose::new("purpose"),
+                "",
+                "aud",
+                Duration::from_secs(1),
+            ),
+            JwtIssuerConfig::rss_access(
+                KeyId::new("kid"),
+                SigningPurpose::new("purpose"),
+                "iss",
+                "",
+                Duration::from_secs(1),
+            ),
+        ];
+        for config in rss_cases {
+            assert!(matches!(
+                JwtIssuer::<RssAccessProfile, _>::new(
+                    Arc::new(RecordingSigner::ok()),
+                    Box::new(TestClock(now_time())),
+                    config,
+                ),
+                Err(JwtIssueError::InvalidConfig)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn failures_short_circuit_or_propagate_without_token_output() {
+        let signer = RecordingSigner::ok();
+        let empty_subject = rss_issuer(signer.clone(), now_time(), Duration::from_secs(1))
+            .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "" })
+            .await;
+        assert!(matches!(empty_subject, Err(JwtIssueError::EmptySubject)));
+        assert!(signer.captured().is_none());
+
+        let before_epoch = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+        let clock_error = rss_issuer(signer.clone(), before_epoch, Duration::from_secs(1))
+            .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "root" })
+            .await;
+        assert!(matches!(clock_error, Err(JwtIssueError::ClockBeforeEpoch)));
+        assert!(signer.captured().is_none());
+
+        let sign_error = rss_issuer(
+            RecordingSigner::failing(),
+            now_time(),
+            Duration::from_secs(1),
+        )
+        .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "root" })
+        .await;
+        assert!(matches!(sign_error, Err(JwtIssueError::Sign(_))));
+    }
+
+    #[test]
+    fn typed_issuer_and_issue_future_are_send_sync() {
+        fn assert_send<T: Send>(_: T) {}
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+
+        let issuer = rss_issuer(RecordingSigner::ok(), now_time(), Duration::from_secs(1));
+        assert_send_sync(&issuer);
+        assert_send(issuer.issue_access(JwtAccessPrincipal::SuperAdmin { subject: "root" }));
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn minted_jwt_debug_is_redacted() {
-        let issuer = issuer_with(
-            RecordingSigner::ok(),
-            now_time(),
-            JwtAlg::Es256,
-            "p",
-            Duration::from_secs(3600),
-        );
-        let jwt = issuer
-            .issue_access(JwtAccessPrincipal::User {
-                subject: "subject-secret",
-                tenant: tenant(),
+    async fn debug_and_errors_do_not_expose_secrets() {
+        let jwt = rss_issuer(RecordingSigner::ok(), now_time(), Duration::from_secs(1))
+            .issue_access(JwtAccessPrincipal::SuperAdmin {
+                subject: "secret-subject",
             })
             .await
-            .expect("issue ok");
-        let dbg = format!("{jwt:?}");
-        assert_eq!(dbg, "MintedJwt(<redacted>)");
-        assert!(!dbg.contains(jwt.as_str()), "Debug 不泄露 token 串");
-    }
-
-    #[test]
-    fn jwt_alg_jose_strings() {
-        // 锁 JOSE 字面量；anti-vacuity：alg=none / RS256 在 [`JwtAlg`] 类型层不可表达。
-        assert_eq!(JwtAlg::Es256.as_jose(), "ES256");
-        assert_eq!(JwtAlg::Hs256.as_jose(), "HS256");
-    }
-
-    #[test]
-    fn jwt_issue_error_messages_are_const_and_source_redacted() {
+            .expect("issue access");
+        assert_eq!(format!("{jwt:?}"), "MintedJwt(<redacted>)");
+        assert!(!format!("{jwt:?}").contains(jwt.as_str()));
         assert_eq!(
             JwtIssueError::InvalidConfig.to_string(),
             "jwt issuer config is invalid"
@@ -1118,23 +793,7 @@ mod tests {
         );
         assert_eq!(
             JwtIssueError::KindNotIssuable.to_string(),
-            "principal kind is not issuable as a jwt"
+            "principal kind is not issuable as an access token"
         );
-        assert_eq!(
-            JwtIssueError::AlgKindMismatch.to_string(),
-            "jwt alg does not match principal kind scheme"
-        );
-        assert_eq!(
-            JwtIssueError::ClockBeforeEpoch.to_string(),
-            "clock is before unix epoch"
-        );
-        assert_eq!(
-            JwtIssueError::ExpiryOverflow.to_string(),
-            "jwt expiry computation overflowed"
-        );
-        // Sign 变体 source 经 SignerError RedactedSource 脱敏：Display/Debug 均不含泄漏 marker。
-        let err = JwtIssueError::Sign(SignerError::new(std::io::Error::other("leak-marker")));
-        assert_eq!(err.to_string(), "jwt signing failed");
-        assert!(!format!("{err:?}").contains("leak-marker"));
     }
 }

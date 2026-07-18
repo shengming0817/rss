@@ -30,8 +30,10 @@ password-policy capability and cannot enter serving. The owner always finishes t
 `run_startup(&mut ServingRuntimeInputs)` result through pending-exporter
 cleanup; the current production startup body has these phases:
 
-1. Preflight OIDC/JWKS, then build provider bundles and transport handles:
-   - OIDC is prepared before forward-only migration and completed afterward with the owner-only PG replay store
+1. Preflight typed token profiles/JWKS, then build provider bundles and transport handles:
+   - only listener-selected RSS/Federated/Service providers are prepared; each access profile owns a distinct
+     issuer, audience, ES256 JWKS source, refresh resource, and readiness signal
+   - Service Token is completed after forward-only migration with the owner-only PG replay store
    - Postgres non-Clone owner from `PgRuntimeDeps::setup_with_audit_admin_config`, then its
      cloneable `PgRuntimeHandle` capability projection
    - Vault `VaultRuntimeConfig::from_snapshot` → consuming `into_runtime`
@@ -71,7 +73,8 @@ The committed baseline records the current DI provider declarations from `assemb
 - `diport::AckableSubscriber`: `amqp::AmqpSubscriber`, active, persistent
 - `diport::Signer`: `vault::VaultSigner`, active, persistent
 - `diport::KeyProvider`: `vault::VaultKeyProvider`, active, persistent
-- `diport::Pdp`: `oidc::OidcProvider`, active, persistent
+- `diport::Pdp`: typed `oidc::OidcProvider<RssAccessProfile|FederatedAccessProfile|ServiceTokenProfile>`,
+  active, persistent, selected by a closed listener `ProfileBinding`
 - `diport::ServiceTokenReplayStore`: `postgres::PgServiceTokenReplayStore`, active, persistent;
   consumed by OIDC, with replay readiness/resource/sweeper lifecycle outputs
 - `diport::RateLimiter`: `ratelimit::GovernorLimiter`, active, ephemeral-memory

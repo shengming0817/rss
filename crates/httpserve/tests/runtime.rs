@@ -212,8 +212,8 @@ async fn primary_public_opt_out_allows() {
             get(ok_handler),
         )
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     // Public opt-out → Allow → 200，即便 plan 要求 Jwt 且无 Authorization。
     let resp = router
@@ -233,8 +233,8 @@ async fn primary_public_opt_out_with_evidence_is_200() {
             get(ok_handler),
         )
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     let mut req = Request::builder()
         .method(Method::GET)
@@ -242,7 +242,7 @@ async fn primary_public_opt_out_with_evidence_is_200() {
         .body(Body::empty())
         .unwrap();
     req.extensions_mut()
-        .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+        .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
@@ -257,8 +257,8 @@ async fn primary_require_without_credential_is_401() {
         )?;
         rb.mount(endpoint)
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     // Require(Jwt) + 无 Authorization → 401 + ERR_CORE_UNAUTHENTICATED。
     let resp = router
@@ -289,8 +289,8 @@ async fn primary_require_is_fail_closed_401() {
             get(ok_handler),
         )
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     let req = Request::builder()
         .method(Method::GET)
@@ -314,8 +314,8 @@ async fn primary_require_with_authenticated_evidence_allows() {
         )?;
         rb.mount(endpoint)
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     let mut req = Request::builder()
         .method(Method::GET)
@@ -323,7 +323,7 @@ async fn primary_require_with_authenticated_evidence_allows() {
         .body(Body::empty())
         .unwrap();
     req.extensions_mut()
-        .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+        .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
@@ -340,14 +340,14 @@ async fn primary_permission_authorizer_deny_is_403() {
     });
     let router = finalize_primary_auth(
         routes,
-        primary_plan(AuthScheme::Jwt),
+        primary_plan(AuthScheme::RssAccessToken),
         Arc::new(DenyAuthorizer),
     )
     .unwrap()
     .into_router_for_test();
     let mut req = empty_req(Method::GET, "/api/v1/x");
     req.extensions_mut()
-        .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+        .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
@@ -367,12 +367,16 @@ async fn primary_self_scoped_permission_uses_principal_subject_resource() {
         )?;
         rb.mount(endpoint)
     });
-    let router = finalize_primary_auth(routes, primary_plan(AuthScheme::Jwt), Arc::new(recorder))
-        .unwrap()
-        .into_router_for_test();
+    let router = finalize_primary_auth(
+        routes,
+        primary_plan(AuthScheme::RssAccessToken),
+        Arc::new(recorder),
+    )
+    .unwrap()
+    .into_router_for_test();
     let mut req = empty_req(Method::GET, "/api/v1/me");
     req.extensions_mut().insert(Authenticated::new(
-        RequiredScheme::Jwt,
+        RequiredScheme::RssAccessToken,
         PrincipalKind::User,
         PRINCIPAL,
         Some(tenant()),
@@ -395,13 +399,17 @@ async fn primary_path_param_permission_uses_axum_decoded_resource() {
         )?;
         rb.mount(endpoint)
     });
-    let router = finalize_primary_auth(routes, primary_plan(AuthScheme::Jwt), Arc::new(recorder))
-        .unwrap()
-        .into_router_for_test();
+    let router = finalize_primary_auth(
+        routes,
+        primary_plan(AuthScheme::RssAccessToken),
+        Arc::new(recorder),
+    )
+    .unwrap()
+    .into_router_for_test();
     let resource = "22222222-3333-4444-8555-666666666666";
     let mut req = empty_req(Method::GET, &format!("/api/v1/roles/{resource}"));
     req.extensions_mut()
-        .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+        .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
@@ -420,12 +428,16 @@ async fn primary_path_param_noncanonical_resource_denies_before_authorizer() {
         )?;
         rb.mount(endpoint)
     });
-    let router = finalize_primary_auth(routes, primary_plan(AuthScheme::Jwt), Arc::new(recorder))
-        .unwrap()
-        .into_router_for_test();
+    let router = finalize_primary_auth(
+        routes,
+        primary_plan(AuthScheme::RssAccessToken),
+        Arc::new(recorder),
+    )
+    .unwrap()
+    .into_router_for_test();
     let mut req = empty_req(Method::GET, "/api/v1/roles/role-123");
     req.extensions_mut()
-        .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+        .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     assert!(
@@ -453,8 +465,8 @@ async fn primary_require_with_mismatched_scheme_is_401() {
             get(ok_handler),
         )
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     let mut req = Request::builder()
         .method(Method::GET)
@@ -523,8 +535,8 @@ async fn request_id_is_generated_on_response() {
             get(ok_handler),
         )
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -553,8 +565,8 @@ async fn incoming_request_id_is_echoed_and_in_envelope() {
             get(ok_handler),
         )
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     let req = Request::builder()
         .method(Method::GET)
@@ -584,8 +596,8 @@ async fn handler_panic_becomes_500_envelope_without_leaking_payload() {
             get(panicking_handler),
         )
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     let req = Request::builder()
         .method(Method::GET)
@@ -623,7 +635,7 @@ async fn admin_opt_out_is_403() {
             get(ok_handler),
         )
     });
-    let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::Jwt).unwrap();
+    let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::RssAccessToken).unwrap();
     let result = finalize_auth(routes, plan);
     assert!(matches!(
         result,
@@ -646,8 +658,8 @@ async fn primary_password_reset_exempt_allows() {
             get(ok_handler),
         )
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -718,8 +730,8 @@ async fn route_meta_in_request_extension() {
         let endpoint = httpserve::GeneratedPrimaryEndpoint::new(META_BINDING, meta_handler)?;
         rb.mount(endpoint)
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/meta"))
@@ -795,8 +807,8 @@ async fn route_meta_exposes_both_declared_idempotency_classes() {
             non_idempotent_handler,
         )?)
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     let idempotent = router
         .clone()
@@ -839,8 +851,8 @@ async fn declared_success_status_drift_fails_closed() {
             drifted_handler,
         )?)
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     let response = router
         .oneshot(empty_req(Method::POST, "/api/v1/wire-status-drift"))
@@ -883,8 +895,8 @@ async fn undeclared_redirect_status_fails_closed() {
             redirect_handler,
         )?)
     });
-    let router =
-        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+    let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
+        .into_router_for_test();
 
     let response = router
         .oneshot(empty_req(Method::POST, "/api/v1/wire-status-redirect"))
@@ -918,10 +930,10 @@ async fn healthz_is_200() {
 #[allow(clippy::unwrap_used)]
 fn health_authenticated_plan_is_rejected_before_serving() {
     for scheme in [
-        AuthScheme::Jwt,
+        AuthScheme::RssAccessToken,
         AuthScheme::Mtls,
         AuthScheme::ServiceToken,
-        AuthScheme::JwtFromAssembly,
+        AuthScheme::FederatedAccessToken,
     ] {
         let routes =
             httpserve::health::routes(|| primitives::HealthReport::aggregate(vec![]), String::new);

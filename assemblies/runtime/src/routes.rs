@@ -1,80 +1,117 @@
 //! Runtime listener route finalization and auth wiring.
 
-use crate::{SPIFFE_ENDPOINT_SOCKET_ENV, auth_bridge, config::SnapshotConfig};
+use crate::{
+    SPIFFE_ENDPOINT_SOCKET_ENV,
+    auth_bridge::{self, ProfileBinding},
+    config::{
+        AccessTokenProfileSelection, InternalAuthSelection, SnapshotConfig, TokenProfilesConfig,
+    },
+};
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
-use oidc::OidcProvider;
-use primitives::{
-    AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, ProbeName, RequiredScheme,
-};
+use primitives::{AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, ProbeName};
 use ratelimit::GovernorLimiter;
 
-/// Internal listener auth mode. Default is mTLS; `service-token` is loopback local-test only.
-pub(crate) const INTERNAL_AUTH_SCHEME_ENV: &str = "RSS_INTERNAL_AUTH_SCHEME";
-const INTERNAL_AUTH_SCHEME_MTLS: &str = "mtls";
-pub(crate) const INTERNAL_AUTH_SCHEME_SERVICE_TOKEN: &str = "service-token";
 /// Comma-separated exact SPIFFE IDs accepted on the Internal mTLS listener.
 pub(crate) const INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV: &str = "RSS_INTERNAL_MTLS_SPIFFE_ALLOW_SET";
 
-/// Resolve one listener's auth policy exclusively from the captured serving generation.
-pub(crate) fn auth_scheme(
-    config: SnapshotConfig<'_>,
-    listener: ListenerKind,
-) -> anyhow::Result<AuthScheme> {
-    auth_scheme_from_value(listener, config.value(INTERNAL_AUTH_SCHEME_ENV))
+/// Active verifier set for one captured configuration generation.
+///
+/// Fields are private and typed by profile. Route assembly validates exact presence against the
+/// selected listeners before constructing any `AuthPlan`.
+pub(crate) struct TokenProviderBindings {
+    rss_access: Option<Arc<oidc::OidcProvider<diport::RssAccessProfile>>>,
+    federated_access: Option<Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>>,
+    service_token: Option<Arc<oidc::OidcProvider<diport::ServiceTokenProfile>>>,
 }
 
-pub(crate) fn auth_scheme_from_value(
-    listener: ListenerKind,
-    internal_auth_scheme: Option<&str>,
-) -> anyhow::Result<AuthScheme> {
-    Ok(match listener {
-        ListenerKind::Primary | ListenerKind::Admin => AuthScheme::Jwt,
-        ListenerKind::Internal => internal_auth_scheme_from_value(internal_auth_scheme)?,
-        ListenerKind::Health => AuthScheme::NoAuth,
-        _ => anyhow::bail!("unknown ListenerKind {listener:?}; refusing to infer an auth scheme"),
-    })
-}
-
-fn internal_auth_scheme_from_value(raw: Option<&str>) -> anyhow::Result<AuthScheme> {
-    let Some(raw) = raw else {
-        return Ok(AuthScheme::Mtls);
-    };
-    let normalized = raw.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        INTERNAL_AUTH_SCHEME_MTLS => Ok(AuthScheme::Mtls),
-        INTERNAL_AUTH_SCHEME_SERVICE_TOKEN => Ok(AuthScheme::ServiceToken),
-        "" => anyhow::bail!(
-            "{INTERNAL_AUTH_SCHEME_ENV} must be either '{INTERNAL_AUTH_SCHEME_MTLS}' or '{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN}'"
-        ),
-        _ => anyhow::bail!(
-            "{INTERNAL_AUTH_SCHEME_ENV} has an unsupported value (expected '{INTERNAL_AUTH_SCHEME_MTLS}' or '{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN}')"
-        ),
+impl TokenProviderBindings {
+    pub(crate) const fn new(
+        rss_access: Option<Arc<oidc::OidcProvider<diport::RssAccessProfile>>>,
+        federated_access: Option<Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>>,
+        service_token: Option<Arc<oidc::OidcProvider<diport::ServiceTokenProfile>>>,
+    ) -> Self {
+        Self {
+            rss_access,
+            federated_access,
+            service_token,
+        }
     }
-}
 
-fn warn_for_live_internal_service_token(listener: ListenerKind, scheme: AuthScheme) {
-    if listener == ListenerKind::Internal && scheme == AuthScheme::ServiceToken {
-        tracing::warn!(
-            env = INTERNAL_AUTH_SCHEME_ENV,
-            "internal listener using local-test service-token auth; mTLS is the production default"
+    fn validate_exact_presence(&self, config: &TokenProfilesConfig) -> anyhow::Result<()> {
+        let rss_required = matches!(config.primary(), AccessTokenProfileSelection::RssAccess)
+            || matches!(config.admin(), AccessTokenProfileSelection::RssAccess);
+        let federated_required =
+            matches!(
+                config.primary(),
+                AccessTokenProfileSelection::FederatedAccess
+            ) || matches!(config.admin(), AccessTokenProfileSelection::FederatedAccess);
+        let service_required = matches!(config.internal(), InternalAuthSelection::ServiceToken);
+        anyhow::ensure!(
+            self.rss_access.is_some() == rss_required,
+            "RSS access provider presence does not match listener profile selection"
         );
+        anyhow::ensure!(
+            self.federated_access.is_some() == federated_required,
+            "federated access provider presence does not match listener profile selection"
+        );
+        anyhow::ensure!(
+            self.service_token.is_some() == service_required,
+            "service-token provider presence does not match Internal listener selection"
+        );
+        Ok(())
+    }
+
+    fn access_binding(
+        &self,
+        selection: AccessTokenProfileSelection,
+    ) -> anyhow::Result<ProfileBinding> {
+        match selection {
+            AccessTokenProfileSelection::RssAccess => self
+                .rss_access
+                .as_ref()
+                .map(|provider| ProfileBinding::RssAccess(Arc::clone(provider)))
+                .context("RSS access listener selected without RSS access provider"),
+            AccessTokenProfileSelection::FederatedAccess => self
+                .federated_access
+                .as_ref()
+                .map(|provider| ProfileBinding::FederatedAccess(Arc::clone(provider)))
+                .context("federated listener selected without federated provider"),
+        }
+    }
+
+    fn service_binding(&self) -> anyhow::Result<ProfileBinding> {
+        self.service_token
+            .as_ref()
+            .map(|provider| ProfileBinding::ServiceToken(Arc::clone(provider)))
+            .context("service-token listener selected without service-token provider")
     }
 }
 
-pub(crate) fn required_scheme_for_auth_scheme(scheme: AuthScheme) -> Option<RequiredScheme> {
-    match scheme {
-        AuthScheme::Jwt | AuthScheme::JwtFromAssembly => Some(RequiredScheme::Jwt),
-        AuthScheme::ServiceToken => Some(RequiredScheme::ServiceToken),
-        AuthScheme::Mtls => Some(RequiredScheme::Mtls),
-        AuthScheme::NoAuth => None,
-        other => {
-            tracing::warn!(scheme = ?other, "listener auth scheme has no verify-bridge; Require routes fail-closed 401");
-            None
+pub(crate) struct RouteAssemblyContext<'a> {
+    pub(crate) audit_sink: httpserve::AuditSinkHandle,
+    pub(crate) audit_clock: Arc<dyn diport::Clock>,
+    pub(crate) primary: AccessTokenProfileSelection,
+    pub(crate) admin: AccessTokenProfileSelection,
+    pub(crate) internal: InternalAuthSelection,
+    pub(crate) internal_mtls_allow_set: Option<&'a str>,
+    pub(crate) spiffe_endpoint: Option<&'a str>,
+}
+
+enum ListenerAuthBinding {
+    Token(ProfileBinding),
+    Mtls,
+}
+
+impl ListenerAuthBinding {
+    const fn scheme(&self) -> AuthScheme {
+        match self {
+            Self::Token(binding) => binding.auth_scheme(),
+            Self::Mtls => AuthScheme::Mtls,
         }
     }
 }
@@ -249,21 +286,25 @@ fn default_rate_quota() -> ratelimit::QuotaConfig {
 /// 无法进 axum handler 闭包。
 pub(crate) fn assemble_authed_routers(
     config: SnapshotConfig<'_>,
+    token_profiles: &TokenProfilesConfig,
     registry: &mut bootstrap::Registry,
-    provider: Arc<OidcProvider>,
+    providers: &TokenProviderBindings,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
 ) -> anyhow::Result<Vec<AssembledListener>> {
-    let internal_scheme = auth_scheme(config, ListenerKind::Internal)
-        .context("resolve captured Internal auth scheme")?;
-    assemble_authed_routers_with_resolved_internal_auth(
+    providers.validate_exact_presence(token_profiles)?;
+    assemble_authed_routers_with_bindings(
         registry,
-        provider,
-        audit_sink,
-        audit_clock,
-        internal_scheme,
-        config.value(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV),
-        config.value(SPIFFE_ENDPOINT_SOCKET_ENV),
+        providers,
+        RouteAssemblyContext {
+            audit_sink,
+            audit_clock,
+            primary: token_profiles.primary(),
+            admin: token_profiles.admin(),
+            internal: token_profiles.internal(),
+            internal_mtls_allow_set: config.value(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV),
+            spiffe_endpoint: config.value(SPIFFE_ENDPOINT_SOCKET_ENV),
+        },
     )
 }
 
@@ -275,35 +316,50 @@ pub(crate) fn assemble_authed_routers(
 #[cfg(feature = "integration")]
 pub fn assemble_authed_routers_from_values(
     registry: &mut bootstrap::Registry,
-    provider: Arc<OidcProvider>,
+    rss_access_provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
-    internal_auth_scheme: Option<&str>,
+    internal_auth_scheme: &str,
     internal_mtls_allow_set: Option<&str>,
     spiffe_endpoint: Option<&str>,
 ) -> anyhow::Result<Vec<AssembledListener>> {
-    let internal_scheme = auth_scheme_from_value(ListenerKind::Internal, internal_auth_scheme)
-        .context("resolve explicit Internal auth scheme")?;
-    assemble_authed_routers_with_resolved_internal_auth(
+    let internal = match internal_auth_scheme {
+        "mtls" => InternalAuthSelection::Mtls,
+        "service-token" => anyhow::bail!(
+            "integration RSS-only assembly cannot select service-token without its typed provider"
+        ),
+        _ => anyhow::bail!("internal auth scheme must be exactly mtls for RSS-only assembly"),
+    };
+    let providers = TokenProviderBindings::new(Some(rss_access_provider), None, None);
+    assemble_authed_routers_with_bindings(
         registry,
-        provider,
-        audit_sink,
-        audit_clock,
-        internal_scheme,
-        internal_mtls_allow_set,
-        spiffe_endpoint,
+        &providers,
+        RouteAssemblyContext {
+            audit_sink,
+            audit_clock,
+            primary: AccessTokenProfileSelection::RssAccess,
+            admin: AccessTokenProfileSelection::RssAccess,
+            internal,
+            internal_mtls_allow_set,
+            spiffe_endpoint,
+        },
     )
 }
 
-fn assemble_authed_routers_with_resolved_internal_auth(
+pub(crate) fn assemble_authed_routers_with_bindings(
     registry: &mut bootstrap::Registry,
-    provider: Arc<OidcProvider>,
-    audit_sink: httpserve::AuditSinkHandle,
-    audit_clock: Arc<dyn diport::Clock>,
-    internal_scheme: AuthScheme,
-    internal_mtls_allow_set: Option<&str>,
-    spiffe_endpoint: Option<&str>,
+    providers: &TokenProviderBindings,
+    context: RouteAssemblyContext<'_>,
 ) -> anyhow::Result<Vec<AssembledListener>> {
+    let RouteAssemblyContext {
+        audit_sink,
+        audit_clock,
+        primary,
+        admin,
+        internal,
+        internal_mtls_allow_set,
+        spiffe_endpoint,
+    } = context;
     crate::modules_gen::register_framework_routes(registry).context("register framework routes")?;
     let primary_authorizer = registry
         .take_primary_authorizer()
@@ -323,12 +379,23 @@ fn assemble_authed_routers_with_resolved_internal_auth(
     )
     .context("validate framework serving")?;
     for (listener, routes) in finalized_routes {
-        let scheme = if listener == ListenerKind::Internal {
-            internal_scheme
-        } else {
-            auth_scheme_from_value(listener, None).context("resolve listener auth scheme")?
+        let binding = match listener {
+            ListenerKind::Primary => ListenerAuthBinding::Token(providers.access_binding(primary)?),
+            ListenerKind::Admin => ListenerAuthBinding::Token(providers.access_binding(admin)?),
+            ListenerKind::Internal => match internal {
+                InternalAuthSelection::Mtls => ListenerAuthBinding::Mtls,
+                InternalAuthSelection::ServiceToken => {
+                    ListenerAuthBinding::Token(providers.service_binding()?)
+                }
+            },
+            ListenerKind::Health => {
+                anyhow::bail!("Health routes must use the dedicated NoAuth assembly path")
+            }
+            _ => anyhow::bail!(
+                "unknown ListenerKind {listener:?}; refusing to infer an authentication binding"
+            ),
         };
-        warn_for_live_internal_service_token(listener, scheme);
+        let scheme = binding.scheme();
         let plan = AuthPlan::new(listener, scheme).context("build auth plan")?;
         let transport = if scheme == AuthScheme::Mtls {
             let allow_set = mtls_allow_set_from_value(listener, internal_mtls_allow_set)?;
@@ -363,10 +430,11 @@ fn assemble_authed_routers_with_resolved_internal_auth(
             mtls_authorizer,
         )
         .context("finalize_auth")?;
-        let required = required_scheme_for_auth_scheme(scheme);
-        let wired = match required {
-            Some(req) => auth_bridge::apply_verify_bridge(authed, provider.clone(), req),
-            None => authed,
+        let wired = match binding {
+            ListenerAuthBinding::Token(profile) => {
+                auth_bridge::apply_verify_bridge(authed, profile)
+            }
+            ListenerAuthBinding::Mtls => auth_bridge::apply_mtls_verify_bridge(authed),
         };
         // INVARIANT RATELIMIT-BEFORE-AUTH-01 —— rate-limit 在 verify-bridge 之后 .layer，
         // 层序上 outer 于桥（请求方向先 rate-limit 后验签），在 auth 计算前拦截超额请求。
@@ -379,7 +447,7 @@ fn assemble_authed_routers_with_resolved_internal_auth(
         tracing::info!(
             listener = ?listener,
             auth_scheme = ?scheme,
-            verify_bridge = required.is_some(),
+            verify_bridge = true,
             "listener auth wiring assembled"
         );
         out.push(AssembledListener {
@@ -496,16 +564,11 @@ fn mtls_spiffe_endpoint_from_value(raw: Option<&str>) -> anyhow::Result<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{RuntimeConfigSnapshot, test_snapshot};
     use crate::listeners::health_listener;
     use crate::{
-        StaticOidcKeyProfile, StaticOidcProviderConfig, SystemClock, TracingAuthAuditSink,
-        provider_from_static_config,
+        KeyedEs256StaticKey, RssAccessStaticProviderConfig, SystemClock, TracingAuthAuditSink,
+        rss_access_provider_from_static_config,
     };
-
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
@@ -515,37 +578,12 @@ mod tests {
         TestPrimaryRoute as PrimaryRoute, TestRoute as Route,
         TestRoutePermission as RoutePermission, TestRouteResourceScope as RouteResourceScope,
     };
+    use primitives::RequiredScheme;
+    use std::future::Future;
+    use std::pin::Pin;
     use tower::ServiceExt as _;
-    use tracing_subscriber::prelude::*;
-
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-    #[derive(Clone)]
-    struct WarnEventCounter(Arc<AtomicUsize>);
-
-    impl<S> tracing_subscriber::Layer<S> for WarnEventCounter
-    where
-        S: tracing::Subscriber,
-    {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if *event.metadata().level() == tracing::Level::WARN {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-    }
-
-    #[allow(clippy::expect_used)]
-    fn test_config(
-        entries: impl IntoIterator<Item = (&'static str, &'static str)>,
-    ) -> RuntimeConfigSnapshot {
-        let entries = entries.into_iter().collect::<Vec<_>>();
-        test_snapshot(&entries).expect("capture test serving config")
-    }
 
     #[derive(Clone)]
     struct AllowAuthorizer;
@@ -599,22 +637,102 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn runtime_test_provider() -> Arc<oidc::OidcProvider> {
+    fn runtime_test_provider() -> Arc<oidc::OidcProvider<diport::RssAccessProfile>> {
         use p256::ecdsa::SigningKey;
 
         let key = SigningKey::from_slice(&[7u8; 32]).expect("signing key");
-        let public_keys_b64 = B64.encode(key.verifying_key().to_encoded_point(false).as_bytes());
+        let public_key_b64 = B64.encode(key.verifying_key().to_encoded_point(false).as_bytes());
+        let keys = [KeyedEs256StaticKey {
+            key_id: "runtime-test-rss",
+            sec1_b64url: &public_key_b64,
+        }];
         Arc::new(
-            provider_from_static_config(StaticOidcProviderConfig {
+            rss_access_provider_from_static_config(RssAccessStaticProviderConfig {
                 issuer: "https://issuer.test",
                 audience: "rss-test",
-                trusted_kinds_csv: "admin,superAdmin",
-                key_profile: StaticOidcKeyProfile::Es256 {
-                    public_keys_b64: &public_keys_b64,
-                },
+                trusted_kinds: &["admin", "superAdmin"],
+                keys: &keys,
                 clock: Box::new(SystemClock),
             })
             .expect("provider"),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn runtime_test_federated_provider() -> Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>
+    {
+        use p256::ecdsa::SigningKey;
+
+        let key = SigningKey::from_slice(&[8u8; 32]).expect("federated signing key");
+        let public_key = key.verifying_key().to_encoded_point(false);
+        let keys = oidc::AccessStaticKeySource::builder()
+            .add_es256_sec1("runtime-test-federated", public_key.as_bytes())
+            .expect("federated public key")
+            .build();
+        let config = oidc::VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
+            "https://federated.issuer.test",
+            "federated-test",
+        )
+        .keys_static(keys)
+        .trust_kind("admin")
+        .build()
+        .expect("federated provider config");
+        Arc::new(oidc::OidcProvider::new(config, Box::new(SystemClock)))
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn primary_and_admin_selections_derive_the_exact_typed_profile_bindings() {
+        let providers = TokenProviderBindings::new(
+            Some(runtime_test_provider()),
+            Some(runtime_test_federated_provider()),
+            None,
+        );
+        for (selection, expected_scheme) in [
+            (
+                AccessTokenProfileSelection::RssAccess,
+                AuthScheme::RssAccessToken,
+            ),
+            (
+                AccessTokenProfileSelection::FederatedAccess,
+                AuthScheme::FederatedAccessToken,
+            ),
+        ] {
+            let binding = providers
+                .access_binding(selection)
+                .expect("selected typed provider");
+            assert_eq!(binding.auth_scheme(), expected_scheme);
+            assert!(matches!(
+                (selection, binding),
+                (
+                    AccessTokenProfileSelection::RssAccess,
+                    ProfileBinding::RssAccess(_)
+                ) | (
+                    AccessTokenProfileSelection::FederatedAccess,
+                    ProfileBinding::FederatedAccess(_)
+                )
+            ));
+        }
+    }
+
+    fn assemble_rss_mtls_test(
+        registry: &mut bootstrap::Registry,
+        internal_mtls_allow_set: Option<&str>,
+        spiffe_endpoint: Option<&str>,
+    ) -> anyhow::Result<Vec<AssembledListener>> {
+        let providers = TokenProviderBindings::new(Some(runtime_test_provider()), None, None);
+        assemble_authed_routers_with_bindings(
+            registry,
+            &providers,
+            RouteAssemblyContext {
+                audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+                audit_clock: Arc::new(SystemClock),
+                primary: AccessTokenProfileSelection::RssAccess,
+                admin: AccessTokenProfileSelection::RssAccess,
+                internal: InternalAuthSelection::Mtls,
+                internal_mtls_allow_set,
+                spiffe_endpoint,
+            },
         )
     }
 
@@ -651,72 +769,6 @@ mod tests {
         assert_eq!(check.status(), HealthStatus::Unhealthy);
         assert_eq!(check.detail(), "not-bound");
         assert_eq!(check.name().as_str(), MTLS_SOURCE_READY_PROBE_NAME);
-    }
-
-    #[test]
-    #[allow(clippy::unwrap_used)]
-    fn auth_scheme_per_listener() {
-        assert_eq!(
-            auth_scheme_from_value(ListenerKind::Primary, None).unwrap(),
-            AuthScheme::Jwt
-        );
-        assert_eq!(
-            auth_scheme_from_value(ListenerKind::Admin, None).unwrap(),
-            AuthScheme::Jwt
-        );
-        assert_eq!(
-            auth_scheme_from_value(ListenerKind::Internal, None).unwrap(),
-            AuthScheme::Mtls
-        );
-        assert_eq!(
-            auth_scheme_from_value(ListenerKind::Health, None).unwrap(),
-            AuthScheme::NoAuth
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn internal_service_token_requires_explicit_transition_flag() {
-        let scheme = auth_scheme_from_value(
-            ListenerKind::Internal,
-            Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN),
-        )
-        .expect("explicit service-token transition is accepted");
-        assert_eq!(scheme, AuthScheme::ServiceToken);
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn internal_auth_scheme_rejects_unknown_value() {
-        const SECRET_FRAGMENT: &str = "auth-secret-bait";
-        let err = auth_scheme_from_value(ListenerKind::Internal, Some(SECRET_FRAGMENT))
-            .expect_err("unknown internal auth scheme must fail-fast");
-        let error = err.to_string();
-        assert!(
-            error.contains(INTERNAL_AUTH_SCHEME_ENV),
-            "error should name env var: {err}"
-        );
-        assert!(
-            !error.contains(SECRET_FRAGMENT),
-            "auth errors must not expose configured values"
-        );
-    }
-
-    #[test]
-    fn required_scheme_maps_and_health_is_none() {
-        assert_eq!(
-            required_scheme_for_auth_scheme(AuthScheme::Jwt),
-            Some(RequiredScheme::Jwt)
-        );
-        assert_eq!(
-            required_scheme_for_auth_scheme(AuthScheme::Mtls),
-            Some(RequiredScheme::Mtls)
-        );
-        assert_eq!(
-            required_scheme_for_auth_scheme(AuthScheme::ServiceToken),
-            Some(RequiredScheme::ServiceToken)
-        );
-        assert_eq!(required_scheme_for_auth_scheme(AuthScheme::NoAuth), None);
     }
 
     #[test]
@@ -775,7 +827,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn route_assembly_requires_endpoint_only_for_internal_mtls() {
+    fn route_assembly_requires_endpoint_for_internal_mtls() {
         fn internal_registry() -> bootstrap::Registry {
             let mut registry = bootstrap::Registry::new();
             registry
@@ -797,75 +849,24 @@ mod tests {
         }
 
         let mut mtls_registry = internal_registry();
-        let mtls_snapshot = test_config([(
-            INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV,
-            "spiffe://example.org/ns/rss/sa/internal",
-        )]);
-        let error = assemble_authed_routers(
-            mtls_snapshot.view(),
+        let error = assemble_rss_mtls_test(
             &mut mtls_registry,
-            runtime_test_provider(),
-            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-            Arc::new(SystemClock),
+            Some("spiffe://example.org/ns/rss/sa/internal"),
+            None,
         )
         .err()
         .expect("mTLS route assembly must fail without a captured SPIFFE endpoint");
         assert!(error.to_string().contains(SPIFFE_ENDPOINT_SOCKET_ENV));
-
-        let mut plaintext_registry = internal_registry();
-        let plaintext_snapshot =
-            test_config([(INTERNAL_AUTH_SCHEME_ENV, INTERNAL_AUTH_SCHEME_SERVICE_TOKEN)]);
-        let warning_count = Arc::new(AtomicUsize::new(0));
-        let subscriber =
-            tracing_subscriber::registry().with(WarnEventCounter(Arc::clone(&warning_count)));
-        let listeners = tracing::subscriber::with_default(subscriber, || {
-            assemble_authed_routers(
-                plaintext_snapshot.view(),
-                &mut plaintext_registry,
-                runtime_test_provider(),
-                httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-                Arc::new(SystemClock),
-            )
-        })
-        .expect("service-token Internal assembly must not require a SPIFFE endpoint");
-        assert_eq!(
-            warning_count.load(Ordering::SeqCst),
-            1,
-            "the live Internal service-token router must emit one warning"
-        );
-        assert!(listeners.iter().any(|listener| {
-            listener.listener == ListenerKind::Internal
-                && matches!(listener.transport, ListenerTransport::Plaintext)
-        }));
     }
 
     #[test]
     #[allow(clippy::expect_used)]
     fn assemble_without_primary_authorizer_fails_closed() {
-        use p256::ecdsa::SigningKey;
-
-        let key = SigningKey::from_slice(&[7u8; 32]).expect("signing key");
-        let public_keys_b64 = B64.encode(key.verifying_key().to_encoded_point(false).as_bytes());
-        let provider = Arc::new(
-            provider_from_static_config(StaticOidcProviderConfig {
-                issuer: "https://issuer.test",
-                audience: "rss",
-                trusted_kinds_csv: "user",
-                key_profile: StaticOidcKeyProfile::Es256 {
-                    public_keys_b64: &public_keys_b64,
-                },
-                clock: Box::new(SystemClock),
-            })
-            .expect("provider"),
-        );
         let mut registry = bootstrap::compose(&[]).expect("compose empty");
-        let snapshot = test_config([]);
-        let error = assemble_authed_routers(
-            snapshot.view(),
+        let error = assemble_rss_mtls_test(
             &mut registry,
-            provider,
-            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-            Arc::new(SystemClock),
+            Some("spiffe://example.org/ns/rss/sa/internal"),
+            Some("unix:///run/spire/test.sock"),
         )
         .err()
         .expect("missing Primary authorizer must fail closed");
@@ -923,19 +924,10 @@ mod tests {
             .register_primary_authorizer(allow_authorizer())
             .expect("Primary authorizer registered");
 
-        let snapshot = test_config([
-            (
-                INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV,
-                "spiffe://example.org/ns/rss/sa/internal",
-            ),
-            (SPIFFE_ENDPOINT_SOCKET_ENV, "unix:///run/spire/test.sock"),
-        ]);
-        let listeners = assemble_authed_routers(
-            snapshot.view(),
+        let listeners = assemble_rss_mtls_test(
             &mut registry,
-            runtime_test_provider(),
-            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-            Arc::new(SystemClock),
+            Some("spiffe://example.org/ns/rss/sa/internal"),
+            Some("unix:///run/spire/test.sock"),
         )
         .expect("assemble listeners");
         let (health_listener_kind, health_routes) =
@@ -1044,7 +1036,8 @@ mod tests {
         let (listener, routes) = listeners.pop().expect("Primary routes");
         assert_eq!(listener, ListenerKind::Primary);
 
-        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("Primary JWT plan");
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken)
+            .expect("Primary JWT plan");
         let authed = finalize_listener_auth(
             listener,
             routes,
@@ -1133,7 +1126,8 @@ mod tests {
                     )?)
                 })
                 .expect("admin route");
-        let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::Jwt).expect("admin jwt plan");
+        let plan =
+            AuthPlan::new(ListenerKind::Admin, AuthScheme::RssAccessToken).expect("admin jwt plan");
         let routes = finalize_listener_auth(
             ListenerKind::Admin,
             admin,
@@ -1146,7 +1140,7 @@ mod tests {
         .layer(axum::middleware::from_fn(
             |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
                 req.extensions_mut().insert(httpserve::Authenticated::new(
-                    RequiredScheme::Jwt,
+                    RequiredScheme::RssAccessToken,
                     vocab::PrincipalKind::Admin,
                     "admin-subject",
                     Some(

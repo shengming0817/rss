@@ -1,7 +1,7 @@
 //! 验签桥（verify-bridge）—— 组合根唯一 [`httpserve::Authenticated`] 证据构造点。
 //!
 //! 落地 `authn/src/lib.rs` `NOTE(#1109)` 承诺：组合根在 `finalize_auth` 返回 router **外层** `.layer()`
-//! 本桥；请求带凭据时经 `authn::verify_jwt` / `verify_service_token`（注入验签 provider）验签，成功则据**验签
+//! 本桥；请求带凭据时经 profile-typed authn funnel（注入验签 provider）验签，成功则据**验签
 //! 产物 Principal** 的脱敏标量构造 [`httpserve::Authenticated`] 证据注入请求 extension，enforce 层据此对
 //! 匹配 `Require(scheme)` 的路由放行（AUTH-EVIDENCE-REQUIRE-01）。
 //!
@@ -43,7 +43,6 @@
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use httpserve::{Authenticated, AuthenticatedRoutes};
@@ -51,18 +50,48 @@ use primitives::RequiredScheme;
 use tracing::Instrument as _;
 use vocab::{PrincipalKind, TenantId};
 
-/// 验签桥中间件 state：共享验签 provider（多次调用 ⇒ 泛型静态分发的 `Arc<S>` 范式，ADR-003 §注入形态收口；
-/// `OidcProvider` 是 `Send + Sync`）+ 本 listener 绑定的已验证方案。
-struct VerifyState<P> {
-    provider: Arc<P>,
-    scheme: RequiredScheme,
+/// One listener-fixed token profile and its matching verifier.
+///
+/// The variant is the only runtime source of the required scheme, trusted credential profile, and
+/// authn funnel. A caller cannot pass a provider and scheme as independently varying values.
+pub(crate) enum ProfileBinding {
+    RssAccess(Arc<oidc::OidcProvider<diport::RssAccessProfile>>),
+    FederatedAccess(Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>),
+    ServiceToken(Arc<oidc::OidcProvider<diport::ServiceTokenProfile>>),
 }
 
-impl<P> Clone for VerifyState<P> {
+impl Clone for ProfileBinding {
     fn clone(&self) -> Self {
-        Self {
-            provider: Arc::clone(&self.provider),
-            scheme: self.scheme,
+        match self {
+            Self::RssAccess(provider) => Self::RssAccess(Arc::clone(provider)),
+            Self::FederatedAccess(provider) => Self::FederatedAccess(Arc::clone(provider)),
+            Self::ServiceToken(provider) => Self::ServiceToken(Arc::clone(provider)),
+        }
+    }
+}
+
+impl ProfileBinding {
+    pub(crate) const fn auth_scheme(&self) -> primitives::AuthScheme {
+        match self {
+            Self::RssAccess(_) => primitives::AuthScheme::RssAccessToken,
+            Self::FederatedAccess(_) => primitives::AuthScheme::FederatedAccessToken,
+            Self::ServiceToken(_) => primitives::AuthScheme::ServiceToken,
+        }
+    }
+
+    pub(crate) const fn required_scheme(&self) -> RequiredScheme {
+        match self {
+            Self::RssAccess(_) => RequiredScheme::RssAccessToken,
+            Self::FederatedAccess(_) => RequiredScheme::FederatedAccessToken,
+            Self::ServiceToken(_) => RequiredScheme::ServiceToken,
+        }
+    }
+
+    const fn profile(&self) -> diport::TokenProfile {
+        match self {
+            Self::RssAccess(_) => diport::TokenProfile::RssAccess,
+            Self::FederatedAccess(_) => diport::TokenProfile::FederatedAccess,
+            Self::ServiceToken(_) => diport::TokenProfile::ServiceToken,
         }
     }
 }
@@ -74,54 +103,143 @@ struct VerifiedPrincipal {
 
 enum VerifyFailure {
     Authn(authn::AuthnError),
-    TenantBindingInvalid,
+    ProfileMismatch,
 }
 
 /// 在 `finalize_auth` 产出的 [`AuthenticatedRoutes`] **外层**叠验签桥（经 `AuthenticatedRoutes::layer` 只能加层、
-/// 不能替换，funnel 封印不破）。组合根按 listener 的已验证 [`RequiredScheme`] 调用。
-pub fn apply_verify_bridge<P>(
+/// 不能替换，funnel 封印不破）。scheme、profile 与 provider 均由同一 closed binding 派生。
+pub(crate) fn apply_verify_bridge(
     routes: AuthenticatedRoutes,
-    provider: Arc<P>,
-    scheme: RequiredScheme,
+    binding: ProfileBinding,
+) -> AuthenticatedRoutes {
+    routes.layer(middleware::from_fn_with_state(binding, verify))
+}
+
+/// mTLS remains a transport binding and never shares a token-provider state.
+pub(crate) fn apply_mtls_verify_bridge(routes: AuthenticatedRoutes) -> AuthenticatedRoutes {
+    routes.layer(middleware::from_fn(verify_mtls))
+}
+
+/// Integration seam that preserves the production RSS profile/provider coupling.
+#[cfg(feature = "integration")]
+pub fn apply_rss_access_verify_bridge_for_test(
+    routes: AuthenticatedRoutes,
+    provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
+) -> AuthenticatedRoutes {
+    apply_verify_bridge(routes, ProfileBinding::RssAccess(provider))
+}
+
+/// Integration seam that preserves the production federated profile/provider coupling.
+#[cfg(feature = "integration")]
+pub fn apply_federated_access_verify_bridge_for_test(
+    routes: AuthenticatedRoutes,
+    provider: Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>,
+) -> AuthenticatedRoutes {
+    apply_verify_bridge(routes, ProfileBinding::FederatedAccess(provider))
+}
+
+/// Integration seam that preserves the production service profile/provider coupling.
+#[cfg(feature = "integration")]
+pub fn apply_service_token_verify_bridge_for_test(
+    routes: AuthenticatedRoutes,
+    provider: Arc<oidc::OidcProvider<diport::ServiceTokenProfile>>,
+) -> AuthenticatedRoutes {
+    apply_verify_bridge(routes, ProfileBinding::ServiceToken(provider))
+}
+
+/// Integration seam for the independent mTLS transport bridge.
+#[cfg(feature = "integration")]
+pub fn apply_mtls_verify_bridge_for_test(routes: AuthenticatedRoutes) -> AuthenticatedRoutes {
+    apply_mtls_verify_bridge(routes)
+}
+
+#[cfg(feature = "integration")]
+enum TestProfileBinding {
+    RssAccess(Arc<diport::DynPdp<'static>>),
+    ServiceToken(Arc<diport::DynPdp<'static>>),
+}
+
+#[cfg(feature = "integration")]
+impl Clone for TestProfileBinding {
+    fn clone(&self) -> Self {
+        match self {
+            Self::RssAccess(provider) => Self::RssAccess(Arc::clone(provider)),
+            Self::ServiceToken(provider) => Self::ServiceToken(Arc::clone(provider)),
+        }
+    }
+}
+
+#[cfg(feature = "integration")]
+impl TestProfileBinding {
+    const fn profile(&self) -> diport::TokenProfile {
+        match self {
+            Self::RssAccess(_) => diport::TokenProfile::RssAccess,
+            Self::ServiceToken(_) => diport::TokenProfile::ServiceToken,
+        }
+    }
+
+    const fn required_scheme(&self) -> RequiredScheme {
+        match self {
+            Self::RssAccess(_) => RequiredScheme::RssAccessToken,
+            Self::ServiceToken(_) => RequiredScheme::ServiceToken,
+        }
+    }
+}
+
+/// Integration-only fixed-profile PDP seam for exercising async/cancellation behavior.
+#[cfg(feature = "integration")]
+pub fn apply_rss_access_pdp_bridge_for_test<P>(
+    routes: AuthenticatedRoutes,
+    provider: P,
 ) -> AuthenticatedRoutes
 where
     P: diport::Pdp + Send + Sync + 'static,
 {
-    routes.layer(middleware::from_fn_with_state(
-        VerifyState { provider, scheme },
-        verify,
-    ))
+    apply_test_profile_bridge(
+        routes,
+        TestProfileBinding::RssAccess(diport::DynPdp::new_arc(provider)),
+    )
 }
 
-/// 提取 `Authorization: Bearer <token>` 的裸 token（owned，便于先释放 header 借用再可变借 req）。
-///
-/// scheme 名大小写不敏感（RFC 7235 §2.1 / RFC 6750）：`Bearer`/`bearer`/`BEARER`/`bEaReR` 均接受（评审 F7）。
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
-    let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let (scheme, token) = raw.split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("bearer") {
-        return None;
-    }
-    let token = token.trim();
-    (!token.is_empty()).then(|| token.to_string())
-}
-
-/// 异步验签产物 → `Principal`（按 listener scheme 选 jwt / service-token funnel）。
-///
-/// `provider` 经 `DynPdp::from_ref` 借为 `&DynPdp` 喂 authn funnel（信任原点单源）；所有失败均不产证据。
-async fn verify_principal<P>(
-    provider: &P,
-    scheme: RequiredScheme,
-    token: &str,
-    headers: &HeaderMap,
-) -> Option<Result<VerifiedPrincipal, VerifyFailure>>
+/// Integration-only fixed-profile PDP seam for service replay/outage behavior.
+#[cfg(feature = "integration")]
+pub fn apply_service_token_pdp_bridge_for_test<P>(
+    routes: AuthenticatedRoutes,
+    provider: P,
+) -> AuthenticatedRoutes
 where
     P: diport::Pdp + Send + Sync + 'static,
 {
-    let pdp = diport::DynPdp::from_ref(provider);
-    match scheme {
-        RequiredScheme::Jwt => Some(
-            authn::verify_jwt(token, pdp)
+    apply_test_profile_bridge(
+        routes,
+        TestProfileBinding::ServiceToken(diport::DynPdp::new_arc(provider)),
+    )
+}
+
+#[cfg(feature = "integration")]
+fn apply_test_profile_bridge(
+    routes: AuthenticatedRoutes,
+    binding: TestProfileBinding,
+) -> AuthenticatedRoutes {
+    routes.layer(middleware::from_fn_with_state(binding, verify_test_profile))
+}
+
+/// 异步验签产物 → `Principal`（profile binding 穷尽选择唯一 typed funnel）。
+///
+/// `provider` 经 `DynPdp::from_ref` 借为 `&DynPdp` 喂 authn funnel（信任原点单源）；所有失败均不产证据。
+async fn verify_principal(
+    binding: &ProfileBinding,
+    credential: httpserve::ExtractedBearerCredential,
+) -> Result<VerifiedPrincipal, VerifyFailure> {
+    let (profile, token, service_tenant) = credential.into_parts();
+    if profile != binding.profile() {
+        return Err(VerifyFailure::ProfileMismatch);
+    }
+
+    match binding {
+        ProfileBinding::RssAccess(provider) => {
+            let pdp = diport::DynPdp::from_ref(provider.as_ref());
+            authn::verify_rss_access(&token, pdp)
                 .await
                 .map(|(_, principal)| {
                     let ambient_tenant = principal.tenant();
@@ -130,26 +248,34 @@ where
                         ambient_tenant,
                     }
                 })
-                .map_err(VerifyFailure::Authn),
-        ),
-        RequiredScheme::ServiceToken => {
-            let (binding, tenant) = match httpserve::service_token_tenant_binding(headers) {
-                Ok(parts) => parts,
-                Err(_) => return Some(Err(VerifyFailure::TenantBindingInvalid)),
-            };
-            Some(
-                authn::verify_service_token(token, binding, pdp)
-                    .await
-                    .map(|(_, principal)| VerifiedPrincipal {
-                        principal,
-                        ambient_tenant: Some(tenant),
-                    })
-                    .map_err(VerifyFailure::Authn),
-            )
+                .map_err(VerifyFailure::Authn)
         }
-        // mTLS 不读取 bearer token；由 `verify` 直接消费 transport 层注入的 VerifiedMtlsPeer。
-        // JwtFromAssembly 留后续；无证据 = Require 路由 401（fail-closed）。
-        _ => None,
+        ProfileBinding::FederatedAccess(provider) => {
+            let pdp = diport::DynPdp::from_ref(provider.as_ref());
+            authn::verify_federated_access(&token, pdp)
+                .await
+                .map(|(_, principal)| {
+                    let ambient_tenant = principal.tenant();
+                    VerifiedPrincipal {
+                        principal,
+                        ambient_tenant,
+                    }
+                })
+                .map_err(VerifyFailure::Authn)
+        }
+        ProfileBinding::ServiceToken(provider) => {
+            let Some((tenant_binding, tenant)) = service_tenant else {
+                return Err(VerifyFailure::ProfileMismatch);
+            };
+            let pdp = diport::DynPdp::from_ref(provider.as_ref());
+            authn::verify_service_token(&token, tenant_binding, pdp)
+                .await
+                .map(|(_, principal)| VerifiedPrincipal {
+                    principal,
+                    ambient_tenant: Some(tenant),
+                })
+                .map_err(VerifyFailure::Authn)
+        }
     }
 }
 
@@ -171,17 +297,17 @@ enum MintEvidenceOutcome {
 /// `verify_jwt` 的 `From<PdpError>` 保真区分三种凭据拒绝与 provider outage；[`deny_reason`] 由此保留
 /// 疑似攻击、配置错、过期和基础设施故障四类低基数信号。
 /// 本桥不为日志粒度旁路 `verify_jwt` funnel（保「唯一信任原点」姿态）——`deny_reason` 只读已收敛的 `AuthnError`。
-async fn mint_evidence<P>(
-    state: &VerifyState<P>,
-    token: &str,
-    headers: &HeaderMap,
-) -> MintEvidenceOutcome
-where
-    P: diport::Pdp + Send + Sync + 'static,
-{
-    match verify_principal(state.provider.as_ref(), state.scheme, token, headers).await {
-        Some(Ok(verified)) => {
-            let (evidence, ctx, principal) = allow_evidence(state.scheme, verified);
+async fn mint_evidence(
+    binding: &ProfileBinding,
+    credential: httpserve::ExtractedBearerCredential,
+) -> MintEvidenceOutcome {
+    match verify_principal(binding, credential).await {
+        Ok(verified) => {
+            let Some((evidence, ctx, principal)) =
+                allow_evidence(binding.required_scheme(), verified)
+            else {
+                return MintEvidenceOutcome::Rejected;
+            };
             MintEvidenceOutcome::Allowed {
                 evidence,
                 ctx,
@@ -189,7 +315,7 @@ where
             }
         }
         // err = AuthnError 变体（PdpError 经 verify_* 一一保真），脱敏；不产证据 ⇒ enforce fail-closed。
-        Some(Err(VerifyFailure::Authn(err))) => {
+        Err(VerifyFailure::Authn(err)) => {
             log_deny_verify(&err);
             if matches!(err, authn::AuthnError::ProviderUnavailable) {
                 MintEvidenceOutcome::ProviderUnavailable
@@ -197,12 +323,10 @@ where
                 MintEvidenceOutcome::Rejected
             }
         }
-        Some(Err(VerifyFailure::TenantBindingInvalid)) => {
+        Err(VerifyFailure::ProfileMismatch) => {
             log_deny_tenant_binding_invalid();
             MintEvidenceOutcome::Rejected
         }
-        // 非 bearer 方案（mTLS 已在 middleware 前置处理；未来 scheme 缺实现时保持无证据）。
-        None => MintEvidenceOutcome::Rejected,
     }
 }
 
@@ -218,7 +342,7 @@ where
 fn allow_evidence(
     scheme: RequiredScheme,
     verified: VerifiedPrincipal,
-) -> (Authenticated, Option<runctx::AppCtx>, Arc<authn::Principal>) {
+) -> Option<(Authenticated, Option<runctx::AppCtx>, Arc<authn::Principal>)> {
     let principal = Arc::new(verified.principal);
     let kind = principal.kind();
     let tenant = verified.ambient_tenant;
@@ -230,12 +354,16 @@ fn allow_evidence(
         scoped_principal = tenant.is_some(),
         "verify-bridge"
     );
-    let evidence = Authenticated::new(scheme, kind, principal.audit_subject(), tenant);
+    let evidence = match (principal.service_caller_domain(), tenant) {
+        (Some(caller), Some(tenant)) => Authenticated::new_service(tenant, caller),
+        (None, tenant) => Authenticated::new(scheme, kind, principal.audit_subject(), tenant),
+        _ => return None,
+    };
     let ctx = tenant.map(|tenant| {
         let facet: Arc<dyn runctx::PrincipalFacet> = principal.clone();
         runctx::RequestCtx::new(tenant, facet)
     });
-    (evidence, ctx, principal)
+    Some((evidence, ctx, principal))
 }
 
 /// mTLS allow 分支：只消费 httpd mTLS listener 在 TLS handshake 后注入的 [`authn::VerifiedMtlsPeer`]。
@@ -306,7 +434,21 @@ fn log_deny_tenant_binding_invalid() {
     );
 }
 
-/// 验签桥中间件：铸证据 + 埋点 + 透传（不自发裁决，见模块 doc）。
+fn log_service_boundary_invalid(req: &Request, span_name: &'static str) {
+    let request_id = httpserve::request_id_str(req.extensions())
+        .unwrap_or_default()
+        .to_owned();
+    let span = tracing::debug_span!(
+        "verify_bridge_boundary",
+        bridge = span_name,
+        scheme = ?RequiredScheme::ServiceToken,
+        request_id = %request_id
+    );
+    let _entered = span.enter();
+    log_deny_tenant_binding_invalid();
+}
+
+/// Token-profile 验签桥：铸证据 + 埋点 + 透传（不自发裁决，见模块 doc）。
 ///
 /// allow/deny 事件落在 `verify_bridge` span 内（携 `scheme` + `request_id` 上下文，spec FR-009「tracing
 /// span」）。request_id 关联已落地（#1320）：`request_id` 中间件经唯一 bindable 出口封在本桥**外层**
@@ -315,54 +457,161 @@ fn log_deny_tenant_binding_invalid() {
 // reason: this is the single request middleware junction for mTLS evidence, bearer extraction,
 // verifier result mapping, and audit logging; splitting would obscure request-order semantics.
 #[allow(clippy::cognitive_complexity)]
-async fn verify<P>(State(state): State<VerifyState<P>>, mut req: Request, next: Next) -> Response
-where
-    P: diport::Pdp + Send + Sync + 'static,
-{
-    if state.scheme == RequiredScheme::Mtls {
-        if let Some(evidence) = mtls_evidence(&req) {
-            req.extensions_mut().insert(evidence);
-        } else {
-            tracing::warn!(
-                authz.decision = "deny",
-                authz.deny_reason = DENY_REASON_MTLS_PEER_MISSING,
-                "verify-bridge-mtls"
+async fn verify(State(binding): State<ProfileBinding>, mut req: Request, next: Next) -> Response {
+    match httpserve::extract_bearer_credential(req.headers(), binding.profile()) {
+        Ok(Some(credential)) => {
+            let request_id = httpserve::request_id_str(req.extensions())
+                .unwrap_or_default()
+                .to_owned();
+            let scheme = binding.required_scheme();
+            let span =
+                tracing::debug_span!("verify_bridge", scheme = ?scheme, request_id = %request_id);
+            match mint_evidence(&binding, credential).instrument(span).await {
+                MintEvidenceOutcome::Allowed {
+                    evidence,
+                    ctx,
+                    principal,
+                } => {
+                    req.extensions_mut().insert(evidence);
+                    req.extensions_mut().insert(principal);
+                    // **scope 不在桥建立**：把 scoped 主体的 AppCtx 经 `PendingScopeCtx` extension 传给内层 enforce，
+                    // 由其在 `Require`-Allow（认证路由放行，非 Public opt-out）后建 `runctx::scope`——使 ambient scope
+                    // 与 route auth 决策对齐（#1105 F2，验签桥在 enforce 外层、运行期读不到 opt_out）。跨租户主体
+                    // ctx=None ⇒ 不附 ⇒ 下游 `try_current()` fail-closed `MissingCtx`。
+                    if let Some(ctx) = ctx {
+                        req.extensions_mut()
+                            .insert(httpserve::PendingScopeCtx::new(ctx));
+                    }
+                }
+                MintEvidenceOutcome::Rejected => {}
+                MintEvidenceOutcome::ProviderUnavailable => {
+                    return httpserve::error::service_unavailable(&request_id);
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(_) => {
+            if binding.profile() == diport::TokenProfile::ServiceToken {
+                log_service_boundary_invalid(&req, "production");
+            }
+            return httpserve::error::unauthenticated(
+                httpserve::request_id_str(req.extensions()).unwrap_or_default(),
             );
         }
-        return next.run(req).await;
     }
+    next.run(req).await
+}
 
-    if let Some(token) = bearer_token(req.headers()) {
-        let request_id = httpserve::request_id_str(req.extensions())
-            .unwrap_or_default()
-            .to_owned();
-        let span =
-            tracing::debug_span!("verify_bridge", scheme = ?state.scheme, request_id = %request_id);
-        match mint_evidence(&state, &token, req.headers())
-            .instrument(span)
+#[cfg(feature = "integration")]
+async fn mint_test_evidence(
+    binding: &TestProfileBinding,
+    credential: httpserve::ExtractedBearerCredential,
+) -> MintEvidenceOutcome {
+    let (profile, token, service_tenant) = credential.into_parts();
+    if profile != binding.profile() {
+        return MintEvidenceOutcome::Rejected;
+    }
+    let verified = match binding {
+        TestProfileBinding::RssAccess(provider) => authn::verify_rss_access(&token, provider)
             .await
-        {
+            .map(|(_, principal)| VerifiedPrincipal {
+                ambient_tenant: principal.tenant(),
+                principal,
+            }),
+        TestProfileBinding::ServiceToken(provider) => {
+            let Some((tenant_binding, tenant)) = service_tenant else {
+                return MintEvidenceOutcome::Rejected;
+            };
+            authn::verify_service_token(&token, tenant_binding, provider)
+                .await
+                .map(|(_, principal)| VerifiedPrincipal {
+                    principal,
+                    ambient_tenant: Some(tenant),
+                })
+        }
+    };
+    match verified {
+        Ok(verified) => {
+            let Some((evidence, ctx, principal)) =
+                allow_evidence(binding.required_scheme(), verified)
+            else {
+                return MintEvidenceOutcome::Rejected;
+            };
             MintEvidenceOutcome::Allowed {
                 evidence,
                 ctx,
                 principal,
-            } => {
-                req.extensions_mut().insert(evidence);
-                req.extensions_mut().insert(principal);
-                // **scope 不在桥建立**：把 scoped 主体的 AppCtx 经 `PendingScopeCtx` extension 传给内层 enforce，
-                // 由其在 `Require`-Allow（认证路由放行，非 Public opt-out）后建 `runctx::scope`——使 ambient scope
-                // 与 route auth 决策对齐（#1105 F2，验签桥在 enforce 外层、运行期读不到 opt_out）。跨租户主体
-                // ctx=None ⇒ 不附 ⇒ 下游 `try_current()` fail-closed `MissingCtx`。
-                if let Some(ctx) = ctx {
-                    req.extensions_mut()
-                        .insert(httpserve::PendingScopeCtx::new(ctx));
-                }
-            }
-            MintEvidenceOutcome::Rejected => {}
-            MintEvidenceOutcome::ProviderUnavailable => {
-                return httpserve::error::service_unavailable(&request_id);
             }
         }
+        Err(err) => {
+            log_deny_verify(&err);
+            if matches!(err, authn::AuthnError::ProviderUnavailable) {
+                MintEvidenceOutcome::ProviderUnavailable
+            } else {
+                MintEvidenceOutcome::Rejected
+            }
+        }
+    }
+}
+
+#[cfg(feature = "integration")]
+async fn verify_test_profile(
+    State(binding): State<TestProfileBinding>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    match httpserve::extract_bearer_credential(req.headers(), binding.profile()) {
+        Ok(Some(credential)) => {
+            let request_id = httpserve::request_id_str(req.extensions())
+                .unwrap_or_default()
+                .to_owned();
+            let scheme = binding.required_scheme();
+            let span = tracing::debug_span!("verify_bridge_test", scheme = ?scheme, request_id = %request_id);
+            match mint_test_evidence(&binding, credential)
+                .instrument(span)
+                .await
+            {
+                MintEvidenceOutcome::Allowed {
+                    evidence,
+                    ctx,
+                    principal,
+                } => {
+                    req.extensions_mut().insert(evidence);
+                    req.extensions_mut().insert(principal);
+                    if let Some(ctx) = ctx {
+                        req.extensions_mut()
+                            .insert(httpserve::PendingScopeCtx::new(ctx));
+                    }
+                }
+                MintEvidenceOutcome::Rejected => {}
+                MintEvidenceOutcome::ProviderUnavailable => {
+                    return httpserve::error::service_unavailable(&request_id);
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(_) => {
+            if binding.profile() == diport::TokenProfile::ServiceToken {
+                log_service_boundary_invalid(&req, "integration");
+            }
+            return httpserve::error::unauthenticated(
+                httpserve::request_id_str(req.extensions()).unwrap_or_default(),
+            );
+        }
+    }
+    next.run(req).await
+}
+
+/// mTLS evidence bridge. Transport verification and token verification remain disjoint states.
+async fn verify_mtls(mut req: Request, next: Next) -> Response {
+    if let Some(evidence) = mtls_evidence(&req) {
+        req.extensions_mut().insert(evidence);
+    } else {
+        tracing::warn!(
+            authz.decision = "deny",
+            authz.deny_reason = DENY_REASON_MTLS_PEER_MISSING,
+            "verify-bridge-mtls"
+        );
     }
     next.run(req).await
 }

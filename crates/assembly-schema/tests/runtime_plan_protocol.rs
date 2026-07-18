@@ -79,8 +79,8 @@ fn expanded_unsigned() -> Value {
         {"id":"z-provider","constructor":"oidc::OidcProvider","outputs":["workers"]}
     ]);
     unsigned["listenerPlans"] = json!([
-        {"id":"admin-main","kind":"admin","auth":"jwt","domains":["identity"]},
-        {"id":"primary-main","kind":"primary","auth":"jwt","domains":["settings"]}
+        {"id":"admin-main","kind":"admin","auth":"rssAccessToken","domains":["identity"]},
+        {"id":"primary-main","kind":"primary","auth":"rssAccessToken","domains":["settings"]}
     ]);
     unsigned["domainPlans"] = json!([
         {"id":"identity","lifecycle":["construct","ready","shutdown"]},
@@ -467,7 +467,7 @@ fn runtime_plan_reader_rejects_duplicate_json_keys_and_does_not_echo_secret_valu
     );
 
     let auth_bait = wire.replace(
-        "\"auth\":\"jwt\"",
+        "\"auth\":\"rssAccessToken\"",
         &format!("\"auth\":\"{SECRET_SENTINEL}\""),
     );
     let auth_error = ParsedRuntimePlan::from_json_slice(auth_bait.as_bytes())

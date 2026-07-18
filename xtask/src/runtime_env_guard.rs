@@ -52,7 +52,7 @@ const GRANT_EXCEPTIONS: &[GrantException] = &[
     },
     GrantException {
         owner: "load_dlq_operator_grants_from_command_env",
-        caller: "dlq_operator_subject",
+        caller: "dlq_operator_receipt",
         constant: "DLQ_OPERATOR_GRANTS_ENV",
     },
     GrantException {

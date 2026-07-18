@@ -1762,10 +1762,10 @@ mod tests {
             eventexec::ProjectionVersion::parse("v1")?,
         );
         let principal =
-            authn::test_support::principal(vocab::PrincipalKind::Service, "test-operator", None);
+            authn::test_support::service_principal(vocab::ServiceCallerDomain::MaintenanceOperator);
         let grants = authn::ProjectionMaintenanceGrantSet::new(vec![
             authn::ProjectionMaintenanceGrant::new(
-                "test-operator",
+                vocab::ServiceCallerDomain::MaintenanceOperator,
                 ProjectionMaintenanceAction::Replay,
                 tenant,
                 "audit.session-projection",

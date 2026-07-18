@@ -16,10 +16,12 @@ pub mod protect;
 pub mod routes;
 
 pub use auth::{
-    AuditSinkHandle, Authenticated, AuthenticatedAuditEvent, AuthorizedSubject, FieldMask,
-    PendingScopeCtx, ResourceProjection, RouteAuthorizationDecision, RouteAuthorizationRequest,
-    RouteAuthorizer, RouteMeta, RouteResource, ServiceTokenTenantBindingError,
-    authorize_subject_for_permission, service_token_tenant_binding,
+    AuditSinkHandle, Authenticated, AuthenticatedAuditEvent, AuthorizedSubject,
+    BearerCredentialError, ExtractedBearerCredential, FieldMask, PendingScopeCtx,
+    ResourceProjection, RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
+    RouteMeta, RouteResource, ServiceTokenTenantBindingError, TenantHeaderError,
+    authorize_subject_for_permission, exact_tenant_header, extract_bearer_credential,
+    service_token_tenant_binding,
 };
 pub use budget::ServerRequestBudget;
 pub use middleware::rate_limit;
@@ -78,6 +80,34 @@ pub(crate) enum RouteResourceScope {
 pub(crate) enum PrimaryRouteAuthz {
     Permission(RoutePermission),
     OptOut(primitives::RouteAuthOptOut),
+    ServiceCaller(ServiceCallerPolicy),
+}
+
+/// Exact caller policy for one Internal service-token route.
+///
+/// The caller is a closed typed domain, so a policy is intrinsically non-empty. The contract id
+/// is checked against generated route evidence at mount time and again at authorization time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceCallerPolicy {
+    contract_id: &'static str,
+    caller: vocab::ServiceCallerDomain,
+}
+
+impl ServiceCallerPolicy {
+    pub const fn exact(contract_id: &'static str, caller: vocab::ServiceCallerDomain) -> Self {
+        Self {
+            contract_id,
+            caller,
+        }
+    }
+
+    pub(crate) fn matches_contract(&self, contract_id: &str) -> bool {
+        self.contract_id == contract_id
+    }
+
+    pub(crate) fn allows(&self, caller: vocab::ServiceCallerDomain) -> bool {
+        self.caller == caller
+    }
 }
 
 // 旧 `RouteGroup` struct（接受裸 `axum::Router` 的 register 闭包）已随 ADR-009 typed funnel 退役——
@@ -141,6 +171,8 @@ pub enum RouteGroupError {
         listener: primitives::ListenerKind,
         auth: vocab::HttpRouteAuth,
     },
+    #[error("service caller policy does not match its route contract")]
+    InvalidServiceCallerPolicy,
 }
 
 // generated endpoint 挂载（`ListenerRouter::mount`）与 auth-finalize funnel（`finalize_auth` /

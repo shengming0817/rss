@@ -91,7 +91,7 @@ mod smoke {
         let _kind = ListenerKind::Internal;
         let _opt = RouteAuthOptOut::Public;
         let _sev = HealthStatus::Degraded;
-        let _req = AuthRequirement::Require(RequiredScheme::Jwt);
+        let _req = AuthRequirement::Require(RequiredScheme::RssAccessToken);
         let _mac_alg = MacAlgorithm::HmacSha256;
 
         // 函数指针绑定证明签名形状。

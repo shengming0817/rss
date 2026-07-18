@@ -37,4 +37,4 @@
 - FR-001..014 含安全同批门（FR-010）、不回归（FR-012）、拆解约束（FR-013）、治理≥Medium（FR-014）。
 - **关键澄清**：#1109 body 把类型层描述成待落地，实际已由 PR 208/211 合并；本 feature 仅剩余 W 接线，已在背景 + Assumptions + 1109 评论坐实。
 - 唯一 open risk：JWKS HTTP/TLS license-clean 栈选型（research.md R3），属 PR-A2 实施裁定，不阻塞 spec / 认证链打通（静态 key 先行）；**裸 plain-HTTP 已否决**（评审 F2），不可得则退静态 key。
-- **内置 review 修订（codex round 0，6 findings 全修）**：F1 信任根守卫由 Soft/defer **升 Medium 入 PR-C T004.6**（#1199 折入 #1198 关闭）；F2 禁明文 JWKS；F3 验收降为 `Authenticated`(facet) 放行（完整 Principal 传播属 W）；F4 feature.json→真实路径；F5 label type-enhancement；F6 补 `oidc_jwks_ready` probe。
+- **内置 review 修订（codex round 0，6 findings 全修）**：F1 信任根守卫由 Soft/defer **升 Medium 入 PR-C T004.6**（#1199 折入 #1198 关闭）；F2 禁明文 JWKS；F3 验收降为 `Authenticated`(facet) 放行（完整 Principal 传播属 W）；F4 feature.json→真实路径；F5 label type-enhancement；F6 补 profile-specific JWKS readiness probe。

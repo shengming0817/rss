@@ -2607,9 +2607,9 @@ fn canonical_identity_router_layer(local: &syn::Local, router: &str) -> bool {
     {
         return false;
     }
-    let jwt = expression_path_is(
+    let rss_access = expression_path_is(
         authenticated.args.first(),
-        &["primitives", "RequiredScheme", "Jwt"],
+        &["primitives", "RequiredScheme", "RssAccessToken"],
     );
     let identity = authenticated.args.iter().nth(1).is_some_and(|principal| {
         expression_path_is(Some(principal), &["vocab", "PrincipalKind", "User"])
@@ -2634,7 +2634,7 @@ fn canonical_identity_router_layer(local: &syn::Local, router: &str) -> bool {
         .iter()
         .nth(3)
         .is_some_and(canonical_settings_tenant);
-    jwt && (identity || settings)
+    rss_access && (identity || settings)
 }
 
 fn canonical_identity_tenant(expression: &Expr) -> bool {
@@ -2833,6 +2833,214 @@ fn identity_provider_fields_are_exact(value: &syn::ExprStruct, parameter: &str) 
             .collect()
 }
 
+fn canonical_identity_common_field_states(
+    items: &[Item],
+) -> Option<BTreeMap<String, BTreeSet<String>>> {
+    if !root_production_struct_exists(items, "IdentityCommonDomain")
+        || !root_production_struct_exists(items, "CommonIdentityRouteState")
+    {
+        return None;
+    }
+    let mut matching = items.iter().filter_map(|item| {
+        let Item::Impl(item) = item else {
+            return None;
+        };
+        (item.trait_.is_none()
+            && !cfg_gated(&item.attrs)
+            && outer_type_ident(&item.self_ty).as_deref() == Some("IdentityCommonDomain"))
+        .then_some(item)
+    });
+    let implementation = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    let method = |name: &str| {
+        let mut methods = implementation.items.iter().filter_map(|item| match item {
+            ImplItem::Fn(function) if function.sig.ident == name && !cfg_gated(&function.attrs) => {
+                Some(function)
+            }
+            _ => None,
+        });
+        let only = methods.next()?;
+        methods.next().is_none().then_some(only)
+    };
+    let constructor = method("new")?;
+    let route_state = method("route_state")?;
+    let parameters = constructor
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            syn::FnArg::Typed(argument) => match &*argument.pat {
+                syn::Pat::Ident(pattern) if immutable_plain_binding(pattern) => {
+                    Some(pattern.ident.to_string())
+                }
+                _ => None,
+            },
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if parameters.len() != constructor.sig.inputs.len()
+        || !parameters.iter().any(|parameter| parameter == "roles")
+        || !parameters.iter().any(|parameter| parameter == "policies")
+    {
+        return None;
+    }
+    let Some(Expr::Struct(returned)) = constructor
+        .block
+        .stmts
+        .last()
+        .and_then(tail_expression)
+        .map(peel_expr)
+    else {
+        return None;
+    };
+    if !returned.path.is_ident("Self")
+        || returned.rest.is_some()
+        || !["roles", "policies"].into_iter().all(|expected| {
+            returned.fields.iter().any(|field| {
+                matches!(&field.member, syn::Member::Named(member) if member == expected)
+                    && simple_ident(&field.expr).as_deref() == Some(expected)
+            })
+        })
+        || block_reassigns_any(&constructor.block, &["roles", "policies"])
+    {
+        return None;
+    }
+    let Some(Expr::Struct(state)) = route_state
+        .block
+        .stmts
+        .last()
+        .and_then(tail_expression)
+        .map(peel_expr)
+    else {
+        return None;
+    };
+    if !state.path.is_ident("CommonIdentityRouteState") || state.rest.is_some() {
+        return None;
+    }
+    let canonical_state = |outer: &str, state_type: &str, state_field: &str, source: &str| {
+        state.fields.iter().any(|field| {
+            if !matches!(&field.member, syn::Member::Named(member) if member == outer) {
+                return false;
+            }
+            let Expr::Struct(value) = peel_expr(&field.expr) else {
+                return false;
+            };
+            value.path.is_ident(state_type)
+                && value.rest.is_none()
+                && value.fields.iter().any(|field| {
+                    matches!(&field.member, syn::Member::Named(member) if member == state_field)
+                        && canonical_identity_state_field(&field.expr).as_deref() == Some(source)
+                })
+        })
+    };
+    if !canonical_state("roles_list", "RolesListHandlerState", "roles", "roles")
+        || !canonical_state("policies_get", "PolicyQueryService", "policies", "policies")
+    {
+        return None;
+    }
+    Some(BTreeMap::from([
+        (
+            "roles".to_string(),
+            BTreeSet::from(["RolesListHandlerState".to_string()]),
+        ),
+        (
+            "policies".to_string(),
+            BTreeSet::from(["PolicyQueryService".to_string()]),
+        ),
+    ]))
+}
+
+fn identity_init_mounts_common_route_state(block: &syn::Block) -> bool {
+    let common_initializer = unique_direct_initializer(block, "common");
+    let canonical_initializer = common_initializer.is_some_and(|initializer| {
+        let Expr::MethodCall(call) = peel_expr(initializer) else {
+            return false;
+        };
+        if call.method != "route_state" || !call.args.is_empty() || call.turbofish.is_some() {
+            return false;
+        }
+        let Expr::Field(field) = peel_expr(&call.receiver) else {
+            return false;
+        };
+        matches!(&field.member, syn::Member::Named(member) if member == "common")
+            && matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
+    });
+    if !canonical_initializer || block_reassigns_any(block, &["common"]) {
+        return false;
+    }
+    struct CommonMounts {
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for CommonMounts {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if relative_call_path_is(&node.func, &["mount_common_identity_routes"])
+                && node.args.len() == 2
+                && node.args.get(1).and_then(simple_ident).as_deref() == Some("common")
+            {
+                self.count += 1;
+            }
+            visit::visit_expr_call(self, node);
+        }
+    }
+    let mut mounts = CommonMounts { count: 0 };
+    mounts.visit_block(block);
+    mounts.count == 1
+}
+
+fn identity_common_aggregate_fields(
+    returned: &syn::ExprStruct,
+    destructured: &BTreeMap<String, String>,
+    common_states: Option<&BTreeMap<String, BTreeSet<String>>>,
+) -> BTreeMap<String, String> {
+    let Some(common_states) = common_states else {
+        return BTreeMap::new();
+    };
+    let Some(common) = returned
+        .fields
+        .iter()
+        .find(|field| matches!(&field.member, syn::Member::Named(member) if member == "common"))
+    else {
+        return BTreeMap::new();
+    };
+    let Expr::Call(call) = peel_expr(&common.expr) else {
+        return BTreeMap::new();
+    };
+    if !relative_call_path_is(&call.func, &["IdentityCommonDomain", "new"]) {
+        return BTreeMap::new();
+    }
+    call.args
+        .iter()
+        .filter_map(|argument| {
+            let root = simple_ident(argument)?;
+            common_states
+                .contains_key(&root)
+                .then(|| destructured.get(&root).map(|field| (field.clone(), root)))
+                .flatten()
+        })
+        .collect()
+}
+
+fn merge_identity_common_states(
+    found: &mut BTreeMap<String, BTreeSet<String>>,
+    common_states: Option<&BTreeMap<String, BTreeSet<String>>>,
+    init: &syn::Block,
+) {
+    if !identity_init_mounts_common_route_state(init) {
+        return;
+    }
+    let Some(common_states) = common_states else {
+        return;
+    };
+    for (field, states) in common_states {
+        found
+            .entry(field.clone())
+            .or_default()
+            .extend(states.iter().cloned());
+    }
+}
+
 impl DomainProviderCertificate {
     fn direct_parameter_closes_state(&self, index: usize, state: &str) -> bool {
         self.constructor_fields
@@ -2913,6 +3121,7 @@ fn collect_domain_provider_certificates(
     let canonical_identity_types = ["IdentityDomain", "IdentityDomainDeps"]
         .into_iter()
         .all(|name| root_production_struct_exists(items, name));
+    let identity_common_states = canonical_identity_common_field_states(items);
     let mut certificates = BTreeMap::<String, DomainProviderCertificate>::new();
     for (item, at_root) in &impls {
         if item.trait_.is_some() {
@@ -3001,6 +3210,12 @@ fn collect_domain_provider_certificates(
                         .map(|deps_field| (deps_field.clone(), domain_field.to_string()))
                 })
                 .collect::<BTreeMap<_, _>>();
+            let mut aggregate_fields = aggregate_fields;
+            aggregate_fields.extend(identity_common_aggregate_fields(
+                returned,
+                &destructured,
+                identity_common_states.as_ref(),
+            ));
             if !aggregate_fields.is_empty()
                 && !block_reassigns_any(
                     &function.block,
@@ -3111,6 +3326,13 @@ fn collect_domain_provider_certificates(
             found: BTreeMap::new(),
         };
         scan.visit_block(&init.block);
+        if identity {
+            merge_identity_common_states(
+                &mut scan.found,
+                identity_common_states.as_ref(),
+                &init.block,
+            );
+        }
         certificates.entry(owner).or_default().field_states = scan.found;
     }
     certificates
@@ -7909,6 +8131,76 @@ async fn conforms_{}() {{
         format!("{production}{receipt}")
     }
 
+    fn canonical_identity_common_aggregate_receipt() -> String {
+        let production = r#"
+struct IdentityDomainDeps {
+    roles: (),
+    binding_reads: (),
+    policies: (),
+    resource_attribute_reads: (),
+}
+struct RolesListHandlerState { roles: () }
+struct PolicyQueryService { policies: () }
+struct CommonIdentityRouteState {
+    roles_list: RolesListHandlerState,
+    policies_get: PolicyQueryService,
+}
+struct IdentityCommonDomain { roles: (), policies: () }
+impl IdentityCommonDomain {
+    fn new(roles: (), binding_reads: (), policies: (), resource_attribute_reads: ()) -> Self {
+        consume((binding_reads, resource_attribute_reads));
+        Self { roles, policies }
+    }
+    fn route_state(&self) -> CommonIdentityRouteState {
+        CommonIdentityRouteState {
+            roles_list: RolesListHandlerState { roles: Arc::clone(&self.roles) },
+            policies_get: PolicyQueryService { policies: Arc::clone(&self.policies) },
+        }
+    }
+}
+struct IdentityDomain { common: IdentityCommonDomain }
+impl IdentityDomain {
+    fn new(deps: IdentityDomainDeps) -> Self {
+        let IdentityDomainDeps {
+            roles,
+            binding_reads,
+            policies,
+            resource_attribute_reads,
+        } = deps;
+        Self {
+            common: IdentityCommonDomain::new(
+                roles,
+                binding_reads,
+                policies,
+                resource_attribute_reads,
+            ),
+        }
+    }
+}
+impl bootstrap::Domain for IdentityDomain {
+    fn init(&self, registry: &mut bootstrap::Registry) {
+        let common = self.common.route_state();
+        registry.route_group(move |rb| mount_common_identity_routes(rb, common));
+    }
+}
+"#;
+        let receipt = canonical_receipt("identity_v1::profile")
+            .replace(
+                "struct TestRepo { read: () }\nimpl TestRepo { fn from_provider<T>(provider: Arc<T>) -> Self { Self { read: consume(provider) } } }",
+                "#[derive(Clone)]\nstruct TestRepo { roles: (), binding_reads: (), policies: (), resource_attribute_reads: () }\nimpl TestRepo { fn from_provider<T>(provider: Arc<T>) -> Self { Self { roles: consume(provider.clone()), binding_reads: consume(provider.clone()), policies: consume(provider.clone()), resource_attribute_reads: consume(provider) } } }",
+            )
+            .replace(
+                "struct DemoDomain { read_repo: () }\nimpl DemoDomain { fn new(read_repo: ()) -> Self { Self { read_repo } } }\nimpl bootstrap::Domain for DemoDomain {\n    fn init(&self, registry: &mut bootstrap::Registry) {\n        let scoped_repo = self.read_repo.clone();\n        let state = ReadState { repo: scoped_repo.clone() };\n        mount(registry, state);\n    }\n}",
+                "",
+            )
+            .replace(
+                "let domain = DemoDomain::new(repo.read);",
+                "let domain = super::IdentityDomain::new(super::IdentityDomainDeps {\n        roles: repo.roles,\n        binding_reads: repo.binding_reads,\n        policies: repo.policies,\n        resource_attribute_reads: repo.resource_attribute_reads,\n    });",
+            )
+            .replace("ReadState", "RolesListHandlerState");
+        format!("{production}{receipt}")
+    }
+
     fn canonical_settings_receipt() -> String {
         let production = r#"
 #[derive(Clone)]
@@ -8489,6 +8781,60 @@ fn conforms() {
             assert!(
                 local_only_receipt_registration(&workspace, &targets).is_err(),
                 "{name} unexpectedly certified"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn identity_common_domain_lineage_is_live_and_fail_closed() -> Result<()> {
+        let canonical = canonical_identity_common_aggregate_receipt();
+        let targets = [receipt_target(
+            "identity.profile",
+            &["identity_v1", "profile"],
+        )];
+        let workspace = receipt_workspace(&canonical)?;
+        let registration = local_only_receipt_registration(&workspace, &targets)?;
+        assert_eq!(
+            registration.registered_contracts,
+            BTreeSet::from(["identity.profile".to_string()])
+        );
+
+        for (name, source) in [
+            (
+                "route state reads a different common field",
+                canonical.replace(
+                    "roles: Arc::clone(&self.roles)",
+                    "roles: Arc::clone(&self.policies)",
+                ),
+            ),
+            (
+                "aggregate drops the roles provider",
+                canonical.replacen(
+                    "                roles,\n                binding_reads,",
+                    "                policies,\n                binding_reads,",
+                    1,
+                ),
+            ),
+            (
+                "common state is not mounted",
+                canonical.replace(
+                    "registry.route_group(move |rb| mount_common_identity_routes(rb, common));",
+                    "consume((registry, common));",
+                ),
+            ),
+            (
+                "common implementation is cfg gated",
+                canonical.replace(
+                    "impl IdentityCommonDomain {",
+                    "#[cfg(test)]\nimpl IdentityCommonDomain {",
+                ),
+            ),
+        ] {
+            let workspace = receipt_workspace(&source)?;
+            assert!(
+                local_only_receipt_registration(&workspace, &targets).is_err(),
+                "{name} must be rejected"
             );
         }
         Ok(())

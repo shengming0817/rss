@@ -65,7 +65,9 @@ pub(crate) enum RuntimePlanError {
     ManifestCanonicalization(#[source] assembly_schema::AssemblyManifestCanonicalizationError),
     #[error("parse bundled runtime AssemblyLock failed")]
     AssemblyLock(#[source] assembly_schema::AssemblyLockError),
-    #[error("resolve RSS_INTERNAL_AUTH_SCHEME failed; expected 'mtls' or 'service-token'")]
+    #[error(
+        "resolve RSS_PRIMARY_TOKEN_PROFILE, RSS_ADMIN_TOKEN_PROFILE, or RSS_INTERNAL_AUTH_SCHEME failed; expected rss-access/federated-access and mtls/service-token"
+    )]
     ListenerAuth,
     #[error("compile bundled RuntimePlan protocol failed: {0}")]
     Protocol(#[source] assembly_schema::RuntimePlanError),
@@ -82,10 +84,8 @@ mod tests {
         AssemblyDomain, AssemblyListenerKind, CanonicalAssemblyManifestV1, DomainLifecyclePhase,
         ListenerAuth, RuntimePlanErrorStage,
     };
+    use std::collections::BTreeMap;
     use std::error::Error as _;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tracing_subscriber::prelude::*;
 
     const SECRET_BAIT: &str = "ZZ_RUNTIME_PLAN_SECRET_1788";
     const IDENTITY_AUDIT_ASSEMBLY_LOCK: &[u8] =
@@ -107,31 +107,24 @@ mod tests {
         ReversePlacements,
     }
 
-    #[derive(Clone)]
-    struct WarnEventCounter(Arc<AtomicUsize>);
-
-    impl<S> tracing_subscriber::Layer<S> for WarnEventCounter
-    where
-        S: tracing::Subscriber,
-    {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if *event.metadata().level() == tracing::Level::WARN {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
+    fn profile_snapshot(entries: &[(&str, &str)]) -> crate::config::RuntimeConfigSnapshot {
+        let mut merged = BTreeMap::from([
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ]);
+        merged.extend(entries.iter().copied());
+        let merged = merged.into_iter().collect::<Vec<_>>();
+        test_snapshot(&merged).expect("test snapshot")
     }
 
     fn bundled(entries: &[(&str, &str)]) -> RuntimePlan {
-        let snapshot = test_snapshot(entries).expect("test snapshot");
+        let snapshot = profile_snapshot(entries);
         RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan")
     }
 
     fn artifact_error(manifest_toml: &str, assembly_lock_json: &[u8]) -> RuntimePlanError {
-        let snapshot = test_snapshot(&[("RSS_VAULT_TOKEN", SECRET_BAIT)]).expect("test snapshot");
+        let snapshot = profile_snapshot(&[("RSS_VAULT_TOKEN", SECRET_BAIT)]);
         RuntimePlan::from_bundled_artifacts(manifest_toml, assembly_lock_json, snapshot.view())
             .expect_err("invalid bundled artifact must fail")
     }
@@ -197,7 +190,7 @@ mod tests {
             .map(|listener| {
                 let auth = match listener.kind {
                     AssemblyListenerKind::Primary | AssemblyListenerKind::Admin => {
-                        ListenerAuth::Jwt
+                        ListenerAuth::RssAccessToken
                     }
                     AssemblyListenerKind::Internal => ListenerAuth::Mtls,
                     AssemblyListenerKind::Health => ListenerAuth::NoAuth,
@@ -310,10 +303,10 @@ mod tests {
                 .map(|listener| (listener.id(), listener.auth()))
                 .collect::<Vec<_>>(),
             [
-                ("admin-main", ListenerAuth::Jwt),
+                ("admin-main", ListenerAuth::RssAccessToken),
                 ("health-main", ListenerAuth::NoAuth),
                 ("internal-main", ListenerAuth::Mtls),
-                ("primary-main", ListenerAuth::Jwt),
+                ("primary-main", ListenerAuth::RssAccessToken),
             ]
         );
         assert_eq!(
@@ -345,19 +338,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_plan_internal_auth_is_typed_but_secret_only_config_is_excluded() {
+    fn runtime_plan_listener_profiles_are_typed_but_secret_only_config_is_excluded() {
         let default = bundled(&[]);
-        let warning_count = Arc::new(AtomicUsize::new(0));
-        let subscriber =
-            tracing_subscriber::registry().with(WarnEventCounter(Arc::clone(&warning_count)));
-        let service_token = tracing::subscriber::with_default(subscriber, || {
-            bundled(&[("RSS_INTERNAL_AUTH_SCHEME", "service-token")])
-        });
-        assert_eq!(
-            warning_count.load(Ordering::SeqCst),
-            0,
-            "plan-only auth resolution must not emit the live-router warning"
-        );
+        let service_token = bundled(&[("RSS_INTERNAL_AUTH_SCHEME", "service-token")]);
         assert_ne!(
             default.as_typed().runtime_plan_fingerprint().as_str(),
             service_token.as_typed().runtime_plan_fingerprint().as_str()
@@ -365,6 +348,23 @@ mod tests {
         assert_eq!(
             service_token.as_typed().listener_plans()[2].auth(),
             ListenerAuth::ServiceToken
+        );
+
+        let federated = bundled(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "federated-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "federated-access"),
+        ]);
+        assert_ne!(
+            default.as_typed().runtime_plan_fingerprint().as_str(),
+            federated.as_typed().runtime_plan_fingerprint().as_str()
+        );
+        assert_eq!(
+            federated.as_typed().listener_plans()[0].auth(),
+            ListenerAuth::FederatedAccessToken
+        );
+        assert_eq!(
+            federated.as_typed().listener_plans()[3].auth(),
+            ListenerAuth::FederatedAccessToken
         );
 
         let secret_only = bundled(&[("RSS_VAULT_TOKEN", SECRET_BAIT)]);
@@ -381,8 +381,7 @@ mod tests {
 
     #[test]
     fn runtime_plan_unknown_internal_auth_fails_closed_without_echoing_value() {
-        let snapshot =
-            test_snapshot(&[("RSS_INTERNAL_AUTH_SCHEME", SECRET_BAIT)]).expect("test snapshot");
+        let snapshot = profile_snapshot(&[("RSS_INTERNAL_AUTH_SCHEME", SECRET_BAIT)]);
         let error = RuntimePlan::bundled(snapshot.view()).expect_err("invalid auth must fail");
         let diagnostic = error.to_string();
         assert!(diagnostic.contains("RSS_INTERNAL_AUTH_SCHEME"));
@@ -390,6 +389,14 @@ mod tests {
         assert!(diagnostic.contains("service-token"));
         assert!(!diagnostic.contains(SECRET_BAIT));
         assert!(!format!("{error:?}").contains(SECRET_BAIT));
+    }
+
+    #[test]
+    fn runtime_plan_rejects_asymmetric_federated_primary_selection() {
+        let snapshot = profile_snapshot(&[("RSS_PRIMARY_TOKEN_PROFILE", "federated-access")]);
+        let error = RuntimePlan::bundled(snapshot.view())
+            .expect_err("federated Primary with RSS Admin must fail");
+        assert!(error.to_string().contains("RSS_PRIMARY_TOKEN_PROFILE"));
     }
 
     #[test]

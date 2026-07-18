@@ -1,18 +1,23 @@
-//! authn — RSS 认证主体词汇（Principal / Session / JWT / token 值类型）。
+//! authn — RSS 认证主体词汇与 profile-typed token funnel。
 //!
 //! 本 crate 承载认证侧的核心值类型与错误枚举；DI port（PDP / session store）归 `diport`（ADR-003）。
 //! 所有类型字段私有，只经显式构造 funnel 创建——外部不可伪造，fail-closed（ADR-001）。
+//! [`JwtIssuer`] / [`JwtIssuerConfig`] 以 sealed profile marker 固定算法、`typ`、`token_use` 与最大
+//! TTL：RSS access 只暴露 access mint，service-token 只暴露 service mint，federated access
+//! 没有本地 issuer 构造入口。
 //!
 //! ## 信任边界（类型层强制，INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）
 //!
-//! 验签（签名/MAC/exp）与身份 claims 由 verifier DI port `diport::Pdp` 负责；`Jwt::parse` 仅作 token
+//! 验签（签名/MAC、profile、时间窗、issuer/audience 与身份 claims）由 verifier DI port
+//! `diport::Pdp` 负责；`Jwt::parse` 仅作 token
 //! **结构闸**（3 段 / base64url / JSON / 非空 sub），不验签、不提取身份。派生 `Principal` 的 funnel 收紧为
 //! 只收**已验证 newtype**：`from_verified_jwt(&VerifiedJwt)` / `from_verified_service_token(&VerifiedServiceToken)`。
 //! `VerifiedJwt` / `VerifiedServiceToken` 私有字段 + `pub(crate)` `seal`——外部 crate 无法 mint，故
 //! 「未经验签派生 Principal」**从类型层不可表达（Hard）**。载体内携**单一 canonical 身份源**
 //! `diport::VerifiedClaims`（验签产物）：一个载体只导出一个 principal，无第二（raw 重解析）身份源（#1158 F1）。
-//! 生产 mint 路径 = authn-owned `verify_jwt` / `verify_service_token`（经 `Pdp` 验签后 seal）；真实 crypto
-//! verifier adapter + httpserve 接线留 W，见 #1109。
+//! 生产 mint 路径 = authn-owned `verify_rss_access` / `verify_federated_access` /
+//! `verify_service_token`（经 `Pdp` 验签后 seal）。生产 runtime 的 exhaustive profile binding
+//! 从同一 variant 派生 provider、所需 auth scheme 与这三个 funnel 之一，避免 scheme/provider 分参错配。
 //!
 //! ## fail-closed
 //!
@@ -41,7 +46,7 @@ const _: fn(AuthPlan, Option<RouteAuthOptOut>) -> AuthRequirement = resolve_requ
 // JWT 签发（mint/sign）：组装 claims + 紧凑 JWS，签名委托注入的 `diport::Signer`（#1314）。验签侧对称物在
 // 本 crate 顶部 verify→mint bridge；mint 子模块复用下方 `KIND_*` claim 串单源（杜绝 round-trip 漂移）。
 mod mint;
-pub use mint::{JwtAccessPrincipal, JwtAlg, JwtIssueError, JwtIssuer, JwtIssuerConfig, MintedJwt};
+pub use mint::{JwtAccessPrincipal, JwtIssueError, JwtIssuer, JwtIssuerConfig, MintedJwt};
 mod mtls;
 pub use mtls::{
     MtlsAllowSet, MtlsIdentityError, MtlsTrustDomain, MtlsTrustDomainAllowSet, OutboundMtlsPolicy,
@@ -71,30 +76,26 @@ pub enum ProjectionMaintenanceAction {
 /// One configured service-principal grant for an exact projection maintenance target.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ProjectionMaintenanceGrant {
-    subject: Box<str>,
+    caller: vocab::ServiceCallerDomain,
     action: ProjectionMaintenanceAction,
     tenant: TenantId,
     projection: Box<str>,
 }
 
 impl ProjectionMaintenanceGrant {
-    /// Build an exact grant. Empty subjects and projection identifiers fail closed.
+    /// Build an exact typed-caller grant. Empty projection identifiers fail closed.
     pub fn new(
-        subject: impl Into<String>,
+        caller: vocab::ServiceCallerDomain,
         action: ProjectionMaintenanceAction,
         tenant: TenantId,
         projection: impl Into<String>,
     ) -> Result<Self, ProjectionMaintenanceGrantError> {
-        let subject = subject.into();
         let projection = projection.into();
-        if subject.trim().is_empty() {
-            return Err(ProjectionMaintenanceGrantError::EmptySubject);
-        }
         if projection.trim().is_empty() {
             return Err(ProjectionMaintenanceGrantError::EmptyProjection);
         }
         Ok(Self {
-            subject: subject.into_boxed_str(),
+            caller,
             action,
             tenant,
             projection: projection.into_boxed_str(),
@@ -126,11 +127,11 @@ impl ProjectionMaintenanceGrantSet {
         tenant: TenantId,
         projection: &str,
     ) -> Result<ProjectionMaintenanceReceipt, ProjectionMaintenanceGrantError> {
-        if principal.kind() != PrincipalKind::Service {
-            return Err(ProjectionMaintenanceGrantError::Forbidden);
-        }
+        let caller = principal
+            .service_caller
+            .ok_or(ProjectionMaintenanceGrantError::Forbidden)?;
         let allowed = self.grants.iter().any(|grant| {
-            principal.matches_subject(&grant.subject)
+            caller == grant.caller
                 && grant.action == action
                 && grant.tenant == tenant
                 && grant.projection.as_ref() == projection
@@ -139,10 +140,7 @@ impl ProjectionMaintenanceGrantSet {
             return Err(ProjectionMaintenanceGrantError::Forbidden);
         }
         Ok(ProjectionMaintenanceReceipt::seal(
-            principal.audit_subject(),
-            action,
-            tenant,
-            projection,
+            caller, action, tenant, projection,
         ))
     }
 }
@@ -153,7 +151,7 @@ impl ProjectionMaintenanceGrantSet {
 /// does not implement `Clone`, so a receipt cannot be widened into an ambient reusable capability.
 /// INVARIANT: AUTHN-PROJECTION-RECEIPT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "private target-bound receipt and sealed mint funnel", facet = "sealed-receipt" }.
 pub struct ProjectionMaintenanceReceipt {
-    operator_subject: Box<str>,
+    operator_caller: vocab::ServiceCallerDomain,
     action: ProjectionMaintenanceAction,
     tenant: TenantId,
     projection: Box<str>,
@@ -162,13 +160,13 @@ pub struct ProjectionMaintenanceReceipt {
 
 impl ProjectionMaintenanceReceipt {
     fn seal(
-        operator_subject: &str,
+        operator_caller: vocab::ServiceCallerDomain,
         action: ProjectionMaintenanceAction,
         tenant: TenantId,
         projection: &str,
     ) -> Self {
         Self {
-            operator_subject: operator_subject.into(),
+            operator_caller,
             action,
             tenant,
             projection: projection.into(),
@@ -176,9 +174,9 @@ impl ProjectionMaintenanceReceipt {
         }
     }
 
-    /// Audit subject of the verified service principal that received this proof.
-    pub fn operator_subject(&self) -> &str {
-        &self.operator_subject
+    /// Typed caller domain of the verified service principal that received this proof.
+    pub const fn operator_caller(&self) -> vocab::ServiceCallerDomain {
+        self.operator_caller
     }
 
     /// Return whether this receipt authorizes exactly the supplied action and target.
@@ -195,7 +193,7 @@ impl ProjectionMaintenanceReceipt {
 impl std::fmt::Debug for ProjectionMaintenanceReceipt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProjectionMaintenanceReceipt")
-            .field("operator_subject", &"<redacted>")
+            .field("operator_caller", &self.operator_caller)
             .field("action", &self.action)
             .field("tenant", &self.tenant)
             .field("projection", &self.projection)
@@ -207,9 +205,6 @@ impl std::fmt::Debug for ProjectionMaintenanceReceipt {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProjectionMaintenanceGrantError {
-    /// A grant subject was empty.
-    #[error("projection maintenance grant subject must be non-empty")]
-    EmptySubject,
     /// A grant projection identifier was empty.
     #[error("projection maintenance grant projection must be non-empty")]
     EmptyProjection,
@@ -238,7 +233,7 @@ struct Claims {
 
 /// JWT 结构闸（不验签）：校验 3 段 + base64url payload + JSON + 非空 `sub`。
 ///
-/// 信任边界：只做**结构**校验，签名/exp 与身份 claims 由上游 verifier（`diport::Pdp`）负责。本闸在 `verify_jwt`
+/// 信任边界：只做**结构**校验，签名/exp 与身份 claims 由上游 verifier（`diport::Pdp`）负责。本闸在 access
 /// 中**验签通过后**运行（防 lenient adapter 误判畸形 token ok），故失败归 [`AuthnError::PrincipalInvalid`]
 /// （验签后失败），**非** `TokenInvalid`（专指 verifier 报告的签名失败，#1275 review F1）。
 fn decode_claims(raw: &str) -> Result<Claims, AuthnError> {
@@ -272,6 +267,7 @@ pub struct Principal {
     subject: String,
     /// 所属租户（`None` 仅限 `Service` / `SuperAdmin` 跨租户场景）。
     tenant: Option<TenantId>,
+    service_caller: Option<vocab::ServiceCallerDomain>,
 }
 
 impl Principal {
@@ -285,7 +281,7 @@ impl Principal {
     /// 入参收紧为 [`VerifiedJwt`]——其私有内层 + `pub(crate)` [`VerifiedJwt::seal`] 使外部 crate 无法 mint，
     /// 故「未经验签派生 Principal」**类型层不可表达（Hard）**。`VerifiedJwt` 内携**单一 canonical 身份源**
     /// `VerifiedClaims`（F1）：一个 verified 载体只导出一个 principal——本函数与 verify→mint bridge
-    /// [`verify_jwt`] 读**同一** `VerifiedClaims`，无第二（raw 重解析）身份源、无分歧。
+    /// access verification funnels read the **same** `VerifiedClaims`, with no second raw identity source.
     pub fn from_verified_jwt(verified: &VerifiedJwt) -> Result<Self, AuthnError> {
         // VerifiedJwt.claims = 验签产物 = 单一身份源（载体的 raw 仅供下游转发，不派生身份）。
         let c = &verified.claims;
@@ -295,7 +291,7 @@ impl Principal {
     /// 由已验证 claims 三元组（subject / tenant / kind）派生 scoped / super-admin [`Principal`]。
     ///
     /// `kind`→[`PrincipalKind`] 策略 + subject 非空不变式**单源**：消费侧两条已验证入口共用本函数，杜绝
-    /// 双份映射 / 双份校验漂移——[`Self::from_verified_jwt`] 与 verify→mint bridge [`verify_jwt`] 均读载体
+    /// 双份映射 / 双份校验漂移——[`Self::from_verified_jwt`] 与 access verify→mint bridge 均读载体
     /// 内 [`diport::VerifiedClaims`]。service / anonymous 不经本 funnel；未知 / 缺失 kind、空 subject、
     /// scoped 主体缺 tenant / tenant 非 canonical UUID → 一律 [`AuthnError::PrincipalInvalid`]（验签**通过后**的
     /// principal 派生失败，fail-closed；**非** `TokenInvalid`——后者专指签名失败，#1275 review F1）。
@@ -330,6 +326,7 @@ impl Principal {
             kind,
             subject: subject.to_string(),
             tenant,
+            service_caller: None,
         })
     }
 
@@ -339,13 +336,13 @@ impl Principal {
     /// [`Self::derive_from_claims`] 同款非空不变式）。信任原点 = verifier：subject 取自验签产物
     /// [`diport::VerifiedClaims::subject`]，service token 的 kind / tenant claim 不参与（service 主体恒跨租户）。
     fn service_from_subject(subject: &str) -> Result<Self, AuthnError> {
-        if subject.is_empty() {
-            return Err(AuthnError::PrincipalInvalid);
-        }
+        let service_caller = vocab::ServiceCallerDomain::from_subject(subject)
+            .ok_or(AuthnError::PrincipalInvalid)?;
         Ok(Self {
             kind: PrincipalKind::Service,
             subject: subject.to_string(),
             tenant: None,
+            service_caller: Some(service_caller),
         })
     }
 
@@ -373,6 +370,7 @@ impl Principal {
             kind: _kind,
             subject: _subject.into(),
             tenant: _tenant,
+            service_caller: None,
         }
     }
 
@@ -384,6 +382,11 @@ impl Principal {
     /// 返回所属租户（跨租户 principal 为 `None`）。
     pub fn tenant(&self) -> Option<TenantId> {
         self.tenant
+    }
+
+    /// Closed caller domain carried only by a verified service-token principal.
+    pub fn service_caller_domain(&self) -> Option<vocab::ServiceCallerDomain> {
+        self.service_caller
     }
 
     /// 返回审计用途的已验证 subject。
@@ -673,6 +676,16 @@ pub mod test_support {
     ) -> Principal {
         Principal::for_test(kind, subject, tenant)
     }
+
+    /// Construct a test service principal from the same closed caller domain used in production.
+    pub fn service_principal(caller: vocab::ServiceCallerDomain) -> Principal {
+        Principal {
+            kind: PrincipalKind::Service,
+            subject: caller.as_str().to_owned(),
+            tenant: None,
+            service_caller: Some(caller),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -681,29 +694,42 @@ pub mod test_support {
 //
 // INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（生产端闭环）。`seal` 是 `pub(crate)`——外部 crate 无法 mint
 // `VerifiedJwt` / `VerifiedServiceToken`（Hard，消费端见 `verified_token_seal` + `tests/ui/`）。本 bridge
-// 是 authn 内**唯一生产 mint 路径**：经注入的 [`diport::Pdp`] 验签（签名/exp/MAC）成功后，才在 crate 内
+// 是 authn 内**唯一生产 mint 路径**：经注入的 [`diport::Pdp`] 验签（profile、签名/MAC、时间与
+// profile claims）成功后，才在 crate 内
 // 调 `seal` 装箱、并据**验签产物** [`diport::VerifiedClaims`] 派生 `Principal`（验签 = 信任原点，非旁路
 // re-parse）。验签**先于** seal 由 `?`-链顺序保证：`pdp.verify(...).await?` 失败即返回，绝不 seal。
-// 真实 crypto verifier adapter + httpserve 生产接线留 #1109 W（ADR-006 §3/§5 验签空窗）。
-//
-// NOTE(#1109)：本 bridge 是认证决策关键路径，httpserve 接线时须补 `tracing` span（ADR-006 §4 承诺
-// 与 #1109 同批交付）：verify ok → `authz.decision=allow` + `principal.kind`（不含 PII）；verify fail →
-// `authz.decision=deny` + 区分凭据拒绝与 `ProviderUnavailable` 基础设施故障。
-// 当前 slice 无生产接线，故不引 `tracing` 依赖、不在此埋点（避免空转 span）。
+// 生产 runtime 以 exhaustive profile binding 把 listener、provider 与对应 funnel 同批绑定；HTTP 边界
+// 在调用本 bridge 前完成 exact-one header 提取。决策 telemetry 位于该 runtime bridge，且不记录凭据值。
 
-/// 验签并 mint JWT：经注入的 [`diport::Pdp`] 校验签名 / exp / MAC，成功后受控 seal 出 [`VerifiedJwt`]
-/// 并据验签产物派生 [`Principal`]。验签失败 fail-closed（[`AuthnError`]），绝不 seal。
+/// 验签并 mint RSS access token：profile 在进入 provider 前由本 funnel 固定。
 ///
 /// `pdp` 取 dynosaur wrapper `&DynPdp`（caller 可持 `Box<DynPdp>` / `Arc<DynPdp>` 或静态 impl）。返回的
 /// `VerifiedJwt` 内携**单一 canonical 身份源** `VerifiedClaims`——`Principal` 与该载体经 `from_verified_jwt`
 /// 同源派生，一个载体只导出一个 principal（F1）。`Principal` 刻意不 derive `Debug`（含 PII）——消费 / 测试
 /// 经 `.kind()` / `.tenant()` 访问器断言，不 debug 格式化整个元组。
-pub async fn verify_jwt(
+pub async fn verify_rss_access(
     raw: &str,
     pdp: &diport::DynPdp<'_>,
 ) -> Result<(VerifiedJwt, Principal), AuthnError> {
+    verify_access(raw, diport::RawCredential::rss_access(raw), pdp).await
+}
+
+/// 验签并 mint federated access token：与 RSS access 共用私有 seal core，但构造不同 profile
+/// credential，因此 listener/provider 错配在任何 token 解析前即可拒绝。
+pub async fn verify_federated_access(
+    raw: &str,
+    pdp: &diport::DynPdp<'_>,
+) -> Result<(VerifiedJwt, Principal), AuthnError> {
+    verify_access(raw, diport::RawCredential::federated_access(raw), pdp).await
+}
+
+async fn verify_access(
+    raw: &str,
+    credential: diport::RawCredential,
+    pdp: &diport::DynPdp<'_>,
+) -> Result<(VerifiedJwt, Principal), AuthnError> {
     // ① 验签（信任原点）：失败即 fail-closed，下方 seal / 派生均不可达。
-    let claims = pdp.verify(&diport::RawCredential::jwt(raw)).await?;
+    let claims = pdp.verify(&credential).await?;
     // ② 结构防御闸（defense-in-depth）：raw 须 well-formed JWT（3 段 + base64url），否则 TokenInvalid——
     //    防 lenient adapter 对畸形 token 误判 ok。解析产物丢弃，仅校验结构（身份在 ④ 取自 VerifiedClaims）。
     Jwt::parse(raw)?;
@@ -714,7 +740,7 @@ pub async fn verify_jwt(
     Ok((verified, principal))
 }
 
-/// 验签并 mint service-token：同 [`verify_jwt`]，funnel 固定 `kind=Service`、`subject` 取自验签产物。
+/// 验签并 mint service-token：funnel 固定 `kind=Service`、`subject` 取自验签产物。
 ///
 /// service token 结构由 verifier（[`diport::Pdp`]）负责，authn 不 re-parse——故 `raw` 对 authn 不透明，
 /// 受控 seal 进 [`VerifiedServiceToken`]（携 raw + 单一 canonical 身份源 `VerifiedClaims`）。
@@ -775,11 +801,11 @@ impl Jwt {
 /// **单一 canonical 身份源（F1）**：载体内 `claims`（验签产物 [`diport::VerifiedClaims`]，verifier =
 /// 信任原点）是**唯一**身份源；`raw` 仅是原始 token 串（供下游 token relay / session），**不派生身份**。
 /// 故一个 `VerifiedJwt` 只能经 `from_verified_jwt` 导出**一个** principal——无第二（raw 重解析）身份源、
-/// 无分歧。bridge [`verify_jwt`] 与 `from_verified_jwt` 读同一 `claims`。
+/// 无分歧。access bridge 与 `from_verified_jwt` 读同一 `claims`。
 ///
 /// ⚠ `seal` 的 `pub(crate)` 可见性是本不变式锚点：改为 `pub` 会让外部可 mint，Hard 静默退化为 Soft。
 /// 改 `pub` 须经 ADR amendment；机器守（`cargo public-api` golden）跟踪见 #1151。**生产端**经 authn-owned
-/// [`verify_jwt`] 闭环；外部 crate 不可达（`tests/ui/` compile-fail 锁）。httpserve 生产挂载留 #1109 W。
+/// access verification funnels 闭环；外部 crate 不可达（`tests/ui/` compile-fail 锁）。
 pub struct VerifiedJwt {
     /// 原始已验证 token 串（供下游 token relay / session；**不派生身份**——身份用 [`Principal::from_verified_jwt`]）。
     raw: String,
@@ -797,7 +823,7 @@ impl VerifiedJwt {
     /// 受控装箱：把已验签 token（`raw`）+ 验签产物 `claims` 标记为 [`VerifiedJwt`]（`pub(crate)`，**不验签**）。
     ///
     /// 调用方须已经 verifier 完成验签（签名/exp/MAC）——本函数只做类型层标记。生产唯一调用方是
-    /// authn-owned [`verify_jwt`]，`seal` 保持 `pub(crate)`。
+    /// authn-owned access verification funnels，`seal` 保持 `pub(crate)`。
     pub(crate) fn seal(raw: String, claims: diport::VerifiedClaims) -> Self {
         Self { raw, claims }
     }
@@ -834,8 +860,8 @@ impl AccessToken {
 /// 与 [`VerifiedJwt`] 同款类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）+ **单一 canonical 身份源**
 /// （F1）：[`Principal::from_verified_service_token`] 只收 `&VerifiedServiceToken`，从载体内 `claims`
 /// （验签产物 [`diport::VerifiedClaims`]）派生身份；`token` 仅是原始串（relay 用，不派生身份）。仅经
-/// `pub(crate)` [`Self::seal`] 装箱（同 [`VerifiedJwt`] 锚点，机器守见 #1151）。生产 mint 由
-/// [`verify_service_token`] 调用。见 #1109。
+/// `pub(crate)` [`Self::seal`] 装箱（同 [`VerifiedJwt`] 锚点，机器守见 #1151）。生产 mint 仅由
+/// [`verify_service_token`] 调用。
 pub struct VerifiedServiceToken {
     /// 原始已验证 service token（relay 用，不派生身份）。
     token: AccessToken,
@@ -889,8 +915,7 @@ pub struct SessionId(String);
 impl SessionId {
     /// 生成新会话 ID（UUID v4 随机值）。
     ///
-    /// 不取系统时钟（满足 clippy clock 纪律）；RW-G1 追踪弹经此 mint 登录会话 id。
-    /// 完整会话生命周期（`Session` / `Principal` 聚合经已校验 JWT / token 派生）留 W。
+    /// 不取系统时钟（满足 clippy clock 纪律）；会话生命周期由持有 [`Session`] 的应用服务管理。
     pub fn generate() -> Self {
         Self(uuid::Uuid::new_v4().to_string())
     }
@@ -1091,8 +1116,9 @@ mod projection_maintenance_receipt_tests {
         TenantId::parse(raw).unwrap_or_else(|_| unreachable!("static tenant fixture is valid"))
     }
 
-    fn service(subject: &str) -> Principal {
-        Principal::for_test(PrincipalKind::Service, subject, None)
+    fn service() -> Principal {
+        Principal::service_from_subject(vocab::ServiceCallerDomain::MaintenanceOperator.as_str())
+            .unwrap_or_else(|_| unreachable!("closed caller is valid"))
     }
 
     #[test]
@@ -1101,7 +1127,7 @@ mod projection_maintenance_receipt_tests {
         let other_tenant = tenant("f47ac10b-58cc-4372-a567-0e02b2c3d480");
         let grants = ProjectionMaintenanceGrantSet::new(vec![
             ProjectionMaintenanceGrant::new(
-                "projection-operator",
+                vocab::ServiceCallerDomain::MaintenanceOperator,
                 ProjectionMaintenanceAction::Replay,
                 target_tenant,
                 "audit.session-projection",
@@ -1112,7 +1138,7 @@ mod projection_maintenance_receipt_tests {
 
         let receipt = grants
             .authorize(
-                &service("projection-operator"),
+                &service(),
                 ProjectionMaintenanceAction::Replay,
                 target_tenant,
                 "audit.session-projection",
@@ -1135,7 +1161,7 @@ mod projection_maintenance_receipt_tests {
         ));
         assert!(matches!(
             grants.authorize(
-                &service("another-service"),
+                &Principal::for_test(PrincipalKind::Service, "another-service", None),
                 ProjectionMaintenanceAction::Replay,
                 target_tenant,
                 "audit.session-projection"
@@ -1145,17 +1171,8 @@ mod projection_maintenance_receipt_tests {
     }
 
     #[test]
-    fn grant_inputs_fail_closed_and_receipt_debug_redacts_subject() {
+    fn grant_inputs_fail_closed_and_receipt_debug_uses_typed_caller() {
         let target_tenant = tenant("f47ac10b-58cc-4372-a567-0e02b2c3d479");
-        assert!(matches!(
-            ProjectionMaintenanceGrant::new(
-                " ",
-                ProjectionMaintenanceAction::Status,
-                target_tenant,
-                "audit.session-projection"
-            ),
-            Err(ProjectionMaintenanceGrantError::EmptySubject)
-        ));
         assert!(matches!(
             ProjectionMaintenanceGrantSet::new(Vec::new()),
             Err(ProjectionMaintenanceGrantError::EmptySet)
@@ -1163,7 +1180,7 @@ mod projection_maintenance_receipt_tests {
 
         let grants = ProjectionMaintenanceGrantSet::new(vec![
             ProjectionMaintenanceGrant::new(
-                "secret-operator",
+                vocab::ServiceCallerDomain::MaintenanceOperator,
                 ProjectionMaintenanceAction::Status,
                 target_tenant,
                 "audit.session-projection",
@@ -1173,13 +1190,16 @@ mod projection_maintenance_receipt_tests {
         .unwrap_or_else(|_| unreachable!("static grant set is non-empty"));
         let receipt = grants
             .authorize(
-                &service("secret-operator"),
+                &service(),
                 ProjectionMaintenanceAction::Status,
                 target_tenant,
                 "audit.session-projection",
             )
             .unwrap_or_else(|_| unreachable!("exact grant must authorize"));
-        assert!(!format!("{receipt:?}").contains("secret-operator"));
+        assert_eq!(
+            receipt.operator_caller(),
+            vocab::ServiceCallerDomain::MaintenanceOperator
+        );
     }
 }
 
@@ -1504,11 +1524,31 @@ mod principal_derive_tests {
         // funnel 固定 kind=Service：即便验签产物携 kind=admin / tenant，也忽略，恒 Service + 跨租户 None。
         let vs = VerifiedServiceToken::seal(
             AccessToken::new("opaque"),
-            VerifiedClaims::new("svc-a", Some(CANON.to_string()), Some("admin".to_string())),
+            VerifiedClaims::new(
+                vocab::ServiceCallerDomain::MaintenanceOperator.as_str(),
+                Some(CANON.to_string()),
+                Some("admin".to_string()),
+            ),
         );
         let p = Principal::from_verified_service_token(&vs).expect("service derive ok");
         assert_eq!(p.kind(), PrincipalKind::Service);
         assert_eq!(p.tenant(), None);
+        assert_eq!(
+            p.service_caller_domain(),
+            Some(vocab::ServiceCallerDomain::MaintenanceOperator)
+        );
+    }
+
+    #[test]
+    fn service_token_funnel_rejects_subject_outside_closed_caller_domains() {
+        let token = VerifiedServiceToken::seal(
+            AccessToken::new("opaque"),
+            VerifiedClaims::new("arbitrary-service", None, Some("service".to_owned())),
+        );
+        assert!(matches!(
+            Principal::from_verified_service_token(&token),
+            Err(AuthnError::PrincipalInvalid)
+        ));
     }
 
     #[test]
@@ -1606,8 +1646,11 @@ mod verify_bridge_tests {
     //! authn-owned verify→mint bridge（#1158）：`Pdp` 验签 ok → seal `VerifiedJwt` / `VerifiedServiceToken`
     //! 并从**验签产物 `VerifiedClaims`** 派生 `Principal`（验签 = 信任原点）；验签 fail → `AuthnError`，
     //! 绝不 seal / 派生（fail-closed，verify 先于 seal 的顺序由 `?`-链保证）。
-    use super::{AuthnError, PrincipalKind, test_jwt, verify_jwt, verify_service_token};
-    use diport::{DynPdp, Pdp, PdpError, RawCredential, VerifiedClaims};
+    use super::{
+        AuthnError, PrincipalKind, test_jwt, verify_federated_access, verify_rss_access,
+        verify_service_token,
+    };
+    use diport::{DynPdp, Pdp, PdpError, RawCredential, TokenProfile, VerifiedClaims};
     use vocab::tenant::TenantId;
 
     const CANON: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -1626,6 +1669,29 @@ mod verify_bridge_tests {
         DynPdp::new_box(StubPdp { result })
     }
 
+    struct ProfilePdp {
+        expected: TokenProfile,
+    }
+
+    impl Pdp for ProfilePdp {
+        async fn verify(&self, raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
+            assert_eq!(raw.profile(), self.expected);
+            let (tenant, kind) = match self.expected {
+                TokenProfile::RssAccess | TokenProfile::FederatedAccess => {
+                    (Some(CANON.to_string()), Some("user".to_string()))
+                }
+                TokenProfile::ServiceToken => (None, Some("service".to_string())),
+            };
+            let subject = match self.expected {
+                TokenProfile::ServiceToken => {
+                    vocab::ServiceCallerDomain::MaintenanceOperator.as_str()
+                }
+                TokenProfile::RssAccess | TokenProfile::FederatedAccess => "subject",
+            };
+            Ok(VerifiedClaims::new(subject, tenant, kind))
+        }
+    }
+
     #[allow(clippy::expect_used)]
     fn service_binding() -> diport::ServiceTokenTenantBinding {
         diport::ServiceTokenTenantBinding::new(TenantId::parse(CANON).expect("canonical tenant"))
@@ -1637,7 +1703,7 @@ mod verify_bridge_tests {
 
         let raw = test_jwt(r#"{"sub":"u"}"#);
         let jwt_pdp = boxed(Err(PdpError::InvalidSignature));
-        assert_send(verify_jwt(&raw, &jwt_pdp));
+        assert_send(verify_rss_access(&raw, &jwt_pdp));
 
         let service_pdp = boxed(Err(PdpError::InvalidSignature));
         assert_send(verify_service_token(
@@ -1647,11 +1713,34 @@ mod verify_bridge_tests {
         ));
     }
 
+    #[tokio::test]
+    async fn access_funnels_fix_the_trusted_profile_before_provider_entry() {
+        let raw = test_jwt(r#"{"sub":"user"}"#);
+        let rss = DynPdp::new_box(ProfilePdp {
+            expected: TokenProfile::RssAccess,
+        });
+        let federated = DynPdp::new_box(ProfilePdp {
+            expected: TokenProfile::FederatedAccess,
+        });
+
+        assert!(verify_rss_access(&raw, &rss).await.is_ok());
+        assert!(verify_federated_access(&raw, &federated).await.is_ok());
+
+        let service = DynPdp::new_box(ProfilePdp {
+            expected: TokenProfile::ServiceToken,
+        });
+        assert!(
+            verify_service_token("opaque", service_binding(), &service)
+                .await
+                .is_ok()
+        );
+    }
+
     /// happy：验签 ok → `(VerifiedJwt, Principal)`；身份反映**验签产物**而非 raw 重解析。
     /// raw payload 故意 `kind=user`，`VerifiedClaims.kind=admin` → `Principal=Admin`，证明信任原点是 verifier。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn verify_jwt_ok_derives_principal_from_verified_claims_not_raw() {
+    async fn verify_rss_access_ok_derives_principal_from_verified_claims_not_raw() {
         let raw = test_jwt(
             r#"{"sub":"raw-ignored","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
         );
@@ -1660,7 +1749,9 @@ mod verify_bridge_tests {
             Some(CANON.to_string()),
             Some("admin".to_string()),
         )));
-        let (vj, principal) = verify_jwt(&raw, &pdp).await.expect("verify ok mints");
+        let (vj, principal) = verify_rss_access(&raw, &pdp)
+            .await
+            .expect("verify ok mints");
         assert_eq!(
             principal.kind(),
             PrincipalKind::Admin,
@@ -1674,7 +1765,7 @@ mod verify_bridge_tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn verify_jwt_super_admin_is_cross_tenant_none() {
+    async fn verify_rss_access_super_admin_is_cross_tenant_none() {
         let raw = test_jwt(
             r#"{"sub":"x","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
         );
@@ -1683,7 +1774,7 @@ mod verify_bridge_tests {
             None,
             Some("superAdmin".to_string()),
         )));
-        let (_vj, principal) = verify_jwt(&raw, &pdp).await.expect("super-admin ok");
+        let (_vj, principal) = verify_rss_access(&raw, &pdp).await.expect("super-admin ok");
         assert_eq!(principal.kind(), PrincipalKind::SuperAdmin);
         assert_eq!(principal.tenant(), None, "super-admin 跨租户 tenant=None");
     }
@@ -1691,7 +1782,7 @@ mod verify_bridge_tests {
     /// fail-closed：四个 `PdpError` 变体均 never `Ok` / seal；三种凭据失败保持 401 taxonomy，
     /// provider outage 则保持独立可重试语义。
     #[tokio::test]
-    async fn verify_jwt_pdp_failure_maps_error_and_never_mints() {
+    async fn verify_rss_access_pdp_failure_maps_error_and_never_mints() {
         let raw = test_jwt(
             r#"{"sub":"u","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
         );
@@ -1707,7 +1798,7 @@ mod verify_bridge_tests {
             let pdp = boxed(Err(perr.clone()));
             // matches! + discriminant 守卫：既断言是 Err（绝不 mint），又锁定映射变体。
             // 不用 expect_err（`Principal` 无 Debug，含 PII 刻意不 derive）、不用 panic（clippy::panic 禁）。
-            let result = verify_jwt(&raw, &pdp).await;
+            let result = verify_rss_access(&raw, &pdp).await;
             assert!(
                 matches!(&result, Err(e) if std::mem::discriminant(e) == std::mem::discriminant(&want)),
                 "PdpError::{perr:?} 须映射到 {want:?}（且绝不 Ok）"
@@ -1718,14 +1809,14 @@ mod verify_bridge_tests {
     /// verify 先于 seal：`Pdp` ok 但 raw 结构坏 → `Jwt::parse` 报 `PrincipalInvalid`（验签后结构闸失败，非
     /// 签名失败、非 seal），无产物。#1275 review F1：此路不得记 `signature_invalid`。
     #[tokio::test]
-    async fn verify_jwt_ok_but_malformed_raw_fails_at_parse() {
+    async fn verify_rss_access_ok_but_malformed_raw_fails_at_parse() {
         let pdp = boxed(Ok(VerifiedClaims::new(
             "u",
             Some(CANON.to_string()),
             Some("user".to_string()),
         )));
         assert!(matches!(
-            verify_jwt("only.two", &pdp).await,
+            verify_rss_access("only.two", &pdp).await,
             Err(AuthnError::PrincipalInvalid)
         ));
     }
@@ -1735,7 +1826,7 @@ mod verify_bridge_tests {
     #[allow(clippy::expect_used)]
     async fn verify_service_token_ok_fixes_service_kind() {
         let pdp = boxed(Ok(VerifiedClaims::new(
-            "svc-a",
+            vocab::ServiceCallerDomain::MaintenanceOperator.as_str(),
             None,
             Some("ignored".to_string()),
         )));
@@ -1747,7 +1838,7 @@ mod verify_bridge_tests {
         assert!(format!("{vs:?}").contains("redacted"));
     }
 
-    /// fail-closed：四个 `PdpError` 变体均 never `Ok` / seal，并与 verify_jwt 路径一一对齐。
+    /// fail-closed：四个 `PdpError` 变体均 never `Ok` / seal，并与 access 路径一一对齐。
     #[tokio::test]
     async fn verify_service_token_pdp_failure_maps_error_and_never_mints() {
         for (perr, want) in [
@@ -1781,7 +1872,7 @@ mod verify_bridge_tests {
             Some("user".to_string()),
         )));
         assert!(matches!(
-            verify_jwt(&raw, &pdp).await,
+            verify_rss_access(&raw, &pdp).await,
             Err(AuthnError::PrincipalInvalid)
         ));
         let pdp_svc = boxed(Ok(VerifiedClaims::new("", None, None)));

@@ -1,0 +1,11 @@
+warning: authorized DLQ operator receipt 仅认证/PDP 边界可构造：`from_authenticated_and_authorized` 不得在此调用
+  --> $DIR/httpserve.rs:6:20
+   |
+LL |     let _receipt = eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅 runtime 可在完成 service-token 验证与精确 action/tenant grant 授权后，经 top-level `dlq_operator_receipt` wrapper 构造 private-field typed receipt
+   = note: `#[warn(rss_dlq_operator_callsite)]` on by default
+
+warning: 1 warning emitted
+

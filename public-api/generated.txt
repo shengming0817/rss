@@ -185,6 +185,8 @@ impl secure::redaction::Redact for generated::event::_seed_v1::SeedThingHappened
 pub fn generated::event::_seed_v1::SeedThingHappenedPayload::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl serde_core::ser::Serialize for generated::event::_seed_v1::SeedThingHappenedPayload
 pub fn generated::event::_seed_v1::SeedThingHappenedPayload::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl vocab::contract::binding::GeneratedEventPayload for generated::event::_seed_v1::SeedThingHappenedPayload
+pub const generated::event::_seed_v1::SeedThingHappenedPayload::FACT: vocab::contract::binding::EventFactBinding
 impl<'de> serde_core::de::Deserialize<'de> for generated::event::_seed_v1::SeedThingHappenedPayload
 pub fn generated::event::_seed_v1::SeedThingHappenedPayload::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for generated::event::_seed_v1::SeedThingHappenedPayload
@@ -196,6 +198,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::event::_seed_v1::See
 impl core::panic::unwind_safe::UnwindSafe for generated::event::_seed_v1::SeedThingHappenedPayload
 pub const generated::event::_seed_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::_seed_v1::CONTRACT_ID: &str
+pub const generated::event::_seed_v1::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::_seed_v1::SPEC: generated::event::EventSpec
 pub const generated::event::_seed_v1::TOPIC: &str
 pub mod generated::event::identity_v1
@@ -327,6 +330,8 @@ impl secure::redaction::Redact for generated::event::identity_v1::policy_updated
 pub fn generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl serde_core::ser::Serialize for generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload
 pub fn generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl vocab::contract::binding::GeneratedEventPayload for generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload
+pub const generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload::FACT: vocab::contract::binding::EventFactBinding
 impl<'de> serde_core::de::Deserialize<'de> for generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload
 pub fn generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload
@@ -338,6 +343,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload
 pub const generated::event::identity_v1::policy_updated::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::identity_v1::policy_updated::CONTRACT_ID: &str
+pub const generated::event::identity_v1::policy_updated::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::policy_updated::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::policy_updated::TOPIC: &str
 pub mod generated::event::identity_v1::role_assigned
@@ -421,6 +427,8 @@ impl secure::redaction::Redact for generated::event::identity_v1::role_assigned:
 pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl serde_core::ser::Serialize for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload
 pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl vocab::contract::binding::GeneratedEventPayload for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload
+pub const generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload::FACT: vocab::contract::binding::EventFactBinding
 impl<'de> serde_core::de::Deserialize<'de> for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload
 pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload
@@ -432,6 +440,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload
 pub const generated::event::identity_v1::role_assigned::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::identity_v1::role_assigned::CONTRACT_ID: &str
+pub const generated::event::identity_v1::role_assigned::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::role_assigned::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::role_assigned::TOPIC: &str
 pub mod generated::event::identity_v1::role_revoked
@@ -515,6 +524,8 @@ impl secure::redaction::Redact for generated::event::identity_v1::role_revoked::
 pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl serde_core::ser::Serialize for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload
 pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl vocab::contract::binding::GeneratedEventPayload for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload
+pub const generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload::FACT: vocab::contract::binding::EventFactBinding
 impl<'de> serde_core::de::Deserialize<'de> for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload
 pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload
@@ -526,6 +537,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload
 pub const generated::event::identity_v1::role_revoked::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::identity_v1::role_revoked::CONTRACT_ID: &str
+pub const generated::event::identity_v1::role_revoked::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::role_revoked::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::role_revoked::TOPIC: &str
 pub mod generated::event::identity_v1::session_created
@@ -560,6 +572,8 @@ impl secure::redaction::Redact for generated::event::identity_v1::session_create
 pub fn generated::event::identity_v1::session_created::IdentitySessionCreatedPayload::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl serde_core::ser::Serialize for generated::event::identity_v1::session_created::IdentitySessionCreatedPayload
 pub fn generated::event::identity_v1::session_created::IdentitySessionCreatedPayload::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl vocab::contract::binding::GeneratedEventPayload for generated::event::identity_v1::session_created::IdentitySessionCreatedPayload
+pub const generated::event::identity_v1::session_created::IdentitySessionCreatedPayload::FACT: vocab::contract::binding::EventFactBinding
 impl<'de> serde_core::de::Deserialize<'de> for generated::event::identity_v1::session_created::IdentitySessionCreatedPayload
 pub fn generated::event::identity_v1::session_created::IdentitySessionCreatedPayload::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for generated::event::identity_v1::session_created::IdentitySessionCreatedPayload
@@ -571,6 +585,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::session_created::IdentitySessionCreatedPayload
 pub const generated::event::identity_v1::session_created::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::identity_v1::session_created::CONTRACT_ID: &str
+pub const generated::event::identity_v1::session_created::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::session_created::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::session_created::TOPIC: &str
 pub mod generated::event::settings_v1
@@ -651,6 +666,8 @@ impl secure::redaction::Redact for generated::event::settings_v1::SettingsConfig
 pub fn generated::event::settings_v1::SettingsConfigVersionChangedPayload::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl serde_core::ser::Serialize for generated::event::settings_v1::SettingsConfigVersionChangedPayload
 pub fn generated::event::settings_v1::SettingsConfigVersionChangedPayload::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl vocab::contract::binding::GeneratedEventPayload for generated::event::settings_v1::SettingsConfigVersionChangedPayload
+pub const generated::event::settings_v1::SettingsConfigVersionChangedPayload::FACT: vocab::contract::binding::EventFactBinding
 impl<'de> serde_core::de::Deserialize<'de> for generated::event::settings_v1::SettingsConfigVersionChangedPayload
 pub fn generated::event::settings_v1::SettingsConfigVersionChangedPayload::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for generated::event::settings_v1::SettingsConfigVersionChangedPayload
@@ -662,6 +679,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::event::settings_v1::
 impl core::panic::unwind_safe::UnwindSafe for generated::event::settings_v1::SettingsConfigVersionChangedPayload
 pub const generated::event::settings_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::settings_v1::CONTRACT_ID: &str
+pub const generated::event::settings_v1::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::settings_v1::SPEC: generated::event::EventSpec
 pub const generated::event::settings_v1::TOPIC: &str
 pub enum generated::event::ExternalEffectPolicy
@@ -1317,7 +1335,9 @@ pub const generated::http::identity_v1::login::CONTRACT: vocab::contract::bindin
 pub const generated::http::identity_v1::login::CONTRACT_ID: &str
 pub const generated::http::identity_v1::login::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::login::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::identity_v1::login::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
 pub const generated::http::identity_v1::login::PATH: &str
+pub const generated::http::identity_v1::login::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::login::RouteMarker>
 pub const generated::http::identity_v1::login::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::login::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::login::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::login::SPEC: generated::http::HttpSpec
@@ -1462,7 +1482,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::password_change::IdentityPasswordChangeData
 pub struct generated::http::identity_v1::password_change::IdentityPasswordChangeRequest
 pub generated::http::identity_v1::password_change::IdentityPasswordChangeRequest::current_password: alloc::string::String
-pub generated::http::identity_v1::password_change::IdentityPasswordChangeRequest::new_password: alloc::string::String
+pub generated::http::identity_v1::password_change::IdentityPasswordChangeRequest::new_password: generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
 impl core::clone::Clone for generated::http::identity_v1::password_change::IdentityPasswordChangeRequest
 pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequest::clone(&self) -> generated::http::identity_v1::password_change::IdentityPasswordChangeRequest
 impl core::fmt::Debug for generated::http::identity_v1::password_change::IdentityPasswordChangeRequest
@@ -1480,6 +1500,51 @@ impl core::marker::Unpin for generated::http::identity_v1::password_change::Iden
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::password_change::IdentityPasswordChangeRequest
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::password_change::IdentityPasswordChangeRequest
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::password_change::IdentityPasswordChangeRequest
+pub struct generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword(_)
+impl core::clone::Clone for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::clone(&self) -> generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+impl core::cmp::Eq for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+impl core::cmp::Ord for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::cmp(&self, &generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::eq(&self, &generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::partial_cmp(&self, &generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword> for alloc::string::String
+pub fn alloc::string::String::from(generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword) -> Self
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub type generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::Error = generated::http::identity_v1::password_change::error::ConversionError
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::password_change::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub type generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::Error = generated::http::identity_v1::password_change::error::ConversionError
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::try_from(&str) -> core::result::Result<Self, generated::http::identity_v1::password_change::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub type generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::Error = generated::http::identity_v1::password_change::error::ConversionError
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::password_change::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+impl core::ops::deref::Deref for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub type generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::Target = alloc::string::String
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::deref(&self) -> &alloc::string::String
+impl core::str::traits::FromStr for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub type generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::Err = generated::http::identity_v1::password_change::error::ConversionError
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::from_str(&str) -> core::result::Result<Self, generated::http::identity_v1::password_change::error::ConversionError>
+impl secure::redaction::Redact for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+pub fn generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+impl core::marker::Send for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+impl core::marker::Sync for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+impl core::marker::Unpin for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::password_change::IdentityPasswordChangeRequestNewPassword
 pub struct generated::http::identity_v1::password_change::IdentityPasswordChangeResponse
 pub generated::http::identity_v1::password_change::IdentityPasswordChangeResponse::data: generated::http::identity_v1::password_change::IdentityPasswordChangeData
 impl core::clone::Clone for generated::http::identity_v1::password_change::IdentityPasswordChangeResponse
@@ -2004,7 +2069,9 @@ pub const generated::http::identity_v1::policies_create::CONTRACT: vocab::contra
 pub const generated::http::identity_v1::policies_create::CONTRACT_ID: &str
 pub const generated::http::identity_v1::policies_create::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::policies_create::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::identity_v1::policies_create::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
 pub const generated::http::identity_v1::policies_create::PATH: &str
+pub const generated::http::identity_v1::policies_create::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::policies_create::RouteMarker>
 pub const generated::http::identity_v1::policies_create::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::policies_create::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_create::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::policies_create::SPEC: generated::http::HttpSpec
@@ -2097,7 +2164,9 @@ pub const generated::http::identity_v1::policies_deactivate::CONTRACT: vocab::co
 pub const generated::http::identity_v1::policies_deactivate::CONTRACT_ID: &str
 pub const generated::http::identity_v1::policies_deactivate::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::policies_deactivate::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::identity_v1::policies_deactivate::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
 pub const generated::http::identity_v1::policies_deactivate::PATH: &str
+pub const generated::http::identity_v1::policies_deactivate::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::policies_deactivate::RouteMarker>
 pub const generated::http::identity_v1::policies_deactivate::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::policies_deactivate::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_deactivate::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::policies_deactivate::SPEC: generated::http::HttpSpec
@@ -3254,7 +3323,9 @@ pub const generated::http::identity_v1::policies_update::CONTRACT: vocab::contra
 pub const generated::http::identity_v1::policies_update::CONTRACT_ID: &str
 pub const generated::http::identity_v1::policies_update::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::policies_update::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::identity_v1::policies_update::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
 pub const generated::http::identity_v1::policies_update::PATH: &str
+pub const generated::http::identity_v1::policies_update::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::policies_update::RouteMarker>
 pub const generated::http::identity_v1::policies_update::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::policies_update::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_update::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::policies_update::SPEC: generated::http::HttpSpec
@@ -3591,7 +3662,9 @@ pub const generated::http::identity_v1::roles_assign::CONTRACT: vocab::contract:
 pub const generated::http::identity_v1::roles_assign::CONTRACT_ID: &str
 pub const generated::http::identity_v1::roles_assign::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::roles_assign::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::identity_v1::roles_assign::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
 pub const generated::http::identity_v1::roles_assign::PATH: &str
+pub const generated::http::identity_v1::roles_assign::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::roles_assign::RouteMarker>
 pub const generated::http::identity_v1::roles_assign::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::roles_assign::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_assign::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::roles_assign::SPEC: generated::http::HttpSpec
@@ -3792,7 +3865,9 @@ pub const generated::http::identity_v1::roles_revoke::CONTRACT: vocab::contract:
 pub const generated::http::identity_v1::roles_revoke::CONTRACT_ID: &str
 pub const generated::http::identity_v1::roles_revoke::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::roles_revoke::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::identity_v1::roles_revoke::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
 pub const generated::http::identity_v1::roles_revoke::PATH: &str
+pub const generated::http::identity_v1::roles_revoke::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::roles_revoke::RouteMarker>
 pub const generated::http::identity_v1::roles_revoke::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::roles_revoke::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_revoke::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::roles_revoke::SPEC: generated::http::HttpSpec
@@ -3949,7 +4024,9 @@ pub const generated::http::settings_v1::CONTRACT: vocab::contract::binding::Cont
 pub const generated::http::settings_v1::CONTRACT_ID: &str
 pub const generated::http::settings_v1::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v1::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::settings_v1::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
 pub const generated::http::settings_v1::PATH: &str
+pub const generated::http::settings_v1::PRODUCER: vocab::http::HttpProducerBinding<generated::http::settings_v1::RouteMarker>
 pub const generated::http::settings_v1::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::settings_v1::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v1::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::settings_v1::SPEC: generated::http::HttpSpec
@@ -4285,7 +4362,9 @@ pub const generated::http::settings_v5::CONTRACT: vocab::contract::binding::Cont
 pub const generated::http::settings_v5::CONTRACT_ID: &str
 pub const generated::http::settings_v5::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v5::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::settings_v5::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
 pub const generated::http::settings_v5::PATH: &str
+pub const generated::http::settings_v5::PRODUCER: vocab::http::HttpProducerBinding<generated::http::settings_v5::RouteMarker>
 pub const generated::http::settings_v5::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::settings_v5::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v5::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::settings_v5::SPEC: generated::http::HttpSpec
@@ -4379,7 +4458,9 @@ pub const generated::http::settings_v6::CONTRACT: vocab::contract::binding::Cont
 pub const generated::http::settings_v6::CONTRACT_ID: &str
 pub const generated::http::settings_v6::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v6::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::settings_v6::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
 pub const generated::http::settings_v6::PATH: &str
+pub const generated::http::settings_v6::PRODUCER: vocab::http::HttpProducerBinding<generated::http::settings_v6::RouteMarker>
 pub const generated::http::settings_v6::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::settings_v6::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v6::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::settings_v6::SPEC: generated::http::HttpSpec
@@ -4526,6 +4607,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::LocalTxSpec
 impl core::panic::unwind_safe::UnwindSafe for generated::http::LocalTxSpec
 pub const generated::http::LOCAL_ONLY_SPECS: &[generated::http::HttpSpec]
 pub const generated::http::LOCAL_TX_SPECS: &[generated::http::HttpSpec]
+pub const generated::http::OUTBOX_PRODUCERS: &[vocab::http::HttpProducerEvidence]
 pub const generated::http::SPECS: &[generated::http::HttpSpec]
 pub mod generated::saga
 pub mod generated::saga::billing_v1

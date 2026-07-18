@@ -12,7 +12,12 @@ use vocab::PrincipalKind;
 
 fn main() {
     // R1：非组合根 crate 调 Authenticated::new → 触发。
-    let _ev = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User, "subject-1", None);
+    let _ev = Authenticated::new(
+        RequiredScheme::RssAccessToken,
+        PrincipalKind::User,
+        "subject-1",
+        None,
+    );
 
     // R2（别名绕过闭合）：函数项别名引用即触发（path 解析到同一 DefId）；后续 `mint(...)` 调本地绑定不再触发。
     let mint = Authenticated::new;
@@ -23,6 +28,16 @@ fn main() {
         None,
     );
 
+    // R2b：service-token typed mint 的直接引用、别名和 fn-pointer 同样触发。
+    let _service = Authenticated::new_service(
+        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+    );
+    let service_mint = Authenticated::new_service;
+    let _service_fn: fn(vocab::TenantId, vocab::ServiceCallerDomain) -> Authenticated =
+        Authenticated::new_service;
+    let _ = service_mint;
+
     // G1（specificity anti-vacuity）：调 Vec::new 不触发——证明 lint 非「任意 ::new 调用」，self-ty 检查生效。
     let _v: Vec<u8> = Vec::new();
 
@@ -32,13 +47,35 @@ fn main() {
 
     // R3：非组合根 crate 引用 Principal 审计 subject accessor → 触发。
     let _subject = authn::Principal::audit_subject;
+    let _caller = authn::Principal::service_caller_domain;
+    inspect_principal;
+
+    // R4：typed caller 本身不是验签证明；settings maintenance capability 的 direct / alias /
+    // fn-pointer mint 也必须由同一 runtime-only gate 阻断。
+    let _config = postgres::ConfigValueMaintenanceCapability::from_verified_service_caller(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+    );
+    let config_mint =
+        postgres::ConfigValueMaintenanceCapability::from_verified_service_caller;
+    let _config_fn: fn(vocab::ServiceCallerDomain) -> postgres::ConfigValueMaintenanceCapability =
+        postgres::ConfigValueMaintenanceCapability::from_verified_service_caller;
+    let _ = config_mint;
 
     // G3（逃生门）：item-level #[allow] 抑制。
     allowed_by_attr();
 }
 
+fn inspect_principal(principal: &authn::Principal) {
+    let _ = principal.service_caller_domain();
+}
+
 #[allow(rss_authenticated_callsite)] // reason: UI fixture 验证逃生门
 fn allowed_by_attr() {
-    let _ev = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::Admin, "admin-1", None);
+    let _ev = Authenticated::new(
+        RequiredScheme::RssAccessToken,
+        PrincipalKind::Admin,
+        "admin-1",
+        None,
+    );
     let _subject = authn::Principal::audit_subject;
 }

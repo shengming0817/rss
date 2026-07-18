@@ -26,6 +26,8 @@ hmac = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 # 常数时间 tag/digest 比较复用（仅 backend）：primitives::crypto::constant_time_eq（CRYPTO-CONST-TIME-01）。
 primitives = { path = "../../crates/primitives", optional = true }
+# Canonical tenant validation is part of the access-profile verification boundary.
+vocab = { path = "../../crates/vocab", optional = true }
 # 三段 JWS base64url 解码（仅 backend）：URL_SAFE_NO_PAD 解 header/payload/signature。
 base64 = { workspace = true, optional = true }
 # 验签后 claims 反序列化 + JWKS 文档解析（仅 backend）：claims DTO 取 sub/exp/nbf/iss/aud + flatten extra；
@@ -45,7 +47,7 @@ tokio-util = { workspace = true, optional = true }
 
 [features]
 default = []
-backend = ["dep:p256", "dep:hmac", "dep:sha2", "dep:primitives", "dep:base64", "dep:serde", "dep:serde_json", "dep:tracing", "dep:thiserror", "dep:tokio", "dep:tokio-util"]
+backend = ["dep:p256", "dep:hmac", "dep:sha2", "dep:primitives", "dep:vocab", "dep:base64", "dep:serde", "dep:serde_json", "dep:tracing", "dep:thiserror", "dep:tokio", "dep:tokio-util"]
 
 [dev-dependencies]
 # 验签器 async path + dyn 注入冒烟（multi_thread 真验 Send future 可跨 worker 调度）；
@@ -55,4 +57,3 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"
 rstest = { workspace = true }
 # 脱敏回归：捕获 tracing 输出，断言原始 token 不入日志（DIPORT-ERR 同源 PII 边界）。
 tracing-subscriber = { workspace = true }
-vocab = { path = "../../crates/vocab" }

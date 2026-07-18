@@ -9,6 +9,7 @@ pub mod http;
 pub mod principal;
 pub mod projection;
 pub mod query;
+pub mod service;
 pub mod tenant;
 
 /// crate-name 形标识符校验：`[a-z][a-z0-9_]*`，整串非空（单一事实源，供 authz / contract 复用）。
@@ -48,6 +49,7 @@ pub use projection::{
     IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION, ProjectionField,
 };
 pub use query::{Cursor, CursorError, Limit, LimitError};
+pub use service::ServiceCallerDomain;
 pub use tenant::{
     CrossTenantVisibility, RowScope, RowVisibility, ScopedTenant, TenantId, TenantIdError,
 };

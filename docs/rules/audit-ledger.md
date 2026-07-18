@@ -102,10 +102,10 @@ prev 链接错误、entry_hash mismatch 或混租户行进入窗口都返回 `Au
 operator 授权需要同时满足：
 
 - service-token 验签成功，且 token tenant 绑定到 `--operator-tenant`。
-- 验出的 principal 必须是 service principal。
-- 必填环境变量 `RSS_AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS=subject|tenant,...` 中存在精确匹配
-  `subject == verified service subject` 且 `tenant == --tenant` 的 grant。无 wildcard、无 namespace、无
-  action fallback。
+- 验出的 principal 必须是 service principal，且 typed caller 精确为
+  `ServiceCallerDomain::MaintenanceOperator`（canonical `sub=rss-maintenance-operator`）。
+- 必填环境变量 `RSS_AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS=tenant,...` 中存在
+  `tenant == --tenant` 的 grant。caller 不从配置字符串选择；无 wildcard、无 namespace、无 action fallback。
 
 命令 start / finish 都写 `auth_audit_events`，`resource_kind="audit.ledger.verify"`，action 固定为
 `audit.ledger.verify.start|finish`。失败原因使用固定枚举字符串，例如 `operator_auth`、

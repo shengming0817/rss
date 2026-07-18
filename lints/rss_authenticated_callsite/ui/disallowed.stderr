@@ -1,27 +1,91 @@
-warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` 不得在此 crate 调用
+warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` / `new_service` 不得在此 crate 调用
   --> $DIR/disallowed.rs:15:15
    |
-LL |     let _ev = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User, "subject-1", None);
+LL |     let _ev = Authenticated::new(
    |               ^^^^^^^^^^^^^^^^^^
    |
-   = help: 在 assembly / bin crate 的组合根验签桥中构造 Authenticated，经外层 `.layer()` 注入；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authenticated_callsite)] // reason: ...`
+   = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
    = note: `#[warn(rss_authenticated_callsite)]` on by default
 
-warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` 不得在此 crate 调用
-  --> $DIR/disallowed.rs:18:16
+warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` / `new_service` 不得在此 crate 调用
+  --> $DIR/disallowed.rs:23:16
    |
 LL |     let mint = Authenticated::new;
    |                ^^^^^^^^^^^^^^^^^^
    |
-   = help: 在 assembly / bin crate 的组合根验签桥中构造 Authenticated，经外层 `.layer()` 注入；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authenticated_callsite)] // reason: ...`
+   = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
 
-warning: Principal subject 是审计 PII funnel：`Principal::audit_subject` 仅组合根可调用
-  --> $DIR/disallowed.rs:34:20
+warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` / `new_service` 不得在此 crate 调用
+  --> $DIR/disallowed.rs:32:20
+   |
+LL |     let _service = Authenticated::new_service(
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
+
+warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` / `new_service` 不得在此 crate 调用
+  --> $DIR/disallowed.rs:36:24
+   |
+LL |     let service_mint = Authenticated::new_service;
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
+
+warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` / `new_service` 不得在此 crate 调用
+  --> $DIR/disallowed.rs:38:9
+   |
+LL |         Authenticated::new_service;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
+
+warning: Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用
+  --> $DIR/disallowed.rs:49:20
    |
 LL |     let _subject = authn::Principal::audit_subject;
    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 在 assembly / bin crate 的组合根验签桥中只为 `diport::AuditEvent` 构造读取 subject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authenticated_callsite)] // reason: ...`
+   = help: 仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值
 
-warning: 3 warnings emitted
+warning: Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用
+  --> $DIR/disallowed.rs:50:19
+   |
+LL |     let _caller = authn::Principal::service_caller_domain;
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值
+
+warning: verified maintenance capability 仅组合根可 mint
+  --> $DIR/disallowed.rs:55:19
+   |
+LL |     let _config = postgres::ConfigValueMaintenanceCapability::from_verified_service_caller(
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability
+
+warning: verified maintenance capability 仅组合根可 mint
+  --> $DIR/disallowed.rs:59:9
+   |
+LL |         postgres::ConfigValueMaintenanceCapability::from_verified_service_caller;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability
+
+warning: verified maintenance capability 仅组合根可 mint
+  --> $DIR/disallowed.rs:61:9
+   |
+LL |         postgres::ConfigValueMaintenanceCapability::from_verified_service_caller;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability
+
+warning: Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用
+  --> $DIR/disallowed.rs:69:13
+   |
+LL |     let _ = principal.service_caller_domain();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值
+
+warning: 11 warnings emitted
 

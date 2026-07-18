@@ -20,7 +20,7 @@
     "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "assemblyDomain": { "type": "string", "enum": ["identity", "settings", "audit", "contractreg", "syshealth"] },
     "listenerKind": { "type": "string", "enum": ["primary", "internal", "health", "admin"] },
-    "authScheme": { "type": "string", "enum": ["noAuth", "jwt", "mtls", "serviceToken"] },
+    "authScheme": { "type": "string", "enum": ["noAuth", "rssAccessToken", "federatedAccessToken", "mtls", "serviceToken"] },
     "lifecycleChannel": { "type": "string", "enum": ["probes", "resources", "workers"] },
     "providerPlan": {
       "type": "object", "additionalProperties": false, "required": ["constructor", "id", "outputs"],
@@ -53,7 +53,7 @@
       "type": "object", "additionalProperties": false, "required": ["auth", "domains", "id", "kind"],
       "properties": { "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" }, "kind": { "$ref": "#/definitions/listenerKind" }, "auth": { "$ref": "#/definitions/authScheme" }, "domains": { "description": "Preserve declared route-mount order; each value references domainPlans.id.", "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/assemblyDomain" } } },
       "allOf": [
-        { "if": { "properties": { "kind": { "enum": ["primary", "admin"] } }, "required": ["kind"] }, "then": { "properties": { "auth": { "const": "jwt" } } } },
+        { "if": { "properties": { "kind": { "enum": ["primary", "admin"] } }, "required": ["kind"] }, "then": { "properties": { "auth": { "enum": ["rssAccessToken", "federatedAccessToken"] } } } },
         { "if": { "properties": { "kind": { "const": "health" } }, "required": ["kind"] }, "then": { "properties": { "auth": { "const": "noAuth" } } } },
         { "if": { "properties": { "kind": { "const": "internal" } }, "required": ["kind"] }, "then": { "properties": { "auth": { "enum": ["mtls", "serviceToken"] } } } }
       ]

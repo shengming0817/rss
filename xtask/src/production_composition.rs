@@ -452,13 +452,108 @@ fn validate_identity_runtime_module(source: &str) -> Result<()> {
     let module = unique_top_level_function(&syntax.items, "module", IDENTITY_RUNTIME_MODULE)?;
     ensure_local_binding_count(&module.block, "deps", 0, IDENTITY_RUNTIME_MODULE)?;
     let module_tail = tail_expression(&module.block).context("identity module tail")?;
+    let Expr::Call(module_call) = peel_expr(module_tail) else {
+        bail!("identity runtime module must directly call wire_with_profile")
+    };
     ensure!(
-        direct_call_has_argument(module_tail, &["wire_configured"], 0, is_deps_pg_for_domain),
-        "identity runtime module must pass deps.pg.for_domain() directly into wire_configured"
+        path_is_exact_expr(&module_call.func, &["wire_with_profile"])
+            && module_call.args.len() == 3
+            && module_call.args.first().is_some_and(is_deps_pg_for_domain)
+            && module_call
+                .args
+                .get(2)
+                .and_then(simple_expr_ident)
+                .as_deref()
+                == Some("input"),
+        "identity runtime module must pass deps.pg.for_domain() and its exact input directly into wire_with_profile"
     );
+    validate_identity_profile_wire(&syntax.items)?;
+    validate_identity_rss_wire(&syntax.items)
+}
 
-    let wire =
-        unique_top_level_function(&syntax.items, "wire_configured", IDENTITY_RUNTIME_MODULE)?;
+fn validate_identity_profile_wire(items: &[Item]) -> Result<()> {
+    let profile_wire =
+        unique_top_level_function(items, "wire_with_profile", IDENTITY_RUNTIME_MODULE)?;
+    let profile_tail =
+        tail_expression(&profile_wire.block).context("identity wire_with_profile tail")?;
+    let Expr::Match(profile_match) = peel_expr(profile_tail) else {
+        bail!("identity wire_with_profile must exhaustively match its profile input")
+    };
+    ensure!(
+        simple_expr_ident(&profile_match.expr).as_deref() == Some("input")
+            && profile_match.arms.len() == 2,
+        "identity wire_with_profile must match its exact input across two closed profile arms"
+    );
+    let mut saw_rss_access = false;
+    let mut saw_federated_access = false;
+    for arm in &profile_match.arms {
+        saw_rss_access |= validate_rss_profile_arm(arm)?;
+        saw_federated_access |= validate_federated_profile_arm(arm)?;
+    }
+    ensure!(
+        saw_rss_access && saw_federated_access,
+        "identity wire_with_profile must close both profile-specific composition paths"
+    );
+    Ok(())
+}
+
+fn validate_rss_profile_arm(arm: &syn::Arm) -> Result<bool> {
+    let Pat::TupleStruct(pattern) = &arm.pat else {
+        return Ok(false);
+    };
+    if !path_is_exact(&pattern.path, &["IdentityModuleInput", "RssAccess"]) {
+        return Ok(false);
+    }
+    ensure!(
+        pattern.elems.len() == 1
+            && pattern.elems.first().and_then(simple_pat_ident).as_deref() == Some("input"),
+        "RSS identity profile arm must bind its exact typed input"
+    );
+    let Expr::Call(call) = peel_expr(&arm.body) else {
+        bail!("RSS identity profile arm must directly call wire_rss_access")
+    };
+    ensure!(
+        path_is_exact_expr(&call.func, &["wire_rss_access"])
+            && call.args.len() == 3
+            && call.args.first().and_then(simple_expr_ident).as_deref() == Some("pg")
+            && call.args.get(1).and_then(simple_expr_ident).as_deref() == Some("blocklist")
+            && call.args.get(2).and_then(simple_expr_ident).as_deref() == Some("input"),
+        "RSS identity profile arm must pass the exact pg, blocklist, and profile input into wire_rss_access"
+    );
+    Ok(true)
+}
+
+fn validate_federated_profile_arm(arm: &syn::Arm) -> Result<bool> {
+    let Pat::Path(pattern) = &arm.pat else {
+        return Ok(false);
+    };
+    if !path_is_exact(&pattern.path, &["IdentityModuleInput", "FederatedAccess"]) {
+        return Ok(false);
+    }
+    let Expr::Call(wire) = peel_expr(&arm.body) else {
+        bail!(
+            "federated identity profile arm must directly call identity_composition::wire_federated"
+        )
+    };
+    let Some(deps) = wire.args.first() else {
+        bail!("federated identity profile arm must construct its typed deps")
+    };
+    let Expr::Call(deps) = peel_expr(deps) else {
+        bail!("federated identity profile arm must directly construct its typed deps")
+    };
+    ensure!(
+        path_is_exact_expr(&wire.func, &["identity_composition", "wire_federated"])
+            && wire.args.len() == 1
+            && path_is_exact_expr(&deps.func, &["FederatedIdentityModuleDeps", "new"])
+            && deps.args.len() == 2
+            && deps.args.first().and_then(simple_expr_ident).as_deref() == Some("pg"),
+        "federated identity profile arm must pass the exact pg into FederatedIdentityModuleDeps"
+    );
+    Ok(true)
+}
+
+fn validate_identity_rss_wire(items: &[Item]) -> Result<()> {
+    let wire = unique_top_level_function(items, "wire_rss_access", IDENTITY_RUNTIME_MODULE)?;
     let composition_binding = wire.block.stmts.iter().find_map(|statement| {
         let Stmt::Local(local) = statement else {
             return None;
@@ -484,7 +579,7 @@ fn validate_identity_runtime_module(source: &str) -> Result<()> {
         1,
         IDENTITY_RUNTIME_MODULE,
     )?;
-    let tail = tail_expression(&wire.block).context("identity wire_configured tail")?;
+    let tail = tail_expression(&wire.block).context("identity wire_rss_access tail")?;
     ensure!(
         direct_call_has_argument(tail, &["identity_composition", "wire"], 0, |expr| {
             simple_expr_ident(expr).as_deref() == Some(&composition_binding)
@@ -632,8 +727,11 @@ fn path_is_exact_expr(expression: &Expr, expected: &[&str]) -> bool {
     let Expr::Path(path) = expression else {
         return false;
     };
-    path.path
-        .segments
+    path_is_exact(&path.path, expected)
+}
+
+fn path_is_exact(path: &syn::Path, expected: &[&str]) -> bool {
+    path.segments
         .iter()
         .map(|segment| segment.ident.to_string())
         .eq(expected.iter().copied())
@@ -843,6 +941,10 @@ fn collect_identity_wire(
     let identity_domain = ensure_canonical_import(&imports, "identity::IdentityDomain", repo_path)?;
     let identity_domain_deps =
         ensure_canonical_import(&imports, "identity::IdentityDomainDeps", repo_path)?;
+    let federated_identity_domain =
+        ensure_canonical_import(&imports, "identity::FederatedIdentityDomain", repo_path)?;
+    let federated_identity_domain_deps =
+        ensure_canonical_import(&imports, "identity::FederatedIdentityDomainDeps", repo_path)?;
     validate_wire_deps(
         &syntax.items,
         wire,
@@ -855,21 +957,55 @@ fn collect_identity_wire(
         "{repo_path}: wire must destructure `pg` from IdentityModuleDeps"
     );
     let domain_fields =
-        unique_struct_constructor_fields(wire, &identity_domain, "new", &identity_domain_deps)
+        unique_struct_constructor_field_exprs(wire, &identity_domain, "new", &identity_domain_deps)
             .with_context(|| format!("{repo_path}: resolve live IdentityDomainDeps"))?;
+    let common_binding = unique_common_identity_services_binding(wire)
+        .with_context(|| format!("{repo_path}: resolve RSS common identity services"))?;
+
+    let federated_wire = unique_top_level_function(&syntax.items, "wire_federated", repo_path)?;
+    validate_wire_deps(
+        &syntax.items,
+        federated_wire,
+        "FederatedIdentityModuleDeps",
+        &pg_domain_deps,
+        repo_path,
+    )?;
+    ensure!(
+        has_pg_destructure(federated_wire, "FederatedIdentityModuleDeps"),
+        "{repo_path}: wire_federated must destructure `pg` from FederatedIdentityModuleDeps"
+    );
+    let federated_domain_fields = unique_struct_constructor_field_exprs(
+        federated_wire,
+        &federated_identity_domain,
+        "new",
+        &federated_identity_domain_deps,
+    )
+    .with_context(|| format!("{repo_path}: resolve live FederatedIdentityDomainDeps"))?;
+    let federated_common_binding = unique_common_identity_services_binding(federated_wire)
+        .with_context(|| format!("{repo_path}: resolve Federated common identity services"))?;
+
+    let common_wire =
+        unique_top_level_function(&syntax.items, "common_identity_services", repo_path)?;
+    let common_fields = direct_tail_struct_fields(common_wire, "CommonIdentityServices")
+        .with_context(|| format!("{repo_path}: resolve CommonIdentityServices output"))?;
 
     let mut projections = BTreeMap::new();
     for injection in IDENTITY_INJECTIONS {
         let canonical_service = format!("identity::{}", injection.service_type);
         let service_binding = ensure_canonical_import(&imports, &canonical_service, repo_path)?;
-        let binding =
-            unique_provider_binding(wire, injection.provider_method).with_context(|| {
+        let injection_wire = if injection.port == ProducerCompositionPort::SessionLifecycleLocal {
+            wire
+        } else {
+            common_wire
+        };
+        let binding = unique_provider_binding(injection_wire, injection.provider_method)
+            .with_context(|| {
                 format!(
                     "{repo_path}: resolve PgDomainDeps::{} binding",
                     injection.provider_method
                 )
             })?;
-        let constructor = unique_constructor(wire, &service_binding, "new")
+        let constructor = unique_constructor(injection_wire, &service_binding, "new")
             .with_context(|| format!("{repo_path}: resolve {}::new", injection.service_type))?;
         ensure!(
             constructor
@@ -883,13 +1019,49 @@ fn collect_identity_wire(
             injection.service_type,
             injection.provider_method
         );
-        ensure!(
-            domain_fields.get(injection.domain_field) == Some(&constructor.binding),
-            "{repo_path}: {}::new result `{}` must enter IdentityDomainDeps.{}",
-            injection.service_type,
-            constructor.binding,
-            injection.domain_field
-        );
+        if injection.port == ProducerCompositionPort::SessionLifecycleLocal {
+            ensure!(
+                domain_fields
+                    .get(injection.domain_field)
+                    .and_then(simple_expr_ident)
+                    .as_deref()
+                    == Some(&constructor.binding),
+                "{repo_path}: {}::new result `{}` must enter IdentityDomainDeps.{}",
+                injection.service_type,
+                constructor.binding,
+                injection.domain_field
+            );
+        } else {
+            ensure!(
+                common_fields.get(injection.domain_field) == Some(&constructor.binding),
+                "{repo_path}: {}::new result `{}` must enter CommonIdentityServices.{}",
+                injection.service_type,
+                constructor.binding,
+                injection.domain_field
+            );
+            ensure!(
+                domain_fields
+                    .get(injection.domain_field)
+                    .is_some_and(|expression| {
+                        expression_is_field_of(expression, &common_binding, injection.domain_field)
+                    }),
+                "{repo_path}: RSS IdentityDomainDeps.{} must consume the exact common-services field",
+                injection.domain_field
+            );
+            ensure!(
+                federated_domain_fields
+                    .get(injection.domain_field)
+                    .is_some_and(|expression| {
+                        expression_is_field_of(
+                            expression,
+                            &federated_common_binding,
+                            injection.domain_field,
+                        )
+                    }),
+                "{repo_path}: FederatedIdentityDomainDeps.{} must consume the exact common-services field",
+                injection.domain_field
+            );
+        }
         projections.insert(
             injection.port,
             ProductionCompositionProjection {
@@ -900,7 +1072,12 @@ fn collect_identity_wire(
                 runtime_module_path: String::new(),
                 runtime_module: String::new(),
                 repo_path: repo_path.to_string(),
-                wire: "wire".to_string(),
+                wire: if injection.port == ProducerCompositionPort::SessionLifecycleLocal {
+                    "wire"
+                } else {
+                    "common_identity_services"
+                }
+                .to_string(),
                 service_constructor: format!("{}::new", injection.service_type),
                 provider_factory: format!("PgDomainDeps::{}", injection.provider_method),
             },
@@ -1286,6 +1463,75 @@ fn unique_provider_binding(wire: &ItemFn, method: &str) -> Result<String> {
     Ok(binding.clone())
 }
 
+fn unique_common_identity_services_binding(wire: &ItemFn) -> Result<String> {
+    let candidates = wire
+        .block
+        .stmts
+        .iter()
+        .filter_map(|statement| {
+            let Stmt::Local(local) = statement else {
+                return None;
+            };
+            let binding = simple_pat_ident(&local.pat)?;
+            let initializer = local.init.as_ref()?;
+            let Expr::Call(call) = peel_expr(&initializer.expr) else {
+                return None;
+            };
+            (path_is_exact_expr(&call.func, &["common_identity_services"])
+                && call.args.len() == 2
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|expr| expr_is_shared_ref_ident(expr, "pg"))
+                && call
+                    .args
+                    .get(1)
+                    .is_some_and(|expr| expr_is_shared_ref_ident(expr, "clock")))
+            .then_some(binding)
+        })
+        .collect::<Vec<_>>();
+    let [binding] = candidates.as_slice() else {
+        bail!(
+            "common_identity_services(&pg, &clock) must initialize exactly one direct binding, found {}",
+            candidates.len()
+        )
+    };
+    Ok(binding.clone())
+}
+
+fn direct_tail_struct_fields(wire: &ItemFn, expected: &str) -> Result<BTreeMap<String, String>> {
+    let tail = tail_expression(&wire.block)
+        .with_context(|| format!("{expected} helper must return a direct struct literal"))?;
+    let Expr::Struct(value) = peel_expr(tail) else {
+        bail!("{expected} helper must return a direct struct literal")
+    };
+    ensure!(
+        path_last(&value.path).as_deref() == Some(expected) && value.rest.is_none(),
+        "{expected} helper must return the canonical closed struct"
+    );
+    value
+        .fields
+        .iter()
+        .map(|field| {
+            let syn::Member::Named(member) = &field.member else {
+                bail!("{expected} must use named fields")
+            };
+            let binding = simple_expr_ident(&field.expr)
+                .with_context(|| format!("{expected}.{member} must receive a direct binding"))?;
+            Ok((member.to_string(), binding))
+        })
+        .collect()
+}
+
+fn expression_is_field_of(expression: &Expr, base: &str, member: &str) -> bool {
+    matches!(
+        peel_expr(expression),
+        Expr::Field(field)
+            if simple_expr_ident(&field.base).as_deref() == Some(base)
+                && matches!(&field.member, syn::Member::Named(ident) if ident == member)
+    )
+}
+
 fn unique_settings_bundle_bindings(wire: &ItemFn) -> Result<(String, String)> {
     let mut candidates = Vec::new();
     for statement in &wire.block.stmts {
@@ -1378,12 +1624,12 @@ fn unique_constructor(wire: &ItemFn, service: &str, method: &str) -> Result<Cons
     Ok(call.clone())
 }
 
-fn unique_struct_constructor_fields(
+fn unique_struct_constructor_field_exprs(
     wire: &ItemFn,
     service: &str,
     method: &str,
     input: &str,
-) -> Result<BTreeMap<String, String>> {
+) -> Result<BTreeMap<String, Expr>> {
     let constructor = unique_constructor(wire, service, method)?;
     ensure!(
         constructor.call.args.len() == 1,
@@ -1412,10 +1658,10 @@ fn unique_struct_constructor_fields(
         let syn::Member::Named(member) = &field.member else {
             bail!("{input} must use named fields")
         };
-        let binding = simple_expr_ident(&field.expr)
-            .with_context(|| format!("{input}.{member} must receive a direct binding"))?;
         ensure!(
-            fields.insert(member.to_string(), binding).is_none(),
+            fields
+                .insert(member.to_string(), field.expr.clone())
+                .is_none(),
             "{input}.{member} is duplicated"
         );
     }
@@ -1526,23 +1772,46 @@ mod tests {
             r#"
             use std::sync::Arc;
             use identity::{{
-                IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService,
-                RbacAdminService,
+                FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain,
+                IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
             }};
             use postgres::PgDomainDeps;
             pub struct IdentityModuleDeps {{ pg: PgDomainDeps }}
+            pub struct FederatedIdentityModuleDeps {{ pg: PgDomainDeps }}
+
+            struct CommonIdentityServices {{
+                rbac_admin: Arc<RbacAdminService>,
+                policy_manage: Arc<PolicyManageService>,
+            }}
+
+            fn common_identity_services(
+                pg: &PgDomainDeps,
+                clock: &Arc<dyn Clock>,
+            ) -> CommonIdentityServices {{
+                let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
+                    pg.policy_lifecycle(boxed_clock(clock)),
+                ));
+                let binding_lifecycle = Arc::from(DynRoleBindingLifecycle::new_box(
+                    pg.role_binding_lifecycle(boxed_clock(clock)),
+                ));
+                let rbac = Arc::new(RbacAdminService::new(roles, binding_lifecycle, clock));
+                let policy = Arc::new(PolicyManageService::new(
+                    policies,
+                    policy_lifecycle,
+                    clock,
+                ));
+                CommonIdentityServices {{
+                    rbac_admin: rbac,
+                    policy_manage: policy,
+                }}
+            }}
 
             pub fn wire(deps: IdentityModuleDeps) {{
                 let IdentityModuleDeps {{ pg, .. }} = deps;
                 let lifecycle = Arc::from(DynSessionLifecycle::new_box(
                     pg.session_lifecycle(boxed_clock(&clock)),
                 ));
-                let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
-                    pg.policy_lifecycle(boxed_clock(&clock)),
-                ));
-                let binding_lifecycle = Arc::from(DynRoleBindingLifecycle::new_box(
-                    pg.role_binding_lifecycle(boxed_clock(&clock)),
-                ));
+                let common = common_identity_services(&pg, &clock);
                 let login = Arc::new(LoginService::new(
                     credentials,
                     {session_argument},
@@ -1551,16 +1820,19 @@ mod tests {
                     clock,
                     session_ttl,
                 ));
-                let rbac = Arc::new(RbacAdminService::new(roles, binding_lifecycle, clock));
-                let policy = Arc::new(PolicyManageService::new(
-                    policies,
-                    policy_lifecycle,
-                    clock,
-                ));
                 let domain = IdentityDomain::new(IdentityDomainDeps {{
                     login: {domain_login},
-                    rbac_admin: rbac,
-                    policy_manage: policy,
+                    rbac_admin: common.rbac_admin,
+                    policy_manage: common.policy_manage,
+                }});
+            }}
+
+            pub fn wire_federated(deps: FederatedIdentityModuleDeps) {{
+                let FederatedIdentityModuleDeps {{ pg, .. }} = deps;
+                let common = common_identity_services(&pg, &clock);
+                let domain = FederatedIdentityDomain::new(FederatedIdentityDomainDeps {{
+                    rbac_admin: common.rbac_admin,
+                    policy_manage: common.policy_manage,
                 }});
             }}
             "#
@@ -1656,6 +1928,49 @@ mod tests {
                 "ConfigUnitOfWorkLocal",
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn identity_runtime_profile_branches_preserve_exact_pg_lineage() -> anyhow::Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .context("xtask must live below the workspace root")?;
+        let source = fs::read_to_string(root.join(IDENTITY_RUNTIME_MODULE))?;
+        validate_identity_runtime_module(&source)?;
+
+        for (label, from, to) in [
+            (
+                "module handoff",
+                "deps.pg.for_domain(),",
+                "decoy_pg.for_domain(),",
+            ),
+            (
+                "RSS profile branch",
+                "IdentityModuleInput::RssAccess(input) => wire_rss_access(pg, blocklist, input),",
+                "IdentityModuleInput::RssAccess(input) => wire_rss_access(decoy_pg, blocklist, input),",
+            ),
+            (
+                "Federated profile branch",
+                "FederatedIdentityModuleDeps::new(pg, Arc::new(SystemClock))",
+                "FederatedIdentityModuleDeps::new(decoy_pg, Arc::new(SystemClock))",
+            ),
+            (
+                "closed Federated pattern",
+                "IdentityModuleInput::FederatedAccess => identity_composition::wire_federated(",
+                "_ => identity_composition::wire_federated(",
+            ),
+        ] {
+            ensure!(
+                source.contains(from),
+                "real identity runtime source no longer contains {label} mutation anchor"
+            );
+            let mutated = source.replacen(from, to, 1);
+            assert!(
+                validate_identity_runtime_module(&mutated).is_err(),
+                "{label} mutation must break production composition evidence"
+            );
+        }
         Ok(())
     }
 

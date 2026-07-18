@@ -49,7 +49,7 @@
 
 **Acceptance Scenarios**:
 
-1. **Given** 一个签名正确、未过期、iss/aud 匹配的 ES256 JWT，**When** `OidcProvider::verify(&RawCredential::jwt(raw))`，**Then** 返回 `Ok(VerifiedClaims)`，subject/tenant/kind 与 payload 一致。
+1. **Given** 一个签名正确、未过期、profile policy 与 iss/aud 匹配的 ES256 access token，**When** typed authn funnel 将其交给对应 `OidcProvider<P>`，**Then** 返回可信 principal，subject/tenant/kind 与 verified claims 一致。
 2. **Given** payload 被篡改（签名不匹配），**When** verify，**Then** `Err(PdpError::InvalidSignature)`，错误不携带 token / key 字节。
 3. **Given** `exp` 早于注入 Clock 的 now（超 leeway），**When** verify，**Then** `Err(PdpError::Expired)`。
 4. **Given** header `alg` 为 `RS256` / `none` / 未知值，**When** verify，**Then** `Err(PdpError::InvalidSignature)`（不在白名单 {ES256, HS256}，`jws::parse` 拒），绝不接受不在白名单的 alg。
@@ -92,13 +92,13 @@ httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Auth
 
 ### User Story 4 - JWKS key 与轮转（本地文件源 + 外部 agent 刷新）(Priority: P2)
 
-`OidcProvider` 支持从 JWKS 文档拉取公钥（按 kid 索引）+ 缓存 + 轮转；JWKS **必须经可机器验证的传输完整性**（TLS/mTLS/签名 JWKS/key pinning / **本地受信文件源**），**禁裸 plain-HTTP-over-network**，license-clean TLS 不可得则不上线 in-app HTTPS（FR-005）。JWKS 源不可读 / kid 缺失时 fail-closed（`Untrusted`），不放行，并经 readiness probe `oidc_jwks_ready` 反映 health。带刷新句柄时另 impl `ManagedResource` 真实关闭。
+typed `OidcProvider<P>` 支持从 profile-specific JWKS 文档拉取公钥（按 kid 索引）+ 缓存 + 轮转；JWKS **必须经可机器验证的传输完整性**（TLS/mTLS/签名 JWKS/key pinning / **本地受信文件源**），**禁裸 plain-HTTP-over-network**，license-clean TLS 不可得则不上线 in-app HTTPS（FR-005）。JWKS 源不可读 / kid 缺失时 fail-closed（`Untrusted`），不放行，并经对应的 `rss_access_token_jwks_ready` / `federated_access_token_jwks_ready` 反映 health。带刷新句柄时另 impl `ManagedResource` 真实关闭。
 
 > **实现决断（#1197，见 research.md R3）**：2026-06 无 license-clean 且生产成熟的 rustls TLS provider，且「应用进程内 HTTPS 拉 JWKS」是被零信任生产系统（Envoy/Istio/SPIFFE/cert-manager）系统性规避的少数派。采纳 R3 **次选「本地文件源」**：`JwksKeySource` 从受 OS 文件权限 / k8s Secret RBAC / 挂载隔离保护的**本地路径**读 JWKS 文档（外部 agent / init-container / controller 经各自 TLS 拉取 + 轮转后写入），**in-app 零 HTTP/TLS provider**；传输完整性属 infra 层（机器强制）。in-app HTTPS 直连外部标准 IdP = follow-up（待成熟 provider，复用 seam）。
 
 **Why this priority**: 静态 key（US1）足以打通生产认证；JWKS 是生产 IdP 对接的真实 key 来源，但引入 key 源刷新 / 轮转 / 关闭编排，是独立工作面，排在认证链打通之后。
 
-**Independent Test**: fake JWKS 文件源（dev-only）验证：按 kid 取 key → 验签成功；key 轮转（重写文件 + reload）后新 kid token 通过、旧 kid 被移除后旧 token → fail-closed；JWKS 源不可读 / 空 / 畸形 → 构造期 fail-fast 拒，运行期刷新失败保留 last-good + `oidc_jwks_ready=false`；`cargo deny` 绿（**零新增 HTTP/TLS 栈**——in-app 不引任何 crypto/TLS provider）。
+**Independent Test**: fake profile-specific JWKS 文件源（dev-only）验证：按 kid 取 key → 验签成功；key 轮转（重写文件 + reload）后新 kid token 通过、旧 kid 被移除后旧 token → fail-closed；JWKS 源不可读 / 空 / 畸形 → 构造期 fail-fast 拒，运行期刷新失败保留 last-good + 对应 profile readiness=false；`cargo deny` 绿（**零新增 HTTP/TLS 栈**——in-app 不引任何 crypto/TLS provider）。
 
 **Acceptance Scenarios**:
 
@@ -116,7 +116,7 @@ httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Auth
 - **空 subject**：adapter 早拒 InvalidSignature；authn `derive_from_claims` 亦对空 subject fail-closed（双闸）。
 - **PdpError 泄漏**：`PdpError` 为纯 taxonomy（不携 source），adapter 内部 crypto 错误只归类不透传；tracing 只记变体名 + `principal.kind`，绝不 `{:?}` 整体 Principal/VerifiedClaims/token。
 - **verify-bridge 层序错位**：bridge 必须挂在 `finalize_auth` 产出 router 的**外层**（外层先注入 extension，enforce 在 MethodRouter 内层才读到）；e2e「有效 JWT→200」覆盖此回归。
-- **JWKS 不可达 / 缓存过期**：fail-closed Untrusted，不回落「跳过验签」；刷新失败经 readiness probe `oidc_jwks_ready` 反映 health（probe 名 + 注册点 + 失败测试见 FR-005 / tasks T003）。
+- **JWKS 不可达 / 缓存过期**：fail-closed Untrusted，不回落「跳过验签」；刷新失败经对应 profile readiness probe 反映 health（probe 名 + 注册点 + 失败测试见 FR-005 / tasks T003）。
 - **JWKS 传输完整性**：远程 JWKS 经裸 plain-HTTP 拉取 = 内网 MITM 可替换公钥伪造 token → **禁明文 JWKS**；要求 TLS/mTLS/签名 JWKS/key pinning，做不到则退静态 key（FR-005）。
 
 ## Requirements *(mandatory)*
@@ -127,8 +127,8 @@ httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Auth
 - **FR-002**: 验签 alg MUST 限定白名单 {ES256, HS256}；`alg=none` / RS256 / 未知 alg MUST fail-closed 拒绝；token header alg MUST 与所选 key 类型一致（防 alg-key 混淆）。依赖 MUST 仅用 RustCrypto 纯 Rust（`p256`/`hmac`/`sha2`），MUST NOT 引入 `ring` / `rsa` / `aws-lc-*` / `openssl` / `jsonwebtoken`。
 - **FR-003**: 时钟 MUST 经构造器位置参注入（`diport::Clock`），MUST NOT 取系统时钟；exp/nbf 校验带可配置 leeway；常数时间比较 MAC（复用 `primitives::crypto`，禁 `==`）。
 - **FR-004**: key 源 MUST 经 `KeySource` 抽象（构造期解析 + 校验，解析失败在构造期 `Result`，不入验签热路径）；首批静态配置 key set（按 kid 索引）；service_token MUST 走独立 HS256-only key set（路径隔离）。
-- **FR-005**: `OidcProvider` MUST 支持 JWKS fetch + 缓存 + 轮转。**key-source 完整性（安全）**：JWKS MUST 经可机器验证的传输完整性（TLS 证书校验 / mTLS / 签名 JWKS / key pinning / **本地受信文件源**）——**裸 plain-HTTP-over-network JWKS MUST NOT 作为可上线选项**（内网 MITM 可替换公钥伪造 token）；若 license-clean TLS 栈暂不可用，则 MUST NOT 上线 in-app HTTPS。in-app HTTP/TLS 栈（若引入）MUST 经 license 甄别（规避 ring/aws-lc/openssl）。JWKS 源不可读 / kid 缺失 MUST fail-closed（`Untrusted`），MUST NOT 跳过验签。**readiness（运维）**：JWKS 刷新失败 MUST 经 readiness probe `oidc_jwks_ready`（依赖可用性 probe，带 `_ready` 后缀）反映 health，verbose readyz MUST 裁剪敏感字段（无 endpoint 凭据 / key 材料）；带刷新句柄 MUST 另 impl `ManagedResource` 真实关闭。
-  - **实现（#1197，见 research.md R3 决断）**：采纳「本地文件源」分支——`JwksKeySource` 从受文件权限 / Secret RBAC 保护的本地路径读 JWKS 文档（外部 agent 经各自 TLS 拉取 + 轮转后写入），**in-app 零 HTTP/TLS provider**；后台 poll 重载 + `RwLock<Arc<KeySet>>` 快照原子换出 + kid 索引 + fail-closed（源不可读/畸形/空 → 构造期拒 / 刷新期保留 last-good + `oidc_jwks_ready=false`，绝不 swap 空集）。in-app HTTPS 直连外部标准 IdP = follow-up（待成熟 license-clean provider，如 graviola 1.0+审计）。readiness probe 注册经组合根 = T004（本 adapter 切片仅暴露 `is_ready()` 状态）。
+- **FR-005**: `OidcProvider<P>` MUST 支持 profile-specific JWKS fetch + 缓存 + 轮转。**key-source 完整性（安全）**：JWKS MUST 经可机器验证的传输完整性（TLS 证书校验 / mTLS / 签名 JWKS / key pinning / **本地受信文件源**）——**裸 plain-HTTP-over-network JWKS MUST NOT 作为可上线选项**（内网 MITM 可替换公钥伪造 token）；若 license-clean TLS 栈暂不可用，则 MUST NOT 上线 in-app HTTPS。in-app HTTP/TLS 栈（若引入）MUST 经 license 甄别（规避 ring/aws-lc/openssl）。JWKS 源不可读 / kid 缺失 MUST fail-closed（`Untrusted`），MUST NOT 跳过验签。**readiness（运维）**：JWKS 刷新失败 MUST 经 `rss_access_token_jwks_ready` / `federated_access_token_jwks_ready` 反映 health，verbose readyz MUST 裁剪敏感字段（无 endpoint 凭据 / key 材料）；带刷新句柄 MUST 另 impl `ManagedResource` 真实关闭。
+  - **实现（#1197，#1831 收紧，见 research.md R3 决断）**：采纳「本地文件源」分支——每个 access profile 的 `JwksKeySource` 从独占、受文件权限 / Secret RBAC 保护的本地路径读 JWKS 文档（外部 agent 经各自 TLS 拉取 + 轮转后写入），**in-app 零 HTTP/TLS provider**；后台 poll 重载 + `RwLock<Arc<KeySet>>` 快照原子换出 + kid 索引 + fail-closed（源不可读/畸形/空 → 构造期拒 / 刷新期保留 last-good + 对应 readiness=false，绝不 swap 空集）。readiness probe 注册经组合根 = T004。
 - **FR-006**: httpserve MUST 定义 own `Authenticated` 证据 extension（基础级类型，脱敏标量：已验证的 `scheme: RequiredScheme` + `principal_kind`，**零 authn 依赖**，私有字段 + `Authenticated::new` 构造 funnel）；enforce 层 `Require(required)` 路由 MUST 仅在请求携 `Authenticated`、其 `principal_kind` 非 `Anonymous`、**且 `scheme()` exact-match `required`** 时放行，缺证据 / 方案不匹配 MUST fail-closed 401（杜绝 scheme 混淆，如 Jwt 证据撞 `Require(Mtls)`）。既有 opt-out（Public/PasswordResetExempt）与 AUTH-FAILCLOSED-01（无 plan→403）MUST 不回归。
 - **FR-007**: httpserve crate MUST NOT 新增任何 path 依赖（不引 authn/oidc/crypto）；`finalize_auth(router, plan)` 签名 MUST 保持冻结（验签桥由组合根外层 `.layer()` 装配，非穿入 finalize_auth）。
 - **FR-008**: 组合根（`bins/server`、`bins/rss`）MUST 从配置构造 `OidcProvider` → `Arc<OidcProvider>`，并经泛型 `apply_verify_bridge<P>` 的 `Arc<P>` 构造器必填位置参注入（`P: Pdp + Send + Sync + 'static`）；MUST 在 `finalize_auth` 产出 router 的**外层**挂 verify-bridge 中间件；**仅组合根**启用生产认证（注入 + 挂载）。
@@ -157,7 +157,7 @@ httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Auth
 - **SC-002**: 生产依赖图（`cargo build --release` + `cargo deny check`）不含 `ring` / `rsa` / `aws-lc-*` / `openssl` / `jsonwebtoken` 任一；deny licenses/bans/advisories 全绿。
 - **SC-003**: 接通后的生产可达 `Require` 端点：有效凭据 200 + `Authenticated`（`scheme` + principal_kind facet）、scheme exact-match 放行；无/坏/过期/错 aud 凭据 / 方案不匹配 401/403；e2e 拒绝路径 100% 覆盖（ADR-006 §8 ③）。
 - **SC-004**: 安全同批门机器可验：启用生产认证的 PR（PR-C）blocked-by 真 verifier（PR-A1）；任一中间态不出现「有 plan + always-allow stub」可达端点；stub Pdp 不在任何生产 bin 依赖图（deny + dev-dep 隔离）；**且 PR-C 的 governance 守卫拒绝 bins 生产 `src/` 内联 `impl diport::Pdp`（Medium，synthetic red case 证守卫非恒真）**。
-- **SC-005**: JWKS 轮转——新 kid token 验签通过、旧 kid 移除后旧 token 拒（Untrusted）；JWKS 不可达 100% fail-closed（经 `oidc_jwks_ready` probe 反映 health），绝不静默跳过验签；**裸 plain-HTTP JWKS 不在可上线路径**（远程 JWKS 经 TLS/pinning，或退静态 key）。
+- **SC-005**: profile-specific JWKS 轮转——新 kid token 验签通过、旧 kid 移除后旧 token 拒（Untrusted）；JWKS 不可达 100% fail-closed（经对应 profile readiness probe 反映 health），绝不静默跳过验签；**裸 plain-HTTP JWKS 不在可上线路径**。
 - **SC-006**: 认证决策 tracing span 在 allow/deny 两路均产生且字段无 PII（无 subject/token/email）；deny 路区分 `PdpError` 三变体（便于告警分级）。
 - **SC-007**: adapter / httpserve 改动覆盖率 ≥ 80%；`cargo clippy --workspace --all-targets -- -D warnings` + `cargo fmt --check` 干净；`cargo xtask layer-deps` 绿（oidc 不被域依赖）；`cargo dylint --all` 绿（adapter impl Pdp 在 allowlist）。
 - **SC-008**: feature 拆为 4 PR，每个净增删 ≤ 2000 行（例外有书面理由），形成 blocked-by DAG（PR-C←A1∧B；PR-A2←A1）+ 2-wave 排序（W1: A1∥B；W2: A2∥C），全部挂 Azure Boards #1109。

@@ -160,15 +160,15 @@ services:
           no_default_policy=true \
           no_parent=true \
           renewable=false >/dev/null
-        vault write -f "$${RSS_VAULT_TRANSIT_MOUNT}/keys/$${RSS_JWT_ES256_KEY_ID}" type=ecdsa-p256
+        vault write -f "$${RSS_VAULT_TRANSIT_MOUNT}/keys/$${RSS_ACCESS_TOKEN_ES256_KEY_ID}" type=ecdsa-p256
 
-  oidc-jwks-init:
+  rss-access-jwks-init:
     build:
       context: ..
       dockerfile: Dockerfile
     image: rss-server:dev
     entrypoint: ["/usr/local/bin/rss"]
-    command: ["oidc-jwks", "export-vault-transit"]
+    command: ["rss-access-jwks", "export-vault-transit"]
     env_file: [.env.example]
     depends_on:
       vault-init:
@@ -180,7 +180,7 @@ services:
       - /tmp
     volumes:
       - vault-tls:/run/rss-demo-vault:ro
-      - oidc-jwks:/run/rss-oidc
+      - rss-access-jwks:/run/rss-access-token
     cap_drop:
       - ALL
     security_opt:
@@ -201,13 +201,12 @@ services:
         condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
-      oidc-jwks-init:
+      rss-access-jwks-init:
         condition: service_completed_successfully
     # 全部端口绑 127.0.0.1（仅本机演示可达，不暴露到局域网/所有网卡）。宿主 smoke 经 localhost 验证不受影响。
     # Internal/Admin 是控制/管理面：即便本机演示也不应对外，loopback 绑定收紧默认暴露面。
     ports:
       - "127.0.0.1:${RSS_PRIMARY_HOST_PORT:-8080}:8080" # Primary（业务 API；scaffold 期无路由）
-      - "127.0.0.1:${RSS_INTERNAL_HOST_PORT:-8081}:8081" # Internal（服务间控制面）
       - "127.0.0.1:${RSS_ADMIN_HOST_PORT:-8082}:8082" # Admin（管理面：audit route，按 Admin listener 鉴权）
       - "127.0.0.1:${RSS_HEALTH_HOST_PORT:-8083}:8083" # Health（healthz / readyz / metrics）— 匿名 NoAuth 面，loopback-only 落实内部网络边界（#1253）
     # ── 运行时加固：非 root + 只读 rootfs + 丢能力（证明 acceptance「read-only rootfs compatible」）──
@@ -217,7 +216,7 @@ services:
       - /tmp # 唯一可写：临时目录兜底（当前进程不依赖，留作安全网）。
     volumes:
       - vault-tls:/run/rss-demo-vault:ro
-      - oidc-jwks:/run/rss-oidc:ro
+      - rss-access-jwks:/run/rss-access-token:ro
       - ./password-blocklist.demo.sha256:/run/rss-password-blocklist.sha256:ro
     cap_drop:
       - ALL # 不需任何 Linux capability（仅 bind 高位端口 8080-8083，无需 NET_BIND_SERVICE）。
@@ -227,5 +226,5 @@ services:
 
 volumes:
   vault-tls:
-  oidc-jwks:
+  rss-access-jwks:
   minio-data:

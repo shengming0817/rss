@@ -7,7 +7,7 @@ fn main() {
     input.listener(
         "primary-main",
         AssemblyListenerKind::Primary,
-        ListenerAuth::Jwt,
+        ListenerAuth::RssAccessToken,
         vec![AssemblyDomain::Identity],
     );
     input.domain(

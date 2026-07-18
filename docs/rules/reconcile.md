@@ -108,8 +108,9 @@ invariant attempt result 并释放 lease，但 due claim 不会自动 reclaim；
 
 生产恢复面固定为一次性 operator CLI，不允许直接 SQL：
 
-1. 配置 `RSS_RECONCILE_OPERATOR_GRANTS=subject|inspect|tenant,subject|resume|tenant`，授权精确到
-   service principal、动作与 tenant。
+1. 使用 `ServiceCallerDomain::MaintenanceOperator`（`sub=rss-maintenance-operator`）service token，
+   并配置 `RSS_RECONCILE_OPERATOR_GRANTS=inspect|tenant,resume|tenant`，授权精确到动作与 tenant；
+   caller 已由 typed token 认证，不得由 grant 字符串选择。
 2. 先运行 `rss reconcile-target inspect --operator-service-token <token> --operator-tenant <tenant>
    --tenant <tenant> --target-id <uuid>`，确认 `status=disabled` 且 `disabledReason=fact_conflict`。
 3. 修正导致稳定 event id 冲突的配置/事实来源后，运行同参数的 `resume`。恢复操作清除 reason、切回

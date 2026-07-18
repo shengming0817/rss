@@ -12,7 +12,10 @@
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use base64::Engine as _;
 use secure::SecretText;
 
 pub(super) const DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV: &str =
@@ -45,23 +48,24 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_HEALTH_LISTEN_ADDR",
     "RSS_HTTP_SERVER_REQUEST_BUDGET_MS",
     "RSS_IDENTITY_SESSION_TTL_SECS",
+    "RSS_ADMIN_TOKEN_PROFILE",
+    "RSS_ACCESS_TOKEN_AUDIENCE",
+    "RSS_ACCESS_TOKEN_ES256_KEY_ID",
+    "RSS_ACCESS_TOKEN_ISSUER",
+    "RSS_ACCESS_TOKEN_JWKS_PATH",
+    "RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+    "RSS_ACCESS_TOKEN_TRUSTED_KINDS",
+    "RSS_ACCESS_TOKEN_TTL_SECS",
+    "RSS_FEDERATED_ACCESS_TOKEN_AUDIENCE",
+    "RSS_FEDERATED_ACCESS_TOKEN_ISSUER",
+    "RSS_FEDERATED_ACCESS_TOKEN_JWKS_PATH",
+    "RSS_FEDERATED_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+    "RSS_FEDERATED_ACCESS_TOKEN_TRUSTED_KINDS",
     "RSS_INTERNAL_AUTH_SCHEME",
     "RSS_INTERNAL_LISTEN_ADDR",
     "RSS_INTERNAL_MTLS_SPIFFE_ALLOW_SET",
-    "RSS_JWT_ACCESS_TTL_SECS",
-    "RSS_JWT_AUDIENCE",
-    "RSS_JWT_ES256_KEY_ID",
-    "RSS_JWT_ISSUER",
     "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS",
     "RSS_LISTENER_ALLOW_PLAINTEXT",
-    "RSS_OIDC_AUDIENCE",
-    "RSS_OIDC_ES256_SEC1_B64URL",
-    "RSS_OIDC_HS256_KID",
-    "RSS_OIDC_HS256_SECRET_B64URL",
-    "RSS_OIDC_ISSUER",
-    "RSS_OIDC_JWKS_PATH",
-    "RSS_OIDC_JWKS_REFRESH_INTERVAL_SECS",
-    "RSS_OIDC_TRUSTED_KINDS",
     "RSS_OTEL_ENDPOINT",
     "RSS_OUTBOX_RETAIN_SECONDS",
     "RSS_OUTBOX_SWEEP_INTERVAL_MS",
@@ -88,6 +92,7 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_PG_SSL_MODE",
     "RSS_PG_SSL_ROOT_CERT_PATH",
     "RSS_PG_USERNAME",
+    "RSS_PRIMARY_TOKEN_PROFILE",
     "RSS_PRIMARY_LISTEN_ADDR",
     "RSS_REDIS_ALLOW_PLAINTEXT",
     "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS",
@@ -112,6 +117,10 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_S3_SECRET_ACCESS_KEY",
     "RSS_S3_SESSION_TOKEN",
     "RSS_SESSION_SWEEP_INTERVAL_MS",
+    "RSS_SERVICE_TOKEN_AUDIENCE",
+    "RSS_SERVICE_TOKEN_HS256_KID",
+    "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL",
+    "RSS_SERVICE_TOKEN_ISSUER",
     "RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES",
     "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME",
     "RSS_TENANT_AUTHORITY_CLOCK_SKEW_SECS",
@@ -239,6 +248,612 @@ impl<'a> SnapshotConfig<'a> {
     pub(crate) fn value(self, name: &str) -> Option<&'a str> {
         self.snapshot.get(name).map(SecretText::expose)
     }
+
+    fn is_configured(self, name: &str) -> bool {
+        self.snapshot
+            .values
+            .get(name)
+            .is_some_and(|value| !matches!(value, CapturedConfigValue::Missing))
+    }
+}
+
+const PRIMARY_TOKEN_PROFILE_ENV: &str = "RSS_PRIMARY_TOKEN_PROFILE";
+const ADMIN_TOKEN_PROFILE_ENV: &str = "RSS_ADMIN_TOKEN_PROFILE";
+const INTERNAL_AUTH_SCHEME_ENV: &str = "RSS_INTERNAL_AUTH_SCHEME";
+
+const RSS_ACCESS_TOKEN_ENV: [&str; 7] = [
+    "RSS_ACCESS_TOKEN_ISSUER",
+    "RSS_ACCESS_TOKEN_AUDIENCE",
+    "RSS_ACCESS_TOKEN_ES256_KEY_ID",
+    "RSS_ACCESS_TOKEN_TTL_SECS",
+    "RSS_ACCESS_TOKEN_TRUSTED_KINDS",
+    "RSS_ACCESS_TOKEN_JWKS_PATH",
+    "RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+];
+const FEDERATED_ACCESS_TOKEN_ENV: [&str; 5] = [
+    "RSS_FEDERATED_ACCESS_TOKEN_ISSUER",
+    "RSS_FEDERATED_ACCESS_TOKEN_AUDIENCE",
+    "RSS_FEDERATED_ACCESS_TOKEN_TRUSTED_KINDS",
+    "RSS_FEDERATED_ACCESS_TOKEN_JWKS_PATH",
+    "RSS_FEDERATED_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+];
+const SERVICE_TOKEN_ENV: [&str; 4] = [
+    "RSS_SERVICE_TOKEN_ISSUER",
+    "RSS_SERVICE_TOKEN_AUDIENCE",
+    "RSS_SERVICE_TOKEN_HS256_KID",
+    "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL",
+];
+
+const MIN_JWKS_REFRESH_INTERVAL_SECS: u64 = 5;
+const MAX_JWKS_REFRESH_INTERVAL_SECS: u64 = 3_600;
+const MIN_HS256_KEY_BYTES: usize = 32;
+const MAX_HS256_KEY_BYTES: usize = 128;
+
+/// Token profile selected for one external listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccessTokenProfileSelection {
+    RssAccess,
+    FederatedAccess,
+}
+
+impl AccessTokenProfileSelection {
+    fn parse(config: SnapshotConfig<'_>, name: &'static str) -> anyhow::Result<Self> {
+        match required_scalar(config, name)? {
+            "rss-access" => Ok(Self::RssAccess),
+            "federated-access" => Ok(Self::FederatedAccess),
+            _ => anyhow::bail!("{name} must be exactly rss-access or federated-access"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn auth_scheme(self) -> primitives::AuthScheme {
+        match self {
+            Self::RssAccess => primitives::AuthScheme::RssAccessToken,
+            Self::FederatedAccess => primitives::AuthScheme::FederatedAccessToken,
+        }
+    }
+}
+
+/// Authentication selected for the Internal listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InternalAuthSelection {
+    Mtls,
+    ServiceToken,
+}
+
+impl InternalAuthSelection {
+    pub(crate) fn parse(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+        match required_scalar(config, INTERNAL_AUTH_SCHEME_ENV)? {
+            "mtls" => Ok(Self::Mtls),
+            "service-token" => Ok(Self::ServiceToken),
+            _ => anyhow::bail!("{INTERNAL_AUTH_SCHEME_ENV} must be exactly mtls or service-token"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn auth_scheme(self) -> primitives::AuthScheme {
+        match self {
+            Self::Mtls => primitives::AuthScheme::Mtls,
+            Self::ServiceToken => primitives::AuthScheme::ServiceToken,
+        }
+    }
+}
+
+/// Principal kinds that an access-token profile may assert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AccessPrincipalKind {
+    User,
+    Device,
+    Admin,
+    SuperAdmin,
+}
+
+impl AccessPrincipalKind {
+    fn parse(value: &str, name: &'static str) -> anyhow::Result<Self> {
+        match value {
+            "user" => Ok(Self::User),
+            "device" => Ok(Self::Device),
+            "admin" => Ok(Self::Admin),
+            "superAdmin" => Ok(Self::SuperAdmin),
+            _ => anyhow::bail!("{name} entries must be exactly user, device, admin, or superAdmin"),
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Device => "device",
+            Self::Admin => "admin",
+            Self::SuperAdmin => "superAdmin",
+        }
+    }
+}
+
+struct AccessJwksLocation {
+    watch_path: PathBuf,
+    startup_identity: PathBuf,
+}
+
+impl AccessJwksLocation {
+    fn parse(config: SnapshotConfig<'_>, name: &'static str) -> anyhow::Result<Self> {
+        let watch_path = PathBuf::from(required_scalar(config, name)?);
+        let startup_identity = std::fs::canonicalize(&watch_path).map_err(|_| {
+            anyhow::anyhow!("{name} must reference an existing canonicalizable path")
+        })?;
+        Ok(Self {
+            watch_path,
+            startup_identity,
+        })
+    }
+
+    fn watch_path(&self) -> &Path {
+        &self.watch_path
+    }
+
+    fn same_startup_identity(&self, other: &Self) -> bool {
+        self.startup_identity == other.startup_identity
+    }
+}
+
+struct AccessVerifierConfigCore {
+    issuer: String,
+    audience: String,
+    trusted_kinds: Vec<AccessPrincipalKind>,
+    jwks_location: AccessJwksLocation,
+    jwks_refresh_interval: Duration,
+}
+
+impl AccessVerifierConfigCore {
+    fn parse(
+        config: SnapshotConfig<'_>,
+        issuer_env: &'static str,
+        audience_env: &'static str,
+        trusted_kinds_env: &'static str,
+        jwks_path_env: &'static str,
+        refresh_interval_env: &'static str,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            issuer: required_scalar(config, issuer_env)?.to_owned(),
+            audience: required_scalar(config, audience_env)?.to_owned(),
+            trusted_kinds: trusted_access_kinds(config, trusted_kinds_env)?,
+            jwks_location: AccessJwksLocation::parse(config, jwks_path_env)?,
+            jwks_refresh_interval: required_duration_secs(
+                config,
+                refresh_interval_env,
+                MIN_JWKS_REFRESH_INTERVAL_SECS,
+                MAX_JWKS_REFRESH_INTERVAL_SECS,
+            )?,
+        })
+    }
+
+    fn same_jwks_startup_identity(&self, other: &Self) -> bool {
+        self.jwks_location
+            .same_startup_identity(&other.jwks_location)
+    }
+}
+
+/// Closed RSS access-token configuration.
+pub(crate) struct RssAccessTokenConfig {
+    verifier: AccessVerifierConfigCore,
+    es256_key_id: String,
+    ttl: Duration,
+}
+
+impl RssAccessTokenConfig {
+    fn parse(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+        let verifier = AccessVerifierConfigCore::parse(
+            config,
+            "RSS_ACCESS_TOKEN_ISSUER",
+            "RSS_ACCESS_TOKEN_AUDIENCE",
+            "RSS_ACCESS_TOKEN_TRUSTED_KINDS",
+            "RSS_ACCESS_TOKEN_JWKS_PATH",
+            "RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+        )?;
+        let es256_key_id = required_scalar(config, "RSS_ACCESS_TOKEN_ES256_KEY_ID")?.to_owned();
+        let ttl = required_duration_secs(
+            config,
+            "RSS_ACCESS_TOKEN_TTL_SECS",
+            1,
+            diport::TokenProfile::RssAccess
+                .policy()
+                .maximum_lifetime()
+                .as_secs(),
+        )?;
+        Ok(Self {
+            verifier,
+            es256_key_id,
+            ttl,
+        })
+    }
+
+    pub(crate) fn issuer(&self) -> &str {
+        &self.verifier.issuer
+    }
+
+    pub(crate) fn audience(&self) -> &str {
+        &self.verifier.audience
+    }
+
+    pub(crate) fn trusted_kinds(&self) -> &[AccessPrincipalKind] {
+        &self.verifier.trusted_kinds
+    }
+
+    pub(crate) fn jwks_path(&self) -> &Path {
+        self.verifier.jwks_location.watch_path()
+    }
+
+    pub(crate) const fn jwks_refresh_interval(&self) -> Duration {
+        self.verifier.jwks_refresh_interval
+    }
+
+    #[cfg(test)]
+    pub(crate) fn es256_key_id(&self) -> &str {
+        &self.es256_key_id
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    fn issuer_config(&self) -> authn::JwtIssuerConfig<diport::RssAccessProfile> {
+        authn::JwtIssuerConfig::rss_access(
+            diport::KeyId::new(self.es256_key_id.clone()),
+            diport::SigningPurpose::new("auth.rss-access"),
+            self.issuer(),
+            self.audience(),
+            self.ttl,
+        )
+    }
+}
+
+/// Closed federated access-token configuration.
+pub(crate) struct FederatedAccessTokenConfig {
+    verifier: AccessVerifierConfigCore,
+}
+
+impl FederatedAccessTokenConfig {
+    fn parse(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+        Ok(Self {
+            verifier: AccessVerifierConfigCore::parse(
+                config,
+                "RSS_FEDERATED_ACCESS_TOKEN_ISSUER",
+                "RSS_FEDERATED_ACCESS_TOKEN_AUDIENCE",
+                "RSS_FEDERATED_ACCESS_TOKEN_TRUSTED_KINDS",
+                "RSS_FEDERATED_ACCESS_TOKEN_JWKS_PATH",
+                "RSS_FEDERATED_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+            )?,
+        })
+    }
+
+    pub(crate) fn issuer(&self) -> &str {
+        &self.verifier.issuer
+    }
+
+    pub(crate) fn audience(&self) -> &str {
+        &self.verifier.audience
+    }
+
+    pub(crate) fn trusted_kinds(&self) -> &[AccessPrincipalKind] {
+        &self.verifier.trusted_kinds
+    }
+
+    pub(crate) fn jwks_path(&self) -> &Path {
+        self.verifier.jwks_location.watch_path()
+    }
+
+    pub(crate) const fn jwks_refresh_interval(&self) -> Duration {
+        self.verifier.jwks_refresh_interval
+    }
+}
+
+/// Closed Service Token configuration.
+pub(crate) struct ServiceTokenConfig {
+    issuer: String,
+    audience: String,
+    hs256_kid: String,
+    hs256_secret: diport::SecretMaterial,
+}
+
+impl ServiceTokenConfig {
+    pub(crate) fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+        Self::parse(config)
+    }
+
+    fn parse(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+        let secret = required_scalar(config, "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL")?;
+        let mut decoded = [0_u8; MAX_HS256_KEY_BYTES];
+        let hs256_secret = (|| {
+            let decoded_len = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode_slice(secret, &mut decoded)
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL must encode {MIN_HS256_KEY_BYTES}..={MAX_HS256_KEY_BYTES} bytes as unpadded base64url"
+                    )
+                })?;
+            anyhow::ensure!(
+                (MIN_HS256_KEY_BYTES..=MAX_HS256_KEY_BYTES).contains(&decoded_len),
+                "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL must encode {MIN_HS256_KEY_BYTES}..={MAX_HS256_KEY_BYTES} bytes"
+            );
+            Ok::<_, anyhow::Error>(diport::SecretMaterial::new(decoded[..decoded_len].to_vec()))
+        })();
+        decoded.fill(0);
+        let hs256_secret = hs256_secret?;
+        Ok(Self {
+            issuer: required_scalar(config, "RSS_SERVICE_TOKEN_ISSUER")?.to_owned(),
+            audience: required_scalar(config, "RSS_SERVICE_TOKEN_AUDIENCE")?.to_owned(),
+            hs256_kid: required_scalar(config, "RSS_SERVICE_TOKEN_HS256_KID")?.to_owned(),
+            hs256_secret,
+        })
+    }
+
+    pub(crate) fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
+    pub(crate) fn audience(&self) -> &str {
+        &self.audience
+    }
+
+    pub(crate) fn hs256_kid(&self) -> &str {
+        &self.hs256_kid
+    }
+
+    pub(crate) fn hs256_secret(&self) -> &[u8] {
+        self.hs256_secret.expose()
+    }
+}
+
+/// One process-wide, mutually exclusive token-profile configuration generation.
+pub(crate) struct TokenProfilesConfig {
+    primary: AccessTokenProfileSelection,
+    admin: AccessTokenProfileSelection,
+    internal: InternalAuthSelection,
+    rss_access: Option<RssAccessTokenConfig>,
+    federated_access: Option<FederatedAccessTokenConfig>,
+    service_token: Option<ServiceTokenConfig>,
+}
+
+impl TokenProfilesConfig {
+    pub(crate) fn listener_selections(
+        config: SnapshotConfig<'_>,
+    ) -> anyhow::Result<(
+        AccessTokenProfileSelection,
+        AccessTokenProfileSelection,
+        InternalAuthSelection,
+    )> {
+        let primary = AccessTokenProfileSelection::parse(config, PRIMARY_TOKEN_PROFILE_ENV)?;
+        let admin = AccessTokenProfileSelection::parse(config, ADMIN_TOKEN_PROFILE_ENV)?;
+        let internal = InternalAuthSelection::parse(config)?;
+        anyhow::ensure!(
+            !matches!(
+                (primary, admin),
+                (
+                    AccessTokenProfileSelection::FederatedAccess,
+                    AccessTokenProfileSelection::RssAccess
+                )
+            ),
+            "federated Primary requires federated Admin"
+        );
+        Ok((primary, admin, internal))
+    }
+
+    pub(crate) fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+        let (primary, admin, internal) = Self::listener_selections(config)?;
+
+        let rss_active = matches!(primary, AccessTokenProfileSelection::RssAccess)
+            || matches!(admin, AccessTokenProfileSelection::RssAccess);
+        let federated_active = matches!(primary, AccessTokenProfileSelection::FederatedAccess)
+            || matches!(admin, AccessTokenProfileSelection::FederatedAccess);
+        let service_active = matches!(internal, InternalAuthSelection::ServiceToken);
+
+        let rss_access = parse_active_namespace(
+            config,
+            rss_active,
+            "RSS_ACCESS_TOKEN_*",
+            &RSS_ACCESS_TOKEN_ENV,
+            RssAccessTokenConfig::parse,
+        )?;
+        let federated_access = parse_active_namespace(
+            config,
+            federated_active,
+            "RSS_FEDERATED_ACCESS_TOKEN_*",
+            &FEDERATED_ACCESS_TOKEN_ENV,
+            FederatedAccessTokenConfig::parse,
+        )?;
+        let service_token = parse_active_namespace(
+            config,
+            service_active,
+            "RSS_SERVICE_TOKEN_*",
+            &SERVICE_TOKEN_ENV,
+            ServiceTokenConfig::parse,
+        )?;
+
+        ensure_profile_trust_isolation(
+            rss_access.as_ref(),
+            federated_access.as_ref(),
+            service_token.as_ref(),
+        )?;
+
+        Ok(Self {
+            primary,
+            admin,
+            internal,
+            rss_access,
+            federated_access,
+            service_token,
+        })
+    }
+
+    pub(crate) const fn primary(&self) -> AccessTokenProfileSelection {
+        self.primary
+    }
+
+    pub(crate) const fn admin(&self) -> AccessTokenProfileSelection {
+        self.admin
+    }
+
+    pub(crate) const fn internal(&self) -> InternalAuthSelection {
+        self.internal
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn health_auth_scheme() -> primitives::AuthScheme {
+        primitives::AuthScheme::NoAuth
+    }
+
+    pub(crate) fn rss_access(&self) -> Option<&RssAccessTokenConfig> {
+        self.rss_access.as_ref()
+    }
+
+    pub(crate) fn federated_access(&self) -> Option<&FederatedAccessTokenConfig> {
+        self.federated_access.as_ref()
+    }
+
+    pub(crate) fn service_token(&self) -> Option<&ServiceTokenConfig> {
+        self.service_token.as_ref()
+    }
+
+    fn primary_identity_profile(
+        &self,
+    ) -> anyhow::Result<crate::domains::identity::IdentityTokenProfileInput> {
+        match self.primary {
+            AccessTokenProfileSelection::RssAccess => self
+                .rss_access
+                .as_ref()
+                .map(|config| {
+                    crate::domains::identity::IdentityTokenProfileInput::rss_access(
+                        config.issuer_config(),
+                    )
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "RSS Primary token profile is missing its typed issuer configuration"
+                    )
+                }),
+            AccessTokenProfileSelection::FederatedAccess => {
+                Ok(crate::domains::identity::IdentityTokenProfileInput::federated_access())
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for TokenProfilesConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TokenProfilesConfig(<redacted>)")
+    }
+}
+
+fn required_scalar<'a>(config: SnapshotConfig<'a>, name: &'static str) -> anyhow::Result<&'a str> {
+    let value = config
+        .value(name)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {name}"))?;
+    anyhow::ensure!(!value.is_empty(), "{name} must not be empty");
+    anyhow::ensure!(
+        value.trim() == value
+            && !value.chars().any(char::is_control)
+            && !value.chars().any(char::is_whitespace),
+        "{name} must not contain leading, trailing, whitespace, or control characters"
+    );
+    Ok(value)
+}
+
+fn required_duration_secs(
+    config: SnapshotConfig<'_>,
+    name: &'static str,
+    min: u64,
+    max: u64,
+) -> anyhow::Result<Duration> {
+    let raw = required_scalar(config, name)?;
+    let seconds = raw
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("{name} must be seconds in {min}..={max}"))?;
+    anyhow::ensure!(
+        (min..=max).contains(&seconds),
+        "{name} must be seconds in {min}..={max}"
+    );
+    Ok(Duration::from_secs(seconds))
+}
+
+fn trusted_access_kinds(
+    config: SnapshotConfig<'_>,
+    name: &'static str,
+) -> anyhow::Result<Vec<AccessPrincipalKind>> {
+    let raw = required_scalar(config, name)?;
+    let mut kinds = BTreeSet::new();
+    for value in raw.split(',') {
+        anyhow::ensure!(!value.is_empty(), "{name} must not contain empty entries");
+        let kind = AccessPrincipalKind::parse(value, name)?;
+        anyhow::ensure!(kinds.insert(kind), "{name} must not contain duplicates");
+    }
+    anyhow::ensure!(!kinds.is_empty(), "{name} must list at least one kind");
+    Ok(kinds.into_iter().collect())
+}
+
+fn parse_active_namespace<T>(
+    config: SnapshotConfig<'_>,
+    active: bool,
+    namespace: &'static str,
+    keys: &[&str],
+    parse: impl FnOnce(SnapshotConfig<'_>) -> anyhow::Result<T>,
+) -> anyhow::Result<Option<T>> {
+    if active {
+        return parse(config).map(Some);
+    }
+    anyhow::ensure!(
+        !keys.iter().any(|name| config.is_configured(name)),
+        "orphan token profile configuration: {namespace} is configured but no listener selects it"
+    );
+    Ok(None)
+}
+
+fn ensure_profile_trust_isolation(
+    rss: Option<&RssAccessTokenConfig>,
+    federated: Option<&FederatedAccessTokenConfig>,
+    service: Option<&ServiceTokenConfig>,
+) -> anyhow::Result<()> {
+    if let (Some(rss), Some(federated)) = (rss, federated) {
+        anyhow::ensure!(
+            rss.issuer() != federated.issuer(),
+            "RSS and federated access token issuers must be distinct"
+        );
+        anyhow::ensure!(
+            rss.audience() != federated.audience(),
+            "RSS and federated access token audiences must be distinct"
+        );
+        anyhow::ensure!(
+            !rss.verifier.same_jwks_startup_identity(&federated.verifier),
+            "RSS and federated access token canonical JWKS paths must be distinct"
+        );
+    }
+    if let Some(service) = service {
+        for (name, issuer, audience) in [
+            (
+                "RSS access",
+                rss.map(RssAccessTokenConfig::issuer),
+                rss.map(RssAccessTokenConfig::audience),
+            ),
+            (
+                "federated access",
+                federated.map(FederatedAccessTokenConfig::issuer),
+                federated.map(FederatedAccessTokenConfig::audience),
+            ),
+        ] {
+            if let Some(issuer) = issuer {
+                anyhow::ensure!(
+                    service.issuer() != issuer,
+                    "Service Token issuer must be distinct from the active {name} issuer"
+                );
+            }
+            if let Some(audience) = audience {
+                anyhow::ensure!(
+                    service.audience() != audience,
+                    "Service Token audience must be distinct from the active {name} audience"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) struct ServingConfigMapper<'a> {
@@ -301,6 +916,7 @@ impl WorkerRuntimeConfig {
 }
 
 pub(crate) struct RuntimeServingConfig {
+    token_profiles: TokenProfilesConfig,
     event_transport: crate::event_transport::EventTransportConfig,
     event_worker: crate::event_transport::EventWorkerConfig,
     dlx_worker: crate::event_transport::DlxWorkerConfig,
@@ -312,6 +928,7 @@ pub(crate) struct RuntimeServingConfig {
 }
 
 pub(crate) struct RuntimeServingConfigParts {
+    pub(crate) token_profiles: TokenProfilesConfig,
     pub(crate) event_transport: crate::event_transport::EventTransportConfig,
     pub(crate) event_worker: crate::event_transport::EventWorkerConfig,
     pub(crate) dlx_worker: crate::event_transport::DlxWorkerConfig,
@@ -325,6 +942,8 @@ pub(crate) struct RuntimeServingConfigParts {
 impl RuntimeServingConfig {
     pub(crate) fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
         let mapper = ServingConfigMapper::new(config);
+        let token_profiles = TokenProfilesConfig::from_snapshot(config)?;
+        let identity_token_profile = token_profiles.primary_identity_profile()?;
         let event_transport = crate::event_transport::EventTransportConfig::from_mapper(&mapper)?;
         let topology = event_transport.topology();
         let WorkerRuntimeConfig {
@@ -338,9 +957,11 @@ impl RuntimeServingConfig {
         let domain_modules = crate::domains::DomainModuleInputs::from_snapshot(
             &mapper,
             keyprovider_readiness_interval,
+            identity_token_profile,
         )?;
         let audit_consumer_key = domain_modules.audit_consumer_key();
         Ok(Self {
+            token_profiles,
             event_transport,
             event_worker: event,
             dlx_worker: dlx,
@@ -354,6 +975,7 @@ impl RuntimeServingConfig {
 
     pub(crate) fn into_parts(self) -> RuntimeServingConfigParts {
         RuntimeServingConfigParts {
+            token_profiles: self.token_profiles,
             event_transport: self.event_transport,
             event_worker: self.event_worker,
             dlx_worker: self.dlx_worker,

@@ -10,7 +10,8 @@
 //! RustCrypto/MACs hmac（`Hmac<Sha256>` MAC）；spiffe/rust-spiffe JWT-SVID 验签链（解析→选 key→验签→校 claim）。
 
 use diport::{
-    Clock, CredentialScheme, PdpError, RawCredential, ServiceTokenReplayStore as _, VerifiedClaims,
+    Clock, PdpError, RawCredential, ServiceTokenReplayStore as _, TokenAlgorithm, TokenProfile,
+    TokenProfileMarker, VerifiedClaims,
 };
 use hmac::{Hmac, Mac};
 use p256::ecdsa::Signature;
@@ -26,77 +27,143 @@ pub(crate) const LOG_TARGET: &str = "oidc";
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// `Pdp::verify` 入口：scheme dispatch → 验签 → claim 映射 → durable replay consume。
-pub(crate) async fn verify_credential(
-    config: &VerifierConfig,
-    clock: &dyn Clock,
-    raw: &RawCredential,
-) -> Result<VerifiedClaims, PdpError> {
-    match raw.scheme() {
-        CredentialScheme::Jwt => {
-            verify_path(config, clock, raw.token(), SupportedAlg::Es256, None).await
-        }
-        CredentialScheme::ServiceToken => verify_service_token_path(config, clock, raw).await,
-        _ => {
-            // 未来 scheme（`CredentialScheme` #[non_exhaustive]）无验签器 → fail-closed。只记静态 reason
-            // （不记 scheme 值——未来变体若携数据则 fmt 会泄漏，前向安全）。
-            tracing::debug!(
-                target: LOG_TARGET,
-                resource = LOG_TARGET,
-                reason = "unsupported_scheme",
-                "oidc verifier rejecting unknown credential scheme"
-            );
-            Err(PdpError::Untrusted)
+/// Exhaustive, low-cardinality telemetry reason. Runtime data can never become a metric/log label.
+#[derive(Clone, Copy)]
+pub(crate) enum TelemetryReason {
+    ProfileMismatch,
+    MissingTenantBinding,
+    TypProfileMismatch,
+    AlgProfileMismatch,
+    KidNoCandidate,
+    BadSignature,
+    ReplayScopeInvalid,
+    MissingReplayStore,
+    ReplayDeadlineInvalid,
+    TokenReplayed,
+    ReplayUnavailable,
+    MalformedToken,
+    TokenTooLarge,
+    UnsupportedAlg,
+    MissingJti,
+    MalformedOrMissingClaim,
+    ClockBeforeEpoch,
+    TokenUseProfileMismatch,
+    UntrustedIssuer,
+    UntrustedAudience,
+    EmptySubject,
+    InvalidExpiryBoundary,
+    KindMissingOrUntrusted,
+    ScopedPrincipalMissingTenant,
+    TenantNotCanonical,
+    SuperAdminHasTenant,
+    UnsupportedPrincipalKind,
+    ServiceKindInvalid,
+    ServiceTenantClaimForbidden,
+    IatAfterExp,
+    IatInFuture,
+    MaximumLifetimeExceeded,
+    Expired,
+    NotYetValid,
+}
+
+impl TelemetryReason {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ProfileMismatch => "profile_mismatch",
+            Self::MissingTenantBinding => "missing_tenant_binding",
+            Self::TypProfileMismatch => "typ_profile_mismatch",
+            Self::AlgProfileMismatch => "alg_profile_mismatch",
+            Self::KidNoCandidate => "kid_no_candidate",
+            Self::BadSignature => "bad_signature",
+            Self::ReplayScopeInvalid => "replay_scope_invalid",
+            Self::MissingReplayStore => "missing_replay_store",
+            Self::ReplayDeadlineInvalid => "replay_store_deadline_invalid",
+            Self::TokenReplayed => "token_replayed",
+            Self::ReplayUnavailable => "replay_store_unavailable",
+            Self::MalformedToken => "malformed_token",
+            Self::TokenTooLarge => "token_too_large",
+            Self::UnsupportedAlg => "unsupported_alg",
+            Self::MissingJti => "missing_jti",
+            Self::MalformedOrMissingClaim => "malformed_or_missing_claim",
+            Self::ClockBeforeEpoch => "clock_before_epoch",
+            Self::TokenUseProfileMismatch => "token_use_profile_mismatch",
+            Self::UntrustedIssuer => "untrusted_issuer",
+            Self::UntrustedAudience => "untrusted_audience",
+            Self::EmptySubject => "empty_subject",
+            Self::InvalidExpiryBoundary => "invalid_expiry_boundary",
+            Self::KindMissingOrUntrusted => "kind_missing_or_untrusted",
+            Self::ScopedPrincipalMissingTenant => "scoped_principal_missing_tenant",
+            Self::TenantNotCanonical => "tenant_not_canonical",
+            Self::SuperAdminHasTenant => "super_admin_has_tenant",
+            Self::UnsupportedPrincipalKind => "unsupported_principal_kind",
+            Self::ServiceKindInvalid => "service_kind_invalid",
+            Self::ServiceTenantClaimForbidden => "service_tenant_claim_forbidden",
+            Self::IatAfterExp => "iat_after_exp",
+            Self::IatInFuture => "iat_in_future",
+            Self::MaximumLifetimeExceeded => "maximum_lifetime_exceeded",
+            Self::Expired => "expired",
+            Self::NotYetValid => "not_yet_valid",
         }
     }
 }
 
-async fn verify_service_token_path(
-    config: &VerifierConfig,
+/// `Pdp::verify` 入口：scheme dispatch → 验签 → claim 映射 → durable replay consume。
+pub(crate) async fn verify_credential<P: TokenProfileMarker>(
+    config: &VerifierConfig<P>,
+    clock: &dyn Clock,
+    raw: &RawCredential,
+) -> Result<VerifiedClaims, PdpError> {
+    if raw.profile() != P::PROFILE {
+        log_fail_without_keys(TelemetryReason::ProfileMismatch);
+        return Err(PdpError::Untrusted);
+    }
+    match P::PROFILE {
+        TokenProfile::RssAccess | TokenProfile::FederatedAccess => {
+            verify_path(config, clock, raw.token(), None).await
+        }
+        TokenProfile::ServiceToken => verify_service_token_path(config, clock, raw).await,
+    }
+}
+
+async fn verify_service_token_path<P: TokenProfileMarker>(
+    config: &VerifierConfig<P>,
     clock: &dyn Clock,
     raw: &RawCredential,
 ) -> Result<VerifiedClaims, PdpError> {
     let Some(binding) = raw.service_token_tenant() else {
-        tracing::warn!(
-            target: LOG_TARGET,
-            resource = LOG_TARGET,
-            reason = "missing_tenant_binding",
-            "oidc service-token missing tenant binding"
-        );
+        log_fail_without_keys(TelemetryReason::MissingTenantBinding);
         return Err(PdpError::InvalidSignature);
     };
-    verify_path(
-        config,
-        clock,
-        raw.token(),
-        SupportedAlg::Hs256,
-        Some(binding),
-    )
-    .await
+    verify_path(config, clock, raw.token(), Some(binding)).await
 }
 
 /// 单路径验签：解析 → 路径隔离闸 → 签名校验 → claim 校验。`expected` = 本 scheme 路径锁定的算法。
-async fn verify_path(
-    config: &VerifierConfig,
+async fn verify_path<P: TokenProfileMarker>(
+    config: &VerifierConfig<P>,
     clock: &dyn Clock,
     token: &str,
-    expected: SupportedAlg,
     service_token_binding: Option<&diport::ServiceTokenTenantBinding>,
 ) -> Result<VerifiedClaims, PdpError> {
-    let jws = jws::parse(token).map_err(classify_parse)?;
+    let profile = raw_profile_for_config(config);
+    let policy = profile.policy();
+    let expected = match policy.algorithm() {
+        TokenAlgorithm::Es256 => SupportedAlg::Es256,
+        TokenAlgorithm::Hs256 => SupportedAlg::Hs256,
+    };
+    let jws = jws::parse(token, policy).map_err(classify_parse)?;
+    if jws.typ != policy.jose_typ() {
+        log_fail_without_keys(TelemetryReason::TypProfileMismatch);
+        return Err(PdpError::Untrusted);
+    }
     // 取当前 key 快照（静态不变 / JWKS 文件源后台刷新的最新；Arc clone 同步零撕裂）。
     let snapshot = config.keys().snapshot();
     // alg-key 路径隔离闸（OIDC-ALG-KEYPATH-01）：token alg 必须匹配 scheme 路径算法，否则 confusion → Untrusted。
     if jws.alg != expected {
-        log_fail("alg_scheme_mismatch", &snapshot);
+        log_fail(TelemetryReason::AlgProfileMismatch, &snapshot);
         return Err(PdpError::Untrusted);
     }
     // kid 缩小候选集（JWKS 轮转按 id 选 key；无 kid → untagged 盲扫）。kid 是 hint、非信任根——下方仍须签名校验。
-    let kid = jws.kid.as_deref();
-    if expected == SupportedAlg::Hs256 && kid.is_none() {
-        log_fail("missing_kid", &snapshot);
-        return Err(PdpError::Untrusted);
-    }
+    let kid = jws.kid.as_str();
     match match expected {
         SupportedAlg::Es256 => verify_es256(&snapshot, kid, &jws),
         SupportedAlg::Hs256 => match service_token_binding {
@@ -108,11 +175,11 @@ async fn verify_path(
         VerifyOutcome::NoCandidate => {
             // kid 不在当前快照（未知 / JWKS 轮转出）→ 签名 key 不在受信集 → `Untrusted`（区别于签名结构坏的
             // `InvalidSignature`；同 iss/aud 不受信，spec R2 / SC-005：kid 无匹配 → Untrusted）。
-            log_fail("kid_no_candidate", &snapshot);
+            log_fail(TelemetryReason::KidNoCandidate, &snapshot);
             return Err(PdpError::Untrusted);
         }
         VerifyOutcome::BadSignature => {
-            log_fail("bad_signature", &snapshot);
+            log_fail(TelemetryReason::BadSignature, &snapshot);
             return Err(PdpError::InvalidSignature);
         }
     }
@@ -122,28 +189,24 @@ async fn verify_path(
         SupportedAlg::Hs256 => {
             let (claims, token_id, expires_at) =
                 claims::validate_service_token_and_map(config, clock, &jws.payload)?;
-            let Some(key_id) = jws.kid.as_deref() else {
-                log_fail("missing_kid", &snapshot);
-                return Err(PdpError::Untrusted);
-            };
             let replay_key =
                 diport::ServiceTokenReplayKey::derive(diport::ServiceTokenReplayScope {
                     issuer: config.issuer(),
                     audience: config.audience(),
-                    key_id,
+                    key_id: &jws.kid,
                     token_id: &token_id,
                 })
                 .map_err(|_| {
-                    log_fail("replay_scope_invalid", &snapshot);
+                    log_fail(TelemetryReason::ReplayScopeInvalid, &snapshot);
                     PdpError::InvalidSignature
                 })?;
             let Some((store, timeout)) = config.service_token_replay_store() else {
-                log_fail("missing_replay_store", &snapshot);
+                log_fail(TelemetryReason::MissingReplayStore, &snapshot);
                 return Err(PdpError::Untrusted);
             };
             let deadline =
                 diport::ServiceTokenReplayDeadline::from_timeout(timeout).map_err(|_| {
-                    log_fail("replay_store_deadline_invalid", &snapshot);
+                    log_fail(TelemetryReason::ReplayDeadlineInvalid, &snapshot);
                     PdpError::ProviderUnavailable
                 })?;
             match store
@@ -152,16 +215,20 @@ async fn verify_path(
             {
                 Ok(diport::ServiceTokenReplayDisposition::Recorded) => Ok(claims),
                 Ok(diport::ServiceTokenReplayDisposition::Replayed) => {
-                    log_fail("token_replayed", &snapshot);
+                    log_fail(TelemetryReason::TokenReplayed, &snapshot);
                     Err(PdpError::InvalidSignature)
                 }
                 Err(diport::ServiceTokenReplayStoreError::Unavailable) => {
-                    log_fail("replay_store_unavailable", &snapshot);
+                    log_fail(TelemetryReason::ReplayUnavailable, &snapshot);
                     Err(PdpError::ProviderUnavailable)
                 }
             }
         }
     }
+}
+
+fn raw_profile_for_config<P: TokenProfileMarker>(_config: &VerifierConfig<P>) -> TokenProfile {
+    P::PROFILE
 }
 
 /// 单路径验签三态（区分 fail-closed 语义）：候选为空 = kid 不在受信集（未知 / 轮转出）→ `Untrusted`；候选存在
@@ -178,7 +245,7 @@ enum VerifyOutcome {
 /// ES256（P-256 ECDSA）签名校验：定长 r‖s 签名 + 逐**候选** ES256 公钥试验（按 `kid` 过滤，见
 /// [`KeySet::es256_candidates`]——支持 JWKS kid 轮转 + 静态多 key）。`VerifyingKey::verify` 内部对 signing input
 /// 做 SHA-256 prehash（非预 hash 输入）。
-fn verify_es256(keys: &KeySet, kid: Option<&str>, jws: &Jws) -> VerifyOutcome {
+fn verify_es256(keys: &KeySet, kid: &str, jws: &Jws) -> VerifyOutcome {
     let Ok(sig) = Signature::from_slice(&jws.signature) else {
         // 签名非定长 64 字节 r‖s（含空签名 / DER 形态）→ 结构坏 → InvalidSignature。
         return VerifyOutcome::BadSignature;
@@ -201,7 +268,7 @@ fn verify_es256(keys: &KeySet, kid: Option<&str>, jws: &Jws) -> VerifyOutcome {
 /// `primitives::crypto::constant_time_eq`，CRYPTO-CONST-TIME-01；候选按 `kid` 过滤）。候选为空 → `NoCandidate`。
 fn verify_hs256(
     keys: &KeySet,
-    kid: Option<&str>,
+    kid: &str,
     jws: &Jws,
     binding: &diport::ServiceTokenTenantBinding,
 ) -> VerifyOutcome {
@@ -236,27 +303,46 @@ fn hs256_tag_matches(secret: &[u8], signing_input: &[u8], signature: &[u8]) -> b
 /// 与 `Untrusted`（iss/aud 不受信、alg-scheme 混淆）同归 401，但语义分层：此处凭据**结构**坏，`Untrusted` 是**来源**不受信（#1229）。
 fn classify_parse(err: JwsError) -> PdpError {
     let reason = match err {
-        JwsError::Malformed => "malformed_token",
-        JwsError::UnsupportedAlg => "unsupported_alg",
+        JwsError::Malformed => TelemetryReason::MalformedToken,
+        JwsError::TooLarge => TelemetryReason::TokenTooLarge,
+        JwsError::UnsupportedAlg => TelemetryReason::UnsupportedAlg,
     };
     tracing::warn!(
         target: LOG_TARGET,
         resource = LOG_TARGET,
-        reason = reason,
+        reason = reason.label(),
         "oidc credential parse failed"
     );
     PdpError::InvalidSignature
 }
 
-/// 脱敏失败日志：reason 闭值标签 + keys_tried 计数（**不**记 token / 签名 / claim / key 材料）。
-fn log_fail(reason: &'static str, keys: &KeySet) {
+fn log_fail_without_keys(reason: TelemetryReason) {
     tracing::warn!(
         target: LOG_TARGET,
         resource = LOG_TARGET,
-        reason = reason,
+        reason = reason.label(),
+        "oidc credential verification failed"
+    );
+}
+
+/// 脱敏失败日志：reason 闭值标签 + keys_tried 计数（**不**记 token / 签名 / claim / key 材料）。
+fn log_fail(reason: TelemetryReason, keys: &KeySet) {
+    tracing::warn!(
+        target: LOG_TARGET,
+        resource = LOG_TARGET,
+        reason = reason.label(),
         es256_keys = keys.es256_len(),
         hs256_keys = keys.hs256_len(),
         "oidc credential verification failed"
+    );
+}
+
+pub(crate) fn log_claim_fail(reason: TelemetryReason) {
+    tracing::warn!(
+        target: LOG_TARGET,
+        resource = LOG_TARGET,
+        reason = reason.label(),
+        "oidc jwt claim validation failed"
     );
 }
 
@@ -265,6 +351,7 @@ mod tests {
     //! 表驱动验签矩阵 + RFC7515 known-answer + PII 边界回归。
     //! 测试 expect/unwrap carve-out 按 error-handling.md §Carve-out 用 **item-level** `#[allow]` 逐 fn 标注。
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -278,11 +365,17 @@ mod tests {
         VerifyOutcome, hs256_tag_matches, verify_credential as verify_credential_async,
         verify_es256,
     };
-    use crate::config::{StaticKeySource, VerifierConfig, VerifierConfigBuilder};
+    use crate::config::{
+        AccessStaticKeySource, ServiceTokenKeySource, VerifierConfig, VerifierConfigBuilder,
+    };
     use crate::jws::{Jws, SupportedAlg};
 
     const ISS: &str = "https://issuer.example";
     const AUD: &str = "rss-api";
+    const FEDERATED_ISS: &str = "https://federation.example";
+    const FEDERATED_AUD: &str = "rss-federated-api";
+    const SERVICE_ISS: &str = "https://service-issuer.example";
+    const SERVICE_AUD: &str = "rss-service-api";
     /// 固定 "now"（2023-11-14T22:13:20Z）——确定性时间边界，绝不取系统时钟。
     const NOW: i64 = 1_700_000_000;
     /// 一次性测试 EC 私钥标量（固定字节，valid scalar < n；**仅测试 fixture，永非生产 key**）。
@@ -323,6 +416,23 @@ mod tests {
         diport::DynServiceTokenReplayStore::new_arc(TestReplayStore::default())
     }
 
+    struct CountingReplayStore {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl diport::ServiceTokenReplayStore for CountingReplayStore {
+        async fn check_and_record(
+            &self,
+            _key: &diport::ServiceTokenReplayKey,
+            _expires_at: SystemTime,
+            _deadline: diport::ServiceTokenReplayDeadline,
+        ) -> Result<diport::ServiceTokenReplayDisposition, diport::ServiceTokenReplayStoreError>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(diport::ServiceTokenReplayDisposition::Recorded)
+        }
+    }
+
     struct UnavailableReplayStore;
 
     impl diport::ServiceTokenReplayStore for UnavailableReplayStore {
@@ -339,8 +449,8 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn verify_credential(
-        config: &VerifierConfig,
+    fn verify_credential<P: diport::TokenProfileMarker>(
+        config: &VerifierConfig<P>,
         clock: &dyn Clock,
         raw: &RawCredential,
     ) -> Result<diport::VerifiedClaims, PdpError> {
@@ -428,7 +538,7 @@ mod tests {
     fn test_sk2() -> SigningKey {
         SigningKey::from_slice(&TEST_SK2_BYTES).expect("valid P-256 scalar")
     }
-    /// SigningKey → SEC1 未压缩点（注入 StaticKeySource）。
+    /// SigningKey → SEC1 未压缩点（注入 AccessStaticKeySource）。
     fn sec1_of(sk: &SigningKey) -> Vec<u8> {
         sk.verifying_key()
             .to_encoded_point(false)
@@ -437,43 +547,86 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn es256_config_with(keys: StaticKeySource) -> VerifierConfig {
-        VerifierConfigBuilder::new(ISS, AUD)
-            .keys(keys)
+    fn es256_config_with(keys: AccessStaticKeySource) -> VerifierConfig<diport::RssAccessProfile> {
+        VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
+            .keys_static(keys)
             .trust_kind("user")
             .build()
             .expect("valid es256 config")
     }
     #[allow(clippy::expect_used)]
-    fn es256_config() -> VerifierConfig {
-        let keys = StaticKeySource::builder()
-            .add_es256_sec1(&sec1_of(&test_sk()))
+    fn es256_config() -> VerifierConfig<diport::RssAccessProfile> {
+        let keys = AccessStaticKeySource::builder()
+            .add_es256_sec1("test-es256", &sec1_of(&test_sk()))
             .expect("es256 key")
             .build();
         es256_config_with(keys)
     }
     #[allow(clippy::expect_used)]
-    fn hs256_config() -> VerifierConfig {
-        let keys = StaticKeySource::builder()
-            .add_hs256_secret_with_kid(HS_KID, HS_SECRET)
+    fn federated_es256_config() -> VerifierConfig<diport::FederatedAccessProfile> {
+        let keys = AccessStaticKeySource::builder()
+            .add_es256_sec1("test-es256", &sec1_of(&test_sk2()))
+            .expect("federated es256 key")
+            .build();
+        VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(FEDERATED_ISS, FEDERATED_AUD)
+            .keys_static(keys)
+            .trust_kind("user")
+            .build()
+            .expect("valid federated es256 config")
+    }
+    #[allow(clippy::expect_used)]
+    fn hs256_config() -> VerifierConfig<diport::ServiceTokenProfile> {
+        let keys = ServiceTokenKeySource::builder()
+            .add_hs256_secret(HS_KID, HS_SECRET)
             .expect("hs256 secret")
             .build();
-        VerifierConfigBuilder::new(ISS, AUD)
-            .keys(keys)
-            .trust_kind("service")
-            .service_token_replay_store(replay_store(), Duration::from_secs(5))
+        VerifierConfigBuilder::<diport::ServiceTokenProfile>::new(ISS, AUD)
+            .keys_hs256(keys)
+            .replay_store(replay_store(), Duration::from_secs(5))
             .build()
             .expect("valid hs256 config")
+    }
+    #[allow(clippy::expect_used)]
+    fn matrix_hs256_config() -> VerifierConfig<diport::ServiceTokenProfile> {
+        let keys = ServiceTokenKeySource::builder()
+            .add_hs256_secret(HS_KID, HS_SECRET)
+            .expect("hs256 secret")
+            .build();
+        VerifierConfigBuilder::<diport::ServiceTokenProfile>::new(SERVICE_ISS, SERVICE_AUD)
+            .keys_hs256(keys)
+            .replay_store(replay_store(), Duration::from_secs(5))
+            .build()
+            .expect("valid matrix hs256 config")
     }
 
     /// 拼 JWT payload JSON（sub=alice + exp/iss/aud + 任意 extra 片段，如 `,"tenant_id":"t1"`）。
     fn payload(exp: i64, iss: &str, aud: &str, extra: &str) -> String {
-        format!(r#"{{"sub":"alice","exp":{exp},"iss":"{iss}","aud":"{aud}"{extra}}}"#)
+        let service = extra.contains(r#""kind":"service""#);
+        let exp = if service { exp.min(NOW + 300) } else { exp };
+        let token_use = if service { "service" } else { "access" };
+        let kind = if extra.contains(r#""kind":"#) {
+            ""
+        } else {
+            r#","kind":"user""#
+        };
+        let tenant = if service
+            || extra.contains(r#""tenant_id":"#)
+            || extra.contains(r#""kind":"superAdmin""#)
+        {
+            ""
+        } else {
+            r#","tenant_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479""#
+        };
+        let iat = exp.saturating_sub(if service { 300 } else { 600 });
+        format!(
+            r#"{{"sub":"alice","iat":{iat},"exp":{exp},"token_use":"{token_use}","iss":"{iss}","aud":"{aud}"{kind}{tenant}{extra}}}"#
+        )
     }
 
     /// 用 ES256 私钥签发 token（header alg=ES256）。RFC6979 确定性签名，无需 RNG。
     fn mint_es256(sk: &SigningKey, payload_json: &str) -> String {
-        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256"}"#);
+        let header =
+            URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","typ":"at+jwt","kid":"test-es256"}"#);
         let body = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         let signing_input = format!("{header}.{body}");
         let sig: Signature = sk.sign(signing_input.as_bytes());
@@ -489,7 +642,9 @@ mod tests {
     fn mint_hs256_with_kid(secret: &[u8], kid: &str, payload_json: &str) -> String {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
-        let header = URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"HS256","kid":"{kid}"}}"#));
+        let header = URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"alg":"HS256","typ":"rss-service+jwt","kid":"{kid}"}}"#
+        ));
         let body = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         let signing_input = format!("{header}.{body}");
         let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
@@ -517,7 +672,9 @@ mod tests {
     ) -> String {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
-        let header = URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"HS256","kid":"{kid}"}}"#));
+        let header = URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"alg":"HS256","typ":"rss-service+jwt","kid":"{kid}"}}"#
+        ));
         let body = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         let signing_input = format!("{header}.{body}");
         let binding = tenant_binding(tenant);
@@ -532,7 +689,7 @@ mod tests {
     fn mint_hs256_bound_without_kid(secret: &[u8], payload_json: &str, tenant: &str) -> String {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
-        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256"}"#);
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"rss-service+jwt"}"#);
         let body = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         let signing_input = format!("{header}.{body}");
         let binding = tenant_binding(tenant);
@@ -550,47 +707,225 @@ mod tests {
         }
     }
 
+    fn access_lifetime_payload(issuer: &str, audience: &str, lifetime: i64) -> String {
+        let exp = NOW.saturating_add(lifetime);
+        format!(
+            r#"{{"sub":"alice","iat":{NOW},"exp":{exp},"token_use":"access","iss":"{issuer}","aud":"{audience}","kind":"user","tenant_id":"{CANON_TENANT}"}}"#
+        )
+    }
+
+    fn service_lifetime_payload(lifetime: i64) -> String {
+        let exp = NOW.saturating_add(lifetime);
+        format!(
+            r#"{{"sub":"service-a","iat":{NOW},"exp":{exp},"token_use":"service","iss":"{SERVICE_ISS}","aud":"{SERVICE_AUD}","kind":"service","jti":"lifetime-{lifetime}"}}"#
+        )
+    }
+
+    #[test]
+    fn rss_access_verifier_enforces_maximum_lifetime_boundary() {
+        let config = es256_config();
+        for (lifetime, accepted) in [(899, true), (900, true), (901, false)] {
+            let token = mint_es256(&test_sk(), &access_lifetime_payload(ISS, AUD, lifetime));
+            let result =
+                verify_credential(&config, &FixedClock(NOW), &RawCredential::rss_access(token));
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "RSS access lifetime {lifetime}s boundary verdict mismatch: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn federated_access_verifier_enforces_maximum_lifetime_boundary() {
+        let config = federated_es256_config();
+        for (lifetime, accepted) in [(899, true), (900, true), (901, false)] {
+            let token = mint_es256(
+                &test_sk2(),
+                &access_lifetime_payload(FEDERATED_ISS, FEDERATED_AUD, lifetime),
+            );
+            let result = verify_credential(
+                &config,
+                &FixedClock(NOW),
+                &RawCredential::federated_access(token),
+            );
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "federated access lifetime {lifetime}s boundary verdict mismatch: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn service_verifier_rejects_lifetime_plus_one_before_replay_io() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let keys = ServiceTokenKeySource::builder()
+            .add_hs256_secret(HS_KID, HS_SECRET)
+            .expect("hs256 secret")
+            .build();
+        let config =
+            VerifierConfigBuilder::<diport::ServiceTokenProfile>::new(SERVICE_ISS, SERVICE_AUD)
+                .keys_hs256(keys)
+                .replay_store(
+                    diport::DynServiceTokenReplayStore::new_arc(CountingReplayStore {
+                        calls: Arc::clone(&calls),
+                    }),
+                    Duration::from_secs(5),
+                )
+                .build()
+                .expect("valid service config");
+
+        for (lifetime, accepted, expected_replay_calls) in
+            [(299, true, 1), (300, true, 2), (301, false, 2)]
+        {
+            let token =
+                mint_hs256_bound(HS_SECRET, &service_lifetime_payload(lifetime), CANON_TENANT);
+            let result = verify_credential(
+                &config,
+                &FixedClock(NOW),
+                &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+            );
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "service lifetime {lifetime}s boundary verdict mismatch: {result:?}"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                expected_replay_calls,
+                "service lifetime {lifetime}s must reject before replay I/O"
+            );
+        }
+    }
+
+    #[test]
+    fn three_profile_matrix_accepts_only_its_diagonal() {
+        let rss_token = mint_es256(&test_sk(), &payload(NOW + 600, ISS, AUD, ""));
+        let federated_token = mint_es256(
+            &test_sk2(),
+            &payload(NOW + 600, FEDERATED_ISS, FEDERATED_AUD, ""),
+        );
+        let service_token = mint_hs256_bound(
+            HS_SECRET,
+            &payload(
+                NOW + 300,
+                SERVICE_ISS,
+                SERVICE_AUD,
+                r#","kind":"service","jti":"matrix-service""#,
+            ),
+            CANON_TENANT,
+        );
+        let binding = || tenant_binding(CANON_TENANT);
+
+        assert!(
+            verify_credential(
+                &es256_config(),
+                &FixedClock(NOW),
+                &RawCredential::rss_access(rss_token.clone()),
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_credential(
+                &federated_es256_config(),
+                &FixedClock(NOW),
+                &RawCredential::federated_access(federated_token.clone()),
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_credential(
+                &matrix_hs256_config(),
+                &FixedClock(NOW),
+                &RawCredential::service_token(service_token.clone(), binding()),
+            )
+            .is_ok()
+        );
+
+        let off_diagonal = [
+            verify_credential(
+                &es256_config(),
+                &FixedClock(NOW),
+                &RawCredential::rss_access(federated_token.clone()),
+            ),
+            verify_credential(
+                &es256_config(),
+                &FixedClock(NOW),
+                &RawCredential::rss_access(service_token.clone()),
+            ),
+            verify_credential(
+                &federated_es256_config(),
+                &FixedClock(NOW),
+                &RawCredential::federated_access(rss_token.clone()),
+            ),
+            verify_credential(
+                &federated_es256_config(),
+                &FixedClock(NOW),
+                &RawCredential::federated_access(service_token),
+            ),
+            verify_credential(
+                &matrix_hs256_config(),
+                &FixedClock(NOW),
+                &RawCredential::service_token(rss_token, binding()),
+            ),
+            verify_credential(
+                &matrix_hs256_config(),
+                &FixedClock(NOW),
+                &RawCredential::service_token(federated_token, binding()),
+            ),
+        ];
+        assert!(
+            off_diagonal.iter().all(Result::is_err),
+            "3×3 profile matrix 的六个 off-diagonal 必须全部 fail-closed"
+        );
+    }
+
     // ── 验收场景 ① 有效 ES256 JWT → 映射 subject/tenant/kind ──────────────────────
     #[test]
     fn valid_es256_jwt_maps_claims() {
         let token = mint_es256(
             &test_sk(),
-            &payload(NOW + 3600, ISS, AUD, r#","tenant_id":"t1","kind":"user""#),
+            &payload(NOW + 600, ISS, AUD, r#","kind":"user""#),
         );
         let claims = ok_claims(verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         ));
         assert_eq!(claims.subject(), "alice");
-        assert_eq!(claims.tenant(), Some("t1"));
+        assert_eq!(claims.tenant(), Some(CANON_TENANT));
         assert_eq!(claims.kind(), Some("user"));
     }
 
     #[test]
-    fn es256_absent_tenant_kind_yield_none() {
-        let token = mint_es256(&test_sk(), &payload(NOW + 3600, ISS, AUD, ""));
-        let claims = ok_claims(verify_credential(
+    fn es256_scoped_kind_without_tenant_is_rejected() {
+        let body = format!(
+            r#"{{"sub":"alice","iat":{NOW},"exp":{},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user"}}"#,
+            NOW + 600
+        );
+        let token = mint_es256(&test_sk(), &body);
+        let result = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
-        ));
-        assert_eq!(claims.tenant(), None);
-        assert_eq!(claims.kind(), None);
+            &RawCredential::rss_access(token),
+        );
+        assert!(matches!(result, Err(PdpError::InvalidSignature)));
     }
 
     #[test]
     fn es256_aud_array_containing_audience_accepted() {
         let extra = "";
         let body = format!(
-            r#"{{"sub":"alice","exp":{},"iss":"{ISS}","aud":["other","{AUD}"]{extra}}}"#,
-            NOW + 3600
+            r#"{{"sub":"alice","iat":{NOW},"exp":{},"token_use":"access","iss":"{ISS}","aud":["other","{AUD}"],"kind":"user","tenant_id":"{CANON_TENANT}"{extra}}}"#,
+            NOW + 600
         );
         let token = mint_es256(&test_sk(), &body);
         let claims = ok_claims(verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         ));
         assert_eq!(claims.subject(), "alice");
     }
@@ -600,11 +935,11 @@ mod tests {
     fn es256_tampered_payload_rejected() {
         let sk = test_sk();
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256"}"#);
-        let signed_body = URL_SAFE_NO_PAD.encode(payload(NOW + 3600, ISS, AUD, "").as_bytes());
+        let signed_body = URL_SAFE_NO_PAD.encode(payload(NOW + 600, ISS, AUD, "").as_bytes());
         let sig: Signature = sk.sign(format!("{header}.{signed_body}").as_bytes());
         // 签名覆盖 signed_body，但提交另一个合法 payload 段 → signing input 变 → 签名失配。
         let other_body =
-            URL_SAFE_NO_PAD.encode(payload(NOW + 3600, ISS, AUD, r#","x":"y""#).as_bytes());
+            URL_SAFE_NO_PAD.encode(payload(NOW + 600, ISS, AUD, r#","x":"y""#).as_bytes());
         let token = format!(
             "{header}.{other_body}.{}",
             URL_SAFE_NO_PAD.encode(sig.to_bytes())
@@ -612,7 +947,7 @@ mod tests {
         let r = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         );
         assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
     }
@@ -620,11 +955,11 @@ mod tests {
     #[test]
     fn es256_wrong_key_rejected() {
         // test_sk2 签发但用 test_sk 公钥的 config 验 → 签名失配。
-        let token = mint_es256(&test_sk2(), &payload(NOW + 3600, ISS, AUD, ""));
+        let token = mint_es256(&test_sk2(), &payload(NOW + 600, ISS, AUD, ""));
         let r = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         );
         assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
     }
@@ -637,7 +972,7 @@ mod tests {
         let r = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         );
         assert!(matches!(r, Err(PdpError::Expired)), "got {r:?}");
     }
@@ -649,7 +984,7 @@ mod tests {
         let claims = ok_claims(verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         ));
         assert_eq!(claims.subject(), "alice");
     }
@@ -658,15 +993,15 @@ mod tests {
     #[test]
     fn es256_nbf_future_maps_expired() {
         let body = format!(
-            r#"{{"sub":"alice","exp":{},"nbf":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
-            NOW + 7200,
-            NOW + 3600
+            r#"{{"sub":"alice","iat":{NOW},"exp":{},"nbf":{},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user","tenant_id":"{CANON_TENANT}"}}"#,
+            NOW + 600,
+            NOW + 600
         );
         let token = mint_es256(&test_sk(), &body);
         let r = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         );
         assert!(matches!(r, Err(PdpError::Expired)), "got {r:?}");
     }
@@ -675,12 +1010,12 @@ mod tests {
     #[test]
     fn alg_none_token_rejected() {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
-        let body = URL_SAFE_NO_PAD.encode(payload(NOW + 3600, ISS, AUD, "").as_bytes());
+        let body = URL_SAFE_NO_PAD.encode(payload(NOW + 600, ISS, AUD, "").as_bytes());
         let token = format!("{header}.{body}.");
         let r = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         );
         assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
     }
@@ -688,12 +1023,12 @@ mod tests {
     #[test]
     fn alg_rs256_token_rejected() {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#);
-        let body = URL_SAFE_NO_PAD.encode(payload(NOW + 3600, ISS, AUD, "").as_bytes());
+        let body = URL_SAFE_NO_PAD.encode(payload(NOW + 600, ISS, AUD, "").as_bytes());
         let token = format!("{header}.{body}.c2lnbmF0dXJl");
         let r = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         );
         assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
     }
@@ -704,7 +1039,7 @@ mod tests {
             let r = verify_credential(
                 &es256_config(),
                 &FixedClock(NOW),
-                &RawCredential::jwt(token.to_string()),
+                &RawCredential::rss_access(token.to_string()),
             );
             assert!(
                 matches!(r, Err(PdpError::InvalidSignature)),
@@ -717,11 +1052,11 @@ mod tests {
     #[test]
     fn jwt_scheme_hs256_token_confusion_rejected() {
         // 攻击者拿 HS256 token 走 JWT 路径（试图让 ES256 公钥被当作 HMAC 密钥）。路径隔离闸先于 key 查找拒。
-        let token = mint_hs256(HS_SECRET, &payload(NOW + 3600, ISS, AUD, ""));
+        let token = mint_hs256(HS_SECRET, &payload(NOW + 600, ISS, AUD, ""));
         let r = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         );
         assert!(matches!(r, Err(PdpError::Untrusted)), "got {r:?}");
     }
@@ -729,7 +1064,7 @@ mod tests {
     #[test]
     fn service_token_scheme_es256_token_confusion_rejected() {
         // 反向：ES256 token 走 service-token 路径 → 路径隔离闸拒。
-        let token = mint_es256(&test_sk(), &payload(NOW + 3600, ISS, AUD, ""));
+        let token = mint_es256(&test_sk(), &payload(NOW + 600, ISS, AUD, ""));
         let r = verify_credential(
             &hs256_config(),
             &FixedClock(NOW),
@@ -744,7 +1079,7 @@ mod tests {
         let token = mint_hs256_bound(
             HS_SECRET,
             &payload(
-                NOW + 3600,
+                NOW + 600,
                 ISS,
                 AUD,
                 r#","kind":"service","jti":"nonce-valid""#,
@@ -765,7 +1100,7 @@ mod tests {
         let token = mint_hs256_bound(
             HS_SECRET,
             &payload(
-                NOW + 3600,
+                NOW + 600,
                 ISS,
                 AUD,
                 r#","kind":"service","jti":"nonce-tenant""#,
@@ -785,7 +1120,7 @@ mod tests {
         let token = mint_hs256(
             HS_SECRET,
             &payload(
-                NOW + 3600,
+                NOW + 600,
                 ISS,
                 AUD,
                 r#","kind":"service","jti":"nonce-unbound""#,
@@ -804,7 +1139,7 @@ mod tests {
         let token = mint_hs256_bound_without_kid(
             HS_SECRET,
             &payload(
-                NOW + 3600,
+                NOW + 600,
                 ISS,
                 AUD,
                 r#","kind":"service","jti":"nonce-no-kid""#,
@@ -816,7 +1151,7 @@ mod tests {
             &FixedClock(NOW),
             &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
         );
-        assert!(matches!(r, Err(PdpError::Untrusted)), "got {r:?}");
+        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
     }
 
     #[test]
@@ -825,7 +1160,7 @@ mod tests {
             HS_SECRET,
             "unknown-kid",
             &payload(
-                NOW + 3600,
+                NOW + 600,
                 ISS,
                 AUD,
                 r#","kind":"service","jti":"nonce-unknown-kid""#,
@@ -844,7 +1179,7 @@ mod tests {
     fn hs256_service_token_missing_jti_rejected() {
         let token = mint_hs256_bound(
             HS_SECRET,
-            &payload(NOW + 3600, ISS, AUD, r#","kind":"service""#),
+            &payload(NOW + 600, ISS, AUD, r#","kind":"service""#),
             CANON_TENANT,
         );
         let r = verify_credential(
@@ -861,7 +1196,7 @@ mod tests {
         let token = mint_hs256_bound(
             HS_SECRET,
             &payload(
-                NOW + 3600,
+                NOW + 600,
                 ISS,
                 AUD,
                 r#","kind":"service","jti":"nonce-dup""#,
@@ -891,14 +1226,13 @@ mod tests {
         const TOKEN_ID_MARKER: &str = "outage-jti-must-never-be-logged";
         capture::install();
         capture::reset();
-        let keys = StaticKeySource::builder()
-            .add_hs256_secret_with_kid(HS_KID, HS_SECRET)
+        let keys = ServiceTokenKeySource::builder()
+            .add_hs256_secret(HS_KID, HS_SECRET)
             .expect("hs256 secret")
             .build();
-        let config = VerifierConfigBuilder::new(ISS, AUD)
-            .keys(keys)
-            .trust_kind("service")
-            .service_token_replay_store(
+        let config = VerifierConfigBuilder::<diport::ServiceTokenProfile>::new(ISS, AUD)
+            .keys_hs256(keys)
+            .replay_store(
                 diport::DynServiceTokenReplayStore::new_arc(UnavailableReplayStore),
                 Duration::from_secs(5),
             )
@@ -907,7 +1241,7 @@ mod tests {
         let token = mint_hs256_bound(
             HS_SECRET,
             &payload(
-                NOW + 3600,
+                NOW + 600,
                 ISS,
                 AUD,
                 &format!(r#","kind":"service","jti":"{TOKEN_ID_MARKER}""#),
@@ -936,20 +1270,19 @@ mod tests {
     fn hs256_same_jti_under_distinct_verified_kids_is_not_a_replay() {
         const SECOND_SECRET: &[u8] = b"second-hs256-secret-for-replay-scope";
         let replay_store = replay_store();
-        let keys = StaticKeySource::builder()
-            .add_hs256_secret_with_kid(HS_KID, HS_SECRET)
+        let keys = ServiceTokenKeySource::builder()
+            .add_hs256_secret(HS_KID, HS_SECRET)
             .expect("first hs256 key")
-            .add_hs256_secret_with_kid(HS_KID2, SECOND_SECRET)
+            .add_hs256_secret(HS_KID2, SECOND_SECRET)
             .expect("second hs256 key")
             .build();
-        let config = VerifierConfigBuilder::new(ISS, AUD)
-            .keys(keys)
-            .trust_kind("service")
-            .service_token_replay_store(replay_store, Duration::from_secs(5))
+        let config = VerifierConfigBuilder::<diport::ServiceTokenProfile>::new(ISS, AUD)
+            .keys_hs256(keys)
+            .replay_store(replay_store, Duration::from_secs(5))
             .build()
             .expect("valid multi-key hs256 config");
         let payload = payload(
-            NOW + 3600,
+            NOW + 600,
             ISS,
             AUD,
             r#","kind":"service","jti":"shared-jti""#,
@@ -980,7 +1313,12 @@ mod tests {
     fn hs256_tampered_rejected() {
         let token = mint_hs256_bound(
             HS_SECRET,
-            &payload(NOW + 3600, ISS, AUD, r#","jti":"nonce-tampered""#),
+            &payload(
+                NOW + 600,
+                ISS,
+                AUD,
+                r#","kind":"service","jti":"nonce-tampered""#,
+            ),
             CANON_TENANT,
         );
         // 篡改签名段最后一字符。
@@ -1000,23 +1338,23 @@ mod tests {
     fn untrusted_issuer_rejected() {
         let token = mint_es256(
             &test_sk(),
-            &payload(NOW + 3600, "https://evil.example", AUD, ""),
+            &payload(NOW + 600, "https://evil.example", AUD, ""),
         );
         let r = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         );
         assert!(matches!(r, Err(PdpError::Untrusted)), "got {r:?}");
     }
 
     #[test]
     fn untrusted_audience_rejected() {
-        let token = mint_es256(&test_sk(), &payload(NOW + 3600, ISS, "other-rp", ""));
+        let token = mint_es256(&test_sk(), &payload(NOW + 600, ISS, "other-rp", ""));
         let r = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         );
         assert!(matches!(r, Err(PdpError::Untrusted)), "got {r:?}");
     }
@@ -1026,13 +1364,13 @@ mod tests {
     fn empty_subject_rejected() {
         let body = format!(
             r#"{{"sub":"","exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
-            NOW + 3600
+            NOW + 600
         );
         let token = mint_es256(&test_sk(), &body);
         let r = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         );
         assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
     }
@@ -1045,61 +1383,59 @@ mod tests {
         let r = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         );
         assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
     }
 
-    // ── 验收场景 ⑩ kind 不在 allowlist → 剥离 None（OIDC-KIND-ALLOWLIST-01）──────
+    // ── kind 不在 allowlist → fail closed ──────────────────────────────────────
     #[test]
-    fn untrusted_kind_stripped() {
+    fn untrusted_kind_rejected() {
         let token = mint_es256(
             &test_sk(),
-            &payload(NOW + 3600, ISS, AUD, r#","kind":"superAdmin""#),
+            &payload(NOW + 600, ISS, AUD, r#","kind":"superAdmin""#),
         );
-        let claims = ok_claims(verify_credential(
+        let result = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
-        ));
-        // superAdmin 不在信任集（只 trust "user"）→ 剥离。
-        assert_eq!(claims.kind(), None);
+            &RawCredential::rss_access(token),
+        );
+        assert!(matches!(result, Err(PdpError::InvalidSignature)));
     }
 
     // ── 多 key 轮转：第二把 key 签发 → 命中 ────────────────────────────────────
     #[test]
     #[allow(clippy::expect_used)]
     fn es256_multi_key_rotation_second_key_succeeds() {
-        let keys = StaticKeySource::builder()
-            .add_es256_sec1(&sec1_of(&test_sk2()))
+        let keys = AccessStaticKeySource::builder()
+            .add_es256_sec1("test-es256", &sec1_of(&test_sk2()))
             .expect("k2")
-            .add_es256_sec1(&sec1_of(&test_sk()))
+            .add_es256_sec1("test-es256", &sec1_of(&test_sk()))
             .expect("k1")
             .build();
-        let token = mint_es256(&test_sk(), &payload(NOW + 3600, ISS, AUD, ""));
+        let token = mint_es256(&test_sk(), &payload(NOW + 600, ISS, AUD, ""));
         let claims = ok_claims(verify_credential(
             &es256_config_with(keys),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         ));
         assert_eq!(claims.subject(), "alice");
     }
 
-    // ── 带 kid 的 token 命中 untagged 静态 key（kid 候选 back-compat：untagged 永远候选）──────────
+    // ── Unknown `kid` never blind-scans static keys ────────────────────────────
     #[test]
-    fn es256_token_with_kid_hits_untagged_static_key() {
-        // 静态源全 untagged；token 带任意 kid 仍命中（保 #1195 静态 key 行为不破坏）。
-        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":"any-kid"}"#);
-        let body = URL_SAFE_NO_PAD.encode(payload(NOW + 3600, ISS, AUD, "").as_bytes());
+    fn es256_token_with_unknown_kid_is_rejected() {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","typ":"at+jwt","kid":"any-kid"}"#);
+        let body = URL_SAFE_NO_PAD.encode(payload(NOW + 600, ISS, AUD, "").as_bytes());
         let signing_input = format!("{header}.{body}");
         let sig: Signature = test_sk().sign(signing_input.as_bytes());
         let token = format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()));
-        let claims = ok_claims(verify_credential(
+        let result = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
-        ));
-        assert_eq!(claims.subject(), "alice");
+            &RawCredential::rss_access(token),
+        );
+        assert!(matches!(result, Err(PdpError::Untrusted)));
     }
 
     // ── RFC 7515 known-answer 向量 ──────────────────────────────────────────────
@@ -1145,8 +1481,8 @@ mod tests {
         let mut point = vec![0x04u8];
         point.extend_from_slice(&URL_SAFE_NO_PAD.decode(RFC_X).expect("x"));
         point.extend_from_slice(&URL_SAFE_NO_PAD.decode(RFC_Y).expect("y"));
-        let keys = StaticKeySource::builder()
-            .add_es256_sec1(&point)
+        let keys = AccessStaticKeySource::builder()
+            .add_es256_sec1("test-es256", &point)
             .expect("rfc point")
             .build();
         let jws = Jws {
@@ -1154,11 +1490,12 @@ mod tests {
             signing_input: A3_SIGNING_INPUT.as_bytes().to_vec(),
             payload: Vec::new(),
             signature: A3_SIG.to_vec(),
-            kid: None,
+            typ: "at+jwt".to_string(),
+            kid: "test-es256".to_string(),
         };
         assert!(
             matches!(
-                verify_es256(&keys.snapshot(), None, &jws),
+                verify_es256(&keys.snapshot(), "test-es256", &jws),
                 VerifyOutcome::Verified
             ),
             "RFC 7515 A.3 已知签名应通过"
@@ -1171,10 +1508,11 @@ mod tests {
             signing_input: A3_SIGNING_INPUT.as_bytes().to_vec(),
             payload: Vec::new(),
             signature: bad.to_vec(),
-            kid: None,
+            typ: "at+jwt".to_string(),
+            kid: "test-es256".to_string(),
         };
         assert!(matches!(
-            verify_es256(&keys.snapshot(), None, &jws_bad),
+            verify_es256(&keys.snapshot(), "test-es256", &jws_bad),
             VerifyOutcome::BadSignature
         ));
     }
@@ -1201,12 +1539,12 @@ mod tests {
         let marker = "MARKER0xDEADBEEF_payload_secret";
         let token = mint_es256(
             &test_sk2(),
-            &payload(NOW + 3600, ISS, AUD, &format!(r#","note":"{marker}""#)),
+            &payload(NOW + 600, ISS, AUD, &format!(r#","note":"{marker}""#)),
         );
         let _ = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token.clone()),
+            &RawCredential::rss_access(token.clone()),
         );
 
         let logged = capture::captured();
@@ -1224,12 +1562,12 @@ mod tests {
     /// payload 不含 "sub" 键（其余 exp/iss/aud 齐）→ 反序列化失败 → InvalidSignature。
     #[test]
     fn missing_subject_rejected() {
-        let body = format!(r#"{{"exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#, NOW + 3600);
+        let body = format!(r#"{{"exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#, NOW + 600);
         let token = mint_es256(&test_sk(), &body);
         let r = verify_credential(
             &es256_config(),
             &FixedClock(NOW),
-            &RawCredential::jwt(token),
+            &RawCredential::rss_access(token),
         );
         assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
     }
@@ -1238,10 +1576,10 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn es256_at_leeway_boundary_accepted() {
-        let config = VerifierConfigBuilder::new(ISS, AUD)
-            .keys({
-                StaticKeySource::builder()
-                    .add_es256_sec1(&sec1_of(&test_sk()))
+        let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
+            .keys_static({
+                AccessStaticKeySource::builder()
+                    .add_es256_sec1("test-es256", &sec1_of(&test_sk()))
                     .expect("key")
                     .build()
             })
@@ -1251,7 +1589,7 @@ mod tests {
             .expect("config");
         // exp = NOW-60：now (1_700_000_000) > exp+leeway (NOW-60+60=NOW)? 不等式 NOW > NOW 为 false → 接受。
         let token = mint_es256(&test_sk(), &payload(NOW - 60, ISS, AUD, ""));
-        let r = verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(token));
+        let r = verify_credential(&config, &FixedClock(NOW), &RawCredential::rss_access(token));
         assert!(r.is_ok(), "leeway 边界内应接受: {r:?}");
     }
 
@@ -1259,10 +1597,10 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn es256_just_past_leeway_rejected() {
-        let config = VerifierConfigBuilder::new(ISS, AUD)
-            .keys({
-                StaticKeySource::builder()
-                    .add_es256_sec1(&sec1_of(&test_sk()))
+        let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
+            .keys_static({
+                AccessStaticKeySource::builder()
+                    .add_es256_sec1("test-es256", &sec1_of(&test_sk()))
                     .expect("key")
                     .build()
             })
@@ -1272,7 +1610,7 @@ mod tests {
             .expect("config");
         // exp = NOW-61：now (NOW) > exp+leeway (NOW-61+60=NOW-1)? NOW > NOW-1 = true → 过期。
         let token = mint_es256(&test_sk(), &payload(NOW - 61, ISS, AUD, ""));
-        let r = verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(token));
+        let r = verify_credential(&config, &FixedClock(NOW), &RawCredential::rss_access(token));
         assert!(matches!(r, Err(PdpError::Expired)), "got {r:?}");
     }
 
@@ -1280,10 +1618,10 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn es256_nbf_within_leeway_accepted() {
-        let config = VerifierConfigBuilder::new(ISS, AUD)
-            .keys({
-                StaticKeySource::builder()
-                    .add_es256_sec1(&sec1_of(&test_sk()))
+        let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
+            .keys_static({
+                AccessStaticKeySource::builder()
+                    .add_es256_sec1("test-es256", &sec1_of(&test_sk()))
                     .expect("key")
                     .build()
             })
@@ -1293,12 +1631,12 @@ mod tests {
             .expect("config");
         // nbf=NOW+30, leeway=60 → nbf-leeway=NOW-30 → now(NOW) >= NOW-30 → 接受。
         let body = format!(
-            r#"{{"sub":"alice","exp":{},"nbf":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
-            NOW + 3600,
+            r#"{{"sub":"alice","iat":{NOW},"exp":{},"nbf":{},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user","tenant_id":"{CANON_TENANT}"}}"#,
+            NOW + 600,
             NOW + 30
         );
         let token = mint_es256(&test_sk(), &body);
-        let r = verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(token));
+        let r = verify_credential(&config, &FixedClock(NOW), &RawCredential::rss_access(token));
         assert!(r.is_ok(), "nbf 在 leeway 内应接受: {r:?}");
     }
 
@@ -1307,28 +1645,22 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn hs256_multi_key_rotation_second_key_succeeds() {
         const HS_SECRET2: &[u8] = b"second-hs256-secret-for-rotation-test";
-        let keys = StaticKeySource::builder()
-            .add_hs256_secret_with_kid(HS_KID, HS_SECRET)
+        let keys = ServiceTokenKeySource::builder()
+            .add_hs256_secret(HS_KID, HS_SECRET)
             .expect("first secret")
-            .add_hs256_secret_with_kid(HS_KID2, HS_SECRET2)
+            .add_hs256_secret(HS_KID2, HS_SECRET2)
             .expect("second secret")
             .build();
-        let config = VerifierConfigBuilder::new(ISS, AUD)
-            .keys(keys)
-            .trust_kind("service")
-            .service_token_replay_store(replay_store(), Duration::from_secs(5))
+        let config = VerifierConfigBuilder::<diport::ServiceTokenProfile>::new(ISS, AUD)
+            .keys_hs256(keys)
+            .replay_store(replay_store(), Duration::from_secs(5))
             .build()
             .expect("config");
         // 用第二把 secret 签发 → 验签器遍历两把密钥，第二把命中 → Ok。
         let token = mint_hs256_bound_with_kid(
             HS_SECRET2,
             HS_KID2,
-            &payload(
-                NOW + 3600,
-                ISS,
-                AUD,
-                r#","kind":"service","jti":"nonce-k2""#,
-            ),
+            &payload(NOW + 600, ISS, AUD, r#","kind":"service","jti":"nonce-k2""#),
             CANON_TENANT,
         );
         let r = verify_credential(

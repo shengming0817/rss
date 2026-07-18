@@ -1,31 +1,36 @@
 #![feature(rustc_private)]
-//! `rss_authenticated_callsite` — RSS 治理 dylint lint：限定认证证据与审计 subject funnel 仅组合根可调用。
-//! `httpserve::Authenticated::new` 与 `authn::Principal::audit_subject` 仅 assembly / bin crate（组合根）可调用。
+//! `rss_authenticated_callsite` — RSS 治理 dylint lint：限定认证证据、审计 subject 与 verified
+//! maintenance capability funnel 仅组合根可调用。
+//! `httpserve::Authenticated::{new,new_service}` 与
+//! `authn::Principal::{audit_subject,service_caller_domain}` 与
+//! `postgres::ConfigValueMaintenanceCapability::from_verified_service_caller` 仅 assembly / bin crate
+//! （组合根）可调用。DLQ verified subject 由专用 `rss_dlq_operator_callsite` 守护。
 //!
 //! INVARIANT: AUTH-EVIDENCE-MINT-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
 //! `Authenticated` 是 enforce 层放行 `Require` 路由的认证证据（INVARIANT AUTH-EVIDENCE-REQUIRE-01）：
 //! 请求携该 extension 即放行。它必须由组合根（assembly / bin）的验签桥在凭据校验通过后经外层 `.layer()`
-//! 注入；域 crate 若直接 `Authenticated::new(..)` 并 `.layer(Extension(..))` 即可伪造证据绕过鉴权。
+//! 注入；域 crate 若直接调用任一 `Authenticated` 构造 funnel 并注入 extension 即可伪造证据绕过鉴权。
 //!
 //! 与 `rss_authplan_callsite`（AUTH-PLAN-MINT-01）同治理姿态：`AuthPlan` 是 listener 级认证计划、
 //! `Authenticated` 是 per-request 认证证据，二者均为安全敏感 mint，均限组合根构造。`Authenticated` 字段私有
-//! （外部无法 struct-literal 伪造），`new` 是唯一构造入口 ⇒ 守住 `new` callsite 即闭合 funnel。
+//! （外部无法 struct-literal 伪造），构造入口闭集为 `new` / `new_service`；二者 callsite 同闸闭合 funnel。
 //!
 //! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
-//! - 上游（构造守卫）：`Authenticated` 字段私有，外部 crate 仅能经 `new` 合法构造——类型层私有字段已封 struct
-//!   literal，但 `new` 为 `pub`（验签桥在 httpserve 外的组合根，无法 `pub(crate)` 收口），故经 callsite lint 约束。
+//! - 上游（构造守卫）：`Authenticated` 字段私有，外部 crate 仅能经构造入口闭集合法构造——类型层私有字段已封
+//!   struct literal，但 runtime 验签桥跨 crate，故 `new` / `new_service` 经同一 callsite lint 约束。
 //! - 下游（使用守卫）：`Authenticated` 可 Clone 传递，使用侧无需 mint——mint 点即唯一约束面。
 //!
-//! 判定四步：① callee crate 名 == "httpserve"；② item 名 == "new"；③ parent 是 Impl；
+//! 判定四步：① callee crate 名 == "httpserve"；② item 名属于 `new | new_service`；③ parent 是 Impl；
 //! ④ impl self 类型的 adt 名 == "Authenticated"（self-ty 检查，杜绝 `Vec::new` 等同名 fn 误报）。
 //!
-//! 检测面：捕获对 funnel assoc fn 的**任意 path 引用**——直接 call callee、`let f = Authenticated::new`
-//! 函数项别名、fn-pointer 强转都解析到同一 `DefId`，杜绝「先别名再调用」绕过。
+//! 检测面：捕获 funnel assoc fn 的 path 引用与 method-call——直接 call、函数项别名、fn-pointer
+//! 强转、`principal.service_caller_domain()` 都解析到受守 `DefId`。
 //!
 //! 盲区：① 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；
-//! ② `ALLOWED_CALLER_CRATES` 扩项无机器复核，靠 greppable + 治理评审；③ **跨函数**洗白仍未覆盖
-//! （intraprocedural，跟踪 #1085）；④ `#[cfg(test)]` 树不扫，httpserve 内自测调用不命中（与 authplan 同）。
+//! ② **跨函数**洗白仍未覆盖（intraprocedural，跟踪 #1085）；③ `#[cfg(test)]` 树不扫，
+//! httpserve 内自测调用不命中（与 authplan 同）。`Authenticated` mint 与 Principal 降维 accessor
+//! 均不采用整 crate allowlist，只允许 runtime 中列明的精确 verification wrapper。
 
 extern crate rustc_hir;
 extern crate rustc_middle;
@@ -40,15 +45,39 @@ use rustc_span::Span;
 
 /// 仅这些 crate 可调用认证证据 / 审计 subject funnel——单一 greppable 真源，扩项须治理评审。
 /// 组合根（assembly / bin）的验签桥在凭据校验通过后构造 `Authenticated` 并经外层 `.layer()` 注入，是唯一合法构造点。
-/// 当前生产代码无 `Authenticated` callsite（验签桥 = #1109 后续），allowlist 为前瞻守卫。
+/// 当前生产 runtime 验签桥构造 access/mTLS 与 service-token evidence；allowlist 精确覆盖该组合根。
 /// assemblies/runtime → package name "runtime"（#1309 单一组合根；薄 bin bins/server、bins/rss 已移出）。
 /// 定义 crate `httpserve` 不入 allowlist：其生产代码不构造 `Authenticated`（仅 `#[cfg(test)]` 调，不被扫）。
-const ALLOWED_CALLER_CRATES: &[&str] = &["runtime"];
+const ALLOWED_AUTHENTICATED_MINT_FUNCTIONS: &[(&str, &str)] = &[
+    ("allow_evidence", "auth_bridge::allow_evidence"),
+    ("mtls_evidence", "auth_bridge::mtls_evidence"),
+];
+const ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS: &[(&str, &str)] = &[
+    ("allow_evidence", "auth_bridge::allow_evidence"),
+    (
+        "verified_service_maintenance_operator_subject",
+        "verified_service_maintenance_operator_subject",
+    ),
+    (
+        "verified_projection_maintenance_operator_subject",
+        "verified_projection_maintenance_operator_subject",
+    ),
+    (
+        "projection_maintenance_operator_receipt",
+        "projection_maintenance_operator_receipt",
+    ),
+    (
+        "authenticate_dlq_operator_principal",
+        "authenticate_dlq_operator_principal",
+    ),
+    ("dlq_operator_receipt", "dlq_operator_receipt"),
+];
+const ALLOWED_CONFIG_VALUE_CAPABILITY_FUNCTION: &str = "run_settings_config_value_maintenance";
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
-    /// 标记非组合根 crate 对 `httpserve::Authenticated::new` 的**任意 path 引用**（直接 call、
-    /// `let f = Authenticated::new` 别名、fn-pointer 强转——凡解析到该 assoc fn DefId）。
+    /// 标记非组合根 crate 对 `httpserve::Authenticated::{new,new_service}` 的**任意 path 引用**（直接
+    /// call、函数项别名、fn-pointer 强转——凡解析到对应 assoc fn DefId）。
     ///
     /// ### Why is this bad?
     /// `Authenticated` 是 enforce 层放行 `Require` 路由的认证证据，必须由组合根（assembly / bin crate）的验签桥
@@ -57,14 +86,14 @@ dylint_linting::declare_late_lint! {
     ///
     /// ### Known problems
     /// 仍 intraprocedural：allowlist crate 内 wrapper fn 被外部调用会**跨函数**洗白（跟踪 #1085）。
-    /// `ALLOWED_CALLER_CRATES` 扩项无机器复核（靠 greppable + 治理）。确需在 allowlist 外引用加
-    /// `#[allow(rss_authenticated_callsite)] // reason: ...`。
+    /// 精确 wrapper closed set 扩项须同步 UI 红/绿 fixture；确需例外时加
+    /// `#[allow(rss_authenticated_callsite)] // reason: ...` 并接受治理复核。
     ///
     /// ### Example
     /// ```ignore
     /// // 域 crate（非组合根）：
     /// let ev = httpserve::Authenticated::new(
-    ///     primitives::RequiredScheme::Jwt,
+    ///     primitives::RequiredScheme::RssAccessToken,
     ///     vocab::PrincipalKind::User,
     ///     "subject-1",
     ///     None,
@@ -78,39 +107,123 @@ dylint_linting::declare_late_lint! {
 
 impl<'tcx> LateLintPass<'tcx> for RssAuthenticatedCallsite {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        // 捕获对 funnel fn-item 的**任意** path 引用——直接 call 的 callee、`let f = Authenticated::new` 别名、
-        // fn-pointer 强转都是 `ExprKind::Path` 解析到该 assoc fn `DefId`；只拦表面 call 会被「先别名再调用」绕过。
-        let ExprKind::Path(ref qpath) = expr.kind else {
-            return;
+        // 捕获 funnel fn-item path 与 method-call；别名、fn-pointer 和 method syntax 均解析到受守 DefId。
+        let did = match expr.kind {
+            ExprKind::Path(ref qpath) => {
+                let Res::Def(DefKind::AssocFn | DefKind::Fn, did) =
+                    cx.qpath_res(qpath, expr.hir_id)
+                else {
+                    return;
+                };
+                did
+            }
+            ExprKind::MethodCall(..) => {
+                let Some(did) = cx.typeck_results().type_dependent_def_id(expr.hir_id) else {
+                    return;
+                };
+                did
+            }
+            _ => return,
         };
-        let Res::Def(DefKind::AssocFn | DefKind::Fn, did) = cx.qpath_res(qpath, expr.hir_id) else {
-            return;
-        };
-        if caller_is_allowed(cx) {
-            return;
-        }
-        if is_authenticated_mint_did(cx, did) {
+        if is_authenticated_mint_did(cx, did)
+            && !authenticated_mint_caller_is_allowed(cx, expr.hir_id)
+        {
             emit(
                 cx,
                 expr.hir_id,
                 expr.span,
-                "Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` 不得在此 crate 调用",
-                "在 assembly / bin crate 的组合根验签桥中构造 Authenticated，经外层 `.layer()` 注入；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authenticated_callsite)] // reason: ...`",
+                "Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` / `new_service` 不得在此 crate 调用",
+                "仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence",
             );
         }
-        if is_principal_audit_subject_did(cx, did) {
+        if is_principal_audit_subject_did(cx, did)
+            && !principal_accessor_caller_is_allowed(cx, expr.hir_id)
+        {
             emit(
                 cx,
                 expr.hir_id,
                 expr.span,
-                "Principal subject 是审计 PII funnel：`Principal::audit_subject` 仅组合根可调用",
-                "在 assembly / bin crate 的组合根验签桥中只为 `diport::AuditEvent` 构造读取 subject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authenticated_callsite)] // reason: ...`",
+                "Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用",
+                "仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值",
+            );
+        }
+        if let Some(funnel) = restricted_service_capability_funnel(cx, did)
+            && !config_value_capability_caller_is_allowed(cx, expr.hir_id)
+        {
+            emit(
+                cx,
+                expr.hir_id,
+                expr.span,
+                "verified maintenance capability 仅组合根可 mint",
+                funnel.help,
             );
         }
     }
 }
 
-/// `did` 是 `httpserve::Authenticated` 的关联 fn `new`。
+fn config_value_capability_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
+    if cx.tcx.crate_name(LOCAL_CRATE).as_str() != "runtime" {
+        return false;
+    }
+    let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
+    let item_name = cx.tcx.item_name(parent);
+    let def_path = cx.tcx.def_path_str(parent);
+    item_name.as_str() == ALLOWED_CONFIG_VALUE_CAPABILITY_FUNCTION
+        && def_path == ALLOWED_CONFIG_VALUE_CAPABILITY_FUNCTION
+}
+
+fn authenticated_mint_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
+    if cx.tcx.crate_name(LOCAL_CRATE).as_str() != "runtime" {
+        return false;
+    }
+    let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
+    let item_name = cx.tcx.item_name(parent);
+    let def_path = cx.tcx.def_path_str(parent);
+    ALLOWED_AUTHENTICATED_MINT_FUNCTIONS
+        .iter()
+        .any(|(expected_name, expected_path)| {
+            item_name.as_str() == *expected_name && def_path == *expected_path
+        })
+}
+
+struct RestrictedFunnel {
+    help: &'static str,
+}
+
+/// Workspace-visible typed constructors still cross a trust boundary: the closed caller value
+/// identifies *who*, not whether authentication and route/grant authorization happened. Restrict
+/// these constructors to runtime so arbitrary domain crates cannot mint a verified capability.
+fn restricted_service_capability_funnel(
+    cx: &LateContext<'_>,
+    did: DefId,
+) -> Option<RestrictedFunnel> {
+    let crate_name = cx.tcx.crate_name(did.krate);
+    let item_name = cx.tcx.item_name(did);
+    let parent_did = cx.tcx.parent(did);
+    if !matches!(cx.tcx.def_kind(parent_did), DefKind::Impl { .. }) {
+        return None;
+    }
+    let self_ty = cx.tcx.type_of(parent_did).skip_binder();
+    let self_name = self_ty
+        .ty_adt_def()
+        .map(|adt| cx.tcx.item_name(adt.did()))?;
+    match (
+        crate_name.as_str(),
+        self_name.as_str(),
+        item_name.as_str(),
+    ) {
+        (
+            "postgres",
+            "ConfigValueMaintenanceCapability",
+            "from_verified_service_caller",
+        ) => Some(RestrictedFunnel {
+            help: "仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability",
+        }),
+        _ => None,
+    }
+}
+
+/// `did` 是 `httpserve::Authenticated` 的关联构造 fn `new` 或 `new_service`。
 /// 四步判定——缺第 4 步会误命中所有 `X::new`：
 /// 1. callee crate 名 == "httpserve"
 /// 2. item 名 == "new"
@@ -122,7 +235,7 @@ fn is_authenticated_mint_did(cx: &LateContext<'_>, did: DefId) -> bool {
         return false;
     }
     // 步骤 2：item 名是 "new"
-    if cx.tcx.item_name(did).as_str() != "new" {
+    if !matches!(cx.tcx.item_name(did).as_str(), "new" | "new_service") {
         return false;
     }
     // 步骤 3：parent 是 Impl（assoc fn，非自由 fn）
@@ -144,7 +257,10 @@ fn is_principal_audit_subject_did(cx: &LateContext<'_>, did: DefId) -> bool {
     if cx.tcx.crate_name(did.krate).as_str() != "authn" {
         return false;
     }
-    if cx.tcx.item_name(did).as_str() != "audit_subject" {
+    if !matches!(
+        cx.tcx.item_name(did).as_str(),
+        "audit_subject" | "service_caller_domain"
+    ) {
         return false;
     }
     let parent_did = cx.tcx.parent(did);
@@ -161,13 +277,29 @@ fn is_principal_audit_subject_did(cx: &LateContext<'_>, did: DefId) -> bool {
 
 /// 当前被编译 crate（caller）在 allowlist 内。`LOCAL_CRATE` 是 caller，区别于 callee 的 `did.krate`；
 /// 按 crate 名判定不可被「在别的 crate 里 `mod server`」伪造。
-fn caller_is_allowed(cx: &LateContext<'_>) -> bool {
-    ALLOWED_CALLER_CRATES.contains(&cx.tcx.crate_name(LOCAL_CRATE).as_str())
+fn principal_accessor_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
+    if cx.tcx.crate_name(LOCAL_CRATE).as_str() != "runtime" {
+        return false;
+    }
+    let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
+    let item_name = cx.tcx.item_name(parent);
+    let def_path = cx.tcx.def_path_str(parent);
+    ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS
+        .iter()
+        .any(|(expected_name, expected_path)| {
+            item_name.as_str() == *expected_name && def_path == *expected_path
+        })
 }
 
 /// 在调用处报告；用调用 expr 的 `HirId` 解析 lint 级别，使 item/expr 级
 /// `#[allow(rss_authenticated_callsite)]` 逃生门生效（同 rss_authplan_callsite）。
-fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span, message: &'static str, help: &'static str) {
+fn emit(
+    cx: &LateContext<'_>,
+    hir_id: HirId,
+    span: Span,
+    message: &'static str,
+    help: &'static str,
+) {
     span_lint_hir_and_then(
         cx,
         RSS_AUTHENTICATED_CALLSITE,
@@ -188,9 +320,9 @@ fn ui_disallowed() {
 }
 
 #[test]
-fn ui_runtime_allowed() {
-    // example target 名 `runtime`（= 唯一合法组合根 crate）⇒ crate_name(LOCAL_CRATE)=="runtime" ⇒ 调 funnel 不触发，
-    // 验证 allowlist 分支（anti-vacuity：lint 非恒报）。golden ui/runtime.stderr 为空。
+fn ui_runtime_exact_settings_wrapper() {
+    // example target 名 `runtime`（= 唯一合法组合根 crate）验证 Authenticated/Principal 的 crate
+    // allowlist，同时用 settings exact top-level wrapper 绿与 direct/nested 红锁住 capability 分支。
     // "runtime" 不与 rss_authplan_callsite 的 "primitives" 在共享 lints workspace 撞 target 名。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "runtime");
 }
