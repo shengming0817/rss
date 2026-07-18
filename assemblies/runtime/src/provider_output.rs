@@ -20,6 +20,11 @@ use crate::SharedRuntimeDeps;
 const RESOURCES: &[LifecycleChannel] = &[LifecycleChannel::Resources];
 const RESOURCES_WORKERS: &[LifecycleChannel] =
     &[LifecycleChannel::Resources, LifecycleChannel::Workers];
+const PROBES_RESOURCES_WORKERS: &[LifecycleChannel] = &[
+    LifecycleChannel::Probes,
+    LifecycleChannel::Resources,
+    LifecycleChannel::Workers,
+];
 
 pub(crate) const PG_OUTPUT_BINDINGS: &[ProviderOutputBinding] = &[
     ProviderOutputBinding {
@@ -33,6 +38,12 @@ pub(crate) const PG_OUTPUT_BINDINGS: &[ProviderOutputBinding] = &[
         provider: "postgres::PgCasStore",
         consumer: "distributed",
         channels: RESOURCES_WORKERS,
+    },
+    ProviderOutputBinding {
+        port: "diport::ServiceTokenReplayStore",
+        provider: "postgres::PgServiceTokenReplayStore",
+        consumer: "oidc",
+        channels: PROBES_RESOURCES_WORKERS,
     },
 ];
 

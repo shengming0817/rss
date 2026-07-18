@@ -70,6 +70,8 @@ pub(crate) enum Rule {
     ProductionSecurityJwksCloseout,
     /// production security closeout 必须有 SPIFFE/mTLS 证据且不得保留 service-token 迁移口。
     ProductionSecuritySpiffeCloseout,
+    /// runtime 的 active PDP 必须绑定 exact active persistent replay-store provider。
+    PdpReplayStoreCapability,
     /// domain/topology required capability 必须有 active persistent provider 或 exact Cargo dependency 事实。
     ///
     /// INVARIANT: ASSEMBLY-REQUIRED-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" } —
@@ -505,10 +507,35 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
         }
     }
     validate_required_capabilities(a, &mut findings);
+    validate_pdp_replay_store_capability(a, &mut findings);
     if a.manifest.profile == AssemblyProfile::Production {
         validate_production_security_closeout(a, &mut findings);
     }
     findings
+}
+
+fn validate_pdp_replay_store_capability(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
+    let has_active_pdp = a.manifest.diport_providers.iter().any(|provider| {
+        provider.port == DiportPort::Pdp && provider.lifecycle == ProviderLifecycle::Active
+    });
+    if a.manifest.name != "runtime" || !has_active_pdp {
+        return;
+    }
+
+    let port = DiportPort::ServiceTokenReplayStore;
+    let provider = "postgres::PgServiceTokenReplayStore";
+    let provider_crate = "postgres";
+    let consumer = "oidc";
+    if !has_active_persistent_provider(a, port, provider, provider_crate, consumer) {
+        findings.push(finding(
+            Rule::PdpReplayStoreCapability,
+            &a.manifest_label,
+            format!(
+                "field=diportProviders capability=PdpReplayStore expected active persistent `{provider}` for `{port}` providerCrate `{provider_crate}` consumer `{consumer}`; actual={}",
+                provider_actual(a, port, provider, provider_crate, consumer)
+            ),
+        ));
+    }
 }
 
 fn validate_manifest_intent(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
@@ -1908,6 +1935,12 @@ fn provider_spec(provider: &str) -> Option<ProviderSpec> {
             required_features: &[],
             provider_crate: "postgres",
         }),
+        "postgres::PgServiceTokenReplayStore" => Some(ProviderSpec {
+            port: DiportPort::ServiceTokenReplayStore,
+            durability: ProviderDurability::Persistent,
+            required_features: &[],
+            provider_crate: "postgres",
+        }),
         "postgres::PgDlxLifecycleRepository" => Some(ProviderSpec {
             port: DiportPort::DlxLifecycleRepository,
             durability: ProviderDurability::Persistent,
@@ -2282,6 +2315,16 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
 outputs = []
+
+[[diportProviders]]
+port = "diport::ServiceTokenReplayStore"
+provider = "postgres::PgServiceTokenReplayStore"
+providerCrate = "postgres"
+consumer = "oidc"
+lifecycle = "active"
+durability = "persistent"
+purpose = "service-token-atomic-replay-consume"
+outputs = ["probes", "resources", "workers"]
 "#,
             );
         }
@@ -2492,6 +2535,18 @@ purpose = "http-auth-decision-audit"
 outputs = []
 "#;
 
+    const CAPABILITY_REPLAY_STORE_PROVIDER: &str = r#"
+[[diportProviders]]
+port = "diport::ServiceTokenReplayStore"
+provider = "postgres::PgServiceTokenReplayStore"
+providerCrate = "postgres"
+consumer = "oidc"
+lifecycle = "active"
+durability = "persistent"
+purpose = "service-token-atomic-replay-consume"
+outputs = ["probes", "resources", "workers"]
+"#;
+
     const IDENTITYAUDIT_MANIFEST: &str =
         include_str!("../../assemblies/identityaudit/assembly.toml");
     const IDENTITYAUDIT_CARGO: &str = include_str!("../../assemblies/identityaudit/Cargo.toml");
@@ -2582,11 +2637,72 @@ outputs = []
             "durable-shared",
             &["identity", "settings", "audit"],
             &format!(
-                "{CAPABILITY_DOMAIN_PROVIDERS}{CAPABILITY_EVENT_TRANSPORT_PROVIDERS}{CAPABILITY_DISTRIBUTED_PROVIDERS}"
+                "{CAPABILITY_DOMAIN_PROVIDERS}{CAPABILITY_REPLAY_STORE_PROVIDER}{CAPABILITY_EVENT_TRANSPORT_PROVIDERS}{CAPABILITY_DISTRIBUTED_PROVIDERS}"
             ),
         );
         let findings = required_capability_findings(&manifest, CAPABILITY_CARGO_FULL)?;
         assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_pdp_requires_durable_replay_store_provider() -> anyhow::Result<()> {
+        let manifest =
+            capability_manifest("demo", "demo", &["identity"], CAPABILITY_DOMAIN_PROVIDERS);
+        let root = unique_tmp("assembly-runtime-pdp-missing-replay-store");
+        write_assembly(&root, &manifest, CAPABILITY_CARGO_FULL)?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::PdpReplayStoreCapability),
+            "runtime Pdp without durable replay provider must fail: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_pdp_rejects_wrong_replay_store_provider() -> anyhow::Result<()> {
+        let wrong_provider = CAPABILITY_REPLAY_STORE_PROVIDER.replace(
+            "postgres::PgServiceTokenReplayStore",
+            "postgres::PgCasStore",
+        );
+        let manifest = capability_manifest(
+            "demo",
+            "demo",
+            &["identity"],
+            &format!("{CAPABILITY_DOMAIN_PROVIDERS}{wrong_provider}"),
+        );
+        let root = unique_tmp("assembly-runtime-pdp-wrong-replay-store");
+        write_assembly(&root, &manifest, CAPABILITY_CARGO_FULL)?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::PdpReplayStoreCapability),
+            "wrong provider must not satisfy replay capability: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_pdp_rejects_ephemeral_replay_store_provider() -> anyhow::Result<()> {
+        let ephemeral = CAPABILITY_REPLAY_STORE_PROVIDER.replace("persistent", "ephemeral-memory");
+        let manifest = capability_manifest(
+            "demo",
+            "demo",
+            &["identity"],
+            &format!("{CAPABILITY_DOMAIN_PROVIDERS}{ephemeral}"),
+        );
+        let root = unique_tmp("assembly-runtime-pdp-ephemeral-replay-store");
+        write_assembly(&root, &manifest, CAPABILITY_CARGO_FULL)?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::PdpReplayStoreCapability),
+            "ephemeral declaration must not satisfy replay capability: {findings:?}"
+        );
         Ok(())
     }
 
@@ -2709,6 +2825,16 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
 outputs = []
+
+[[diportProviders]]
+port = "diport::ServiceTokenReplayStore"
+provider = "postgres::PgServiceTokenReplayStore"
+providerCrate = "postgres"
+consumer = "oidc"
+lifecycle = "active"
+durability = "persistent"
+purpose = "service-token-atomic-replay-consume"
+outputs = ["probes", "resources", "workers"]
 "#,
         );
         let findings = required_capability_findings(
@@ -4937,12 +5063,23 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
 outputs = []
+
+[[diportProviders]]
+port = "diport::ServiceTokenReplayStore"
+provider = "postgres::PgServiceTokenReplayStore"
+providerCrate = "postgres"
+consumer = "oidc"
+lifecycle = "active"
+durability = "persistent"
+purpose = "service-token-atomic-replay-consume"
+outputs = ["probes", "resources", "workers"]
 "#,
             r#"[package]
 name = "runtime"
 
 [dependencies]
 oidc = { path = "../../adapters/oidc", features = ["backend"] }
+postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
 

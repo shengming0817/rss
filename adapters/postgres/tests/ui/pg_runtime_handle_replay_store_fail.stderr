@@ -1,0 +1,5 @@
+error[E0599]: no method named `service_token_replay_store` found for reference `&PgRuntimeHandle` in the current scope
+ --> tests/ui/pg_runtime_handle_replay_store_fail.rs:4:20
+  |
+4 |     let _ = handle.service_token_replay_store();
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&PgRuntimeHandle`

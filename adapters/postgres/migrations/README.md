@@ -103,6 +103,89 @@ out-of-band 注入。runtime 还会用显式 `BEGIN READ ONLY`，并在 mint rea
 reader 密码并启动新 binary。该命令只用 migrator 凭据，保留 SQLx lock/checksum/ledger，并在数据库不是
 0066/0067 或镜像含 0068+ 时无写入拒绝，不能退化为通用迁移入口。
 
+### 0068 service-token replay store 破坏性切换
+
+`0068` 删除存放 raw `jti` 的 `service_token_replay_nonces`，只保留固定 32-byte
+`SHA-256(issuer, audience, verified kid, jti)` digest。不存在兼容视图、双写或旧表读取。
+旧行缺少 issuer/audience/kid，无法安全转换；只要旧表仍有未过期行，迁移就以固定错误失败并完整回滚。
+
+这是 non-rolling、forward-only cutover。唯一受支持的迁移入口是待发布镜像的**零参数 `rss` bootstrap**：
+`rss` 会先以短生命周期 migrator 连接执行 SQLx migration，成功关闭 migrator 后才构造 serving pools。
+不得用旧镜像、maintenance CLI、手工 `psql -f` 或通用迁移脚本替代。按以下顺序执行：
+
+1. **停止旧世界**：停止签发旧 operator token，等待其最长 TTL 到期；随后把所有旧 runtime 实例缩容到
+   0，并停止 projection、audit-ledger、DLQ、reconcile 和 settings maintenance CLI。确认数据库中不再有
+   `application_name IN ('rss-postgres-writer', 'rss-postgres-maintenance')` 的旧进程；不得手工删除仍有效的
+   防重放证据。
+2. **迁移前探针**：用 migrator 凭据运行下列只读 SQL。结果必须依次为 migration version `67`、active
+   legacy rows `0`、旧 writer/maintenance sessions `0`、旧表上的冲突锁 `0`；任一不满足均中止。
+
+   ```sql
+   SELECT max(version) FROM public._sqlx_migrations;
+   SELECT count(*) FROM public.service_token_replay_nonces
+    WHERE expires_at > pg_catalog.clock_timestamp();
+   SELECT count(*) FROM pg_catalog.pg_stat_activity
+    WHERE application_name IN ('rss-postgres-writer', 'rss-postgres-maintenance');
+   SELECT count(*) FROM pg_catalog.pg_locks AS held
+    WHERE held.relation = 'public.service_token_replay_nonces'::regclass
+      AND held.granted;
+   ```
+
+3. **唯一 migration runner**：只启动 1 个待发布镜像的零参数 `rss` 实例，不并行启动第二个实例或任何
+   maintenance CLI。等待该实例完成 `rss-postgres-migrator` 阶段；migration/startup 非零退出即进入步骤 7，
+   不得继续扩容。
+4. **迁移后 catalog / ACL 探针**：仍以 migrator 凭据确认 ledger 为 `68`、旧表消失、新表存在；两个函数
+   owner 均为 `rss_service_token_replay_owner`、`pg_proc.proconfig` 中 search path 精确为
+   `search_path=pg_catalog, pg_temp`，`rss_app` 仅有函数 EXECUTE、没有新表权限。
+
+   ```sql
+   SELECT max(version) FROM public._sqlx_migrations;
+   SELECT to_regclass('public.service_token_replay_nonces') IS NULL,
+          to_regclass('public.service_token_replay_keys') IS NOT NULL;
+   SELECT proc.proname,
+          pg_catalog.pg_get_userbyid(proc.proowner) AS owner,
+          proc.proconfig,
+          has_function_privilege('rss_app', proc.oid, 'EXECUTE') AS rss_app_can_execute
+     FROM pg_catalog.pg_proc AS proc
+    WHERE proc.oid IN (
+      'public.rss_service_token_replay_check_and_record(bytea,timestamptz)'::regprocedure,
+      'public.rss_service_token_replay_sweep_expired()'::regprocedure
+    )
+    ORDER BY proc.proname;
+   SELECT has_table_privilege('rss_app', 'public.service_token_replay_keys', 'SELECT')
+       OR has_table_privilege('rss_app', 'public.service_token_replay_keys', 'INSERT')
+       OR has_table_privilege('rss_app', 'public.service_token_replay_keys', 'UPDATE')
+       OR has_table_privilege('rss_app', 'public.service_token_replay_keys', 'DELETE')
+      AS forbidden_table_access;
+   ```
+
+5. **以 `rss_app` 实测固定函数**：用 migrator 会话在回滚事务内切换角色，验证 consume/sweep 可执行且
+   不留下探针行；任一错误均中止。
+
+   ```sql
+   BEGIN;
+   SET LOCAL ROLE rss_app;
+   SELECT public.rss_service_token_replay_check_and_record(
+     decode(repeat('00', 32), 'hex'),
+     pg_catalog.clock_timestamp() + interval '10 minutes'
+   );
+   SELECT public.rss_service_token_replay_sweep_expired();
+   ROLLBACK;
+   ```
+
+6. **只启动新世界**：确认 singleton 的 `/readyz` 响应 healthy，且
+   `service_token_replay_sweeper` probe 已注册并 healthy；保留该实例，再逐步扩容同一待发布镜像。迁移成功后
+   严禁重启旧 binary 或旧 CLI。
+7. **失败恢复**：若 singleton 在提交 `0068` 前退出，只在重新执行步骤 2 并确认 ledger 仍为 `67`、旧表存在、
+   新表不存在后，才可恢复旧实例和旧 token 签发；保留失败日志并修正 active row/lock 等前置条件后重试。
+   若 ledger 已为 `68`，这是已提交的 forward-only 状态：不得启动旧 binary；修复新版本的启动配置，重启同一
+   待发布镜像并重新执行步骤 4–6。
+
+认证热路径只可执行固定函数 `rss_service_token_replay_check_and_record(bytea, timestamptz)`，以单条
+`INSERT ... ON CONFLICT DO NOTHING` 原子消费。`rss_app` 没有新表的直接权限。过期清理必须由独立维护任务
+调用 `rss_service_token_replay_sweep_expired()`；每次最多删除 1000 行，并保留 5 分钟安全余量，禁止在每次
+认证时附带清理。
+
 `0034` 新增 `abac_policies` tenant 表并授予 `rss_app` SELECT/INSERT/UPDATE；policy delete 经 versioned
 tombstone UPDATE，不授表级 DELETE，防止同 id 删除后重建把 CAS version 水位重置。
 
@@ -115,9 +198,8 @@ expire 经 versioned tombstone UPDATE，不授表级 DELETE。主键为
 `partition_blocked_depth`。该值只统计同 tenant/domain/partition 前序未 published 导致被队头阻塞的行数；
 函数不返回 `partition_key`，避免把业务分区键带入 metrics 或 operator 输出。
 
-`0048` 新增 `service_token_replay_nonces` 平台表，供一次性 maintenance/operator CLI 的 service-token `jti`
-防重放使用。该表不带 `tenant_id`：auth 完成前还没有可信 tenant RLS 上下文，且 `jti` replay 检查必须跨
-CLI 进程全局生效。唯一键 `(nonce)` 提供原子 insert-if-absent；`expires_at` 索引用于 opportunistic prune。
+`0048` 曾新增 raw `jti` 的 `service_token_replay_nonces` 平台表；这是只用于重放历史 ledger 的迁移态。
+`0068` 已将其破坏性删除，当前代码和权限不得再次读写该表，也不得恢复 opportunistic auth-path prune。
 
 `0038` 新增 `inbox_receipts` tenant 表作为 runtime durable consumer 的 receipt schema：tenant-first
 主键、contract/schema header、trace/correlation、lease CAS 状态与 `FORCE RLS` 同迁移落地。该表是可变

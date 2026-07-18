@@ -2,6 +2,7 @@ pub mod authn
 #[non_exhaustive] pub enum authn::AuthnError
 pub authn::AuthnError::Forbidden
 pub authn::AuthnError::PrincipalInvalid
+pub authn::AuthnError::ProviderUnavailable
 pub authn::AuthnError::SessionNotFound
 pub authn::AuthnError::TokenExpired
 pub authn::AuthnError::TokenInvalid

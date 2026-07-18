@@ -153,35 +153,56 @@ where
     }
 }
 
-/// 验签 + 埋点 → 铸 [`Authenticated`] 证据（成功）或 `None`（无凭据 / 验签失败 = 均 fail-closed）。
+enum MintEvidenceOutcome {
+    Allowed {
+        evidence: Authenticated,
+        ctx: Option<runctx::AppCtx>,
+        principal: Arc<authn::Principal>,
+    },
+    Rejected,
+    ProviderUnavailable,
+}
+
+/// 验签 + 埋点 → 铸 [`Authenticated`] 证据，或返回拒绝/安全关键 provider 故障。
 ///
 /// 各分支埋点拆独立 fn（每 fn 一条 `tracing` 宏；宏展开 cognitive-complexity 高，分摊保 ≤15）。
 ///
 /// 埋点变体粒度（#1275，spec SC-006/FR-009）：`Some(Err)` 记 `AuthnError` 变体 + 闭值 `authz.deny_reason`。
-/// `verify_jwt` 的 `From<PdpError>` 三变体一一保真（`InvalidSignature`→`TokenInvalid`、`Untrusted`→`TokenUntrusted`、
-/// `Expired`→`TokenExpired`），故 [`deny_reason`] 据变体记**三路**告警分级（区分疑似攻击 vs 疑似配置错 vs 过期）。
+/// `verify_jwt` 的 `From<PdpError>` 保真区分三种凭据拒绝与 provider outage；[`deny_reason`] 由此保留
+/// 疑似攻击、配置错、过期和基础设施故障四类低基数信号。
 /// 本桥不为日志粒度旁路 `verify_jwt` funnel（保「唯一信任原点」姿态）——`deny_reason` 只读已收敛的 `AuthnError`。
 async fn mint_evidence<P>(
     state: &VerifyState<P>,
     token: &str,
     headers: &HeaderMap,
-) -> Option<(Authenticated, Option<runctx::AppCtx>, Arc<authn::Principal>)>
+) -> MintEvidenceOutcome
 where
     P: diport::Pdp + Send + Sync + 'static,
 {
     match verify_principal(state.provider.as_ref(), state.scheme, token, headers).await {
-        Some(Ok(verified)) => Some(allow_evidence(state.scheme, verified)),
-        // err = AuthnError 变体（PdpError 经 verify_* 一一保真，三路），脱敏；不产证据 ⇒ enforce fail-closed。
+        Some(Ok(verified)) => {
+            let (evidence, ctx, principal) = allow_evidence(state.scheme, verified);
+            MintEvidenceOutcome::Allowed {
+                evidence,
+                ctx,
+                principal,
+            }
+        }
+        // err = AuthnError 变体（PdpError 经 verify_* 一一保真），脱敏；不产证据 ⇒ enforce fail-closed。
         Some(Err(VerifyFailure::Authn(err))) => {
             log_deny_verify(&err);
-            None
+            if matches!(err, authn::AuthnError::ProviderUnavailable) {
+                MintEvidenceOutcome::ProviderUnavailable
+            } else {
+                MintEvidenceOutcome::Rejected
+            }
         }
         Some(Err(VerifyFailure::TenantBindingInvalid)) => {
             log_deny_tenant_binding_invalid();
-            None
+            MintEvidenceOutcome::Rejected
         }
         // 非 bearer 方案（mTLS 已在 middleware 前置处理；未来 scheme 缺实现时保持无证据）。
-        None => None,
+        None => MintEvidenceOutcome::Rejected,
     }
 }
 
@@ -245,12 +266,13 @@ fn log_deny_verify(err: &authn::AuthnError) {
 }
 
 // deny 告警分级闭值集（observability.md「告警 / metrics label 闭值集」：低基数、无 PII）——bridge deny 路
-// `authz.deny_reason` 仅取此 7 值（#1275，spec SC-006/FR-009）：
+// `authz.deny_reason` 仅取此 8 值（#1275，spec SC-006/FR-009）：
 //   `SIGNATURE_INVALID` ← `TokenInvalid` = verifier 报告的**凭据签名/MAC/结构失败**（疑似攻击）；
 //   `UNTRUSTED`         ← `TokenUntrusted` = iss/aud/key-path 不受信（疑似配置错）；
 //   `EXPIRED`           ← `TokenExpired` = 时间窗越界；
 //   `PRINCIPAL_INVALID` ← `PrincipalInvalid` = **验签通过后**的 claims/principal 派生失败（良性，#1275 review
 //                          F1：与签名失败分开，杜绝把良性失败误报成 `signature_invalid` 攻击信号）；
+//   `PROVIDER_UNAVAILABLE` ← replay store 等安全关键 provider 暂不可用（503，可重试）；
 //   `TENANT_BINDING_INVALID` ← service-token tenant binding 缺失 / 非法；
 //   `MTLS_PEER_MISSING`      ← mTLS listener 缺 transport 层已验证 peer evidence；
 //   `INVALID`           ← `#[non_exhaustive]` 未来 / 本桥不可达变体（`SessionNotFound` / `Forbidden`）fail-safe 兜底。
@@ -258,6 +280,7 @@ pub(crate) const DENY_REASON_SIGNATURE_INVALID: &str = "signature_invalid";
 pub(crate) const DENY_REASON_UNTRUSTED: &str = "untrusted";
 pub(crate) const DENY_REASON_EXPIRED: &str = "expired";
 pub(crate) const DENY_REASON_PRINCIPAL_INVALID: &str = "principal_invalid";
+pub(crate) const DENY_REASON_PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
 pub(crate) const DENY_REASON_TENANT_BINDING_INVALID: &str = "tenant_binding_invalid";
 pub(crate) const DENY_REASON_MTLS_PEER_MISSING: &str = "mtls_peer_missing";
 pub(crate) const DENY_REASON_INVALID: &str = "invalid";
@@ -269,6 +292,7 @@ fn deny_reason(err: &authn::AuthnError) -> &'static str {
         authn::AuthnError::TokenUntrusted => DENY_REASON_UNTRUSTED,
         authn::AuthnError::TokenExpired => DENY_REASON_EXPIRED,
         authn::AuthnError::PrincipalInvalid => DENY_REASON_PRINCIPAL_INVALID,
+        authn::AuthnError::ProviderUnavailable => DENY_REASON_PROVIDER_UNAVAILABLE,
         _ => DENY_REASON_INVALID,
     }
 }
@@ -314,19 +338,29 @@ where
             .to_owned();
         let span =
             tracing::debug_span!("verify_bridge", scheme = ?state.scheme, request_id = %request_id);
-        if let Some((evidence, ctx, principal)) = mint_evidence(&state, &token, req.headers())
+        match mint_evidence(&state, &token, req.headers())
             .instrument(span)
             .await
         {
-            req.extensions_mut().insert(evidence);
-            req.extensions_mut().insert(principal);
-            // **scope 不在桥建立**：把 scoped 主体的 AppCtx 经 `PendingScopeCtx` extension 传给内层 enforce，
-            // 由其在 `Require`-Allow（认证路由放行，非 Public opt-out）后建 `runctx::scope`——使 ambient scope
-            // 与 route auth 决策对齐（#1105 F2，验签桥在 enforce 外层、运行期读不到 opt_out）。跨租户主体
-            // ctx=None ⇒ 不附 ⇒ 下游 `try_current()` fail-closed `MissingCtx`。
-            if let Some(ctx) = ctx {
-                req.extensions_mut()
-                    .insert(httpserve::PendingScopeCtx::new(ctx));
+            MintEvidenceOutcome::Allowed {
+                evidence,
+                ctx,
+                principal,
+            } => {
+                req.extensions_mut().insert(evidence);
+                req.extensions_mut().insert(principal);
+                // **scope 不在桥建立**：把 scoped 主体的 AppCtx 经 `PendingScopeCtx` extension 传给内层 enforce，
+                // 由其在 `Require`-Allow（认证路由放行，非 Public opt-out）后建 `runctx::scope`——使 ambient scope
+                // 与 route auth 决策对齐（#1105 F2，验签桥在 enforce 外层、运行期读不到 opt_out）。跨租户主体
+                // ctx=None ⇒ 不附 ⇒ 下游 `try_current()` fail-closed `MissingCtx`。
+                if let Some(ctx) = ctx {
+                    req.extensions_mut()
+                        .insert(httpserve::PendingScopeCtx::new(ctx));
+                }
+            }
+            MintEvidenceOutcome::Rejected => {}
+            MintEvidenceOutcome::ProviderUnavailable => {
+                return httpserve::error::service_unavailable(&request_id);
             }
         }
     }
@@ -338,17 +372,18 @@ where
 mod tests {
     use super::{
         DENY_REASON_EXPIRED, DENY_REASON_INVALID, DENY_REASON_MTLS_PEER_MISSING,
-        DENY_REASON_PRINCIPAL_INVALID, DENY_REASON_SIGNATURE_INVALID,
-        DENY_REASON_TENANT_BINDING_INVALID, DENY_REASON_UNTRUSTED, deny_reason, mtls_evidence,
+        DENY_REASON_PRINCIPAL_INVALID, DENY_REASON_PROVIDER_UNAVAILABLE,
+        DENY_REASON_SIGNATURE_INVALID, DENY_REASON_TENANT_BINDING_INVALID, DENY_REASON_UNTRUSTED,
+        deny_reason, mtls_evidence,
     };
     use axum::body::Body;
     use axum::http::Request;
     use primitives::RequiredScheme;
     use vocab::PrincipalKind;
 
-    /// `deny_reason` 闭值映射全臂覆盖（含 `_` 兜底）：四路一一保真（含 `PrincipalInvalid`→`principal_invalid`，
+    /// `deny_reason` 闭值映射全臂覆盖（含 `_` 兜底）：五路一一保真（含 `PrincipalInvalid`→`principal_invalid`，
     /// #1275 review F1：验签后良性失败不记 `signature_invalid`）+ 本桥不可达的 `SessionNotFound` / `Forbidden`
-    /// （非 verify funnel 产）fail-safe 落 `INVALID`。四路**端到端**可区分性见 auth_e2e.rs
+    /// （非 verify funnel 产）fail-safe 落 `INVALID`。各路**端到端**可区分性见 auth_e2e.rs
     /// `tracing_deny_logs_per_variant_reason_no_pii`（断言用 literal 钉死可观测告警 label 契约）。
     #[test]
     fn deny_reason_maps_every_variant_to_closed_value() {
@@ -370,6 +405,10 @@ mod tests {
             "验签后良性派生失败 → principal_invalid（非 signature_invalid）"
         );
         assert_eq!(
+            deny_reason(&authn::AuthnError::ProviderUnavailable),
+            DENY_REASON_PROVIDER_UNAVAILABLE
+        );
+        assert_eq!(
             deny_reason(&authn::AuthnError::SessionNotFound),
             DENY_REASON_INVALID,
             "本桥不可达变体 fail-safe 落 INVALID"
@@ -387,6 +426,7 @@ mod tests {
             DENY_REASON_UNTRUSTED,
             DENY_REASON_EXPIRED,
             DENY_REASON_PRINCIPAL_INVALID,
+            DENY_REASON_PROVIDER_UNAVAILABLE,
             DENY_REASON_TENANT_BINDING_INVALID,
             DENY_REASON_MTLS_PEER_MISSING,
             DENY_REASON_INVALID,

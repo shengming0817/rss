@@ -6,6 +6,9 @@
 //! httpserve 生产挂载亦留 #1109（ADR-006 §5 验签空窗——本 PR 不接线生产可达认证路径）。
 
 use dynosaur::dynosaur;
+use sha2::{Digest as _, Sha256};
+use std::future::Future;
+use std::time::Duration;
 use vocab::tenant::TenantId;
 
 /// service-token MAC 绑定的 HTTP header 名（wire 原始大小写）。
@@ -16,11 +19,10 @@ pub const SERVICE_TOKEN_TENANT_MAC_NAME: &str = "x-tenant-id";
 /// 验签失败分类（port-own 闭值集，`#[non_exhaustive]`）。
 ///
 /// PII 边界：变体不携 runtime 数据，`Display` 仅 provider 无关的安全摘要常量——adapter 把内部错误
-/// **归类**到这三种 taxonomy 变体（不经 `source` 透传原始错误，杜绝凭据 / 连接串泄漏）。消费侧据变体
-/// 映射 HTTP 语义（authn `From<PdpError>`，#1229 / #1275 三路一一保真）：`InvalidSignature` →
-/// `TokenInvalid`、`Untrusted` → `TokenUntrusted`、`Expired` → `TokenExpired`；三者 wire **均** 401
-/// `invalid_token`（RFC 6750 §3.1，verify 层纯认证不发 403；独立变体仅供 deny 路 `authz.deny_reason` 告警
-/// 分级，区分疑似攻击 vs 疑似配置错），403 留给 authz 层「已认证但无权」。
+/// **归类**到四种 taxonomy 变体（不经 `source` 透传原始错误，杜绝凭据 / 连接串泄漏）。消费侧据变体
+/// 映射 HTTP 语义（authn `From<PdpError>`）：`InvalidSignature` → `TokenInvalid`、`Untrusted` →
+/// `TokenUntrusted`、`Expired` → `TokenExpired`，三种凭据拒绝 wire 均为 401 `invalid_token`；
+/// `ProviderUnavailable` 则保持基础设施故障语义并映射可重试 503。403 留给 authz 层「已认证但无权」。
 /// `Clone`：消费侧单测 stub 按预置结果重放。
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -39,29 +41,302 @@ pub enum PdpError {
     /// 未知 credential scheme。消费侧 → 401 `invalid_token`（verify 层纯认证，不发 403）。
     #[error("credential issuer untrusted")]
     Untrusted,
+    /// A required authentication provider could not complete the verification operation.
+    ///
+    /// This remains a data-free closed value: adapters must log only their own redacted,
+    /// operator-facing diagnostics. Consumers map it to a retryable service-availability response,
+    /// never to `invalid_token` or a signature-attack signal.
+    #[error("authentication provider unavailable")]
+    ProviderUnavailable,
 }
 
-/// service-token replay guard failure.
-#[derive(Debug, Clone, thiserror::Error)]
-#[non_exhaustive]
-pub enum ServiceTokenReplayError {
-    /// Token nonce/jti was already observed.
-    #[error("service-token nonce replayed")]
+const SERVICE_TOKEN_REPLAY_KEY_DOMAIN: &[u8] = b"rss.service-token-replay.v1";
+
+/// Named, already-verified inputs for deriving one service-token replay identity.
+///
+/// The fields intentionally preserve their exact RFC case-sensitive bytes. Named fields prevent
+/// four same-typed strings from being silently reordered at call sites.
+pub struct ServiceTokenReplayScope<'a> {
+    pub issuer: &'a str,
+    pub audience: &'a str,
+    pub key_id: &'a str,
+    pub token_id: &'a str,
+}
+
+/// Failure to frame a replay scope into the stable v1 digest protocol.
+#[derive(Debug, thiserror::Error)]
+pub enum ServiceTokenReplayKeyError {
+    /// A component cannot be represented by the canonical unsigned 64-bit byte length.
+    #[error("service-token replay scope component is too large")]
+    ComponentTooLarge,
+}
+
+/// Opaque, fixed-width identity for one verified service-token replay scope.
+///
+/// INVARIANT: AUTHN-SERVICE-TOKEN-REPLAY-KEY-01 { level = "Hard", exec = "native-compile", source = "code", native = "private [u8; 32] field and named verified scope derivation" } — raw issuer/audience/kid/jti values cannot enter the replay store API. The v1 digest frames each
+/// exact string as `u64::to_be_bytes(len) || bytes` beneath a fixed domain tag.
+#[derive(Clone)]
+pub struct ServiceTokenReplayKey([u8; 32]);
+
+impl ServiceTokenReplayKey {
+    /// Derive the canonical SHA-256 replay key from verified scope components.
+    pub fn derive(scope: ServiceTokenReplayScope<'_>) -> Result<Self, ServiceTokenReplayKeyError> {
+        let mut digest = Sha256::new();
+        digest.update(SERVICE_TOKEN_REPLAY_KEY_DOMAIN);
+        for component in [scope.issuer, scope.audience, scope.key_id, scope.token_id] {
+            let length = u64::try_from(component.len())
+                .map_err(|_| ServiceTokenReplayKeyError::ComponentTooLarge)?;
+            digest.update(length.to_be_bytes());
+            digest.update(component.as_bytes());
+        }
+        Ok(Self(digest.finalize().into()))
+    }
+
+    /// Borrow the fixed-width digest for a storage adapter.
+    pub fn digest_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ServiceTokenReplayKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ServiceTokenReplayKey([REDACTED])")
+    }
+}
+
+/// Closed outcome of one atomic replay-key consume attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceTokenReplayDisposition {
+    /// This exact scoped key was recorded for the first time.
+    Recorded,
+    /// This exact scoped key was already recorded.
     Replayed,
-    /// Guard storage/check failed; callers must fail closed.
-    #[error("service-token replay guard failed")]
-    Guard,
 }
 
-/// Required seam for service-token `jti`/nonce replay protection.
-pub trait ServiceTokenReplayGuard: Send + Sync + 'static {
-    /// Atomically record a nonce if it has not been observed, retaining it at least until the
-    /// already-validated service token expiry boundary.
-    fn check_and_record(
+/// Provider failure while atomically consuming a replay key.
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+pub enum ServiceTokenReplayStoreError {
+    /// Durable replay storage is unavailable or rejected the request.
+    #[error("service-token replay store unavailable")]
+    Unavailable,
+}
+
+/// Construction or expiry failure for a service-token replay operation deadline.
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+pub enum ServiceTokenReplayDeadlineError {
+    /// A zero budget would make the provider deterministically unavailable.
+    #[error("service-token replay deadline budget must be non-zero")]
+    ZeroBudget,
+    /// The requested duration cannot be represented as a monotonic absolute deadline.
+    #[error("service-token replay deadline overflow")]
+    Overflow,
+    /// The single absolute operation deadline has elapsed.
+    #[error("service-token replay deadline elapsed")]
+    Elapsed,
+}
+
+/// One absolute monotonic deadline shared by the complete replay-store operation.
+///
+/// The instant is private so adapters cannot reset the budget between pool acquire, transaction
+/// setup, SQL execution, and commit. [`Self::run`] provides the client-side cancellation boundary;
+/// [`Self::server_timeout_millis`] derives strictly-inner PostgreSQL statement/lock budgets from
+/// the same instant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceTokenReplayDeadline {
+    operation: tokio::time::Instant,
+}
+
+impl ServiceTokenReplayDeadline {
+    /// Mint one absolute deadline from an explicit non-zero caller budget.
+    pub fn from_timeout(timeout: Duration) -> Result<Self, ServiceTokenReplayDeadlineError> {
+        if timeout.is_zero() {
+            return Err(ServiceTokenReplayDeadlineError::ZeroBudget);
+        }
+        #[allow(clippy::disallowed_methods)]
+        let operation = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or(ServiceTokenReplayDeadlineError::Overflow)?;
+        Ok(Self { operation })
+    }
+
+    /// Run the complete provider future beneath this single absolute deadline.
+    pub async fn run<F: Future>(
+        self,
+        future: F,
+    ) -> Result<F::Output, ServiceTokenReplayDeadlineError> {
+        #[allow(clippy::disallowed_methods)]
+        if tokio::time::Instant::now() >= self.operation {
+            return Err(ServiceTokenReplayDeadlineError::Elapsed);
+        }
+        tokio::time::timeout_at(self.operation, future)
+            .await
+            .map_err(|_| ServiceTokenReplayDeadlineError::Elapsed)
+    }
+
+    /// Derive server-side statement and lock timeouts strictly inside the client deadline.
+    pub fn server_timeout_millis(self) -> Result<(u64, u64), ServiceTokenReplayDeadlineError> {
+        #[allow(clippy::disallowed_methods)]
+        let remaining = self
+            .operation
+            .saturating_duration_since(tokio::time::Instant::now());
+        let remaining_millis = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX);
+        let statement_millis = remaining_millis
+            .checked_sub(2)
+            .filter(|millis| *millis > 0)
+            .ok_or(ServiceTokenReplayDeadlineError::Elapsed)?;
+        let lock_millis = statement_millis.min(5_000);
+        Ok((statement_millis, lock_millis))
+    }
+}
+
+/// Required async seam for durable, scoped service-token replay protection.
+#[trait_variant::make(ServiceTokenReplayStore: Send)]
+#[dynosaur(
+    pub DynServiceTokenReplayStore = dyn(box) ServiceTokenReplayStore,
+    bridge(dyn)
+)]
+#[allow(async_fn_in_trait)]
+pub trait ServiceTokenReplayStoreLocal: Send + Sync {
+    /// Atomically record a scoped key if absent, retaining it at least until the already-validated
+    /// service-token expiry boundary.
+    async fn check_and_record(
         &self,
-        nonce: &str,
+        key: &ServiceTokenReplayKey,
         expires_at: std::time::SystemTime,
-    ) -> Result<(), ServiceTokenReplayError>;
+        deadline: ServiceTokenReplayDeadline,
+    ) -> Result<ServiceTokenReplayDisposition, ServiceTokenReplayStoreError>;
+}
+
+#[cfg(test)]
+mod replay_key_tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    use super::{
+        DynServiceTokenReplayStore, ServiceTokenReplayDeadline, ServiceTokenReplayDeadlineError,
+        ServiceTokenReplayDisposition, ServiceTokenReplayKey, ServiceTokenReplayScope,
+        ServiceTokenReplayStore, ServiceTokenReplayStoreError,
+    };
+
+    #[allow(clippy::expect_used)]
+    fn key(issuer: &str, audience: &str, key_id: &str, token_id: &str) -> ServiceTokenReplayKey {
+        ServiceTokenReplayKey::derive(ServiceTokenReplayScope {
+            issuer,
+            audience,
+            key_id,
+            token_id,
+        })
+        .expect("test replay scope lengths fit u64")
+    }
+
+    #[test]
+    fn replay_key_v1_golden_is_stable() {
+        assert_eq!(
+            key("https://issuer.example", "rss", "svc-2026", "nonce-123").digest_bytes(),
+            &[
+                0xe7, 0x6c, 0xbd, 0xad, 0x45, 0x7d, 0x11, 0xca, 0xe3, 0x73, 0xd3, 0x84, 0xee, 0x63,
+                0xa1, 0xfe, 0x99, 0x4d, 0xbe, 0xca, 0x35, 0x15, 0x4a, 0x7a, 0x74, 0x3f, 0x40, 0x4a,
+                0x96, 0x4d, 0x5f, 0xdd,
+            ]
+        );
+    }
+
+    #[test]
+    fn every_verified_scope_component_changes_the_replay_key() {
+        let keys = [
+            key("iss-a", "aud-a", "kid-a", "jti-a"),
+            key("iss-b", "aud-a", "kid-a", "jti-a"),
+            key("iss-a", "aud-b", "kid-a", "jti-a"),
+            key("iss-a", "aud-a", "kid-b", "jti-a"),
+            key("iss-a", "aud-a", "kid-a", "jti-b"),
+        ];
+        assert_eq!(
+            keys.iter()
+                .map(|key| *key.digest_bytes())
+                .collect::<HashSet<_>>()
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn length_prefixes_prevent_component_boundary_ambiguity() {
+        assert_ne!(
+            key("ab", "c", "kid", "jti").digest_bytes(),
+            key("a", "bc", "kid", "jti").digest_bytes()
+        );
+    }
+
+    #[test]
+    fn replay_key_debug_never_exposes_scope_or_digest() {
+        let replay_key = key(
+            "issuer-marker",
+            "audience-marker",
+            "kid-marker",
+            "jti-marker",
+        );
+        let rendered = format!("{replay_key:?}");
+        assert_eq!(rendered, "ServiceTokenReplayKey([REDACTED])");
+        for marker in [
+            "issuer-marker",
+            "audience-marker",
+            "kid-marker",
+            "jti-marker",
+        ] {
+            assert!(!rendered.contains(marker));
+        }
+    }
+
+    #[test]
+    fn replay_deadline_rejects_zero_budget() {
+        assert_eq!(
+            ServiceTokenReplayDeadline::from_timeout(std::time::Duration::ZERO),
+            Err(ServiceTokenReplayDeadlineError::ZeroBudget)
+        );
+    }
+
+    struct YieldingStore;
+
+    impl ServiceTokenReplayStore for YieldingStore {
+        async fn check_and_record(
+            &self,
+            _key: &ServiceTokenReplayKey,
+            _expires_at: SystemTime,
+            _deadline: ServiceTokenReplayDeadline,
+        ) -> Result<ServiceTokenReplayDisposition, ServiceTokenReplayStoreError> {
+            tokio::task::yield_now().await;
+            Ok(ServiceTokenReplayDisposition::Recorded)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replay_store_is_dyn_injectable_and_send_across_yield() {
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+
+        let store: Arc<DynServiceTokenReplayStore<'static>> =
+            DynServiceTokenReplayStore::new_arc(YieldingStore);
+        assert_send_sync(&store);
+        let result = tokio::spawn(async move {
+            let deadline =
+                match ServiceTokenReplayDeadline::from_timeout(std::time::Duration::from_secs(1)) {
+                    Ok(deadline) => deadline,
+                    Err(_) => return Err(ServiceTokenReplayStoreError::Unavailable),
+                };
+            store
+                .check_and_record(
+                    &key("iss", "aud", "kid", "jti"),
+                    SystemTime::UNIX_EPOCH,
+                    deadline,
+                )
+                .await
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Ok(Ok(ServiceTokenReplayDisposition::Recorded))
+        ));
+    }
 }
 
 /// 凭据 scheme 标签——adapter 据此选验签路径（JWT 签名 vs service-token MAC）。闭值集，`#[non_exhaustive]`。

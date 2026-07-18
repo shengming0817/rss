@@ -2,7 +2,7 @@
 //!
 //! 单一 `OidcProvider`：
 //! - 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-04）。
-//! - `backend` feature 开时增补 `impl diport::Pdp`（纯 RustCrypto 验签 → `VerifiedClaims`）。
+//! - `backend` feature 开时增补 `impl diport::Pdp`（RustCrypto 验签 + durable replay consume → `VerifiedClaims`）。
 //!
 //! feature-off（default build）：空壳编译、freeze smoke 类型断言仍有效；不引入任何 crypto dep。
 //! feature-on（`--features backend`）：持有注入的 `VerifierConfig`（issuer / audience / [`StaticKeySource`] /
@@ -37,8 +37,8 @@ use diport::{ManagedResource, ShutdownError};
 
 /// OIDC JWT / service-token 验签 adapter（sealed-marker）。
 ///
-/// `backend` feature 关时为空壳（仅供 freeze smoke 类型断言）；开时持有验签配置 + 注入时钟。无 infra 句柄
-/// （key 构造期注入、纯计算验签）。
+/// `backend` feature 关时为空壳（仅供 freeze smoke 类型断言）；开时持有验签配置 + 注入时钟。key
+/// 构造期注入；service-token 验签还会异步调用配置中注入的 durable replay-store port。
 pub struct OidcProvider {
     #[cfg(feature = "backend")]
     config: config::VerifierConfig,
@@ -84,9 +84,9 @@ impl diport::Pdp for OidcProvider {
         &self,
         raw: &diport::RawCredential,
     ) -> Result<diport::VerifiedClaims, diport::PdpError> {
-        // scheme dispatch + 验签 + claim 映射全在 verify 模块（控制 lib.rs 认知复杂度）。纯计算（key + clock
-        // 注入），无 await——async 仅为满足 port 签名（#1109 接 live JWKS 时在此 await）。
-        verify::verify_credential(&self.config, self.clock.as_ref(), raw)
+        // scheme dispatch + 验签 + claim 映射全在 verify 模块（控制 lib.rs 认知复杂度）；service-token
+        // replay consume 是真正异步 durable I/O。
+        verify::verify_credential(&self.config, self.clock.as_ref(), raw).await
     }
 }
 

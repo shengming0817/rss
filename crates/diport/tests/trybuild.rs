@@ -4,7 +4,7 @@
 //! - fail（dyn-compat）：`async fn` in trait 裸 `Box<dyn _>` → E0038，锁 dynosaur 为 DI port 解决的根问题。
 //! - fail（unsafe-forbid）：anti-vacuity——`#![forbid(unsafe_code)]` + 手写 unsafe 编不过，锁
 //!   DIPORT-UNSAFE-HYGIENE-01 的基线（forbid 非恒真；dynosaur 生成 unsafe 不触发 forbid 是 hygiene 效果）。
-//! - fail（arc-not-send）：除 serving PDP 窄例外外，async port 的 `Arc<DynX>: !Send`（dynosaur Send 变体非
+//! - fail（arc-not-send）：除显式共享 PDP / replay-store 窄例外外，async port 的 `Arc<DynX>: !Send`（dynosaur Send 变体非
 //!   Sync），锁 #1095 注入形态收口决策；PDP 的 Send+Sync 正向证据在 pass fixture。
 //! - fail（pdp-non-sync）：PDP provider 必须 Sync，锁多线程 serving runtime 的共享边界。
 //!

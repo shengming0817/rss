@@ -45,7 +45,10 @@ pub(crate) use secret_config::EnvSecret;
 
 pub use distributed_runtime::DistributedRuntimeDeps;
 pub use domains::settings::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
-pub use infra::oidc::{build_provider, provider_from_b64};
+pub use infra::oidc::{
+    Hs256ServiceTokenProfile, StaticOidcKeyProfile, StaticOidcProviderConfig,
+    provider_from_static_config,
+};
 pub use infra::vault::{is_oidc_jwks_export_command, run_oidc_jwks_export_command};
 pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 
@@ -159,8 +162,8 @@ pub use phase::{OperatorRuntimeInputs, ServingRuntimeInputs};
 
 use bootstrap::DomainModuleResult;
 use infra::oidc::{
-    OIDC_JWKS_READY_PROBE_NAME, OidcJwksReadyProbe, build_provider_with_replay_guard,
-    build_runtime_oidc_provider,
+    OIDC_JWKS_READY_PROBE_NAME, OidcJwksReadyProbe, build_provider_with_replay_store,
+    prepare_runtime_oidc_provider,
 };
 use infra::pg::{
     PgRuntimeConfig, PgRuntimeConfigParts, build_pg_audit_maintenance_config,
@@ -185,8 +188,10 @@ use config::{
     domain_transport_required_domains_from, domain_transport_url_env,
 };
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
@@ -332,34 +337,6 @@ async fn verify_dlx_vault_key_capability(
         "DLX Vault capability accepted wrong AAD"
     );
     Ok(())
-}
-
-#[derive(Default)]
-pub(crate) struct RuntimeServiceTokenReplayGuard {
-    seen: Mutex<HashMap<String, SystemTime>>,
-}
-
-impl diport::ServiceTokenReplayGuard for RuntimeServiceTokenReplayGuard {
-    fn check_and_record(
-        &self,
-        nonce: &str,
-        expires_at: SystemTime,
-    ) -> Result<(), diport::ServiceTokenReplayError> {
-        // reason: runtime assembly owns this in-process fallback guard; production clock read is local to
-        // replay-state expiry pruning and does not leak into domain logic.
-        #[allow(clippy::disallowed_methods)]
-        let now = SystemTime::now();
-        let mut seen = self
-            .seen
-            .lock()
-            .map_err(|_| diport::ServiceTokenReplayError::Guard)?;
-        seen.retain(|_, expires_at| *expires_at > now);
-        if seen.contains_key(nonce) {
-            return Err(diport::ServiceTokenReplayError::Replayed);
-        }
-        seen.insert(nonce.to_string(), expires_at);
-        Ok(())
-    }
 }
 
 /// Test/lightweight auth decision audit sink provider.
@@ -615,6 +592,11 @@ async fn wire_domain_transport(
 
 pub const SESSION_SWEEPER_PROBE_NAME: &str = "session_sweeper";
 const SESSION_SWEEPER_WORKER_NAME: &str = "session-sweeper";
+pub const SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME: &str = "service_token_replay_sweeper";
+const SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME: &str = "service-token-replay-sweeper";
+const SERVICE_TOKEN_REPLAY_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+const SERVICE_TOKEN_REPLAY_STORE_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVICE_TOKEN_REPLAY_SWEEP_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// `rss` binary 是否请求 PostgreSQL operator namespace；具体 subcommand 由 runner 精确校验。
 #[must_use]
@@ -1147,8 +1129,10 @@ async fn projection_maintenance_operator_receipt(
     parsed: &ProjectionCliArgs,
     resource_id: &str,
 ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
-    let operator_provider = match build_provider_with_replay_guard(pg.service_token_replay_guard())
-    {
+    let operator_provider = match build_provider_with_replay_store(
+        pg.service_token_replay_store(),
+        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+    ) {
         Ok(provider) => provider,
         Err(err) => {
             record_projection_maintenance_finish_audit(
@@ -1897,8 +1881,10 @@ async fn audit_ledger_verify_operator_subject(
     parsed: &AuditLedgerVerifyArgs,
     resource_id: &str,
 ) -> anyhow::Result<String> {
-    let operator_provider = match build_provider_with_replay_guard(pg.service_token_replay_guard())
-    {
+    let operator_provider = match build_provider_with_replay_store(
+        pg.service_token_replay_store(),
+        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+    ) {
         Ok(provider) => provider,
         Err(err) => {
             record_audit_ledger_verify_finish_audit(
@@ -2797,8 +2783,10 @@ async fn dlq_operator_subject(
     parsed: &DlqCliArgs,
     resource_id: &str,
 ) -> anyhow::Result<String> {
-    let operator_provider = match build_provider_with_replay_guard(pg.service_token_replay_guard())
-    {
+    let operator_provider = match build_provider_with_replay_store(
+        pg.service_token_replay_store(),
+        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+    ) {
         Ok(provider) => provider,
         Err(err) => {
             record_dlq_maintenance_finish_audit(
@@ -3535,7 +3523,10 @@ pub async fn run_reconcile_target_command(
         pg.shutdown().await.ok();
         return Err(error);
     }
-    let provider = match build_provider_with_replay_guard(pg.service_token_replay_guard()) {
+    let provider = match build_provider_with_replay_store(
+        pg.service_token_replay_store(),
+        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+    ) {
         Ok(provider) => provider,
         Err(error) => {
             record_reconcile_audit(
@@ -3762,7 +3753,10 @@ async fn settings_config_value_maintenance_operator_subject(
     parsed: &SettingsConfigValueMaintenanceArgs,
     resource_id: &str,
 ) -> anyhow::Result<String> {
-    let operator_provider = match build_provider() {
+    let operator_provider = match build_provider_with_replay_store(
+        pg.service_token_replay_store(),
+        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+    ) {
         Ok(provider) => provider,
         Err(err) => {
             record_config_value_maintenance_finish_audit(
@@ -4071,13 +4065,14 @@ impl bootstrap::HealthProbe for SessionSweeperProbe {
 }
 
 struct SessionSweeperWorker {
+    name: &'static str,
     handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     token: CancellationToken,
 }
 
 impl ManagedResource for SessionSweeperWorker {
     fn name(&self) -> &str {
-        SESSION_SWEEPER_WORKER_NAME
+        self.name
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
@@ -4133,6 +4128,7 @@ fn spawn_session_sweeper(
         }
     });
     SessionSweeperWorker {
+        name: SESSION_SWEEPER_WORKER_NAME,
         handle: tokio::sync::Mutex::new(Some(handle)),
         token: child,
     }
@@ -4141,9 +4137,9 @@ fn spawn_session_sweeper(
 fn session_sweeper_module_result(
     worker: bootstrap::WorkerSpec,
     health: Arc<SessionSweeperHealth>,
+    probe_name: &'static str,
 ) -> anyhow::Result<DomainModuleResult> {
-    let probe_name = ProbeName::parse(SESSION_SWEEPER_PROBE_NAME)
-        .context("session_sweeper probe name is invalid")?;
+    let probe_name = ProbeName::parse(probe_name).context("sweeper probe name is invalid")?;
     Ok(DomainModuleResult {
         probes: vec![(
             probe_name.clone(),
@@ -4171,7 +4167,65 @@ fn wire_session_sweeper(
         interval_ms = period.as_millis(),
         "session sweeper interval configured"
     );
-    session_sweeper_module_result(worker, health)
+    session_sweeper_module_result(worker, health, SESSION_SWEEPER_PROBE_NAME)
+}
+
+fn wire_service_token_replay_sweeper(pg: &PgRuntimeHandle) -> anyhow::Result<DomainModuleResult> {
+    let sweeper = pg.infra().service_token_replay_sweeper();
+    let health = Arc::new(SessionSweeperHealth::healthy());
+    let worker_health = Arc::clone(&health);
+    let worker: bootstrap::WorkerSpec = Box::new(move |token| {
+        let child = token.child_token();
+        let worker_token = child.clone();
+        let health = worker_health;
+        let handle = tokio::spawn(async move {
+            let _stopped = SessionSweeperStoppedGuard(Arc::clone(&health));
+            let mut ticker = tokio::time::interval(SERVICE_TOKEN_REPLAY_SWEEP_INTERVAL);
+            loop {
+                tokio::select! {
+                    biased;
+                    () = worker_token.cancelled() => break,
+                    _ = ticker.tick() => {
+                        tokio::select! {
+                            biased;
+                            () = worker_token.cancelled() => break,
+                            result = sweeper.sweep_expired(
+                                match diport::ServiceTokenReplayDeadline::from_timeout(
+                                    SERVICE_TOKEN_REPLAY_SWEEP_TIMEOUT,
+                                ) {
+                                    Ok(deadline) => deadline,
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            target_table = "service_token_replay_keys",
+                                            error = %error,
+                                            "replay sweeper: deadline setup failed"
+                                        );
+                                        health.mark_degraded();
+                                        continue;
+                                    }
+                                }
+                            ) => match result {
+                                Ok(deleted) => {
+                                    tracing::debug!(target_table = "service_token_replay_keys", deleted, "replay sweeper: tick completed");
+                                    health.mark_healthy();
+                                }
+                                Err(error) => {
+                                    tracing::warn!(target_table = "service_token_replay_keys", error = %error, "replay sweeper: sweep failed");
+                                    health.mark_degraded();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        DynManagedResource::new_box(SessionSweeperWorker {
+            name: SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME,
+            handle: tokio::sync::Mutex::new(Some(handle)),
+            token: child,
+        })
+    });
+    session_sweeper_module_result(worker, health, SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME)
 }
 
 /// otel OTLP/gRPC 导出端点环境变量（**按需开启**：未设 → 不导出 trace，仅 fmt 日志；设了 → 按 scheme 派发 typed endpoint）。
@@ -4337,6 +4391,7 @@ impl RuntimeLifecycleOwner {
 struct RuntimeModuleAssemblyInputs {
     domains_module: DomainModuleResult,
     session_sweeper_module: DomainModuleResult,
+    service_token_replay_sweeper_module: DomainModuleResult,
     s3_canary_module: DomainModuleResult,
     provider_module: DomainModuleResult,
     oidc_resource: Box<DynManagedResource<'static>>,
@@ -4360,6 +4415,7 @@ fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> Domai
     let mut module = DomainModuleResult::default();
     module.merge(inputs.domains_module);
     module.merge(inputs.session_sweeper_module);
+    module.merge(inputs.service_token_replay_sweeper_module);
     module.merge(inputs.s3_canary_module);
     module.merge(inputs.provider_module);
     module.resources.push(inputs.oidc_resource);
@@ -4427,7 +4483,7 @@ where
 /// 缺配 / 连不上 / migration 失败均 **fail-fast**（不静默 ready）。各域业务 handler ↔ service 接线
 /// 由 manifest-derived domain list 驱动，禁止回退为手写 per-domain wiring。
 /// tracing subscriber 与配置 snapshot 由 [`prepare_runtime`] 在 `main` 中先于本 fn 装配。
-// reason: 组合根入口顺序编排（provider setup → generated domains → compose → finalize → serve）
+// reason: 组合根入口顺序编排（infra setup → provider setup → generated domains → compose → finalize → serve）
 // 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点——item-level carve-out（error-handling.md §Carve-out）。
 #[allow(clippy::cognitive_complexity)]
 pub async fn run(runtime_inputs: ServingRuntimeInputs) -> anyhow::Result<()> {
@@ -4456,12 +4512,13 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
     );
     drop(runtime_plan);
 
-    // BuildProvider phase: ServingRuntimeInputs proves local policy was sealed before entry.
-    let runtime_oidc = phase_result(
+    // Fail every OIDC/JWKS configuration or source error before the forward-only PG migration.
+    // The prepared value cannot authenticate until the owner-only durable store is injected.
+    let prepared_runtime_oidc = phase_result(
         RuntimePhase::BuildProvider,
-        build_runtime_oidc_provider(runtime_inputs.config()).context("build runtime OIDC provider"),
+        prepare_runtime_oidc_provider(runtime_inputs.config())
+            .context("preflight runtime OIDC provider"),
     )?;
-    let provider = runtime_oidc.provider();
 
     // BuildInfra phase: provider bundles, topology config, shared deps, and metrics exporter.
     let (
@@ -4666,9 +4723,8 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
             // **fail-fast**：global recorder 已装（重复 install）即 Err——误配在接线期暴露，不静默 noop。Arc<dyn> 共享给 /metrics handler。
             // PromExporter 的 ManagedResource::shutdown 是文档化 no-op（pull exporter 无后台任务/连接），故不进 ShutdownStack。
             //
-            // assembly.toml 治理豁免（与 oidc/vault/postgres 等 adapter 同——均在组合根注入、不在 `[[diportProviders]]` 声明）：
-            // `cargo xtask assembly validate` 的 `DiportPort` 仅 gate `diport::RevocationStore` 的「production 必须 durability=persistent」。
-            // `MetricsExporter` 是无状态 pull port，无 ephemeral/persistent 之分、无 dev/demo vs prod provider 选择，治理无可校验项 ⇒ 不入 enum。
+            // `MetricsExporter` 是无状态 pull port，无 ephemeral/persistent 之分，也没有 dev/demo 与
+            // production provider 选择；因此 assembly durability governance 无可校验项。
             let metrics_exporter: Arc<dyn diport::MetricsExporter> = Arc::new(
                 prometheus::PromExporter::install().context("install prometheus recorder")?,
             );
@@ -4698,6 +4754,14 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         .await,
     )?;
 
+    let runtime_oidc = prepared_runtime_oidc
+        .finish(
+            pg_owner.service_token_replay_store(),
+            SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+        )
+        .context("inject durable replay store into runtime OIDC provider")?;
+    let provider = runtime_oidc.provider();
+
     // WireDomains phase: domain roots, registry/module outputs, probes, workers, and event transport.
     let (mut registry, pg_readiness_period, domain_module) = phase_result(
         RuntimePhase::WireDomains,
@@ -4724,6 +4788,9 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
 
             let session_sweeper_module = wire_session_sweeper(&deps.pg, session_sweep_interval)
                 .context("wire session sweeper")?;
+            let service_token_replay_sweeper_module =
+                wire_service_token_replay_sweeper(&deps.pg)
+                    .context("wire service-token replay sweeper")?;
             let s3_canary_module =
                 wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?;
             // provider capability bundle 单源装配：adapter 保持 diport-only 原语，runtime 本地适配为唯一
@@ -4796,6 +4863,7 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
             let mut module = crate::assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
                 domains_module,
                 session_sweeper_module,
+                service_token_replay_sweeper_module,
                 s3_canary_module,
                 provider_module,
                 oidc_resource,
@@ -4887,7 +4955,6 @@ mod tests {
 
     use audit::ports::TenantRepoScope as AuditTenantRepoScope;
     use axum::http::Method;
-    use diport::ServiceTokenReplayGuard;
     use eventexec::{
         DlqError, EVENT_CONSUMER_PROBE, OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE,
         OUTBOX_SWEEPER_PROBE, SWEEPER_WORKER_NAME,
@@ -5127,11 +5194,11 @@ mod tests {
             runtime_module_harness_transcript(),
             [
                 "phase-order: build_provider -> build_infra -> wire_domains -> finalize -> launch",
-                "module-probes: configs_ready, keyprovider_ready, session_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
+                "module-probes: configs_ready, keyprovider_ready, session_sweeper, service_token_replay_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
                 "module-resources: redis, s3, vault-secret-resolver, vault-key-provider, oidc-jwks, domain-http-transport, identity-pub, identity-sub, settings-pub, settings-sub, postgres-dlx-lifecycle",
-                "module-workers: keyprovider-readiness-sampler, session-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, dlx-lifecycle, dlx-archive-readiness, redis-readiness-sampler",
-                "readyz-probes-before-reporter: rls_ready, redis_ready, oidc_jwks_ready, configs_ready, keyprovider_ready, session_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
-                "reporter-probe-count: 20",
+                "module-workers: keyprovider-readiness-sampler, session-sweeper, service-token-replay-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, dlx-lifecycle, dlx-archive-readiness, redis-readiness-sampler",
+                "readyz-probes-before-reporter: rls_ready, redis_ready, oidc_jwks_ready, configs_ready, keyprovider_ready, session_sweeper, service_token_replay_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
+                "reporter-probe-count: 21",
                 "registry-probe-count-after-take: 0",
             ]
             .join("\n")
@@ -5193,6 +5260,11 @@ mod tests {
                 &[SESSION_SWEEPER_PROBE_NAME],
                 &[],
                 &["session-sweeper"],
+            ),
+            service_token_replay_sweeper_module: harness_module(
+                &[SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME],
+                &[],
+                &[SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME],
             ),
             s3_canary_module: harness_module(
                 &[crate::infra::s3::S3_READY_PROBE_NAME],
@@ -5939,16 +6011,17 @@ mod tests {
         use p256::ecdsa::SigningKey;
 
         let key = SigningKey::from_slice(&[7u8; 32]).expect("signing key");
+        let public_keys_b64 = B64.encode(key.verifying_key().to_encoded_point(false).as_bytes());
         Arc::new(
-            provider_from_b64(
-                "https://issuer.test",
-                "rss-test",
-                "admin,superAdmin",
-                Some(&B64.encode(key.verifying_key().to_encoded_point(false).as_bytes())),
-                Some(&B64.encode([9u8; 32])),
-                Some("cell-a.svc-a"),
-                Box::new(SystemClock),
-            )
+            provider_from_static_config(StaticOidcProviderConfig {
+                issuer: "https://issuer.test",
+                audience: "rss-test",
+                trusted_kinds_csv: "admin,superAdmin",
+                key_profile: StaticOidcKeyProfile::Es256 {
+                    public_keys_b64: &public_keys_b64,
+                },
+                clock: Box::new(SystemClock),
+            })
             .expect("provider"),
         )
     }
@@ -8520,7 +8593,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn dlq_operator_provider_uses_durable_replay_guard() {
+    fn maintenance_operator_providers_use_durable_replay_store() {
         let source = include_str!("lib.rs");
         let function = source
             .split("async fn dlq_operator_subject(")
@@ -8529,13 +8602,35 @@ mod tests {
             .expect("dlq_operator_subject source slice");
 
         assert!(
-            function.contains("build_provider_with_replay_guard")
-                && function.contains("pg.service_token_replay_guard()"),
-            "DLQ operator verifier must inject the durable PG service-token replay guard"
+            function.contains("build_provider_with_replay_store")
+                && function.contains("pg.service_token_replay_store()")
+                && function.contains("SERVICE_TOKEN_REPLAY_STORE_TIMEOUT"),
+            "DLQ operator verifier must inject the durable PG service-token replay store"
         );
         assert!(
             !function.contains("build_provider()"),
-            "DLQ operator verifier must not fall back to the in-process replay guard"
+            "DLQ operator verifier must not have a store-free construction path"
+        );
+        assert!(
+            source
+                .split("async fn settings_config_value_maintenance_operator_subject(")
+                .nth(1)
+                .and_then(|rest| {
+                    rest.split("async fn run_settings_config_value_maintenance(")
+                        .next()
+                })
+                .is_some_and(|function| {
+                    function.contains("build_provider_with_replay_store")
+                        && function.contains("pg.service_token_replay_store()")
+                        && function.contains("SERVICE_TOKEN_REPLAY_STORE_TIMEOUT")
+                }),
+            "settings config maintenance must inject the durable replay store"
+        );
+        assert!(
+            source.contains("prepare_runtime_oidc_provider(runtime_inputs.config())")
+                && source.contains("pg_owner.service_token_replay_store(),")
+                && source.contains("SERVICE_TOKEN_REPLAY_STORE_TIMEOUT"),
+            "serving OIDC must preflight before migration and receive the owner replay store with an explicit bounded timeout"
         );
     }
 
@@ -9086,8 +9181,8 @@ mod tests {
         let health = Arc::new(SessionSweeperHealth::healthy());
         let worker: bootstrap::WorkerSpec =
             Box::new(|_| diport::DynManagedResource::new_box(NoopResource));
-        let result =
-            session_sweeper_module_result(worker, health).expect("session sweeper module result");
+        let result = session_sweeper_module_result(worker, health, SESSION_SWEEPER_PROBE_NAME)
+            .expect("session sweeper module result");
         assert_eq!(result.probes.len(), 1);
         assert_eq!(result.probes[0].0.as_str(), SESSION_SWEEPER_PROBE_NAME);
         assert!(result.resources.is_empty());
@@ -9132,24 +9227,6 @@ mod tests {
         let down = probe.check();
         assert_eq!(down.status(), HealthStatus::Unhealthy);
         assert_eq!(down.detail(), "not-enforced");
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn runtime_replay_guard_expires_seen_nonce() {
-        let guard = RuntimeServiceTokenReplayGuard::default();
-        let expired = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
-        let future = SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800);
-        guard
-            .check_and_record("nonce-a", expired)
-            .expect("first record");
-        guard
-            .check_and_record("nonce-a", future)
-            .expect("expired nonce pruned before second record");
-        assert!(matches!(
-            guard.check_and_record("nonce-a", future),
-            Err(diport::ServiceTokenReplayError::Replayed)
-        ));
     }
 
     #[test]
@@ -9400,7 +9477,7 @@ mod tests {
         let err = run(inputs)
             .await
             .expect_err("missing OIDC config must fail before launch handoff");
-        assert!(format!("{err:#}").contains("build runtime OIDC provider"));
+        assert!(format!("{err:#}").contains("preflight runtime OIDC provider"));
         assert!(
             shutdown_witness.shutdown().is_err(),
             "pre-handoff failure must explicitly shut down the shared provider"

@@ -30,7 +30,7 @@ use oidc::OidcProvider;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme};
 use runtime::auth_bridge::apply_verify_bridge;
-use runtime::provider_from_b64;
+use runtime::{StaticOidcKeyProfile, StaticOidcProviderConfig, provider_from_static_config};
 use tower::ServiceExt as _;
 use vault::VaultSigner;
 use wiremock::matchers::{body_partial_json, method as match_method};
@@ -149,19 +149,19 @@ fn vault_jwt_issuer(vault_uri: &str) -> authn::JwtIssuer<VaultSigner> {
     .expect("jwt issuer config")
 }
 
-/// 真 `OidcProvider`（经生产装配路径 `provider_from_b64`），信任指定 kind + mock 私钥对应的 ES256 公钥。
+/// 真 `OidcProvider`（经静态 profile 装配），信任指定 kind + mock 私钥对应的 ES256 公钥。
 #[allow(clippy::expect_used)]
 fn oidc_provider(trusted_kinds: &str) -> OidcProvider {
     let es256_b64 = B64_URL.encode(sec1(&sk_jwt()));
-    provider_from_b64(
-        ISS,
-        AUD,
-        trusted_kinds,
-        Some(&es256_b64),
-        None,
-        None,
-        Box::new(FixedClock(NOW)),
-    )
+    provider_from_static_config(StaticOidcProviderConfig {
+        issuer: ISS,
+        audience: AUD,
+        trusted_kinds_csv: trusted_kinds,
+        key_profile: StaticOidcKeyProfile::Es256 {
+            public_keys_b64: &es256_b64,
+        },
+        clock: Box::new(FixedClock(NOW)),
+    })
     .expect("es256 production provider")
 }
 

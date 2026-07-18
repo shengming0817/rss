@@ -110,6 +110,7 @@ classify_ports! {
     dyn DynPdp => AuthEffect;
     dyn DynRateLimiter => AuthEffect;
     dyn DynSecretResolver => AuthEffect;
+    dyn DynServiceTokenReplayStore => AuthEffect;
     dyn DynSigner => AuthEffect;
 
     dyn DynAcker => BusinessWriteEffect;
@@ -135,7 +136,6 @@ classify_ports! {
 
     sync Clock => ReadEffect;
     sync MetricsExporter => ReadEffect;
-    sync ServiceTokenReplayGuard => AuthEffect;
     sync SubscribeInitializer => WorkflowEffect;
 }
 

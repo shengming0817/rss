@@ -2404,6 +2404,7 @@ impl core::panic::unwind_safe::UnwindSafe for diport::pdp::CredentialScheme
 #[non_exhaustive] pub enum diport::pdp::PdpError
 pub diport::pdp::PdpError::Expired
 pub diport::pdp::PdpError::InvalidSignature
+pub diport::pdp::PdpError::ProviderUnavailable
 pub diport::pdp::PdpError::Untrusted
 impl core::clone::Clone for diport::pdp::PdpError
 pub fn diport::pdp::PdpError::clone(&self) -> diport::pdp::PdpError
@@ -2419,23 +2420,83 @@ impl core::marker::Unpin for diport::pdp::PdpError
 impl core::marker::UnsafeUnpin for diport::pdp::PdpError
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::PdpError
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::PdpError
-#[non_exhaustive] pub enum diport::pdp::ServiceTokenReplayError
-pub diport::pdp::ServiceTokenReplayError::Guard
-pub diport::pdp::ServiceTokenReplayError::Replayed
-impl core::clone::Clone for diport::pdp::ServiceTokenReplayError
-pub fn diport::pdp::ServiceTokenReplayError::clone(&self) -> diport::pdp::ServiceTokenReplayError
-impl core::error::Error for diport::pdp::ServiceTokenReplayError
-impl core::fmt::Debug for diport::pdp::ServiceTokenReplayError
-pub fn diport::pdp::ServiceTokenReplayError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for diport::pdp::ServiceTokenReplayError
-pub fn diport::pdp::ServiceTokenReplayError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for diport::pdp::ServiceTokenReplayError
-impl core::marker::Send for diport::pdp::ServiceTokenReplayError
-impl core::marker::Sync for diport::pdp::ServiceTokenReplayError
-impl core::marker::Unpin for diport::pdp::ServiceTokenReplayError
-impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayError
-impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayError
-impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayError
+pub enum diport::pdp::ServiceTokenReplayDeadlineError
+pub diport::pdp::ServiceTokenReplayDeadlineError::Elapsed
+pub diport::pdp::ServiceTokenReplayDeadlineError::Overflow
+pub diport::pdp::ServiceTokenReplayDeadlineError::ZeroBudget
+impl core::clone::Clone for diport::pdp::ServiceTokenReplayDeadlineError
+pub fn diport::pdp::ServiceTokenReplayDeadlineError::clone(&self) -> diport::pdp::ServiceTokenReplayDeadlineError
+impl core::cmp::Eq for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::cmp::PartialEq for diport::pdp::ServiceTokenReplayDeadlineError
+pub fn diport::pdp::ServiceTokenReplayDeadlineError::eq(&self, &diport::pdp::ServiceTokenReplayDeadlineError) -> bool
+impl core::error::Error for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayDeadlineError
+pub fn diport::pdp::ServiceTokenReplayDeadlineError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pdp::ServiceTokenReplayDeadlineError
+pub fn diport::pdp::ServiceTokenReplayDeadlineError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::marker::StructuralPartialEq for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::marker::Send for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayDeadlineError
+pub enum diport::pdp::ServiceTokenReplayDisposition
+pub diport::pdp::ServiceTokenReplayDisposition::Recorded
+pub diport::pdp::ServiceTokenReplayDisposition::Replayed
+impl core::clone::Clone for diport::pdp::ServiceTokenReplayDisposition
+pub fn diport::pdp::ServiceTokenReplayDisposition::clone(&self) -> diport::pdp::ServiceTokenReplayDisposition
+impl core::cmp::Eq for diport::pdp::ServiceTokenReplayDisposition
+impl core::cmp::PartialEq for diport::pdp::ServiceTokenReplayDisposition
+pub fn diport::pdp::ServiceTokenReplayDisposition::eq(&self, &diport::pdp::ServiceTokenReplayDisposition) -> bool
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayDisposition
+pub fn diport::pdp::ServiceTokenReplayDisposition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::ServiceTokenReplayDisposition
+impl core::marker::StructuralPartialEq for diport::pdp::ServiceTokenReplayDisposition
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayDisposition
+impl core::marker::Send for diport::pdp::ServiceTokenReplayDisposition
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayDisposition
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayDisposition
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayDisposition
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayDisposition
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayDisposition
+pub enum diport::pdp::ServiceTokenReplayKeyError
+pub diport::pdp::ServiceTokenReplayKeyError::ComponentTooLarge
+impl core::error::Error for diport::pdp::ServiceTokenReplayKeyError
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayKeyError
+pub fn diport::pdp::ServiceTokenReplayKeyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pdp::ServiceTokenReplayKeyError
+pub fn diport::pdp::ServiceTokenReplayKeyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayKeyError
+impl core::marker::Send for diport::pdp::ServiceTokenReplayKeyError
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayKeyError
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayKeyError
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayKeyError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayKeyError
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayKeyError
+pub enum diport::pdp::ServiceTokenReplayStoreError
+pub diport::pdp::ServiceTokenReplayStoreError::Unavailable
+impl core::clone::Clone for diport::pdp::ServiceTokenReplayStoreError
+pub fn diport::pdp::ServiceTokenReplayStoreError::clone(&self) -> diport::pdp::ServiceTokenReplayStoreError
+impl core::cmp::Eq for diport::pdp::ServiceTokenReplayStoreError
+impl core::cmp::PartialEq for diport::pdp::ServiceTokenReplayStoreError
+pub fn diport::pdp::ServiceTokenReplayStoreError::eq(&self, &diport::pdp::ServiceTokenReplayStoreError) -> bool
+impl core::error::Error for diport::pdp::ServiceTokenReplayStoreError
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayStoreError
+pub fn diport::pdp::ServiceTokenReplayStoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pdp::ServiceTokenReplayStoreError
+pub fn diport::pdp::ServiceTokenReplayStoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::ServiceTokenReplayStoreError
+impl core::marker::StructuralPartialEq for diport::pdp::ServiceTokenReplayStoreError
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayStoreError
+impl core::marker::Send for diport::pdp::ServiceTokenReplayStoreError
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayStoreError
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayStoreError
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayStoreError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayStoreError
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayStoreError
 #[repr(transparent)] pub struct diport::pdp::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynPdp<'dynosaur_struct>
 pub const fn diport::DynPdp<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::pdp::Pdp + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>>
@@ -2463,6 +2524,33 @@ impl<'dynosaur_struct> !core::marker::Unpin for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynPdp<'dynosaur_struct>
+#[repr(transparent)] pub struct diport::pdp::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> diport::DynServiceTokenReplayStore<'dynosaur_struct>
+pub const fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
+pub const fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::from_mut(&mut impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> &mut diport::DynServiceTokenReplayStore<'dynosaur_struct>
+pub const fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::from_ref(&impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> &diport::DynServiceTokenReplayStore<'dynosaur_struct>
+pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::new_arc(impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
+pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::new_box(impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
+pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::new_rc(impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
+impl diport::DiPortEffect for diport::DynServiceTokenReplayStore<'_>
+pub type diport::DynServiceTokenReplayStore<'_>::Effect = diport::AuthEffect
+pub type diport::DynServiceTokenReplayStore<'_>::Privilege = diport::LocalPrivilege
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for &diport::DynServiceTokenReplayStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &diport::DynServiceTokenReplayStore<'dynosaur_struct>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for &mut diport::DynServiceTokenReplayStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynServiceTokenReplayStore<'dynosaur_struct>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> !core::marker::Freeze for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Send for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Sized for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Sync for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Unpin for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynServiceTokenReplayStore<'dynosaur_struct>
 pub struct diport::pdp::RawCredential
 impl diport::pdp::RawCredential
 pub fn diport::pdp::RawCredential::jwt(impl core::convert::Into<alloc::string::String>) -> Self
@@ -2483,6 +2571,54 @@ impl core::marker::Unpin for diport::pdp::RawCredential
 impl core::marker::UnsafeUnpin for diport::pdp::RawCredential
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::RawCredential
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::RawCredential
+pub struct diport::pdp::ServiceTokenReplayDeadline
+impl diport::pdp::ServiceTokenReplayDeadline
+pub fn diport::pdp::ServiceTokenReplayDeadline::from_timeout(core::time::Duration) -> core::result::Result<Self, diport::pdp::ServiceTokenReplayDeadlineError>
+pub async fn diport::pdp::ServiceTokenReplayDeadline::run<F: core::future::future::Future>(self, F) -> core::result::Result<<F as core::future::future::Future>::Output, diport::pdp::ServiceTokenReplayDeadlineError>
+pub fn diport::pdp::ServiceTokenReplayDeadline::server_timeout_millis(self) -> core::result::Result<(u64, u64), diport::pdp::ServiceTokenReplayDeadlineError>
+impl core::clone::Clone for diport::pdp::ServiceTokenReplayDeadline
+pub fn diport::pdp::ServiceTokenReplayDeadline::clone(&self) -> diport::pdp::ServiceTokenReplayDeadline
+impl core::cmp::Eq for diport::pdp::ServiceTokenReplayDeadline
+impl core::cmp::PartialEq for diport::pdp::ServiceTokenReplayDeadline
+pub fn diport::pdp::ServiceTokenReplayDeadline::eq(&self, &diport::pdp::ServiceTokenReplayDeadline) -> bool
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayDeadline
+pub fn diport::pdp::ServiceTokenReplayDeadline::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::ServiceTokenReplayDeadline
+impl core::marker::StructuralPartialEq for diport::pdp::ServiceTokenReplayDeadline
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayDeadline
+impl core::marker::Send for diport::pdp::ServiceTokenReplayDeadline
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayDeadline
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayDeadline
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayDeadline
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayDeadline
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayDeadline
+pub struct diport::pdp::ServiceTokenReplayKey(_)
+impl diport::pdp::ServiceTokenReplayKey
+pub fn diport::pdp::ServiceTokenReplayKey::derive(diport::pdp::ServiceTokenReplayScope<'_>) -> core::result::Result<Self, diport::pdp::ServiceTokenReplayKeyError>
+pub fn diport::pdp::ServiceTokenReplayKey::digest_bytes(&self) -> &[u8; 32]
+impl core::clone::Clone for diport::pdp::ServiceTokenReplayKey
+pub fn diport::pdp::ServiceTokenReplayKey::clone(&self) -> diport::pdp::ServiceTokenReplayKey
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayKey
+pub fn diport::pdp::ServiceTokenReplayKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayKey
+impl core::marker::Send for diport::pdp::ServiceTokenReplayKey
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayKey
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayKey
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayKey
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayKey
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayKey
+pub struct diport::pdp::ServiceTokenReplayScope<'a>
+pub diport::pdp::ServiceTokenReplayScope::audience: &'a str
+pub diport::pdp::ServiceTokenReplayScope::issuer: &'a str
+pub diport::pdp::ServiceTokenReplayScope::key_id: &'a str
+pub diport::pdp::ServiceTokenReplayScope::token_id: &'a str
+impl<'a> core::marker::Freeze for diport::pdp::ServiceTokenReplayScope<'a>
+impl<'a> core::marker::Send for diport::pdp::ServiceTokenReplayScope<'a>
+impl<'a> core::marker::Sync for diport::pdp::ServiceTokenReplayScope<'a>
+impl<'a> core::marker::Unpin for diport::pdp::ServiceTokenReplayScope<'a>
+impl<'a> core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayScope<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayScope<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayScope<'a>
 pub struct diport::pdp::ServiceTokenTenantBinding(_)
 impl diport::pdp::ServiceTokenTenantBinding
 pub fn diport::pdp::ServiceTokenTenantBinding::new(vocab::tenant::TenantId) -> Self
@@ -2535,8 +2671,20 @@ pub trait diport::pdp::PdpLocal: core::marker::Send + core::marker::Sync
 pub async fn diport::pdp::PdpLocal::verify(&self, &diport::pdp::RawCredential) -> core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>
 impl<TraitVariantBlanketType: diport::pdp::Pdp> diport::pdp::PdpLocal for TraitVariantBlanketType
 pub async fn TraitVariantBlanketType::verify(&self, &diport::pdp::RawCredential) -> core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>
-pub trait diport::pdp::ServiceTokenReplayGuard: core::marker::Send + core::marker::Sync + 'static
-pub fn diport::pdp::ServiceTokenReplayGuard::check_and_record(&self, &str, std::time::SystemTime) -> core::result::Result<(), diport::pdp::ServiceTokenReplayError>
+pub trait diport::pdp::ServiceTokenReplayStore: core::marker::Send + core::marker::Sync + core::marker::Send
+pub fn diport::pdp::ServiceTokenReplayStore::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for &diport::DynServiceTokenReplayStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &diport::DynServiceTokenReplayStore<'dynosaur_struct>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for &mut diport::DynServiceTokenReplayStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynServiceTokenReplayStore<'dynosaur_struct>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+pub trait diport::pdp::ServiceTokenReplayStoreLocal: core::marker::Send + core::marker::Sync
+pub async fn diport::pdp::ServiceTokenReplayStoreLocal::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>
+impl<TraitVariantBlanketType: diport::pdp::ServiceTokenReplayStore> diport::pdp::ServiceTokenReplayStoreLocal for TraitVariantBlanketType
+pub async fn TraitVariantBlanketType::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>
 pub fn diport::pdp::service_token_mac_input(&[u8], &diport::pdp::ServiceTokenTenantBinding) -> alloc::vec::Vec<u8>
 pub mod diport::publisher
 pub enum diport::publisher::PublishErrorKind
@@ -4222,6 +4370,7 @@ impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::OutboxEmit
 #[non_exhaustive] pub enum diport::PdpError
 pub diport::PdpError::Expired
 pub diport::PdpError::InvalidSignature
+pub diport::PdpError::ProviderUnavailable
 pub diport::PdpError::Untrusted
 impl core::clone::Clone for diport::pdp::PdpError
 pub fn diport::pdp::PdpError::clone(&self) -> diport::pdp::PdpError
@@ -4397,23 +4546,83 @@ impl core::marker::Unpin for diport::secret_resolver::SecretResolverError
 impl core::marker::UnsafeUnpin for diport::secret_resolver::SecretResolverError
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::secret_resolver::SecretResolverError
 impl !core::panic::unwind_safe::UnwindSafe for diport::secret_resolver::SecretResolverError
-#[non_exhaustive] pub enum diport::ServiceTokenReplayError
-pub diport::ServiceTokenReplayError::Guard
-pub diport::ServiceTokenReplayError::Replayed
-impl core::clone::Clone for diport::pdp::ServiceTokenReplayError
-pub fn diport::pdp::ServiceTokenReplayError::clone(&self) -> diport::pdp::ServiceTokenReplayError
-impl core::error::Error for diport::pdp::ServiceTokenReplayError
-impl core::fmt::Debug for diport::pdp::ServiceTokenReplayError
-pub fn diport::pdp::ServiceTokenReplayError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for diport::pdp::ServiceTokenReplayError
-pub fn diport::pdp::ServiceTokenReplayError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for diport::pdp::ServiceTokenReplayError
-impl core::marker::Send for diport::pdp::ServiceTokenReplayError
-impl core::marker::Sync for diport::pdp::ServiceTokenReplayError
-impl core::marker::Unpin for diport::pdp::ServiceTokenReplayError
-impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayError
-impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayError
-impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayError
+pub enum diport::ServiceTokenReplayDeadlineError
+pub diport::ServiceTokenReplayDeadlineError::Elapsed
+pub diport::ServiceTokenReplayDeadlineError::Overflow
+pub diport::ServiceTokenReplayDeadlineError::ZeroBudget
+impl core::clone::Clone for diport::pdp::ServiceTokenReplayDeadlineError
+pub fn diport::pdp::ServiceTokenReplayDeadlineError::clone(&self) -> diport::pdp::ServiceTokenReplayDeadlineError
+impl core::cmp::Eq for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::cmp::PartialEq for diport::pdp::ServiceTokenReplayDeadlineError
+pub fn diport::pdp::ServiceTokenReplayDeadlineError::eq(&self, &diport::pdp::ServiceTokenReplayDeadlineError) -> bool
+impl core::error::Error for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayDeadlineError
+pub fn diport::pdp::ServiceTokenReplayDeadlineError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pdp::ServiceTokenReplayDeadlineError
+pub fn diport::pdp::ServiceTokenReplayDeadlineError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::marker::StructuralPartialEq for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::marker::Send for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayDeadlineError
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayDeadlineError
+pub enum diport::ServiceTokenReplayDisposition
+pub diport::ServiceTokenReplayDisposition::Recorded
+pub diport::ServiceTokenReplayDisposition::Replayed
+impl core::clone::Clone for diport::pdp::ServiceTokenReplayDisposition
+pub fn diport::pdp::ServiceTokenReplayDisposition::clone(&self) -> diport::pdp::ServiceTokenReplayDisposition
+impl core::cmp::Eq for diport::pdp::ServiceTokenReplayDisposition
+impl core::cmp::PartialEq for diport::pdp::ServiceTokenReplayDisposition
+pub fn diport::pdp::ServiceTokenReplayDisposition::eq(&self, &diport::pdp::ServiceTokenReplayDisposition) -> bool
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayDisposition
+pub fn diport::pdp::ServiceTokenReplayDisposition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::ServiceTokenReplayDisposition
+impl core::marker::StructuralPartialEq for diport::pdp::ServiceTokenReplayDisposition
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayDisposition
+impl core::marker::Send for diport::pdp::ServiceTokenReplayDisposition
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayDisposition
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayDisposition
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayDisposition
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayDisposition
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayDisposition
+pub enum diport::ServiceTokenReplayKeyError
+pub diport::ServiceTokenReplayKeyError::ComponentTooLarge
+impl core::error::Error for diport::pdp::ServiceTokenReplayKeyError
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayKeyError
+pub fn diport::pdp::ServiceTokenReplayKeyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pdp::ServiceTokenReplayKeyError
+pub fn diport::pdp::ServiceTokenReplayKeyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayKeyError
+impl core::marker::Send for diport::pdp::ServiceTokenReplayKeyError
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayKeyError
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayKeyError
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayKeyError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayKeyError
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayKeyError
+pub enum diport::ServiceTokenReplayStoreError
+pub diport::ServiceTokenReplayStoreError::Unavailable
+impl core::clone::Clone for diport::pdp::ServiceTokenReplayStoreError
+pub fn diport::pdp::ServiceTokenReplayStoreError::clone(&self) -> diport::pdp::ServiceTokenReplayStoreError
+impl core::cmp::Eq for diport::pdp::ServiceTokenReplayStoreError
+impl core::cmp::PartialEq for diport::pdp::ServiceTokenReplayStoreError
+pub fn diport::pdp::ServiceTokenReplayStoreError::eq(&self, &diport::pdp::ServiceTokenReplayStoreError) -> bool
+impl core::error::Error for diport::pdp::ServiceTokenReplayStoreError
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayStoreError
+pub fn diport::pdp::ServiceTokenReplayStoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pdp::ServiceTokenReplayStoreError
+pub fn diport::pdp::ServiceTokenReplayStoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::ServiceTokenReplayStoreError
+impl core::marker::StructuralPartialEq for diport::pdp::ServiceTokenReplayStoreError
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayStoreError
+impl core::marker::Send for diport::pdp::ServiceTokenReplayStoreError
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayStoreError
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayStoreError
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayStoreError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayStoreError
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayStoreError
 #[non_exhaustive] pub enum diport::WriteOutcome
 pub diport::WriteOutcome::Committed
 pub diport::WriteOutcome::Fenced
@@ -5654,6 +5863,33 @@ impl<'dynosaur_struct> !core::marker::Unpin for diport::DynSecretResolver<'dynos
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynSecretResolver<'dynosaur_struct>
+#[repr(transparent)] pub struct diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> diport::DynServiceTokenReplayStore<'dynosaur_struct>
+pub const fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
+pub const fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::from_mut(&mut impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> &mut diport::DynServiceTokenReplayStore<'dynosaur_struct>
+pub const fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::from_ref(&impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> &diport::DynServiceTokenReplayStore<'dynosaur_struct>
+pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::new_arc(impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
+pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::new_box(impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
+pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::new_rc(impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
+impl diport::DiPortEffect for diport::DynServiceTokenReplayStore<'_>
+pub type diport::DynServiceTokenReplayStore<'_>::Effect = diport::AuthEffect
+pub type diport::DynServiceTokenReplayStore<'_>::Privilege = diport::LocalPrivilege
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for &diport::DynServiceTokenReplayStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &diport::DynServiceTokenReplayStore<'dynosaur_struct>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for &mut diport::DynServiceTokenReplayStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynServiceTokenReplayStore<'dynosaur_struct>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> !core::marker::Freeze for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Send for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Sized for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Sync for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Unpin for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynServiceTokenReplayStore<'dynosaur_struct>
 #[repr(transparent)] pub struct diport::DynSigner<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynSigner<'dynosaur_struct>
 pub const fn diport::DynSigner<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::signer::Signer + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynSigner<'dynosaur_struct>>
@@ -6640,6 +6876,54 @@ impl core::marker::Unpin for diport::secret_resolver::SecretMaterial
 impl core::marker::UnsafeUnpin for diport::secret_resolver::SecretMaterial
 impl core::panic::unwind_safe::RefUnwindSafe for diport::secret_resolver::SecretMaterial
 impl core::panic::unwind_safe::UnwindSafe for diport::secret_resolver::SecretMaterial
+pub struct diport::ServiceTokenReplayDeadline
+impl diport::pdp::ServiceTokenReplayDeadline
+pub fn diport::pdp::ServiceTokenReplayDeadline::from_timeout(core::time::Duration) -> core::result::Result<Self, diport::pdp::ServiceTokenReplayDeadlineError>
+pub async fn diport::pdp::ServiceTokenReplayDeadline::run<F: core::future::future::Future>(self, F) -> core::result::Result<<F as core::future::future::Future>::Output, diport::pdp::ServiceTokenReplayDeadlineError>
+pub fn diport::pdp::ServiceTokenReplayDeadline::server_timeout_millis(self) -> core::result::Result<(u64, u64), diport::pdp::ServiceTokenReplayDeadlineError>
+impl core::clone::Clone for diport::pdp::ServiceTokenReplayDeadline
+pub fn diport::pdp::ServiceTokenReplayDeadline::clone(&self) -> diport::pdp::ServiceTokenReplayDeadline
+impl core::cmp::Eq for diport::pdp::ServiceTokenReplayDeadline
+impl core::cmp::PartialEq for diport::pdp::ServiceTokenReplayDeadline
+pub fn diport::pdp::ServiceTokenReplayDeadline::eq(&self, &diport::pdp::ServiceTokenReplayDeadline) -> bool
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayDeadline
+pub fn diport::pdp::ServiceTokenReplayDeadline::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::ServiceTokenReplayDeadline
+impl core::marker::StructuralPartialEq for diport::pdp::ServiceTokenReplayDeadline
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayDeadline
+impl core::marker::Send for diport::pdp::ServiceTokenReplayDeadline
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayDeadline
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayDeadline
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayDeadline
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayDeadline
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayDeadline
+pub struct diport::ServiceTokenReplayKey(_)
+impl diport::pdp::ServiceTokenReplayKey
+pub fn diport::pdp::ServiceTokenReplayKey::derive(diport::pdp::ServiceTokenReplayScope<'_>) -> core::result::Result<Self, diport::pdp::ServiceTokenReplayKeyError>
+pub fn diport::pdp::ServiceTokenReplayKey::digest_bytes(&self) -> &[u8; 32]
+impl core::clone::Clone for diport::pdp::ServiceTokenReplayKey
+pub fn diport::pdp::ServiceTokenReplayKey::clone(&self) -> diport::pdp::ServiceTokenReplayKey
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayKey
+pub fn diport::pdp::ServiceTokenReplayKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayKey
+impl core::marker::Send for diport::pdp::ServiceTokenReplayKey
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayKey
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayKey
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayKey
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayKey
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayKey
+pub struct diport::ServiceTokenReplayScope<'a>
+pub diport::ServiceTokenReplayScope::audience: &'a str
+pub diport::ServiceTokenReplayScope::issuer: &'a str
+pub diport::ServiceTokenReplayScope::key_id: &'a str
+pub diport::ServiceTokenReplayScope::token_id: &'a str
+impl<'a> core::marker::Freeze for diport::pdp::ServiceTokenReplayScope<'a>
+impl<'a> core::marker::Send for diport::pdp::ServiceTokenReplayScope<'a>
+impl<'a> core::marker::Sync for diport::pdp::ServiceTokenReplayScope<'a>
+impl<'a> core::marker::Unpin for diport::pdp::ServiceTokenReplayScope<'a>
+impl<'a> core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayScope<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayScope<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayScope<'a>
 pub struct diport::ServiceTokenTenantBinding(_)
 impl diport::pdp::ServiceTokenTenantBinding
 pub fn diport::pdp::ServiceTokenTenantBinding::new(vocab::tenant::TenantId) -> Self
@@ -6975,6 +7259,9 @@ pub type diport::DynSagaTenantSource<'_>::Privilege = diport::LocalPrivilege
 impl diport::DiPortEffect for diport::DynSecretResolver<'_>
 pub type diport::DynSecretResolver<'_>::Effect = diport::AuthEffect
 pub type diport::DynSecretResolver<'_>::Privilege = diport::LocalPrivilege
+impl diport::DiPortEffect for diport::DynServiceTokenReplayStore<'_>
+pub type diport::DynServiceTokenReplayStore<'_>::Effect = diport::AuthEffect
+pub type diport::DynServiceTokenReplayStore<'_>::Privilege = diport::LocalPrivilege
 impl diport::DiPortEffect for diport::DynSigner<'_>
 pub type diport::DynSigner<'_>::Effect = diport::AuthEffect
 pub type diport::DynSigner<'_>::Privilege = diport::LocalPrivilege
@@ -6987,9 +7274,6 @@ pub type (dyn diport::clock::Clock + 'a)::Privilege = diport::LocalPrivilege
 impl<'a> diport::DiPortEffect for (dyn diport::metrics_exporter::MetricsExporter + 'a)
 pub type (dyn diport::metrics_exporter::MetricsExporter + 'a)::Effect = diport::ReadEffect
 pub type (dyn diport::metrics_exporter::MetricsExporter + 'a)::Privilege = diport::LocalPrivilege
-impl<'a> diport::DiPortEffect for (dyn diport::pdp::ServiceTokenReplayGuard + 'a)
-pub type (dyn diport::pdp::ServiceTokenReplayGuard + 'a)::Effect = diport::AuthEffect
-pub type (dyn diport::pdp::ServiceTokenReplayGuard + 'a)::Privilege = diport::LocalPrivilege
 impl<'a> diport::DiPortEffect for (dyn diport::subscriber::SubscribeInitializer + 'a)
 pub type (dyn diport::subscriber::SubscribeInitializer + 'a)::Effect = diport::WorkflowEffect
 pub type (dyn diport::subscriber::SubscribeInitializer + 'a)::Privilege = diport::LocalPrivilege
@@ -7333,8 +7617,16 @@ impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed:
 pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for diport::DynSecretResolver<'dynosaur_struct>
 pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
-pub trait diport::ServiceTokenReplayGuard: core::marker::Send + core::marker::Sync + 'static
-pub fn diport::ServiceTokenReplayGuard::check_and_record(&self, &str, std::time::SystemTime) -> core::result::Result<(), diport::pdp::ServiceTokenReplayError>
+pub trait diport::ServiceTokenReplayStore: core::marker::Send + core::marker::Sync + core::marker::Send
+pub fn diport::ServiceTokenReplayStore::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for &diport::DynServiceTokenReplayStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &diport::DynServiceTokenReplayStore<'dynosaur_struct>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for &mut diport::DynServiceTokenReplayStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynServiceTokenReplayStore<'dynosaur_struct>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
 pub trait diport::Signer: core::marker::Send
 pub fn diport::Signer::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::signer::SignerError>> + core::marker::Send
 pub fn diport::Signer::sign(&self, diport::signer::SignRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::signer::Signature, diport::signer::SignerError>> + core::marker::Send

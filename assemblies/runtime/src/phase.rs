@@ -1,7 +1,7 @@
 /// Production runtime assembly phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuntimePhase {
-    /// Build credential provider roots.
+    /// Preflight credential provider configuration and external key sources.
     BuildProvider,
     /// Build infrastructure bundles and shared runtime dependencies.
     BuildInfra,

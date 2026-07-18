@@ -10,6 +10,7 @@
 //!
 //! NOTE: `bins/rss` 与 `bins/server` 已成薄壳（#1309）；验签桥逻辑现集中在 `assemblies/runtime`。
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
@@ -32,7 +33,10 @@ use oidc::OidcProvider;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut};
 use runtime::auth_bridge::apply_verify_bridge;
-use runtime::provider_from_b64;
+use runtime::{
+    Hs256ServiceTokenProfile, StaticOidcKeyProfile, StaticOidcProviderConfig,
+    provider_from_static_config,
+};
 use tokio::sync::Notify;
 use tower::ServiceExt as _;
 
@@ -60,6 +64,34 @@ impl diport::Clock for FixedClock {
     fn now(&self) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(self.0 as u64)
     }
+}
+
+#[derive(Default)]
+struct TestReplayStore {
+    seen: Mutex<HashSet<[u8; 32]>>,
+}
+
+impl diport::ServiceTokenReplayStore for TestReplayStore {
+    async fn check_and_record(
+        &self,
+        key: &diport::ServiceTokenReplayKey,
+        _expires_at: SystemTime,
+        _deadline: diport::ServiceTokenReplayDeadline,
+    ) -> Result<diport::ServiceTokenReplayDisposition, diport::ServiceTokenReplayStoreError> {
+        let mut seen = self
+            .seen
+            .lock()
+            .map_err(|_| diport::ServiceTokenReplayStoreError::Unavailable)?;
+        Ok(if seen.insert(*key.digest_bytes()) {
+            diport::ServiceTokenReplayDisposition::Recorded
+        } else {
+            diport::ServiceTokenReplayDisposition::Replayed
+        })
+    }
+}
+
+fn replay_store() -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+    diport::DynServiceTokenReplayStore::new_arc(TestReplayStore::default())
 }
 
 #[derive(Clone)]
@@ -253,22 +285,20 @@ fn service_token_payload(exp: i64, sub: &str) -> String {
     )
 }
 
-// ── provider 构造：经**生产装配路径** `server::provider_from_b64`（真 RustCrypto 验签 + FixedClock）─────
-// 评审 F2：e2e 复用生产 builder（含 trusted-kind 注入），杜绝测试/生产配置漂移——若 F1 的 trusted-kind
-// 接线缺失，下方任一 JWT 验收会 401 FAIL（生产失效响亮暴露，非静默）。
+// ── provider 构造：经 static operator/test profile（真 RustCrypto 验签 + FixedClock）─────────────
 #[allow(clippy::expect_used)]
 fn es256_provider() -> OidcProvider {
     let es256_b64 = B64.encode(sec1(&sk_jwt()));
     // trust superAdmin（无 tenant 路径）+ user/device/admin（带 tenant 路径），覆盖跨租户 + 全 scoped kind。
-    provider_from_b64(
-        ISS,
-        AUD,
-        "superAdmin,user,device,admin",
-        Some(&es256_b64),
-        None,
-        None,
-        Box::new(FixedClock(NOW)),
-    )
+    provider_from_static_config(StaticOidcProviderConfig {
+        issuer: ISS,
+        audience: AUD,
+        trusted_kinds_csv: "superAdmin,user,device,admin",
+        key_profile: StaticOidcKeyProfile::Es256 {
+            public_keys_b64: &es256_b64,
+        },
+        clock: Box::new(FixedClock(NOW)),
+    })
     .expect("es256 production provider")
 }
 #[allow(clippy::expect_used)]
@@ -276,15 +306,18 @@ fn hs256_provider() -> (OidcProvider, Vec<u8>) {
     let secret = vec![9u8; 32];
     let hs_b64 = B64.encode(&secret);
     // service-token 忽略 kind，trusted-kinds 仅为满足 builder ≥1 约束。
-    let provider = provider_from_b64(
-        ISS,
-        AUD,
-        "user",
-        None,
-        Some(&hs_b64),
-        Some(HS_KID),
-        Box::new(FixedClock(NOW)),
-    )
+    let provider = provider_from_static_config(StaticOidcProviderConfig {
+        issuer: ISS,
+        audience: AUD,
+        trusted_kinds_csv: "user",
+        key_profile: StaticOidcKeyProfile::ServiceTokenHs256(Hs256ServiceTokenProfile {
+            secret_b64: &hs_b64,
+            key_id: HS_KID,
+            replay_store: replay_store(),
+            replay_timeout: Duration::from_secs(5),
+        }),
+        clock: Box::new(FixedClock(NOW)),
+    })
     .expect("hs256 production provider");
     (provider, secret)
 }
@@ -347,6 +380,16 @@ impl Pdp for YieldingErrorPdp {
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
         tokio::task::yield_now().await;
         Err(PdpError::Untrusted)
+    }
+}
+
+#[derive(Clone)]
+struct ProviderUnavailablePdp;
+
+impl Pdp for ProviderUnavailablePdp {
+    async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
+        tokio::task::yield_now().await;
+        Err(PdpError::ProviderUnavailable)
     }
 }
 
@@ -1673,6 +1716,63 @@ fn tracing_yielding_provider_error_keeps_span_and_redacts_pii() {
     assert!(logs.contains("untrusted"), "须只记闭值 reason: {logs}");
     for canary in [token, "subject-canary", "claims-canary", tenant] {
         assert!(!logs.contains(canary), "禁泄漏 PII canary {canary}: {logs}");
+    }
+}
+
+#[test]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+fn provider_outage_returns_existing_503_envelope_and_redacts_pii() {
+    let _capture_guard = tracing_capture_lock().lock().unwrap();
+    ensure_global_trace_capture();
+
+    let token = "outage-token-canary.subject-canary.claims-canary";
+    let tenant = "outage-tenant-canary";
+    let request_id = "trace-provider-unavailable";
+    let start = trace_len();
+    let response = block_on_current_thread(async {
+        jwt_router_with_pdp(Arc::new(ProviderUnavailablePdp))
+            .into_router_for_test()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::GET)
+                    .uri("/protected")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(diport::SERVICE_TOKEN_TENANT_HEADER, tenant)
+                    .header("x-request-id", request_id)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("infallible router")
+    });
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = block_on_current_thread(async {
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("503 body")
+    });
+    let body = String::from_utf8(body.to_vec()).expect("utf8 error envelope");
+    assert!(
+        body.contains("ERR_CORE_UNAVAILABLE"),
+        "existing 503 envelope: {body}"
+    );
+    assert!(body.contains(request_id), "request id correlation: {body}");
+
+    let captured = captured_since(start);
+    let logs = logs_for_request(&captured, request_id);
+    assert!(
+        logs.contains("provider_unavailable"),
+        "closed reason: {logs}"
+    );
+    assert!(
+        logs.contains("ProviderUnavailable"),
+        "operator error variant remains distinct: {logs}"
+    );
+    for canary in [token, "subject-canary", "claims-canary", tenant] {
+        assert!(
+            !logs.contains(canary),
+            "provider outage leaked {canary}: {logs}"
+        );
     }
 }
 

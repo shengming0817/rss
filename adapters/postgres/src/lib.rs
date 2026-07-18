@@ -143,7 +143,7 @@ pub use role_repo::PgRoleRepo;
 pub use saga::{PgSagaInstanceStore, PgSagaJournal};
 #[cfg(feature = "domain-settings")]
 pub use secret_repo::{PgSecretRepo, PgSecretUnitOfWork};
-pub use service_token_replay::PgServiceTokenReplayGuard;
+pub use service_token_replay::{PgServiceTokenReplayStore, PgServiceTokenReplaySweeper};
 #[cfg(feature = "domain-identity")]
 pub use session_lifecycle::PgSessionLifecycle;
 pub use session_sweeper::PgSessionSweeper;

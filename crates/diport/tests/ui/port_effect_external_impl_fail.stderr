@@ -13,12 +13,12 @@ help: the trait `diport::effect::sealed::DiPortEffect` is not implemented for `F
   = help: the following other types implement trait `diport::effect::sealed::DiPortEffect`:
             (dyn Clock + 'a)
             (dyn MetricsExporter + 'a)
-            (dyn ServiceTokenReplayGuard + 'a)
             (dyn SubscribeInitializer + 'a)
             Arc<T>
             Box<T>
             DynAckableSubscriber<'_>
             DynAcker<'_>
+            DynAuditSink<'_>
           and $N others
 note: required by a bound in `DiPortEffect`
  --> src/effect.rs
@@ -33,6 +33,6 @@ note: required by a bound in `DiPortEffect`
             diport::DynPdp<'_>
             diport::DynRateLimiter<'_>
             diport::DynSecretResolver<'_>
+            diport::DynServiceTokenReplayStore<'_>
             diport::DynSigner<'_>
-            diport::DynAcker<'_>
           and $N others

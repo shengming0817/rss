@@ -30,8 +30,8 @@ password-policy capability and cannot enter serving. The owner always finishes t
 `run_startup(&mut ServingRuntimeInputs)` result through pending-exporter
 cleanup; the current production startup body has these phases:
 
-1. Build provider bundles and transport handles:
-   - OIDC `build_provider()`
+1. Preflight OIDC/JWKS, then build provider bundles and transport handles:
+   - OIDC is prepared before forward-only migration and completed afterward with the owner-only PG replay store
    - Postgres non-Clone owner from `PgRuntimeDeps::setup_with_audit_admin_config`, then its
      cloneable `PgRuntimeHandle` capability projection
    - Vault `VaultRuntimeConfig::from_snapshot` → consuming `into_runtime`
@@ -48,6 +48,7 @@ cleanup; the current production startup body has these phases:
 5. Merge module results, with generated domain output first:
    - generated domain output
    - session sweeper
+   - service-token replay retention sweeper
    - S3 canary
    - provider runtime resources for Redis, S3, and Vault
    - outbound domain transport module result
@@ -71,6 +72,8 @@ The committed baseline records the current DI provider declarations from `assemb
 - `diport::Signer`: `vault::VaultSigner`, active, persistent
 - `diport::KeyProvider`: `vault::VaultKeyProvider`, active, persistent
 - `diport::Pdp`: `oidc::OidcProvider`, active, persistent
+- `diport::ServiceTokenReplayStore`: `postgres::PgServiceTokenReplayStore`, active, persistent;
+  consumed by OIDC, with replay readiness/resource/sweeper lifecycle outputs
 - `diport::RateLimiter`: `ratelimit::GovernorLimiter`, active, ephemeral-memory
 - `diport::LockStore`: `redis::RedisLockStore`, active, persistent
 - `diport::CasStore`: `postgres::PgCasStore`, active, persistent
@@ -96,7 +99,8 @@ allowlisting belongs to the runtime deps guard.
 
 `PgRuntimeDeps` remains local to `run_startup()` as the non-Clone lifecycle owner; it is not a second shared
 input. The owner directly wraps the same `PgRuntimeHandle` used by capability consumers and is retained
-until launch assembly consumes it. `PgRuntimeHandle` exposes only domain/infra/readiness projections.
+until launch assembly consumes it. `PgRuntimeHandle` exposes only domain/infra/readiness projections;
+the replay consume store is intentionally owner-only.
 Pool guards and the readiness sampler can only leave the owner through
 `into_runtime_parts(self, period)`.
 

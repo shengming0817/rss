@@ -90,6 +90,16 @@ durability = "persistent"
 purpose = "jwt-credential-verification"
 outputs = ["resources"]
 
+[[diportProviders]]
+port = "diport::ServiceTokenReplayStore"
+provider = "postgres::PgServiceTokenReplayStore"
+providerCrate = "postgres"
+consumer = "oidc"
+lifecycle = "active"
+durability = "persistent"
+purpose = "service-token-atomic-replay-consume"
+outputs = ["probes", "resources", "workers"]
+
 # HTTP auth 决策审计 sink：runtime 经 audit domain 注入 postgres durable flat sink（PgAuthAuditSink）。
 [[diportProviders]]
 port = "diport::AuditSink"

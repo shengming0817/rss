@@ -293,10 +293,10 @@ domains = []
             summary.listeners(),
             ["primary", "internal", "admin", "health"]
         );
-        assert_eq!(summary.provider_counts().total, 15);
-        assert_eq!(summary.provider_counts().active, 13);
+        assert_eq!(summary.provider_counts().total, 16);
+        assert_eq!(summary.provider_counts().active, 14);
         assert_eq!(summary.provider_counts().draft, 2);
-        assert_eq!(summary.provider_counts().persistent, 13);
+        assert_eq!(summary.provider_counts().persistent, 14);
         assert_eq!(summary.provider_counts().ephemeral_memory, 2);
     }
 

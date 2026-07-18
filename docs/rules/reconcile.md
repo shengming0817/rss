@@ -115,7 +115,7 @@ invariant attempt result 并释放 lease，但 due claim 不会自动 reclaim；
 3. 修正导致稳定 event id 冲突的配置/事实来源后，运行同参数的 `resume`。恢复操作清除 reason、切回
    `active` 并使 target 立即到期；不得在冲突根因未消除时反复 resume。
 
-inspect/resume 均要求 durable replay guard 验证 service token、精确 grant 授权，并在
+inspect/resume 均要求 scoped durable replay store 验证 service token、精确 grant 授权，并在
 `auth_audit_events` 写 start/finish 记录；输出不包含 payload、metadata、fingerprint 或 resource id。
 `reconcile_actions` 不保存 terminal attempt result；不得 direct publisher/broker，也不得在 `eventexec` 内裸 `append_outbox`。
 

@@ -517,20 +517,22 @@ mod tests {
     const SK1_BYTES: [u8; 32] = [0x42; 32];
     const SK2_BYTES: [u8; 32] = [0x11; 32];
 
-    struct NoopReplayGuard;
+    struct NoopReplayStore;
 
-    impl diport::ServiceTokenReplayGuard for NoopReplayGuard {
-        fn check_and_record(
+    impl diport::ServiceTokenReplayStore for NoopReplayStore {
+        async fn check_and_record(
             &self,
-            _nonce: &str,
+            _key: &diport::ServiceTokenReplayKey,
             _expires_at: std::time::SystemTime,
-        ) -> Result<(), diport::ServiceTokenReplayError> {
-            Ok(())
+            _deadline: diport::ServiceTokenReplayDeadline,
+        ) -> Result<diport::ServiceTokenReplayDisposition, diport::ServiceTokenReplayStoreError>
+        {
+            Ok(diport::ServiceTokenReplayDisposition::Recorded)
         }
     }
 
-    fn replay_guard() -> Arc<dyn diport::ServiceTokenReplayGuard> {
-        Arc::new(NoopReplayGuard)
+    fn replay_store() -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        diport::DynServiceTokenReplayStore::new_arc(NoopReplayStore)
     }
 
     /// 确定性 tracing 捕获（JWKS poison recovery 回归测试用）。仅包住本测试触发的新 callsite，避免与
@@ -933,19 +935,22 @@ mod tests {
         .expect("initial load");
         let config = VerifierConfigBuilder::new(ISS, AUD)
             .keys_jwks(src)
-            .service_token_replay_guard(replay_guard())
+            .service_token_replay_store(replay_store(), Duration::from_secs(5))
             .build()
             .expect("config");
 
         // 命中 kid=k1 → 通过完整 scheme dispatch → kid 候选 → 签名 → claim 校验。
         let tok_k1 = mint_es256_kid(&sk(&SK1_BYTES), "k1", &payload(NOW + 3600));
         assert!(
-            verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok_k1)).is_ok(),
+            verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok_k1))
+                .await
+                .is_ok(),
             "k1 token 应通过"
         );
         // 未知 kid（不在快照）→ 无候选 → 签名 key 不在受信集 → Untrusted（即便用同一把 sk1 签发）。
         let tok_unknown = mint_es256_kid(&sk(&SK1_BYTES), "not-in-jwks", &payload(NOW + 3600));
-        let r = verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok_unknown));
+        let r =
+            verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok_unknown)).await;
         assert!(
             matches!(r, Err(PdpError::Untrusted)),
             "未知 kid 应 fail-closed (Untrusted): {r:?}"
@@ -969,13 +974,13 @@ mod tests {
         assert!(src.reload(), "reload 成功");
         let config = VerifierConfigBuilder::new(ISS, AUD)
             .keys_jwks(src)
-            .service_token_replay_guard(replay_guard())
+            .service_token_replay_store(replay_store(), Duration::from_secs(5))
             .build()
             .expect("config");
 
         // 旧 k1 token（kid 已轮转出快照）→ 无候选 → fail-closed (Untrusted，spec SC-005 / 验收场景②)。
         let tok_k1 = mint_es256_kid(&sk(&SK1_BYTES), "k1", &payload(NOW + 3600));
-        let r_old = verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok_k1));
+        let r_old = verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok_k1)).await;
         assert!(
             matches!(r_old, Err(PdpError::Untrusted)),
             "旧 kid 轮转后应 fail-closed (Untrusted): {r_old:?}"
@@ -983,7 +988,9 @@ mod tests {
         // 新 k2 token → 通过。
         let tok_k2 = mint_es256_kid(&sk(&SK2_BYTES), "k2", &payload(NOW + 3600));
         assert!(
-            verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok_k2)).is_ok(),
+            verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok_k2))
+                .await
+                .is_ok(),
             "k2 token 应通过"
         );
     }
@@ -1110,7 +1117,7 @@ mod tests {
         .expect("initial load");
         let config = VerifierConfigBuilder::new(ISS, AUD)
             .keys_jwks(src)
-            .service_token_replay_guard(replay_guard())
+            .service_token_replay_store(replay_store(), Duration::from_secs(5))
             .build()
             .expect("config");
         // 无 kid 的 token（用 k1 私钥签发，但 header 不带 kid）→ JWKS 快照无 untagged → 无候选 → Untrusted。
@@ -1119,7 +1126,7 @@ mod tests {
         let signing_input = format!("{header}.{body}");
         let sig: Signature = sk(&SK1_BYTES).sign(signing_input.as_bytes());
         let tok = format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()));
-        let r = verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok));
+        let r = verify_credential(&config, &FixedClock(NOW), &RawCredential::jwt(tok)).await;
         assert!(
             matches!(r, Err(PdpError::Untrusted)),
             "JWKS 无 kid token 应 fail-closed (Untrusted): {r:?}"
@@ -1175,7 +1182,7 @@ mod tests {
         assert!(handle.is_ready());
         let _config = VerifierConfigBuilder::new(ISS, AUD)
             .keys_jwks(src)
-            .service_token_replay_guard(replay_guard())
+            .service_token_replay_store(replay_store(), Duration::from_secs(5))
             .build()
             .expect("config");
         // src 已 move 进 config，句柄仍读共享 ready（组合根据此注册 oidc_jwks_ready probe）。

@@ -688,7 +688,7 @@ pub mod test_support {
 //
 // NOTE(#1109)：本 bridge 是认证决策关键路径，httpserve 接线时须补 `tracing` span（ADR-006 §4 承诺
 // 与 #1109 同批交付）：verify ok → `authz.decision=allow` + `principal.kind`（不含 PII）；verify fail →
-// `authz.decision=deny` + 区分 `PdpError` 变体（InvalidSignature / Expired / Untrusted 告警级别不同）。
+// `authz.decision=deny` + 区分凭据拒绝与 `ProviderUnavailable` 基础设施故障。
 // 当前 slice 无生产接线，故不引 `tracing` 依赖、不在此埋点（避免空转 span）。
 
 /// 验签并 mint JWT：经注入的 [`diport::Pdp`] 校验签名 / exp / MAC，成功后受控 seal 出 [`VerifiedJwt`]
@@ -970,6 +970,10 @@ pub enum AuthnError {
     /// 令牌过期（verifier 报 [`diport::PdpError::Expired`]，经 verify→mint bridge 的 `From<PdpError>` 产生）。
     #[error("token is expired")]
     TokenExpired,
+    /// 凭据验证所依赖的安全关键 provider 暂不可用。该状态仍 fail-closed，但必须与无效凭据分离，
+    /// 以便 runtime 返回可重试的 503，而不是把基础设施故障伪装成调用方 401。
+    #[error("authentication provider is unavailable")]
+    ProviderUnavailable,
     /// 会话不存在。**本 crate 当前不可达**——由 W session store（`diport` 仓储 port）产生。
     #[error("session not found")]
     SessionNotFound,
@@ -983,9 +987,8 @@ pub enum AuthnError {
 /// 验签 port 错误 → 认证错误映射（verify→mint bridge 经 `?` 使用，#1158）。fail-closed：所有 `PdpError`
 /// 变体均映射到**拒绝**态，绝不静默成功；`PdpError` 是 `#[non_exhaustive]`，未来变体默认落 `TokenInvalid`。
 ///
-/// 三变体一一保真（#1275，spec SC-006/FR-009）：`Untrusted` 单列 [`AuthnError::TokenUntrusted`]、不与
-/// `InvalidSignature` 折叠成同一 `TokenInvalid`，使 deny 路告警可区分疑似配置错 vs 疑似攻击。三者 wire 语义不变
-/// （`TokenInvalid` / `TokenUntrusted` 同为 401 invalid_token，`TokenExpired` 亦 401），仅观测粒度提升。
+/// 四变体一一保真：三种凭据失败保持 401 `invalid_token` 语义；`ProviderUnavailable` 单列
+/// [`AuthnError::ProviderUnavailable`]，使 runtime 能返回可重试 503，且不会误记为签名攻击。
 impl From<diport::PdpError> for AuthnError {
     fn from(e: diport::PdpError) -> Self {
         match e {
@@ -994,6 +997,7 @@ impl From<diport::PdpError> for AuthnError {
             // verify 层纯认证：Untrusted（iss / key / aud 不受信 / 未知 alg / kid 无匹配）= 凭据无效 →
             // 401 invalid_token（RFC 6750 §3.1），非 403 Forbidden（后者留给 authz 层「已认证但无权」）。
             diport::PdpError::Untrusted => AuthnError::TokenUntrusted,
+            diport::PdpError::ProviderUnavailable => AuthnError::ProviderUnavailable,
             // PdpError #[non_exhaustive]：未来变体 fail-closed 落 TokenInvalid（默认拒绝，无静默成功）。
             _ => AuthnError::TokenInvalid,
         }
@@ -1684,9 +1688,8 @@ mod verify_bridge_tests {
         assert_eq!(principal.tenant(), None, "super-admin 跨租户 tenant=None");
     }
 
-    /// fail-closed：三 `PdpError` 变体均映射到**拒绝**态，never `Ok`，never seal（verify 层纯认证）。
-    /// 三路一一保真（#1275，spec SC-006/FR-009）：`Untrusted` 单列 `TokenUntrusted`（与 `TokenInvalid` 同为
-    /// 401 invalid_token wire 语义，独立变体仅供 deny 路告警分级），不再与 `InvalidSignature` 折叠。
+    /// fail-closed：四个 `PdpError` 变体均 never `Ok` / seal；三种凭据失败保持 401 taxonomy，
+    /// provider outage 则保持独立可重试语义。
     #[tokio::test]
     async fn verify_jwt_pdp_failure_maps_error_and_never_mints() {
         let raw = test_jwt(
@@ -1696,6 +1699,10 @@ mod verify_bridge_tests {
             (PdpError::InvalidSignature, AuthnError::TokenInvalid),
             (PdpError::Expired, AuthnError::TokenExpired),
             (PdpError::Untrusted, AuthnError::TokenUntrusted),
+            (
+                PdpError::ProviderUnavailable,
+                AuthnError::ProviderUnavailable,
+            ),
         ] {
             let pdp = boxed(Err(perr.clone()));
             // matches! + discriminant 守卫：既断言是 Err（绝不 mint），又锁定映射变体。
@@ -1740,14 +1747,17 @@ mod verify_bridge_tests {
         assert!(format!("{vs:?}").contains("redacted"));
     }
 
-    /// fail-closed：三 `PdpError` 变体均映射到**拒绝**态，never `Ok` / seal（与 verify_jwt 路径对齐；
-    /// 三路一一保真，`Untrusted`→`TokenUntrusted`，#1275）。
+    /// fail-closed：四个 `PdpError` 变体均 never `Ok` / seal，并与 verify_jwt 路径一一对齐。
     #[tokio::test]
     async fn verify_service_token_pdp_failure_maps_error_and_never_mints() {
         for (perr, want) in [
             (PdpError::InvalidSignature, AuthnError::TokenInvalid),
             (PdpError::Expired, AuthnError::TokenExpired),
             (PdpError::Untrusted, AuthnError::TokenUntrusted),
+            (
+                PdpError::ProviderUnavailable,
+                AuthnError::ProviderUnavailable,
+            ),
         ] {
             let pdp = boxed(Err(perr.clone()));
             let result = verify_service_token("opaque-token", service_binding(), &pdp).await;
@@ -1854,6 +1864,7 @@ mod enum_exhaustiveness {
             AuthnError::TokenUntrusted,
             AuthnError::PrincipalInvalid,
             AuthnError::TokenExpired,
+            AuthnError::ProviderUnavailable,
             AuthnError::SessionNotFound,
             AuthnError::Forbidden,
         ] {
@@ -1863,13 +1874,14 @@ mod enum_exhaustiveness {
                 | AuthnError::TokenUntrusted
                 | AuthnError::PrincipalInvalid
                 | AuthnError::TokenExpired
+                | AuthnError::ProviderUnavailable
                 | AuthnError::SessionNotFound
                 | AuthnError::Forbidden => {}
             }
         }
     }
 
-    /// deny 分级（#1275 + review F1）：四个 deny 变体 Debug 互不相同（bridge 据变体记不同 `authz.deny_reason`
+    /// deny 分级：五个 deny / unavailable 变体 Debug 互不相同（bridge 据变体记不同 `authz.deny_reason`
     /// 闭值），Display 为 const literal，且 Debug/Display 均不含任何 runtime 数据（taxonomy 不携 PII）。
     /// 重点：`PrincipalInvalid`（验签后良性失败）须与 `TokenInvalid`（签名失败）Debug 可区分，否则 bridge 无法
     /// 避免把良性失败误报成 `signature_invalid`。
@@ -1880,6 +1892,7 @@ mod enum_exhaustiveness {
             AuthnError::TokenUntrusted,
             AuthnError::PrincipalInvalid,
             AuthnError::TokenExpired,
+            AuthnError::ProviderUnavailable,
         ]
         .iter()
         .map(|e| format!("{e:?}"))
@@ -1890,12 +1903,13 @@ mod enum_exhaustiveness {
                 "TokenInvalid",
                 "TokenUntrusted",
                 "PrincipalInvalid",
-                "TokenExpired"
+                "TokenExpired",
+                "ProviderUnavailable"
             ],
             "Debug 为变体名"
         );
         let unique: std::collections::HashSet<&String> = debugs.iter().collect();
-        assert_eq!(unique.len(), debugs.len(), "四 deny 变体 Debug 须互不相同");
+        assert_eq!(unique.len(), debugs.len(), "deny 变体 Debug 须互不相同");
         assert_eq!(
             AuthnError::PrincipalInvalid.to_string(),
             "principal cannot be derived",

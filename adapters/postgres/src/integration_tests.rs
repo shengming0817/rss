@@ -745,29 +745,431 @@ async fn verify_rls_capability_ok_after_migrations() -> TestResult {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_token_replay_guard_rejects_duplicate_nonce_after_migrations() -> TestResult {
-    use diport::{ServiceTokenReplayError, ServiceTokenReplayGuard as _};
+async fn service_token_replay_store_atomically_rejects_duplicate_after_restart() -> TestResult {
+    use diport::{
+        ServiceTokenReplayDeadline, ServiceTokenReplayDisposition, ServiceTokenReplayKey,
+        ServiceTokenReplayScope, ServiceTokenReplayStore as _,
+    };
+    use std::sync::Arc;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let app = Arc::new(connect_pg_rss_app_role(&pg, &store).await?);
+    let (session_user, current_user): (String, String) =
+        sqlx::query_as("SELECT session_user, current_user")
+            .fetch_one(&app.pool)
+            .await?;
+    assert_eq!(
+        (session_user.as_str(), current_user.as_str()),
+        ("rss_app", "rss_app")
+    );
+    let first_store = crate::PgServiceTokenReplayStore::new(Arc::clone(&app));
+    let concurrent_store = crate::PgServiceTokenReplayStore::new(Arc::clone(&app));
+    let token_id = format!("nonce-{}", uuid::Uuid::new_v4().simple());
+    let key = ServiceTokenReplayKey::derive(ServiceTokenReplayScope {
+        issuer: "https://issuer.example",
+        audience: "rss-api",
+        key_id: "cell-a.svc-a",
+        token_id: &token_id,
+    })?;
+    let now_epoch: i64 = sqlx::query_scalar("SELECT extract(epoch FROM clock_timestamp())::bigint")
+        .fetch_one(&app.pool)
+        .await?;
+    let expires_at = UNIX_EPOCH + Duration::from_secs(u64::try_from(now_epoch)?.saturating_add(60));
+
+    let (first, concurrent) = tokio::join!(
+        first_store.check_and_record(
+            &key,
+            expires_at,
+            ServiceTokenReplayDeadline::from_timeout(Duration::from_secs(5))?
+        ),
+        concurrent_store.check_and_record(
+            &key,
+            expires_at,
+            ServiceTokenReplayDeadline::from_timeout(Duration::from_secs(5))?
+        )
+    );
+    assert!(
+        matches!(
+            (first?, concurrent?),
+            (
+                ServiceTokenReplayDisposition::Recorded,
+                ServiceTokenReplayDisposition::Replayed
+            ) | (
+                ServiceTokenReplayDisposition::Replayed,
+                ServiceTokenReplayDisposition::Recorded
+            )
+        ),
+        "atomic insert must produce exactly one concurrent winner"
+    );
+    drop(first_store);
+    drop(concurrent_store);
+    app.shutdown().await?;
+    let restarted_app = Arc::new(connect_pg_rss_app_role(&pg, &store).await?);
+    let restarted_store = crate::PgServiceTokenReplayStore::new(Arc::clone(&restarted_app));
+    assert_eq!(
+        restarted_store
+            .check_and_record(
+                &key,
+                expires_at,
+                ServiceTokenReplayDeadline::from_timeout(Duration::from_secs(5))?,
+            )
+            .await?,
+        ServiceTokenReplayDisposition::Replayed,
+        "same scoped service-token key must stay consumed across adapter restart"
+    );
+    let app_has_table_access: bool = sqlx::query_scalar(
+        "SELECT has_table_privilege('rss_app', 'public.service_token_replay_keys', 'SELECT') \
+             OR has_table_privilege('rss_app', 'public.service_token_replay_keys', 'INSERT') \
+             OR has_table_privilege('rss_app', 'public.service_token_replay_keys', 'UPDATE') \
+             OR has_table_privilege('rss_app', 'public.service_token_replay_keys', 'DELETE')",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(
+        !app_has_table_access,
+        "rss_app must only execute the fixed function, never access replay rows directly"
+    );
+    let app_can_consume: bool = sqlx::query_scalar(
+        "SELECT has_function_privilege( \
+             'rss_app', \
+             'public.rss_service_token_replay_check_and_record(bytea,timestamptz)', \
+             'EXECUTE')",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(
+        app_can_consume,
+        "rss_app must execute the fixed consume function"
+    );
+
+    restarted_app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0068_rejects_active_legacy_replay_rows_without_partial_cutover() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(67).run(&store.pool).await?;
+    sqlx::query(
+        "INSERT INTO service_token_replay_nonces (nonce, expires_at) \
+         VALUES ('active-legacy-fixture', clock_timestamp() + interval '1 hour')",
+    )
+    .execute(&store.pool)
+    .await?;
+
+    let verdict = sqlx::migrate!("./migrations").run(&store.pool).await;
+    assert!(
+        verdict.is_err(),
+        "active legacy evidence must fail the cutover"
+    );
+    let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(latest, 67, "failed 0068 must leave the ledger unchanged");
+    let tables: (bool, bool) = sqlx::query_as(
+        "SELECT to_regclass('public.service_token_replay_nonces') IS NOT NULL, \
+                to_regclass('public.service_token_replay_keys') IS NOT NULL",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        tables,
+        (true, false),
+        "failed cutover must roll back both old-table drop and new-table create"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::expect_used)]
+async fn migration_0068_rejects_preexisting_owner_membership_before_ownership_transfer()
+-> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(67).run(&store.pool).await?;
+    sqlx::raw_sql(
+        "CREATE ROLE rss_service_token_replay_owner NOLOGIN; \
+         GRANT rss_service_token_replay_owner TO rss_app",
+    )
+    .execute(&store.pool)
+    .await?;
+
+    let error = sqlx::migrate!("./migrations")
+        .run(&store.pool)
+        .await
+        .expect_err("owner membership must reject 0068");
+    assert!(
+        error
+            .to_string()
+            .contains("rss_service_token_replay_owner must have no role memberships")
+    );
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_token_replay_store_outage_fails_closed_without_runtime_panic() -> TestResult {
+    use diport::{
+        ServiceTokenReplayDeadline, ServiceTokenReplayKey, ServiceTokenReplayScope,
+        ServiceTokenReplayStore as _, ServiceTokenReplayStoreError,
+    };
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let store = Arc::new(store);
-    let guard = crate::PgServiceTokenReplayGuard::new(Arc::clone(&store));
-    let nonce = format!("nonce-{}", uuid::Uuid::new_v4().simple());
-    let now_epoch: i64 = sqlx::query_scalar("SELECT extract(epoch FROM clock_timestamp())::bigint")
+    let replay_store = crate::PgServiceTokenReplayStore::new(Arc::clone(&store));
+    let key = ServiceTokenReplayKey::derive(ServiceTokenReplayScope {
+        issuer: "https://issuer.example",
+        audience: "rss-api",
+        key_id: "cell-a.svc-a",
+        token_id: "outage-fixture",
+    })?;
+    store.shutdown().await?;
+
+    let verdict = replay_store
+        .check_and_record(
+            &key,
+            UNIX_EPOCH + Duration::from_secs(4_102_444_800),
+            ServiceTokenReplayDeadline::from_timeout(Duration::from_secs(5))?,
+        )
+        .await;
+    assert_eq!(
+        verdict,
+        Err(ServiceTokenReplayStoreError::Unavailable),
+        "storage outage must remain a closed error instead of fallback or panic"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_token_replay_deadline_bounds_lock_waits_and_recycles_connections() -> TestResult {
+    use diport::{
+        ServiceTokenReplayDeadline, ServiceTokenReplayDisposition, ServiceTokenReplayKey,
+        ServiceTokenReplayScope, ServiceTokenReplayStore as _, ServiceTokenReplayStoreError,
+    };
+    use std::sync::Arc;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = Arc::new(connect_pg_rss_app_role(&pg, &owner).await?);
+    let replay_store = crate::PgServiceTokenReplayStore::new(Arc::clone(&app));
+    let sweeper = crate::PgServiceTokenReplaySweeper::new(Arc::clone(&app));
+    let key = ServiceTokenReplayKey::derive(ServiceTokenReplayScope {
+        issuer: "https://issuer.example",
+        audience: "rss-api",
+        key_id: "cell-a.svc-a",
+        token_id: "deadline-lock-fixture",
+    })?;
+    let expires_at = UNIX_EPOCH + Duration::from_secs(4_102_444_800);
+
+    let mut row_blocker = owner.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO public.service_token_replay_keys (key_digest, retain_until) \
+         VALUES ($1, to_timestamp($2))",
+    )
+    .bind(key.digest_bytes().as_slice())
+    .bind(i64::try_from(
+        expires_at.duration_since(UNIX_EPOCH)?.as_secs(),
+    )?)
+    .execute(&mut *row_blocker)
+    .await?;
+    let consume = tokio::time::timeout(
+        Duration::from_secs(1),
+        replay_store.check_and_record(
+            &key,
+            expires_at,
+            ServiceTokenReplayDeadline::from_timeout(Duration::from_millis(100))?,
+        ),
+    )
+    .await;
+    assert!(
+        matches!(consume, Ok(Err(ServiceTokenReplayStoreError::Unavailable))),
+        "same-key lock wait must fail closed before the outer test oracle: {consume:?}"
+    );
+    row_blocker.rollback().await?;
+
+    assert_eq!(
+        replay_store
+            .check_and_record(
+                &key,
+                expires_at,
+                ServiceTokenReplayDeadline::from_timeout(Duration::from_secs(5))?,
+            )
+            .await?,
+        ServiceTokenReplayDisposition::Recorded,
+        "timed-out replay transaction must return a reusable connection"
+    );
+
+    let mut table_blocker = owner.pool.begin().await?;
+    sqlx::query("LOCK TABLE public.service_token_replay_keys IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *table_blocker)
+        .await?;
+    let sweep = tokio::time::timeout(
+        Duration::from_secs(1),
+        sweeper.sweep_expired(ServiceTokenReplayDeadline::from_timeout(
+            Duration::from_millis(100),
+        )?),
+    )
+    .await;
+    assert!(
+        matches!(sweep, Ok(Err(ServiceTokenReplayStoreError::Unavailable))),
+        "sweep table-lock wait must fail closed before the outer test oracle: {sweep:?}"
+    );
+    table_blocker.rollback().await?;
+    sweeper
+        .sweep_expired(ServiceTokenReplayDeadline::from_timeout(
+            Duration::from_secs(5),
+        )?)
+        .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_token_replay_deadline_bounds_pool_exhaustion() -> TestResult {
+    use diport::{
+        ServiceTokenReplayDeadline, ServiceTokenReplayDisposition, ServiceTokenReplayKey,
+        ServiceTokenReplayScope, ServiceTokenReplayStore as _, ServiceTokenReplayStoreError,
+    };
+    use std::sync::Arc;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = Arc::new(
+        connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(5)).await?,
+    );
+    let held_connection = app.pool.acquire().await?;
+    let replay_store = crate::PgServiceTokenReplayStore::new(Arc::clone(&app));
+    let key = ServiceTokenReplayKey::derive(ServiceTokenReplayScope {
+        issuer: "https://issuer.example",
+        audience: "rss-api",
+        key_id: "cell-a.svc-a",
+        token_id: "deadline-pool-fixture",
+    })?;
+    let expires_at = UNIX_EPOCH + Duration::from_secs(4_102_444_800);
+
+    let consume = tokio::time::timeout(
+        Duration::from_secs(1),
+        replay_store.check_and_record(
+            &key,
+            expires_at,
+            ServiceTokenReplayDeadline::from_timeout(Duration::from_millis(100))?,
+        ),
+    )
+    .await;
+    assert!(
+        matches!(consume, Ok(Err(ServiceTokenReplayStoreError::Unavailable))),
+        "pool exhaustion must fail closed before the outer test oracle: {consume:?}"
+    );
+    drop(held_connection);
+
+    assert_eq!(
+        replay_store
+            .check_and_record(
+                &key,
+                expires_at,
+                ServiceTokenReplayDeadline::from_timeout(Duration::from_secs(5))?,
+            )
+            .await?,
+        ServiceTokenReplayDisposition::Recorded,
+        "pool must remain reusable after a deadline while acquiring"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_token_replay_retention_is_bounded_and_off_the_authentication_path() -> TestResult {
+    use diport::ServiceTokenReplayDeadline;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let store = Arc::new(store);
+    let future_sentinel = format!("future-sentinel-{}", uuid::Uuid::new_v4().simple());
+    let safety_margin_sentinel =
+        format!("safety-margin-sentinel-{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO public.service_token_replay_keys (key_digest, retain_until) \
+         SELECT decode(md5(i::text) || md5(i::text || '-replay'), 'hex'), \
+                clock_timestamp() - interval '10 minutes' \
+         FROM generate_series(1, 1001) AS generated(i)",
+    )
+    .execute(&store.pool)
+    .await?;
+    for (seed, retain_offset_seconds) in [
+        (future_sentinel.as_str(), 60_i64),
+        (safety_margin_sentinel.as_str(), -240_i64),
+    ] {
+        sqlx::query(
+            "INSERT INTO public.service_token_replay_keys (key_digest, retain_until) \
+             VALUES (decode(md5($1) || md5($1 || '-replay'), 'hex'), \
+                     clock_timestamp() + make_interval(secs => $2))",
+        )
+        .bind(seed)
+        .bind(retain_offset_seconds)
+        .execute(&store.pool)
+        .await?;
+    }
+    let replay_store = crate::PgServiceTokenReplaySweeper::new(Arc::clone(&store));
+
+    assert_eq!(
+        replay_store
+            .sweep_expired(ServiceTokenReplayDeadline::from_timeout(
+                Duration::from_secs(5),
+            )?)
+            .await?,
+        1000
+    );
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM public.service_token_replay_keys")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        remaining, 3,
+        "one bounded sweep must leave one old row and both protected sentinels"
+    );
+    assert_eq!(
+        replay_store
+            .sweep_expired(ServiceTokenReplayDeadline::from_timeout(
+                Duration::from_secs(5),
+            )?)
+            .await?,
+        1
+    );
+    for (seed, message) in [
+        (
+            future_sentinel,
+            "a replay key whose token has not expired must be retained",
+        ),
+        (
+            safety_margin_sentinel,
+            "a replay key inside the five-minute safety margin must be retained",
+        ),
+    ] {
+        let retained: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM public.service_token_replay_keys \
+                 WHERE key_digest = decode(md5($1) || md5($1 || '-replay'), 'hex'))",
+        )
+        .bind(seed)
         .fetch_one(&store.pool)
         .await?;
-    let expires_at = UNIX_EPOCH + Duration::from_secs(u64::try_from(now_epoch)?.saturating_add(60));
-
-    guard.check_and_record(&nonce, expires_at)?;
-    assert!(
-        matches!(
-            guard.check_and_record(&nonce, expires_at),
-            Err(ServiceTokenReplayError::Replayed)
-        ),
-        "same service-token jti must be rejected across guard calls"
-    );
+        assert!(retained, "{message}");
+    }
 
     store.shutdown().await?;
     Ok(())
@@ -18461,7 +18863,32 @@ async fn bootstrap_reader_upgrade_smoke_predecessor() -> TestResult {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reader_lane_migration_command_applies_only_0067_and_is_idempotent() -> TestResult {
+async fn reader_lane_migration_command_rejects_binary_embedding_0068_without_advancing()
+-> TestResult {
+    let (fixture, store) = connect_pg().await?;
+    migrations_through(66).run(&store.pool).await?;
+    let config = isolated_database_config(fixture.params(), &fixture.params().database);
+
+    let verdict = PgRuntimeDeps::migrate_reader_lane_only(&config).await;
+
+    assert!(matches!(
+        verdict,
+        Err(crate::PgError::ReaderLaneMigrationPrecondition { .. })
+    ));
+    let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        latest, 66,
+        "0067 release-only command must reject a binary embedding 0068 before any write"
+    );
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the historical release artifact embedding exactly migrations 0001..0067"]
+async fn reader_lane_0067_release_artifact_applies_only_0067_and_is_idempotent() -> TestResult {
     let (fixture, store) = connect_pg().await?;
     migrations_through(66).run(&store.pool).await?;
     sqlx::raw_sql(

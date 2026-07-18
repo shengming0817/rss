@@ -158,6 +158,7 @@ pub assembly_schema::DiportPort::Pdp
 pub assembly_schema::DiportPort::Publisher
 pub assembly_schema::DiportPort::RateLimiter
 pub assembly_schema::DiportPort::RevocationStore
+pub assembly_schema::DiportPort::ServiceTokenReplayStore
 pub assembly_schema::DiportPort::Signer
 impl assembly_schema::DiportPort
 pub fn assembly_schema::DiportPort::as_str(self) -> &'static str

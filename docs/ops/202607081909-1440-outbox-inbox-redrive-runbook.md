@@ -37,7 +37,9 @@ horizon；RSS 明确增加两个持久化绝对 deadline，防止 receipt 过期
 必须先确认：
 
 - operator service token 可被 PDP 验证。
-- operator service token 的 `jti` 由 Postgres `service_token_replay_nonces` 持久记录；同一 token 跨 CLI 进程重放会被拒绝。
+- operator service token 的 `issuer/audience/已验证 kid/jti` 会被长度分帧并 SHA-256；Postgres
+  `service_token_replay_keys` 只持久化固定 32-byte digest。同一 scope 的 token 跨 CLI 进程重放会被拒绝，
+  replay store 不可用时认证 fail-closed。
 - 命令带 `--operator-service-token`、`--operator-tenant`、`--tenant`。
 - 环境变量 `RSS_DLQ_OPERATOR_GRANTS` 包含精确 grant：`subject|action|tenant`。
 - 仅 `replay-dead-letter` 需要 DLQ payload 解密依赖：`RSS_DLX_PAYLOAD_KEY_NAME`、`RSS_VAULT_ADDR`、`RSS_VAULT_TOKEN`、`RSS_VAULT_TRANSIT_MOUNT`。`list`、`inspect` 与 `redrive-outbox` 不依赖 payload key provider。

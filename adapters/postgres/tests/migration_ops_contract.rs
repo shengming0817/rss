@@ -4,10 +4,142 @@ const MIGRATION_README: &str = include_str!("../migrations/README.md");
 const DLX_CUTOVER: &str = include_str!("../migrations/0062_prepare_dead_letter_cutover.sql");
 const DLX_LIFECYCLE: &str = include_str!("../migrations/0063_dead_letter_lifecycle.sql");
 const LOCALONLY_READ_ROLE: &str = include_str!("../migrations/0067_localonly_read_role.sql");
+const SERVICE_TOKEN_REPLAY_MIGRATION: &str =
+    include_str!("../migrations/0068_replace_service_token_replay_store.sql");
+const SERVICE_TOKEN_REPLAY_ADAPTER: &str = include_str!("../src/service_token_replay.rs");
 const READER_PROVISIONING: &str =
     include_str!("../../../deploy/postgres-upgrade/provision-reader-role.sh");
 const READER_UPGRADE_SMOKE: &str =
     include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
+
+#[test]
+fn service_token_replay_store_is_async_fixed_shape_and_least_privilege() {
+    for forbidden in [
+        "block_in_place",
+        "Handle::block_on",
+        "service_token_replay_nonces",
+        "DELETE FROM service_token_replay",
+    ] {
+        assert!(
+            !SERVICE_TOKEN_REPLAY_ADAPTER.contains(forbidden),
+            "replay adapter contains blocking, legacy, or hot-path cleanup token: {forbidden}"
+        );
+    }
+
+    let consume_function = SERVICE_TOKEN_REPLAY_MIGRATION
+        .split_once("CREATE FUNCTION public.rss_service_token_replay_sweep_expired()")
+        .map_or(SERVICE_TOKEN_REPLAY_MIGRATION, |(consume, _)| consume);
+    for required in [
+        "active legacy service-token replay entries prevent scoped-store cutover",
+        "DROP TABLE public.service_token_replay_nonces",
+        "key_digest bytea PRIMARY KEY",
+        "pg_catalog.octet_length(key_digest) = 32",
+        "INSERT INTO public.service_token_replay_keys",
+        "ON CONFLICT (key_digest) DO NOTHING",
+        "SECURITY DEFINER",
+        "SET search_path = pg_catalog, pg_temp",
+        "REVOKE ALL ON TABLE public.service_token_replay_keys FROM PUBLIC, rss_app",
+        "GRANT EXECUTE ON FUNCTION public.rss_service_token_replay_check_and_record",
+    ] {
+        assert!(
+            SERVICE_TOKEN_REPLAY_MIGRATION.contains(required),
+            "0068 omits replay-store contract token: {required}"
+        );
+    }
+    assert!(
+        !consume_function.contains("DELETE FROM public.service_token_replay_keys"),
+        "authentication consume function must never perform retention cleanup"
+    );
+    for required in [
+        ".run(async",
+        ".server_timeout_millis()",
+        "pool.begin()",
+        "set_config('statement_timeout'",
+        "set_config('lock_timeout'",
+        ".commit()",
+    ] {
+        assert!(
+            SERVICE_TOKEN_REPLAY_ADAPTER.contains(required),
+            "replay adapter omits the single absolute deadline transaction funnel: {required}"
+        );
+    }
+    assert!(
+        !SERVICE_TOKEN_REPLAY_ADAPTER.contains(".fetch_one(&self.pool)"),
+        "replay SQL must not bypass the deadline-owned transaction"
+    );
+    for required in [
+        "LIMIT 1000",
+        "FOR UPDATE SKIP LOCKED",
+        "interval '5 minutes'",
+    ] {
+        assert!(
+            SERVICE_TOKEN_REPLAY_MIGRATION.contains(required),
+            "bounded replay retention function omits: {required}"
+        );
+    }
+}
+
+#[test]
+fn service_token_replay_cutover_runbook_is_non_rolling_and_executable() {
+    let runbook = MIGRATION_README
+        .split_once("### 0068 service-token replay store 破坏性切换")
+        .map_or(MIGRATION_README, |(_, runbook)| runbook);
+
+    for required in [
+        "零参数 `rss` bootstrap",
+        "rss-postgres-writer",
+        "rss-postgres-maintenance",
+        "rss-postgres-migrator",
+        "pg_catalog.pg_stat_activity",
+        "pg_catalog.pg_locks",
+        "service_token_replay_nonces",
+        "expires_at > pg_catalog.clock_timestamp()",
+        "SELECT max(version) FROM public._sqlx_migrations",
+        "to_regclass('public.service_token_replay_nonces') IS NULL",
+        "to_regclass('public.service_token_replay_keys') IS NOT NULL",
+        "pg_catalog.pg_get_userbyid",
+        "proc.proconfig",
+        "has_function_privilege",
+        "SET LOCAL ROLE rss_app",
+        "rss_service_token_replay_check_and_record",
+        "rss_service_token_replay_sweep_expired",
+        "service_token_replay_sweeper",
+        "readyz",
+    ] {
+        assert!(
+            runbook.contains(required),
+            "0068 cutover runbook omits executable evidence token: {required}"
+        );
+    }
+
+    let ordered_steps = [
+        "1. **停止旧世界**",
+        "2. **迁移前探针**",
+        "3. **唯一 migration runner**",
+        "4. **迁移后 catalog / ACL 探针**",
+        "5. **以 `rss_app` 实测固定函数**",
+        "6. **只启动新世界**",
+        "7. **失败恢复**",
+    ];
+    let positions: Vec<Option<usize>> = ordered_steps
+        .iter()
+        .map(|step| runbook.find(step))
+        .collect();
+    assert!(
+        positions.iter().all(Option::is_some),
+        "0068 cutover runbook must contain every ordered non-rolling step: {positions:?}"
+    );
+    assert!(
+        positions
+            .windows(2)
+            .all(|pair| matches!(pair, [Some(left), Some(right)] if left < right)),
+        "0068 cutover steps are not in executable order: {positions:?}"
+    );
+    assert!(
+        !runbook.contains("执行 migration job"),
+        "0068 must name the supported singleton bootstrap instead of a fictitious generic migration job"
+    );
+}
 
 #[test]
 fn reader_provisioning_disables_inherited_xtrace_before_secret_expansion() {

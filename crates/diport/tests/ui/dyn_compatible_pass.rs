@@ -1,20 +1,22 @@
 //! pass：dynosaur Send DI port 可 native AFIT impl + 经 `Box<DynX>` / `Arc<DynX>` 注入。
-//! 覆盖全部 12 个 async DI port（DIPORT-DYN-COMPAT-01 回归锁随新增端口同步扩展）：Signer / AuditSink / Subscriber / Publisher / RateLimiter / ObjectStore / Pdp / ManagedResource / OutboxEmitter / RevocationStore / CasStore / LockStore。
+//! 覆盖 async DI port（DIPORT-DYN-COMPAT-01 回归锁随新增端口同步扩展）。
 use consistency::{EventEntry, EventTopic, IdemKey};
 use diport::{
     AuditSink, AuditSinkError, CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest, CertScope,
     CertSerial, DynAuditSink, DynCasStore, DynLockStore, DynManagedResource, DynObjectStore,
     DynOutboxEmitter, DynPdp, DynPublisher, DynRateLimiter, DynRevocationStore, DynSigner,
-    DynSubscriber, KeyId, LockAcquireOutcome, LockRenewOutcome, LockStore, LockStoreError,
-    LockStoreKey, ManagedResource, MessageStream, ObjectKey, ObjectPayload, ObjectStore,
-    ObjectStoreError, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts, Pdp, PdpError,
-    PublishRequest, Publisher, PublisherError, RateLimitDecision, RateLimitError, RateLimitKey,
-    RateLimiter, RawCredential, RevocationStore, RevocationStoreError, ShutdownError, SignRequest,
-    Signature, Signer, SignerError, SigningPurpose, Subscriber, SubscriberError, Topic,
+    DynServiceTokenReplayStore, DynSubscriber, KeyId, LockAcquireOutcome, LockRenewOutcome,
+    LockStore, LockStoreError, LockStoreKey, ManagedResource, MessageStream, ObjectKey,
+    ObjectPayload, ObjectStore, ObjectStoreError, OutboxEmitError, OutboxEmitter,
+    OutboxEnvelopeParts, Pdp, PdpError, PublishRequest, Publisher, PublisherError,
+    RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter, RawCredential, RevocationStore,
+    RevocationStoreError, ServiceTokenReplayDeadline, ServiceTokenReplayDisposition,
+    ServiceTokenReplayKey, ServiceTokenReplayStore, ServiceTokenReplayStoreError, ShutdownError,
+    SignRequest, Signature, Signer, SignerError, SigningPurpose, Subscriber, SubscriberError, Topic,
     VerifiedClaims,
 };
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio_util::sync::CancellationToken;
 
 fn assert_send_sync<T: Send + Sync>() {}
@@ -114,6 +116,19 @@ struct OkPdp;
 impl Pdp for OkPdp {
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
         Ok(VerifiedClaims::new("sub", None, None))
+    }
+}
+
+struct OkServiceTokenReplayStore;
+
+impl ServiceTokenReplayStore for OkServiceTokenReplayStore {
+    async fn check_and_record(
+        &self,
+        _key: &ServiceTokenReplayKey,
+        _expires_at: SystemTime,
+        _deadline: ServiceTokenReplayDeadline,
+    ) -> Result<ServiceTokenReplayDisposition, ServiceTokenReplayStoreError> {
+        Ok(ServiceTokenReplayDisposition::Recorded)
     }
 }
 
@@ -229,6 +244,12 @@ fn main() {
     let _pdp_boxed: Box<DynPdp> = DynPdp::new_box(OkPdp);
     let _pdp_arced: Arc<DynPdp> = DynPdp::new_arc(OkPdp);
     assert_send_sync::<Arc<DynPdp<'static>>>();
+
+    let _replay_boxed: Box<DynServiceTokenReplayStore> =
+        DynServiceTokenReplayStore::new_box(OkServiceTokenReplayStore);
+    let _replay_arced: Arc<DynServiceTokenReplayStore> =
+        DynServiceTokenReplayStore::new_arc(OkServiceTokenReplayStore);
+    assert_send_sync::<Arc<DynServiceTokenReplayStore<'static>>>();
 
     // OutboxEmitter：async DI port（#1100 durable outbox 发射），dyn(box) wrapper 可 Box/Arc 注入。
     let _oe_boxed: Box<DynOutboxEmitter> = DynOutboxEmitter::new_box(OkOutboxEmitter);

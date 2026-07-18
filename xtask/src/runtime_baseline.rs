@@ -9846,7 +9846,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.provider.oidc",
         path: RUNTIME_LIB_PATH,
-        pattern: "build_runtime_oidc_provider(runtime_inputs.config()).context(",
+        pattern: "prepare_runtime_oidc_provider(runtime_inputs.config())",
     },
     AnchorSpec {
         id: "run.config.serving",
@@ -10645,7 +10645,7 @@ pub async fn run_oidc_jwks_export_command(
         );
         let startup = startup.replace(
             "    let config = runtime_inputs.config();",
-            "    build_runtime_oidc_provider(runtime_inputs.config());\n    assemble_authed_routers(runtime_inputs.config());\n    launch(runtime_inputs.config());\n    let config = runtime_inputs.config();",
+            "    prepare_runtime_oidc_provider(runtime_inputs.config());\n    finish(pg_owner.service_token_replay_store());\n    assemble_authed_routers(runtime_inputs.config());\n    launch(runtime_inputs.config());\n    let config = runtime_inputs.config();",
         );
         format!(
             r#"{startup}

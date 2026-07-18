@@ -807,6 +807,8 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::disallowed_methods)]
+    // reason: paused Tokio time is the test oracle; production deadlines stay behind LocalTxDeadline.
     #[tokio::test(start_paused = true)]
     async fn deadline_backoff_exhausts_without_sleeping_past_operation_budget()
     -> Result<(), consistency::LocalTxExecutionBudgetError> {

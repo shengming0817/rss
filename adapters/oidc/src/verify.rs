@@ -9,7 +9,9 @@
 //! ref: RustCrypto/elliptic-curves p256 ecdsa（`VerifyingKey::verify` 内部 SHA-256 prehash + 定长 r‖s 签名）；
 //! RustCrypto/MACs hmac（`Hmac<Sha256>` MAC）；spiffe/rust-spiffe JWT-SVID 验签链（解析→选 key→验签→校 claim）。
 
-use diport::{Clock, CredentialScheme, PdpError, RawCredential, VerifiedClaims};
+use diport::{
+    Clock, CredentialScheme, PdpError, RawCredential, ServiceTokenReplayStore as _, VerifiedClaims,
+};
 use hmac::{Hmac, Mac};
 use p256::ecdsa::Signature;
 use p256::ecdsa::signature::Verifier;
@@ -24,15 +26,17 @@ pub(crate) const LOG_TARGET: &str = "oidc";
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// `Pdp::verify` 入口：scheme dispatch → 验签 → claim 映射。纯计算（key 构造期注入），无 I/O。
-pub(crate) fn verify_credential(
+/// `Pdp::verify` 入口：scheme dispatch → 验签 → claim 映射 → durable replay consume。
+pub(crate) async fn verify_credential(
     config: &VerifierConfig,
     clock: &dyn Clock,
     raw: &RawCredential,
 ) -> Result<VerifiedClaims, PdpError> {
     match raw.scheme() {
-        CredentialScheme::Jwt => verify_path(config, clock, raw.token(), SupportedAlg::Es256, None),
-        CredentialScheme::ServiceToken => verify_service_token_path(config, clock, raw),
+        CredentialScheme::Jwt => {
+            verify_path(config, clock, raw.token(), SupportedAlg::Es256, None).await
+        }
+        CredentialScheme::ServiceToken => verify_service_token_path(config, clock, raw).await,
         _ => {
             // 未来 scheme（`CredentialScheme` #[non_exhaustive]）无验签器 → fail-closed。只记静态 reason
             // （不记 scheme 值——未来变体若携数据则 fmt 会泄漏，前向安全）。
@@ -47,7 +51,7 @@ pub(crate) fn verify_credential(
     }
 }
 
-fn verify_service_token_path(
+async fn verify_service_token_path(
     config: &VerifierConfig,
     clock: &dyn Clock,
     raw: &RawCredential,
@@ -68,10 +72,11 @@ fn verify_service_token_path(
         SupportedAlg::Hs256,
         Some(binding),
     )
+    .await
 }
 
 /// 单路径验签：解析 → 路径隔离闸 → 签名校验 → claim 校验。`expected` = 本 scheme 路径锁定的算法。
-fn verify_path(
+async fn verify_path(
     config: &VerifierConfig,
     clock: &dyn Clock,
     token: &str,
@@ -115,22 +120,46 @@ fn verify_path(
     match expected {
         SupportedAlg::Es256 => claims::validate_and_map(config, clock, &jws.payload),
         SupportedAlg::Hs256 => {
-            let (claims, nonce, expires_at) =
+            let (claims, token_id, expires_at) =
                 claims::validate_service_token_and_map(config, clock, &jws.payload)?;
-            let Some(guard) = config.service_token_replay_guard() else {
-                log_fail("missing_replay_guard", &snapshot);
+            let Some(key_id) = jws.kid.as_deref() else {
+                log_fail("missing_kid", &snapshot);
                 return Err(PdpError::Untrusted);
             };
-            guard.check_and_record(&nonce, expires_at).map_err(|e| {
-                let reason = match e {
-                    diport::ServiceTokenReplayError::Replayed => "nonce_replayed",
-                    diport::ServiceTokenReplayError::Guard => "replay_guard_error",
-                    _ => "replay_guard_error",
-                };
-                log_fail(reason, &snapshot);
-                PdpError::InvalidSignature
-            })?;
-            Ok(claims)
+            let replay_key =
+                diport::ServiceTokenReplayKey::derive(diport::ServiceTokenReplayScope {
+                    issuer: config.issuer(),
+                    audience: config.audience(),
+                    key_id,
+                    token_id: &token_id,
+                })
+                .map_err(|_| {
+                    log_fail("replay_scope_invalid", &snapshot);
+                    PdpError::InvalidSignature
+                })?;
+            let Some((store, timeout)) = config.service_token_replay_store() else {
+                log_fail("missing_replay_store", &snapshot);
+                return Err(PdpError::Untrusted);
+            };
+            let deadline =
+                diport::ServiceTokenReplayDeadline::from_timeout(timeout).map_err(|_| {
+                    log_fail("replay_store_deadline_invalid", &snapshot);
+                    PdpError::ProviderUnavailable
+                })?;
+            match store
+                .check_and_record(&replay_key, expires_at, deadline)
+                .await
+            {
+                Ok(diport::ServiceTokenReplayDisposition::Recorded) => Ok(claims),
+                Ok(diport::ServiceTokenReplayDisposition::Replayed) => {
+                    log_fail("token_replayed", &snapshot);
+                    Err(PdpError::InvalidSignature)
+                }
+                Err(diport::ServiceTokenReplayStoreError::Unavailable) => {
+                    log_fail("replay_store_unavailable", &snapshot);
+                    Err(PdpError::ProviderUnavailable)
+                }
+            }
         }
     }
 }
@@ -245,7 +274,10 @@ mod tests {
     use p256::ecdsa::signature::Signer;
     use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
 
-    use super::{VerifyOutcome, hs256_tag_matches, verify_credential, verify_es256};
+    use super::{
+        VerifyOutcome, hs256_tag_matches, verify_credential as verify_credential_async,
+        verify_es256,
+    };
     use crate::config::{StaticKeySource, VerifierConfig, VerifierConfigBuilder};
     use crate::jws::{Jws, SupportedAlg};
 
@@ -264,25 +296,59 @@ mod tests {
     const OTHER_TENANT: &str = "11111111-2222-4333-8444-555555555555";
 
     #[derive(Default)]
-    struct TestReplayGuard {
-        seen: Mutex<HashSet<String>>,
+    struct TestReplayStore {
+        seen: Mutex<HashSet<[u8; 32]>>,
     }
 
-    impl diport::ServiceTokenReplayGuard for TestReplayGuard {
-        fn check_and_record(
+    impl diport::ServiceTokenReplayStore for TestReplayStore {
+        async fn check_and_record(
             &self,
-            nonce: &str,
+            key: &diport::ServiceTokenReplayKey,
             _expires_at: SystemTime,
-        ) -> Result<(), diport::ServiceTokenReplayError> {
+            _deadline: diport::ServiceTokenReplayDeadline,
+        ) -> Result<diport::ServiceTokenReplayDisposition, diport::ServiceTokenReplayStoreError>
+        {
             let mut seen = self
                 .seen
                 .lock()
-                .map_err(|_| diport::ServiceTokenReplayError::Guard)?;
-            if !seen.insert(nonce.to_string()) {
-                return Err(diport::ServiceTokenReplayError::Replayed);
+                .map_err(|_| diport::ServiceTokenReplayStoreError::Unavailable)?;
+            if !seen.insert(*key.digest_bytes()) {
+                return Ok(diport::ServiceTokenReplayDisposition::Replayed);
             }
-            Ok(())
+            Ok(diport::ServiceTokenReplayDisposition::Recorded)
         }
+    }
+
+    fn replay_store() -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        diport::DynServiceTokenReplayStore::new_arc(TestReplayStore::default())
+    }
+
+    struct UnavailableReplayStore;
+
+    impl diport::ServiceTokenReplayStore for UnavailableReplayStore {
+        async fn check_and_record(
+            &self,
+            _key: &diport::ServiceTokenReplayKey,
+            _expires_at: SystemTime,
+            _deadline: diport::ServiceTokenReplayDeadline,
+        ) -> Result<diport::ServiceTokenReplayDisposition, diport::ServiceTokenReplayStoreError>
+        {
+            tokio::task::yield_now().await;
+            Err(diport::ServiceTokenReplayStoreError::Unavailable)
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn verify_credential(
+        config: &VerifierConfig,
+        clock: &dyn Clock,
+        raw: &RawCredential,
+    ) -> Result<diport::VerifiedClaims, PdpError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(verify_credential_async(config, clock, raw))
     }
 
     /// 确定性 tracing 捕获（PII 回归测试用）。`cargo test`（非进程隔离的 nextest）多测试共进程：先跑的、
@@ -395,7 +461,7 @@ mod tests {
         VerifierConfigBuilder::new(ISS, AUD)
             .keys(keys)
             .trust_kind("service")
-            .service_token_replay_guard(Arc::new(TestReplayGuard::default()))
+            .service_token_replay_store(replay_store(), Duration::from_secs(5))
             .build()
             .expect("valid hs256 config")
     }
@@ -820,6 +886,96 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
+    fn hs256_replay_store_outage_fails_closed_without_identifier_logs() {
+        const TOKEN_ID_MARKER: &str = "outage-jti-must-never-be-logged";
+        capture::install();
+        capture::reset();
+        let keys = StaticKeySource::builder()
+            .add_hs256_secret_with_kid(HS_KID, HS_SECRET)
+            .expect("hs256 secret")
+            .build();
+        let config = VerifierConfigBuilder::new(ISS, AUD)
+            .keys(keys)
+            .trust_kind("service")
+            .service_token_replay_store(
+                diport::DynServiceTokenReplayStore::new_arc(UnavailableReplayStore),
+                Duration::from_secs(5),
+            )
+            .build()
+            .expect("valid hs256 config");
+        let token = mint_hs256_bound(
+            HS_SECRET,
+            &payload(
+                NOW + 3600,
+                ISS,
+                AUD,
+                &format!(r#","kind":"service","jti":"{TOKEN_ID_MARKER}""#),
+            ),
+            CANON_TENANT,
+        );
+
+        let verdict = verify_credential(
+            &config,
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        );
+        assert!(matches!(verdict, Err(PdpError::ProviderUnavailable)));
+        let logs = capture::captured();
+        assert!(logs.contains("replay_store_unavailable"));
+        for forbidden in [TOKEN_ID_MARKER, ISS, AUD, HS_KID] {
+            assert!(
+                !logs.contains(forbidden),
+                "replay outage log leaked scoped identifier {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn hs256_same_jti_under_distinct_verified_kids_is_not_a_replay() {
+        const SECOND_SECRET: &[u8] = b"second-hs256-secret-for-replay-scope";
+        let replay_store = replay_store();
+        let keys = StaticKeySource::builder()
+            .add_hs256_secret_with_kid(HS_KID, HS_SECRET)
+            .expect("first hs256 key")
+            .add_hs256_secret_with_kid(HS_KID2, SECOND_SECRET)
+            .expect("second hs256 key")
+            .build();
+        let config = VerifierConfigBuilder::new(ISS, AUD)
+            .keys(keys)
+            .trust_kind("service")
+            .service_token_replay_store(replay_store, Duration::from_secs(5))
+            .build()
+            .expect("valid multi-key hs256 config");
+        let payload = payload(
+            NOW + 3600,
+            ISS,
+            AUD,
+            r#","kind":"service","jti":"shared-jti""#,
+        );
+        let first = mint_hs256_bound_with_kid(HS_SECRET, HS_KID, &payload, CANON_TENANT);
+        let second = mint_hs256_bound_with_kid(SECOND_SECRET, HS_KID2, &payload, CANON_TENANT);
+
+        let first_result = verify_credential(
+            &config,
+            &FixedClock(NOW),
+            &RawCredential::service_token(first, tenant_binding(CANON_TENANT)),
+        );
+        let second_result = verify_credential(
+            &config,
+            &FixedClock(NOW),
+            &RawCredential::service_token(second, tenant_binding(CANON_TENANT)),
+        );
+
+        assert!(first_result.is_ok(), "first scoped key must pass");
+        assert!(
+            second_result.is_ok(),
+            "same jti under a distinct verified kid is a distinct replay scope: {second_result:?}"
+        );
+    }
+
+    #[test]
     #[allow(clippy::unwrap_used)]
     fn hs256_tampered_rejected() {
         let token = mint_hs256_bound(
@@ -1160,7 +1316,7 @@ mod tests {
         let config = VerifierConfigBuilder::new(ISS, AUD)
             .keys(keys)
             .trust_kind("service")
-            .service_token_replay_guard(Arc::new(TestReplayGuard::default()))
+            .service_token_replay_store(replay_store(), Duration::from_secs(5))
             .build()
             .expect("config");
         // 用第二把 secret 签发 → 验签器遍历两把密钥，第二把命中 → Ok。

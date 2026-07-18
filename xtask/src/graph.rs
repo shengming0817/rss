@@ -1245,6 +1245,16 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "identity-auth"
 outputs = ["resources", "workers"]
+
+[[diportProviders]]
+port = "diport::ServiceTokenReplayStore"
+provider = "postgres::PgServiceTokenReplayStore"
+providerCrate = "postgres"
+consumer = "oidc"
+lifecycle = "active"
+durability = "persistent"
+purpose = "service-token-atomic-replay-consume"
+outputs = ["probes", "resources", "workers"]
 "#
         )
     }

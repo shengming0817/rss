@@ -11,14 +11,14 @@
       "path": "assemblies/runtime/assembly.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "e24e1dc3a1b110a06df0a67e4238c4624f7aaf8944b100f0631a51854f91504b"
+        "value": "beb14ed47b67ef6ebecb291ddba498a324d9b3776bb997435c96a443b488b08f"
       }
     },
     {
       "path": "assemblies/runtime/src/generated/modules_gen.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "5e1dcdd451cfddc483c6a6ca012f48bce16ead5cc4ef2111689fff37d6b4c0d5"
+        "value": "a657541fc741e93a9fb69e30b88149d9446e5c6398c978bbf6909dbddd1968b2"
       }
     },
     {
@@ -210,6 +210,21 @@
       "id": "n_f19e907a3e57f5b7e7deb34c",
       "kind": "component",
       "label": "httpserve",
+      "inAssembly": true
+    },
+    {
+      "id": "n_15e9819ce58fdec8a9a049a9",
+      "kind": "provider",
+      "label": "postgres::PgServiceTokenReplayStore (postgres)",
+      "port": "diport::ServiceTokenReplayStore",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "service-token-atomic-replay-consume"
+    },
+    {
+      "id": "n_8e107d8249b8a9501a348900",
+      "kind": "component",
+      "label": "oidc",
       "inAssembly": true
     },
     {
@@ -523,6 +538,31 @@
     {
       "from": "n_dcc76ad522f7375035bd3dbc",
       "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_8e107d8249b8a9501a348900",
+      "to": "n_15e9819ce58fdec8a9a049a9",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_15e9819ce58fdec8a9a049a9",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_15e9819ce58fdec8a9a049a9",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_15e9819ce58fdec8a9a049a9",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_15e9819ce58fdec8a9a049a9",
+      "to": "n_b07dcd04ac2a96bb91f67966",
       "kind": "contributes-output"
     },
     {

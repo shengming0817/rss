@@ -287,15 +287,15 @@ async fn assertion_pool(
 
 fn test_provider() -> oidc::OidcProvider {
     #[allow(clippy::expect_used)]
-    runtime::provider_from_b64(
-        "https://issuer.test",
-        "rss",
-        "user,admin",
-        Some(&B64_URL.encode(sec1(&sk_jwt()))),
-        Some(&B64_URL.encode([7u8; 32])),
-        Some("cell-a.svc-a"),
-        Box::new(SystemClock),
-    )
+    runtime::provider_from_static_config(runtime::StaticOidcProviderConfig {
+        issuer: "https://issuer.test",
+        audience: "rss",
+        trusted_kinds_csv: "user,admin",
+        key_profile: runtime::StaticOidcKeyProfile::Es256 {
+            public_keys_b64: &B64_URL.encode(sec1(&sk_jwt())),
+        },
+        clock: Box::new(SystemClock),
+    })
     .expect("test provider")
 }
 

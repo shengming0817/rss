@@ -193,15 +193,13 @@ SMT/等价机制。CDC deployment 使用 `pgoutput` 时要求 PostgreSQL 18+，�
 `subjectId`、`actor`、`principal`、`causation_id`、
 `aggregate_id`、`contract_id` 与业务 free-form metadata 保持 persisted-only，除非后续 reviewed 设计明确改变。
 
-## 复用层选型（claimer / nonce，topology-gated）
+## 复用层选型（claimer，topology-gated）
 
-组合根的 outbox 消费幂等 claimer + 内部 listener service-token nonce store 同样经
-`bootstrap::replaydeps::resolve(ctx, clk, topo)` 按 `Topology` 单源选型：demo/single-pod → in-memory；
-real multi-pod → Redis-backed（client 作 ManagedResource），缺 Redis 配置启动期 fail-closed。两个
-组合根（`bins/server` + `examples/ssobff`）复用同一 crate，不各自接线 in-memory 原语。`idempotency::InMemClaimer::new`
-/ `authn::InMemoryNonceStore::new` 在这两个 root 内**仅** `bootstrap::replaydeps::resolve` 的 demo 分支可达——用
-sealed resolver + `pub(crate)` 构造器从类型层封闭（Hard，编译期不可达）。bus / claimer / nonce 三 funnel 合起来确保组合根内每个 in-memory
-单 pod 原语只经 sealed resolver 可达。权威语义见 `bootstrap::replaydeps` 模块的 rustdoc。
+组合根的 outbox 消费幂等 claimer 经 `bootstrap::replaydeps::resolve(ctx, clk, topo)` 按 `Topology`
+单源选型：demo/single-pod → in-memory；real multi-pod → Redis-backed（client 作 ManagedResource），
+缺 Redis 配置启动期 fail-closed。两个组合根（`bins/server` + `examples/ssobff`）复用同一 crate，不各自
+接线 in-memory 原语。service-token replay 不属于这个 topology resolver：所有可用的 HS256 operator
+路径必须显式注入 Postgres durable store，不存在 serving、demo 或进程内 fallback。
 
 ## saga 实例资源选型（instance / journal / checkpoint / dead-letter / runtime lock，topology-gated）
 
@@ -460,7 +458,8 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
   `Vec` 即完整队列。
 - Runtime 提供 tenant-scoped operator CLI：`rss dlq list` / `inspect` / `replay-dead-letter` /
   `redrive-outbox` 与 `resolve-expired-outbox`。所有命令必须带 `--operator-service-token`、`--operator-tenant`、`--tenant`；授权由
-  service token PDP 验证（`jti` 经 Postgres 持久 replay guard 原子记录，跨 CLI 进程防重放）+
+  service token PDP 验证（`issuer/audience/已验证 kid/jti` 经长度分帧 SHA-256 成固定 digest，再由
+  Postgres async replay store 单语句原子消费；raw 标识不落库，跨 CLI 进程防重放；存储失败 fail-closed）+
   `RSS_DLQ_OPERATOR_GRANTS=subject|action|tenant` 精确 grant 共同决定。`list` 支持 `--source` / `--domain` /
   `--contract-id` / `--cursor` 精确收窄，filter 集合覆盖 `OutboxPartitionBlocked{tenant_id,domain,contract_id}`
   告警标签。审计 kind 固定为

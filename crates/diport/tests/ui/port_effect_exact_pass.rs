@@ -3,9 +3,9 @@ use diport::{
     DynDeadLetterStore, DynFencedWriter, DynKeyProvider, DynLeaderElector, DynLockStore,
     DynManagedResource, DynObjectStore, DynOutboxEmitter, DynOwnerCheckpointStore, DynPdp,
     DynPublisher, DynRateLimiter, DynRevocationStore, DynSagaInstanceStore, DynSagaJournal,
-    DynSagaTenantSource, DynSecretResolver, DynSigner, DynSubscriber, MetricsExporter,
-    LocalPrivilege, OutboxEffect, PortEffectClass, PortPrivilegeClass, ReadEffect,
-    ServiceTokenReplayGuard, SubscribeInitializer, WorkflowEffect, BusinessWriteEffect,
+    DynSagaTenantSource, DynSecretResolver, DynServiceTokenReplayStore, DynSigner, DynSubscriber,
+    LocalPrivilege, MetricsExporter, OutboxEffect, PortEffectClass, PortPrivilegeClass, ReadEffect,
+    SubscribeInitializer, WorkflowEffect, BusinessWriteEffect,
 };
 
 fn assert_classification<T, E, P>()
@@ -30,7 +30,7 @@ fn main() {
     assert_local_effect!(DynPdp<'static>, AuthEffect);
     assert_local_effect!(DynRateLimiter<'static>, AuthEffect);
     assert_local_effect!(DynSecretResolver<'static>, AuthEffect);
-    assert_local_effect!(dyn ServiceTokenReplayGuard, AuthEffect);
+    assert_local_effect!(DynServiceTokenReplayStore<'static>, AuthEffect);
     assert_local_effect!(DynSigner<'static>, AuthEffect);
 
     assert_local_effect!(DynAcker<'static>, BusinessWriteEffect);

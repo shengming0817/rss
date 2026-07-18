@@ -85,7 +85,8 @@ use crate::{
     PgConfig, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore,
     PgInboxSweeper, PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionControl,
     PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgSagaInstanceStore, PgSagaJournal,
-    PgServiceTokenReplayGuard, PgSessionSweeper, PgStore, PgStoreGuard, PgTenantReadConfig,
+    PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgSessionSweeper, PgStore,
+    PgStoreGuard, PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo, PgAuthAuditSink};
@@ -254,6 +255,17 @@ impl Clock for PgMaintenanceSystemClock {
 }
 
 impl PgRuntimeDeps {
+    /// Owner-only projection for serving service-token authentication.
+    ///
+    /// The cloneable [`PgRuntimeHandle`] deliberately has no replay writer projection, so only the
+    /// composition root holding this non-Clone owner can inject the capability into the PDP.
+    #[must_use]
+    pub fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        diport::DynServiceTokenReplayStore::new_arc(PgServiceTokenReplayStore::new(
+            self.handle.stores.writer_store_arc(),
+        ))
+    }
+
     /// Release-only SQLx migration runner for the exact 0066 → 0067 LocalOnly reader cutover.
     ///
     /// This entry does not construct writer/reader serving pools. The adapter verifies both the
@@ -586,10 +598,12 @@ impl PgRuntimeHandle {
 }
 
 impl PgMaintenanceDeps {
-    /// Durable replay guard for one-shot maintenance operator service tokens.
+    /// Durable replay store for one-shot maintenance operator service tokens.
     #[must_use]
-    pub fn service_token_replay_guard(&self) -> Arc<dyn diport::ServiceTokenReplayGuard> {
-        Arc::new(PgServiceTokenReplayGuard::new(self.store.store_arc()))
+    pub fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        diport::DynServiceTokenReplayStore::new_arc(PgServiceTokenReplayStore::new(
+            self.store.store_arc(),
+        ))
     }
 
     /// settings `ConfigValue` 存量 backfill/rewrap 执行器。
@@ -1323,6 +1337,12 @@ impl PgInfraDeps {
     #[must_use]
     pub fn session_sweeper(&self) -> PgSessionSweeper {
         self.stores.writer_store_arc().session_sweeper()
+    }
+
+    /// Bounded service-token replay retention without replay consume authority.
+    #[must_use]
+    pub fn service_token_replay_sweeper(&self) -> PgServiceTokenReplaySweeper {
+        PgServiceTokenReplaySweeper::new(self.stores.writer_store_arc())
     }
 
     /// owner checkpoint store（reconcile/saga 进度）。

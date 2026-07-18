@@ -494,7 +494,10 @@ mod tests {
     use super::*;
     use crate::config::{RuntimeConfigSnapshot, test_snapshot};
     use crate::listeners::health_listener;
-    use crate::{SystemClock, TracingAuthAuditSink, provider_from_b64};
+    use crate::{
+        StaticOidcKeyProfile, StaticOidcProviderConfig, SystemClock, TracingAuthAuditSink,
+        provider_from_static_config,
+    };
 
     use std::future::Future;
     use std::pin::Pin;
@@ -576,16 +579,17 @@ mod tests {
         use p256::ecdsa::SigningKey;
 
         let key = SigningKey::from_slice(&[7u8; 32]).expect("signing key");
+        let public_keys_b64 = B64.encode(key.verifying_key().to_encoded_point(false).as_bytes());
         Arc::new(
-            provider_from_b64(
-                "https://issuer.test",
-                "rss-test",
-                "admin,superAdmin",
-                Some(&B64.encode(key.verifying_key().to_encoded_point(false).as_bytes())),
-                Some(&B64.encode([9u8; 32])),
-                Some("cell-a.svc-a"),
-                Box::new(SystemClock),
-            )
+            provider_from_static_config(StaticOidcProviderConfig {
+                issuer: "https://issuer.test",
+                audience: "rss-test",
+                trusted_kinds_csv: "admin,superAdmin",
+                key_profile: StaticOidcKeyProfile::Es256 {
+                    public_keys_b64: &public_keys_b64,
+                },
+                clock: Box::new(SystemClock),
+            })
             .expect("provider"),
         )
     }
@@ -804,17 +808,20 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn assemble_without_primary_authorizer_fails_closed() {
-        let secret = B64.encode([7u8; 32]);
+        use p256::ecdsa::SigningKey;
+
+        let key = SigningKey::from_slice(&[7u8; 32]).expect("signing key");
+        let public_keys_b64 = B64.encode(key.verifying_key().to_encoded_point(false).as_bytes());
         let provider = Arc::new(
-            provider_from_b64(
-                "https://issuer.test",
-                "rss",
-                "user",
-                None,
-                Some(&secret),
-                Some("cell-a.svc-a"),
-                Box::new(SystemClock),
-            )
+            provider_from_static_config(StaticOidcProviderConfig {
+                issuer: "https://issuer.test",
+                audience: "rss",
+                trusted_kinds_csv: "user",
+                key_profile: StaticOidcKeyProfile::Es256 {
+                    public_keys_b64: &public_keys_b64,
+                },
+                clock: Box::new(SystemClock),
+            })
             .expect("provider"),
         );
         let mut registry = bootstrap::compose(&[]).expect("compose empty");

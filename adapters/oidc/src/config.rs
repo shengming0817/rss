@@ -12,6 +12,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use p256::ecdsa::VerifyingKey;
 
@@ -20,6 +21,9 @@ const DEFAULT_LEEWAY_SECS: u64 = 60;
 /// leeway 上限（秒）。300s（5min）是工业 skew 容忍上限——超此值等于近似关闭 exp/nbf 时间校验（极大
 /// leeway 把 exp 饱和到 `i64::MAX`、nbf 饱和到 `i64::MIN`），故构造期 fail-fast 拒（安全边界前移）。
 const MAX_LEEWAY_SECS: u64 = 300;
+/// Replay-store operation budget upper bound. Runtime callers must choose an explicit, non-zero
+/// budget; this cap prevents configuration from silently recreating an effectively unbounded call.
+const MAX_SERVICE_TOKEN_REPLAY_TIMEOUT: Duration = Duration::from_secs(60);
 /// HS256 共享密钥最小字节数。RFC 7518 §3.2：HMAC-SHA256 key 不得短于 hash 输出（256-bit = 32 bytes），
 /// 短密钥削弱 MAC 强度，故构造期 fail-fast 拒（空密钥是其子集）。`pub(crate)`：JWKS `oct` key 解析（[`crate::jwks`]）
 /// 复用同一最小强度约束（单源）。
@@ -60,9 +64,12 @@ pub enum ConfigError {
     /// 重复设置 key 源（`keys` 与 `keys_jwks` 互斥，二次调用即冲突）。互斥配置不静默覆盖，构造期 fail-fast。
     #[error("oidc key source set more than once (keys/keys_jwks are mutually exclusive)")]
     ConflictingKeySources,
-    /// service-token key present without replay guard.
-    #[error("oidc service-token replay guard is required")]
-    MissingReplayGuard,
+    /// service-token key present without a durable replay store.
+    #[error("oidc service-token replay store is required")]
+    MissingReplayStore,
+    /// replay-store timeout must be explicit, non-zero, and operationally bounded.
+    #[error("oidc service-token replay timeout must be between 1ns and 60s")]
+    ReplayTimeoutOutOfRange,
 }
 
 /// 单把验签 key + 其可选 `kid`（key id）。`kid = None` = untagged ES256 static key.
@@ -178,10 +185,11 @@ impl KeySource {
         }
     }
 
-    pub(crate) fn has_hs256(&self) -> bool {
+    fn requires_service_token_replay_store(&self) -> bool {
         match self {
             KeySource::Static(set) => set.has_hs256(),
-            // JWKS may rotate in HS256 service-token keys; require ReplayGuard at config boundary.
+            // A dynamic source may rotate from ES256-only to HS256 after construction. Requiring
+            // the store for the source lifetime makes that future state safe by construction.
             KeySource::Jwks(_) => true,
         }
     }
@@ -291,7 +299,15 @@ pub struct VerifierConfig {
     kind_allowlist: HashSet<String>,
     leeway_secs: u64,
     keys: KeySource,
-    service_token_replay_guard: Option<Arc<dyn diport::ServiceTokenReplayGuard>>,
+    service_token_replay: ServiceTokenReplayProtection,
+}
+
+enum ServiceTokenReplayProtection {
+    Disabled,
+    Scoped {
+        store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+        timeout: Duration,
+    },
 }
 
 impl VerifierConfig {
@@ -317,10 +333,15 @@ impl VerifierConfig {
     pub(crate) fn keys(&self) -> &KeySource {
         &self.keys
     }
-    pub(crate) fn service_token_replay_guard(
+    pub(crate) fn service_token_replay_store(
         &self,
-    ) -> Option<&dyn diport::ServiceTokenReplayGuard> {
-        self.service_token_replay_guard.as_deref()
+    ) -> Option<(&diport::DynServiceTokenReplayStore<'static>, Duration)> {
+        match &self.service_token_replay {
+            ServiceTokenReplayProtection::Disabled => None,
+            ServiceTokenReplayProtection::Scoped { store, timeout } => {
+                Some((store.as_ref(), *timeout))
+            }
+        }
     }
 }
 
@@ -334,7 +355,8 @@ pub struct VerifierConfigBuilder {
     kind_allowlist: HashSet<String>,
     leeway_secs: u64,
     keys: Option<KeySource>,
-    service_token_replay_guard: Option<Arc<dyn diport::ServiceTokenReplayGuard>>,
+    service_token_replay_store:
+        Option<(Arc<diport::DynServiceTokenReplayStore<'static>>, Duration)>,
     /// 是否重复设置 key 源（`keys`/`keys_jwks` 二次调用即 true）→ `build` fail-fast 拒（互斥不静默覆盖，#254 F3）。
     key_source_conflict: bool,
 }
@@ -350,7 +372,7 @@ impl VerifierConfigBuilder {
             kind_allowlist: HashSet::new(),
             leeway_secs: DEFAULT_LEEWAY_SECS,
             keys: None,
-            service_token_replay_guard: None,
+            service_token_replay_store: None,
             key_source_conflict: false,
         }
     }
@@ -411,13 +433,14 @@ impl VerifierConfigBuilder {
         self
     }
 
-    /// Inject required replay guard for service-token `jti`/nonce checks.
+    /// Inject the required durable store for scoped service-token replay checks.
     #[must_use]
-    pub fn service_token_replay_guard(
+    pub fn service_token_replay_store(
         mut self,
-        guard: Arc<dyn diport::ServiceTokenReplayGuard>,
+        store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+        timeout: Duration,
     ) -> Self {
-        self.service_token_replay_guard = Some(guard);
+        self.service_token_replay_store = Some((store, timeout));
         self
     }
 
@@ -445,9 +468,18 @@ impl VerifierConfigBuilder {
             .keys
             .filter(|k| !k.is_empty())
             .ok_or(ConfigError::NoKeys)?;
-        if keys.has_hs256() && self.service_token_replay_guard.is_none() {
-            return Err(ConfigError::MissingReplayGuard);
-        }
+        let service_token_replay = match self.service_token_replay_store {
+            Some((_store, timeout))
+                if timeout.is_zero() || timeout > MAX_SERVICE_TOKEN_REPLAY_TIMEOUT =>
+            {
+                return Err(ConfigError::ReplayTimeoutOutOfRange);
+            }
+            Some((store, timeout)) => ServiceTokenReplayProtection::Scoped { store, timeout },
+            None if keys.requires_service_token_replay_store() => {
+                return Err(ConfigError::MissingReplayStore);
+            }
+            None => ServiceTokenReplayProtection::Disabled,
+        };
         Ok(VerifierConfig {
             issuer: self.issuer,
             audience: self.audience,
@@ -456,7 +488,7 @@ impl VerifierConfigBuilder {
             kind_allowlist: self.kind_allowlist,
             leeway_secs: self.leeway_secs,
             keys,
-            service_token_replay_guard: self.service_token_replay_guard,
+            service_token_replay,
         })
     }
 }
@@ -470,16 +502,22 @@ mod tests {
 
     use super::*;
 
-    struct NoopReplayGuard;
+    struct NoopReplayStore;
 
-    impl diport::ServiceTokenReplayGuard for NoopReplayGuard {
-        fn check_and_record(
+    impl diport::ServiceTokenReplayStore for NoopReplayStore {
+        async fn check_and_record(
             &self,
-            _nonce: &str,
+            _key: &diport::ServiceTokenReplayKey,
             _expires_at: std::time::SystemTime,
-        ) -> Result<(), diport::ServiceTokenReplayError> {
-            Ok(())
+            _deadline: diport::ServiceTokenReplayDeadline,
+        ) -> Result<diport::ServiceTokenReplayDisposition, diport::ServiceTokenReplayStoreError>
+        {
+            Ok(diport::ServiceTokenReplayDisposition::Recorded)
         }
+    }
+
+    fn replay_store() -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        diport::DynServiceTokenReplayStore::new_arc(NoopReplayStore)
     }
 
     /// 合法 ES256 SEC1 点（来自固定标量 0x42；**仅测试 fixture，永非生产 key**）。
@@ -591,7 +629,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn hs256_service_token_key_requires_replay_guard() {
+    fn hs256_service_token_key_requires_replay_store() {
         let keys = StaticKeySource::builder()
             .add_hs256_secret_with_kid("svc-a", &[0x33u8; MIN_HS256_SECRET_BYTES])
             .expect("hs256 key")
@@ -600,12 +638,12 @@ mod tests {
             .keys(keys)
             .trust_kind("service")
             .build();
-        assert!(matches!(result, Err(ConfigError::MissingReplayGuard)));
+        assert!(matches!(result, Err(ConfigError::MissingReplayStore)));
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn hs256_service_token_key_with_replay_guard_builds() {
+    fn hs256_service_token_key_with_replay_store_builds() {
         let keys = StaticKeySource::builder()
             .add_hs256_secret_with_kid("svc-a", &[0x44u8; MIN_HS256_SECRET_BYTES])
             .expect("hs256 key")
@@ -613,10 +651,27 @@ mod tests {
         let config = VerifierConfigBuilder::new("https://iss", "aud")
             .keys(keys)
             .trust_kind("service")
-            .service_token_replay_guard(Arc::new(NoopReplayGuard))
+            .service_token_replay_store(replay_store(), Duration::from_secs(5))
             .build()
-            .expect("replay guard satisfies service-token config gate");
+            .expect("replay store satisfies service-token config gate");
         assert_eq!(config.issuer(), "https://iss");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn replay_store_timeout_must_be_nonzero_and_bounded() {
+        for timeout in [Duration::ZERO, Duration::from_secs(61)] {
+            let keys = StaticKeySource::builder()
+                .add_hs256_secret_with_kid("svc-a", &[0x45u8; MIN_HS256_SECRET_BYTES])
+                .expect("hs256 key")
+                .build();
+            let result = VerifierConfigBuilder::new("https://iss", "aud")
+                .keys(keys)
+                .trust_kind("service")
+                .service_token_replay_store(replay_store(), timeout)
+                .build();
+            assert!(matches!(result, Err(ConfigError::ReplayTimeoutOutOfRange)));
+        }
     }
 
     #[test]

@@ -24,6 +24,7 @@ const ACKABLE_SUBSCRIBER_PORT: &str = "diport::AckableSubscriber";
 const SIGNER_PORT: &str = "diport::Signer";
 const KEY_PROVIDER_PORT: &str = "diport::KeyProvider";
 const PDP_PORT: &str = "diport::Pdp";
+const SERVICE_TOKEN_REPLAY_STORE_PORT: &str = "diport::ServiceTokenReplayStore";
 const AUDIT_SINK_PORT: &str = "diport::AuditSink";
 const RATE_LIMITER_PORT: &str = "diport::RateLimiter";
 const LOCK_STORE_PORT: &str = "diport::LockStore";
@@ -488,6 +489,8 @@ pub enum DiportPort {
     KeyProvider,
     #[serde(rename = "diport::Pdp")]
     Pdp,
+    #[serde(rename = "diport::ServiceTokenReplayStore")]
+    ServiceTokenReplayStore,
     #[serde(rename = "diport::AuditSink")]
     AuditSink,
     #[serde(rename = "diport::RateLimiter")]
@@ -513,6 +516,7 @@ impl DiportPort {
             Self::Signer => SIGNER_PORT,
             Self::KeyProvider => KEY_PROVIDER_PORT,
             Self::Pdp => PDP_PORT,
+            Self::ServiceTokenReplayStore => SERVICE_TOKEN_REPLAY_STORE_PORT,
             Self::AuditSink => AUDIT_SINK_PORT,
             Self::RateLimiter => RATE_LIMITER_PORT,
             Self::Lock => LOCK_STORE_PORT,
@@ -714,6 +718,17 @@ outputs = ["resources", "workers"]
             let manifest = AssemblyManifest::from_toml_str(&source).expect("DLX port parses");
             assert_eq!(manifest.diport_providers[0].port, expected);
         }
+    }
+
+    #[test]
+    fn parses_service_token_replay_store_provider_port() {
+        let source = MINIMAL.replace("diport::Pdp", "diport::ServiceTokenReplayStore");
+        let manifest =
+            AssemblyManifest::from_toml_str(&source).expect("service-token replay port parses");
+        assert_eq!(
+            manifest.diport_providers[0].port,
+            DiportPort::ServiceTokenReplayStore
+        );
     }
 
     #[test]

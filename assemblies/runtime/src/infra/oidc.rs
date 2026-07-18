@@ -10,8 +10,8 @@ use oidc::OidcProvider;
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 use tokio_util::sync::CancellationToken;
 
+use crate::SystemClock;
 use crate::config::SnapshotConfig;
-use crate::{RuntimeServiceTokenReplayGuard, SystemClock};
 
 const OIDC_JWKS_PATH_ENV: &str = "RSS_OIDC_JWKS_PATH";
 const OIDC_JWKS_REFRESH_INTERVAL_ENV: &str = "RSS_OIDC_JWKS_REFRESH_INTERVAL_SECS";
@@ -52,6 +52,40 @@ impl From<oidc::JwksError> for RuntimeJwksLoadError {
 pub(crate) struct RuntimeOidcProvider {
     provider: Arc<OidcProvider>,
     jwks_readiness: JwksReadinessHandle,
+}
+
+pub(crate) struct PreparedRuntimeOidcProvider {
+    builder: oidc::VerifierConfigBuilder,
+    jwks_readiness: JwksReadinessHandle,
+    clock: Box<dyn diport::Clock>,
+}
+
+impl PreparedRuntimeOidcProvider {
+    pub(crate) fn finish(
+        self,
+        replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+        replay_timeout: Duration,
+    ) -> anyhow::Result<RuntimeOidcProvider> {
+        let provider = finish_oidc_provider(
+            self.builder
+                .service_token_replay_store(replay_store, replay_timeout),
+            self.clock,
+        )?;
+        Ok(RuntimeOidcProvider {
+            provider: Arc::new(provider),
+            jwks_readiness: self.jwks_readiness,
+        })
+    }
+}
+
+fn finish_oidc_provider(
+    builder: oidc::VerifierConfigBuilder,
+    clock: Box<dyn diport::Clock>,
+) -> anyhow::Result<OidcProvider> {
+    let config = builder
+        .build()
+        .map_err(|error| anyhow::anyhow!("invalid verifier config: {error}"))?;
+    Ok(OidcProvider::new(config, clock))
 }
 
 impl RuntimeOidcProvider {
@@ -110,10 +144,10 @@ impl bootstrap::HealthProbe for OidcJwksReadyProbe {
 ///
 /// HTTP listener 的生产 key-source 必须是本地 JWKS 文件（外部 agent / init-container 经 TLS 拉取后写入只读挂载）；
 /// 静态 ES256 env 只保留给 operator CLI / 单测路径，不再作为 serving production fallback。
-pub(crate) fn build_runtime_oidc_provider(
+pub(crate) fn prepare_runtime_oidc_provider(
     config: SnapshotConfig<'_>,
-) -> anyhow::Result<RuntimeOidcProvider> {
-    build_runtime_oidc_provider_from_values(
+) -> anyhow::Result<PreparedRuntimeOidcProvider> {
+    prepare_runtime_oidc_provider_from_values(
         config.value("RSS_OIDC_ISSUER"),
         config.value("RSS_OIDC_AUDIENCE"),
         config.value("RSS_OIDC_TRUSTED_KINDS"),
@@ -123,18 +157,23 @@ pub(crate) fn build_runtime_oidc_provider(
     )
 }
 
-fn build_runtime_oidc_provider_from_values(
+fn prepare_runtime_oidc_provider_from_values(
     issuer: Option<&str>,
     audience: Option<&str>,
     trusted_kinds: Option<&str>,
     jwks_path: Option<&str>,
     refresh_interval: Option<&str>,
     clock: Box<dyn diport::Clock>,
-) -> anyhow::Result<RuntimeOidcProvider> {
+) -> anyhow::Result<PreparedRuntimeOidcProvider> {
     let issuer =
         issuer.ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_ISSUER"))?;
     let audience =
         audience.ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_AUDIENCE"))?;
+    anyhow::ensure!(!issuer.trim().is_empty(), "oidc issuer must not be empty");
+    anyhow::ensure!(
+        !audience.trim().is_empty(),
+        "oidc audience must not be empty"
+    );
     let trusted_kinds = trusted_kinds
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_TRUSTED_KINDS"))?;
     let jwks_path = jwks_path
@@ -150,9 +189,7 @@ fn build_runtime_oidc_provider_from_values(
     .map_err(RuntimeJwksLoadError::from)?;
     let jwks_readiness = jwks.readiness_handle();
 
-    let mut builder = oidc::VerifierConfigBuilder::new(issuer, audience)
-        .keys_jwks(jwks)
-        .service_token_replay_guard(Arc::new(RuntimeServiceTokenReplayGuard::default()));
+    let mut builder = oidc::VerifierConfigBuilder::new(issuer, audience).keys_jwks(jwks);
     let mut trusted = 0usize;
     for kind in trusted_kinds
         .split(',')
@@ -167,13 +204,36 @@ fn build_runtime_oidc_provider_from_values(
             "RSS_OIDC_TRUSTED_KINDS must list ≥1 trusted principal kind (else all JWTs 401)"
         );
     }
-    let config = builder
-        .build()
-        .map_err(|e| anyhow::anyhow!("invalid verifier config: {e}"))?;
-    Ok(RuntimeOidcProvider {
-        provider: Arc::new(OidcProvider::new(config, clock)),
+    Ok(PreparedRuntimeOidcProvider {
+        builder,
         jwks_readiness,
+        clock,
     })
+}
+
+#[cfg(test)]
+fn build_runtime_oidc_provider_from_values(
+    issuer: Option<&str>,
+    audience: Option<&str>,
+    trusted_kinds: Option<&str>,
+    jwks_path: Option<&str>,
+    refresh_interval: Option<&str>,
+    replay_store: Option<Arc<diport::DynServiceTokenReplayStore<'static>>>,
+    clock: Box<dyn diport::Clock>,
+) -> anyhow::Result<RuntimeOidcProvider> {
+    let prepared = prepare_runtime_oidc_provider_from_values(
+        issuer,
+        audience,
+        trusted_kinds,
+        jwks_path,
+        refresh_interval,
+        clock,
+    )?;
+    prepared.finish(
+        replay_store
+            .ok_or_else(|| anyhow::anyhow!("oidc service-token replay store is required"))?,
+        Duration::from_secs(5),
+    )
 }
 
 fn oidc_jwks_refresh_interval_from(raw: Option<&str>) -> anyhow::Result<Duration> {
@@ -195,7 +255,7 @@ fn oidc_jwks_refresh_interval_from(raw: Option<&str>) -> anyhow::Result<Duration
     Ok(Duration::from_secs(secs))
 }
 
-/// 从 env 构造生产验签 `OidcProvider`（issuer / audience / ES256·HS256 静态 key）。
+/// 从 env 构造 operator / maintenance 验签 `OidcProvider`（issuer / audience / ES256·HS256 静态 key）。
 ///
 /// - `RSS_OIDC_ISSUER` / `RSS_OIDC_AUDIENCE`：必填。
 /// - `RSS_OIDC_TRUSTED_KINDS`：**必填**——本 IdP 可 assert 的 principal kind 逗号分隔白名单（如 `user,admin,device`）。
@@ -205,21 +265,18 @@ fn oidc_jwks_refresh_interval_from(raw: Option<&str>) -> anyhow::Result<Duration
 /// - `RSS_OIDC_HS256_SECRET_B64URL`：service-token 路径 HS256 密钥，base64url（可选）。
 /// - `RSS_OIDC_HS256_KID`：service-token 路径 key id；配置 HS256 secret 时必填。
 ///
-/// 该 operator / maintenance CLI 入口不启动 serving listener，故不属于 serving snapshot 迁移范围。
-/// 它仍从静态 env 构造 provider，再委托显式 raw-value 核心。
-pub fn build_provider() -> anyhow::Result<OidcProvider> {
-    build_provider_from_static_env(None)
-}
-
-pub(crate) fn build_provider_with_replay_guard(
-    replay_guard: Arc<dyn diport::ServiceTokenReplayGuard>,
+/// 该 operator / maintenance CLI 入口必须显式注入 durable replay store。
+pub(crate) fn build_provider_with_replay_store(
+    replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+    replay_timeout: Duration,
 ) -> anyhow::Result<OidcProvider> {
-    build_provider_from_static_env(Some(replay_guard))
+    build_provider_from_static_env(replay_store, replay_timeout)
 }
 
 /// 非 serving 的 operator / maintenance OOS 路径；不得被 listener 装配调用。
 fn build_provider_from_static_env(
-    replay_guard: Option<Arc<dyn diport::ServiceTokenReplayGuard>>,
+    replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+    replay_timeout: Duration,
 ) -> anyhow::Result<OidcProvider> {
     let issuer = std::env::var("RSS_OIDC_ISSUER").ok();
     let audience = std::env::var("RSS_OIDC_AUDIENCE").ok();
@@ -228,122 +285,183 @@ fn build_provider_from_static_env(
     let hs256 = std::env::var("RSS_OIDC_HS256_SECRET_B64URL").ok();
     let hs256_kid = std::env::var("RSS_OIDC_HS256_KID").ok();
     build_provider_from_values(
-        issuer.as_deref(),
-        audience.as_deref(),
-        trusted_kinds.as_deref(),
-        es256.as_deref(),
-        hs256.as_deref(),
-        hs256_kid.as_deref(),
-        replay_guard,
+        StaticOidcEnvValues {
+            issuer: issuer.as_deref(),
+            audience: audience.as_deref(),
+            trusted_kinds: trusted_kinds.as_deref(),
+            es256: es256.as_deref(),
+            hs256: hs256.as_deref(),
+            hs256_kid: hs256_kid.as_deref(),
+        },
+        replay_store,
+        replay_timeout,
+        Box::new(SystemClock),
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+struct StaticOidcEnvValues<'a> {
+    issuer: Option<&'a str>,
+    audience: Option<&'a str>,
+    trusted_kinds: Option<&'a str>,
+    es256: Option<&'a str>,
+    hs256: Option<&'a str>,
+    hs256_kid: Option<&'a str>,
+}
+
 fn build_provider_from_values(
-    issuer: Option<&str>,
-    audience: Option<&str>,
-    trusted_kinds: Option<&str>,
-    es256: Option<&str>,
-    hs256: Option<&str>,
-    hs256_kid: Option<&str>,
-    replay_guard: Option<Arc<dyn diport::ServiceTokenReplayGuard>>,
+    values: StaticOidcEnvValues<'_>,
+    replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+    replay_timeout: Duration,
+    clock: Box<dyn diport::Clock>,
 ) -> anyhow::Result<OidcProvider> {
-    let issuer =
-        issuer.ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_ISSUER"))?;
-    let audience =
-        audience.ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_AUDIENCE"))?;
-    let trusted_kinds = trusted_kinds
+    let issuer = values
+        .issuer
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_ISSUER"))?;
+    let audience = values
+        .audience
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_AUDIENCE"))?;
+    let trusted_kinds = values
+        .trusted_kinds
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_TRUSTED_KINDS"))?;
-    provider_from_b64_with_replay_guard(
+    let key_profile = static_key_profile_from_values(
+        values.es256,
+        values.hs256,
+        values.hs256_kid,
+        replay_store,
+        replay_timeout,
+    )?;
+    provider_from_static_config(StaticOidcProviderConfig {
         issuer,
         audience,
-        trusted_kinds,
-        es256,
-        hs256,
-        hs256_kid,
-        ProviderAuthDeps {
-            clock: Box::new(SystemClock),
-            replay_guard,
-        },
-    )
+        trusted_kinds_csv: trusted_kinds,
+        key_profile,
+        clock,
+    })
 }
 
-/// 由已读出的配置串装配生产 `OidcProvider`（纯函数，无 env 副作用——**生产装配唯一路径**，e2e 经此覆盖以杜绝
-/// 测试/生产配置漂移，评审 F2）。
+fn static_key_profile_from_values<'a>(
+    es256: Option<&'a str>,
+    hs256: Option<&'a str>,
+    hs256_kid: Option<&'a str>,
+    replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+    replay_timeout: Duration,
+) -> anyhow::Result<StaticOidcKeyProfile<'a>> {
+    let service_token = |secret_b64, key_id| Hs256ServiceTokenProfile {
+        secret_b64,
+        key_id,
+        replay_store,
+        replay_timeout,
+    };
+    match (es256, hs256, hs256_kid) {
+        (Some(public_keys_b64), None, None) => Ok(StaticOidcKeyProfile::Es256 { public_keys_b64 }),
+        (None, Some(secret_b64), Some(key_id)) => Ok(StaticOidcKeyProfile::ServiceTokenHs256(
+            service_token(secret_b64, key_id),
+        )),
+        (Some(public_keys_b64), Some(secret_b64), Some(key_id)) => {
+            Ok(StaticOidcKeyProfile::Es256AndServiceTokenHs256 {
+                public_keys_b64,
+                service_token: service_token(secret_b64, key_id),
+            })
+        }
+        (_, Some(_), None) => {
+            anyhow::bail!("missing required env var: RSS_OIDC_HS256_KID")
+        }
+        (_, None, Some(_)) => {
+            anyhow::bail!("RSS_OIDC_HS256_KID requires RSS_OIDC_HS256_SECRET_B64URL")
+        }
+        (None, None, None) => {
+            anyhow::bail!("at least one static OIDC key profile is required")
+        }
+    }
+}
+
+/// 静态 operator/test OIDC provider 的命名输入。
+///
+/// key source 必须经 [`StaticOidcKeyProfile`] 选择一个闭合 profile；serving 生产路径使用本地 JWKS
+/// [`prepare_runtime_oidc_provider`]，两条路径最终都经同一个 verifier 构建漏斗。
+pub struct StaticOidcProviderConfig<'a> {
+    pub issuer: &'a str,
+    pub audience: &'a str,
+    pub trusted_kinds_csv: &'a str,
+    pub key_profile: StaticOidcKeyProfile<'a>,
+    pub clock: Box<dyn diport::Clock>,
+}
+
+/// 静态 key source 的闭合 profile；无 key 状态无法构造。
+pub enum StaticOidcKeyProfile<'a> {
+    Es256 {
+        public_keys_b64: &'a str,
+    },
+    ServiceTokenHs256(Hs256ServiceTokenProfile<'a>),
+    Es256AndServiceTokenHs256 {
+        public_keys_b64: &'a str,
+        service_token: Hs256ServiceTokenProfile<'a>,
+    },
+}
+
+/// HS256 service-token 所需的 key 与 replay protection 原子配置。
+///
+/// replay store 和 deadline 不再是与 HS256 key 分离的可选参数，因此调用方无法表达“HS256 已启用但
+/// replay protection 缺失”的配置。
+///
+/// ```compile_fail
+/// use runtime::Hs256ServiceTokenProfile;
+///
+/// let _ = Hs256ServiceTokenProfile {
+///     secret_b64: "base64url-secret",
+///     key_id: "cell-a.svc-a",
+///     // replay_store 与 replay_timeout 是必填字段。
+/// };
+/// ```
+pub struct Hs256ServiceTokenProfile<'a> {
+    pub secret_b64: &'a str,
+    pub key_id: &'a str,
+    pub replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+    pub replay_timeout: Duration,
+}
+
+/// 由命名静态 profile 装配 operator/test `OidcProvider`，纯函数且无 env 副作用。
 ///
 /// - `trusted_kinds_csv`：逗号分隔 trusted principal kind（`.trust_kind` 白名单，OIDC-KIND-ALLOWLIST-01）；解析后
 ///   **空集 fail-fast**——无 trusted kind 的 provider 验签 JWT 恒剥离 kind → 派生 `TokenInvalid` → 全 401（F1 根因）。
-/// - `es256_csv` = 逗号分隔 base64url(SEC1 未压缩点)；`hs256_b64` = base64url HS256 密钥。两集皆空时
-///   `VerifierConfigBuilder::build` fail-fast 拒（无 key 的 provider 验签恒失败、是配置错误）。
-/// - `clock`：验签时钟（构造器位置参，rust-standards「Clock 是构造器位置参」）。生产传 [`SystemClock`]，
-///   e2e 传 `FixedClock` 经**同一生产装配路径**覆盖（评审 F2：杜绝测试/生产配置漂移）。
-pub fn provider_from_b64(
-    issuer: &str,
-    audience: &str,
-    trusted_kinds_csv: &str,
-    es256_csv: Option<&str>,
-    hs256_b64: Option<&str>,
-    hs256_kid: Option<&str>,
-    clock: Box<dyn diport::Clock>,
+/// - ES256 profile 接受逗号分隔 base64url(SEC1 未压缩点)；HS256 profile 将 secret/kid/replay
+///   store/deadline 绑定为一个值。
+pub fn provider_from_static_config(
+    config: StaticOidcProviderConfig<'_>,
 ) -> anyhow::Result<OidcProvider> {
-    provider_from_b64_with_replay_guard(
+    let StaticOidcProviderConfig {
         issuer,
         audience,
         trusted_kinds_csv,
-        es256_csv,
-        hs256_b64,
-        hs256_kid,
-        ProviderAuthDeps {
-            clock,
-            replay_guard: None,
-        },
-    )
-}
-
-struct ProviderAuthDeps {
-    clock: Box<dyn diport::Clock>,
-    replay_guard: Option<Arc<dyn diport::ServiceTokenReplayGuard>>,
-}
-
-fn provider_from_b64_with_replay_guard(
-    issuer: &str,
-    audience: &str,
-    trusted_kinds_csv: &str,
-    es256_csv: Option<&str>,
-    hs256_b64: Option<&str>,
-    hs256_kid: Option<&str>,
-    deps: ProviderAuthDeps,
-) -> anyhow::Result<OidcProvider> {
+        key_profile,
+        clock,
+    } = config;
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let mut keys = oidc::StaticKeySource::builder();
-    if let Some(es) = es256_csv {
-        for part in es.split(',').filter(|s| !s.is_empty()) {
-            let sec1 = b64
-                .decode(part)
-                .context("RSS_OIDC_ES256_SEC1_B64URL not valid base64url")?;
-            keys = keys
-                .add_es256_sec1(&sec1)
-                .map_err(|e| anyhow::anyhow!("invalid ES256 key: {e}"))?;
+    let replay = match key_profile {
+        StaticOidcKeyProfile::Es256 { public_keys_b64 } => {
+            keys = add_es256_keys(keys, &b64, public_keys_b64)?;
+            None
         }
-    }
-    if let Some(hs) = hs256_b64 {
-        let kid = hs256_kid
-            .filter(|kid| !kid.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_HS256_KID"))?;
-        let secret = b64
-            .decode(hs)
-            .context("RSS_OIDC_HS256_SECRET_B64URL not valid base64url")?;
-        keys = keys
-            .add_hs256_secret_with_kid(kid, &secret)
-            .map_err(|e| anyhow::anyhow!("weak HS256 secret: {e}"))?;
-    }
+        StaticOidcKeyProfile::ServiceTokenHs256(service_token) => {
+            let (next, replay) = add_service_token_key(keys, &b64, service_token)?;
+            keys = next;
+            Some(replay)
+        }
+        StaticOidcKeyProfile::Es256AndServiceTokenHs256 {
+            public_keys_b64,
+            service_token,
+        } => {
+            keys = add_es256_keys(keys, &b64, public_keys_b64)?;
+            let (next, replay) = add_service_token_key(keys, &b64, service_token)?;
+            keys = next;
+            Some(replay)
+        }
+    };
 
     let mut builder = oidc::VerifierConfigBuilder::new(issuer, audience).keys(keys.build());
-    if hs256_b64.is_some() {
-        builder = builder.service_token_replay_guard(
-            deps.replay_guard
-                .unwrap_or_else(|| Arc::new(RuntimeServiceTokenReplayGuard::default())),
-        );
+    if let Some((replay_store, replay_timeout)) = replay {
+        builder = builder.service_token_replay_store(replay_store, replay_timeout);
     }
     let mut trusted = 0usize;
     for kind in trusted_kinds_csv
@@ -355,15 +473,54 @@ fn provider_from_b64_with_replay_guard(
         trusted += 1;
     }
     if trusted == 0 {
-        // F1 根因 fail-fast：无 trusted kind ⇒ JWT 的 kind 被剥离 ⇒ Principal 派生 TokenInvalid ⇒ 全 401。
         anyhow::bail!(
             "RSS_OIDC_TRUSTED_KINDS must list ≥1 trusted principal kind (else all JWTs 401)"
         );
     }
-    let config = builder
-        .build()
-        .map_err(|e| anyhow::anyhow!("invalid verifier config: {e}"))?;
-    Ok(OidcProvider::new(config, deps.clock))
+    finish_oidc_provider(builder, clock)
+}
+
+fn add_es256_keys(
+    mut keys: oidc::StaticKeySourceBuilder,
+    b64: &base64::engine::general_purpose::GeneralPurpose,
+    public_keys_b64: &str,
+) -> anyhow::Result<oidc::StaticKeySourceBuilder> {
+    for part in public_keys_b64.split(',').filter(|part| !part.is_empty()) {
+        let sec1 = b64
+            .decode(part)
+            .context("RSS_OIDC_ES256_SEC1_B64URL not valid base64url")?;
+        keys = keys
+            .add_es256_sec1(&sec1)
+            .map_err(|error| anyhow::anyhow!("invalid ES256 key: {error}"))?;
+    }
+    Ok(keys)
+}
+
+fn add_service_token_key(
+    mut keys: oidc::StaticKeySourceBuilder,
+    b64: &base64::engine::general_purpose::GeneralPurpose,
+    profile: Hs256ServiceTokenProfile<'_>,
+) -> anyhow::Result<(
+    oidc::StaticKeySourceBuilder,
+    (Arc<diport::DynServiceTokenReplayStore<'static>>, Duration),
+)> {
+    let Hs256ServiceTokenProfile {
+        secret_b64,
+        key_id,
+        replay_store,
+        replay_timeout,
+    } = profile;
+    anyhow::ensure!(
+        !key_id.trim().is_empty(),
+        "missing required env var: RSS_OIDC_HS256_KID"
+    );
+    let secret = b64
+        .decode(secret_b64)
+        .context("RSS_OIDC_HS256_SECRET_B64URL not valid base64url")?;
+    keys = keys
+        .add_hs256_secret_with_kid(key_id, &secret)
+        .map_err(|error| anyhow::anyhow!("weak HS256 secret: {error}"))?;
+    Ok((keys, (replay_store, replay_timeout)))
 }
 
 #[cfg(test)]
@@ -375,6 +532,24 @@ mod tests {
 
     fn clk() -> Box<dyn diport::Clock> {
         Box::new(crate::SystemClock)
+    }
+
+    struct TestReplayStore;
+
+    impl diport::ServiceTokenReplayStore for TestReplayStore {
+        async fn check_and_record(
+            &self,
+            _key: &diport::ServiceTokenReplayKey,
+            _expires_at: std::time::SystemTime,
+            _deadline: diport::ServiceTokenReplayDeadline,
+        ) -> Result<diport::ServiceTokenReplayDisposition, diport::ServiceTokenReplayStoreError>
+        {
+            Ok(diport::ServiceTokenReplayDisposition::Recorded)
+        }
+    }
+
+    fn replay_store() -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        diport::DynServiceTokenReplayStore::new_arc(TestReplayStore)
     }
 
     static TEMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -446,8 +621,9 @@ mod tests {
         ])
         .expect("capture serving OIDC generation");
 
-        let runtime = build_runtime_oidc_provider(snapshot.view())
-            .expect("snapshot mapping builds the serving provider");
+        let runtime = prepare_runtime_oidc_provider(snapshot.view())
+            .and_then(|prepared| prepared.finish(replay_store(), Duration::from_secs(5)))
+            .expect("serving HS256 uses the explicitly wired durable replay store");
         assert!(runtime.jwks_readiness().is_ready());
         runtime
             .managed_resource()
@@ -462,6 +638,7 @@ mod tests {
             Some("https://issuer.test"),
             Some("rss-test"),
             Some("service"),
+            None,
             None,
             None,
             clk(),
@@ -482,6 +659,7 @@ mod tests {
             Some("rss-test"),
             Some("service,user,admin"),
             Some(&missing),
+            None,
             None,
             clk(),
         );
@@ -520,6 +698,7 @@ mod tests {
                 Some("service"),
                 Some(&path),
                 None,
+                None,
                 clk(),
             )
             .err()
@@ -540,6 +719,7 @@ mod tests {
             Some("rss-test"),
             Some("service"),
             Some(&missing),
+            None,
             None,
             clk(),
         )
@@ -586,6 +766,7 @@ mod tests {
             Some("service,user,admin"),
             Some(&jwks_path),
             None,
+            Some(replay_store()),
             clk(),
         )
         .expect("valid runtime OIDC provider");
@@ -616,6 +797,7 @@ mod tests {
             Some("service,user,admin"),
             Some(&jwks_path_display),
             Some("5"),
+            Some(replay_store()),
             clk(),
         )
         .expect("valid runtime OIDC provider");
@@ -668,35 +850,39 @@ mod tests {
     }
 
     #[test]
-    fn provider_from_b64_empty_keys_fails_fast() {
-        // 无任何 key → VerifierConfigBuilder::build fail-fast（无 key 的 provider 是配置错误）。
-        assert!(
-            provider_from_b64(
-                "https://issuer.test",
-                "rss",
-                "user",
-                None,
-                None,
-                None,
-                clk()
-            )
-            .is_err()
+    fn static_env_values_without_keys_fail_fast() {
+        let result = build_provider_from_values(
+            StaticOidcEnvValues {
+                issuer: Some("https://issuer.test"),
+                audience: Some("rss"),
+                trusted_kinds: Some("user"),
+                es256: None,
+                hs256: None,
+                hs256_kid: None,
+            },
+            replay_store(),
+            Duration::from_secs(5),
+            clk(),
         );
+        assert!(matches!(&result, Err(error) if error.to_string().contains("key profile")));
     }
 
     #[test]
-    fn provider_from_b64_empty_trusted_kinds_fails_fast() {
+    fn static_profile_empty_trusted_kinds_fails_fast() {
         // 评审 F1：无 trusted kind ⇒ JWT kind 被剥离 ⇒ 派生 TokenInvalid ⇒ 全 401，构造期 fail-fast 拒。
         let secret = B64.encode([7u8; 32]);
-        let r = provider_from_b64(
-            "https://issuer.test",
-            "rss",
-            "  ,  ",
-            None,
-            Some(&secret),
-            Some("cell-a.svc-a"),
-            clk(),
-        );
+        let r = provider_from_static_config(StaticOidcProviderConfig {
+            issuer: "https://issuer.test",
+            audience: "rss",
+            trusted_kinds_csv: "  ,  ",
+            key_profile: StaticOidcKeyProfile::ServiceTokenHs256(Hs256ServiceTokenProfile {
+                secret_b64: &secret,
+                key_id: "cell-a.svc-a",
+                replay_store: replay_store(),
+                replay_timeout: Duration::from_secs(5),
+            }),
+            clock: clk(),
+        });
         assert!(matches!(&r, Err(e) if e.to_string().contains("RSS_OIDC_TRUSTED_KINDS")));
     }
 
@@ -704,13 +890,17 @@ mod tests {
     fn build_provider_from_values_missing_trusted_kinds_fails_fast() {
         // issuer + audience 在、trusted kinds 缺 → fail-fast（F1 生产失效根因守）。
         let result = build_provider_from_values(
-            Some("https://issuer.test"),
-            Some("rss"),
-            None,
-            None,
-            None,
-            None,
-            None,
+            StaticOidcEnvValues {
+                issuer: Some("https://issuer.test"),
+                audience: Some("rss"),
+                trusted_kinds: None,
+                es256: None,
+                hs256: None,
+                hs256_kid: None,
+            },
+            replay_store(),
+            Duration::from_secs(5),
+            clk(),
         );
         assert!(matches!(&result, Err(e) if e.to_string().contains("RSS_OIDC_TRUSTED_KINDS")));
     }
@@ -719,7 +909,19 @@ mod tests {
     fn build_provider_from_values_missing_issuer_fails_fast() {
         // 显式 raw values 缺 RSS_OIDC_ISSUER → fail-fast（错误含变量名，不含值）。
         // OidcProvider 无 Debug（不能 expect_err），用 matches! 既断言 Err 又锁错误文案。
-        let result = build_provider_from_values(None, None, None, None, None, None, None);
+        let result = build_provider_from_values(
+            StaticOidcEnvValues {
+                issuer: None,
+                audience: None,
+                trusted_kinds: None,
+                es256: None,
+                hs256: None,
+                hs256_kid: None,
+            },
+            replay_store(),
+            Duration::from_secs(5),
+            clk(),
+        );
         assert!(matches!(&result, Err(e) if e.to_string().contains("RSS_OIDC_ISSUER")));
     }
 
@@ -727,13 +929,17 @@ mod tests {
     fn build_provider_from_values_missing_audience_fails_fast() {
         // issuer 存在、audience 缺失 → fail-fast 命中 audience 那行（独立于 issuer 缺失路径）。
         let result = build_provider_from_values(
-            Some("https://issuer.test"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            StaticOidcEnvValues {
+                issuer: Some("https://issuer.test"),
+                audience: None,
+                trusted_kinds: None,
+                es256: None,
+                hs256: None,
+                hs256_kid: None,
+            },
+            replay_store(),
+            Duration::from_secs(5),
+            clk(),
         );
         assert!(matches!(&result, Err(e) if e.to_string().contains("RSS_OIDC_AUDIENCE")));
     }
@@ -743,49 +949,107 @@ mod tests {
     fn build_provider_from_values_happy_hs256() {
         let secret = B64.encode([7u8; 32]);
         build_provider_from_values(
-            Some("https://issuer.test"),
-            Some("rss"),
-            Some("user,admin"),
-            None,
-            Some(&secret),
-            Some("cell-a.svc-a"),
-            None,
+            StaticOidcEnvValues {
+                issuer: Some("https://issuer.test"),
+                audience: Some("rss"),
+                trusted_kinds: Some("user,admin"),
+                es256: None,
+                hs256: Some(&secret),
+                hs256_kid: Some("cell-a.svc-a"),
+            },
+            replay_store(),
+            Duration::from_secs(5),
+            clk(),
         )
         .expect("issuer + aud + trusted kinds + hs256 key ⇒ 构造成功");
     }
 
     #[test]
-    fn provider_from_b64_bad_base64_fails_fast() {
-        // ES256 串非 base64url → fail-fast（误配在 setup 期暴露，非运行时静默）。
-        let bad = provider_from_b64(
-            "https://issuer.test",
-            "rss",
-            "user",
-            Some("!!not-b64!!"),
-            None,
-            None,
-            clk(),
+    #[allow(clippy::expect_used)]
+    fn build_provider_from_values_preserves_combined_static_profile() {
+        use p256::ecdsa::SigningKey;
+
+        let signing_key = SigningKey::from_slice(&[8u8; 32]).expect("signing key");
+        let public_keys_b64 = B64.encode(
+            signing_key
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes(),
         );
+        let secret = B64.encode([7u8; 32]);
+        build_provider_from_values(
+            StaticOidcEnvValues {
+                issuer: Some("https://issuer.test"),
+                audience: Some("rss"),
+                trusted_kinds: Some("user,admin"),
+                es256: Some(&public_keys_b64),
+                hs256: Some(&secret),
+                hs256_kid: Some("cell-a.svc-a"),
+            },
+            replay_store(),
+            Duration::from_secs(5),
+            clk(),
+        )
+        .expect("combined ES256 JWT + HS256 service-token profile");
+    }
+
+    #[test]
+    fn static_es256_profile_bad_base64_fails_fast() {
+        // ES256 串非 base64url → fail-fast（误配在 setup 期暴露，非运行时静默）。
+        let bad = provider_from_static_config(StaticOidcProviderConfig {
+            issuer: "https://issuer.test",
+            audience: "rss",
+            trusted_kinds_csv: "user",
+            key_profile: StaticOidcKeyProfile::Es256 {
+                public_keys_b64: "!!not-b64!!",
+            },
+            clock: clk(),
+        });
         assert!(bad.is_err());
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn provider_from_b64_with_hs256_ok() {
+    fn static_service_token_profile_with_hs256_ok() {
         let secret = B64.encode([7u8; 32]);
-        let p = provider_from_b64(
-            "https://issuer.test",
-            "rss",
-            "user",
-            None,
-            Some(&secret),
-            Some("cell-a.svc-a"),
-            clk(),
-        );
+        let p = provider_from_static_config(StaticOidcProviderConfig {
+            issuer: "https://issuer.test",
+            audience: "rss",
+            trusted_kinds_csv: "user",
+            key_profile: StaticOidcKeyProfile::ServiceTokenHs256(Hs256ServiceTokenProfile {
+                secret_b64: &secret,
+                key_id: "cell-a.svc-a",
+                replay_store: replay_store(),
+                replay_timeout: Duration::from_secs(5),
+            }),
+            clock: clk(),
+        });
         assert!(
             p.is_ok(),
             "有效 HS256 key + issuer/aud + trusted kind ⇒ 构造成功"
         );
         let _ = p.expect("ok");
+    }
+
+    #[test]
+    fn static_env_values_hs256_without_kid_fail_fast() {
+        let secret = B64.encode([7u8; 32]);
+        let result = build_provider_from_values(
+            StaticOidcEnvValues {
+                issuer: Some("https://issuer.test"),
+                audience: Some("rss"),
+                trusted_kinds: Some("user"),
+                es256: None,
+                hs256: Some(&secret),
+                hs256_kid: None,
+            },
+            replay_store(),
+            Duration::from_secs(5),
+            clk(),
+        );
+        assert!(
+            matches!(&result, Err(error) if error.to_string().contains("RSS_OIDC_HS256_KID")),
+            "HS256 construction must require a key id"
+        );
     }
 }
