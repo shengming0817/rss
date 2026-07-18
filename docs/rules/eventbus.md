@@ -273,18 +273,24 @@ broker `Requeue`，不写 app DLX、不提交 inbox `done`、不 `Ack`；`commit
 `Requeue`；只有永久 `Reject` 可写 app DLX、提交 inbox `done` 后 broker `Ack`。
 
 durable runtime 对 generated subscription fail closed：每条订阅在 `contract.toml` 声明 identity
-（contract/topic/consumer/group）和闭枚举 `execution = "adapter-native" | "domain-effect"`，再由 codegen 派生为
+（contract/topic/consumer/group）、闭枚举 `execution = "adapter-native" | "domain-effect"` 与逐订阅
+`externalEffectPolicy = "transactional-only" | "idempotency-key" | "reconcile" | "compensated"`，再由 codegen 派生为
 `SubscriptionSpec`，并从 `(contract id, version, consumer)` 同源生成闭枚举 `SubscriptionDispatchKey`。
 runtime 必须对该 dispatch key 穷尽匹配并只绑定 `ConsumerTx` plan；新增订阅而未接线时编译失败，guard
 只守穷尽 match 的结构，不维护订阅实例清单。`adapter-native` 禁止声明 `effect`；`domain-effect`
 必须声明当前唯一闭值 `effect = "settings-config-version-refresh"`，仅用于必须捕获域内 singleton 的
 settings cache refresh，并由 generated topology 的穷举 resolver 限制在 `settings.config-version-changed`。
-新增订阅、execution/effect 缺失或配对非法、identity/execution/effect 与实际 handler 错配时，解析、测试或启动失败；
+当前完整语义矩阵只接受 `adapter-native + 无 effect + transactional-only`，或
+`domain-effect + settings-config-version-refresh + reconcile`：四个 audit handler 的业务写与 Inbox Done
+同属 ConsumerTx，settings refresh 则从持久化权威状态重建进程内 cache，允许重复并收敛。其它 policy 已冻结为
+可扩展闭值，但必须与新增 effect/capability evidence 同步扩展矩阵后才可激活；不得用 `idempotency-key`
+冒充未实现的稳定 key，也不得用 `compensated` 冒充未落地的补偿闭环。
+新增订阅、execution/effect/policy 缺失或配对非法、声明与 generated marker 漂移时，解析或测试失败；
 不得增加 wildcard、默认分支、通用 handler registry、平行映射清单或 fallback。payload decode / wire DTO 归属域 crate（域可依赖
 `generated`），postgres adapter 只保留 PG transaction / TxCapability 职责，避免 adapter 维护第二套 event schema。
 
 active L2 manifest 的 topic、delivery、consistency level、outbox role/atomicity/emits 以及 subscription
-集合、consumer/group、topology、execution/effect 都是 wire 语义，受 `cargo xtask contract breaking`
+集合、consumer/group、topology、execution/effect/externalEffectPolicy 都是 wire 语义，受 `cargo xtask contract breaking`
 跨版本门保护。`emits` 与 subscription 集合的排序不是语义，但元素任何增、删、替换都是
 breaking；active 默认 deny（跨 LocalOnly 边界的 consistency review rule 固定 warn，但须精确
 `Contract-Review-Ack` trailer）、deprecated warn、draft 跳过。

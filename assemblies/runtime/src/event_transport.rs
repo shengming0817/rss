@@ -48,8 +48,8 @@ use eventexec::{
     spawn_consumer_ackable_tx_subscriber, spawn_relay, sweeper_loop,
 };
 use generated::event::{
-    EventSpec, SubscriberReadiness, SubscriptionDispatchKey, SubscriptionEffect,
-    SubscriptionExecution, SubscriptionSpec,
+    EventSpec, ExternalEffectPolicy, SubscriberReadiness, SubscriptionDispatchKey,
+    SubscriptionEffect, SubscriptionExecution, SubscriptionSpec,
 };
 use postgres::{
     AuditConsumerTxEffect as _, DlxPayloadProtector, PgDlxLifecycleRepository,
@@ -1827,15 +1827,24 @@ fn adapter_native_plan(
     execution: SubscriberExecution,
     plan: ConsumerTxPlan,
 ) -> anyhow::Result<ConsumerTxPlan> {
-    match (spec.execution(), spec.effect(), execution) {
-        (SubscriptionExecution::AdapterNative, None, SubscriberExecution::AdapterNative) => {
-            Ok(plan)
-        }
+    match (
+        spec.execution(),
+        spec.effect(),
+        spec.external_effect_policy(),
+        execution,
+    ) {
+        (
+            SubscriptionExecution::AdapterNative,
+            None,
+            ExternalEffectPolicy::TransactionalOnly,
+            SubscriberExecution::AdapterNative,
+        ) => Ok(plan),
         _ => anyhow::bail!(
-            "adapter-native subscription dispatch or runtime execution mismatch: dispatch={:?} consumer={} group={}",
+            "adapter-native subscription dispatch or runtime execution mismatch: dispatch={:?} consumer={} group={} policy={:?}",
             spec.dispatch(),
             spec.consumer(),
-            spec.group()
+            spec.group(),
+            spec.external_effect_policy()
         ),
     }
 }
@@ -1844,17 +1853,24 @@ fn settings_config_refresh_plan(
     spec: SubscriptionSpec,
     execution: SubscriberExecution,
 ) -> anyhow::Result<ConsumerTxPlan> {
-    match (spec.execution(), spec.effect(), execution) {
+    match (
+        spec.execution(),
+        spec.effect(),
+        spec.external_effect_policy(),
+        execution,
+    ) {
         (
             SubscriptionExecution::DomainEffect,
             Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+            ExternalEffectPolicy::Reconcile,
             SubscriberExecution::DomainEffect(effect),
         ) => Ok(ConsumerTxPlan::SettingsConfigVersionChanged(effect)),
         _ => anyhow::bail!(
-            "settings config-version refresh subscription dispatch or runtime execution mismatch: dispatch={:?} consumer={} group={}",
+            "settings config-version refresh subscription dispatch or runtime execution mismatch: dispatch={:?} consumer={} group={} policy={:?}",
             spec.dispatch(),
             spec.consumer(),
-            spec.group()
+            spec.group(),
+            spec.external_effect_policy()
         ),
     }
 }

@@ -26,6 +26,7 @@ consumer = "settings"
 group = "settings.config-version-changed"
 execution = "domain-effect"
 effect = "settings-config-version-refresh"
+externalEffectPolicy = "reconcile"
 
 [subscriptions.topology]
 partitionKey = "none"

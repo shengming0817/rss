@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "producerCount": 9,
   "factCount": 5,
   "contracts": [
@@ -386,7 +386,8 @@
       "subscriptions": [
         {
           "consumer": "audit",
-          "group": "audit.policy-updated"
+          "group": "audit.policy-updated",
+          "externalEffectPolicy": "transactional-only"
         }
       ],
       "evidence": {
@@ -462,7 +463,8 @@
       "subscriptions": [
         {
           "consumer": "audit",
-          "group": "audit.role-assigned"
+          "group": "audit.role-assigned",
+          "externalEffectPolicy": "transactional-only"
         }
       ],
       "evidence": {
@@ -538,7 +540,8 @@
       "subscriptions": [
         {
           "consumer": "audit",
-          "group": "audit.role-revoked"
+          "group": "audit.role-revoked",
+          "externalEffectPolicy": "transactional-only"
         }
       ],
       "evidence": {
@@ -788,7 +791,8 @@
       "subscriptions": [
         {
           "consumer": "audit",
-          "group": "audit.session-created"
+          "group": "audit.session-created",
+          "externalEffectPolicy": "transactional-only"
         }
       ],
       "evidence": {
@@ -1150,7 +1154,8 @@
       "subscriptions": [
         {
           "consumer": "settings",
-          "group": "settings.config-version-changed"
+          "group": "settings.config-version-changed",
+          "externalEffectPolicy": "reconcile"
         }
       ],
       "evidence": {

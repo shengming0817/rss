@@ -28,10 +28,10 @@ use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
 use crate::contract::manifest::{
-    CommandJournalPolicy, ConsistencyLevel, ContractKind, ContractOwner, EffectKind, HttpAuthMode,
-    HttpHeaderMode, HttpIdempotency, HttpResourceSharingMode, Lifecycle, LocalTxBoundary,
-    LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxRole, SubscriptionEffect,
-    SubscriptionExecution, WorkflowMode,
+    CommandJournalPolicy, ConsistencyLevel, ContractKind, ContractOwner, EffectKind,
+    ExternalEffectPolicy, HttpAuthMode, HttpHeaderMode, HttpIdempotency, HttpResourceSharingMode,
+    Lifecycle, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxRole,
+    SubscriptionEffect, SubscriptionExecution, WorkflowMode,
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
@@ -1432,9 +1432,15 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
                 format!("Some({sup}SubscriptionEffect::SettingsConfigVersionRefresh)")
             }
         };
+        let external_effect_policy = match s.external_effect_policy {
+            ExternalEffectPolicy::TransactionalOnly => "TransactionalOnly",
+            ExternalEffectPolicy::IdempotencyKey => "IdempotencyKey",
+            ExternalEffectPolicy::Reconcile => "Reconcile",
+            ExternalEffectPolicy::Compensated => "Compensated",
+        };
         let dispatch = subscription_dispatch_variant(c, &s.consumer)?;
         subs.push(format!(
-            "    {sup}SubscriptionSpec::new(\"{}\", \"{}\", {sup}SubscriptionDispatchKey::{dispatch}, {sup}SubscriberReadiness::{}, {sup}SubscriptionExecution::{execution}, {effect})",
+            "    {sup}SubscriptionSpec::new(\"{}\", \"{}\", {sup}SubscriptionDispatchKey::{dispatch}, {sup}SubscriberReadiness::{}, {sup}SubscriptionExecution::{execution}, {effect}, {sup}ExternalEffectPolicy::{external_effect_policy})",
             s.consumer,
             s.group,
             match s.topology.readiness {
@@ -2064,6 +2070,19 @@ pub enum SubscriptionEffect {
     SettingsConfigVersionRefresh,
 }
 
+/// Closed policy for effects outside the ConsumerTx database transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalEffectPolicy {
+    /// Handler effects are limited to the ConsumerTx database transaction.
+    TransactionalOnly,
+    /// External calls use a stable idempotency key.
+    IdempotencyKey,
+    /// External state converges from an authoritative source.
+    Reconcile,
+    /// External effects have a durable compensation path.
+    Compensated,
+}
+
 /// 一个 event contract 的唯一 producer/subscriber topology 规格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventSpec {
@@ -2105,6 +2124,7 @@ pub struct SubscriptionSpec {
     readiness: SubscriberReadiness,
     execution: SubscriptionExecution,
     effect: Option<SubscriptionEffect>,
+    external_effect_policy: ExternalEffectPolicy,
 }
 
 impl SubscriptionSpec {
@@ -2115,7 +2135,18 @@ impl SubscriptionSpec {
         readiness: SubscriberReadiness,
         execution: SubscriptionExecution,
         effect: Option<SubscriptionEffect>,
-    ) -> Self { Self { consumer, group, dispatch, readiness, execution, effect } }
+        external_effect_policy: ExternalEffectPolicy,
+    ) -> Self {
+        Self {
+            consumer,
+            group,
+            dispatch,
+            readiness,
+            execution,
+            effect,
+            external_effect_policy,
+        }
+    }
     /// Consumer domain identifier.
     pub const fn consumer(self) -> &'static str { self.consumer }
     /// Durable consumer group.
@@ -2128,6 +2159,10 @@ impl SubscriptionSpec {
     pub const fn execution(self) -> SubscriptionExecution { self.execution }
     /// Domain effect required by this subscription, when execution is domain-owned.
     pub const fn effect(self) -> Option<SubscriptionEffect> { self.effect }
+    /// Policy for effects outside the ConsumerTx database transaction.
+    pub const fn external_effect_policy(self) -> ExternalEffectPolicy {
+        self.external_effect_policy
+    }
 }
 "#;
 
@@ -2896,9 +2931,11 @@ mod tests {
             "pub enum SubscriptionDispatchKey",
             "pub enum SubscriptionExecution",
             "pub enum SubscriptionEffect",
+            "pub enum ExternalEffectPolicy",
             "pub const fn dispatch",
             "pub const fn execution",
             "pub const fn effect",
+            "pub const fn external_effect_policy",
         ] {
             assert!(
                 root_module.contains(required),
@@ -3041,6 +3078,7 @@ mod tests {
                 "consumer = \"audit\"\n",
                 "group = \"audit.seed-happened\"\n",
                 "execution = \"adapter-native\"\n",
+                "externalEffectPolicy = \"transactional-only\"\n",
                 "[subscriptions.topology]\n",
                 "partitionKey = \"none\"\n",
                 "readiness = \"required\"\n",
@@ -4516,7 +4554,8 @@ mod tests {
             rendered.contains("SubscriptionSpec::new(")
                 && rendered.contains(r#""audit""#)
                 && rendered.contains(r#""audit.seed-happened""#)
-                && rendered.contains("SubscriptionDispatchKey::SeedHappenedV1Audit"),
+                && rendered.contains("SubscriptionDispatchKey::SeedHappenedV1Audit")
+                && rendered.contains("ExternalEffectPolicy::TransactionalOnly"),
             "SPEC 缺 consumer 字面量:\n{rendered}"
         );
         assert_subscription_wire_semantics(&rendered, &mod_rs);
@@ -4562,6 +4601,8 @@ mod tests {
             "[[subscriptions]]\n",
             "consumer = \"settings\"\n",
             "group = \"settings.seed-happened\"\n",
+            "execution = \"adapter-native\"\n",
+            "externalEffectPolicy = \"transactional-only\"\n",
             "[subscriptions.topology]\n",
             "partitionKey = \"aggregate\"\n",
             "readiness = \"required\"\n",

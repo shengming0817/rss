@@ -80,19 +80,22 @@ cargo dylint --all                                     # AST 级自写 lint（do
 ```
 
 `generated/l2-assurance.json` 是下游读取 L2 assurance inventory 的唯一 committed artifact；其 9 条
-producer 与 5 条 fact 记录由 active contract、compiled registry、runtime/effect wiring 和 ready fault
+producer 与 5 条 fact 记录由 active contract、compiled registry、subscription external-effect policy、
+runtime/effect wiring 和 ready fault
 evidence 共同派生。该文件只允许由 `l2-assurance` 更新，不手工编辑；`--check` 不写文件，并拒绝缺失、篡改、
 CRLF 或输入漂移。
 
-JSON v1 的紧凑 wire 约定如下：
+JSON v2 的紧凑 wire 约定如下；v1 不再读取或双写：
 
-- 根字段固定为 `schemaVersion: 1`、`producerCount`、`factCount`、`contracts`。
+- 根字段固定为 `schemaVersion: 2`、`producerCount`、`factCount`、`contracts`。
 - 每条 contract 共有 `contractId`、`domain`、`version`、`role`、`status`、`evidence`；producer
-  另带 `emittedFacts`，fact 另带 `topic` 和 `subscriptions: [{consumer, group}]`。
+  另带 `emittedFacts`，fact 另带 `topic` 和
+  `subscriptions: [{consumer, group, externalEffectPolicy}]`。
 - `evidence` 固定包含 `contract`、`generated`、`runtime`、`effect`、`fault` 五个 facet；每个
   facet 都是 `{status, carriers}`，carrier 固定为 `{kind, path, symbol}`。
 - 枚举是闭集：`role` 只有 `producer|fact`，record `status` 只有 `closed`，facet `status`
-  只有 `complete`，`kind` 只有 `manifest|rust-symbol|fault-fixture`。
+  只有 `complete`，`kind` 只有 `manifest|rust-symbol|fault-fixture`，`externalEffectPolicy`
+  只有 `transactional-only|idempotency-key|reconcile|compensated`。
 - 输出顺序是协议的一部分：contracts 按 `(contractId, role)`，`emittedFacts` 按 contract ID，
   subscriptions 按 `(consumer, group)`，carriers 按 `(path, symbol, kind)` 升序；pretty JSON 仅一个尾随 LF。
 - consumer 必须按 `schemaVersion` 精确分派并拒绝未知字段或枚举值。任何字段、枚举或语义变更

@@ -19,6 +19,7 @@
 //! fail-closed）；本规则在 validate 阶段提供 fail-fast + 清晰诊断（早于 codegen）+ PascalCase 形态。
 //! INVARIANT: EVENT-ACTIVE-SUB-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::r14_active_event_empty_subscriptions_rejected", anti_vacuity = "tests::r14_active_event_with_subscription_ok" }— `lifecycle=active && kind=event` ⇒ `[[subscriptions]]` 非空（R14，Medium）；
 //! active event 无 subscriber 即死事件，视为错误配置（#1120）。
+//! INVARIANT: SUBSCRIPTION-EXTERNAL-EFFECT-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::wire_metadata_rejects_external_effect_policy_mismatch", anti_vacuity = "tests::wire_metadata_accepts_valid_closed_shapes" }— 每条 subscription 的 execution/effect/externalEffectPolicy 必须命中闭合语义矩阵；未知或缺失 policy 由 manifest 闭枚举/必填字段在解析期 Hard 拒绝。
 //! INVARIANT: CONTRACT-REDACTION-POLICY-01 { level = "Medium", exec = "verify", source = "code" }— declared schema property 上的 `x-pii` / `x-redaction`
 //! 是 generated 安全 `Debug` 的单源（R16）。遗留 `x-sensitive`、未知枚举、高风险字段未标注、
 //! `x-redaction=hash` 均 fail-closed。
@@ -63,14 +64,14 @@ use syn::visit::Visit;
 
 use super::manifest::{
     Capabilities, ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery,
-    FIELD_COMMAND, FIELD_DELIVERY, FIELD_EFFECT_PROFILE, FIELD_ENDPOINTS_HTTP_AUTH,
-    FIELD_ENDPOINTS_HTTP_HEADERS, FIELD_ENDPOINTS_HTTP_PROJECTION,
+    ExternalEffectPolicy, FIELD_COMMAND, FIELD_DELIVERY, FIELD_EFFECT_PROFILE,
+    FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS, FIELD_ENDPOINTS_HTTP_PROJECTION,
     FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING, FIELD_METHOD, FIELD_PATH, FIELD_RECONCILE, FIELD_SAGA,
     FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
     HttpMethod, HttpResourceSharingMode, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown,
     LocalTxModel, LocalTxRetry, OutboxAtomicity, OutboxRole, SCHEMA_KEY_PAYLOAD,
-    SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, SubscriptionExecution, WorkflowMode, WorkflowOrdering,
-    WorkflowRequirement,
+    SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, SubscriptionEffect, SubscriptionExecution,
+    WorkflowMode, WorkflowOrdering, WorkflowRequirement,
 };
 use super::protection;
 use super::redaction;
@@ -1081,16 +1082,27 @@ fn rule_manifest_wire_metadata(m: &ContractManifest, label: &str) -> Vec<Finding
     let mut subscription_identities = BTreeSet::new();
     for subscription in &m.subscriptions {
         let valid_effect_shape = matches!(
-            (subscription.execution, subscription.effect),
-            (SubscriptionExecution::AdapterNative, None)
-                | (SubscriptionExecution::DomainEffect, Some(_))
+            (
+                subscription.execution,
+                subscription.effect,
+                subscription.external_effect_policy
+            ),
+            (
+                SubscriptionExecution::AdapterNative,
+                None,
+                ExternalEffectPolicy::TransactionalOnly
+            ) | (
+                SubscriptionExecution::DomainEffect,
+                Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+                ExternalEffectPolicy::Reconcile
+            )
         );
         if !valid_effect_shape {
             out.push(finding(
                 Rule::ManifestWireMetadata,
                 label,
                 format!(
-                    "subscription consumer={} group={} 的 execution/effect 组合非法：domain-effect 必须声明 effect，adapter-native 禁止 effect",
+                    "subscription consumer={} group={} 的 execution/effect/externalEffectPolicy 组合非法：adapter-native 仅允许 transactional-only 且禁止 effect；settings-config-version-refresh 必须为 domain-effect + reconcile",
                     subscription.consumer, subscription.group
                 ),
             ));
@@ -2424,12 +2436,12 @@ mod tests {
     use crate::contract::manifest::{
         Capabilities, CompensationOrder, Delivery, DeviceLatentCapability, DeviceLatentFencing,
         DeviceLatentLateMessagePolicy, DeviceLatentLoop, DeviceLatentTenancy, DeviceLatentTrigger,
-        EffectKind, EffectProfile, Endpoints, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
-        HttpIdempotency, HttpMethod, HttpProjection, HttpProjectionField, HttpProjectionFieldName,
-        HttpResourceSharing, HttpResourceSharingMode, Lifecycle, LocalTxCapability,
-        OutboxCapability, PartitionKeyStrategy, ReconcileBlock, SagaBlock, SagaStep, Schemas,
-        SubscriberReadiness, Subscription, SubscriptionEffect, SubscriptionExecution,
-        SubscriptionTopology, WorkflowCapability,
+        EffectKind, EffectProfile, Endpoints, ExternalEffectPolicy, HttpAuth, HttpAuthMode,
+        HttpEndpoint, HttpHeaderMode, HttpIdempotency, HttpMethod, HttpProjection,
+        HttpProjectionField, HttpProjectionFieldName, HttpResourceSharing, HttpResourceSharingMode,
+        Lifecycle, LocalTxCapability, OutboxCapability, PartitionKeyStrategy, ReconcileBlock,
+        SagaBlock, SagaStep, Schemas, SubscriberReadiness, Subscription, SubscriptionEffect,
+        SubscriptionExecution, SubscriptionTopology, WorkflowCapability,
     };
     use crate::testutil::unique_tmp;
     use rstest::rstest;
@@ -2492,6 +2504,7 @@ mod tests {
             group: "audit.session-created".to_string(),
             execution: SubscriptionExecution::AdapterNative,
             effect: None,
+            external_effect_policy: ExternalEffectPolicy::TransactionalOnly,
             topology: SubscriptionTopology {
                 partition_key: PartitionKeyStrategy::None,
                 readiness: SubscriberReadiness::Required,
@@ -2575,9 +2588,57 @@ mod tests {
         event.subscriptions = vec![Subscription {
             execution: SubscriptionExecution::DomainEffect,
             effect: Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+            external_effect_policy: ExternalEffectPolicy::Reconcile,
             ..one_subscription()
         }];
         assert!(rule_manifest_wire_metadata(&event, "event").is_empty());
+    }
+
+    #[test]
+    fn wire_metadata_rejects_external_effect_policy_mismatch() {
+        let mut event = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Framework,
+            payload_schemas(),
+        );
+        event.subscriptions = vec![one_subscription()];
+
+        for invalid in [
+            ExternalEffectPolicy::IdempotencyKey,
+            ExternalEffectPolicy::Reconcile,
+            ExternalEffectPolicy::Compensated,
+        ] {
+            event.subscriptions[0].external_effect_policy = invalid;
+            assert_eq!(
+                rule_manifest_wire_metadata(&event, "event").len(),
+                1,
+                "adapter-native audit subscription accepted invalid policy {invalid:?}"
+            );
+        }
+
+        event.subscriptions[0] = Subscription {
+            execution: SubscriptionExecution::DomainEffect,
+            effect: Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+            external_effect_policy: ExternalEffectPolicy::Reconcile,
+            ..one_subscription()
+        };
+        assert!(
+            rule_manifest_wire_metadata(&event, "event").is_empty(),
+            "settings refresh should accept reconcile"
+        );
+        for invalid in [
+            ExternalEffectPolicy::TransactionalOnly,
+            ExternalEffectPolicy::IdempotencyKey,
+            ExternalEffectPolicy::Compensated,
+        ] {
+            event.subscriptions[0].external_effect_policy = invalid;
+            assert_eq!(
+                rule_manifest_wire_metadata(&event, "event").len(),
+                1,
+                "settings refresh accepted invalid policy {invalid:?}"
+            );
+        }
     }
 
     fn http_schemas() -> Schemas {
@@ -3297,6 +3358,7 @@ mod tests {
             group: group.to_string(),
             execution: SubscriptionExecution::AdapterNative,
             effect: None,
+            external_effect_policy: ExternalEffectPolicy::TransactionalOnly,
             topology: SubscriptionTopology {
                 partition_key: PartitionKeyStrategy::None,
                 readiness: SubscriberReadiness::Required,

@@ -51,6 +51,27 @@ enum RecordStatus {
 struct SubscriptionIdentity {
     consumer: String,
     group: String,
+    external_effect_policy: AssuranceExternalEffectPolicy,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum AssuranceExternalEffectPolicy {
+    TransactionalOnly,
+    IdempotencyKey,
+    Reconcile,
+    Compensated,
+}
+
+impl AssuranceExternalEffectPolicy {
+    fn as_wire(&self) -> &'static str {
+        match self {
+            Self::TransactionalOnly => "transactional-only",
+            Self::IdempotencyKey => "idempotency-key",
+            Self::Reconcile => "reconcile",
+            Self::Compensated => "compensated",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,7 +130,7 @@ fn committed_l2_assurance_is_closed_and_matches_compiled_registries()
 -> Result<(), serde_json::Error> {
     let inventory: AssuranceInventory = serde_json::from_str(ASSURANCE_JSON)?;
 
-    assert_eq!(inventory.schema_version, 1);
+    assert_eq!(inventory.schema_version, 2);
     assert_eq!(inventory.producer_count, 9);
     assert_eq!(inventory.fact_count, 5);
     assert_eq!(inventory.contracts.len(), 14);
@@ -348,12 +369,29 @@ fn assert_fact(record: &AssuranceRecord, compiled: &BTreeMap<&str, &event::Event
     );
     let actual_subscriptions: Vec<_> = subscriptions
         .iter()
-        .map(|subscription| (subscription.consumer.as_str(), subscription.group.as_str()))
+        .map(|subscription| {
+            (
+                subscription.consumer.as_str(),
+                subscription.group.as_str(),
+                subscription.external_effect_policy.as_wire(),
+            )
+        })
         .collect();
     let mut compiled_subscriptions: Vec<_> = spec
         .subscriptions()
         .iter()
-        .map(|subscription| (subscription.consumer(), subscription.group()))
+        .map(|subscription| {
+            (
+                subscription.consumer(),
+                subscription.group(),
+                match subscription.external_effect_policy() {
+                    event::ExternalEffectPolicy::TransactionalOnly => "transactional-only",
+                    event::ExternalEffectPolicy::IdempotencyKey => "idempotency-key",
+                    event::ExternalEffectPolicy::Reconcile => "reconcile",
+                    event::ExternalEffectPolicy::Compensated => "compensated",
+                },
+            )
+        })
         .collect();
     compiled_subscriptions.sort_unstable();
     assert_eq!(

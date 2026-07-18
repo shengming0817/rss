@@ -41,9 +41,9 @@ use sha2::{Digest, Sha256};
 use super::discover;
 use super::manifest::{
     ConsistencyLevel, ContractKind, ContractManifest, Delivery, EffectKind, EffectProfile,
-    HttpAuthMode, HttpIdempotency, HttpMethod, HttpResourceSharingMode, Lifecycle, OutboxAtomicity,
-    OutboxRole, PartitionKeyStrategy, SubscriberReadiness, SubscriptionEffect,
-    SubscriptionExecution,
+    ExternalEffectPolicy, HttpAuthMode, HttpIdempotency, HttpMethod, HttpResourceSharingMode,
+    Lifecycle, OutboxAtomicity, OutboxRole, PartitionKeyStrategy, SubscriberReadiness,
+    SubscriptionEffect, SubscriptionExecution,
 };
 use super::protection;
 use super::redaction;
@@ -111,6 +111,7 @@ pub(crate) enum BreakingRule {
     SubscriptionTopologyChanged,
     SubscriptionExecutionChanged,
     SubscriptionEffectChanged,
+    SubscriptionExternalEffectPolicyChanged,
     LifecycleDowngraded,
     ContractRemoved,
 }
@@ -162,6 +163,9 @@ impl BreakingRule {
             BreakingRule::SubscriptionTopologyChanged => "SUBSCRIPTION_TOPOLOGY_CHANGED",
             BreakingRule::SubscriptionExecutionChanged => "SUBSCRIPTION_EXECUTION_CHANGED",
             BreakingRule::SubscriptionEffectChanged => "SUBSCRIPTION_EFFECT_CHANGED",
+            BreakingRule::SubscriptionExternalEffectPolicyChanged => {
+                "SUBSCRIPTION_EXTERNAL_EFFECT_POLICY_CHANGED"
+            }
             BreakingRule::LifecycleDowngraded => "LIFECYCLE_DOWNGRADED",
             BreakingRule::ContractRemoved => "CONTRACT_REMOVED",
         }
@@ -757,6 +761,7 @@ struct SubscriptionProjection {
     readiness: String,
     execution: Option<String>,
     effect: Option<String>,
+    external_effect_policy: String,
 }
 
 fn changed(
@@ -1081,6 +1086,14 @@ fn compare_subscriptions(
                 "subscriptions.effect",
                 &a.effect,
                 &b.effect,
+            ));
+        }
+        if a.external_effect_policy != b.external_effect_policy {
+            out.push(changed(
+                BreakingRule::SubscriptionExternalEffectPolicyChanged,
+                "subscriptions.externalEffectPolicy",
+                &a.external_effect_policy,
+                &b.external_effect_policy,
             ));
         }
     }
@@ -1810,6 +1823,8 @@ struct BaseSubscription {
     execution: Option<SubscriptionExecution>,
     #[serde(default)]
     effect: Option<SubscriptionEffect>,
+    #[serde(default, rename = "externalEffectPolicy")]
+    external_effect_policy: Option<ExternalEffectPolicy>,
     topology: BaseSubscriptionTopology,
 }
 
@@ -1928,6 +1943,8 @@ fn manifest_projection(m: &ContractManifest) -> Result<ManifestProjection> {
                 readiness: readiness(s.topology.readiness).to_string(),
                 execution: Some(execution(s.execution).to_string()),
                 effect: s.effect.map(effect).map(str::to_string),
+                external_effect_policy: external_effect_policy(s.external_effect_policy)
+                    .to_string(),
             })
             .collect(),
     })
@@ -1972,16 +1989,40 @@ fn base_manifest_projection(m: &BaseContractManifest) -> Result<ManifestProjecti
         subscriptions: m
             .subscriptions
             .iter()
-            .map(|s| SubscriptionProjection {
-                consumer: s.consumer.clone(),
-                group: s.group.clone(),
-                partition: partition(s.topology.partition_key).to_string(),
-                readiness: readiness(s.topology.readiness).to_string(),
-                execution: s.execution.map(execution).map(str::to_string),
-                effect: s.effect.map(effect).map(str::to_string),
+            .map(|s| {
+                Ok(SubscriptionProjection {
+                    consumer: s.consumer.clone(),
+                    group: s.group.clone(),
+                    partition: partition(s.topology.partition_key).to_string(),
+                    readiness: readiness(s.topology.readiness).to_string(),
+                    execution: s.execution.map(execution).map(str::to_string),
+                    effect: s.effect.map(effect).map(str::to_string),
+                    external_effect_policy: base_external_effect_policy(s)?,
+                })
             })
-            .collect(),
+            .collect::<Result<BTreeSet<_>>>()?,
     })
+}
+
+fn base_external_effect_policy(subscription: &BaseSubscription) -> Result<String> {
+    let policy = match subscription.external_effect_policy {
+        Some(policy) => policy,
+        None => match (subscription.execution, subscription.effect) {
+            (Some(SubscriptionExecution::AdapterNative), None) => {
+                ExternalEffectPolicy::TransactionalOnly
+            }
+            (
+                Some(SubscriptionExecution::DomainEffect),
+                Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+            ) => ExternalEffectPolicy::Reconcile,
+            _ => bail!(
+                "legacy subscription {}/{} 缺 externalEffectPolicy，且 execution/effect 无法唯一推导策略",
+                subscription.consumer,
+                subscription.group
+            ),
+        },
+    };
+    Ok(external_effect_policy(policy).to_string())
 }
 
 fn strict_http_effects(
@@ -2096,6 +2137,14 @@ fn execution(value: SubscriptionExecution) -> &'static str {
 fn effect(value: SubscriptionEffect) -> &'static str {
     match value {
         SubscriptionEffect::SettingsConfigVersionRefresh => "settings-config-version-refresh",
+    }
+}
+fn external_effect_policy(value: ExternalEffectPolicy) -> &'static str {
+    match value {
+        ExternalEffectPolicy::TransactionalOnly => "transactional-only",
+        ExternalEffectPolicy::IdempotencyKey => "idempotency-key",
+        ExternalEffectPolicy::Reconcile => "reconcile",
+        ExternalEffectPolicy::Compensated => "compensated",
     }
 }
 
@@ -3185,6 +3234,7 @@ lifecycle = "active"
                 readiness: "required".into(),
                 execution: Some("adapter-native".into()),
                 effect: None,
+                external_effect_policy: "transactional-only".into(),
             }]),
         }
     }
@@ -4077,6 +4127,12 @@ effects = ["read"]
                 BreakingRule::SubscriptionEffectChanged,
                 Box::new(|s| s.effect = Some("settings-config-version-refresh".into())),
             ),
+            (
+                BreakingRule::SubscriptionExternalEffectPolicyChanged,
+                Box::new(|s| {
+                    s.external_effect_policy = "reconcile".into();
+                }),
+            ),
         ];
         for (rule, mutate) in cases {
             let mut new = old.clone();
@@ -4104,6 +4160,49 @@ effects = ["read"]
         Ok(())
     }
 
+    #[test]
+    fn subscription_policy_rollout_normalizes_legacy_semantics() -> anyhow::Result<()> {
+        let mut legacy = BaseSubscription {
+            consumer: "audit".into(),
+            group: "audit.sessions".into(),
+            execution: Some(SubscriptionExecution::AdapterNative),
+            effect: None,
+            external_effect_policy: None,
+            topology: BaseSubscriptionTopology {
+                partition_key: PartitionKeyStrategy::Aggregate,
+                readiness: SubscriberReadiness::Required,
+            },
+        };
+        assert_eq!(base_external_effect_policy(&legacy)?, "transactional-only");
+
+        legacy.consumer = "settings".into();
+        legacy.group = "settings.config-version-changed".into();
+        legacy.execution = Some(SubscriptionExecution::DomainEffect);
+        legacy.effect = Some(SubscriptionEffect::SettingsConfigVersionRefresh);
+        assert_eq!(base_external_effect_policy(&legacy)?, "reconcile");
+
+        legacy.execution = Some(SubscriptionExecution::AdapterNative);
+        assert!(
+            base_external_effect_policy(&legacy).is_err(),
+            "legacy policy must not be inferred from an invalid execution/effect shape"
+        );
+
+        let old = full_projection();
+        let mut new = old.clone();
+        let mut subscription = new
+            .subscriptions
+            .pop_first()
+            .ok_or_else(|| anyhow::anyhow!("missing subscription fixture"))?;
+        subscription.external_effect_policy = "reconcile".into();
+        new.subscriptions.insert(subscription);
+        assert_eq!(
+            manifest_rules(&old, &new),
+            vec![BreakingRule::SubscriptionExternalEffectPolicyChanged],
+            "legacy inferred policy must still reject semantic drift"
+        );
+        Ok(())
+    }
+
     fn subscription(
         consumer: &str,
         group: &str,
@@ -4119,6 +4218,7 @@ effects = ["read"]
             readiness: readiness.into(),
             execution: Some(execution.into()),
             effect: effect.map(str::to_string),
+            external_effect_policy: "transactional-only".into(),
         }
     }
 

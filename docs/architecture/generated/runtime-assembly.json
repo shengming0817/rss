@@ -25,35 +25,35 @@
       "path": "contracts/event/identity/v1/policy-updated/contract.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "492ceeda4d3169069d61f735d67d319e6bea0d5d9d4cb374e45be1266d7a0e43"
+        "value": "2e63c0b4e72a8cd8ccc74a5c4d2a941919b25181b9beedcfb4b54b3b0d1489f2"
       }
     },
     {
       "path": "contracts/event/identity/v1/role-assigned/contract.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "dff1926195b313111f35bc4e6176a4d9ef384d945f2e2250ad036c3d73c1a273"
+        "value": "72da793e2e3681cf3cd3ada0670e9a9e7ea7c175c55fb67159360dab8febd056"
       }
     },
     {
       "path": "contracts/event/identity/v1/role-revoked/contract.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "adea11321d9c2aafd99a1c240ae14b16eef517d7231db4180ef1423a3423b079"
+        "value": "fb9e63134c471316798d40ebf37c95e7f3088f46d96487ebac76f968f1b0f5b4"
       }
     },
     {
       "path": "contracts/event/identity/v1/session-created/contract.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "fb4befda3f168cbe261c7c9bb587ccd4ffe979d50a57e1393e037f8782ce3cc7"
+        "value": "8a1a630df681365cdea6e2d20ca099a8a98a90813b6eb5f0d9fe93b8bf3a6e19"
       }
     },
     {
       "path": "contracts/event/settings/v1/contract.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "4b220bac72b16d84801f3b5bb261b300435c02b9a16b97da7a16e10906dbe5d4"
+        "value": "be904f6c21b60260b3f7d1848572e8547cb0baf39d11c440042552313c30cad1"
       }
     },
     {

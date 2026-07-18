@@ -29,7 +29,9 @@ RSS wire contract 由 `contract.toml` 和 JSON Schema 共同表达，HTTP / even
 
 1. CLI 只接受可选 `--against`；不存在模式 flag、环境开关或时间窗口。
 2. working manifest 始终严格解析；为读取实现前历史 ref 保留的窄 base projection 仅是历史 diff
-   能力，不是当前格式的兼容 shim。
+   能力，不是当前格式的兼容 shim。历史 subscription 缺 `externalEffectPolicy` 时只按旧闭合矩阵
+   唯一归一化（adapter-native → transactional-only；settings refresh → reconcile）；无法唯一推导即
+   fail-closed，归一化后仍与 working policy 精确比较。
 3. lifecycle 处置由 **base lifecycle** 决定，active 降级为 draft/deprecated 不能绕过门。
 4. 新 contract ID/version 且旧 identity 完整保留时放行；删除或破坏旧 identity 仍拦截。
 5. base ref 不可解析、Git 命令/对象读取失败、已枚举文件不可读、TOML/JSON 损坏都
@@ -90,11 +92,15 @@ schema 以 contract + logical slot 取并集递归比较；删除整个契约或
 | `SUBSCRIPTION_CONSUMER_CHANGED` / `SUBSCRIPTION_GROUP_CHANGED` | consumer identity 变化 |
 | `SUBSCRIPTION_TOPOLOGY_CHANGED` | partition/readiness 变化 |
 | `SUBSCRIPTION_EXECUTION_CHANGED` / `SUBSCRIPTION_EFFECT_CHANGED` | execution/effect 变化 |
+| `SUBSCRIPTION_EXTERNAL_EFFECT_POLICY_CHANGED` | 既有 subscription 的事务外副作用策略变化 |
 
 `emits` 与 subscription 集合排序不敏感，但任何元素增、删、替换都是 breaking。
 subscription 必须声明 `execution = "adapter-native" | "domain-effect"`；`domain-effect` 必须配
 `effect = "settings-config-version-refresh"`，`adapter-native` 禁止 effect。generated `SubscriptionSpec`
-同时携 codegen 从 `(contract id, version, consumer)` 派生的闭枚举 `SubscriptionDispatchKey`；runtime
+同时携非可选闭枚举 `ExternalEffectPolicy` 与 codegen 从 `(contract id, version, consumer)` 派生的
+闭枚举 `SubscriptionDispatchKey`。当前只允许 `adapter-native + 无 effect + transactional-only` 和
+`domain-effect + settings-config-version-refresh + reconcile` 两组完整语义；policy 无默认、alias 或自由文本。
+runtime
 对该 key 穷尽匹配实际 handler plan，新增订阅未接线即编译失败。guard 只验证该穷尽 funnel 的结构，
 不存在按 consumer 推断、wildcard、默认分支、平行实例清单或备用 registry。
 

@@ -25,6 +25,7 @@ role = "fact"
 consumer = "audit"
 group = "audit.session-created"
 execution = "adapter-native"
+externalEffectPolicy = "transactional-only"
 
 [subscriptions.topology]
 partitionKey = "none"

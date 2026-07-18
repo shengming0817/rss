@@ -32,6 +32,19 @@ pub enum SubscriptionEffect {
     SettingsConfigVersionRefresh,
 }
 
+/// Closed policy for effects outside the ConsumerTx database transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalEffectPolicy {
+    /// Handler effects are limited to the ConsumerTx database transaction.
+    TransactionalOnly,
+    /// External calls use a stable idempotency key.
+    IdempotencyKey,
+    /// External state converges from an authoritative source.
+    Reconcile,
+    /// External effects have a durable compensation path.
+    Compensated,
+}
+
 /// 一个 event contract 的唯一 producer/subscriber topology 规格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventSpec {
@@ -94,6 +107,7 @@ pub struct SubscriptionSpec {
     readiness: SubscriberReadiness,
     execution: SubscriptionExecution,
     effect: Option<SubscriptionEffect>,
+    external_effect_policy: ExternalEffectPolicy,
 }
 
 impl SubscriptionSpec {
@@ -104,6 +118,7 @@ impl SubscriptionSpec {
         readiness: SubscriberReadiness,
         execution: SubscriptionExecution,
         effect: Option<SubscriptionEffect>,
+        external_effect_policy: ExternalEffectPolicy,
     ) -> Self {
         Self {
             consumer,
@@ -112,6 +127,7 @@ impl SubscriptionSpec {
             readiness,
             execution,
             effect,
+            external_effect_policy,
         }
     }
     /// Consumer domain identifier.
@@ -137,6 +153,10 @@ impl SubscriptionSpec {
     /// Domain effect required by this subscription, when execution is domain-owned.
     pub const fn effect(self) -> Option<SubscriptionEffect> {
         self.effect
+    }
+    /// Policy for effects outside the ConsumerTx database transaction.
+    pub const fn external_effect_policy(self) -> ExternalEffectPolicy {
+        self.external_effect_policy
     }
 }
 pub mod _seed_v1;

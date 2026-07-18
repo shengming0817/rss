@@ -10,8 +10,9 @@
 //! 尽量上移类型层（Hard）：`HttpMethod`/`Delivery`/`CompensationOrder` 枚举解析拒非法 variant、saga
 //! `retryMillis`/`timeoutMillis` 用 `u64` 使「负 duration」不可表达、嵌套结构 `deny_unknown_fields`。
 //!
-//! event 订阅声明（#1120）：`[[subscriptions]]` 声明 event 契约的 consumer 域与 consumer group，
-//! 由 codegen 派生订阅注册 glue（`SUBSCRIPTIONS` 常量数组），供 bootstrap 接线消费（EVENT-ACTIVE-SUB-01 守）。
+//! event 订阅声明（#1120/#1822）：`[[subscriptions]]` 声明 event 契约的 consumer 域、consumer group
+//! 与非可选 closed `externalEffectPolicy`，由 codegen 派生 typed `SubscriptionSpec`，供 bootstrap 接线消费
+//! （EVENT-ACTIVE-SUB-01 / SUBSCRIPTION-EXTERNAL-EFFECT-POLICY-01 守）。
 //! `#[serde(default)]` 将未声明 subscriptions 精确表达为空集合；active 非空约束由 validate R14 承担。
 
 use serde::{Deserialize, Serialize};
@@ -728,6 +729,9 @@ pub struct Subscription {
     /// domain effect 标识；与 `execution` 的出现关系由 validate fail-closed。
     #[serde(default)]
     pub effect: Option<SubscriptionEffect>,
+    /// 事务外副作用策略。每条 subscription 必须显式声明；无默认或兼容别名。
+    #[serde(rename = "externalEffectPolicy")]
+    pub external_effect_policy: ExternalEffectPolicy,
     /// L2 topology gate：partition key 策略 + subscriber readiness 要求。
     pub topology: SubscriptionTopology,
 }
@@ -743,6 +747,16 @@ pub enum SubscriptionExecution {
 #[serde(rename_all = "kebab-case")]
 pub enum SubscriptionEffect {
     SettingsConfigVersionRefresh,
+}
+
+/// Closed policy for side effects that cannot be protected by the ConsumerTx database transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExternalEffectPolicy {
+    TransactionalOnly,
+    IdempotencyKey,
+    Reconcile,
+    Compensated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -1403,6 +1417,7 @@ mod tests {
             consumer = "audit"
             group = "audit.session-created"
             execution = "adapter-native"
+            externalEffectPolicy = "transactional-only"
             [subscriptions.topology]
             partitionKey = "none"
             readiness = "required"
@@ -1411,44 +1426,38 @@ mod tests {
             group = "devicestate.session-watch"
             execution = "domain-effect"
             effect = "settings-config-version-refresh"
+            externalEffectPolicy = "reconcile"
             [subscriptions.topology]
             partitionKey = "aggregate"
             readiness = "required"
         "#;
         let m = ContractManifest::from_toml_str(toml)?;
-        assert_eq!(m.subscriptions.len(), 2);
-        assert_eq!(m.subscriptions[0].consumer, "audit");
-        assert_eq!(m.subscriptions[0].group, "audit.session-created");
         assert_eq!(
-            m.subscriptions[0].topology.partition_key,
-            PartitionKeyStrategy::None
-        );
-        assert_eq!(
-            m.subscriptions[0].topology.readiness,
-            SubscriberReadiness::Required
-        );
-        assert_eq!(m.subscriptions[1].consumer, "devicestate");
-        assert_eq!(m.subscriptions[1].group, "devicestate.session-watch");
-        assert_eq!(
-            m.subscriptions[0].execution,
-            SubscriptionExecution::AdapterNative
-        );
-        assert_eq!(m.subscriptions[0].effect, None);
-        assert_eq!(
-            m.subscriptions[1].execution,
-            SubscriptionExecution::DomainEffect
-        );
-        assert_eq!(
-            m.subscriptions[1].effect,
-            Some(SubscriptionEffect::SettingsConfigVersionRefresh)
-        );
-        assert_eq!(
-            m.subscriptions[1].topology.partition_key,
-            PartitionKeyStrategy::Aggregate
-        );
-        assert_eq!(
-            m.subscriptions[1].topology.readiness,
-            SubscriberReadiness::Required
+            m.subscriptions,
+            vec![
+                Subscription {
+                    consumer: "audit".to_string(),
+                    group: "audit.session-created".to_string(),
+                    execution: SubscriptionExecution::AdapterNative,
+                    effect: None,
+                    external_effect_policy: ExternalEffectPolicy::TransactionalOnly,
+                    topology: SubscriptionTopology {
+                        partition_key: PartitionKeyStrategy::None,
+                        readiness: SubscriberReadiness::Required,
+                    },
+                },
+                Subscription {
+                    consumer: "devicestate".to_string(),
+                    group: "devicestate.session-watch".to_string(),
+                    execution: SubscriptionExecution::DomainEffect,
+                    effect: Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+                    external_effect_policy: ExternalEffectPolicy::Reconcile,
+                    topology: SubscriptionTopology {
+                        partition_key: PartitionKeyStrategy::Aggregate,
+                        readiness: SubscriberReadiness::Required,
+                    },
+                },
+            ]
         );
         Ok(())
     }
@@ -1471,6 +1480,55 @@ mod tests {
             "        group = \"audit.events\"\n        execution = \"domain-effect\"\n        effect = \"refresh-something\"",
         );
         assert!(ContractManifest::from_toml_str(&unknown_effect).is_err());
+    }
+
+    #[test]
+    fn subscription_external_effect_policy_is_required_and_closed() {
+        let declared = VALID_EVENT.replace(
+            "        [schemas]",
+            concat!(
+                "        [[subscriptions]]\n",
+                "        consumer = \"audit\"\n",
+                "        group = \"audit.events\"\n",
+                "        execution = \"adapter-native\"\n",
+                "        externalEffectPolicy = \"transactional-only\"\n",
+                "        [subscriptions.topology]\n",
+                "        partitionKey = \"none\"\n",
+                "        readiness = \"required\"\n",
+                "        [schemas]",
+            ),
+        );
+        assert!(
+            ContractManifest::from_toml_str(&declared).is_ok(),
+            "closed policy should parse on a declared subscription"
+        );
+
+        let missing = declared.replace(
+            "        externalEffectPolicy = \"transactional-only\"\n",
+            "",
+        );
+        assert!(
+            ContractManifest::from_toml_str(&missing).is_err(),
+            "a declared subscription must not omit externalEffectPolicy"
+        );
+
+        for policy in [
+            "transactional-only",
+            "idempotency-key",
+            "reconcile",
+            "compensated",
+        ] {
+            let candidate = declared.replace("transactional-only", policy);
+            assert!(
+                ContractManifest::from_toml_str(&candidate).is_ok(),
+                "closed policy {policy} should parse"
+            );
+        }
+        let unknown = declared.replace("transactional-only", "best-effort");
+        assert!(
+            ContractManifest::from_toml_str(&unknown).is_err(),
+            "unknown external-effect policy must fail closed"
+        );
     }
 
     /// 绿用例（anti-vacuity）：draft event 可不声明 subscriptions，并精确解析为空集合。

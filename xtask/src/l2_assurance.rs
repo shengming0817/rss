@@ -4,7 +4,7 @@
 //! role-specific Rust records are the only inventory authoring surface; closed status and five
 //! complete evidence facets cannot be supplied as strings by callers.
 //! INVARIANT: L2-ASSURANCE-WIRE-01 { level = "Hard", exec = "verify", source = "codegen", golden = "generated/l2-assurance.json", synthetic_red = "tests::check_rejects_missing_tampered_and_crlf_without_writing", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
-//! the typed JSON v1 projection and committed golden are byte-for-byte deterministic and reject
+//! the typed JSON v2 projection and committed golden are byte-for-byte deterministic and reject
 //! missing, tampered, or non-LF output without writing in check mode.
 //! INVARIANT: L2-ASSURANCE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::exact_set_rejects_equal_size_wrong_identity", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
 //! active OutboxFact manifests, generated registries, runtime closure, effect metadata and named
@@ -19,12 +19,14 @@ use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail, ensure};
 use assembly_schema::contract_manifest::{
-    ConsistencyLevel, ContractKind, EffectKind, Lifecycle, OutboxRole,
+    ConsistencyLevel, ContractKind, EffectKind,
+    ExternalEffectPolicy as ManifestExternalEffectPolicy, Lifecycle, OutboxRole,
     SubscriptionEffect as ManifestSubscriptionEffect,
     SubscriptionExecution as ManifestSubscriptionExecution,
 };
 use assembly_schema::repository_contract::{DiscoveredContract, schema_hash};
 use generated::event::{
+    ExternalEffectPolicy as GeneratedExternalEffectPolicy,
     SubscriptionEffect as GeneratedSubscriptionEffect,
     SubscriptionExecution as GeneratedSubscriptionExecution,
 };
@@ -190,7 +192,7 @@ fn build_inventory(root: &Path) -> Result<Inventory> {
     records.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
 
     Ok(Inventory {
-        schema_version: 1,
+        schema_version: 2,
         producer_count: universe.producers.len(),
         fact_count: universe.facts.len(),
         contracts: records,
@@ -428,6 +430,9 @@ fn validate_generated_fact(
                 .effect
                 .map(manifest_effect_wire)
                 .map(str::to_string),
+            external_effect_policy: manifest_external_effect_policy(
+                subscription.external_effect_policy,
+            ),
         })
         .collect::<Vec<_>>();
     manifest_subscriptions.sort();
@@ -443,6 +448,9 @@ fn validate_generated_fact(
                 .effect()
                 .map(generated_subscription_effect_wire)
                 .map(str::to_string),
+            external_effect_policy: generated_external_effect_policy(
+                subscription.external_effect_policy(),
+            ),
         })
         .collect::<Vec<_>>();
     generated_subscriptions.sort();
@@ -457,6 +465,7 @@ fn validate_generated_fact(
         .map(|subscription| SubscriptionIdentity {
             consumer: subscription.consumer,
             group: subscription.group,
+            external_effect_policy: subscription.external_effect_policy,
         })
         .collect())
 }
@@ -504,6 +513,36 @@ fn generated_subscription_effect_wire(value: GeneratedSubscriptionEffect) -> &'s
         GeneratedSubscriptionEffect::SettingsConfigVersionRefresh => {
             "settings-config-version-refresh"
         }
+    }
+}
+
+fn manifest_external_effect_policy(
+    value: ManifestExternalEffectPolicy,
+) -> AssuranceExternalEffectPolicy {
+    match value {
+        ManifestExternalEffectPolicy::TransactionalOnly => {
+            AssuranceExternalEffectPolicy::TransactionalOnly
+        }
+        ManifestExternalEffectPolicy::IdempotencyKey => {
+            AssuranceExternalEffectPolicy::IdempotencyKey
+        }
+        ManifestExternalEffectPolicy::Reconcile => AssuranceExternalEffectPolicy::Reconcile,
+        ManifestExternalEffectPolicy::Compensated => AssuranceExternalEffectPolicy::Compensated,
+    }
+}
+
+fn generated_external_effect_policy(
+    value: GeneratedExternalEffectPolicy,
+) -> AssuranceExternalEffectPolicy {
+    match value {
+        GeneratedExternalEffectPolicy::TransactionalOnly => {
+            AssuranceExternalEffectPolicy::TransactionalOnly
+        }
+        GeneratedExternalEffectPolicy::IdempotencyKey => {
+            AssuranceExternalEffectPolicy::IdempotencyKey
+        }
+        GeneratedExternalEffectPolicy::Reconcile => AssuranceExternalEffectPolicy::Reconcile,
+        GeneratedExternalEffectPolicy::Compensated => AssuranceExternalEffectPolicy::Compensated,
     }
 }
 
@@ -967,6 +1006,7 @@ struct FactRecord {
 struct SubscriptionIdentity {
     consumer: String,
     group: String,
+    external_effect_policy: AssuranceExternalEffectPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -975,6 +1015,16 @@ struct SubscriptionValidation {
     group: String,
     execution: String,
     effect: Option<String>,
+    external_effect_policy: AssuranceExternalEffectPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum AssuranceExternalEffectPolicy {
+    TransactionalOnly,
+    IdempotencyKey,
+    Reconcile,
+    Compensated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -1441,7 +1491,6 @@ pub mod cfg_attr_parent {
     }
 
     #[test]
-    #[allow(clippy::expect_used)] // reason: unit-test Err assertion; Ok is the failure mode.
     fn governance_failure_reports_every_finding() {
         #[derive(Debug, Clone, Copy)]
         enum SyntheticRule {
@@ -1453,8 +1502,9 @@ pub mod cfg_attr_parent {
             crate::diagnostic::finding(SyntheticRule::Second, "two", "second detail"),
         ];
         let error = ensure_findings_empty("synthetic", &findings)
-            .expect_err("multiple findings must fail")
-            .to_string();
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
         assert!(error.contains("[First] one: first detail"), "{error}");
         assert!(error.contains("[Second] two: second detail"), "{error}");
     }

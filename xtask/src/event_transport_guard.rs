@@ -3,6 +3,9 @@
 //! INVARIANT: EVENT-TRANSPORT-PG-INBOX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_missing_pg_bundle_fragment", anti_vacuity = "tests::scan_content_accepts_pg_inbox_bundle" }——
 //! `assemblies/runtime/src/event_transport.rs` 的 consumer idempotency must come from PG inbox, not Redis,
 //! and production consumer workers must go through the generated-topology bridge.
+//! INVARIANT: EVENT-CONSUMER-EXTERNAL-EFFECT-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_consumer_tx_plan_without_external_effect_policy", anti_vacuity = "tests::workspace_runtime_closes_consumer_tx_external_effect_policy" }——
+//! ConsumerTx plan 必须把 generated external-effect policy 纳入闭合 matcher；audit 仅接受
+//! transactional-only，settings refresh 仅接受 reconcile，任何漂移都在启动前 fail-closed。
 //! INVARIANT: EVENT-PRODUCER-SPEC-PAIR-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::producer_ast_rejects_swapped_specs_without_partition_key", anti_vacuity = "tests::producer_ast_accepts_generated_spec_alias_and_counts_typed_partition_key" }——
 //! every authoring function must use exactly one identical generated SPEC for its EventEntry and
 //! envelope before any fact is admitted to the global topology set.
@@ -767,6 +770,8 @@ struct RuntimeShape {
     bridged_input: bool,
     required_worker_probe_bundle: bool,
     handler_mapping: bool,
+    adapter_native_external_effect_policy: bool,
+    settings_refresh_external_effect_policy: bool,
 }
 
 fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
@@ -828,6 +833,28 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
             syn::Item::Fn(item) if item.sig.ident == "resolve_consumer_tx_plan" => {
                 shape.handler_mapping = consumer_tx_plan_resolver_is_closed(item);
             }
+            syn::Item::Fn(item) if item.sig.ident == "adapter_native_plan" => {
+                shape.adapter_native_external_effect_policy = consumer_tx_plan_matcher_is_closed(
+                    item,
+                    [
+                        "SubscriptionExecution::AdapterNative",
+                        "None",
+                        "ExternalEffectPolicy::TransactionalOnly",
+                        "SubscriberExecution::AdapterNative",
+                    ],
+                );
+            }
+            syn::Item::Fn(item) if item.sig.ident == "settings_config_refresh_plan" => {
+                shape.settings_refresh_external_effect_policy = consumer_tx_plan_matcher_is_closed(
+                    item,
+                    [
+                        "SubscriptionExecution::DomainEffect",
+                        "Some(SubscriptionEffect::SettingsConfigVersionRefresh)",
+                        "ExternalEffectPolicy::Reconcile",
+                        "SubscriberExecution::DomainEffect(effect)",
+                    ],
+                );
+            }
             _ => {}
         }
     }
@@ -852,6 +879,11 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         (
             shape.handler_mapping,
             "runtime 必须以单一 resolver 穷尽匹配 generated typed dispatch key → ConsumerTx plan，且不得使用 wildcard/guard",
+        ),
+        (
+            shape.adapter_native_external_effect_policy
+                && shape.settings_refresh_external_effect_policy,
+            "ConsumerTx plan 必须在闭合 matcher 中消费 externalEffectPolicy：audit=transactional-only、settings refresh=reconcile，且 mismatch fail-closed",
         ),
     ]
     .into_iter()
@@ -878,6 +910,50 @@ fn consumer_tx_plan_resolver_is_closed(item: &syn::ItemFn) -> bool {
                     if path.path.segments.len() == 2
                         && path.path.segments[0].ident == "SubscriptionDispatchKey")
         })
+}
+
+fn consumer_tx_plan_matcher_is_closed(item: &syn::ItemFn, expected: [&str; 4]) -> bool {
+    let Some(syn::Stmt::Expr(syn::Expr::Match(mapping), None)) = item.block.stmts.last() else {
+        return false;
+    };
+    let syn::Expr::Tuple(input) = mapping.expr.as_ref() else {
+        return false;
+    };
+    let expected_input = [
+        "spec.execution()",
+        "spec.effect()",
+        "spec.external_effect_policy()",
+        "execution",
+    ];
+    if input.elems.len() != expected_input.len()
+        || input
+            .elems
+            .iter()
+            .zip(expected_input)
+            .any(|(actual, expected)| normalized_tokens(actual) != expected)
+        || mapping.arms.len() != 2
+    {
+        return false;
+    }
+
+    let success = &mapping.arms[0];
+    let failure = &mapping.arms[1];
+    let syn::Pat::Tuple(success_pattern) = &success.pat else {
+        return false;
+    };
+    success.guard.is_none()
+        && success_pattern.elems.len() == expected.len()
+        && success_pattern
+            .elems
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| normalized_tokens(actual) == expected)
+        && normalized_tokens(success.body.as_ref()).starts_with("Ok(")
+        && failure.guard.is_none()
+        && matches!(failure.pat, syn::Pat::Wild(_))
+        && normalized_tokens(failure.body.as_ref()).starts_with("anyhow::bail!(")
+        && normalized_tokens(failure.body.as_ref()).contains("policy={:?}")
+        && normalized_tokens(failure.body.as_ref()).contains("spec.external_effect_policy()")
 }
 
 fn normalized_tokens(tokens: &impl ToTokens) -> String {
@@ -5844,7 +5920,38 @@ mod tests {
             }
             "#,
         );
-        assert!(findings.is_empty(), "{findings:?}");
+        let unrelated = findings
+            .iter()
+            .filter(|finding| !finding.detail.contains("externalEffectPolicy"))
+            .collect::<Vec<_>>();
+        assert!(unrelated.is_empty(), "{unrelated:?}");
+    }
+
+    #[test]
+    fn scan_content_rejects_consumer_tx_plan_without_external_effect_policy() {
+        let canonical = include_str!("../../assemblies/runtime/src/event_transport.rs");
+        let red = canonical.replace("        spec.external_effect_policy(),\n", "");
+        assert_ne!(red, canonical);
+        let findings = scan_runtime_content(Path::new(TARGET), &red);
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::MissingBundleFragment
+                && finding.detail.contains("externalEffectPolicy")
+        }));
+    }
+
+    #[test]
+    fn workspace_runtime_closes_consumer_tx_external_effect_policy() {
+        let findings = scan_runtime_content(
+            Path::new(TARGET),
+            include_str!("../../assemblies/runtime/src/event_transport.rs"),
+        );
+        assert!(
+            !findings.iter().any(|finding| {
+                finding.rule == Rule::MissingBundleFragment
+                    && finding.detail.contains("externalEffectPolicy")
+            }),
+            "{findings:?}"
+        );
     }
 
     #[test]

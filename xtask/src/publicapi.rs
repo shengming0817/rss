@@ -444,10 +444,12 @@ mod tests {
             "pub struct generated::event::EventSpec",
             "pub enum generated::event::PartitionKeyStrategy",
             "pub enum generated::event::SubscriberReadiness",
+            "pub enum generated::event::ExternalEffectPolicy",
             "pub enum generated::event::SubscriptionDispatchKey",
             "pub const generated::event::EVENTS: &[generated::event::EventSpec]",
             "pub const fn generated::event::EventSpec::subscriptions(self) -> &'static [generated::event::SubscriptionSpec]",
             "pub const fn generated::event::SubscriptionSpec::dispatch(self) -> generated::event::SubscriptionDispatchKey",
+            "pub const fn generated::event::SubscriptionSpec::external_effect_policy(self) -> generated::event::ExternalEffectPolicy",
         ] {
             assert!(
                 baseline.contains(required),

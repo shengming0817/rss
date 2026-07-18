@@ -327,6 +327,7 @@ pub mod policy_updated {
             super::super::SubscriberReadiness::Required,
             super::super::SubscriptionExecution::AdapterNative,
             None,
+            super::super::ExternalEffectPolicy::TransactionalOnly,
         )],
     );
 }
@@ -555,6 +556,7 @@ pub mod role_assigned {
             super::super::SubscriberReadiness::Required,
             super::super::SubscriptionExecution::AdapterNative,
             None,
+            super::super::ExternalEffectPolicy::TransactionalOnly,
         )],
     );
 }
@@ -783,6 +785,7 @@ pub mod role_revoked {
             super::super::SubscriberReadiness::Required,
             super::super::SubscriptionExecution::AdapterNative,
             None,
+            super::super::ExternalEffectPolicy::TransactionalOnly,
         )],
     );
 }
@@ -897,6 +900,7 @@ pub mod session_created {
             super::super::SubscriberReadiness::Required,
             super::super::SubscriptionExecution::AdapterNative,
             None,
+            super::super::ExternalEffectPolicy::TransactionalOnly,
         )],
     );
 }

@@ -207,5 +207,6 @@ pub const SPEC: super::EventSpec = super::EventSpec::new(
         super::SubscriberReadiness::Required,
         super::SubscriptionExecution::DomainEffect,
         Some(super::SubscriptionEffect::SettingsConfigVersionRefresh),
+        super::ExternalEffectPolicy::Reconcile,
     )],
 );

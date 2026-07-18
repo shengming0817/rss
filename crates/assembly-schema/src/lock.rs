@@ -956,8 +956,8 @@ mod tests {
 
     use super::*;
     use crate::contract_manifest::{
-        CompensationOrder, ConsistencyLevel, ContractManifest, Delivery, HttpAuthMode, HttpMethod,
-        Lifecycle, LocalTxModel,
+        CompensationOrder, ConsistencyLevel, ContractManifest, Delivery, ExternalEffectPolicy,
+        HttpAuthMode, HttpMethod, Lifecycle, LocalTxModel,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -1364,6 +1364,7 @@ delivery = "at-least-once"
 consumer = "audit"
 group = "audit.identity.changed"
 execution = "adapter-native"
+externalEffectPolicy = "transactional-only"
 [subscriptions.topology]
 partitionKey = "aggregate"
 readiness = "required"
@@ -1377,7 +1378,10 @@ readiness = "required"
         delivery.delivery = Some(Delivery::AtMostOnce);
         let mut subscriptions = event.clone();
         subscriptions.subscriptions[0].group = "audit.identity.changed-v2".to_owned();
-        for changed in [topic, delivery, subscriptions] {
+        let mut external_effect_policy = event.clone();
+        external_effect_policy.subscriptions[0].external_effect_policy =
+            ExternalEffectPolicy::Reconcile;
+        for changed in [topic, delivery, subscriptions, external_effect_policy] {
             assert_ne!(
                 event_hash,
                 runtime_semantics_hash_v1(&changed).expect("changed event semantics")

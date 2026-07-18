@@ -1292,6 +1292,7 @@ role = "fact"
 consumer = "outside"
 group = "outside.created"
 execution = "adapter-native"
+externalEffectPolicy = "transactional-only"
 [subscriptions.topology]
 partitionKey = "none"
 readiness = "required"

@@ -1350,6 +1350,7 @@ payload = "payload.schema.json"
 consumer = "identity"
 group = "identity.session-created"
 execution = "adapter-native"
+externalEffectPolicy = "transactional-only"
 
 [subscriptions.topology]
 partitionKey = "none"
