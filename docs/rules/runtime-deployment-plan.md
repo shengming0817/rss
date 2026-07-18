@@ -5,7 +5,7 @@ This rule governs how runtime-deployment target constraints select enforcement c
 ## 当前事实
 
 - Assembly manifest validation, generated domain ordering, and committed v1 AssemblyLock drift are governed by typed repository gates.
-- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Listener/auth/tracing/serving-OIDC, the operator OIDC static provider, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan is still summary-oriented, subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
+- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Listener/auth/tracing/serving-OIDC, the operator OIDC static provider, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is now typed and fingerprinted, but it currently supplies identity/diagnostics rather than driving the remaining handwritten live wiring; subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
 - `cargo xtask archrules list` and its generated matrix derive implemented rules from real carrier anchors. Planning documents are not a second index.
 - The active forge does not make the existing `ci-gate` a required check.
 
@@ -60,8 +60,10 @@ preserving decision and error order.
 All captured UTF-8 values use `secure::SecretText`: private storage, opaque `Debug`, no
 `Clone`/`Display`/serialization, and drop-time zeroization. Snapshot `Debug` and capture errors are
 closed and do not expose keys, presence, or values. Configuration material is runtime state: it is
-never serialized into AssemblyLock/RuntimePlan/DeploymentPlan, included in their fingerprints, or
-written to deployment evidence.
+never serialized into AssemblyLock/RuntimePlan/DeploymentPlan, included directly in their
+fingerprints, or written to deployment evidence. Only the closed non-secret Internal listener auth
+decision (`mtls` or `serviceToken`) enters RuntimePlan; secret-only snapshot changes leave its
+fingerprint unchanged.
 
 `SecretText::expose` and `into_string` are explicit disclosure/ownership boundaries, not a claim
 that callers cannot copy. Runtime allocation handoff uses named move/copy funnels; Medium
@@ -151,6 +153,16 @@ Schema ownership is exclusive:
 - #1802 owns DeploymentPlan implementation, consumes `runtimePlanFingerprint`, and produces `deploymentFingerprint`.
 - #1806 owns RuntimeInventory, carries assembly/runtime-plan/deployment fingerprints, and adds a separate authorized HTTP contract: auth mode is `permission|serviceOwned`, resource sharing is explicit `tenantScoped|global`, and `public|bootstrap|clientsOnly` are invalid.
 - #1796 and #1797 each own their subset assembly config schema and artifact closure.
+
+The landed #1788 Hard carrier is `RUNTIME-PLAN-CONSTRUCTION-01`: protocol fields are private,
+`RuntimePlan::compile_v1` validates canonical manifest/lock identity and declaration bijections,
+`ProviderConstructor` is the exhaustive manifest/plan/xtask registry, candidate authoring cannot
+supply derived listener IDs or lifecycle phases, and `ParsedRuntimePlan` is the only wire reader.
+Its diagnostics retain only a closed category and sanitized known-field path. Draft-07 validation
+of the real writer, writer-to-reader round-trip, shared RFC8785 vector, compile-fail privacy tests,
+and the bundled full-plan JSON golden freeze the same v1 facts.
+Downstream stages must carry the supplied upstream fingerprint and must not reconstruct Assembly
+identity from partial RuntimePlan fields.
 
 ## AssemblyLock committed workflow
 

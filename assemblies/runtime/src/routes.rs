@@ -47,19 +47,22 @@ fn internal_auth_scheme_from_value(raw: Option<&str>) -> anyhow::Result<AuthSche
     let normalized = raw.trim().to_ascii_lowercase();
     match normalized.as_str() {
         INTERNAL_AUTH_SCHEME_MTLS => Ok(AuthScheme::Mtls),
-        INTERNAL_AUTH_SCHEME_SERVICE_TOKEN => {
-            tracing::warn!(
-                env = INTERNAL_AUTH_SCHEME_ENV,
-                "internal listener using local-test service-token auth; mTLS is the production default"
-            );
-            Ok(AuthScheme::ServiceToken)
-        }
+        INTERNAL_AUTH_SCHEME_SERVICE_TOKEN => Ok(AuthScheme::ServiceToken),
         "" => anyhow::bail!(
             "{INTERNAL_AUTH_SCHEME_ENV} must be either '{INTERNAL_AUTH_SCHEME_MTLS}' or '{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN}'"
         ),
         _ => anyhow::bail!(
             "{INTERNAL_AUTH_SCHEME_ENV} has an unsupported value (expected '{INTERNAL_AUTH_SCHEME_MTLS}' or '{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN}')"
         ),
+    }
+}
+
+fn warn_for_live_internal_service_token(listener: ListenerKind, scheme: AuthScheme) {
+    if listener == ListenerKind::Internal && scheme == AuthScheme::ServiceToken {
+        tracing::warn!(
+            env = INTERNAL_AUTH_SCHEME_ENV,
+            "internal listener using local-test service-token auth; mTLS is the production default"
+        );
     }
 }
 
@@ -325,6 +328,7 @@ fn assemble_authed_routers_with_resolved_internal_auth(
         } else {
             auth_scheme_from_value(listener, None).context("resolve listener auth scheme")?
         };
+        warn_for_live_internal_service_token(listener, scheme);
         let plan = AuthPlan::new(listener, scheme).context("build auth plan")?;
         let transport = if scheme == AuthScheme::Mtls {
             let allow_set = mtls_allow_set_from_value(listener, internal_mtls_allow_set)?;
@@ -501,6 +505,7 @@ mod tests {
 
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
@@ -511,9 +516,28 @@ mod tests {
         TestRoutePermission as RoutePermission, TestRouteResourceScope as RouteResourceScope,
     };
     use tower::ServiceExt as _;
+    use tracing_subscriber::prelude::*;
 
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    #[derive(Clone)]
+    struct WarnEventCounter(Arc<AtomicUsize>);
+
+    impl<S> tracing_subscriber::Layer<S> for WarnEventCounter
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
 
     #[allow(clippy::expect_used)]
     fn test_config(
@@ -791,14 +815,24 @@ mod tests {
         let mut plaintext_registry = internal_registry();
         let plaintext_snapshot =
             test_config([(INTERNAL_AUTH_SCHEME_ENV, INTERNAL_AUTH_SCHEME_SERVICE_TOKEN)]);
-        let listeners = assemble_authed_routers(
-            plaintext_snapshot.view(),
-            &mut plaintext_registry,
-            runtime_test_provider(),
-            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-            Arc::new(SystemClock),
-        )
+        let warning_count = Arc::new(AtomicUsize::new(0));
+        let subscriber =
+            tracing_subscriber::registry().with(WarnEventCounter(Arc::clone(&warning_count)));
+        let listeners = tracing::subscriber::with_default(subscriber, || {
+            assemble_authed_routers(
+                plaintext_snapshot.view(),
+                &mut plaintext_registry,
+                runtime_test_provider(),
+                httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+                Arc::new(SystemClock),
+            )
+        })
         .expect("service-token Internal assembly must not require a SPIFFE endpoint");
+        assert_eq!(
+            warning_count.load(Ordering::SeqCst),
+            1,
+            "the live Internal service-token router must emit one warning"
+        );
         assert!(listeners.iter().any(|listener| {
             listener.listener == ListenerKind::Internal
                 && matches!(listener.transport, ListenerTransport::Plaintext)

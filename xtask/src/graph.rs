@@ -1215,6 +1215,7 @@ frameworkContracts = []
 kind = "{listener}"
 domains = ["{domain}"]
 [[diportProviders]]
+id = "listener-rate-limiter"
 port = "diport::RateLimiter"
 provider = "ratelimit::GovernorLimiter"
 providerCrate = "ratelimit"
@@ -1225,6 +1226,7 @@ purpose = "test"
 outputs = ["resources"]
 
 [[diportProviders]]
+id = "identity-signer"
 port = "diport::Signer"
 provider = "vault::VaultSigner"
 providerCrate = "vault"
@@ -1236,6 +1238,7 @@ purpose = "identity-signing"
 outputs = ["resources"]
 
 [[diportProviders]]
+id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"
@@ -1247,6 +1250,7 @@ purpose = "identity-auth"
 outputs = ["resources", "workers"]
 
 [[diportProviders]]
+id = "service-token-replay-store"
 port = "diport::ServiceTokenReplayStore"
 provider = "postgres::PgServiceTokenReplayStore"
 providerCrate = "postgres"

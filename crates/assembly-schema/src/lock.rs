@@ -248,12 +248,16 @@ impl AssemblyDigests {
         &self.contracts
     }
 }
-#[derive(Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(transparent)]
-pub struct AssemblyFingerprint(String);
+pub struct AssemblyFingerprint(#[schemars(regex(pattern = "^sha256:[0-9a-f]{64}$"))] String);
 impl AssemblyFingerprint {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub(crate) fn from_validated(value: String) -> Self {
+        Self(value)
     }
 }
 

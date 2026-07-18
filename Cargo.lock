@@ -207,10 +207,12 @@ name = "assembly-schema"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "jsonschema",
  "schemars 0.8.22",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
+ "serde_path_to_error",
  "sha2 0.10.9",
  "thiserror",
  "toml 0.8.23",
@@ -5006,6 +5008,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+ "toml 0.8.23",
  "tower",
  "tracing",
  "tracing-subscriber",

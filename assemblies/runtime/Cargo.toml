@@ -73,6 +73,7 @@ anyhow = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+toml = { workspace = true }
 # runtime 其它模块仍使用 BoxFuture / stream；认证桥不再同步轮询 futures（#1828）。
 futures = { workspace = true }
 # 从配置（env）解 ES256 SEC1 公钥（base64url）。

@@ -21,6 +21,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "device-revocation-store"
 port = "diport::RevocationStore"
 provider = "softca::InMemRevocationLedger"
 providerCrate = "softca"
@@ -36,6 +37,7 @@ outputs = []
 # profile 仍为 demo：翻 production 受阻于上方 RevocationStore 尚为 draft/ephemeral（#1252/#1254）。
 # 生产化 checklist：① #1252 RevocationStore → persistent provider；② #1254 device 接线；③ 本文件 profile demo→production
 [[diportProviders]]
+id = "event-publisher"
 port = "diport::Publisher"
 provider = "amqp::AmqpPublisher"
 providerCrate = "amqp"
@@ -47,6 +49,7 @@ purpose = "outbox-relay-amqp-publish"
 outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
+id = "event-subscriber"
 port = "diport::AckableSubscriber"
 provider = "amqp::AmqpSubscriber"
 providerCrate = "amqp"
@@ -58,6 +61,7 @@ purpose = "event-consume-at-least-once"
 outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
+id = "identity-signer"
 port = "diport::Signer"
 provider = "vault::VaultSigner"
 providerCrate = "vault"
@@ -69,6 +73,7 @@ purpose = "jwt-access-token-signing"
 outputs = ["resources"]
 
 [[diportProviders]]
+id = "settings-key-provider"
 port = "diport::KeyProvider"
 provider = "vault::VaultKeyProvider"
 providerCrate = "vault"
@@ -80,6 +85,7 @@ purpose = "settings-configvalue-at-rest-encryption"
 outputs = ["resources"]
 
 [[diportProviders]]
+id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"
@@ -91,6 +97,7 @@ purpose = "jwt-credential-verification"
 outputs = ["resources"]
 
 [[diportProviders]]
+id = "service-token-replay-store"
 port = "diport::ServiceTokenReplayStore"
 provider = "postgres::PgServiceTokenReplayStore"
 providerCrate = "postgres"
@@ -102,6 +109,7 @@ outputs = ["probes", "resources", "workers"]
 
 # HTTP auth 决策审计 sink：runtime 经 audit domain 注入 postgres durable flat sink（PgAuthAuditSink）。
 [[diportProviders]]
+id = "auth-audit-sink"
 port = "diport::AuditSink"
 provider = "postgres::PgAuthAuditSink"
 providerCrate = "postgres"
@@ -113,6 +121,7 @@ outputs = ["resources", "workers"]
 
 # edge 防护：per-peer-IP 限流（#1106，pre-auth DoS/brute-force 防护）——httpserve 消费、active。
 [[diportProviders]]
+id = "listener-rate-limiter"
 port = "diport::RateLimiter"
 provider = "ratelimit::GovernorLimiter"
 providerCrate = "ratelimit"
@@ -126,6 +135,7 @@ outputs = []
 # `deps.redis.infra().lock_store()` + `deps.pg.infra().cas_store()` 构造 `DistributedRuntimeDeps`，并作为
 # event transport outbox maintenance coordinator 的必填参数注入。Redis CAS 仍是 draft alternative。
 [[diportProviders]]
+id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
@@ -136,6 +146,7 @@ purpose = "distributed-lock-fencing"
 outputs = ["resources"]
 
 [[diportProviders]]
+id = "distributed-cas-store"
 port = "diport::CasStore"
 provider = "postgres::PgCasStore"
 providerCrate = "postgres"
@@ -146,6 +157,7 @@ purpose = "distributed-state-cas"
 outputs = ["resources", "workers"]
 
 [[diportProviders]]
+id = "distributed-cas-store-alternative"
 port = "diport::CasStore"
 provider = "redis::RedisCasStore"
 providerCrate = "redis"
@@ -158,6 +170,7 @@ outputs = ["resources"]
 # S3 object-store provider（#1164）：runtime canary 对真实 bucket 执行 put/get/delete/get-miss，
 # readiness 失败即摘流；adapter 经 backend feature 启 AWS SDK 真身。
 [[diportProviders]]
+id = "runtime-object-store"
 port = "diport::ObjectStore"
 provider = "s3::S3Store"
 providerCrate = "s3"
@@ -172,6 +185,7 @@ outputs = ["resources"]
 # the exact-role fixed-function repository; the archive store is only constructible after the
 # startup WORM capability gate; the existing KeyProvider port carries a distinct archive workload.
 [[diportProviders]]
+id = "dlx-lifecycle-repository"
 port = "diport::DlxLifecycleRepository"
 provider = "postgres::PgDlxLifecycleRepository"
 providerCrate = "postgres"
@@ -182,6 +196,7 @@ purpose = "dead-letter-archive-receipt-purge-reconcile"
 outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
+id = "dlx-archive-store"
 port = "diport::DlxArchiveStore"
 provider = "s3::VerifiedS3DlxArchiveStore"
 providerCrate = "s3"
@@ -193,6 +208,7 @@ purpose = "dead-letter-compliance-worm-archive"
 outputs = ["probes", "workers"]
 
 [[diportProviders]]
+id = "dlx-archive-key-provider"
 port = "diport::KeyProvider"
 provider = "vault::VaultKeyProvider"
 providerCrate = "vault"

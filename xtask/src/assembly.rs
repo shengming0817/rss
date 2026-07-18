@@ -8,7 +8,8 @@
 use anyhow::{Context, Result, bail};
 use assembly_schema::{
     AssemblyDomain, AssemblyManifest, AssemblyProfile, AssemblyTopology, DiportPort,
-    DiportProvider, ManifestValidationError, ProviderDurability, ProviderLifecycle,
+    DiportProvider, ManifestValidationError, ProviderConstructor, ProviderDurability,
+    ProviderLifecycle,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -434,45 +435,46 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
         }
 
         if provider.lifecycle == ProviderLifecycle::Active {
-            let spec = provider_spec(&provider.provider);
-            match spec {
-                Some(spec) if spec.port == provider.port => {
-                    if spec.durability != provider.durability {
-                        findings.push(finding(
-                            Rule::ProviderDurabilityMismatch,
-                            &subject,
-                            format!(
-                                "field=durability provider `{}` 的真实 durability 是 `{}`，manifest 不得声明为 `{}`",
-                                provider.provider,
-                                spec.durability,
-                                provider.durability
-                            ),
-                        ));
-                    }
-                    if spec.provider_crate != provider.provider_crate {
-                        findings.push(finding(
-                            Rule::ProviderCrateMismatch,
-                            &subject,
-                            format!(
-                                "field=providerCrate provider `{}` 的实现 crate 是 `{}`，manifest 不得声明为 `{}`",
-                                provider.provider,
-                                spec.provider_crate,
-                                provider.provider_crate
-                            ),
-                        ));
-                    }
-                }
-                _ => findings.push(finding(
+            let constructor = provider.provider;
+            if constructor.port() != provider.port {
+                findings.push(finding(
                     Rule::ActiveProviderPort,
                     &subject,
                     format!(
-                        "field=provider active provider `{}` 未在 xtask provider matrix 中声明为 `{}` 的实现",
-                        provider.provider, provider.port
+                        "field=provider typed provider `{}` 的真实 port 是 `{}`，manifest 不得声明为 `{}`",
+                        constructor,
+                        constructor.port(),
+                        provider.port
                     ),
-                )),
+                ));
+            } else {
+                if constructor.durability() != provider.durability {
+                    findings.push(finding(
+                        Rule::ProviderDurabilityMismatch,
+                        &subject,
+                        format!(
+                            "field=durability provider `{}` 的真实 durability 是 `{}`，manifest 不得声明为 `{}`",
+                            constructor,
+                            constructor.durability(),
+                            provider.durability
+                        ),
+                    ));
+                }
+                if constructor.provider_crate() != provider.provider_crate {
+                    findings.push(finding(
+                        Rule::ProviderCrateMismatch,
+                        &subject,
+                        format!(
+                            "field=providerCrate provider `{}` 的实现 crate 是 `{}`，manifest 不得声明为 `{}`",
+                            constructor,
+                            constructor.provider_crate(),
+                            provider.provider_crate
+                        ),
+                    ));
+                }
             }
 
-            let required_features = required_features(provider, spec);
+            let required_features = required_features(provider);
             if let Some(actual_features) =
                 dependency_features(&a.cargo_toml, &provider.provider_crate)
             {
@@ -522,17 +524,17 @@ fn validate_pdp_replay_store_capability(a: &DiscoveredAssembly, findings: &mut V
         return;
     }
 
-    let port = DiportPort::ServiceTokenReplayStore;
-    let provider = "postgres::PgServiceTokenReplayStore";
-    let provider_crate = "postgres";
+    let provider = ProviderConstructor::PostgresServiceTokenReplayStore;
     let consumer = "oidc";
-    if !has_active_persistent_provider(a, port, provider, provider_crate, consumer) {
+    if !has_active_persistent_provider(a, provider, consumer) {
         findings.push(finding(
             Rule::PdpReplayStoreCapability,
             &a.manifest_label,
             format!(
-                "field=diportProviders capability=PdpReplayStore expected active persistent `{provider}` for `{port}` providerCrate `{provider_crate}` consumer `{consumer}`; actual={}",
-                provider_actual(a, port, provider, provider_crate, consumer)
+                "field=diportProviders capability=PdpReplayStore expected active persistent `{provider}` for `{}` providerCrate `{}` consumer `{consumer}`; actual={}",
+                provider.port(),
+                provider.provider_crate(),
+                provider_actual(a, provider, consumer)
             ),
         ));
     }
@@ -650,6 +652,13 @@ fn push_manifest_validation_finding(
                 format!("field={field} invalid assembly manifest declaration"),
             ));
         }
+        ManifestValidationError::Invalid { field } => {
+            findings.push(finding(
+                Rule::InvalidDiportProvider,
+                &a.manifest_label,
+                format!("field={field} invalid assembly manifest declaration"),
+            ));
+        }
     }
 }
 
@@ -672,9 +681,7 @@ enum RequiredCapabilityExpectation {
         required_features: &'static [&'static str],
     },
     ActivePersistentProvider {
-        port: DiportPort,
-        provider: &'static str,
-        provider_crate: &'static str,
+        provider: ProviderConstructor,
         consumer: &'static str,
     },
 }
@@ -690,18 +697,14 @@ const IDENTITY_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
     RequiredCapabilitySpec {
         capability: "Signer",
         expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
-            port: DiportPort::Signer,
-            provider: "vault::VaultSigner",
-            provider_crate: "vault",
+            provider: ProviderConstructor::VaultSigner,
             consumer: "identity",
         },
     },
     RequiredCapabilitySpec {
         capability: "Pdp",
         expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
-            port: DiportPort::Pdp,
-            provider: "oidc::OidcProvider",
-            provider_crate: "oidc",
+            provider: ProviderConstructor::OidcProvider,
             consumer: "httpserve",
         },
     },
@@ -718,9 +721,7 @@ const SETTINGS_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
     RequiredCapabilitySpec {
         capability: "VaultKeyProvider",
         expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
-            port: DiportPort::KeyProvider,
-            provider: "vault::VaultKeyProvider",
-            provider_crate: "vault",
+            provider: ProviderConstructor::VaultKeyProvider,
             consumer: "settings",
         },
     },
@@ -744,9 +745,7 @@ const AUDIT_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
     RequiredCapabilitySpec {
         capability: "AuthAuditSink",
         expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
-            port: DiportPort::AuditSink,
-            provider: "postgres::PgAuthAuditSink",
-            provider_crate: "postgres",
+            provider: ProviderConstructor::PostgresAuthAuditSink,
             consumer: "httpserve",
         },
     },
@@ -758,36 +757,28 @@ const DURABLE_TOPOLOGY_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
     RequiredCapabilitySpec {
         capability: "Publisher",
         expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
-            port: DiportPort::Publisher,
-            provider: "amqp::AmqpPublisher",
-            provider_crate: "amqp",
+            provider: ProviderConstructor::AmqpPublisher,
             consumer: "eventexec",
         },
     },
     RequiredCapabilitySpec {
         capability: "AckableSubscriber",
         expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
-            port: DiportPort::AckableSubscriber,
-            provider: "amqp::AmqpSubscriber",
-            provider_crate: "amqp",
+            provider: ProviderConstructor::AmqpSubscriber,
             consumer: "eventexec",
         },
     },
     RequiredCapabilitySpec {
         capability: "LockStore",
         expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
-            port: DiportPort::Lock,
-            provider: "redis::RedisLockStore",
-            provider_crate: "redis",
+            provider: ProviderConstructor::RedisLockStore,
             consumer: "distributed",
         },
     },
     RequiredCapabilitySpec {
         capability: "CasStore",
         expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
-            port: DiportPort::Cas,
-            provider: "postgres::PgCasStore",
-            provider_crate: "postgres",
+            provider: ProviderConstructor::PostgresCasStore,
             consumer: "distributed",
         },
     },
@@ -888,19 +879,19 @@ fn validate_required_capability(
             Some(_) => {}
         }
         RequiredCapabilityExpectation::ActivePersistentProvider {
-            port,
             provider,
-            provider_crate,
             consumer,
         } => {
-            if !has_active_persistent_provider(a, port, provider, provider_crate, consumer) {
+            if !has_active_persistent_provider(a, provider, consumer) {
                 findings.push(finding(
                     Rule::RequiredCapability,
                     &a.manifest_label,
                     format!(
-                        "field=diportProviders domain={domain} capability={} expected active persistent `{provider}` for `{port}` providerCrate `{provider_crate}` consumer `{consumer}`; actual={}",
+                        "field=diportProviders domain={domain} capability={} expected active persistent `{provider}` for `{}` providerCrate `{}` consumer `{consumer}`; actual={}",
                         spec.capability,
-                        provider_actual(a, port, provider, provider_crate, consumer)
+                        provider.port(),
+                        provider.provider_crate(),
+                        provider_actual(a, provider, consumer)
                     ),
                 ));
             }
@@ -918,26 +909,22 @@ fn requires_distributed_capabilities(a: &DiscoveredAssembly) -> bool {
 
 fn has_active_persistent_provider(
     a: &DiscoveredAssembly,
-    port: DiportPort,
-    provider: &str,
-    provider_crate: &str,
+    provider: ProviderConstructor,
     consumer: &str,
 ) -> bool {
     a.manifest.diport_providers.iter().any(|candidate| {
         candidate.lifecycle == ProviderLifecycle::Active
             && candidate.durability == ProviderDurability::Persistent
-            && candidate.port == port
+            && candidate.port == provider.port()
             && candidate.provider == provider
-            && candidate.provider_crate == provider_crate
+            && candidate.provider_crate == provider.provider_crate()
             && candidate.consumer == consumer
     })
 }
 
 fn provider_actual(
     a: &DiscoveredAssembly,
-    port: DiportPort,
-    provider: &str,
-    provider_crate: &str,
+    provider: ProviderConstructor,
     consumer: &str,
 ) -> String {
     let actual = a
@@ -945,9 +932,9 @@ fn provider_actual(
         .diport_providers
         .iter()
         .filter(|candidate| {
-            candidate.port == port
+            candidate.port == provider.port()
                 || candidate.provider == provider
-                || candidate.provider_crate == provider_crate
+                || candidate.provider_crate == provider.provider_crate()
                 || candidate.consumer == consumer
         })
         .map(provider_state)
@@ -1280,9 +1267,7 @@ fn workspace_package_layer(
 
 struct CriticalProviderSpec {
     gate: &'static str,
-    port: DiportPort,
-    provider: &'static str,
-    provider_crate: &'static str,
+    provider: ProviderConstructor,
 }
 
 fn validate_production_security_closeout(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
@@ -1292,21 +1277,15 @@ fn validate_production_security_closeout(a: &DiscoveredAssembly, findings: &mut 
     const CRITICAL_PROVIDERS: &[CriticalProviderSpec] = &[
         CriticalProviderSpec {
             gate: "oidc-pdp",
-            port: DiportPort::Pdp,
-            provider: "oidc::OidcProvider",
-            provider_crate: "oidc",
+            provider: ProviderConstructor::OidcProvider,
         },
         CriticalProviderSpec {
             gate: "vault-signer",
-            port: DiportPort::Signer,
-            provider: "vault::VaultSigner",
-            provider_crate: "vault",
+            provider: ProviderConstructor::VaultSigner,
         },
         CriticalProviderSpec {
             gate: "vault-keyprovider",
-            port: DiportPort::KeyProvider,
-            provider: "vault::VaultKeyProvider",
-            provider_crate: "vault",
+            provider: ProviderConstructor::VaultKeyProvider,
         },
     ];
 
@@ -1319,9 +1298,9 @@ fn validate_production_security_closeout(a: &DiscoveredAssembly, findings: &mut 
                     "field=diportProviders profile=production gate={} 必须声明 active persistent `{}` for `{}`，且 {} [dependencies].{} 必须启用 backend feature",
                     spec.gate,
                     spec.provider,
-                    spec.port,
+                    spec.provider.port(),
                     a.cargo_label,
-                    spec.provider_crate
+                    spec.provider.provider_crate()
                 ),
             ));
         }
@@ -1351,10 +1330,10 @@ fn has_active_persistent_backend_provider(
     a.manifest.diport_providers.iter().any(|provider| {
         provider.lifecycle == ProviderLifecycle::Active
             && provider.durability == ProviderDurability::Persistent
-            && provider.port == spec.port
+            && provider.port == spec.provider.port()
             && provider.provider == spec.provider
-            && provider.provider_crate == spec.provider_crate
-            && dependency_features(&a.cargo_toml, spec.provider_crate)
+            && provider.provider_crate == spec.provider.provider_crate()
+            && dependency_features(&a.cargo_toml, spec.provider.provider_crate())
                 .is_some_and(|features| features.contains("backend"))
     })
 }
@@ -1874,122 +1853,13 @@ fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-#[derive(Clone, Copy)]
-struct ProviderSpec {
-    port: DiportPort,
-    durability: ProviderDurability,
-    required_features: &'static [&'static str],
-    /// xtask provider matrix 锁定的实现 crate 名；必须与 manifest `providerCrate` 严格匹配。
-    provider_crate: &'static str,
-}
-
-fn provider_spec(provider: &str) -> Option<ProviderSpec> {
-    match provider {
-        "softca::InMemRevocationLedger" => Some(ProviderSpec {
-            port: DiportPort::RevocationStore,
-            durability: ProviderDurability::EphemeralMemory,
-            required_features: &["backend"],
-            provider_crate: "softca",
-        }),
-        "ratelimit::GovernorLimiter" => Some(ProviderSpec {
-            port: DiportPort::RateLimiter,
-            durability: ProviderDurability::EphemeralMemory,
-            required_features: &[],
-            provider_crate: "ratelimit",
-        }),
-        // #1251 eventbus 真传输：amqp publisher/subscriber 是 topology-gated durable 选型的 diport-infra
-        // provider；真 lapin impl 经 amqp `backend` feature 门控（持久 broker，非内存）。
-        "amqp::AmqpPublisher" => Some(ProviderSpec {
-            port: DiportPort::Publisher,
-            durability: ProviderDurability::Persistent,
-            required_features: &["backend"],
-            provider_crate: "amqp",
-        }),
-        "amqp::AmqpSubscriber" => Some(ProviderSpec {
-            port: DiportPort::AckableSubscriber,
-            durability: ProviderDurability::Persistent,
-            required_features: &["backend"],
-            provider_crate: "amqp",
-        }),
-        "redis::RedisLockStore" => Some(ProviderSpec {
-            port: DiportPort::Lock,
-            durability: ProviderDurability::Persistent,
-            required_features: &["backend"],
-            provider_crate: "redis",
-        }),
-        "redis::RedisCasStore" => Some(ProviderSpec {
-            port: DiportPort::Cas,
-            durability: ProviderDurability::Persistent,
-            required_features: &["backend"],
-            provider_crate: "redis",
-        }),
-        "postgres::PgCasStore" => Some(ProviderSpec {
-            port: DiportPort::Cas,
-            durability: ProviderDurability::Persistent,
-            required_features: &[],
-            provider_crate: "postgres",
-        }),
-        "postgres::PgAuthAuditSink" => Some(ProviderSpec {
-            port: DiportPort::AuditSink,
-            durability: ProviderDurability::Persistent,
-            required_features: &[],
-            provider_crate: "postgres",
-        }),
-        "postgres::PgServiceTokenReplayStore" => Some(ProviderSpec {
-            port: DiportPort::ServiceTokenReplayStore,
-            durability: ProviderDurability::Persistent,
-            required_features: &[],
-            provider_crate: "postgres",
-        }),
-        "postgres::PgDlxLifecycleRepository" => Some(ProviderSpec {
-            port: DiportPort::DlxLifecycleRepository,
-            durability: ProviderDurability::Persistent,
-            required_features: &[],
-            provider_crate: "postgres",
-        }),
-        "vault::VaultSigner" => Some(ProviderSpec {
-            port: DiportPort::Signer,
-            durability: ProviderDurability::Persistent,
-            required_features: &["backend"],
-            provider_crate: "vault",
-        }),
-        "vault::VaultKeyProvider" => Some(ProviderSpec {
-            port: DiportPort::KeyProvider,
-            durability: ProviderDurability::Persistent,
-            required_features: &["backend"],
-            provider_crate: "vault",
-        }),
-        "oidc::OidcProvider" => Some(ProviderSpec {
-            port: DiportPort::Pdp,
-            durability: ProviderDurability::Persistent,
-            required_features: &["backend"],
-            provider_crate: "oidc",
-        }),
-        "s3::S3Store" => Some(ProviderSpec {
-            port: DiportPort::ObjectStore,
-            durability: ProviderDurability::Persistent,
-            required_features: &["backend"],
-            provider_crate: "s3",
-        }),
-        "s3::VerifiedS3DlxArchiveStore" => Some(ProviderSpec {
-            port: DiportPort::DlxArchiveStore,
-            durability: ProviderDurability::Persistent,
-            required_features: &["backend"],
-            provider_crate: "s3",
-        }),
-        _ => None,
-    }
-}
-
-fn required_features(provider: &DiportProvider, spec: Option<ProviderSpec>) -> Vec<&str> {
+fn required_features(provider: &DiportProvider) -> Vec<&str> {
     let mut features: Vec<&str> = provider
         .required_features
         .iter()
         .map(String::as_str)
         .collect();
-    if let Some(spec) = spec {
-        features.extend(spec.required_features);
-    }
+    features.extend(provider.provider.required_features());
     features.sort_unstable();
     features.dedup();
     features
@@ -2098,6 +1968,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "device-revocation-store"
 port = "diport::RevocationStore"
 provider = "softca::InMemRevocationLedger"
 providerCrate = "softca"
@@ -2138,6 +2009,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "device-revocation-store"
 port = "diport::RevocationStore"
 provider = "softca::InMemRevocationLedger"
 providerCrate = "softca"
@@ -2307,6 +2179,7 @@ domains = []
             manifest.push_str(
                 r#"
 [[diportProviders]]
+id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"
@@ -2317,6 +2190,7 @@ purpose = "jwt-credential-verification"
 outputs = []
 
 [[diportProviders]]
+id = "service-token-replay-store"
 port = "diport::ServiceTokenReplayStore"
 provider = "postgres::PgServiceTokenReplayStore"
 providerCrate = "postgres"
@@ -2332,6 +2206,7 @@ outputs = ["probes", "resources", "workers"]
             manifest.push_str(
                 r#"
 [[diportProviders]]
+id = "identity-signer"
 port = "diport::Signer"
 provider = "vault::VaultSigner"
 providerCrate = "vault"
@@ -2347,6 +2222,7 @@ outputs = []
             manifest.push_str(
                 r#"
 [[diportProviders]]
+id = "settings-key-provider"
 port = "diport::KeyProvider"
 provider = "vault::VaultKeyProvider"
 providerCrate = "vault"
@@ -2361,6 +2237,7 @@ outputs = []
         manifest.push_str(
             r#"
 [[diportProviders]]
+id = "auth-audit-sink"
 port = "diport::AuditSink"
 provider = "postgres::PgAuthAuditSink"
 providerCrate = "postgres"
@@ -2375,6 +2252,7 @@ outputs = []
             manifest.push_str(
                 r#"
 [[diportProviders]]
+id = "event-publisher"
 port = "diport::Publisher"
 provider = "amqp::AmqpPublisher"
 providerCrate = "amqp"
@@ -2386,6 +2264,7 @@ purpose = "outbox event publishing"
 outputs = []
 
 [[diportProviders]]
+id = "event-subscriber"
 port = "diport::AckableSubscriber"
 provider = "amqp::AmqpSubscriber"
 providerCrate = "amqp"
@@ -2397,6 +2276,7 @@ purpose = "manual-ack event subscriber workers"
 outputs = []
 
 [[diportProviders]]
+id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
@@ -2407,6 +2287,7 @@ purpose = "distributed-lock-fencing"
 outputs = []
 
 [[diportProviders]]
+id = "distributed-cas-store"
 port = "diport::CasStore"
 provider = "postgres::PgCasStore"
 providerCrate = "postgres"
@@ -2492,6 +2373,7 @@ amqp = { path = "../../adapters/amqp", features = ["backend"] }
 
     const CAPABILITY_DOMAIN_PROVIDERS: &str = r#"
 [[diportProviders]]
+id = "identity-signer"
 port = "diport::Signer"
 provider = "vault::VaultSigner"
 providerCrate = "vault"
@@ -2503,6 +2385,7 @@ purpose = "jwt-access-token-signing"
 outputs = []
 
 [[diportProviders]]
+id = "settings-key-provider"
 port = "diport::KeyProvider"
 provider = "vault::VaultKeyProvider"
 providerCrate = "vault"
@@ -2514,6 +2397,7 @@ purpose = "settings-configvalue-at-rest-encryption"
 outputs = []
 
 [[diportProviders]]
+id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"
@@ -2525,6 +2409,7 @@ purpose = "jwt-credential-verification"
 outputs = []
 
 [[diportProviders]]
+id = "auth-audit-sink"
 port = "diport::AuditSink"
 provider = "postgres::PgAuthAuditSink"
 providerCrate = "postgres"
@@ -2537,6 +2422,7 @@ outputs = []
 
     const CAPABILITY_REPLAY_STORE_PROVIDER: &str = r#"
 [[diportProviders]]
+id = "service-token-replay-store"
 port = "diport::ServiceTokenReplayStore"
 provider = "postgres::PgServiceTokenReplayStore"
 providerCrate = "postgres"
@@ -2555,6 +2441,7 @@ outputs = ["probes", "resources", "workers"]
 
     const CAPABILITY_EVENT_TRANSPORT_PROVIDERS: &str = r#"
 [[diportProviders]]
+id = "event-publisher"
 port = "diport::Publisher"
 provider = "amqp::AmqpPublisher"
 providerCrate = "amqp"
@@ -2566,6 +2453,7 @@ purpose = "outbox event publishing"
 outputs = []
 
 [[diportProviders]]
+id = "event-subscriber"
 port = "diport::AckableSubscriber"
 provider = "amqp::AmqpSubscriber"
 providerCrate = "amqp"
@@ -2579,6 +2467,7 @@ outputs = []
 
     const CAPABILITY_DISTRIBUTED_PROVIDERS: &str = r#"
 [[diportProviders]]
+id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
@@ -2589,6 +2478,7 @@ purpose = "distributed-lock-fencing"
 outputs = []
 
 [[diportProviders]]
+id = "distributed-cas-store"
 port = "diport::CasStore"
 provider = "postgres::PgCasStore"
 providerCrate = "postgres"
@@ -2753,19 +2643,28 @@ outputs = []
             ),
             (
                 IDENTITYAUDIT_CARGO.to_owned(),
-                IDENTITYAUDIT_MANIFEST.replace("provider = \"vault::VaultSigner\"", "provider = \"vault::MissingSigner\""),
+                IDENTITYAUDIT_MANIFEST.replace(
+                    "provider = \"vault::VaultSigner\"",
+                    "provider = \"vault::VaultKeyProvider\"",
+                ),
                 "identity",
                 "Signer",
             ),
             (
                 IDENTITYAUDIT_CARGO.to_owned(),
-                IDENTITYAUDIT_MANIFEST.replace("provider = \"oidc::OidcProvider\"", "provider = \"oidc::MissingPdp\""),
+                IDENTITYAUDIT_MANIFEST.replace(
+                    "provider = \"oidc::OidcProvider\"",
+                    "provider = \"vault::VaultSigner\"",
+                ),
                 "identity",
                 "Pdp",
             ),
             (
                 IDENTITYAUDIT_CARGO.to_owned(),
-                IDENTITYAUDIT_MANIFEST.replace("provider = \"postgres::PgAuthAuditSink\"", "provider = \"postgres::MissingAuditSink\""),
+                IDENTITYAUDIT_MANIFEST.replace(
+                    "provider = \"postgres::PgAuthAuditSink\"",
+                    "provider = \"postgres::PgCasStore\"",
+                ),
                 "audit",
                 "AuthAuditSink",
             ),
@@ -2816,6 +2715,7 @@ postgres = { path = "../../adapters/postgres" }
             &["identity"],
             r#"
 [[diportProviders]]
+id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"
@@ -2827,6 +2727,7 @@ purpose = "jwt-credential-verification"
 outputs = []
 
 [[diportProviders]]
+id = "service-token-replay-store"
 port = "diport::ServiceTokenReplayStore"
 provider = "postgres::PgServiceTokenReplayStore"
 providerCrate = "postgres"
@@ -2859,6 +2760,7 @@ oidc = { path = "../../adapters/oidc", features = ["backend"] }
             &["audit"],
             r#"
 [[diportProviders]]
+id = "auth-audit-sink"
 port = "diport::AuditSink"
 provider = "postgres::PgAuthAuditSink"
 providerCrate = "postgres"
@@ -2907,6 +2809,7 @@ crypto-adapter = { path = "../../adapters/crypto" }
             &["identity"],
             r#"
 [[diportProviders]]
+id = "identity-signer"
 port = "diport::Signer"
 provider = "vault::VaultSigner"
 providerCrate = "vault"
@@ -2918,6 +2821,7 @@ purpose = "jwt-access-token-signing"
 outputs = []
 
 [[diportProviders]]
+id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"
@@ -2997,6 +2901,7 @@ redis = { path = "../../adapters/redis", features = ["backend"] }
             &format!(
                 r#"{CAPABILITY_EVENT_TRANSPORT_PROVIDERS}
 [[diportProviders]]
+id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
@@ -3007,6 +2912,7 @@ purpose = "distributed-lock-fencing"
 outputs = []
 
 [[diportProviders]]
+id = "distributed-cas-store-alternative"
 port = "diport::CasStore"
 provider = "redis::RedisCasStore"
 providerCrate = "redis"
@@ -3052,6 +2958,7 @@ amqp = { path = "../../adapters/amqp", features = ["backend"] }
                 &format!(
                     r#"
 [[diportProviders]]
+id = "settings-key-provider"
 port = "diport::KeyProvider"
 provider = "vault::VaultKeyProvider"
 providerCrate = "vault"
@@ -3400,6 +3307,7 @@ name = "runtime"
 profile = "demo"
 
 [[diportProviders]]
+id = "device-revocation-store"
 port = "diport::RevocationStore"
 provider = "softca::InMemRevocationLedger"
 providerCrate = "softca"
@@ -4325,7 +4233,7 @@ softca = { path = "../../adapters/softca" }
     }
 
     #[test]
-    fn active_provider_must_match_known_port_matrix() -> anyhow::Result<()> {
+    fn unknown_provider_is_rejected_by_typed_manifest() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-unknown-active-provider");
         write_assembly(
             &root,
@@ -4344,10 +4252,12 @@ softca = { path = "../../adapters/softca", features = ["backend"] }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let Err(error) = validate_root(&root) else {
+            bail!("unknown typed provider must fail to parse");
+        };
         assert!(
-            findings.iter().any(|f| f.rule == Rule::ActiveProviderPort),
-            "unknown active provider must be rejected: {findings:?}"
+            format!("{error:#}").contains("softca::MissingProvider"),
+            "typed provider diagnostic lost the rejected constructor: {error:#}"
         );
         Ok(())
     }
@@ -4432,6 +4342,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "device-revocation-store"
 port = "diport::RevocationStore"
 provider = "softca::InMemRevocationLedger"
 providerCrate = "softca"
@@ -4442,6 +4353,7 @@ purpose = "device-certificate-revocation"
 outputs = []
 
 [[diportProviders]]
+id = "listener-rate-limiter"
 port = "diport::RateLimiter"
 provider = "ratelimit::GovernorLimiter"
 providerCrate = "ratelimit"
@@ -4499,6 +4411,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
@@ -4509,6 +4422,7 @@ purpose = "distributed-lock-fencing"
 outputs = []
 
 [[diportProviders]]
+id = "distributed-cas-store"
 port = "diport::CasStore"
 provider = "postgres::PgCasStore"
 providerCrate = "postgres"
@@ -4581,6 +4495,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
@@ -4662,6 +4577,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
@@ -4720,6 +4636,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "listener-rate-limiter"
 port = "diport::RateLimiter"
 provider = "ratelimit::GovernorLimiter"
 providerCrate = "softca"
@@ -4778,6 +4695,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "listener-rate-limiter"
 port = "diport::RateLimiter"
 provider = "ratelimit::GovernorLimiter"
 providerCrate = "ratelimit"
@@ -4855,6 +4773,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "fixture-provider"
 port = "{port}"
 provider = "{provider}"
 providerCrate = "amqp"
@@ -4949,6 +4868,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "identity-signer"
 port = "diport::Signer"
 provider = "vault::VaultSigner"
 providerCrate = "vault"
@@ -5002,6 +4922,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "settings-key-provider"
 port = "diport::KeyProvider"
 provider = "vault::VaultKeyProvider"
 providerCrate = "vault"
@@ -5054,6 +4975,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"
@@ -5065,6 +4987,7 @@ purpose = "jwt-credential-verification"
 outputs = []
 
 [[diportProviders]]
+id = "service-token-replay-store"
 port = "diport::ServiceTokenReplayStore"
 provider = "postgres::PgServiceTokenReplayStore"
 providerCrate = "postgres"
@@ -5118,6 +5041,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "runtime-object-store"
 port = "diport::ObjectStore"
 provider = "s3::S3Store"
 providerCrate = "s3"
@@ -5235,7 +5159,7 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
 
     #[test]
     fn amqp_provider_declared_on_wrong_port_rejected() -> anyhow::Result<()> {
-        // amqp::AmqpPublisher 声明在 AckableSubscriber 端口上 ⇒ spec.port 不匹配 ⇒ ActiveProviderPort。
+        // amqp::AmqpPublisher 声明在 AckableSubscriber 端口上 ⇒ typed metadata 不匹配 ⇒ ActiveProviderPort。
         let root = unique_tmp("assembly-amqp-wrong-port");
         write_assembly(
             &root,

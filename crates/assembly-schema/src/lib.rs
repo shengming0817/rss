@@ -3,11 +3,17 @@ pub mod contract_manifest;
 mod lock;
 #[doc(hidden)]
 pub mod repository_contract;
+mod runtime_plan;
 
 pub use lock::{
     AssemblyDigests, AssemblyFingerprint, AssemblyIdentity, AssemblyLock, AssemblyLockError,
     AssemblyLockErrorStage, GENERATED_MODULE_OWNERSHIP_MARKER, ParsedAssemblyLock,
     RepositoryVerifiedAssemblyLock,
+};
+pub use runtime_plan::{
+    DomainLifecyclePhase, DomainPlan, ListenerAuth, ListenerPlan, ParsedRuntimePlan, PlacementPlan,
+    ProviderPlan, RuntimePlan, RuntimePlanError, RuntimePlanErrorStage, RuntimePlanFingerprint,
+    RuntimePlanJsonCategory, RuntimePlanJsonPath, RuntimePlanV1Input,
 };
 
 use schemars::JsonSchema;
@@ -83,9 +89,21 @@ impl AssemblyManifest {
             &mut errors,
         );
         ensure_unique_provider_keys(&self.diport_providers, &mut errors);
+        ensure_unique(
+            self.diport_providers
+                .iter()
+                .map(|provider| provider.id.as_str()),
+            "diportProviders.id",
+            &mut errors,
+        );
 
         for provider in &self.diport_providers {
-            ensure_non_empty_string(&provider.provider, "diportProviders.provider", &mut errors);
+            ensure_non_empty_string(&provider.id, "diportProviders.id", &mut errors);
+            if !provider.id.is_empty() && !is_kebab_case_id(&provider.id) {
+                errors.push(ManifestValidationError::Invalid {
+                    field: "diportProviders.id",
+                });
+            }
             ensure_non_empty_string(
                 &provider.provider_crate,
                 "diportProviders.providerCrate",
@@ -332,6 +350,8 @@ pub enum ManifestValidationError {
     Empty { field: &'static str },
     #[error("field={field} duplicate declaration")]
     Duplicate { field: &'static str },
+    #[error("field={field} invalid declaration")]
+    Invalid { field: &'static str },
 }
 
 fn write_error_list<T: fmt::Display>(f: &mut fmt::Formatter<'_>, errors: &[T]) -> fmt::Result {
@@ -372,7 +392,9 @@ impl AssemblyProfile {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum AssemblyDomain {
     Identity,
@@ -419,7 +441,9 @@ pub struct AssemblyListener {
     pub domains: Vec<AssemblyDomain>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum AssemblyListenerKind {
     Primary,
@@ -442,8 +466,9 @@ impl AssemblyListenerKind {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiportProvider {
+    pub id: String,
     pub port: DiportPort,
-    pub provider: String,
+    pub provider: ProviderConstructor,
     #[serde(rename = "providerCrate")]
     pub provider_crate: String,
     #[serde(default, rename = "requiredFeatures")]
@@ -455,7 +480,144 @@ pub struct DiportProvider {
     pub outputs: Vec<LifecycleChannel>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+/// Closed registry of provider constructors accepted by an AssemblyManifest and RuntimePlan v1.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
+)]
+pub enum ProviderConstructor {
+    #[serde(rename = "softca::InMemRevocationLedger")]
+    SoftcaInMemRevocationLedger,
+    #[serde(rename = "ratelimit::GovernorLimiter")]
+    RatelimitGovernorLimiter,
+    #[serde(rename = "amqp::AmqpPublisher")]
+    AmqpPublisher,
+    #[serde(rename = "amqp::AmqpSubscriber")]
+    AmqpSubscriber,
+    #[serde(rename = "redis::RedisLockStore")]
+    RedisLockStore,
+    #[serde(rename = "redis::RedisCasStore")]
+    RedisCasStore,
+    #[serde(rename = "postgres::PgCasStore")]
+    PostgresCasStore,
+    #[serde(rename = "postgres::PgAuthAuditSink")]
+    PostgresAuthAuditSink,
+    #[serde(rename = "postgres::PgServiceTokenReplayStore")]
+    PostgresServiceTokenReplayStore,
+    #[serde(rename = "postgres::PgDlxLifecycleRepository")]
+    PostgresDlxLifecycleRepository,
+    #[serde(rename = "vault::VaultSigner")]
+    VaultSigner,
+    #[serde(rename = "vault::VaultKeyProvider")]
+    VaultKeyProvider,
+    #[serde(rename = "oidc::OidcProvider")]
+    OidcProvider,
+    #[serde(rename = "s3::S3Store")]
+    S3Store,
+    #[serde(rename = "s3::VerifiedS3DlxArchiveStore")]
+    S3VerifiedDlxArchiveStore,
+}
+
+impl ProviderConstructor {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SoftcaInMemRevocationLedger => "softca::InMemRevocationLedger",
+            Self::RatelimitGovernorLimiter => "ratelimit::GovernorLimiter",
+            Self::AmqpPublisher => "amqp::AmqpPublisher",
+            Self::AmqpSubscriber => "amqp::AmqpSubscriber",
+            Self::RedisLockStore => "redis::RedisLockStore",
+            Self::RedisCasStore => "redis::RedisCasStore",
+            Self::PostgresCasStore => "postgres::PgCasStore",
+            Self::PostgresAuthAuditSink => "postgres::PgAuthAuditSink",
+            Self::PostgresServiceTokenReplayStore => "postgres::PgServiceTokenReplayStore",
+            Self::PostgresDlxLifecycleRepository => "postgres::PgDlxLifecycleRepository",
+            Self::VaultSigner => "vault::VaultSigner",
+            Self::VaultKeyProvider => "vault::VaultKeyProvider",
+            Self::OidcProvider => "oidc::OidcProvider",
+            Self::S3Store => "s3::S3Store",
+            Self::S3VerifiedDlxArchiveStore => "s3::VerifiedS3DlxArchiveStore",
+        }
+    }
+
+    pub const fn port(self) -> DiportPort {
+        match self {
+            Self::SoftcaInMemRevocationLedger => DiportPort::RevocationStore,
+            Self::RatelimitGovernorLimiter => DiportPort::RateLimiter,
+            Self::AmqpPublisher => DiportPort::Publisher,
+            Self::AmqpSubscriber => DiportPort::AckableSubscriber,
+            Self::RedisLockStore => DiportPort::Lock,
+            Self::RedisCasStore | Self::PostgresCasStore => DiportPort::Cas,
+            Self::PostgresAuthAuditSink => DiportPort::AuditSink,
+            Self::PostgresServiceTokenReplayStore => DiportPort::ServiceTokenReplayStore,
+            Self::PostgresDlxLifecycleRepository => DiportPort::DlxLifecycleRepository,
+            Self::VaultSigner => DiportPort::Signer,
+            Self::VaultKeyProvider => DiportPort::KeyProvider,
+            Self::OidcProvider => DiportPort::Pdp,
+            Self::S3Store => DiportPort::ObjectStore,
+            Self::S3VerifiedDlxArchiveStore => DiportPort::DlxArchiveStore,
+        }
+    }
+
+    pub const fn durability(self) -> ProviderDurability {
+        match self {
+            Self::SoftcaInMemRevocationLedger | Self::RatelimitGovernorLimiter => {
+                ProviderDurability::EphemeralMemory
+            }
+            Self::AmqpPublisher
+            | Self::AmqpSubscriber
+            | Self::RedisLockStore
+            | Self::RedisCasStore
+            | Self::PostgresCasStore
+            | Self::PostgresAuthAuditSink
+            | Self::PostgresServiceTokenReplayStore
+            | Self::PostgresDlxLifecycleRepository
+            | Self::VaultSigner
+            | Self::VaultKeyProvider
+            | Self::OidcProvider
+            | Self::S3Store
+            | Self::S3VerifiedDlxArchiveStore => ProviderDurability::Persistent,
+        }
+    }
+
+    pub const fn required_features(self) -> &'static [&'static str] {
+        match self {
+            Self::SoftcaInMemRevocationLedger
+            | Self::AmqpPublisher
+            | Self::AmqpSubscriber
+            | Self::RedisLockStore
+            | Self::RedisCasStore
+            | Self::VaultSigner
+            | Self::VaultKeyProvider
+            | Self::OidcProvider
+            | Self::S3Store
+            | Self::S3VerifiedDlxArchiveStore => &["backend"],
+            Self::RatelimitGovernorLimiter
+            | Self::PostgresCasStore
+            | Self::PostgresAuthAuditSink
+            | Self::PostgresServiceTokenReplayStore
+            | Self::PostgresDlxLifecycleRepository => &[],
+        }
+    }
+
+    pub const fn provider_crate(self) -> &'static str {
+        match self {
+            Self::SoftcaInMemRevocationLedger => "softca",
+            Self::RatelimitGovernorLimiter => "ratelimit",
+            Self::AmqpPublisher | Self::AmqpSubscriber => "amqp",
+            Self::RedisLockStore | Self::RedisCasStore => "redis",
+            Self::PostgresCasStore
+            | Self::PostgresAuthAuditSink
+            | Self::PostgresServiceTokenReplayStore
+            | Self::PostgresDlxLifecycleRepository => "postgres",
+            Self::VaultSigner | Self::VaultKeyProvider => "vault",
+            Self::OidcProvider => "oidc",
+            Self::S3Store | Self::S3VerifiedDlxArchiveStore => "s3",
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum LifecycleChannel {
     Probes,
@@ -473,7 +635,12 @@ impl LifecycleChannel {
     }
 }
 
-display_as_str!(AssemblyDomain, AssemblyListenerKind, LifecycleChannel);
+display_as_str!(
+    AssemblyDomain,
+    AssemblyListenerKind,
+    LifecycleChannel,
+    ProviderConstructor
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub enum DiportPort {
@@ -637,6 +804,15 @@ fn ensure_unique_provider_keys(
     }
 }
 
+fn is_kebab_case_id(value: &str) -> bool {
+    value.split('-').all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    })
+}
+
 fn provider_key(provider: &DiportProvider) -> (&str, &str, &str, &str) {
     (
         provider.port.as_str(),
@@ -665,6 +841,7 @@ kind = "primary"
 domains = ["identity", "settings", "audit"]
 
 [[diportProviders]]
+id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"
@@ -703,6 +880,35 @@ outputs = ["resources", "workers"]
             [LifecycleChannel::Resources, LifecycleChannel::Workers]
         );
         manifest.validate_basic().expect("valid manifest");
+    }
+
+    #[test]
+    fn provider_ids_are_required_unique_kebab_case_facts() {
+        assert!(
+            AssemblyManifest::from_toml_str(&MINIMAL.replace("id = \"listener-pdp\"\n", ""))
+                .is_err()
+        );
+
+        let invalid =
+            AssemblyManifest::from_toml_str(&MINIMAL.replace("listener-pdp", "Listener_Pdp"))
+                .expect("syntactically valid manifest");
+        assert!(
+            invalid
+                .basic_validation_errors()
+                .contains(&ManifestValidationError::Invalid {
+                    field: "diportProviders.id"
+                })
+        );
+
+        let mut duplicate = AssemblyManifest::from_toml_str(MINIMAL).expect("manifest");
+        duplicate
+            .diport_providers
+            .push(duplicate.diport_providers[0].clone());
+        assert!(duplicate.basic_validation_errors().contains(
+            &ManifestValidationError::Duplicate {
+                field: "diportProviders.id"
+            }
+        ));
     }
 
     #[test]

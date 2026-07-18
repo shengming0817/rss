@@ -2,7 +2,10 @@
 
 ## 当前事实
 
-The repository has `AssemblyManifest`, generated domain modules, and a summary-oriented RuntimePlan, but no canonical AssemblyLock, process configuration snapshot, DeploymentPlan, protected RuntimeInventory contract, or cross-stage fingerprint chain. These entities below are target models, not current Rust types.
+The repository has canonical AssemblyLock generation/check, a process-lifetime
+`RuntimeConfigSnapshot`, and a closed typed RuntimePlan v1 carrying the upstream
+`assemblyFingerprint` and its own `runtimePlanFingerprint`. DeploymentPlan, protected
+RuntimeInventory, and the complete live/deployment evidence chain remain target models.
 
 ## 目标能力
 
@@ -28,7 +31,9 @@ Required fields:
 
 ### RuntimeConfigSnapshot
 
-One process-level value will contain all serving configuration after parsing and secret-reference resolution boundaries are established. It will be constructed once before planning, passed as a required typed input, and never rebuilt by providers, routes, listeners, or workers. Secret material handling remains outside stable plan serialization.
+One process-level value contains all serving configuration. It is captured once before planning,
+passed through the private `SnapshotConfig` capability, and never rebuilt by providers, routes,
+listeners, or workers. Secret material remains outside stable plan serialization.
 
 ### RuntimePlan
 
@@ -40,8 +45,25 @@ Required fields:
 - `domainPlans`: declaration-ordered domains and lifecycle phases.
 - `placementPlans`: stable domain-to-workload placements.
 
-Private constructors and typestate will prevent partially finalized plans. Domain and lifecycle arrays preserve declaration order; set-like outputs and placements sort by stable identity.
+Private constructors prevent partially finalized plans. `ProviderConstructor` is the manifest,
+RuntimePlan, and xtask metadata registry single source, so an unknown constructor cannot enter a
+canonical manifest or be accepted by the strict reader. The candidate API accepts only
+non-derivable facts: listener IDs are derived as `{kind}-main`, and domain lifecycle is materialized
+internally as `construct → ready → shutdown`. Domain arrays preserve declaration order; set-like
+outputs and placements sort by stable identity.
 `runtimePlanFingerprint` covers the stable, serializable plan facts and excludes itself. It does not hash the raw RuntimeConfigSnapshot or secret material; a configuration change affects the fingerprint only when it changes a typed, non-secret execution fact.
+
+#1788 implements this contract in `assembly-schema`: the strict reader rejects unknown
+versions/fields/enums, non-canonical set arrays, keyed duplicates, dangling references, invalid
+lifecycle/auth combinations, and fingerprint mismatch. The validated compiler binds the exact
+canonical manifest name/profile/digest to the embedded AssemblyLock. Provider IDs are explicit
+required kebab-case manifest facts; provider/listener plans sort by ID, domains retain manifest
+order, placements sort by wire domain/workload, and lifecycle is exactly
+`construct → ready → shutdown`. Strict JSON errors expose only a closed stage/category and a
+sanitized known-field path; input keys and values are never retained. Bundled manifest and lock
+errors keep their repository-owned source chain behind fixed top-level messages. Runtime currently
+uses the plan for stable identity and startup diagnostics; #1789–#1794 own the final plan-driven
+live transition.
 
 ### DeploymentPlan
 
@@ -104,7 +126,10 @@ Declared -> Locked -> Configured -> Planned -> Launched -> Deployed -> Observed 
 
 ## Secret boundary
 
-Only a closed `SecretRef` object crosses stable artifacts. It identifies a supported reference kind, name, and key. Inline material, generic maps, free-form provider payloads, or debug representations are outside every target schema.
+RuntimePlan carries no secret reference, endpoint, URL, allow-set, presence bit, token, key, or raw
+snapshot value. Later deployment artifacts may carry only a closed `SecretRef` identifier. Inline
+material, generic maps, free-form provider payloads, or secret-bearing debug/error representations
+are outside every stable schema and fingerprint preimage.
 
 ## Version and compatibility
 
@@ -116,7 +141,8 @@ There is no migration graph in this baseline. Consumers will accept version 1 an
 |---|---|---|
 | AssemblyLock | #1780–#1781 | Hard model/codegen/golden; Medium drift check |
 | RuntimeConfigSnapshot | #1782–#1787 | Hard required input; Medium ambient-read guard |
-| RuntimePlan and live transition | #1788–#1794 | Hard closed types/typestate/catalog; Medium closure ratchets |
+| RuntimePlan identity and diagnostics | #1788 | Hard private fields/validated compiler/strict reader/schema/golden |
+| RuntimePlan-driven live transition | #1789–#1794 | Hard typestate/catalog; Medium closure ratchets |
 | runtimeexec and subset artifacts | #1795–#1798 | Hard launch graph; Medium artifact matrix |
 | production security state | #1799–#1801 | Hard type/database/manifest constraints |
 | DeploymentPlan and Helm | #1802–#1805 | Hard schema/render; Medium deployment acceptance |

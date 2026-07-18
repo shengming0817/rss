@@ -6,8 +6,12 @@
 
 ## 当前事实
 
-- `RuntimePlan` validates and summarizes manifest facts but does not own the live wiring performed in `assemblies/runtime/src/lib.rs::run`.
-- serving modules still read ambient environment values; there is no process-wide immutable RuntimeConfigSnapshot.
+- `RuntimePlan` is a closed typed v1 protocol with an exhaustive provider-constructor registry,
+  internally derived listener IDs/lifecycle, strict redacted parsing diagnostics, stable
+  provider/listener/domain/placement facts, an upstream AssemblyFingerprint, and a domain-separated
+  RuntimePlanFingerprint. Startup consumes the bundled plan for identity/diagnostics, while
+  #1789–#1794 still own plan-driven live wiring.
+- serving and operator paths capture one immutable process-wide RuntimeConfigSnapshot; the runtime environment funnel rejects serving ambient reads outside named maintenance boundaries.
 - `settingsonly` and `identityaudit` are build closures without launch, probe, config-schema, image, or journey closure.
 - deployment is Compose-oriented and not derived from assembly identity; protected inventory and same-head deployment/release receipts do not exist.
 - 001 is superseded, immutable audit lineage. 007 is the active planning entry and provides no compatibility path back to 001.

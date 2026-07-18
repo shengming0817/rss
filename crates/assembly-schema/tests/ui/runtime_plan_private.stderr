@@ -1,0 +1,68 @@
+error[E0451]: fields `schema_version`, `assembly_fingerprint`, `runtime_plan_fingerprint`, `provider_plans`, `listener_plans`, `domain_plans` and `placement_plans` of struct `RuntimePlan` are private
+  --> tests/ui/runtime_plan_private.rs:12:9
+   |
+11 |     RuntimePlan {
+   |     ----------- in this type
+12 |         schema_version: 1,
+   |         ^^^^^^^^^^^^^^ private field
+13 |         assembly_fingerprint,
+   |         ^^^^^^^^^^^^^^^^^^^^ private field
+14 |         runtime_plan_fingerprint,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^ private field
+15 |         provider_plans: vec![ProviderPlan {
+   |         ^^^^^^^^^^^^^^ private field
+...
+20 |         listener_plans: vec![ListenerPlan {
+   |         ^^^^^^^^^^^^^^ private field
+...
+26 |         domain_plans: vec![DomainPlan {
+   |         ^^^^^^^^^^^^ private field
+...
+34 |         placement_plans: vec![PlacementPlan {
+   |         ^^^^^^^^^^^^^^^ private field
+
+error[E0451]: fields `id`, `constructor` and `outputs` of struct `ProviderPlan` are private
+  --> tests/ui/runtime_plan_private.rs:16:13
+   |
+15 |         provider_plans: vec![ProviderPlan {
+   |                              ------------ in this type
+16 |             id: "pdp".to_owned(),
+   |             ^^ private field
+17 |             constructor: ProviderConstructor::OidcProvider,
+   |             ^^^^^^^^^^^ private field
+18 |             outputs: vec![LifecycleChannel::Resources],
+   |             ^^^^^^^ private field
+
+error[E0451]: fields `id`, `kind`, `auth` and `domains` of struct `ListenerPlan` are private
+  --> tests/ui/runtime_plan_private.rs:21:13
+   |
+20 |         listener_plans: vec![ListenerPlan {
+   |                              ------------ in this type
+21 |             id: "primary-main".to_owned(),
+   |             ^^ private field
+22 |             kind: assembly_schema::AssemblyListenerKind::Primary,
+   |             ^^^^ private field
+23 |             auth: ListenerAuth::Jwt,
+   |             ^^^^ private field
+24 |             domains: vec![AssemblyDomain::Identity],
+   |             ^^^^^^^ private field
+
+error[E0451]: fields `id` and `lifecycle` of struct `DomainPlan` are private
+  --> tests/ui/runtime_plan_private.rs:27:13
+   |
+26 |         domain_plans: vec![DomainPlan {
+   |                            ---------- in this type
+27 |             id: AssemblyDomain::Identity,
+   |             ^^ private field
+28 |             lifecycle: vec![
+   |             ^^^^^^^^^ private field
+
+error[E0451]: fields `domain` and `workload` of struct `PlacementPlan` are private
+  --> tests/ui/runtime_plan_private.rs:35:13
+   |
+34 |         placement_plans: vec![PlacementPlan {
+   |                               ------------- in this type
+35 |             domain: AssemblyDomain::Identity,
+   |             ^^^^^^ private field
+36 |             workload: "runtime".to_owned(),
+   |             ^^^^^^^^ private field

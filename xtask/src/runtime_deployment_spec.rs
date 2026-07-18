@@ -304,6 +304,29 @@ fn validate_schema_set(
         for case in &fixture.invalid {
             let schema_rejects = validator.validate(&case.instance).is_err();
             let semantics_reject = validate_semantics(name, &case.instance, fingerprints).is_err();
+            if name == "runtime-plan.schema.json"
+                && matches!(
+                    case.name.as_str(),
+                    "empty-provider-plans"
+                        | "empty-listener-plans"
+                        | "empty-domain-plans"
+                        | "empty-placement-plans"
+                        | "internal-no-auth"
+                        | "unknown-auth-scheme"
+                        | "unknown-provider-constructor"
+                        | "unknown-lifecycle-channel"
+                        | "invalid-lifecycle-sequence"
+                        | "non-kebab-provider-id"
+                        | "primary-mtls-auth"
+                        | "non-kebab-workload-id"
+                )
+            {
+                ensure!(
+                    schema_rejects,
+                    "{name}/{} must be rejected by Draft-07 itself, independently of its stale fingerprint",
+                    case.name
+                );
+            }
             ensure!(
                 schema_rejects || semantics_reject,
                 "{name}/{} invalid case was accepted",
@@ -380,10 +403,9 @@ fn validate_semantics(
         "assembly-lock.schema.json" => {
             validate_instance_fingerprint(instance, "fingerprint", "rss-assembly-lock-v1")
         }
-        "runtime-plan.schema.json" => {
-            validate_runtime_plan(instance)?;
-            validate_instance_fingerprint(instance, "runtimePlanFingerprint", "rss-runtime-plan-v1")
-        }
+        "runtime-plan.schema.json" => validate_runtime_plan_wire(
+            &serde_json::to_vec(instance).context("serialize RuntimePlan semantics input")?,
+        ),
         "deployment-plan.schema.json" => {
             validate_deployment_plan(instance)?;
             validate_instance_fingerprint(
@@ -456,18 +478,6 @@ fn sorted_unique_objects(
     Ok(identities)
 }
 
-fn sorted_unique_strings(values: &[Value], label: &str) -> Result<()> {
-    let ordered = values
-        .iter()
-        .map(|value| value.as_str().context("set-like value must be string"))
-        .collect::<Result<Vec<_>>>()?;
-    ensure!(
-        ordered.windows(2).all(|pair| pair[0] < pair[1]),
-        "{label}: values are not unique and strictly sorted"
-    );
-    Ok(())
-}
-
 fn sorted_unique_secret_refs(values: &[Value]) -> Result<()> {
     let identities = values
         .iter()
@@ -505,38 +515,10 @@ fn sorted_unique_secret_refs(values: &[Value]) -> Result<()> {
     Ok(())
 }
 
-fn validate_runtime_plan(instance: &Value) -> Result<()> {
-    let providers = array_field(instance, "providerPlans")?;
-    sorted_unique_objects(providers, "providerPlans", &["id"])?;
-    for provider in providers {
-        sorted_unique_strings(array_field(provider, "outputs")?, "provider.outputs")?;
-    }
-    let listeners = array_field(instance, "listenerPlans")?;
-    sorted_unique_objects(listeners, "listenerPlans", &["id"])?;
-    let domains = unique_objects(
-        array_field(instance, "domainPlans")?,
-        "domainPlans",
-        &["id"],
-    )?;
-    let placements = array_field(instance, "placementPlans")?;
-    sorted_unique_objects(placements, "placementPlans", &["domain", "workload"])?;
-    for listener in listeners {
-        for domain in array_field(listener, "domains")? {
-            let domain = domain.as_str().context("listener domain must be string")?;
-            ensure!(
-                domains.contains(&vec![domain.to_owned()]),
-                "listener references unknown domain {domain}"
-            );
-        }
-    }
-    for placement in placements {
-        let domain = string_field(placement, "domain")?;
-        ensure!(
-            domains.contains(&vec![domain.to_owned()]),
-            "placement references unknown domain {domain}"
-        );
-    }
-    Ok(())
+fn validate_runtime_plan_wire(bytes: &[u8]) -> Result<()> {
+    assembly_schema::ParsedRuntimePlan::from_json_slice(bytes)
+        .map(|_| ())
+        .context("typed RuntimePlan semantics rejected wire")
 }
 
 fn validate_deployment_plan(instance: &Value) -> Result<()> {
@@ -1228,6 +1210,53 @@ mod tests {
             &["left", "right"],
         )?;
         assert_eq!(identities.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_plan_semantics_are_owned_by_the_typed_reader() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let loaded = validate_repository(&root)?;
+        let valid = loaded.schema_cases.schemas["runtime-plan.schema.json"]
+            .valid
+            .first()
+            .context("runtime plan valid case missing")?
+            .instance
+            .clone();
+
+        validate_semantics("runtime-plan.schema.json", &valid, &loaded.fingerprints)?;
+
+        let raw = serde_json::to_string(&valid)?;
+        let duplicate_key = raw.replacen(
+            "\"schemaVersion\":1",
+            "\"schemaVersion\":1,\"schemaVersion\":1",
+            1,
+        );
+        assert!(validate_runtime_plan_wire(duplicate_key.as_bytes()).is_err());
+
+        let mut dangling = valid.clone();
+        dangling["listenerPlans"][0]["domains"] =
+            Value::Array(vec![Value::String("settings".to_owned())]);
+        let Err(error) =
+            validate_semantics("runtime-plan.schema.json", &dangling, &loaded.fingerprints)
+        else {
+            bail!("typed reader accepted dangling domains");
+        };
+        assert!(format!("{error:#}").contains("dangling reference"));
+
+        let mut unsorted = valid;
+        let mut earlier = unsorted["providerPlans"][0].clone();
+        object_mut(&mut earlier)?.insert("id".to_owned(), Value::String("a-provider".to_owned()));
+        unsorted["providerPlans"]
+            .as_array_mut()
+            .context("provider plans missing")?
+            .push(earlier);
+        let Err(error) =
+            validate_semantics("runtime-plan.schema.json", &unsorted, &loaded.fingerprints)
+        else {
+            bail!("typed reader accepted noncanonical plan order");
+        };
+        assert!(format!("{error:#}").contains("canonical order"));
         Ok(())
     }
 

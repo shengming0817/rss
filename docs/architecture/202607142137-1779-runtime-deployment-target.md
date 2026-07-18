@@ -10,8 +10,8 @@
 
 | Fact | Repository evidence | Consequence |
 |---|---|---|
-| Runtime plan is descriptive, not executable | `assemblies/runtime/src/plan.rs` stores a summary plus provider declarations; `assemblies/runtime/src/lib.rs::run` builds it before continuing through handwritten wiring | plan identity cannot yet prove live topology |
-| Serving configuration is read in multiple places | direct `std::env::var` calls remain in `assemblies/runtime/src/lib.rs`, `launch.rs`, `listeners.rs`, and `routes.rs` | one process does not yet have one immutable configuration fact |
+| Runtime plan has typed identity but does not yet drive live wiring | `assembly-schema` owns the closed v1 protocol/strict reader; `assemblies/runtime/src/plan/**` compiles the bundled manifest, lock, and snapshot-backed listener auth before startup continues through handwritten wiring | plan identity and diagnostics are stable; #1789–#1794 still close live topology |
+| Serving configuration is one captured generation | `RuntimeConfigSnapshot` and the runtime environment funnel cover serving/operator consumers; RuntimePlan receives only the borrowed snapshot capability | raw configuration and secrets cannot enter the plan artifact |
 | Subset assemblies are compile-time closures | `assemblies/settingsonly` and `assemblies/identityaudit` have manifests and generated modules but no launch binary | build closure is not runtime or deployment closure |
 | Deployment is demo-oriented | `deploy/docker-compose.yml` is the supported demo stack (`docs/ops/202606271438-003-container-image.md`); no `deploy/helm/rss` tree exists | assembly identity cannot be checked against Kubernetes output |
 | CI evidence is local/shadow | `README.md` records the typed `ci-gate` and Azure active forge, while the gate is not a required forge check | future evidence must extend the local gate without claiming branch protection |
@@ -34,9 +34,9 @@ assembly.toml + generated modules + contracts
   -> same-head local ci-gate receipts
 ```
 
-- **AssemblyLock** will identify the assembly and digest manifest, generated, and contract inputs (#1780–#1781).
-- **RuntimeConfigSnapshot** will be constructed once and passed as a required typed input; serving code will stop reading ambient configuration (#1782–#1787).
-- **RuntimePlan** will close provider, listener, domain, lifecycle, and placement decisions, then drive the live root (#1788–#1794).
+- **AssemblyLock** identifies the assembly and digests manifest, generated, and contract inputs (#1780–#1781).
+- **RuntimeConfigSnapshot** is constructed once and passed as a required typed input; serving ambient reads are closed (#1782–#1787).
+- **RuntimePlan** closes and fingerprints provider, listener, domain, lifecycle, and placement decisions (#1788); #1789–#1794 make it drive the live root.
 - **runtimeexec** will own provider-independent startup and typed lifecycle transitions used by all runnable assemblies (#1795–#1798).
 - Production security posture will close persistent revocation, Vault allowlists, and production manifest requirements (#1799–#1801).
 - **DeploymentPlan** will derive renderable deployment facts from assembly identity; Helm, policy, and kind acceptance will detect drift (#1802–#1805).
@@ -64,7 +64,9 @@ The four Draft-07 files under the active SpecKit freeze only the minimum downstr
 | `deployment-plan.schema.json` | assembly/runtime-plan/deployment fingerprints, immutable images, workloads/services/probes/identities/secret refs/resources | #1802 |
 | `runtime-inventory.schema.json` | build identity, all three fingerprints, domains/listeners/provider posture/placements | #1806 |
 
-These are design contracts for downstream codegen and golden work. They do not claim that the Rust types, generators, renderers, endpoints, or gates already exist.
+AssemblyLock and RuntimePlan now have matching Rust types, strict readers, generators/compilers and
+goldens. DeploymentPlan and RuntimeInventory remain design contracts; this table does not claim
+their renderers, endpoints, or gates already exist.
 
 ## 缺口与 owner
 
@@ -72,7 +74,8 @@ These are design contracts for downstream codegen and golden work. They do not c
 |---|---|---|
 | RFC 8785 canonical assembly identity, exact input universe, and drift check | #1780–#1781 | Hard type/schema/codegen/golden; Medium generate/check |
 | one configuration read and no serving ambient reads | #1782–#1787 | Hard snapshot and required inputs; Medium AST guard |
-| fingerprinted executable plan and live cutover | #1788–#1794 | Hard closed plan/typestate/catalog; Medium bijection and root ratchet |
+| fingerprinted typed plan identity | #1788 | Hard private protocol/compiler/reader/schema/golden |
+| plan-driven live cutover | #1789–#1794 | Hard typestate/catalog; Medium bijection and root ratchet |
 | reusable launch and runnable subset closure | #1795–#1798 | Hard runtimeexec graph; Medium artifact closure |
 | production security posture | #1799–#1801 | Hard types, database constraints, and manifest validation |
 | Kubernetes deployment fact chain | #1802–#1805 | Hard plan schema-to-golden; Medium Helm drift/policy/kind acceptance |

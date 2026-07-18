@@ -426,6 +426,8 @@ fn canonical_password_preload_local(
 struct RunRuntimeConfigWiring {
     runtime_inputs_calls: usize,
     runtime_inputs_config_calls: usize,
+    runtime_plan_calls: usize,
+    canonical_runtime_plan_calls: usize,
     config_view_bindings: usize,
     canonical_config_view_bindings: usize,
     serving_config_calls: usize,
@@ -503,7 +505,9 @@ impl RunRuntimeConfigWiring {
             && serving_sinks_are_canonical
             && self.pg_setup_after_serving_config == 1;
         self.runtime_inputs_calls == 0
-            && self.runtime_inputs_config_calls == 4
+            && self.runtime_inputs_config_calls == 4 + self.runtime_plan_calls
+            && self.runtime_plan_calls <= 1
+            && self.runtime_plan_calls == self.canonical_runtime_plan_calls
             && self.config_view_bindings == 1
             && self.canonical_config_view_bindings == 1
             && serving_is_canonical
@@ -749,6 +753,20 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
         self.record_serving_sink_call(call);
         if path_ends_with(&call.func, &["RuntimeInputs", "new"]) {
             self.runtime_inputs_calls += 1;
+        }
+        if path_ends_with(&call.func, &["plan", "RuntimePlan", "bundled"]) {
+            self.runtime_plan_calls += 1;
+            self.canonical_runtime_plan_calls += usize::from(
+                call.args.len() == 1
+                    && self
+                        .runtime_inputs_binding
+                        .as_ref()
+                        .is_some_and(|runtime_inputs| {
+                            call.args.first().is_some_and(|arg| {
+                                is_runtime_inputs_config_view(arg, runtime_inputs)
+                            })
+                        }),
+            );
         }
         if path_ends_with(&call.func, &["RuntimeServingConfig", "from_snapshot"]) {
             self.serving_config_calls += 1;
@@ -9651,6 +9669,7 @@ fn render_toml_value(value: &toml::Value) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProviderEntry {
     index: usize,
+    id: String,
     port: String,
     provider: String,
     provider_crate: String,
@@ -9701,8 +9720,9 @@ fn assembly_providers(root: &Path) -> Result<Vec<ProviderEntry>> {
     for (index, provider) in manifest.diport_providers.iter().enumerate() {
         providers.push(ProviderEntry {
             index: index + 1,
+            id: provider.id.clone(),
             port: provider.port.to_string(),
-            provider: provider.provider.clone(),
+            provider: provider.provider.to_string(),
             provider_crate: provider.provider_crate.clone(),
             required_features: provider.required_features.clone(),
             consumer: provider.consumer.clone(),
@@ -9868,7 +9888,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.plan.load",
         path: RUNTIME_LIB_PATH,
-        pattern: "plan::RuntimePlan::bundled().context(",
+        pattern: "plan::RuntimePlan::bundled(runtime_inputs.config()).context(",
     },
     AnchorSpec {
         id: "run.provider.oidc",
@@ -10446,8 +10466,9 @@ fn render_baseline(
         push_line(
             &mut out,
             format_args!(
-                "{:02} | port={} | provider={} | providerCrate={} | requiredFeatures={} | consumer={} | lifecycle={} | durability={} | purpose={}",
+                "{:02} | id={} | port={} | provider={} | providerCrate={} | requiredFeatures={} | consumer={} | lifecycle={} | durability={} | purpose={}",
                 provider.index,
+                provider.id,
                 provider.port,
                 provider.provider,
                 provider.provider_crate,
@@ -10778,6 +10799,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"
@@ -10978,6 +11000,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
+id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"
@@ -11033,7 +11056,7 @@ serde = workspace=true; features=[derive]
                 .contains("listeners = [primary,internal,admin,health]")
         );
         assert!(report.rendered.contains(
-            "01 | port=diport::Pdp | provider=oidc::OidcProvider | providerCrate=oidc | requiredFeatures=[backend] | consumer=httpserve | lifecycle=active | durability=persistent | purpose=jwt-credential-verification"
+            "01 | id=listener-pdp | port=diport::Pdp | provider=oidc::OidcProvider | providerCrate=oidc | requiredFeatures=[backend] | consumer=httpserve | lifecycle=active | durability=persistent | purpose=jwt-credential-verification"
         ));
         assert!(
             report

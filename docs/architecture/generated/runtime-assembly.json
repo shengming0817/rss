@@ -11,14 +11,14 @@
       "path": "assemblies/runtime/assembly.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "beb14ed47b67ef6ebecb291ddba498a324d9b3776bb997435c96a443b488b08f"
+        "value": "fcb9a3dc1fced1633f6e957746cb2731483beb43ed94ac574a226523f36150c5"
       }
     },
     {
       "path": "assemblies/runtime/src/generated/modules_gen.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "a657541fc741e93a9fb69e30b88149d9446e5c6398c978bbf6909dbddd1968b2"
+        "value": "049f49c4675a8211746933b0d56c8dd9e68309551087c1ed6ee8243603130946"
       }
     },
     {

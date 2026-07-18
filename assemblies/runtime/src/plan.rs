@@ -1,485 +1,539 @@
+//! Bundled RuntimePlan compiler.
+
+mod domain;
+mod listener;
+mod placement;
+mod provider;
+
+use crate::config::SnapshotConfig;
 use assembly_schema::{
-    AssemblyManifest, DiportProvider, ManifestValidationError, ProviderDurability,
-    ProviderLifecycle,
+    AssemblyManifest, ParsedAssemblyLock, RuntimePlan as TypedRuntimePlan, RuntimePlanV1Input,
 };
 use std::fmt;
 
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
+const BUNDLED_ASSEMBLY_LOCK: &[u8] = include_bytes!("../assembly.lock.json");
 
-pub const FACT_SOURCE_MATRIX: &[FactSourceEntry] = &[
-    FactSourceEntry {
-        source: "contracts",
-        owns: "wire contracts",
-    },
-    FactSourceEntry {
-        source: "Cargo.toml",
-        owns: "physical dependencies",
-    },
-    FactSourceEntry {
-        source: "assembly.toml",
-        owns: "active assembly declaration",
-    },
-    FactSourceEntry {
-        source: "modules_gen.rs",
-        owns: "derived runtime module output",
-    },
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FactSourceEntry {
-    pub source: &'static str,
-    pub owns: &'static str,
-}
-
-#[derive(Clone)]
-pub struct AssemblyPlan {
-    manifest: AssemblyManifest,
-}
-
-impl fmt::Debug for AssemblyPlan {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AssemblyPlan(<redacted-manifest>)")
-    }
-}
-
-impl AssemblyPlan {
-    pub fn from_toml_str(src: &str) -> Result<Self, AssemblyPlanError> {
-        let manifest =
-            AssemblyManifest::from_toml_str(src).map_err(|_| AssemblyPlanError::Parse)?;
-        Ok(Self { manifest })
-    }
-
-    pub fn bundled() -> Result<Self, AssemblyPlanError> {
-        Self::from_toml_str(BUNDLED_ASSEMBLY_TOML)
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum AssemblyPlanError {
-    #[error("parse assembly manifest failed")]
-    Parse,
-}
-
-#[derive(Debug, Clone)]
-pub struct RuntimePlan {
-    summary: RuntimePlanSummary,
-    providers: Vec<RuntimeProviderSummary>,
-}
+/// Runtime-owned entrypoint around the shared, sealed protocol value.
+pub struct RuntimePlan(TypedRuntimePlan);
 
 impl RuntimePlan {
-    pub fn from_assembly(plan: AssemblyPlan) -> Result<Self, RuntimePlanError> {
-        validate_manifest(&plan.manifest)?;
-        let summary = RuntimePlanSummary::from_manifest(&plan.manifest);
-        let providers = plan
-            .manifest
-            .diport_providers
-            .iter()
-            .map(RuntimeProviderSummary::from_provider)
-            .collect();
-        Ok(Self { summary, providers })
+    /// Build the exact bundled plan from the committed manifest, lock and captured configuration.
+    pub(crate) fn bundled(config: SnapshotConfig<'_>) -> Result<Self, RuntimePlanError> {
+        Self::from_bundled_artifacts(BUNDLED_ASSEMBLY_TOML, BUNDLED_ASSEMBLY_LOCK, config)
     }
 
-    pub fn bundled() -> Result<Self, RuntimePlanError> {
-        Self::from_assembly(AssemblyPlan::bundled()?)
+    fn from_bundled_artifacts(
+        manifest_toml: &str,
+        assembly_lock_json: &[u8],
+        config: SnapshotConfig<'_>,
+    ) -> Result<Self, RuntimePlanError> {
+        let manifest = AssemblyManifest::from_toml_str(manifest_toml)
+            .map_err(RuntimePlanError::ManifestParse)?
+            .canonicalize_v1()
+            .map_err(RuntimePlanError::ManifestCanonicalization)?;
+        let lock = ParsedAssemblyLock::from_json_slice(assembly_lock_json)
+            .map_err(RuntimePlanError::AssemblyLock)?;
+
+        let mut input = RuntimePlanV1Input::new();
+        provider::append(&manifest, &mut input);
+        listener::append(&manifest, config, &mut input)?;
+        domain::append(&manifest, &mut input);
+        placement::append(&manifest, &lock, &mut input);
+
+        TypedRuntimePlan::compile_v1(&manifest, &lock, input)
+            .map(Self)
+            .map_err(RuntimePlanError::Protocol)
     }
 
-    pub fn summary(&self) -> &RuntimePlanSummary {
-        &self.summary
+    pub const fn as_typed(&self) -> &TypedRuntimePlan {
+        &self.0
     }
+}
 
-    pub fn providers(&self) -> &[RuntimeProviderSummary] {
-        &self.providers
+impl fmt::Debug for RuntimePlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RuntimePlanError {
-    #[error(transparent)]
-    Assembly(#[from] AssemblyPlanError),
-    #[error("runtime assembly plan field `{field}` must not be empty")]
-    Empty { field: &'static str },
-    #[error("runtime assembly plan field `{field}` must not contain duplicates")]
-    Duplicate { field: &'static str },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimePlanSummary {
-    name: String,
-    profile: &'static str,
-    topology: &'static str,
-    domains: Vec<&'static str>,
-    listeners: Vec<&'static str>,
-    provider_counts: ProviderCounts,
-}
-
-impl RuntimePlanSummary {
-    fn from_manifest(manifest: &AssemblyManifest) -> Self {
-        Self {
-            name: manifest.name.clone(),
-            profile: manifest.profile.as_str(),
-            topology: manifest.topology.as_str(),
-            domains: manifest
-                .domains
-                .iter()
-                .map(|domain| domain.as_str())
-                .collect(),
-            listeners: manifest
-                .listeners
-                .iter()
-                .map(|listener| listener.kind.as_str())
-                .collect(),
-            provider_counts: ProviderCounts::from_providers(&manifest.diport_providers),
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn profile(&self) -> &'static str {
-        self.profile
-    }
-
-    pub fn topology(&self) -> &'static str {
-        self.topology
-    }
-
-    pub fn domains(&self) -> &[&'static str] {
-        &self.domains
-    }
-
-    pub fn listeners(&self) -> &[&'static str] {
-        &self.listeners
-    }
-
-    pub fn provider_counts(&self) -> ProviderCounts {
-        self.provider_counts
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ProviderCounts {
-    pub total: usize,
-    pub active: usize,
-    pub draft: usize,
-    pub deprecated: usize,
-    pub persistent: usize,
-    pub ephemeral_memory: usize,
-}
-
-impl ProviderCounts {
-    fn from_providers(providers: &[DiportProvider]) -> Self {
-        let mut counts = Self {
-            total: providers.len(),
-            ..Self::default()
-        };
-        for provider in providers {
-            match provider.lifecycle {
-                ProviderLifecycle::Active => counts.active += 1,
-                ProviderLifecycle::Draft => counts.draft += 1,
-                ProviderLifecycle::Deprecated => counts.deprecated += 1,
-            }
-            match provider.durability {
-                ProviderDurability::Persistent => counts.persistent += 1,
-                ProviderDurability::EphemeralMemory => counts.ephemeral_memory += 1,
-            }
-        }
-        counts
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeProviderSummary {
-    port: &'static str,
-    lifecycle: &'static str,
-    durability: &'static str,
-    required_features: Vec<String>,
-}
-
-impl RuntimeProviderSummary {
-    fn from_provider(provider: &DiportProvider) -> Self {
-        Self {
-            port: provider.port.as_str(),
-            lifecycle: provider.lifecycle.as_str(),
-            durability: provider.durability.as_str(),
-            required_features: provider.required_features.clone(),
-        }
-    }
-
-    pub fn port(&self) -> &'static str {
-        self.port
-    }
-
-    pub fn lifecycle(&self) -> &'static str {
-        self.lifecycle
-    }
-
-    pub fn durability(&self) -> &'static str {
-        self.durability
-    }
-
-    pub fn required_features(&self) -> &[String] {
-        &self.required_features
-    }
-}
-
-fn validate_manifest(manifest: &AssemblyManifest) -> Result<(), RuntimePlanError> {
-    if let Err(errors) = manifest.validate_basic()
-        && let Some(error) = errors.as_slice().first()
-    {
-        return Err(runtime_validation_error(*error));
-    }
-    Ok(())
-}
-
-fn runtime_validation_error(error: ManifestValidationError) -> RuntimePlanError {
-    match error {
-        ManifestValidationError::Empty { field } => RuntimePlanError::Empty { field },
-        ManifestValidationError::Duplicate { field } => RuntimePlanError::Duplicate { field },
-    }
+pub(crate) enum RuntimePlanError {
+    #[error("parse bundled runtime assembly manifest failed")]
+    ManifestParse(#[source] toml::de::Error),
+    #[error("canonicalize bundled runtime assembly manifest failed")]
+    ManifestCanonicalization(#[source] assembly_schema::AssemblyManifestCanonicalizationError),
+    #[error("parse bundled runtime AssemblyLock failed")]
+    AssemblyLock(#[source] assembly_schema::AssemblyLockError),
+    #[error("resolve RSS_INTERNAL_AUTH_SCHEME failed; expected 'mtls' or 'service-token'")]
+    ListenerAuth,
+    #[error("compile bundled RuntimePlan protocol failed: {0}")]
+    Protocol(#[source] assembly_schema::RuntimePlanError),
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used, clippy::unwrap_used)]
-    // reason: plan parser tests use direct fixture assertions; parse failures should panic with local context.
+    #![allow(clippy::expect_used)]
+    // reason: bundled protocol/golden tests should stop at the exact local drift assertion.
 
     use super::*;
+    use crate::config::test_snapshot;
+    use assembly_schema::{
+        AssemblyDomain, AssemblyListenerKind, CanonicalAssemblyManifestV1, DomainLifecyclePhase,
+        ListenerAuth, RuntimePlanErrorStage,
+    };
+    use std::error::Error as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracing_subscriber::prelude::*;
 
-    const MINIMAL_PROVIDER: &str = r#"
-[[diportProviders]]
-port = "diport::Pdp"
-provider = "oidc::OidcProvider"
-providerCrate = "oidc"
-consumer = "httpserve"
-lifecycle = "active"
-durability = "persistent"
-purpose = "jwt-credential-verification"
-outputs = []
-"#;
+    const SECRET_BAIT: &str = "ZZ_RUNTIME_PLAN_SECRET_1788";
+    const IDENTITY_AUDIT_ASSEMBLY_LOCK: &[u8] =
+        include_bytes!("../../identityaudit/assembly.lock.json");
 
-    fn manifest_with(body: &str) -> String {
-        format!(
-            r#"
-name = "runtime"
-profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
-frameworkContracts = []
-
-[[listeners]]
-kind = "primary"
-domains = []
-
-[[listeners]]
-kind = "internal"
-domains = []
-
-{body}
-"#
-        )
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Mutation {
+        MissingProvider,
+        DuplicateProvider,
+        MissingListener,
+        DuplicateListener,
+        MissingDomain,
+        DuplicateDomain,
+        MissingPlacement,
+        DuplicatePlacement,
+        DanglingListener,
+        DanglingPlacement,
+        ReverseListeners,
+        ReversePlacements,
     }
 
-    #[test]
-    fn runtime_plan_parses_bundled_runtime_assembly_manifest() {
-        let plan = RuntimePlan::bundled().expect("bundled runtime plan");
-        let summary = plan.summary();
+    #[derive(Clone)]
+    struct WarnEventCounter(Arc<AtomicUsize>);
 
-        assert_eq!(summary.name(), "runtime");
-        assert_eq!(summary.profile(), "demo");
-        assert_eq!(summary.topology(), "durable-shared");
-        assert_eq!(summary.domains(), ["settings", "identity", "audit"]);
-        assert_eq!(
-            summary.listeners(),
-            ["primary", "internal", "admin", "health"]
-        );
-        assert_eq!(summary.provider_counts().total, 16);
-        assert_eq!(summary.provider_counts().active, 14);
-        assert_eq!(summary.provider_counts().draft, 2);
-        assert_eq!(summary.provider_counts().persistent, 14);
-        assert_eq!(summary.provider_counts().ephemeral_memory, 2);
+    impl<S> tracing_subscriber::Layer<S> for WarnEventCounter
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
     }
 
-    #[test]
-    fn runtime_plan_defaults_missing_required_features_to_empty() {
-        let plan = RuntimePlan::from_assembly(
-            AssemblyPlan::from_toml_str(&manifest_with(MINIMAL_PROVIDER)).expect("assembly plan"),
-        )
-        .expect("runtime plan");
+    fn bundled(entries: &[(&str, &str)]) -> RuntimePlan {
+        let snapshot = test_snapshot(entries).expect("test snapshot");
+        RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan")
+    }
 
-        let provider = plan
-            .providers()
+    fn artifact_error(manifest_toml: &str, assembly_lock_json: &[u8]) -> RuntimePlanError {
+        let snapshot = test_snapshot(&[("RSS_VAULT_TOKEN", SECRET_BAIT)]).expect("test snapshot");
+        RuntimePlan::from_bundled_artifacts(manifest_toml, assembly_lock_json, snapshot.view())
+            .expect_err("invalid bundled artifact must fail")
+    }
+
+    fn canonical_manifest(source: &str) -> CanonicalAssemblyManifestV1 {
+        AssemblyManifest::from_toml_str(source)
+            .expect("manifest")
+            .canonicalize_v1()
+            .expect("canonical manifest")
+    }
+
+    fn parsed_lock(source: &[u8]) -> ParsedAssemblyLock {
+        ParsedAssemblyLock::from_json_slice(source).expect("AssemblyLock")
+    }
+
+    fn compile_error(
+        manifest: &CanonicalAssemblyManifestV1,
+        lock: &ParsedAssemblyLock,
+    ) -> assembly_schema::RuntimePlanError {
+        TypedRuntimePlan::compile_v1(manifest, lock, compiler_input(manifest, lock, None))
+            .expect_err("mismatched manifest/lock must fail")
+    }
+
+    fn compiler_input(
+        manifest: &CanonicalAssemblyManifestV1,
+        lock: &ParsedAssemblyLock,
+        mutation: Option<Mutation>,
+    ) -> RuntimePlanV1Input {
+        let mut input = RuntimePlanV1Input::new();
+        append_candidate_providers(manifest, mutation, &mut input);
+        append_candidate_listeners(manifest, mutation, &mut input);
+        append_candidate_domains(manifest, mutation, &mut input);
+        append_candidate_placements(manifest, lock, mutation, &mut input);
+        input
+    }
+
+    fn append_candidate_providers(
+        manifest: &CanonicalAssemblyManifestV1,
+        mutation: Option<Mutation>,
+        input: &mut RuntimePlanV1Input,
+    ) {
+        let mut providers = manifest.diport_providers().iter().collect::<Vec<_>>();
+        providers.sort_by(|left, right| left.id.cmp(&right.id));
+        for (index, provider) in providers.iter().enumerate() {
+            if index == 0 && mutation == Some(Mutation::MissingProvider) {
+                continue;
+            }
+            input.provider(&provider.id, provider.provider, provider.outputs.clone());
+            if index == 0 && mutation == Some(Mutation::DuplicateProvider) {
+                input.provider(&provider.id, provider.provider, provider.outputs.clone());
+            }
+        }
+    }
+
+    fn append_candidate_listeners(
+        manifest: &CanonicalAssemblyManifestV1,
+        mutation: Option<Mutation>,
+        input: &mut RuntimePlanV1Input,
+    ) {
+        let mut listeners = manifest
+            .listeners()
             .iter()
-            .find(|provider| provider.port() == "diport::Pdp")
-            .expect("pdp provider");
-        assert!(provider.required_features().is_empty());
+            .map(|listener| {
+                let auth = match listener.kind {
+                    AssemblyListenerKind::Primary | AssemblyListenerKind::Admin => {
+                        ListenerAuth::Jwt
+                    }
+                    AssemblyListenerKind::Internal => ListenerAuth::Mtls,
+                    AssemblyListenerKind::Health => ListenerAuth::NoAuth,
+                };
+                (listener.kind, auth, listener.domains.clone())
+            })
+            .collect::<Vec<_>>();
+        listeners.sort_by_key(|(kind, _, _)| kind.as_str());
+        if mutation == Some(Mutation::ReverseListeners) {
+            listeners.reverse();
+        }
+        for (index, (kind, auth, domains)) in listeners.iter().enumerate() {
+            if index == 0 && mutation == Some(Mutation::MissingListener) {
+                continue;
+            }
+            let domains = if index == 0 && mutation == Some(Mutation::DanglingListener) {
+                vec![AssemblyDomain::Contractreg]
+            } else {
+                domains.clone()
+            };
+            input.listener(*kind, *auth, domains.clone());
+            if index == 0 && mutation == Some(Mutation::DuplicateListener) {
+                input.listener(*kind, *auth, domains);
+            }
+        }
+    }
+
+    fn append_candidate_domains(
+        manifest: &CanonicalAssemblyManifestV1,
+        mutation: Option<Mutation>,
+        input: &mut RuntimePlanV1Input,
+    ) {
+        for (index, domain) in manifest.domains().iter().enumerate() {
+            if index == 0 && mutation == Some(Mutation::MissingDomain) {
+                continue;
+            }
+            input.domain(*domain);
+            if index == 0 && mutation == Some(Mutation::DuplicateDomain) {
+                input.domain(*domain);
+            }
+        }
+    }
+
+    fn append_candidate_placements(
+        manifest: &CanonicalAssemblyManifestV1,
+        lock: &ParsedAssemblyLock,
+        mutation: Option<Mutation>,
+        input: &mut RuntimePlanV1Input,
+    ) {
+        let mut placements = manifest
+            .domains()
+            .iter()
+            .map(|domain| (*domain, lock.identity().name()))
+            .collect::<Vec<_>>();
+        placements
+            .sort_by(|left, right| (left.0.as_str(), left.1).cmp(&(right.0.as_str(), right.1)));
+        if mutation == Some(Mutation::ReversePlacements) {
+            placements.reverse();
+        }
+        for (index, (domain, workload)) in placements.iter().enumerate() {
+            if index == 0 && mutation == Some(Mutation::MissingPlacement) {
+                continue;
+            }
+            let domain = if index == 0 && mutation == Some(Mutation::DanglingPlacement) {
+                AssemblyDomain::Contractreg
+            } else {
+                *domain
+            };
+            input.placement(domain, *workload);
+            if index == 0 && mutation == Some(Mutation::DuplicatePlacement) {
+                input.placement(domain, *workload);
+            }
+        }
     }
 
     #[test]
-    fn runtime_plan_accepts_audit_sink_provider_declared_by_current_manifest() {
-        let plan = RuntimePlan::bundled().expect("bundled runtime plan");
+    fn runtime_plan_bundled_closes_every_declared_fact_in_stable_order() {
+        let plan = bundled(&[]);
+        let typed = plan.as_typed();
+        let provider_ids = typed
+            .provider_plans()
+            .iter()
+            .map(assembly_schema::ProviderPlan::id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            provider_ids,
+            [
+                "auth-audit-sink",
+                "device-revocation-store",
+                "distributed-cas-store",
+                "distributed-cas-store-alternative",
+                "distributed-lock-store",
+                "dlx-archive-key-provider",
+                "dlx-archive-store",
+                "dlx-lifecycle-repository",
+                "event-publisher",
+                "event-subscriber",
+                "identity-signer",
+                "listener-pdp",
+                "listener-rate-limiter",
+                "runtime-object-store",
+                "service-token-replay-store",
+                "settings-key-provider",
+            ]
+        );
+        assert_eq!(
+            typed
+                .listener_plans()
+                .iter()
+                .map(|listener| (listener.id(), listener.auth()))
+                .collect::<Vec<_>>(),
+            [
+                ("admin-main", ListenerAuth::Jwt),
+                ("health-main", ListenerAuth::NoAuth),
+                ("internal-main", ListenerAuth::Mtls),
+                ("primary-main", ListenerAuth::Jwt),
+            ]
+        );
+        assert_eq!(
+            typed
+                .domain_plans()
+                .iter()
+                .map(|domain| domain.id().as_str())
+                .collect::<Vec<_>>(),
+            ["settings", "identity", "audit"]
+        );
+        assert!(typed.domain_plans().iter().all(|domain| domain.lifecycle()
+            == [
+                DomainLifecyclePhase::Construct,
+                DomainLifecyclePhase::Ready,
+                DomainLifecyclePhase::Shutdown
+            ]));
+        assert_eq!(
+            typed
+                .placement_plans()
+                .iter()
+                .map(|placement| (placement.domain().as_str(), placement.workload()))
+                .collect::<Vec<_>>(),
+            [
+                ("audit", "runtime"),
+                ("identity", "runtime"),
+                ("settings", "runtime"),
+            ]
+        );
+    }
 
+    #[test]
+    fn runtime_plan_internal_auth_is_typed_but_secret_only_config_is_excluded() {
+        let default = bundled(&[]);
+        let warning_count = Arc::new(AtomicUsize::new(0));
+        let subscriber =
+            tracing_subscriber::registry().with(WarnEventCounter(Arc::clone(&warning_count)));
+        let service_token = tracing::subscriber::with_default(subscriber, || {
+            bundled(&[("RSS_INTERNAL_AUTH_SCHEME", "service-token")])
+        });
+        assert_eq!(
+            warning_count.load(Ordering::SeqCst),
+            0,
+            "plan-only auth resolution must not emit the live-router warning"
+        );
+        assert_ne!(
+            default.as_typed().runtime_plan_fingerprint().as_str(),
+            service_token.as_typed().runtime_plan_fingerprint().as_str()
+        );
+        assert_eq!(
+            service_token.as_typed().listener_plans()[2].auth(),
+            ListenerAuth::ServiceToken
+        );
+
+        let secret_only = bundled(&[("RSS_VAULT_TOKEN", SECRET_BAIT)]);
+        assert_eq!(
+            default.as_typed().runtime_plan_fingerprint().as_str(),
+            secret_only.as_typed().runtime_plan_fingerprint().as_str()
+        );
+        let json = serde_json::to_string(secret_only.as_typed()).expect("plan JSON");
+        let debug = format!("{secret_only:?}");
+        assert!(!json.contains(SECRET_BAIT));
+        assert!(!debug.contains(SECRET_BAIT));
+        assert!(!debug.contains("oidc::OidcProvider"));
+    }
+
+    #[test]
+    fn runtime_plan_unknown_internal_auth_fails_closed_without_echoing_value() {
+        let snapshot =
+            test_snapshot(&[("RSS_INTERNAL_AUTH_SCHEME", SECRET_BAIT)]).expect("test snapshot");
+        let error = RuntimePlan::bundled(snapshot.view()).expect_err("invalid auth must fail");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("RSS_INTERNAL_AUTH_SCHEME"));
+        assert!(diagnostic.contains("mtls"));
+        assert!(diagnostic.contains("service-token"));
+        assert!(!diagnostic.contains(SECRET_BAIT));
+        assert!(!format!("{error:?}").contains(SECRET_BAIT));
+    }
+
+    #[test]
+    fn runtime_plan_compiler_rejects_manifest_lock_name_mismatch() {
+        let manifest = canonical_manifest(BUNDLED_ASSEMBLY_TOML);
+        let lock = parsed_lock(IDENTITY_AUDIT_ASSEMBLY_LOCK);
+
+        let error = compile_error(&manifest, &lock);
+        assert_eq!(error.stage(), RuntimePlanErrorStage::AssemblyIdentity);
+        assert_eq!(
+            error.to_string(),
+            "RuntimePlan identity does not match the canonical assembly manifest and lock"
+        );
+    }
+
+    #[test]
+    fn runtime_plan_compiler_rejects_manifest_lock_profile_mismatch() {
+        let source =
+            BUNDLED_ASSEMBLY_TOML.replacen("profile = \"demo\"", "profile = \"production\"", 1);
+        let manifest = canonical_manifest(&source);
+        let lock = parsed_lock(BUNDLED_ASSEMBLY_LOCK);
+
+        let error = compile_error(&manifest, &lock);
+        assert_eq!(error.stage(), RuntimePlanErrorStage::AssemblyIdentity);
+        assert_eq!(
+            error.to_string(),
+            "RuntimePlan identity does not match the canonical assembly manifest and lock"
+        );
+    }
+
+    #[test]
+    fn runtime_plan_compiler_rejects_manifest_digest_mismatch() {
+        let source = BUNDLED_ASSEMBLY_TOML.replacen(
+            "purpose = \"device-certificate-revocation\"",
+            "purpose = \"device-certificate-revocation-v2\"",
+            1,
+        );
+        let manifest = canonical_manifest(&source);
+        let lock = parsed_lock(BUNDLED_ASSEMBLY_LOCK);
+
+        let error = compile_error(&manifest, &lock);
+        assert_eq!(error.stage(), RuntimePlanErrorStage::ManifestDigest);
+        assert_eq!(
+            error.to_string(),
+            "RuntimePlan canonical manifest digest does not match AssemblyLock"
+        );
+    }
+
+    #[test]
+    fn runtime_plan_bundled_manifest_parse_error_preserves_safe_source() {
+        let error = artifact_error("name = [", BUNDLED_ASSEMBLY_LOCK);
+
+        assert_eq!(
+            error.to_string(),
+            "parse bundled runtime assembly manifest failed"
+        );
         assert!(
-            plan.providers().iter().any(|provider| {
-                provider.port() == "diport::AuditSink"
-                    && provider.lifecycle() == "active"
-                    && provider.durability() == "persistent"
-            }),
-            "current manifest must include active persistent AuditSink provider"
+            error
+                .source()
+                .is_some_and(|source| source.is::<toml::de::Error>())
         );
+        assert!(!format!("{error:?}").contains(SECRET_BAIT));
     }
 
     #[test]
-    fn runtime_plan_rejects_unknown_fields() {
-        let top_level = format!("{}\nlegacy = true\n", manifest_with(MINIMAL_PROVIDER));
-        assert!(AssemblyPlan::from_toml_str(&top_level).is_err());
-
-        let listener_field = manifest_with(
-            r#"
-[[listeners]]
-kind = "health"
-domains = []
-addr = "127.0.0.1:0"
-"#,
+    fn runtime_plan_bundled_manifest_canonicalization_error_preserves_safe_source() {
+        let source = BUNDLED_ASSEMBLY_TOML.replacen(
+            "domains = [\"settings\", \"identity\", \"audit\"]",
+            "domains = []",
+            1,
         );
-        assert!(AssemblyPlan::from_toml_str(&listener_field).is_err());
+        let error = artifact_error(&source, BUNDLED_ASSEMBLY_LOCK);
 
-        let provider_field = manifest_with(
-            r#"
-[[diportProviders]]
-port = "diport::Pdp"
-provider = "oidc::OidcProvider"
-providerCrate = "oidc"
-consumer = "httpserve"
-lifecycle = "active"
-durability = "persistent"
-purpose = "jwt-credential-verification"
-outputs = []
-secret = "super-secret-token"
-"#,
+        assert_eq!(
+            error.to_string(),
+            "canonicalize bundled runtime assembly manifest failed"
         );
-        assert!(AssemblyPlan::from_toml_str(&provider_field).is_err());
+        assert!(error.source().is_some_and(|source| {
+            source.is::<assembly_schema::AssemblyManifestCanonicalizationError>()
+        }));
+        assert!(!format!("{error:?}").contains(SECRET_BAIT));
     }
 
     #[test]
-    fn runtime_plan_rejects_unknown_closed_values() {
-        for manifest in [
-            manifest_with(MINIMAL_PROVIDER).replace("\"identity\"", "\"billing\""),
-            manifest_with(MINIMAL_PROVIDER).replace("durable-shared", "durable-global"),
-            manifest_with(MINIMAL_PROVIDER).replace("primary", "public"),
-            manifest_with(MINIMAL_PROVIDER).replace("diport::Pdp", "diport::Unknown"),
-            manifest_with(MINIMAL_PROVIDER).replace("active", "enabled"),
-            manifest_with(MINIMAL_PROVIDER).replace("persistent", "durable"),
+    fn runtime_plan_bundled_lock_parse_error_preserves_safe_source_chain() {
+        let error = artifact_error(BUNDLED_ASSEMBLY_TOML, b"{");
+
+        assert_eq!(
+            error.to_string(),
+            "parse bundled runtime AssemblyLock failed"
+        );
+        let source = error.source().expect("AssemblyLock source");
+        assert!(source.is::<assembly_schema::AssemblyLockError>());
+        assert!(
+            source
+                .source()
+                .is_some_and(|source| source.is::<serde_json::Error>())
+        );
+        assert!(!format!("{error:?}").contains(SECRET_BAIT));
+    }
+
+    #[test]
+    fn runtime_plan_compiler_rejects_complete_negative_matrix() {
+        let manifest = AssemblyManifest::from_toml_str(BUNDLED_ASSEMBLY_TOML)
+            .expect("manifest")
+            .canonicalize_v1()
+            .expect("canonical manifest");
+        let lock =
+            ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK).expect("AssemblyLock");
+
+        TypedRuntimePlan::compile_v1(&manifest, &lock, compiler_input(&manifest, &lock, None))
+            .expect("unmutated candidate facts must compile");
+        for mutation in [
+            Mutation::MissingProvider,
+            Mutation::DuplicateProvider,
+            Mutation::MissingListener,
+            Mutation::DuplicateListener,
+            Mutation::MissingDomain,
+            Mutation::DuplicateDomain,
+            Mutation::MissingPlacement,
+            Mutation::DuplicatePlacement,
+            Mutation::DanglingListener,
+            Mutation::DanglingPlacement,
+            Mutation::ReverseListeners,
+            Mutation::ReversePlacements,
         ] {
             assert!(
-                AssemblyPlan::from_toml_str(&manifest).is_err(),
-                "manifest should reject unknown closed value: {manifest}"
+                TypedRuntimePlan::compile_v1(
+                    &manifest,
+                    &lock,
+                    compiler_input(&manifest, &lock, Some(mutation))
+                )
+                .is_err(),
+                "compiler accepted {mutation:?}"
             );
         }
     }
 
     #[test]
-    fn runtime_plan_rejects_empty_or_duplicate_declarations() {
-        let no_domains = manifest_with(MINIMAL_PROVIDER).replace(
-            r#"domains = ["identity", "settings", "audit"]"#,
-            "domains = []",
-        );
-        assert!(
-            RuntimePlan::from_assembly(AssemblyPlan::from_toml_str(&no_domains).unwrap()).is_err()
-        );
-
-        let duplicate_domains = manifest_with(MINIMAL_PROVIDER).replace(
-            r#"domains = ["identity", "settings", "audit"]"#,
-            r#"domains = ["identity", "identity"]"#,
-        );
-        assert!(
-            RuntimePlan::from_assembly(AssemblyPlan::from_toml_str(&duplicate_domains).unwrap())
-                .is_err()
-        );
-
-        let no_listeners = r#"
-name = "runtime"
-profile = "demo"
-domains = ["identity"]
-topology = "demo"
-frameworkContracts = []
-listeners = []
-
-[[diportProviders]]
-port = "diport::Pdp"
-provider = "oidc::OidcProvider"
-providerCrate = "oidc"
-consumer = "httpserve"
-lifecycle = "active"
-durability = "persistent"
-purpose = "jwt-credential-verification"
-outputs = []
-"#;
-        assert!(
-            RuntimePlan::from_assembly(AssemblyPlan::from_toml_str(no_listeners).unwrap()).is_err()
-        );
-
-        let duplicate_listeners =
-            manifest_with(MINIMAL_PROVIDER).replace(r#"kind = "internal""#, r#"kind = "primary""#);
-        assert!(
-            RuntimePlan::from_assembly(AssemblyPlan::from_toml_str(&duplicate_listeners).unwrap())
-                .is_err()
-        );
-
-        let no_providers = r#"
-name = "runtime"
-profile = "demo"
-domains = ["identity"]
-topology = "demo"
-frameworkContracts = []
-diportProviders = []
-
-[[listeners]]
-kind = "primary"
-domains = []
-"#;
-        assert!(
-            RuntimePlan::from_assembly(AssemblyPlan::from_toml_str(no_providers).unwrap()).is_err()
-        );
-    }
-
-    #[test]
-    fn runtime_plan_summary_excludes_secret_bearing_manifest_values() {
-        let manifest = manifest_with(
-            r#"
-[[diportProviders]]
-port = "diport::Pdp"
-provider = "oidc::OidcProvider"
-providerCrate = "oidc"
-consumer = "httpserve"
-lifecycle = "active"
-durability = "persistent"
-purpose = "super-secret-token"
-outputs = []
-"#,
-        );
-        let assembly = AssemblyPlan::from_toml_str(&manifest).expect("assembly plan");
-        assert!(!format!("{assembly:?}").contains("super-secret-token"));
-        let plan = RuntimePlan::from_assembly(assembly).expect("runtime plan");
-        let rendered = format!("{:?}", plan.summary());
-
-        assert!(!rendered.contains("super-secret-token"));
-        assert!(!rendered.contains("oidc::OidcProvider"));
-    }
-
-    #[test]
-    fn runtime_plan_fact_source_matrix_is_stable() {
-        assert_eq!(
-            FACT_SOURCE_MATRIX
-                .iter()
-                .map(|entry| (entry.source, entry.owns))
-                .collect::<Vec<_>>(),
-            [
-                ("contracts", "wire contracts"),
-                ("Cargo.toml", "physical dependencies"),
-                ("assembly.toml", "active assembly declaration"),
-                ("modules_gen.rs", "derived runtime module output"),
-            ]
-        );
+    fn runtime_plan_bundled_json_matches_full_golden() {
+        let actual = serde_json::to_value(bundled(&[]).as_typed()).expect("plan JSON");
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/runtime-plan-v1.json"))
+                .expect("runtime plan golden");
+        assert_eq!(actual, expected);
     }
 }

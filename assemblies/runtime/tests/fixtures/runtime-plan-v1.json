@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "assemblyFingerprint": "sha256:ea53e592ba3586de1bc057d557fe95dc134c9c7650467f76c76b40b167d7b07e",
+  "runtimePlanFingerprint": "sha256:996fa2c0b1286a277c96d7167c90756e4c3accf998d43c524bab8c17bcd5e0ef",
+  "providerPlans": [
+    {
+      "id": "auth-audit-sink",
+      "constructor": "postgres::PgAuthAuditSink",
+      "outputs": ["resources", "workers"]
+    },
+    {
+      "id": "device-revocation-store",
+      "constructor": "softca::InMemRevocationLedger",
+      "outputs": []
+    },
+    {
+      "id": "distributed-cas-store",
+      "constructor": "postgres::PgCasStore",
+      "outputs": ["resources", "workers"]
+    },
+    {
+      "id": "distributed-cas-store-alternative",
+      "constructor": "redis::RedisCasStore",
+      "outputs": ["resources"]
+    },
+    {
+      "id": "distributed-lock-store",
+      "constructor": "redis::RedisLockStore",
+      "outputs": ["resources"]
+    },
+    {
+      "id": "dlx-archive-key-provider",
+      "constructor": "vault::VaultKeyProvider",
+      "outputs": ["workers"]
+    },
+    {
+      "id": "dlx-archive-store",
+      "constructor": "s3::VerifiedS3DlxArchiveStore",
+      "outputs": ["probes", "workers"]
+    },
+    {
+      "id": "dlx-lifecycle-repository",
+      "constructor": "postgres::PgDlxLifecycleRepository",
+      "outputs": ["probes", "resources", "workers"]
+    },
+    {
+      "id": "event-publisher",
+      "constructor": "amqp::AmqpPublisher",
+      "outputs": ["probes", "resources", "workers"]
+    },
+    {
+      "id": "event-subscriber",
+      "constructor": "amqp::AmqpSubscriber",
+      "outputs": ["probes", "resources", "workers"]
+    },
+    {
+      "id": "identity-signer",
+      "constructor": "vault::VaultSigner",
+      "outputs": ["resources"]
+    },
+    {
+      "id": "listener-pdp",
+      "constructor": "oidc::OidcProvider",
+      "outputs": ["resources"]
+    },
+    {
+      "id": "listener-rate-limiter",
+      "constructor": "ratelimit::GovernorLimiter",
+      "outputs": []
+    },
+    {
+      "id": "runtime-object-store",
+      "constructor": "s3::S3Store",
+      "outputs": ["resources"]
+    },
+    {
+      "id": "service-token-replay-store",
+      "constructor": "postgres::PgServiceTokenReplayStore",
+      "outputs": ["probes", "resources", "workers"]
+    },
+    {
+      "id": "settings-key-provider",
+      "constructor": "vault::VaultKeyProvider",
+      "outputs": ["resources"]
+    }
+  ],
+  "listenerPlans": [
+    {
+      "id": "admin-main",
+      "kind": "admin",
+      "auth": "jwt",
+      "domains": ["audit"]
+    },
+    {
+      "id": "health-main",
+      "kind": "health",
+      "auth": "noAuth",
+      "domains": []
+    },
+    {
+      "id": "internal-main",
+      "kind": "internal",
+      "auth": "mtls",
+      "domains": []
+    },
+    {
+      "id": "primary-main",
+      "kind": "primary",
+      "auth": "jwt",
+      "domains": ["settings", "identity"]
+    }
+  ],
+  "domainPlans": [
+    {
+      "id": "settings",
+      "lifecycle": ["construct", "ready", "shutdown"]
+    },
+    {
+      "id": "identity",
+      "lifecycle": ["construct", "ready", "shutdown"]
+    },
+    {
+      "id": "audit",
+      "lifecycle": ["construct", "ready", "shutdown"]
+    }
+  ],
+  "placementPlans": [
+    {"domain": "audit", "workload": "runtime"},
+    {"domain": "identity", "workload": "runtime"},
+    {"domain": "settings", "workload": "runtime"}
+  ]
+}

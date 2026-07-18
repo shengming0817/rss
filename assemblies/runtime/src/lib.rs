@@ -4544,22 +4544,17 @@ pub async fn run(runtime_inputs: ServingRuntimeInputs) -> anyhow::Result<()> {
 #[allow(clippy::cognitive_complexity)]
 async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Result<()> {
     let password_blocklist = Arc::clone(runtime_inputs.password_blocklist());
-    let runtime_plan = plan::RuntimePlan::bundled().context("build runtime assembly plan")?;
-    let runtime_plan_summary = runtime_plan.summary();
-    let provider_counts = runtime_plan_summary.provider_counts();
+    let runtime_plan =
+        plan::RuntimePlan::bundled(runtime_inputs.config()).context("build RuntimePlan")?;
+    let typed_runtime_plan = runtime_plan.as_typed();
     tracing::info!(
-        assembly.name = runtime_plan_summary.name(),
-        assembly.profile = runtime_plan_summary.profile(),
-        assembly.declared_topology = runtime_plan_summary.topology(),
-        assembly.domains = ?runtime_plan_summary.domains(),
-        assembly.listeners = ?runtime_plan_summary.listeners(),
-        assembly.providers.total = provider_counts.total,
-        assembly.providers.active = provider_counts.active,
-        assembly.providers.draft = provider_counts.draft,
-        assembly.providers.deprecated = provider_counts.deprecated,
-        assembly.providers.persistent = provider_counts.persistent,
-        assembly.providers.ephemeral_memory = provider_counts.ephemeral_memory,
-        "runtime assembly plan loaded"
+        assembly.fingerprint = typed_runtime_plan.assembly_fingerprint().as_str(),
+        runtime_plan.fingerprint = typed_runtime_plan.runtime_plan_fingerprint().as_str(),
+        runtime_plan.providers = typed_runtime_plan.provider_plans().len(),
+        runtime_plan.listeners = typed_runtime_plan.listener_plans().len(),
+        runtime_plan.domains = typed_runtime_plan.domain_plans().len(),
+        runtime_plan.placements = typed_runtime_plan.placement_plans().len(),
+        "typed RuntimePlan loaded"
     );
     drop(runtime_plan);
 

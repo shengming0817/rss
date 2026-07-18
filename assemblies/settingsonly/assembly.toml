@@ -9,6 +9,7 @@ kind = "primary"
 domains = ["settings"]
 
 [[diportProviders]]
+id = "settings-key-provider"
 port = "diport::KeyProvider"
 provider = "vault::VaultKeyProvider"
 providerCrate = "vault"

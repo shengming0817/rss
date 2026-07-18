@@ -13,6 +13,7 @@ kind = "admin"
 domains = ["audit"]
 
 [[diportProviders]]
+id = "identity-signer"
 port = "diport::Signer"
 provider = "vault::VaultSigner"
 providerCrate = "vault"
@@ -24,6 +25,7 @@ purpose = "jwt-access-token-signing"
 outputs = ["resources"]
 
 [[diportProviders]]
+id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"
@@ -35,6 +37,7 @@ purpose = "jwt-credential-verification-capability-witness"
 outputs = ["resources"]
 
 [[diportProviders]]
+id = "auth-audit-sink"
 port = "diport::AuditSink"
 provider = "postgres::PgAuthAuditSink"
 providerCrate = "postgres"

@@ -1,4 +1,4 @@
-error[E0451]: fields `name` and `profile` of struct `AssemblyIdentity` are private
+error[E0451]: fields `name` and `profile` of struct `assembly_schema::AssemblyIdentity` are private
  --> tests/ui/assembly_identity_private.rs:5:9
   |
 4 |     let _ = AssemblyIdentity {
