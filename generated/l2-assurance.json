@@ -78,13 +78,13 @@
               "productionComposition": {
                 "runtimeEntry": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/lib.rs",
-                  "symbol": "run_startup"
+                  "path": "assemblies/runtime/src/phase.rs",
+                  "symbol": "execute"
                 },
                 "runtimeAssembly": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/generated/modules_gen.rs",
-                  "symbol": "wire_domains"
+                  "path": "assemblies/runtime/src/phase/domains.rs",
+                  "symbol": "InfraBuilt::wire_domains"
                 },
                 "runtimeModule": {
                   "kind": "rust-symbol",
@@ -232,13 +232,13 @@
               "productionComposition": {
                 "runtimeEntry": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/lib.rs",
-                  "symbol": "run_startup"
+                  "path": "assemblies/runtime/src/phase.rs",
+                  "symbol": "execute"
                 },
                 "runtimeAssembly": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/generated/modules_gen.rs",
-                  "symbol": "wire_domains"
+                  "path": "assemblies/runtime/src/phase/domains.rs",
+                  "symbol": "InfraBuilt::wire_domains"
                 },
                 "runtimeModule": {
                   "kind": "rust-symbol",
@@ -386,13 +386,13 @@
               "productionComposition": {
                 "runtimeEntry": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/lib.rs",
-                  "symbol": "run_startup"
+                  "path": "assemblies/runtime/src/phase.rs",
+                  "symbol": "execute"
                 },
                 "runtimeAssembly": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/generated/modules_gen.rs",
-                  "symbol": "wire_domains"
+                  "path": "assemblies/runtime/src/phase/domains.rs",
+                  "symbol": "InfraBuilt::wire_domains"
                 },
                 "runtimeModule": {
                   "kind": "rust-symbol",
@@ -540,13 +540,13 @@
               "productionComposition": {
                 "runtimeEntry": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/lib.rs",
-                  "symbol": "run_startup"
+                  "path": "assemblies/runtime/src/phase.rs",
+                  "symbol": "execute"
                 },
                 "runtimeAssembly": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/generated/modules_gen.rs",
-                  "symbol": "wire_domains"
+                  "path": "assemblies/runtime/src/phase/domains.rs",
+                  "symbol": "InfraBuilt::wire_domains"
                 },
                 "runtimeModule": {
                   "kind": "rust-symbol",
@@ -970,13 +970,13 @@
               "productionComposition": {
                 "runtimeEntry": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/lib.rs",
-                  "symbol": "run_startup"
+                  "path": "assemblies/runtime/src/phase.rs",
+                  "symbol": "execute"
                 },
                 "runtimeAssembly": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/generated/modules_gen.rs",
-                  "symbol": "wire_domains"
+                  "path": "assemblies/runtime/src/phase/domains.rs",
+                  "symbol": "InfraBuilt::wire_domains"
                 },
                 "runtimeModule": {
                   "kind": "rust-symbol",
@@ -1124,13 +1124,13 @@
               "productionComposition": {
                 "runtimeEntry": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/lib.rs",
-                  "symbol": "run_startup"
+                  "path": "assemblies/runtime/src/phase.rs",
+                  "symbol": "execute"
                 },
                 "runtimeAssembly": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/generated/modules_gen.rs",
-                  "symbol": "wire_domains"
+                  "path": "assemblies/runtime/src/phase/domains.rs",
+                  "symbol": "InfraBuilt::wire_domains"
                 },
                 "runtimeModule": {
                   "kind": "rust-symbol",
@@ -1390,13 +1390,13 @@
               "productionComposition": {
                 "runtimeEntry": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/lib.rs",
-                  "symbol": "run_startup"
+                  "path": "assemblies/runtime/src/phase.rs",
+                  "symbol": "execute"
                 },
                 "runtimeAssembly": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/generated/modules_gen.rs",
-                  "symbol": "wire_domains"
+                  "path": "assemblies/runtime/src/phase/domains.rs",
+                  "symbol": "InfraBuilt::wire_domains"
                 },
                 "runtimeModule": {
                   "kind": "rust-symbol",
@@ -1549,13 +1549,13 @@
               "productionComposition": {
                 "runtimeEntry": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/lib.rs",
-                  "symbol": "run_startup"
+                  "path": "assemblies/runtime/src/phase.rs",
+                  "symbol": "execute"
                 },
                 "runtimeAssembly": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/generated/modules_gen.rs",
-                  "symbol": "wire_domains"
+                  "path": "assemblies/runtime/src/phase/domains.rs",
+                  "symbol": "InfraBuilt::wire_domains"
                 },
                 "runtimeModule": {
                   "kind": "rust-symbol",
@@ -1703,13 +1703,13 @@
               "productionComposition": {
                 "runtimeEntry": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/lib.rs",
-                  "symbol": "run_startup"
+                  "path": "assemblies/runtime/src/phase.rs",
+                  "symbol": "execute"
                 },
                 "runtimeAssembly": {
                   "kind": "rust-symbol",
-                  "path": "assemblies/runtime/src/generated/modules_gen.rs",
-                  "symbol": "wire_domains"
+                  "path": "assemblies/runtime/src/phase/domains.rs",
+                  "symbol": "InfraBuilt::wire_domains"
                 },
                 "runtimeModule": {
                   "kind": "rust-symbol",

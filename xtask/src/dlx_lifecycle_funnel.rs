@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use quote::ToTokens as _;
+use syn::visit::Visit as _;
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::workspace_root;
@@ -16,6 +17,22 @@ const LIFECYCLE_REPOSITORY: &str = "adapters/postgres/src/dlx_lifecycle.rs";
 const ARCHIVE_PROVIDER: &str = "adapters/s3/src/dlx_archive.rs";
 const CUTOVER_MIGRATION: &str = "adapters/postgres/migrations/0062_prepare_dead_letter_cutover.sql";
 const LIFECYCLE_MIGRATION: &str = "adapters/postgres/migrations/0063_dead_letter_lifecycle.sql";
+const RUNTIME_INFRA_PHASE: &str = "assemblies/runtime/src/phase/infra.rs";
+const RUNTIME_DOMAINS_PHASE: &str = "assemblies/runtime/src/phase/domains.rs";
+const RUNTIME_INFRA_FLOW: &str = "DLX preflight→migration→ACL→runtime deps";
+const RUNTIME_DOMAINS_FLOW: &str = "DLX runtime deps→lifecycle wire";
+const RUNTIME_INFRA_REQUIRED: &[&str] = &[
+    "after_required_preflight(",
+    "PgDlxLifecycleRuntime::preflight_identities(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,)",
+    "archive_store.verify()",
+    "verify_dlx_vault_key_capability(&hot_vault_provider",
+    "verify_dlx_vault_key_capability(&archive_vault_provider",
+    "Ok((dlx_archiver_pg_config,dlx_verifier_pg_config,dlx_purger_pg_config,archive_store,archive_vault_provider,))",
+    "PgRuntimeDeps::setup_with_audit_admin_config(",
+    "PgDlxLifecycleRuntime::setup(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,hot_payload_protector,)",
+    "DlxLifecycleRuntimeDeps::new(dlx_pg_owner,archive_store,archive_vault_provider,archive_key",
+];
+const RUNTIME_DOMAINS_REQUIRED: &[&str] = &["wire_dlx_lifecycle(dlx_lifecycle,dlx_worker)"];
 
 pub(crate) const FIXED_FUNCTIONS: &[&str] = &[
     "rss_dlx_claim_archive_candidates",
@@ -88,91 +105,247 @@ fn scan_workspace(root: &Path) -> Result<Vec<Finding<Rule>>> {
             }
         }
     }
-    findings.extend(runtime_run_funnel_findings(root)?);
+    findings.extend(runtime_phase_funnel_findings(root)?);
     Ok(findings)
 }
 
-fn runtime_run_funnel_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
-    const RUNTIME: &str = "assemblies/runtime/src/lib.rs";
-    let source = std::fs::read_to_string(root.join(RUNTIME))
-        .context("dlx-lifecycle-funnel: read runtime composition root")?;
-    let file = match syn::parse_file(&source) {
-        Ok(file) => file,
-        Err(error) => {
-            return Ok(vec![finding(
-                Rule::MissingRuntimeProvider,
-                RUNTIME.to_owned(),
-                format!("无法解析生产 runtime run_startup(): {error}"),
-            )]);
-        }
-    };
-    let Some(run) = file.items.iter().find_map(|item| match item {
-        syn::Item::Fn(item) if item.sig.ident == "run_startup" && item.sig.asyncness.is_some() => {
-            Some(item)
-        }
-        _ => None,
-    }) else {
-        return Ok(vec![finding(
-            Rule::MissingRuntimeProvider,
-            RUNTIME.to_owned(),
-            "生产 async run_startup() 缺失".to_owned(),
-        )]);
-    };
-    let rendered = run.block.to_token_stream().to_string();
-    let code = mask_rust_strings(&rendered)
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>();
-    let required = [
-        "after_required_preflight(",
-        "PgDlxLifecycleRuntime::preflight_identities(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,)",
-        "archive_store.verify()",
-        "verify_dlx_vault_key_capability(&hot_vault_provider",
-        "verify_dlx_vault_key_capability(&archive_vault_provider",
-        "Ok((dlx_archiver_pg_config,dlx_verifier_pg_config,dlx_purger_pg_config,archive_store,archive_vault_provider,))",
-        "PgRuntimeDeps::setup_with_audit_admin_config(",
-        "PgDlxLifecycleRuntime::setup(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,hot_payload_protector,)",
-        "DlxLifecycleRuntimeDeps::new(dlx_pg_owner,archive_store,archive_vault_provider,archive_key",
-        "wire_dlx_lifecycle(dlx_lifecycle,dlx_worker)",
+fn runtime_phase_funnel_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let owners = [
+        (
+            RUNTIME_INFRA_PHASE,
+            "ProvidersBuilt",
+            "build_infra",
+            RUNTIME_INFRA_REQUIRED,
+            RUNTIME_INFRA_FLOW,
+        ),
+        (
+            RUNTIME_DOMAINS_PHASE,
+            "InfraBuilt",
+            "wire_domains",
+            RUNTIME_DOMAINS_REQUIRED,
+            RUNTIME_DOMAINS_FLOW,
+        ),
     ];
-    let mut cursor = 0;
-    for expected in required {
-        let Some(relative) = code.get(cursor..).and_then(|tail| tail.find(expected)) else {
-            return Ok(vec![finding(
+    let mut findings = Vec::new();
+    for (path, owner, method, required, flow) in owners {
+        match std::fs::read_to_string(root.join(path)) {
+            Ok(source) => findings.extend(runtime_phase_owner_findings(
+                Path::new(path),
+                &source,
+                owner,
+                method,
+                required,
+                flow,
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => findings.push(finding(
                 Rule::MissingRuntimeProvider,
-                RUNTIME.to_owned(),
-                format!(
-                    "run_startup() DLX preflight→migration→ACL→wire 数据流缺失或乱序: `{expected}`"
-                ),
-            )]);
-        };
-        cursor += relative + expected.len();
+                path.to_owned(),
+                format!("生产 phase owner `{owner}::{method}` 载体缺失"),
+            )),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("dlx-lifecycle-funnel: read phase owner {path}"));
+            }
+        }
     }
-    Ok(Vec::new())
+    Ok(findings)
 }
 
-fn mask_rust_strings(source: &str) -> String {
-    let mut output = String::with_capacity(source.len());
-    let mut quoted = false;
-    let mut escaped = false;
-    for character in source.chars() {
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                quoted = false;
-            }
-            output.push(' ');
-        } else if character == '"' {
-            quoted = true;
-            output.push(' ');
-        } else {
-            output.push(character);
+fn runtime_phase_owner_findings(
+    path: &Path,
+    source: &str,
+    owner: &str,
+    method: &str,
+    required: &[&str],
+    flow: &str,
+) -> Vec<Finding<Rule>> {
+    let file = match syn::parse_file(source) {
+        Ok(file) => file,
+        Err(error) => {
+            return vec![finding(
+                Rule::MissingRuntimeProvider,
+                path.display().to_string(),
+                format!("无法解析生产 phase owner `{owner}::{method}`: {error}"),
+            )];
+        }
+    };
+    let methods = file
+        .items
+        .iter()
+        .filter_map(|item| {
+            let syn::Item::Impl(item_impl) = item else {
+                return None;
+            };
+            (item_impl.trait_.is_none()
+                && !has_test_attribute(&item_impl.attrs)
+                && type_last_ident(&item_impl.self_ty).as_deref() == Some(owner))
+            .then_some(item_impl)
+        })
+        .flat_map(|item_impl| &item_impl.items)
+        .filter_map(|item| {
+            let syn::ImplItem::Fn(function) = item else {
+                return None;
+            };
+            (function.sig.ident == method
+                && function.sig.asyncness.is_some()
+                && !has_test_attribute(&function.attrs))
+            .then_some(function)
+        })
+        .collect::<Vec<_>>();
+    let [selected_method] = methods.as_slice() else {
+        return vec![finding(
+            Rule::MissingRuntimeProvider,
+            path.display().to_string(),
+            format!(
+                "生产 async phase owner `{owner}::{method}` 必须且只能存在一个；实际 {}",
+                methods.len()
+            ),
+        )];
+    };
+    let mut evidence = RuntimePhaseEvidence::new(required);
+    evidence.visit_block(&selected_method.block);
+    let expected = (0..required.len()).collect::<Vec<_>>();
+    if evidence.observed != expected {
+        let first_missing = expected
+            .iter()
+            .find(|index| !evidence.observed.contains(index))
+            .and_then(|index| required.get(*index))
+            .copied()
+            .unwrap_or("<duplicate or reordered evidence>");
+        return vec![finding(
+            Rule::MissingRuntimeProvider,
+            path.display().to_string(),
+            format!(
+                "phase owner `{owner}::{method}` {flow} 数据流缺失、重复或乱序: `{first_missing}`"
+            ),
+        )];
+    }
+    Vec::new()
+}
+
+struct RuntimePhaseEvidence<'a> {
+    required: &'a [&'a str],
+    observed: Vec<usize>,
+}
+
+impl<'a> RuntimePhaseEvidence<'a> {
+    fn new(required: &'a [&'a str]) -> Self {
+        Self {
+            required,
+            observed: Vec::new(),
         }
     }
-    output
+
+    fn record(&mut self, expression: &impl quote::ToTokens) {
+        let code = expression
+            .to_token_stream()
+            .to_string()
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        let canonical = code
+            .strip_prefix("crate::event_transport::")
+            .unwrap_or(&code);
+        for (index, expected) in self.required.iter().enumerate() {
+            if canonical.starts_with(expected) {
+                self.observed.push(index);
+            }
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for RuntimePhaseEvidence<'_> {
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        for statement in &block.stmts {
+            if dlx_statement_has_test_attr(statement) {
+                continue;
+            }
+            self.visit_stmt(statement);
+            if matches!(
+                statement,
+                syn::Stmt::Expr(
+                    syn::Expr::Return(_) | syn::Expr::Break(_) | syn::Expr::Continue(_),
+                    _
+                )
+            ) {
+                break;
+            }
+        }
+    }
+
+    fn visit_expr_block(&mut self, block: &'ast syn::ExprBlock) {
+        if !has_test_attribute(&block.attrs) {
+            syn::visit::visit_expr_block(self, block);
+        }
+    }
+
+    fn visit_expr_if(&mut self, if_: &'ast syn::ExprIf) {
+        if has_test_attribute(&if_.attrs) {
+            return;
+        }
+        let condition = if_.cond.to_token_stream().to_string();
+        if condition.trim() == "false"
+            || condition
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+                == "cfg!(test)"
+        {
+            if let Some((_, alternative)) = &if_.else_branch {
+                self.visit_expr(alternative);
+            }
+            return;
+        }
+        syn::visit::visit_expr_if(self, if_);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        self.record(call);
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "verify" {
+            self.record(call);
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+fn dlx_statement_has_test_attr(statement: &syn::Stmt) -> bool {
+    match statement {
+        syn::Stmt::Local(local) => has_test_attribute(&local.attrs),
+        syn::Stmt::Item(item) => match item {
+            syn::Item::Fn(item) => has_test_attribute(&item.attrs),
+            syn::Item::Impl(item) => has_test_attribute(&item.attrs),
+            syn::Item::Macro(item) => has_test_attribute(&item.attrs),
+            syn::Item::Mod(item) => has_test_attribute(&item.attrs),
+            _ => false,
+        },
+        syn::Stmt::Expr(syn::Expr::Block(block), _) => has_test_attribute(&block.attrs),
+        syn::Stmt::Expr(syn::Expr::If(if_), _) => has_test_attribute(&if_.attrs),
+        syn::Stmt::Expr(syn::Expr::Macro(macro_), _) => has_test_attribute(&macro_.attrs),
+        syn::Stmt::Macro(statement) => has_test_attribute(&statement.attrs),
+        syn::Stmt::Expr(_, _) => false,
+    }
+}
+
+fn type_last_ident(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    path.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+}
+
+fn has_test_attribute(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("test")
+            || (attr.path().is_ident("cfg")
+                && attr.meta.to_token_stream().to_string().contains("test"))
+    })
 }
 
 fn collect_production_sources(root: &Path) -> Result<Vec<PathBuf>> {
@@ -1230,6 +1403,54 @@ fn has_provider_output_binding(file: &syn::File, port: &str, provider: &str) -> 
 mod tests {
     use super::*;
 
+    fn canonical_runtime_infra_phase_fixture() -> &'static str {
+        r#"
+            impl<'a> ProvidersBuilt<'a> {
+                async fn build_infra(self) {
+                    after_required_preflight();
+                    PgDlxLifecycleRuntime::preflight_identities(
+                        &dlx_archiver_pg_config,
+                        &dlx_verifier_pg_config,
+                        &dlx_purger_pg_config,
+                    );
+                    archive_store.verify();
+                    verify_dlx_vault_key_capability(&hot_vault_provider);
+                    verify_dlx_vault_key_capability(&archive_vault_provider);
+                    Ok((
+                        dlx_archiver_pg_config,
+                        dlx_verifier_pg_config,
+                        dlx_purger_pg_config,
+                        archive_store,
+                        archive_vault_provider,
+                    ));
+                    PgRuntimeDeps::setup_with_audit_admin_config();
+                    PgDlxLifecycleRuntime::setup(
+                        &dlx_archiver_pg_config,
+                        &dlx_verifier_pg_config,
+                        &dlx_purger_pg_config,
+                        hot_payload_protector,
+                    );
+                    DlxLifecycleRuntimeDeps::new(
+                        dlx_pg_owner,
+                        archive_store,
+                        archive_vault_provider,
+                        archive_key,
+                    );
+                }
+            }
+        "#
+    }
+
+    fn canonical_runtime_domains_phase_fixture() -> &'static str {
+        r#"
+            impl<'a> InfraBuilt<'a> {
+                async fn wire_domains(self) {
+                    wire_dlx_lifecycle(dlx_lifecycle, dlx_worker);
+                }
+            }
+        "#
+    }
+
     fn canonical_s3_archive_builder_fixture() -> &'static str {
         r#"
 const DLX_ARCHIVE_S3_BUCKET_ENV: &str = "RSS_DLX_ARCHIVE_S3_BUCKET";
@@ -1608,7 +1829,7 @@ pub(crate) async fn build_s3_dlx_archive_store(
     }
 
     #[test]
-    fn canonical_lifecycle_sources_are_accepted() {
+    fn canonical_lifecycle_sources_are_accepted() -> Result<()> {
         let repository = FIXED_FUNCTIONS.join(" ");
         assert!(scan_content(Path::new(LIFECYCLE_REPOSITORY), &repository).is_empty());
         assert!(
@@ -1625,6 +1846,12 @@ pub(crate) async fn build_s3_dlx_archive_store(
             )
             .is_empty(),
         );
+        let root = workspace_root()?;
+        assert!(
+            runtime_phase_funnel_findings(&root)?.is_empty(),
+            "canonical phase owners are the runtime anti-vacuity witness",
+        );
+        Ok(())
     }
 
     #[test]
@@ -1672,20 +1899,30 @@ pub(crate) async fn build_s3_dlx_archive_store(
     #[test]
     fn structured_guard_rejects_malformed_and_incomplete_runtime_sources() -> Result<()> {
         let root = crate::testutil::unique_tmp("dlx-structured-red");
-        std::fs::create_dir_all(root.join("assemblies/runtime/src"))?;
-        std::fs::write(root.join("assemblies/runtime/src/lib.rs"), "fn {")?;
+        std::fs::create_dir_all(root.join("assemblies/runtime/src/phase"))?;
+        std::fs::write(root.join(RUNTIME_INFRA_PHASE), "fn {")?;
+        std::fs::write(
+            root.join(RUNTIME_DOMAINS_PHASE),
+            canonical_runtime_domains_phase_fixture(),
+        )?;
         assert_eq!(
-            runtime_run_funnel_findings(&root)?[0].rule,
+            runtime_phase_funnel_findings(&root)?[0].rule,
             Rule::MissingRuntimeProvider
         );
         std::fs::write(
-            root.join("assemblies/runtime/src/lib.rs"),
-            "pub fn run_startup() {}",
+            root.join(RUNTIME_INFRA_PHASE),
+            "pub async fn build_infra() {}",
         )?;
         assert_eq!(
-            runtime_run_funnel_findings(&root)?[0].rule,
+            runtime_phase_funnel_findings(&root)?[0].rule,
             Rule::MissingRuntimeProvider
         );
+        std::fs::remove_file(root.join(RUNTIME_DOMAINS_PHASE))?;
+        let findings = runtime_phase_funnel_findings(&root)?;
+        assert!(findings.iter().any(|finding| {
+            finding.subject == RUNTIME_DOMAINS_PHASE
+                && finding.detail.contains("InfraBuilt::wire_domains")
+        }));
 
         for (path, source) in [
             (
@@ -1832,11 +2069,6 @@ pub(crate) async fn build_s3_dlx_archive_store(
             root.join("adapters/rogue/Cargo.toml"),
             "[package]\nname = \"rogue\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
         )?;
-        std::fs::create_dir_all(root.join("assemblies/runtime/src"))?;
-        std::fs::write(
-            root.join("assemblies/runtime/src/lib.rs"),
-            "pub async fn run_startup() {}\n",
-        )?;
         std::fs::write(&bypass, "DELETE FROM dead_letter WHERE id = $1")?;
 
         let findings = scan_workspace(&root)?;
@@ -1849,22 +2081,85 @@ pub(crate) async fn build_s3_dlx_archive_store(
     }
 
     #[test]
-    fn runtime_order_gate_rejects_string_bait_and_missing_live_preflight() -> Result<()> {
-        let root = crate::testutil::unique_tmp("dlx-runtime-order");
-        std::fs::create_dir_all(root.join("assemblies/runtime/src"))?;
-        std::fs::write(
-            root.join("assemblies/runtime/src/lib.rs"),
-            r#"pub async fn run_startup() {
-                let _bait = "after_required_preflight(PgDlxLifecycleRuntime::preflight_identity(&dlx_pg_config))";
+    fn runtime_phase_gate_rejects_missing_reordered_comment_string_and_test_bait() {
+        let canonical = canonical_runtime_infra_phase_fixture();
+        assert!(
+            runtime_phase_owner_findings(
+                Path::new(RUNTIME_INFRA_PHASE),
+                canonical,
+                "ProvidersBuilt",
+                "build_infra",
+                RUNTIME_INFRA_REQUIRED,
+                RUNTIME_INFRA_FLOW,
+            )
+            .is_empty(),
+            "canonical synthetic phase fixture must stay green",
+        );
+
+        let reordered = canonical
+            .replace(
+                "archive_store.verify();\n                    verify_dlx_vault_key_capability(&hot_vault_provider);",
+                "verify_dlx_vault_key_capability(&hot_vault_provider);\n                    archive_store.verify();",
+            );
+        assert_ne!(reordered, canonical);
+        let missing = "impl<'a> ProvidersBuilt<'a> { async fn unrelated(self) {} }";
+        let comment_bait = r#"
+            impl<'a> ProvidersBuilt<'a> {
+                async fn build_infra(self) {
+                    // after_required_preflight() PgDlxLifecycleRuntime::preflight_identities(
+                    // archive_store.verify() verify_dlx_vault_key_capability(
+                    // PgRuntimeDeps::setup_with_audit_admin_config(
+                    // PgDlxLifecycleRuntime::setup( DlxLifecycleRuntimeDeps::new(
+                }
             }
-            "#,
-        )?;
-        let findings = runtime_run_funnel_findings(&root)?;
-        assert!(findings.iter().any(|item| {
-            item.rule == Rule::MissingRuntimeProvider
-                && item.detail.contains("preflight→migration→ACL→wire")
-        }));
-        std::fs::remove_dir_all(root)?;
-        Ok(())
+        "#;
+        let string_bait = r#"
+            impl<'a> ProvidersBuilt<'a> {
+                async fn build_infra(self) {
+                    let _bait = "after_required_preflight() PgDlxLifecycleRuntime::preflight_identities(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,) archive_store.verify() verify_dlx_vault_key_capability(&hot_vault_provider) verify_dlx_vault_key_capability(&archive_vault_provider) PgRuntimeDeps::setup_with_audit_admin_config() PgDlxLifecycleRuntime::setup(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,hot_payload_protector,) DlxLifecycleRuntimeDeps::new(dlx_pg_owner,archive_store,archive_vault_provider,archive_key)";
+                }
+            }
+        "#;
+        let test_bait = format!(
+            "#[cfg(test)] {}\nimpl<'a> OtherPhase<'a> {{ async fn build_infra(self) {{}} }}",
+            canonical
+        );
+        let body_start = canonical
+            .find("                    after_required_preflight();")
+            .unwrap_or_else(|| unreachable!("canonical body start"));
+        let body_end = canonical
+            .rfind("                }\n            }")
+            .unwrap_or_else(|| unreachable!("canonical body end"));
+        let nested_test_bait = format!(
+            "{}                    #[cfg(test)] {{\n{}                    }}\n{}",
+            &canonical[..body_start],
+            &canonical[body_start..body_end],
+            &canonical[body_end..]
+        );
+        let dead_branch_bait = format!(
+            "{}                    if false {{\n{}                    }}\n{}",
+            &canonical[..body_start],
+            &canonical[body_start..body_end],
+            &canonical[body_end..]
+        );
+        for (name, source) in [
+            ("missing owner", missing),
+            ("reordered preflight", reordered.as_str()),
+            ("comment bait", comment_bait),
+            ("string bait", string_bait),
+            ("cfg(test) owner bait", test_bait.as_str()),
+            ("nested cfg(test) statement bait", nested_test_bait.as_str()),
+            ("dead constant branch bait", dead_branch_bait.as_str()),
+        ] {
+            let findings = runtime_phase_owner_findings(
+                Path::new(RUNTIME_INFRA_PHASE),
+                source,
+                "ProvidersBuilt",
+                "build_infra",
+                RUNTIME_INFRA_REQUIRED,
+                RUNTIME_INFRA_FLOW,
+            );
+            assert!(!findings.is_empty(), "{name} must fail closed");
+        }
     }
 }

@@ -1,0 +1,10 @@
+error[E0624]: associated function `completed` is private
+ --> tests/ui/runtime_outputs_completed_is_private_fail.rs:4:35
+  |
+4 |     let _forged = RuntimeOutputs::completed();
+  |                                   ^^^^^^^^^ private associated function
+  |
+ ::: src/phase.rs
+  |
+  |     const fn completed() -> Self {
+  |     ---------------------------- private associated function defined here

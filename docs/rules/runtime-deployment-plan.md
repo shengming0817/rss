@@ -5,7 +5,7 @@ This rule governs how runtime-deployment target constraints select enforcement c
 ## 当前事实
 
 - Assembly manifest validation, generated domain ordering, and committed v1 AssemblyLock drift are governed by typed repository gates.
-- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Listener/auth/tracing/serving-OIDC, the operator OIDC static provider, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is now typed and fingerprinted, but it currently supplies identity/diagnostics rather than driving the remaining handwritten live wiring; subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
+- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Listener/auth/tracing/serving-OIDC, the operator OIDC static provider, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is typed, fingerprinted, and retained by the unique consuming runtime phase chain; it still supplies identity/diagnostics rather than driving the remaining handwritten live decisions. Subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
 - `cargo xtask archrules list` and its generated matrix derive implemented rules from real carrier anchors. Planning documents are not a second index.
 - The active forge does not make the existing `ci-gate` a required check.
 
@@ -164,6 +164,24 @@ of the real writer, writer-to-reader round-trip, shared RFC8785 vector, compile-
 and the bundled full-plan JSON golden freeze the same v1 facts.
 Downstream stages must carry the supplied upstream fingerprint and must not reconstruct Assembly
 identity from partial RuntimePlan fields.
+
+The landed #1789 Hard carrier is `RUNTIME-PHASE-TRANSITION-01`: private phase-state fields,
+non-Clone/non-Copy/non-Debug/non-Default lifecycle ownership, consuming transition receivers, and
+transition return signatures bound directly to exact associated `Next` types make only
+`Planned → ProvidersBuilt → InfraBuilt → DomainsWired → Finalized → RuntimeOutputs`
+representable. The private `PhaseContext` retains the serving input and owned `RuntimePlan`;
+callers cannot supply a phase label, extract a lifecycle owner, skip a state, or reuse a consumed
+state. `phase::execute` is the sole production chain and `run_startup` has one call into it.
+
+Medium `RUNTIME-PHASE-TRANSITION-LIVE-01` binds that type-level proof to production source. Its
+crate-wide production AST inventory verifies the unique entry, five-step order, consuming
+receivers, associated closed phase labels, common redaction funnel, closed state trait impls, and
+sole `Finalized` launch-plan handoff. Request-budget validation must succeed before trace/PG/domain
+handoff. Synthetic reds reject missing or reordered transitions, early plan drop, the old tuple
+path, direct or aliased `LaunchPlan`/`ShutdownStack` construction, cross-file state impls, macros,
+dead branches, and compliant comment/test bait. The lifecycle contract remains unchanged:
+pre-launch trace cleanup stays in `RuntimeLifecycleOwner`, while the top-level launch executor
+creates and consumes the only `ShutdownStack`.
 
 ## AssemblyLock committed workflow
 

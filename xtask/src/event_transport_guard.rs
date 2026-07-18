@@ -2028,7 +2028,7 @@ const OUTBOX_SETTLEMENT_RAW_FUNCTIONS: &[&str] = &[
 const RELAY_BUDGET_SOURCE_PATHS: &[&str] = &[
     "crates/eventexec/src/relay_config.rs",
     "assemblies/runtime/src/event_transport.rs",
-    "assemblies/runtime/src/lib.rs",
+    "assemblies/runtime/src/phase/infra.rs",
     "adapters/amqp/src/conn.rs",
     "adapters/amqp/src/publisher.rs",
     "adapters/amqp/src/bundle.rs",
@@ -2617,9 +2617,9 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
     }
     for (path, marker, function, required) in [
         (
-            "assemblies/runtime/src/lib.rs",
+            "assemblies/runtime/src/phase/infra.rs",
             "runtime event transport budget loaded",
-            "run_startup",
+            "ProvidersBuilt::build_infra",
             &[
                 "runtime.event_topology",
                 "relay.lease_ttl_ms",
@@ -4222,11 +4222,30 @@ fn relay_budget_sql_code(content: &str) -> String {
 
 #[derive(Default)]
 struct RelayBudgetAuditVisitor {
+    impl_owner: Option<String>,
     function: Option<String>,
-    macros: Vec<(String, String)>,
+    macros: Vec<(Option<String>, String, String)>,
 }
 
 impl<'ast> Visit<'ast> for RelayBudgetAuditVisitor {
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        for statement in &node.stmts {
+            if statement_has_test_attr(statement) {
+                continue;
+            }
+            self.visit_stmt(statement);
+            if matches!(
+                statement,
+                syn::Stmt::Expr(
+                    syn::Expr::Return(_) | syn::Expr::Break(_) | syn::Expr::Continue(_),
+                    _
+                )
+            ) {
+                break;
+            }
+        }
+    }
+
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
         if !has_test_attr(&node.attrs) {
             syn::visit::visit_item_mod(self, node);
@@ -4235,9 +4254,21 @@ impl<'ast> Visit<'ast> for RelayBudgetAuditVisitor {
 
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         if !has_test_attr(&node.attrs) {
+            let previous_owner = self.impl_owner.take();
             let previous = self.function.replace(node.sig.ident.to_string());
             syn::visit::visit_item_fn(self, node);
             self.function = previous;
+            self.impl_owner = previous_owner;
+        }
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        if !has_test_attr(&node.attrs) {
+            let previous = self.impl_owner.replace(
+                type_path_last_ident(&node.self_ty).unwrap_or_else(|| "<unknown>".to_string()),
+            );
+            syn::visit::visit_item_impl(self, node);
+            self.impl_owner = previous;
         }
     }
 
@@ -4249,6 +4280,32 @@ impl<'ast> Visit<'ast> for RelayBudgetAuditVisitor {
         }
     }
 
+    fn visit_expr_block(&mut self, node: &'ast syn::ExprBlock) {
+        if !has_test_attr(&node.attrs) {
+            syn::visit::visit_expr_block(self, node);
+        }
+    }
+
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        if has_test_attr(&node.attrs) {
+            return;
+        }
+        let condition = node.cond.to_token_stream().to_string();
+        if condition.trim() == "false"
+            || condition
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+                == "cfg!(test)"
+        {
+            if let Some((_, alternative)) = &node.else_branch {
+                self.visit_expr(alternative);
+            }
+            return;
+        }
+        syn::visit::visit_expr_if(self, node);
+    }
+
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         let name = node
             .path
@@ -4258,11 +4315,53 @@ impl<'ast> Visit<'ast> for RelayBudgetAuditVisitor {
         if matches!(name.as_deref(), Some("info" | "warn" | "error"))
             && let Some(function) = &self.function
         {
-            self.macros
-                .push((function.clone(), node.tokens.to_string()));
+            self.macros.push((
+                self.impl_owner.clone(),
+                function.clone(),
+                node.tokens.to_string(),
+            ));
         }
         syn::visit::visit_macro(self, node);
     }
+}
+
+fn statement_has_test_attr(statement: &syn::Stmt) -> bool {
+    match statement {
+        syn::Stmt::Local(local) => has_test_attr(&local.attrs),
+        syn::Stmt::Item(item) => match item {
+            syn::Item::Const(item) => has_test_attr(&item.attrs),
+            syn::Item::Enum(item) => has_test_attr(&item.attrs),
+            syn::Item::ExternCrate(item) => has_test_attr(&item.attrs),
+            syn::Item::Fn(item) => has_test_attr(&item.attrs),
+            syn::Item::ForeignMod(item) => has_test_attr(&item.attrs),
+            syn::Item::Impl(item) => has_test_attr(&item.attrs),
+            syn::Item::Macro(item) => has_test_attr(&item.attrs),
+            syn::Item::Mod(item) => has_test_attr(&item.attrs),
+            syn::Item::Static(item) => has_test_attr(&item.attrs),
+            syn::Item::Struct(item) => has_test_attr(&item.attrs),
+            syn::Item::Trait(item) => has_test_attr(&item.attrs),
+            syn::Item::TraitAlias(item) => has_test_attr(&item.attrs),
+            syn::Item::Type(item) => has_test_attr(&item.attrs),
+            syn::Item::Union(item) => has_test_attr(&item.attrs),
+            syn::Item::Use(item) => has_test_attr(&item.attrs),
+            _ => false,
+        },
+        syn::Stmt::Expr(syn::Expr::Block(block), _) => has_test_attr(&block.attrs),
+        syn::Stmt::Expr(syn::Expr::If(if_), _) => has_test_attr(&if_.attrs),
+        syn::Stmt::Expr(syn::Expr::Macro(macro_), _) => has_test_attr(&macro_.attrs),
+        syn::Stmt::Macro(statement) => has_test_attr(&statement.attrs),
+        syn::Stmt::Expr(_, _) => false,
+    }
+}
+
+fn type_path_last_ident(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    path.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
 }
 
 fn scan_relay_budget_audit(
@@ -4277,19 +4376,34 @@ fn scan_relay_budget_audit(
     };
     let mut visitor = RelayBudgetAuditVisitor::default();
     visitor.visit_file(&file);
+    let (expected_owner, expected_function) = expected_function
+        .split_once("::")
+        .map_or((None, expected_function), |(owner, function)| {
+            (Some(owner), function)
+        });
     let matches = visitor
         .macros
         .into_iter()
-        .filter(|(function, tokens)| function == expected_function && tokens.contains(marker))
+        .filter(|(owner, function, tokens)| {
+            expected_owner.is_none_or(|expected| owner.as_deref() == Some(expected))
+                && function == expected_function
+                && tokens.contains(marker)
+        })
         .collect::<Vec<_>>();
     if matches.len() != 1 {
         return vec![finding(
             Rule::OutboxRelayBudget,
             path.to_string(),
-            format!("生产函数 `{expected_function}` 必须且只能有一个审计事件 `{marker}`"),
+            format!(
+                "生产函数 `{}` 必须且只能有一个审计事件 `{marker}`",
+                expected_owner.map_or_else(
+                    || expected_function.to_string(),
+                    |owner| format!("{owner}::{expected_function}")
+                )
+            ),
         )];
     }
-    let tokens = &matches[0].1;
+    let tokens = &matches[0].2;
     let compact = tokens
         .chars()
         .filter(|character| !character.is_whitespace())
@@ -8965,12 +9079,12 @@ $do$;
                 )],
             ),
             RelayBudgetRedCase::replace(
-                "runtime startup carrier",
-                "assemblies/runtime/src/lib.rs",
+                "runtime infra phase audit carrier",
+                "assemblies/runtime/src/phase/infra.rs",
                 "relay.required_budget_ms = relay_budget.required_budget_millis()",
                 "relay.required_budget = relay_budget.required_budget_millis()",
                 &[(
-                    "assemblies/runtime/src/lib.rs",
+                    "assemblies/runtime/src/phase/infra.rs",
                     "审计事件 `runtime event transport budget loaded` 缺安全字段 `relay.required_budget_ms`",
                 )],
             ),
@@ -9131,6 +9245,24 @@ $do$;
                 "amqp publish outcome is ambiguous",
                 "amqp production timeout marker removed",
             ),
+            (
+                "runtime audit comment bait",
+                "assemblies/runtime/src/phase/infra.rs",
+                "runtime event transport budget loaded",
+                "runtime event transport budget marker removed",
+            ),
+            (
+                "runtime audit cfg(test) owner bait",
+                "assemblies/runtime/src/phase/infra.rs",
+                "runtime event transport budget loaded",
+                "runtime event transport budget marker removed",
+            ),
+            (
+                "runtime audit wrong owner bait",
+                "assemblies/runtime/src/phase/infra.rs",
+                "runtime event transport budget loaded",
+                "runtime event transport budget marker removed",
+            ),
         ];
 
         for (name, path, from, to) in cases {
@@ -9168,8 +9300,87 @@ mod relay_budget_audit_bait {
 }
 "#,
                 ),
+                "runtime audit comment bait" => content.push_str(
+                    "\n// tracing::info!(runtime.event_topology, relay.lease_ttl_ms, relay.publish_timeout_ms, relay.settle_timeout_ms, relay.safety_margin_ms, relay.required_budget_ms, \"runtime event transport budget loaded\");\n",
+                ),
+                "runtime audit cfg(test) owner bait" => content.push_str(
+                    r#"
+#[cfg(test)]
+impl<'a> ProvidersBuilt<'a> {
+    async fn build_infra(self) {
+        tracing::info!(
+            runtime.event_topology = "bait",
+            relay.lease_ttl_ms = 1,
+            relay.publish_timeout_ms = 1,
+            relay.settle_timeout_ms = 1,
+            relay.safety_margin_ms = 1,
+            relay.required_budget_ms = 1,
+            "runtime event transport budget loaded"
+        );
+    }
+}
+"#,
+                ),
+                "runtime audit wrong owner bait" => content.push_str(
+                    r#"
+impl<'a> OtherPhase<'a> {
+    async fn build_infra(self) {
+        tracing::info!(
+            runtime.event_topology = "bait",
+            relay.lease_ttl_ms = 1,
+            relay.publish_timeout_ms = 1,
+            relay.settle_timeout_ms = 1,
+            relay.safety_margin_ms = 1,
+            relay.required_budget_ms = 1,
+            "runtime event transport budget loaded"
+        );
+    }
+}
+"#,
+                ),
                 _ => {}
             }
+            assert!(
+                !scan_relay_budget_sources(&sources).is_empty(),
+                "{name} must not satisfy OUTBOX-RELAY-BUDGET-01"
+            );
+        }
+
+        for (name, wrapper) in [
+            ("runtime audit nested cfg(test) bait", "#[cfg(test)]"),
+            ("runtime audit dead branch bait", "if false"),
+        ] {
+            let mut sources = canonical.clone();
+            let (_, content) = sources
+                .iter_mut()
+                .find(|(candidate, _)| {
+                    candidate == Path::new("assemblies/runtime/src/phase/infra.rs")
+                })
+                .expect("runtime infra carrier");
+            *content = content.replacen(
+                "runtime event transport budget loaded",
+                "runtime event transport budget marker removed",
+                1,
+            );
+            content.push_str(&format!(
+                r#"
+impl<'a> ProvidersBuilt<'a> {{
+    async fn build_infra(self) {{
+        {wrapper} {{
+            tracing::info!(
+                runtime.event_topology = "bait",
+                relay.lease_ttl_ms = 1,
+                relay.publish_timeout_ms = 1,
+                relay.settle_timeout_ms = 1,
+                relay.safety_margin_ms = 1,
+                relay.required_budget_ms = 1,
+                "runtime event transport budget loaded"
+            );
+        }}
+    }}
+}}
+"#
+            ));
             assert!(
                 !scan_relay_budget_sources(&sources).is_empty(),
                 "{name} must not satisfy OUTBOX-RELAY-BUDGET-01"

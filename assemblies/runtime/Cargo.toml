@@ -129,6 +129,8 @@ tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }
 hmac = { workspace = true, features = ["std"] }
 sha2 = { workspace = true }
+static_assertions = { workspace = true }
+trybuild = { workspace = true }
 # 集成测试 postgres fixture（testcontainers，仅 integration feature 激活）。
 # deny.toml memory wrapper 不含 runtime，故 MemSecretResolver 在 e2e 中用 inline 结构代替（无需 memory dep）。
 testkit = { path = "../../crates/testkit" }

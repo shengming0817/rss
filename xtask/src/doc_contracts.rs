@@ -200,9 +200,9 @@ const CODE_FOLLOWUPS: &[CodeFollowup] = &[
         }),
     },
     CodeFollowup {
-        id: "current:runtime-lib.rs:audit-tail-verify",
+        id: "current:runtime-phase-domains.rs:audit-tail-verify",
         anchor: Some(SourceAnchor {
-            path: "assemblies/runtime/src/lib.rs",
+            path: "assemblies/runtime/src/phase/domains.rs",
             needle: "bootstrap 启动 tail-verify（跨租户全量巡检）defer 到 Part B",
         }),
     },
@@ -3943,7 +3943,7 @@ mod tests {
             "current:publisher.rs:topology-provisioning",
             "current:0012_enable_tenant_rls.sql:dual-pool",
             "current:integration_tests.rs:envelope-metadata",
-            "current:runtime-lib.rs:audit-tail-verify",
+            "current:runtime-phase-domains.rs:audit-tail-verify",
         ] {
             assert!(ids.contains(expected), "missing {expected}");
         }

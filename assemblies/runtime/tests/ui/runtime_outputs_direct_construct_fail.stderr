@@ -1,0 +1,10 @@
+error[E0423]: expected value, found struct `RuntimeOutputs`
+ --> tests/ui/runtime_outputs_direct_construct_fail.rs:4:19
+  |
+4 |     let _forged = RuntimeOutputs;
+  |                   ^^^^^^^^^^^^^^
+  |
+ ::: src/phase.rs
+  |
+  | pub struct RuntimeOutputs {
+  | ------------------------- `RuntimeOutputs` defined here

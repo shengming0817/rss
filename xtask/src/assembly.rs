@@ -63,7 +63,9 @@ pub(crate) enum Rule {
     /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "verify", source = "code" }— provider↔providerCrate 绑定由 xtask provider
     /// matrix 单源锁定；manifest 声明错误 crate 名须被机器拒（Medium，red test 反恒真）。
     ProviderCrateMismatch,
-    /// active distributed provider 必须有组合根 consumer 接线证据。
+    /// active distributed provider 必须有真实 phase owner 的 consumer 接线证据。
+    ///
+    /// INVARIANT: ASSEMBLY-DISTRIBUTED-CONSUMER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::active_distributed_provider_reordered_comment_or_test_bait_is_rejected", anti_vacuity = "tests::active_distributed_lock_cas_providers_pass" }— only the ordered `InfraBuilt::wire_domains` producer→consumer dataflow in `src/phase/domains.rs` is production evidence.
     ActiveDistributedProviderConsumer,
     /// production security closeout 必须声明 active critical provider。
     ProductionSecurityCriticalProvider,
@@ -516,7 +518,7 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
                 findings.push(finding(
                     Rule::ActiveDistributedProviderConsumer,
                     &subject,
-                    "field=consumer active distributed Lock/CAS provider 必须在唯一 run_startup composition root 有 consumer 证据：wire_distributed + DistributedRuntimeDeps 必填注入真实 consumer",
+                    "field=consumer active distributed Lock/CAS provider 必须在 src/phase/domains.rs 的唯一 InfraBuilt::wire_domains phase owner 有 consumer 证据：wire_distributed 结果须按序注入 wire_event_transport",
                 ));
             }
         }
@@ -1476,22 +1478,14 @@ fn has_distributed_consumer_evidence(a: &DiscoveredAssembly) -> bool {
 }
 
 fn distributed_consumer_evidence_from_sources(dir: &Path) -> Result<bool> {
-    let src_dir = dir.join("src");
-    if !src_dir.exists() {
+    let path = dir.join("src/phase/domains.rs");
+    if !path.exists() {
         return Ok(false);
     }
-    let mut files = Vec::new();
-    collect_rust_sources(&src_dir, &mut files)?;
-    files.sort();
-    for path in files {
-        let content = std::fs::read_to_string(&path)?;
-        let file = syn::parse_file(&content)
-            .with_context(|| format!("parse rust source {}", path.display()))?;
-        if file_has_distributed_consumer_evidence(&file) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    let content = std::fs::read_to_string(&path)?;
+    let file = syn::parse_file(&content)
+        .with_context(|| format!("parse rust source {}", path.display()))?;
+    Ok(file_has_distributed_consumer_evidence(&file))
 }
 
 fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -1506,70 +1500,112 @@ fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-#[derive(Default)]
-struct DistributedConsumerVisitor {
-    root_entrypoint_depth: usize,
-    distributed_bindings: BTreeSet<String>,
-    found_consumer: bool,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for DistributedConsumerVisitor {
-    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if node.sig.ident != "run_startup" {
-            return;
-        }
-
-        self.root_entrypoint_depth += 1;
-        syn::visit::visit_item_fn(self, node);
-        self.root_entrypoint_depth -= 1;
-    }
-
-    fn visit_local(&mut self, node: &'ast syn::Local) {
-        if self.root_entrypoint_depth == 0 {
-            return;
-        }
-        if let Some(ident) = local_binding_ident(&node.pat)
-            && let Some(init) = &node.init
-            && expr_contains_wire_distributed(&init.expr)
-        {
-            self.distributed_bindings.insert(ident.to_string());
-        }
-        syn::visit::visit_local(self, node);
-    }
-
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if self.root_entrypoint_depth == 0 {
-            return;
-        }
-        if call_path_ends_with(node.func.as_ref(), "wire_event_transport") {
-            let second_arg = node.args.iter().nth(1);
-            if second_arg.is_some_and(|expr| self.expr_is_distributed_arg(expr)) {
-                self.found_consumer = true;
-            }
-        }
-        syn::visit::visit_expr_call(self, node);
-    }
-}
-
-impl DistributedConsumerVisitor {
-    fn expr_is_distributed_arg(&self, expr: &syn::Expr) -> bool {
-        if expr_contains_wire_distributed(expr) {
-            return true;
-        }
-        matches!(
-            expr,
-            syn::Expr::Path(path)
-                if path.path.get_ident().is_some_and(|ident| {
-                    self.distributed_bindings.contains(&ident.to_string())
-                })
-        )
-    }
-}
-
 fn file_has_distributed_consumer_evidence(file: &syn::File) -> bool {
-    let mut visitor = DistributedConsumerVisitor::default();
-    syn::visit::Visit::visit_file(&mut visitor, file);
-    visitor.found_consumer
+    let methods = file
+        .items
+        .iter()
+        .filter_map(|item| {
+            let syn::Item::Impl(implementation) = item else {
+                return None;
+            };
+            if has_cfg_test(&implementation.attrs)
+                || implementation.trait_.is_some()
+                || !matches!(
+                    implementation.self_ty.as_ref(),
+                    syn::Type::Path(path)
+                        if path.path.segments.last().is_some_and(|segment| segment.ident == "InfraBuilt")
+                )
+            {
+                return None;
+            }
+            Some(implementation)
+        })
+        .flat_map(|implementation| &implementation.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(method)
+                if method.sig.ident == "wire_domains"
+                    && method.sig.asyncness.is_some()
+                    && !has_cfg_test(&method.attrs) =>
+            {
+                Some(method)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [method] = methods.as_slice() else {
+        return false;
+    };
+    let phase_bodies = method
+        .block
+        .stmts
+        .iter()
+        .filter_map(|statement| {
+            let syn::Stmt::Local(local) = statement else {
+                return None;
+            };
+            let binding = local_binding_ident(&local.pat)?;
+            let init = local.init.as_ref()?;
+            let syn::Expr::Await(awaited) = init.expr.as_ref() else {
+                return None;
+            };
+            let syn::Expr::Async(body) = awaited.base.as_ref() else {
+                return None;
+            };
+            (binding == "result").then_some(&body.block)
+        })
+        .collect::<Vec<_>>();
+    let [body] = phase_bodies.as_slice() else {
+        return false;
+    };
+
+    let producers = body
+        .stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, statement)| {
+            let syn::Stmt::Local(local) = statement else {
+                return None;
+            };
+            let binding = local_binding_ident(&local.pat)?;
+            let init = local.init.as_ref()?;
+            terminal_path_call(
+                &init.expr,
+                &["crate", "distributed_runtime", "wire_distributed"],
+            )
+            .is_some()
+            .then_some((index, binding.to_string()))
+        })
+        .collect::<Vec<_>>();
+    let [(producer_index, binding)] = producers.as_slice() else {
+        return false;
+    };
+    let consumers = body
+        .stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, statement)| {
+            let syn::Stmt::Local(local) = statement else {
+                return None;
+            };
+            let init = local.init.as_ref()?;
+            let call = terminal_path_call(
+                &init.expr,
+                &["crate", "event_transport", "wire_event_transport"],
+            )?;
+            call.args
+                .iter()
+                .nth(1)
+                .is_some_and(|argument| {
+                    matches!(
+                        argument,
+                        syn::Expr::Path(path)
+                            if path.path.get_ident().is_some_and(|ident| ident == binding)
+                    )
+                })
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    matches!(consumers.as_slice(), [consumer_index] if consumer_index > producer_index)
 }
 
 fn local_binding_ident(pat: &syn::Pat) -> Option<&syn::Ident> {
@@ -1580,23 +1616,37 @@ fn local_binding_ident(pat: &syn::Pat) -> Option<&syn::Ident> {
     }
 }
 
-fn expr_contains_wire_distributed(expr: &syn::Expr) -> bool {
-    struct WireDistributedVisitor {
-        found: bool,
-    }
-
-    impl<'ast> syn::visit::Visit<'ast> for WireDistributedVisitor {
-        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-            if call_path_ends_with(node.func.as_ref(), "wire_distributed") {
-                self.found = true;
-            }
-            syn::visit::visit_expr_call(self, node);
+fn terminal_path_call<'a>(expr: &'a syn::Expr, expected: &[&str]) -> Option<&'a syn::ExprCall> {
+    match expr {
+        syn::Expr::Call(call) if expr_path_is_exact(&call.func, expected) => Some(call),
+        syn::Expr::Await(awaited) => terminal_path_call(&awaited.base, expected),
+        syn::Expr::Try(propagated) => terminal_path_call(&propagated.expr, expected),
+        syn::Expr::Paren(paren) => terminal_path_call(&paren.expr, expected),
+        syn::Expr::Group(group) => terminal_path_call(&group.expr, expected),
+        syn::Expr::MethodCall(method)
+            if matches!(
+                method.method.to_string().as_str(),
+                "context" | "with_context"
+            ) && method.args.len() == 1 =>
+        {
+            terminal_path_call(&method.receiver, expected)
         }
+        _ => None,
     }
+}
 
-    let mut visitor = WireDistributedVisitor { found: false };
-    syn::visit::Visit::visit_expr(&mut visitor, expr);
-    visitor.found
+fn expr_path_is_exact(expr: &syn::Expr, expected: &[&str]) -> bool {
+    matches!(
+        expr,
+        syn::Expr::Path(path)
+            if path.qself.is_none()
+                && path.path.leading_colon.is_none()
+                && path.path.segments.len() == expected.len()
+                && path.path.segments.iter().zip(expected).all(|(segment, expected)| {
+                    segment.ident == *expected
+                        && matches!(segment.arguments, syn::PathArguments::None)
+                })
+    )
 }
 
 #[derive(Clone, Default)]
@@ -5902,20 +5952,33 @@ postgres = { path = "../../adapters/postgres" }
         )?;
         write_runtime_src(
             &root,
-            "lib.rs",
+            "phase/domains.rs",
             r#"
-pub struct DistributedRuntimeDeps;
-	pub fn wire_distributed(_: &SharedRuntimeDeps) -> DistributedRuntimeDeps { DistributedRuntimeDeps }
-	pub struct SharedRuntimeDeps;
-	pub fn run_startup(deps: &SharedRuntimeDeps) {
-	    let pg = ();
-	    let subscribers = Vec::new();
-	    let cfg = ();
-	    let distributed: DistributedRuntimeDeps = wire_distributed(deps);
-	    let _ = wire_event_transport(&pg, distributed, subscribers, cfg);
-	}
-	fn wire_event_transport(_: &(), _: DistributedRuntimeDeps, _: Vec<()>, _: ()) {}
-	"#,
+pub struct InfraBuilt;
+
+impl InfraBuilt {
+    pub async fn wire_domains(self) {
+        let result = async move {
+            let distributed =
+                crate::distributed_runtime::wire_distributed(&deps, distributed_worker)
+                    .context("wire distributed")?;
+            let event_module = crate::event_transport::wire_event_transport(
+                &deps.pg,
+                distributed,
+                event_subscribers,
+                event_transport,
+                event_worker,
+                audit_consumer_key,
+            )
+            .await
+            .context("wire event transport")?;
+            Ok::<_, anyhow::Error>(event_module)
+        }
+        .await;
+        phase_result(<Self as RuntimePhaseState>::PHASE, result)
+    }
+}
+"#,
         )?;
 
         let (_count, findings) = validate_root(&root)?;
@@ -5927,7 +5990,69 @@ pub struct DistributedRuntimeDeps;
     }
 
     #[test]
-    fn active_distributed_provider_comment_or_outer_run_bait_is_rejected() -> anyhow::Result<()> {
+    fn distributed_consumer_evidence_rejects_same_name_and_alias_decoys() -> anyhow::Result<()> {
+        let canonical = r#"
+impl InfraBuilt {
+    async fn wire_domains(self) {
+        let result = async move {
+            let distributed =
+                crate::distributed_runtime::wire_distributed(&deps, distributed_worker)?;
+            let event_module = crate::event_transport::wire_event_transport(
+                &deps.pg,
+                distributed,
+                event_subscribers,
+                event_transport,
+                event_worker,
+                audit_consumer_key,
+            ).await?;
+            Ok::<_, anyhow::Error>(event_module)
+        }.await;
+        phase_result(<Self as RuntimePhaseState>::PHASE, result)
+    }
+}
+"#;
+        assert!(
+            file_has_distributed_consumer_evidence(&syn::parse_file(canonical)?),
+            "canonical fully-qualified producer and consumer paths must pass"
+        );
+
+        let same_name_decoy = canonical.replace(
+            "crate::distributed_runtime::wire_distributed",
+            "crate::decoy::wire_distributed",
+        );
+        assert!(
+            !file_has_distributed_consumer_evidence(&syn::parse_file(&same_name_decoy)?),
+            "same-name producer in a non-canonical module must be rejected"
+        );
+
+        let alias_decoy = canonical
+            .replace(
+                "impl InfraBuilt {",
+                "use crate::distributed_runtime::wire_distributed as build_distributed;\n\nimpl InfraBuilt {",
+            )
+            .replace(
+                "crate::distributed_runtime::wire_distributed",
+                "build_distributed",
+            );
+        assert!(
+            !file_has_distributed_consumer_evidence(&syn::parse_file(&alias_decoy)?),
+            "aliases are intentionally unsupported and must be rejected"
+        );
+
+        let consumer_decoy = canonical.replace(
+            "crate::event_transport::wire_event_transport",
+            "crate::decoy::wire_event_transport",
+        );
+        assert!(
+            !file_has_distributed_consumer_evidence(&syn::parse_file(&consumer_decoy)?),
+            "same-name consumer in a non-canonical module must be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn active_distributed_provider_reordered_comment_or_test_bait_is_rejected() -> anyhow::Result<()>
+    {
         let root = unique_tmp("assembly-distributed-string-evidence");
         write_assembly(
             &root,
@@ -5974,26 +6099,42 @@ redis = { path = "../../adapters/redis", features = ["backend"] }
         )?;
         write_runtime_src(
             &root,
-            "lib.rs",
+            "phase/domains.rs",
             r#"
-pub struct DistributedRuntimeDeps;
-pub struct SharedRuntimeDeps;
-
-// wire_distributed( DistributedRuntimeDeps wire_event_transport
-const COMMENT_BAIT: &str = "wire_distributed(DistributedRuntimeDeps) wire_event_transport";
-
-fn run(deps: &SharedRuntimeDeps) {
-    let distributed: DistributedRuntimeDeps = wire_distributed(deps);
-    let pg = ();
-    let subscribers = Vec::new();
-    let cfg = ();
-    let _ = wire_event_transport(&pg, distributed, subscribers, cfg);
+#[cfg(test)]
+impl InfraBuilt {
+    async fn wire_domains(self) {
+        let result = async move {
+            let distributed = wire_distributed(&deps, distributed_worker)?;
+            let event_module = wire_event_transport(
+                &deps.pg,
+                distributed,
+                event_subscribers,
+                event_transport,
+                event_worker,
+                audit_consumer_key,
+            ).await?;
+            Ok::<_, anyhow::Error>(event_module)
+        }.await;
+        phase_result(<Self as RuntimePhaseState>::PHASE, result)
+    }
 }
 
-fn wire_distributed(_: &SharedRuntimeDeps) -> DistributedRuntimeDeps {
-    DistributedRuntimeDeps
+impl InfraBuilt {
+    async fn wire_domains(self) {
+        // wire_distributed(&deps, distributed_worker)
+        let result = async move {
+            let _bait = "wire_event_transport(&deps.pg, distributed)";
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        phase_result(<Self as RuntimePhaseState>::PHASE, result)
+    }
 }
-fn wire_event_transport(_: &(), _: DistributedRuntimeDeps, _: Vec<()>, _: ()) {}
+
+fn outer_bait() {
+    let distributed = wire_distributed(&deps, distributed_worker);
+    let _ = wire_event_transport(&deps.pg, distributed);
+}
 "#,
         )?;
 
@@ -6002,14 +6143,45 @@ fn wire_event_transport(_: &(), _: DistributedRuntimeDeps, _: Vec<()>, _: ()) {}
             findings
                 .iter()
                 .any(|f| f.rule == Rule::ActiveDistributedProviderConsumer),
-            "comment/string/outer run bait must not satisfy the run_startup consumer guard: {findings:?}"
+            "comment/string/cfg(test)/outer-function bait must not satisfy the phase-owner consumer guard: {findings:?}"
+        );
+
+        write_runtime_src(
+            &root,
+            "phase/domains.rs",
+            r#"
+impl InfraBuilt {
+    async fn wire_domains(self) {
+        let result = async move {
+            let event_module = wire_event_transport(
+                &deps.pg,
+                distributed,
+                event_subscribers,
+                event_transport,
+                event_worker,
+                audit_consumer_key,
+            ).await?;
+            let distributed = wire_distributed(&deps, distributed_worker)?;
+            Ok::<_, anyhow::Error>(event_module)
+        }.await;
+        phase_result(<Self as RuntimePhaseState>::PHASE, result)
+    }
+}
+"#,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ActiveDistributedProviderConsumer),
+            "a consumer ordered before its distributed producer must fail closed: {findings:?}"
         );
         Ok(())
     }
 
     #[test]
-    fn active_distributed_provider_without_composition_root_consumer_is_rejected()
-    -> anyhow::Result<()> {
+    fn active_distributed_provider_without_domains_phase_consumer_is_rejected() -> anyhow::Result<()>
+    {
         let root = unique_tmp("assembly-distributed-no-consumer");
         write_assembly(
             &root,

@@ -1,6 +1,6 @@
 //! Fail-closed evidence for the production Postgres provider injection used by active producers.
 //!
-//! INVARIANT: L2-PRODUCER-PRODUCTION-COMPOSITION-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_entry_must_call_and_consume_the_generated_domain_wire", anti_vacuity = "tests::workspace_production_composition_is_exact" }——
+//! INVARIANT: L2-PRODUCER-PRODUCTION-COMPOSITION-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_phase_owners_reject_missing_reordered_and_bait_wiring", anti_vacuity = "tests::workspace_production_composition_is_exact" }——
 //! the production `wire` functions must inject the exact Postgres lifecycle/UoW binding into the
 //! service constructor that owns each active producer path, and that exact constructor result must
 //! enter the live domain. Merely defining or constructing a correct provider elsewhere is not
@@ -14,18 +14,19 @@ use anyhow::{Context, Result, bail, ensure};
 use syn::parse::{Parse, ParseStream};
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Expr, ExprCall, ExprMethodCall, Item, ItemFn, Pat, Stmt, Token, UseTree,
-    punctuated::Punctuated,
+    Attribute, Expr, ExprCall, ExprMethodCall, ImplItem, ImplItemFn, Item, ItemFn, Pat, Stmt,
+    Token, UseTree, punctuated::Punctuated,
 };
 
 const IDENTITY_COMPOSITION: &str = "composition/identity/src/lib.rs";
 const SETTINGS_COMPOSITION: &str = "composition/settings/src/lib.rs";
-const RUNTIME_ENTRY: &str = "assemblies/runtime/src/lib.rs";
+const RUNTIME_PHASES: &str = "assemblies/runtime/src/phase.rs";
+const RUNTIME_DOMAINS_PHASE: &str = "assemblies/runtime/src/phase/domains.rs";
 const RUNTIME_MODULES: &str = "assemblies/runtime/src/generated/modules_gen.rs";
 const IDENTITY_RUNTIME_MODULE: &str = "assemblies/runtime/src/domains/identity.rs";
 const SETTINGS_RUNTIME_MODULE: &str = "assemblies/runtime/src/domains/settings.rs";
 const MAX_COMPOSITION_BYTES: u64 = 256 * 1024;
-const MAX_RUNTIME_ENTRY_BYTES: u64 = 512 * 1024;
+const MAX_RUNTIME_PHASE_BYTES: u64 = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[allow(clippy::enum_variant_names)]
@@ -93,10 +94,10 @@ pub(crate) fn collect_producer_composition(
         let lineage = runtime
             .get(port)
             .with_context(|| format!("missing runtime lineage for {}", port.trait_symbol()))?;
-        projection.runtime_entry_path = RUNTIME_ENTRY.to_string();
-        projection.runtime_entry = "run_startup".to_string();
-        projection.runtime_assembly_path = RUNTIME_MODULES.to_string();
-        projection.runtime_assembly = "wire_domains".to_string();
+        projection.runtime_entry_path = RUNTIME_PHASES.to_string();
+        projection.runtime_entry = "execute".to_string();
+        projection.runtime_assembly_path = RUNTIME_DOMAINS_PHASE.to_string();
+        projection.runtime_assembly = "InfraBuilt::wire_domains".to_string();
         projection.runtime_module_path = lineage.repo_path.clone();
         projection.runtime_module = "module".to_string();
     }
@@ -111,8 +112,10 @@ struct RuntimeLineage {
 fn collect_runtime_lineage(
     root: &Path,
 ) -> Result<BTreeMap<ProducerCompositionPort, RuntimeLineage>> {
-    let entry = read_bounded_with_limit(&root.join(RUNTIME_ENTRY), MAX_RUNTIME_ENTRY_BYTES)?;
-    validate_runtime_entry(&entry)?;
+    let phases = read_bounded_with_limit(&root.join(RUNTIME_PHASES), MAX_RUNTIME_PHASE_BYTES)?;
+    validate_runtime_phase_entry(&phases)?;
+    let domains_phase = read_bounded(&root.join(RUNTIME_DOMAINS_PHASE))?;
+    validate_runtime_domains_phase(&domains_phase)?;
     let generated = read_bounded(&root.join(RUNTIME_MODULES))?;
     validate_generated_runtime_modules(&generated)?;
     let identity = read_bounded(&root.join(IDENTITY_RUNTIME_MODULE))?;
@@ -147,10 +150,31 @@ fn collect_runtime_lineage(
     ]))
 }
 
-fn validate_runtime_entry(source: &str) -> Result<()> {
-    let syntax = syn::parse_file(source).context("parse production runtime entry")?;
-    let run = unique_top_level_function(&syntax.items, "run_startup", RUNTIME_ENTRY)?;
-    let phase_calls = run
+fn validate_runtime_phase_entry(source: &str) -> Result<()> {
+    let syntax = syn::parse_file(source).context("parse production runtime phases")?;
+    let execute = unique_top_level_function(&syntax.items, "execute", RUNTIME_PHASES)?;
+    ensure!(
+        execute.sig.asyncness.is_some()
+            && execute.sig.inputs.len() == 1
+            && execute.sig.inputs.first().is_some_and(|argument| {
+                typed_argument_is(argument, "runtime_inputs", |ty| {
+                    matches!(
+                        ty,
+                        syn::Type::Reference(reference)
+                            if reference.mutability.is_some()
+                                && matches!(
+                                    reference.elem.as_ref(),
+                                    syn::Type::Path(path)
+                                        if path.path.segments.last().is_some_and(
+                                            |segment| segment.ident == "ServingRuntimeInputs"
+                                        )
+                                )
+                    )
+                })
+            }),
+        "{RUNTIME_PHASES}: execute must remain async with exact `runtime_inputs: &mut ServingRuntimeInputs` owner"
+    );
+    let planned = execute
         .block
         .stmts
         .iter()
@@ -159,61 +183,161 @@ fn validate_runtime_entry(source: &str) -> Result<()> {
             let Stmt::Local(local) = statement else {
                 return None;
             };
-            let initializer = local.init.as_ref()?;
-            let Expr::Call(call) = peel_expr(&initializer.expr) else {
+            let Pat::Ident(binding) = &local.pat else {
                 return None;
             };
-            (path_is_exact_expr(&call.func, &["phase_result"])
-                && call.args.first().is_some_and(|argument| {
-                    path_is_exact_expr(argument, &["RuntimePhase", "WireDomains"])
-                }))
-            .then_some((index, local, call))
+            let initializer = local.init.as_ref()?;
+            let Expr::Struct(structure) = initializer.expr.as_ref() else {
+                return None;
+            };
+            (binding.ident == "planned"
+                && structure.path.is_ident("Planned")
+                && structure.rest.is_none()
+                && structure.fields.len() == 1
+                && matches!(
+                    structure.fields.first(),
+                    Some(field)
+                        if matches!(&field.member, syn::Member::Named(member) if member == "runtime_inputs")
+                            && simple_expr_ident(&field.expr).as_deref()
+                                == Some("runtime_inputs")
+                ))
+            .then_some(index)
         })
         .collect::<Vec<_>>();
-    let [(_, phase_local, phase_call)] = phase_calls.as_slice() else {
+    let [planned_index] = planned.as_slice() else {
         bail!(
-            "{RUNTIME_ENTRY}: run_startup must have one direct WireDomains phase_result binding, found {}",
-            phase_calls.len()
+            "{RUNTIME_PHASES}: execute must create exactly one direct `Planned {{ runtime_inputs }}` state"
         )
     };
+
+    let expected = [
+        ("providers", "planned", "build_providers"),
+        ("infra", "providers", "build_infra"),
+        ("domains", "infra", "wire_domains"),
+        ("finalized", "domains", "finalize"),
+    ];
+    let mut previous = *planned_index;
+    for (binding, receiver, method) in expected {
+        let transitions = execute
+            .block
+            .stmts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, statement)| {
+                let Stmt::Local(local) = statement else {
+                    return None;
+                };
+                let Pat::Ident(result) = &local.pat else {
+                    return None;
+                };
+                let initializer = local.init.as_ref()?;
+                exact_awaited_try_method_call(&initializer.expr, receiver, method)
+                    .then_some((index, result))
+            })
+            .collect::<Vec<_>>();
+        let [(index, result)] = transitions.as_slice() else {
+            bail!(
+                "{RUNTIME_PHASES}: execute must contain exactly one direct `{binding} = {receiver}.{method}().await?` transition"
+            )
+        };
+        ensure!(
+            result.ident == binding
+                && result.mutability.is_none()
+                && result.subpat.is_none()
+                && index > &previous,
+            "{RUNTIME_PHASES}: execute phase transition `{binding}` is missing, renamed, or reordered"
+        );
+        previous = *index;
+    }
+    for method in [
+        "build_providers",
+        "build_infra",
+        "wire_domains",
+        "finalize",
+        "launch",
+    ] {
+        ensure!(
+            method_call_count_block(&execute.block, method) == 1,
+            "{RUNTIME_PHASES}: execute must call phase transition `{method}` exactly once"
+        );
+    }
+    let tail = tail_expression(&execute.block)
+        .context("runtime phase execute must finish with finalized.launch().await")?;
     ensure!(
-        matches!(phase_local.pat, Pat::Tuple(_))
-            && matches!(
-                phase_local.init.as_ref().map(|init| init.expr.as_ref()),
-                Some(Expr::Try(_))
-            ),
-        "{RUNTIME_ENTRY}: WireDomains phase_result must be propagated into its production tuple"
+        exact_awaited_method_call(tail, "finalized", "launch")
+            && previous + 1 == execute.block.stmts.len() - 1,
+        "{RUNTIME_PHASES}: execute must finish the ordered chain with `finalized.launch().await`"
     );
+    Ok(())
+}
+
+fn validate_runtime_domains_phase(source: &str) -> Result<()> {
+    let syntax = syn::parse_file(source).context("parse production runtime domains phase")?;
+    let wire = unique_impl_method(
+        &syntax.items,
+        "InfraBuilt",
+        "wire_domains",
+        RUNTIME_DOMAINS_PHASE,
+    )?;
     ensure!(
-        phase_call.args.len() == 2,
-        "{RUNTIME_ENTRY}: WireDomains phase_result must have exact phase and body arguments"
+        wire.sig.asyncness.is_some(),
+        "{RUNTIME_DOMAINS_PHASE}: InfraBuilt::wire_domains must remain async"
     );
-    let body = phase_call
-        .args
+    let phase_bodies = wire
+        .block
+        .stmts
         .iter()
-        .nth(1)
-        .and_then(async_block)
-        .context(
-            "WireDomains phase_result second argument must be one directly awaited async block",
-        )?;
+        .filter_map(|statement| {
+            let Stmt::Local(local) = statement else {
+                return None;
+            };
+            let Pat::Ident(binding) = &local.pat else {
+                return None;
+            };
+            let initializer = local.init.as_ref()?;
+            let Expr::Await(awaited) = initializer.expr.as_ref() else {
+                return None;
+            };
+            let Expr::Async(body) = awaited.base.as_ref() else {
+                return None;
+            };
+            (binding.ident == "result").then_some(&body.block)
+        })
+        .collect::<Vec<_>>();
+    let [body] = phase_bodies.as_slice() else {
+        bail!(
+            "{RUNTIME_DOMAINS_PHASE}: InfraBuilt::wire_domains must own exactly one direct awaited `result` phase body"
+        )
+    };
+    let tail = tail_expression(&wire.block)
+        .context("InfraBuilt::wire_domains must return its phase_result")?;
+    let Expr::Call(phase_result_call) = tail else {
+        bail!("{RUNTIME_DOMAINS_PHASE}: wire_domains must end in phase_result")
+    };
+    ensure!(
+        path_is_exact_expr(&phase_result_call.func, &["phase_result"])
+            && phase_result_call.args.len() == 2
+            && phase_result_call
+                .args
+                .first()
+                .is_some_and(expr_is_runtime_phase_state_phase)
+            && phase_result_call
+                .args
+                .iter()
+                .nth(1)
+                .and_then(simple_expr_ident)
+                .as_deref()
+                == Some("result"),
+        "{RUNTIME_DOMAINS_PHASE}: wire_domains must return its exact result through phase_result"
+    );
     validate_runtime_wire_phase(body)
 }
 
-fn async_block(expression: &Expr) -> Option<&syn::Block> {
-    let Expr::Await(awaited) = expression else {
-        return None;
-    };
-    let Expr::Async(body) = peel_expr(&awaited.base) else {
-        return None;
-    };
-    Some(&body.block)
-}
-
 fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
-    let wire_path = ["modules_gen", "wire_domains"];
+    let wire_path = ["crate", "modules_gen", "wire_domains"];
     ensure!(
         exact_path_call_count_block(block, &wire_path) == 1,
-        "{RUNTIME_ENTRY}: WireDomains phase must contain exactly one generated wire_domains call"
+        "{RUNTIME_DOMAINS_PHASE}: WireDomains phase must contain exactly one generated wire_domains call"
     );
     let wire_bindings = block
         .stmts
@@ -242,20 +366,20 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
         .collect::<Vec<_>>();
     let [(wire_index, binding)] = wire_bindings.as_slice() else {
         bail!(
-            "{RUNTIME_ENTRY}: generated wire_domains must initialize one direct awaited/propagated binding"
+            "{RUNTIME_DOMAINS_PHASE}: generated wire_domains must initialize one direct awaited/propagated binding"
         )
     };
     ensure!(
         binding.ident == "domain_bindings"
             && binding.mutability.is_some()
             && binding.subpat.is_none(),
-        "{RUNTIME_ENTRY}: generated wire_domains result must be the mutable `domain_bindings` carrier"
+        "{RUNTIME_DOMAINS_PHASE}: generated wire_domains result must be the mutable `domain_bindings` carrier"
     );
 
     let compose_path = ["bootstrap", "compose_bindings"];
     ensure!(
         exact_path_call_count_block(block, &compose_path) == 1,
-        "{RUNTIME_ENTRY}: WireDomains phase must contain exactly one compose_bindings call"
+        "{RUNTIME_DOMAINS_PHASE}: WireDomains phase must contain exactly one compose_bindings call"
     );
     let consumers = block
         .stmts
@@ -278,7 +402,7 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
         .collect::<Vec<_>>();
     let [(consumer_index, Pat::Tuple(result))] = consumers.as_slice() else {
         bail!(
-            "{RUNTIME_ENTRY}: domain_bindings must enter one direct propagated compose_bindings tuple"
+            "{RUNTIME_DOMAINS_PHASE}: domain_bindings must enter one direct propagated compose_bindings tuple"
         )
     };
     ensure!(
@@ -294,11 +418,11 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
                 Some(Pat::Ident(module))
                     if module.ident == "domains_module" && module.mutability.is_none()
             ),
-        "{RUNTIME_ENTRY}: compose_bindings must directly produce `(mut registry, domains_module)` after wire_domains"
+        "{RUNTIME_DOMAINS_PHASE}: compose_bindings must directly produce `(mut registry, domains_module)` after wire_domains"
     );
     ensure!(
         expr_ident_count_block(block, "domain_bindings") == 1,
-        "{RUNTIME_ENTRY}: domain_bindings must have exactly one consumer"
+        "{RUNTIME_DOMAINS_PHASE}: domain_bindings must have exactly one consumer"
     );
     Ok(())
 }
@@ -716,11 +840,102 @@ fn unique_top_level_function<'a>(
     Ok(*function)
 }
 
+fn unique_impl_method<'a>(
+    items: &'a [Item],
+    owner: &str,
+    name: &str,
+    repo_path: &str,
+) -> Result<&'a ImplItemFn> {
+    let methods = items
+        .iter()
+        .filter_map(|item| {
+            let Item::Impl(implementation) = item else {
+                return None;
+            };
+            if !production_attributes(&implementation.attrs)
+                || implementation.trait_.is_some()
+                || !matches!(
+                    implementation.self_ty.as_ref(),
+                    syn::Type::Path(path)
+                        if path.path.segments.last().is_some_and(|segment| segment.ident == owner)
+                )
+            {
+                return None;
+            }
+            Some(implementation)
+        })
+        .flat_map(|implementation| &implementation.items)
+        .filter_map(|item| match item {
+            ImplItem::Fn(method)
+                if method.sig.ident == name && production_attributes(&method.attrs) =>
+            {
+                Some(method)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [method] = methods.as_slice() else {
+        bail!(
+            "{repo_path}: expected exactly one production `{owner}::{name}` method, found {}",
+            methods.len()
+        )
+    };
+    Ok(*method)
+}
+
 fn tail_expression(block: &syn::Block) -> Option<&Expr> {
     match block.stmts.last()? {
         Stmt::Expr(expression, None) => Some(expression),
         _ => None,
     }
+}
+
+fn exact_awaited_try_method_call(expression: &Expr, receiver: &str, method: &str) -> bool {
+    let Expr::Try(propagated) = expression else {
+        return false;
+    };
+    exact_awaited_method_call(&propagated.expr, receiver, method)
+}
+
+fn exact_awaited_method_call(expression: &Expr, receiver: &str, method: &str) -> bool {
+    let Expr::Await(awaited) = expression else {
+        return false;
+    };
+    matches!(
+        awaited.base.as_ref(),
+        Expr::MethodCall(call)
+            if call.method == method
+                && call.args.is_empty()
+                && simple_expr_ident(&call.receiver).as_deref() == Some(receiver)
+    )
+}
+
+fn method_call_count_block(block: &syn::Block, method: &str) -> usize {
+    struct Calls<'a> {
+        method: &'a str,
+        count: usize,
+    }
+    impl Visit<'_> for Calls<'_> {
+        fn visit_expr_method_call(&mut self, call: &ExprMethodCall) {
+            if call.method == self.method {
+                self.count += 1;
+            }
+            visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut calls = Calls { method, count: 0 };
+    calls.visit_block(block);
+    calls.count
+}
+
+fn expr_is_runtime_phase_state_phase(expression: &Expr) -> bool {
+    matches!(
+        expression,
+        Expr::Path(path)
+            if path.qself.is_some()
+                && path.path.segments.last().is_some_and(|segment| segment.ident == "PHASE")
+                && path.path.segments.iter().any(|segment| segment.ident == "RuntimePhaseState")
+    )
 }
 
 fn path_is_exact_expr(expression: &Expr, expected: &[&str]) -> bool {
@@ -1928,6 +2143,16 @@ mod tests {
                 "ConfigUnitOfWorkLocal",
             ]
         );
+        for projection in projections.values() {
+            assert_eq!(projection.runtime_entry_path, RUNTIME_PHASES);
+            assert_eq!(projection.runtime_entry, "execute");
+            assert_eq!(projection.runtime_assembly_path, RUNTIME_DOMAINS_PHASE);
+            assert_eq!(projection.runtime_assembly, "InfraBuilt::wire_domains");
+            assert_ne!(
+                projection.runtime_entry_path,
+                "assemblies/runtime/src/lib.rs"
+            );
+        }
         Ok(())
     }
 
@@ -1983,6 +2208,8 @@ mod tests {
         for relative in [
             IDENTITY_COMPOSITION,
             SETTINGS_COMPOSITION,
+            RUNTIME_PHASES,
+            RUNTIME_DOMAINS_PHASE,
             IDENTITY_RUNTIME_MODULE,
             SETTINGS_RUNTIME_MODULE,
         ] {
@@ -2041,103 +2268,132 @@ mod tests {
     }
 
     #[test]
-    fn runtime_entry_must_call_and_consume_the_generated_domain_wire() -> anyhow::Result<()> {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .context("xtask must live below the workspace root")?;
-        let invalid_entries = [
+    fn runtime_phase_owners_reject_missing_reordered_and_bait_wiring() {
+        let invalid_phase_entries = [
             (
                 "missing",
                 r#"
-                async fn run_startup() -> anyhow::Result<()> {
-                    let (mut registry, pg_readiness_period, domain_module) =
-                        phase_result(RuntimePhase::WireDomains, async {
-                            Ok::<_, anyhow::Error>((registry, period, module))
-                        }.await)?;
-                    Ok(())
+                pub(crate) async fn execute(runtime_inputs: &mut ServingRuntimeInputs) {
+                    let planned = Planned { runtime_inputs };
+                    let providers = planned.build_providers().await?;
+                    let domains = providers.wire_domains().await?;
+                    let finalized = domains.finalize().await?;
+                    finalized.launch().await
                 }
                 "#,
             ),
             (
-                "decoy",
+                "reordered",
                 r#"
-                async fn run_startup() -> anyhow::Result<()> {
-                    let (mut registry, pg_readiness_period, domain_module) =
-                        phase_result(RuntimePhase::WireDomains, async {
-                            let mut domain_bindings = decoy::wire_domains(&deps, domain_modules)
-                                .await
-                                .context("wire generated domains")?;
-                            let (mut registry, domains_module) =
-                                bootstrap::compose_bindings(&mut domain_bindings)
-                                    .context("compose generated domains")?;
-                            Ok::<_, anyhow::Error>((registry, period, domains_module))
-                        }.await)?;
-                    Ok(())
+                pub(crate) async fn execute(runtime_inputs: &mut ServingRuntimeInputs) {
+                    let planned = Planned { runtime_inputs };
+                    let providers = planned.build_providers().await?;
+                    let domains = infra.wire_domains().await?;
+                    let infra = providers.build_infra().await?;
+                    let finalized = domains.finalize().await?;
+                    finalized.launch().await
                 }
                 "#,
             ),
             (
-                "discarded",
+                "comment-and-test-bait",
                 r#"
-                async fn run_startup() -> anyhow::Result<()> {
-                    let (mut registry, pg_readiness_period, domain_module) =
-                        phase_result(RuntimePhase::WireDomains, async {
-                            modules_gen::wire_domains(&deps, domain_modules)
-                                .await
-                                .context("wire generated domains")?;
-                            Ok::<_, anyhow::Error>((registry, period, module))
-                        }.await)?;
-                    Ok(())
+                #[cfg(test)]
+                async fn execute(runtime_inputs: &mut ServingRuntimeInputs) {
+                    let planned = Planned { runtime_inputs };
+                    let providers = planned.build_providers().await?;
+                    let infra = providers.build_infra().await?;
+                    let domains = infra.wire_domains().await?;
+                    let finalized = domains.finalize().await?;
+                    finalized.launch().await
                 }
-                "#,
-            ),
-            (
-                "conditional",
-                r#"
-                async fn run_startup() -> anyhow::Result<()> {
-                    let (mut registry, pg_readiness_period, domain_module) =
-                        phase_result(RuntimePhase::WireDomains, async {
-                            if enabled {
-                                let mut domain_bindings =
-                                    modules_gen::wire_domains(&deps, domain_modules)
-                                        .await
-                                        .context("wire generated domains")?;
-                                let (mut registry, domains_module) =
-                                    bootstrap::compose_bindings(&mut domain_bindings)
-                                        .context("compose generated domains")?;
-                            }
-                            Ok::<_, anyhow::Error>((registry, period, module))
-                        }.await)?;
-                    Ok(())
+
+                pub(crate) async fn execute(runtime_inputs: &mut ServingRuntimeInputs) {
+                    // planned.build_providers().await?.build_infra().await?
+                    let _bait = "wire_domains finalize launch";
                 }
                 "#,
             ),
         ];
-        for (case, runtime_entry) in invalid_entries {
-            let root =
-                crate::testutil::unique_tmp(&format!("producer-composition-runtime-entry-{case}"));
-            for relative in [
-                IDENTITY_COMPOSITION,
-                SETTINGS_COMPOSITION,
-                RUNTIME_MODULES,
-                IDENTITY_RUNTIME_MODULE,
-                SETTINGS_RUNTIME_MODULE,
-            ] {
-                let destination = root.join(relative);
-                fs::create_dir_all(destination.parent().context("composition parent")?)?;
-                fs::copy(workspace.join(relative), destination)?;
-            }
-            let runtime = root.join("assemblies/runtime/src/lib.rs");
-            fs::create_dir_all(runtime.parent().context("runtime entry parent")?)?;
-            fs::write(runtime, runtime_entry)?;
-
-            let result = collect_producer_composition(&root);
-            fs::remove_dir_all(root)?;
+        for (case, source) in invalid_phase_entries {
             assert!(
-                result.is_err(),
-                "runtime entry mutation `{case}` must invalidate production composition evidence"
+                validate_runtime_phase_entry(source).is_err(),
+                "runtime phase entry mutation `{case}` must fail closed"
             );
         }
-        Ok(())
+
+        let invalid_domain_phases = [
+            (
+                "missing",
+                r#"
+                impl<'a> InfraBuilt<'a> {
+                    pub(super) async fn wire_domains(self) {
+                        let result = async move {
+                            Ok::<_, anyhow::Error>(())
+                        }.await;
+                        phase_result(<Self as RuntimePhaseState>::PHASE, result)
+                    }
+                }
+                "#,
+            ),
+            (
+                "reordered",
+                r#"
+                impl<'a> InfraBuilt<'a> {
+                    pub(super) async fn wire_domains(self) {
+                        let result = async move {
+                            let (mut registry, domains_module) =
+                                bootstrap::compose_bindings(&mut domain_bindings)
+                                    .context("compose generated domains")?;
+                            let mut domain_bindings =
+                                crate::modules_gen::wire_domains(&deps, domain_modules)
+                                    .await
+                                    .context("wire generated domains")?;
+                            Ok::<_, anyhow::Error>(())
+                        }.await;
+                        phase_result(<Self as RuntimePhaseState>::PHASE, result)
+                    }
+                }
+                "#,
+            ),
+            (
+                "comment-and-test-bait",
+                r#"
+                #[cfg(test)]
+                impl<'a> InfraBuilt<'a> {
+                    async fn wire_domains(self) {
+                        let result = async move {
+                            let mut domain_bindings =
+                                crate::modules_gen::wire_domains(&deps, domain_modules)
+                                    .await
+                                    .context("wire generated domains")?;
+                            let (mut registry, domains_module) =
+                                bootstrap::compose_bindings(&mut domain_bindings)
+                                    .context("compose generated domains")?;
+                            Ok::<_, anyhow::Error>(())
+                        }.await;
+                        phase_result(<Self as RuntimePhaseState>::PHASE, result)
+                    }
+                }
+
+                impl<'a> InfraBuilt<'a> {
+                    async fn wire_domains(self) {
+                        // crate::modules_gen::wire_domains(&deps, domain_modules)
+                        let result = async move {
+                            let _bait = "bootstrap::compose_bindings(&mut domain_bindings)";
+                            Ok::<_, anyhow::Error>(())
+                        }.await;
+                        phase_result(<Self as RuntimePhaseState>::PHASE, result)
+                    }
+                }
+                "#,
+            ),
+        ];
+        for (case, source) in invalid_domain_phases {
+            assert!(
+                validate_runtime_domains_phase(source).is_err(),
+                "runtime domains phase mutation `{case}` must fail closed"
+            );
+        }
     }
 }

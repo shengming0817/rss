@@ -162,32 +162,32 @@ use phase::OperatorRuntimeCapability;
 pub use phase::{OperatorRuntimeInputs, ServingRuntimeInputs};
 
 use bootstrap::DomainModuleResult;
+use infra::oidc::build_service_token_provider;
+#[cfg(test)]
 use infra::oidc::{
-    AccessTokenJwksReadyProbe, FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
-    RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME, RuntimeAccessProvider, RuntimeServiceTokenProvider,
-    build_federated_access_provider, build_rss_access_provider, build_service_token_provider,
+    FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME, RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
 };
-use infra::pg::{
-    PgRuntimeConfig, PgRuntimeConfigParts, build_pg_audit_maintenance_config,
-    build_pg_migrator_config,
-};
-use infra::redis::{
-    REDIS_READY_PROBE_NAME, RedisReadyProbe, RedisRuntimeConfig, build_redis_runtime_deps,
-    spawn_redis_readiness_sampler,
-};
-use infra::s3::{
-    S3DlxArchiveConfig, S3RuntimeConfig, S3RuntimeConfigParts, build_s3_dlx_archive_store,
-    build_s3_runtime_deps, wire_s3_canary,
-};
+use infra::pg::{build_pg_audit_maintenance_config, build_pg_migrator_config};
+#[cfg(test)]
+use infra::redis::REDIS_READY_PROBE_NAME;
+use infra::s3::{S3DlxArchiveConfig, build_s3_dlx_archive_store};
+#[cfg(test)]
+use infra::s3::{S3RuntimeConfig, S3RuntimeConfigParts};
 use infra::vault::{VaultRuntimeConfig, VaultRuntimeConfigError};
-use phase::{PreparedRuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
+use phase::PreparedRuntimeInputs;
+#[cfg(test)]
+use phase::{
+    RuntimeModuleAssemblyInputs, RuntimePhase, after_required_preflight,
+    assemble_runtime_module_outputs, validate_domain_listener_evidence,
+    validate_provider_output_bindings, validate_provider_output_evidence,
+};
 
 #[cfg(test)]
 use config::DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV;
 use config::{
-    RuntimeConfigSnapshot, RuntimeServingConfig, RuntimeServingConfigParts, ServiceTokenConfig,
-    ServingConfigMapper, SnapshotConfig, domain_transport_mtls_allow_set_env,
-    domain_transport_required_domains_from, domain_transport_url_env,
+    RuntimeConfigSnapshot, ServiceTokenConfig, ServingConfigMapper, SnapshotConfig,
+    domain_transport_mtls_allow_set_env, domain_transport_required_domains_from,
+    domain_transport_url_env,
 };
 
 use std::collections::BTreeMap;
@@ -217,8 +217,8 @@ use eventexec::{
 use postgres::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
     ConfigValueMaintenanceOptions, ConfigValueProtection, MaintenanceAuditOutcome, PgDlqStore,
-    PgDlxLifecycleRuntime, PgMaintenanceDeps, PgReconcileStore, PgRuntimeDeps, PgRuntimeHandle,
-    ProjectionPointerPrecondition, caps,
+    PgMaintenanceDeps, PgReconcileStore, PgRuntimeDeps, PgRuntimeHandle,
+    ProjectionPointerPrecondition,
 };
 #[cfg(test)]
 use primitives::MacKey;
@@ -4456,94 +4456,6 @@ impl RuntimeLifecycleOwner {
     }
 }
 
-struct RuntimeModuleAssemblyInputs {
-    domains_module: DomainModuleResult,
-    session_sweeper_module: DomainModuleResult,
-    service_token_replay_sweeper_module: DomainModuleResult,
-    s3_canary_module: DomainModuleResult,
-    provider_module: DomainModuleResult,
-    token_verifier_resources: Vec<Box<DynManagedResource<'static>>>,
-    domain_transport_module: DomainModuleResult,
-    event_module: DomainModuleResult,
-    dlx_lifecycle_module: DomainModuleResult,
-    redis_readiness_worker: bootstrap::WorkerSpec,
-}
-
-struct RuntimeWiringInputs {
-    event_transport: event_transport::EventTransportConfig,
-    event_worker: event_transport::EventWorkerConfig,
-    dlx_worker: event_transport::DlxWorkerConfig,
-    distributed_worker: distributed_runtime::DistributedWorkerConfig,
-    domain_modules: domains::DomainModuleInputs,
-    audit_consumer_key: primitives::MacKey,
-    session_sweep_interval: Duration,
-}
-
-fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> DomainModuleResult {
-    let mut module = DomainModuleResult::default();
-    module.merge(inputs.domains_module);
-    module.merge(inputs.session_sweeper_module);
-    module.merge(inputs.service_token_replay_sweeper_module);
-    module.merge(inputs.s3_canary_module);
-    module.merge(inputs.provider_module);
-    module.resources.extend(inputs.token_verifier_resources);
-    module.merge(inputs.domain_transport_module);
-    module.merge(inputs.event_module);
-    module.merge(inputs.dlx_lifecycle_module);
-    module.workers.push(inputs.redis_readiness_worker);
-    module
-}
-
-fn validate_domain_listener_evidence(
-    actual: &[bootstrap::DomainListenerBinding],
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        actual == modules_gen::DOMAIN_LISTENER_BINDINGS,
-        "runtime domain-listener evidence drift: expected {}, observed {}",
-        modules_gen::DOMAIN_LISTENER_BINDINGS.len(),
-        actual.len()
-    );
-    Ok(())
-}
-
-fn validate_provider_output_evidence() -> anyhow::Result<()> {
-    let mut actual = provider_output::provider_output_bindings();
-    actual.extend_from_slice(event_transport::PROVIDER_OUTPUT_BINDINGS);
-    validate_provider_output_bindings(&actual)
-}
-
-fn validate_provider_output_bindings(
-    actual: &[bootstrap::ProviderOutputBinding],
-) -> anyhow::Result<()> {
-    let mut actual = actual.to_vec();
-    actual.sort_by_key(|binding| (binding.port, binding.provider, binding.consumer));
-    let mut expected: Vec<_> = modules_gen::PROVIDER_OUTPUT_BINDINGS
-        .iter()
-        .copied()
-        .filter(|binding| !binding.channels.is_empty())
-        .collect();
-    expected.sort_by_key(|binding| (binding.port, binding.provider, binding.consumer));
-    anyhow::ensure!(
-        actual == expected,
-        "runtime provider-output evidence drift: expected {}, observed {}",
-        expected.len(),
-        actual.len()
-    );
-    Ok(())
-}
-
-async fn after_required_preflight<Capability, Output, Preflight, Migrate>(
-    preflight: Preflight,
-    migrate: impl FnOnce(Capability) -> Migrate,
-) -> anyhow::Result<Output>
-where
-    Preflight: std::future::Future<Output = anyhow::Result<Capability>>,
-    Migrate: std::future::Future<Output = anyhow::Result<Output>>,
-{
-    let capability = preflight.await?;
-    migrate(capability).await
-}
-
 /// 生产组合根入口：构造共享基础设施 → generated domains → `compose_bindings`
 /// → 聚合 readiness/lifecycle outputs → 装配认证接线 → 挂 Health listener
 /// → bind + serve + 信号优雅关停。
@@ -4558,528 +4470,8 @@ pub async fn run(runtime_inputs: ServingRuntimeInputs) -> anyhow::Result<()> {
     RuntimeLifecycleOwner::new(runtime_inputs).run().await
 }
 
-#[allow(clippy::cognitive_complexity)]
 async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Result<()> {
-    let password_blocklist = Arc::clone(runtime_inputs.password_blocklist());
-    let runtime_plan =
-        plan::RuntimePlan::bundled(runtime_inputs.config()).context("build RuntimePlan")?;
-    let typed_runtime_plan = runtime_plan.as_typed();
-    tracing::info!(
-        assembly.fingerprint = typed_runtime_plan.assembly_fingerprint().as_str(),
-        runtime_plan.fingerprint = typed_runtime_plan.runtime_plan_fingerprint().as_str(),
-        runtime_plan.providers = typed_runtime_plan.provider_plans().len(),
-        runtime_plan.listeners = typed_runtime_plan.listener_plans().len(),
-        runtime_plan.domains = typed_runtime_plan.domain_plans().len(),
-        runtime_plan.placements = typed_runtime_plan.placement_plans().len(),
-        "typed RuntimePlan loaded"
-    );
-    drop(runtime_plan);
-
-    // BuildInfra phase: provider bundles, topology config, shared deps, and metrics exporter.
-    let (
-        pg_owner,
-        deps,
-        s3_canary_config,
-        wiring_inputs,
-        dlx_lifecycle,
-        domain_transport,
-        metrics_exporter,
-        pg_readiness_period,
-        redis_readiness_period,
-        _command_idempotency_keyring,
-        token_profiles,
-        runtime_rss_access,
-        runtime_federated_access,
-    ) = phase_result(
-        RuntimePhase::BuildInfra,
-        async {
-            let config = runtime_inputs.config();
-            let RuntimeServingConfigParts {
-                token_profiles,
-                event_transport,
-                event_worker,
-                dlx_worker,
-                distributed_worker,
-                domain_transport: domain_transport_config,
-                domain_modules,
-                audit_consumer_key,
-                session_sweep_interval,
-            } = RuntimeServingConfig::from_snapshot(config)
-                .context("build snapshot-backed serving config")?
-                .into_parts();
-            // Load every selected access JWKS before the forward-only PG migration. Service-token
-            // construction remains blocked on the owner-only durable replay store and is completed
-            // immediately after PG setup.
-            let (rss_key_isolation, federated_key_isolation) =
-                if token_profiles.rss_access().is_some()
-                    && token_profiles.federated_access().is_some()
-                {
-                    let generation = oidc::AccessJwksKeyIsolationGeneration::new();
-                    let (rss, federated) = generation.into_bindings();
-                    (Some(rss), Some(federated))
-                } else {
-                    (None, None)
-                };
-            let runtime_rss_access = token_profiles
-                .rss_access()
-                .map(|config| {
-                    build_rss_access_provider(config, CancellationToken::new(), rss_key_isolation)
-                        .context("build RSS access-token verifier")
-                })
-                .transpose()?;
-            let runtime_federated_access = token_profiles
-                .federated_access()
-                .map(|config| {
-                    build_federated_access_provider(
-                        config,
-                        CancellationToken::new(),
-                        federated_key_isolation,
-                    )
-                    .context("build federated access-token verifier")
-                })
-                .transpose()?;
-            let pg_config = PgRuntimeConfig::from_snapshot(config)
-                .context("build snapshot-backed postgres config")?;
-            let redis_config = RedisRuntimeConfig::from_snapshot(config)
-                .context("build snapshot-backed redis config")?;
-            let s3_config = S3RuntimeConfig::from_snapshot(config)
-                .context("build snapshot-backed s3 config")?;
-            let PgRuntimeConfigParts {
-                serving: app_pg_config,
-                tenant_read: tenant_read_pg_config,
-                migrator: migrator_config,
-                audit_admin: audit_admin_config,
-                dlx_archiver: dlx_archiver_pg_config,
-                dlx_verifier: dlx_verifier_pg_config,
-                dlx_purger: dlx_purger_pg_config,
-                legacy_policy: plaintext_policy,
-                readiness_period: pg_readiness_period,
-            } = pg_config.into_parts();
-            let S3RuntimeConfigParts {
-                general: s3_general_config,
-                canary: s3_canary_config,
-                dlx_archive: s3_dlx_archive_config,
-            } = s3_config.into_parts();
-            let config_value = |name: &str| config.value(name).map(str::to_owned);
-            // Phase A parses every configuration and proves all external DLX capabilities before
-            // the forward-only 0062 migration can commit. A bad credential or WORM/key capability
-            // therefore cannot strand the deployment between incompatible schema generations.
-            let vault_config = VaultRuntimeConfig::from_snapshot(config)
-                .context("build snapshot-backed vault config")?;
-            let (vault, settings_config_value_key_name) =
-                vault_config.into_runtime().context("setup vault deps")?;
-            let (redis, redis_readiness_period) = build_redis_runtime_deps(redis_config)
-                .await
-                .context("setup redis deps")?;
-            let s3 = build_s3_runtime_deps(s3_general_config).context("setup s3 deps")?;
-            let relay_budget = event_worker.relay_budget();
-            tracing::info!(
-                runtime.event_topology = topology_label(event_transport.topology()),
-                relay.lease_ttl_ms = relay_budget.lease_ttl_millis(),
-                relay.publish_timeout_ms = relay_budget.publish_timeout_millis(),
-                relay.settle_timeout_ms = relay_budget.settle_timeout_millis(),
-                relay.safety_margin_ms = relay_budget.safety_margin_millis(),
-                relay.required_budget_ms = relay_budget.required_budget_millis(),
-                "runtime event transport budget loaded"
-            );
-            if event_transport.topology() == bootstrap::Topology::Demo {
-                anyhow::bail!(
-                    "RSS_TOPOLOGY=demo is not supported in the production runtime; \
-                     use durable-shared or durable-isolated"
-                );
-            }
-            let dlx_bootstrap = build_dlx_lifecycle_bootstrap_config_from(
-                dlx_archiver_pg_config,
-                dlx_verifier_pg_config,
-                dlx_purger_pg_config,
-                s3_dlx_archive_config,
-                config_value,
-                Arc::new(SystemClock),
-            )
-            .await?;
-            let DlxLifecycleBootstrapConfig {
-                archiver_pg: dlx_archiver_pg_config,
-                verifier_pg: dlx_verifier_pg_config,
-                purger_pg: dlx_purger_pg_config,
-                archive_store,
-                hot_vault_provider,
-                archive_vault_provider,
-                hot_key,
-                archive_key,
-            } = dlx_bootstrap;
-            let hot_payload_protector = event_transport
-                .dlx_payload_protector()
-                .context("durable DLX hot payload protector missing")?;
-            let archive_key_for_preflight = archive_key.clone();
-
-            let (pg_owner, dlx_pg_owner, archive_store, archive_vault_provider) =
-                after_required_preflight(
-                    async move {
-                        PgDlxLifecycleRuntime::preflight_identities(
-                            &dlx_archiver_pg_config,
-                            &dlx_verifier_pg_config,
-                            &dlx_purger_pg_config,
-                        )
-                        .await
-                        .context("preflight independent DLX postgres identities")?;
-                        let archive_store = archive_store
-                            .verify()
-                            .await
-                            .context("verify DLX archive S3 WORM capability")?;
-                        verify_dlx_vault_key_capability(
-                            &hot_vault_provider,
-                            hot_key.as_key_name(),
-                            "dlx-hot-startup",
-                        )
-                        .await
-                        .context("verify DLX hot Vault capability")?;
-                        verify_dlx_vault_key_capability(
-                            &archive_vault_provider,
-                            archive_key_for_preflight.as_key_name(),
-                            "dlx-archive-startup",
-                        )
-                        .await
-                        .context("verify DLX archive Vault capability")?;
-                        Ok((
-                            dlx_archiver_pg_config,
-                            dlx_verifier_pg_config,
-                            dlx_purger_pg_config,
-                            archive_store,
-                            archive_vault_provider,
-                        ))
-                    },
-                    |(
-                        dlx_archiver_pg_config,
-                        dlx_verifier_pg_config,
-                        dlx_purger_pg_config,
-                        archive_store,
-                        archive_vault_provider,
-                    )| async move {
-                        // Phase B is the only destructive step. Exact function/table ACL checks run
-                        // through `setup` only after the migration has installed the closed surface.
-                        let pg_owner = PgRuntimeDeps::setup_with_audit_admin_config(
-                            &migrator_config,
-                            &app_pg_config,
-                            &tenant_read_pg_config,
-                            audit_admin_config.as_ref(),
-                            plaintext_policy,
-                            generated::event::PROJECTION_INPUT_GENERATION,
-                            generated::event::PROJECTION_INPUTS,
-                        )
-                        .await
-                        .context("setup postgres deps after DLX capability preflight")?;
-                        let dlx_pg_owner = PgDlxLifecycleRuntime::setup(
-                            &dlx_archiver_pg_config,
-                            &dlx_verifier_pg_config,
-                            &dlx_purger_pg_config,
-                            hot_payload_protector,
-                        )
-                        .await
-                        .context("verify exact DLX lifecycle postgres ACLs")?;
-                        Ok((
-                            pg_owner,
-                            dlx_pg_owner,
-                            archive_store,
-                            archive_vault_provider,
-                        ))
-                    },
-                )
-                .await?;
-            let pg = pg_owner.handle();
-            let dlx_lifecycle = event_transport::DlxLifecycleRuntimeDeps::new(
-                dlx_pg_owner,
-                archive_store,
-                archive_vault_provider,
-                archive_key,
-            );
-            let domain_transport = wire_domain_transport(domain_transport_config)
-                .await
-                .context("wire outbound domain transport")?;
-            let command_idempotency_keyring = build_command_idempotency_keyring_from(config_value)
-                .context("build command idempotency keyring")?;
-
-            // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
-            let deps = SharedRuntimeDeps {
-                password_blocklist: Arc::clone(&password_blocklist),
-                pg,
-                redis,
-                s3,
-                vault,
-                settings_config_value_key_name,
-                domain_transport: domain_transport.dispatch_handle(),
-            };
-
-            // Prometheus 指标导出（#1253）：装进程级 `metrics` global recorder（counter!/gauge! 发射点经此写入）+ 持 render 句柄。
-            // **fail-fast**：global recorder 已装（重复 install）即 Err——误配在接线期暴露，不静默 noop。Arc<dyn> 共享给 /metrics handler。
-            // PromExporter 的 ManagedResource::shutdown 是文档化 no-op（pull exporter 无后台任务/连接），故不进 ShutdownStack。
-            //
-            // `MetricsExporter` 是无状态 pull port，无 ephemeral/persistent 之分，也没有 dev/demo 与
-            // production provider 选择；因此 assembly durability governance 无可校验项。
-            let metrics_exporter: Arc<dyn diport::MetricsExporter> = Arc::new(
-                prometheus::PromExporter::install().context("install prometheus recorder")?,
-            );
-            let wiring_inputs = RuntimeWiringInputs {
-                event_transport,
-                event_worker,
-                dlx_worker,
-                distributed_worker,
-                domain_modules,
-                audit_consumer_key,
-                session_sweep_interval,
-            };
-
-            Ok::<_, anyhow::Error>((
-                pg_owner,
-                deps,
-                s3_canary_config,
-                wiring_inputs,
-                dlx_lifecycle,
-                domain_transport,
-                metrics_exporter,
-                pg_readiness_period,
-                redis_readiness_period,
-                command_idempotency_keyring,
-                token_profiles,
-                runtime_rss_access,
-                runtime_federated_access,
-            ))
-        }
-        .await,
-    )?;
-
-    let runtime_service_token = token_profiles
-        .service_token()
-        .map(|config| {
-            build_service_token_provider(
-                config,
-                pg_owner.service_token_replay_store(),
-                SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
-            )
-            .context("build service-token verifier with durable replay")
-        })
-        .transpose()?;
-    let token_provider_bindings = routes::TokenProviderBindings::new(
-        runtime_rss_access
-            .as_ref()
-            .map(RuntimeAccessProvider::provider),
-        runtime_federated_access
-            .as_ref()
-            .map(RuntimeAccessProvider::provider),
-        runtime_service_token
-            .as_ref()
-            .map(RuntimeServiceTokenProvider::provider),
-    );
-
-    // WireDomains phase: domain roots, registry/module outputs, probes, workers, and event transport.
-    let (mut registry, pg_readiness_period, domain_module) = phase_result(
-        RuntimePhase::WireDomains,
-        async {
-            let RuntimeWiringInputs {
-                event_transport,
-                event_worker,
-                dlx_worker,
-                distributed_worker,
-                domain_modules,
-                audit_consumer_key,
-                session_sweep_interval,
-            } = wiring_inputs;
-            // assembly.toml 的 domain 顺序经 committed generated glue 成为 live 单源；typed route/subscriber
-            // handles 已由各 Domain::init 捕获进 Registry，不经 SharedRuntimeDeps/DomainModuleResult service bag。
-            // bootstrap 启动 tail-verify（跨租户全量巡检）defer 到 Part B；本接线仍只收窄 request/subscriber capability。
-            let mut domain_bindings = modules_gen::wire_domains(&deps, domain_modules)
-                .await
-                .context("wire generated domains")?;
-            let (mut registry, domains_module) = bootstrap::compose_bindings(&mut domain_bindings)
-                .context("compose generated domains")?;
-            validate_domain_listener_evidence(&registry.domain_listener_bindings())
-                .context("validate runtime domain-listener evidence")?;
-
-            let session_sweeper_module = wire_session_sweeper(&deps.pg, session_sweep_interval)
-                .context("wire session sweeper")?;
-            let service_token_replay_sweeper_module =
-                wire_service_token_replay_sweeper(&deps.pg)
-                    .context("wire service-token replay sweeper")?;
-            let s3_canary_module =
-                wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?;
-            // provider capability bundle 单源装配：adapter 保持 diport-only 原语，runtime 本地适配为唯一
-            // DomainModuleResult，并按 Redis → S3 → Vault 固定顺序进入统一 merge 路径。
-            let provider_module = crate::provider_output::build_provider_module(&deps);
-            validate_provider_output_evidence()
-                .context("validate runtime provider-output evidence")?;
-            let mut token_verifier_resources = Vec::new();
-            if let Some(provider) = runtime_rss_access.as_ref() {
-                token_verifier_resources.push(provider.managed_resource());
-            }
-            if let Some(provider) = runtime_federated_access.as_ref() {
-                token_verifier_resources.push(provider.managed_resource());
-            }
-            if let Some(provider) = runtime_service_token.as_ref() {
-                token_verifier_resources.push(provider.managed_resource());
-            }
-            // 框架归属 RLS 能力门 readyz 兜底探针（须先于 take_health_reporter）：把启动期 verify_rls_capability
-            // 的结果显式暴露到 readyz（启动已 fail-fast，故进程在跑时恒 ready；运维可见 + 周期再核验接线点）。
-            let rls_probe_name =
-                ProbeName::parse(RLS_READY_PROBE_NAME).context("parse rls_ready probe name")?;
-            registry
-                .probe(
-                    rls_probe_name,
-                    Box::new(RlsReadyProbe::new(deps.pg.rls_ready_handle())),
-                )
-                .context("register rls_ready probe")?;
-            let redis_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
-            let redis_probe_name =
-                ProbeName::parse(REDIS_READY_PROBE_NAME).context("parse redis_ready probe name")?;
-            registry
-                .probe(
-                    redis_probe_name,
-                    Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
-                )
-                .context("register redis_ready probe")?;
-            if let Some(provider) = runtime_rss_access.as_ref() {
-                let name = ProbeName::parse(RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)
-                    .context("parse RSS access-token JWKS probe name")?;
-                registry
-                    .probe(
-                        name,
-                        Box::new(AccessTokenJwksReadyProbe::rss_access(
-                            provider.jwks_readiness(),
-                        )),
-                    )
-                    .context("register RSS access-token JWKS readiness probe")?;
-            }
-            if let Some(provider) = runtime_federated_access.as_ref() {
-                let name = ProbeName::parse(FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)
-                    .context("parse federated access-token JWKS probe name")?;
-                registry
-                    .probe(
-                        name,
-                        Box::new(AccessTokenJwksReadyProbe::federated_access(
-                            provider.jwks_readiness(),
-                        )),
-                    )
-                    .context("register federated access-token JWKS readiness probe")?;
-            }
-
-            // 事件传输接线（#1251）：topology-gated durable AMQP/Redis + outbox relay + consumer workers。
-            // Demo 拓扑已在构造 SharedRuntimeDeps 前 fail-fast；production runtime 不走 in-memory path。
-            let domain_transport_module = domain_transport
-                .module_result()
-                .context("wire outbound domain transport module")?;
-            let distributed = distributed_runtime::wire_distributed(&deps, distributed_worker)
-                .context("wire distributed")?;
-            let event_subscribers =
-                event_transport::bridge_generated_subscriptions(registry.drain_subscribers())
-                    .context("bridge generated event subscriptions")?;
-            let event_module = event_transport::wire_event_transport(
-                &deps.pg,
-                distributed,
-                event_subscribers,
-                event_transport,
-                event_worker,
-                audit_consumer_key,
-            )
-            .await
-            .context("wire event transport")?;
-            let dlx_lifecycle_module =
-                event_transport::wire_dlx_lifecycle(dlx_lifecycle, dlx_worker)
-                    .context("wire DLX lifecycle")?;
-            // 聚合各域 module result / provider capability guards / event transport outputs。
-            let redis_for_sampler = deps.redis.clone();
-            let redis_readiness_worker: bootstrap::WorkerSpec = Box::new(move |token| {
-                DynManagedResource::new_box(spawn_redis_readiness_sampler(
-                    redis_for_sampler.clone(),
-                    redis_readiness_period,
-                    token,
-                    Arc::clone(&redis_ready),
-                ))
-            });
-            let mut module = crate::assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
-                domains_module,
-                session_sweeper_module,
-                service_token_replay_sweeper_module,
-                s3_canary_module,
-                provider_module,
-                token_verifier_resources,
-                domain_transport_module,
-                event_module,
-                dlx_lifecycle_module,
-                redis_readiness_worker,
-            });
-
-            // 排空 module 探针进 registry（须先于 take_health_reporter，readyz 才聚合域 + event worker probes）。
-            for (name, probe) in std::mem::take(&mut module.probes) {
-                let probe_label = name.as_str().to_owned();
-                registry
-                    .probe(name, probe)
-                    .with_context(|| format!("register module probe '{probe_label}'"))?;
-            }
-
-            tracing::info!(
-                sample_interval_secs = pg_readiness_period.as_secs(),
-                "pg readiness sampler interval configured"
-            );
-            tracing::info!(
-                sample_interval_secs = redis_readiness_period.as_secs(),
-                "redis readiness sampler interval configured"
-            );
-
-            Ok::<_, anyhow::Error>((registry, pg_readiness_period, module))
-        }
-        .await,
-    )?;
-
-    // Finalize phase: authenticated routers and the dedicated health listener.
-    let listeners = phase_result(
-        RuntimePhase::Finalize,
-        (|| {
-            use crate::listeners::health_listener;
-            use crate::routes::{AssembledListener, assemble_authed_routers};
-
-            // 装配域路由认证接线（drain registry 路由组，借 &mut——probe 留存供下方 readyz）。
-            // Auth decision audit is a flat durable sink, not the audit ledger hash-chain actor model.
-            let auth_audit_sink = httpserve::AuditSinkHandle::new(
-                deps.pg.for_domain::<caps::Audit>().auth_audit_sink(),
-            );
-            let auth_audit_clock: Arc<dyn diport::Clock> = Arc::new(SystemClock);
-            let mut listeners = assemble_authed_routers(
-                runtime_inputs.config(),
-                &token_profiles,
-                &mut registry,
-                &token_provider_bindings,
-                auth_audit_sink,
-                auth_audit_clock,
-            )
-            .context("assemble authed routers")?;
-
-            // Health listener（框架归属）：readyz 经 Arc<HealthReporter>（Send+Sync）每请求聚合探针。registry 路由组
-            // 已 drain，探针经 take_health_reporter 移出（整体非 Sync 的 Registry 无法进 axum handler 闭包）。
-            let reporter = Arc::new(registry.take_health_reporter());
-            let (listener, routes) =
-                health_listener(reporter, metrics_exporter).context("build health listener")?;
-            listeners.push(AssembledListener::plain(listener, routes));
-
-            Ok::<_, anyhow::Error>(listeners)
-        })(),
-    )?;
-
-    let trace_export = runtime_inputs.take_trace_export();
-    // Launch phase: listener serving plus LIFO shutdown resource registration.
-    let trace_exporter = trace_export.map(DynManagedResource::new_box);
-    let pg_runtime_module =
-        crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
-    let launch_plan = launch::LaunchPlan::new(launch::LaunchPlanParts {
-        listeners,
-        trace_exporter,
-        pg_runtime_module,
-        domain_module,
-    });
-    phase_result(
-        RuntimePhase::Launch,
-        launch::launch(runtime_inputs.config(), launch_plan)
-            .await
-            .map(|()| RuntimeOutputs::completed()),
-    )?;
-    Ok(())
+    phase::execute(runtime_inputs).await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -8720,11 +8112,15 @@ mod tests {
                 }),
             "settings config maintenance must consume the snapshot capability and inject the durable replay store"
         );
+        let provider_phase = include_str!("phase/provider.rs");
+        let infra_phase = include_str!("phase/infra.rs");
         assert!(
-            source.contains("build_service_token_provider(")
-                && source.contains("pg_owner.service_token_replay_store(),")
-                && source.contains("SERVICE_TOKEN_REPLAY_STORE_TIMEOUT"),
-            "serving typed service-token verifier must receive the owner replay store with an explicit bounded timeout"
+            provider_phase.contains("build_rss_access_provider(")
+                && provider_phase.contains("build_federated_access_provider(")
+                && infra_phase.contains("build_service_token_provider(")
+                && infra_phase.contains("pg_owner.service_token_replay_store(),")
+                && infra_phase.contains("SERVICE_TOKEN_REPLAY_STORE_TIMEOUT"),
+            "serving access-token providers must preflight before migration and the typed service-token verifier must receive the owner replay store with an explicit bounded timeout"
         );
     }
 

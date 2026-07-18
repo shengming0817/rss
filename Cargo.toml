@@ -289,6 +289,7 @@ rustix = { version = "1.1.4", features = ["fs"] }
 toml = "0.8"
 # 测试
 rstest = "0.24"
+static_assertions = "1.1.0"
 trybuild = "1"   # diport DI port trait 的 dyn-compatible compile-pass/fail 回归锁（Medium）
 mockall = "0.13"
 insta = "1"   # inert 前瞻预留（snapshot 测试，暂未引入任何成员）

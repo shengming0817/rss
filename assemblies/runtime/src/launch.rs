@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) const HTTP_SERVER_REQUEST_BUDGET_ENV: &str = "RSS_HTTP_SERVER_REQUEST_BUDGET_MS";
 
-fn server_request_budget(
+pub(crate) fn server_request_budget(
     config: SnapshotConfig<'_>,
 ) -> anyhow::Result<httpserve::ServerRequestBudget> {
     let raw = config
@@ -115,8 +115,11 @@ impl LaunchPlan {
 }
 
 /// Production launch entry: bind listeners, wait for SIGTERM/SIGINT, then drain resources.
-pub(crate) async fn launch(config: SnapshotConfig<'_>, plan: LaunchPlan) -> anyhow::Result<()> {
-    let budget = server_request_budget(config).context("resolve HTTP server request budget")?;
+pub(crate) async fn launch(
+    config: SnapshotConfig<'_>,
+    budget: httpserve::ServerRequestBudget,
+    plan: LaunchPlan,
+) -> anyhow::Result<()> {
     launch_until(
         plan,
         budget,
@@ -678,7 +681,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)] // reason: direct async test assertion for clean listener launch.
-    async fn launch_until_binds_all_listeners_and_drains_clean() {
+    async fn launch_plan_binds_all_listeners_and_drains_clean() {
         let plan = minimal_plan(vec![test_health_assembled(), test_health_assembled()]);
         launch_until(
             plan,
@@ -692,7 +695,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)] // reason: direct async test assertion for fail-fast listener validation.
-    async fn launch_until_empty_listeners_errs() {
+    async fn launch_plan_empty_listeners_errs() {
         let shutdowns = Arc::new(AtomicUsize::new(0));
         let mut plan = minimal_plan(Vec::new());
         plan.domain_module.resources.push(recording_resource(
@@ -753,7 +756,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn launch_until_partial_bind_failure_drains_resources_once_and_releases_port() {
+    async fn launch_plan_partial_bind_failure_drains_resources_once_and_releases_port() {
         let first_reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("reserve first listener address");
@@ -800,7 +803,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn launch_until_shutdown_trigger_error_preserves_error_and_drains_once() {
+    async fn launch_plan_shutdown_trigger_error_preserves_error_and_drains_once() {
         let shutdowns = Arc::new(AtomicUsize::new(0));
         let mut plan = minimal_plan(vec![test_health_assembled()]);
         plan.domain_module.resources.push(recording_resource(
@@ -823,7 +826,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn launch_until_preserves_primary_error_when_cleanup_also_fails() {
+    async fn launch_plan_preserves_primary_error_when_cleanup_also_fails() {
         let shutdowns = Arc::new(AtomicUsize::new(0));
         let cleanup_error_events = Arc::new(AtomicUsize::new(0));
         let subscriber = tracing_subscriber::registry()
@@ -856,7 +859,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn launch_until_partial_registration_failure_drains_registered_resources_once() {
+    async fn launch_plan_partial_registration_failure_drains_registered_resources_once() {
         let trace_shutdowns = Arc::new(AtomicUsize::new(0));
         let pg_shutdowns = Arc::new(AtomicUsize::new(0));
         let domain_shutdowns = Arc::new(AtomicUsize::new(0));

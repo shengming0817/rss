@@ -9,100 +9,52 @@ cargo xtask runtime-baseline verify
 
 ## Scope
 
-The baseline locks static repository facts only:
-
-- `assemblies/runtime/Cargo.toml` `[dependencies]`
-- `assemblies/runtime/assembly.toml` `[[diportProviders]]`
-- `assemblies/runtime/src/module.rs` `SharedRuntimeDeps` fields
-- `crates/bootstrap/src/module.rs` `DomainModuleResult` fields plus `merge`
-- the exact outer `runtime::run()` lifecycle owner and ordered assembly anchors inside its unique
-  `run_startup()` body
-- the unique PG lifecycle-output helper and production call
-- ordered launch anchors inside `assemblies/runtime/src/launch.rs`
+The complete static inventory is machine-owned by
+[`runtime-baseline/runtime.txt`](../../runtime-baseline/runtime.txt). Its
+`[runtime.dependencies]`, `[assembly.diportProviders]`, `[sharedRuntimeDeps.fields]`,
+`[domainModuleResult.fields]`, and `[runtime.run.orderedAnchors]` sections are the source of truth;
+this document only explains the architectural meaning of those facts.
 
 Dynamic state is not asserted by this gate: environment variables, live provider health, generated event subscriptions, topology-specific routing, socket bind results, and OS signal behavior remain runtime facts.
 
-## Current `runtime::run_startup()` Inventory
+## Current Typed Phase Inventory
 
 The public `runtime::run()` only accepts `ServingRuntimeInputs` and transfers it into
 `RuntimeLifecycleOwner`; `OperatorRuntimeInputs` is a distinct, unforgeable profile without the
 password-policy capability and cannot enter serving. The owner always finishes the unique
 `run_startup(&mut ServingRuntimeInputs)` result through pending-exporter
-cleanup; the current production startup body has these phases:
-
-1. Preflight typed token profiles/JWKS, then build provider bundles and transport handles:
-   - only listener-selected RSS/Federated/Service providers are prepared; each access profile owns a distinct
-     issuer, audience, ES256 JWKS source, refresh resource, and readiness signal
-   - Service Token is completed after forward-only migration with the owner-only PG replay store
-   - Postgres non-Clone owner from `PgRuntimeDeps::setup_with_audit_admin_config`, then its
-     cloneable `PgRuntimeHandle` capability projection
-   - Vault `VaultRuntimeConfig::from_snapshot` → consuming `into_runtime`
-   - Redis `build_redis_runtime_deps`
-   - S3 `S3RuntimeConfig::from_snapshot` → named parts → `build_s3_runtime_deps` and the DLX archive builder
-   - one `RuntimeServingConfig::from_snapshot` mapping for event/domain/DLX/worker and exact
-     generated-domain inputs
-   - outbound domain transport from its typed target + mandatory SPIFFE endpoint carrier
-2. Build `SharedRuntimeDeps` from infrastructure-only inputs.
-3. Wire domain roots:
-   - `modules_gen::wire_domains(&deps, domain_modules)`; generated glue consumes one exact typed
-     input per manifest domain
-4. Compose the generated bindings and lifecycle output with `bootstrap::compose_bindings`.
-5. Merge module results, with generated domain output first:
-   - generated domain output
-   - session sweeper
-   - service-token replay retention sweeper
-   - S3 canary
-   - provider runtime resources for Redis, S3, and Vault
-   - outbound domain transport module result
-   - event transport module result
-6. Register direct framework probes for RLS and Redis readiness.
-7. Call `wire_distributed` with its exact worker timing, bridge generated event subscriptions, then
-   call `event_transport::wire_event_transport` with snapshot-derived event timing and audit key.
-8. Drain module probes into `Registry` before `take_health_reporter`.
-9. Assemble authenticated routers and the dedicated health listener.
-10. Consume the retained PG owner once through `build_pg_runtime_module(owner, period)` into the
-    existing `DomainModuleResult` type, pass that required module batch to `LaunchPlan`, and serve
-    listeners through `launch::launch`.
+cleanup. `run_startup()` contains no assembly body or compatibility path: it enters
+`phase::execute`, whose exact consuming chain is
+`Planned → ProvidersBuilt → InfraBuilt → DomainsWired → Finalized → RuntimeOutputs`.
+The private `PhaseContext` retains the same mutable serving input and owned `RuntimePlan` through
+launch. Each phase file owns one transition: listener-selected RSS/Federated access-token provider
+preflight, infrastructure construction plus Service Token replay-store completion, domain wiring,
+listener finalization, then launch. The selected profiles retain distinct typed providers,
+resources, and readiness signals throughout that chain. Infrastructure capabilities are complete
+before domain composition begins; module probes enter the registry before listener finalization;
+and only the launch phase may consume `Finalized` and transfer lifecycle ownership to the sole
+`ShutdownStack` owner. The exact production calls and ordering are intentionally not repeated
+here; see `[runtime.run.orderedAnchors]` in the machine baseline.
 
 ## Provider Inventory
 
-The committed baseline records the current DI provider declarations from `assembly.toml`:
-
-- `diport::RevocationStore`: `softca::InMemRevocationLedger`, draft, ephemeral-memory
-- `diport::Publisher`: `amqp::AmqpPublisher`, active, persistent
-- `diport::AckableSubscriber`: `amqp::AmqpSubscriber`, active, persistent
-- `diport::Signer`: `vault::VaultSigner`, active, persistent
-- `diport::KeyProvider`: `vault::VaultKeyProvider`, active, persistent
-- `diport::Pdp`: typed `oidc::OidcProvider<RssAccessProfile|FederatedAccessProfile|ServiceTokenProfile>`,
-  active, persistent, selected by a closed listener `ProfileBinding`
-- `diport::ServiceTokenReplayStore`: `postgres::PgServiceTokenReplayStore`, active, persistent;
-  consumed by OIDC, with replay readiness/resource/sweeper lifecycle outputs
-- `diport::RateLimiter`: `ratelimit::GovernorLimiter`, active, ephemeral-memory
-- `diport::LockStore`: `redis::RedisLockStore`, active, persistent
-- `diport::CasStore`: `postgres::PgCasStore`, active, persistent
-- `diport::CasStore`: `redis::RedisCasStore`, draft, persistent
-- `diport::ObjectStore`: `s3::S3Store`, active, persistent
-
-`cargo xtask assembly validate` remains the provider correctness gate. `runtime-baseline verify` prevents later runtime root movement from silently changing this inventory.
+The exact DI declarations, including lifecycle and durability metadata, live in
+`[assembly.diportProviders]` in the machine baseline and are derived from `assembly.toml`.
+`cargo xtask assembly validate` remains the provider correctness gate; `runtime-baseline verify`
+prevents later runtime-root movement from silently changing the derived inventory.
 
 ## Shared Inputs And Module Outputs
 
-`SharedRuntimeDeps` currently carries:
+The exact shared capability fields live in `[sharedRuntimeDeps.fields]`; the exact lifecycle result
+shape and merge coverage live in `[domainModuleResult.fields]`. Neither list is duplicated here.
+The architectural boundary is that shared inputs contain infrastructure capabilities, not domain
+services or repositories. `cargo xtask runtime-deps guard` enforces that semantic allowlist
+(`WIRING-DEPS-INFRA-ONLY-01`), while the baseline detects structural drift.
 
-- `PgRuntimeHandle`
-- `RedisRuntimeDeps`
-- `S3RuntimeDeps`
-- `VaultRuntimeDeps`
-- `KeyName` for settings config-value encryption
-- outbound `DomainTransport`
-
-The infrastructure-only input boundary is enforced by `cargo xtask runtime-deps guard`
-(`WIRING-DEPS-INFRA-ONLY-01`). The baseline remains an inventory drift gate; semantic field
-allowlisting belongs to the runtime deps guard.
-
-`PgRuntimeDeps` remains local to `run_startup()` as the non-Clone lifecycle owner; it is not a second shared
-input. The owner directly wraps the same `PgRuntimeHandle` used by capability consumers and is retained
-until launch assembly consumes it. `PgRuntimeHandle` exposes only domain/infra/readiness projections;
+`PgRuntimeDeps` moves by value through `InfraBuilt → DomainsWired → Finalized` as the non-Clone
+lifecycle owner; it is not a second shared input. The owner directly wraps the same
+`PgRuntimeHandle` used by capability consumers and is retained until the launch transition
+consumes it. `PgRuntimeHandle` exposes only domain/infra/readiness projections;
 the replay consume store is intentionally owner-only.
 Pool guards and the readiness sampler can only leave the owner through
 `into_runtime_parts(self, period)`.
@@ -115,30 +67,21 @@ registration helper. Keeping them as ordered batches preserves the PG sampler-be
 dependency without creating a second output seam. Event transport itself returns the normal domain
 module type directly: AMQP guards are resources and event loops are workers, with no parallel runtime wrapper.
 
-`DomainModuleResult` currently carries:
-
-- probes
-- detached managed resources
-- cancel-token workers
-
-`DomainModuleResult::merge` extends every field. The baseline checks the field list and merge extension list so later module result expansion cannot drift silently.
+All domain/provider lifecycle contributions converge on one `DomainModuleResult` merge path. The
+machine baseline checks that every lifecycle field participates in that merge, so an expanded
+result cannot silently leave a lifecycle carrier behind.
 
 ## Listener, Health, And Shutdown Order
 
-Authenticated listeners are built through `assemble_authed_routers`. Health and metrics use a dedicated plain listener from `health_listener`, after route groups are drained and before `run_startup()` hands a `LaunchPlan` to `launch::launch`.
+Authenticated listeners are built through `assemble_authed_routers`. Health and metrics use a
+dedicated plain listener from `health_listener`, after route groups are drained. Only
+`phase/launch.rs` can consume `Finalized` into a `LaunchPlan` and hand it to `launch::launch`.
 
-`LaunchPlan::register` transfers both PG and domain lifecycle batches into `ShutdownStack` before
-it propagates either batch's validation result, so an earlier invalid batch cannot synchronously
-drop the later batch. `launch_until` then binds listener sockets. Shutdown is registered in LIFO order:
-
-1. optional OTEL exporter
-2. PG `DomainModuleResult`: primary pool guard, optional audit-admin pool guard, then readiness sampler
-3. unified module resources, including AMQP publisher/subscriber guards
-4. unified module workers
-5. listeners, registered inside `launch_until`
-
-The effective shutdown drain order is the reverse: listeners first, then workers, module resources
-(including AMQP guards), PG sampler, pool guards, and finally OTEL flushing.
+`LaunchPlan::register` transfers both lifecycle batches into `ShutdownStack` before propagating
+either batch's validation result, so an earlier invalid batch cannot synchronously drop the later
+batch. Registration remains LIFO: externally visible listeners drain before background work and
+provider resources, with tracing flushed last. Exact registration anchors and their order live in
+`[runtime.run.orderedAnchors]`.
 
 ## Machine Gate
 
@@ -147,13 +90,14 @@ The effective shutdown drain order is the reverse: listeners first, then workers
 - `runtime-baseline/runtime.txt` is missing
 - regenerated baseline text differs from the committed file
 - runtime dependencies or assembly providers are empty
-- the exact outer `runtime::run()` owner, required `run_startup()` anchors, or `launch.rs` anchors
-  are missing or out of order
+- the exact outer `runtime::run()` owner, sole `run_startup() → phase::execute` entry, typed
+  transition chain, phase-owner anchors, or `launch.rs` anchors are missing or out of order
 - the unique PG helper or its unique production call is missing/duplicated, PG implements generic
   `ProviderOutput`, lifecycle primitives escape the helper, a parallel PG output type appears, or
   PG module registration moves after the unified domain module
-- event transport restores a parallel output type, exposes its production wiring API outside the crate,
-  extracts channels in `run_startup()`, bypasses the single merge, or registers lifecycle primitives outside the common helper
+- event transport restores a parallel output type, exposes its production wiring API outside the
+  crate, extracts channels outside `phase/domains.rs`, bypasses the single merge, or registers
+  lifecycle primitives outside the common helper
 - `DomainModuleResult::merge` is absent or stops merging a field
 
 `cargo xtask verify --fast` and `cargo xtask ci full` run this gate before `archrules`, so `RUNTIME-BASELINE-DRIFT-01` is indexed by `cargo xtask archrules verify`.

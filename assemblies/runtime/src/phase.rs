@@ -35,7 +35,24 @@ impl RuntimePhase {
     }
 }
 
+mod domains;
+mod finalize;
+mod infra;
+mod launch;
+mod provider;
+
 use crate::config::{RuntimeConfigSnapshot, SnapshotConfig};
+use std::sync::Arc;
+use std::time::Duration;
+
+#[cfg(test)]
+pub(crate) use domains::{
+    RuntimeModuleAssemblyInputs, assemble_runtime_module_outputs,
+    validate_domain_listener_evidence, validate_provider_output_bindings,
+    validate_provider_output_evidence,
+};
+#[cfg(test)]
+pub(crate) use infra::after_required_preflight;
 
 /// Process-wide inputs shared by the mutually exclusive serving and operator preparations.
 pub(crate) struct PreparedRuntimeInputs {
@@ -134,18 +151,176 @@ impl OperatorRuntimeInputs {
 }
 
 /// Marker returned when runtime launch exits cleanly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RuntimeOutputs;
+#[derive(Debug, PartialEq, Eq)]
+pub struct RuntimeOutputs {
+    _completed: LaunchCompleted,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LaunchCompleted;
 
 impl RuntimeOutputs {
-    /// Construct the launch completion marker.
-    pub const fn completed() -> Self {
-        Self
+    /// Mint the completion capability for the launch phase.
+    const fn completed() -> Self {
+        Self {
+            _completed: LaunchCompleted,
+        }
     }
 }
 
+struct PhaseContext<'a> {
+    runtime_inputs: &'a mut ServingRuntimeInputs,
+    runtime_plan: crate::plan::RuntimePlan,
+}
+
+impl<'a> PhaseContext<'a> {
+    fn new(
+        runtime_inputs: &'a mut ServingRuntimeInputs,
+        runtime_plan: crate::plan::RuntimePlan,
+    ) -> Self {
+        Self {
+            runtime_inputs,
+            runtime_plan,
+        }
+    }
+
+    fn config(&self) -> SnapshotConfig<'_> {
+        self.runtime_inputs.config()
+    }
+
+    fn password_blocklist(&self) -> &Arc<secure::DigestPasswordBlocklist> {
+        self.runtime_inputs.password_blocklist()
+    }
+
+    fn take_trace_export(&mut self) -> Option<otel::OtelExporter> {
+        self.runtime_inputs.take_trace_export()
+    }
+}
+
+/// INVARIANT: RUNTIME-PHASE-TRANSITION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private state fields, exact associated Next chain, consuming transition receivers, and non-Clone lifecycle owners" } -- production startup is representable only as the closed `Planned -> ProvidersBuilt -> InfraBuilt -> DomainsWired -> Finalized -> RuntimeOutputs` chain; every transition consumes its predecessor and selects its phase label through this trait.
+mod sealed {
+    pub(super) trait Sealed {}
+}
+
+trait RuntimePhaseState: sealed::Sealed {
+    type Next;
+    const PHASE: RuntimePhase;
+}
+
+#[must_use]
+pub(crate) struct Planned<'a> {
+    runtime_inputs: &'a mut ServingRuntimeInputs,
+}
+
+#[must_use]
+pub(crate) struct ProvidersBuilt<'a> {
+    context: PhaseContext<'a>,
+    serving_config: crate::config::RuntimeServingConfigParts,
+    runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
+    runtime_federated_access:
+        Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
+}
+
+#[must_use]
+pub(crate) struct InfraBuilt<'a> {
+    context: PhaseContext<'a>,
+    pg_owner: postgres::PgRuntimeDeps,
+    deps: crate::SharedRuntimeDeps,
+    s3_canary_config: crate::infra::s3::S3CanaryConfig,
+    wiring_inputs: infra::RuntimeWiringInputs,
+    dlx_lifecycle: crate::event_transport::DlxLifecycleRuntimeDeps,
+    domain_transport: crate::DomainTransportRuntime<httpd::SharedDomainHttpTransport>,
+    metrics_exporter: Arc<dyn diport::MetricsExporter>,
+    pg_readiness_period: Duration,
+    redis_readiness_period: Duration,
+    command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
+    token_profiles: crate::config::TokenProfilesConfig,
+    runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
+    runtime_federated_access:
+        Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
+    runtime_service_token: Option<crate::infra::oidc::RuntimeServiceTokenProvider>,
+}
+
+#[must_use]
+pub(crate) struct DomainsWired<'a> {
+    context: PhaseContext<'a>,
+    pg_owner: postgres::PgRuntimeDeps,
+    deps: crate::SharedRuntimeDeps,
+    token_profiles: crate::config::TokenProfilesConfig,
+    runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
+    runtime_federated_access:
+        Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
+    runtime_service_token: Option<crate::infra::oidc::RuntimeServiceTokenProvider>,
+    domain_transport: crate::DomainTransportRuntime<httpd::SharedDomainHttpTransport>,
+    command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
+    metrics_exporter: Arc<dyn diport::MetricsExporter>,
+    pg_readiness_period: Duration,
+    registry: bootstrap::Registry,
+    domain_module: bootstrap::DomainModuleResult,
+}
+
+#[must_use]
+pub(crate) struct Finalized<'a> {
+    context: PhaseContext<'a>,
+    pg_owner: postgres::PgRuntimeDeps,
+    deps: crate::SharedRuntimeDeps,
+    token_profiles: crate::config::TokenProfilesConfig,
+    runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
+    runtime_federated_access:
+        Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
+    runtime_service_token: Option<crate::infra::oidc::RuntimeServiceTokenProvider>,
+    domain_transport: crate::DomainTransportRuntime<httpd::SharedDomainHttpTransport>,
+    command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
+    pg_readiness_period: Duration,
+    domain_module: bootstrap::DomainModuleResult,
+    listeners: Vec<crate::routes::AssembledListener>,
+}
+
+impl sealed::Sealed for Planned<'_> {}
+impl sealed::Sealed for ProvidersBuilt<'_> {}
+impl sealed::Sealed for InfraBuilt<'_> {}
+impl sealed::Sealed for DomainsWired<'_> {}
+impl sealed::Sealed for Finalized<'_> {}
+
+impl<'a> RuntimePhaseState for Planned<'a> {
+    type Next = ProvidersBuilt<'a>;
+    const PHASE: RuntimePhase = RuntimePhase::BuildProvider;
+}
+
+impl<'a> RuntimePhaseState for ProvidersBuilt<'a> {
+    type Next = InfraBuilt<'a>;
+    const PHASE: RuntimePhase = RuntimePhase::BuildInfra;
+}
+
+impl<'a> RuntimePhaseState for InfraBuilt<'a> {
+    type Next = DomainsWired<'a>;
+    const PHASE: RuntimePhase = RuntimePhase::WireDomains;
+}
+
+impl<'a> RuntimePhaseState for DomainsWired<'a> {
+    type Next = Finalized<'a>;
+    const PHASE: RuntimePhase = RuntimePhase::Finalize;
+}
+
+impl RuntimePhaseState for Finalized<'_> {
+    type Next = RuntimeOutputs;
+    const PHASE: RuntimePhase = RuntimePhase::Launch;
+}
+
+/// Execute the only production serving phase sequence.
+pub(crate) async fn execute(
+    runtime_inputs: &mut ServingRuntimeInputs,
+) -> anyhow::Result<RuntimeOutputs> {
+    let planned = Planned { runtime_inputs };
+    let providers = planned.build_providers().await?;
+    let infra = providers.build_infra().await?;
+    let domains = infra.wire_domains().await?;
+    let finalized = domains.finalize().await?;
+    finalized.launch().await
+}
+
 /// Emit bounded phase logs and preserve the original result.
-pub fn phase_result<T>(phase: RuntimePhase, result: anyhow::Result<T>) -> anyhow::Result<T> {
+fn phase_result<T>(phase: RuntimePhase, result: anyhow::Result<T>) -> anyhow::Result<T> {
     match result {
         Ok(value) => {
             log_phase_completed(phase);
@@ -182,6 +357,8 @@ mod tests {
     use tracing::{Event, Subscriber};
     use tracing_subscriber::layer::{Context as LayerContext, Layer};
     use tracing_subscriber::prelude::*;
+
+    static PHASE_LOG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct MissingConfigSource;
 
@@ -282,7 +459,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_config_anyhow_chain_and_phase_log_remain_opaque() {
+    fn runtime_phase_config_anyhow_chain_and_phase_log_remain_opaque() {
+        let _guard = PHASE_LOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let snapshot = RuntimeConfigSnapshot::capture_test(BaitConfigSource)
             .expect("closed catalog capture succeeds");
         let error = anyhow::anyhow!("{snapshot:?}");
@@ -306,13 +486,14 @@ mod tests {
     }
 
     #[test]
-    fn runtime_outputs_is_completion_marker() {
+    fn runtime_phase_outputs_is_completion_marker() {
+        static_assertions::assert_not_impl_any!(RuntimeOutputs: Clone, Copy);
         let output = RuntimeOutputs::completed();
-        assert_eq!(output, RuntimeOutputs);
+        assert_eq!(output, RuntimeOutputs::completed());
     }
 
     #[test]
-    fn phase_result_passes_through_ok_and_error() {
+    fn runtime_phase_result_passes_through_ok_and_error() {
         let ok = phase_result(RuntimePhase::BuildInfra, Ok::<_, anyhow::Error>(7))
             .expect("ok result must pass through");
         assert_eq!(ok, 7);
@@ -323,7 +504,10 @@ mod tests {
     }
 
     #[test]
-    fn phase_result_logs_error_from_question_mark_phase_body() {
+    fn runtime_phase_result_logs_error_from_question_mark_phase_body() {
+        let _guard = PHASE_LOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let recorder = EventRecorder::default();
         let subscriber = tracing_subscriber::registry().with(recorder.clone());
         let result = tracing::subscriber::with_default(subscriber, || {
@@ -345,20 +529,31 @@ mod tests {
     }
 
     #[test]
-    fn phase_result_logs_only_closed_phase_labels() {
+    fn runtime_phase_result_logs_only_closed_phase_labels() {
+        let _guard = PHASE_LOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let recorder = EventRecorder::default();
         let subscriber = tracing_subscriber::registry().with(recorder.clone());
         tracing::subscriber::with_default(subscriber, || {
-            let _ = phase_result(RuntimePhase::Launch, Ok::<_, anyhow::Error>(()));
-            let _ = phase_result::<()>(RuntimePhase::Finalize, Err(anyhow::anyhow!("fail")));
+            for phase in RuntimePhase::ALL {
+                let _ = phase_result(phase, Ok::<_, anyhow::Error>(()));
+            }
         });
 
         let events = recorder.events();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].runtime_phase.as_deref(), Some("launch"));
-        assert_eq!(events[1].runtime_phase.as_deref(), Some("finalize"));
-        assert!(events[0].error.is_none());
-        assert_eq!(events[1].error.as_deref(), Some("fail"));
+        assert_eq!(events.len(), RuntimePhase::ALL.len());
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.runtime_phase.as_deref().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            RuntimePhase::ALL
+                .iter()
+                .copied()
+                .map(RuntimePhase::as_str)
+                .collect::<Vec<_>>()
+        );
         assert!(
             events
                 .iter()
@@ -368,38 +563,102 @@ mod tests {
                         .copied()
                         .map(RuntimePhase::as_str)
                         .any(|closed_phase| closed_phase == phase)
-                }) && event.message.is_some()),
+                }) && event.message.is_some()
+                    && event.error.is_none()),
             "phase logs must only record closed phase labels"
         );
     }
 
     #[test]
-    fn phase_result_redacts_error_field() {
+    fn runtime_phase_result_redacts_error_field() {
+        let _guard = PHASE_LOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let recorder = EventRecorder::default();
         let subscriber = tracing_subscriber::registry().with(recorder.clone());
         tracing::subscriber::with_default(subscriber, || {
-            let _ = phase_result::<()>(
-                RuntimePhase::Finalize,
-                Err(anyhow::anyhow!(
-                    "connect postgres://svc:s3cr3t@db.internal:5432/app refused"
-                )),
-            );
+            for phase in RuntimePhase::ALL {
+                let _ = phase_result::<()>(
+                    phase,
+                    Err(anyhow::anyhow!(
+                        "connect postgres://svc:s3cr3t@db.internal:5432/app refused"
+                    )),
+                );
+            }
         });
 
         let events = recorder.events();
-        assert_eq!(events.len(), 1);
-        let error = events[0]
-            .error
-            .as_deref()
-            .expect("error field must be logged");
-        assert!(
-            !error.contains("s3cr3t"),
-            "error field must be redacted: {error}"
+        assert_eq!(events.len(), RuntimePhase::ALL.len());
+        for (event, phase) in events.iter().zip(RuntimePhase::ALL) {
+            assert_eq!(event.runtime_phase.as_deref(), Some(phase.as_str()));
+            let error = event.error.as_deref().expect("error field must be logged");
+            assert!(
+                !error.contains("s3cr3t"),
+                "error field must be redacted: {error}"
+            );
+            assert!(
+                error.contains("postgres://<redacted>@db.internal:5432/app"),
+                "error field must retain redacted diagnostic shape: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_phase_transition_types_are_exact_and_non_copyable() {
+        use static_assertions::{assert_not_impl_any, assert_type_eq_all, assert_type_ne_all};
+
+        trait TypeEq<T: ?Sized> {}
+        impl<T: ?Sized> TypeEq<T> for T {}
+        fn assert_type_eq<T, U>()
+        where
+            T: ?Sized + TypeEq<U>,
+            U: ?Sized,
+        {
+        }
+        fn assert_lifetime_bound_chain<'a>(_: &'a ()) {
+            assert_type_eq::<<Planned<'a> as RuntimePhaseState>::Next, ProvidersBuilt<'a>>();
+            assert_type_eq::<<ProvidersBuilt<'a> as RuntimePhaseState>::Next, InfraBuilt<'a>>();
+            assert_type_eq::<<InfraBuilt<'a> as RuntimePhaseState>::Next, DomainsWired<'a>>();
+            assert_type_eq::<<DomainsWired<'a> as RuntimePhaseState>::Next, Finalized<'a>>();
+            assert_type_eq::<<Finalized<'a> as RuntimePhaseState>::Next, RuntimeOutputs>();
+        }
+        assert_lifetime_bound_chain(&());
+
+        assert_type_eq_all!(
+            <Planned<'static> as RuntimePhaseState>::Next,
+            ProvidersBuilt<'static>
         );
-        assert!(
-            error.contains("postgres://<redacted>@db.internal:5432/app"),
-            "error field must retain redacted diagnostic shape: {error}"
+        assert_type_eq_all!(
+            <ProvidersBuilt<'static> as RuntimePhaseState>::Next,
+            InfraBuilt<'static>
         );
+        assert_type_eq_all!(
+            <InfraBuilt<'static> as RuntimePhaseState>::Next,
+            DomainsWired<'static>
+        );
+        assert_type_eq_all!(
+            <DomainsWired<'static> as RuntimePhaseState>::Next,
+            Finalized<'static>
+        );
+        assert_type_eq_all!(
+            <Finalized<'static> as RuntimePhaseState>::Next,
+            RuntimeOutputs
+        );
+
+        assert_type_ne_all!(
+            Planned<'static>,
+            ProvidersBuilt<'static>,
+            InfraBuilt<'static>,
+            DomainsWired<'static>,
+            Finalized<'static>,
+            RuntimeOutputs
+        );
+
+        assert_not_impl_any!(Planned<'static>: Clone, Copy, std::fmt::Debug, Default);
+        assert_not_impl_any!(ProvidersBuilt<'static>: Clone, Copy, std::fmt::Debug, Default);
+        assert_not_impl_any!(InfraBuilt<'static>: Clone, Copy, std::fmt::Debug, Default);
+        assert_not_impl_any!(DomainsWired<'static>: Clone, Copy, std::fmt::Debug, Default);
+        assert_not_impl_any!(Finalized<'static>: Clone, Copy, std::fmt::Debug, Default);
     }
 
     #[derive(Clone, Default)]
