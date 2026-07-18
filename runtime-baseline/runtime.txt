@@ -104,7 +104,7 @@ merge = present
 mergeExtends = probes,resources,workers
 
 [runtime.run.orderedAnchors]
-01 | prepare.config.snapshot | assemblies/runtime/src/lib.rs | RuntimeConfigSnapshot::capture(EnvConfigSource) | status=ok
+01 | prepare.config.snapshot | assemblies/runtime/src/lib.rs | RuntimeConfigSnapshot::capture_process_snapshot() | status=ok
 02 | prepare.password-policy.preload | assemblies/runtime/src/lib.rs | prepare_runtime_kernel(prepare_serving_local)? | status=ok
 03 | prepare.tracing.otel | assemblies/runtime/src/lib.rs | prepare_local_before_external(config, prepare_local, || build_trace_export(config))? | status=ok
 04 | prepare.tracing.filter | assemblies/runtime/src/lib.rs | let filter = config | status=ok

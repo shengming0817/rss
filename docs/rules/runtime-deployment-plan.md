@@ -5,7 +5,7 @@ This rule governs how runtime-deployment target constraints select enforcement c
 ## 当前事实
 
 - Assembly manifest validation, generated domain ordering, and committed v1 AssemblyLock drift are governed by typed repository gates.
-- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Listener/auth/tracing/serving-OIDC, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only; #1787 owns the remaining crate-wide ambient-reader closure. RuntimePlan is still summary-oriented, subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
+- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Listener/auth/tracing/serving-OIDC, the operator OIDC static provider, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan is still summary-oriented, subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
 - `cargo xtask archrules list` and its generated matrix derive implemented rules from real carrier anchors. Planning documents are not a second index.
 - The active forge does not make the existing `ci-gate` a required check.
 
@@ -47,14 +47,15 @@ is unreachable from runtime production wiring.
 The explicit-value route-assembly core used by the identity wire e2e is compiled only under the
 test-only `integration` feature; it is absent from the default production library API.
 
-The catalog is an explicit serving universe: fixed listener/auth/OIDC/tracing, PG/Redis,
-Vault/S3, identity/audit, event/DLX/worker keys; generated event-domain AMQP keys; and the
+The catalog is an explicit runtime configuration universe: fixed listener/auth/OIDC/tracing,
+PG/Redis, Vault/S3, identity/audit, event/DLX/worker keys; generated event-domain AMQP keys; the
 domain-transport URL/mTLS families derived in a second step from the captured required-domain
-value. It never calls `vars_os()` and excludes the four maintenance grant keys, CI/Forge
-credentials, AWS default-chain dynamic credentials, and SPIFFE rotation material. Missing and
-non-Unicode values both preserve the existing `std::env::var(...).ok()` result; empty strings,
-whitespace, and case are not normalized by capture. Invalid required-domain syntax is retained and
-reported later by the existing builder, preserving decision and error order.
+value; and the operator OIDC static provider. It never calls `vars_os()`. Exactly four named
+command-specific maintenance grant sources are outside this catalog; no other runtime production
+ambient reader is accepted. Missing and non-Unicode values both preserve the existing
+`std::env::var(...).ok()` result; empty strings, whitespace, and case are not normalized by
+capture. Invalid required-domain syntax is retained and reported later by the existing builder,
+preserving decision and error order.
 
 All captured UTF-8 values use `secure::SecretText`: private storage, opaque `Debug`, no
 `Clone`/`Display`/serialization, and drop-time zeroization. Snapshot `Debug` and capture errors are
@@ -68,17 +69,26 @@ that callers cannot copy. Runtime allocation handoff uses named move/copy funnel
 Vault resolver owner copy.
 
 The active carriers are Hard `SECRET-TEXT-OPAQUE-01` and
-`RUNTIME-CONFIG-SNAPSHOT-01`, plus Medium `RUNTIME-CONFIG-SNAPSHOT-LIVE-01` and
-`RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01` in `runtime-baseline`. The Hard carrier combines the mutually exclusive owned profile inputs, unforgeable
+`RUNTIME-CONFIG-SNAPSHOT-01` (`SnapshotConfig`), plus Medium
+`RUNTIME-CONFIG-SNAPSHOT-LIVE-01`, `RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01` in
+`runtime-baseline`, and `RUNTIME-ENV-FUNNEL-01`. The fast exact-inventory carrier is executed by
+`cargo xtask runtime-env guard`; the registered `rss_runtime_env_funnel` Dylint supplies the
+macro-expansion and name-resolved HIR backstop during full verification. The Hard carrier combines
+the private concrete process source and generic capture primitive behind the zero-argument
+`RuntimeConfigSnapshot::capture_process_snapshot()` factory, the mutually exclusive owned profile
+inputs, unforgeable
 `SnapshotConfig` consumer signatures, and the mTLS transport carrier; omission or capability
-forgery at those boundaries is therefore not expressible. It does not claim that a Rust function
-body cannot name an ambient API. The Medium AST check proves the production module graph contains
-exactly one capture per selected profile, profile-specific input construction, and typed PostgreSQL/Redis/Vault/S3 mappings with
+forgery at those boundaries, or minting from an alternate source, is therefore not expressible.
+The crate-visible process factory is additionally restricted by the Medium inventory/HIR gates:
+the production module graph must contain exactly one factory reference and call in the canonical
+owner, plus profile-specific input construction and typed PostgreSQL/Redis/Vault/S3 mappings with
 their consuming builders, and it
 rejects ambient environment reads in a `SnapshotConfig` consumer or its crate-wide conservatively
 reachable call graph. Protected aliases, direct and function-item environment aliases, local and
 cross-file wrappers, UFCS, transitive macro and re-export indirection, ambiguous same-name shadows,
-and compliant bait fail closed. It also proves that the snapshot-derived `RUST_LOG` filter is
+macro-generated production modules, compile-time environment macros, included source, and
+compliant bait fail closed through the combined inventory/HIR gate. It also proves that the
+snapshot-derived `RUST_LOG` filter is
 installed in the subscriber and that the exact outer runtime owner always finishes the unique
 inner startup result through one pending-exporter cleanup while preserving the primary error. The
 binary lifecycle carrier separately proves one ownership-complete terminal path per command:
@@ -89,11 +99,12 @@ binary wrong bindings and early returns (including the exact prepared input pass
 PostgreSQL operator), ambient filter restoration, transitive reachable ambient
 reader variants, and compliant unrelated-name bait.
 
-Ownership after #1786 is explicit: PostgreSQL/Redis/Vault/S3, event/domain/DLX/worker,
-composition settings, OIDC JWKS export, and Vault-backed settings maintenance are snapshot-backed.
-The four command-specific maintenance grant sources remain deliberately named and outside the
-serving catalog; #1787 closes the final crate-wide ambient-read AST guard. Operator commands bind
-no listener and do not use the serving OIDC/JWKS provider or password-policy capability.
+Ownership after #1786/#1787 is explicit: PostgreSQL/Redis/Vault/S3, event/domain/DLX/worker,
+composition settings, serving and operator OIDC providers, OIDC JWKS export, and Vault-backed
+settings maintenance are snapshot-backed. The four command-specific maintenance grant sources
+remain deliberately named and outside the catalog; each reader requires the unforgeable
+operator-only `OperatorRuntimeCapability`, while `RUNTIME-ENV-FUNNEL-01` fixes its exact caller.
+Operator commands bind no listener and use neither serving OIDC/JWKS nor password-policy capability.
 This section records the boundary; it is not a second or Soft enforcement mechanism.
 
 ## 目标能力

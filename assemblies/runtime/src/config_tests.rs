@@ -76,7 +76,7 @@ fn runtime_config_snapshot_reads_source_once_and_replays_stable_values() {
     let reads = read_log(&source);
     let dropped = Arc::clone(&source.dropped);
 
-    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+    let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
 
     assert!(dropped.load(Ordering::Acquire), "source must be dropped");
     assert_eq!(
@@ -114,7 +114,7 @@ fn worker_runtime_config_uses_one_snapshot_generation_for_every_interval() {
     let source =
         FakeSource::new(values.map(|(key, value)| (key, FakeValue::Present(value.to_owned()))));
     let reads = read_log(&source);
-    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+    let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
 
     let mapper = ServingConfigMapper::for_test(snapshot.view());
     let (event, session_sweep_interval, keyprovider_readiness_interval) =
@@ -210,7 +210,7 @@ fn runtime_config_serving_event_domain_dlx_and_worker_inputs_share_one_captured_
             .map(|(key, value)| (key, FakeValue::Present(value))),
     );
     let reads = read_log(&source);
-    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+    let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
 
     let parts = RuntimeServingConfig::from_snapshot(snapshot.view())
         .expect("complete serving config")
@@ -270,7 +270,7 @@ fn runtime_serving_config_accepts_complete_isolated_transport_with_explicit_spif
             format!("amqps://user:pass@{}.broker.test/rss", domain.as_str()),
         ));
     }
-    let snapshot = RuntimeConfigSnapshot::capture(FakeSource::new(
+    let snapshot = RuntimeConfigSnapshot::capture_test(FakeSource::new(
         values
             .into_iter()
             .map(|(key, value)| (key, FakeValue::Present(value))),
@@ -341,7 +341,7 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
         Some((*key, FakeValue::Present(value.to_owned())))
     }));
     let reads = read_log(&source);
-    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+    let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
 
     for _ in 0..2 {
         let pg = crate::infra::pg::PgRuntimeConfig::from_snapshot(snapshot.view())
@@ -406,7 +406,7 @@ fn runtime_infra_vault_s3_snapshot_reads_each_key_once_across_repeated_typed_map
         Some((*key, FakeValue::Present(value.to_owned())))
     }));
     let reads = read_log(&source);
-    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+    let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
 
     for _ in 0..2 {
         let vault = crate::infra::vault::VaultRuntimeConfig::from_snapshot(snapshot.view())
@@ -473,7 +473,7 @@ fn runtime_config_catalog_deduplicates_static_dynamic_keys_and_excludes_maintena
         FakeValue::Present("identity,IDENTITY,audit".to_owned()),
     )]);
     let reads = read_log(&source);
-    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+    let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
     drop(snapshot);
 
     let reads = reads.lock().expect("read log mutex");
@@ -619,7 +619,7 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
         ));
 
         let snapshot =
-            RuntimeConfigSnapshot::capture(FakeSource::new(values)).expect("capture succeeds");
+            RuntimeConfigSnapshot::capture_test(FakeSource::new(values)).expect("capture succeeds");
         captured.push_str(&format!(
             "[{name}]\n{}\n",
             runtime_config_decision_transcript(&|key| snapshot
@@ -659,7 +659,7 @@ fn runtime_config_snapshot_preserves_env_var_ok_transcript() {
             FakeValue::Present("identity".to_owned()),
         ),
     ]);
-    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+    let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
 
     assert!(snapshot.view().value("RSS_MISSING_SERVING_KEY").is_none());
     assert!(snapshot.view().value("RSS_VAULT_TOKEN").is_none());
@@ -680,7 +680,7 @@ fn runtime_config_snapshot_debug_is_fully_opaque() {
             FakeValue::Present("identity".to_owned()),
         ),
     ]);
-    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+    let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
     let debug = format!("{snapshot:?}");
 
     assert_eq!(debug, "RuntimeConfigSnapshot(<redacted>)");
@@ -719,7 +719,7 @@ fn snapshot_capability_reuses_one_generation_for_serving_decisions() {
         ),
     ]);
     let reads = read_log(&source);
-    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture succeeds");
+    let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
     let config = snapshot.view();
 
     let scheme = crate::routes::auth_scheme(config, primitives::ListenerKind::Internal)
@@ -756,7 +756,8 @@ fn runtime_config_invalid_required_domains_are_deferred_to_the_existing_builder(
         "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS",
         FakeValue::Present("identity,,audit".to_owned()),
     )]);
-    let snapshot = RuntimeConfigSnapshot::capture(source).expect("capture must not parse-fail");
+    let snapshot =
+        RuntimeConfigSnapshot::capture_test(source).expect("capture must not parse-fail");
 
     let error = crate::domain_transport_required_domains_from(&|name| {
         snapshot.view().value(name).map(str::to_owned)

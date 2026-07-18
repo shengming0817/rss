@@ -65,7 +65,7 @@ impl PreparedRuntimeInputs {
 
 /// Serving-only runtime inputs.
 ///
-/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- the crate-private constructor requires an owned process snapshot and a non-optional typed password blocklist, while operator inputs cannot be passed to [`crate::run`].
+/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- the crate-private constructor requires an owned process snapshot and a non-optional typed password blocklist, while operator inputs cannot be passed to [`crate::run`]; serving and operator provider APIs can only borrow the unforgeable [`SnapshotConfig`] minted from these owned inputs.
 pub struct ServingRuntimeInputs {
     prepared: PreparedRuntimeInputs,
     password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
@@ -103,9 +103,15 @@ impl ServingRuntimeInputs {
     }
 }
 
-/// Operator-only runtime inputs. Password-policy capabilities are intentionally unrepresentable.
+/// Operator-only inputs: no serving password-policy or ambient-config source is representable.
 pub struct OperatorRuntimeInputs {
     prepared: PreparedRuntimeInputs,
+}
+
+/// Proof that a consumer belongs to the operator runtime, never the serving runtime.
+#[derive(Clone, Copy)]
+pub(crate) struct OperatorRuntimeCapability<'a> {
+    _operator: &'a OperatorRuntimeInputs,
 }
 
 impl OperatorRuntimeInputs {
@@ -116,6 +122,10 @@ impl OperatorRuntimeInputs {
     /// Mint a borrowed capability for operator configuration consumers.
     pub(crate) fn config(&self) -> SnapshotConfig<'_> {
         self.prepared.config()
+    }
+
+    pub(crate) fn operator_capability(&self) -> OperatorRuntimeCapability<'_> {
+        OperatorRuntimeCapability { _operator: self }
     }
 
     pub(crate) fn prepared_mut(&mut self) -> &mut PreparedRuntimeInputs {
@@ -255,7 +265,7 @@ mod tests {
 
     #[test]
     fn runtime_config_inputs_separate_serving_policy_from_operator_capabilities() {
-        let snapshot = RuntimeConfigSnapshot::capture(MissingConfigSource)
+        let snapshot = RuntimeConfigSnapshot::capture_test(MissingConfigSource)
             .expect("closed catalog capture succeeds");
         let blocklist = test_password_blocklist();
         let prepared = PreparedRuntimeInputs::new(snapshot, None);
@@ -264,7 +274,7 @@ mod tests {
         assert!(Arc::ptr_eq(serving.password_blocklist(), &blocklist));
         assert!(serving.take_trace_export().is_none());
 
-        let snapshot = RuntimeConfigSnapshot::capture(MissingConfigSource)
+        let snapshot = RuntimeConfigSnapshot::capture_test(MissingConfigSource)
             .expect("closed catalog capture succeeds");
         let mut operator = OperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None));
         assert!(operator.config().value("RSS_VAULT_TOKEN").is_none());
@@ -273,7 +283,7 @@ mod tests {
 
     #[test]
     fn runtime_config_anyhow_chain_and_phase_log_remain_opaque() {
-        let snapshot = RuntimeConfigSnapshot::capture(BaitConfigSource)
+        let snapshot = RuntimeConfigSnapshot::capture_test(BaitConfigSource)
             .expect("closed catalog capture succeeds");
         let error = anyhow::anyhow!("{snapshot:?}");
         let chain = format!("{error:#}");

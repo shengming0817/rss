@@ -158,11 +158,12 @@ pub mod test_support {
     }
 }
 pub use module::SharedRuntimeDeps;
+use phase::OperatorRuntimeCapability;
 pub use phase::{OperatorRuntimeInputs, ServingRuntimeInputs};
 
 use bootstrap::DomainModuleResult;
 use infra::oidc::{
-    OIDC_JWKS_READY_PROBE_NAME, OidcJwksReadyProbe, build_provider_with_replay_store,
+    OIDC_JWKS_READY_PROBE_NAME, OidcJwksReadyProbe, build_operator_provider,
     prepare_runtime_oidc_provider,
 };
 use infra::pg::{
@@ -183,9 +184,9 @@ use phase::{PreparedRuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
 #[cfg(test)]
 use config::DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV;
 use config::{
-    EnvConfigSource, RuntimeConfigSnapshot, RuntimeServingConfig, RuntimeServingConfigParts,
-    ServingConfigMapper, SnapshotConfig, domain_transport_mtls_allow_set_env,
-    domain_transport_required_domains_from, domain_transport_url_env,
+    RuntimeConfigSnapshot, RuntimeServingConfig, RuntimeServingConfigParts, ServingConfigMapper,
+    SnapshotConfig, domain_transport_mtls_allow_set_env, domain_transport_required_domains_from,
+    domain_transport_url_env,
 };
 
 use std::collections::BTreeMap;
@@ -1117,8 +1118,9 @@ fn parse_projection_maintenance_grants(
     authn::ProjectionMaintenanceGrantSet::new(grants).map_err(Into::into)
 }
 
-fn load_projection_maintenance_grants_from_command_env()
--> anyhow::Result<authn::ProjectionMaintenanceGrantSet> {
+fn load_projection_maintenance_grants_from_command_env(
+    _operator: OperatorRuntimeCapability<'_>,
+) -> anyhow::Result<authn::ProjectionMaintenanceGrantSet> {
     let raw = std::env::var(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV)
         .with_context(|| format!("{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} is required"))?;
     parse_projection_maintenance_grants(&raw)
@@ -1126,29 +1128,11 @@ fn load_projection_maintenance_grants_from_command_env()
 
 async fn projection_maintenance_operator_receipt(
     pg: &PgMaintenanceDeps,
+    operator_pdp: &diport::DynPdp<'_>,
     parsed: &ProjectionCliArgs,
     resource_id: &str,
+    operator: OperatorRuntimeCapability<'_>,
 ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
-    let operator_provider = match build_provider_with_replay_store(
-        pg.service_token_replay_store(),
-        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
-    ) {
-        Ok(provider) => provider,
-        Err(err) => {
-            record_projection_maintenance_finish_audit(
-                pg,
-                UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR,
-                &format!("projection.{}.finish", parsed.command.action().as_str()),
-                resource_id,
-                MaintenanceAuditOutcome::Failure {
-                    reason: "operator_provider_config",
-                },
-            )
-            .await?;
-            return Err(err).context("projection maintenance operator verifier");
-        }
-    };
-    let operator_pdp = diport::DynPdp::from_ref(&operator_provider);
     let principal = match verified_projection_maintenance_operator_subject(
         &parsed.operator_service_token,
         parsed.operator_tenant,
@@ -1172,7 +1156,7 @@ async fn projection_maintenance_operator_receipt(
         }
     };
     let subject = principal.audit_subject().to_owned();
-    let grants = match load_projection_maintenance_grants_from_command_env() {
+    let grants = match load_projection_maintenance_grants_from_command_env(operator) {
         Ok(grants) => grants,
         Err(err) => {
             record_projection_maintenance_finish_audit(
@@ -1544,6 +1528,7 @@ trait ProjectionControlRuntime {
 
 struct ProductionProjectionControlRuntime<'a> {
     config: SnapshotConfig<'a>,
+    operator: OperatorRuntimeCapability<'a>,
 }
 
 impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
@@ -1579,7 +1564,35 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
         parsed: &ProjectionCliArgs,
         resource_id: &str,
     ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
-        projection_maintenance_operator_receipt(session, parsed, resource_id).await
+        let provider = match build_operator_provider(
+            self.config,
+            self.operator,
+            session.service_token_replay_store(),
+            SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+        ) {
+            Ok(provider) => provider,
+            Err(err) => {
+                record_projection_maintenance_finish_audit(
+                    session,
+                    UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR,
+                    &format!("projection.{}.finish", parsed.command.action().as_str()),
+                    resource_id,
+                    MaintenanceAuditOutcome::Failure {
+                        reason: "operator_provider_config",
+                    },
+                )
+                .await?;
+                return Err(err).context("projection maintenance operator verifier");
+            }
+        };
+        projection_maintenance_operator_receipt(
+            session,
+            diport::DynPdp::from_ref(&provider),
+            parsed,
+            resource_id,
+            self.operator,
+        )
+        .await
     }
 
     async fn run_projection_command(
@@ -1675,6 +1688,7 @@ pub async fn run_projection_control_command(
 ) -> anyhow::Result<()> {
     let runtime = ProductionProjectionControlRuntime {
         config: runtime_inputs.config(),
+        operator: runtime_inputs.operator_capability(),
     };
     run_projection_control_command_with_runtime(args, &runtime).await
 }
@@ -1823,8 +1837,9 @@ fn parse_audit_ledger_verify_grants(raw: &str) -> anyhow::Result<Vec<AuditLedger
     Ok(grants)
 }
 
-fn load_audit_ledger_verify_grants_from_command_env() -> anyhow::Result<Vec<AuditLedgerVerifyGrant>>
-{
+fn load_audit_ledger_verify_grants_from_command_env(
+    _operator: OperatorRuntimeCapability<'_>,
+) -> anyhow::Result<Vec<AuditLedgerVerifyGrant>> {
     let raw = std::env::var(AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV)
         .with_context(|| format!("{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} is required"))?;
     parse_audit_ledger_verify_grants(&raw)
@@ -1878,28 +1893,11 @@ async fn record_audit_ledger_verify_finish_audit(
 
 async fn audit_ledger_verify_operator_subject(
     pg: &PgMaintenanceDeps,
+    operator_pdp: &diport::DynPdp<'_>,
     parsed: &AuditLedgerVerifyArgs,
     resource_id: &str,
+    operator: OperatorRuntimeCapability<'_>,
 ) -> anyhow::Result<String> {
-    let operator_provider = match build_provider_with_replay_store(
-        pg.service_token_replay_store(),
-        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
-    ) {
-        Ok(provider) => provider,
-        Err(err) => {
-            record_audit_ledger_verify_finish_audit(
-                pg,
-                UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR,
-                resource_id,
-                MaintenanceAuditOutcome::Failure {
-                    reason: "operator_provider_config",
-                },
-            )
-            .await?;
-            return Err(err).context("audit ledger verify operator verifier");
-        }
-    };
-    let operator_pdp = diport::DynPdp::from_ref(&operator_provider);
     let subject = match verified_audit_ledger_verify_operator_subject(
         &parsed.operator_service_token,
         parsed.operator_tenant,
@@ -1921,7 +1919,7 @@ async fn audit_ledger_verify_operator_subject(
             return Err(err);
         }
     };
-    let grants = match load_audit_ledger_verify_grants_from_command_env() {
+    let grants = match load_audit_ledger_verify_grants_from_command_env(operator) {
         Ok(grants) => grants,
         Err(err) => {
             record_audit_ledger_verify_finish_audit(
@@ -1984,6 +1982,7 @@ trait AuditLedgerVerifyRuntime {
 
 struct ProductionAuditLedgerVerifyRuntime<'a> {
     config: SnapshotConfig<'a>,
+    operator: OperatorRuntimeCapability<'a>,
 }
 
 impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime<'_> {
@@ -2024,7 +2023,34 @@ impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime<'_> {
         parsed: &AuditLedgerVerifyArgs,
         resource_id: &str,
     ) -> anyhow::Result<String> {
-        audit_ledger_verify_operator_subject(session, parsed, resource_id).await
+        let provider = match build_operator_provider(
+            self.config,
+            self.operator,
+            session.service_token_replay_store(),
+            SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+        ) {
+            Ok(provider) => provider,
+            Err(err) => {
+                record_audit_ledger_verify_finish_audit(
+                    session,
+                    UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR,
+                    resource_id,
+                    MaintenanceAuditOutcome::Failure {
+                        reason: "operator_provider_config",
+                    },
+                )
+                .await?;
+                return Err(err).context("audit ledger verify operator verifier");
+            }
+        };
+        audit_ledger_verify_operator_subject(
+            session,
+            diport::DynPdp::from_ref(&provider),
+            parsed,
+            resource_id,
+            self.operator,
+        )
+        .await
     }
 
     async fn verify_tenant(
@@ -2119,6 +2145,7 @@ pub async fn run_audit_ledger_verify_command(
 ) -> anyhow::Result<()> {
     let runtime = ProductionAuditLedgerVerifyRuntime {
         config: runtime_inputs.config(),
+        operator: runtime_inputs.operator_capability(),
     };
     run_audit_ledger_verify_command_with_runtime(args, &runtime).await
 }
@@ -2677,7 +2704,9 @@ fn parse_dlq_operator_grants(raw: &str) -> anyhow::Result<Vec<DlqMaintenanceGran
     Ok(grants)
 }
 
-fn load_dlq_operator_grants_from_command_env() -> anyhow::Result<Vec<DlqMaintenanceGrant>> {
+fn load_dlq_operator_grants_from_command_env(
+    _operator: OperatorRuntimeCapability<'_>,
+) -> anyhow::Result<Vec<DlqMaintenanceGrant>> {
     let raw = std::env::var(DLQ_OPERATOR_GRANTS_ENV)
         .with_context(|| format!("{DLQ_OPERATOR_GRANTS_ENV} is required"))?;
     parse_dlq_operator_grants(&raw)
@@ -2780,29 +2809,11 @@ async fn record_dlq_maintenance_finish_audit(
 
 async fn dlq_operator_subject(
     pg: &PgMaintenanceDeps,
+    operator_pdp: &diport::DynPdp<'_>,
     parsed: &DlqCliArgs,
     resource_id: &str,
+    operator: OperatorRuntimeCapability<'_>,
 ) -> anyhow::Result<String> {
-    let operator_provider = match build_provider_with_replay_store(
-        pg.service_token_replay_store(),
-        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
-    ) {
-        Ok(provider) => provider,
-        Err(err) => {
-            record_dlq_maintenance_finish_audit(
-                pg,
-                UNVERIFIED_DLQ_OPERATOR,
-                &format!("dlq.{}.finish", parsed.command.action().as_str()),
-                resource_id,
-                MaintenanceAuditOutcome::Failure {
-                    reason: "operator_provider_config",
-                },
-            )
-            .await?;
-            return Err(err).context("DLQ maintenance operator verifier");
-        }
-    };
-    let operator_pdp = diport::DynPdp::from_ref(&operator_provider);
     let subject = match authenticate_dlq_operator_subject(
         &parsed.operator_service_token,
         parsed.operator_tenant,
@@ -2825,7 +2836,7 @@ async fn dlq_operator_subject(
             return Err(err);
         }
     };
-    let grants = match load_dlq_operator_grants_from_command_env() {
+    let grants = match load_dlq_operator_grants_from_command_env(operator) {
         Ok(grants) => grants,
         Err(err) => {
             record_dlq_maintenance_finish_audit(
@@ -3123,6 +3134,7 @@ trait DlqControlRuntime {
 
 struct ProductionDlqControlRuntime<'a> {
     config: SnapshotConfig<'a>,
+    operator: OperatorRuntimeCapability<'a>,
 }
 
 impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
@@ -3155,7 +3167,35 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
         parsed: &DlqCliArgs,
         resource_id: &str,
     ) -> anyhow::Result<String> {
-        dlq_operator_subject(session, parsed, resource_id).await
+        let provider = match build_operator_provider(
+            self.config,
+            self.operator,
+            session.service_token_replay_store(),
+            SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+        ) {
+            Ok(provider) => provider,
+            Err(err) => {
+                record_dlq_maintenance_finish_audit(
+                    session,
+                    UNVERIFIED_DLQ_OPERATOR,
+                    &format!("dlq.{}.finish", parsed.command.action().as_str()),
+                    resource_id,
+                    MaintenanceAuditOutcome::Failure {
+                        reason: "operator_provider_config",
+                    },
+                )
+                .await?;
+                return Err(err).context("DLQ maintenance operator verifier");
+            }
+        };
+        dlq_operator_subject(
+            session,
+            diport::DynPdp::from_ref(&provider),
+            parsed,
+            resource_id,
+            self.operator,
+        )
+        .await
     }
 
     fn dlq_store(
@@ -3266,6 +3306,7 @@ pub async fn run_dlq_control_command(
 ) -> anyhow::Result<()> {
     let runtime = ProductionDlqControlRuntime {
         config: runtime_inputs.config(),
+        operator: runtime_inputs.operator_capability(),
     };
     run_dlq_control_command_with_runtime(args, &runtime).await
 }
@@ -3420,8 +3461,9 @@ fn parse_reconcile_operator_grants(raw: &str) -> anyhow::Result<Vec<ReconcileMai
     Ok(grants)
 }
 
-fn load_reconcile_operator_grants_from_command_env()
--> anyhow::Result<Vec<ReconcileMaintenanceGrant>> {
+fn load_reconcile_operator_grants_from_command_env(
+    _operator: OperatorRuntimeCapability<'_>,
+) -> anyhow::Result<Vec<ReconcileMaintenanceGrant>> {
     let raw = std::env::var(RECONCILE_OPERATOR_GRANTS_ENV)
         .with_context(|| format!("{RECONCILE_OPERATOR_GRANTS_ENV} is required"))?;
     parse_reconcile_operator_grants(&raw)
@@ -3507,10 +3549,10 @@ pub async fn run_reconcile_target_command(
     let resource_id = format!("tenant={} target_id={}", parsed.tenant, parsed.target_id);
     let start_action = format!("reconcile.target.{}.start", parsed.action.as_str());
     let finish_action = format!("reconcile.target.{}.finish", parsed.action.as_str());
-    let pg =
-        PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(runtime_inputs.config())?)
-            .await
-            .context("setup postgres maintenance deps")?;
+    let config = runtime_inputs.config();
+    let pg = PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(config)?)
+        .await
+        .context("setup postgres maintenance deps")?;
     if let Err(error) = record_reconcile_audit(
         &pg,
         UNVERIFIED_RECONCILE_OPERATOR,
@@ -3523,7 +3565,10 @@ pub async fn run_reconcile_target_command(
         pg.shutdown().await.ok();
         return Err(error);
     }
-    let provider = match build_provider_with_replay_store(
+    let operator = runtime_inputs.operator_capability();
+    let provider = match build_operator_provider(
+        config,
+        operator,
         pg.service_token_replay_store(),
         SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
     ) {
@@ -3567,7 +3612,7 @@ pub async fn run_reconcile_target_command(
             return Err(error);
         }
     };
-    let authorization = load_reconcile_operator_grants_from_command_env()
+    let authorization = load_reconcile_operator_grants_from_command_env(operator)
         .and_then(|grants| authorize_reconcile_operator(&subject, &parsed, &grants));
     if let Err(error) = authorization {
         record_reconcile_audit(
@@ -3750,10 +3795,14 @@ async fn record_config_value_maintenance_finish_audit(
 
 async fn settings_config_value_maintenance_operator_subject(
     pg: &PgMaintenanceDeps,
+    config: SnapshotConfig<'_>,
+    operator: OperatorRuntimeCapability<'_>,
     parsed: &SettingsConfigValueMaintenanceArgs,
     resource_id: &str,
 ) -> anyhow::Result<String> {
-    let operator_provider = match build_provider_with_replay_store(
+    let operator_provider = match build_operator_provider(
+        config,
+        operator,
         pg.service_token_replay_store(),
         SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
     ) {
@@ -3857,10 +3906,10 @@ pub async fn run_settings_config_value_maintenance(
     let parsed = parse_settings_config_value_maintenance_args(args)?;
     let options = parsed.options.clone();
     let resource_id = settings_config_value_maintenance_resource_id(&options);
-    let pg =
-        PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(runtime_inputs.config())?)
-            .await
-            .context("setup postgres maintenance deps")?;
+    let config = runtime_inputs.config();
+    let pg = PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(config)?)
+        .await
+        .context("setup postgres maintenance deps")?;
     pg.record_config_value_maintenance_audit(
         UNVERIFIED_CONFIG_MAINTENANCE_OPERATOR,
         "settings.config-values.maintenance.start",
@@ -3871,6 +3920,8 @@ pub async fn run_settings_config_value_maintenance(
     .context("record settings config value maintenance start audit")?;
     let operator_subject = match settings_config_value_maintenance_operator_subject(
         &pg,
+        config,
+        runtime_inputs.operator_capability(),
         &parsed,
         &resource_id,
     )
@@ -4293,7 +4344,7 @@ fn prepare_runtime_kernel<Local>(
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
-    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource)
+    let runtime_config = RuntimeConfigSnapshot::capture_process_snapshot()
         .context("capture process runtime configuration")?;
     let config = runtime_config.view();
     let (local, trace_export) =
@@ -4968,46 +5019,6 @@ mod tests {
 
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn maintenance_command_sources_read_only_their_exact_named_grant() {
-        let source = include_str!("lib.rs");
-        let sources = [
-            (
-                "load_projection_maintenance_grants_from_command_env",
-                "PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV",
-            ),
-            (
-                "load_audit_ledger_verify_grants_from_command_env",
-                "AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV",
-            ),
-            (
-                "load_dlq_operator_grants_from_command_env",
-                "DLQ_OPERATOR_GRANTS_ENV",
-            ),
-            (
-                "load_reconcile_operator_grants_from_command_env",
-                "RECONCILE_OPERATOR_GRANTS_ENV",
-            ),
-        ];
-
-        for (function, exact_key) in sources {
-            let start = source
-                .find(&format!("fn {function}"))
-                .expect("maintenance source");
-            let body = source[start..]
-                .split_once("\n}")
-                .map(|(body, _)| body)
-                .expect("maintenance source body");
-            assert_eq!(body.matches("std::env::var(").count(), 1, "{function}");
-            assert!(body.contains(&format!("std::env::var({exact_key})")));
-            for (_, other_key) in sources {
-                assert!(other_key == exact_key || !body.contains(other_key));
-            }
-            assert!(!body.contains("SnapshotConfig"));
-        }
-    }
 
     struct FixedDlxBootstrapClock;
 
@@ -8596,20 +8607,26 @@ mod tests {
     fn maintenance_operator_providers_use_durable_replay_store() {
         let source = include_str!("lib.rs");
         let function = source
-            .split("async fn dlq_operator_subject(")
+            .split("impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {")
             .nth(1)
-            .and_then(|rest| rest.split("fn dlq_summary_json_line(").next())
-            .expect("dlq_operator_subject source slice");
+            .and_then(|rest| rest.split("fn dlq_store(").next())
+            .expect("production DLQ operator_subject source slice");
 
         assert!(
-            function.contains("build_provider_with_replay_store")
-                && function.contains("pg.service_token_replay_store()")
+            function.contains("build_operator_provider(")
+                && function.contains("self.config,")
+                && function.contains("self.operator,")
+                && function.contains("session.service_token_replay_store()")
                 && function.contains("SERVICE_TOKEN_REPLAY_STORE_TIMEOUT"),
-            "DLQ operator verifier must inject the durable PG service-token replay store"
+            "DLQ operator verifier must consume the captured snapshot and inject the durable PG service-token replay store with a bounded timeout"
         );
         assert!(
-            !function.contains("build_provider()"),
-            "DLQ operator verifier must not have a store-free construction path"
+            !function.contains("std::env"),
+            "DLQ operator verifier must not revive ambient configuration"
+        );
+        assert!(
+            !function.contains("build_provider_with_replay_store"),
+            "DLQ operator verifier must not have an ambient or capability-free construction path"
         );
         assert!(
             source
@@ -8620,11 +8637,14 @@ mod tests {
                         .next()
                 })
                 .is_some_and(|function| {
-                    function.contains("build_provider_with_replay_store")
+                    function.contains("build_operator_provider")
+                        && function.contains("config,")
+                        && function.contains("operator,")
                         && function.contains("pg.service_token_replay_store()")
                         && function.contains("SERVICE_TOKEN_REPLAY_STORE_TIMEOUT")
+                        && !function.contains("std::env")
                 }),
-            "settings config maintenance must inject the durable replay store"
+            "settings config maintenance must consume the snapshot capability and inject the durable replay store"
         );
         assert!(
             source.contains("prepare_runtime_oidc_provider(runtime_inputs.config())")

@@ -18,7 +18,7 @@ All #1779–#1809 PBIs are open. The tracker bodies own scope, acceptance, budge
 | RTD-006A | #1784 | #1782 | 850–1200 | `cargo test -p runtime infra && cargo test -p postgres -p redis && cargo xtask verify --fast` | Hard — typed PostgreSQL/Redis config |
 | RTD-006B | #1785 | #1782 | 900–1300 | `cargo test -p runtime infra && cargo test -p vault -p s3 && cargo xtask verify --fast` | Hard — typed Vault/S3 config |
 | RTD-007 | #1786 | #1782 | 1750–2000 | `cargo test -p runtime event_transport distributed_runtime && cargo test -p bootstrap domaintransport eventtransport && cargo xtask verify --fast` | Hard — typed serving transport config |
-| RTD-008 | #1787 | #1783, #1784, #1785, #1786 | 900–1300 | `cargo test -p xtask runtime_env_guard && cargo xtask runtime-env guard && cargo xtask verify --fast` | Medium — AST guard with synthetic red/anti-vacuity |
+| RTD-008 | #1787 | #1783, #1784, #1785, #1786 | 900–1300 | `cargo test -p xtask runtime_env_guard && cargo xtask runtime-env guard && cargo dylint --all && cargo xtask verify --fast` | Hard+Medium — private snapshot factory, exact inventory, expanded/name-resolved HIR guard with synthetic red/anti-vacuity |
 | RTD-009 | #1788 | #1781, #1787 | 1400–1900 | `cargo test -p runtime runtime_plan && cargo xtask assembly validate && cargo xtask verify --fast` | Hard — closed plan types/private construction/fingerprint golden |
 | RTD-010 | #1789 | #1788 | 1200–1700 | `cargo test -p runtime runtime_phase && cargo test -p runtime launch_plan && cargo xtask runtime-baseline verify` | Hard — typestate transitions |
 | RTD-011 | #1790 | #1789 | 1400–1900 | `cargo test -p runtime listener_plan auth_plan && cargo xtask runtime-baseline verify && cargo xtask verify --fast` | Hard — plan-owned listener finalization |

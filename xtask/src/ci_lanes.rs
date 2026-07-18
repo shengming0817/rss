@@ -651,6 +651,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            RuntimeEnvGuard => (step_runtime_env_guard, Some("xtask/src/runtime_env_guard.rs"),
+                gate(
+                        GateId::RuntimeEnvGuard,
+                        "runtime-env-guard",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             RuntimeDeploymentSpec => (step_runtime_deployment_spec, Some("xtask/src/runtime_deployment_spec.rs"),
                 gate(
                         GateId::RuntimeDeploymentSpec,

@@ -13,6 +13,7 @@ members = [
   "rss_principal_facet_impl_allowlist",
   "rss_authplan_callsite",
   "rss_authenticated_callsite",
+  "rss_runtime_env_funnel",
   "rss_handler_local_principal_authz",
   "rss_diport_error_debug_redacted",
   "rss_diport_dto_debug_redacted",

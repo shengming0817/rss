@@ -388,7 +388,7 @@ mod tests {
     fn snapshot_from_get(
         get: impl Fn(&str) -> Option<String>,
     ) -> anyhow::Result<crate::config::RuntimeConfigSnapshot> {
-        Ok(crate::config::RuntimeConfigSnapshot::capture(
+        Ok(crate::config::RuntimeConfigSnapshot::capture_test(
             GetterSource(get),
         )?)
     }

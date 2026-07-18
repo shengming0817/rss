@@ -231,7 +231,7 @@ mod tests {
     fn snapshot_from_get(
         get: impl Fn(&str) -> Option<String>,
     ) -> crate::config::RuntimeConfigSnapshot {
-        crate::config::RuntimeConfigSnapshot::capture(GetterSource(get))
+        crate::config::RuntimeConfigSnapshot::capture_test(GetterSource(get))
             .expect("closed test catalog")
     }
 

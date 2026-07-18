@@ -5,9 +5,10 @@
 //! only borrow captured values. `SnapshotConfig` seals the listener/auth/tracing/serving-OIDC
 //! consumers migrated by #1783, every PostgreSQL/Redis serving or maintenance consumer migrated by
 //! #1784, the Vault/S3 serving plus settings-maintenance consumers migrated by #1785, and the
-//! event/domain/DLX/worker serving inputs migrated by #1786. Full crate-wide reader exclusivity
-//! remains owned by #1787. Maintenance grants, CI/Forge credentials, the AWS default credential
-//! chain, and SPIFFE rotation material are deliberately outside this serving catalog.
+//! event/domain/DLX/worker serving inputs migrated by #1786. `RUNTIME-ENV-FUNNEL-01` enforces
+//! crate-wide reader exclusivity: this module owns the sole snapshot capture, while exactly four
+//! named maintenance grant sources remain outside the catalog. CI/Forge credentials, the AWS
+//! default credential chain, and SPIFFE rotation material are not runtime-crate readers.
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -160,7 +161,7 @@ pub(crate) trait RuntimeConfigSource {
 }
 
 /// Production environment source. It reads only the key supplied by the closed catalog.
-pub(crate) struct EnvConfigSource;
+struct EnvConfigSource;
 
 impl RuntimeConfigSource for EnvConfigSource {
     fn read(&mut self, key: &RuntimeConfigKey) -> CapturedConfigValue {
@@ -214,9 +215,9 @@ pub(crate) enum RuntimeConfigCaptureError {
 ///
 /// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- private storage, by-value source consumption, mutually exclusive owned serving/operator inputs, the sole `RuntimeServingConfig` aggregate mapper, exact generated-domain inputs, and private-field `SnapshotConfig` signatures make snapshot omission and capability forgery unrepresentable for migrated serving, event/domain/DLX/worker, PostgreSQL maintenance, OIDC JWKS export, and Vault-backed settings-maintenance consumers.
 ///
-/// The separate Medium `RUNTIME-CONFIG-SNAPSHOT-LIVE-01` carrier in `runtime-baseline` guards the
-/// production capture-to-consumer flow against ambient implementation substitutions; #1787 owns
-/// the final global reader-exclusivity gate.
+/// The Medium `RUNTIME-CONFIG-SNAPSHOT-LIVE-01` carrier in `runtime-baseline` guards the production
+/// capture-to-consumer flow; the independent `RUNTIME-ENV-FUNNEL-01` gate enforces the complete
+/// runtime-crate direct-reader inventory.
 pub(crate) struct RuntimeConfigSnapshot {
     values: BTreeMap<RuntimeConfigKey, CapturedConfigValue>,
 }
@@ -412,10 +413,25 @@ fn keyprovider_readiness_interval_from_value(
 }
 
 impl RuntimeConfigSnapshot {
-    /// Consume a source and capture each unique serving key exactly once.
-    pub(crate) fn capture(
-        mut source: impl RuntimeConfigSource,
+    /// Capture the process-lifetime configuration generation from the closed environment source.
+    ///
+    /// This is the only production source-minting surface. The generic capture primitive and the
+    /// concrete environment source stay private to this module so sibling modules cannot express a
+    /// second or alternate production capture.
+    pub(crate) fn capture_process_snapshot() -> Result<Self, RuntimeConfigCaptureError> {
+        Self::capture(EnvConfigSource)
+    }
+
+    /// Test-only generic capture surface for purpose-built source fakes.
+    #[cfg(test)]
+    pub(crate) fn capture_test(
+        source: impl RuntimeConfigSource,
     ) -> Result<Self, RuntimeConfigCaptureError> {
+        Self::capture(source)
+    }
+
+    /// Consume a source and capture each unique serving key exactly once.
+    fn capture(mut source: impl RuntimeConfigSource) -> Result<Self, RuntimeConfigCaptureError> {
         let mut catalog = fixed_catalog()?;
         add_generated_event_keys(&mut catalog);
 

@@ -12,7 +12,7 @@
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must consume the committed generated domain list through `compose_bindings`, must merge its output, and must not restore per-domain handwritten wiring.
 //!
-//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring" } -- the unique production `prepare_runtime()` captures exactly one `EnvConfigSource` generation and seals the password blocklist into `ServingRuntimeInputs`, while `prepare_operator_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` maps the serving snapshot view once into the exact serving, PG, Redis, Vault, and S3 generations; the serving aggregate is then consumed by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes one typed Vault generation. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring" } -- the unique production `prepare_runtime()` calls exactly one closed process snapshot factory and seals the password blocklist into `ServingRuntimeInputs`, while `prepare_operator_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` maps the serving snapshot view once into the exact serving, PG, Redis, Vault, and S3 generations; the serving aggregate is then consumed by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes one typed Vault generation. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
 //! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, while operator commands prepare only `OperatorRuntimeInputs`, every operator arm receives that exact binding, and the sole operator shutdown consumes it. No shared input type, pre-consumption early return, alias, macro, shadow path, or unreachable bait is accepted.
 //!
@@ -315,9 +315,12 @@ impl<'ast> Visit<'ast> for PrepareRuntimeConfigWiring {
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if path_ends_with(&call.func, &["RuntimeConfigSnapshot", "capture"]) {
+        if path_ends_with(
+            &call.func,
+            &["RuntimeConfigSnapshot", "capture_process_snapshot"],
+        ) {
             self.snapshot_calls += 1;
-            if is_env_snapshot_call(call) {
+            if is_process_snapshot_call(call) {
                 self.canonical_snapshot_calls += 1;
             }
         }
@@ -1941,7 +1944,12 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        let snapshot = self.associated_call_is_canonical(call, "capture", "RuntimeConfigSnapshot");
+        let snapshot = call.args.is_empty()
+            && self.associated_call_is_canonical(
+                call,
+                "capture_process_snapshot",
+                "RuntimeConfigSnapshot",
+            );
         let inputs = self.associated_call_is_canonical(call, "new", "PreparedRuntimeInputs");
         let serving_mapping =
             self.associated_call_is_canonical(call, "from_snapshot", "RuntimeServingConfig");
@@ -3403,10 +3411,19 @@ fn pg_operator_runtime_struct_is_exact(file: &syn::File, name: &str) -> bool {
     let syn::Fields::Named(fields) = &item.fields else {
         return false;
     };
-    fields.named.len() == 1
-        && fields.named.first().is_some_and(|field| {
+    fields.named.len() == 2
+        && fields.named.iter().any(|field| {
             field.ident.as_ref().is_some_and(|ident| ident == "config")
                 && type_last_ident(&field.ty).is_some_and(|ident| ident == "SnapshotConfig")
+                && matches!(field.vis, syn::Visibility::Inherited)
+        })
+        && fields.named.iter().any(|field| {
+            field
+                .ident
+                .as_ref()
+                .is_some_and(|ident| ident == "operator")
+                && type_last_ident(&field.ty)
+                    .is_some_and(|ident| ident == "OperatorRuntimeCapability")
                 && matches!(field.vis, syn::Visibility::Inherited)
         })
 }
@@ -3421,6 +3438,7 @@ struct PgOperatorWrapperFlow<'a> {
     result_bindings: BTreeSet<String>,
     config_calls: usize,
     canonical_config_calls: usize,
+    operator_capability_calls: usize,
     runtime_structs: usize,
     canonical_runtime_structs: usize,
     with_runtime_calls: usize,
@@ -3444,6 +3462,7 @@ impl<'a> PgOperatorWrapperFlow<'a> {
             result_bindings: BTreeSet::new(),
             config_calls: 0,
             canonical_config_calls: 0,
+            operator_capability_calls: 0,
             runtime_structs: 0,
             canonical_runtime_structs: 0,
             with_runtime_calls: 0,
@@ -3454,14 +3473,21 @@ impl<'a> PgOperatorWrapperFlow<'a> {
     fn runtime_struct_is_canonical(&self, runtime: &syn::ExprStruct) -> bool {
         is_exact_syn_path(&runtime.path, &[self.runtime_type])
             && runtime.rest.is_none()
-            && runtime.fields.len() == 1
-            && runtime.fields.first().is_some_and(|field| {
+            && runtime.fields.len() == 2
+            && runtime.fields.iter().any(|field| {
                 matches!(&field.member, syn::Member::Named(member) if member == "config")
                     && pg_source_expr_is_canonical(
                         &field.expr,
                         PgBuilderOrigin::RuntimeInputs(self.runtime_inputs),
                         &self.source_aliases,
                     )
+            })
+            && runtime.fields.iter().any(|field| {
+                matches!(&field.member, syn::Member::Named(member) if member == "operator")
+                    && matches!(transparent_expr(&field.expr), syn::Expr::MethodCall(call)
+                        if call.method == "operator_capability"
+                            && call.args.is_empty()
+                            && is_exact_ident_path(&call.receiver, self.runtime_inputs))
             })
     }
 
@@ -3497,6 +3523,7 @@ impl<'a> PgOperatorWrapperFlow<'a> {
     fn is_exact(&self) -> bool {
         self.config_calls == 1
             && self.canonical_config_calls == 1
+            && self.operator_capability_calls == 1
             && self.runtime_structs == 1
             && self.canonical_runtime_structs == 1
             && self.with_runtime_calls == 1
@@ -3548,6 +3575,8 @@ impl<'ast> Visit<'ast> for PgOperatorWrapperFlow<'_> {
             self.config_calls += 1;
             self.canonical_config_calls +=
                 usize::from(is_exact_ident_path(&call.receiver, self.runtime_inputs));
+        } else if call.method == "operator_capability" && call.args.is_empty() {
+            self.operator_capability_calls += 1;
         }
         syn::visit::visit_expr_method_call(self, call);
     }
@@ -5434,7 +5463,7 @@ fn runtime_config_snapshot_findings(
             Rule::ForbiddenWiring,
             RUNTIME_LIB_PATH,
             format!(
-                "prepare_runtime() must seal its sole EnvConfigSource snapshot and password blocklist into ServingRuntimeInputs while prepare_operator_runtime() constructs capability-free OperatorRuntimeInputs; the exact serving lifecycle owner must finish one run_startup result; run_startup must map exact PG/Redis/Vault/S3 generations, consume Vault/Redis and named S3 parts by value, preserve canonical PG setup, and route the DLX S3 part without aliases or bait; {}; run={run_wiring:?}, inventory={} ",
+                "prepare_runtime() must seal its sole process snapshot and password blocklist into ServingRuntimeInputs while prepare_operator_runtime() constructs capability-free OperatorRuntimeInputs; the exact serving lifecycle owner must finish one run_startup result; run_startup must map exact PG/Redis/Vault/S3 generations, consume Vault/Redis and named S3 parts by value, preserve canonical PG setup, and route the DLX S3 part without aliases or bait; {}; run={run_wiring:?}, inventory={} ",
                 password_preload.diagnostic(),
                 inventory.diagnostic()
             ),
@@ -6509,16 +6538,14 @@ fn call_behind_result_context(expr: &syn::Expr) -> Option<&syn::ExprCall> {
 }
 
 fn is_env_snapshot_initializer(expr: &syn::Expr) -> bool {
-    call_behind_result_context(expr).is_some_and(is_env_snapshot_call)
+    call_behind_result_context(expr).is_some_and(is_process_snapshot_call)
 }
 
-fn is_env_snapshot_call(call: &syn::ExprCall) -> bool {
-    path_ends_with(&call.func, &["RuntimeConfigSnapshot", "capture"])
-        && call.args.len() == 1
-        && call
-            .args
-            .first()
-            .is_some_and(|arg| is_exact_path(arg, &["EnvConfigSource"]))
+fn is_process_snapshot_call(call: &syn::ExprCall) -> bool {
+    path_ends_with(
+        &call.func,
+        &["RuntimeConfigSnapshot", "capture_process_snapshot"],
+    ) && call.args.is_empty()
 }
 
 fn is_snapshot_view(expr: &syn::Expr, snapshot: &syn::Ident) -> bool {
@@ -9816,7 +9843,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "prepare.config.snapshot",
         path: RUNTIME_LIB_PATH,
-        pattern: "RuntimeConfigSnapshot::capture(EnvConfigSource)",
+        pattern: "RuntimeConfigSnapshot::capture_process_snapshot()",
     },
     AnchorSpec {
         id: "prepare.password-policy.preload",
@@ -11014,7 +11041,7 @@ serde = workspace=true; features=[derive]
                 .contains("mergeExtends = probes,resources,workers")
         );
         assert!(report.rendered.contains(
-            "01 | prepare.config.snapshot | assemblies/runtime/src/lib.rs | RuntimeConfigSnapshot::capture(EnvConfigSource)"
+            "01 | prepare.config.snapshot | assemblies/runtime/src/lib.rs | RuntimeConfigSnapshot::capture_process_snapshot()"
         ));
         assert!(report.rendered.contains("| launch.register-plan |"));
         assert!(report.rendered.contains("| launch.listeners |"));
@@ -12307,7 +12334,7 @@ use infra::s3::{
 use infra::vault::VaultRuntimeConfig;
 
 pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
-    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource);
+    let runtime_config = RuntimeConfigSnapshot::capture_process_snapshot();
     let config = runtime_config.view();
     let filter = config.value("RUST_LOG")
         .and_then(|raw| EnvFilter::try_new(raw).ok())
@@ -12982,7 +13009,7 @@ use infra::s3::{
 };
 
 pub fn prepare_runtime() -> anyhow::Result<PreparedRuntimeInputs> {
-    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource);
+    let runtime_config = RuntimeConfigSnapshot::capture_process_snapshot();
     let config = runtime_config.view();
     let filter = config.value("RUST_LOG");
     let trace_export = build_trace_export(config)?;
@@ -13061,7 +13088,7 @@ pub async fn run(mut runtime_inputs: ServingRuntimeInputs) {
             (
                 "renamed use plus local function alias",
                 r#"use crate::config::RuntimeConfigSnapshot as Snapshot;
-fn hidden() { let take = Snapshot::capture; let _ = take(EnvConfigSource); }
+fn hidden() { let take = Snapshot::capture_process_snapshot; let _ = take(); }
 "#,
             ),
             (
@@ -13085,7 +13112,7 @@ fn hidden() {
             (
                 "protected invocation hidden in a macro",
                 r#"use crate::config::RuntimeConfigSnapshot as Snapshot;
-fn hidden() { passthrough!(Snapshot::capture(EnvConfigSource)); }
+fn hidden() { passthrough!(Snapshot::capture_process_snapshot()); }
 "#,
             ),
         ] {
@@ -13101,7 +13128,7 @@ fn hidden() { passthrough!(Snapshot::capture(EnvConfigSource)); }
             r#"
 mod local {
     pub struct RuntimeConfigSnapshot;
-    impl RuntimeConfigSnapshot { pub fn capture(_: LocalSource) {} }
+    impl RuntimeConfigSnapshot { pub fn capture_process_snapshot() {} }
     pub struct PreparedRuntimeInputs;
     impl PreparedRuntimeInputs { pub fn new(_: LocalSnapshot, _: LocalTrace) {} }
     pub fn build_vault_runtime_deps(_: LocalReader) {}
@@ -13111,7 +13138,7 @@ mod local {
 use local::{PreparedRuntimeInputs, RuntimeConfigSnapshot};
 use local::{build_vault_runtime_deps, build_redis_runtime_deps, build_s3_runtime_deps_from};
 fn harmless() {
-    RuntimeConfigSnapshot::capture(LocalSource);
+    RuntimeConfigSnapshot::capture_process_snapshot();
     PreparedRuntimeInputs::new(LocalSnapshot, LocalTrace);
     build_vault_runtime_deps(LocalReader);
     build_redis_runtime_deps(LocalReader);
@@ -13126,7 +13153,7 @@ fn harmless() {
 
         write(
             &side_path,
-            "fn capture(_: LocalSource) {}\nfn harmless() { capture(LocalSource); }\n",
+            "fn capture_process_snapshot() {}\nfn harmless() { capture_process_snapshot(); }\n",
         )?;
         assert!(
             runtime_config_global_capture_findings(&root)?.is_empty(),
@@ -13168,7 +13195,7 @@ fn harmless(local: &LocalRuntime) { local.into_runtime(); launch(); }
             r#"use crate::config::RuntimeConfigSnapshot;
 use crate::phase::RuntimeInputs;
 fn fixture_only() {
-    let snapshot = RuntimeConfigSnapshot::capture(EnvConfigSource);
+    let snapshot = RuntimeConfigSnapshot::capture_process_snapshot();
     let _ = RuntimeInputs::new(snapshot, trace());
 }
 "#,
@@ -13205,7 +13232,7 @@ use infra::s3::{
 };
 
 pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
-    let runtime_config = RuntimeConfigSnapshot::capture(EnvConfigSource);
+    let runtime_config = RuntimeConfigSnapshot::capture_process_snapshot();
     let config = runtime_config.view();
     let filter = config.value("RUST_LOG")
         .and_then(|raw| EnvFilter::try_new(raw).ok())
@@ -13836,6 +13863,14 @@ async fn main() -> anyhow::Result<()> {
                 ),
             ),
             (
+                "wrapper mints the operator capability from the wrong binding",
+                source.replacen(
+                    "operator: runtime_inputs.operator_capability(),",
+                    "operator: other_inputs.operator_capability(),",
+                    1,
+                ),
+            ),
+            (
                 "typed runtime reads the wrong snapshot field",
                 source.replacen(
                     "build_pg_migrator_config(self.config)?",
@@ -13900,8 +13935,8 @@ async fn main() -> anyhow::Result<()> {
         let source = fs::read_to_string(workspace_root()?.join(RUNTIME_LIB_PATH))?;
         let renamed_and_split = source
             .replacen(
-                "pub async fn run_projection_control_command(\n    args: &[String],\n    runtime_inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let runtime = ProductionProjectionControlRuntime {\n        config: runtime_inputs.config(),\n    };\n    run_projection_control_command_with_runtime(args, &runtime).await\n}",
-                "pub async fn run_projection_control_command(\n    command_args: &[String],\n    inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let snapshot = inputs.config();\n    let runtime = ProductionProjectionControlRuntime { config: snapshot };\n    let outcome = run_projection_control_command_with_runtime(command_args, &runtime)\n        .await\n        .context(\"run projection operator\");\n    outcome\n}",
+                "pub async fn run_projection_control_command(\n    args: &[String],\n    runtime_inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let runtime = ProductionProjectionControlRuntime {\n        config: runtime_inputs.config(),\n        operator: runtime_inputs.operator_capability(),\n    };\n    run_projection_control_command_with_runtime(args, &runtime).await\n}",
+                "pub async fn run_projection_control_command(\n    command_args: &[String],\n    inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let snapshot = inputs.config();\n    let runtime = ProductionProjectionControlRuntime {\n        config: snapshot,\n        operator: inputs.operator_capability(),\n    };\n    let outcome = run_projection_control_command_with_runtime(command_args, &runtime)\n        .await\n        .context(\"run projection operator\");\n    outcome\n}",
                 1,
             );
         assert_ne!(

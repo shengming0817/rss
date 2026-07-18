@@ -1,0 +1,59 @@
+warning: runtime 生产代码不得通过 compile-time macro 读取环境或包含外部源码
+  --> $DIR/runtime.rs:21:34
+   |
+LL | const DIRECT_COMPILE_ENV: &str = env!("CARGO_PKG_NAME");
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: `env!` / `option_env!` / `include!` 会绕过 process snapshot；把值加入 closed runtime catalog 并从 SnapshotConfig 消费
+   = note: `#[warn(rss_runtime_env_funnel)]` on by default
+
+warning: runtime 生产代码不得通过 compile-time macro 读取环境或包含外部源码
+  --> $DIR/runtime.rs:22:29
+   |
+LL | const INCLUDED_EXPR: &str = include!("auxiliary/included_expr.rs");
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: `env!` / `option_env!` / `include!` 会绕过 process snapshot；把值加入 closed runtime catalog 并从 SnapshotConfig 消费
+
+warning: runtime 不得在封闭配置入口之外读取进程环境
+  --> $DIR/auxiliary/generated.rs:2:13
+   |
+LL |     let _ = std::env::vars_os();
+   |             ^^^^^^^^^^^^^^^^^
+   |
+   = help: 把 serving/runtime 配置加入 closed catalog 并从 SnapshotConfig 消费；operator grant 仅保留四个带 typed capability 的精确 reader
+
+warning: runtime 生产代码不得通过 compile-time macro 读取环境或包含外部源码
+  --> $DIR/runtime.rs:20:46
+   |
+LL | const CROSS_FILE_COMPILE_ENV: Option<&str> = invoke!(option_env);
+   |                                              ^^^^^^^^^^^^^^^^^^^
+   |
+   = help: `env!` / `option_env!` / `include!` 会绕过 process snapshot；把值加入 closed runtime catalog 并从 SnapshotConfig 消费
+
+warning: process runtime snapshot factory 仅可由 `prepare_runtime_kernel` 引用
+  --> $DIR/runtime.rs:54:13
+   |
+LL |     let _ = config::RuntimeConfigSnapshot::capture_process_snapshot();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 从 PreparedRuntimeInputs / ServingRuntimeInputs / OperatorRuntimeInputs 传递已有 snapshot capability，不得再次 capture
+
+warning: runtime 不得在封闭配置入口之外读取进程环境
+  --> $DIR/runtime.rs:59:13
+   |
+LL |     let _ = std::env::var("RSS_DIRECT");
+   |             ^^^^^^^^^^^^^
+   |
+   = help: 把 serving/runtime 配置加入 closed catalog 并从 SnapshotConfig 消费；operator grant 仅保留四个带 typed capability 的精确 reader
+
+warning: runtime 不得在封闭配置入口之外读取进程环境
+  --> $DIR/runtime.rs:65:22
+   |
+LL |     let read_later = read;
+   |                      ^^^^
+   |
+   = help: 把 serving/runtime 配置加入 closed catalog 并从 SnapshotConfig 消费；operator grant 仅保留四个带 typed capability 的精确 reader
+
+warning: 7 warnings emitted
+

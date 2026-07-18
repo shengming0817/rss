@@ -1,0 +1,20 @@
+[package]
+name = "rss_runtime_env_funnel"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "RSS runtime environment funnel: compiler-resolved ambient readers, compile-time macros, and process snapshot callsite"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# clippy_utils rev is paired with lints/rust-toolchain.toml (Dylint v6.0.1 template).
+clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "f6d310692116e9a527ce6d0b3526c965d9c5d7b9" }
+dylint_linting = "6.0.1"
+
+[dev-dependencies]
+dylint_testing = "6.0.1"
+
+[package.metadata.rust-analyzer]
+rustc_private = true

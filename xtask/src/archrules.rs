@@ -2692,6 +2692,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
         role: GateDeclarationRole::PlanStep,
     },
     GateDeclaration {
+        path: "xtask/src/runtime_env_guard.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
         path: "xtask/src/runtime_deps_guard.rs",
         tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,

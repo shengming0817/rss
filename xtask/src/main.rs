@@ -35,6 +35,7 @@
 //!   `cargo xtask runtime-baseline list|verify`
 //!                                      runtime assembly baseline 清单 / 漂移门（#1656，CI 门）
 //!   `cargo xtask runtime-deps guard`    SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）
+//!   `cargo xtask runtime-env guard`     runtime ambient environment single-funnel guard（RUNTIME-ENV-FUNNEL-01）
 //!   `cargo xtask runtime-deployment-spec [--selftest] [--against <git-ref>]`
 //!                                      #1779 Runtime Deployment SpecKit v2 schema/DAG/fingerprint 机器门
 //!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
@@ -122,6 +123,7 @@ mod repo_scope_guard;
 mod runtime_baseline;
 mod runtime_deployment_spec;
 mod runtime_deps_guard;
+mod runtime_env_guard;
 mod schema_rls;
 mod setlocal_funnel;
 mod shipped_feature_guard;
@@ -161,6 +163,7 @@ enum Command {
     RuntimeBaselineVerify,
     RuntimeDeploymentSpec(runtime_deployment_spec::Options),
     RuntimeDepsGuard,
+    RuntimeEnvGuard,
     ContractBreaking {
         /// base git-ref（缺省 = `contract::breaking::DEFAULT_AGAINST`）。
         against: Option<String>,
@@ -258,6 +261,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
             runtime_deployment_spec::parse_options(rest).map(Command::RuntimeDeploymentSpec)
         }
         ["runtime-deps", rest @ ..] => parse_runtime_deps(rest),
+        ["runtime-env", rest @ ..] => parse_runtime_env(rest),
         ["contract", rest @ ..] => parse_contract(rest),
         ["assembly", rest @ ..] => parse_assembly(rest),
         ["graph", rest @ ..] => graph::parse(rest).map(Command::GraphAssembly),
@@ -442,6 +446,13 @@ fn parse_runtime_deps(args: &[&str]) -> Result<Command> {
     match args {
         ["guard"] => Ok(Command::RuntimeDepsGuard),
         other => bail!("未知 runtime-deps 子命令: {other:?}；用法: cargo xtask runtime-deps guard"),
+    }
+}
+
+fn parse_runtime_env(args: &[&str]) -> Result<Command> {
+    match args {
+        ["guard"] => Ok(Command::RuntimeEnvGuard),
+        other => bail!("未知 runtime-env 子命令: {other:?}；用法: cargo xtask runtime-env guard"),
     }
 }
 
@@ -644,6 +655,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::RuntimeBaselineVerify => diagnostic::run_check(&runtime_baseline::RuntimeBaseline),
         Command::RuntimeDeploymentSpec(options) => runtime_deployment_spec::run(&options),
         Command::RuntimeDepsGuard => diagnostic::run_check(&runtime_deps_guard::RuntimeDepsGuard),
+        Command::RuntimeEnvGuard => diagnostic::run_check(&runtime_env_guard::RuntimeEnvGuard),
         Command::ContractBreaking { against } => {
             let against =
                 against.unwrap_or_else(|| contract::breaking::DEFAULT_AGAINST.to_string());
@@ -1052,6 +1064,17 @@ mod tests {
         assert!(parse_command(&s(&["runtime-deps", "guard", "extra"])).is_err());
         assert!(parse_command(&s(&["runtime-deps", "bogus"])).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn parse_command_runtime_env_guard() {
+        assert!(matches!(
+            parse_command(&s(&["runtime-env", "guard"])),
+            Ok(Command::RuntimeEnvGuard)
+        ));
+        assert!(parse_command(&s(&["runtime-env"])).is_err());
+        assert!(parse_command(&s(&["runtime-env", "guard", "extra"])).is_err());
+        assert!(parse_command(&s(&["runtime_env", "guard"])).is_err());
     }
 
     #[test]

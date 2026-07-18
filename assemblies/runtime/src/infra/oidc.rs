@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::SystemClock;
 use crate::config::SnapshotConfig;
+use crate::phase::OperatorRuntimeCapability;
 
 const OIDC_JWKS_PATH_ENV: &str = "RSS_OIDC_JWKS_PATH";
 const OIDC_JWKS_REFRESH_INTERVAL_ENV: &str = "RSS_OIDC_JWKS_REFRESH_INTERVAL_SECS";
@@ -255,7 +256,7 @@ fn oidc_jwks_refresh_interval_from(raw: Option<&str>) -> anyhow::Result<Duration
     Ok(Duration::from_secs(secs))
 }
 
-/// 从 env 构造 operator / maintenance 验签 `OidcProvider`（issuer / audience / ES256·HS256 静态 key）。
+/// 从 operator 配置快照构造验签 `OidcProvider`（issuer / audience / ES256·HS256 静态 key）。
 ///
 /// - `RSS_OIDC_ISSUER` / `RSS_OIDC_AUDIENCE`：必填。
 /// - `RSS_OIDC_TRUSTED_KINDS`：**必填**——本 IdP 可 assert 的 principal kind 逗号分隔白名单（如 `user,admin,device`）。
@@ -265,33 +266,23 @@ fn oidc_jwks_refresh_interval_from(raw: Option<&str>) -> anyhow::Result<Duration
 /// - `RSS_OIDC_HS256_SECRET_B64URL`：service-token 路径 HS256 密钥，base64url（可选）。
 /// - `RSS_OIDC_HS256_KID`：service-token 路径 key id；配置 HS256 secret 时必填。
 ///
-/// 该 operator / maintenance CLI 入口必须显式注入 durable replay store。
-pub(crate) fn build_provider_with_replay_store(
+/// Operator / maintenance CLI 与 serving 使用同一进程级配置代际，但仍保留独立的静态 key
+/// provider 语义；调用方必须显式提供不可伪造的快照能力、durable replay store 和有界
+/// deadline，不存在 ambient fallback 或 store-free HS256 配置。
+pub(crate) fn build_operator_provider(
+    config: SnapshotConfig<'_>,
+    _operator: OperatorRuntimeCapability<'_>,
     replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
     replay_timeout: Duration,
 ) -> anyhow::Result<OidcProvider> {
-    build_provider_from_static_env(replay_store, replay_timeout)
-}
-
-/// 非 serving 的 operator / maintenance OOS 路径；不得被 listener 装配调用。
-fn build_provider_from_static_env(
-    replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
-    replay_timeout: Duration,
-) -> anyhow::Result<OidcProvider> {
-    let issuer = std::env::var("RSS_OIDC_ISSUER").ok();
-    let audience = std::env::var("RSS_OIDC_AUDIENCE").ok();
-    let trusted_kinds = std::env::var("RSS_OIDC_TRUSTED_KINDS").ok();
-    let es256 = std::env::var("RSS_OIDC_ES256_SEC1_B64URL").ok();
-    let hs256 = std::env::var("RSS_OIDC_HS256_SECRET_B64URL").ok();
-    let hs256_kid = std::env::var("RSS_OIDC_HS256_KID").ok();
     build_provider_from_values(
         StaticOidcEnvValues {
-            issuer: issuer.as_deref(),
-            audience: audience.as_deref(),
-            trusted_kinds: trusted_kinds.as_deref(),
-            es256: es256.as_deref(),
-            hs256: hs256.as_deref(),
-            hs256_kid: hs256_kid.as_deref(),
+            issuer: config.value("RSS_OIDC_ISSUER"),
+            audience: config.value("RSS_OIDC_AUDIENCE"),
+            trusted_kinds: config.value("RSS_OIDC_TRUSTED_KINDS"),
+            es256: config.value("RSS_OIDC_ES256_SEC1_B64URL"),
+            hs256: config.value("RSS_OIDC_HS256_SECRET_B64URL"),
+            hs256_kid: config.value("RSS_OIDC_HS256_KID"),
         },
         replay_store,
         replay_timeout,
@@ -962,6 +953,31 @@ mod tests {
             clk(),
         )
         .expect("issuer + aud + trusted kinds + hs256 key ⇒ 构造成功");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn operator_provider_consumes_captured_snapshot_without_ambient_fallback() {
+        let secret = B64.encode([7u8; 32]);
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_OIDC_ISSUER", "https://issuer.test"),
+            ("RSS_OIDC_AUDIENCE", "rss"),
+            ("RSS_OIDC_TRUSTED_KINDS", "user,admin"),
+            ("RSS_OIDC_HS256_SECRET_B64URL", &secret),
+            ("RSS_OIDC_HS256_KID", "cell-a.svc-a"),
+        ])
+        .expect("capture operator OIDC values");
+
+        let inputs = crate::phase::OperatorRuntimeInputs::new(
+            crate::phase::PreparedRuntimeInputs::new(snapshot, None),
+        );
+        build_operator_provider(
+            inputs.config(),
+            inputs.operator_capability(),
+            replay_store(),
+            Duration::from_secs(5),
+        )
+        .expect("operator provider must consume the captured generation");
     }
 
     #[test]
