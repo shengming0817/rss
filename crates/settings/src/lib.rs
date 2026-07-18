@@ -27,9 +27,9 @@ pub mod ports;
 mod secret_application;
 
 pub use application::{
-    ConfigQueryService, ConfigVersionChangedEvent, ConfigVersionChangedEventError, FlagStoreBox,
-    SETTINGS_ROUTE_PREFIX, SettingsDomain, SettingsService, SettingsServiceError,
-    config_version_changed_event_from_message,
+    ConfigQueryService, ConfigVersionChangedEvent, ConfigVersionChangedEventError,
+    ConfigVersionReconciler, FlagStoreBox, SETTINGS_ROUTE_PREFIX, SettingsDomain, SettingsService,
+    SettingsServiceError, config_version_changed_event_from_message,
 };
 pub use ports::ConfigEntry;
 pub use secret_application::{SecretService, SecretServiceError};

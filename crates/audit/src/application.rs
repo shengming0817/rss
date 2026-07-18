@@ -41,7 +41,7 @@ use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Extension, Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
-use bootstrap::{KernelError, Registry, SubscriberExecution};
+use bootstrap::{KernelError, Registry, SubscriberCapability};
 use consistency::ConsumerGroup;
 use diport::Message;
 use generated::event::EventSpec;
@@ -888,7 +888,15 @@ fn register_audit_subscriber(reg: &mut Registry, event: EventSpec) -> Result<(),
         .iter()
         .find(|s| s.consumer() == AUDIT_DOMAIN)
         .ok_or(KernelError::Subscriber)?;
-    if (spec.execution(), spec.effect()) != (SubscriptionExecution::AdapterNative, None) {
+    if (
+        spec.execution(),
+        spec.effect(),
+        spec.external_effect_policy(),
+    ) != (
+        SubscriptionExecution::AdapterNative,
+        None,
+        vocab::ExternalEffectPolicy::TransactionalOnly,
+    ) {
         return Err(KernelError::Subscriber);
     }
     let group = ConsumerGroup::parse(spec.group()).map_err(|_| KernelError::Subscriber)?;
@@ -897,7 +905,7 @@ fn register_audit_subscriber(reg: &mut Registry, event: EventSpec) -> Result<(),
         event.topic(),
         spec.consumer(),
         group,
-        SubscriberExecution::AdapterNative,
+        SubscriberCapability::AdapterNativeTransactional,
     )
 }
 
@@ -1992,14 +2000,21 @@ mod tests {
             assert_eq!(spec.consumer(), AUDIT_DOMAIN);
             assert_eq!(spec.execution(), SubscriptionExecution::AdapterNative);
             assert_eq!(spec.effect(), None);
+            assert_eq!(
+                spec.external_effect_policy(),
+                vocab::ExternalEffectPolicy::TransactionalOnly
+            );
             assert!(
                 subs.iter()
-                    .any(|(contract_id, topic, consumer, group, execution)| {
+                    .any(|(contract_id, topic, consumer, group, capability)| {
                         *contract_id == event.contract_id()
                             && *topic == event.topic()
                             && *consumer == spec.consumer()
                             && group.as_str() == spec.group()
-                            && matches!(execution, SubscriberExecution::AdapterNative)
+                            && matches!(
+                                capability,
+                                SubscriberCapability::AdapterNativeTransactional
+                            )
                     }),
                 "missing subscriber binding for {}",
                 event.contract_id()

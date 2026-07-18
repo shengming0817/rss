@@ -1,0 +1,17 @@
+error[E0432]: unresolved imports `bootstrap::ReconcileSubscriber`, `bootstrap::ReconcileSubscriberEffect`
+ --> tests/ui/reconcile_wide_wrapper_fail.rs:3:17
+  |
+3 | use bootstrap::{ReconcileSubscriber, ReconcileSubscriberEffect};
+  |                 ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^ no `ReconcileSubscriberEffect` in the root
+  |                 |
+  |                 no `ReconcileSubscriber` in the root
+  |
+help: a similar name exists in the module
+  |
+3 | use bootstrap::{ReconcileSubscriberOwner, ReconcileSubscriberEffect};
+  |                                    +++++
+help: a similar name exists in the module
+  |
+3 - use bootstrap::{ReconcileSubscriber, ReconcileSubscriberEffect};
+3 + use bootstrap::{ReconcileSubscriber, ReconcileSubscriberOwner};
+  |

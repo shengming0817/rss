@@ -11,13 +11,10 @@ use audit::ports::{
     AuditChainHasher, AuditEventKind, AuditEventRecordError, AuditRecord,
     audit_record_from_event_message,
 };
-#[cfg(feature = "domain-settings")]
-use bootstrap::SubscriberEffect;
 use consistency::idempotency::LeaseOutcome;
 #[cfg(feature = "domain-settings")]
 use consistency::{Disposition, HandleResult};
 use consistency::{EngineErrorKind, IdemKey, InboxReceiptContext, LeaseToken};
-use eventexec::{ConsumerTxHandlerFn, ConsumerTxOutcome};
 #[cfg(feature = "domain-audit")]
 use primitives::MacVerifier;
 
@@ -27,35 +24,77 @@ use crate::cotx::{PgTenantWritePool, infra_tenant_scope};
 use crate::inbox::commit_in_tx;
 use crate::pool::VerifiedPgWriteStore;
 
+/// Opaque evidence that the postgres ConsumerTx unit committed while its inbox lease was held.
+///
+/// The field and constructor stay provider-private. Runtime and eventexec may carry and consume the
+/// type, but downstream code cannot mint a value that would authorize a broker Ack.
+pub struct PgConsumerTxCommitProof {
+    _provider_owned: (),
+}
+
+impl PgConsumerTxCommitProof {
+    fn committed() -> Self {
+        Self {
+            _provider_owned: (),
+        }
+    }
+}
+
+/// Provider-owned result of one ConsumerTx attempt.
+///
+/// Only the concrete Postgres handler methods can return `Committed` with the opaque proof.
+/// The Ack-authorizing consumer trait and runner live crate-private in the runtime assembly.
+pub enum PgConsumerTxOutcome {
+    Committed(PgConsumerTxCommitProof),
+    Requeue(PgConsumerTxRequeue),
+    LeaseLost { summary: &'static str },
+    Reject { summary: &'static str },
+}
+
+pub struct PgConsumerTxRequeue {
+    category: PgConsumerTxRequeueCategory,
+    summary: &'static str,
+}
+
+enum PgConsumerTxRequeueCategory {
+    HandlerTransient,
+    CommitUnknown,
+}
+
+impl PgConsumerTxOutcome {
+    fn handler_transient(summary: &'static str) -> Self {
+        Self::Requeue(PgConsumerTxRequeue {
+            category: PgConsumerTxRequeueCategory::HandlerTransient,
+            summary,
+        })
+    }
+
+    fn commit_unknown(summary: &'static str) -> Self {
+        Self::Requeue(PgConsumerTxRequeue {
+            category: PgConsumerTxRequeueCategory::CommitUnknown,
+            summary,
+        })
+    }
+}
+
+impl PgConsumerTxRequeue {
+    #[must_use]
+    pub fn is_commit_unknown(&self) -> bool {
+        matches!(self.category, PgConsumerTxRequeueCategory::CommitUnknown)
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> &'static str {
+        self.summary
+    }
+}
+
 #[cfg(feature = "domain-audit")]
 /// Postgres-backed ConsumerTx audit handler.
 pub struct PgAuditConsumerTx<M: MacVerifier> {
     pool: PgTenantWritePool,
     hasher: Arc<AuditChainHasher<M>>,
     kind: AuditEventKind,
-}
-
-#[cfg(feature = "domain-audit")]
-mod audit_consumer_tx_effect_sealed {
-    pub trait Sealed {}
-}
-
-/// Canonical effect classification and the only public erasure path for the durable audit
-/// consumer transaction capability.
-///
-/// The trait is sealed by the postgres adapter, so downstream composition roots can erase a
-/// [`PgAuditConsumerTx`] into an event handler only after the compiler has proved that the typed
-/// capability carries [`diport::BusinessWriteEffect`].
-#[cfg(feature = "domain-audit")]
-pub trait AuditConsumerTxEffect: audit_consumer_tx_effect_sealed::Sealed {
-    /// Strongest effect exposed by the durable consumer transaction.
-    type Effect: diport::PortEffectClass;
-
-    /// Erase this classified transaction capability into the event executor handler shape.
-    #[must_use]
-    fn into_handler(self) -> ConsumerTxHandlerFn
-    where
-        Self: Sized + AuditConsumerTxEffect<Effect = diport::BusinessWriteEffect>;
 }
 
 #[cfg(feature = "domain-audit")]
@@ -97,21 +136,13 @@ where
         }
     }
 
-    fn erase_into_handler(self) -> ConsumerTxHandlerFn {
-        let this = Arc::new(self);
-        Box::new(move |message, ctx, key, lease| {
-            let this = Arc::clone(&this);
-            Box::pin(async move { this.handle(message, ctx, key, lease).await })
-        })
-    }
-
-    async fn handle(
+    async fn handle_attempt(
         &self,
         message: diport::Message,
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
-    ) -> ConsumerTxOutcome {
+    ) -> PgConsumerTxOutcome {
         let record = match self.validated_record_from_message(&message, &ctx) {
             Ok(record) => record,
             Err(outcome) => return outcome,
@@ -167,7 +198,7 @@ where
         &self,
         message: &diport::Message,
         ctx: &InboxReceiptContext,
-    ) -> Result<AuditRecord, ConsumerTxOutcome> {
+    ) -> Result<AuditRecord, PgConsumerTxOutcome> {
         let record = self
             .record_from_message(message)
             .map_err(|error| reject_audit_payload(message, &error))?;
@@ -179,17 +210,18 @@ where
 }
 
 #[cfg(feature = "domain-audit")]
-impl<M> audit_consumer_tx_effect_sealed::Sealed for PgAuditConsumerTx<M> where M: MacVerifier {}
-
-#[cfg(feature = "domain-audit")]
-impl<M> AuditConsumerTxEffect for PgAuditConsumerTx<M>
+impl<M> PgAuditConsumerTx<M>
 where
     M: MacVerifier + Send + Sync + 'static,
 {
-    type Effect = diport::BusinessWriteEffect;
-
-    fn into_handler(self) -> ConsumerTxHandlerFn {
-        self.erase_into_handler()
+    pub fn handle(
+        self: Arc<Self>,
+        message: diport::Message,
+        ctx: InboxReceiptContext,
+        key: IdemKey,
+        lease: LeaseToken,
+    ) -> futures::future::BoxFuture<'static, PgConsumerTxOutcome> {
+        Box::pin(async move { self.handle_attempt(message, ctx, key, lease).await })
     }
 }
 
@@ -197,42 +229,34 @@ where
 /// Postgres-backed ConsumerTx handler for settings config-version-changed.
 pub struct PgSettingsConsumerTx {
     pool: PgTenantWritePool,
-    effect: SubscriberEffect,
+    reconciler: Arc<settings::ConfigVersionReconciler>,
 }
 
 #[cfg(feature = "domain-settings")]
 impl PgSettingsConsumerTx {
     pub(crate) fn config_version_changed(
         store: &VerifiedPgWriteStore,
-        effect: SubscriberEffect,
+        reconciler: Arc<settings::ConfigVersionReconciler>,
     ) -> Self {
         Self {
             pool: PgTenantWritePool::new(store),
-            effect,
+            reconciler,
         }
     }
 
-    #[must_use]
-    pub fn into_handler(self) -> ConsumerTxHandlerFn {
-        let this = Arc::new(self);
-        Box::new(move |message, ctx, key, lease| {
-            let this = Arc::clone(&this);
-            Box::pin(async move { this.handle(message, ctx, key, lease).await })
-        })
-    }
-
-    async fn handle(
+    async fn handle_attempt(
         &self,
         message: diport::Message,
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
-    ) -> ConsumerTxOutcome {
+    ) -> PgConsumerTxOutcome {
         let message_id = message.id.as_str().to_string();
         let tenant = ctx.tenant_id();
-        if let Err(outcome) =
-            settings_refresh_outcome(&message_id, (self.effect)(message, tenant).await)
-        {
+        if let Err(outcome) = settings_refresh_outcome(
+            &message_id,
+            self.reconciler.reconcile(message, tenant).await,
+        ) {
             return outcome;
         }
         pg_consumer_tx_outcome("settings", self.mark_done_only(ctx, key, lease).await)
@@ -265,13 +289,26 @@ impl PgSettingsConsumerTx {
     }
 }
 
+#[cfg(feature = "domain-settings")]
+impl PgSettingsConsumerTx {
+    pub fn handle(
+        self: Arc<Self>,
+        message: diport::Message,
+        ctx: InboxReceiptContext,
+        key: IdemKey,
+        lease: LeaseToken,
+    ) -> futures::future::BoxFuture<'static, PgConsumerTxOutcome> {
+        Box::pin(async move { self.handle_attempt(message, ctx, key, lease).await })
+    }
+}
+
 fn pg_consumer_tx_outcome(
     scope: &'static str,
     result: Result<(), PgConsumerTxError>,
-) -> ConsumerTxOutcome {
+) -> PgConsumerTxOutcome {
     match result {
-        Ok(()) => ConsumerTxOutcome::Committed,
-        Err(PgConsumerTxError::LeaseLost) => ConsumerTxOutcome::LeaseLost {
+        Ok(()) => PgConsumerTxOutcome::Committed(PgConsumerTxCommitProof::committed()),
+        Err(PgConsumerTxError::LeaseLost) => PgConsumerTxOutcome::LeaseLost {
             summary: EngineErrorKind::Transient.message(),
         },
         Err(error) => {
@@ -280,7 +317,7 @@ fn pg_consumer_tx_outcome(
                 error = %secure::redact_error(&error),
                 "consumer-tx: postgres transaction failed"
             );
-            ConsumerTxOutcome::commit_unknown(EngineErrorKind::Transient.message())
+            PgConsumerTxOutcome::commit_unknown(EngineErrorKind::Transient.message())
         }
     }
 }
@@ -289,13 +326,13 @@ fn pg_consumer_tx_outcome(
 fn reject_audit_payload(
     message: &diport::Message,
     error: &AuditEventRecordError,
-) -> ConsumerTxOutcome {
+) -> PgConsumerTxOutcome {
     tracing::warn!(
         message_id = message.id.as_str(),
         error = %secure::redact_error(error),
         "consumer-tx: audit payload rejected"
     );
-    ConsumerTxOutcome::Reject {
+    PgConsumerTxOutcome::Reject {
         summary: consistency::PermanentErrorKind::Permanent.message(),
     }
 }
@@ -305,14 +342,14 @@ fn reject_audit_tenant_mismatch(
     message: &diport::Message,
     record: &AuditRecord,
     ctx: &InboxReceiptContext,
-) -> ConsumerTxOutcome {
+) -> PgConsumerTxOutcome {
     tracing::warn!(
         message_id = message.id.as_str(),
         payload_tenant = %record.tenant,
         receipt_tenant = %ctx.tenant_id(),
         "consumer-tx: audit payload tenant does not match verified envelope tenant"
     );
-    ConsumerTxOutcome::Reject {
+    PgConsumerTxOutcome::Reject {
         summary: consistency::PermanentErrorKind::Invariant.message(),
     }
 }
@@ -321,15 +358,15 @@ fn reject_audit_tenant_mismatch(
 fn settings_refresh_outcome(
     message_id: &str,
     result: HandleResult,
-) -> Result<(), ConsumerTxOutcome> {
+) -> Result<(), PgConsumerTxOutcome> {
     match result.disposition() {
         Disposition::Ack => Ok(()),
-        Disposition::Requeue => Err(ConsumerTxOutcome::handler_transient(
+        Disposition::Requeue => Err(PgConsumerTxOutcome::handler_transient(
             result
                 .error_summary()
                 .unwrap_or(EngineErrorKind::Transient.message()),
         )),
-        Disposition::Reject => Err(ConsumerTxOutcome::Reject {
+        Disposition::Reject => Err(PgConsumerTxOutcome::Reject {
             summary: result
                 .error_summary()
                 .unwrap_or(consistency::PermanentErrorKind::Permanent.message()),
@@ -339,7 +376,7 @@ fn settings_refresh_outcome(
                 message_id,
                 "consumer-tx: settings refresh returned unknown disposition"
             );
-            Err(ConsumerTxOutcome::handler_transient(
+            Err(PgConsumerTxOutcome::handler_transient(
                 EngineErrorKind::Invariant.message(),
             ))
         }

@@ -6,6 +6,12 @@
 //! INVARIANT: EVENT-CONSUMER-EXTERNAL-EFFECT-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_consumer_tx_plan_without_external_effect_policy", anti_vacuity = "tests::workspace_runtime_closes_consumer_tx_external_effect_policy" }——
 //! ConsumerTx plan 必须把 generated external-effect policy 纳入闭合 matcher；audit 仅接受
 //! transactional-only，settings refresh 仅接受 reconcile，任何漂移都在启动前 fail-closed。
+//! INVARIANT: EVENT-CONSUMER-RAW-EFFECT-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::consumer_policy_guard_rejects_raw_effect_bypass_matrix", anti_vacuity = "tests::consumer_policy_guard_accepts_closed_capability_without_raw_effect" }——
+//! policy-bound ConsumerTx handler 的 reachable production call graph 禁止绕过 capability 直接调用
+//! publisher/HTTP/email/MDM/cloud/object-store；direct、function-item/import alias、UFCS、cross-file
+//! helper、macro 与 chained request 均有 synthetic red，歧义 helper resolution fail closed。本 AST guard
+//! 不声称具备编译器 HIR/宏展开完备性，assembly-private handler/runner 与 exact owner activation
+//! 仍是主防线。
 //! INVARIANT: EVENT-PRODUCER-SPEC-PAIR-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::producer_ast_rejects_swapped_specs_without_partition_key", anti_vacuity = "tests::producer_ast_accepts_generated_spec_alias_and_counts_typed_partition_key" }——
 //! every authoring function must use exactly one identical generated SPEC for its EventEntry and
 //! envelope before any fact is admitted to the global topology set.
@@ -94,6 +100,7 @@ pub(crate) enum Rule {
     AmqpPublishFailureFunnel,
     AmqpRecoveryOwner,
     PostgresOutboxSettlementFunnel,
+    ConsumerExternalEffectCapability,
 }
 
 pub(crate) struct EventTransportGuard;
@@ -130,12 +137,534 @@ pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
     findings.extend(scan_relay_budget_constructor_callsites(
         &claim_cutover_sources,
     ));
+    findings.extend(scan_consumer_external_effect_capabilities(root)?);
     Ok((
         format!(
-            "{TARGET} 经 generated topology bridge + ConsumerTx PG inbox bundle 接线，生产 src 无散装 consumer bundle/outbox split claim"
+            "{TARGET} 经 generated topology bridge + ConsumerTx PG inbox bundle 接线；ConsumerTx active handlers=5，unauthorized external effect callsites=0"
         ),
         findings,
     ))
+}
+
+#[derive(Debug)]
+struct ConsumerPolicyCallable {
+    path: PathBuf,
+    name: String,
+    calls: BTreeSet<String>,
+    raw_calls: Vec<String>,
+    root: bool,
+}
+
+#[derive(Default)]
+struct ConsumerPolicyCallVisitor {
+    calls: BTreeSet<String>,
+    raw_calls: Vec<String>,
+    aliases: BTreeMap<String, String>,
+    raw_bindings: BTreeSet<String>,
+    raw_function_aliases: BTreeSet<String>,
+}
+
+impl ConsumerPolicyCallVisitor {
+    fn new(signature: &syn::Signature, aliases: &BTreeMap<String, String>) -> Self {
+        let mut visitor = Self {
+            aliases: aliases.clone(),
+            ..Self::default()
+        };
+        for input in &signature.inputs {
+            let syn::FnArg::Typed(input) = input else {
+                continue;
+            };
+            if raw_external_effect_owner(&normalized_tokens(&input.ty))
+                && let syn::Pat::Ident(binding) = input.pat.as_ref()
+            {
+                visitor.raw_bindings.insert(binding.ident.to_string());
+            }
+        }
+        visitor
+    }
+
+    fn resolve_alias(&self, name: &str) -> String {
+        let mut resolved = name.to_string();
+        let mut seen = BTreeSet::new();
+        while seen.insert(resolved.clone()) {
+            let Some(next) = self.aliases.get(&resolved) else {
+                break;
+            };
+            resolved = next.clone();
+        }
+        resolved
+    }
+
+    fn receiver_is_raw(&self, receiver: &syn::Expr, rendered: &str) -> bool {
+        if raw_external_effect_owner(rendered)
+            || raw_external_effect_chain(rendered)
+            || matches!(
+                peel_expr(receiver),
+                syn::Expr::Path(path)
+                    if path.path.segments.last().is_some_and(|segment| {
+                        self.raw_bindings.contains(&segment.ident.to_string())
+                    })
+            )
+        {
+            return true;
+        }
+        false
+    }
+}
+
+impl<'ast> Visit<'ast> for ConsumerPolicyCallVisitor {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = peel_expr(&node.func)
+            && let Some(segment) = path.path.segments.last()
+        {
+            let name = segment.ident.to_string();
+            let resolved = self.resolve_alias(&name);
+            let target = resolved.rsplit("::").next().unwrap_or(&resolved);
+            if self.raw_function_aliases.contains(&name)
+                || raw_external_effect_method(target, Some(&resolved))
+            {
+                self.raw_calls.push(normalized_tokens(node));
+            }
+            self.calls.insert(target.to_string());
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let method = node.method.to_string();
+        let receiver = normalized_tokens(&node.receiver);
+        if raw_external_effect_method(&method, Some(&receiver))
+            || (self.receiver_is_raw(&node.receiver, &receiver)
+                && raw_external_effect_operation(&method))
+        {
+            self.raw_calls.push(normalized_tokens(node));
+        }
+        self.calls.insert(method);
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if let syn::Pat::Ident(binding) = &node.pat
+            && let Some(init) = &node.init
+            && let syn::Expr::Path(path) = peel_expr(&init.expr)
+            && let Some(segment) = path.path.segments.last()
+        {
+            let alias = binding.ident.to_string();
+            let rendered = normalized_tokens(&path.path);
+            let resolved = self.resolve_alias(&segment.ident.to_string());
+            let target = resolved.rsplit("::").next().unwrap_or(&resolved);
+            if self
+                .raw_function_aliases
+                .contains(&segment.ident.to_string())
+                || raw_external_effect_method(target, Some(&rendered))
+            {
+                self.raw_function_aliases.insert(alias);
+            } else {
+                self.aliases.insert(alias, resolved);
+            }
+        }
+        syn::visit::visit_local(self, node);
+    }
+
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        collect_consumer_policy_use_aliases(&node.tree, String::new(), &mut self.aliases);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if let Some(segment) = node.path.segments.last() {
+            self.calls.insert(segment.ident.to_string());
+        }
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+fn raw_external_effect_method(method: &str, receiver: Option<&str>) -> bool {
+    if method == "publish" {
+        return true;
+    }
+    let receiver = receiver.unwrap_or_default().to_ascii_lowercase();
+    (raw_external_effect_owner(&receiver) || raw_external_effect_chain(&receiver))
+        && raw_external_effect_operation(method)
+}
+
+fn raw_external_effect_owner(rendered: &str) -> bool {
+    let rendered = rendered.to_ascii_lowercase();
+    [
+        "publisher",
+        "outboxemitter",
+        "objectstore",
+        "object_store",
+        "httpclient",
+        "email",
+        "mailer",
+        "mdm",
+        "cloud",
+        "reqwest",
+        "s3",
+    ]
+    .iter()
+    .any(|marker| rendered.contains(marker))
+}
+
+fn raw_external_effect_chain(rendered: &str) -> bool {
+    let rendered = rendered.to_ascii_lowercase();
+    [
+        ".post(",
+        ".get(",
+        ".put(",
+        ".patch(",
+        ".delete(",
+        ".request(",
+    ]
+    .iter()
+    .any(|marker| rendered.contains(marker))
+}
+
+fn raw_external_effect_operation(method: &str) -> bool {
+    matches!(
+        method,
+        "send" | "request" | "execute" | "post" | "put" | "put_object" | "upload" | "delete_object"
+    )
+}
+
+fn raw_external_effect_tokens(tokens: &str) -> bool {
+    let tokens = tokens.to_ascii_lowercase();
+    tokens.contains(".publish(")
+        || tokens.contains("::publish(")
+        || ((raw_external_effect_owner(&tokens) || raw_external_effect_chain(&tokens))
+            && [
+                ".send(",
+                ".request(",
+                ".execute(",
+                ".put(",
+                ".put_object(",
+                ".upload(",
+                ".delete_object(",
+            ]
+            .iter()
+            .any(|operation| tokens.contains(operation)))
+}
+
+fn collect_consumer_policy_use_aliases(
+    tree: &syn::UseTree,
+    prefix: String,
+    aliases: &mut BTreeMap<String, String>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let prefix = if prefix.is_empty() {
+                path.ident.to_string()
+            } else {
+                format!("{prefix}::{}", path.ident)
+            };
+            collect_consumer_policy_use_aliases(&path.tree, prefix, aliases);
+        }
+        syn::UseTree::Name(name) => {
+            let target = if prefix.is_empty() {
+                name.ident.to_string()
+            } else {
+                format!("{prefix}::{}", name.ident)
+            };
+            aliases.insert(name.ident.to_string(), target);
+        }
+        syn::UseTree::Rename(rename) => {
+            let target = if prefix.is_empty() {
+                rename.ident.to_string()
+            } else {
+                format!("{prefix}::{}", rename.ident)
+            };
+            aliases.insert(rename.rename.to_string(), target);
+        }
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                collect_consumer_policy_use_aliases(tree, prefix.clone(), aliases);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn consumer_policy_function_is_root(
+    owner: Option<&str>,
+    name: &str,
+    signature: &str,
+    body: &str,
+) -> bool {
+    let owner = owner.unwrap_or_default();
+    name.contains("consumer_tx_handler")
+        || signature.contains("ConsumerTxHandler<")
+        || body.contains("SubscriberCapability::")
+        || body.contains("ConsumerTxPlan::")
+        || body.contains("spawn_consumer_ackable_tx_subscriber")
+        || (owner.contains("ConfigVersionReconciler") && name == "reconcile")
+}
+
+fn collect_consumer_policy_callables(
+    path: &Path,
+    items: &[syn::Item],
+    inherited_aliases: &BTreeMap<String, String>,
+    callables: &mut Vec<ConsumerPolicyCallable>,
+) {
+    let mut aliases = inherited_aliases.clone();
+    for item in items {
+        if let syn::Item::Use(item) = item {
+            collect_consumer_policy_use_aliases(&item.tree, String::new(), &mut aliases);
+        }
+    }
+    for item in items {
+        if has_test_attr(match item {
+            syn::Item::Fn(item) => &item.attrs,
+            syn::Item::Impl(item) => &item.attrs,
+            syn::Item::Macro(item) => &item.attrs,
+            syn::Item::Mod(item) => &item.attrs,
+            _ => &[],
+        }) {
+            continue;
+        }
+        match item {
+            syn::Item::Fn(function) => {
+                let body = normalized_tokens(&function.block);
+                let signature = normalized_tokens(&function.sig);
+                let mut visitor = ConsumerPolicyCallVisitor::new(&function.sig, &aliases);
+                visitor.visit_block(&function.block);
+                callables.push(ConsumerPolicyCallable {
+                    path: path.to_path_buf(),
+                    name: function.sig.ident.to_string(),
+                    calls: visitor.calls,
+                    raw_calls: visitor.raw_calls,
+                    root: consumer_policy_function_is_root(
+                        None,
+                        &function.sig.ident.to_string(),
+                        &signature,
+                        &body,
+                    ),
+                });
+            }
+            syn::Item::Impl(item) => {
+                let owner = normalized_tokens(&item.self_ty);
+                for method in &item.items {
+                    let syn::ImplItem::Fn(method) = method else {
+                        continue;
+                    };
+                    if has_test_attr(&method.attrs) {
+                        continue;
+                    }
+                    let body = normalized_tokens(&method.block);
+                    let signature = normalized_tokens(&method.sig);
+                    let mut visitor = ConsumerPolicyCallVisitor::new(&method.sig, &aliases);
+                    visitor.visit_block(&method.block);
+                    callables.push(ConsumerPolicyCallable {
+                        path: path.to_path_buf(),
+                        name: method.sig.ident.to_string(),
+                        calls: visitor.calls,
+                        raw_calls: visitor.raw_calls,
+                        root: consumer_policy_function_is_root(
+                            Some(&owner),
+                            &method.sig.ident.to_string(),
+                            &signature,
+                            &body,
+                        ),
+                    });
+                }
+            }
+            syn::Item::Macro(item) => {
+                if let Some(ident) = &item.ident {
+                    let body = normalized_tokens(&item.mac.tokens);
+                    let raw_calls = if raw_external_effect_tokens(&body) {
+                        vec![body]
+                    } else {
+                        Vec::new()
+                    };
+                    callables.push(ConsumerPolicyCallable {
+                        path: path.to_path_buf(),
+                        name: ident.to_string(),
+                        calls: BTreeSet::new(),
+                        raw_calls,
+                        root: false,
+                    });
+                }
+            }
+            syn::Item::Mod(module) => {
+                if let Some((_, nested)) = &module.content {
+                    collect_consumer_policy_callables(path, nested, &aliases, callables);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn scan_consumer_policy_sources(sources: &[(PathBuf, String)]) -> (usize, Vec<Finding<Rule>>) {
+    let mut callables = Vec::new();
+    let mut findings = Vec::new();
+    for (path, source) in sources {
+        match syn::parse_file(source) {
+            Ok(file) => collect_consumer_policy_callables(
+                path,
+                &file.items,
+                &BTreeMap::new(),
+                &mut callables,
+            ),
+            Err(error) => findings.push(finding(
+                Rule::ConsumerExternalEffectCapability,
+                path.display().to_string(),
+                format!("ConsumerTx policy source AST 无法解析: {error}"),
+            )),
+        }
+    }
+
+    let root_count = callables.iter().filter(|callable| callable.root).count();
+    let mut reachable = callables
+        .iter()
+        .enumerate()
+        .filter_map(|(index, callable)| callable.root.then_some(index))
+        .collect::<BTreeSet<_>>();
+    let mut frontier = reachable.iter().copied().collect::<Vec<_>>();
+    while let Some(index) = frontier.pop() {
+        let calls = callables[index].calls.clone();
+        let scope = consumer_policy_source_scope(&callables[index].path);
+        for call in calls
+            .into_iter()
+            .filter(|call| consumer_policy_call_is_traversable(call))
+        {
+            let candidates = callables
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| {
+                    candidate.name == call && consumer_policy_source_scope(&candidate.path) == scope
+                })
+                .map(|(candidate_index, _)| candidate_index)
+                .collect::<Vec<_>>();
+            if candidates.len() > 4 {
+                findings.push(finding(
+                    Rule::ConsumerExternalEffectCapability,
+                    callables[index].path.display().to_string(),
+                    format!(
+                        "ConsumerTx policy ambiguous helper resolution for `{call}`: {} same-scope candidates exceed limit 4",
+                        candidates.len()
+                    ),
+                ));
+                continue;
+            }
+            for candidate_index in candidates {
+                if reachable.insert(candidate_index) {
+                    frontier.push(candidate_index);
+                }
+            }
+        }
+    }
+
+    for index in reachable {
+        let callable = &callables[index];
+        for raw_call in &callable.raw_calls {
+            findings.push(finding(
+                Rule::ConsumerExternalEffectCapability,
+                callable.path.display().to_string(),
+                format!(
+                    "unauthorized external effect reachable from ConsumerTx policy capability at `{}`: `{raw_call}`",
+                    callable.name
+                ),
+            ));
+        }
+    }
+    (root_count, findings)
+}
+
+fn consumer_policy_source_scope(path: &Path) -> PathBuf {
+    path.components().take(2).collect()
+}
+
+fn consumer_policy_call_is_traversable(name: &str) -> bool {
+    !matches!(
+        name,
+        "and_then"
+            | "as_ref"
+            | "as_str"
+            | "clone"
+            | "collect"
+            | "config"
+            | "contains"
+            | "execute"
+            | "expect"
+            | "from"
+            | "from_snapshot"
+            | "get"
+            | "insert"
+            | "into"
+            | "key"
+            | "map"
+            | "map_err"
+            | "new"
+            | "ok_or"
+            | "ok_or_else"
+            | "parse"
+            | "push"
+            | "register"
+            | "shutdown"
+            | "tenant"
+            | "to_owned"
+            | "to_string"
+            | "try_from"
+            | "unwrap_or"
+            | "unwrap_or_else"
+            | "version"
+    )
+}
+
+fn scan_consumer_external_effect_capabilities(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let sources = producer_source_files(root)?
+        .into_iter()
+        .map(|path| {
+            let source = std::fs::read_to_string(&path)
+                .with_context(|| format!("ConsumerTx policy guard: read {}", path.display()))?;
+            Ok((rel_path(root, &path), source))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (root_count, mut findings) = scan_consumer_policy_sources(&sources);
+    if root_count == 0 {
+        findings.push(finding(
+            Rule::ConsumerExternalEffectCapability,
+            TARGET,
+            "ConsumerTx policy guard 未发现 registration/plan/handler/executor capability root"
+                .to_string(),
+        ));
+    }
+
+    let active_subscriptions = generated::event::EVENTS
+        .iter()
+        .flat_map(|event| event.subscriptions().iter())
+        .collect::<Vec<_>>();
+    if active_subscriptions.len() != 5 {
+        findings.push(finding(
+            Rule::ConsumerExternalEffectCapability,
+            "generated::event::EVENTS",
+            format!(
+                "ConsumerTx active handler anti-vacuity drift: expected 5, got {}",
+                active_subscriptions.len()
+            ),
+        ));
+    }
+    for subscription in active_subscriptions {
+        if !matches!(
+            subscription.external_effect_policy(),
+            vocab::ExternalEffectPolicy::TransactionalOnly | vocab::ExternalEffectPolicy::Reconcile
+        ) {
+            findings.push(finding(
+                Rule::ConsumerExternalEffectCapability,
+                subscription.group(),
+                format!(
+                    "active ConsumerTx policy lacks production capability/executor: {:?}",
+                    subscription.external_effect_policy()
+                ),
+            ));
+        }
+    }
+    findings.sort_by(|left, right| {
+        left.subject
+            .cmp(&right.subject)
+            .then_with(|| left.detail.cmp(&right.detail))
+    });
+    Ok(findings)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -849,6 +1378,8 @@ struct RuntimeShape {
     generated_events_bridge: bool,
     bridged_input: bool,
     required_worker_probe_bundle: bool,
+    policy_bound_worker_activation: bool,
+    resolver_passes_generated_policy: bool,
     handler_mapping: bool,
     adapter_native_external_effect_policy: bool,
     settings_refresh_external_effect_policy: bool,
@@ -899,8 +1430,7 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                     "pg.infra().inbox()",
                     "LeaseConfig::from_ttl(inbox.lease_ttl())",
                     "dead_letter(security.dlx_payload_protector.clone())",
-                    "consumer_tx_handler_for_subscription(pg,&subscription,audit_key)",
-                    "spawn_consumer_ackable_tx_subscriber(",
+                    "consumer_tx_worker_for_subscription(",
                     "matchsubscription.readiness()",
                     "SubscriberReadiness::Required=>",
                     "module.workers.push(worker)",
@@ -910,30 +1440,35 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                 .iter()
                 .all(|required| body.contains(required));
             }
+            syn::Item::Fn(item) if item.sig.ident == "consumer_tx_worker_spec" => {
+                let signature = normalized_tokens(&item.sig);
+                let body = normalized_tokens(&item.block);
+                shape.policy_bound_worker_activation = signature.contains("ConsumerTxHandler<P>")
+                    && body.contains("spawn_consumer_ackable_tx_subscriber(");
+            }
             syn::Item::Fn(item) if item.sig.ident == "resolve_consumer_tx_plan" => {
+                let body = normalized_tokens(&item.block);
+                shape.resolver_passes_generated_policy = [
+                    "resolve_consumer_tx_plan_parts(",
+                    "spec.dispatch()",
+                    "spec.execution()",
+                    "spec.effect()",
+                    "spec.external_effect_policy()",
+                    "capability",
+                ]
+                .iter()
+                .all(|required| body.contains(required));
+            }
+            syn::Item::Fn(item) if item.sig.ident == "resolve_consumer_tx_plan_parts" => {
                 shape.handler_mapping = consumer_tx_plan_resolver_is_closed(item);
             }
             syn::Item::Fn(item) if item.sig.ident == "adapter_native_plan" => {
-                shape.adapter_native_external_effect_policy = consumer_tx_plan_matcher_is_closed(
-                    item,
-                    [
-                        "SubscriptionExecution::AdapterNative",
-                        "None",
-                        "ExternalEffectPolicy::TransactionalOnly",
-                        "SubscriberExecution::AdapterNative",
-                    ],
-                );
+                shape.adapter_native_external_effect_policy =
+                    consumer_tx_plan_matcher_is_closed(item, false);
             }
             syn::Item::Fn(item) if item.sig.ident == "settings_config_refresh_plan" => {
-                shape.settings_refresh_external_effect_policy = consumer_tx_plan_matcher_is_closed(
-                    item,
-                    [
-                        "SubscriptionExecution::DomainEffect",
-                        "Some(SubscriptionEffect::SettingsConfigVersionRefresh)",
-                        "ExternalEffectPolicy::Reconcile",
-                        "SubscriberExecution::DomainEffect(effect)",
-                    ],
-                );
+                shape.settings_refresh_external_effect_policy =
+                    consumer_tx_plan_matcher_is_closed(item, true);
             }
             _ => {}
         }
@@ -953,7 +1488,7 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
             "wire_event_transport 必须消费 Vec<BridgedSubscription>",
         ),
         (
-            shape.required_worker_probe_bundle,
+            shape.required_worker_probe_bundle && shape.policy_bound_worker_activation,
             "consumer bundle 必须以 Required 穷尽分支成对注册 PG ConsumerTx worker 与 readyz probe",
         ),
         (
@@ -961,9 +1496,16 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
             "runtime 必须以单一 resolver 穷尽匹配 generated typed dispatch key → ConsumerTx plan，且不得使用 wildcard/guard",
         ),
         (
-            shape.adapter_native_external_effect_policy
-                && shape.settings_refresh_external_effect_policy,
-            "ConsumerTx plan 必须在闭合 matcher 中消费 externalEffectPolicy：audit=transactional-only、settings refresh=reconcile，且 mismatch fail-closed",
+            shape.resolver_passes_generated_policy,
+            "ConsumerTx resolver 必须把 generated externalEffectPolicy 传入唯一 plan matcher",
+        ),
+        (
+            shape.adapter_native_external_effect_policy,
+            "ConsumerTx plan 必须闭合匹配 adapter-native + transactional-only capability",
+        ),
+        (
+            shape.settings_refresh_external_effect_policy,
+            "ConsumerTx plan 必须闭合匹配 settings refresh + reconcile capability",
         ),
     ]
     .into_iter()
@@ -979,61 +1521,91 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
 }
 
 fn consumer_tx_plan_resolver_is_closed(item: &syn::ItemFn) -> bool {
-    let Some(syn::Stmt::Expr(syn::Expr::Match(mapping), None)) = item.block.stmts.last() else {
-        return false;
-    };
-    normalized_tokens(&mapping.expr) == "spec.dispatch()"
-        && !mapping.arms.is_empty()
-        && mapping.arms.iter().all(|arm| {
-            arm.guard.is_none()
-                && matches!(&arm.pat, syn::Pat::Path(path)
-                    if path.path.segments.len() == 2
-                        && path.path.segments[0].ident == "SubscriptionDispatchKey")
-        })
+    let signature = normalized_tokens(&item.sig);
+    let body = normalized_tokens(&item.block);
+    let mut visitor = ConsumerPolicyMatchVisitor::default();
+    visitor.visit_block(&item.block);
+    signature.contains("dispatch:SubscriptionDispatchKey")
+        && signature.contains("policy:ExternalEffectPolicy")
+        && signature.contains("capability:SubscriberCapability")
+        && visitor.dispatch_is_closed
+        && visitor.policy_is_closed
+        && body.contains("adapter_native_plan(")
+        && body.contains("settings_config_refresh_plan(")
 }
 
-fn consumer_tx_plan_matcher_is_closed(item: &syn::ItemFn, expected: [&str; 4]) -> bool {
-    let Some(syn::Stmt::Expr(syn::Expr::Match(mapping), None)) = item.block.stmts.last() else {
-        return false;
-    };
-    let syn::Expr::Tuple(input) = mapping.expr.as_ref() else {
-        return false;
-    };
-    let expected_input = [
-        "spec.execution()",
-        "spec.effect()",
-        "spec.external_effect_policy()",
-        "execution",
-    ];
-    if input.elems.len() != expected_input.len()
-        || input
-            .elems
-            .iter()
-            .zip(expected_input)
-            .any(|(actual, expected)| normalized_tokens(actual) != expected)
-        || mapping.arms.len() != 2
-    {
-        return false;
-    }
+#[derive(Default)]
+struct ConsumerPolicyMatchVisitor {
+    dispatch_is_closed: bool,
+    policy_is_closed: bool,
+    has_wildcard: bool,
+}
 
-    let success = &mapping.arms[0];
-    let failure = &mapping.arms[1];
-    let syn::Pat::Tuple(success_pattern) = &success.pat else {
-        return false;
-    };
-    success.guard.is_none()
-        && success_pattern.elems.len() == expected.len()
-        && success_pattern
-            .elems
+impl<'ast> Visit<'ast> for ConsumerPolicyMatchVisitor {
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        let input = normalized_tokens(&node.expr);
+        if input == "dispatch" {
+            self.dispatch_is_closed = !node.arms.is_empty()
+                && node.arms.iter().all(|arm| {
+                    arm.guard.is_none()
+                        && matches!(&arm.pat, syn::Pat::Path(path)
+                            if path.path.segments.len() == 2
+                                && path.path.segments[0].ident == "SubscriptionDispatchKey")
+                });
+        }
+        if input == "policy" {
+            let patterns = node
+                .arms
+                .iter()
+                .map(|arm| normalized_tokens(&arm.pat))
+                .collect::<String>();
+            self.policy_is_closed = [
+                "ExternalEffectPolicy::TransactionalOnly",
+                "ExternalEffectPolicy::IdempotencyKey",
+                "ExternalEffectPolicy::Reconcile",
+                "ExternalEffectPolicy::Compensated",
+            ]
             .iter()
-            .zip(expected)
-            .all(|(actual, expected)| normalized_tokens(actual) == expected)
-        && normalized_tokens(success.body.as_ref()).starts_with("Ok(")
-        && failure.guard.is_none()
-        && matches!(failure.pat, syn::Pat::Wild(_))
-        && normalized_tokens(failure.body.as_ref()).starts_with("anyhow::bail!(")
-        && normalized_tokens(failure.body.as_ref()).contains("policy={:?}")
-        && normalized_tokens(failure.body.as_ref()).contains("spec.external_effect_policy()")
+            .all(|variant| patterns.contains(variant))
+                && node.arms.iter().all(|arm| arm.guard.is_none());
+        }
+        if node
+            .arms
+            .iter()
+            .any(|arm| matches!(arm.pat, syn::Pat::Wild(_)))
+        {
+            self.has_wildcard = true;
+        }
+        syn::visit::visit_expr_match(self, node);
+    }
+}
+
+fn consumer_tx_plan_matcher_is_closed(item: &syn::ItemFn, reconcile: bool) -> bool {
+    let body = normalized_tokens(&item.block);
+    let mut visitor = ConsumerPolicyMatchVisitor::default();
+    visitor.visit_block(&item.block);
+    let common = [
+        "match execution",
+        "match effect",
+        "match policy",
+        "SubscriberCapability::AdapterNativeTransactional",
+        "SubscriberCapability::DomainReconcile",
+        "ExternalEffectPolicy::TransactionalOnly",
+        "ExternalEffectPolicy::IdempotencyKey",
+        "ExternalEffectPolicy::Reconcile",
+        "ExternalEffectPolicy::Compensated",
+    ]
+    .iter()
+    .all(|required| body.contains(&required.replace(' ', "")));
+    let policy_specific = if reconcile {
+        body.contains("SubscriberCapability::DomainReconcile(effect)ifgenerated_matches")
+            && body.contains("into_owner::<settings::ConfigVersionReconciler>()")
+            && body.contains(".map(ConsumerTxPlan::SettingsConfigVersionChanged)")
+    } else {
+        body.contains("SubscriberCapability::AdapterNativeTransactionalifgenerated_matches")
+            && body.contains("Ok(plan)")
+    };
+    common && policy_specific && !visitor.has_wildcard
 }
 
 fn normalized_tokens(tokens: &impl ToTokens) -> String {
@@ -5729,6 +6301,292 @@ fn rel_path(root: &Path, path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn assert_consumer_policy_raw_effect_is_rejected(case: &str, sources: &[(PathBuf, &str)]) {
+        let sources = sources
+            .iter()
+            .map(|(path, source)| (path.clone(), (*source).to_string()))
+            .collect::<Vec<_>>();
+        let (_, findings) = scan_consumer_policy_sources(&sources);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ConsumerExternalEffectCapability
+                    && finding.detail.contains("unauthorized external effect")
+            }),
+            "synthetic-red `{case}` must expose an unauthorized raw external effect: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn consumer_policy_guard_accepts_closed_capability_without_raw_effect() {
+        let sources = [(
+            PathBuf::from("adapters/postgres/src/consumer_tx.rs"),
+            r#"
+            fn audit_consumer_tx_handler() -> ConsumerTxHandler<TransactionalOnly> {
+                ConsumerTxHandler::transactional(|tx| async move {
+                    tx.write_business_row().await?;
+                    tx.append_outbox().await?;
+                    tx.mark_inbox_done().await
+                })
+            }
+            "#
+            .to_string(),
+        )];
+        let (roots, findings) = scan_consumer_policy_sources(&sources);
+        assert_eq!(roots, 1);
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn consumer_policy_guard_roots_concrete_settings_reconciler() {
+        assert_consumer_policy_raw_effect_is_rejected(
+            "settings-owner-reconcile",
+            &[(
+                PathBuf::from("crates/settings/src/application.rs"),
+                r#"
+                impl ConfigVersionReconciler {
+                    fn reconcile(&self, publisher: DynPublisher) {
+                        publisher.publish(message);
+                    }
+                }
+                "#,
+            )],
+        );
+    }
+
+    #[test]
+    fn consumer_policy_guard_rejects_direct_raw_publisher_call() {
+        assert_consumer_policy_raw_effect_is_rejected(
+            "direct",
+            &[(
+                PathBuf::from("adapters/postgres/src/consumer_tx.rs"),
+                r#"
+                fn audit_consumer_tx_handler(publisher: DynPublisher) {
+                    publisher.publish(message);
+                }
+                "#,
+            )],
+        );
+    }
+
+    #[test]
+    fn consumer_policy_guard_rejects_aliased_raw_publisher_call() {
+        assert_consumer_policy_raw_effect_is_rejected(
+            "alias",
+            &[(
+                PathBuf::from("adapters/postgres/src/consumer_tx.rs"),
+                r#"
+                use eventbus::Publisher as EffectSink;
+                fn audit_consumer_tx_handler(sink: EffectSink) {
+                    EffectSink::publish(&sink, message);
+                }
+                "#,
+            )],
+        );
+    }
+
+    #[test]
+    fn consumer_policy_guard_rejects_cross_file_helper_raw_call() {
+        assert_consumer_policy_raw_effect_is_rejected(
+            "cross-file",
+            &[
+                (
+                    PathBuf::from("adapters/postgres/src/consumer_tx.rs"),
+                    r#"
+                    fn audit_consumer_tx_handler(effect: &EffectHelper) {
+                        effect.emit(message);
+                    }
+                    "#,
+                ),
+                (
+                    PathBuf::from("adapters/postgres/src/effect_helper.rs"),
+                    r#"
+                    impl EffectHelper {
+                        fn emit(&self, message: Message) {
+                            self.publisher.publish(message);
+                        }
+                    }
+                    "#,
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn consumer_policy_guard_rejects_macro_hidden_raw_call() {
+        assert_consumer_policy_raw_effect_is_rejected(
+            "macro",
+            &[(
+                PathBuf::from("adapters/postgres/src/consumer_tx.rs"),
+                r#"
+                macro_rules! emit_external {
+                    ($publisher:expr, $message:expr) => {
+                        $publisher.publish($message)
+                    };
+                }
+                fn audit_consumer_tx_handler(publisher: DynPublisher) {
+                    emit_external!(publisher, message);
+                }
+                "#,
+            )],
+        );
+    }
+
+    #[test]
+    fn consumer_policy_guard_rejects_raw_effect_bypass_matrix() {
+        let cases = [
+            (
+                "function-item-alias",
+                r#"
+                fn audit_consumer_tx_handler(publisher: DynPublisher) {
+                    let send = DynPublisher::publish;
+                    send(&publisher, message);
+                }
+                "#,
+            ),
+            (
+                "renamed-wrapper",
+                r#"
+                fn deliver_raw(publisher: DynPublisher) {
+                    publisher.publish(message);
+                }
+                fn audit_consumer_tx_handler(publisher: DynPublisher) {
+                    use crate::deliver_raw as renamed_wrapper;
+                    renamed_wrapper(publisher);
+                }
+                "#,
+            ),
+            (
+                "ufcs",
+                r#"
+                fn audit_consumer_tx_handler(publisher: DynPublisher) {
+                    DynPublisher::publish(&publisher, message);
+                }
+                "#,
+            ),
+            (
+                "chained-http-send",
+                r#"
+                fn audit_consumer_tx_handler(client: HttpClient) {
+                    client.post(url).send();
+                }
+                "#,
+            ),
+            (
+                "http-request",
+                r#"
+                fn audit_consumer_tx_handler(client: HttpClient) {
+                    client.request(request);
+                }
+                "#,
+            ),
+            (
+                "http-execute",
+                r#"
+                fn audit_consumer_tx_handler(client: HttpClient) {
+                    client.execute(request);
+                }
+                "#,
+            ),
+            (
+                "email-send",
+                r#"
+                fn audit_consumer_tx_handler(email: EmailClient) {
+                    email.send(message);
+                }
+                "#,
+            ),
+            (
+                "object-store-put",
+                r#"
+                fn audit_consumer_tx_handler(store: DynObjectStore) {
+                    store.put_object(key, bytes);
+                }
+                "#,
+            ),
+            (
+                "cloud-upload",
+                r#"
+                fn audit_consumer_tx_handler(cloud: CloudClient) {
+                    cloud.upload(key, bytes);
+                }
+                "#,
+            ),
+            (
+                "helper-object-store",
+                r#"
+                fn persist_blob(store: DynObjectStore) {
+                    store.put_object(key, bytes);
+                }
+                fn audit_consumer_tx_handler(store: DynObjectStore) {
+                    persist_blob(store);
+                }
+                "#,
+            ),
+            (
+                "macro-hidden-http",
+                r#"
+                macro_rules! call_external {
+                    ($client:expr) => {
+                        $client.post(url).send()
+                    };
+                }
+                fn audit_consumer_tx_handler(client: HttpClient) {
+                    call_external!(client);
+                }
+                "#,
+            ),
+            (
+                "macro-hidden-email",
+                r#"
+                macro_rules! send_mail {
+                    ($email:expr) => {
+                        $email.send(message)
+                    };
+                }
+                fn audit_consumer_tx_handler(email: EmailClient) {
+                    send_mail!(email);
+                }
+                "#,
+            ),
+        ];
+        for (case, source) in cases {
+            assert_consumer_policy_raw_effect_is_rejected(
+                case,
+                &[(
+                    PathBuf::from("adapters/postgres/src/consumer_tx.rs"),
+                    source,
+                )],
+            );
+        }
+    }
+
+    #[test]
+    fn consumer_policy_guard_fails_closed_when_helper_resolution_is_ambiguous() {
+        let mut source = String::from(
+            r#"
+            fn audit_consumer_tx_handler() {
+                shared_helper();
+            }
+            "#,
+        );
+        for index in 0..5 {
+            source.push_str(&format!(
+                "mod candidate_{index} {{ fn shared_helper() {{}} }}\n"
+            ));
+        }
+        let (_, findings) = scan_consumer_policy_sources(&[(
+            PathBuf::from("adapters/postgres/src/consumer_tx.rs"),
+            source,
+        )]);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ConsumerExternalEffectCapability
+                    && finding.detail.contains("ambiguous helper resolution")
+            }),
+            "more than four same-name helper candidates must fail closed: {findings:#?}"
+        );
+    }
+
     #[allow(clippy::unwrap_used)]
     fn scan_producer_source(content: &str) -> (ProducerFacts, Vec<Finding<Rule>>) {
         let file = syn::parse_file(content).unwrap();
@@ -6029,9 +6887,8 @@ mod tests {
                     pg.infra()
                         .dead_letter(security.dlx_payload_protector.clone()),
                 );
-                let handler =
-                    consumer_tx_handler_for_subscription(pg, &subscription, audit_key)?;
-                let worker = spawn_consumer_ackable_tx_subscriber();
+                let worker =
+                    consumer_tx_worker_for_subscription(pg, &subscription, audit_key, inputs)?;
                 let consumer_probe = probe();
                 match subscription.readiness() {
                     SubscriberReadiness::Required => {
@@ -6040,6 +6897,11 @@ mod tests {
                     }
                 }
                 wire_inbox_sweeper(pg, timing, module)?;
+            }
+            fn consumer_tx_worker_spec<P>(
+                handler: ConsumerTxHandler<P>,
+            ) {
+                spawn_consumer_ackable_tx_subscriber(handler);
             }
             fn resolve_consumer_tx_plan(
                 spec: SubscriptionSpec,
@@ -6056,7 +6918,12 @@ mod tests {
         );
         let unrelated = findings
             .iter()
-            .filter(|finding| !finding.detail.contains("externalEffectPolicy"))
+            .filter(|finding| {
+                finding.detail.contains("BridgedSubscription")
+                    || finding.detail.contains("bridge_generated_subscriptions")
+                    || finding.detail.contains("wire_event_transport")
+                    || finding.detail.contains("consumer bundle")
+            })
             .collect::<Vec<_>>();
         assert!(unrelated.is_empty(), "{unrelated:?}");
     }
@@ -6149,7 +7016,7 @@ mod tests {
         .items
         .into_iter()
         .find_map(|item| match item {
-            syn::Item::Fn(item) if item.sig.ident == "resolve_consumer_tx_plan" => Some(item),
+            syn::Item::Fn(item) if item.sig.ident == "resolve_consumer_tx_plan_parts" => Some(item),
             _ => None,
         })
         .expect("runtime resolver exists")

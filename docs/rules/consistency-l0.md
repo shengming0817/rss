@@ -253,10 +253,11 @@ ref: casbin/casbin-rs src/management_api.rs@fc425d4a2522ab1ee97e3bd8fada8b3ef45d
 `audit.list-entries` 只服务 ambient tenant scoped read，声明 `auth`/`read`/`projection`，不接受
 `tenantId` query。跨租户行为由独立 LocalTx `audit.list-tenant-entries` 承载，避免把 durable audit write
 藏在 L0 声明下。ambient `AuditDomain` 只注入 `AuditReadRepo`；demo/tests 可显式持有窄
-`AuditWriteRepo`，生产 durable subscriber 则只能经 postgres-owner-sealed `AuditConsumerTxEffect`
-把固定为 `BusinessWriteEffect` 的 `PgAuditConsumerTx` 擦除成执行器 handler；擦除方法自身要求关联类型等式，不依赖
-旁路 smoke test。该 handler 保持 audit append 与 inbox commit 同一事务。两条路径均不向 ambient route
-暴露可同时读写的宽 capability。
+`AuditWriteRepo`，生产 durable subscriber 则只能由具体 `PgAuditConsumerTx` 进入 runtime assembly 私有的
+`ConsumerTxHandler<policy::TransactionalOnly>`；旧 `BusinessWriteEffect` 关联类型以及公开 handler/outcome/
+runner/spawn 均不存在。该 handler 保持 audit append 与 inbox commit 同一事务，policy marker 直到 worker
+activation 都不丢失。
+两条路径均不向 ambient route 暴露可同时读写的宽 capability。
 
 ## Failure and adoption semantics
 

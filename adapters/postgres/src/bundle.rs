@@ -962,9 +962,9 @@ impl PgDomainDeps<caps::Settings> {
     #[must_use]
     pub fn config_version_changed_consumer_tx(
         &self,
-        effect: bootstrap::SubscriberEffect,
+        reconciler: std::sync::Arc<settings::ConfigVersionReconciler>,
     ) -> PgSettingsConsumerTx {
-        PgSettingsConsumerTx::config_version_changed(self.stores.writer_capability(), effect)
+        PgSettingsConsumerTx::config_version_changed(self.stores.writer_capability(), reconciler)
     }
 }
 

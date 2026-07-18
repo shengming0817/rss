@@ -2,7 +2,11 @@
 //!
 //! INVARIANT: L2-ASSURANCE-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private role-specific evidence construction plus closed Role, CarrierKind, ClosedStatus, and EvidenceStatus types make incomplete or caller-authored status records unrepresentable" }——
 //! producer and fact records have distinct closed evidence types. A producer can only be authored
-//! with contract/generated/execution/fault; the former runtime/effect carrier bag is absent.
+//! with contract/generated/execution/fault；fact effect evidence 则由 active subscription 动态发现
+//! registration/plan/handler/executor 四阶段真实 carrier，generated SPEC 不得冒充执行证据。
+//! INVARIANT: L2-ASSURANCE-CONSUMER-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "event_transport_guard::tests::consumer_policy_guard_rejects_raw_effect_bypass_matrix", anti_vacuity = "tests::workspace_fact_effect_evidence_closes_all_policy_stages" }——
+//! active ConsumerTx handler 数从 generated subscriptions 计算且当前精确为 5；每条 policy capability
+//! 必须在四个执行阶段都有唯一、非测试 Rust symbol carrier。
 //! INVARIANT: L2-ASSURANCE-WIRE-01 { level = "Hard", exec = "verify", source = "codegen", golden = "generated/l2-assurance.json", synthetic_red = "tests::check_rejects_missing_tampered_and_crlf_without_writing", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
 //! the typed JSON v3 projection and committed golden are byte-for-byte deterministic and reject
 //! missing, tampered, or non-LF output without writing in check mode.
@@ -27,12 +31,13 @@ use assembly_schema::contract_manifest::{
 };
 use assembly_schema::repository_contract::{DiscoveredContract, schema_hash};
 use generated::event::{
-    ExternalEffectPolicy as GeneratedExternalEffectPolicy,
     SubscriptionEffect as GeneratedSubscriptionEffect,
     SubscriptionExecution as GeneratedSubscriptionExecution,
 };
 use serde::Serialize;
-use vocab::{HttpConsistencyLevel, HttpEffectKind};
+use vocab::{
+    ExternalEffectPolicy as GeneratedExternalEffectPolicy, HttpConsistencyLevel, HttpEffectKind,
+};
 
 use crate::{
     consistency_fixtures, contract, event_transport_guard, generated_file, producer_assurance,
@@ -171,7 +176,12 @@ fn build_inventory(root: &Path) -> Result<Inventory> {
         let fault = fault_evidence
             .get(id)
             .with_context(|| format!("active L2 fact lacks named fault evidence: {id}"))?;
-        let evidence = complete_fact_evidence(root, contract, named_fault_carriers(root, fault)?)?;
+        let evidence = complete_fact_evidence(
+            root,
+            contract,
+            &subscriptions,
+            named_fault_carriers(root, fault)?,
+        )?;
         records.push(AssuranceRecord::fact(
             Identity::from_contract(contract),
             FactDetails {
@@ -775,6 +785,7 @@ fn complete_producer_evidence(
 fn complete_fact_evidence(
     root: &Path,
     contract: &DiscoveredContract,
+    subscriptions: &[SubscriptionIdentity],
     fault_carriers: Vec<Carrier>,
 ) -> Result<CompleteEvidence<FactEvidence>> {
     let manifest_path = repo_label(root, &contract.dir.join("contract.toml"))?;
@@ -805,14 +816,155 @@ fn complete_fact_evidence(
             &spec.symbol,
         )?])?,
         EvidenceFacet::new(runtime)?,
-        EvidenceFacet::new(vec![Carrier::new(
-            root,
-            CarrierKind::RustSymbol,
-            &spec.repo_path,
-            &spec.symbol,
-        )?])?,
+        EvidenceFacet::new(fact_effect_policy_carriers(root, subscriptions)?)?,
         EvidenceFacet::new(fault_carriers)?,
     )
+}
+
+fn fact_effect_policy_carriers(
+    root: &Path,
+    subscriptions: &[SubscriptionIdentity],
+) -> Result<Vec<Carrier>> {
+    let mut carriers = Vec::new();
+    for subscription in subscriptions {
+        let (registration_marker, handler_marker) = match subscription.external_effect_policy {
+            AssuranceExternalEffectPolicy::TransactionalOnly => (
+                "SubscriberCapability::AdapterNativeTransactional",
+                "ConsumerTxHandler<policy::TransactionalOnly>",
+            ),
+            AssuranceExternalEffectPolicy::Reconcile => (
+                "SubscriberCapability::DomainReconcile",
+                "ConsumerTxHandler<policy::Reconcile>",
+            ),
+            AssuranceExternalEffectPolicy::IdempotencyKey
+            | AssuranceExternalEffectPolicy::Compensated => {
+                bail!(
+                    "active subscription {}/{} has no production policy capability/executor",
+                    subscription.consumer,
+                    subscription.group
+                )
+            }
+        };
+        let registration_path = format!("crates/{}/src/application.rs", subscription.consumer);
+        carriers.push(discover_policy_carrier(
+            root,
+            &registration_path,
+            "registration",
+            registration_marker,
+        )?);
+        carriers.push(discover_policy_carrier(
+            root,
+            "assemblies/runtime/src/consumer_tx.rs",
+            "handler",
+            handler_marker,
+        )?);
+    }
+    carriers.push(Carrier::new(
+        root,
+        CarrierKind::RustSymbol,
+        "assemblies/runtime/src/event_transport.rs",
+        "resolve_consumer_tx_plan",
+    )?);
+    carriers.push(Carrier::new(
+        root,
+        CarrierKind::RustSymbol,
+        "assemblies/runtime/src/consumer_tx.rs",
+        "spawn_consumer_ackable_tx_subscriber",
+    )?);
+    carriers.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+    carriers.dedup();
+    Ok(carriers)
+}
+
+fn discover_policy_carrier(
+    root: &Path,
+    repo_path: &str,
+    stage: &str,
+    marker: &str,
+) -> Result<Carrier> {
+    let source_path = root.join(repo_path);
+    let source = generated_file::read_stable_utf8_file(
+        &source_path,
+        MAX_RUST_CARRIER_BYTES,
+        "ConsumerTx policy carrier",
+    )?;
+    let syntax = syn::parse_file(&source)
+        .with_context(|| format!("cannot parse ConsumerTx policy carrier {repo_path}"))?;
+    let mut symbols = Vec::new();
+    collect_policy_carrier_symbols(&syntax.items, marker, &mut symbols);
+    ensure!(
+        symbols.len() == 1,
+        "ConsumerTx {stage} marker `{marker}` must identify one production carrier in {repo_path}, got {symbols:?}"
+    );
+    Carrier::new(root, CarrierKind::RustSymbol, repo_path, &symbols.remove(0))
+}
+
+fn collect_policy_carrier_symbols(items: &[syn::Item], marker: &str, symbols: &mut Vec<String>) {
+    for item in items {
+        let conditionally_compiled = match item {
+            syn::Item::Fn(item) => attrs_are_conditional(&item.attrs),
+            syn::Item::Impl(item) => attrs_are_conditional(&item.attrs),
+            syn::Item::Mod(item) => attrs_are_conditional(&item.attrs),
+            _ => false,
+        };
+        if conditionally_compiled {
+            continue;
+        }
+        match item {
+            syn::Item::Fn(function)
+                if policy_tokens(&function.sig).contains(marker)
+                    || policy_tokens(&function.block).contains(marker) =>
+            {
+                symbols.push(function.sig.ident.to_string());
+            }
+            syn::Item::Impl(item) => {
+                let Some(owner) = type_last_ident(&item.self_ty) else {
+                    continue;
+                };
+                let trait_carries_marker = item
+                    .trait_
+                    .as_ref()
+                    .is_some_and(|(_, path, _)| policy_tokens(path).contains(marker));
+                if trait_carries_marker
+                    && let Some(method) = item.items.iter().find_map(|item| {
+                        let syn::ImplItem::Fn(method) = item else {
+                            return None;
+                        };
+                        (method.sig.ident == "handle" && !attrs_are_conditional(&method.attrs))
+                            .then_some(method)
+                    })
+                {
+                    symbols.push(format!("{owner}::{}", method.sig.ident));
+                    continue;
+                }
+                for method in &item.items {
+                    let syn::ImplItem::Fn(method) = method else {
+                        continue;
+                    };
+                    if attrs_are_conditional(&method.attrs) {
+                        continue;
+                    }
+                    if policy_tokens(&method.sig).contains(marker)
+                        || policy_tokens(&method.block).contains(marker)
+                    {
+                        symbols.push(format!("{owner}::{}", method.sig.ident));
+                    }
+                }
+            }
+            syn::Item::Mod(module) => {
+                if let Some((_, nested)) = &module.content {
+                    collect_policy_carrier_symbols(nested, marker, symbols);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn policy_tokens(tokens: &impl quote::ToTokens) -> String {
+    quote::ToTokens::to_token_stream(tokens)
+        .to_string()
+        .replace(' ', "")
 }
 
 fn named_fault_carriers(
@@ -1587,6 +1739,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn policy_carrier_discovers_marker_on_assembly_private_trait_impl() -> anyhow::Result<()> {
+        let syntax = syn::parse_file(
+            r#"
+            struct PgAuditConsumerTx;
+            impl ConsumerTxHandler<policy::TransactionalOnly> for PgAuditConsumerTx {
+                type CommitProof = PgConsumerTxCommitProof;
+                fn handle(&self) {}
+            }
+            "#,
+        )?;
+        let mut symbols = Vec::new();
+        collect_policy_carrier_symbols(
+            &syntax.items,
+            "ConsumerTxHandler<policy::TransactionalOnly>",
+            &mut symbols,
+        );
+        assert_eq!(symbols, ["PgAuditConsumerTx::handle"]);
+        Ok(())
+    }
+
+    #[test]
     fn carrier_paths_reject_escapes_backslashes_and_symlinks() -> anyhow::Result<()> {
         let root = crate::testutil::unique_tmp("l2-assurance-path");
         fs::create_dir_all(root.join("contracts"))?;
@@ -1917,6 +2090,77 @@ impl DemoProvider {
         assert!(!text.contains("_seed"));
         assert!(!text.contains("/Users/"));
         assert!(!text.contains("schemaHash\": \"HEAD"));
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_fact_effect_evidence_closes_all_policy_stages() -> anyhow::Result<()> {
+        let inventory = build_inventory(&workspace_root()?)?;
+        let facts = inventory
+            .contracts
+            .iter()
+            .filter_map(|record| match record {
+                AssuranceRecord::Fact(record) => Some(record),
+                AssuranceRecord::Producer(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let active_handlers = facts
+            .iter()
+            .map(|record| record.subscriptions.len())
+            .sum::<usize>();
+
+        assert_eq!(
+            active_handlers, 5,
+            "active handler count must come from generated fact subscriptions"
+        );
+        for fact in facts {
+            let carrier_paths = fact
+                .evidence
+                .effect
+                .carriers
+                .iter()
+                .map(|carrier| carrier.path.0.as_str())
+                .collect::<BTreeSet<_>>();
+            for subscription in &fact.subscriptions {
+                let registration_root = format!("crates/{}/", subscription.consumer);
+                assert!(
+                    carrier_paths
+                        .iter()
+                        .any(|path| path.starts_with(&registration_root)),
+                    "{} effect evidence lacks registration capability for {}",
+                    fact.contract_id,
+                    subscription.consumer
+                );
+            }
+            assert!(
+                carrier_paths
+                    .iter()
+                    .any(|path| path == &"assemblies/runtime/src/event_transport.rs"),
+                "{} effect evidence lacks policy-bound plan",
+                fact.contract_id
+            );
+            assert!(
+                carrier_paths
+                    .iter()
+                    .any(|path| path.starts_with("adapters/postgres/")),
+                "{} effect evidence lacks policy-bound handler",
+                fact.contract_id
+            );
+            assert!(
+                carrier_paths
+                    .iter()
+                    .any(|path| path.starts_with("crates/eventexec/")),
+                "{} effect evidence lacks policy-bound executor",
+                fact.contract_id
+            );
+            assert!(
+                carrier_paths
+                    .iter()
+                    .all(|path| !path.starts_with("generated/src/event/")),
+                "{} generated SPEC must not masquerade as effect execution evidence",
+                fact.contract_id
+            );
+        }
         Ok(())
     }
 }

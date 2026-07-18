@@ -1252,6 +1252,14 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     },
     InvariantCarrierBinding {
         path: "xtask/src/l2_assurance.rs",
+        id: "L2-ASSURANCE-CONSUMER-POLICY-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "active five-handler registration-plan-handler-executor carriers with raw-callsite synthetic reds",
+        gates: "verify,ci,ci-meta",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/l2_assurance.rs",
         id: "L2-ASSURANCE-WIRE-01",
         facet: None,
         carrier: "xtask",

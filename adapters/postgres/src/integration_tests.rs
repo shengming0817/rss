@@ -3430,6 +3430,94 @@ async fn inbox_receipts_claims_then_duplicates_and_scopes_by_group() -> TestResu
     Ok(())
 }
 
+/// A settings reconcile failure must leave the real postgres receipt claim retryable instead of
+/// advancing it to `done`. After the lease becomes stale, the same delivery must be claimable by a
+/// new worker token.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: fixed integration identifiers are valid and unique_event_id always yields a non-empty key.
+async fn settings_consumer_tx_reconcile_failure_keeps_receipt_reclaimable() -> TestResult {
+    let (fixture, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = std::sync::Arc::new(connect_pg_rss_app_role(&fixture, &owner).await?);
+    let inbox = app.inbox();
+    let group = format!("settings-reconcile-failure-{}", uuid::Uuid::new_v4());
+    let ctx = InboxReceiptContext::new(
+        test_tenant(),
+        ConsumerGroup::parse(&group).unwrap(),
+        "settings",
+        CONFIG_VERSION_CHANGED_TOPIC,
+        CONFIG_VERSION_CHANGED_TOPIC,
+        "v1",
+        TEST_SCHEMA_HASH,
+        None,
+        None,
+    )
+    .unwrap();
+    let event_id = unique_event_id("settings-reconcile-failure");
+    let key = IdemKey::parse(&event_id).unwrap();
+    let first_lease = LeaseToken::mint();
+    assert_eq!(
+        inbox.try_claim(&ctx, &key, &first_lease).await?,
+        SeenState::Fresh
+    );
+
+    let stores = crate::pool::PgRuntimeStores::from_unverified_for_test(
+        std::sync::Arc::clone(&app),
+        std::sync::Arc::clone(&app),
+    );
+    let handler = crate::consumer_tx::PgSettingsConsumerTx::config_version_changed(
+        stores.writer_capability(),
+        std::sync::Arc::new(settings::ConfigVersionReconciler::test_requeue()),
+    );
+    let outcome = std::sync::Arc::new(handler)
+        .handle(
+            diport::Message::new(&event_id, b"{}".to_vec()),
+            ctx.clone(),
+            key.clone(),
+            first_lease,
+        )
+        .await;
+    assert!(
+        matches!(outcome, crate::PgConsumerTxOutcome::Requeue(_)),
+        "transient reconcile failure must request retry"
+    );
+
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM inbox_receipts \
+         WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
+    )
+    .bind(ctx.tenant_id().to_string())
+    .bind(&event_id)
+    .bind(&group)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(status, "claimed", "failure must not commit Inbox Done");
+
+    sqlx::query(
+        "UPDATE inbox_receipts \
+         SET claimed_at = now() - make_interval(secs => $1), \
+             updated_at = now() - make_interval(secs => $1) \
+         WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
+    )
+    .bind(crate::inbox::INBOX_LEASE_TTL_SECONDS + 1)
+    .bind(ctx.tenant_id().to_string())
+    .bind(&event_id)
+    .bind(&group)
+    .execute(&owner.pool)
+    .await?;
+
+    assert_eq!(
+        inbox.try_claim(&ctx, &key, &LeaseToken::mint()).await?,
+        SeenState::Fresh,
+        "stale failed reconcile claim must be reclaimable for redelivery"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
 /// inbox_receipts target schema catalog lock (#1626).
 ///
 /// The tenant-scoped mutable receipt table must exist with its target columns,

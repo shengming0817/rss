@@ -679,8 +679,23 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "generated/src/event/identity_v1.rs",
-              "symbol": "generated::event::identity_v1::policy_updated::SPEC"
+              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "symbol": "PgAuditConsumerTx::handle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "symbol": "spawn_consumer_ackable_tx_subscriber"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "resolve_consumer_tx_plan"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/audit/src/application.rs",
+              "symbol": "register_audit_subscriber"
             }
           ]
         },
@@ -756,8 +771,23 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "generated/src/event/identity_v1.rs",
-              "symbol": "generated::event::identity_v1::role_assigned::SPEC"
+              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "symbol": "PgAuditConsumerTx::handle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "symbol": "spawn_consumer_ackable_tx_subscriber"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "resolve_consumer_tx_plan"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/audit/src/application.rs",
+              "symbol": "register_audit_subscriber"
             }
           ]
         },
@@ -833,8 +863,23 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "generated/src/event/identity_v1.rs",
-              "symbol": "generated::event::identity_v1::role_revoked::SPEC"
+              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "symbol": "PgAuditConsumerTx::handle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "symbol": "spawn_consumer_ackable_tx_subscriber"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "resolve_consumer_tx_plan"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/audit/src/application.rs",
+              "symbol": "register_audit_subscriber"
             }
           ]
         },
@@ -1218,8 +1263,23 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "generated/src/event/identity_v1.rs",
-              "symbol": "generated::event::identity_v1::session_created::SPEC"
+              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "symbol": "PgAuditConsumerTx::handle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "symbol": "spawn_consumer_ackable_tx_subscriber"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "resolve_consumer_tx_plan"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/audit/src/application.rs",
+              "symbol": "register_audit_subscriber"
             }
           ]
         },
@@ -1782,8 +1842,23 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "generated/src/event/settings_v1.rs",
-              "symbol": "generated::event::settings_v1::SPEC"
+              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "symbol": "PgSettingsConsumerTx::handle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "symbol": "spawn_consumer_ackable_tx_subscriber"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "assemblies/runtime/src/event_transport.rs",
+              "symbol": "resolve_consumer_tx_plan"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/settings/src/application.rs",
+              "symbol": "SettingsDomain::init"
             }
           ]
         },

@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/consumer_tx_commit_proof_substitute_fail.rs:4:65
+  |
+4 |     let _: PgConsumerTxOutcome = PgConsumerTxOutcome::Committed(());
+  |                                  ------------------------------ ^^ expected `PgConsumerTxCommitProof`, found `()`
+  |                                  |
+  |                                  arguments to this enum variant are incorrect
+  |
+note: tuple variant defined here
+ --> src/consumer_tx.rs
+  |
+  |     Committed(PgConsumerTxCommitProof),
+  |     ^^^^^^^^^

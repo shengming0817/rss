@@ -1434,7 +1434,7 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
         };
         let dispatch = subscription_dispatch_variant(c, &s.consumer)?;
         subs.push(format!(
-            "    {sup}SubscriptionSpec::new(\"{}\", \"{}\", {sup}SubscriptionDispatchKey::{dispatch}, {sup}SubscriberReadiness::{}, {sup}SubscriptionExecution::{execution}, {effect}, {sup}ExternalEffectPolicy::{external_effect_policy})",
+            "    {sup}SubscriptionSpec::new(\"{}\", \"{}\", {sup}SubscriptionDispatchKey::{dispatch}, {sup}SubscriberReadiness::{}, {sup}SubscriptionExecution::{execution}, {effect}, ::vocab::ExternalEffectPolicy::{external_effect_policy})",
             s.consumer,
             s.group,
             match s.topology.readiness {
@@ -2082,19 +2082,6 @@ pub enum SubscriptionEffect {
     SettingsConfigVersionRefresh,
 }
 
-/// Closed policy for effects outside the ConsumerTx database transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalEffectPolicy {
-    /// Handler effects are limited to the ConsumerTx database transaction.
-    TransactionalOnly,
-    /// External calls use a stable idempotency key.
-    IdempotencyKey,
-    /// External state converges from an authoritative source.
-    Reconcile,
-    /// External effects have a durable compensation path.
-    Compensated,
-}
-
 /// 一个 event contract 的唯一 producer/subscriber topology 规格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventSpec {
@@ -2136,7 +2123,7 @@ pub struct SubscriptionSpec {
     readiness: SubscriberReadiness,
     execution: SubscriptionExecution,
     effect: Option<SubscriptionEffect>,
-    external_effect_policy: ExternalEffectPolicy,
+    external_effect_policy: ::vocab::ExternalEffectPolicy,
 }
 
 impl SubscriptionSpec {
@@ -2147,7 +2134,7 @@ impl SubscriptionSpec {
         readiness: SubscriberReadiness,
         execution: SubscriptionExecution,
         effect: Option<SubscriptionEffect>,
-        external_effect_policy: ExternalEffectPolicy,
+        external_effect_policy: ::vocab::ExternalEffectPolicy,
     ) -> Self {
         Self {
             consumer,
@@ -2172,7 +2159,7 @@ impl SubscriptionSpec {
     /// Domain effect required by this subscription, when execution is domain-owned.
     pub const fn effect(self) -> Option<SubscriptionEffect> { self.effect }
     /// Policy for effects outside the ConsumerTx database transaction.
-    pub const fn external_effect_policy(self) -> ExternalEffectPolicy {
+    pub const fn external_effect_policy(self) -> ::vocab::ExternalEffectPolicy {
         self.external_effect_policy
     }
 }
@@ -2943,7 +2930,7 @@ mod tests {
             "pub enum SubscriptionDispatchKey",
             "pub enum SubscriptionExecution",
             "pub enum SubscriptionEffect",
-            "pub enum ExternalEffectPolicy",
+            "::vocab::ExternalEffectPolicy",
             "pub const fn dispatch",
             "pub const fn execution",
             "pub const fn effect",
@@ -4571,7 +4558,7 @@ mod tests {
                 && rendered.contains(r#""audit""#)
                 && rendered.contains(r#""audit.seed-happened""#)
                 && rendered.contains("SubscriptionDispatchKey::SeedHappenedV1Audit")
-                && rendered.contains("ExternalEffectPolicy::TransactionalOnly"),
+                && rendered.contains("::vocab::ExternalEffectPolicy::TransactionalOnly"),
             "SPEC 缺 consumer 字面量:\n{rendered}"
         );
         assert_subscription_wire_semantics(&rendered, &mod_rs);

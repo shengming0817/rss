@@ -280,8 +280,11 @@ durable PG consumer 的 Fresh 成功路径固定为：
 
 `verify envelope + tenantAuthority -> try_claim -> lease renewal race -> ConsumerTx handler -> PG commit -> broker Ack`。
 
-ConsumerTx handler 由 postgres adapter 构造，runtime 只按 generated subscription 选择 handler；外部 crate
-无法构造或逃逸 `TxCapability`。handler 在同一事务内先做业务写 / outbox append，再用同一个
+ConsumerTx handler 由 postgres adapter 构造，runtime 只按 generated subscription 选择具体 handler；外部 crate
+无法构造或逃逸 `TxCapability`。`ConsumerTxHandler<P>`、outcome、runner 与 worker spawn 全部归
+runtime assembly 私有，且只为 `PgAuditConsumerTx` / `PgSettingsConsumerTx` 实现；eventexec 不再公开可由
+下游实现或伪造 committed outcome 的授权接缝。policy marker 保留到 policy-specific worker spawn，旧裸
+handler alias 与公开擦除入口均不存在。handler 在同一事务内先做业务写 / outbox append，再用同一个
 `TxCapability` 执行 inbox `done` CAS；`LeaseOutcome::Lost`、SQL/commit unknown、handler transient failure
 均不得 broker Ack。Duplicate delivery 不进入 tx handler，直接 Ack。
 ConsumerTx outcome 使用 typed constructor 收口：`handler_transient` 可在当前投递内 bounded retry，但耗尽后仍只
@@ -290,20 +293,39 @@ broker `Requeue`，不写 app DLX、不提交 inbox `done`、不 `Ack`；`commit
 
 durable runtime 对 generated subscription fail closed：每条订阅在 `contract.toml` 声明 identity
 （contract/topic/consumer/group）、闭枚举 `execution = "adapter-native" | "domain-effect"` 与逐订阅
-`externalEffectPolicy = "transactional-only" | "idempotency-key" | "reconcile" | "compensated"`，再由 codegen 派生为
-`SubscriptionSpec`，并从 `(contract id, version, consumer)` 同源生成闭枚举 `SubscriptionDispatchKey`。
-runtime 必须对该 dispatch key 穷尽匹配并只绑定 `ConsumerTx` plan；新增订阅而未接线时编译失败，guard
-只守穷尽 match 的结构，不维护订阅实例清单。`adapter-native` 禁止声明 `effect`；`domain-effect`
+`externalEffectPolicy = "transactional-only" | "idempotency-key" | "reconcile" | "compensated"`。唯一
+Rust policy 类型是 `vocab::ExternalEffectPolicy`；codegen 直接把它写入 `SubscriptionSpec`，不在 generated
+crate 复制或 re-export 第二个枚举，并从 `(contract id, version, consumer)` 同源生成闭枚举
+`SubscriptionDispatchKey`。域注册只能提交 `SubscriberCapability::AdapterNativeTransactional` 或携带
+owner concrete value 的 `DomainReconcile` opaque declaration；它不含可执行 trait/closure。runtime 必须
+把 settings dispatch 精确 downcast 为私有字段的 `settings::ConfigVersionReconciler`，任意宽 wrapper 均
+fail closed。execution/policy 由 capability variant 推导，调用方不能分别传值制造错配。runtime 必须对
+dispatch key、generated policy 与注册 capability 穷尽匹配并只绑定
+policy-bound `ConsumerTx` plan；新增订阅而未接线时编译失败，guard 从 generated registry 计算 active
+handler 数，不维护订阅实例清单。`adapter-native` 禁止声明 `effect`；`domain-effect`
 必须声明当前唯一闭值 `effect = "settings-config-version-refresh"`，仅用于必须捕获域内 singleton 的
 settings cache refresh，并由 generated topology 的穷举 resolver 限制在 `settings.config-version-changed`。
 当前完整语义矩阵只接受 `adapter-native + 无 effect + transactional-only`，或
 `domain-effect + settings-config-version-refresh + reconcile`：四个 audit handler 的业务写与 Inbox Done
-同属 ConsumerTx，settings refresh 则从持久化权威状态重建进程内 cache，允许重复并收敛。其它 policy 已冻结为
-可扩展闭值，但必须与新增 effect/capability evidence 同步扩展矩阵后才可激活；不得用 `idempotency-key`
-冒充未实现的稳定 key，也不得用 `compensated` 冒充未落地的补偿闭环。
+同属 ConsumerTx，settings refresh 则从持久化权威状态重建进程内 cache，允许重复并收敛。其它 policy
+只是穷尽 matcher 必须拒绝的闭值：当前没有其生产 registration、handler constructor 或 executor，因此
+active spec 声明 `idempotency-key` / `compensated` 必须 fail closed，不预建空 executor 框架。未来
+idempotency policy 的外部 key 类型在 policy 未激活期间保持 consistency crate-private；其值只能由既有
+Inbox identity `(tenant_id, event_id, consumer_group)` 派生，consumer group 是稳定 handler identity，
+不得新增第二 Inbox key。
 新增订阅、execution/effect/policy 缺失或配对非法、声明与 generated marker 漂移时，解析或测试失败；
 不得增加 wildcard、默认分支、通用 handler registry、平行映射清单或 fallback。payload decode / wire DTO 归属域 crate（域可依赖
 `generated`），postgres adapter 只保留 PG transaction / TxCapability 职责，避免 adapter 维护第二套 event schema。
+
+handler 内自行构造或间接取得 raw external port 是类型系统之外的补强面：
+`event-transport-guard` 以 Medium AST call-graph 扫描 production roots，覆盖函数项/import alias、renamed
+wrapper、UFCS、同 crate 跨文件 helper、常见 HTTP chained request、email/object-store/cloud 调用与
+`macro_rules!` token 形态；同名 helper 候选超过解析上限时直接产生 finding，不得静默跳过。该 guard
+不声称等价于 rustc HIR、trait resolution 或过程宏展开；动态分派、非语法可见的 proc-macro expansion
+仍是 residual risk，主防线仍是 assembly-private handler/runner、provider opaque proof 与 exact owner
+activation（Hard）。
+synthetic-red 矩阵覆盖上述已知形态，workspace anti-vacuity 同时锁定 active handler 精确为 5 且
+`unauthorized external effect callsites=0`。
 
 active L2 manifest 的 topic、delivery、consistency level、outbox role/atomicity/emits 以及 subscription
 集合、consumer/group、topology、execution/effect/externalEffectPolicy 都是 wire 语义，受 `cargo xtask contract breaking`
@@ -312,8 +334,10 @@ breaking；active 默认 deny（跨 LocalOnly 边界的 consistency review rule 
 `Contract-Review-Ack` trailer）、deprecated warn、draft 跳过。
 这里的 lifecycle 分级仅定义 breaking review 处置，不削弱 R22 的全 lifecycle producer/fact 同域约束。
 
-`settings.config-version-changed` 的 `DomainEffect` 捕获 HTTP routes 使用的同一 `SettingsService`；成功路径必须
-先刷新该 singleton cache，再由 ConsumerTx 提交 inbox `done`。refresh transient 不提交 inbox、走 `Requeue`，
+`settings.config-version-changed` 的 `DomainReconcile` 只携带由 config read repository 与 singleton cache
+组成、私有字段的 concrete `ConfigVersionReconciler`；bootstrap carrier 不可执行，runtime 只激活该精确
+owner type，不接受含 writer/outbox 能力的 `SettingsService` 或其 wrapper。成功路径必须
+先从持久化权威状态刷新该 cache，再由 ConsumerTx 提交 inbox `done`。refresh transient 不提交 inbox、走 `Requeue`，
 permanent payload 错误走 `Reject`。否则 inbox done 后的重复投递会被 Duplicate 直接 Ack，无法修复 stale cache。
 
 ### 租约续租 + leaseLost hard-fence（#1213）

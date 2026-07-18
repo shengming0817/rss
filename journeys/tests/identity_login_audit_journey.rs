@@ -44,7 +44,7 @@ use audit::ports::{
 };
 use bootstrap::replaydeps::resolve;
 use bootstrap::shutdown::ShutdownStack;
-use bootstrap::{IdempotencyConfig, ResolvedIdempotency, SubscriberExecution, Topology};
+use bootstrap::{IdempotencyConfig, ResolvedIdempotency, SubscriberCapability, Topology};
 use common::{
     CANON_TENANT, CANON_USER, LOGIN_USERNAME, NOW_SECS, PASSWORD, SESSION_CREATED_TOPIC, TTL_SECS,
     audit_domain, identity_domain, memory_tenant_signer, password_policy,
@@ -307,7 +307,10 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
     let binding = session_created_subscription(registry)?;
     assert_eq!(binding.topic(), SESSION_CREATED_TOPIC);
     let (contract_id, topic, _, group, execution) = binding.into_parts();
-    assert!(matches!(execution, SubscriberExecution::AdapterNative));
+    assert!(matches!(
+        execution,
+        SubscriberCapability::AdapterNativeTransactional
+    ));
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
     let consumer_group = group.clone();
@@ -397,7 +400,10 @@ async fn relay_redelivery_audits_once() -> Result<()> {
 
     let (contract_id, topic, _, group, execution) =
         session_created_subscription(registry)?.into_parts();
-    assert!(matches!(execution, SubscriberExecution::AdapterNative));
+    assert!(matches!(
+        execution,
+        SubscriberCapability::AdapterNativeTransactional
+    ));
 
     // anti-vacuity（acc #2）：计数器包装 handler，证明内层 handler 恰调用一次——ConsumerBase 幂等短路
     // 第二条投递（不执行 handler），而非 sink 自身去重。
@@ -513,7 +519,10 @@ async fn rejected_login_does_not_audit() -> Result<()> {
 
     let (contract_id, topic, _, group, execution) =
         session_created_subscription(registry)?.into_parts();
-    assert!(matches!(execution, SubscriberExecution::AdapterNative));
+    assert!(matches!(
+        execution,
+        SubscriberCapability::AdapterNativeTransactional
+    ));
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
     let consumer_group = group.clone();
@@ -566,7 +575,10 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
 
     let (contract_id, topic, _, group, execution) =
         session_created_subscription(registry)?.into_parts();
-    assert!(matches!(execution, SubscriberExecution::AdapterNative));
+    assert!(matches!(
+        execution,
+        SubscriberCapability::AdapterNativeTransactional
+    ));
 
     // 永久失败 handler（绕过真实 audit handler）：恒 reject → ConsumerBase 写 DLX。
     let erroring = move |_msg: Message| -> BoxFuture<'static, HandleResult> {

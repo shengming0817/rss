@@ -682,27 +682,6 @@ pub const generated::event::settings_v1::CONTRACT_ID: &str
 pub const generated::event::settings_v1::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::settings_v1::SPEC: generated::event::EventSpec
 pub const generated::event::settings_v1::TOPIC: &str
-pub enum generated::event::ExternalEffectPolicy
-pub generated::event::ExternalEffectPolicy::Compensated
-pub generated::event::ExternalEffectPolicy::IdempotencyKey
-pub generated::event::ExternalEffectPolicy::Reconcile
-pub generated::event::ExternalEffectPolicy::TransactionalOnly
-impl core::clone::Clone for generated::event::ExternalEffectPolicy
-pub fn generated::event::ExternalEffectPolicy::clone(&self) -> generated::event::ExternalEffectPolicy
-impl core::cmp::Eq for generated::event::ExternalEffectPolicy
-impl core::cmp::PartialEq for generated::event::ExternalEffectPolicy
-pub fn generated::event::ExternalEffectPolicy::eq(&self, &generated::event::ExternalEffectPolicy) -> bool
-impl core::fmt::Debug for generated::event::ExternalEffectPolicy
-pub fn generated::event::ExternalEffectPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for generated::event::ExternalEffectPolicy
-impl core::marker::StructuralPartialEq for generated::event::ExternalEffectPolicy
-impl core::marker::Freeze for generated::event::ExternalEffectPolicy
-impl core::marker::Send for generated::event::ExternalEffectPolicy
-impl core::marker::Sync for generated::event::ExternalEffectPolicy
-impl core::marker::Unpin for generated::event::ExternalEffectPolicy
-impl core::marker::UnsafeUnpin for generated::event::ExternalEffectPolicy
-impl core::panic::unwind_safe::RefUnwindSafe for generated::event::ExternalEffectPolicy
-impl core::panic::unwind_safe::UnwindSafe for generated::event::ExternalEffectPolicy
 pub enum generated::event::PartitionKeyStrategy
 pub generated::event::PartitionKeyStrategy::Aggregate
 pub generated::event::PartitionKeyStrategy::None
@@ -853,7 +832,7 @@ pub const fn generated::event::SubscriptionSpec::consumer(self) -> &'static str
 pub const fn generated::event::SubscriptionSpec::dispatch(self) -> generated::event::SubscriptionDispatchKey
 pub const fn generated::event::SubscriptionSpec::effect(self) -> core::option::Option<generated::event::SubscriptionEffect>
 pub const fn generated::event::SubscriptionSpec::execution(self) -> generated::event::SubscriptionExecution
-pub const fn generated::event::SubscriptionSpec::external_effect_policy(self) -> generated::event::ExternalEffectPolicy
+pub const fn generated::event::SubscriptionSpec::external_effect_policy(self) -> vocab::ExternalEffectPolicy
 pub const fn generated::event::SubscriptionSpec::group(self) -> &'static str
 pub const fn generated::event::SubscriptionSpec::readiness(self) -> generated::event::SubscriberReadiness
 impl core::clone::Clone for generated::event::SubscriptionSpec

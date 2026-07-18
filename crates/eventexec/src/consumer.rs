@@ -112,7 +112,8 @@ impl ConsumerMeta {
         self
     }
 
-    pub(crate) fn domain(&self) -> &str {
+    #[doc(hidden)]
+    pub fn domain(&self) -> &str {
         &self.domain
     }
 
@@ -120,19 +121,23 @@ impl ConsumerMeta {
         &self.authority_domain
     }
 
-    pub(crate) fn contract_id(&self) -> &str {
+    #[doc(hidden)]
+    pub fn contract_id(&self) -> &str {
         &self.contract_id
     }
 
-    pub(crate) fn topic(&self) -> &str {
+    #[doc(hidden)]
+    pub fn topic(&self) -> &str {
         &self.topic
     }
 
-    pub(crate) fn consumer_group(&self) -> &str {
+    #[doc(hidden)]
+    pub fn consumer_group(&self) -> &str {
         &self.consumer_group
     }
 
-    pub(crate) fn verify_tenant_authority(
+    #[doc(hidden)]
+    pub fn verify_tenant_authority(
         &self,
         msg: &Message,
     ) -> Result<vocab::TenantId, TenantAuthorityError> {
@@ -152,7 +157,8 @@ impl ConsumerMeta {
         )
     }
 
-    pub(crate) fn verify_envelope_header(
+    #[doc(hidden)]
+    pub fn verify_envelope_header(
         &self,
         msg: &Message,
     ) -> Result<EnvelopeHeader, EnvelopeHeaderError> {
@@ -174,7 +180,8 @@ impl ConsumerMeta {
         Ok(header)
     }
 
-    pub(crate) fn receipt_context(
+    #[doc(hidden)]
+    pub fn receipt_context(
         &self,
         tenant_id: vocab::TenantId,
         header: &EnvelopeHeader,
@@ -197,7 +204,8 @@ impl ConsumerMeta {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReceiptContextBuildError {
+#[doc(hidden)]
+pub enum ReceiptContextBuildError {
     ConsumerGroup,
     Receipt(InboxReceiptContextError),
 }
@@ -456,7 +464,8 @@ async fn handle_fresh<S, H>(
 /// 构造消费 span 并（若 producer 透传了 W3C `traceparent`）还原 remote parent，使 handler span 与 producer
 /// 同 `trace_id`（#1224）。`traceparent` 缺失（`None`）/ 畸形 → span 保持 root（fail-open，
 /// [`tracewire::restore_parent`] no-op，不阻消费）。抽出为 helper 控制 [`handle_fresh`] 认知复杂度 ≤15。
-pub(crate) fn build_consume_span(
+#[doc(hidden)]
+pub fn build_consume_span(
     meta: &ConsumerMeta,
     message_id: &str,
     traceparent: Option<&str>,
@@ -481,7 +490,8 @@ pub(crate) fn build_consume_span(
 /// `Held`→继续持有（**不返回**，由 `select!` 在 handler 完成时 drop）；`Lost`→**返回**（claim 被他人重捞，触发
 /// [`handle_fresh`] 的 hard-fence 分支取消 handler）；`Err`（瞬态后端故障）→结构化 warn + 续命（不误判丢租，
 /// handler 完成时由 commit 侧 CAS 兜底判终态）。
-pub(crate) async fn renewal_loop<S>(
+#[doc(hidden)]
+pub async fn renewal_loop<S>(
     idempotency: &Arc<S>,
     meta: &ConsumerMeta,
     ctx: &InboxReceiptContext,
@@ -675,7 +685,8 @@ where
 #[allow(clippy::too_many_arguments)]
 // reason: 9 参数是 DLX 路径的最小必要集合（dlx/idempotency/key/lease/meta/msg/attempts/summary/acker 各自语义独立）；
 // 引入聚合 struct 会增加间接层且不适用于本模块的借用生命周期，item-level carve-out。
-pub(crate) async fn dead_letter<S>(
+#[doc(hidden)]
+pub async fn dead_letter<S>(
     dlx: &DynDeadLetterStore<'static>,
     idempotency: &Arc<S>,
     ctx: &InboxReceiptContext,
@@ -749,7 +760,8 @@ pub(crate) async fn dead_letter<S>(
 ///
 /// `error = %e` 安全前提：`AckError::Display` 是 const literal `"ack settle failed"`，不携 runtime 数据
 /// （见 `diport::AckError` rustdoc，INVARIANT DIPORT-ERR-SOURCE-REDACT-01）。
-pub(crate) async fn settle(
+#[doc(hidden)]
+pub async fn settle(
     acker: Option<&diport::DynAcker<'static>>,
     action: diport::AckAction,
     domain: &str,
@@ -782,7 +794,8 @@ pub(crate) async fn settle(
 ///
 /// Closed labels: `reason` is emitted from module-owned literals; `domain` is bounded by `ConsumerMeta`.
 /// This keeps alerts separate from broker settle metrics, which only describe final broker disposition.
-pub(crate) fn record_dead_letter_skip(meta: &ConsumerMeta, reason: &'static str) {
+#[doc(hidden)]
+pub fn record_dead_letter_skip(meta: &ConsumerMeta, reason: &'static str) {
     metrics::counter!(
         "consumer_dlx_skip_total",
         "domain" => meta.domain().to_owned(),
@@ -844,7 +857,8 @@ async fn reject_invalid_receipt_context(
     .await;
 }
 
-pub(crate) fn envelope_header_error_reason(error: &EnvelopeHeaderError) -> &'static str {
+#[doc(hidden)]
+pub fn envelope_header_error_reason(error: &EnvelopeHeaderError) -> &'static str {
     match error {
         EnvelopeHeaderError::MissingTenantId => "envelope_missing_tenant_id",
         EnvelopeHeaderError::InvalidTenantId => "envelope_invalid_tenant_id",
@@ -857,7 +871,8 @@ pub(crate) fn envelope_header_error_reason(error: &EnvelopeHeaderError) -> &'sta
     }
 }
 
-pub(crate) fn receipt_context_error_reason(error: ReceiptContextBuildError) -> &'static str {
+#[doc(hidden)]
+pub fn receipt_context_error_reason(error: ReceiptContextBuildError) -> &'static str {
     match error {
         ReceiptContextBuildError::ConsumerGroup => "inbox_receipt_invalid_consumer_group",
         ReceiptContextBuildError::Receipt(InboxReceiptContextError::EmptyDomain) => {
@@ -1016,7 +1031,8 @@ fn log_dlx_write_failed(meta: &ConsumerMeta, error: &DeadLetterStoreError) {
 }
 
 /// leaseLost hard-fence（#1213）：续租侧探测租约被他人 TTL 重捞 → handler 被取消、结算降级 Requeue。
-pub(crate) fn log_lease_lost(meta: &ConsumerMeta, message_id: &str) {
+#[doc(hidden)]
+pub fn log_lease_lost(meta: &ConsumerMeta, message_id: &str) {
     tracing::warn!(
         message_id,
         domain = meta.domain(),
@@ -1091,7 +1107,8 @@ fn log_commit_failed(
 ///
 /// 闭值集 label：`domain` 由 [`ConsumerMeta`] 封边（发射处才降 owned String）。minimal 直发 `metrics` facade
 /// （无 recorder 即 no-op，同 `consumer_settle_total` 范式；注入式 port 随 consumer worker 生命周期 #1301）。
-pub(crate) fn emit_lease_lost(domain: &str) {
+#[doc(hidden)]
+pub fn emit_lease_lost(domain: &str) {
     metrics::counter!(
         "consumer_lease_lost_total",
         "domain" => domain.to_owned(),

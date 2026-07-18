@@ -129,7 +129,8 @@ impl WorkerHealth {
     /// 一整轮 claim/relay（或 sweep）干净成功 → 恢复 Healthy（瞬态故障自愈，**非**单向 latch；F5）。
     ///
     /// 与 [`WorkerHealth::mark_degraded`] 同档（无条件 store）；仅在运行期由 tick 调用。
-    pub(crate) fn mark_healthy(&self) {
+    #[doc(hidden)]
+    pub fn mark_healthy(&self) {
         if self.0.load(Ordering::Acquire) == HEALTH_INVARIANT {
             return;
         }
@@ -149,13 +150,15 @@ impl WorkerHealth {
     }
 
     /// 订阅失败（broker/subscriber 不可用）→ Unhealthy，detail 固定为 subscriber-unavailable。
-    pub(crate) fn mark_subscriber_unavailable(&self) {
+    #[doc(hidden)]
+    pub fn mark_subscriber_unavailable(&self) {
         self.0
             .store(HEALTH_SUBSCRIBER_UNAVAILABLE, Ordering::Release);
     }
 
     /// DLX 写失败 → Degraded，detail 固定为 dlx-write-error。
-    pub(crate) fn mark_dlx_write_error(&self) {
+    #[doc(hidden)]
+    pub fn mark_dlx_write_error(&self) {
         self.0.store(HEALTH_DLX_WRITE_ERROR, Ordering::Release);
     }
 

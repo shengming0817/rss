@@ -248,10 +248,10 @@ fn assert_fact(record: &AssuranceRecord, compiled: &BTreeMap<&str, &event::Event
                 subscription.consumer(),
                 subscription.group(),
                 match subscription.external_effect_policy() {
-                    event::ExternalEffectPolicy::TransactionalOnly => "transactional-only",
-                    event::ExternalEffectPolicy::IdempotencyKey => "idempotency-key",
-                    event::ExternalEffectPolicy::Reconcile => "reconcile",
-                    event::ExternalEffectPolicy::Compensated => "compensated",
+                    vocab::ExternalEffectPolicy::TransactionalOnly => "transactional-only",
+                    vocab::ExternalEffectPolicy::IdempotencyKey => "idempotency-key",
+                    vocab::ExternalEffectPolicy::Reconcile => "reconcile",
+                    vocab::ExternalEffectPolicy::Compensated => "compensated",
                 },
             )
         })

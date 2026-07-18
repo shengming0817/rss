@@ -1299,6 +1299,29 @@ impl core::marker::Unpin for vocab::contract::owner::DomainNameError
 impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainNameError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainNameError
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainNameError
+pub enum vocab::ExternalEffectPolicy
+pub vocab::ExternalEffectPolicy::Compensated
+pub vocab::ExternalEffectPolicy::IdempotencyKey
+pub vocab::ExternalEffectPolicy::Reconcile
+pub vocab::ExternalEffectPolicy::TransactionalOnly
+impl core::clone::Clone for vocab::ExternalEffectPolicy
+pub fn vocab::ExternalEffectPolicy::clone(&self) -> vocab::ExternalEffectPolicy
+impl core::cmp::Eq for vocab::ExternalEffectPolicy
+impl core::cmp::PartialEq for vocab::ExternalEffectPolicy
+pub fn vocab::ExternalEffectPolicy::eq(&self, &vocab::ExternalEffectPolicy) -> bool
+impl core::fmt::Debug for vocab::ExternalEffectPolicy
+pub fn vocab::ExternalEffectPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::ExternalEffectPolicy
+pub fn vocab::ExternalEffectPolicy::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::ExternalEffectPolicy
+impl core::marker::StructuralPartialEq for vocab::ExternalEffectPolicy
+impl core::marker::Freeze for vocab::ExternalEffectPolicy
+impl core::marker::Send for vocab::ExternalEffectPolicy
+impl core::marker::Sync for vocab::ExternalEffectPolicy
+impl core::marker::Unpin for vocab::ExternalEffectPolicy
+impl core::marker::UnsafeUnpin for vocab::ExternalEffectPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::ExternalEffectPolicy
+impl core::panic::unwind_safe::UnwindSafe for vocab::ExternalEffectPolicy
 pub enum vocab::GrantPermission
 pub vocab::GrantPermission::PolicyManage(vocab::authz::RoutePermissionId)
 pub vocab::GrantPermission::Route(vocab::authz::RoutePermissionId)

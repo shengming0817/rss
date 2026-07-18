@@ -69,3 +69,17 @@ fn dlx_lifecycle_proofs_and_capabilities_are_sealed() {
     t.compile_fail("tests/ui/dlx_missing_archive_proof_forge_fail.rs");
     t.compile_fail("tests/ui/dlx_archive_store_delete_fail.rs");
 }
+
+#[test]
+fn consumer_tx_policy_capabilities_are_sealed() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/consumer_tx_external_impl_fail.rs");
+    t.compile_fail("tests/ui/consumer_tx_forged_proof_fail.rs");
+    t.compile_fail("tests/ui/consumer_tx_external_handler_construct_fail.rs");
+    t.compile_fail("tests/ui/consumer_tx_wrong_policy_fail.rs");
+    t.compile_fail("tests/ui/consumer_tx_inactive_policy_constructor_fail.rs");
+    t.compile_fail("tests/ui/consumer_tx_external_key_public_name_fail.rs");
+    t.compile_fail("tests/ui/consumer_tx_external_key_raw_construct_fail.rs");
+    t.compile_fail("tests/ui/consumer_tx_transactional_raw_capability_fail.rs");
+    t.compile_fail("tests/ui/consumer_tx_bare_handler_alias_fail.rs");
+}

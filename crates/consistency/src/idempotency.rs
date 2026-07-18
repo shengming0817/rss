@@ -5,6 +5,10 @@
 //! `idempotency` 模块名下。
 //! ref: kube-rs kube-runtime/src/watcher.rs@main（内部 native AFIT trait `ApiMode` + 泛型 `step<A>` 消费）。
 
+use sha2::{Digest as _, Sha256};
+
+const EXTERNAL_EFFECT_KEY_DOMAIN: &str = "rss-consumer-external-effect-v1";
+
 /// 幂等键 newtype（私有字段，构造经 fallible funnel）。
 ///
 /// 命令 dispatch / outbox 消费两阶段去重的稳定 key。空 key 非法——重放时 key 漂移会退化成新消费者，
@@ -33,6 +37,70 @@ impl IdemKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Crate-private stable provider key reserved for the inactive idempotent ConsumerTx policy.
+///
+/// The raw value cannot be parsed or supplied by business code. It is derived only from the same
+/// tenant, event id, and consumer group that identify the durable Inbox receipt, so retries reuse
+/// one provider key without creating a second Inbox identity.
+///
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ExternalEffectIdempotencyKey(String);
+
+impl std::fmt::Debug for ExternalEffectIdempotencyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ExternalEffectIdempotencyKey(<redacted>)")
+    }
+}
+
+/// Crate-owned proof that key material came through the verified Inbox claim boundary.
+///
+/// The type and its fields are not public API, so public `InboxReceiptContext`/`IdemKey` values
+/// cannot be combined by application code to mint provider keys.
+#[allow(dead_code)]
+// reason: frozen for the inactive IdempotencyKey policy; only internal conformance tests activate it.
+pub(crate) struct VerifiedExternalEffectInboxIdentity<'a> {
+    context: &'a crate::inbox::InboxReceiptContext,
+    event_id: &'a IdemKey,
+}
+
+#[allow(dead_code)]
+// reason: frozen for the inactive IdempotencyKey policy; the future engine claim funnel is its consumer.
+impl<'a> VerifiedExternalEffectInboxIdentity<'a> {
+    pub(crate) fn from_verified_claim(
+        context: &'a crate::inbox::InboxReceiptContext,
+        event_id: &'a IdemKey,
+    ) -> Self {
+        Self { context, event_id }
+    }
+}
+
+#[allow(dead_code)]
+// reason: frozen derivation has no production caller until the IdempotencyKey policy is activated.
+impl ExternalEffectIdempotencyKey {
+    /// Derive the provider key from a crate-owned verified Inbox identity.
+    #[must_use]
+    pub(crate) fn derive(identity: &VerifiedExternalEffectInboxIdentity<'_>) -> Self {
+        let mut hasher = Sha256::new();
+        hash_component(&mut hasher, EXTERNAL_EFFECT_KEY_DOMAIN);
+        hash_component(&mut hasher, &identity.context.tenant_id().to_string());
+        hash_component(&mut hasher, identity.event_id.as_str());
+        hash_component(&mut hasher, identity.context.consumer_group().as_str());
+        Self(format!("sha256:{:x}", hasher.finalize()))
+    }
+
+    /// Borrow the stable provider representation.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn hash_component(hasher: &mut Sha256, value: &str) {
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    hasher.update(b"\0");
 }
 
 /// 消费者组 newtype（私有字段，构造经 fallible funnel）。
@@ -151,11 +219,66 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, LeaseOutcome, LeaseToken,
-        SeenState,
+        ConsumerGroup, ConsumerGroupError, ExternalEffectIdempotencyKey, IdemKey, IdemKeyError,
+        LeaseOutcome, LeaseToken, SeenState, VerifiedExternalEffectInboxIdentity,
     };
     use crate::error::EngineError;
     use crate::inbox::{InboxReceiptContext, InboxStore};
+
+    const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const TENANT_B: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d480";
+    const SCHEMA_HASH: &str =
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[allow(clippy::expect_used)]
+    // reason: fixed valid fixtures make setup failure a test-construction bug.
+    fn receipt(tenant: &str, group: &str) -> InboxReceiptContext {
+        InboxReceiptContext::new(
+            vocab::TenantId::parse(tenant).expect("tenant"),
+            ConsumerGroup::parse(group).expect("group"),
+            "identity",
+            "identity.session-created",
+            "identity.session-created",
+            "v1",
+            SCHEMA_HASH,
+            None,
+            None,
+        )
+        .expect("receipt")
+    }
+
+    fn external_effect_key(
+        context: &InboxReceiptContext,
+        event_id: &IdemKey,
+    ) -> ExternalEffectIdempotencyKey {
+        let identity = VerifiedExternalEffectInboxIdentity::from_verified_claim(context, event_id);
+        ExternalEffectIdempotencyKey::derive(&identity)
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: fixed non-empty event fixtures make parse failure a test-construction bug.
+    fn external_effect_key_is_stable_and_bound_to_verified_inbox_identity() {
+        let event_a = IdemKey::parse("event-1").expect("event");
+        let event_b = IdemKey::parse("event-2").expect("event");
+        let context = receipt(TENANT_A, "audit-consumer");
+
+        let key = external_effect_key(&context, &event_a);
+        assert_eq!(
+            key.as_str(),
+            "sha256:f38b4e73be55986b8ac0c51fbc6164da0175f93c3191950b4768f55e9a2a04f1"
+        );
+        assert_eq!(key, external_effect_key(&context, &event_a));
+        assert_ne!(key, external_effect_key(&context, &event_b));
+        assert_ne!(
+            key,
+            external_effect_key(&receipt(TENANT_B, "audit-consumer"), &event_a)
+        );
+        assert_ne!(
+            key,
+            external_effect_key(&receipt(TENANT_A, "audit-consumer-v2"), &event_a)
+        );
+    }
 
     // ─── in-mem fake（测试专用，覆盖完整 token CAS 状态机）──────────────────────────
 

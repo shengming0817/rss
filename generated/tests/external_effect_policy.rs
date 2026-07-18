@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use generated::event::{EVENTS, ExternalEffectPolicy};
+use generated::event::EVENTS;
+use vocab::ExternalEffectPolicy;
 
 fn policy_wire(policy: ExternalEffectPolicy) -> &'static str {
     match policy {

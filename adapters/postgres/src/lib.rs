@@ -101,10 +101,14 @@ pub use config_repo::{
     ConfigValueMaintenanceOptions, ConfigValueMaintenanceReport, ConfigValueProtection,
     ConfigValueProtections, PgConfigRepo, PgConfigValueMaintenance,
 };
+#[cfg(feature = "domain-audit")]
+pub use consumer_tx::PgAuditConsumerTx;
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
+pub use consumer_tx::PgConsumerTxCommitProof;
 #[cfg(feature = "domain-settings")]
 pub use consumer_tx::PgSettingsConsumerTx;
-#[cfg(feature = "domain-audit")]
-pub use consumer_tx::{AuditConsumerTxEffect, PgAuditConsumerTx};
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
+pub use consumer_tx::{PgConsumerTxOutcome, PgConsumerTxRequeue};
 #[cfg(feature = "domain-identity")]
 pub use credential_repo::PgCredentialRepo;
 pub use dead_letter::PgDeadLetterStore;
@@ -288,11 +292,6 @@ mod smoke {
         _: PhantomData<T>,
     ) {
     }
-    fn assert_audit_consumer_tx_effect<T>(_: PhantomData<T>)
-    where
-        T: super::AuditConsumerTxEffect<Effect = diport::BusinessWriteEffect>,
-    {
-    }
     fn assert_send_sync<T: Send + Sync>(_: PhantomData<T>) {}
 
     #[test]
@@ -334,8 +333,8 @@ mod smoke {
         assert_audit_repo(
             PhantomData::<super::PgAuditRepo<super::audit_repo::test_support::TestVerifier>>,
         );
-        // 真实 durable audit subscriber 在擦除为 ConsumerTxHandlerFn 前必须携带 BusinessWriteEffect。
-        assert_audit_consumer_tx_effect(
+        // 真实 durable audit subscriber 的具体类型只能经 policy-bound `into_handler` 激活。
+        assert_send_sync(
             PhantomData::<super::PgAuditConsumerTx<super::audit_repo::test_support::TestVerifier>>,
         );
         // `PgSessionSweeper` 是 concrete postgres maintenance 能力，不 impl identity 域端口；Send+Sync smoke

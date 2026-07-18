@@ -11,7 +11,7 @@
 use crate::domain::KernelError;
 use httpserve::{Listener, ListenerRouter, UnfinalizedRoutes};
 use primitives::ListenerKind;
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{any::Any, sync::Arc};
 
 /// 路由组注册的延迟闭包类型（listener-typed，#1103）。
 ///
@@ -42,48 +42,83 @@ pub struct DomainListenerBinding {
 
 /// 事件订阅声明（由 [`Registry::subscriber`] 收集）。
 ///
-/// contract_id、topic、consumer domain、consumer group 与闭枚举 execution policy 五元绑定；经
+/// contract_id、topic、consumer domain、consumer group 与闭枚举 policy capability 五元绑定；经
 /// [`Registry::drain_subscribers`] 转为 [`SubscriberBinding`]，由组合根一次解析为封闭执行计划。
 pub(crate) struct SubscriberDecl {
     pub(crate) contract_id: &'static str,
     pub(crate) topic: &'static str,
     pub(crate) consumer: &'static str,
     pub(crate) group: consistency::ConsumerGroup,
-    pub(crate) execution: SubscriberExecution,
+    pub(crate) capability: SubscriberCapability,
 }
 
-/// 域事件 effect 的 framework-neutral 执行接缝。
+/// 可重复收敛域事件的 owner-typed 声明载体。
 ///
-/// 输入 provider-neutral [`diport::Message`] 与已认证 [`vocab::TenantId`]；返回一致性引擎的
-/// [`consistency::HandleResult`]，由唯一 consumer transaction funnel 决定 ack/requeue/reject。
-/// `Arc` 使同一域实例捕获的 effect 可在声明、bridge 与 durable consumer 间共享，而不暴露 concrete service。
-pub type SubscriberEffect = Arc<
-    dyn Fn(
-            diport::Message,
-            vocab::TenantId,
-        ) -> Pin<Box<dyn Future<Output = consistency::HandleResult> + Send + 'static>>
-        + Send
-        + Sync
-        + 'static,
->;
+/// 本类型不含可执行 trait/closure；它只把 domain owner 的 concrete opaque value 携带到组合根。
+/// runtime 必须按 generated dispatch 精确 downcast 到唯一允许的 owner type，任意 wrapper 即使能被
+/// 声明也无法激活。执行能力因此留在 owner 的 concrete type 上，不再由任意下游实现者自报。
+type ReconcileSubscriberOwnerObject = dyn Any + Send + Sync + 'static;
 
-/// 订阅的唯一执行模式。
+#[derive(Clone)]
+pub struct ReconcileSubscriberOwner {
+    inner: Arc<ReconcileSubscriberOwnerObject>,
+}
+
+impl ReconcileSubscriberOwner {
+    /// Erase one concrete owner value for registry transport only.
+    ///
+    /// This is deliberately not an execution constructor. The runtime activation root accepts
+    /// only the generated dispatch's exact owner type via [`Self::into_owner`].
+    pub fn from_owner<R>(owner: R) -> Self
+    where
+        R: Any + Send + Sync + 'static,
+    {
+        Self {
+            inner: Arc::new(owner),
+        }
+    }
+
+    /// Recover the exact generated-dispatch owner type or return the still-opaque declaration.
+    pub fn into_owner<R>(self) -> Result<Arc<R>, Self>
+    where
+        R: Any + Send + Sync + 'static,
+    {
+        match Arc::downcast::<R>(self.inner) {
+            Ok(owner) => Ok(owner),
+            Err(inner) => Err(Self { inner }),
+        }
+    }
+}
+
+/// 订阅的唯一可激活 policy capability。
 ///
-/// 闭枚举使每条声明必须显式选择 adapter-native durable handler 或域 effect；不存在 `None`/默认回退。
+/// execution 与 external-effect policy 由同一个 variant 表达，调用方无法分别传入并构造错配。
+/// 当前 contract matrix 只允许 transactional adapter handler 与 domain reconcile effect；冻结但尚未
+/// 落地 executor/evidence 的其它 policy 没有 registration variant，因而不能 active。
 ///
-/// INVARIANT: DOMAIN-TYPED-HANDOFF-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed enum plus private binding fields" }—— domain service 不经 generic bag 外泄：execution 模式穷尽，binding 字段私有，route authorizer 只经专用 typed slot 交接。
-pub enum SubscriberExecution {
-    /// durable handler 由 adapter 的唯一 `ConsumerTx` registry 提供。
-    AdapterNative,
-    /// durable handler 调用域注册的窄型 effect。
-    DomainEffect(SubscriberEffect),
+/// INVARIANT: CONSUMER-TX-POLICY-REGISTRATION-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed enum plus private binding fields" }.
+pub enum SubscriberCapability {
+    /// Adapter-owned handler whose effects are confined to ConsumerTx.
+    AdapterNativeTransactional,
+    /// Domain-owned repeatable reconciliation effect.
+    DomainReconcile(ReconcileSubscriberOwner),
+}
+
+impl SubscriberCapability {
+    /// Canonical policy carried by this capability.
+    pub const fn external_effect_policy(&self) -> vocab::ExternalEffectPolicy {
+        match self {
+            Self::AdapterNativeTransactional => vocab::ExternalEffectPolicy::TransactionalOnly,
+            Self::DomainReconcile(_) => vocab::ExternalEffectPolicy::Reconcile,
+        }
+    }
 }
 
 /// finalize 后交组合根的订阅绑定（从 [`SubscriberDecl`] 展开）。
 ///
 /// 组合根据此校验 generated topology identity：`topic` 用于 broker 订阅；
 /// `consumer` 用于 ConsumerMeta/DLX/metrics 归因；`group` 传 ConsumerBase；`contract_id` 提供契约来源（审计/追踪）；
-/// `execution` 显式区分 adapter-native `ConsumerTx` 与域 effect，并随 topology identity 一起受控消费。
+/// `capability` 同时固定 execution 与 effect policy，并随 topology identity 一起受控消费。
 pub struct SubscriberBinding {
     /// 契约 ID（对应 `generated` 中的 `CONTRACT_ID` 常量）。
     contract_id: &'static str,
@@ -93,8 +128,8 @@ pub struct SubscriberBinding {
     consumer: &'static str,
     /// 消费者组（稳定标识，幂等去重 PK 的第二维度）。
     group: consistency::ConsumerGroup,
-    /// 订阅的显式执行模式。
-    execution: SubscriberExecution,
+    /// 订阅的显式 policy capability。
+    capability: SubscriberCapability,
 }
 
 impl SubscriberBinding {
@@ -118,7 +153,7 @@ impl SubscriberBinding {
         &self.group
     }
 
-    /// 一次性拆出完整绑定；execution 与 topology identity 不可被遗忘地分离消费。
+    /// 一次性拆出完整绑定；capability 与 topology identity 不可被遗忘地分离消费。
     pub fn into_parts(
         self,
     ) -> (
@@ -126,14 +161,14 @@ impl SubscriberBinding {
         &'static str,
         &'static str,
         consistency::ConsumerGroup,
-        SubscriberExecution,
+        SubscriberCapability,
     ) {
         (
             self.contract_id,
             self.topic,
             self.consumer,
             self.group,
-            self.execution,
+            self.capability,
         )
     }
 }
@@ -264,7 +299,7 @@ impl Registry {
         Ok(())
     }
 
-    /// 声明事件订阅（generated topology identity + execution policy 五元绑定）。
+    /// 声明事件订阅（generated topology identity + policy capability 五元绑定）。
     ///
     /// - `contract_id`：契约 ID，取自 `generated::event::<domain_v1>::CONTRACT_ID`。
     /// - `topic`：broker routing key，取自 `generated::event::<domain_v1>::TOPIC`。
@@ -273,11 +308,11 @@ impl Registry {
     /// - `group`：消费者组（[`consistency::ConsumerGroup`]），幂等去重 PK 的第二维度；
     ///   取自消费域 const，经 `ConsumerGroup::parse(...)` 构造——失败须冒泡为 [`KernelError::Subscriber`]，
     ///   不得在 init 内 `unwrap`/`expect`。
-    /// - `execution`：闭枚举执行策略。`AdapterNative` 由 adapter 的 typed `ConsumerTx`
-    ///   构造 handler；`DomainEffect` 捕获域内同一 service 实例并经窄型 effect 执行。
+    /// - `capability`：闭枚举 capability。`AdapterNativeTransactional` 由 adapter 的 typed
+    ///   `ConsumerTx` 构造 handler；`DomainReconcile` 只携带可重复收敛的窄 effect。
     ///
     /// 组合根 finalize 经 [`Registry::drain_subscribers`] 取出 [`SubscriberBinding`] 校验 generated topology，
-    /// durable bridge 必须把 topology identity 与 execution 同批解析为唯一封闭执行计划；缺失或错配
+    /// durable bridge 必须把 topology identity 与 capability 同批解析为唯一封闭执行计划；缺失或错配
     /// 一律 fail-closed，不得默认、fallback 或另建 handler registry。
     /// DomainId = 注册域，由注册时机隐式记录（不作为参数，避免与 contract owner 语义冲突）。
     pub fn subscriber(
@@ -286,14 +321,14 @@ impl Registry {
         topic: &'static str,
         consumer: &'static str,
         group: consistency::ConsumerGroup,
-        execution: SubscriberExecution,
+        capability: SubscriberCapability,
     ) -> Result<(), KernelError> {
         self.subscribers.push(SubscriberDecl {
             contract_id,
             topic,
             consumer,
             group,
-            execution,
+            capability,
         });
         Ok(())
     }
@@ -507,7 +542,7 @@ impl Registry {
                 topic: d.topic,
                 consumer: d.consumer,
                 group: d.group,
-                execution: d.execution,
+                capability: d.capability,
             })
             .collect()
     }
@@ -574,7 +609,7 @@ mod smoke {
 mod collect {
     //! Registry 声明收集 + 取出（RW-G1 已写实）：route_group / subscriber 收集，
     //! route_groups() / drain_subscribers() 取出，compose 跨域聚合。
-    use super::{Registry, SubscriberExecution};
+    use super::{Registry, SubscriberCapability};
     use crate::domain::{Domain, KernelError, compose};
     use httpserve::Primary;
     use primitives::ListenerKind;
@@ -593,7 +628,7 @@ mod collect {
             "identity.session-created",
             "audit",
             group,
-            SubscriberExecution::AdapterNative,
+            SubscriberCapability::AdapterNativeTransactional,
         )
         .expect("subscriber declared");
 
@@ -604,14 +639,17 @@ mod collect {
         assert_eq!(reg.probe_count(), 0);
 
         let mut subs = reg.drain_subscribers().into_iter();
-        let (contract_id, topic, consumer, group, execution) =
+        let (contract_id, topic, consumer, group, capability) =
             subs.next().expect("subscriber binding").into_parts();
         assert!(subs.next().is_none());
         assert_eq!(contract_id, "identity.session-created");
         assert_eq!(topic, "identity.session-created");
         assert_eq!(consumer, "audit");
         assert_eq!(group.as_str(), "audit.session-created");
-        assert!(matches!(execution, SubscriberExecution::AdapterNative));
+        assert!(matches!(
+            capability,
+            SubscriberCapability::AdapterNativeTransactional
+        ));
     }
 
     struct TwoGroupDomain;
@@ -625,7 +663,7 @@ mod collect {
                 "topic.a",
                 "domain-a",
                 group,
-                SubscriberExecution::AdapterNative,
+                SubscriberCapability::AdapterNativeTransactional,
             )?;
             Ok(())
         }
@@ -640,7 +678,7 @@ mod collect {
                 "topic.b",
                 "domain-b",
                 group,
-                SubscriberExecution::AdapterNative,
+                SubscriberCapability::AdapterNativeTransactional,
             )?;
             Ok(())
         }
@@ -677,7 +715,7 @@ mod collect {
 
 #[cfg(test)]
 mod typed_handoff {
-    use super::{Registry, SubscriberEffect, SubscriberExecution};
+    use super::{ReconcileSubscriberOwner, Registry, SubscriberCapability};
     use crate::domain::KernelError;
     use httpserve::{RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer};
     use std::{future::Future, pin::Pin, sync::Arc};
@@ -696,6 +734,8 @@ mod typed_handoff {
     fn authorizer() -> Arc<dyn RouteAuthorizer> {
         Arc::new(AllowAuthorizer)
     }
+
+    struct AckReconciler;
 
     #[test]
     #[allow(clippy::expect_used)]
@@ -739,20 +779,19 @@ mod typed_handoff {
 
     #[test]
     #[allow(clippy::expect_used, clippy::panic)]
-    fn subscriber_execution_is_ordered_and_consumed_with_identity() {
+    fn subscriber_capability_is_ordered_and_consumed_with_identity() {
         let group_a =
             consistency::ConsumerGroup::parse("audit.native").expect("valid consumer group");
         let group_b =
             consistency::ConsumerGroup::parse("settings.effect").expect("valid consumer group");
-        let effect: SubscriberEffect =
-            Arc::new(|_message, _tenant_id| Box::pin(async { consistency::HandleResult::ack() }));
+        let effect = ReconcileSubscriberOwner::from_owner(AckReconciler);
         let mut reg = Registry::new();
         reg.subscriber(
             "audit.native",
             "audit.native",
             "audit",
             group_a,
-            SubscriberExecution::AdapterNative,
+            SubscriberCapability::AdapterNativeTransactional,
         )
         .expect("native subscriber declared");
         reg.subscriber(
@@ -760,26 +799,29 @@ mod typed_handoff {
             "settings.effect",
             "settings",
             group_b,
-            SubscriberExecution::DomainEffect(Arc::clone(&effect)),
+            SubscriberCapability::DomainReconcile(effect.clone()),
         )
         .expect("effect subscriber declared");
 
         let mut bindings = reg.drain_subscribers().into_iter();
-        let (contract_id, topic, consumer, group, execution) =
+        let (contract_id, topic, consumer, group, capability) =
             bindings.next().expect("first binding").into_parts();
         assert_eq!(contract_id, "audit.native");
         assert_eq!(topic, "audit.native");
         assert_eq!(consumer, "audit");
         assert_eq!(group.as_str(), "audit.native");
-        assert!(matches!(execution, SubscriberExecution::AdapterNative));
+        assert!(matches!(
+            capability,
+            SubscriberCapability::AdapterNativeTransactional
+        ));
 
-        let (contract_id, _, _, _, execution) =
+        let (contract_id, _, _, _, capability) =
             bindings.next().expect("second binding").into_parts();
         assert_eq!(contract_id, "settings.effect");
-        let SubscriberExecution::DomainEffect(actual) = execution else {
+        let SubscriberCapability::DomainReconcile(actual) = capability else {
             panic!("settings binding must carry domain effect");
         };
-        assert!(Arc::ptr_eq(&effect, &actual));
+        assert!(Arc::ptr_eq(&effect.inner, &actual.inner));
         assert!(bindings.next().is_none());
     }
 }
@@ -790,7 +832,7 @@ mod finalize {
     //! （按 listener 分组折叠 typed register 闭包为 per-listener `UnfinalizedRoutes`）。前者复用
     //! `primitives::HealthReport::aggregate`；后者经 typed `route_group::<L>` 守 listener 隔离
     //! （ROUTE-LISTENER-TYPED-01 类型层，#1103 Medium→Hard）+ ROUTE-AUTH-FUNNEL-01（无 bindable 出口）。
-    use super::{HealthProbe, HealthReporter, Registry, SubscriberExecution};
+    use super::{HealthProbe, HealthReporter, Registry, SubscriberCapability};
     use crate::domain::KernelError;
     use httpserve::{Internal, Primary};
     use primitives::{HealthCheck, HealthStatus, ListenerKind, ProbeName};
@@ -842,7 +884,7 @@ mod finalize {
             "drain.topic",
             "test-consumer",
             group,
-            SubscriberExecution::AdapterNative,
+            SubscriberCapability::AdapterNativeTransactional,
         )
         .expect("subscriber declared");
 

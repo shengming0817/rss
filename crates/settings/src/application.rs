@@ -49,7 +49,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 #[cfg(test)]
 use axum::routing::{delete, get, post};
-use bootstrap::{KernelError, SubscriberEffect, SubscriberExecution};
+use bootstrap::{KernelError, ReconcileSubscriberOwner, SubscriberCapability};
 use consistency::{
     ConsumerGroup, EngineError, EngineErrorKind, EventEntry, HandleResult, IdemKey, PermanentError,
     PermanentErrorKind,
@@ -175,6 +175,78 @@ impl ConfigQueryService {
         }
         self.cache.upsert(entry.clone());
         Ok(Some(entry))
+    }
+
+    /// Rebuild the local config cache from the authoritative read repository.
+    ///
+    /// This method deliberately lives on the read-only query capability: a reconcile subscriber
+    /// cannot reach the settings write UoW, outbox emitter, flag store, clock, or secret ports.
+    async fn handle_config_version_changed_event(
+        &self,
+        event: ConfigVersionChangedEvent,
+    ) -> HandleResult {
+        match self
+            .apply_config_version_changed(event.tenant, event.key, event.version, event.change_kind)
+            .await
+        {
+            Ok(()) => HandleResult::ack(),
+            Err(error) => HandleResult::requeue(error),
+        }
+    }
+
+    async fn apply_config_version_changed(
+        &self,
+        tenant: TenantId,
+        key: SettingKey,
+        version: u64,
+        change_kind: SettingsConfigChangeKind,
+    ) -> Result<(), EngineError> {
+        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
+        let latest = self
+            .configs
+            .head(scope, &key)
+            .await
+            .map_err(|_| config_refresh_error())?;
+        match latest {
+            Some(current) if current.version() > version => {
+                let current = self
+                    .configs
+                    .find(scope, &key)
+                    .await
+                    .map_err(|_| config_refresh_error())?;
+                match current {
+                    Some(entry) => self.cache.upsert(entry),
+                    None => self.cache.remove(tenant, &key),
+                }
+                return Ok(());
+            }
+            Some(current) if current.version() < version => {
+                return Err(config_refresh_error());
+            }
+            Some(ConfigHead::Deleted(_)) if change_kind == SettingsConfigChangeKind::Deleted => {
+                self.cache.remove(tenant, &key);
+                return Ok(());
+            }
+            Some(ConfigHead::Active(_)) if change_kind == SettingsConfigChangeKind::Deleted => {
+                return Err(config_refresh_error());
+            }
+            Some(ConfigHead::Deleted(_)) => {
+                return Err(config_refresh_error());
+            }
+            Some(ConfigHead::Active(_)) => {}
+            None => {
+                return Err(config_refresh_error());
+            }
+        }
+
+        let entry = self
+            .configs
+            .find_version(scope, &key, version)
+            .await
+            .map_err(|_| config_refresh_error())?
+            .ok_or_else(config_refresh_error)?;
+        self.cache.upsert(entry);
+        Ok(())
     }
 }
 
@@ -617,77 +689,6 @@ impl SettingsService {
             .collect();
         Ok(evaluate_flag(&state, &EvalContext::new(&owned)) == FlagDecision::Enabled)
     }
-
-    pub async fn handle_config_version_changed_event(
-        &self,
-        event: ConfigVersionChangedEvent,
-    ) -> HandleResult {
-        match self
-            .apply_config_version_changed(event.tenant, event.key, event.version, event.change_kind)
-            .await
-        {
-            Ok(()) => HandleResult::ack(),
-            Err(error) => HandleResult::requeue(error),
-        }
-    }
-
-    async fn apply_config_version_changed(
-        &self,
-        tenant: TenantId,
-        key: SettingKey,
-        version: u64,
-        change_kind: SettingsConfigChangeKind,
-    ) -> Result<(), EngineError> {
-        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
-        let latest = self
-            .query
-            .configs
-            .head(scope, &key)
-            .await
-            .map_err(|_| config_refresh_error())?;
-        match latest {
-            Some(current) if current.version() > version => {
-                let current = self
-                    .query
-                    .configs
-                    .find(scope, &key)
-                    .await
-                    .map_err(|_| config_refresh_error())?;
-                match current {
-                    Some(entry) => self.query.cache.upsert(entry),
-                    None => self.query.cache.remove(tenant, &key),
-                }
-                return Ok(());
-            }
-            Some(current) if current.version() < version => {
-                return Err(config_refresh_error());
-            }
-            Some(ConfigHead::Deleted(_)) if change_kind == SettingsConfigChangeKind::Deleted => {
-                self.query.cache.remove(tenant, &key);
-                return Ok(());
-            }
-            Some(ConfigHead::Active(_)) if change_kind == SettingsConfigChangeKind::Deleted => {
-                return Err(config_refresh_error());
-            }
-            Some(ConfigHead::Deleted(_)) => {
-                return Err(config_refresh_error());
-            }
-            Some(ConfigHead::Active(_)) => {}
-            None => {
-                return Err(config_refresh_error());
-            }
-        }
-
-        let entry = self
-            .query
-            .configs
-            .find_version(scope, &key, version)
-            .await
-            .map_err(|_| config_refresh_error())?
-            .ok_or_else(config_refresh_error)?;
-        self.query.cache.upsert(entry);
-        Ok(())
-    }
 }
 
 fn config_refresh_error() -> EngineError {
@@ -1035,6 +1036,94 @@ fn log_config_version_tenant_mismatch(
     );
 }
 
+/// Narrow, read-only reconciler for `settings.config-version-changed`.
+///
+/// Its only state is [`ConfigQueryService`], whose fields are the owner-defined config read port
+/// and cache. It cannot reach [`SettingsService`]'s writer, flag store, clock, or any outbox path.
+pub struct ConfigVersionReconciler {
+    state: ConfigVersionReconcilerState,
+}
+
+enum ConfigVersionReconcilerState {
+    Query(ConfigQueryService),
+    #[cfg(feature = "test-support")]
+    TestAck,
+    #[cfg(feature = "test-support")]
+    TestRequeue,
+}
+
+impl ConfigVersionReconciler {
+    fn new(query: ConfigQueryService) -> Self {
+        Self {
+            state: ConfigVersionReconcilerState::Query(query),
+        }
+    }
+
+    /// Test-only exact owner capability used by runtime topology tests.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_ack() -> Self {
+        Self {
+            state: ConfigVersionReconcilerState::TestAck,
+        }
+    }
+
+    /// Test-only exact owner capability that returns a transient reconciliation result.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_requeue() -> Self {
+        Self {
+            state: ConfigVersionReconcilerState::TestRequeue,
+        }
+    }
+
+    /// Reconcile one authenticated config-version event using only the owner-defined read/cache
+    /// capability captured by this opaque concrete type.
+    pub fn reconcile(
+        &self,
+        message: Message,
+        authenticated_tenant: TenantId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = HandleResult> + Send + 'static>> {
+        let query = match &self.state {
+            ConfigVersionReconcilerState::Query(query) => query.clone(),
+            #[cfg(feature = "test-support")]
+            ConfigVersionReconcilerState::TestAck => {
+                return Box::pin(async { HandleResult::ack() });
+            }
+            #[cfg(feature = "test-support")]
+            ConfigVersionReconcilerState::TestRequeue => {
+                return Box::pin(async {
+                    HandleResult::requeue(EngineError::new(EngineErrorKind::Transient))
+                });
+            }
+        };
+        Box::pin(async move {
+            let event = match config_version_changed_event_from_message(&message) {
+                Ok(event) => event,
+                Err(error) => {
+                    tracing::warn!(
+                        message_id = message.id.as_str(),
+                        error = %secure::redact_error(&error),
+                        "settings config-version payload rejected"
+                    );
+                    return HandleResult::reject(PermanentError::new(
+                        PermanentErrorKind::Permanent,
+                    ));
+                }
+            };
+            if event.tenant() != authenticated_tenant {
+                log_config_version_tenant_mismatch(
+                    message.id.as_str(),
+                    &event.tenant(),
+                    &authenticated_tenant,
+                );
+                return HandleResult::reject(PermanentError::new(PermanentErrorKind::Invariant));
+            }
+            query.handle_config_version_changed_event(event).await
+        })
+    }
+}
+
 impl ::bootstrap::Domain for SettingsDomain {
     fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
         let spec = VERSION_CHANGED_SPEC
@@ -1042,51 +1131,27 @@ impl ::bootstrap::Domain for SettingsDomain {
             .iter()
             .find(|s| s.consumer() == SETTINGS_DOMAIN)
             .ok_or(KernelError::Subscriber)?;
-        if (spec.execution(), spec.effect())
-            != (
-                SubscriptionExecution::DomainEffect,
-                Some(SubscriptionEffect::SettingsConfigVersionRefresh),
-            )
-        {
+        if (
+            spec.execution(),
+            spec.effect(),
+            spec.external_effect_policy(),
+        ) != (
+            SubscriptionExecution::DomainEffect,
+            Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+            vocab::ExternalEffectPolicy::Reconcile,
+        ) {
             return Err(KernelError::Subscriber);
         }
         let group = ConsumerGroup::parse(spec.group()).map_err(|_| KernelError::Subscriber)?;
-        let effect_config = Arc::clone(&self.config);
-        let effect: SubscriberEffect = Arc::new(move |message, authenticated_tenant| {
-            let config = Arc::clone(&effect_config);
-            Box::pin(async move {
-                let event = match config_version_changed_event_from_message(&message) {
-                    Ok(event) => event,
-                    Err(error) => {
-                        tracing::warn!(
-                            message_id = message.id.as_str(),
-                            error = %secure::redact_error(&error),
-                            "settings config-version payload rejected"
-                        );
-                        return HandleResult::reject(PermanentError::new(
-                            PermanentErrorKind::Permanent,
-                        ));
-                    }
-                };
-                if event.tenant() != authenticated_tenant {
-                    log_config_version_tenant_mismatch(
-                        message.id.as_str(),
-                        &event.tenant(),
-                        &authenticated_tenant,
-                    );
-                    return HandleResult::reject(PermanentError::new(
-                        PermanentErrorKind::Invariant,
-                    ));
-                }
-                config.handle_config_version_changed_event(event).await
-            })
-        });
+        let effect = ReconcileSubscriberOwner::from_owner(ConfigVersionReconciler::new(
+            self.config_query.clone(),
+        ));
         reg.subscriber(
             VERSION_CHANGED_SPEC.contract_id(),
             VERSION_CHANGED_SPEC.topic(),
             spec.consumer(),
             group,
-            SubscriberExecution::DomainEffect(effect),
+            SubscriberCapability::DomainReconcile(effect),
         )?;
 
         let config = Arc::clone(&self.config);
@@ -2740,7 +2805,7 @@ mod tests {
     }
 
     #[allow(clippy::expect_used, clippy::panic)]
-    fn subscriber_effect_for(service: Arc<SettingsService>) -> SubscriberEffect {
+    fn subscriber_effect_for(service: Arc<SettingsService>) -> Arc<ConfigVersionReconciler> {
         let (secret_repo, secret_uow) = secret_ports_arc();
         let domain = SettingsDomain::new(service, secret_repo, secret_uow);
         let mut registry = bootstrap::compose(&[&domain]).expect("settings domain composes");
@@ -2748,10 +2813,17 @@ mod tests {
             .drain_subscribers()
             .pop()
             .expect("settings subscription exists");
-        let (_, _, _, _, execution) = binding.into_parts();
-        match execution {
-            SubscriberExecution::DomainEffect(effect) => effect,
-            SubscriberExecution::AdapterNative => panic!("settings subscription must be effect"),
+        let (_, _, _, _, capability) = binding.into_parts();
+        match capability {
+            SubscriberCapability::DomainReconcile(effect) => {
+                match effect.into_owner::<ConfigVersionReconciler>() {
+                    Ok(reconciler) => reconciler,
+                    Err(_) => panic!("settings registration must carry its exact owner reconciler"),
+                }
+            }
+            SubscriberCapability::AdapterNativeTransactional => {
+                panic!("settings subscription must be reconcile")
+            }
         }
     }
 
@@ -2829,14 +2901,21 @@ mod tests {
             spec.effect(),
             Some(SubscriptionEffect::SettingsConfigVersionRefresh)
         );
-        let (contract_id, topic, consumer, group, execution) =
+        assert_eq!(
+            spec.external_effect_policy(),
+            vocab::ExternalEffectPolicy::Reconcile
+        );
+        let (contract_id, topic, consumer, group, capability) =
             subs.next().expect("settings subscriber").into_parts();
         assert!(subs.next().is_none());
         assert_eq!(contract_id, VERSION_CHANGED_SPEC.contract_id());
         assert_eq!(topic, VERSION_CHANGED_SPEC.topic());
         assert_eq!(consumer, spec.consumer());
         assert_eq!(group.as_str(), spec.group());
-        assert!(matches!(execution, SubscriberExecution::DomainEffect(_)));
+        assert!(matches!(
+            capability,
+            SubscriberCapability::DomainReconcile(_)
+        ));
     }
 
     #[allow(clippy::expect_used)]
@@ -2903,7 +2982,10 @@ mod tests {
             ),
         );
         let event = config_version_changed_event_from_message(&message).expect("parse event");
-        let result = service.handle_config_version_changed_event(event).await;
+        let result = service
+            .config_query_service()
+            .handle_config_version_changed_event(event)
+            .await;
         assert_eq!(result.disposition(), consistency::Disposition::Ack);
         assert!(service.query.cache.find(tenant(), &key).is_none());
     }
@@ -2931,7 +3013,10 @@ mod tests {
 
         let message = Message::new("m-settings", version_changed_payload(TENANT));
         let event = config_version_changed_event_from_message(&message).expect("parse event");
-        let result = service.handle_config_version_changed_event(event).await;
+        let result = service
+            .config_query_service()
+            .handle_config_version_changed_event(event)
+            .await;
         assert_eq!(result.disposition(), consistency::Disposition::Ack);
         let cached = service
             .query
@@ -2960,7 +3045,10 @@ mod tests {
 
         let message = Message::new("m-settings", version_changed_payload(TENANT));
         let event = config_version_changed_event_from_message(&message).expect("parse event");
-        let result = service.handle_config_version_changed_event(event).await;
+        let result = service
+            .config_query_service()
+            .handle_config_version_changed_event(event)
+            .await;
 
         assert_eq!(result.disposition(), consistency::Disposition::Ack);
         let cached = service
@@ -2989,11 +3077,12 @@ mod tests {
         service.query.cache.remove(tenant(), &key);
         let effect = subscriber_effect_for(Arc::clone(&service));
 
-        let result = effect(
-            Message::new("m-settings-effect", version_changed_payload(TENANT)),
-            tenant(),
-        )
-        .await;
+        let result = effect
+            .reconcile(
+                Message::new("m-settings-effect", version_changed_payload(TENANT)),
+                tenant(),
+            )
+            .await;
 
         assert_eq!(result.disposition(), consistency::Disposition::Ack);
         assert_eq!(
@@ -3016,12 +3105,15 @@ mod tests {
         let other_tenant = TenantId::parse("11111111-2222-4333-8444-555555555555")
             .expect("canonical other tenant");
 
-        let invalid = effect(Message::new("m-invalid", b"not-json".to_vec()), tenant()).await;
-        let mismatch = effect(
-            Message::new("m-mismatch", version_changed_payload(TENANT)),
-            other_tenant,
-        )
-        .await;
+        let invalid = effect
+            .reconcile(Message::new("m-invalid", b"not-json".to_vec()), tenant())
+            .await;
+        let mismatch = effect
+            .reconcile(
+                Message::new("m-mismatch", version_changed_payload(TENANT)),
+                other_tenant,
+            )
+            .await;
 
         assert_eq!(invalid.disposition(), consistency::Disposition::Reject);
         assert_eq!(
@@ -3134,14 +3226,15 @@ mod tests {
         let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
         let effect = subscriber_effect_for(service);
 
-        let result = effect(
-            Message::new(
-                "m-future-version",
-                version_changed_payload_for(TENANT, "app.feature", 2),
-            ),
-            tenant(),
-        )
-        .await;
+        let result = effect
+            .reconcile(
+                Message::new(
+                    "m-future-version",
+                    version_changed_payload_for(TENANT, "app.feature", 2),
+                ),
+                tenant(),
+            )
+            .await;
 
         assert_eq!(result.disposition(), consistency::Disposition::Requeue);
         assert_eq!(
@@ -3181,7 +3274,10 @@ mod tests {
             version_changed_payload_for(TENANT, "app.feature", 1),
         );
         let event = config_version_changed_event_from_message(&message).expect("parse event");
-        let result = service.handle_config_version_changed_event(event).await;
+        let result = service
+            .config_query_service()
+            .handle_config_version_changed_event(event)
+            .await;
         assert_eq!(result.disposition(), consistency::Disposition::Ack);
         let cached = service
             .query

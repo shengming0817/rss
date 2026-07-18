@@ -28,7 +28,7 @@ use audit::ports::{
     AuditEventKind, AuditWriteRepo as _, DynAuditWriteRepo, TenantRepoScope,
     audit_record_from_event_message,
 };
-use bootstrap::SubscriberExecution;
+use bootstrap::SubscriberCapability;
 use common::{
     CANON_TENANT, CANON_USER, CapturingVerifier, LOGIN_USERNAME, NOW_SECS, PASSWORD,
     SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, dlx_payload_protector, identity_domain,
@@ -49,9 +49,10 @@ use eventexec::{
 };
 use futures::future::BoxFuture;
 use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
-use generated::http::identity_v1::login::IdentityLoginRequest;
+use generated::http::identity_v1::login::{IdentityLoginRequest, PRODUCER as LOGIN_PRODUCER};
+use httpserve::ProducerMarker;
 use identity::LoginService;
-use identity::ports::DynSessionLifecycle;
+use identity::ports::{DynSessionLifecycle, LoginProducerReceipt};
 use memory::{FixedClock, MemBus};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
 use primitives::MacKey;
@@ -67,6 +68,10 @@ const RSS_APP_READ_PASSWORD: &str = "rss_app_read_test_pw";
 /// #1160：注入的 correlation——经 diagctx ambient → PgSessionLifecycle emit → outbox.metadata 列 → relay
 /// hydrate → MemBus → consumer `Message.metadata` 端到端保真断言（白名单字符，CorrelationId::parse 必通）。
 const JOURNEY_CORR: &str = "journey-corr-1160";
+
+fn login_producer_receipt() -> LoginProducerReceipt {
+    ProducerMarker::for_test(LOGIN_PRODUCER).into_receipt()
+}
 
 fn finish_with_pg_cleanup(body: Result<()>, cleanup: Result<()>) -> Result<()> {
     match (body, cleanup) {
@@ -305,7 +310,10 @@ async fn login_audit_durable_topology() -> Result<()> {
         let binding = session_created_subscription(registry)?;
         anyhow::ensure!(binding.topic() == SESSION_CREATED_TOPIC);
         let (event_contract_id, event_topic, _, group, execution) = binding.into_parts();
-        anyhow::ensure!(matches!(execution, SubscriberExecution::AdapterNative));
+        anyhow::ensure!(matches!(
+            execution,
+            SubscriberCapability::AdapterNativeTransactional
+        ));
         let event_domain = event_topic.split('.').next().unwrap_or(event_topic);
 
         // 消费侧：PgInboxStore 幂等 claimer（durable，group 自 binding 单源；非 identity 域资源）。
@@ -378,6 +386,7 @@ async fn login_audit_durable_topology() -> Result<()> {
             let response = diagctx::scope(
                 DiagnosticCtx::new(CorrelationId::parse(JOURNEY_CORR)?),
                 login.login(
+                    login_producer_receipt(),
                     tenant,
                     IdentityLoginRequest {
                         username: LOGIN_USERNAME.to_string(),

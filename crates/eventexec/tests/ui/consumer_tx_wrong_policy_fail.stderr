@@ -1,0 +1,17 @@
+error[E0433]: cannot find `consumer_tx` in `eventexec`
+ --> tests/ui/consumer_tx_wrong_policy_fail.rs:4:16
+  |
+4 | use eventexec::consumer_tx::policy::Reconcile;
+  |                ^^^^^^^^^^^ could not find `consumer_tx` in `eventexec`
+
+error[E0432]: unresolved import `eventexec::ConsumerTxHandler`
+ --> tests/ui/consumer_tx_wrong_policy_fail.rs:3:5
+  |
+3 | use eventexec::ConsumerTxHandler;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ConsumerTxHandler` in the root
+
+error[E0433]: cannot find `ConsumerTxOutcome` in `eventexec`
+  --> tests/ui/consumer_tx_wrong_policy_fail.rs:10:32
+   |
+10 |             async { eventexec::ConsumerTxOutcome::Committed }.boxed()
+   |                                ^^^^^^^^^^^^^^^^^ could not find `ConsumerTxOutcome` in `eventexec`

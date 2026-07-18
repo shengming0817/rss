@@ -53,3 +53,20 @@ pub use service::ServiceCallerDomain;
 pub use tenant::{
     CrossTenantVisibility, RowScope, RowVisibility, ScopedTenant, TenantId, TenantIdError,
 };
+
+/// Closed policy for effects outside a durable ConsumerTx database transaction.
+///
+/// This vocabulary is shared by generated subscription metadata, bootstrap registration, and the
+/// runtime executor bridge. Keeping one type makes policy drift a type error instead of requiring
+/// conversions between parallel enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExternalEffectPolicy {
+    /// Handler effects are limited to the ConsumerTx database transaction.
+    TransactionalOnly,
+    /// External calls use a stable idempotency key.
+    IdempotencyKey,
+    /// External state converges from an authoritative source.
+    Reconcile,
+    /// External effects have a durable compensation path.
+    Compensated,
+}

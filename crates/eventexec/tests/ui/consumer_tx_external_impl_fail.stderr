@@ -1,0 +1,13 @@
+error[E0433]: cannot find `consumer_tx` in `eventexec`
+ --> tests/ui/consumer_tx_external_impl_fail.rs:5:16
+  |
+5 | use eventexec::consumer_tx::policy::TransactionalOnly;
+  |                ^^^^^^^^^^^ could not find `consumer_tx` in `eventexec`
+
+error[E0432]: unresolved imports `eventexec::ConsumerTxHandler`, `eventexec::ConsumerTxOutcome`
+ --> tests/ui/consumer_tx_external_impl_fail.rs:6:17
+  |
+6 | use eventexec::{ConsumerTxHandler, ConsumerTxOutcome};
+  |                 ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^ no `ConsumerTxOutcome` in the root
+  |                 |
+  |                 no `ConsumerTxHandler` in the root

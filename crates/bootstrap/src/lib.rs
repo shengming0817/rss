@@ -64,7 +64,8 @@ pub use primitives::ListenerKind;
 pub use refreshstoredeps::{RefreshStoreConfig, RefreshStoreResolveError, ResolvedRefreshStore};
 pub use registry::DomainListenerBinding;
 pub use registry::{
-    HealthProbe, HealthReporter, Registry, SubscriberBinding, SubscriberEffect, SubscriberExecution,
+    HealthProbe, HealthReporter, ReconcileSubscriberOwner, Registry, SubscriberBinding,
+    SubscriberCapability,
 };
 pub use replaydeps::{IdempotencyConfig, IdempotencyResolveError, RedisUrl, ResolvedIdempotency};
 pub use sagaprojectiondeps::{
