@@ -29,8 +29,16 @@ Result<httpserve::ListenerRouter<L>, KernelError>`，错误必须冒泡到 boots
   安装私有 route-bound witness。handler 首 extractor 必须是同一契约的 move-only
   `ProducerMarker<RouteMarker>`；witness 缺失时提取 fail-closed，提取成功后 marker 自带 mounted
   binding，handler 仅能消费 `marker.into_receipt()` 铸造 receipt，不能替换 binding。receipt
-  继续交给 service / Unit-of-Work producer funnel。`OutboxFact` 不能调用普通
-  `new(ROUTE, handler)`。
+  继续交给 service / Unit-of-Work producer funnel。generated event DTO 实现
+  `GeneratedEventPayload`，由 payload 类型单源选择原子的 `EventFactBinding { contract, topic }`；
+  active producer 的 `EventEntry` 必须由该 typed payload 构造，不能从独立 topic/bytes 拼装。Postgres
+  active producer 的唯一事务入口是
+  `PgWritePool::producer_tx` / `retry_producer_tx`：业务 closure 只拿同一个 crate-private
+  `&mut TxCapability`，并返回字段封闭的 `ProducerTxOutcome::Emitted(value, authorization)` 或
+  `NoMutation(value)`；只有 funnel 能把 authorization、envelope contract 与 typed entry fact 三者精确
+  校验后执行 canonical outbox append，并进入统一 settlement。active producer provider 禁止普通
+  `.write()`、direct append、publisher 或 emitter。
+  `OutboxFact` 不能调用普通 `new(ROUTE, handler)`。
 - method/path/auth/resource scope 全由 binding 内的同一 `HttpRouteEvidence` 推导。`SPEC.route`
   仅供元数据查询，不是 production endpoint 构造入口。
 - 非 L0 stateful handler 在 endpoint 上调用 `.with_state(state)`。L0 (`LocalOnly`) 只能保持

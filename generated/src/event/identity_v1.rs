@@ -315,6 +315,14 @@ pub mod policy_updated {
         "sha256:47b84018a53fa99bd8674f8b3344b11da69a9964e569b57de821483c8b2d0de2",
     );
 
+    /// Generated contract + topic identity carried by this event payload.
+    pub const FACT: ::vocab::EventFactBinding =
+        ::vocab::EventFactBinding::from_static(CONTRACT, TOPIC);
+
+    impl ::vocab::GeneratedEventPayload for IdentityPolicyUpdatedPayload {
+        const FACT: ::vocab::EventFactBinding = FACT;
+    }
+
     /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
     pub const SPEC: super::super::EventSpec = super::super::EventSpec::new(
         CONTRACT,
@@ -543,6 +551,14 @@ pub mod role_assigned {
         "v1",
         "sha256:fc6a7fae4a70adde19490fdc933f3aee257a3ea758902b4c834890922681171d",
     );
+
+    /// Generated contract + topic identity carried by this event payload.
+    pub const FACT: ::vocab::EventFactBinding =
+        ::vocab::EventFactBinding::from_static(CONTRACT, TOPIC);
+
+    impl ::vocab::GeneratedEventPayload for IdentityRoleAssignedPayload {
+        const FACT: ::vocab::EventFactBinding = FACT;
+    }
 
     /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
     pub const SPEC: super::super::EventSpec = super::super::EventSpec::new(
@@ -773,6 +789,14 @@ pub mod role_revoked {
         "sha256:c590835ecdadb62478a2074dbce19d3e3729066ccaa2e8b6f6f811006fa78f66",
     );
 
+    /// Generated contract + topic identity carried by this event payload.
+    pub const FACT: ::vocab::EventFactBinding =
+        ::vocab::EventFactBinding::from_static(CONTRACT, TOPIC);
+
+    impl ::vocab::GeneratedEventPayload for IdentityRoleRevokedPayload {
+        const FACT: ::vocab::EventFactBinding = FACT;
+    }
+
     /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
     pub const SPEC: super::super::EventSpec = super::super::EventSpec::new(
         CONTRACT,
@@ -887,6 +911,14 @@ pub mod session_created {
         "v1",
         "sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516",
     );
+
+    /// Generated contract + topic identity carried by this event payload.
+    pub const FACT: ::vocab::EventFactBinding =
+        ::vocab::EventFactBinding::from_static(CONTRACT, TOPIC);
+
+    impl ::vocab::GeneratedEventPayload for IdentitySessionCreatedPayload {
+        const FACT: ::vocab::EventFactBinding = FACT;
+    }
 
     /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
     pub const SPEC: super::super::EventSpec = super::super::EventSpec::new(

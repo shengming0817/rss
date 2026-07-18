@@ -2736,6 +2736,7 @@ pub(crate) enum CanonicalMountedState {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct CanonicalRouteMount {
     pub(crate) source: String,
+    pub(crate) handler: String,
     pub(crate) state: CanonicalMountedState,
 }
 
@@ -4164,11 +4165,12 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
             );
             if !mounts.is_empty() {
                 self.evidence.routes.extend(mounts.keys().cloned());
-                for (key, states) in mounts {
+                for (key, mounts) in mounts {
                     let destination = self.evidence.canonical_mounts.entry(key).or_default();
-                    destination.extend(states.into_iter().map(|state| CanonicalRouteMount {
+                    destination.extend(mounts.into_iter().map(|mount| CanonicalRouteMount {
                         source: self.source.to_string(),
-                        state,
+                        handler: mount.handler,
+                        state: mount.state,
                     }));
                 }
                 self.evidence
@@ -4300,8 +4302,8 @@ fn direct_serving_route_mounts(
     handlers: &BTreeMap<String, BTreeSet<String>>,
     reachability: Reachability,
     attribute_safe: bool,
-) -> BTreeMap<String, BTreeSet<CanonicalMountedState>> {
-    let mut routes = BTreeMap::<String, BTreeSet<CanonicalMountedState>>::new();
+) -> BTreeMap<String, BTreeSet<ResolvedRouteMount>> {
+    let mut routes = BTreeMap::<String, BTreeSet<ResolvedRouteMount>>::new();
     for statement in &block.stmts {
         let Stmt::Expr(expr, _) = statement else {
             continue;
@@ -4388,9 +4390,10 @@ fn mounted_route_states(
     handlers: &BTreeMap<String, BTreeSet<String>>,
     reachability: Reachability,
     attribute_safe: bool,
-) -> BTreeMap<String, BTreeSet<CanonicalMountedState>> {
+) -> BTreeMap<String, BTreeSet<ResolvedRouteMount>> {
     let mut binding_counts = BTreeMap::<String, usize>::new();
-    let mut endpoint_bindings = BTreeMap::<String, (String, CanonicalMountedState)>::new();
+    let mut endpoint_bindings =
+        BTreeMap::<String, (ResolvedEndpoint, CanonicalMountedState)>::new();
     for statement in &block.stmts {
         let Stmt::Local(local) = statement else {
             continue;
@@ -4406,9 +4409,9 @@ fn mounted_route_states(
             && reachability.with_attrs(&local.attrs).prod
             && !reachability.with_attrs(&local.attrs).unknown
             && let Some(init) = &local.init
-            && let Some(route) = endpoint_route(&init.expr, resolver, module, handlers)
+            && let Some(endpoint) = endpoint_mount(&init.expr, resolver, module, handlers)
         {
-            endpoint_bindings.insert(name, (route, mounted_state(&init.expr)));
+            endpoint_bindings.insert(name, (endpoint, mounted_state(&init.expr)));
         }
     }
 
@@ -4443,12 +4446,18 @@ fn mounted_route_states(
     }
 
     let mut routes = collector.inline_routes;
-    for (binding, (route, state)) in endpoint_bindings {
+    for (binding, (endpoint, state)) in endpoint_bindings {
         if binding_counts.get(&binding) == Some(&1)
             && collector.binding_uses.get(&binding) == Some(&1)
             && collector.mounted_bindings.get(&binding) == Some(&1)
         {
-            routes.entry(route).or_default().insert(state);
+            routes
+                .entry(endpoint.route)
+                .or_default()
+                .insert(ResolvedRouteMount {
+                    handler: endpoint.handler,
+                    state,
+                });
         }
     }
     routes
@@ -4459,7 +4468,7 @@ struct SameScopeMountCollector<'a> {
     resolver: &'a Resolver,
     module: &'a [String],
     handlers: &'a BTreeMap<String, BTreeSet<String>>,
-    inline_routes: BTreeMap<String, BTreeSet<CanonicalMountedState>>,
+    inline_routes: BTreeMap<String, BTreeSet<ResolvedRouteMount>>,
     mounted_bindings: BTreeMap<String, usize>,
     binding_uses: BTreeMap<String, usize>,
     reachability: Reachability,
@@ -4498,12 +4507,16 @@ impl<'ast> Visit<'ast> for SameScopeMountCollector<'_> {
             && node.args.len() == 1
             && let Some(argument) = node.args.first()
         {
-            if let Some(route) = endpoint_route(argument, self.resolver, self.module, self.handlers)
+            if let Some(endpoint) =
+                endpoint_mount(argument, self.resolver, self.module, self.handlers)
             {
                 self.inline_routes
-                    .entry(route)
+                    .entry(endpoint.route)
                     .or_default()
-                    .insert(mounted_state(argument));
+                    .insert(ResolvedRouteMount {
+                        handler: endpoint.handler,
+                        state: mounted_state(argument),
+                    });
             } else if let Some(binding) = simple_ident(argument) {
                 *self.mounted_bindings.entry(binding).or_default() += 1;
             }
@@ -4552,12 +4565,24 @@ fn simple_ident(expr: &Expr) -> Option<String> {
         .then(|| path.path.segments[0].ident.to_string())
 }
 
-fn endpoint_route(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedEndpoint {
+    route: String,
+    handler: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ResolvedRouteMount {
+    handler: String,
+    state: CanonicalMountedState,
+}
+
+fn endpoint_mount(
     expr: &Expr,
     resolver: &Resolver,
     module: &[String],
     handlers: &BTreeMap<String, BTreeSet<String>>,
-) -> Option<String> {
+) -> Option<ResolvedEndpoint> {
     let Expr::Call(call) = peel_endpoint_expr(expr) else {
         return None;
     };
@@ -4570,13 +4595,26 @@ fn endpoint_route(
         .and_then(|expr| route_key(expr, resolver))?;
     let handler = call.args.iter().nth(1)?;
     if let Some(identity) = handler_identity(handler, module, resolver) {
-        handlers
+        return handlers
             .get(&identity)
             .is_some_and(|keys| keys.contains(&route))
-            .then_some(route)
-    } else {
-        expr_contains_marker(handler, &route, resolver).then_some(route)
+            .then_some(ResolvedEndpoint {
+                route,
+                handler: identity,
+            });
     }
+    expr_contains_marker(handler, &route, resolver).then(|| {
+        let start = handler.span().start();
+        ResolvedEndpoint {
+            route,
+            handler: format!(
+                "<inline:{}@{}:{}>",
+                module_key(module),
+                start.line,
+                start.column
+            ),
+        }
+    })
 }
 
 fn peel_endpoint_expr(expr: &Expr) -> &Expr {
@@ -6100,6 +6138,33 @@ mod tests {
             Some("demo_v1::write")
         );
         assert!(constructor_is_canonical(&constructor, &resolver));
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_mount_preserves_the_exact_mounted_handler_identity() -> anyhow::Result<()> {
+        let resolver = Resolver::default();
+        let expression: Expr = syn::parse_str(
+            "::httpserve::GeneratedPrimaryEndpoint::new_producer(\
+             ::generated::http::demo_v1::write::PRODUCER, fake_handler)",
+        )?;
+        let handlers = BTreeMap::from([
+            (
+                "correct_handler".to_string(),
+                BTreeSet::from(["demo_v1::write".to_string()]),
+            ),
+            (
+                "fake_handler".to_string(),
+                BTreeSet::from(["demo_v1::write".to_string()]),
+            ),
+        ]);
+
+        let mounted = endpoint_mount(&expression, &resolver, &[], &handlers)
+            .context("canonical producer endpoint must resolve")?;
+
+        assert_eq!(mounted.route, "demo_v1::write");
+        assert_eq!(mounted.handler, "fake_handler");
+        assert_ne!(mounted.handler, "correct_handler");
         Ok(())
     }
     use std::fs;

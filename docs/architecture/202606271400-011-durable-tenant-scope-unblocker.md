@@ -56,7 +56,7 @@ pub async fn set_local_tenant(conn: &mut PgConn, tenant_uuid: &str) -> Result<()
 pub async fn set_local_tenant(conn: &mut PgConn, tenant: TenantId) -> Result<(), PgError>
 ```
 
-三个 helper：`set_local_tenant` / `tenant_scoped_read` / `co_tx_with_outbox`。非
+三个 helper：`set_local_tenant` / `tenant_scoped_read` / `producer_tx`。非
 `TenantId` 类型无法编译进入 funnel（Hard，type system）。`TenantId::parse` 已 fail-closed
 拒空值 / nil UUID / 非 canonical（ADR-002 §D3 落地 #1032）。
 
@@ -225,7 +225,7 @@ impl Probe for RlsReadyProbe {
 
 | 约束 | 评级 | 载体 |
 |------|------|------|
-| `set_local_tenant` / `tenant_scoped_read` / `co_tx_with_outbox` 参数类型为 `TenantId`（非 `&str`） | **Hard（类型系统）** | 参数类型，非 `TenantId` 无法编译；`TenantId::parse` fail-closed 拒非法值（ADR-002 #1032） |
+| `set_local_tenant` / `tenant_scoped_read` / `producer_tx` 参数类型为 `TenantId`（非 `&str`） | **Hard（类型系统）** | 参数类型，非 `TenantId` 无法编译；`TenantId::parse` fail-closed 拒非法值（ADR-002 #1032） |
 | `set_config('rss.tenant_id'` 字面量只允许出现在 `cotx.rs`（生产源） | **Medium（xtask 内容扫描）** | `cargo xtask setlocal-funnel`（TENANCY-SETLOCAL-FUNNEL-01）；synthetic red + anti-vacuity green，`xtask/src/setlocal_funnel.rs`；盲区 = `#[cfg(test)]` 豁免，由 Hard 载体覆盖 |
 | durable 模式启动断言 tenant 表 RLS 三件套已在 force 中 | **Medium（运行期门）** | `PgStore::verify_rls_capability` 在 `PgRuntimeDeps::setup` 中 fail-fast；DB 状态不可编译期校验 |
 | readyz probe 反映 startup RLS 验证状态（未验证 → 503） | **Medium（运行期 backstop）** | `RlsReadyProbe`，默认 Unhealthy，fail-closed；接入 `httpserve::HealthListener` |

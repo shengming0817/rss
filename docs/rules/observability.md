@@ -148,7 +148,7 @@ postgres UoW retry boundary 发射下列 metric（bare 名，emit site = `adapte
 | `tx_retry_attempts_total` | Counter | `boundary`,`class`,`reason` | 失败 attempt 按错误分类与低基数原因计数 |
 | `tx_retry_final_total` | Counter | `boundary`,`status`,`reason` | 每次 UoW retry loop 的最终状态；无失败时 `reason=none` |
 | `tx_retry_attempts` | Histogram | `boundary`,`status`,`reason` | 每次 UoW 实际 attempt 数 |
-| `tx_settlement_final_total` | Counter | `boundary`,`final_status` | 不携带 HTTP contract identity 的 generic UoW 最后真实结算状态；全程未开始事务则不发 |
+| `tx_settlement_final_total` | Counter | `boundary`,`final_status` | 不携带 HTTP contract identity 的 generic UoW / plain producer 最后真实结算状态；全程未开始事务则不发 |
 
 label 闭值集纪律：
 
@@ -167,11 +167,13 @@ label 闭值集纪律：
 - `settings.secret` 的 generic retry telemetry 覆盖非 HTTP `publish_internal` 与 rollback `republish`；它只描述
   repository CAS retry loop，不得附着 `settings.secret-publish` 的 contract identity。其真实事务终态只由
   `tx_settlement_final_total` 按闭值 `boundary` / `final_status` 报告；不得从 `tx_retry_final_total` 反推。
-- `tx_settlement_final_total.final_status` 闭合于 `LocalTxFinalStatus::as_label()`；仅 generic
-  `run_pg_tx_retry` 发射。HTTP-aware `run_pg_localtx_retry` 继续只发 `localtx_*`，两条路径不会重复计数。
+- `tx_settlement_final_total.final_status` 闭合于 `LocalTxFinalStatus::as_label()`；generic
+  `run_pg_tx_retry` 与 non-retry outbox producer 的封闭 `ProducerTxAttempt::into_result` 发射，后者固定
+  `boundary="outbox.producer"`。HTTP-aware `run_pg_localtx_retry` 继续只发 `localtx_*`，各路径不会重复计数。
 - generic final metric 与 unsafe WARN 只由同一个 private settlement routing 派生，二者共用闭值
-  `boundary` / `final_status`；common cotx settlement funnel 不发 unsafe WARN，避免 HTTP LocalTx 与 generic
-  routing 重复。HTTP 路径的 actionable WARN 仍只由 `LocalTxObservation` 携 contract scope 发射。
+  `boundary` / `final_status`；common cotx settlement funnel 不发 unsafe WARN，plain producer 则必须先经
+  move-only `ProducerTxAttempt` 观察结算再压平结果，避免漏报或 replay。HTTP LocalTx 路径的 actionable
+  WARN 仍只由 `LocalTxObservation` 携 contract scope 发射。
 
 ### LocalTx Settlement Metrics（#1705）
 

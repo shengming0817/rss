@@ -11,11 +11,13 @@ retry-budget alerts and must not trigger automatic replay.
 Contract-attributed alert scope is limited to the closed labels `domain`, `contract_id`, and
 `boundary`. For generic UoW, the generic WARN routing fields are exactly `boundary` and
 `final_status`; both values come from the same closed settlement routing used by
-`tx_settlement_final_total`. The generic runner is the only generic unsafe-settlement WARN emitter;
-HTTP LocalTx keeps its contract-attributed WARN path and does not emit the generic WARN. Tenant,
-business key, SQL, payload, and error text are intentionally absent. Obtain any record-level context
-from access-controlled tracing or audit storage; never add it to metric labels, WARN routing fields,
-or alert annotations.
+`tx_settlement_final_total`. The shared private settlement router is the only generic
+unsafe-settlement WARN emitter: bounded generic retries reach it through `run_pg_tx_retry`, while
+non-retrying outbox producers must consume their move-only `ProducerTxAttempt` through
+`into_result` with `boundary="outbox.producer"`. HTTP LocalTx keeps its contract-attributed WARN
+path and does not emit the generic WARN. Tenant, business key, SQL, payload, and error text are
+intentionally absent. Obtain any record-level context from access-controlled tracing or audit
+storage; never add it to metric labels, WARN routing fields, or alert annotations.
 
 ## Static proof preflight
 

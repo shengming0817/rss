@@ -1,136 +1,22 @@
+#![allow(clippy::expect_used, clippy::panic)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
 use generated::{event, http};
-use serde::Deserialize;
 use vocab::HttpConsistencyLevel;
+
+#[path = "support/l2_assurance.rs"]
+mod l2_assurance_support;
+use l2_assurance_support::*;
 
 const ASSURANCE_JSON: &str = include_str!("../l2-assurance.json");
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AssuranceInventory {
-    schema_version: u32,
-    producer_count: usize,
-    fact_count: usize,
-    contracts: Vec<AssuranceRecord>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "role", rename_all = "camelCase", deny_unknown_fields)]
-enum AssuranceRecord {
-    #[serde(rename_all = "camelCase")]
-    Producer {
-        contract_id: String,
-        domain: String,
-        version: String,
-        status: RecordStatus,
-        emitted_facts: Vec<String>,
-        evidence: CompleteEvidence,
-    },
-    #[serde(rename_all = "camelCase")]
-    Fact {
-        contract_id: String,
-        domain: String,
-        version: String,
-        status: RecordStatus,
-        topic: String,
-        subscriptions: Vec<SubscriptionIdentity>,
-        evidence: CompleteEvidence,
-    },
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-enum RecordStatus {
-    Closed,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SubscriptionIdentity {
-    consumer: String,
-    group: String,
-    external_effect_policy: AssuranceExternalEffectPolicy,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-enum AssuranceExternalEffectPolicy {
-    TransactionalOnly,
-    IdempotencyKey,
-    Reconcile,
-    Compensated,
-}
-
-impl AssuranceExternalEffectPolicy {
-    fn as_wire(&self) -> &'static str {
-        match self {
-            Self::TransactionalOnly => "transactional-only",
-            Self::IdempotencyKey => "idempotency-key",
-            Self::Reconcile => "reconcile",
-            Self::Compensated => "compensated",
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CompleteEvidence {
-    contract: EvidenceFacet,
-    generated: EvidenceFacet,
-    runtime: EvidenceFacet,
-    effect: EvidenceFacet,
-    fault: EvidenceFacet,
-}
-
-impl CompleteEvidence {
-    fn facets(&self) -> [&EvidenceFacet; 5] {
-        [
-            &self.contract,
-            &self.generated,
-            &self.runtime,
-            &self.effect,
-            &self.fault,
-        ]
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct EvidenceFacet {
-    status: FacetStatus,
-    carriers: Vec<EvidenceCarrier>,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-enum FacetStatus {
-    Complete,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct EvidenceCarrier {
-    kind: CarrierKind,
-    path: String,
-    symbol: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "kebab-case")]
-enum CarrierKind {
-    Manifest,
-    RustSymbol,
-    FaultFixture,
-}
-
 #[test]
-fn committed_l2_assurance_is_closed_and_matches_compiled_registries()
--> Result<(), serde_json::Error> {
-    let inventory: AssuranceInventory = serde_json::from_str(ASSURANCE_JSON)?;
+fn committed_l2_assurance_is_closed_and_matches_compiled_registries() {
+    let inventory = AssuranceInventory::parse_v3(ASSURANCE_JSON).expect("strict v3 inventory");
 
-    assert_eq!(inventory.schema_version, 2);
+    assert_eq!(inventory.schema_version, 3);
     assert_eq!(inventory.producer_count, 9);
     assert_eq!(inventory.fact_count, 5);
     assert_eq!(inventory.contracts.len(), 14);
@@ -195,8 +81,7 @@ fn committed_l2_assurance_is_closed_and_matches_compiled_registries()
             "draft seed entered the assurance inventory"
         );
         match record {
-            AssuranceRecord::Producer { evidence, .. } => {
-                assert_producer_runtime(evidence, contract_id, domain);
+            AssuranceRecord::Producer { .. } => {
                 assert_producer(
                     record,
                     &fact_ids,
@@ -214,11 +99,29 @@ fn committed_l2_assurance_is_closed_and_matches_compiled_registries()
             }
         }
     }
-
-    Ok(())
 }
 
-fn assert_fact_runtime_symbols(evidence: &CompleteEvidence, expected: &[&str], contract_id: &str) {
+#[test]
+fn assurance_reader_rejects_v2_and_unknown_fields() {
+    let v2 = ASSURANCE_JSON.replacen("\"schemaVersion\": 3", "\"schemaVersion\": 2", 1);
+    assert!(AssuranceInventory::parse_v3(&v2).is_err());
+
+    let unknown = ASSURANCE_JSON.replacen(
+        "\"producerCount\": 9",
+        "\"legacyProducerEvidence\": true,\n  \"producerCount\": 9",
+        1,
+    );
+    assert!(AssuranceInventory::parse_v3(&unknown).is_err());
+
+    let duplicate_schema = ASSURANCE_JSON.replacen(
+        "\"schemaVersion\": 3",
+        "\"schemaVersion\": 3,\n  \"schemaVersion\": 3",
+        1,
+    );
+    assert!(AssuranceInventory::parse_v3(&duplicate_schema).is_err());
+}
+
+fn assert_fact_runtime_symbols(evidence: &FactEvidence, expected: &[&str], contract_id: &str) {
     let actual = evidence
         .runtime
         .carriers
@@ -232,46 +135,6 @@ fn assert_fact_runtime_symbols(evidence: &CompleteEvidence, expected: &[&str], c
                 && carrier.path == "assemblies/runtime/src/event_transport.rs"
         }),
         "{contract_id} runtime carriers must be production event-transport symbols"
-    );
-}
-
-fn assert_producer_runtime(evidence: &CompleteEvidence, contract_id: &str, domain: &str) {
-    assert_eq!(
-        evidence.runtime.carriers.len(),
-        1,
-        "{contract_id} must have one canonical producer handler"
-    );
-    let handler = &evidence.runtime.carriers[0];
-    assert_eq!(handler.kind, CarrierKind::RustSymbol, "{contract_id}");
-    assert!(
-        handler.path.starts_with(&format!("crates/{domain}/src/")) && handler.path.ends_with(".rs"),
-        "{contract_id} runtime must be its domain HTTP handler"
-    );
-    assert!(
-        handler.symbol.ends_with("_handler"),
-        "{contract_id} runtime must name the route handler"
-    );
-    assert!(
-        evidence.effect.carriers.iter().any(|carrier| {
-            carrier.kind == CarrierKind::RustSymbol
-                && carrier.path.starts_with(&format!("crates/{domain}/src/"))
-        }),
-        "{contract_id} lacks domain service/UoW receipt evidence"
-    );
-    assert!(
-        evidence.effect.carriers.iter().any(|carrier| {
-            carrier.kind == CarrierKind::RustSymbol
-                && carrier.path.starts_with("adapters/postgres/src/")
-        }),
-        "{contract_id} lacks Postgres receipt authorization evidence"
-    );
-    assert!(
-        evidence.effect.carriers.iter().any(|carrier| {
-            carrier.kind == CarrierKind::RustSymbol
-                && carrier.path.starts_with("generated/src/http/")
-                && carrier.symbol.ends_with("::EFFECT_PROFILE")
-        }),
-        "{contract_id} lacks generated effect-profile evidence"
     );
 }
 
@@ -339,7 +202,7 @@ fn assert_producer(
             .any(|symbol| symbol.ends_with("::PRODUCER")),
         "{contract_id} lacks generated producer binding"
     );
-    assert_complete_evidence(evidence, contract_id);
+    assert_producer_evidence(evidence, contract_id, domain, emitted_facts);
 }
 
 fn assert_fact(record: &AssuranceRecord, compiled: &BTreeMap<&str, &event::EventSpec>) {
@@ -398,28 +261,265 @@ fn assert_fact(record: &AssuranceRecord, compiled: &BTreeMap<&str, &event::Event
         actual_subscriptions, compiled_subscriptions,
         "{contract_id}"
     );
-    assert_complete_evidence(evidence, contract_id);
+    assert_complete_fact_evidence(evidence, contract_id);
 }
 
-fn assert_complete_evidence(evidence: &CompleteEvidence, contract_id: &str) {
-    for facet in evidence.facets() {
-        assert_eq!(facet.status, FacetStatus::Complete, "{contract_id}");
-        assert!(!facet.carriers.is_empty(), "{contract_id}");
+#[allow(clippy::cognitive_complexity)]
+fn assert_producer_evidence(
+    evidence: &ProducerEvidence,
+    contract_id: &str,
+    domain: &str,
+    emitted_facts: &[String],
+) {
+    for facet in [&evidence.contract, &evidence.generated] {
+        assert_complete_facet(facet, contract_id);
+    }
+    assert_eq!(
+        evidence.execution.status,
+        FacetStatus::Complete,
+        "{contract_id}"
+    );
+    assert_eq!(
+        evidence.execution.route.kind,
+        CarrierKind::RustSymbol,
+        "{contract_id}"
+    );
+    assert!(
+        evidence
+            .execution
+            .route
+            .path
+            .starts_with("generated/src/http/")
+            && evidence.execution.route.symbol.ends_with("::SPEC"),
+        "{contract_id} execution route must be its generated HTTP spec"
+    );
+    let handler = &evidence.execution.mounted_handler;
+    assert_eq!(handler.kind, CarrierKind::RustSymbol, "{contract_id}");
+    assert!(
+        handler.path.starts_with(&format!("crates/{domain}/src/"))
+            && handler.path.ends_with(".rs")
+            && handler.symbol.ends_with("_handler"),
+        "{contract_id} mounted handler drift"
+    );
+    let terminal_facts = evidence
+        .execution
+        .terminals
+        .iter()
+        .map(|terminal| terminal.fact_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal_facts,
+        emitted_facts.iter().map(String::as_str).collect::<Vec<_>>(),
+        "{contract_id} terminal fact set must exactly equal emittedFacts"
+    );
+    for terminal in &evidence.execution.terminals {
         assert!(
-            facet.carriers.windows(2).all(|pair| {
-                (&pair[0].path, &pair[0].symbol, pair[0].kind)
-                    < (&pair[1].path, &pair[1].symbol, pair[1].kind)
-            }),
-            "{contract_id} carriers must be sorted and unique: {:?}",
-            facet.carriers
+            !terminal.domain_path.is_empty(),
+            "{contract_id} has an empty domain execution path"
         );
-        for carrier in &facet.carriers {
-            assert!(!carrier.symbol.is_empty(), "{contract_id}");
+        assert!(
+            terminal.domain_path.iter().all(|carrier| {
+                carrier.kind == CarrierKind::RustSymbol
+                    && carrier.path.starts_with(&format!("crates/{domain}/src/"))
+            }),
+            "{contract_id} domain execution path escaped its domain"
+        );
+        assert!(
+            terminal.port_method.path == format!("crates/{domain}/src/ports.rs")
+                && terminal.port_method.symbol.contains("Local::"),
+            "{contract_id} must record one exact local port method"
+        );
+        assert!(
+            terminal
+                .provider_method
+                .path
+                .starts_with("adapters/postgres/src/")
+                && terminal.provider_method.symbol.starts_with("Pg")
+                && terminal.provider_method.symbol.contains("::"),
+            "{contract_id} must record one exact Postgres provider method"
+        );
+        assert!(
+            terminal.production_composition.runtime_entry.path == "assemblies/runtime/src/lib.rs"
+                && terminal.production_composition.runtime_entry.symbol == "run_startup"
+                && terminal
+                    .production_composition
+                    .runtime_assembly
+                    .path
+                    .starts_with("assemblies/runtime/src/generated/")
+                && terminal.production_composition.runtime_assembly.symbol == "wire_domains"
+                && terminal
+                    .production_composition
+                    .runtime_module
+                    .path
+                    .starts_with("assemblies/runtime/src/domains/")
+                && terminal.production_composition.runtime_module.symbol == "module"
+                && terminal
+                    .production_composition
+                    .wire
+                    .path
+                    .starts_with("composition/")
+                && terminal.production_composition.wire.symbol == "wire"
+                && !terminal
+                    .production_composition
+                    .service_constructor
+                    .is_empty()
+                && !terminal.production_composition.provider_factory.is_empty(),
+            "{contract_id} production composition is incomplete"
+        );
+        assert_eq!(
+            terminal.transaction.path, "adapters/postgres/src/cotx/mod.rs",
+            "{contract_id}"
+        );
+        assert!(
+            matches!(
+                terminal.transaction.symbol.as_str(),
+                "PgWritePool::producer_tx" | "PgWritePool::retry_producer_tx"
+            ),
+            "{contract_id} transaction must use the only producer funnel"
+        );
+        assert_eq!(terminal.capability.symbol, "TxCapability", "{contract_id}");
+        assert_eq!(
+            terminal.append.symbol, "append_outbox_with_projection",
+            "{contract_id}"
+        );
+        assert_eq!(
+            terminal.settlement.symbol, "finish_local_tx",
+            "{contract_id}"
+        );
+        for carrier in terminal.domain_path.iter().chain([
+            &terminal.port_method,
+            &terminal.provider_method,
+            &terminal.production_composition.runtime_entry,
+            &terminal.production_composition.runtime_assembly,
+            &terminal.production_composition.runtime_module,
+            &terminal.production_composition.wire,
+            &terminal.transaction,
+            &terminal.capability,
+            &terminal.append,
+            &terminal.settlement,
+        ]) {
             assert_canonical_repo_relative_path(&carrier.path, contract_id);
         }
     }
-    let runner_carriers = evidence
-        .fault
+    assert_producer_fault(&evidence.fault, contract_id, emitted_facts);
+}
+
+fn assert_producer_fault(
+    fault: &ProducerFaultEvidence,
+    contract_id: &str,
+    emitted_facts: &[String],
+) {
+    assert_eq!(fault.status, FacetStatus::Complete, "{contract_id}");
+    assert_eq!(
+        fault
+            .terminals
+            .iter()
+            .map(|terminal| terminal.fact_id.as_str())
+            .collect::<Vec<_>>(),
+        emitted_facts.iter().map(String::as_str).collect::<Vec<_>>(),
+        "{contract_id} fault terminals must equal emitted facts"
+    );
+    for terminal in &fault.terminals {
+        assert_eq!(
+            terminal.provider_method.path,
+            evidence_provider_path(contract_id),
+            "{contract_id}"
+        );
+        assert!(
+            matches!(
+                terminal.transaction.symbol.as_str(),
+                "PgWritePool::producer_tx" | "PgWritePool::retry_producer_tx"
+            ),
+            "{contract_id}"
+        );
+        for (carrier, path, symbol) in [
+            (
+                &terminal.rollback,
+                "adapters/postgres/src/cotx/mod.rs",
+                "rollback_local_tx",
+            ),
+            (
+                &terminal.commit_unknown,
+                "adapters/postgres/src/cotx/mod.rs",
+                "finish_local_tx_commit_result",
+            ),
+            (
+                &terminal.rollback_failed,
+                "adapters/postgres/src/cotx/mod.rs",
+                "finish_local_tx_rollback_result",
+            ),
+        ] {
+            assert_eq!(carrier.path, path, "{contract_id}");
+            assert_eq!(carrier.symbol, symbol, "{contract_id}");
+        }
+        let expected_consumer = [
+            (
+                "PgWritePool::producer_tx",
+                "adapters/postgres/src/cotx/mod.rs",
+                "ProducerTxAttempt::into_result",
+            ),
+            (
+                "PgWritePool::retry_producer_tx",
+                "adapters/postgres/src/cotx/settlement.rs",
+                "LocalTxAttempt::into_retry_result",
+            ),
+        ]
+        .into_iter()
+        .find(|(transaction, _, _)| *transaction == terminal.transaction.symbol.as_str())
+        .map(|(_, path, symbol)| (path, symbol));
+        assert_eq!(
+            expected_consumer,
+            Some((
+                terminal.no_replay.path.as_str(),
+                terminal.no_replay.symbol.as_str(),
+            )),
+            "{contract_id}"
+        );
+    }
+}
+
+fn evidence_provider_path(contract_id: &str) -> &'static str {
+    match contract_id {
+        "identity.login" => "adapters/postgres/src/session_lifecycle.rs",
+        "identity.policies-create"
+        | "identity.policies-deactivate"
+        | "identity.policies-update" => "adapters/postgres/src/policy_repo.rs",
+        "identity.roles-assign" | "identity.roles-revoke" => {
+            "adapters/postgres/src/role_binding_lifecycle.rs"
+        }
+        "settings.config-delete" | "settings.config-publish" | "settings.config-rollback" => {
+            "adapters/postgres/src/config_repo.rs"
+        }
+        _ => panic!("unexpected producer {contract_id}"),
+    }
+}
+
+fn assert_complete_fact_evidence(evidence: &FactEvidence, contract_id: &str) {
+    for facet in evidence.facets() {
+        assert_complete_facet(facet, contract_id);
+    }
+    assert_fault_runner(&evidence.fault, contract_id);
+}
+
+fn assert_complete_facet(facet: &EvidenceFacet, contract_id: &str) {
+    assert_eq!(facet.status, FacetStatus::Complete, "{contract_id}");
+    assert!(!facet.carriers.is_empty(), "{contract_id}");
+    assert!(
+        facet.carriers.windows(2).all(|pair| {
+            (&pair[0].path, &pair[0].symbol, pair[0].kind)
+                < (&pair[1].path, &pair[1].symbol, pair[1].kind)
+        }),
+        "{contract_id} carriers must be sorted and unique: {:?}",
+        facet.carriers
+    );
+    for carrier in &facet.carriers {
+        assert!(!carrier.symbol.is_empty(), "{contract_id}");
+        assert_canonical_repo_relative_path(&carrier.path, contract_id);
+    }
+}
+
+fn assert_fault_runner(fault: &EvidenceFacet, contract_id: &str) {
+    let runner_carriers = fault
         .carriers
         .iter()
         .filter(|carrier| carrier.kind == CarrierKind::RustSymbol)

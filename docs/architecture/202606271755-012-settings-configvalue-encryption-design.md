@@ -265,7 +265,7 @@ FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2 ORDER BY vers
 
 ### D8 — seal / DB 事务顺序（ops 约束，补 ADR-011 空白）
 
-seal（含 KeyProvider/Vault 生成/包裹 DEK 的**网络往返**）必须在 `co_tx_with_outbox` 打开 Postgres 事务**之前**完成；
+seal（含 KeyProvider/Vault 生成/包裹 DEK 的**网络往返**）必须在 `producer_tx` 打开 Postgres 事务**之前**完成；
 事务体只 bind 已封装字节。**禁止**持 DB 事务 / 行锁跨 KMS 网络调用（会把锁时长与事务存活绑到 KMS 延迟）。逻辑 seal 点 =
 「先产出 envelope 字节，**再**进 `business_write` 闭包 INSERT」。ADR-011 未触及事务/KMS 调用顺序，settings 落地须显式遵守。
 

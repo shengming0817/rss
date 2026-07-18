@@ -5,7 +5,7 @@
 //!
 //! **`append_outbox`**（`pub(crate)` free fn，收 `&mut TxCapability`）是 L1 原子性的编译期硬约束：
 //! 只能在已有事务内调用，不能脱离事务双写；tenant-scoped 业务写经
-//! `PgTenantWritePool::co_tx_with_outbox` 注入租户事务后传入能力令牌，全局 outbox-only infra
+//! `PgTenantWritePool::producer_tx` 注入租户事务后传入能力令牌，全局 outbox-only infra
 //! 路径也必须先显式打开事务并由 postgres adapter 铸造令牌——类型系统天然阻止无事务直接调用。
 //!
 //! **CAS fencing**：`claim_batch` 在数据库内原子选择并铸造 token/deadline；settle 同时精确匹配二者且
@@ -915,7 +915,7 @@ pub(crate) struct ReplayedOutboxAppend {
 ///
 /// # INVARIANT: OUTBOX-ATOMIC-IDEM-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
-/// outbox 双写必须在业务事务内原子执行——tenant-scoped caller 须经 `PgTenantWritePool::co_tx_with_outbox`
+/// outbox 双写必须在业务事务内原子执行——active producer 须经 `PgTenantWritePool::producer_tx`
 /// 或同等 postgres 事务 funnel 传入 `TxCapability`；裸 `PgPool::acquire()` / `PgConnection` 无法调用（Hard）。
 // 生产 caller：`PgEmitter::emit`（impl `diport::OutboxEmitter`）在事务内调用——域 crate 不直接 import 本
 // adapter（域→adapter 反向依赖被 deny.toml 禁），域侧只经 `OutboxEmitter` port 触发该 durable 写路径（T008/#1100）。

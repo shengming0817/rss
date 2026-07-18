@@ -80,7 +80,6 @@ enum ModKind {
 pub(crate) enum GeneratedItem {
     Contract,
     Spec,
-    EffectProfile,
     Producer,
 }
 
@@ -89,7 +88,6 @@ impl GeneratedItem {
         match self {
             Self::Contract => "CONTRACT",
             Self::Spec => "SPEC",
-            Self::EffectProfile => "EFFECT_PROFILE",
             Self::Producer => "PRODUCER",
         }
     }
@@ -158,11 +156,6 @@ impl GeneratedCarrier {
             GeneratedItem::Spec => {
                 if self.kind == ContractKind::Http && self.lifecycle != Lifecycle::Active {
                     bail!("inactive HTTP contract has no generated SPEC");
-                }
-            }
-            GeneratedItem::EffectProfile => {
-                if self.kind != ContractKind::Http || self.lifecycle != Lifecycle::Active {
-                    bail!("only active HTTP contracts have generated EFFECT_PROFILE");
                 }
             }
             GeneratedItem::Producer => {
@@ -1360,6 +1353,7 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
     let schema_hash = schema_hash(c)?;
     // active event 必有 topic（R8）；draft 无 topic 则回退用 id，保持确定性（不出现 Option 条件代码分歧）。
     let topic = c.manifest.topic.as_deref().unwrap_or(contract_id.as_str());
+    let payload_type = event_payload_type_name(c)?;
     // 防注入自守（review #271 F4）：domain / id / topic 拼进生成 Rust 字符串字面量（`CONTRACT_ID` / `TOPIC` /
     // `CONTRACT::from_static`），与 consumer / group 同款经 [`is_safe_codegen_ident`] 收口——codegen 可独立于
     // `contract validate`（R7）运行，故不依赖上游已收口，自守拒引号 / 反斜杠 / 控制字符等可破坏字面量的字符
@@ -1470,6 +1464,14 @@ pub const TOPIC: &str = "{topic}";
 pub const CONTRACT: ::vocab::ContractBinding =
     ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
 
+/// Generated contract + topic identity carried by this event payload.
+pub const FACT: ::vocab::EventFactBinding =
+    ::vocab::EventFactBinding::from_static(CONTRACT, TOPIC);
+
+impl ::vocab::GeneratedEventPayload for {payload_type} {{
+    const FACT: ::vocab::EventFactBinding = FACT;
+}}
+
 /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
 pub const SPEC: {sup}EventSpec = {sup}EventSpec::new(
     CONTRACT,
@@ -1483,6 +1485,16 @@ pub const SPEC: {sup}EventSpec = {sup}EventSpec::new(
             crate::contract::manifest::PartitionKeyStrategy::Aggregate => "Aggregate",
         },
     ))
+}
+
+fn event_payload_type_name(c: &DiscoveredContract) -> Result<String> {
+    let file = c
+        .manifest
+        .schemas
+        .payload
+        .as_deref()
+        .context("event 契约缺 [schemas].payload（R4 应已守）")?;
+    schema_root_type_name(c, file, "event payload schema")
 }
 
 /// codegen 安全标识符（review #216 F6）：仅 `[a-z0-9._-]`（消费者域名 ∪ 点分 group 名的字符全集）——
@@ -4548,6 +4560,10 @@ mod tests {
                 && rendered.contains(r#""v1","#)
                 && rendered.contains(r#""sha256:"#),
             "缺 CONTRACT binding 常量:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("impl ::vocab::GeneratedEventPayload for SeedHappenedPayload"),
+            "event payload must carry its generated contract+topic fact binding:\n{rendered}"
         );
         // 每事件只有一个 SPEC，subscription 嵌套在同一 EventSpec。
         assert!(

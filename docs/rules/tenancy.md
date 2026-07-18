@@ -183,7 +183,7 @@ partition liveness 语义。
 从声明过的认证/预认证通道（JWT tenant claim 或 `X-Tenant-ID` populate-only header，见 §Tenant source）
 流入；域内从已认证/授权证据派生本地 `TenantRepoScope`，repo / tenant read/write capability 只接收该 sealed handle。
 `adapters/postgres/src/cotx/mod.rs` 是唯一 lower 点：从 scope handle 取 `TenantId`，经
-`set_local_tenant` / `tenant_scoped_read` / `co_tx_with_outbox` 注入当前 PG 事务；永不从 HTTP request body 读取。
+`set_local_tenant` / `tenant_scoped_read` / `producer_tx` 注入当前 PG 事务；永不从 HTTP request body 读取。
 
 **缺失 SET LOCAL 的行为（预期 default-deny）**：若 `SET LOCAL rss.tenant_id` 未注入，
 `current_setting('rss.tenant_id', true)` 返回 NULL，`tenant_id = NULL` 永不匹配任何行——

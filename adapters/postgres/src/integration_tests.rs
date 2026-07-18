@@ -11261,7 +11261,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     drop(rollback_timeout_seam);
 
     let occurred_at = i64::try_from(TEST_OCCURRED_SECS)?;
-    let contract = config_contract();
+    let contract = settings::ports::CONFIG_VERSION_CHANGED_CONTRACT;
     let entry = config_outbox_entry(&unique_event_id("localtx-co-tx-commit"));
     let env = OutboxEnvelope::new(
         contract.domain().to_owned(),
@@ -11271,8 +11271,14 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     );
     let co_tx_pid = Arc::new(AtomicI32::new(0));
     let operation_pid = Arc::clone(&co_tx_pid);
+    let authorization = settings::config_publish_receipt_for_test()
+        .authorize(
+            <generated::event::settings_v1::SettingsConfigVersionChangedPayload as vocab::GeneratedEventPayload>::FACT,
+            settings::ports::CONFIG_VERSION_CHANGED_CONTRACT,
+        )
+        .ok_or_else(|| std::io::Error::other("config producer authorization missing"))?;
     let attempt = scoped
-        .retry_co_tx_with_outbox(
+        .retry_producer_tx(
             settings_scope(tenant),
             crate::tx_retry::localtx_deadline_for_test(),
             &entry,
@@ -11284,7 +11290,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
                         .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                     operation_pid.store(pid, Ordering::SeqCst);
-                    Ok(())
+                    Ok(crate::cotx::ProducerTxOutcome::Emitted((), authorization))
                 })
             },
             |error| ConfigRepoError::Storage(Box::new(error)),
@@ -11299,7 +11305,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     )
     .await?;
 
-    let contract = config_contract();
+    let contract = settings::ports::CONFIG_VERSION_CHANGED_CONTRACT;
     let entry = config_outbox_entry(&unique_event_id("localtx-co-tx-unknown"));
     let env = OutboxEnvelope::new(
         contract.domain().to_owned(),
@@ -11309,8 +11315,14 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     );
     let co_tx_pid = Arc::new(AtomicI32::new(0));
     let operation_pid = Arc::clone(&co_tx_pid);
+    let authorization = settings::config_publish_receipt_for_test()
+        .authorize(
+            <generated::event::settings_v1::SettingsConfigVersionChangedPayload as vocab::GeneratedEventPayload>::FACT,
+            settings::ports::CONFIG_VERSION_CHANGED_CONTRACT,
+        )
+        .ok_or_else(|| std::io::Error::other("config producer authorization missing"))?;
     let attempt = scoped
-        .retry_co_tx_with_outbox(
+        .retry_producer_tx(
             settings_scope(tenant),
             crate::tx_retry::localtx_deadline_for_test(),
             &entry,
@@ -11325,7 +11337,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
                     tx.inject_commit_unknown_after_commit()
                         .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
-                    Ok(())
+                    Ok(crate::cotx::ProducerTxOutcome::Emitted((), authorization))
                 })
             },
             |error| ConfigRepoError::Storage(Box::new(error)),
@@ -16551,11 +16563,16 @@ const SESSION_CREATED_TOPIC: &str = "identity.session-created";
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path——EventTopic/IdemKey parse 已知合法值；item-level carve-out（error-handling.md §Carve-out）。
 fn session_entry(event_id: &str) -> EventEntry {
-    EventEntry::new(
-        EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
+    EventEntry::from_generated_payload(
+        &generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
+            session_id: "session-integration".to_string(),
+            subject: uuid::Uuid::from_u128(1),
+            tenant_id: COTX_TENANT_A.to_string(),
+            occurred_at: i64::try_from(TEST_OCCURRED_SECS).unwrap(),
+        },
         IdemKey::parse(event_id).unwrap(),
-        reviewed_payload(br#"{"sessionId":"s"}"#),
     )
+    .unwrap()
 }
 
 /// 构造 session-created envelope（opaque subject）。
@@ -21929,7 +21946,7 @@ async fn localtx_rollback_timeout_does_not_forge_final_status() -> TestResult {
 // ── PgConfigRepo / PgConfigUnitOfWork：配置仓储 + co-tx 集成测试（#1249）─────────────
 //
 // OUTBOX-COTX-CONFIG-01 anti-vacuity：正向 `tc5` 证真实 method commit 两行皆在 ↔ 负向双覆盖——`tc6` 经真实
-// `co_tx_with_outbox`（业务写真插一行后强制 Err）证两写共回滚，`tc7` 驱动真实 `commit` 的 CAS
+// `producer_tx`（业务写真插一行后强制 Err）证两写共回滚，`tc7` 驱动真实 `commit` 的 CAS
 // 冲突分支证「冲突 → 无 outbox 行」（write-without-event 不发生）。
 
 use settings::ports::{
@@ -22269,27 +22286,34 @@ fn mutating_backfill_config_protection(pool: sqlx::PgPool) -> ConfigValueProtect
 /// 构造 config-version-changed outbox EventEntry。
 #[allow(clippy::unwrap_used)]
 fn config_outbox_entry(event_id: &str) -> EventEntry {
-    EventEntry::new(
-        EventTopic::parse(CONFIG_VERSION_CHANGED_TOPIC).unwrap(),
+    EventEntry::from_generated_payload(
+        &generated::event::settings_v1::SettingsConfigVersionChangedPayload {
+            change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Published,
+            key: "app.k".to_string(),
+            occurred_at: i64::try_from(TEST_OCCURRED_SECS).unwrap(),
+            source_version: None,
+            tenant_id: CONFIG_TENANT.to_string(),
+            version: 1,
+        },
         IdemKey::parse(event_id).unwrap(),
-        reviewed_payload(br#"{"key":"app.k","version":1}"#),
     )
+    .unwrap()
 }
 
 #[allow(clippy::unwrap_used)]
 fn config_deleted_outbox_entry(event_id: &str, key: &str, version: u64) -> EventEntry {
-    EventEntry::new(
-        EventTopic::parse(CONFIG_VERSION_CHANGED_TOPIC).unwrap(),
+    EventEntry::from_generated_payload(
+        &generated::event::settings_v1::SettingsConfigVersionChangedPayload {
+            change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Deleted,
+            key: key.to_string(),
+            occurred_at: i64::try_from(TEST_OCCURRED_SECS).unwrap(),
+            source_version: None,
+            tenant_id: CONFIG_TENANT.to_string(),
+            version: i64::try_from(version).unwrap(),
+        },
         IdemKey::parse(event_id).unwrap(),
-        reviewed_payload(
-            &serde_json::to_vec(&serde_json::json!({
-                "key": key,
-                "version": version,
-                "changeKind": "deleted"
-            }))
-            .unwrap(),
-        ),
     )
+    .unwrap()
 }
 
 /// 构造 config-version-changed envelope（opaque subject = 配置 key）。
@@ -23709,7 +23733,7 @@ async fn tc5c_config_cotx_rejects_scope_entry_tenant_mismatch() -> TestResult {
     Ok(())
 }
 
-/// tc6：co-tx 业务写后强制 Err → config 行 + outbox 行**共回滚**（both-or-neither，真实 `co_tx_with_outbox`）。
+/// tc6：producer tx 业务写后强制 Err → config 行 + outbox 行**共回滚**（both-or-neither）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
@@ -23728,7 +23752,7 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
 
     // 业务写：真插一行 config（成功）后强制 Err（模拟「配置写后、后续步骤失败」= emit/commit 失败等价物）。
     let result = tenant_pool
-        .co_tx_with_outbox(settings_scope(tenant),
+        .producer_tx(settings_scope(tenant),
             &entry,
             &env,
             move |conn| {
@@ -23746,12 +23770,19 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
                     .execute(conn.conn())
                     .await
                     .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                    Err::<(), ConfigRepoError>(ConfigRepoError::VersionConflict)
+                    Err::<
+                        crate::cotx::ProducerTxOutcome<
+                            generated::http::settings_v1::RouteMarker,
+                            (),
+                        >,
+                        ConfigRepoError,
+                    >(ConfigRepoError::VersionConflict)
                 })
             },
             |e| ConfigRepoError::Storage(Box::new(e)),
         )
-        .await;
+        .await
+        .into_result();
     assert!(matches!(result, Err(ConfigRepoError::VersionConflict)));
 
     // both-or-neither：config 行回滚（不落库）+ outbox 行不落库。
@@ -23768,6 +23799,89 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
     assert_eq!(
         ob_cnt.0, 0,
         "业务写失败 → outbox 行不落库（both-or-neither）"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// A typed entry for another generated fact must not consume config authorization. The business
+/// mutation has already run, so the mismatch exercises the transaction rollback boundary rather
+/// than a preflight-only rejection.
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_fact_binding_mismatch_rolls_back_business_write() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let tenant = config_tenant();
+    let event_id = unique_event_id("producer-fact-binding-mismatch");
+    let entry = EventEntry::from_generated_payload(
+        &generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
+            session_id: "mismatched-session".to_string(),
+            subject: uuid::Uuid::from_u128(2),
+            tenant_id: tenant.to_string(),
+            occurred_at: i64::try_from(TEST_OCCURRED_SECS)?,
+        },
+        IdemKey::parse(&event_id)?,
+    )?;
+    let contract = settings::ports::CONFIG_VERSION_CHANGED_CONTRACT;
+    let env = OutboxEnvelope::new(
+        contract.domain().to_string(),
+        contract.contract_id().to_string(),
+        OutboxMetadata::new(i64::try_from(TEST_OCCURRED_SECS)?, tenant, contract)
+            .with_subject_id(subject_id("app.fact-binding-mismatch")),
+    );
+    let authorization = settings::config_publish_receipt_for_test()
+        .authorize(
+            <generated::event::settings_v1::SettingsConfigVersionChangedPayload as vocab::GeneratedEventPayload>::FACT,
+            settings::ports::CONFIG_VERSION_CHANGED_CONTRACT,
+        )
+        .ok_or_else(|| std::io::Error::other("config producer authorization missing"))?;
+
+    let result = PgTenantWritePool::from_unverified_for_test(&store)
+        .producer_tx(
+            settings_scope(tenant),
+            &entry,
+            &env,
+            move |tx| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "INSERT INTO config_entries (
+                             tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
+                         ) VALUES ($1::uuid, $2, 1, NULL, 1, $3, $4)",
+                    )
+                    .bind(CONFIG_TENANT)
+                    .bind("app.fact-binding-mismatch")
+                    .bind(&b"ciphertext"[..])
+                    .bind("settings-config:1")
+                    .execute(tx.conn())
+                    .await
+                    .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    Ok(crate::cotx::ProducerTxOutcome::Emitted((), authorization))
+                })
+            },
+            |error| ConfigRepoError::Storage(Box::new(error)),
+        )
+        .await
+        .into_result();
+    assert!(
+        matches!(result, Err(ConfigRepoError::Storage(_))),
+        "fact binding mismatch must fail closed: {result:?}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM config_entries WHERE config_key = $1")
+            .bind("app.fact-binding-mismatch")
+            .fetch_one(&store.pool)
+            .await?,
+        0,
+        "authorization mismatch must roll back the business mutation"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?,
+        0,
+        "authorization mismatch must not append an outbox row"
     );
 
     store.shutdown().await?;
@@ -23814,7 +23928,7 @@ async fn config_fact_conflict_rolls_back_mutation() -> TestResult {
 /// tc7：**真实 method** `commit` 的 CAS 冲突分支 → VersionConflict 且**无 outbox 行**
 /// （write-without-event 不发生）；原版本不被覆盖。
 ///
-/// 与 tc6（直测 `co_tx_with_outbox` 骨架的业务写失败回滚）互补：tc7 驱动**真实 method** 的 rollback 路径
+/// 与 tc6（直测 `producer_tx` 骨架的业务写失败回滚）互补：tc7 驱动**真实 method** 的 rollback 路径
 /// （CAS Err → 整事务回滚 → outbox 不落库），对齐 session t14「直测真实 method rollback 分支」范式，消除 tc6
 /// 仅测骨架的盲区——OUTBOX-COTX-CONFIG-01 anti-vacuity（正向 tc5 ↔ 负向 tc6+tc7）由此闭合。
 #[tokio::test(flavor = "multi_thread")]
@@ -23919,7 +24033,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                         .with_subject_id(subject_id("app.cotx-rollback")),
                 );
                 tenant_pool
-                    .co_tx_with_outbox(settings_scope(tenant),
+                    .producer_tx(settings_scope(tenant),
                         &entry,
                         &env,
                         move |conn| {
@@ -23937,12 +24051,19 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                                 .execute(conn.conn())
                                 .await
                                 .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                                Err::<(), ConfigRepoError>(ConfigRepoError::VersionConflict)
+                                Err::<
+                                    crate::cotx::ProducerTxOutcome<
+                                        generated::http::settings_v1::RouteMarker,
+                                        (),
+                                    >,
+                                    ConfigRepoError,
+                                >(ConfigRepoError::VersionConflict)
                             })
                         },
                         |e| ConfigRepoError::Storage(Box::new(e)),
                     )
                     .await
+                    .into_result()
             },
             business_exists: || async {
                 let cnt: (i64,) =
@@ -25607,7 +25728,6 @@ fn role_tenant(raw: &str) -> Result<TenantId, Box<dyn std::error::Error + Send +
 const POLICY_CONTRACT_ID: &str = "identity.roles";
 const POLICY_PERMISSION: &str = "identity:role:read";
 const RESOURCE_ATTRIBUTE_ID: &str = "11111111-2222-4333-8444-555555555555";
-const POLICY_UPDATED_TOPIC: &str = "identity.policy-updated";
 const POLICY_UPDATED_CONTRACT: vocab::ContractBinding = vocab::ContractBinding::from_static(
     "identity",
     "identity.policy-updated",
@@ -25746,23 +25866,32 @@ fn policy_lifecycle_event_with_id(
     event_id: &str,
 ) -> Result<(EventEntry, diport::OutboxEnvelopeParts), IdentityError> {
     let actor = uuid::Uuid::from_u128(0xA11CE);
-    let payload = serde_json::json!({
-        "policyId": policy_id,
-        "changeKind": change_kind,
-        "version": version.get(),
-        "contractId": POLICY_CONTRACT_ID,
-        "permission": POLICY_PERMISSION,
-        "updatedBy": actor,
-        "actorKind": "admin",
-        "tenantId": tenant.to_string(),
-        "occurredAt": expected_occurred_at(),
-    });
-    let payload = serde_json::to_vec(&payload).map_err(|e| IdentityError::Storage(Box::new(e)))?;
-    let entry = EventEntry::new(
-        EventTopic::parse(POLICY_UPDATED_TOPIC).map_err(|_| IdentityError::InvalidPolicy)?,
+    use generated::event::identity_v1::policy_updated::{
+        IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadActorKind,
+        IdentityPolicyUpdatedPayloadChangeKind,
+    };
+    let change_kind = match change_kind {
+        "created" => IdentityPolicyUpdatedPayloadChangeKind::Created,
+        "updated" => IdentityPolicyUpdatedPayloadChangeKind::Updated,
+        "deactivated" => IdentityPolicyUpdatedPayloadChangeKind::Deactivated,
+        _ => return Err(IdentityError::InvalidPolicy),
+    };
+    let payload = IdentityPolicyUpdatedPayload {
+        policy_id: policy_id.to_string(),
+        change_kind,
+        version: std::num::NonZeroU32::new(version.get()).ok_or(IdentityError::InvalidPolicy)?,
+        contract_id: POLICY_CONTRACT_ID.to_string(),
+        permission: POLICY_PERMISSION.to_string(),
+        updated_by: actor,
+        actor_kind: IdentityPolicyUpdatedPayloadActorKind::Admin,
+        tenant_id: tenant.to_string(),
+        occurred_at: expected_occurred_at(),
+    };
+    let entry = EventEntry::from_generated_payload(
+        &payload,
         IdemKey::parse(event_id).map_err(|_| IdentityError::InvalidPolicy)?,
-        OutboxPayload::from_reviewed_event_bytes(payload),
-    );
+    )
+    .map_err(|error| IdentityError::Storage(Box::new(error)))?;
     let actor_subject = actor.hyphenated().to_string();
     let envelope = diport::OutboxEnvelopeParts::new(
         POLICY_UPDATED_CONTRACT,
@@ -26469,7 +26598,7 @@ async fn policy_repo_cotx_rolls_back_policy_and_outbox() -> TestResult {
     );
 
     let result = tenant_pool
-        .co_tx_with_outbox(identity_scope(tenant),
+        .producer_tx(identity_scope(tenant),
             &entry,
             &env,
             move |conn| {
@@ -26487,12 +26616,19 @@ async fn policy_repo_cotx_rolls_back_policy_and_outbox() -> TestResult {
                     .execute(conn.conn())
                     .await
                     .map_err(|e| IdentityError::Storage(Box::new(e)))?;
-                    Err::<(), IdentityError>(IdentityError::VersionConflict)
+                    Err::<
+                        crate::cotx::ProducerTxOutcome<
+                            generated::http::identity_v1::policies_create::RouteMarker,
+                            (),
+                        >,
+                        IdentityError,
+                    >(IdentityError::VersionConflict)
                 })
             },
             |e| IdentityError::Storage(Box::new(e)),
         )
-        .await;
+        .await
+        .into_result();
     assert!(
         matches!(result, Err(IdentityError::VersionConflict)),
         "forced business failure must bubble"
@@ -27630,11 +27766,18 @@ async fn role_binding_lifecycle_persists_nonempty_causation_id() -> TestResult {
 
     let event_id = unique_event_id("role-causation");
     let role_assigned_contract = generated::event::identity_v1::role_assigned::CONTRACT;
-    let entry = EventEntry::new(
-        EventTopic::parse("identity.role-assigned").unwrap(),
+    let entry = EventEntry::from_generated_payload(
+        &generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload {
+            actor_kind: generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Admin,
+            assigned_by: uuid::Uuid::from_u128(0xA11CE),
+            occurred_at: expected_occurred_at(),
+            role_id: "role-causation".to_string(),
+            subject: "target-user".to_string(),
+            tenant_id: tenant.to_string(),
+        },
         IdemKey::parse(&event_id).unwrap(),
-        reviewed_payload(br#"{"subject":"target-user","roleId":"role-causation"}"#),
     );
+    let entry = entry.unwrap();
     let envelope = OutboxEnvelopeParts::new(
         role_assigned_contract,
         tenant,
@@ -27693,17 +27836,17 @@ async fn role_binding_fact_conflict_rolls_back_assignment() -> TestResult {
         .await?;
     let event_id = unique_event_id("role-binding-fact-conflict");
     let seed = seed_conflicting_outbox_fact(&store, tenant, &event_id).await?;
-    let entry = EventEntry::new(
-        EventTopic::parse("identity.role-assigned")?,
+    let entry = EventEntry::from_generated_payload(
+        &generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload {
+            actor_kind: generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Admin,
+            assigned_by: uuid::Uuid::from_u128(0xA11CE),
+            occurred_at: expected_occurred_at(),
+            role_id: role_name.clone(),
+            subject: subject.clone(),
+            tenant_id: tenant.to_string(),
+        },
         IdemKey::parse(&event_id)?,
-        reviewed_payload(
-            serde_json::to_vec(&serde_json::json!({
-                "subject": subject,
-                "roleId": role_name
-            }))?
-            .as_slice(),
-        ),
-    );
+    )?;
     let envelope = OutboxEnvelopeParts::new(
         generated::event::identity_v1::role_assigned::CONTRACT,
         tenant,

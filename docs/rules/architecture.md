@@ -38,6 +38,13 @@ workspace(见 §扁平 workspace 结构、§Rust 原生强制)。
 | context 控制流值(tenant/principal) | `runctx::RequestCtx`/`AppCtx`(`task_local` 传播);tenant payload = `vocab::tenant::TenantId` | sealed 构造 + redacted Debug + fail-closed 取用(决策 #2 → ADR-002);base intra-base DAG `runctx → vocab` |
 | 层 | 扁平 `crates/` 分组 + `deny.toml` 强制 | 见 §扁平 workspace 结构、§分层 |
 
+active HTTP L2 producer 的 route hard binding 使用
+`HttpProducerBinding<RouteMarker>` → move-only `ProducerMarker` / `ProducerAssuranceReceipt` /
+`ProducerAuthorization<M>`；Postgres 侧只允许 `producer_tx` / `retry_producer_tx` 消费同一个
+crate-private `TxCapability`，并由 `ProducerTxOutcome<M,T>` 闭合 emitted/no-mutation。跨文件 residual
+由 Medium fail-closed execution graph 加 production-composition join 证明，committed 单一 artifact 是
+`generated/l2-assurance.json` schema v3；不保留旧 co-tx API、v2 reader、alias、shim 或双写。
+
 一句话:cargo 的 **crate ≈ 域 / 服务 / adapter / contract 派生体**,**workspace ≈ assembly**;
 Rust 的**类型系统 + crate 依赖图原生强制了大部分静态架构约束**(见 §Rust 原生强制)。
 

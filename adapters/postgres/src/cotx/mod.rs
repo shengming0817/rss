@@ -1,10 +1,11 @@
-//! `co_tx_with_outbox` —— 通用 **co-tx** 骨架：begin → SET LOCAL tenant → 业务写闭包 → `append_outbox` →
-//! 单 commit；任一步 Err ⇒ rollback + warn（#1249，吸收 #1232 co-tx）。
+//! `producer_tx` —— active HTTP producer 的唯一事务骨架：begin → SET LOCAL tenant → 业务写闭包返回
+//! typed outcome → 授权校验 → canonical append → 单 commit；任一步 Err ⇒ rollback + warn。
 //!
 //! 抽取自 session co-tx 范式（`session_lifecycle.rs`），供 session 创建与配置写
 //! `PgConfigUnitOfWork` 复用。
 //!
-//! 错误泛型 `E`：业务写闭包返回 `Result<(), E>`（如 CAS 0 行 → 域 `VersionConflict`）；骨架自身产生的 sqlx
+//! 错误泛型 `E`：业务写闭包返回 `Result<ProducerTxOutcome<M, T>, E>`（如 CAS 0 行 → 域
+//! `VersionConflict`）；骨架自身产生的 sqlx
 //! 错误（begin / SET LOCAL / `append_outbox` / commit）经调用方传入的 `map_storage: Fn(sqlx::Error)->E` 收敛进
 //! 同一 `E`——**不**要求 `E: From<sqlx::Error>`（域错误 `ConfigRepoError` 不依赖 sqlx，无法 impl `From`）。
 //! 这正是不直接复用 `PgStore::run_global_transaction`（要求 `E: From<sqlx::Error>`）的原因。
@@ -22,6 +23,8 @@ use consistency::EventEntry;
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use diport::OutboxEmitError;
 use futures::future::BoxFuture;
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+use httpserve::ProducerAuthorization;
 use sqlx::{Acquire, PgConnection, PgPool, Postgres, Transaction};
 use tokio::time::Instant;
 use vocab::TenantId;
@@ -37,6 +40,8 @@ use crate::tx_retry::{
     LocalTxAcquireDeadline, LocalTxBeginDeadline, LocalTxCommitDeadline, LocalTxDeadline,
     LocalTxOperationDeadline, LocalTxRollbackDeadline, LocalTxSetupDeadline, LocalTxStageResult,
 };
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+use crate::tx_retry::{OUTBOX_PRODUCER_BOUNDARY, record_settlement};
 
 mod settlement;
 
@@ -121,10 +126,46 @@ impl TenantScopeHandle for audit::ports::TenantRepoScope {
 struct OutboxTenantMismatch;
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-struct CoTxOutboxWrite<'a> {
+#[derive(Debug, thiserror::Error)]
+#[error("producer authorization does not match outbox envelope")]
+struct ProducerAuthorizationMismatch;
+
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+struct ProducerTxWrite<'a> {
     tenant: TenantId,
     entry: &'a EventEntry,
     env: &'a OutboxEnvelope,
+}
+
+/// Field-closed result of an active HTTP producer business mutation.
+///
+/// The emitted branch can only carry an unforgeable authorization derived from the exact mounted
+/// producer marker. `NoMutation` is the only branch that reaches settlement without an append.
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+pub(crate) enum ProducerTxOutcome<M, T> {
+    Emitted(T, ProducerAuthorization<M>),
+    NoMutation(T),
+}
+
+/// One non-retrying producer attempt whose only result projection records its typed settlement.
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+#[must_use = "producer settlement must be observed through ProducerTxAttempt::into_result"]
+pub(crate) struct ProducerTxAttempt<T, E> {
+    attempt: LocalTxAttempt<T, E>,
+}
+
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+impl<T, E> ProducerTxAttempt<T, E> {
+    fn new(attempt: LocalTxAttempt<T, E>) -> Self {
+        Self { attempt }
+    }
+
+    /// Consume the attempt after routing every acknowledged final settlement through the shared
+    /// low-cardinality metric and unsafe-settlement WARN owner. There is deliberately no replay API.
+    pub(crate) fn into_result(self) -> Result<T, E> {
+        record_settlement(OUTBOX_PRODUCER_BOUNDARY, self.attempt.settlement());
+        self.attempt.into_result()
+    }
 }
 
 /// Postgres 事务能力令牌。
@@ -449,37 +490,45 @@ impl<L> PgWritePool<L> {
         tenant_scoped_retry_write_inner(&self.pool, tenant, deadline, write, map_storage).await
     }
 
-    /// Run a tenant-scoped business write followed by outbox append in the same transaction.
-    #[cfg(feature = "domain-identity")]
-    pub(crate) async fn co_tx_with_outbox<S, F, E>(
+    /// Run one active producer mutation through the only authorization + append transaction funnel.
+    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+    pub(crate) async fn producer_tx<S, M, T, F, E>(
         &self,
         scope: S,
         entry: &EventEntry,
         env: &OutboxEnvelope,
         business_write: F,
         map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
-    ) -> Result<(), E>
+    ) -> ProducerTxAttempt<T, E>
     where
         S: TenantScopeHandle,
-        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
+        F: for<'c, 'tx> FnOnce(
+                &'c mut TxCapability<'tx>,
+            ) -> BoxFuture<'c, Result<ProducerTxOutcome<M, T>, E>>
+            + Send,
         E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
+        M: Send + 'static,
+        T: Send + 'static,
     {
         let tenant = scope.tenant();
-        co_tx_with_outbox(
-            &self.pool,
-            self.projection_registry,
-            tenant,
-            entry,
-            env,
-            business_write,
-            map_storage,
+        ProducerTxAttempt::new(
+            producer_tx_inner(
+                &self.pool,
+                self.projection_registry,
+                ProducerTxWrite { tenant, entry, env },
+                LocalTxExecutionPolicy::Plain {
+                    bound_lock_wait: false,
+                },
+                business_write,
+                map_storage,
+            )
+            .await,
         )
-        .await
     }
 
-    /// Run a tenant-scoped co-transaction with a per-attempt lock wait bound.
-    #[cfg(feature = "domain-settings")]
-    pub(crate) async fn retry_co_tx_with_outbox<S, F, E>(
+    /// Run one retry attempt through the same active producer transaction funnel.
+    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+    pub(crate) async fn retry_producer_tx<S, M, T, F, E>(
         &self,
         scope: S,
         deadline: LocalTxDeadline,
@@ -487,18 +536,23 @@ impl<L> PgWritePool<L> {
         env: &OutboxEnvelope,
         business_write: F,
         map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
-    ) -> LocalTxAttempt<(), E>
+    ) -> LocalTxAttempt<T, E>
     where
         S: TenantScopeHandle,
-        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
+        F: for<'c, 'tx> FnOnce(
+                &'c mut TxCapability<'tx>,
+            ) -> BoxFuture<'c, Result<ProducerTxOutcome<M, T>, E>>
+            + Send,
         E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
+        M: Send + 'static,
+        T: Send + 'static,
     {
         let tenant = scope.tenant();
-        retry_co_tx_with_outbox_inner(
+        producer_tx_inner(
             &self.pool,
             self.projection_registry,
-            CoTxOutboxWrite { tenant, entry, env },
-            deadline,
+            ProducerTxWrite { tenant, entry, env },
+            LocalTxExecutionPolicy::Deadline(deadline),
             business_write,
             map_storage,
         )
@@ -601,7 +655,7 @@ async fn set_local_deadline_timeouts(
 
 /// tenant-scoped 只读事务：`BEGIN READ ONLY` → SET LOCAL `rss.tenant_id` → 读闭包 → commit。
 ///
-/// 与写侧 [`co_tx_with_outbox`]（co-tx + outbox）对称，是读路径的 RLS policy
+/// 与写侧 [`PgTenantWritePool::producer_tx`]（producer write + outbox）对称，是读路径的 RLS policy
 /// `current_setting('rss.tenant_id', true)` 锚点（#1298）。读闭包仅做 SQL fetch 返回 owned 原始值
 /// （`Option<PgRow>` / 标量 / tuple），hydrate（域类型转换 / 域错误映射）在 tx 外执行，保持域错误
 /// 语义不变且不依赖 sqlx。失败时 rollback（不覆盖原错误）。
@@ -703,7 +757,7 @@ async fn begin_tenant_read(
 }
 
 /// 在事务内注入 tenant scope（SET LOCAL `rss.tenant_id`，参数化绑定防注入；tenancy.md §RLS 与 PG scope）。
-/// co-tx 写（[`PgTenantWritePool::co_tx_with_outbox`]）与 plain 写（`config_repo` 的 tenant-scoped save/delete，#1249 F3）
+/// producer 写（[`PgTenantWritePool::producer_tx`]）与 plain tenant-scoped 写
 /// 共享，保证所有 postgres 写路径经统一 SET LOCAL 收口（未来 RLS policy 的 current_setting 锚点，不留绕过面）。
 ///
 /// # INVARIANT: TENANCY-SETLOCAL-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
@@ -788,95 +842,29 @@ where
 
 /// 在单事务内：注入 tenant scope（SET LOCAL）→ 业务写闭包 → `append_outbox` → 单 commit。
 ///
-/// `business_write(&mut TxCapability) -> Result<(), E>`：在同一事务内执行业务写（如 CAS INSERT），可返回业务
-/// 错误 `E`（如 `VersionConflict`）使整事务回滚。骨架自身 sqlx 错误经 `map_storage` 映射为 `E`。任一步 Err ⇒
-/// 显式 rollback：成功则保留原错误为 `RolledBack`；rollback 本身失败则经 `map_storage` 收口为独立
-/// settlement Storage 错误（保留 primary+rollback 因果链），不再把可重试领域冲突冒泡到 HTTP。
-/// `tenant` 为类型化租户标识（funnel 内 stringify + SET LOCAL 绑定）。
-///
-/// # Examples
-///
-/// ```ignore
-/// // 调用方在 `business_write` 闭包内执行业务写（HRTB + BoxFuture 绕过异步闭包借用规则）；
-/// // sqlx 错误经 `map_storage` 收口为域错误 E（绕开 `E: From<sqlx::Error>` 跨 crate 约束）。
-/// PgTenantWritePool::new(&store)
-///     .co_tx_with_outbox(
-///         tenant,
-///         &outbox_entry,
-///         &env,
-///         move |tx| Box::pin(async move { cas_insert(tx.conn(), tenant, &entry).await }),
-///         |e| ConfigRepoError::Storage(Box::new(e)),
-///     )
-///     .await
-/// ```
-#[cfg(feature = "domain-identity")]
-async fn co_tx_with_outbox<F, E>(
-    pool: &PgPool,
-    projection_registry: ProjectionWriteRegistry,
-    tenant: TenantId,
-    entry: &EventEntry,
-    env: &OutboxEnvelope,
-    business_write: F,
-    map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
-) -> Result<(), E>
-where
-    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
-    E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
-{
-    co_tx_with_outbox_inner(
-        pool,
-        projection_registry,
-        CoTxOutboxWrite { tenant, entry, env },
-        business_write,
-        map_storage,
-    )
-    .await
-    .into_result()
-}
-
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-async fn co_tx_with_outbox_inner<F, E>(
+async fn producer_tx_inner<M, T, F, E>(
     pool: &PgPool,
     projection_registry: ProjectionWriteRegistry,
-    write: CoTxOutboxWrite<'_>,
+    write: ProducerTxWrite<'_>,
+    policy: LocalTxExecutionPolicy,
     business_write: F,
     map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
-) -> LocalTxAttempt<(), E>
+) -> LocalTxAttempt<T, E>
 where
-    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
+    F: for<'c, 'tx> FnOnce(
+            &'c mut TxCapability<'tx>,
+        ) -> BoxFuture<'c, Result<ProducerTxOutcome<M, T>, E>>
+        + Send,
     E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
+    M: Send + 'static,
+    T: Send + 'static,
 {
-    execute_outbox_local_tx(
+    execute_producer_local_tx(
         pool,
         projection_registry,
         write,
-        LocalTxExecutionPolicy::Plain {
-            bound_lock_wait: false,
-        },
-        business_write,
-        map_storage,
-    )
-    .await
-}
-
-#[cfg(feature = "domain-settings")]
-async fn retry_co_tx_with_outbox_inner<F, E>(
-    pool: &PgPool,
-    projection_registry: ProjectionWriteRegistry,
-    write: CoTxOutboxWrite<'_>,
-    deadline: LocalTxDeadline,
-    business_write: F,
-    map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
-) -> LocalTxAttempt<(), E>
-where
-    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
-    E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
-{
-    execute_outbox_local_tx(
-        pool,
-        projection_registry,
-        write,
-        LocalTxExecutionPolicy::Deadline(deadline),
+        policy,
         business_write,
         map_storage,
     )
@@ -1029,26 +1017,32 @@ where
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-struct OutboxLocalTxOperation<'a, F> {
+struct ProducerLocalTxOperation<'a, F> {
     projection_registry: ProjectionWriteRegistry,
-    write: CoTxOutboxWrite<'a>,
+    write: ProducerTxWrite<'a>,
     business_write: F,
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-impl<'a, F, E> LocalTxOperation<(), CoTxWriteError<E>> for OutboxLocalTxOperation<'a, F>
+impl<'a, M, T, F, E> LocalTxOperation<T, ProducerTxWriteError<E>>
+    for ProducerLocalTxOperation<'a, F>
 where
-    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
+    F: for<'c, 'tx> FnOnce(
+            &'c mut TxCapability<'tx>,
+        ) -> BoxFuture<'c, Result<ProducerTxOutcome<M, T>, E>>
+        + Send,
     E: std::error::Error + Send + Sync + 'static,
+    M: Send + 'static,
+    T: Send + 'static,
 {
     fn execute<'c, 'tx>(
         self,
         tx: &'c mut TxCapability<'tx>,
-    ) -> BoxFuture<'c, Result<(), CoTxWriteError<E>>>
+    ) -> BoxFuture<'c, Result<T, ProducerTxWriteError<E>>>
     where
         Self: 'c,
     {
-        Box::pin(write_in_tx_after_setup(
+        Box::pin(complete_producer_write(
             tx,
             self.projection_registry,
             self.write.tenant,
@@ -1132,37 +1126,42 @@ where
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-async fn execute_outbox_local_tx<F, E>(
+async fn execute_producer_local_tx<M, T, F, E>(
     pool: &PgPool,
     projection_registry: ProjectionWriteRegistry,
-    write: CoTxOutboxWrite<'_>,
+    write: ProducerTxWrite<'_>,
     policy: LocalTxExecutionPolicy,
     business_write: F,
     map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
-) -> LocalTxAttempt<(), E>
+) -> LocalTxAttempt<T, E>
 where
-    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
+    F: for<'c, 'tx> FnOnce(
+            &'c mut TxCapability<'tx>,
+        ) -> BoxFuture<'c, Result<ProducerTxOutcome<M, T>, E>>
+        + Send,
     E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
+    M: Send + 'static,
+    T: Send + 'static,
 {
     let attempt = execute_local_tx(
         pool,
         write.tenant,
         policy,
-        OutboxLocalTxOperation {
+        ProducerLocalTxOperation {
             projection_registry,
-            write: CoTxOutboxWrite {
+            write: ProducerTxWrite {
                 tenant: write.tenant,
                 entry: write.entry,
                 env: write.env,
             },
             business_write,
         },
-        CoTxWriteError::TenantScope,
-        "co-tx-with-outbox",
+        ProducerTxWriteError::TenantScope,
+        "producer-tx",
     )
     .await;
     attempt.map_error(|error| {
-        log_cotx_write_error(write.entry, write.env, &error);
+        log_producer_tx_write_error(write.entry, write.env, &error);
         error.into_domain(&map_storage)
     })
 }
@@ -1504,42 +1503,57 @@ where
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-async fn write_in_tx_after_setup<F, E>(
+async fn complete_producer_write<M, T, F, E>(
     tx: &mut TxCapability<'_>,
     projection_registry: ProjectionWriteRegistry,
     tenant: TenantId,
     entry: &EventEntry,
     env: &OutboxEnvelope,
     business_write: F,
-) -> Result<(), CoTxWriteError<E>>
+) -> Result<T, ProducerTxWriteError<E>>
 where
-    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
+    F: for<'c, 'tx> FnOnce(
+            &'c mut TxCapability<'tx>,
+        ) -> BoxFuture<'c, Result<ProducerTxOutcome<M, T>, E>>
+        + Send,
     E: std::error::Error + 'static,
 {
     if env.tenant() != tenant {
-        return Err(CoTxWriteError::TenantMismatch(sqlx::Error::AnyDriverError(
-            Box::new(OutboxTenantMismatch),
-        )));
+        return Err(ProducerTxWriteError::TenantMismatch(
+            sqlx::Error::AnyDriverError(Box::new(OutboxTenantMismatch)),
+        ));
     }
-    // 业务写（同 tx；CAS 0 行 → 业务 E::VersionConflict）。tx_cap 是从 live Transaction 铸造的能力令牌；
-    // append_outbox 也只接受该令牌，裸 PgPool/PgConnection 无法调用 outbox 双写入口。
-    business_write(tx)
+    let outcome = business_write(tx)
         .await
-        .map_err(CoTxWriteError::BusinessWrite)?;
-    // outbox append（同 tx — co-tx 原子性；复用 append_outbox + OUTBOX-ATOMIC-IDEM-01）。
-    append_outbox_with_projection(tx, entry, env, &projection_registry)
-        .await
-        .map(|_| ())
-        .map_err(CoTxWriteError::AppendOutbox)
+        .map_err(ProducerTxWriteError::BusinessWrite)?;
+    match outcome {
+        ProducerTxOutcome::Emitted(value, authorization) => {
+            let authorized_fact = authorization.fact();
+            if !env.matches_contract(authorized_fact.contract())
+                || entry.generated_fact() != Some(authorized_fact)
+            {
+                return Err(ProducerTxWriteError::AuthorizationMismatch(
+                    sqlx::Error::AnyDriverError(Box::new(ProducerAuthorizationMismatch)),
+                ));
+            }
+            let _outcome = append_outbox_with_projection(tx, entry, env, &projection_registry)
+                .await
+                .map_err(ProducerTxWriteError::AppendOutbox)?;
+            Ok(value)
+        }
+        ProducerTxOutcome::NoMutation(value) => Ok(value),
+    }
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 #[derive(Debug, thiserror::Error)]
-enum CoTxWriteError<E: std::error::Error + 'static> {
+enum ProducerTxWriteError<E: std::error::Error + 'static> {
     #[error("failed to establish tenant transaction state")]
     TenantScope(#[source] sqlx::Error),
     #[error("outbox tenant does not match transaction tenant")]
     TenantMismatch(#[source] sqlx::Error),
+    #[error("producer authorization does not match outbox envelope")]
+    AuthorizationMismatch(#[source] sqlx::Error),
     #[error("business write failed")]
     BusinessWrite(#[source] E),
     #[error("outbox append failed")]
@@ -1579,11 +1593,12 @@ impl MapOutboxAppendError for identity::ports::IdentityError {
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-impl<E: MapOutboxAppendError + std::error::Error + 'static> CoTxWriteError<E> {
+impl<E: MapOutboxAppendError + std::error::Error + 'static> ProducerTxWriteError<E> {
     fn stage(&self) -> &'static str {
         match self {
             Self::TenantScope(_) => "set-local-tenant",
             Self::TenantMismatch(_) => "outbox-tenant-match",
+            Self::AuthorizationMismatch(_) => "producer-authorization-match",
             Self::BusinessWrite(_) => "business-write",
             Self::AppendOutbox(_) => "append-outbox",
         }
@@ -1591,7 +1606,9 @@ impl<E: MapOutboxAppendError + std::error::Error + 'static> CoTxWriteError<E> {
 
     fn sqlx_source(&self) -> Option<&sqlx::Error> {
         match self {
-            Self::TenantScope(e) | Self::TenantMismatch(e) => Some(e),
+            Self::TenantScope(e) | Self::TenantMismatch(e) | Self::AuthorizationMismatch(e) => {
+                Some(e)
+            }
             Self::AppendOutbox(OutboxAppendError::Storage(e)) => Some(e),
             Self::AppendOutbox(
                 OutboxAppendError::Conflict(_)
@@ -1604,7 +1621,9 @@ impl<E: MapOutboxAppendError + std::error::Error + 'static> CoTxWriteError<E> {
 
     fn into_domain(self, map_storage: &(impl Fn(sqlx::Error) -> E + Send)) -> E {
         match self {
-            Self::TenantScope(e) | Self::TenantMismatch(e) => map_storage(e),
+            Self::TenantScope(e) | Self::TenantMismatch(e) | Self::AuthorizationMismatch(e) => {
+                map_storage(e)
+            }
             Self::AppendOutbox(e) => E::from_outbox_append(e),
             Self::BusinessWrite(e) => e,
         }
@@ -1612,25 +1631,28 @@ impl<E: MapOutboxAppendError + std::error::Error + 'static> CoTxWriteError<E> {
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-fn log_cotx_write_error<E: MapOutboxAppendError + std::error::Error + 'static>(
+fn log_producer_tx_write_error<E: MapOutboxAppendError + std::error::Error + 'static>(
     entry: &EventEntry,
     env: &OutboxEnvelope,
-    error: &CoTxWriteError<E>,
+    error: &ProducerTxWriteError<E>,
 ) {
-    if let CoTxWriteError::AppendOutbox(append_error) = error
-        && log_cotx_identity_error(append_error)
+    if let ProducerTxWriteError::AppendOutbox(append_error) = error
+        && log_producer_tx_identity_error(append_error)
     {
         return;
     }
     if let Some(source) = error.sqlx_source() {
-        log_cotx_sqlx_error(entry, env, error.stage(), source);
+        log_producer_tx_sqlx_error(entry, env, error.stage(), source);
     } else {
-        log_cotx_domain_error(entry, env, error.stage());
+        log_producer_tx_domain_error(entry, env, error.stage());
     }
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-fn log_cotx_identity_error(error: &OutboxAppendError) -> bool {
+const PRODUCER_TX_ROLLBACK_MESSAGE: &str = "producer tx: write failed; rolling back";
+
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+fn log_producer_tx_identity_error(error: &OutboxAppendError) -> bool {
     let Some(reason) = error.identity_failure_reason() else {
         return false;
     };
@@ -1638,13 +1660,13 @@ fn log_cotx_identity_error(error: &OutboxAppendError) -> bool {
         target: "postgres",
         stage = "append-outbox",
         reason,
-        "co-tx: write failed; rolling back"
+        message = PRODUCER_TX_ROLLBACK_MESSAGE,
     );
     true
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-fn log_cotx_sqlx_error(
+fn log_producer_tx_sqlx_error(
     entry: &EventEntry,
     env: &OutboxEnvelope,
     stage: &'static str,
@@ -1657,19 +1679,19 @@ fn log_cotx_sqlx_error(
         topic = entry.topic().as_str(),
         stage,
         error = %secure::redact_error(source),
-        "co-tx: write failed; rolling back"
+        message = PRODUCER_TX_ROLLBACK_MESSAGE,
     );
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-fn log_cotx_domain_error(entry: &EventEntry, env: &OutboxEnvelope, stage: &'static str) {
+fn log_producer_tx_domain_error(entry: &EventEntry, env: &OutboxEnvelope, stage: &'static str) {
     tracing::warn!(
         target: "postgres",
         event_id = entry.idem_key().as_str(),
         domain = env.domain(),
         topic = entry.topic().as_str(),
         stage,
-        "co-tx: write failed; rolling back"
+        message = PRODUCER_TX_ROLLBACK_MESSAGE,
     );
 }
 
@@ -1827,31 +1849,48 @@ mod tx_capability_tests {
             OutboxMetadata::new(0, tenant, contract),
         );
 
-        #[cfg(feature = "domain-identity")]
-        {
-            let co_tx = scoped
-                .co_tx_with_outbox(
-                    settings::ports::TenantRepoScope::for_test(tenant),
-                    &entry,
-                    &env,
-                    |_| Box::pin(async { Ok::<(), ConfigRepoError>(()) }),
-                    map_storage,
-                )
-                .await;
-            assert!(co_tx.is_err());
-        }
+        let authorization = settings::config_publish_receipt_for_test()
+            .authorize(
+                <generated::event::settings_v1::SettingsConfigVersionChangedPayload as vocab::GeneratedEventPayload>::FACT,
+                settings::ports::CONFIG_VERSION_CHANGED_CONTRACT,
+            )
+            .ok_or_else(|| "test producer authorization missing".to_owned())?;
+        let producer_tx = scoped
+            .producer_tx(
+                settings::ports::TenantRepoScope::for_test(tenant),
+                &entry,
+                &env,
+                move |_| {
+                    Box::pin(async move {
+                        Ok::<_, ConfigRepoError>(super::ProducerTxOutcome::Emitted(
+                            (),
+                            authorization,
+                        ))
+                    })
+                },
+                map_storage,
+            )
+            .await;
+        assert!(producer_tx.into_result().is_err());
 
-        let retry_co_tx = scoped
-            .retry_co_tx_with_outbox(
+        let retry_producer_tx = scoped
+            .retry_producer_tx(
                 settings::ports::TenantRepoScope::for_test(tenant),
                 crate::tx_retry::localtx_deadline_for_test(),
                 &entry,
                 &env,
-                |_| Box::pin(async { Ok::<(), ConfigRepoError>(()) }),
+                move |_| {
+                    Box::pin(async move {
+                        Ok::<_, ConfigRepoError>(super::ProducerTxOutcome::Emitted(
+                            (),
+                            authorization,
+                        ))
+                    })
+                },
                 map_storage,
             )
             .await;
-        assert_eq!(retry_co_tx.settlement(), None);
+        assert_eq!(retry_producer_tx.settlement(), None);
         Ok(())
     }
 
@@ -1908,7 +1947,7 @@ mod retry_settlement_tests {
     #[cfg(feature = "domain-settings")]
     use tracing::{Event, Id, Metadata, Subscriber, field::Visit};
 
-    use super::LocalTxAttempt;
+    use super::{LocalTxAttempt, ProducerTxAttempt};
     use crate::tx_retry::run_pg_localtx_retry;
     #[cfg(feature = "domain-settings")]
     use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, SETTINGS_SECRET_BOUNDARY, run_pg_tx_retry};
@@ -2233,6 +2272,62 @@ mod retry_settlement_tests {
             records.is_empty(),
             "common settlement funnel must leave unsafe WARN ownership to the runner: {records:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "domain-settings")]
+    fn plain_producer_attempt_observes_unsafe_settlement_before_result_flattening()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let capture = WarnCapture::default();
+        let records = Arc::clone(&capture.records);
+        let dispatch = tracing::Dispatch::new(capture);
+        let _dispatch_guard = tracing::dispatcher::set_default(&dispatch);
+
+        metrics::with_local_recorder(&recorder, || {
+            for attempt in [
+                ProducerTxAttempt::new(LocalTxAttempt::<(), _>::commit_unknown(
+                    FakeError::Transient,
+                )),
+                ProducerTxAttempt::new(LocalTxAttempt::<(), _>::rollback_failed(
+                    FakeError::Transient,
+                )),
+            ] {
+                assert!(attempt.into_result().is_err());
+            }
+        });
+
+        let rendered = handle.render();
+        assert!(rendered.contains("tx_settlement_final_total"), "{rendered}");
+        assert!(
+            rendered.contains("boundary=\"outbox.producer\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("final_status=\"commit_unknown\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("final_status=\"rollback_failed\""),
+            "{rendered}"
+        );
+        let records = records.lock().unwrap_or_else(|error| error.into_inner());
+        let unsafe_warnings: Vec<_> = records
+            .iter()
+            .filter(|fields| fields.contains_key("final_status"))
+            .collect();
+        assert_eq!(unsafe_warnings.len(), 2, "{records:?}");
+        for final_status in ["commit_unknown", "rollback_failed"] {
+            assert!(
+                unsafe_warnings.iter().any(|fields| {
+                    fields.get("boundary").map(String::as_str) == Some("outbox.producer")
+                        && fields.get("final_status").map(String::as_str) == Some(final_status)
+                }),
+                "plain producer has no actionable WARN for {final_status}: {records:?}"
+            );
+        }
         Ok(())
     }
 

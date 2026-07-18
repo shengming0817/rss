@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
+use consistency::{EventEntry, IdemKey};
 use diport::{
     Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts,
 };
@@ -125,13 +125,11 @@ impl RbacAdminService {
             tenant_id: tenant.to_string(),
             occurred_at: unix_secs(now),
         };
-        let bytes = serde_json::to_vec(&payload).map_err(RbacAdminError::PayloadEncode)?;
-        let entry = EventEntry::new(
-            EventTopic::parse(ROLE_ASSIGNED_SPEC.topic())
-                .map_err(|_| RbacAdminError::EntryBuild)?,
+        let entry = EventEntry::from_generated_payload(
+            &payload,
             IdemKey::parse(&Uuid::new_v4().to_string()).map_err(|_| RbacAdminError::EntryBuild)?,
-            OutboxPayload::from_reviewed_event_bytes(bytes),
-        );
+        )
+        .map_err(RbacAdminError::PayloadEncode)?;
         // envelope subject_id = **actor** opaque id（FR-020 非 PII originator），非 target subject（F2）。
         let actor_subject = actor.as_uuid().hyphenated().to_string();
         let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
@@ -186,12 +184,11 @@ impl RbacAdminService {
             tenant_id: tenant.to_string(),
             occurred_at: unix_secs(now),
         };
-        let bytes = serde_json::to_vec(&payload).map_err(RbacAdminError::PayloadEncode)?;
-        let entry = EventEntry::new(
-            EventTopic::parse(ROLE_REVOKED_SPEC.topic()).map_err(|_| RbacAdminError::EntryBuild)?,
+        let entry = EventEntry::from_generated_payload(
+            &payload,
             IdemKey::parse(&Uuid::new_v4().to_string()).map_err(|_| RbacAdminError::EntryBuild)?,
-            OutboxPayload::from_reviewed_event_bytes(bytes),
-        );
+        )
+        .map_err(RbacAdminError::PayloadEncode)?;
         // envelope subject_id = **actor** opaque id（FR-020），非 target subject（F2）。
         let actor_subject = actor.as_uuid().hyphenated().to_string();
         let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())

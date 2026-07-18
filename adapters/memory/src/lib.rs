@@ -382,11 +382,18 @@ impl SessionLifecycle for MemSessionLifecycle {
                 "session persist envelope tenant scope mismatch",
             )));
         }
-        let _authorization = receipt.authorize(*envelope.contract()).ok_or_else(|| {
+        let generated_fact = entry.generated_fact().ok_or_else(|| {
             OutboxEmitError::new(std::io::Error::other(
-                "login producer does not authorize session-created envelope",
+                "login producer requires a generated session-created entry",
             ))
         })?;
+        let _authorization = receipt
+            .authorize(generated_fact, *envelope.contract())
+            .ok_or_else(|| {
+                OutboxEmitError::new(std::io::Error::other(
+                    "login producer does not authorize session-created envelope",
+                ))
+            })?;
         // demo：把 session 存入进程内 store（demo logout/查询可见），再复用 MemPublisher 把 entry fan 到总线
         // （`Message.id = entry.idem_key()` = EventId，闭合 demo 侧幂等传播）。
         // reason: 真实 co-tx both-or-neither + durable 持久化由 PgSessionLifecycle 的 OUTBOX-COTX-SESSION-01

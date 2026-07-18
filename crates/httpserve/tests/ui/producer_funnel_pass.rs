@@ -39,9 +39,20 @@ const ROUTE: HttpRouteBinding<RouteMarker, OutboxFact> = HttpRouteBinding::from_
 const PRODUCER: HttpProducerBinding<RouteMarker> =
     HttpProducerBinding::from_static(ROUTE, &[FACT_CONTRACT]);
 
+struct FactPayload;
+impl vocab::GeneratedEventPayload for FactPayload {
+    const FACT: vocab::EventFactBinding =
+        vocab::EventFactBinding::from_static(FACT_CONTRACT, "identity.session-created");
+}
+
 async fn handler(marker: httpserve::ProducerMarker<RouteMarker>) {
     let receipt = marker.into_receipt();
-    let authorization = receipt.authorize(FACT_CONTRACT).expect("generated fact");
+    let authorization = receipt
+        .authorize(
+            <FactPayload as vocab::GeneratedEventPayload>::FACT,
+            FACT_CONTRACT,
+        )
+        .expect("generated fact");
     assert_eq!(authorization.fact_contract(), FACT_CONTRACT);
 }
 

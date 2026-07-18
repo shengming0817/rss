@@ -316,16 +316,24 @@ pub struct ProducerAssuranceReceipt<M> {
 }
 
 impl<M> ProducerAssuranceReceipt<M> {
-    /// Consume the one-shot request receipt and authorize one fact from its exact generated set.
+    /// Consume the one-shot request receipt and authorize one typed generated fact from its exact
+    /// emitted set.
+    ///
+    /// The fact must come from the caller's typed event-entry boundary; the separately named
+    /// contract keeps static producer assurance bound to the manifest alias.
     #[must_use]
-    pub fn authorize(self, fact: ContractBinding) -> Option<ProducerAuthorization<M>> {
-        self.producer
-            .emitted_facts()
-            .contains(&fact)
-            .then_some(ProducerAuthorization {
-                producer: self.producer,
-                fact,
-            })
+    pub fn authorize(
+        self,
+        fact: vocab::EventFactBinding,
+        expected_contract: ContractBinding,
+    ) -> Option<ProducerAuthorization<M>> {
+        (fact.contract() == expected_contract
+            && self.producer.emitted_facts().contains(&expected_contract))
+        .then_some(ProducerAuthorization {
+            producer_contract: self.producer.route_evidence().contract(),
+            fact,
+            marker: PhantomData,
+        })
     }
 }
 
@@ -334,8 +342,9 @@ impl<M> ProducerAssuranceReceipt<M> {
 /// This token has no public constructor. It may only be derived by consuming a
 /// [`ProducerAssuranceReceipt`] minted from the matching request marker and generated binding.
 pub struct ProducerAuthorization<M> {
-    producer: HttpProducerBinding<M>,
-    fact: ContractBinding,
+    producer_contract: ContractBinding,
+    fact: vocab::EventFactBinding,
+    marker: PhantomData<fn() -> M>,
 }
 
 impl<M> Copy for ProducerAuthorization<M> {}
@@ -350,12 +359,18 @@ impl<M> ProducerAuthorization<M> {
     /// Producer HTTP contract carried by this authorization.
     #[must_use]
     pub const fn producer_contract(&self) -> ContractBinding {
-        self.producer.route_evidence().contract()
+        self.producer_contract
     }
 
     /// The exact generated fact selected from this producer's emitted-fact set.
     #[must_use]
     pub const fn fact_contract(&self) -> ContractBinding {
+        self.fact.contract()
+    }
+
+    /// Complete generated fact identity selected by the payload type.
+    #[must_use]
+    pub const fn fact(&self) -> vocab::EventFactBinding {
         self.fact
     }
 }
@@ -1535,6 +1550,18 @@ mod tests {
         "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     );
 
+    struct ProducerPayload;
+    impl vocab::GeneratedEventPayload for ProducerPayload {
+        const FACT: vocab::EventFactBinding =
+            vocab::EventFactBinding::from_static(PRODUCER_FACT, "test.produced");
+    }
+
+    struct OtherPayload;
+    impl vocab::GeneratedEventPayload for OtherPayload {
+        const FACT: vocab::EventFactBinding =
+            vocab::EventFactBinding::from_static(OTHER_FACT, "test.other");
+    }
+
     enum TestRouteMarker {}
     enum OtherTestRouteMarker {}
 
@@ -1637,14 +1664,16 @@ mod tests {
     #[test]
     fn producer_receipt_authorizes_only_its_generated_fact() {
         let producer = producer_binding::<TestRouteMarker>();
-        let rejected = ProducerMarker::for_test(producer)
-            .into_receipt()
-            .authorize(OTHER_FACT);
+        let rejected = ProducerMarker::for_test(producer).into_receipt().authorize(
+            <OtherPayload as vocab::GeneratedEventPayload>::FACT,
+            OTHER_FACT,
+        );
         assert!(rejected.is_none());
 
-        let authorization = ProducerMarker::for_test(producer)
-            .into_receipt()
-            .authorize(PRODUCER_FACT);
+        let authorization = ProducerMarker::for_test(producer).into_receipt().authorize(
+            <ProducerPayload as vocab::GeneratedEventPayload>::FACT,
+            PRODUCER_FACT,
+        );
         assert!(authorization.is_some(), "generated fact must be authorized");
         if let Some(authorization) = authorization {
             let retry_copy = authorization;
@@ -1679,7 +1708,10 @@ mod tests {
             |marker: ProducerMarker<TestRouteMarker>| async move {
                 marker
                     .into_receipt()
-                    .authorize(PRODUCER_FACT)
+                    .authorize(
+                        <ProducerPayload as vocab::GeneratedEventPayload>::FACT,
+                        PRODUCER_FACT,
+                    )
                     .map_or(StatusCode::INTERNAL_SERVER_ERROR, |_| StatusCode::CREATED)
             },
         )

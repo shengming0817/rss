@@ -1,10 +1,13 @@
 //! `contract-binding-guard` —— 生产源中禁止裸 mint generated contract/HTTP route/projection/saga binding，并守
 //! projection DB fixed function callsite 收口。
 //!
-//! `ContractBinding` 的正确生产来源是 `generated::{http,event,command}::*::CONTRACT`，HTTP route evidence
-//! 的正确来源是 `generated::http::*::SPEC.route`。`from_static`
+//! `ContractBinding` / `EventFactBinding` 的正确生产来源是
+//! `generated::{http,event,command}::*::{CONTRACT,FACT}`，HTTP route evidence 的正确来源是
+//! `generated::http::*::SPEC.route`。`from_static`
 //! 必须保持 `pub const fn`，否则 codegen 无法跨 crate 发射常量；因此跨 crate provenance 以 AST guard
 //! 收口为 Medium，不与 manifest → generated 原子生成的 Hard golden 保证混为一谈。
+//! `GeneratedEventPayload` 同理只允许 codegen owner 实现；生产 crate 手写 impl（含 alias / glob import）
+//! 会让任意 payload 自签 contract/topic，故本 guard 一并 fail-fast。
 //! `ProjectionInputBinding` 的正确生产来源是 `generated::event::PROJECTION_INPUTS`；saga binding / policy /
 //! output marker 的正确生产来源是 `generated::saga::*::{SPEC,STEPS,STEP_*}` 和 generated output DTO。本 guard 把残余面
 //! 收口为 Medium：扫描生产 Rust AST，任何非测试代码直接调用 generated binding constructor 或手写
@@ -12,40 +15,61 @@
 //! 测试 fixture 与 generated/xtask 不在本扫描范围内。
 //!
 //! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }.
-//! INVARIANT: ROUTE-EVIDENCE-PROVENANCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "contract_binding_guard::tests::scan_sources_covers_nested_examples_and_direct_journey_roots", anti_vacuity = "contract_binding_guard::tests::real_source_roots_cover_examples_and_direct_journeys" }.
+//! INVARIANT: ROUTE-EVIDENCE-PROVENANCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "contract_binding_guard::tests::scan_sources_covers_nested_examples_and_direct_journey_roots", anti_vacuity = "contract_binding_guard::tests::real_source_roots_cover_workspace_compositions_and_direct_journeys" }.
+//! INVARIANT: PRODUCER-RAW-TRANSPORT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "contract_binding_guard::tests::flags_raw_transport_in_cross_file_reachable_helper", anti_vacuity = "contract_binding_guard::tests::real_active_producer_providers_have_no_raw_transport" }.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
+use serde::Deserialize;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Expr, ExprPath, ItemFn, ItemImpl, ItemMod, ItemType, ItemUse, Lit, Meta, Token,
-    Type, TypePath, UseTree,
+    Attribute, Block, Expr, ExprMethodCall, ExprPath, ImplItem, Item, ItemFn, ItemImpl, ItemMod,
+    ItemType, ItemUse, Lit, Meta, Signature, Token, Type, TypePath, UseTree,
 };
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
-use crate::src_scan::{member_dirs, rs_files};
+use crate::src_scan::rs_files;
 use crate::workspace_root;
 
-const MEMBER_SCAN_ROOTS: &[&str] = &["crates", "adapters", "bins", "assemblies", "examples"];
 const DIRECT_SCAN_ROOTS: &[&str] = &["journeys", "journeys-fault-matrix"];
+const EXCLUDED_WORKSPACE_PACKAGES: &[&str] = &["generated", "xtask"];
 const PROJECTION_EVENTS_WRAPPER: &str = "adapters/postgres/src/projection_events.rs";
 const SAGA_BINDING_TEST_SUPPORT_FILES: &[&str] =
     &["adapters/postgres/src/fault_matrix/saga_fixture.rs"];
 const PROJECTION_DB_FUNCTIONS: &[&str] =
     &["rss_append_projection_event", "rss_read_projection_events"];
+const ACTIVE_PRODUCER_PROVIDER_FILES: &[&str] = &[
+    "adapters/postgres/src/session_lifecycle.rs",
+    "adapters/postgres/src/policy_repo.rs",
+    "adapters/postgres/src/role_binding_lifecycle.rs",
+    "adapters/postgres/src/config_repo.rs",
+];
+const RAW_PRODUCER_TRANSPORT_TYPES: &[&str] = &[
+    "Publisher",
+    "DynPublisher",
+    "PublishRequest",
+    "OutboxEmitter",
+];
+const RAW_PRODUCER_TRANSPORT_METHODS: &[&str] = &["publish", "emit"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
     /// 生产代码引用 generated binding constructor，绕过 generated 常量。
     BareFromStatic,
+    /// 生产代码手写 generated event payload marker，伪造 codegen provenance。
+    GeneratedEventPayloadImpl,
     /// 生产代码手写 saga output DTO marker，绕过 generated output DTO。
     SagaStepOutputBindingImpl,
     /// 生产代码绕过 sanctioned projection_events wrapper 直接调用 DB fixed function。
     ProjectionDbFunctionCallsite,
+    /// active HTTP producer provider 引用 raw publisher/emitter transport。
+    RawProducerTransport,
 }
 
 pub(crate) struct ContractBindingGuard;
@@ -62,7 +86,7 @@ impl GovernanceCheck for ContractBindingGuard {
         let (scanned, findings) = scan_sources(&root)?;
         Ok((
             format!(
-                "扫描 {scanned} 个生产 Rust 源文件；contract/HTTP route/projection/saga binding 生产 mint 仅允许 generated 常量；projection DB functions 仅允许 sanctioned wrapper"
+                "扫描 {scanned} 个生产 Rust 源文件；contract/event fact/HTTP route/projection/saga binding 生产 mint 与 GeneratedEventPayload impl 仅允许 generated/codegen owner；projection DB functions 仅允许 sanctioned wrapper；active HTTP producer provider 禁止 raw publisher/emitter"
             ),
             findings,
         ))
@@ -71,6 +95,7 @@ impl GovernanceCheck for ContractBindingGuard {
 
 fn scan_sources(root: &Path) -> Result<(usize, Vec<Finding<Rule>>)> {
     let mut findings = Vec::new();
+    let mut sources = BTreeMap::new();
     let mut scanned = 0usize;
     for source_root in production_source_roots(root)? {
         for path in rs_files(&source_root.join("src"))? {
@@ -82,18 +107,100 @@ fn scan_sources(root: &Path) -> Result<(usize, Vec<Finding<Rule>>)> {
             }
             scanned += 1;
             findings.extend(scan_file(&relative, &content)?);
+            sources.insert(relative, content);
         }
     }
+    findings.extend(scan_reachable_raw_transport_helpers(&sources)?);
     Ok((scanned, findings))
 }
 
 fn production_source_roots(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut roots = Vec::new();
-    for top in MEMBER_SCAN_ROOTS {
-        roots.extend(member_dirs(&root.join(top))?);
-    }
+    let mut roots = workspace_member_roots(root)?;
     roots.extend(DIRECT_SCAN_ROOTS.iter().map(|direct| root.join(direct)));
     roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
+#[derive(Deserialize)]
+struct CargoMetadata {
+    packages: Vec<CargoPackage>,
+    workspace_members: BTreeSet<String>,
+    workspace_root: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct CargoPackage {
+    id: String,
+    name: String,
+    manifest_path: PathBuf,
+    targets: Vec<CargoTarget>,
+}
+
+#[derive(Deserialize)]
+struct CargoTarget {
+    kind: Vec<String>,
+}
+
+fn workspace_member_roots(root: &Path) -> Result<Vec<PathBuf>> {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = Command::new(cargo)
+        .current_dir(root)
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .output()
+        .with_context(|| {
+            format!(
+                "contract-binding-guard: run cargo metadata below {}",
+                root.display()
+            )
+        })?;
+    ensure!(
+        output.status.success(),
+        "contract-binding-guard: cargo metadata failed below {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let metadata: CargoMetadata = serde_json::from_slice(&output.stdout)
+        .context("contract-binding-guard: decode cargo metadata")?;
+    let workspace_root = metadata.workspace_root.clone();
+    let mut roots = metadata
+        .packages
+        .into_iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .filter(|package| !EXCLUDED_WORKSPACE_PACKAGES.contains(&package.name.as_str()))
+        .filter(|package| {
+            package.targets.iter().any(|target| {
+                target.kind.iter().any(|kind| {
+                    !matches!(kind.as_str(), "test" | "bench" | "example" | "custom-build")
+                })
+            })
+        })
+        .map(|package| {
+            let manifest_parent = package
+                .manifest_path
+                .parent()
+                .map(Path::to_path_buf)
+                .with_context(|| {
+                    format!(
+                        "contract-binding-guard: workspace member {} manifest has no parent",
+                        package.name
+                    )
+                })?;
+            let relative = manifest_parent.strip_prefix(&workspace_root).with_context(|| {
+                format!(
+                    "contract-binding-guard: workspace member {} escaped metadata workspace root",
+                    package.name
+                )
+            })?;
+            Ok(root.join(relative))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    roots.sort();
+    roots.dedup();
+    ensure!(
+        !roots.is_empty(),
+        "contract-binding-guard: cargo metadata returned no production workspace members"
+    );
     Ok(roots)
 }
 
@@ -101,15 +208,393 @@ fn scan_file(path: &Path, content: &str) -> Result<Vec<Finding<Rule>>> {
     let ast = syn::parse_file(content)
         .with_context(|| format!("contract-binding-guard: parse {}", path.display()))?;
     let aliases = collect_contract_binding_aliases(&ast);
+    let raw_transport_aliases = collect_raw_transport_aliases(&ast);
     let mut visitor = BindingVisitor {
         path,
         binding_aliases: aliases.binding_constructors,
         saga_output_binding_aliases: aliases.saga_output_binding_traits,
+        generated_event_payload_aliases: aliases.generated_event_payload_traits,
+        raw_transport_aliases,
+        guard_raw_transport: is_active_producer_provider(path),
+        guard_untyped_emit: is_active_producer_provider(path),
         in_test: 0,
         findings: Vec::new(),
+        raw_transport_hits: BTreeMap::new(),
     };
     visitor.visit_file(&ast);
-    Ok(visitor.findings)
+    Ok(visitor.into_findings())
+}
+
+#[derive(Clone)]
+struct ProducerFunctionNode {
+    key: String,
+    symbol: String,
+    path: PathBuf,
+    module: Vec<String>,
+    owner: Option<String>,
+    call_aliases: BTreeMap<String, Vec<String>>,
+    signature: Signature,
+    block: Block,
+    calls: Vec<ProducerCall>,
+}
+
+#[derive(Clone)]
+enum ProducerCall {
+    Function(Vec<String>),
+    SelfMethod(String),
+}
+
+fn scan_reachable_raw_transport_helpers(
+    sources: &BTreeMap<PathBuf, String>,
+) -> Result<Vec<Finding<Rule>>> {
+    let mut nodes = BTreeMap::new();
+    let mut aliases_by_path = BTreeMap::new();
+    for (path, source) in sources {
+        let Some(module) = postgres_module(path) else {
+            continue;
+        };
+        let file = syn::parse_file(source).with_context(|| {
+            format!(
+                "contract-binding-guard: parse producer call graph {}",
+                path.display()
+            )
+        })?;
+        aliases_by_path.insert(path.clone(), collect_raw_transport_aliases(&file));
+        let call_aliases = collect_producer_call_aliases(&file.items);
+        collect_producer_function_nodes(path, &module, &call_aliases, &file.items, &mut nodes)?;
+    }
+
+    let mut reachable = BTreeSet::new();
+    let mut pending = nodes
+        .values()
+        .filter(|node| is_active_producer_provider(&node.path))
+        .map(|node| node.key.clone())
+        .collect::<VecDeque<_>>();
+    while let Some(key) = pending.pop_front() {
+        if !reachable.insert(key.clone()) {
+            continue;
+        }
+        let Some(node) = nodes.get(&key) else {
+            continue;
+        };
+        for call in &node.calls {
+            if let Some(callee) = resolve_producer_call(node, call, &nodes) {
+                pending.push_back(callee);
+            }
+        }
+    }
+
+    let mut findings = Vec::new();
+    let mut reported_sites = BTreeSet::new();
+    for key in reachable {
+        let Some(node) = nodes.get(&key) else {
+            continue;
+        };
+        if is_active_producer_provider(&node.path) {
+            continue;
+        }
+        let aliases = aliases_by_path
+            .get(&node.path)
+            .context("reachable producer helper must retain its file aliases")?
+            .clone();
+        let mut visitor = BindingVisitor {
+            path: &node.path,
+            binding_aliases: BindingConstructorAliases::new(),
+            saga_output_binding_aliases: BTreeSet::new(),
+            generated_event_payload_aliases: BTreeSet::new(),
+            raw_transport_aliases: aliases,
+            guard_raw_transport: true,
+            guard_untyped_emit: false,
+            in_test: 0,
+            findings: Vec::new(),
+            raw_transport_hits: BTreeMap::new(),
+        };
+        visitor.visit_signature(&node.signature);
+        visitor.visit_block(&node.block);
+        for finding in visitor
+            .into_findings()
+            .into_iter()
+            .filter(|finding| finding.rule == Rule::RawProducerTransport)
+        {
+            if reported_sites.insert(finding.subject.clone()) {
+                findings.push(finding);
+            }
+        }
+    }
+    Ok(findings)
+}
+
+fn postgres_module(path: &Path) -> Option<Vec<String>> {
+    let relative = path.strip_prefix("adapters/postgres/src").ok()?;
+    let mut module = relative
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+        .filter_map(|component| component.as_os_str().to_str().map(ToString::to_string))
+        .collect::<Vec<_>>();
+    let stem = relative.file_stem()?.to_str()?;
+    if !matches!(stem, "lib" | "mod") {
+        module.push(stem.to_string());
+    }
+    Some(module)
+}
+
+fn collect_producer_function_nodes(
+    path: &Path,
+    module: &[String],
+    call_aliases: &BTreeMap<String, Vec<String>>,
+    items: &[Item],
+    nodes: &mut BTreeMap<String, ProducerFunctionNode>,
+) -> Result<()> {
+    for item in items {
+        if is_test_like(item_attrs(item)) {
+            continue;
+        }
+        match item {
+            Item::Fn(function) => insert_producer_function_node(
+                path,
+                module,
+                None,
+                call_aliases,
+                &function.sig,
+                &function.block,
+                nodes,
+            )?,
+            Item::Impl(item_impl) => {
+                let owner = type_path_last_ident(&item_impl.self_ty)
+                    .context("producer call graph requires a path-like impl owner")?;
+                for item in &item_impl.items {
+                    let ImplItem::Fn(method) = item else {
+                        continue;
+                    };
+                    if !is_test_like(&method.attrs) {
+                        insert_producer_function_node(
+                            path,
+                            module,
+                            Some(&owner),
+                            call_aliases,
+                            &method.sig,
+                            &method.block,
+                            nodes,
+                        )?;
+                    }
+                }
+            }
+            Item::Mod(item_mod) => {
+                if let Some((_, nested)) = &item_mod.content {
+                    let mut nested_module = module.to_vec();
+                    nested_module.push(item_mod.ident.to_string());
+                    collect_producer_function_nodes(
+                        path,
+                        &nested_module,
+                        call_aliases,
+                        nested,
+                        nodes,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn insert_producer_function_node(
+    path: &Path,
+    module: &[String],
+    owner: Option<&str>,
+    call_aliases: &BTreeMap<String, Vec<String>>,
+    signature: &Signature,
+    block: &Block,
+    nodes: &mut BTreeMap<String, ProducerFunctionNode>,
+) -> Result<()> {
+    let mut symbol = module.to_vec();
+    if let Some(owner) = owner {
+        symbol.push(owner.to_string());
+    }
+    symbol.push(signature.ident.to_string());
+    let symbol = symbol.join("::");
+    let key_prefix = format!("{}::{symbol}", path.display());
+    let mut key = key_prefix.clone();
+    let mut ordinal = 2usize;
+    while nodes.contains_key(&key) {
+        key = format!("{key_prefix}#{ordinal}");
+        ordinal += 1;
+    }
+    let calls = collect_producer_calls(block);
+    let node = ProducerFunctionNode {
+        key: key.clone(),
+        symbol,
+        path: path.to_path_buf(),
+        module: module.to_vec(),
+        owner: owner.map(ToString::to_string),
+        call_aliases: call_aliases.clone(),
+        signature: signature.clone(),
+        block: block.clone(),
+        calls,
+    };
+    nodes.insert(key, node);
+    Ok(())
+}
+
+fn collect_producer_calls(block: &Block) -> Vec<ProducerCall> {
+    #[derive(Default)]
+    struct CallCollector {
+        calls: Vec<ProducerCall>,
+    }
+
+    impl<'ast> Visit<'ast> for CallCollector {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let Some(path) = producer_function_path(&node.func) {
+                self.calls.push(ProducerCall::Function(path));
+            }
+            for argument in &node.args {
+                self.visit_expr(argument);
+            }
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+            if producer_simple_expr_ident(&node.receiver).as_deref() == Some("self") {
+                self.calls
+                    .push(ProducerCall::SelfMethod(node.method.to_string()));
+            }
+            self.visit_expr(&node.receiver);
+            for argument in &node.args {
+                self.visit_expr(argument);
+            }
+        }
+
+        fn visit_macro(&mut self, _node: &'ast syn::Macro) {}
+        fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {}
+    }
+
+    let mut collector = CallCollector::default();
+    collector.visit_block(block);
+    collector.calls
+}
+
+fn producer_function_path(expression: &Expr) -> Option<Vec<String>> {
+    let Expr::Path(path) = producer_peel_expr(expression) else {
+        return None;
+    };
+    Some(
+        path.path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+    )
+}
+
+fn producer_simple_expr_ident(expression: &Expr) -> Option<String> {
+    let Expr::Path(path) = producer_peel_expr(expression) else {
+        return None;
+    };
+    (path.qself.is_none() && path.path.leading_colon.is_none() && path.path.segments.len() == 1)
+        .then(|| path.path.segments[0].ident.to_string())
+}
+
+fn producer_peel_expr(expression: &Expr) -> &Expr {
+    match expression {
+        Expr::Await(value) => producer_peel_expr(&value.base),
+        Expr::Group(value) => producer_peel_expr(&value.expr),
+        Expr::Paren(value) => producer_peel_expr(&value.expr),
+        Expr::Try(value) => producer_peel_expr(&value.expr),
+        other => other,
+    }
+}
+
+fn resolve_producer_call(
+    caller: &ProducerFunctionNode,
+    call: &ProducerCall,
+    nodes: &BTreeMap<String, ProducerFunctionNode>,
+) -> Option<String> {
+    let candidates = match call {
+        ProducerCall::Function(path) => {
+            let expanded = path
+                .first()
+                .and_then(|binding| caller.call_aliases.get(binding))
+                .map(|canonical| {
+                    canonical
+                        .iter()
+                        .cloned()
+                        .chain(path.iter().skip(1).cloned())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| path.clone());
+            let normalized = expanded
+                .iter()
+                .filter(|segment| !matches!(segment.as_str(), "crate" | "self" | "super"))
+                .cloned()
+                .collect::<Vec<_>>();
+            nodes
+                .values()
+                .filter(|node| normalized.len() > 1 || node.owner.is_none())
+                .filter(|node| symbol_has_suffix(&node.symbol, &normalized))
+                .map(|node| node.key.clone())
+                .collect::<Vec<_>>()
+        }
+        ProducerCall::SelfMethod(method) => nodes
+            .values()
+            .filter(|node| node.module == caller.module && node.owner == caller.owner)
+            .filter(|node| node.signature.ident == method)
+            .map(|node| node.key.clone())
+            .collect::<Vec<_>>(),
+    };
+    let [candidate] = candidates.as_slice() else {
+        return None;
+    };
+    Some(candidate.clone())
+}
+
+fn collect_producer_call_aliases(items: &[Item]) -> BTreeMap<String, Vec<String>> {
+    fn collect(
+        tree: &UseTree,
+        mut prefix: Vec<String>,
+        aliases: &mut BTreeMap<String, Vec<String>>,
+    ) {
+        match tree {
+            UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                collect(&path.tree, prefix, aliases);
+            }
+            UseTree::Name(name) => {
+                prefix.push(name.ident.to_string());
+                aliases.insert(name.ident.to_string(), prefix);
+            }
+            UseTree::Rename(rename) => {
+                prefix.push(rename.ident.to_string());
+                if rename.rename != "_" {
+                    aliases.insert(rename.rename.to_string(), prefix);
+                }
+            }
+            UseTree::Group(group) => {
+                for item in &group.items {
+                    collect(item, prefix.clone(), aliases);
+                }
+            }
+            UseTree::Glob(_) => {}
+        }
+    }
+
+    let mut aliases = BTreeMap::new();
+    for item in items {
+        if let Item::Use(item_use) = item
+            && !is_test_like(&item_use.attrs)
+        {
+            collect(&item_use.tree, Vec::new(), &mut aliases);
+        }
+    }
+    aliases
+}
+
+fn symbol_has_suffix(symbol: &str, suffix: &[String]) -> bool {
+    let symbol = symbol.split("::").collect::<Vec<_>>();
+    suffix.len() <= symbol.len()
+        && symbol[symbol.len() - suffix.len()..]
+            .iter()
+            .zip(suffix)
+            .all(|(left, right)| *left == right)
 }
 
 fn root_relative(root: &Path, path: &Path) -> PathBuf {
@@ -136,6 +621,12 @@ fn is_projection_events_wrapper(path: &Path) -> bool {
     path == Path::new(PROJECTION_EVENTS_WRAPPER)
 }
 
+fn is_active_producer_provider(path: &Path) -> bool {
+    ACTIVE_PRODUCER_PROVIDER_FILES
+        .iter()
+        .any(|provider| path == Path::new(provider))
+}
+
 fn expr_contains_projection_db_function(expr: &Expr) -> bool {
     let Expr::Lit(lit) = expr else {
         return false;
@@ -153,11 +644,22 @@ struct BindingVisitor<'a> {
     path: &'a Path,
     binding_aliases: BindingConstructorAliases,
     saga_output_binding_aliases: BTreeSet<String>,
+    generated_event_payload_aliases: BTreeSet<String>,
+    raw_transport_aliases: BTreeSet<String>,
+    guard_raw_transport: bool,
+    guard_untyped_emit: bool,
     in_test: usize,
     findings: Vec<Finding<Rule>>,
+    raw_transport_hits: BTreeMap<(usize, usize), BTreeSet<&'static str>>,
 }
 
 impl<'ast> Visit<'ast> for BindingVisitor<'_> {
+    fn visit_item(&mut self, node: &'ast Item) {
+        self.with_test_scope(is_test_like(item_attrs(node)), |this| {
+            visit::visit_item(this, node);
+        });
+    }
+
     fn visit_item_mod(&mut self, node: &'ast ItemMod) {
         self.with_test_scope(is_test_like(&node.attrs), |this| {
             visit::visit_item_mod(this, node);
@@ -181,7 +683,52 @@ impl<'ast> Visit<'ast> for BindingVisitor<'_> {
                 "生产代码不得引用 generated binding constructor；请使用 generated `CONTRACT` / HTTP `ROUTE` / `PROJECTION_INPUTS` / saga `SPEC` / `STEPS` 常量",
             ));
         }
+        if self.raw_transport_guard_active()
+            && node.path.segments.last().is_some_and(|segment| {
+                segment.ident == "publish" || (self.guard_untyped_emit && segment.ident == "emit")
+            })
+        {
+            self.flag_raw_transport(node.span(), "raw publish/emitter function path");
+        }
         visit::visit_expr_path(self, node);
+    }
+
+    fn visit_item_use(&mut self, node: &'ast ItemUse) {
+        self.with_test_scope(is_test_like(&node.attrs), |this| {
+            if this.raw_transport_guard_active()
+                && use_tree_mentions_raw_transport(&node.tree, &this.raw_transport_aliases)
+            {
+                this.flag_raw_transport(node.span(), "raw transport import");
+            }
+            visit::visit_item_use(this, node);
+        });
+    }
+
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        if self.raw_transport_guard_active()
+            && path_mentions_raw_transport(node, &self.raw_transport_aliases)
+        {
+            self.flag_raw_transport(node.span(), "raw transport type/value path");
+        }
+        visit::visit_path(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if self.raw_transport_guard_active()
+            && (node.method == "publish" || (self.guard_untyped_emit && node.method == "emit"))
+        {
+            self.flag_raw_transport(node.span(), "raw publish/emitter method call");
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if self.raw_transport_guard_active()
+            && macro_tokens_mention_raw_transport(&node.tokens, &self.raw_transport_aliases)
+        {
+            self.flag_raw_transport(node.span(), "macro-hidden raw transport");
+        }
+        visit::visit_macro(self, node);
     }
 
     fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
@@ -194,6 +741,13 @@ impl<'ast> Visit<'ast> for BindingVisitor<'_> {
                     Rule::SagaStepOutputBindingImpl,
                     this.path.display().to_string(),
                     "生产代码不得手写 `SagaStepOutputBinding`；请使用 generated saga output DTO",
+                ));
+            }
+            if this.in_test == 0 && is_trait_impl(node, &this.generated_event_payload_aliases) {
+                this.findings.push(finding(
+                    Rule::GeneratedEventPayloadImpl,
+                    this.path.display().to_string(),
+                    "生产代码不得手写 `GeneratedEventPayload`；请使用 generated event DTO",
                 ));
             }
             visit::visit_item_impl(this, node);
@@ -225,11 +779,62 @@ impl BindingVisitor<'_> {
             self.in_test -= 1;
         }
     }
+
+    fn raw_transport_guard_active(&self) -> bool {
+        self.guard_raw_transport && self.in_test == 0
+    }
+
+    fn flag_raw_transport(&mut self, span: proc_macro2::Span, evidence: &'static str) {
+        let start = span.start();
+        self.raw_transport_hits
+            .entry((start.line, start.column))
+            .or_default()
+            .insert(evidence);
+    }
+
+    fn into_findings(mut self) -> Vec<Finding<Rule>> {
+        self.findings
+            .extend(self.raw_transport_hits.into_iter().map(
+                |((line, column), evidence)| {
+                    finding(
+                        Rule::RawProducerTransport,
+                        format!("{}:{line}:{}", self.path.display(), column + 1),
+                        format!(
+                            "active HTTP producer execution 不得引用 `Publisher` / `DynPublisher` / `PublishRequest` / `OutboxEmitter` 或直接调用 publish/emit；命中 {}",
+                            evidence.into_iter().collect::<Vec<_>>().join(", ")
+                        ),
+                    )
+                },
+            ));
+        self.findings
+    }
+}
+
+fn item_attrs(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
 }
 
 struct AliasCollector {
     binding_constructors: BindingConstructorAliases,
     saga_output_binding_traits: BTreeSet<String>,
+    generated_event_payload_traits: BTreeSet<String>,
 }
 
 impl<'ast> Visit<'ast> for AliasCollector {
@@ -238,6 +843,7 @@ impl<'ast> Visit<'ast> for AliasCollector {
             &node.tree,
             &mut self.binding_constructors,
             &mut self.saga_output_binding_traits,
+            &mut self.generated_event_payload_traits,
         );
         visit::visit_item_use(self, node);
     }
@@ -257,6 +863,7 @@ impl<'ast> Visit<'ast> for AliasCollector {
 struct SourceAliases {
     binding_constructors: BindingConstructorAliases,
     saga_output_binding_traits: BTreeSet<String>,
+    generated_event_payload_traits: BTreeSet<String>,
 }
 
 fn collect_contract_binding_aliases(file: &syn::File) -> SourceAliases {
@@ -265,6 +872,11 @@ fn collect_contract_binding_aliases(file: &syn::File) -> SourceAliases {
         &mut binding_constructors,
         "ContractBinding",
         "ContractBinding",
+    );
+    insert_binding_alias(
+        &mut binding_constructors,
+        "EventFactBinding",
+        "EventFactBinding",
     );
     insert_binding_alias(
         &mut binding_constructors,
@@ -302,15 +914,156 @@ fn collect_contract_binding_aliases(file: &syn::File) -> SourceAliases {
         "SagaContractBinding",
     );
     let saga_output_binding_traits = BTreeSet::from(["SagaStepOutputBinding".to_string()]);
+    let generated_event_payload_traits = BTreeSet::from(["GeneratedEventPayload".to_string()]);
     let mut collector = AliasCollector {
         binding_constructors,
         saga_output_binding_traits,
+        generated_event_payload_traits,
     };
     collector.visit_file(file);
     SourceAliases {
         binding_constructors: collector.binding_constructors,
         saga_output_binding_traits: collector.saga_output_binding_traits,
+        generated_event_payload_traits: collector.generated_event_payload_traits,
     }
+}
+
+fn collect_raw_transport_aliases(file: &syn::File) -> BTreeSet<String> {
+    let mut aliases = RAW_PRODUCER_TRANSPORT_TYPES
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+
+    // Imports/type aliases may be declared in any order and may form an alias chain. Iterate to a
+    // fixed point so `use self::A as B; type A = dyn diport::Publisher;` is still closed.
+    loop {
+        let before = aliases.len();
+        let mut use_collector = RawTransportUseAliasCollector {
+            aliases: &mut aliases,
+        };
+        use_collector.visit_file(file);
+        for item in &file.items {
+            collect_raw_transport_type_alias(item, &mut aliases);
+        }
+        if aliases.len() == before {
+            break;
+        }
+    }
+    aliases
+}
+
+struct RawTransportUseAliasCollector<'a> {
+    aliases: &'a mut BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for RawTransportUseAliasCollector<'_> {
+    fn visit_item_use(&mut self, node: &'ast ItemUse) {
+        collect_raw_transport_use_aliases(&node.tree, self.aliases);
+        visit::visit_item_use(self, node);
+    }
+}
+
+fn collect_raw_transport_use_aliases(tree: &UseTree, aliases: &mut BTreeSet<String>) {
+    match tree {
+        UseTree::Path(path) => collect_raw_transport_use_aliases(&path.tree, aliases),
+        UseTree::Name(name) => {
+            let ident = name.ident.to_string();
+            if aliases.contains(&ident) {
+                aliases.insert(ident);
+            }
+        }
+        UseTree::Rename(rename) => {
+            if aliases.contains(rename.ident.to_string().as_str()) {
+                aliases.insert(rename.rename.to_string());
+            }
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_raw_transport_use_aliases(item, aliases);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn collect_raw_transport_type_alias(item: &Item, aliases: &mut BTreeSet<String>) {
+    match item {
+        Item::Type(item) if type_mentions_raw_transport(&item.ty, aliases) => {
+            aliases.insert(item.ident.to_string());
+        }
+        Item::Mod(item) => {
+            if let Some((_, nested)) = &item.content {
+                for nested_item in nested {
+                    collect_raw_transport_type_alias(nested_item, aliases);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn type_mentions_raw_transport(ty: &Type, aliases: &BTreeSet<String>) -> bool {
+    struct RawTransportTypeProbe<'a> {
+        aliases: &'a BTreeSet<String>,
+        found: bool,
+    }
+
+    impl<'ast> Visit<'ast> for RawTransportTypeProbe<'_> {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            self.found |= path_mentions_raw_transport(path, self.aliases);
+            if !self.found {
+                visit::visit_path(self, path);
+            }
+        }
+    }
+
+    let mut probe = RawTransportTypeProbe {
+        aliases,
+        found: false,
+    };
+    probe.visit_type(ty);
+    probe.found
+}
+
+fn use_tree_mentions_raw_transport(tree: &UseTree, aliases: &BTreeSet<String>) -> bool {
+    match tree {
+        UseTree::Path(path) => use_tree_mentions_raw_transport(&path.tree, aliases),
+        UseTree::Name(name) => aliases.contains(name.ident.to_string().as_str()),
+        UseTree::Rename(rename) => {
+            aliases.contains(rename.ident.to_string().as_str())
+                || aliases.contains(rename.rename.to_string().as_str())
+        }
+        UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|item| use_tree_mentions_raw_transport(item, aliases)),
+        UseTree::Glob(_) => false,
+    }
+}
+
+fn path_mentions_raw_transport(path: &syn::Path, aliases: &BTreeSet<String>) -> bool {
+    path.segments
+        .iter()
+        .any(|segment| aliases.contains(segment.ident.to_string().as_str()))
+}
+
+fn macro_tokens_mention_raw_transport(
+    tokens: &proc_macro2::TokenStream,
+    aliases: &BTreeSet<String>,
+) -> bool {
+    tokens.clone().into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Ident(ident) => {
+            let ident = ident.to_string();
+            aliases.contains(&ident)
+                || RAW_PRODUCER_TRANSPORT_METHODS
+                    .iter()
+                    .any(|method| ident == *method)
+        }
+        proc_macro2::TokenTree::Group(group) => {
+            macro_tokens_mention_raw_transport(&group.stream(), aliases)
+        }
+        proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => false,
+    })
 }
 
 type BindingConstructorAliases = BTreeMap<String, BTreeSet<&'static str>>;
@@ -319,16 +1072,24 @@ fn collect_use_tree_aliases(
     tree: &UseTree,
     aliases: &mut BindingConstructorAliases,
     output_binding_aliases: &mut BTreeSet<String>,
+    generated_event_payload_aliases: &mut BTreeSet<String>,
 ) {
     match tree {
         UseTree::Path(path) => {
-            collect_use_tree_aliases(&path.tree, aliases, output_binding_aliases);
+            collect_use_tree_aliases(
+                &path.tree,
+                aliases,
+                output_binding_aliases,
+                generated_event_payload_aliases,
+            );
         }
         UseTree::Name(name) => {
             let ident = name.ident.to_string();
             insert_binding_alias(aliases, &ident, &ident);
             if ident == "SagaStepOutputBinding" {
                 output_binding_aliases.insert(ident);
+            } else if ident == "GeneratedEventPayload" {
+                generated_event_payload_aliases.insert(ident);
             }
         }
         UseTree::Rename(rename) => {
@@ -339,11 +1100,18 @@ fn collect_use_tree_aliases(
             );
             if rename.ident == "SagaStepOutputBinding" {
                 output_binding_aliases.insert(rename.rename.to_string());
+            } else if rename.ident == "GeneratedEventPayload" {
+                generated_event_payload_aliases.insert(rename.rename.to_string());
             }
         }
         UseTree::Group(group) => {
             for tree in &group.items {
-                collect_use_tree_aliases(tree, aliases, output_binding_aliases);
+                collect_use_tree_aliases(
+                    tree,
+                    aliases,
+                    output_binding_aliases,
+                    generated_event_payload_aliases,
+                );
             }
         }
         _ => {}
@@ -369,6 +1137,7 @@ fn insert_binding_alias(aliases: &mut BindingConstructorAliases, alias: &str, ty
 fn binding_constructor_methods(type_name: &str) -> Option<&'static [&'static str]> {
     match type_name {
         "ContractBinding"
+        | "EventFactBinding"
         | "HttpRouteEvidence"
         | "HttpRouteBinding"
         | "HttpProducerBinding"
@@ -416,6 +1185,10 @@ fn type_path_last_ident(ty: &Type) -> Option<String> {
 }
 
 fn is_saga_step_output_binding_impl(node: &ItemImpl, aliases: &BTreeSet<String>) -> bool {
+    is_trait_impl(node, aliases)
+}
+
+fn is_trait_impl(node: &ItemImpl, aliases: &BTreeSet<String>) -> bool {
     let Some((_, path, _)) = &node.trait_ else {
         return false;
     };
@@ -494,6 +1267,26 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("unnamed")
         ));
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"examples/demo\", \"composition/settings\"]\nresolver = \"2\"\n",
+        )?;
+        for member in ["examples/demo", "composition/settings"] {
+            let manifest = root.join(member).join("Cargo.toml");
+            std::fs::create_dir_all(
+                manifest
+                    .parent()
+                    .context("synthetic member manifest must have a parent")?,
+            )?;
+            std::fs::write(
+                manifest,
+                format!(
+                    "[package]\nname = \"{}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+                    member.replace('/', "-")
+                ),
+            )?;
+        }
         let source = r#"
             fn mint() {
                 let _ = vocab::HttpRouteEvidence::from_static(
@@ -512,6 +1305,7 @@ mod tests {
         "#;
         for relative in [
             "examples/demo/src/lib.rs",
+            "composition/settings/src/lib.rs",
             "journeys/src/lib.rs",
             "journeys-fault-matrix/src/lib.rs",
         ] {
@@ -529,28 +1323,40 @@ mod tests {
         let result = scan_sources(&root);
         std::fs::remove_dir_all(&root)?;
         let (scanned, findings) = result?;
-        assert_eq!(scanned, 3, "all production root shapes must be scanned");
+        assert_eq!(
+            scanned, 4,
+            "all workspace members and direct production root shapes must be scanned"
+        );
         assert_eq!(
             findings.len(),
-            3,
+            4,
             "each synthetic root must trip the provenance guard: {findings:?}"
         );
         Ok(())
     }
 
     #[test]
-    fn real_source_roots_cover_examples_and_direct_journeys() -> anyhow::Result<()> {
+    fn real_source_roots_cover_workspace_compositions_and_direct_journeys() -> anyhow::Result<()> {
         let root = workspace_root()?;
         let roots = production_source_roots(&root)?;
         for relative in [
             "examples/tenancy-consumer",
             "examples/iotdevice",
+            "composition/identity",
+            "composition/settings",
+            "composition/audit",
             "journeys",
             "journeys-fault-matrix",
         ] {
             assert!(
                 roots.contains(&root.join(relative)),
                 "production provenance scan must include {relative}"
+            );
+        }
+        for relative in ["generated", "xtask"] {
+            assert!(
+                !roots.contains(&root.join(relative)),
+                "{relative} is an owner, not a production provenance consumer"
             );
         }
         Ok(())
@@ -638,6 +1444,79 @@ mod tests {
             "producer binding mint must stay generated-only"
         );
         assert_eq!(findings[0].rule, Rule::BareFromStatic);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prod_event_fact_binding_mint() -> anyhow::Result<()> {
+        let src = r#"
+            fn mint() {
+                let _ = vocab::EventFactBinding::from_static(
+                    generated::event::identity_v1::session_created::CONTRACT,
+                    "identity.commands.forged",
+                );
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(
+            findings.len(),
+            1,
+            "event fact mint must stay generated-only"
+        );
+        assert_eq!(findings[0].rule, Rule::BareFromStatic);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prod_generated_event_payload_impl() -> anyhow::Result<()> {
+        let src = r#"
+            struct ForgedPayload;
+
+            impl vocab::GeneratedEventPayload for ForgedPayload {
+                const FACT: vocab::EventFactBinding =
+                    generated::event::identity_v1::session_created::FACT;
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(
+            findings.len(),
+            1,
+            "generated payload provenance must stay codegen-owned"
+        );
+        assert_eq!(findings[0].rule, Rule::GeneratedEventPayloadImpl);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prod_generated_event_payload_alias_and_glob_impls() -> anyhow::Result<()> {
+        for src in [
+            r#"
+                use vocab::GeneratedEventPayload as GeneratedPayload;
+
+                struct ForgedPayload;
+                impl GeneratedPayload for ForgedPayload {
+                    const FACT: vocab::EventFactBinding =
+                        generated::event::identity_v1::session_created::FACT;
+                }
+            "#,
+            r#"
+                use vocab::*;
+
+                struct ForgedPayload;
+                impl GeneratedEventPayload for ForgedPayload {
+                    const FACT: EventFactBinding =
+                        generated::event::identity_v1::session_created::FACT;
+                }
+            "#,
+        ] {
+            let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+            assert_eq!(
+                findings.len(),
+                1,
+                "aliases and glob imports must not bypass generated payload ownership"
+            );
+            assert_eq!(findings[0].rule, Rule::GeneratedEventPayloadImpl);
+        }
         Ok(())
     }
 
@@ -1023,6 +1902,223 @@ mod tests {
     }
 
     #[test]
+    fn flags_alias_aware_raw_transport_in_active_producer_provider() -> anyhow::Result<()> {
+        let src = r#"
+            use diport::{
+                DynPublisher as Bus,
+                OutboxEmitter as DurableEmitter,
+                PublishRequest as Request,
+                Publisher as PublisherPort,
+            };
+
+            type Transport = Bus<'static>;
+
+            async fn bypass(
+                _transport: Transport,
+                publisher: &PublisherPort,
+                emitter: &DurableEmitter,
+                request: Request,
+            ) {
+                publisher.publish(request).await;
+                emitter.emit(parts()).await;
+            }
+        "#;
+        let findings = scan_file(Path::new("adapters/postgres/src/session_lifecycle.rs"), src)?;
+        let raw_findings = findings
+            .iter()
+            .filter(|finding| finding.rule == Rule::RawProducerTransport)
+            .collect::<Vec<_>>();
+        assert!(
+            !raw_findings.is_empty(),
+            "renamed imports, chained type alias, parameters and calls must remain visible"
+        );
+        let subjects = raw_findings
+            .iter()
+            .map(|finding| finding.subject.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            subjects.len(),
+            raw_findings.len(),
+            "one syntax site must not emit duplicate raw transport diagnostics: {raw_findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn flags_raw_transport_in_cross_file_reachable_helper() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "rss-producer-raw-transport-call-graph-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let postgres_src = root.join("adapters/postgres/src");
+        std::fs::create_dir_all(&postgres_src)?;
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"adapters/postgres\"]\nresolver = \"2\"\n",
+        )?;
+        std::fs::write(
+            root.join("adapters/postgres/Cargo.toml"),
+            "[package]\nname = \"postgres\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        std::fs::write(postgres_src.join("lib.rs"), "")?;
+        std::fs::write(
+            postgres_src.join("session_lifecycle.rs"),
+            r#"
+                use crate::producer_transport_helper::publish_raw as dispatch;
+
+                async fn persist() {
+                    dispatch().await;
+                }
+            "#,
+        )?;
+        std::fs::write(
+            postgres_src.join("producer_transport_helper.rs"),
+            r#"
+                use diport::{DynPublisher, PublishRequest};
+
+                async fn publish_raw(publisher: &DynPublisher<'_>, request: PublishRequest) {
+                    publisher.publish(request).await;
+                }
+
+                async fn dead_decoy(publisher: &DynPublisher<'_>, request: PublishRequest) {
+                    publisher.publish(request).await;
+                }
+            "#,
+        )?;
+
+        let result = scan_sources(&root);
+        std::fs::remove_dir_all(&root)?;
+        let (_, findings) = result?;
+        let raw_findings = findings
+            .iter()
+            .filter(|finding| finding.rule == Rule::RawProducerTransport)
+            .collect::<Vec<_>>();
+        assert!(
+            !raw_findings.is_empty(),
+            "a provider must not hide raw transport behind a cross-file helper"
+        );
+        assert!(
+            raw_findings
+                .iter()
+                .all(|finding| finding.subject.contains("producer_transport_helper.rs")),
+            "the finding must identify the reachable helper rather than a dead sibling: {raw_findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn flags_raw_publish_method_without_transport_type_name() -> anyhow::Result<()> {
+        let src = r#"
+            async fn bypass(transport: &HiddenTransport, request: HiddenRequest) {
+                transport.publish(request).await;
+            }
+        "#;
+        let findings = scan_file(Path::new("adapters/postgres/src/policy_repo.rs"), src)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::RawProducerTransport),
+            "method syntax must not hide raw publish from the producer guard: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn flags_macro_hidden_raw_transport_alias() -> anyhow::Result<()> {
+        let src = r#"
+            use diport::DynPublisher as Bus;
+
+            fn bypass() {
+                install_transport!(Bus::new_box(hidden()));
+            }
+        "#;
+        let findings = scan_file(
+            Path::new("adapters/postgres/src/role_binding_lifecycle.rs"),
+            src,
+        )?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::RawProducerTransport),
+            "macro token trees must not hide an aliased raw transport: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cfg_test_transport_bait_does_not_hide_production_bypass() -> anyhow::Result<()> {
+        let src = r#"
+            #[cfg(test)]
+            mod bait {
+                use diport::OutboxEmitter;
+
+                async fn emit_only_in_tests(emitter: &OutboxEmitter) {
+                    emitter.emit(parts()).await;
+                }
+            }
+
+            async fn production_bypass(transport: &HiddenTransport, request: HiddenRequest) {
+                transport.publish(request).await;
+            }
+        "#;
+        let findings = scan_file(Path::new("adapters/postgres/src/config_repo.rs"), src)?;
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|finding| finding.rule == Rule::RawProducerTransport)
+                .count(),
+            1,
+            "cfg(test) bait is excluded, but the production bypass must still fail: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn allows_raw_transport_outside_active_producer_providers() -> anyhow::Result<()> {
+        let src = r#"
+            use diport::{DynPublisher, PublishRequest};
+
+            async fn relay(publisher: &DynPublisher<'_>, request: PublishRequest) {
+                publisher.publish(request).await;
+            }
+        "#;
+        let findings = scan_file(Path::new("adapters/postgres/src/outbox.rs"), src)?;
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule != Rule::RawProducerTransport),
+            "generic relay infrastructure is outside the active HTTP producer closure: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn real_active_producer_providers_have_no_raw_transport() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        for relative in ACTIVE_PRODUCER_PROVIDER_FILES {
+            let content = std::fs::read_to_string(root.join(relative))?;
+            let findings = scan_file(Path::new(relative), &content)?;
+            assert!(
+                findings
+                    .iter()
+                    .all(|finding| finding.rule != Rule::RawProducerTransport),
+                "{relative} must stay behind producer_tx and never import/call raw transport: {findings:?}"
+            );
+        }
+        let (_, findings) = scan_sources(&root)?;
+        let raw_findings = findings
+            .iter()
+            .filter(|finding| finding.rule == Rule::RawProducerTransport)
+            .collect::<Vec<_>>();
+        assert!(
+            raw_findings.is_empty(),
+            "active provider execution-reachable helpers must stay behind producer_tx: {raw_findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn flags_projection_db_function_callsite_outside_wrapper_case_insensitive() -> anyhow::Result<()>
     {
         let src = r#"
@@ -1085,6 +2181,29 @@ mod tests {
         assert!(
             findings.is_empty(),
             "生产 src 不应裸调用 binding from_static 或 projection DB function: {findings:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn generated_event_fact_owner_is_non_vacuous() {
+        let root = workspace_root().expect("workspace root");
+        let generated_sources =
+            rs_files(&root.join("generated/src/event")).expect("generated event sources");
+        let mut fact_mints = 0usize;
+        let mut payload_impls = 0usize;
+        for path in generated_sources {
+            let source = std::fs::read_to_string(path).expect("generated event source");
+            fact_mints += source
+                .matches("::vocab::EventFactBinding::from_static")
+                .count();
+            payload_impls += source
+                .matches("impl ::vocab::GeneratedEventPayload for")
+                .count();
+        }
+        assert!(
+            fact_mints >= 6 && payload_impls >= 6,
+            "codegen owner must retain real event fact mints and payload impls; fact_mints={fact_mints}, payload_impls={payload_impls}"
         );
     }
 }

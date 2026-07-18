@@ -1,14 +1,15 @@
 //! Deterministic active-L2 producer/fact assurance inventory.
 //!
-//! INVARIANT: L2-ASSURANCE-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private CompleteEvidence construction plus closed Role, CarrierKind, ClosedStatus, and EvidenceStatus types make incomplete or caller-authored status records unrepresentable" }——
-//! role-specific Rust records are the only inventory authoring surface; closed status and five
-//! complete evidence facets cannot be supplied as strings by callers.
+//! INVARIANT: L2-ASSURANCE-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private role-specific evidence construction plus closed Role, CarrierKind, ClosedStatus, and EvidenceStatus types make incomplete or caller-authored status records unrepresentable" }——
+//! producer and fact records have distinct closed evidence types. A producer can only be authored
+//! with contract/generated/execution/fault; the former runtime/effect carrier bag is absent.
 //! INVARIANT: L2-ASSURANCE-WIRE-01 { level = "Hard", exec = "verify", source = "codegen", golden = "generated/l2-assurance.json", synthetic_red = "tests::check_rejects_missing_tampered_and_crlf_without_writing", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
-//! the typed JSON v2 projection and committed golden are byte-for-byte deterministic and reject
+//! the typed JSON v3 projection and committed golden are byte-for-byte deterministic and reject
 //! missing, tampered, or non-LF output without writing in check mode.
 //! INVARIANT: L2-ASSURANCE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::exact_set_rejects_equal_size_wrong_identity", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
-//! active OutboxFact manifests, generated registries, runtime closure, effect metadata and named
-//! fault cases are joined bidirectionally; 9 producers and 5 facts are an anti-vacuity floor.
+//! active OutboxFact manifests, generated registries, producer execution terminals and named fault
+//! cases are joined bidirectionally; each producer terminal fact set equals manifest `emits`, while
+//! 9 producers and 5 facts are an anti-vacuity floor.
 //! INVARIANT: L2-ASSURANCE-PATH-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::carrier_paths_reject_escapes_backslashes_and_symlinks", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
 //! every carrier and the fixed output are real repository-local paths without symlink traversal.
 
@@ -155,12 +156,7 @@ fn build_inventory(root: &Path) -> Result<Inventory> {
         let closure = producer_closures
             .get(id)
             .with_context(|| format!("active L2 producer lacks typed receipt closure: {id}"))?;
-        let evidence = complete_producer_evidence(
-            root,
-            contract,
-            closure,
-            producer_fault_carriers(root, &emitted_facts, &fault_evidence)?,
-        )?;
+        let evidence = complete_producer_evidence(root, contract, closure)?;
         records.push(AssuranceRecord::producer(
             Identity::from_contract(contract),
             ProducerDetails { emitted_facts },
@@ -192,7 +188,7 @@ fn build_inventory(root: &Path) -> Result<Inventory> {
     records.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
 
     Ok(Inventory {
-        schema_version: 2,
+        schema_version: 3,
         producer_count: universe.producers.len(),
         fact_count: universe.facts.len(),
         contracts: records,
@@ -586,40 +582,171 @@ fn fault_evidence_by_fact<'a>(
     Ok(by_fact)
 }
 
-struct ProducerEvidence;
 struct FactEvidence;
 
 fn complete_producer_evidence(
     root: &Path,
     contract: &DiscoveredContract,
-    closure: &producer_assurance::ProducerClosureProjection,
-    fault_carriers: Vec<Carrier>,
-) -> Result<CompleteEvidence<ProducerEvidence>> {
+    execution: &producer_assurance::ProducerExecutionProjection,
+) -> Result<CompleteProducerEvidence> {
     let manifest_path = repo_label(root, &contract.dir.join("contract.toml"))?;
     let generated = crate::codegen::GeneratedCarrier::from_contract(contract)?;
     let spec = generated.item(crate::codegen::GeneratedItem::Spec)?;
     let producer = generated.item(crate::codegen::GeneratedItem::Producer)?;
-    let effect_profile = generated.item(crate::codegen::GeneratedItem::EffectProfile)?;
-    let runtime = vec![Carrier::new(
+    let route = Carrier::new(
         root,
         CarrierKind::RustSymbol,
-        &closure.handler.repo_path,
-        &closure.handler.symbol,
-    )?];
-    let mut effects = vec![Carrier::new(
+        &execution.route.repo_path,
+        &execution.route.symbol,
+    )?;
+    let mounted_handler = Carrier::new(
         root,
         CarrierKind::RustSymbol,
-        &effect_profile.repo_path,
-        &effect_profile.symbol,
-    )?];
-    effects.extend(
-        closure
-            .effects
-            .iter()
-            .map(|item| Carrier::new(root, CarrierKind::RustSymbol, &item.repo_path, &item.symbol))
-            .collect::<Result<Vec<_>>>()?,
+        &execution.mounted_handler.repo_path,
+        &execution.mounted_handler.symbol,
+    )?;
+    let terminals = execution
+        .terminals
+        .iter()
+        .map(|terminal| {
+            let domain_path = terminal
+                .domain_path
+                .iter()
+                .map(|item| {
+                    Carrier::new(root, CarrierKind::RustSymbol, &item.repo_path, &item.symbol)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            ensure!(
+                !domain_path.is_empty(),
+                "producer terminal {} has empty domain execution path",
+                terminal.fact_id
+            );
+            Ok(ProducerTerminalEvidence {
+                fact_id: terminal.fact_id.clone(),
+                domain_path,
+                port_method: Carrier::new(
+                    root,
+                    CarrierKind::RustSymbol,
+                    &terminal.port_method.repo_path,
+                    &terminal.port_method.symbol,
+                )?,
+                provider_method: Carrier::new(
+                    root,
+                    CarrierKind::RustSymbol,
+                    &terminal.provider_method.repo_path,
+                    &terminal.provider_method.symbol,
+                )?,
+                production_composition: ProductionCompositionEvidence {
+                    runtime_entry: Carrier::new(
+                        root,
+                        CarrierKind::RustSymbol,
+                        &terminal.production_composition.runtime_entry_path,
+                        &terminal.production_composition.runtime_entry,
+                    )?,
+                    runtime_assembly: Carrier::new(
+                        root,
+                        CarrierKind::RustSymbol,
+                        &terminal.production_composition.runtime_assembly_path,
+                        &terminal.production_composition.runtime_assembly,
+                    )?,
+                    runtime_module: Carrier::new(
+                        root,
+                        CarrierKind::RustSymbol,
+                        &terminal.production_composition.runtime_module_path,
+                        &terminal.production_composition.runtime_module,
+                    )?,
+                    wire: Carrier::new(
+                        root,
+                        CarrierKind::RustSymbol,
+                        &terminal.production_composition.repo_path,
+                        &terminal.production_composition.wire,
+                    )?,
+                    service_constructor: terminal
+                        .production_composition
+                        .service_constructor
+                        .clone(),
+                    provider_factory: terminal.production_composition.provider_factory.clone(),
+                },
+                transaction: Carrier::new(
+                    root,
+                    CarrierKind::RustSymbol,
+                    &terminal.transaction.repo_path,
+                    &terminal.transaction.symbol,
+                )?,
+                capability: Carrier::new(
+                    root,
+                    CarrierKind::RustSymbol,
+                    &terminal.capability.repo_path,
+                    &terminal.capability.symbol,
+                )?,
+                append: Carrier::new(
+                    root,
+                    CarrierKind::RustSymbol,
+                    &terminal.append.repo_path,
+                    &terminal.append.symbol,
+                )?,
+                settlement: Carrier::new(
+                    root,
+                    CarrierKind::RustSymbol,
+                    &terminal.settlement.repo_path,
+                    &terminal.settlement.symbol,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        !terminals.is_empty(),
+        "producer {} has no execution terminals",
+        contract.manifest.id
     );
-    CompleteEvidence::new(
+    let fault = ProducerFaultEvidence::new(
+        execution
+            .terminals
+            .iter()
+            .map(|terminal| {
+                Ok(ProducerFaultTerminalEvidence {
+                    fact_id: terminal.fact_id.clone(),
+                    provider_method: Carrier::new(
+                        root,
+                        CarrierKind::RustSymbol,
+                        &terminal.provider_method.repo_path,
+                        &terminal.provider_method.symbol,
+                    )?,
+                    transaction: Carrier::new(
+                        root,
+                        CarrierKind::RustSymbol,
+                        &terminal.transaction.repo_path,
+                        &terminal.transaction.symbol,
+                    )?,
+                    rollback: Carrier::new(
+                        root,
+                        CarrierKind::RustSymbol,
+                        &terminal.rollback.repo_path,
+                        &terminal.rollback.symbol,
+                    )?,
+                    commit_unknown: Carrier::new(
+                        root,
+                        CarrierKind::RustSymbol,
+                        &terminal.commit_unknown.repo_path,
+                        &terminal.commit_unknown.symbol,
+                    )?,
+                    rollback_failed: Carrier::new(
+                        root,
+                        CarrierKind::RustSymbol,
+                        &terminal.rollback_failed.repo_path,
+                        &terminal.rollback_failed.symbol,
+                    )?,
+                    no_replay: Carrier::new(
+                        root,
+                        CarrierKind::RustSymbol,
+                        &terminal.no_replay.repo_path,
+                        &terminal.no_replay.symbol,
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    )?;
+    Ok(CompleteProducerEvidence::new(
         EvidenceFacet::new(vec![Carrier::new(
             root,
             CarrierKind::Manifest,
@@ -635,10 +762,14 @@ fn complete_producer_evidence(
                 &producer.symbol,
             )?,
         ])?,
-        EvidenceFacet::new(runtime)?,
-        EvidenceFacet::new(effects)?,
-        EvidenceFacet::new(fault_carriers)?,
-    )
+        ProducerExecutionEvidence {
+            status: EvidenceStatus::Complete,
+            route,
+            mounted_handler,
+            terminals,
+        },
+        fault,
+    ))
 }
 
 fn complete_fact_evidence(
@@ -682,24 +813,6 @@ fn complete_fact_evidence(
         )?])?,
         EvidenceFacet::new(fault_carriers)?,
     )
-}
-
-fn producer_fault_carriers(
-    root: &Path,
-    emitted_facts: &[String],
-    evidence: &FaultEvidenceMap,
-) -> Result<Vec<Carrier>> {
-    let mut named_cases = Vec::new();
-    for fact in emitted_facts {
-        named_cases.extend(
-            evidence
-                .get(fact)
-                .with_context(|| format!("producer emits fact without fault evidence: {fact}"))?
-                .iter()
-                .cloned(),
-        );
-    }
-    named_fault_carriers(root, &named_cases)
 }
 
 fn named_fault_carriers(
@@ -910,7 +1023,7 @@ impl AssuranceRecord {
     fn producer(
         identity: Identity,
         details: ProducerDetails,
-        evidence: CompleteEvidence<ProducerEvidence>,
+        evidence: CompleteProducerEvidence,
     ) -> Self {
         Self::Producer(ProducerRecord {
             contract_id: identity.contract_id,
@@ -985,7 +1098,7 @@ struct ProducerRecord {
     role: Role,
     status: ClosedStatus,
     emitted_facts: Vec<String>,
-    evidence: EvidenceWire,
+    evidence: ProducerEvidenceWire,
 }
 
 #[derive(Debug, Serialize)]
@@ -1049,6 +1162,38 @@ struct CompleteEvidence<R> {
     role: PhantomData<fn() -> R>,
 }
 
+struct CompleteProducerEvidence {
+    contract: EvidenceFacet,
+    generated: EvidenceFacet,
+    execution: ProducerExecutionEvidence,
+    fault: ProducerFaultEvidence,
+}
+
+impl CompleteProducerEvidence {
+    fn new(
+        contract: EvidenceFacet,
+        generated: EvidenceFacet,
+        execution: ProducerExecutionEvidence,
+        fault: ProducerFaultEvidence,
+    ) -> Self {
+        Self {
+            contract,
+            generated,
+            execution,
+            fault,
+        }
+    }
+
+    fn into_wire(self) -> ProducerEvidenceWire {
+        ProducerEvidenceWire {
+            contract: self.contract,
+            generated: self.generated,
+            execution: self.execution,
+            fault: self.fault,
+        }
+    }
+}
+
 impl<R> CompleteEvidence<R> {
     fn new(
         contract: EvidenceFacet,
@@ -1085,6 +1230,85 @@ struct EvidenceWire {
     runtime: EvidenceFacet,
     effect: EvidenceFacet,
     fault: EvidenceFacet,
+}
+
+#[derive(Debug, Serialize)]
+struct ProducerEvidenceWire {
+    contract: EvidenceFacet,
+    generated: EvidenceFacet,
+    execution: ProducerExecutionEvidence,
+    fault: ProducerFaultEvidence,
+}
+
+#[derive(Debug, Serialize)]
+struct ProducerFaultEvidence {
+    status: EvidenceStatus,
+    terminals: Vec<ProducerFaultTerminalEvidence>,
+}
+
+impl ProducerFaultEvidence {
+    fn new(terminals: Vec<ProducerFaultTerminalEvidence>) -> Result<Self> {
+        ensure!(
+            !terminals.is_empty(),
+            "producer fault evidence must have at least one terminal"
+        );
+        ensure!(
+            terminals
+                .windows(2)
+                .all(|pair| pair[0].fact_id < pair[1].fact_id),
+            "producer fault terminals must be sorted and unique"
+        );
+        Ok(Self {
+            status: EvidenceStatus::Complete,
+            terminals,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProducerFaultTerminalEvidence {
+    fact_id: String,
+    provider_method: Carrier,
+    transaction: Carrier,
+    rollback: Carrier,
+    commit_unknown: Carrier,
+    rollback_failed: Carrier,
+    no_replay: Carrier,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProducerExecutionEvidence {
+    status: EvidenceStatus,
+    route: Carrier,
+    mounted_handler: Carrier,
+    terminals: Vec<ProducerTerminalEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProducerTerminalEvidence {
+    fact_id: String,
+    domain_path: Vec<Carrier>,
+    port_method: Carrier,
+    provider_method: Carrier,
+    production_composition: ProductionCompositionEvidence,
+    transaction: Carrier,
+    capability: Carrier,
+    append: Carrier,
+    settlement: Carrier,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductionCompositionEvidence {
+    runtime_entry: Carrier,
+    runtime_assembly: Carrier,
+    runtime_module: Carrier,
+    wire: Carrier,
+    service_constructor: String,
+    provider_factory: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1156,13 +1380,19 @@ fn validate_rust_symbol(root: &Path, repo_path: &str, symbol: &str) -> Result<()
     )?;
     let syntax = syn::parse_file(&source)
         .with_context(|| format!("cannot parse Rust carrier {}", source_path.display()))?;
-    let item = find_rust_item(&syntax.items, &local_segments).with_context(|| {
-        format!("Rust carrier symbol `{symbol}` does not name a real item in {repo_path}")
-    })?;
-    ensure!(
-        !item_is_conditionally_compiled(item),
-        "Rust carrier symbol `{symbol}` is conditionally compiled"
-    );
+    if repo_path.starts_with("generated/src/") {
+        let item = find_rust_item(&syntax.items, &local_segments).with_context(|| {
+            format!("Rust carrier symbol `{symbol}` does not name a real item in {repo_path}")
+        })?;
+        ensure!(
+            !item_is_conditionally_compiled(item),
+            "Rust carrier symbol `{symbol}` is conditionally compiled"
+        );
+    } else {
+        validate_non_generated_rust_symbol(&syntax.items, &local_segments).with_context(|| {
+            format!("Rust carrier symbol `{symbol}` does not name one exact production item or method in {repo_path}")
+        })?;
+    }
     Ok(())
 }
 
@@ -1194,11 +1424,90 @@ fn rust_symbol_local_segments<'a>(repo_path: &str, symbol: &'a str) -> Result<Ve
         );
         return Ok(segments);
     }
+    let segments = symbol.split("::").collect::<Vec<_>>();
     ensure!(
-        !symbol.contains("::") && syn::parse_str::<syn::Ident>(symbol).is_ok(),
-        "non-generated Rust carrier must use one exact top-level item name"
+        matches!(segments.len(), 1 | 2)
+            && segments
+                .iter()
+                .all(|segment| syn::parse_str::<syn::Ident>(segment).is_ok()),
+        "non-generated Rust carrier must use `Item` or exact `Type::method` / `Trait::method` syntax"
     );
-    Ok(vec![symbol])
+    Ok(segments)
+}
+
+fn validate_non_generated_rust_symbol(items: &[syn::Item], segments: &[&str]) -> Option<()> {
+    match segments {
+        [item_name] => {
+            let item = items
+                .iter()
+                .find(|item| rust_item_ident(item).is_some_and(|ident| ident == *item_name))?;
+            (!item_is_conditionally_compiled(item)).then_some(())
+        }
+        [owner, method] => {
+            let mut matches = 0usize;
+            for item in items {
+                match item {
+                    syn::Item::Trait(item)
+                        if item.ident == *owner
+                            && !attrs_are_conditional(&item.attrs)
+                            && item.items.iter().any(|trait_item| {
+                                matches!(
+                                    trait_item,
+                                    syn::TraitItem::Fn(function)
+                                        if function.sig.ident == *method
+                                            && !attrs_are_conditional(&function.attrs)
+                                )
+                            }) =>
+                    {
+                        matches += 1;
+                    }
+                    syn::Item::Impl(item)
+                        if !attrs_are_conditional(&item.attrs)
+                            && type_last_ident(&item.self_ty).as_deref() == Some(*owner)
+                            && item.items.iter().any(|impl_item| {
+                                matches!(
+                                    impl_item,
+                                    syn::ImplItem::Fn(function)
+                                        if function.sig.ident == *method
+                                            && !attrs_are_conditional(&function.attrs)
+                                )
+                            }) =>
+                    {
+                        matches += 1;
+                    }
+                    _ => {}
+                }
+            }
+            (matches == 1).then_some(())
+        }
+        _ => None,
+    }
+}
+
+fn type_last_ident(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    path.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+}
+
+fn attrs_are_conditional(attrs: &[syn::Attribute]) -> bool {
+    use quote::ToTokens as _;
+
+    attrs.iter().any(|attribute| {
+        attribute.path().is_ident("test")
+            || attribute.path().is_ident("cfg_attr")
+            || (attribute.path().is_ident("cfg")
+                && attribute
+                    .meta
+                    .to_token_stream()
+                    .to_string()
+                    .split(|character: char| !character.is_alphanumeric() && character != '_')
+                    .any(|token| token == "test"))
+    })
 }
 
 fn find_rust_item<'a>(items: &'a [syn::Item], segments: &[&str]) -> Option<&'a syn::Item> {
@@ -1315,6 +1624,7 @@ mod tests {
     fn rust_symbol_carrier_rejects_missing_and_test_only_items() -> anyhow::Result<()> {
         let root = crate::testutil::unique_tmp("l2-assurance-rust-symbol");
         fs::create_dir_all(root.join("generated/src/event"))?;
+        fs::create_dir_all(root.join("crates/demo/src"))?;
         fs::write(
             root.join("generated/src/event/identity_v1.rs"),
             r#"
@@ -1367,6 +1677,43 @@ pub mod cfg_attr_parent {
                 CarrierKind::RustSymbol,
                 "generated/src/event/identity_v1.rs",
                 "generated::event::identity_v1::session_created::TEST_ONLY",
+            )
+            .is_err()
+        );
+        fs::write(
+            root.join("crates/demo/src/lib.rs"),
+            r#"
+pub trait DemoPort {
+    fn commit(&self);
+}
+pub struct DemoProvider;
+impl DemoPort for DemoProvider {
+    fn commit(&self) {}
+}
+#[cfg(test)]
+impl DemoProvider {
+    fn decoy(&self) {}
+}
+"#,
+        )?;
+        Carrier::new(
+            &root,
+            CarrierKind::RustSymbol,
+            "crates/demo/src/lib.rs",
+            "DemoPort::commit",
+        )?;
+        Carrier::new(
+            &root,
+            CarrierKind::RustSymbol,
+            "crates/demo/src/lib.rs",
+            "DemoProvider::commit",
+        )?;
+        assert!(
+            Carrier::new(
+                &root,
+                CarrierKind::RustSymbol,
+                "crates/demo/src/lib.rs",
+                "DemoProvider::decoy",
             )
             .is_err()
         );
@@ -1527,8 +1874,42 @@ pub mod cfg_attr_parent {
                 _ => None,
             })
             .context("identity.login producer disappeared")?;
-        assert_eq!(login.evidence.runtime.carriers.len(), 1);
-        assert_eq!(login.evidence.runtime.carriers[0].symbol, "login_handler");
+        assert_eq!(
+            login.evidence.execution.mounted_handler.symbol,
+            "login_handler"
+        );
+        assert!(
+            login
+                .evidence
+                .fault
+                .terminals
+                .iter()
+                .all(|terminal| terminal.no_replay.symbol == "ProducerTxAttempt::into_result"),
+            "plain producer terminals must record their actual non-retry settlement consumer"
+        );
+        let config_publish = first
+            .contracts
+            .iter()
+            .find_map(|record| match record {
+                AssuranceRecord::Producer(record)
+                    if record.contract_id == "settings.config-publish" =>
+                {
+                    Some(record)
+                }
+                _ => None,
+            })
+            .context("settings.config-publish producer disappeared")?;
+        assert!(
+            config_publish
+                .evidence
+                .fault
+                .terminals
+                .iter()
+                .all(|terminal| {
+                    terminal.no_replay.symbol == "LocalTxAttempt::into_retry_result"
+                }),
+            "retry producer terminals must record the retry runner's actual settlement consumer"
+        );
         assert_eq!(first_bytes, second_bytes);
         assert_eq!(first_bytes.last(), Some(&b'\n'));
         assert!(!first_bytes.contains(&b'\r'));

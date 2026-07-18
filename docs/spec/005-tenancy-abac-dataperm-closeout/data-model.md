@@ -16,7 +16,7 @@
 ## Postgres Tenant Scope
 
 - Owner: `adapters/postgres::cotx`.
-- Shape: `set_local_tenant`, `tenant_scoped_read`, `co_tx_with_outbox`.
+- Shape: `set_local_tenant`, `tenant_scoped_read`, `producer_tx`.
 - Invariant: production GUC writes only via cotx; startup verifies non-bypass role, RLS, policy, and GUC round-trip.
 
 ## PartitionKey

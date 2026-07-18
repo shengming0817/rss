@@ -80,19 +80,26 @@ cargo dylint --all                                     # AST 级自写 lint（do
 ```
 
 `generated/l2-assurance.json` 是下游读取 L2 assurance inventory 的唯一 committed artifact；其 9 条
-producer 与 5 条 fact 记录由 active contract、compiled registry、subscription external-effect policy、
-runtime/effect wiring 和 ready fault
-evidence 共同派生。该文件只允许由 `l2-assurance` 更新，不手工编辑；`--check` 不写文件，并拒绝缺失、篡改、
-CRLF 或输入漂移。
+producer 与 5 条 fact 记录由 active contract、compiled registry、精确 mounted handler、receipt
+execution graph、production composition、Postgres producer transaction closure、subscription
+external-effect policy 和 ready fault evidence 共同派生。该文件只允许由 `l2-assurance` 更新，不手工
+编辑；`--check` 不写文件，并拒绝缺失、篡改、CRLF 或输入漂移。
 
-JSON v2 的紧凑 wire 约定如下；v1 不再读取或双写：
+JSON v3 的紧凑 wire 约定如下；v2 不再读取或双写：
 
-- 根字段固定为 `schemaVersion: 2`、`producerCount`、`factCount`、`contracts`。
+- 根字段固定为 `schemaVersion: 3`、`producerCount`、`factCount`、`contracts`。
 - 每条 contract 共有 `contractId`、`domain`、`version`、`role`、`status`、`evidence`；producer
   另带 `emittedFacts`，fact 另带 `topic` 和
   `subscriptions: [{consumer, group, externalEffectPolicy}]`。
-- `evidence` 固定包含 `contract`、`generated`、`runtime`、`effect`、`fault` 五个 facet；每个
-  facet 都是 `{status, carriers}`，carrier 固定为 `{kind, path, symbol}`。
+- producer `evidence` 只含 `contract`、`generated`、`execution`、`fault`；不再携带 v2 的
+  `runtime/effect` 泛化 bag。`execution` 固定记录 generated route、精确 mounted handler 及按 fact
+  排序的 terminals；每个 terminal 记录 domain call path、`Trait::method` port、`Type::method`
+  provider、production `wire` 注入、`producer_tx`、`TxCapability`、canonical append 与 settlement。
+  terminal fact 集必须与该 producer 的 `emittedFacts` 精确相等。producer `fault` 同样按 fact terminal
+  记录 provider/transaction、rollback、commit-unknown、rollback-failed 与生产 no-replay carrier，
+  不复用 consumer/relay fixture 冒充 producer settlement 证据。
+- fact 继续携带其适用的 `contract/generated/runtime/effect/fault` evidence。普通 facet 是
+  `{status, carriers}`，carrier 固定为 `{kind, path, symbol}`。
 - 枚举是闭集：`role` 只有 `producer|fact`，record `status` 只有 `closed`，facet `status`
   只有 `complete`，`kind` 只有 `manifest|rust-symbol|fault-fixture`，`externalEffectPolicy`
   只有 `transactional-only|idempotency-key|reconcile|compensated`。

@@ -46,7 +46,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool, ProducerTxOutcome};
 use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_with_ambient, unix_secs};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
@@ -216,9 +216,13 @@ impl SessionLifecycle for PgSessionLifecycle {
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
-        let authorized_env = env.clone();
+        let generated_fact = entry.generated_fact().ok_or_else(|| {
+            OutboxEmitError::new(std::io::Error::other(
+                "session producer entry lacks generated fact provenance",
+            ))
+        })?;
         self.write_pool
-            .co_tx_with_outbox(
+            .producer_tx(
                 scope,
                 &entry,
                 &env,
@@ -228,23 +232,19 @@ impl SessionLifecycle for PgSessionLifecycle {
                             .await
                             .map_err(OutboxEmitError::new)?;
                         let authorization = receipt
-                            .authorize(SESSION_CREATED_CONTRACT)
+                            .authorize(generated_fact, SESSION_CREATED_CONTRACT)
                             .ok_or_else(|| {
                                 OutboxEmitError::new(std::io::Error::other(
                                     "session co-tx: producer receipt does not authorize session-created",
                                 ))
                             })?;
-                        if !authorized_env.matches_contract(authorization.fact_contract()) {
-                            return Err(OutboxEmitError::new(std::io::Error::other(
-                                "session co-tx: producer authorization does not match outbox envelope",
-                            )));
-                        }
-                        Ok(())
+                        Ok(ProducerTxOutcome::Emitted((), authorization))
                     })
                 },
                 OutboxEmitError::new,
             )
             .await
+            .into_result()
     }
 
     async fn find(
@@ -419,7 +419,7 @@ fn storage(e: sqlx::Error) -> IdentityError {
     IdentityError::Storage(Box::new(e))
 }
 
-/// 同一 tenant-scoped 事务内写 session；outbox append 由 [`PgTenantWritePool::co_tx_with_outbox`] 接续执行。
+/// 同一 tenant-scoped 事务内写 session；outbox append 由 [`PgTenantWritePool::producer_tx`] 接续执行。
 async fn write_session(
     conn: &mut sqlx::PgConnection,
     session: &Session,

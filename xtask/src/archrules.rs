@@ -782,6 +782,7 @@ fn scan_record_granular_xtask_invariants(
         "xtask/src/assembly_lock.rs" => ASSEMBLY_LOCK_INVARIANT_BINDINGS,
         "xtask/src/l2_assurance.rs" => L2_ASSURANCE_INVARIANT_BINDINGS,
         "xtask/src/producer_assurance.rs" => PRODUCER_ASSURANCE_INVARIANT_BINDINGS,
+        "xtask/src/production_composition.rs" => PRODUCTION_COMPOSITION_INVARIANT_BINDINGS,
         _ => return Ok(false),
     };
     let found_invariants = extract_invariants(root, path)?;
@@ -1278,13 +1279,23 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
 const PRODUCER_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     InvariantCarrierBinding {
         path: "xtask/src/producer_assurance.rs",
-        id: "L2-PRODUCER-RECEIPT-CLOSURE-01",
+        id: "L2-PRODUCER-EXECUTION-CLOSURE-01",
         facet: None,
         carrier: "xtask",
-        evidence: "typed receipt cross-file exact-set synthetic red and real 9-producer workspace closure",
+        evidence: "exact mounted-handler call graph synthetic red and real 9-producer transaction closure",
         gates: "verify,ci,ci-meta",
     },
 ];
+
+const PRODUCTION_COMPOSITION_INVARIANT_BINDINGS: &[InvariantCarrierBinding] =
+    &[InvariantCarrierBinding {
+        path: "xtask/src/production_composition.rs",
+        id: "L2-PRODUCER-PRODUCTION-COMPOSITION-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "wrong-injection synthetic reds and exact four-port production composition",
+        gates: "verify,ci,ci-meta",
+    }];
 
 fn invariant_key(rule: &FoundRule) -> (String, Option<String>) {
     (
@@ -4442,7 +4453,24 @@ fn unrelated_green_accepted() { assert!(true); }
         validate_closed_invariant_bindings(&mut missing, &path, &found, &[]);
         assert!(missing.findings.iter().any(|finding| {
             finding.rule == Rule::MissingInvariant
-                && finding.detail.contains("L2-PRODUCER-RECEIPT-CLOSURE-01")
+                && finding.detail.contains("L2-PRODUCER-EXECUTION-CLOSURE-01")
+                && finding.detail.contains("缺 carrier binding")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn production_composition_binding_rejects_omission_red() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let path = root.join("xtask/src/production_composition.rs");
+        let found = extract_invariants(&root, &path)?;
+        let mut missing = Index::default();
+        validate_closed_invariant_bindings(&mut missing, &path, &found, &[]);
+        assert!(missing.findings.iter().any(|finding| {
+            finding.rule == Rule::MissingInvariant
+                && finding
+                    .detail
+                    .contains("L2-PRODUCER-PRODUCTION-COMPOSITION-01")
                 && finding.detail.contains("缺 carrier binding")
         }));
         Ok(())

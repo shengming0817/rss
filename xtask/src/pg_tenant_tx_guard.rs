@@ -91,6 +91,10 @@ pub(crate) enum Rule {
     DlxLifecycleBypass,
     /// Exact DLX lifecycle repository/function sites are missing (anti-vacuity).
     DlxLifecycleSitesAbsent,
+    /// An active HTTP producer bypassed the single typed producer transaction funnel.
+    ProducerFunnelBypass,
+    /// The single producer transaction funnel or one of its exact provider call sites disappeared.
+    ProducerFunnelSitesAbsent,
 }
 
 pub(crate) struct PgTenantTxGuard;
@@ -121,6 +125,7 @@ impl GovernanceCheck for PgTenantTxGuard {
         let settings_ports = std::fs::read_to_string(&settings_ports_path)
             .with_context(|| format!("读 {} 失败", settings_ports_path.display()))?;
         let (summary, mut findings) = scan_guard(&migrations, &files);
+        findings.extend(producer_funnel_findings(&files));
         findings.extend(localtx_required_carriers_missing(&files));
         findings.extend(localtx_deadline_observation_findings(&workspace_files));
         let dlx_path = root.join("adapters/postgres/src/dlx_lifecycle.rs");
@@ -133,6 +138,215 @@ impl GovernanceCheck for PgTenantTxGuard {
         ));
         Ok((summary, findings))
     }
+}
+
+fn producer_funnel_findings(files: &[(String, String)]) -> Vec<Finding> {
+    use syn::visit::Visit as _;
+
+    #[derive(Default)]
+    struct CallScan {
+        producer_tx: usize,
+        retry_producer_tx: usize,
+        forbidden: Vec<String>,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for CallScan {
+        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+            if !attributes_are_test_only(&node.attrs) {
+                syn::visit::visit_item_fn(self, node);
+            }
+        }
+
+        fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+            if !attributes_are_test_only(&node.attrs) {
+                syn::visit::visit_item_impl(self, node);
+            }
+        }
+
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            if !attributes_are_test_only(&node.attrs) {
+                syn::visit::visit_impl_item_fn(self, node);
+            }
+        }
+
+        fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+            if !attributes_are_test_only(&node.attrs) {
+                syn::visit::visit_trait_item_fn(self, node);
+            }
+        }
+
+        fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
+            if !localtx_test_only_statement(node) {
+                syn::visit::visit_stmt(self, node);
+            }
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            let method = node.method.to_string();
+            match method.as_str() {
+                "producer_tx" => self.producer_tx += 1,
+                "retry_producer_tx" => self.retry_producer_tx += 1,
+                "write" | "co_tx_with_outbox" | "retry_co_tx_with_outbox" | "publish" | "emit" => {
+                    self.forbidden.push(method)
+                }
+                _ => {}
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*node.func
+                && path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "append_outbox_with_projection")
+            {
+                self.forbidden
+                    .push("append_outbox_with_projection".to_owned());
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+
+    let mut findings = Vec::new();
+    let by_path = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let Some(cotx) = by_path.get("cotx/mod.rs").copied() else {
+        findings.push(finding(
+            Rule::ProducerFunnelSitesAbsent,
+            "cotx/mod.rs",
+            "producer transaction owner is missing",
+        ));
+        return findings;
+    };
+    let cotx = strip_rust_comment_lines(&strip_cfg_test_modules(cotx));
+    let parsed_cotx = syn::parse_file(&cotx).ok();
+    if parsed_cotx.as_ref().is_none_or(|file| {
+        let outcomes = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Enum(item) if item.ident == "ProducerTxOutcome" => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        outcomes.len() != 1 || !canonical_producer_tx_outcome(outcomes[0])
+    }) {
+        findings.push(finding(
+            Rule::ProducerFunnelSitesAbsent,
+            "cotx/mod.rs",
+            "ProducerTxOutcome must be crate-private with exact Emitted(T, ProducerAuthorization<M>) / NoMutation(T) variants",
+        ));
+    }
+    for required in ["fn producer_tx", "fn retry_producer_tx"] {
+        if !cotx.contains(required) {
+            findings.push(finding(
+                Rule::ProducerFunnelSitesAbsent,
+                "cotx/mod.rs",
+                format!("single producer transaction funnel is missing `{required}`"),
+            ));
+        }
+    }
+    for removed in ["co_tx_with_outbox", "retry_co_tx_with_outbox"] {
+        if cotx.contains(removed) {
+            findings.push(finding(
+                Rule::ProducerFunnelBypass,
+                "cotx/mod.rs",
+                format!("removed producer compatibility API `{removed}` still exists"),
+            ));
+        }
+    }
+
+    for (path, producer_tx, retry_producer_tx) in [
+        ("session_lifecycle.rs", 1, 0),
+        ("policy_repo.rs", 3, 0),
+        ("role_binding_lifecycle.rs", 2, 0),
+        ("config_repo.rs", 0, 1),
+    ] {
+        let Some(source) = by_path.get(path).copied() else {
+            findings.push(finding(
+                Rule::ProducerFunnelSitesAbsent,
+                path,
+                "active producer provider is missing",
+            ));
+            continue;
+        };
+        let source = strip_cfg_test_modules(source);
+        let Ok(parsed) = syn::parse_file(&source) else {
+            findings.push(finding(
+                Rule::ProducerFunnelBypass,
+                path,
+                "active producer provider cannot be parsed fail-closed",
+            ));
+            continue;
+        };
+        let mut scan = CallScan::default();
+        scan.visit_file(&parsed);
+        if scan.producer_tx != producer_tx || scan.retry_producer_tx != retry_producer_tx {
+            findings.push(finding(
+                Rule::ProducerFunnelSitesAbsent,
+                path,
+                format!(
+                    "expected exact producer funnel calls producer_tx={producer_tx}, retry_producer_tx={retry_producer_tx}; found producer_tx={}, retry_producer_tx={}",
+                    scan.producer_tx, scan.retry_producer_tx
+                ),
+            ));
+        }
+        for forbidden in scan.forbidden {
+            findings.push(finding(
+                Rule::ProducerFunnelBypass,
+                path,
+                format!("active producer provider calls forbidden `{forbidden}` path"),
+            ));
+        }
+    }
+    findings
+}
+
+fn canonical_producer_tx_outcome(item: &syn::ItemEnum) -> bool {
+    let visibility = matches!(
+        &item.vis,
+        syn::Visibility::Restricted(restricted)
+            if restricted.path.is_ident("crate")
+    );
+    let generics = item
+        .generics
+        .params
+        .iter()
+        .map(compact_tokens)
+        .collect::<Vec<_>>();
+    if !visibility || generics != ["M", "T"] || item.variants.len() != 2 {
+        return false;
+    }
+    let emitted = &item.variants[0];
+    let no_mutation = &item.variants[1];
+    let syn::Fields::Unnamed(emitted_fields) = &emitted.fields else {
+        return false;
+    };
+    let syn::Fields::Unnamed(no_mutation_fields) = &no_mutation.fields else {
+        return false;
+    };
+    emitted.ident == "Emitted"
+        && emitted.discriminant.is_none()
+        && emitted_fields.unnamed.len() == 2
+        && emitted_fields
+            .unnamed
+            .first()
+            .is_some_and(|field| compact_tokens(&field.ty) == "T")
+        && emitted_fields
+            .unnamed
+            .get(1)
+            .is_some_and(|field| compact_tokens(&field.ty) == "ProducerAuthorization<M>")
+        && no_mutation.ident == "NoMutation"
+        && no_mutation.discriminant.is_none()
+        && no_mutation_fields.unnamed.len() == 1
+        && no_mutation_fields
+            .unnamed
+            .first()
+            .is_some_and(|field| compact_tokens(&field.ty) == "T")
 }
 
 fn dlx_lifecycle_funnel_findings(source: &str) -> Vec<Finding> {
@@ -799,36 +1013,48 @@ fn localtx_ingress_graph_is_closed(syntax: &syn::File) -> bool {
             true,
             2,
         ),
-        (
-            "co_tx_with_outbox_inner",
-            "execute_outbox_local_tx",
-            false,
-            3,
-        ),
-        (
-            "retry_co_tx_with_outbox_inner",
-            "execute_outbox_local_tx",
-            true,
-            3,
-        ),
     ];
-    let entries_closed = entries
+    let plain_entries_closed = entries
         .into_iter()
         .all(|(name, target, deadline, policy_index)| {
             let functions = free_functions(syntax, name);
             functions.len() == 1
                 && canonical_localtx_entry(functions[0], target, deadline, policy_index)
         });
-    let bridges = free_functions(syntax, "execute_outbox_local_tx");
+    let producer_entries = free_functions(syntax, "producer_tx_inner");
+    let producer_entry_closed = producer_entries.len() == 1
+        && canonical_policy_forward_entry(producer_entries[0], "execute_producer_local_tx", 3);
+    let bridges = free_functions(syntax, "execute_producer_local_tx");
     let bridge_closed = bridges.len() == 1 && canonical_outbox_bridge(bridges[0]);
     let owners = execute_core_call_owners(syntax);
     let owners_closed = owners
         == BTreeSet::from([
-            "execute_outbox_local_tx".to_owned(),
+            "execute_producer_local_tx".to_owned(),
             "tenant_scoped_retry_write_inner".to_owned(),
             "tenant_scoped_write_inner".to_owned(),
         ]);
-    entries_closed && bridge_closed && owners_closed
+    plain_entries_closed && producer_entry_closed && bridge_closed && owners_closed
+}
+
+fn canonical_policy_forward_entry(
+    function: &syn::ItemFn,
+    target: &str,
+    policy_index: usize,
+) -> bool {
+    let Some(call) = awaited_call_tail(&function.block) else {
+        return false;
+    };
+    let Some(policy) = signature_binding_of_type(&function.sig, "LocalTxExecutionPolicy") else {
+        return false;
+    };
+    exact_expr_path(&call.func).as_deref() == Some(target)
+        && call
+            .args
+            .get(policy_index)
+            .and_then(exact_expr_path)
+            .as_deref()
+            == Some(&policy)
+        && !statements_shadow_or_assign(&function.block.stmts, &policy)
 }
 
 fn canonical_localtx_entry(
@@ -893,7 +1119,7 @@ fn canonical_outbox_operation(expression: &syn::Expr) -> bool {
     let syn::Expr::Struct(operation) = transparent_expr(expression) else {
         return false;
     };
-    if compact_tokens(&operation.path) != "OutboxLocalTxOperation"
+    if compact_tokens(&operation.path) != "ProducerLocalTxOperation"
         || operation.rest.is_some()
         || operation.fields.len() != 3
     {
@@ -907,7 +1133,7 @@ fn canonical_outbox_operation(expression: &syn::Expr) -> bool {
             "projection_registry" => compact_tokens(&field.expr) == "projection_registry",
             "business_write" => compact_tokens(&field.expr) == "business_write",
             "write" => matches!(transparent_expr(&field.expr), syn::Expr::Struct(write)
-                if compact_tokens(&write.path) == "CoTxOutboxWrite"
+                if compact_tokens(&write.path) == "ProducerTxWrite"
                     && write.rest.is_none()
                     && write.fields.len() == 3),
             _ => false,
@@ -2906,7 +3132,7 @@ fn retry_primitive_signature_findings(rel: &str, syntax: &syn::File) -> Vec<Find
     if rel != "cotx/mod.rs" {
         return Vec::new();
     }
-    ["retry_write", "retry_co_tx_with_outbox"]
+    ["retry_write", "retry_producer_tx"]
         .into_iter()
         .filter(|method| !has_unique_deadline_primitive(syntax, method))
         .map(|method| {
@@ -3449,7 +3675,7 @@ fn valid_settings_retry(call: &RetryCall) -> bool {
     call.wrapper == Some(RetryWrapper::Generic)
         && call.arguments.len() == 3
         && call.arguments[0].exact_path.as_deref() == Some("SETTINGS_CONFIG_BOUNDARY")
-        && call.arguments[1].operation_method.as_deref() == Some("retry_co_tx_with_outbox")
+        && call.arguments[1].operation_method.as_deref() == Some("retry_producer_tx")
         && call.arguments[1].scoped_operation_calls == 1
         && !call.arguments[1].legacy_write
         && call.arguments[1].deadline_dataflow
@@ -4437,7 +4663,7 @@ fn canonical_deadline_dataflow(expr: &syn::Expr) -> bool {
             if is_self_pool(&node.receiver)
                 && matches!(
                     node.method.to_string().as_str(),
-                    "retry_write" | "retry_co_tx_with_outbox"
+                    "retry_write" | "retry_producer_tx"
                 )
             {
                 self.operation_calls += 1;
@@ -4472,8 +4698,8 @@ impl<'ast> syn::visit::Visit<'ast> for ScopedOperationScan {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         if is_self_pool(&node.receiver) {
             match node.method.to_string().as_str() {
-                "retry_write" | "retry_co_tx_with_outbox" => self.calls += 1,
-                "write" | "co_tx_with_outbox" => {
+                "retry_write" | "retry_producer_tx" => self.calls += 1,
+                "write" | "producer_tx" => {
                     self.calls += 1;
                     self.legacy_write = true;
                 }
@@ -4500,7 +4726,7 @@ fn canonical_retry_tail(expr: &syn::Expr) -> Option<String> {
         syn::Expr::MethodCall(method)
             if matches!(
                 method.method.to_string().as_str(),
-                "retry_write" | "retry_co_tx_with_outbox"
+                "retry_write" | "retry_producer_tx"
             ) && is_self_pool(&method.receiver) =>
         {
             Some(method.method.to_string())
@@ -4719,8 +4945,8 @@ fn tenant_lane_scan(
                 | "deadline_write"
                 | "lock_bounded_write"
                 | "retry_write"
-                | "co_tx_with_outbox"
-                | "retry_co_tx_with_outbox"
+                | "producer_tx"
+                | "retry_producer_tx"
         );
         scan.read_sites += usize::from(call.lane == TenantLane::Read && is_read);
         scan.write_sites += usize::from(call.lane == TenantLane::Write && is_write);
@@ -5241,7 +5467,7 @@ fn writer_call_sql_assessment(
 ) -> (bool, bool) {
     if matches!(
         node.method.to_string().as_str(),
-        "co_tx_with_outbox" | "retry_co_tx_with_outbox"
+        "producer_tx" | "retry_producer_tx"
     ) {
         return (false, false);
     }
@@ -7134,6 +7360,75 @@ fn braced_body(s: &str) -> Option<(&str, usize)> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn producer_funnel_guard_real_workspace_closes_exact_sites() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let files = load_prod_rs(&root.join("adapters/postgres/src"))?;
+        let findings = producer_funnel_findings(&files);
+        assert!(findings.is_empty(), "{findings:#?}");
+        Ok(())
+    }
+
+    #[test]
+    fn producer_funnel_guard_rejects_direct_write_and_missing_typed_outcome() {
+        let findings = producer_funnel_findings(&files(&[
+            (
+                "cotx/mod.rs",
+                "impl<L> PgWritePool<L> { fn producer_tx() {} fn retry_producer_tx() {} }",
+            ),
+            (
+                "session_lifecycle.rs",
+                "async fn persist(pool: P) { pool.write(scope, operation, storage).await; }",
+            ),
+            ("policy_repo.rs", ""),
+            ("role_binding_lifecycle.rs", ""),
+            ("config_repo.rs", ""),
+        ]));
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProducerFunnelBypass),
+            "{findings:#?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProducerFunnelSitesAbsent),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn producer_funnel_guard_ignores_test_only_members_and_statements() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let mut files = load_prod_rs(&root.join("adapters/postgres/src"))?;
+        let session = files
+            .iter_mut()
+            .find(|(path, _)| path == "session_lifecycle.rs")
+            .context("session provider")?;
+        session.1.push_str(
+            r#"
+impl SyntheticTestBait {
+    #[cfg(test)]
+    async fn member(&self) {
+        self.pool.producer_tx();
+        self.pool.write();
+    }
+    async fn production(&self) {
+        #[cfg(test)]
+        self.pool.producer_tx();
+        #[cfg(test)]
+        self.pool.write();
+    }
+}
+"#,
+        );
+
+        let findings = producer_funnel_findings(&files);
+        assert!(findings.is_empty(), "{findings:#?}");
+        Ok(())
+    }
+
     fn migrations() -> Vec<(String, String)> {
         vec![(
             "0001.sql".to_string(),
@@ -7323,22 +7618,18 @@ async fn tenant_scoped_retry_write_inner(pool: &PgPool, tenant: TenantId, deadli
     execute_local_tx(pool, tenant, LocalTxExecutionPolicy::Deadline(deadline), PlainLocalTxOperation(write)).await
 }
 
-async fn co_tx_with_outbox_inner(pool: &PgPool, projection_registry: Registry, write: CoTxOutboxWrite<'_>, business_write: F) {
-    execute_outbox_local_tx(pool, projection_registry, write, LocalTxExecutionPolicy::Plain { bound_lock_wait: false }, business_write).await
+async fn producer_tx_inner(pool: &PgPool, projection_registry: Registry, write: ProducerTxWrite<'_>, policy: LocalTxExecutionPolicy, business_write: F) {
+    execute_producer_local_tx(pool, projection_registry, write, policy, business_write).await
 }
 
-async fn retry_co_tx_with_outbox_inner(pool: &PgPool, projection_registry: Registry, write: CoTxOutboxWrite<'_>, deadline: LocalTxDeadline, business_write: F) {
-    execute_outbox_local_tx(pool, projection_registry, write, LocalTxExecutionPolicy::Deadline(deadline), business_write).await
-}
-
-async fn execute_outbox_local_tx(pool: &PgPool, projection_registry: Registry, write: CoTxOutboxWrite<'_>, policy: LocalTxExecutionPolicy, business_write: F) {
+async fn execute_producer_local_tx(pool: &PgPool, projection_registry: Registry, write: ProducerTxWrite<'_>, policy: LocalTxExecutionPolicy, business_write: F) {
     let attempt = execute_local_tx(
         pool,
         write.tenant,
         policy,
-        OutboxLocalTxOperation {
+        ProducerLocalTxOperation {
             projection_registry,
-            write: CoTxOutboxWrite { tenant: write.tenant, entry: write.entry, env: write.env },
+            write: ProducerTxWrite { tenant: write.tenant, entry: write.entry, env: write.env },
             business_write,
         },
     ).await;
@@ -7694,23 +7985,16 @@ impl Drop for LocalTxConnectionLease {
             );
         }
 
-        let mut removed_deadline_entries = localtx_quarantine_semantic_fixture();
-        removed_deadline_entries[0].1 = removed_deadline_entries[0]
+        let mut removed_producer_entry = localtx_quarantine_semantic_fixture();
+        removed_producer_entry[0].1 = removed_producer_entry[0]
             .1
-            .replace(
-                "tenant_scoped_retry_write_inner",
-                "removed_retry_write_inner",
-            )
-            .replace(
-                "retry_co_tx_with_outbox_inner",
-                "removed_retry_outbox_inner",
-            );
-        let findings = localtx_quarantine_findings(&removed_deadline_entries);
+            .replace("producer_tx_inner", "removed_producer_tx_inner");
+        let findings = localtx_quarantine_findings(&removed_producer_entry);
         assert!(
             findings
                 .iter()
                 .any(|finding| finding.rule == Rule::LocalTxQuarantineSitesAbsent),
-            "simultaneous deadline entry removal must fail closed: {findings:?}"
+            "producer entry removal must fail closed: {findings:?}"
         );
 
         let mut unused_unsafe_seam = localtx_quarantine_semantic_fixture();
@@ -8618,8 +8902,8 @@ pub mod fault_matrix;
             ),
             (
                 "reader-co-tx",
-                "struct R { pool: PgTenantReadPool } async fn f(){ self.pool.co_tx_with_outbox(tenant, |tx| Box::pin(async move { sqlx::query(\"UPDATE roles SET id = id\").execute(tx.conn()).await })); }",
-                "PgTenantReadPool::co_tx_with_outbox",
+                "struct R { pool: PgTenantReadPool } async fn f(){ self.pool.producer_tx(tenant, |tx| Box::pin(async move { sqlx::query(\"UPDATE roles SET id = id\").execute(tx.conn()).await })); }",
+                "PgTenantReadPool::producer_tx",
             ),
         ];
 
@@ -9284,7 +9568,7 @@ pub mod fault_matrix;
         let mut sites = BTreeSet::new();
         let findings = retry_placement_findings(
             "config_repo.rs",
-            "use crate::tx_retry::{run_pg_tx_retry as retry}; impl Uow { async fn commit_authorized(&self){ retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope, deadline) }, classify).await; } }",
+            "use crate::tx_retry::{run_pg_tx_retry as retry}; impl Uow { async fn commit_authorized(&self){ retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_producer_tx(scope, deadline) }, classify).await; } }",
             &mut sites,
         );
         assert!(findings.is_empty(), "{findings:?}");
@@ -9296,7 +9580,7 @@ pub mod fault_matrix;
         let mut sites = BTreeSet::new();
         let findings = retry_placement_findings(
             "config_repo.rs",
-            "impl Uow { async fn commit_publish(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            "impl Uow { async fn commit_publish(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_producer_tx() }, classify).await; } }",
             &mut sites,
         );
         assert!(
@@ -9346,7 +9630,7 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         for source in [
             "impl Repo { async fn bump_version(&self){ run_pg_tx_retry(IDENTITY_CREDENTIAL_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
             "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, observation, || async { self.pool.retry_write() }, classify).await; } }",
-            "impl Uow { async fn commit(&self){ run_pg_localtx_retry(SETTINGS_CONFIG_BOUNDARY, observation, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            "impl Uow { async fn commit(&self){ run_pg_localtx_retry(SETTINGS_CONFIG_BOUNDARY, observation, || async { self.pool.retry_producer_tx() }, classify).await; } }",
             "impl Repo { async fn save(&self){ run_pg_tx_retry(SETTINGS_SECRET_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
             "impl Repo { async fn save(&self){ run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, observation, || async { self.pool.retry_write() }, classify).await; } }",
             "impl Repo { async fn save(&self){ run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, identity::password_change_localtx_observation().ok_or_else(missing)?, || async { self.pool.retry_write() }, classify).await; } }",
@@ -9426,7 +9710,7 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         );
         let wrapper = retry_placement_findings(
             "config_repo.rs",
-            "use crate::tx_retry as retry; impl Uow { async fn commit_authorized(&self){ retry::run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope, deadline) }, classify).await; } }",
+            "use crate::tx_retry as retry; impl Uow { async fn commit_authorized(&self){ retry::run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_producer_tx(scope, deadline) }, classify).await; } }",
             &mut sites,
         );
         assert!(direct.is_empty(), "{direct:?}");
@@ -9736,7 +10020,7 @@ pub trait SecretRepoLocal: Send + Sync {
         assert_retry_shape(
             &mut sites,
             "config_repo.rs",
-            "impl Uow { async fn commit_authorized(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope, deadline) }, classify).await; } }",
+            "impl Uow { async fn commit_authorized(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_producer_tx(scope, deadline) }, classify).await; } }",
         );
         assert_retry_shape(
             &mut sites,
@@ -9861,39 +10145,39 @@ pub trait SecretRepoLocal: Send + Sync {
         for (rel, source) in [
             (
                 "config_repo.rs",
-                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt| async { self.pool.retry_co_tx_with_outbox(scope) }, classify).await; } }",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt| async { self.pool.retry_producer_tx(scope) }, classify).await; } }",
             ),
             (
                 "config_repo.rs",
-                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope) }, classify).await; } }",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_producer_tx(scope) }, classify).await; } }",
             ),
             (
                 "config_repo.rs",
-                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope, attempt) }, classify).await; } }",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |attempt, deadline| async { self.pool.retry_producer_tx(scope, attempt) }, classify).await; } }",
             ),
             (
                 "config_repo.rs",
-                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { inspect(deadline); self.pool.retry_co_tx_with_outbox(scope, deadline) }, classify).await; } }",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { inspect(deadline); self.pool.retry_producer_tx(scope, deadline) }, classify).await; } }",
             ),
             (
                 "config_repo.rs",
-                "impl Uow { async fn commit(&self){ let forged = LocalTxDeadline { operation: now, final_settlement: now }; run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope, deadline) }, classify).await; } }",
+                "impl Uow { async fn commit(&self){ let forged = LocalTxDeadline { operation: now, final_settlement: now }; run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_producer_tx(scope, deadline) }, classify).await; } }",
             ),
             (
                 "config_repo.rs",
-                "impl Uow { async fn commit(&self){ let forged = LocalTxDeadline\n{ operation: now, final_settlement: now }; run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_co_tx_with_outbox(scope, deadline) }, classify).await; } }",
+                "impl Uow { async fn commit(&self){ let forged = LocalTxDeadline\n{ operation: now, final_settlement: now }; run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_producer_tx(scope, deadline) }, classify).await; } }",
             ),
             (
                 "config_repo.rs",
-                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| { let deadline = forged; async { self.pool.retry_co_tx_with_outbox(scope, deadline) } }, classify).await; } }",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| { let deadline = forged; async { self.pool.retry_producer_tx(scope, deadline) } }, classify).await; } }",
             ),
             (
                 "config_repo.rs",
-                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, mut deadline| { deadline = forged; async { self.pool.retry_co_tx_with_outbox(scope, deadline) } }, classify).await; } }",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, mut deadline| { deadline = forged; async { self.pool.retry_producer_tx(scope, deadline) } }, classify).await; } }",
             ),
             (
                 "config_repo.rs",
-                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { if false { self.pool.retry_co_tx_with_outbox(scope, deadline).await } else { forged().await } }, classify).await; } }",
+                "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { if false { self.pool.retry_producer_tx(scope, deadline).await } else { forged().await } }, classify).await; } }",
             ),
             (
                 "config_repo.rs",
@@ -9901,7 +10185,7 @@ pub trait SecretRepoLocal: Send + Sync {
             ),
             (
                 "cotx/mod.rs",
-                "impl<L> PgWritePool<L> { pub(crate) async fn retry_write(&self, scope: Scope) {} pub(crate) async fn retry_co_tx_with_outbox(&self, scope: Scope) {} }",
+                "impl<L> PgWritePool<L> { pub(crate) async fn retry_write(&self, scope: Scope) {} pub(crate) async fn retry_producer_tx(&self, scope: Scope) {} }",
             ),
             ("cotx/mod.rs", "async fn set_local_retry_lock_timeout() {}"),
         ] {

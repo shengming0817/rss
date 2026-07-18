@@ -40,6 +40,9 @@ audit = { path = "../../crates/audit", optional = true }
 # adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml settings wrapper + allows(Adapter,Domain) 放行）。
 # PgConfigRepo impl settings::ports::ConfigRepo + ConfigUnitOfWork（co-tx，#1249）——真实 impl（非 edge proof）。
 settings = { path = "../../crates/settings", optional = true }
+# Active HTTP producers carry an unforgeable route authorization into the adapter-owned
+# transaction funnel. The dependency is feature-gated with the two producer domains.
+httpserve = { path = "../../crates/httpserve", optional = true }
 # eventexec 持久化基座（#1116）：连接池 / 事务 / Migrator。features migrate+macros 在 workspace.dependencies 声明。
 sqlx = { workspace = true }
 # run_global_transaction 闭包返回 BoxFuture（HRTB 绕过异步闭包借用规则）。
@@ -72,8 +75,8 @@ anyhow = { workspace = true, optional = true }
 
 [features]
 default = []
-domain-settings = ["dep:settings", "dep:observ"]
-domain-identity = ["dep:identity", "dep:observ"]
+domain-settings = ["dep:settings", "dep:httpserve", "dep:observ"]
+domain-identity = ["dep:identity", "dep:httpserve", "dep:observ"]
 domain-audit = ["dep:audit", "dep:observ"]
 # 需真实 postgres 的集成测试门控（azure 无 CI；feature 关闭时 src/integration_tests.rs 不编译，verify 永远绿）。
 # testkit/containers 经此传递激活 testcontainers（self-provision pg，无需手工预置）。

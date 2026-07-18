@@ -27,6 +27,20 @@ use diport::{OutboxEmitError, OutboxEnvelopeParts};
 #[cfg(any(test, feature = "seed-login"))]
 use std::sync::Arc;
 
+#[cfg(test)]
+fn authorize_entry<M>(
+    receipt: httpserve::ProducerAssuranceReceipt<M>,
+    entry: &EventEntry,
+    envelope: &OutboxEnvelopeParts,
+    expected_contract: vocab::ContractBinding,
+) -> Option<httpserve::ProducerAuthorization<M>> {
+    let fact = entry.generated_fact()?;
+    if *envelope.contract() != fact.contract() {
+        return None;
+    }
+    receipt.authorize(fact, expected_contract)
+}
+
 // RefreshTokenStore in-mem 替身（test/seed-login 门控）：seed-login 供 journey/demo 登录首发 token 落库（#1252）。
 #[cfg(any(test, feature = "seed-login"))]
 use crate::domain::{RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord};
@@ -47,11 +61,6 @@ use crate::ports::{
     ResourceAttributeReadRepo, ResourceAttributeWriteRepo, RoleBindingLifecycle,
     RoleBindingReadRepo, RoleReadRepo, RoleWriteRepo, RolesAssignProducerReceipt,
     RolesRevokeProducerReceipt,
-};
-#[cfg(test)]
-use generated::event::identity_v1::{
-    policy_updated::SPEC as POLICY_UPDATED_SPEC, role_assigned::SPEC as ROLE_ASSIGNED_SPEC,
-    role_revoked::SPEC as ROLE_REVOKED_SPEC, session_created::SPEC as SESSION_CREATED_SPEC,
 };
 #[cfg(test)]
 use std::collections::HashSet;
@@ -284,21 +293,25 @@ impl SessionLifecycle for InMemSessionLifecycle {
         receipt: LoginProducerReceipt,
         scope: TenantRepoScope,
         session: Session,
-        _entry: EventEntry,
-        _envelope: OutboxEnvelopeParts,
+        entry: EventEntry,
+        envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         if scope.tenant() != session.tenant() {
             return Err(OutboxEmitError::new(std::io::Error::other(
                 "session persist tenant scope mismatch",
             )));
         }
-        let _authorization = receipt
-            .authorize(SESSION_CREATED_SPEC.contract())
-            .ok_or_else(|| {
-                OutboxEmitError::new(std::io::Error::other(
-                    "login producer does not authorize session-created",
-                ))
-            })?;
+        let _authorization = authorize_entry(
+            receipt,
+            &entry,
+            &envelope,
+            generated::event::identity_v1::session_created::SPEC.contract(),
+        )
+        .ok_or_else(|| {
+            OutboxEmitError::new(std::io::Error::other(
+                "login producer does not authorize session-created",
+            ))
+        })?;
         // reason: in-mem 替身无 durable 事务 / outbox 载体——创建即把 session 直插共享 store（revoked=false）；
         // entry/envelope 不落库（同 MemSessionLifecycle；真实 co-tx 原子性由 PgSessionLifecycle 守）。
         recover(&self.sessions).insert(session.id().clone(), (session, false));
@@ -506,9 +519,13 @@ impl PolicyLifecycle for InMemPolicyRepo {
         if guard.contains_key(&key) {
             return Err(IdentityError::PolicyAlreadyExists);
         }
-        let _authorization = receipt
-            .authorize(POLICY_UPDATED_SPEC.contract())
-            .ok_or(IdentityError::InvalidPolicy)?;
+        let _authorization = authorize_entry(
+            receipt,
+            &entry,
+            &envelope,
+            generated::event::identity_v1::policy_updated::SPEC.contract(),
+        )
+        .ok_or(IdentityError::InvalidPolicy)?;
         guard.insert(key, StoredPolicy::active(policy.clone()));
         recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
         Ok(policy)
@@ -543,9 +560,13 @@ impl PolicyLifecycle for InMemPolicyRepo {
         if current.version != expected {
             return Err(IdentityError::VersionConflict);
         }
-        let _authorization = receipt
-            .authorize(POLICY_UPDATED_SPEC.contract())
-            .ok_or(IdentityError::InvalidPolicy)?;
+        let _authorization = authorize_entry(
+            receipt,
+            &entry,
+            &envelope,
+            generated::event::identity_v1::policy_updated::SPEC.contract(),
+        )
+        .ok_or(IdentityError::InvalidPolicy)?;
         let next = policy.with_version(expected.next_checked()?);
         current.version = next.version();
         current.active = Some(next.clone());
@@ -582,9 +603,13 @@ impl PolicyLifecycle for InMemPolicyRepo {
         if active.version() != expected {
             return Err(IdentityError::VersionConflict);
         }
-        let _authorization = receipt
-            .authorize(POLICY_UPDATED_SPEC.contract())
-            .ok_or(IdentityError::InvalidPolicy)?;
+        let _authorization = authorize_entry(
+            receipt,
+            &entry,
+            &envelope,
+            generated::event::identity_v1::policy_updated::SPEC.contract(),
+        )
+        .ok_or(IdentityError::InvalidPolicy)?;
         current.version = expected.next_checked()?;
         current.active = None;
         recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
@@ -989,13 +1014,17 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
                 "inmem-rbac-cotx-fail",
             )));
         }
-        let _authorization = receipt
-            .authorize(ROLE_ASSIGNED_SPEC.contract())
-            .ok_or_else(|| {
-                OutboxEmitError::new(std::io::Error::other(
-                    "roles-assign producer does not authorize role-assigned",
-                ))
-            })?;
+        let _authorization = authorize_entry(
+            receipt,
+            &entry,
+            &envelope,
+            generated::event::identity_v1::role_assigned::SPEC.contract(),
+        )
+        .ok_or_else(|| {
+            OutboxEmitError::new(std::io::Error::other(
+                "roles-assign producer does not authorize role-assigned",
+            ))
+        })?;
         recover(&self.bindings).insert((
             binding.tenant().to_string(),
             binding.role_id().as_str().to_string(),
@@ -1035,13 +1064,17 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
         if !bindings.contains(&key) {
             return Ok(false);
         }
-        let _authorization = receipt
-            .authorize(ROLE_REVOKED_SPEC.contract())
-            .ok_or_else(|| {
-                OutboxEmitError::new(std::io::Error::other(
-                    "roles-revoke producer does not authorize role-revoked",
-                ))
-            })?;
+        let _authorization = authorize_entry(
+            receipt,
+            &entry,
+            &envelope,
+            generated::event::identity_v1::role_revoked::SPEC.contract(),
+        )
+        .ok_or_else(|| {
+            OutboxEmitError::new(std::io::Error::other(
+                "roles-revoke producer does not authorize role-revoked",
+            ))
+        })?;
         let removed = bindings.remove(&key);
         drop(bindings);
         if removed {
@@ -1328,13 +1361,44 @@ mod tests {
         .expect("resource attribute")
     }
 
-    // co-tx 创建入参占位（InMemSessionLifecycle::persist_session_and_emit 忽略 entry/envelope，仅存 session）。
+    // co-tx generated entry fixture shared by the in-memory producer conformance tests.
     fn dummy_entry() -> EventEntry {
+        let payload =
+            generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
+                occurred_at: 1,
+                session_id: "session-test".to_string(),
+                subject: USER_ALICE.parse().expect("subject uuid"),
+                tenant_id: TENANT_A.to_string(),
+            };
+        EventEntry::from_generated_payload(
+            &payload,
+            IdemKey::parse("evt-1").expect("idem key parses"),
+        )
+        .expect("test payload encodes")
+    }
+
+    fn missing_fact_entry() -> EventEntry {
         EventEntry::new(
             EventTopic::parse("identity.session-created").expect("topic parses"),
-            IdemKey::parse("evt-1").expect("idem key parses"),
+            IdemKey::parse("evt-missing-fact").expect("idem key parses"),
             OutboxPayload::from_reviewed_event_bytes(b"{}".to_vec()),
         )
+    }
+
+    fn wrong_fact_entry() -> EventEntry {
+        let payload = generated::event::settings_v1::SettingsConfigVersionChangedPayload {
+            change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Published,
+            key: "app.test".to_string(),
+            occurred_at: 1,
+            source_version: None,
+            tenant_id: TENANT_A.to_string(),
+            version: 1,
+        };
+        EventEntry::from_generated_payload(
+            &payload,
+            IdemKey::parse("evt-wrong-fact").expect("idem key parses"),
+        )
+        .expect("test payload encodes")
     }
 
     fn dummy_envelope() -> OutboxEnvelopeParts {
@@ -1351,6 +1415,41 @@ mod tests {
                 OpaqueActorId::from_opaque("actor-1").expect("actor"),
                 tenant,
                 vocab::ScopedTenant::SelfOnly,
+            ),
+        )
+    }
+
+    fn policy_entry() -> EventEntry {
+        let payload =
+            generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload {
+                actor_kind: generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayloadActorKind::Admin,
+                change_kind: generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayloadChangeKind::Created,
+                contract_id: "identity.login".to_string(),
+                occurred_at: 1,
+                permission: "identity:policy:write".to_string(),
+                policy_id: "policy-tombstone".to_string(),
+                tenant_id: TENANT_A.to_string(),
+                updated_by: USER_ALICE.parse().expect("updated-by uuid"),
+                version: std::num::NonZeroU32::MIN,
+            };
+        EventEntry::from_generated_payload(
+            &payload,
+            IdemKey::parse("evt-policy").expect("idem key parses"),
+        )
+        .expect("test payload encodes")
+    }
+
+    fn policy_envelope() -> OutboxEnvelopeParts {
+        let tenant = tid(TENANT_A);
+        OutboxEnvelopeParts::new(
+            generated::event::identity_v1::policy_updated::CONTRACT,
+            tenant,
+            EnvelopeSubjectId::from_opaque("policy-tombstone").expect("subject"),
+            OutboxActor::scoped(
+                vocab::PrincipalKind::Admin,
+                OpaqueActorId::from_opaque("actor-1").expect("actor"),
+                tenant,
+                vocab::ScopedTenant::Tenant,
             ),
         )
     }
@@ -1649,8 +1748,8 @@ mod tests {
             policy_create_receipt(),
             scope(tenant),
             policy("policy-tombstone", tenant),
-            dummy_entry(),
-            dummy_envelope(),
+            policy_entry(),
+            policy_envelope(),
         )
         .await
         .expect("create policy");
@@ -1660,8 +1759,8 @@ mod tests {
                 scope(tenant),
                 id.clone(),
                 PolicyVersion::first(),
-                dummy_entry(),
-                dummy_envelope(),
+                policy_entry(),
+                policy_envelope(),
             )
             .await
             .expect("delete policy"),
@@ -1680,8 +1779,8 @@ mod tests {
                 policy_create_receipt(),
                 scope(tenant),
                 policy("policy-tombstone", tenant),
-                dummy_entry(),
-                dummy_envelope(),
+                policy_entry(),
+                policy_envelope(),
             )
             .await;
         assert!(
@@ -1967,6 +2066,99 @@ mod tests {
     // ---------------------------------------------------------------------------
     // InMemSessionLifecycle tests（创建经 persist_session_and_emit + 查询/软撤销 + 跨租隔离，#1278）
     // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn session_lifecycle_rejects_missing_and_wrong_entry_fact_before_mutation() {
+        let tenant = tid(TENANT_A);
+        for (suffix, entry) in [
+            ("missing", missing_fact_entry()),
+            ("wrong", wrong_fact_entry()),
+        ] {
+            let repo = InMemSessionLifecycle::new();
+            let session_id = format!("sid-{suffix}-fact");
+            let result = repo
+                .persist_session_and_emit(
+                    login_receipt(),
+                    scope(tenant),
+                    make_session(&session_id, tenant),
+                    entry,
+                    dummy_envelope(),
+                )
+                .await;
+
+            assert!(result.is_err(), "{suffix} generated fact must fail closed");
+            assert!(
+                repo.find(scope(tenant), SessionId::new(&session_id))
+                    .await
+                    .expect("find")
+                    .is_none(),
+                "{suffix} generated fact must fail before session mutation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_lifecycle_rejects_missing_and_wrong_entry_fact_before_mutation() {
+        let tenant = tid(TENANT_A);
+        for (suffix, entry) in [
+            ("missing", missing_fact_entry()),
+            ("wrong", wrong_fact_entry()),
+        ] {
+            let repo = InMemPolicyRepo::new();
+            let raw_id = format!("policy-{suffix}-fact");
+            let id = policy_id(&raw_id);
+            let result = repo
+                .create_and_emit(
+                    policy_create_receipt(),
+                    scope(tenant),
+                    policy(&raw_id, tenant),
+                    entry,
+                    dummy_envelope(),
+                )
+                .await;
+
+            assert!(result.is_err(), "{suffix} generated fact must fail closed");
+            assert!(
+                repo.find(scope(tenant), id).await.expect("find").is_none(),
+                "{suffix} generated fact must fail before policy mutation"
+            );
+            assert!(
+                repo.emitted().is_empty(),
+                "{suffix} generated fact must fail before policy emit"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn role_binding_lifecycle_rejects_missing_and_wrong_entry_fact_before_mutation() {
+        let tenant = tid(TENANT_A);
+        for (suffix, entry) in [
+            ("missing", missing_fact_entry()),
+            ("wrong", wrong_fact_entry()),
+        ] {
+            let lifecycle = InMemRoleBindingLifecycle::new();
+            let role_id = RoleId::parse(&format!("role-{suffix}-fact")).expect("role id");
+            let result = lifecycle
+                .assign_and_emit(
+                    role_assign_receipt(),
+                    scope(tenant),
+                    RoleBinding::new("user-1", role_id.clone(), tenant),
+                    entry,
+                    dummy_envelope(),
+                )
+                .await;
+
+            assert!(result.is_err(), "{suffix} generated fact must fail closed");
+            assert!(
+                !lifecycle.has_binding(tenant, &role_id, "user-1"),
+                "{suffix} generated fact must fail before binding mutation"
+            );
+            assert!(
+                lifecycle.emitted().is_empty(),
+                "{suffix} generated fact must fail before binding emit"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn lifecycle_persist_then_find_roundtrip() {

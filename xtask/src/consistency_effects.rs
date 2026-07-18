@@ -10099,15 +10099,18 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         use crate::localtx_coverage::{CanonicalMountedState, CanonicalRouteMount};
         let one = BTreeSet::from([CanonicalRouteMount {
             source: "crates/demo/src/lib.rs:1".to_string(),
+            handler: "demo_handler".to_string(),
             state: CanonicalMountedState::Stateless,
         }]);
         let two = BTreeSet::from([
             CanonicalRouteMount {
                 source: "crates/demo/src/lib.rs:1".to_string(),
+                handler: "first_handler".to_string(),
                 state: CanonicalMountedState::Stateless,
             },
             CanonicalRouteMount {
                 source: "crates/demo/src/lib.rs:2".to_string(),
+                handler: "second_handler".to_string(),
                 state: CanonicalMountedState::Opaque,
             },
         ]);
@@ -10131,6 +10134,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 "_seed_v1::filesystem_slug".to_string(),
                 BTreeSet::from([CanonicalRouteMount {
                     source: "crates/_seed/src/lib.rs".to_string(),
+                    handler: "filesystem_slug_handler".to_string(),
                     state: CanonicalMountedState::Stateless,
                 }]),
             ),
@@ -10138,6 +10142,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 "_seed_v1::semantic_name".to_string(),
                 BTreeSet::from([CanonicalRouteMount {
                     source: "crates/_seed/src/other.rs".to_string(),
+                    handler: "semantic_name_handler".to_string(),
                     state: CanonicalMountedState::Stateless,
                 }]),
             ),
@@ -10202,10 +10207,12 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         let ambiguous_mounts = BTreeSet::from([
             CanonicalRouteMount {
                 source: format!("{source_path}:2"),
+                handler: "second_handler".to_string(),
                 state: CanonicalMountedState::Opaque,
             },
             CanonicalRouteMount {
                 source: format!("{source_path}:1"),
+                handler: "first_handler".to_string(),
                 state: CanonicalMountedState::Ordinary,
             },
         ]);
@@ -10267,6 +10274,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             );
             let mounts = BTreeSet::from([CanonicalRouteMount {
                 source: source_path.to_string(),
+                handler: "state_handler".to_string(),
                 state,
             }]);
             let row = build_contract_posture(&spec, &domain_scope(), Some(&mounts), Some(&empty))?;
@@ -10317,6 +10325,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         );
         let classified_mounts = BTreeSet::from([CanonicalRouteMount {
             source: source_path.to_string(),
+            handler: "classified_handler".to_string(),
             state: CanonicalMountedState::Classified(
                 "State { admin: unimplemented!() }".to_string(),
             ),

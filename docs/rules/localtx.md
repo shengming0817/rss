@@ -198,8 +198,10 @@ generated logout/password-change `ROUTE + LOCAL_TX.boundary` 封装进私有字�
 production generated 依赖，而是消费 domain port 暴露的 marker alias。`PgSecretUnitOfWork::publish`、
 `PgCredentialRepo::apply_password_change` 与 `PgSessionLifecycle::logout` 使用 `run_pg_localtx_retry` 发射 HTTP
 contract telemetry；`publish_internal` 与 rollback `republish` 不携带该 command，
-只经 `run_pg_tx_retry` 发射 generic `settings.secret` retry telemetry 与闭值 `tx_settlement_final_total`，不能冒充
-HTTP 调用；generic settlement 不携带 domain / contract id，unsafe 终态仍可独立告警。两个 runner
+只经 `run_pg_tx_retry` 发射 generic `settings.secret` retry telemetry，不能冒充 HTTP 调用。non-retry
+outbox producer 则必须消费 move-only `ProducerTxAttempt`，在压平为领域 `Result` 前与 generic runner 共用唯一
+settlement router 发射闭值 `tx_settlement_final_total`。该 signal 不携带 domain / contract id，
+unsafe 终态仍可独立告警。两个 retry runner
 复用同一个私有 retry core，不以 `Option` context
 或 bool 在运行期区分语义。该 core 既服务 `tenant-scoped-uow` 准入路径，也可被
 `repo-atomic-cas` adapter 用于单次 CAS 的底层 settlement；
@@ -216,7 +218,7 @@ route marker 实现，并从 marker 派生唯一 `PgTxRetryBoundary`；错误 ro
 reserve、8s operation。budget 只保存 `Duration`，零值、零 reserve 或 `reserve >= total` 无法构造；runner 在
 invocation 起点只 mint 一组 absolute monotonic deadline，并把同一 opaque `LocalTxDeadline` 复制给所有
 attempt。token 字段与构造器私有，caller closure 必须接收 `(attempt, deadline)` 并把 deadline 立即传给
-`retry_write` / `retry_co_tx_with_outbox`；不能重置 budget、读取 raw `Instant`、跨 helper 转发或手制 token。
+`retry_write` / `retry_producer_tx`；不能重置 budget、读取 raw `Instant`、跨 helper 转发或手制 token。
 operation deadline 分别约束 `acquire` / `begin` / `setup` / `operation` / `backoff`；到达 reserve 后不再 poll
 operation 或启动下一 attempt。setup 从 operation 剩余量设置 `statement_timeout`（client deadline 前至少 1ms）
 与 `lock_timeout = min(statement_timeout, 5s)`；client monotonic deadline 始终为最终约束。

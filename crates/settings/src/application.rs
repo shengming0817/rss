@@ -51,8 +51,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use bootstrap::{KernelError, SubscriberEffect, SubscriberExecution};
 use consistency::{
-    ConsumerGroup, EngineError, EngineErrorKind, EventEntry, EventTopic, HandleResult, IdemKey,
-    OutboxPayload, PermanentError, PermanentErrorKind,
+    ConsumerGroup, EngineError, EngineErrorKind, EventEntry, HandleResult, IdemKey, PermanentError,
+    PermanentErrorKind,
 };
 use diport::{Clock, EnvelopeSubjectId, Message, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
 use generated::event::settings_v1::{
@@ -426,18 +426,16 @@ impl SettingsService {
             tenant_id: tenant.to_string(),
             version: wire_version(version),
         };
-        let bytes = serde_json::to_vec(&payload).map_err(SettingsServiceError::PayloadEncode)?;
         let event_id = format!(
             "{}:{tenant}:{}:v{version}",
             VERSION_CHANGED_SPEC.topic(),
             key.as_str()
         );
-        let entry = EventEntry::new(
-            EventTopic::parse(VERSION_CHANGED_SPEC.topic())
-                .map_err(|_| SettingsServiceError::EntryBuild)?,
+        let entry = EventEntry::from_generated_payload(
+            &payload,
             IdemKey::parse(&event_id).map_err(|_| SettingsServiceError::EntryBuild)?,
-            OutboxPayload::from_reviewed_event_bytes(bytes),
-        );
+        )
+        .map_err(SettingsServiceError::PayloadEncode)?;
         // 契约归属经 generated `CONTRACT`（domain + contract_id + version + schema_hash 同源绑定，#1193/#1618）；
         // subject = opaque 配置 key。
         let subject_id = EnvelopeSubjectId::from_opaque(key.as_str())

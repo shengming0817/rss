@@ -656,6 +656,7 @@ pub struct EventEntry {
     topic: EventTopic,
     idem_key: crate::idempotency::IdemKey,
     payload: OutboxPayload,
+    generated_fact: Option<vocab::EventFactBinding>,
 }
 
 impl EventEntry {
@@ -669,7 +670,29 @@ impl EventEntry {
             topic,
             idem_key,
             payload,
+            generated_fact: None,
         }
+    }
+
+    /// Encode one generated event payload together with its contract-owned topic.
+    ///
+    /// The payload type chooses its generated [`vocab::EventFactBinding`]; callers cannot supply a
+    /// separate topic or contract identity. Active HTTP producer transactions require this typed
+    /// provenance and reject entries constructed through the generic infrastructure constructor.
+    pub fn from_generated_payload<P>(
+        payload: &P,
+        idem_key: crate::idempotency::IdemKey,
+    ) -> Result<Self, serde_json::Error>
+    where
+        P: vocab::GeneratedEventPayload + serde::Serialize,
+    {
+        let generated_fact = P::FACT;
+        Ok(Self {
+            topic: EventTopic(generated_fact.topic().to_string()),
+            idem_key,
+            payload: OutboxPayload::from_reviewed_event_bytes(serde_json::to_vec(payload)?),
+            generated_fact: Some(generated_fact),
+        })
     }
 
     /// 目标 topic。
@@ -685,6 +708,11 @@ impl EventEntry {
     /// 已编码 payload。
     pub fn payload(&self) -> &[u8] {
         self.payload.as_bytes()
+    }
+
+    /// Generated fact provenance carried by typed producer entries.
+    pub fn generated_fact(&self) -> Option<vocab::EventFactBinding> {
+        self.generated_fact
     }
 }
 

@@ -79,6 +79,13 @@ pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_st
     "sha256:016334bee5ce3a5205f0e31d2cb6f9ca20bbefc741f82111a08bb5506a50be23",
 );
 
+/// Generated contract + topic identity carried by this event payload.
+pub const FACT: ::vocab::EventFactBinding = ::vocab::EventFactBinding::from_static(CONTRACT, TOPIC);
+
+impl ::vocab::GeneratedEventPayload for SeedThingHappenedPayload {
+    const FACT: ::vocab::EventFactBinding = FACT;
+}
+
 /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
 pub const SPEC: super::EventSpec =
     super::EventSpec::new(CONTRACT, TOPIC, super::PartitionKeyStrategy::None, &[]);

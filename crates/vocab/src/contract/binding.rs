@@ -86,6 +86,45 @@ impl ContractBinding {
     }
 }
 
+/// Generated identity of one event fact, binding its contract columns and broker topic atomically.
+///
+/// Code generation is the production mint surface. Active producer authorization and typed event
+/// encoding carry this value as one unit, so an entry topic cannot drift from its contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventFactBinding {
+    contract: ContractBinding,
+    topic: &'static str,
+}
+
+impl EventFactBinding {
+    /// Construct a generated event fact binding from manifest-derived constants.
+    #[must_use]
+    pub const fn from_static(contract: ContractBinding, topic: &'static str) -> Self {
+        Self { contract, topic }
+    }
+
+    /// Generated contract identity for the fact.
+    #[must_use]
+    pub const fn contract(&self) -> ContractBinding {
+        self.contract
+    }
+
+    /// Generated broker topic for the same fact.
+    #[must_use]
+    pub const fn topic(&self) -> &'static str {
+        self.topic
+    }
+}
+
+/// Payload type generated from one event contract.
+///
+/// Implementations are emitted next to the generated DTO. Producer code selects authorization by
+/// payload type instead of passing a freely chosen contract or topic.
+pub trait GeneratedEventPayload {
+    /// Contract and topic that own this generated payload type.
+    const FACT: EventFactBinding;
+}
+
 /// Projection workflow input binding generated from `[capabilities.workflow].inputs`.
 ///
 /// The projection id and input event contract are emitted by `cargo xtask codegen` from the

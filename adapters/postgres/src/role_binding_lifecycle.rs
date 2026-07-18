@@ -12,11 +12,8 @@ use identity::ports::{
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::PgTenantWritePool;
-use crate::outbox::{
-    OutboxAppendError, OutboxEnvelope, append_outbox_with_projection, metadata_with_ambient,
-    unix_secs,
-};
+use crate::cotx::{PgTenantWritePool, ProducerTxOutcome};
+use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
 use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::ProjectionWriteRegistry;
 
@@ -84,9 +81,13 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
                 "role binding assign co-tx: envelope tenant does not match binding tenant",
             )));
         }
-        let authorized_env = env.clone();
+        let generated_fact = entry.generated_fact().ok_or_else(|| {
+            OutboxEmitError::new(std::io::Error::other(
+                "role binding assign entry lacks generated fact provenance",
+            ))
+        })?;
         self.pool
-            .co_tx_with_outbox(
+            .producer_tx(
                 scope,
                 &entry,
                 &env,
@@ -108,23 +109,19 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
                         .map_err(OutboxEmitError::new)
                         .map(|_| ())?;
                         let authorization = receipt
-                            .authorize(ROLE_ASSIGNED_CONTRACT)
+                            .authorize(generated_fact, ROLE_ASSIGNED_CONTRACT)
                             .ok_or_else(|| {
                                 OutboxEmitError::new(std::io::Error::other(
                                     "role binding assign co-tx: producer receipt does not authorize role-assigned",
                                 ))
                             })?;
-                        if !authorized_env.matches_contract(authorization.fact_contract()) {
-                            return Err(OutboxEmitError::new(std::io::Error::other(
-                                "role binding assign co-tx: producer authorization does not match outbox envelope",
-                            )));
-                        }
-                        Ok(())
+                        Ok(ProducerTxOutcome::Emitted((), authorization))
                     })
                 },
                 OutboxEmitError::new,
             )
             .await
+            .into_result()
     }
 
     async fn revoke_and_emit(
@@ -144,10 +141,16 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
             )));
         }
         let tenant_uuid = tenant.as_uuid().to_string();
-        let projection_registry = self.pool.projection_registry();
+        let generated_fact = entry.generated_fact().ok_or_else(|| {
+            OutboxEmitError::new(std::io::Error::other(
+                "role binding revoke entry lacks generated fact provenance",
+            ))
+        })?;
         self.pool
-            .write(
+            .producer_tx(
                 scope,
+                &entry,
+                &env,
                 move |conn| {
                     Box::pin(async move {
                         let deleted = sqlx::query(
@@ -164,29 +167,21 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
                         .map_err(OutboxEmitError::new)?
                         .rows_affected();
                         if deleted == 0 {
-                            return Ok(false);
+                            return Ok(ProducerTxOutcome::NoMutation(false));
                         }
                         let authorization = receipt
-                            .authorize(ROLE_REVOKED_CONTRACT)
+                            .authorize(generated_fact, ROLE_REVOKED_CONTRACT)
                             .ok_or_else(|| {
                                 OutboxEmitError::new(std::io::Error::other(
                                     "role binding revoke co-tx: producer receipt does not authorize role-revoked",
                                 ))
                             })?;
-                        if !env.matches_contract(authorization.fact_contract()) {
-                            return Err(OutboxEmitError::new(std::io::Error::other(
-                                "role binding revoke co-tx: producer authorization does not match outbox envelope",
-                            )));
-                        }
-                        let _outcome =
-                            append_outbox_with_projection(conn, &entry, &env, &projection_registry)
-                                .await
-                                .map_err(OutboxAppendError::into_observed_emit_error)?;
-                        Ok(true)
+                        Ok(ProducerTxOutcome::Emitted(true, authorization))
                     })
                 },
                 OutboxEmitError::new,
             )
             .await
+            .into_result()
     }
 }

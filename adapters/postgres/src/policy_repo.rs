@@ -16,11 +16,8 @@ use sqlx::Row;
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
-use crate::outbox::{
-    OutboxAppendError, OutboxEnvelope, append_outbox_with_projection, epoch_secs_to_time,
-    metadata_with_ambient, unix_secs,
-};
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool, ProducerTxOutcome};
+use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_with_ambient, unix_secs};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
 
@@ -99,13 +96,6 @@ fn producer_authorization_storage_error(path: &'static str) -> IdentityError {
     storage_boxed(std::io::Error::other(format!(
         "{path}: producer receipt does not authorize outbox envelope contract"
     )))
-}
-
-fn append_storage(error: OutboxAppendError) -> IdentityError {
-    match error {
-        OutboxAppendError::Conflict(conflict) => IdentityError::OutboxFactConflict(conflict),
-        other => storage_boxed(other),
-    }
 }
 
 fn tenant_param(tenant: TenantId) -> String {
@@ -512,11 +502,15 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         let permission = policy.route_scope().permission().as_str().to_string();
         let effective_from = unix_secs(policy.effective_from());
         let effective_until = policy.effective_until().map(unix_secs);
-        let projection_registry = self.pool.projection_registry();
+        let generated_fact = entry
+            .generated_fact()
+            .ok_or_else(|| producer_authorization_storage_error("policy create entry"))?;
         let inserted = self
             .pool
-            .write(
+            .producer_tx(
                 tenant_scope,
+                &entry,
+                &env,
                 move |conn| {
                     Box::pin(async move {
                         sqlx::query(
@@ -549,25 +543,18 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                                 Err(IdentityError::PolicyAlreadyExists)
                             }
                         })?;
-                        let authorization =
-                            receipt.authorize(POLICY_UPDATED_CONTRACT).ok_or_else(|| {
+                        let authorization = receipt
+                            .authorize(generated_fact, POLICY_UPDATED_CONTRACT)
+                            .ok_or_else(|| {
                                 producer_authorization_storage_error("policy create co-tx")
                             })?;
-                        if !env.matches_contract(authorization.fact_contract()) {
-                            return Err(producer_authorization_storage_error(
-                                "policy create co-tx",
-                            ));
-                        }
-                        let _outcome =
-                            append_outbox_with_projection(conn, &entry, &env, &projection_registry)
-                                .await
-                                .map_err(append_storage)?;
-                        Ok(1)
+                        Ok(ProducerTxOutcome::Emitted(1, authorization))
                     })
                 },
                 storage,
             )
-            .await?;
+            .await
+            .into_result()?;
         debug_assert_eq!(inserted, 1);
         Ok(policy)
     }
@@ -592,11 +579,15 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         let tenant_uuid = tenant_param(tenant);
         let rules_json = encode_rules(&policy)?;
         let expected_version = version_param(expected)?;
-        let projection_registry = self.pool.projection_registry();
+        let generated_fact = entry
+            .generated_fact()
+            .ok_or_else(|| producer_authorization_storage_error("policy update entry"))?;
         let (raw, exists): (Option<RawPolicy>, bool) = self
             .pool
-            .write(
+            .producer_tx(
                 tenant_scope,
+                &entry,
+                &env,
                 move |conn| {
                     Box::pin(async move {
                         let row = sqlx::query(
@@ -630,26 +621,16 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                         .fetch_optional(conn.conn())
                         .await
                         .map_err(storage)?;
-                        if row.is_some() {
+                        let authorization = if row.is_some() {
                             let authorization = receipt
-                                .authorize(POLICY_UPDATED_CONTRACT)
+                                .authorize(generated_fact, POLICY_UPDATED_CONTRACT)
                                 .ok_or_else(|| {
                                     producer_authorization_storage_error("policy update co-tx")
                                 })?;
-                            if !env.matches_contract(authorization.fact_contract()) {
-                                return Err(producer_authorization_storage_error(
-                                    "policy update co-tx",
-                                ));
-                            }
-                            let _outcome = append_outbox_with_projection(
-                                conn,
-                                &entry,
-                                &env,
-                                &projection_registry,
-                            )
-                            .await
-                            .map_err(append_storage)?;
-                        }
+                            Some(authorization)
+                        } else {
+                            None
+                        };
                         let exists = if row.is_none() {
                             sqlx::query_scalar::<_, bool>(
                                 "SELECT EXISTS (SELECT 1 FROM abac_policies WHERE tenant_id = $1::uuid AND id = $2 AND deleted_at IS NULL)",
@@ -662,12 +643,19 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                         } else {
                             false
                         };
-                        Ok((row.map(row_to_raw).transpose().map_err(storage)?, exists))
+                        let value = (row.map(row_to_raw).transpose().map_err(storage)?, exists);
+                        Ok(match authorization {
+                            Some(authorization) => {
+                                ProducerTxOutcome::Emitted(value, authorization)
+                            }
+                            None => ProducerTxOutcome::NoMutation(value),
+                        })
                     })
                 },
                 storage,
             )
-            .await?;
+            .await
+            .into_result()?;
 
         match raw {
             Some(raw) => hydrate_policy(tenant, raw),
@@ -698,11 +686,15 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         let tenant_uuid = tenant_param(tenant);
         let id_str = id.as_str().to_string();
         let expected_version = version_param(expected)?;
-        let projection_registry = self.pool.projection_registry();
+        let generated_fact = entry
+            .generated_fact()
+            .ok_or_else(|| producer_authorization_storage_error("policy deactivate entry"))?;
         let (deleted, exists) = self
             .pool
-            .write(
+            .producer_tx(
                 tenant_scope,
+                &entry,
+                &env,
                 move |conn| {
                     Box::pin(async move {
                         let rows = sqlx::query(
@@ -724,26 +716,16 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                         .await
                         .map_err(storage)
                         .map(|r| r.rows_affected())?;
-                        if rows > 0 {
+                        let authorization = if rows > 0 {
                             let authorization = receipt
-                                .authorize(POLICY_UPDATED_CONTRACT)
+                                .authorize(generated_fact, POLICY_UPDATED_CONTRACT)
                                 .ok_or_else(|| {
                                     producer_authorization_storage_error("policy deactivate co-tx")
                                 })?;
-                            if !env.matches_contract(authorization.fact_contract()) {
-                                return Err(producer_authorization_storage_error(
-                                    "policy deactivate co-tx",
-                                ));
-                            }
-                            let _outcome = append_outbox_with_projection(
-                                conn,
-                                &entry,
-                                &env,
-                                &projection_registry,
-                            )
-                            .await
-                            .map_err(append_storage)?;
-                        }
+                            Some(authorization)
+                        } else {
+                            None
+                        };
                         let exists = if rows == 0 {
                             sqlx::query_scalar::<_, bool>(
                                 "SELECT EXISTS (SELECT 1 FROM abac_policies WHERE tenant_id = $1::uuid AND id = $2 AND deleted_at IS NULL)",
@@ -756,12 +738,19 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                         } else {
                             false
                         };
-                        Ok((rows, exists))
+                        let value = (rows, exists);
+                        Ok(match authorization {
+                            Some(authorization) => {
+                                ProducerTxOutcome::Emitted(value, authorization)
+                            }
+                            None => ProducerTxOutcome::NoMutation(value),
+                        })
                     })
                 },
                 storage,
             )
-            .await?;
+            .await
+            .into_result()?;
         if deleted > 0 {
             return Ok(true);
         }

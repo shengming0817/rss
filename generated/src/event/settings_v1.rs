@@ -195,6 +195,13 @@ pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_st
     "sha256:b74288de6fd13213cb6676431f4833a7c921ec9ffe2825ad244cad49c52d17e4",
 );
 
+/// Generated contract + topic identity carried by this event payload.
+pub const FACT: ::vocab::EventFactBinding = ::vocab::EventFactBinding::from_static(CONTRACT, TOPIC);
+
+impl ::vocab::GeneratedEventPayload for SettingsConfigVersionChangedPayload {
+    const FACT: ::vocab::EventFactBinding = FACT;
+}
+
 /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
 pub const SPEC: super::EventSpec = super::EventSpec::new(
     CONTRACT,

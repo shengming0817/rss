@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
+use consistency::{EventEntry, IdemKey};
 use diport::{Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
 use generated::event::identity_v1::policy_updated::{
     IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadActorKind,
@@ -412,14 +412,12 @@ impl PolicyManageService {
             tenant_id: tenant.to_string(),
             occurred_at: unix_secs(self.clock.now()),
         };
-        let bytes = serde_json::to_vec(&payload).map_err(PolicyManageError::PayloadEncode)?;
-        let entry = EventEntry::new(
-            EventTopic::parse(POLICY_UPDATED_SPEC.topic())
-                .map_err(|_| PolicyManageError::EntryBuild)?,
+        let entry = EventEntry::from_generated_payload(
+            &payload,
             IdemKey::parse(&Uuid::new_v4().to_string())
                 .map_err(|_| PolicyManageError::EntryBuild)?,
-            OutboxPayload::from_reviewed_event_bytes(bytes),
-        );
+        )
+        .map_err(PolicyManageError::PayloadEncode)?;
         let actor_subject = actor.as_uuid().hyphenated().to_string();
         let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
             .map_err(|_| PolicyManageError::EntryBuild)?;

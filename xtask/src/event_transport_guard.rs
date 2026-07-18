@@ -375,6 +375,7 @@ struct ProducerFacts {
 #[derive(Default)]
 struct SpecImports {
     aliases: BTreeMap<String, String>,
+    payload_aliases: BTreeMap<String, String>,
     globs: Vec<String>,
 }
 
@@ -408,6 +409,31 @@ impl SpecImports {
         }
         None
     }
+
+    fn resolve_payload_type(&self, path: &syn::Path) -> Option<String> {
+        let rendered = path.to_token_stream().to_string().replace(' ', "");
+        if rendered.starts_with("generated::event::")
+            && path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident.to_string().ends_with("Payload"))
+        {
+            let mut spec = path.clone();
+            spec.segments.pop();
+            spec.segments.push(syn::PathSegment::from(syn::Ident::new(
+                "SPEC",
+                proc_macro2::Span::call_site(),
+            )));
+            return Some(spec.to_token_stream().to_string().replace(' ', ""));
+        }
+        if path.segments.len() == 1 {
+            return self
+                .payload_aliases
+                .get(&path.segments[0].ident.to_string())
+                .cloned();
+        }
+        None
+    }
 }
 
 fn collect_spec_imports(tree: &syn::UseTree, mut prefix: Vec<String>, imports: &mut SpecImports) {
@@ -427,6 +453,18 @@ fn collect_spec_imports(tree: &syn::UseTree, mut prefix: Vec<String>, imports: &
             imports
                 .aliases
                 .insert(rename.rename.to_string(), prefix.join("::"));
+        }
+        syn::UseTree::Name(name) if name.ident.to_string().ends_with("Payload") => {
+            imports.payload_aliases.insert(
+                name.ident.to_string(),
+                format!("{}::SPEC", prefix.join("::")),
+            );
+        }
+        syn::UseTree::Rename(rename) if rename.ident.to_string().ends_with("Payload") => {
+            imports.payload_aliases.insert(
+                rename.rename.to_string(),
+                format!("{}::SPEC", prefix.join("::")),
+            );
         }
         syn::UseTree::Group(group) => {
             for item in &group.items {
@@ -469,6 +507,7 @@ impl<'a> ProducerVisitor<'a> {
             entry_helpers: self.entry_helpers,
             entries: BTreeSet::new(),
             envelopes: BTreeSet::new(),
+            payload_locals: BTreeMap::new(),
             partition_calls: 0,
         };
         function.visit_block(block);
@@ -514,7 +553,7 @@ impl<'a> ProducerVisitor<'a> {
                 Rule::ProducerTopology,
                 self.path.display().to_string(),
                 format!(
-                    "函数 `{ident}` 的 EventEntry topic 必须直接来自 generated event SPEC.topic()"
+                    "函数 `{ident}` 的 EventEntry fact 必须来自 generated event typed payload 或 SPEC.topic()"
                 ),
             ));
         }
@@ -563,16 +602,35 @@ struct FunctionProducerVisitor<'a> {
     entry_helpers: &'a BTreeSet<String>,
     entries: BTreeSet<String>,
     envelopes: BTreeSet<String>,
+    payload_locals: BTreeMap<String, String>,
     partition_calls: usize,
 }
 
 impl<'ast> Visit<'ast> for FunctionProducerVisitor<'_> {
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if let (syn::Pat::Ident(binding), Some(init)) = (&node.pat, &node.init)
+            && let Some(spec) = payload_spec_from_expr(&init.expr, self.imports)
+        {
+            self.payload_locals.insert(binding.ident.to_string(), spec);
+        }
+        syn::visit::visit_local(self, node);
+    }
+
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         if call_ends_with(&node.func, "EventEntry", "new") {
             self.entries.insert(
                 node.args
                     .first()
                     .and_then(|arg| spec_method_receiver(arg, "topic", self.imports))
+                    .unwrap_or_else(|| UNRESOLVED_SPEC.to_string()),
+            );
+        } else if call_ends_with(&node.func, "EventEntry", "from_generated_payload") {
+            self.entries.insert(
+                node.args
+                    .first()
+                    .and_then(|arg| {
+                        payload_spec_from_entry_arg(arg, self.imports, &self.payload_locals)
+                    })
                     .unwrap_or_else(|| UNRESOLVED_SPEC.to_string()),
             );
         } else if call_ident(&node.func).is_some_and(|ident| self.entry_helpers.contains(&ident)) {
@@ -599,6 +657,28 @@ impl<'ast> Visit<'ast> for FunctionProducerVisitor<'_> {
         }
         syn::visit::visit_expr_method_call(self, node);
     }
+}
+
+fn payload_spec_from_entry_arg(
+    expr: &syn::Expr,
+    imports: &SpecImports,
+    payload_locals: &BTreeMap<String, String>,
+) -> Option<String> {
+    let expr = peel_expr(expr);
+    if let syn::Expr::Path(path) = expr
+        && path.path.segments.len() == 1
+        && let Some(spec) = payload_locals.get(&path.path.segments[0].ident.to_string())
+    {
+        return Some(spec.clone());
+    }
+    payload_spec_from_expr(expr, imports)
+}
+
+fn payload_spec_from_expr(expr: &syn::Expr, imports: &SpecImports) -> Option<String> {
+    let syn::Expr::Struct(expr_struct) = peel_expr(expr) else {
+        return None;
+    };
+    imports.resolve_payload_type(&expr_struct.path)
 }
 
 fn spec_method_receiver(expr: &syn::Expr, method: &str, imports: &SpecImports) -> Option<String> {
@@ -5685,6 +5765,60 @@ mod tests {
         assert!(facts.entries.contains(spec));
         assert!(facts.envelopes.contains(spec));
         assert_eq!(facts.partition_sites.get(spec), Some(&vec![1]));
+    }
+
+    #[test]
+    fn producer_ast_accepts_typed_payload_fact_binding() {
+        let (facts, findings) = scan_producer_source(
+            r#"
+            use generated::event::identity_v1::session_created::{
+                IdentitySessionCreatedPayload, SPEC as SESSION_SPEC,
+            };
+            fn produce() {
+                let payload = IdentitySessionCreatedPayload {
+                    session_id,
+                    subject,
+                    tenant_id,
+                    occurred_at,
+                };
+                let entry = EventEntry::from_generated_payload(&payload, id)?;
+                let envelope = OutboxEnvelopeParts::new(
+                    SESSION_SPEC.contract(), tenant, subject, actor
+                );
+            }
+            "#,
+        );
+        let spec = "generated::event::identity_v1::session_created::SPEC";
+        assert!(findings.is_empty(), "{findings:?}");
+        assert!(facts.entries.contains(spec));
+        assert!(facts.envelopes.contains(spec));
+    }
+
+    #[test]
+    fn producer_ast_rejects_typed_payload_envelope_fact_mismatch() {
+        let (facts, findings) = scan_producer_source(
+            r#"
+            use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
+            use generated::event::settings_v1::SPEC as SETTINGS_SPEC;
+            fn produce() {
+                let entry = EventEntry::from_generated_payload(
+                    &IdentitySessionCreatedPayload {
+                        session_id,
+                        subject,
+                        tenant_id,
+                        occurred_at,
+                    },
+                    id,
+                )?;
+                let envelope = OutboxEnvelopeParts::new(
+                    SETTINGS_SPEC.contract(), tenant, subject, actor
+                );
+            }
+            "#,
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(facts.entries.is_empty());
+        assert!(facts.envelopes.is_empty());
     }
 
     #[test]

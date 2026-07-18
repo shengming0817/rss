@@ -116,6 +116,7 @@ mod pdpallow;
 mod pg_tenant_tx_guard;
 mod postgres_feature_matrix;
 mod producer_assurance;
+mod production_composition;
 mod promtool;
 mod publicapi;
 mod reconcile_outbox_command_guard;

@@ -315,6 +315,8 @@ fn localtx_execution_budget() -> LocalTxExecutionBudget {
 /// Closed Postgres retry-routing boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PgTxRetryBoundary {
+    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+    OutboxProducer,
     #[cfg(feature = "domain-settings")]
     SettingsConfig,
     #[cfg(feature = "domain-settings")]
@@ -334,6 +336,8 @@ pub(crate) enum PgTxRetryBoundary {
 impl PgTxRetryBoundary {
     pub(crate) const fn as_label(self) -> &'static str {
         match self {
+            #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+            Self::OutboxProducer => "outbox.producer",
             #[cfg(feature = "domain-settings")]
             Self::SettingsConfig => "settings.config",
             #[cfg(feature = "domain-settings")]
@@ -352,6 +356,9 @@ impl PgTxRetryBoundary {
     }
 }
 
+/// Non-retrying HTTP producer transaction boundary.
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+pub(crate) const OUTBOX_PRODUCER_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::OutboxProducer;
 /// Retry boundary for settings config UoW writes.
 #[cfg(feature = "domain-settings")]
 pub(crate) const SETTINGS_CONFIG_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::SettingsConfig;
@@ -507,7 +514,7 @@ where
 {
     let (result, _, settlement) =
         run_pg_tx_retry_core(boundary, op, classify, |_, _, _, _| {}, |_| {}).await;
-    record_generic_settlement(boundary, settlement);
+    record_settlement(boundary, settlement);
     result
 }
 
@@ -691,12 +698,12 @@ fn record_attempt(boundary: PgTxRetryBoundary, class: TxRetryClass, reason: &'st
 }
 
 #[derive(Clone, Copy)]
-struct GenericSettlementRouting {
+struct SettlementRouting {
     boundary: PgTxRetryBoundary,
     final_status: LocalTxFinalStatus,
 }
 
-impl GenericSettlementRouting {
+impl SettlementRouting {
     fn emit(self) {
         let boundary = self.boundary.as_label();
         let final_status = self.final_status.as_label();
@@ -715,17 +722,20 @@ impl GenericSettlementRouting {
                 target: "postgres",
                 boundary,
                 final_status,
-                "generic transaction completed with an unsafe settlement"
+                "transaction completed with an unsafe settlement"
             );
         }
     }
 }
 
-fn record_generic_settlement(boundary: PgTxRetryBoundary, settlement: Option<LocalTxFinalStatus>) {
+pub(crate) fn record_settlement(
+    boundary: PgTxRetryBoundary,
+    settlement: Option<LocalTxFinalStatus>,
+) {
     let Some(final_status) = settlement else {
         return;
     };
-    GenericSettlementRouting {
+    SettlementRouting {
         boundary,
         final_status,
     }

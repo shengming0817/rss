@@ -92,7 +92,7 @@ use base64::Engine as _;
 #[cfg(test)]
 use bootstrap::Domain as _;
 use bootstrap::KernelError;
-use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
+use consistency::{EventEntry, IdemKey};
 use diport::{
     Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEmitErrorKind,
     OutboxEnvelopeParts,
@@ -363,15 +363,13 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             tenant_id: tenant.to_string(), // canonical hyphenated
             occurred_at: unix_secs(now),
         };
-        let bytes = serde_json::to_vec(&payload).map_err(LoginError::PayloadEncode)?;
-
         // EventId 是独立 opaque 标识（非 session_id；session_id 敏感，不得进 broker metadata/日志）。
         let event_id = Uuid::new_v4().to_string();
-        let entry = EventEntry::new(
-            EventTopic::parse(SESSION_CREATED_SPEC.topic()).map_err(|_| LoginError::EntryBuild)?,
+        let entry = EventEntry::from_generated_payload(
+            &payload,
             IdemKey::parse(&event_id).map_err(|_| LoginError::EntryBuild)?,
-            OutboxPayload::from_reviewed_event_bytes(bytes),
-        );
+        )
+        .map_err(LoginError::PayloadEncode)?;
         // 契约归属经 generated `CONTRACT`（domain + contract_id + version + schema_hash 同源绑定，#1193/#1618）；
         // business 只给 opaque subject。
         let subject_id =

@@ -88,6 +88,24 @@ active producer 在同域约束之上另加 runtime readiness：目标 fact 也�
 `[[subscriptions]]`。`cargo xtask contract validate` R22 对全 lifecycle 同域约束和 active-only readiness
 分别 fail-closed；契约字段摘要只引用本节，不维护另一套例外规则。
 
+active HTTP producer 的持久化只有一个事务 funnel：domain receipt 在 concrete Postgres UoW method 中
+派生 exact `ProducerAuthorization<M>`，业务 closure 经同一个 `&mut TxCapability` 写业务行并返回
+`ProducerTxOutcome<M, T>`。generated payload DTO 通过 `GeneratedEventPayload` 原子选择
+`EventFactBinding { contract, topic }` 并构造 typed `EventEntry`；`Emitted` 由 `producer_tx` /
+`retry_producer_tx` 同时校验 authorization、envelope contract 与 entry fact 后 canonical append，再经
+统一 settlement commit。generic `EventEntry::new` 不具 generated fact provenance，不能进入 active HTTP
+producer 的 emitted 分支；`NoMutation` 只表示业务未变更且不 append。旧 producer co-transaction API、
+provider `.write()+append`、publisher 补发及兼容双写均不存在；generic append 只保留给非 HTTP-producer
+基础设施（例如 relay/emitter）。
+
+`generated/l2-assurance.json` schema v3 把每条 active producer 的 exact mount、live domain call path、
+`Trait::method` port、`Type::method` provider、production composition injection、producer transaction、
+`TxCapability`、append 与 settlement 记录成按 fact 排序的 execution terminals。terminal fact 集必须与
+manifest `emits` 精确相等；任一调用边、注入或 terminal 多义/缺失时生成 fail closed。producer evidence
+不再携带 v2 `runtime/effect` 泛化 bag，也不读取 v2。producer `fault` 按同一 fact terminal 精确绑定
+provider/transaction、rollback、commit-unknown、rollback-failed 与 production no-replay carrier，不能
+复用 consumer/relay fault fixture 代替 producer settlement。
+
 ### Outbox relay 投递语义（at-least-once）
 
 Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event/message ID 发布；publish 成功、settle 前崩溃允许 broker duplicate，broker confirm 的 ambiguous outcome 也必须按可能已发布处理并重试，不能换 ID 或假定消息尚未到达。

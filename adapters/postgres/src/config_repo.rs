@@ -6,7 +6,7 @@
 //!
 //! 版本历史模型 + CAS（etcd 版本模型，settings ports.rs）：每 (tenant, key) 全版本行；`find` = max(version)、
 //! `find_version` = 精确版本、`save` = `INSERT ... WHERE $v = 1 + COALESCE(max(version),0)`（0 行 → VersionConflict；
-//! 并发同版本写经 PK unique violation 亦 → VersionConflict）。三条 typed commit 经 `co_tx_with_outbox`
+//! 并发同版本写经 PK unique violation 亦 → VersionConflict）。三条 typed commit 经 `retry_producer_tx`
 //! 把同一 CAS INSERT 与 outbox append 收进单事务（both-or-neither，OUTBOX-COTX-CONFIG-01）。
 //!
 //! storage 错误经 `ConfigRepoError::Storage(Box::new(sqlx_err))` 分层冒泡（保留 source 链；域 crate 不依赖
@@ -28,6 +28,7 @@ use diport::{
     Clock, DynKeyProvider, KeyName, KeyProvider, KeyProviderError, KeyRef, OutboxEnvelopeParts,
     RedactedBytes,
 };
+use httpserve::ProducerAuthorization;
 use secure::{DerivedAad, Plaintext, ProtectionContext};
 use settings::ports::{
     CONFIG_VERSION_CHANGED_CONTRACT, ConfigDeleteReceipt, ConfigEntry, ConfigHead, ConfigMutation,
@@ -37,7 +38,7 @@ use settings::ports::{
 use sqlx::{Executor, Postgres, Row};
 
 use crate::PgStore;
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
+use crate::cotx::{PgTenantReadPool, PgTenantWritePool, ProducerTxOutcome};
 use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
@@ -1283,16 +1284,16 @@ impl ConfigRepo for PgConfigRepo {
 }
 
 impl PgConfigRepo {
-    async fn commit_authorized<A>(
+    async fn commit_authorized<M>(
         &self,
-        authorization: A,
+        authorization: ProducerAuthorization<M>,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
         outbox_entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError>
     where
-        A: Fn() -> vocab::ContractBinding + Copy + Send + Sync,
+        M: Send + 'static,
     {
         let tenant = scope.tenant();
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgSessionLifecycle）。
@@ -1323,9 +1324,6 @@ impl PgConfigRepo {
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
-        if !env.matches_contract(authorization()) {
-            return Err(producer_authorization_storage_error("config co-tx"));
-        }
         // co-tx：CAS 配置写 + outbox append 同事务（OUTBOX-COTX-CONFIG-01）。CAS 冲突 → VersionConflict 使整
         // 事务回滚（outbox 不落库）；storage 失败 → Storage。
         run_pg_tx_retry(
@@ -1339,7 +1337,7 @@ impl PgConfigRepo {
                 record_config_retry_attempt(mutation.key());
                 async move {
                     self.write_pool
-                        .retry_co_tx_with_outbox(
+                        .retry_producer_tx(
                             scope,
                             deadline,
                             &outbox_entry,
@@ -1363,7 +1361,7 @@ impl PgConfigRepo {
                                     }
                                     #[cfg(all(test, feature = "integration"))]
                                     maybe_fail_config_retry(mutation.key())?;
-                                    Ok(())
+                                    Ok(ProducerTxOutcome::Emitted((), authorization))
                                 })
                             },
                             storage,
@@ -1386,17 +1384,14 @@ impl ConfigUnitOfWork for PgConfigRepo {
         outbox_entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError> {
+        let generated_fact = outbox_entry
+            .generated_fact()
+            .ok_or_else(|| producer_authorization_storage_error("config publish entry"))?;
         let authorization = receipt
-            .authorize(CONFIG_VERSION_CHANGED_CONTRACT)
+            .authorize(generated_fact, CONFIG_VERSION_CHANGED_CONTRACT)
             .ok_or_else(|| producer_authorization_storage_error("config publish co-tx"))?;
-        self.commit_authorized(
-            move || authorization.fact_contract(),
-            scope,
-            mutation,
-            outbox_entry,
-            envelope,
-        )
-        .await
+        self.commit_authorized(authorization, scope, mutation, outbox_entry, envelope)
+            .await
     }
 
     async fn commit_delete(
@@ -1407,17 +1402,14 @@ impl ConfigUnitOfWork for PgConfigRepo {
         outbox_entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError> {
+        let generated_fact = outbox_entry
+            .generated_fact()
+            .ok_or_else(|| producer_authorization_storage_error("config delete entry"))?;
         let authorization = receipt
-            .authorize(CONFIG_VERSION_CHANGED_CONTRACT)
+            .authorize(generated_fact, CONFIG_VERSION_CHANGED_CONTRACT)
             .ok_or_else(|| producer_authorization_storage_error("config delete co-tx"))?;
-        self.commit_authorized(
-            move || authorization.fact_contract(),
-            scope,
-            mutation,
-            outbox_entry,
-            envelope,
-        )
-        .await
+        self.commit_authorized(authorization, scope, mutation, outbox_entry, envelope)
+            .await
     }
 
     async fn commit_rollback(
@@ -1428,16 +1420,13 @@ impl ConfigUnitOfWork for PgConfigRepo {
         outbox_entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError> {
+        let generated_fact = outbox_entry
+            .generated_fact()
+            .ok_or_else(|| producer_authorization_storage_error("config rollback entry"))?;
         let authorization = receipt
-            .authorize(CONFIG_VERSION_CHANGED_CONTRACT)
+            .authorize(generated_fact, CONFIG_VERSION_CHANGED_CONTRACT)
             .ok_or_else(|| producer_authorization_storage_error("config rollback co-tx"))?;
-        self.commit_authorized(
-            move || authorization.fact_contract(),
-            scope,
-            mutation,
-            outbox_entry,
-            envelope,
-        )
-        .await
+        self.commit_authorized(authorization, scope, mutation, outbox_entry, envelope)
+            .await
     }
 }

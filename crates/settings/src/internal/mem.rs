@@ -239,6 +239,19 @@ impl<E> InMemConfigUnitOfWork<E> {
     }
 }
 
+fn authorize_entry<M>(
+    receipt: httpserve::ProducerAssuranceReceipt<M>,
+    entry: &EventEntry,
+    envelope: &OutboxEnvelopeParts,
+    expected_contract: vocab::ContractBinding,
+) -> Option<httpserve::ProducerAuthorization<M>> {
+    let fact = entry.generated_fact()?;
+    if *envelope.contract() != fact.contract() {
+        return None;
+    }
+    receipt.authorize(fact, expected_contract)
+}
+
 impl<E: OutboxEmitter + Send + Sync + 'static> InMemConfigUnitOfWork<E> {
     async fn commit_authorized(
         &self,
@@ -276,13 +289,17 @@ impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigU
         outbox_entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError> {
-        let authorization = receipt
-            .authorize(generated::event::settings_v1::CONTRACT)
-            .ok_or_else(|| {
-                ConfigRepoError::Storage(Box::new(std::io::Error::other(
-                    "config publish receipt does not authorize generated fact",
-                )))
-            })?;
+        let authorization = authorize_entry(
+            receipt,
+            &outbox_entry,
+            &envelope,
+            crate::ports::CONFIG_VERSION_CHANGED_CONTRACT,
+        )
+        .ok_or_else(|| {
+            ConfigRepoError::Storage(Box::new(std::io::Error::other(
+                "config publish receipt does not authorize generated fact",
+            )))
+        })?;
         self.commit_authorized(
             authorization.fact_contract(),
             scope,
@@ -301,13 +318,17 @@ impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigU
         outbox_entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError> {
-        let authorization = receipt
-            .authorize(generated::event::settings_v1::CONTRACT)
-            .ok_or_else(|| {
-                ConfigRepoError::Storage(Box::new(std::io::Error::other(
-                    "config delete receipt does not authorize generated fact",
-                )))
-            })?;
+        let authorization = authorize_entry(
+            receipt,
+            &outbox_entry,
+            &envelope,
+            crate::ports::CONFIG_VERSION_CHANGED_CONTRACT,
+        )
+        .ok_or_else(|| {
+            ConfigRepoError::Storage(Box::new(std::io::Error::other(
+                "config delete receipt does not authorize generated fact",
+            )))
+        })?;
         self.commit_authorized(
             authorization.fact_contract(),
             scope,
@@ -326,13 +347,17 @@ impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigU
         outbox_entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError> {
-        let authorization = receipt
-            .authorize(generated::event::settings_v1::CONTRACT)
-            .ok_or_else(|| {
-                ConfigRepoError::Storage(Box::new(std::io::Error::other(
-                    "config rollback receipt does not authorize generated fact",
-                )))
-            })?;
+        let authorization = authorize_entry(
+            receipt,
+            &outbox_entry,
+            &envelope,
+            crate::ports::CONFIG_VERSION_CHANGED_CONTRACT,
+        )
+        .ok_or_else(|| {
+            ConfigRepoError::Storage(Box::new(std::io::Error::other(
+                "config rollback receipt does not authorize generated fact",
+            )))
+        })?;
         self.commit_authorized(
             authorization.fact_contract(),
             scope,
@@ -673,11 +698,46 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn entry(event_id: &str) -> EventEntry {
+        let payload = generated::event::settings_v1::SettingsConfigVersionChangedPayload {
+            change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Published,
+            key: "app.test".to_string(),
+            occurred_at: 1,
+            source_version: None,
+            tenant_id: TENANT_A.to_string(),
+            version: 1,
+        };
+        EventEntry::from_generated_payload(
+            &payload,
+            consistency::IdemKey::parse(event_id).expect("event id"),
+        )
+        .expect("test payload encodes")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn missing_fact_entry(event_id: &str) -> EventEntry {
         EventEntry::new(
             consistency::EventTopic::parse("settings.config-version-changed").expect("topic"),
             consistency::IdemKey::parse(event_id).expect("event id"),
             consistency::OutboxPayload::from_reviewed_event_bytes(b"{}".to_vec()),
         )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn wrong_fact_entry(event_id: &str) -> EventEntry {
+        let payload =
+            generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
+                occurred_at: 1,
+                session_id: "session-test".to_string(),
+                subject: "11111111-2222-4333-8444-555555555555"
+                    .parse()
+                    .expect("uuid"),
+                tenant_id: TENANT_A.to_string(),
+            };
+        EventEntry::from_generated_payload(
+            &payload,
+            consistency::IdemKey::parse(event_id).expect("event id"),
+        )
+        .expect("test payload encodes")
     }
 
     #[allow(clippy::expect_used)]
@@ -698,6 +758,49 @@ mod tests {
 
     fn publish_receipt() -> ConfigPublishReceipt {
         httpserve::ProducerMarker::for_test(generated::http::settings_v1::PRODUCER).into_receipt()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_uow_rejects_missing_and_wrong_entry_fact_before_mutation() {
+        for (suffix, outbox_entry) in [
+            ("missing", missing_fact_entry("evt-config-missing-fact")),
+            ("wrong", wrong_fact_entry("evt-config-wrong-entry-fact")),
+        ] {
+            let store = new_config_store();
+            let emitter = CountingEmitter::default();
+            let uow = InMemConfigUnitOfWork::new(store.clone(), emitter.clone());
+            let repo = InMemConfigRepo::from_shared(store);
+            let raw_key = format!("app.{suffix}-fact");
+            let key = setting_key(&raw_key);
+
+            let result = uow
+                .commit_publish(
+                    publish_receipt(),
+                    scope(TENANT_A),
+                    ConfigMutation::Put(config_entry(&raw_key, TENANT_A)),
+                    outbox_entry,
+                    envelope(TENANT_A),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(ConfigRepoError::Storage(_))),
+                "{suffix} generated fact must fail closed"
+            );
+            assert!(
+                repo.find(scope(TENANT_A), &key)
+                    .await
+                    .expect("find")
+                    .is_none(),
+                "{suffix} generated fact must fail before mutation"
+            );
+            assert_eq!(
+                emitter.emitted(),
+                0,
+                "{suffix} generated fact must fail before emit"
+            );
+        }
     }
 
     #[tokio::test]
