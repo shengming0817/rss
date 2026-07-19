@@ -28,6 +28,7 @@
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
 //! INVARIANT: ASSEMBLY-LOCK-FAST-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_lock_fast_gate_is_typed_and_fail_closed", anti_vacuity = "lock::tests::shared_child_vectors_freeze_bytes_universes_and_final_fingerprint" }—— `verify --fast` executes the complete AssemblyLock protocol crate test carrier.
+//! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once between modules drift and AssemblyLock in every aggregate plan.
 //! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }—— L2 assurance drift check is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
 //! INVARIANT: CI-ADAPTIVE-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— GitHub CI workflow
 //!   精确委托闭合 xtask job，Meta/Security 并行，Core tests 仅依赖单次 prerequisites；门归属由
@@ -87,6 +88,8 @@ enum InternalCheck {
     AssemblyValidate,
     /// assembly.toml domains → committed modules_gen.rs 漂移门（ASSEMBLY-MODULES-CODEGEN-01）。
     AssemblyModulesCheck,
+    /// assembly.toml providers → committed providers_gen.rs 漂移门（ASSEMBLY-PROVIDERS-CODEGEN-01）。
+    AssemblyProvidersCheck,
     /// repository-verified committed assembly.lock.json raw-byte 漂移门（#1781）。
     AssemblyLockCheck,
     /// committed runtime assembly Mermaid/JSON graph 漂移与 source closure 门。
@@ -242,6 +245,14 @@ fn step_assembly_modules_check() -> Step {
         id: GateId::AssemblyModulesCheck,
         args: &[],
         kind: StepKind::Internal(InternalCheck::AssemblyModulesCheck),
+        env: &[],
+    }
+}
+fn step_assembly_providers_check() -> Step {
+    Step {
+        id: GateId::AssemblyProvidersCheck,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::AssemblyProvidersCheck),
         env: &[],
     }
 }
@@ -1230,6 +1241,7 @@ fn run_internal(check: InternalCheck, contract_against: &str) -> Result<()> {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
         InternalCheck::AssemblyValidate => run_check(&assembly::AssemblyValidate),
         InternalCheck::AssemblyModulesCheck => crate::assembly_codegen::run(true),
+        InternalCheck::AssemblyProvidersCheck => crate::assembly_codegen::run_providers(true),
         InternalCheck::AssemblyLockCheck => {
             assembly_lock::run(assembly_lock::AssemblyLockAction::Check)
         }
@@ -1972,7 +1984,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 38);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 39);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -2081,14 +2093,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_57_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_58_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 57);
+        assert_eq!(plan.len(), 58);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 57);
+        assert_eq!(ids.len(), 58);
     }
 
     #[test]
@@ -2110,6 +2122,7 @@ mod tests {
                 "contract-validate",
                 "assembly-validate",
                 "assembly-modules-check",
+                "assembly-providers-check",
                 "assembly-lock-check",
                 "assembly-graph-check",
                 "contract-breaking",
@@ -2434,6 +2447,7 @@ mod tests {
                 "contract-validate",
                 "assembly-validate",
                 "assembly-modules-check",
+                "assembly-providers-check",
                 "assembly-lock-check",
                 "assembly-graph-check",
                 "contract-breaking",
@@ -2497,6 +2511,7 @@ mod tests {
                     "contract-validate",
                     "assembly-validate",
                     "assembly-modules-check",
+                    "assembly-providers-check",
                     "assembly-lock-check",
                     "assembly-graph-check",
                     "contract-breaking",
@@ -2659,6 +2674,85 @@ mod tests {
         Ok(())
     }
 
+    fn validate_assembly_provider_codegen_gate(plan: &[Step]) -> anyhow::Result<()> {
+        let members = plan
+            .iter()
+            .filter(|step| step.id == GateId::AssemblyProvidersCheck)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            members.len() == 1,
+            "expected exactly one assembly provider check"
+        );
+        let provider = members[0];
+        anyhow::ensure!(
+            !provider.needs_compile(),
+            "provider check must be no-compile"
+        );
+        anyhow::ensure!(
+            provider.carrier_file() == Some("xtask/src/assembly_codegen.rs"),
+            "provider carrier drift"
+        );
+        anyhow::ensure!(
+            matches!(
+                provider.kind,
+                StepKind::Internal(InternalCheck::AssemblyProvidersCheck)
+            ),
+            "provider executor drift"
+        );
+        anyhow::ensure!(
+            provider.id.spec().lanes() == [Some(CiLane::Meta), None]
+                && provider.id.spec().verify_membership() == VerifyMembership::Included
+                && provider.id.spec().compat() == CompatMembership::Included
+                && provider.id.spec().tool() == ToolRequirement::InProcess,
+            "provider typed membership drift"
+        );
+        let modules = plan
+            .iter()
+            .position(|step| step.id == GateId::AssemblyModulesCheck)
+            .context("plan lacks modules check")?;
+        let providers = plan
+            .iter()
+            .position(|step| step.id == GateId::AssemblyProvidersCheck)
+            .context("plan lacks providers check")?;
+        let lock = plan
+            .iter()
+            .position(|step| step.id == GateId::AssemblyLockCheck)
+            .context("plan lacks lock check")?;
+        anyhow::ensure!(
+            providers == modules + 1 && lock == providers + 1,
+            "assembly order must be modules -> providers -> lock"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans()
+    -> anyhow::Result<()> {
+        for (name, plan) in [
+            ("full", plan_for(PlanTarget::Verify)),
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
+            validate_assembly_provider_codegen_gate(&plan)
+                .with_context(|| format!("{name} plan"))?;
+        }
+
+        let mut omitted = verify_plan(&opts(true, false));
+        omitted.retain(|step| step.id != GateId::AssemblyProvidersCheck);
+        assert!(validate_assembly_provider_codegen_gate(&omitted).is_err());
+
+        let mut duplicated = verify_plan(&opts(true, false));
+        let duplicate = duplicated
+            .iter()
+            .find(|step| step.id == GateId::AssemblyProvidersCheck)
+            .context("committed fast plan lacks provider check")?
+            .clone();
+        duplicated.push(duplicate);
+        assert!(validate_assembly_provider_codegen_gate(&duplicated).is_err());
+        Ok(())
+    }
+
     fn validate_assembly_lock_check(plan: &[Step]) -> anyhow::Result<()> {
         let members = plan
             .iter()
@@ -2692,6 +2786,10 @@ mod tests {
             .iter()
             .position(|step| step.id == GateId::AssemblyModulesCheck)
             .context("plan lacks modules check")?;
+        let providers = plan
+            .iter()
+            .position(|step| step.id == GateId::AssemblyProvidersCheck)
+            .context("plan lacks providers check")?;
         let lock = plan
             .iter()
             .position(|step| step.id == GateId::AssemblyLockCheck)
@@ -2701,8 +2799,8 @@ mod tests {
             .position(|step| step.id == GateId::AssemblyGraphCheck)
             .context("plan lacks graph check")?;
         anyhow::ensure!(
-            lock == modules + 1 && graph == lock + 1,
-            "assembly order must be modules -> lock -> graph"
+            providers == modules + 1 && lock == providers + 1 && graph == lock + 1,
+            "assembly order must be modules -> providers -> lock -> graph"
         );
         Ok(())
     }
@@ -2849,11 +2947,16 @@ mod tests {
                 .iter()
                 .position(|label| *label == "assembly-graph-check")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-graph-check"))?;
+            let providers = labels
+                .iter()
+                .position(|label| *label == "assembly-providers-check")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-providers-check"))?;
             let lock = labels
                 .iter()
                 .position(|label| *label == "assembly-lock-check")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-lock-check"))?;
-            assert_eq!(lock, modules + 1, "{name} lock lane order drift");
+            assert_eq!(providers, modules + 1, "{name} providers lane order drift");
+            assert_eq!(lock, providers + 1, "{name} lock lane order drift");
             assert_eq!(graph, lock + 1, "{name} graph lane order drift");
             assert!(!plan[graph].needs_compile());
             assert_eq!(plan[graph].carrier_file(), Some("xtask/src/graph.rs"));
@@ -3174,6 +3277,7 @@ mod tests {
                 "contract-validate",
                 "assembly-validate",
                 "assembly-modules-check",
+                "assembly-providers-check",
                 "assembly-lock-check",
                 "assembly-graph-check",
                 "contract-breaking",
@@ -3298,6 +3402,7 @@ mod tests {
             "contract-validate",
             "assembly-validate",
             "assembly-modules-check",
+            "assembly-providers-check",
             "assembly-lock-check",
             "assembly-graph-check",
             "contract-breaking",

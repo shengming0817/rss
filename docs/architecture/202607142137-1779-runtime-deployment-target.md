@@ -10,9 +10,9 @@
 
 | Fact | Repository evidence | Consequence |
 |---|---|---|
-| Runtime plan has typed identity but does not yet drive live wiring | `assembly-schema` owns the closed v1 protocol/strict reader; `assemblies/runtime/src/plan/**` compiles the bundled manifest, lock, and snapshot-backed listener auth before startup continues through handwritten wiring | plan identity and diagnostics are stable; #1789–#1794 still close live topology |
+| Runtime plan has typed identity but does not yet drive live wiring | `assembly-schema` owns the closed v1 protocol/strict reader and provider registry; each assembly compiles a generated typed provider constructor catalog, while `assemblies/runtime/src/plan/**` compiles the bundled manifest, lock, and snapshot-backed listener auth before startup continues through handwritten wiring | plan/catalog identity and diagnostics are stable; #1792–#1794 still close live topology |
 | Serving configuration is one captured generation | `RuntimeConfigSnapshot` and the runtime environment funnel cover serving/operator consumers; RuntimePlan receives only the borrowed snapshot capability | raw configuration and secrets cannot enter the plan artifact |
-| Subset assemblies are compile-time closures | `assemblies/settingsonly` and `assemblies/identityaudit` have manifests and generated modules but no launch binary | build closure is not runtime or deployment closure |
+| Subset assemblies are compile-time closures | `assemblies/settingsonly` and `assemblies/identityaudit` have manifests and generated module/provider catalogs but no launch binary | build closure is not runtime or deployment closure |
 | Deployment is demo-oriented | `deploy/docker-compose.yml` is the supported demo stack (`docs/ops/202606271438-003-container-image.md`); no `deploy/helm/rss` tree exists | assembly identity cannot be checked against Kubernetes output |
 | CI evidence is local/shadow | `README.md` records the typed `ci-gate` and Azure active forge, while the gate is not a required forge check | future evidence must extend the local gate without claiming branch protection |
 
@@ -23,7 +23,7 @@
 The downstream PBIs will establish one directional fact chain:
 
 ```text
-assembly.toml + generated modules + contracts
+assembly.toml + generated modules/providers + contracts
   -> AssemblyLock [assemblyFingerprint]
   -> RuntimeConfigSnapshot
   -> RuntimePlan [runtimePlanFingerprint]
@@ -36,7 +36,7 @@ assembly.toml + generated modules + contracts
 
 - **AssemblyLock** identifies the assembly and digests manifest, generated, and contract inputs (#1780–#1781).
 - **RuntimeConfigSnapshot** is constructed once and passed as a required typed input; serving ambient reads are closed (#1782–#1787).
-- **RuntimePlan** closes and fingerprints provider, listener, domain, lifecycle, and placement decisions (#1788); #1789–#1794 make it drive the live root.
+- **RuntimePlan** closes and fingerprints provider, listener, domain, lifecycle, and placement decisions (#1788). The closed generated provider constructor catalog (#1791) enters assembly identity without constructing instances; #1792–#1794 make the plan/catalog drive the live root.
 - **runtimeexec** will own provider-independent startup and typed lifecycle transitions used by all runnable assemblies (#1795–#1798).
 - Production security posture will close persistent revocation, Vault allowlists, and production manifest requirements (#1799–#1801).
 - **DeploymentPlan** will derive renderable deployment facts from assembly identity; Helm, policy, and kind acceptance will detect drift (#1802–#1805).
@@ -75,7 +75,7 @@ their renderers, endpoints, or gates already exist.
 | RFC 8785 canonical assembly identity, exact input universe, and drift check | #1780–#1781 | Hard type/schema/codegen/golden; Medium generate/check |
 | one configuration read and no serving ambient reads | #1782–#1787 | Hard snapshot and required inputs; Medium AST guard |
 | fingerprinted typed plan identity | #1788 | Hard private protocol/compiler/reader/schema/golden |
-| plan-driven live cutover | #1789–#1794 | Hard typestate/catalog; Medium bijection and root ratchet |
+| plan-driven live cutover | #1792–#1794 | Hard typed dispatch; Medium bijection and root ratchet |
 | reusable launch and runnable subset closure | #1795–#1798 | Hard runtimeexec graph; Medium artifact closure |
 | production security posture | #1799–#1801 | Hard types, database constraints, and manifest validation |
 | Kubernetes deployment fact chain | #1802–#1805 | Hard plan schema-to-golden; Medium Helm drift/policy/kind acceptance |

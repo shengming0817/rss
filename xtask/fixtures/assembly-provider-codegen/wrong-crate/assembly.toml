@@ -1,0 +1,20 @@
+name = "runtime"
+profile = "demo"
+domains = ["identity"]
+topology = "durable-shared"
+frameworkContracts = []
+
+[[listeners]]
+kind = "primary"
+domains = ["identity"]
+
+[[diportProviders]]
+id = "listener-rate-limiter"
+port = "diport::RateLimiter"
+provider = "ratelimit::GovernorLimiter"
+providerCrate = "not-ratelimit"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "ephemeral-memory"
+purpose = "wrong-crate"
+outputs = []

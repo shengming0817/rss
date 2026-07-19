@@ -40,8 +40,14 @@ here; see `[runtime.run.orderedAnchors]` in the machine baseline.
 
 The exact DI declarations, including lifecycle and durability metadata, live in
 `[assembly.diportProviders]` in the machine baseline and are derived from `assembly.toml`.
-`cargo xtask assembly validate` remains the provider correctness gate; `runtime-baseline verify`
-prevents later runtime-root movement from silently changing the derived inventory.
+`cargo xtask assembly validate` checks every closed role against the private provider registry.
+Each assembly also compiles an internal, active-only `providers_gen.rs` catalog whose const checked
+entries bind the role to its canonical factory/capability evidence;
+`cargo xtask assembly generate-providers --check` is its independent drift gate.
+This catalog does not construct instances or read configuration/secrets, and it is not a fallback
+for the current `modules_gen.rs` live output carrier. #1792 owns live dispatch and bypass removal.
+`runtime-baseline verify` prevents later runtime-root movement from silently changing the derived
+inventory.
 
 ## Shared Inputs And Module Outputs
 

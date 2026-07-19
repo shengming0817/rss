@@ -7,6 +7,8 @@
 //!   `cargo xtask assembly validate`     assembly-level DI provider 声明校验（RevocationStore 持久 provider 门）
 //!   `cargo xtask assembly generate-modules [--check]`
 //!                                      assembly.toml domains → committed modules_gen.rs（--check 为漂移门）
+//!   `cargo xtask assembly generate-providers [--check]`
+//!                                      assembly.toml providers → committed typed provider catalog
 //!   `cargo xtask assembly lock generate|check`
 //!                                      全仓 v1 assembly.lock.json 原子生成 / raw-byte 漂移门
 //!   `cargo xtask graph assembly [--assembly <name>] [--format mermaid|json] [--check]`
@@ -153,6 +155,9 @@ enum Command {
     ContractValidate,
     AssemblyValidate,
     AssemblyGenerateModules {
+        check: bool,
+    },
+    AssemblyGenerateProviders {
         check: bool,
     },
     AssemblyLock(assembly_lock::AssemblyLockAction),
@@ -474,6 +479,8 @@ fn parse_assembly(args: &[&str]) -> Result<Command> {
         ["validate"] => Ok(Command::AssemblyValidate),
         ["generate-modules"] => Ok(Command::AssemblyGenerateModules { check: false }),
         ["generate-modules", "--check"] => Ok(Command::AssemblyGenerateModules { check: true }),
+        ["generate-providers"] => Ok(Command::AssemblyGenerateProviders { check: false }),
+        ["generate-providers", "--check"] => Ok(Command::AssemblyGenerateProviders { check: true }),
         ["lock", "generate"] => Ok(Command::AssemblyLock(
             assembly_lock::AssemblyLockAction::Generate,
         )),
@@ -481,7 +488,7 @@ fn parse_assembly(args: &[&str]) -> Result<Command> {
             assembly_lock::AssemblyLockAction::Check,
         )),
         _ => bail!(
-            "未知 assembly 子命令；用法: cargo xtask assembly <validate | generate-modules [--check] | lock <generate|check>>"
+            "未知 assembly 子命令；用法: cargo xtask assembly <validate | generate-modules [--check] | generate-providers [--check] | lock <generate|check>>"
         ),
     }
 }
@@ -647,6 +654,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::ContractValidate => diagnostic::run_check(&contract::validate::ContractValidate),
         Command::AssemblyValidate => diagnostic::run_check(&assembly::AssemblyValidate),
         Command::AssemblyGenerateModules { check } => assembly_codegen::run(check),
+        Command::AssemblyGenerateProviders { check } => assembly_codegen::run_providers(check),
         Command::AssemblyLock(action) => assembly_lock::run(action),
         Command::GraphAssembly(options) => graph::run(&options),
         Command::ArchRulesList => archrules::list(),
@@ -917,6 +925,30 @@ mod tests {
     fn parse_command_assembly_generate_modules_rejects_bad_args() {
         assert!(parse_command(&s(&["assembly", "generate-modules", "--bogus"])).is_err());
         assert!(parse_command(&s(&["assembly", "generate-modules", "--check", "extra"])).is_err());
+    }
+
+    #[test]
+    fn assembly_provider_codegen_cli_is_exact_and_fail_closed() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["assembly", "generate-providers"]))?,
+            Command::AssemblyGenerateProviders { check: false }
+        );
+        assert_eq!(
+            parse_command(&s(&["assembly", "generate-providers", "--check"]))?,
+            Command::AssemblyGenerateProviders { check: true }
+        );
+        for invalid in [
+            vec!["assembly", "generate-providers", "--bogus"],
+            vec!["assembly", "generate-providers", "--check", "--check"],
+            vec!["assembly", "generate-providers", "--check", "extra"],
+            vec!["assembly", "generate-providers", "SECRET_BAIT"],
+        ] {
+            assert!(
+                parse_command(&s(&invalid)).is_err(),
+                "invalid provider codegen argv accepted: {invalid:?}"
+            );
+        }
+        Ok(())
     }
 
     #[test]

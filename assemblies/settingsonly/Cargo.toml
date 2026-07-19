@@ -14,6 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+assembly-schema = { path = "../../crates/assembly-schema" }
 bootstrap = { path = "../../crates/bootstrap" }
 diport = { path = "../../crates/diport" }
 postgres = { path = "../../adapters/postgres", features = ["domain-settings"] }

@@ -167,14 +167,22 @@ mod tests {
         input: &mut RuntimePlanV1Input,
     ) {
         let mut providers = manifest.diport_providers().iter().collect::<Vec<_>>();
-        providers.sort_by(|left, right| left.id.cmp(&right.id));
+        providers.sort_by_key(|provider| provider.id.as_str());
         for (index, provider) in providers.iter().enumerate() {
             if index == 0 && mutation == Some(Mutation::MissingProvider) {
                 continue;
             }
-            input.provider(&provider.id, provider.provider, provider.outputs.clone());
+            input.provider(
+                provider.id.as_str(),
+                provider.provider,
+                provider.outputs.clone(),
+            );
             if index == 0 && mutation == Some(Mutation::DuplicateProvider) {
-                input.provider(&provider.id, provider.provider, provider.outputs.clone());
+                input.provider(
+                    provider.id.as_str(),
+                    provider.provider,
+                    provider.outputs.clone(),
+                );
             }
         }
     }

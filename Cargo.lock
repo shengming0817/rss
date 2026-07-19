@@ -3074,6 +3074,7 @@ name = "identityaudit"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "assembly-schema",
  "audit",
  "audit-composition",
  "authn",
@@ -5574,6 +5575,7 @@ name = "settingsonly"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "assembly-schema",
  "base64",
  "bootstrap",
  "diport",

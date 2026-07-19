@@ -68,6 +68,7 @@ cargo fmt --all -- --check                             # 格式
 cargo xtask contract validate                          # 契约元数据校验
 cargo xtask assembly validate                          # assembly 声明与依赖闭包校验
 cargo xtask assembly generate-modules --check          # domain modules 生成物漂移门
+cargo xtask assembly generate-providers --check        # typed provider catalog 独立漂移门
 cargo xtask assembly lock check                        # 全仓 AssemblyLock raw-byte 漂移门
 cargo xtask layer-deps                                 # source-centric 分层依赖 lint
 cargo xtask codegen --check                            # 契约 codegen 漂移门
@@ -78,6 +79,16 @@ cargo clippy --workspace --all-targets -- -D warnings  # lint（clock 注入 / p
 cargo deny check                                       # 分层禁依赖 + license + advisory
 cargo dylint --all                                     # AST 级自写 lint（domain 禁 derive serde 等）
 ```
+
+`providers_gen.rs` 是每个 assembly crate 内部编译的 provider constructor catalog，不是外部
+SDK/API，也不读取环境、配置或 secret。它只收 active provider，并通过闭合 role、consumer、factory
+symbol 与 `ProviderCatalogEntry::checked` 绑定 canonical registry evidence；现有 `modules_gen.rs`
+继续承载 live output composition，不能作为 catalog fallback。两类生成物分别漂移检查，固定聚合顺序为
+`assembly validate → modules check → providers check → lock check → graph check`；live provider dispatch、
+手写旁路删除和 output bijection 由 #1792 完成。
+factory symbol 的 wire、Display 与 JSON Schema ID 统一使用显式 `consumer::factory` 声明；assembly
+root 的 compile-link 守卫同时拒绝 crate-level `cfg` 及可递归展开为 `cfg` 的 `cfg_attr`，避免 catalog
+引用与 non-empty 断言被条件编译整体移除。
 
 `generated/l2-assurance.json` 是下游读取 L2 assurance inventory 的唯一 committed artifact；其 9 条
 producer 与 5 条 fact 记录由 active contract、compiled registry、精确 mounted handler、receipt

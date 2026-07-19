@@ -11312,12 +11312,12 @@ fn assembly_providers(root: &Path) -> Result<Vec<ProviderEntry>> {
     for (index, provider) in manifest.diport_providers.iter().enumerate() {
         providers.push(ProviderEntry {
             index: index + 1,
-            id: provider.id.clone(),
+            id: provider.id.as_str().to_owned(),
             port: provider.port.to_string(),
             provider: provider.provider.to_string(),
             provider_crate: provider.provider_crate.clone(),
             required_features: provider.required_features.clone(),
-            consumer: provider.consumer.clone(),
+            consumer: provider.consumer.as_str().to_owned(),
             lifecycle: provider.lifecycle.to_string(),
             durability: provider.durability.to_string(),
             purpose: provider.purpose.clone(),

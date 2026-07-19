@@ -1,0 +1,7 @@
+[[providers]]
+role = "event-publisher"
+factory = "eventexec::amqp-publisher"
+
+[[providers]]
+role = "event-subscriber"
+factory = "eventexec::amqp-publisher"

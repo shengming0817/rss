@@ -1,0 +1,20 @@
+name = "runtime"
+profile = "demo"
+domains = ["identity"]
+topology = "durable-shared"
+frameworkContracts = []
+
+[[listeners]]
+kind = "primary"
+domains = ["identity"]
+
+[[diportProviders]]
+id = "settings-key-provider"
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+consumer = "settings"
+lifecycle = "active"
+durability = "persistent"
+purpose = "wrong-features"
+outputs = ["resources"]

@@ -1,0 +1,33 @@
+name = "runtime"
+profile = "demo"
+domains = ["identity"]
+topology = "durable-shared"
+frameworkContracts = []
+
+[[listeners]]
+kind = "primary"
+domains = ["identity"]
+
+[[diportProviders]]
+id = "event-publisher"
+port = "diport::Publisher"
+provider = "amqp::AmqpPublisher"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "duplicate-factory-red-fixture"
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+id = "event-subscriber"
+port = "diport::AckableSubscriber"
+provider = "amqp::AmqpSubscriber"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "duplicate-factory-red-fixture"
+outputs = ["probes", "resources", "workers"]

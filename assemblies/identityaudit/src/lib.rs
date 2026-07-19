@@ -9,6 +9,9 @@ use primitives::MacKey;
 
 #[path = "generated/modules_gen.rs"]
 mod modules_gen;
+#[path = "generated/providers_gen.rs"]
+mod providers_gen;
+const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
 pub use modules_gen::{DOMAIN_LISTENER_BINDINGS, PROVIDER_OUTPUT_BINDINGS};
 
 const DEMO_JWT_ISSUER: &str = "https://identityaudit.demo.invalid";

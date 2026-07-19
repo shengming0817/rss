@@ -1,0 +1,11 @@
+error[E0451]: fields `role`, `factory` and `evidence` of struct `ProviderCatalogEntry` are private
+  --> tests/ui/provider_catalog_entry_private.rs:20:9
+   |
+19 |     let _ = ProviderCatalogEntry {
+   |             -------------------- in this type
+20 |         role: ProviderRole::ListenerRateLimiter,
+   |         ^^^^ private field
+21 |         factory: ProviderFactorySymbol::HttpserveGovernorRateLimiter,
+   |         ^^^^^^^ private field
+22 |         evidence: *VALID.evidence(),
+   |         ^^^^^^^^ private field

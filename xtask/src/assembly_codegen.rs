@@ -1,22 +1,60 @@
-//! `assembly generate-modules` — assembly manifest domain 顺序表 codegen。
+//! Assembly manifest committed codegen for modules and typed provider catalogs.
 //!
 //! INVARIANT: ASSEMBLY-MODULES-CODEGEN-01 { level = "Hard", exec = "verify", source = "codegen", golden = "assemblies/runtime/src/generated/modules_gen.rs", synthetic_red = "assembly_codegen::tests::check_rejects_manifest_domain_drift", anti_vacuity = "assembly_codegen::tests::generated_runtime_modules_are_non_empty_and_check_clean" } —— `assembly.toml` 是 domain 组合顺序单源；生成物 committed 并由 verify 字节级守漂移，red/green 测试证明门不恒真。
+//! INVARIANT: ASSEMBLY-PROVIDERS-CODEGEN-01 { level = "Hard", exec = "verify", source = "codegen", golden = "assemblies/runtime/src/generated/providers_gen.rs", synthetic_red = "assembly_codegen::tests::assembly_provider_codegen_rejects_closed_registry_mismatches_before_output", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" } —— active provider catalog is role-sorted typed `checked` evidence; the independent drift gate rejects invalid manifests, missing/tampered/orphan outputs, marker crossover, symlinks, and dynamic construction syntax.
 //! INVARIANT: ASSEMBLY-GENERATED-LF-CHECKOUT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_codegen::tests::generated_lf_checkout_guard_rejects_missing_weakened_and_overridden_attributes", anti_vacuity = "assembly_codegen::tests::generated_lf_checkout_guard_accepts_canonical_repository" } —— generator-owned tracked paths 的 Git 最终有效属性必须精确为 `text=set,eol=lf`，避免 raw-byte digest 随 checkout 平台漂移。
 
 use anyhow::{Context, Result, bail, ensure};
 use assembly_schema::{
     AssemblyDomain, AssemblyListenerKind, AssemblyManifest, CanonicalAssemblyManifestV1,
-    GENERATED_MODULE_OWNERSHIP_MARKER, LifecycleChannel,
+    DiportPort, GENERATED_MODULE_OWNERSHIP_MARKER, GENERATED_PROVIDER_OWNERSHIP_MARKER,
+    LifecycleChannel, ProviderConstructor, ProviderConsumer, ProviderDurability,
+    ProviderFactorySymbol, ProviderLifecycle, ProviderRole,
 };
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 const MANIFEST_NAME: &str = "assembly.toml";
-const GENERATED_REL: &str = "src/generated/modules_gen.rs";
 const GENERATED_PATHSPEC: &str = "assemblies/*/src/generated/**";
 const GENERATED_LF_ATTRIBUTE_RULE: &str = "assemblies/*/src/generated/** text eol=lf";
 const OWNERSHIP_MARKER: &str = GENERATED_MODULE_OWNERSHIP_MARKER;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactKind {
+    Modules,
+    Providers,
+}
+
+impl ArtifactKind {
+    const fn generated_rel(self) -> &'static str {
+        match self {
+            Self::Modules => "src/generated/modules_gen.rs",
+            Self::Providers => "src/generated/providers_gen.rs",
+        }
+    }
+
+    const fn ownership_marker(self) -> &'static str {
+        match self {
+            Self::Modules => GENERATED_MODULE_OWNERSHIP_MARKER,
+            Self::Providers => GENERATED_PROVIDER_OWNERSHIP_MARKER,
+        }
+    }
+
+    const fn noun(self) -> &'static str {
+        match self {
+            Self::Modules => "modules",
+            Self::Providers => "providers",
+        }
+    }
+
+    const fn command(self) -> &'static str {
+        match self {
+            Self::Modules => "generate-modules",
+            Self::Providers => "generate-providers",
+        }
+    }
+}
 
 struct Target {
     path: PathBuf,
@@ -38,10 +76,25 @@ pub(crate) fn run(check: bool) -> Result<()> {
     generate_root(&root, false)
 }
 
+pub(crate) fn run_providers(check: bool) -> Result<()> {
+    let root = crate::workspace_root()?;
+    if check {
+        return check_provider_root(&root);
+    }
+    verify_generated_lf_checkout(&root)?;
+    generate_providers_root(&root, false)
+}
+
 /// Run the complete modules gate, including effective LF policy and owned-orphan detection.
 pub(crate) fn check_root(root: &Path) -> Result<()> {
     verify_generated_lf_checkout(root)?;
     generate_root(root, true)
+}
+
+/// Run the complete provider catalog gate independently from module generation.
+pub(crate) fn check_provider_root(root: &Path) -> Result<()> {
+    verify_generated_lf_checkout(root)?;
+    generate_providers_root(root, true)
 }
 
 fn verify_generated_lf_checkout(root: &Path) -> Result<()> {
@@ -76,7 +129,15 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn generate_root(root: &Path, check: bool) -> Result<()> {
-    let plan = plan_generation(root)?;
+    generate_artifact_root(root, check, ArtifactKind::Modules)
+}
+
+pub(crate) fn generate_providers_root(root: &Path, check: bool) -> Result<()> {
+    generate_artifact_root(root, check, ArtifactKind::Providers)
+}
+
+fn generate_artifact_root(root: &Path, check: bool, kind: ArtifactKind) -> Result<()> {
+    let plan = plan_generation(root, kind)?;
     let drift: Vec<&Path> = plan
         .targets
         .iter()
@@ -86,7 +147,7 @@ pub(crate) fn generate_root(root: &Path, check: bool) -> Result<()> {
 
     if check {
         if drift.is_empty() && plan.owned_orphans.is_empty() {
-            eprintln!("assembly generate-modules --check: 无漂移");
+            eprintln!("assembly {} --check: 无漂移", kind.command());
             return Ok(());
         }
         for path in &drift {
@@ -96,9 +157,11 @@ pub(crate) fn generate_root(root: &Path, check: bool) -> Result<()> {
             eprintln!("  孤儿派生文件: {}", relative_label(root, path));
         }
         bail!(
-            "assembly modules 派生漂移：{} 个目标不一致，{} 个孤儿；运行 `cargo xtask assembly generate-modules`",
+            "assembly {} 派生漂移：{} 个目标不一致，{} 个孤儿；运行 `cargo xtask assembly {}`",
+            kind.noun(),
             drift.len(),
-            plan.owned_orphans.len()
+            plan.owned_orphans.len(),
+            kind.command(),
         );
     }
 
@@ -120,7 +183,7 @@ pub(crate) fn generate_root(root: &Path, check: bool) -> Result<()> {
 
 pub(crate) fn check_target(root: &Path, assembly_name: &str) -> Result<()> {
     let assembly_dir = root.join("assemblies").join(assembly_name);
-    let target = plan_target(root, &assembly_dir)?
+    let target = plan_target(root, &assembly_dir, ArtifactKind::Modules)?
         .with_context(|| format!("assembly `{assembly_name}` 缺 {MANIFEST_NAME}"))?;
     if target.actual.as_deref() != Some(target.content.as_slice()) {
         bail!("assembly `{assembly_name}` modules carrier 漂移");
@@ -128,15 +191,17 @@ pub(crate) fn check_target(root: &Path, assembly_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn plan_generation(root: &Path) -> Result<GenerationPlan> {
+fn plan_generation(root: &Path, kind: ArtifactKind) -> Result<GenerationPlan> {
     let assemblies_root = root.join("assemblies");
+    reject_symlink(root)?;
+    reject_symlink(&assemblies_root)?;
     let mut entries = fs::read_dir(&assemblies_root)
         .with_context(|| format!("读取 {} 失败", assemblies_root.display()))?
         .collect::<io::Result<Vec<_>>>()?;
     entries.sort_by_key(fs::DirEntry::path);
 
     let mut targets = Vec::new();
-    let mut orphan_candidates = Vec::new();
+    let mut owned_files = Vec::new();
     for entry in entries {
         let file_type = entry
             .file_type()
@@ -149,22 +214,21 @@ fn plan_generation(root: &Path) -> Result<GenerationPlan> {
         }
 
         let assembly_dir = entry.path();
-        let output_path = assembly_dir.join(GENERATED_REL);
-        let Some(target) = plan_target(root, &assembly_dir)? else {
-            if output_path.is_file() {
-                orphan_candidates.push(output_path);
-            }
+        owned_files.extend(discover_owned_files(&assembly_dir, kind)?);
+        let Some(target) = plan_target(root, &assembly_dir, kind)? else {
             continue;
         };
         targets.push(target);
     }
 
-    let mut owned_orphans = Vec::new();
-    for path in orphan_candidates {
-        let bytes = fs::read(&path).with_context(|| format!("读取 {} 失败", path.display()))?;
-        ensure_owned(&path, &bytes)?;
-        owned_orphans.push(path);
-    }
+    let target_paths = targets
+        .iter()
+        .map(|target| target.path.as_path())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut owned_orphans = owned_files
+        .into_iter()
+        .filter(|path| !target_paths.contains(path.as_path()))
+        .collect::<Vec<_>>();
     owned_orphans.sort();
     Ok(GenerationPlan {
         targets,
@@ -172,13 +236,16 @@ fn plan_generation(root: &Path) -> Result<GenerationPlan> {
     })
 }
 
-fn plan_target(root: &Path, assembly_dir: &Path) -> Result<Option<Target>> {
+fn plan_target(root: &Path, assembly_dir: &Path, kind: ArtifactKind) -> Result<Option<Target>> {
     let manifest_path = assembly_dir.join(MANIFEST_NAME);
-    let output_path = assembly_dir.join(GENERATED_REL);
+    let output_path = assembly_dir.join(kind.generated_rel());
     reject_symlink(&manifest_path)?;
     ensure_output_path_has_no_symlinks(&output_path)?;
     if !manifest_path.is_file() {
         return Ok(None);
+    }
+    if kind == ArtifactKind::Providers {
+        ensure_provider_catalog_linked(assembly_dir)?;
     }
     let source = fs::read(&manifest_path)
         .with_context(|| format!("读取 {} 失败", manifest_path.display()))?;
@@ -191,9 +258,14 @@ fn plan_target(root: &Path, assembly_dir: &Path) -> Result<Option<Target>> {
     let manifest = parsed
         .canonicalize_v1()
         .with_context(|| format!("编译 {source_label} canonical v1 失败"))?;
-    let framework_routes = framework_http_routes(root, &manifest)?;
-    let content = render_modules(&manifest, &framework_routes, &source_label)?;
-    let actual = read_owned_target(&output_path)?;
+    let content = match kind {
+        ArtifactKind::Modules => {
+            let framework_routes = framework_http_routes(root, &manifest)?;
+            render_modules(&manifest, &framework_routes, &source_label)?
+        }
+        ArtifactKind::Providers => render_providers(&manifest, &source_label)?,
+    };
+    let actual = read_owned_target(&output_path, kind)?;
     Ok(Some(Target {
         path: output_path,
         content: content.into_bytes(),
@@ -235,7 +307,179 @@ fn ensure_output_path_has_no_symlinks(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn read_owned_target(path: &Path) -> Result<Option<Vec<u8>>> {
+fn discover_owned_files(assembly_dir: &Path, kind: ArtifactKind) -> Result<Vec<PathBuf>> {
+    let generated_dir = assembly_dir.join("src/generated");
+    let expected_path = assembly_dir.join(kind.generated_rel());
+    let metadata = match fs::symlink_metadata(&generated_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("读取 {} 元数据失败", generated_dir.display()));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!(
+            "generated 路径必须是无符号链接的目录：{}",
+            generated_dir.display()
+        );
+    }
+
+    let mut entries = fs::read_dir(&generated_dir)
+        .with_context(|| format!("读取 {} 失败", generated_dir.display()))?
+        .collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(fs::DirEntry::path);
+    let mut owned = Vec::new();
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("读取 {} 类型失败", path.display()))?;
+        if file_type.is_symlink() || !file_type.is_file() {
+            bail!("generated 下只允许无符号链接的普通文件：{}", path.display());
+        }
+        let bytes = fs::read(&path).with_context(|| format!("读取 {} 失败", path.display()))?;
+        let first_line = bytes
+            .split(|byte| *byte == b'\n')
+            .next()
+            .unwrap_or_default();
+        if first_line == kind.ownership_marker().as_bytes() {
+            owned.push(path);
+        } else if path == expected_path {
+            ensure_owned(&path, &bytes, kind)?;
+        }
+    }
+    Ok(owned)
+}
+
+fn ensure_provider_catalog_linked(assembly_dir: &Path) -> Result<()> {
+    let lib_path = assembly_dir.join("src/lib.rs");
+    reject_symlink(&lib_path)?;
+    let source = fs::read_to_string(&lib_path).with_context(|| {
+        format!(
+            "读取 provider catalog assembly root {} 失败",
+            lib_path.display()
+        )
+    })?;
+    let syntax = syn::parse_file(&source)
+        .with_context(|| format!("解析 {} Rust AST 失败", lib_path.display()))?;
+    ensure!(
+        !syntax
+            .attrs
+            .iter()
+            .any(|attribute| meta_may_apply_cfg(&attribute.meta)),
+        "{} 禁止 crate-level `cfg` 或可展开为 `cfg` 的 `cfg_attr`，避免 provider catalog compile-link 证明被条件移除",
+        lib_path.display()
+    );
+
+    let linked_modules = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module) if module.ident == "providers_gen" => Some(module),
+            _ => None,
+        })
+        .filter(|module| {
+            matches!(module.vis, syn::Visibility::Inherited)
+                && module.content.is_none()
+                && module.attrs.len() == 1
+                && module.attrs.iter().all(|attribute| {
+                    let syn::Meta::NameValue(meta) = &attribute.meta else {
+                        return false;
+                    };
+                    if !meta.path.is_ident("path") {
+                        return false;
+                    }
+                    matches!(
+                        &meta.value,
+                        syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Str(value),
+                            ..
+                        }) if value.value() == "generated/providers_gen.rs"
+                    )
+                })
+        })
+        .count();
+    ensure!(
+        linked_modules == 1,
+        "{} 必须唯一私有编译 `#[path = \"generated/providers_gen.rs\"] mod providers_gen;`",
+        lib_path.display()
+    );
+
+    let catalog_assertions = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Const(item) if item.ident == "_" => Some(item),
+            _ => None,
+        })
+        .filter(|item| provider_catalog_non_empty_assertion(item))
+        .count();
+    ensure!(
+        catalog_assertions == 1,
+        "{} 必须唯一 const 断言 `!providers_gen::PROVIDER_CATALOG.is_empty()`",
+        lib_path.display()
+    );
+    Ok(())
+}
+
+fn meta_may_apply_cfg(meta: &syn::Meta) -> bool {
+    if meta.path().is_ident("cfg") {
+        return true;
+    }
+    let syn::Meta::List(list) = meta else {
+        return false;
+    };
+    if !list.path.is_ident("cfg_attr") {
+        return false;
+    }
+    let nested = list.parse_args_with(
+        syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+    );
+    match nested {
+        Ok(attributes) => attributes.iter().skip(1).any(meta_may_apply_cfg),
+        Err(_) => true,
+    }
+}
+
+fn provider_catalog_non_empty_assertion(item: &syn::ItemConst) -> bool {
+    if !item.attrs.is_empty() || !matches!(item.vis, syn::Visibility::Inherited) {
+        return false;
+    }
+    let syn::Type::Tuple(tuple) = item.ty.as_ref() else {
+        return false;
+    };
+    if !tuple.elems.is_empty() {
+        return false;
+    }
+    let syn::Expr::Macro(expression) = item.expr.as_ref() else {
+        return false;
+    };
+    if !expression.mac.path.is_ident("assert") {
+        return false;
+    }
+    let Ok(syn::Expr::Unary(negated)) = syn::parse2::<syn::Expr>(expression.mac.tokens.clone())
+    else {
+        return false;
+    };
+    if !matches!(negated.op, syn::UnOp::Not(_)) {
+        return false;
+    }
+    let syn::Expr::MethodCall(call) = negated.expr.as_ref() else {
+        return false;
+    };
+    call.method == "is_empty"
+        && call.args.is_empty()
+        && matches!(
+            call.receiver.as_ref(),
+            syn::Expr::Path(path)
+                if path.path.segments.len() == 2
+                    && path.path.segments[0].ident == "providers_gen"
+                    && path.path.segments[1].ident == "PROVIDER_CATALOG"
+        )
+}
+
+fn read_owned_target(path: &Path, kind: ArtifactKind) -> Result<Option<Vec<u8>>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -243,18 +487,350 @@ fn read_owned_target(path: &Path) -> Result<Option<Vec<u8>>> {
         bail!("生成目标不是普通文件：{}", path.display());
     }
     let bytes = fs::read(path).with_context(|| format!("读取 {} 失败", path.display()))?;
-    ensure_owned(path, &bytes)?;
+    ensure_owned(path, &bytes, kind)?;
+    if kind == ArtifactKind::Providers {
+        let source = std::str::from_utf8(&bytes)
+            .with_context(|| format!("{} provider catalog 不是 UTF-8", path.display()))?;
+        validate_provider_catalog_syntax(source)
+            .with_context(|| format!("{} provider catalog 结构非法", path.display()))?;
+    }
     Ok(Some(bytes))
 }
 
-fn ensure_owned(path: &Path, bytes: &[u8]) -> Result<()> {
-    if !bytes.starts_with(OWNERSHIP_MARKER.as_bytes()) {
+fn ensure_owned(path: &Path, bytes: &[u8], kind: ArtifactKind) -> Result<()> {
+    let first_line = bytes
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    if first_line != kind.ownership_marker().as_bytes() {
         bail!(
             "拒绝覆盖或删除非本生成器文件：{}（缺 ownership marker）",
             path.display()
         );
     }
     Ok(())
+}
+
+fn render_providers(manifest: &CanonicalAssemblyManifestV1, source_label: &str) -> Result<String> {
+    let mut providers = manifest
+        .diport_providers()
+        .iter()
+        .filter(|provider| provider.lifecycle == ProviderLifecycle::Active)
+        .collect::<Vec<_>>();
+    providers.sort_by_key(|provider| provider.id.as_str());
+
+    let mut code = format!(
+        "{GENERATED_PROVIDER_OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {}\n\nuse assembly_schema::{{\n    DiportPort, LifecycleChannel, ProviderCatalogEntry, ProviderConstructor, ProviderConsumer,\n    ProviderDurability, ProviderFactorySymbol, ProviderRole,\n}};\n\n#[allow(dead_code)] // Compiled catalog evidence; live dispatch is owned by #1792.\npub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[\n",
+        manifest.manifest_digest()
+    );
+    for provider in providers {
+        let factory = provider.id.factory_symbol().with_context(|| {
+            format!(
+                "active provider role `{}` has no factory symbol",
+                provider.id.as_str()
+            )
+        })?;
+        code.push_str("    ProviderCatalogEntry::checked(\n");
+        code.push_str(&format!(
+            "        ProviderRole::{},\n",
+            provider_role_variant(provider.id)
+        ));
+        code.push_str(&format!(
+            "        DiportPort::{},\n",
+            port_variant(provider.port)
+        ));
+        code.push_str(&format!(
+            "        ProviderConstructor::{},\n",
+            constructor_variant(provider.provider)
+        ));
+        code.push_str(&format!(
+            "        ProviderFactorySymbol::{},\n",
+            factory_variant(factory)
+        ));
+        code.push_str(&format!("        {:?},\n", provider.provider_crate));
+        code.push_str("        &[");
+        for feature in &provider.required_features {
+            code.push_str(&format!("{feature:?}, "));
+        }
+        code.push_str("],\n");
+        code.push_str(&format!(
+            "        ProviderConsumer::{},\n",
+            consumer_variant(provider.consumer)
+        ));
+        code.push_str(&format!(
+            "        ProviderDurability::{},\n",
+            durability_variant(provider.durability)
+        ));
+        code.push_str("        &[");
+        for output in &provider.outputs {
+            code.push_str(&format!("LifecycleChannel::{}, ", channel_variant(*output)));
+        }
+        code.push_str("],\n");
+        code.push_str("    ),\n");
+    }
+    code.push_str("];\n");
+    let formatted = crate::codegen::format_rust(&code)?;
+    validate_provider_catalog_syntax(&formatted)?;
+    Ok(formatted)
+}
+
+fn validate_provider_catalog_syntax(source: &str) -> Result<()> {
+    let syntax = syn::parse_file(source).context("解析 provider catalog Rust AST 失败")?;
+    let [syn::Item::Use(import), syn::Item::Const(catalog)] = syntax.items.as_slice() else {
+        bail!("provider catalog 只允许一个固定 import 与一个 const catalog");
+    };
+    let import_tokens = compact_tokens(&import.tree);
+    ensure!(
+        import_tokens
+            == "assembly_schema::{DiportPort,LifecycleChannel,ProviderCatalogEntry,ProviderConstructor,ProviderConsumer,ProviderDurability,ProviderFactorySymbol,ProviderRole,}",
+        "provider catalog import 集合漂移：{import_tokens}"
+    );
+    ensure!(
+        catalog.attrs.len() == 1 && compact_tokens(&catalog.attrs[0]) == "#[allow(dead_code)]",
+        "provider catalog const 只允许 `#[allow(dead_code)]`"
+    );
+    ensure!(
+        compact_tokens(&catalog.vis) == "pub(crate)",
+        "provider catalog 必须保持 crate-private"
+    );
+    ensure!(
+        catalog.ident == "PROVIDER_CATALOG",
+        "provider catalog const 名称漂移"
+    );
+    ensure!(
+        compact_tokens(catalog.ty.as_ref()) == "&[ProviderCatalogEntry]",
+        "provider catalog const 类型漂移"
+    );
+    let syn::Expr::Reference(reference) = catalog.expr.as_ref() else {
+        bail!("provider catalog 必须是不可变 slice reference");
+    };
+    ensure!(
+        reference.mutability.is_none(),
+        "provider catalog 禁止可变 reference"
+    );
+    let syn::Expr::Array(entries) = reference.expr.as_ref() else {
+        bail!("provider catalog 必须是 checked entry array");
+    };
+    for entry in &entries.elems {
+        validate_provider_catalog_entry(entry)?;
+    }
+    Ok(())
+}
+
+fn validate_provider_catalog_entry(expression: &syn::Expr) -> Result<()> {
+    let syn::Expr::Call(call) = expression else {
+        bail!("provider catalog array 只允许 checked call");
+    };
+    ensure!(
+        matches!(
+            call.func.as_ref(),
+            syn::Expr::Path(path)
+                if exact_path(&path.path, &["ProviderCatalogEntry", "checked"])
+        ),
+        "provider catalog entry 只允许 ProviderCatalogEntry::checked"
+    );
+    ensure!(
+        call.args.len() == 9,
+        "ProviderCatalogEntry::checked 参数数量必须为 9"
+    );
+    let args = call.args.iter().collect::<Vec<_>>();
+    ensure_enum_variant(args[0], "ProviderRole")?;
+    ensure_enum_variant(args[1], "DiportPort")?;
+    ensure_enum_variant(args[2], "ProviderConstructor")?;
+    ensure_enum_variant(args[3], "ProviderFactorySymbol")?;
+    ensure!(
+        matches!(
+            args[4],
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(_),
+                ..
+            })
+        ),
+        "provider crate 必须是字符串字面量"
+    );
+    ensure_string_slice(args[5])?;
+    ensure_enum_variant(args[6], "ProviderConsumer")?;
+    ensure_enum_variant(args[7], "ProviderDurability")?;
+    ensure_enum_slice(args[8], "LifecycleChannel")?;
+    Ok(())
+}
+
+fn ensure_enum_variant(expression: &syn::Expr, enum_name: &str) -> Result<()> {
+    ensure!(
+        matches!(
+            expression,
+            syn::Expr::Path(path)
+                if path.path.segments.len() == 2
+                    && path.path.segments[0].ident == enum_name
+                    && matches!(path.path.segments[0].arguments, syn::PathArguments::None)
+                    && matches!(path.path.segments[1].arguments, syn::PathArguments::None)
+        ),
+        "provider catalog 参数必须是 {enum_name} 的闭合 variant"
+    );
+    Ok(())
+}
+
+fn ensure_string_slice(expression: &syn::Expr) -> Result<()> {
+    let array = immutable_array_reference(expression, "requiredFeatures")?;
+    ensure!(
+        array.elems.iter().all(|element| matches!(
+            element,
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(_),
+                ..
+            })
+        )),
+        "requiredFeatures 只允许字符串字面量"
+    );
+    Ok(())
+}
+
+fn ensure_enum_slice(expression: &syn::Expr, enum_name: &str) -> Result<()> {
+    let array = immutable_array_reference(expression, "outputs")?;
+    for element in &array.elems {
+        ensure_enum_variant(element, enum_name)?;
+    }
+    Ok(())
+}
+
+fn immutable_array_reference<'a>(
+    expression: &'a syn::Expr,
+    label: &str,
+) -> Result<&'a syn::ExprArray> {
+    let syn::Expr::Reference(reference) = expression else {
+        bail!("{label} 必须是不可变 array reference");
+    };
+    ensure!(reference.mutability.is_none(), "{label} 禁止可变 reference");
+    let syn::Expr::Array(array) = reference.expr.as_ref() else {
+        bail!("{label} 必须是 array");
+    };
+    Ok(array)
+}
+
+fn exact_path(path: &syn::Path, segments: &[&str]) -> bool {
+    path.leading_colon.is_none()
+        && path.segments.len() == segments.len()
+        && path
+            .segments
+            .iter()
+            .zip(segments)
+            .all(|(actual, expected)| {
+                actual.ident == *expected && matches!(actual.arguments, syn::PathArguments::None)
+            })
+}
+
+fn compact_tokens(tokens: &impl quote::ToTokens) -> String {
+    tokens
+        .to_token_stream()
+        .to_string()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+const fn provider_role_variant(role: ProviderRole) -> &'static str {
+    match role {
+        ProviderRole::DeviceRevocationStore => "DeviceRevocationStore",
+        ProviderRole::EventPublisher => "EventPublisher",
+        ProviderRole::EventSubscriber => "EventSubscriber",
+        ProviderRole::IdentitySigner => "IdentitySigner",
+        ProviderRole::SettingsKeyProvider => "SettingsKeyProvider",
+        ProviderRole::ListenerPdp => "ListenerPdp",
+        ProviderRole::ServiceTokenReplayStore => "ServiceTokenReplayStore",
+        ProviderRole::AuthAuditSink => "AuthAuditSink",
+        ProviderRole::ListenerRateLimiter => "ListenerRateLimiter",
+        ProviderRole::DistributedLockStore => "DistributedLockStore",
+        ProviderRole::DistributedCasStore => "DistributedCasStore",
+        ProviderRole::DistributedCasStoreAlternative => "DistributedCasStoreAlternative",
+        ProviderRole::RuntimeObjectStore => "RuntimeObjectStore",
+        ProviderRole::DlxLifecycleRepository => "DlxLifecycleRepository",
+        ProviderRole::DlxArchiveStore => "DlxArchiveStore",
+        ProviderRole::DlxArchiveKeyProvider => "DlxArchiveKeyProvider",
+    }
+}
+
+const fn port_variant(port: DiportPort) -> &'static str {
+    match port {
+        DiportPort::RevocationStore => "RevocationStore",
+        DiportPort::Publisher => "Publisher",
+        DiportPort::AckableSubscriber => "AckableSubscriber",
+        DiportPort::Signer => "Signer",
+        DiportPort::KeyProvider => "KeyProvider",
+        DiportPort::Pdp => "Pdp",
+        DiportPort::ServiceTokenReplayStore => "ServiceTokenReplayStore",
+        DiportPort::AuditSink => "AuditSink",
+        DiportPort::RateLimiter => "RateLimiter",
+        DiportPort::Lock => "Lock",
+        DiportPort::Cas => "Cas",
+        DiportPort::ObjectStore => "ObjectStore",
+        DiportPort::DlxLifecycleRepository => "DlxLifecycleRepository",
+        DiportPort::DlxArchiveStore => "DlxArchiveStore",
+    }
+}
+
+const fn constructor_variant(constructor: ProviderConstructor) -> &'static str {
+    match constructor {
+        ProviderConstructor::SoftcaInMemRevocationLedger => "SoftcaInMemRevocationLedger",
+        ProviderConstructor::RatelimitGovernorLimiter => "RatelimitGovernorLimiter",
+        ProviderConstructor::AmqpPublisher => "AmqpPublisher",
+        ProviderConstructor::AmqpSubscriber => "AmqpSubscriber",
+        ProviderConstructor::RedisLockStore => "RedisLockStore",
+        ProviderConstructor::RedisCasStore => "RedisCasStore",
+        ProviderConstructor::PostgresCasStore => "PostgresCasStore",
+        ProviderConstructor::PostgresAuthAuditSink => "PostgresAuthAuditSink",
+        ProviderConstructor::PostgresServiceTokenReplayStore => "PostgresServiceTokenReplayStore",
+        ProviderConstructor::PostgresDlxLifecycleRepository => "PostgresDlxLifecycleRepository",
+        ProviderConstructor::VaultSigner => "VaultSigner",
+        ProviderConstructor::VaultKeyProvider => "VaultKeyProvider",
+        ProviderConstructor::OidcProvider => "OidcProvider",
+        ProviderConstructor::S3Store => "S3Store",
+        ProviderConstructor::S3VerifiedDlxArchiveStore => "S3VerifiedDlxArchiveStore",
+    }
+}
+
+const fn factory_variant(factory: ProviderFactorySymbol) -> &'static str {
+    match factory {
+        ProviderFactorySymbol::EventexecAmqpPublisher => "EventexecAmqpPublisher",
+        ProviderFactorySymbol::EventexecAmqpSubscriber => "EventexecAmqpSubscriber",
+        ProviderFactorySymbol::IdentityVaultSigner => "IdentityVaultSigner",
+        ProviderFactorySymbol::SettingsVaultKeyProvider => "SettingsVaultKeyProvider",
+        ProviderFactorySymbol::HttpserveOidcPdp => "HttpserveOidcPdp",
+        ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore => {
+            "OidcPostgresServiceTokenReplayStore"
+        }
+        ProviderFactorySymbol::HttpservePostgresAuthAuditSink => "HttpservePostgresAuthAuditSink",
+        ProviderFactorySymbol::HttpserveGovernorRateLimiter => "HttpserveGovernorRateLimiter",
+        ProviderFactorySymbol::DistributedRedisLockStore => "DistributedRedisLockStore",
+        ProviderFactorySymbol::DistributedPostgresCasStore => "DistributedPostgresCasStore",
+        ProviderFactorySymbol::RuntimeS3ObjectStore => "RuntimeS3ObjectStore",
+        ProviderFactorySymbol::EventexecPostgresDlxLifecycleRepository => {
+            "EventexecPostgresDlxLifecycleRepository"
+        }
+        ProviderFactorySymbol::EventexecS3DlxArchiveStore => "EventexecS3DlxArchiveStore",
+        ProviderFactorySymbol::EventexecVaultArchiveKeyProvider => {
+            "EventexecVaultArchiveKeyProvider"
+        }
+    }
+}
+
+const fn consumer_variant(consumer: ProviderConsumer) -> &'static str {
+    match consumer {
+        ProviderConsumer::Deviceloop => "Deviceloop",
+        ProviderConsumer::Eventexec => "Eventexec",
+        ProviderConsumer::Identity => "Identity",
+        ProviderConsumer::Settings => "Settings",
+        ProviderConsumer::Httpserve => "Httpserve",
+        ProviderConsumer::Oidc => "Oidc",
+        ProviderConsumer::Distributed => "Distributed",
+        ProviderConsumer::Runtime => "Runtime",
+    }
+}
+
+const fn durability_variant(durability: ProviderDurability) -> &'static str {
+    match durability {
+        ProviderDurability::EphemeralMemory => "EphemeralMemory",
+        ProviderDurability::Persistent => "Persistent",
+    }
 }
 
 fn render_modules(
@@ -452,8 +1028,8 @@ fn relative_label(root: &Path, path: &Path) -> String {
 mod tests {
     use super::*;
 
-    const RATE_PROVIDER: &str = r#"{ port = "diport::RateLimiter", provider = "ratelimit::GovernorLimiter", providerCrate = "ratelimit", requiredFeatures = ["redis", "metrics"], consumer = "httpserve", lifecycle = "active", durability = "ephemeral-memory", purpose = "test", outputs = ["workers", "resources"] }"#;
-    const PDP_PROVIDER: &str = r#"{ port = "diport::Pdp", provider = "oidc::OidcProvider", providerCrate = "oidc", consumer = "httpserve", lifecycle = "active", durability = "persistent", purpose = "authorization", outputs = ["probes"] }"#;
+    const RATE_PROVIDER: &str = r#"{ id = "listener-rate-limiter", port = "diport::RateLimiter", provider = "ratelimit::GovernorLimiter", providerCrate = "ratelimit", consumer = "httpserve", lifecycle = "active", durability = "ephemeral-memory", purpose = "test", outputs = [] }"#;
+    const PDP_PROVIDER: &str = r#"{ id = "listener-pdp", port = "diport::Pdp", provider = "oidc::OidcProvider", providerCrate = "oidc", requiredFeatures = ["backend"], consumer = "httpserve", lifecycle = "active", durability = "persistent", purpose = "authorization", outputs = ["resources"] }"#;
 
     fn manifest(domains: &str) -> String {
         format!(
@@ -649,9 +1225,7 @@ domains = [{domains}]
             .replace(
                 &format!("diportProviders = [{RATE_PROVIDER}, {PDP_PROVIDER}]"),
                 &format!("diportProviders = [{PDP_PROVIDER}, {RATE_PROVIDER}]"),
-            )
-            .replace("requiredFeatures = [\"redis\", \"metrics\"]", "requiredFeatures = [\"metrics\", \"redis\"]")
-            .replace("outputs = [\"workers\", \"resources\"]", "outputs = [\"resources\", \"workers\"]");
+            );
         let first = AssemblyManifest::from_toml_str(&first_source)?.canonicalize_v1()?;
         let equivalent = AssemblyManifest::from_toml_str(&equivalent_source)?.canonicalize_v1()?;
 
@@ -915,6 +1489,427 @@ domains = [{domains}]
         assert!(!outside.join("generated/modules_gen.rs").exists());
         fs::remove_dir_all(root)?;
         fs::remove_dir_all(outside)?;
+        Ok(())
+    }
+
+    fn provider_fixture_root(name: &str) -> Result<PathBuf> {
+        let root = crate::testutil::unique_tmp(&format!("assembly-provider-codegen-{name}"));
+        let assembly_dir = root.join("assemblies/runtime");
+        fs::create_dir_all(&assembly_dir)?;
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/assembly-provider-codegen")
+                .join(name)
+                .join("assembly.toml"),
+            assembly_dir.join("assembly.toml"),
+        )?;
+        write_provider_catalog_link(&assembly_dir)?;
+        Ok(root)
+    }
+
+    fn write_provider_catalog_link(assembly_dir: &Path) -> Result<()> {
+        fs::create_dir_all(assembly_dir.join("src"))?;
+        fs::write(
+            assembly_dir.join("src/lib.rs"),
+            r#"#[path = "generated/providers_gen.rs"]
+mod providers_gen;
+const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn provider_output(root: &Path) -> PathBuf {
+        root.join("assemblies/runtime/src/generated/providers_gen.rs")
+    }
+
+    #[test]
+    fn assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean()
+    -> Result<()> {
+        let root = provider_fixture_root("green")?;
+        generate_providers_root(&root, false)?;
+        generate_providers_root(&root, true)?;
+        let rendered = fs::read_to_string(provider_output(&root))?;
+
+        assert!(rendered.starts_with(GENERATED_PROVIDER_OWNERSHIP_MARKER));
+        assert!(rendered.contains("ProviderCatalogEntry::checked("));
+        assert!(rendered.contains("ProviderRole::ListenerRateLimiter"));
+        assert!(rendered.contains("ProviderFactorySymbol::HttpserveGovernorRateLimiter"));
+        assert!(rendered.contains("ProviderConsumer::Eventexec"));
+        assert!(rendered.contains("ProviderConsumer::Settings"));
+        assert!(rendered.contains("ProviderDurability::EphemeralMemory"));
+        assert!(rendered.contains("&[]"));
+        assert!(!rendered.contains("SECRET_BAIT"));
+        for banned in [
+            "std::env",
+            "Secret",
+            "Config",
+            "Any",
+            "TypeId",
+            "HashMap",
+            "BTreeMap",
+            "fn ",
+            "callback",
+            "service_locator",
+        ] {
+            assert!(
+                !rendered.contains(banned),
+                "generated provider catalog contains banned token `{banned}`"
+            );
+        }
+        validate_provider_catalog_syntax(&rendered)?;
+
+        let dlx = rendered
+            .find("ProviderRole::DlxArchiveKeyProvider")
+            .context("missing DLX archive key provider")?;
+        let limiter = rendered
+            .find("ProviderRole::ListenerRateLimiter")
+            .context("missing listener rate limiter")?;
+        let settings = rendered
+            .find("ProviderRole::SettingsKeyProvider")
+            .context("missing settings key provider")?;
+        assert!(dlx < limiter && limiter < settings);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_provider_codegen_rejects_closed_registry_mismatches_before_output() -> Result<()> {
+        for name in [
+            "missing-factory",
+            "wrong-output",
+            "unknown-consumer",
+            "wrong-port",
+            "wrong-crate",
+            "wrong-features",
+            "wrong-durability",
+            "unknown-constructor",
+            "unknown-output",
+        ] {
+            let root = provider_fixture_root(name)?;
+            assert!(
+                generate_providers_root(&root, false).is_err(),
+                "fixture `{name}` unexpectedly generated"
+            );
+            assert!(
+                !provider_output(&root).exists(),
+                "fixture `{name}` wrote partial output"
+            );
+            fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DuplicateFactoryFixture {
+        providers: Vec<DuplicateFactoryEntry>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DuplicateFactoryEntry {
+        role: ProviderRole,
+        factory: ProviderFactorySymbol,
+    }
+
+    #[test]
+    fn assembly_provider_codegen_duplicate_factory_fixture_fails_checked_entry() -> Result<()> {
+        let root = provider_fixture_root("duplicate-factory")?;
+        let source = fs::read_to_string(root.join("assemblies/runtime/assembly.toml"))?;
+        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
+        let fixture: DuplicateFactoryFixture = toml::from_str(&fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/assembly-provider-codegen/duplicate-factory/registry.toml"),
+        )?)?;
+
+        let unique_factories = fixture
+            .providers
+            .iter()
+            .map(|entry| entry.factory)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(fixture.providers.len(), 2);
+        assert_eq!(unique_factories.len(), 1);
+
+        let mut accepted = Vec::new();
+        for entry in fixture.providers {
+            let provider = manifest
+                .diport_providers()
+                .iter()
+                .find(|provider| provider.id == entry.role)
+                .with_context(|| format!("missing fixture role `{}`", entry.role.as_str()))?;
+            let provider_crate: &'static str =
+                Box::leak(provider.provider_crate.clone().into_boxed_str());
+            let required_features: &'static [&'static str] = Box::leak(
+                provider
+                    .required_features
+                    .iter()
+                    .map(|feature| {
+                        let value: &'static mut str = Box::leak(feature.clone().into_boxed_str());
+                        &*value
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
+            let outputs: &'static [LifecycleChannel] =
+                Box::leak(provider.outputs.clone().into_boxed_slice());
+            accepted.push(std::panic::catch_unwind(|| {
+                assembly_schema::ProviderCatalogEntry::checked(
+                    provider.id,
+                    provider.port,
+                    provider.provider,
+                    entry.factory,
+                    provider_crate,
+                    required_features,
+                    provider.consumer,
+                    provider.durability,
+                    outputs,
+                )
+            }));
+        }
+        assert!(accepted[0].is_ok());
+        assert!(accepted[1].is_err());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_provider_codegen_plans_every_assembly_before_any_write() -> Result<()> {
+        let root = provider_fixture_root("green")?;
+        let invalid_dir = root.join("assemblies/settingsonly");
+        fs::create_dir_all(&invalid_dir)?;
+        let invalid_source = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/assembly-provider-codegen/wrong-output/assembly.toml"),
+        )?
+        .replace("name = \"runtime\"", "name = \"settingsonly\"");
+        fs::write(invalid_dir.join("assembly.toml"), invalid_source)?;
+        write_provider_catalog_link(&invalid_dir)?;
+
+        assert!(generate_providers_root(&root, false).is_err());
+        assert!(!provider_output(&root).exists());
+        assert!(!invalid_dir.join("src/generated/providers_gen.rs").exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_provider_codegen_is_deterministic_for_manifest_set_reorder() -> Result<()> {
+        let root = provider_fixture_root("green")?;
+        let source = fs::read_to_string(root.join("assemblies/runtime/assembly.toml"))?;
+        let mut manifest = AssemblyManifest::from_toml_str(&source)?;
+        let canonical = manifest.clone().canonicalize_v1()?;
+        let first = render_providers(&canonical, "assemblies/runtime/assembly.toml")?;
+        manifest.diport_providers.reverse();
+        for provider in &mut manifest.diport_providers {
+            provider.required_features.reverse();
+            provider.outputs.reverse();
+        }
+        let reordered = manifest.canonicalize_v1()?;
+        assert_eq!(
+            first,
+            render_providers(&reordered, "assemblies/runtime/assembly.toml")?
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_provider_codegen_rejects_unlinked_or_comment_bait_catalogs() -> Result<()> {
+        let root = provider_fixture_root("green")?;
+        let lib = root.join("assemblies/runtime/src/lib.rs");
+        fs::write(
+            &lib,
+            "// #[path = \"generated/providers_gen.rs\"] mod providers_gen;\n\
+             // const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());\n",
+        )?;
+        assert!(generate_providers_root(&root, false).is_err());
+
+        fs::write(
+            &lib,
+            "#[path = \"generated/providers_gen.rs\"]\nmod providers_gen;\n",
+        )?;
+        assert!(generate_providers_root(&root, false).is_err());
+
+        fs::write(
+            &lib,
+            "#[cfg(any())]\n#[path = \"generated/providers_gen.rs\"]\nmod providers_gen;\n\
+             #[cfg(any())]\n\
+             const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());\n",
+        )?;
+        assert!(generate_providers_root(&root, false).is_err());
+        assert!(!provider_output(&root).exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_provider_codegen_rejects_crate_level_conditional_compile_link() -> Result<()> {
+        for (name, attribute) in [
+            ("crate-cfg", "#![cfg(any())]"),
+            ("crate-cfg-attr", "#![cfg_attr(all(), cfg(any()))]"),
+            (
+                "nested-crate-cfg-attr",
+                "#![cfg_attr(all(), cfg_attr(all(), cfg(any())))]",
+            ),
+        ] {
+            let root = provider_fixture_root("green")?;
+            let lib = root.join("assemblies/runtime/src/lib.rs");
+            let source = fs::read_to_string(&lib)?;
+            fs::write(&lib, format!("{attribute}\n{source}"))?;
+
+            assert!(
+                generate_providers_root(&root, false).is_err(),
+                "synthetic-red `{name}` unexpectedly generated"
+            );
+            assert!(
+                !provider_output(&root).exists(),
+                "synthetic-red `{name}` wrote partial output"
+            );
+            fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_provider_codegen_allows_non_conditional_crate_attributes() -> Result<()> {
+        let root = provider_fixture_root("green")?;
+        let lib = root.join("assemblies/runtime/src/lib.rs");
+        let source = fs::read_to_string(&lib)?;
+        fs::write(
+            &lib,
+            format!("#![cfg_attr(all(), allow(dead_code))]\n{source}"),
+        )?;
+
+        generate_providers_root(&root, false)?;
+        assert!(provider_output(&root).exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_provider_codegen_closed_ast_rejects_dynamic_or_extra_items() -> Result<()> {
+        let root = provider_fixture_root("green")?;
+        let source = fs::read_to_string(root.join("assemblies/runtime/assembly.toml"))?;
+        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
+        let rendered = render_providers(&manifest, "assemblies/runtime/assembly.toml")?;
+
+        let extra_const =
+            format!("{rendered}\nconst SECRET: Option<&str> = option_env!(\"RSS_PASSWORD\");\n");
+        assert!(validate_provider_catalog_syntax(&extra_const).is_err());
+        assert!(
+            validate_provider_catalog_syntax(&rendered.replacen(
+                "\"vault\"",
+                "option_env!(\"RSS_PROVIDER\").unwrap_or(\"vault\")",
+                1
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_provider_catalog_syntax(&rendered.replacen(
+                "ProviderCatalogEntry::checked",
+                "build_provider",
+                1
+            ))
+            .is_err()
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_provider_codegen_check_detects_tamper_missing_and_owned_orphan() -> Result<()> {
+        let root = provider_fixture_root("green")?;
+        assert!(generate_providers_root(&root, true).is_err());
+        generate_providers_root(&root, false)?;
+        let target = provider_output(&root);
+        fs::write(
+            &target,
+            format!("{GENERATED_PROVIDER_OWNERSHIP_MARKER}\n// tampered\n"),
+        )?;
+        assert!(generate_providers_root(&root, true).is_err());
+
+        fs::remove_file(&target)?;
+        assert!(generate_providers_root(&root, true).is_err());
+        generate_providers_root(&root, false)?;
+        fs::remove_file(root.join("assemblies/runtime/assembly.toml"))?;
+        assert!(generate_providers_root(&root, true).is_err());
+        assert!(target.exists());
+        generate_providers_root(&root, false)?;
+        assert!(!target.exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_provider_codegen_markers_are_isolated() -> Result<()> {
+        let root = provider_fixture_root("green")?;
+        let target = provider_output(&root);
+        fs::create_dir_all(
+            target
+                .parent()
+                .context("provider output must have generated parent")?,
+        )?;
+        fs::write(&target, format!("{GENERATED_MODULE_OWNERSHIP_MARKER}\n"))?;
+        assert!(generate_providers_root(&root, false).is_err());
+        assert_eq!(
+            fs::read_to_string(&target)?,
+            format!("{GENERATED_MODULE_OWNERSHIP_MARKER}\n")
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn assembly_provider_codegen_rejects_symlink_output_path() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let root = provider_fixture_root("green")?;
+        let outside = crate::testutil::unique_tmp("assembly-provider-codegen-symlink-target");
+        fs::create_dir_all(&outside)?;
+        fs::remove_dir_all(root.join("assemblies/runtime/src"))?;
+        symlink(&outside, root.join("assemblies/runtime/src"))?;
+        assert!(generate_providers_root(&root, false).is_err());
+        assert!(!outside.join("generated/providers_gen.rs").exists());
+        fs::remove_dir_all(root)?;
+        fs::remove_dir_all(outside)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn assembly_provider_codegen_rejects_symlink_ancestry_and_abnormal_orphans() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let root = provider_fixture_root("green")?;
+        let outside = crate::testutil::unique_tmp("assembly-provider-codegen-assemblies-target");
+        fs::rename(root.join("assemblies"), &outside)?;
+        symlink(&outside, root.join("assemblies"))?;
+        assert!(generate_providers_root(&root, false).is_err());
+        fs::remove_file(root.join("assemblies"))?;
+        fs::rename(&outside, root.join("assemblies"))?;
+
+        generate_providers_root(&root, false)?;
+        let target = provider_output(&root);
+        fs::remove_file(root.join("assemblies/runtime/assembly.toml"))?;
+        fs::remove_file(&target)?;
+        symlink("missing-provider-catalog", &target)?;
+        assert!(generate_providers_root(&root, false).is_err());
+        fs::remove_file(&target)?;
+
+        fs::write(
+            root.join("assemblies/runtime/src/generated/foreign.rs"),
+            format!("{GENERATED_PROVIDER_OWNERSHIP_MARKER}\n"),
+        )?;
+        assert!(generate_providers_root(&root, true).is_err());
+        generate_providers_root(&root, false)?;
+        assert!(
+            !root
+                .join("assemblies/runtime/src/generated/foreign.rs")
+                .exists()
+        );
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 }

@@ -8,8 +8,8 @@
 use anyhow::{Context, Result, bail};
 use assembly_schema::{
     AssemblyDomain, AssemblyManifest, AssemblyProfile, AssemblyTopology, DiportPort,
-    DiportProvider, ManifestValidationError, ProviderConstructor, ProviderDurability,
-    ProviderLifecycle,
+    DiportProvider, ManifestValidationError, ProviderConstructor, ProviderConsumer,
+    ProviderDurability, ProviderLifecycle,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -674,6 +674,13 @@ fn push_manifest_validation_finding(
                 format!("field={field} invalid assembly manifest declaration"),
             ));
         }
+        error @ ManifestValidationError::ProviderRegistryMismatch { .. } => {
+            findings.push(finding(
+                Rule::InvalidDiportProvider,
+                &a.manifest_label,
+                error.to_string(),
+            ));
+        }
     }
 }
 
@@ -933,7 +940,7 @@ fn has_active_persistent_provider(
             && candidate.port == provider.port()
             && candidate.provider == provider
             && candidate.provider_crate == provider.provider_crate()
-            && candidate.consumer == consumer
+            && candidate.consumer.as_str() == consumer
     })
 }
 
@@ -950,7 +957,7 @@ fn provider_actual(
             candidate.port == provider.port()
                 || candidate.provider == provider
                 || candidate.provider_crate == provider.provider_crate()
-                || candidate.consumer == consumer
+                || candidate.consumer.as_str() == consumer
         })
         .map(provider_state)
         .collect::<Vec<_>>()
@@ -1469,7 +1476,7 @@ fn has_active_persistent_backend_provider(
 
 fn is_active_distributed_provider(provider: &DiportProvider) -> bool {
     provider.lifecycle == ProviderLifecycle::Active
-        && provider.consumer == "distributed"
+        && provider.consumer == ProviderConsumer::Distributed
         && matches!(provider.port, DiportPort::Lock | DiportPort::Cas)
 }
 
@@ -2996,6 +3003,39 @@ mod tests {
         write(&file, text)
     }
 
+    fn write_distributed_consumer_fixture(root: &Path) -> anyhow::Result<()> {
+        write_runtime_src(
+            root,
+            "phase/domains.rs",
+            r#"
+pub struct InfraBuilt;
+
+impl InfraBuilt {
+    pub async fn wire_domains(self) {
+        let result = async move {
+            let distributed =
+                crate::distributed_runtime::wire_distributed(&deps, distributed_worker)
+                    .context("wire distributed")?;
+            let event_module = crate::event_transport::wire_event_transport(
+                &deps.pg,
+                distributed,
+                event_subscribers,
+                event_transport,
+                event_worker,
+                audit_consumer_key,
+            )
+            .await
+            .context("wire event transport")?;
+            Ok::<_, anyhow::Error>(event_module)
+        }
+        .await;
+        phase_result(<Self as RuntimePhaseState>::PHASE, result)
+    }
+}
+"#,
+        )
+    }
+
     fn valid_manifest_with_profile(profile: &str, provider_extra: &str) -> String {
         format!(
             r#"
@@ -3026,6 +3066,7 @@ id = "device-revocation-store"
 port = "diport::RevocationStore"
 provider = "softca::InMemRevocationLedger"
 providerCrate = "softca"
+requiredFeatures = ["backend"]
 consumer = "deviceloop"
 purpose = "device-certificate-revocation"
 outputs = []
@@ -3067,6 +3108,7 @@ id = "device-revocation-store"
 port = "diport::RevocationStore"
 provider = "softca::InMemRevocationLedger"
 providerCrate = "softca"
+requiredFeatures = ["backend"]
 consumer = "deviceloop"
 lifecycle = "draft"
 durability = "ephemeral-memory"
@@ -3237,11 +3279,12 @@ id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"
+requiredFeatures = ["backend"]
 consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
-outputs = []
+outputs = ["resources"]
 
 [[diportProviders]]
 id = "service-token-replay-store"
@@ -3264,11 +3307,12 @@ id = "identity-signer"
 port = "diport::Signer"
 provider = "vault::VaultSigner"
 providerCrate = "vault"
+requiredFeatures = ["backend"]
 consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
-outputs = []
+outputs = ["resources"]
 "#,
             );
         }
@@ -3280,11 +3324,12 @@ id = "settings-key-provider"
 port = "diport::KeyProvider"
 provider = "vault::VaultKeyProvider"
 providerCrate = "vault"
+requiredFeatures = ["backend"]
 consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
-outputs = []
+outputs = ["resources"]
 "#,
             );
         }
@@ -3299,7 +3344,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
-outputs = []
+outputs = ["resources", "workers"]
 "#,
         );
         if profile == "production" {
@@ -3315,7 +3360,7 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "outbox event publishing"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "event-subscriber"
@@ -3327,18 +3372,19 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "manual-ack event subscriber workers"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
-outputs = []
+outputs = ["resources"]
 
 [[diportProviders]]
 id = "distributed-cas-store"
@@ -3349,7 +3395,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-state-cas"
-outputs = []
+outputs = ["resources", "workers"]
 "#,
             );
         }
@@ -3525,6 +3571,7 @@ id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
@@ -5588,6 +5635,7 @@ fn run() {{
             CARGO_SECURITY_BACKEND,
         )?;
         write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_RUN_PATH_SOURCE)?;
+        write_distributed_consumer_fixture(&root)?;
 
         let (_count, findings) = validate_root(&root)?;
         assert!(findings.is_empty(), "{findings:?}");
@@ -5604,6 +5652,7 @@ fn run() {{
         )?;
         write_runtime_src(&root, "lib.rs", &security_closeout_run_to_launch_source())?;
         write_runtime_src(&root, "launch.rs", SECURITY_CLOSEOUT_LAUNCH_SOURCE)?;
+        write_distributed_consumer_fixture(&root)?;
 
         let (_count, findings) = validate_root(&root)?;
         assert!(findings.is_empty(), "{findings:?}");
@@ -5619,6 +5668,7 @@ fn run() {{
             CARGO_SECURITY_BACKEND,
         )?;
         write_runtime_src(&root, "lib.rs", &security_closeout_lifecycle_owner_source())?;
+        write_distributed_consumer_fixture(&root)?;
 
         let (_count, findings) = validate_root(&root)?;
         assert!(findings.is_empty(), "{findings:?}");
@@ -5801,8 +5851,8 @@ softca = { path = "../../adapters/softca", features = ["backend"] }
     }
 
     #[test]
-    fn active_provider_with_dependency_and_required_feature_is_allowed() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-active-provider-green");
+    fn draft_only_provider_cannot_be_activated_even_with_dependency() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-draft-only-provider-active");
         write_assembly(
             &root,
             &valid_manifest_with_profile(
@@ -5819,7 +5869,12 @@ softca = { path = "../../adapters/softca", features = ["backend"] }
         )?;
 
         let (_count, findings) = validate_root(&root)?;
-        assert!(findings.is_empty(), "{findings:?}");
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::InvalidDiportProvider && finding.detail.contains("lifecycle")
+            }),
+            "draft-only role must reject active lifecycle before downstream consumption: {findings:?}"
+        );
         Ok(())
     }
 
@@ -5856,6 +5911,7 @@ id = "device-revocation-store"
 port = "diport::RevocationStore"
 provider = "softca::InMemRevocationLedger"
 providerCrate = "softca"
+requiredFeatures = ["backend"]
 consumer = "deviceloop"
 lifecycle = "draft"
 durability = "ephemeral-memory"
@@ -5925,11 +5981,12 @@ id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
-outputs = []
+outputs = ["resources"]
 
 [[diportProviders]]
 id = "distributed-cas-store"
@@ -5940,7 +5997,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-state-cas"
-outputs = []
+outputs = ["resources", "workers"]
 "#,
             r#"[package]
 name = "runtime"
@@ -6379,7 +6436,14 @@ name = "runtime"
     // ---- #1251 eventbus 真传输 provider（diport::Publisher / diport::AckableSubscriber）----
 
     /// demo-profile manifest，单条 amqp transport provider（topology-gated durable 选型）。
+    #[allow(clippy::panic)]
+    // reason: closed test helper rejects accidental non-AMQP fixture input at the call site.
     fn amqp_manifest(provider: &str, port: &str, lifecycle: &str, durability: &str) -> String {
+        let role = match provider {
+            "amqp::AmqpPublisher" => "event-publisher",
+            "amqp::AmqpSubscriber" => "event-subscriber",
+            _ => panic!("test helper only admits closed AMQP providers"),
+        };
         format!(
             r#"
 name = "runtime"
@@ -6405,7 +6469,7 @@ kind = "health"
 domains = []
 
 [[diportProviders]]
-id = "fixture-provider"
+id = "{role}"
 port = "{port}"
 provider = "{provider}"
 providerCrate = "amqp"
@@ -6414,7 +6478,7 @@ consumer = "eventexec"
 lifecycle = "{lifecycle}"
 durability = "{durability}"
 purpose = "eventbus-transport"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 "#
         )
     }
@@ -6509,7 +6573,7 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
-outputs = []
+outputs = ["resources"]
 "#,
             r#"[package]
 name = "runtime"
@@ -6563,7 +6627,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
-outputs = []
+outputs = ["resources"]
 "#,
             r#"[package]
 name = "runtime"
@@ -6616,7 +6680,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
-outputs = []
+outputs = ["resources"]
 
 [[diportProviders]]
 id = "service-token-replay-store"
@@ -6682,7 +6746,7 @@ consumer = "runtime"
 lifecycle = "active"
 durability = "persistent"
 purpose = "runtime-s3-readiness-canary"
-outputs = []
+outputs = ["resources"]
 "#,
             r#"[package]
 name = "runtime"
@@ -6735,10 +6799,10 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
         )?;
         let (_count, findings) = validate_root(&root)?;
         assert!(
-            findings
-                .iter()
-                .any(|f| f.rule == Rule::ProviderDurabilityMismatch),
-            "persistent amqp subscriber must not be declared ephemeral-memory: {findings:?}"
+            findings.iter().any(|f| {
+                f.rule == Rule::InvalidDiportProvider && f.detail.contains("durability")
+            }),
+            "closed subscriber role must reject ephemeral durability before downstream consumption: {findings:?}"
         );
         Ok(())
     }
@@ -6781,10 +6845,10 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
         )?;
         let (_count, findings) = validate_root(&root)?;
         assert!(
-            findings
-                .iter()
-                .any(|f| f.rule == Rule::ProviderDurabilityMismatch),
-            "persistent amqp publisher must not be declared ephemeral-memory: {findings:?}"
+            findings.iter().any(|f| {
+                f.rule == Rule::InvalidDiportProvider && f.detail.contains("durability")
+            }),
+            "closed publisher role must reject ephemeral durability before downstream consumption: {findings:?}"
         );
         Ok(())
     }
@@ -6805,8 +6869,10 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
         )?;
         let (_count, findings) = validate_root(&root)?;
         assert!(
-            findings.iter().any(|f| f.rule == Rule::ActiveProviderPort),
-            "amqp publisher declared on subscriber port must be rejected: {findings:?}"
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::InvalidDiportProvider && f.detail.contains("port")),
+            "closed publisher role must reject the subscriber port before downstream consumption: {findings:?}"
         );
         Ok(())
     }

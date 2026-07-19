@@ -424,6 +424,7 @@ fn build_model(root: &Path, assembly_name: &str) -> Result<GraphModel> {
         builder.edge(&output, channel, EdgeKind::ShapeIncludes);
     }
     for provider in &manifest.diport_providers {
+        let consumer_name = provider.consumer.as_str();
         let details = ProviderDetails {
             port: provider.port.as_str().into(),
             lifecycle: provider_lifecycle(provider.lifecycle),
@@ -436,22 +437,22 @@ fn build_model(root: &Path, assembly_name: &str) -> Result<GraphModel> {
                 "provider:{}:{}:{}",
                 provider.port.as_str(),
                 provider.provider,
-                provider.consumer
+                consumer_name
             ),
             NodeKind::Provider,
             format!("{} ({})", provider.provider, provider.provider_crate),
             true,
             Some(NodeDetails::Provider(details)),
         )?;
-        let consumer = if provider.consumer == manifest.name {
+        let consumer = if consumer_name == manifest.name.as_str() {
             assembly_id.clone()
-        } else if domains.contains(&provider.consumer) {
-            builder.endpoint(&provider.consumer)?
+        } else if domains.contains(consumer_name) {
+            builder.endpoint(consumer_name)?
         } else {
             builder.node(
-                format!("endpoint:{}", provider.consumer),
+                format!("endpoint:{consumer_name}"),
                 NodeKind::Component,
-                provider.consumer.clone(),
+                consumer_name.to_owned(),
                 true,
                 None,
             )?
@@ -900,7 +901,19 @@ mod tests {
             .iter()
             .find(|node| node.label == "resources channel")
             .context("resources channel missing")?;
-        assert!(model.edges.iter().any(|edge| edge.from == provider.id
+        assert!(
+            !model
+                .edges
+                .iter()
+                .any(|edge| edge.from == provider.id && edge.kind == EdgeKind::ContributesOutput),
+            "active provider with outputs=[] must not gain a lifecycle edge"
+        );
+        let signer = model
+            .nodes
+            .iter()
+            .find(|node| node.label.contains("VaultSigner"))
+            .context("resource-contributing provider missing")?;
+        assert!(model.edges.iter().any(|edge| edge.from == signer.id
             && edge.to == resources.id
             && edge.kind == EdgeKind::ContributesOutput));
         assert!(!render_json(&model)?.contains("produces"));
@@ -1076,11 +1089,18 @@ mod tests {
                 original.replacen(from, to, 1)
             };
             std::fs::write(&path, changed)?;
-            crate::assembly_codegen::generate_root(&root, false)?;
-            let error = build_model(&root, "runtime")
-                .err()
-                .context("invalid target accepted")?;
-            assert!(error.to_string().contains("项校验失败"), "{error}");
+            let error = match crate::assembly_codegen::generate_root(&root, false) {
+                Ok(()) => build_model(&root, "runtime")
+                    .err()
+                    .context("invalid target accepted")?,
+                Err(error) => error,
+            };
+            let diagnostic = format!("{error:#}");
+            assert!(
+                diagnostic.contains("invalid assembly declarations")
+                    || diagnostic.contains("项校验失败"),
+                "{diagnostic}"
+            );
             std::fs::remove_dir_all(root)?;
         }
         Ok(())
@@ -1223,7 +1243,7 @@ consumer = "{consumer}"
 lifecycle = "active"
 durability = "ephemeral-memory"
 purpose = "test"
-outputs = ["resources"]
+outputs = []
 
 [[diportProviders]]
 id = "identity-signer"
@@ -1247,7 +1267,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "identity-auth"
-outputs = ["resources", "workers"]
+outputs = ["resources"]
 
 [[diportProviders]]
 id = "service-token-replay-store"

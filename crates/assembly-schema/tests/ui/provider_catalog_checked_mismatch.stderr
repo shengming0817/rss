@@ -1,0 +1,22 @@
+error[E0080]: evaluation panicked: provider port drift
+  --> tests/ui/provider_catalog_checked_mismatch.rs:6:38
+   |
+ 6 |   const FORGED: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+   |  ______________________________________^
+ 7 | |     ProviderRole::ListenerRateLimiter,
+ 8 | |     DiportPort::Signer,
+ 9 | |     ProviderConstructor::RatelimitGovernorLimiter,
+...  |
+15 | |     &[],
+16 | | );
+   | |_^ evaluation of `FORGED` failed inside this call
+   |
+note: inside `ProviderCatalogEntry::checked`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: src/provider.rs
+   |
+   |         assert!(spec.port as u8 == port as u8, "provider port drift");
+   |         ------------------------------------------------------------- in this macro invocation

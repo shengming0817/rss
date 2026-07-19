@@ -35,6 +35,9 @@ pub mod listeners;
 pub mod module;
 #[path = "generated/modules_gen.rs"]
 mod modules_gen;
+#[path = "generated/providers_gen.rs"]
+mod providers_gen;
+const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
 pub mod phase;
 pub mod plan;
 mod provider_output;

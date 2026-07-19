@@ -4,7 +4,7 @@ This rule governs how runtime-deployment target constraints select enforcement c
 
 ## 当前事实
 
-- Assembly manifest validation, generated domain ordering, and committed v1 AssemblyLock drift are governed by typed repository gates.
+- Assembly manifest validation, generated domain ordering, generated typed provider constructor catalogs, and committed v1 AssemblyLock drift are governed by typed repository gates. The provider catalog is assembly-crate-internal identity evidence; it does not yet drive live construction.
 - Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Listener/auth/tracing/serving-OIDC, the operator OIDC static provider, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is typed, fingerprinted, and retained by the unique consuming runtime phase chain; it still supplies identity/diagnostics rather than driving the remaining handwritten live decisions. Subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
 - `cargo xtask archrules list` and its generated matrix derive implemented rules from real carrier anchors. Planning documents are not a second index.
 - The active forge does not make the existing `ci-gate` a required check.
@@ -173,6 +173,14 @@ representable. The private `PhaseContext` retains the serving input and owned `R
 callers cannot supply a phase label, extract a lifecycle owner, skip a state, or reuse a consumed
 state. `phase::execute` is the sole production chain and `run_startup` has one call into it.
 
+The landed #1791 provider-catalog Hard carrier is the closed `ProviderRole`,
+`ProviderConsumer`, and `ProviderFactorySymbol` universe, the private role registry and capability
+evidence, and `ProviderCatalogEntry::checked` const validation compiled into each assembly. Its
+Medium/codegen backstop is exact manifest-to-registry validation, the restricted data-only
+`providers_gen.rs` grammar, rustc typecheck, committed goldens, and a separate provider drift gate.
+The existing `modules_gen.rs` live output carrier is not a fallback. #1792 owns live dispatch,
+handwritten bypass deletion, and output bijection.
+
 Medium `RUNTIME-PHASE-TRANSITION-LIVE-01` binds that type-level proof to production source. Its
 crate-wide production AST inventory verifies the unique entry, five-step order, consuming
 receivers, associated closed phase labels, common redaction funnel, closed state trait impls, and
@@ -189,14 +197,30 @@ AssemblyLock is generated repository identity, never a hand-maintained input. Af
 
 ```bash
 cargo xtask assembly generate-modules
+cargo xtask assembly generate-providers
 cargo xtask assembly lock generate
 ```
 
-Review the raw inputs and both generated layers in the same diff, then run the focused sequence `assembly validate` → `assembly generate-modules --check` → `assembly lock check` → `graph assembly --check`. The aggregate typed plans preserve the same modules → lock → graph order. Do not edit `assembly.lock.json` by hand; regenerate it from verified inputs.
+Review the raw inputs and generated layers in the same diff, then run the focused sequence
+`assembly validate` → `assembly generate-modules --check` →
+`assembly generate-providers --check` → `assembly lock check` →
+`graph assembly --check`. The aggregate typed plans preserve the same
+validate → modules → providers → lock → graph order. Do not edit `assembly.lock.json` by hand;
+regenerate it from verified inputs.
 
 A reserved `assembly.lock.json` below a direct `assemblies/*/` directory without its `assembly.toml` ownership marker is an orphan. Both lock actions fail and leave it untouched. Recovery is explicit: restore the matching manifest if removal was accidental, or inspect and manually delete the orphan before regenerating.
 
 The committed lock contains deterministic repository identities and digests only. It must not contain secret material, environment values, tenant/device state, or other runtime configuration. Its fingerprint proves repository-input integrity; it is not a signature, authorization decision, deployment receipt, or runtime-state proof.
+
+Provider catalog rollout and rollback are pure code/identity operations: no database, secret,
+configuration, or external contract migration is introduced. A rollback reverts the generated
+catalogs, consuming binaries, locks, and rotated fingerprints together; it cannot introduce an old
+reader, alias, dual write, free-form factory path, or runtime fallback.
+
+The catalog approach keeps
+[Typify's programmatic codegen](https://github.com/oxidecomputer/typify/blob/aec3da53c4319164542b393a86d552424be24384/typify/src/lib.rs)
+and [Omicron's explicit manifest](https://github.com/oxidecomputer/omicron/blob/9932e3633a3417d130af44dfce12672eb8e0ec00/package-manifest.toml)
+as external comparison points; RSS does not adopt either project's public schema or package model.
 
 ## 缺口与 owner
 

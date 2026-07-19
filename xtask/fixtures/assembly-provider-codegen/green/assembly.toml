@@ -1,0 +1,44 @@
+name = "runtime"
+profile = "demo"
+domains = ["identity"]
+topology = "durable-shared"
+frameworkContracts = []
+
+[[listeners]]
+kind = "primary"
+domains = ["identity"]
+
+[[diportProviders]]
+id = "settings-key-provider"
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "settings"
+lifecycle = "active"
+durability = "persistent"
+purpose = "SECRET_BAIT must never enter generated Rust"
+outputs = ["resources"]
+
+[[diportProviders]]
+id = "listener-rate-limiter"
+port = "diport::RateLimiter"
+provider = "ratelimit::GovernorLimiter"
+providerCrate = "ratelimit"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "ephemeral-memory"
+purpose = "active-empty-output"
+outputs = []
+
+[[diportProviders]]
+id = "dlx-archive-key-provider"
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "same-constructor-distinct-role"
+outputs = ["workers"]

@@ -497,6 +497,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            AssemblyProvidersCheck => (step_assembly_providers_check, Some("xtask/src/assembly_codegen.rs"),
+                gate(
+                        GateId::AssemblyProvidersCheck,
+                        "assembly-providers-check",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             AssemblyLockCheck => (step_assembly_lock_check, Some("xtask/src/assembly_lock.rs"),
                 gate(
                         GateId::AssemblyLockCheck,

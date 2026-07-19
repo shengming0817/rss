@@ -11,14 +11,14 @@
       "path": "assemblies/runtime/assembly.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "fcb9a3dc1fced1633f6e957746cb2731483beb43ed94ac574a226523f36150c5"
+        "value": "294d772dfc04cb231efbb82bfa10c2961848bb611b2157cd0ba9e7d0929ba75e"
       }
     },
     {
       "path": "assemblies/runtime/src/generated/modules_gen.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "049f49c4675a8211746933b0d56c8dd9e68309551087c1ed6ee8243603130946"
+        "value": "9ba417b0b07091bfb351e48688220cd4707853f6184e42e4695b14b870991bc7"
       }
     },
     {
@@ -132,7 +132,10 @@
       "port": "diport::RevocationStore",
       "lifecycle": "draft",
       "durability": "ephemeral-memory",
-      "purpose": "device-certificate-revocation"
+      "purpose": "device-certificate-revocation",
+      "requiredFeatures": [
+        "backend"
+      ]
     },
     {
       "id": "n_3faf7a7cf7b7c75bd2462f92",
@@ -252,7 +255,10 @@
       "port": "diport::LockStore",
       "lifecycle": "active",
       "durability": "persistent",
-      "purpose": "distributed-lock-fencing"
+      "purpose": "distributed-lock-fencing",
+      "requiredFeatures": [
+        "backend"
+      ]
     },
     {
       "id": "n_51af174d851d072ffc196829",
@@ -276,7 +282,10 @@
       "port": "diport::CasStore",
       "lifecycle": "draft",
       "durability": "persistent",
-      "purpose": "distributed-state-cas-redis-alternative"
+      "purpose": "distributed-state-cas-redis-alternative",
+      "requiredFeatures": [
+        "backend"
+      ]
     },
     {
       "id": "n_6df5db0fdf560b20204cbbd8",

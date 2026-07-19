@@ -3,7 +3,7 @@
 //! INVARIANT: ASSEMBLY-LOCK-GOLDEN-01 { level = "Hard", exec = "verify", source = "codegen", golden = "assemblies/runtime/assembly.lock.json", synthetic_red = "assembly_lock::tests::changed_inputs_drift_expected_targets", anti_vacuity = "assembly_lock::tests::three_committed_locks_are_clean_and_verified" } — the repository-verified compiler is the sole source of committed lock bytes; raw-byte drift fails the aggregate gate.
 //! INVARIANT: ASSEMBLY-LOCK-DIAGNOSTIC-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed command error variants carry only fixed stages, escaped repository-relative paths, counts, and io::ErrorKind; no source error or arbitrary detail field is representable" } — invalid manifest/contract/generated contents cannot enter this command's error value.
 //! INVARIANT: ASSEMBLY-LOCK-LF-CHECKOUT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "generated_file::tests::lf_checkout_rejects_missing_weakened_and_overridden_rules", anti_vacuity = "assembly_lock::tests::three_committed_locks_are_clean_and_verified" } — every lock target has effective `text=set,eol=lf` before byte comparison or generation.
-//! INVARIANT: ASSEMBLY-LOCK-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_lock_check_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_lock::tests::three_committed_locks_are_clean_and_verified" } — the typed no-compile check occurs exactly once in verify, fast, compatibility CI, and ci-meta between modules drift and graph drift.
+//! INVARIANT: ASSEMBLY-LOCK-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_lock_check_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_lock::tests::three_committed_locks_are_clean_and_verified" } — the typed no-compile check occurs exactly once in verify, fast, compatibility CI, and ci-meta between provider catalog drift and graph drift.
 
 use assembly_schema::{AssemblyLockErrorStage, RepositoryVerifiedAssemblyLock};
 use std::fmt;
@@ -64,6 +64,8 @@ fn preflight(root: &Path) -> CommandResult<Vec<crate::assembly::AssemblyTarget>>
     }
     crate::assembly_codegen::check_root(root)
         .map_err(|_| CommandError::Preflight(PreflightFailure::ModulesAggregate))?;
+    crate::assembly_codegen::check_provider_root(root)
+        .map_err(|_| CommandError::Preflight(PreflightFailure::ProvidersAggregate))?;
     let lock_paths = targets
         .iter()
         .map(|target| target.lock_path().to_path_buf())
@@ -248,6 +250,7 @@ enum PreflightFailure {
     AssemblyHardError,
     AssemblyFindings(usize),
     ModulesAggregate,
+    ProvidersAggregate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,6 +298,9 @@ impl fmt::Display for CommandError {
             ),
             Self::Preflight(PreflightFailure::ModulesAggregate) => formatter.write_str(
                 "assembly lock: modules aggregate policy 无效；运行 `cargo xtask assembly generate-modules`",
+            ),
+            Self::Preflight(PreflightFailure::ProvidersAggregate) => formatter.write_str(
+                "assembly lock: providers aggregate policy 无效；运行 `cargo xtask assembly generate-providers`",
             ),
             Self::CheckoutPolicy(stage) => match stage {
                 crate::generated_file::LfCheckoutFailure::AttributesRead => formatter.write_str(
@@ -466,6 +472,11 @@ mod tests {
                 "generated",
                 mutate_generated as FixtureMutation,
                 &["identityaudit"] as &[&str],
+            ),
+            (
+                "provider-generated",
+                mutate_provider_generated as FixtureMutation,
+                &["settingsonly"] as &[&str],
             ),
             (
                 "contract-semantics",
@@ -669,6 +680,46 @@ mod tests {
     }
 
     #[test]
+    fn standalone_actions_reject_provider_drift_and_owned_orphan() -> anyhow::Result<()> {
+        let fixture = Fixture::new("providers-drift")?;
+        let provider = fixture
+            .root
+            .join("assemblies/runtime/src/generated/providers_gen.rs");
+        fs::remove_file(&provider)?;
+        assert_eq!(
+            run_root(&fixture.root, AssemblyLockAction::Check),
+            Err(CommandError::Preflight(
+                PreflightFailure::ProvidersAggregate
+            ))
+        );
+        assert_eq!(
+            CommandError::Preflight(PreflightFailure::ProvidersAggregate).to_string(),
+            "assembly lock: providers aggregate policy 无效；运行 `cargo xtask assembly generate-providers`"
+        );
+
+        let fixture = Fixture::new("providers-orphan")?;
+        let orphan = fixture
+            .root
+            .join("assemblies/removed/src/generated/providers_gen.rs");
+        fs::create_dir_all(orphan.parent().context("providers orphan parent")?)?;
+        fs::write(
+            &orphan,
+            format!("{}\n", assembly_schema::GENERATED_PROVIDER_OWNERSHIP_MARKER),
+        )?;
+        assert_eq!(
+            run_root(&fixture.root, AssemblyLockAction::Generate),
+            Err(CommandError::Preflight(
+                PreflightFailure::ProvidersAggregate
+            ))
+        );
+        assert!(
+            orphan.is_file(),
+            "lock action must not delete providers orphan"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn empty_target_universe_is_rejected() -> anyhow::Result<()> {
         let fixture = Fixture::new("empty")?;
         let assemblies = fixture.root.join("assemblies");
@@ -778,6 +829,15 @@ mod tests {
         Ok(())
     }
 
+    fn mutate_provider_generated(root: &Path) -> anyhow::Result<()> {
+        let path = root.join("assemblies/settingsonly/src/generated/providers_gen.rs");
+        fs::write(
+            &path,
+            format!("{}\n// changed\n", fs::read_to_string(&path)?),
+        )?;
+        Ok(())
+    }
+
     fn mutate_contract_semantics(root: &Path) -> anyhow::Result<()> {
         replace(
             &root.join("contracts/event/identity/v1/session-created/contract.toml"),
@@ -863,24 +923,44 @@ mod tests {
                     target_dir.join("assembly.toml"),
                 )?;
                 fs::copy(source_dir.join("Cargo.toml"), target_dir.join("Cargo.toml"))?;
+                fs::copy(source_dir.join("src/lib.rs"), target_dir.join("src/lib.rs"))?;
                 fs::copy(
                     source_dir.join("src/generated/modules_gen.rs"),
                     target_dir.join("src/generated/modules_gen.rs"),
                 )?;
+                fs::copy(
+                    source_dir.join("src/generated/providers_gen.rs"),
+                    target_dir.join("src/generated/providers_gen.rs"),
+                )?;
                 if assembly == "runtime" {
+                    fs::create_dir_all(target_dir.join("src/phase"))?;
                     fs::write(
-                        target_dir.join("src/assembly_lock_fixture.rs"),
+                        target_dir.join("src/phase/domains.rs"),
                         r#"
-pub struct DistributedRuntimeDeps;
-pub struct SharedRuntimeDeps;
-pub fn wire_distributed(_: &SharedRuntimeDeps) -> DistributedRuntimeDeps {
-    DistributedRuntimeDeps
+pub struct InfraBuilt;
+
+impl InfraBuilt {
+    pub async fn wire_domains(self) {
+        let result = async move {
+            let distributed =
+                crate::distributed_runtime::wire_distributed(&deps, distributed_worker)
+                    .context("wire distributed")?;
+            let event_module = crate::event_transport::wire_event_transport(
+                &deps.pg,
+                distributed,
+                event_subscribers,
+                event_transport,
+                event_worker,
+                audit_consumer_key,
+            )
+            .await
+            .context("wire event transport")?;
+            Ok::<_, anyhow::Error>(event_module)
+        }
+        .await;
+        phase_result(<Self as RuntimePhaseState>::PHASE, result)
+    }
 }
-pub fn run_startup(deps: &SharedRuntimeDeps) {
-    let distributed: DistributedRuntimeDeps = wire_distributed(deps);
-    wire_event_transport((), distributed, (), ());
-}
-fn wire_event_transport(_: (), _: DistributedRuntimeDeps, _: (), _: ()) {}
 "#,
                     )?;
                 }

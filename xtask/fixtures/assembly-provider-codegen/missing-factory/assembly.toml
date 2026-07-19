@@ -1,0 +1,21 @@
+name = "runtime"
+profile = "demo"
+domains = ["identity"]
+topology = "durable-shared"
+frameworkContracts = []
+
+[[listeners]]
+kind = "primary"
+domains = ["identity"]
+
+[[diportProviders]]
+id = "device-revocation-store"
+port = "diport::RevocationStore"
+provider = "softca::InMemRevocationLedger"
+providerCrate = "softca"
+requiredFeatures = ["backend"]
+consumer = "deviceloop"
+lifecycle = "active"
+durability = "ephemeral-memory"
+purpose = "draft-only-role-promoted-without-factory"
+outputs = []
