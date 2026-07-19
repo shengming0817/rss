@@ -18,6 +18,7 @@ diport = { path = "../crates/diport" }
 eventexec = { path = "../crates/eventexec" }
 generated = { path = "../generated" }
 postgres = { path = "../adapters/postgres", features = [
+    "domain-audit",
     "domain-identity",
     "domain-settings",
     "fault-matrix-test-support",

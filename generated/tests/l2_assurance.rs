@@ -339,14 +339,12 @@ fn assert_producer_evidence(
             "{contract_id} must record one exact Postgres provider method"
         );
         assert!(
-            terminal.production_composition.runtime_entry.path == "assemblies/runtime/src/lib.rs"
-                && terminal.production_composition.runtime_entry.symbol == "run_startup"
-                && terminal
-                    .production_composition
-                    .runtime_assembly
-                    .path
-                    .starts_with("assemblies/runtime/src/generated/")
-                && terminal.production_composition.runtime_assembly.symbol == "wire_domains"
+            terminal.production_composition.runtime_entry.path == "assemblies/runtime/src/phase.rs"
+                && terminal.production_composition.runtime_entry.symbol == "execute"
+                && terminal.production_composition.runtime_assembly.path
+                    == "assemblies/runtime/src/phase/domains.rs"
+                && terminal.production_composition.runtime_assembly.symbol
+                    == "InfraBuilt::wire_domains"
                 && terminal
                     .production_composition
                     .runtime_module
@@ -358,7 +356,10 @@ fn assert_producer_evidence(
                     .wire
                     .path
                     .starts_with("composition/")
-                && terminal.production_composition.wire.symbol == "wire"
+                && (terminal.production_composition.wire.symbol == "wire"
+                    || (domain == "identity"
+                        && terminal.production_composition.wire.symbol
+                            == "common_identity_services"))
                 && !terminal
                     .production_composition
                     .service_constructor
@@ -524,18 +525,41 @@ fn assert_fault_runner(fault: &EvidenceFacet, contract_id: &str) {
         .iter()
         .filter(|carrier| carrier.kind == CarrierKind::RustSymbol)
         .collect::<Vec<_>>();
-    assert_eq!(runner_carriers.len(), 1, "{contract_id}");
     assert_eq!(
-        (
-            runner_carriers[0].path.as_str(),
-            runner_carriers[0].symbol.as_str(),
-        ),
-        (
-            "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
-            "READY_CASE_RUNNERS",
-        ),
+        runner_carriers
+            .iter()
+            .map(|carrier| carrier.symbol.as_str())
+            .collect::<Vec<_>>(),
+        expected_fault_runners(contract_id),
         "{contract_id} fault runner carrier drift"
     );
+    assert!(
+        runner_carriers.iter().all(|carrier| {
+            carrier.path == "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs"
+        }),
+        "{contract_id} fault runner escaped the dedicated journey"
+    );
+}
+
+fn expected_fault_runners(contract_id: &str) -> &'static [&'static str] {
+    match contract_id {
+        "identity.policy-updated" | "settings.config-version-changed" => {
+            &["run_outbox_transient_publish_failure"]
+        }
+        "identity.role-assigned" | "identity.role-revoked" => {
+            &["run_outbox_permanent_publish_failure"]
+        }
+        "identity.session-created" => &[
+            "run_inbox_claim_crash_before_commit",
+            "run_inbox_commit_before_ack_crash",
+            "run_inbox_lease_lost_before_commit",
+            "run_outbox_after_publish_before_settle",
+            "run_outbox_confirm_lost_channel_close",
+            "run_outbox_deadline_expired_settle",
+            "run_outbox_stale_contender_settle",
+        ],
+        _ => panic!("unexpected fact {contract_id}"),
+    }
 }
 
 fn assert_strictly_sorted_and_unique<T: Ord + std::fmt::Debug>(values: &[T], owner: &str) {

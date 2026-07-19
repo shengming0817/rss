@@ -344,11 +344,17 @@ pub struct PublishAmbiguityObservation {
     pub retry_generation: u64,
 }
 
+/// Unforgeable evidence that the publish-ambiguity conformance assertion passed.
+#[derive(Debug)]
+pub struct PublishAmbiguityConformancePassed {
+    _private: (),
+}
+
 /// Assert same-id retry, visible duplication, and retirement of the ambiguous generation.
 pub fn assert_publish_ambiguity_conformance(
     ids: &EventingIds,
     observation: &PublishAmbiguityObservation,
-) -> Result<(), EventingConformanceError> {
+) -> Result<PublishAmbiguityConformancePassed, EventingConformanceError> {
     expect(
         "publish.ambiguity.same-id",
         ids,
@@ -375,7 +381,8 @@ pub fn assert_publish_ambiguity_conformance(
             "retired_generation={} retry_generation={}",
             observation.retired_generation, observation.retry_generation
         ),
-    )
+    )?;
+    Ok(PublishAmbiguityConformancePassed { _private: () })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1059,6 +1066,12 @@ pub struct ConsumerDuplicateEffectObservation {
     pub duplicate_settle: SettleAction,
 }
 
+/// Unforgeable evidence that duplicate delivery preserved exactly one database effect.
+#[derive(Debug)]
+pub struct ConsumerDuplicateEffectConformancePassed {
+    _private: (),
+}
+
 /// Provider-neutral observation of one active ConsumerTx policy capability chain.
 ///
 /// The strings are deliberately policy values observed at the three executable stages rather
@@ -1121,7 +1134,7 @@ pub fn assert_consumer_tx_policy_conformance(
 pub fn assert_consumer_duplicate_effect_conformance(
     ids: &EventingIds,
     observation: &ConsumerDuplicateEffectObservation,
-) -> Result<(), EventingConformanceError> {
+) -> Result<ConsumerDuplicateEffectConformancePassed, EventingConformanceError> {
     expect_eq(
         "consumer.duplicate-effect.business-mutations",
         ids,
@@ -1139,7 +1152,8 @@ pub fn assert_consumer_duplicate_effect_conformance(
         ids,
         observation.duplicate_settle,
         SettleAction::Ack,
-    )
+    )?;
+    Ok(ConsumerDuplicateEffectConformancePassed { _private: () })
 }
 
 pub struct ConsumerConformanceCase<'a> {
@@ -1603,7 +1617,8 @@ mod tests {
     #[test]
     fn publish_ambiguity_conformance_accepts_same_id_duplicate_on_fresh_generation()
     -> Result<(), EventingConformanceError> {
-        assert_publish_ambiguity_conformance(&ids(), &publish_ambiguity_observation())
+        assert_publish_ambiguity_conformance(&ids(), &publish_ambiguity_observation())?;
+        Ok(())
     }
 
     #[test]
@@ -1663,7 +1678,8 @@ mod tests {
         assert_consumer_duplicate_effect_conformance(
             &ids(),
             &consumer_duplicate_effect_observation(),
-        )
+        )?;
+        Ok(())
     }
 
     #[test]

@@ -92,7 +92,11 @@ test-support = []
 # 不被通用 test-support 包含，避免 Cargo feature 并集把事务故障注入带入无关测试图。
 journey-fault-support = []
 # N-028 fault matrix typed harness。仅专用 journey crate 启用；不暴露 PgPool/raw SQL。
-fault-matrix-test-support = ["dep:anyhow"]
+fault-matrix-test-support = [
+    "dep:anyhow",
+    "dep:identity",
+    "identity/fault-matrix-test-support",
+]
 
 [dev-dependencies]
 generated = { path = "../../generated" }

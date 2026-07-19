@@ -95,17 +95,30 @@ pub(crate) enum Rule {
     ProducerFunnelBypass,
     /// The single producer transaction funnel or one of its exact provider call sites disappeared.
     ProducerFunnelSitesAbsent,
+    /// The feature-gated fault harness attempted to author a production terminal state directly.
+    FaultMatrixTerminalBypass,
 }
 
 pub(crate) struct PgTenantTxGuard;
 
 const FAULT_MATRIX_FILE: &str = "fault_matrix.rs";
+const MAX_FAULT_MATRIX_GUARD_SOURCE_BYTES: u64 = 512 * 1024;
 const FAULT_MATRIX_LIB_GATE: &str = "#[cfg(feature = \"fault-matrix-test-support\")]";
 const FAULT_MATRIX_OWNER_POOL: &str = "fault-matrix-owner-pool";
+const FAULT_MATRIX_EXACT_OUTBOX_CLAIM: &str = "fault-matrix-exact-outbox-claim";
 const FAULT_MATRIX_SEED_OUTBOX: &str = "fault-matrix-seed-outbox";
+const FAULT_MATRIX_SEED_SESSION_CREATED: &str = "fault-matrix-seed-session-created";
+const FAULT_MATRIX_SESSION_RETRY_DUE: &str = "fault-matrix-session-retry-due";
+const FAULT_MATRIX_PUBLISH_BUDGET_RETRY_DUE: &str = "fault-matrix-publish-budget-retry-due";
+const FAULT_MATRIX_OUTBOX_RETRY_OBSERVATION: &str = "fault-matrix-outbox-retry-observation";
+const FAULT_MATRIX_RECONCILE_ALIAS_OBSERVATION: &str = "fault-matrix-reconcile-alias-observation";
+const FAULT_MATRIX_SESSION_AUDIT_COUNT: &str = "fault-matrix-session-audit-count";
+const FAULT_MATRIX_SESSION_INBOX_DONE_COUNT: &str = "fault-matrix-session-inbox-done-count";
+const FAULT_MATRIX_EXPIRED_DEADLINE: &str = "fault-matrix-expired-deadline";
+const FAULT_MATRIX_OUTBOX_STATUS_OBSERVATION: &str = "fault-matrix-outbox-status-observation";
+const FAULT_MATRIX_TERMINAL_OBSERVATION: &str = "fault-matrix-terminal-observation";
 const FAULT_MATRIX_OUTBOX_STATUS_COUNT: &str = "fault-matrix-outbox-status-count";
 const FAULT_MATRIX_DEAD_LETTER_OBSERVATION: &str = "fault-matrix-dead-letter-observation";
-const FAULT_MATRIX_OUTBOX_CONTRACT_COUNT: &str = "fault-matrix-outbox-contract-count";
 const FAULT_MATRIX_AGE_OUTBOX_PUBLISHING: &str = "fault-matrix-age-outbox-publishing";
 const FAULT_MATRIX_AGE_INBOX_CLAIM: &str = "fault-matrix-age-inbox-claim";
 
@@ -125,6 +138,10 @@ impl GovernanceCheck for PgTenantTxGuard {
         let settings_ports = std::fs::read_to_string(&settings_ports_path)
             .with_context(|| format!("读 {} 失败", settings_ports_path.display()))?;
         let (summary, mut findings) = scan_guard(&migrations, &files);
+        findings.extend(load_fault_matrix_governance_findings(
+            &migrations,
+            &root.join("adapters/postgres/src"),
+        )?);
         findings.extend(producer_funnel_findings(&files));
         findings.extend(localtx_required_carriers_missing(&files));
         findings.extend(localtx_deadline_observation_findings(&workspace_files));
@@ -138,6 +155,52 @@ impl GovernanceCheck for PgTenantTxGuard {
         ));
         Ok((summary, findings))
     }
+}
+
+fn load_fault_matrix_governance_findings(
+    migrations: &[(String, String)],
+    src_dir: &Path,
+) -> Result<Vec<Finding>> {
+    let mut files = Vec::new();
+    for rel in ["lib.rs", FAULT_MATRIX_FILE] {
+        let path = src_dir.join(rel);
+        let source = crate::generated_file::read_stable_utf8_file(
+            &path,
+            MAX_FAULT_MATRIX_GUARD_SOURCE_BYTES,
+            "PostgreSQL fault-matrix governance source",
+        )
+        .with_context(|| format!("稳定读取 {} 失败", path.display()))?;
+        files.push((rel.to_string(), source));
+    }
+    let mut findings = fault_matrix_exception_staleness(&files);
+    findings.extend(fault_matrix_terminal_bypass_findings(&files));
+    let tenant_tables = tenant_tables_from_migrations(migrations);
+    if let Some((rel, source)) = files.iter().find(|(rel, _)| rel == FAULT_MATRIX_FILE) {
+        let stripped = strip_rust_comment_lines(&strip_cfg_test_modules(source));
+        let expanded = expand_simple_table_consts(&stripped).to_lowercase();
+        let helper_tables = tenant_pgconnection_helpers(&expanded, &tenant_tables);
+        let (raw_tenant_hits, _) =
+            raw_tenant_accesses(rel, &expanded, &tenant_tables, &helper_tables);
+        let (raw_outbox_hits, _, _) = raw_outbox_insert_sites(rel, &expanded);
+        findings.extend(raw_tenant_hits.iter().map(|hit| {
+            finding(
+                Rule::RawTenantTableAccess,
+                site_subject(rel, hit.line),
+                format!(
+                    "tenant tables {:?} touched through raw pattern {:?}; use PgTenantReadPool/PgTenantWritePool scoped methods",
+                    hit.tables, hit.pattern
+                ),
+            )
+        }));
+        findings.extend(raw_outbox_hits.iter().map(|hit| {
+            finding(
+                Rule::RawOutboxInsert,
+                site_subject(rel, hit.line),
+                "outbox rows must be created through outbox.rs TxCapability append funnel",
+            )
+        }));
+    }
+    Ok(findings)
 }
 
 fn producer_funnel_findings(files: &[(String, String)]) -> Vec<Finding> {
@@ -630,6 +693,7 @@ pub(crate) fn scan_guard(
     let mut state = ScanState::default();
     let writer_sql_helpers = workspace_writer_sql_helpers(files);
     findings.extend(fault_matrix_exception_staleness(files));
+    findings.extend(fault_matrix_terminal_bypass_findings(files));
     findings.extend(localtx_quarantine_findings(files));
 
     for (rel, content) in files {
@@ -6473,6 +6537,26 @@ fn skip_sql_quoted(bytes: &[u8], mut index: usize, quote: u8) -> Option<usize> {
     }
 }
 
+fn read_sql_quoted_identifier(sql: &str, mut index: usize) -> Option<(usize, String)> {
+    let bytes = sql.as_bytes();
+    index += 1;
+    let mut identifier = String::new();
+    loop {
+        let byte = *bytes.get(index)?;
+        index += 1;
+        if byte == b'"' {
+            if bytes.get(index) == Some(&b'"') {
+                identifier.push('"');
+                index += 1;
+            } else {
+                return Some((index, identifier.to_ascii_uppercase()));
+            }
+        } else {
+            identifier.push(byte as char);
+        }
+    }
+}
+
 fn skip_sql_dollar_quote(sql: &str, index: usize) -> Option<usize> {
     let bytes = sql.as_bytes();
     let tag_end = bytes[index + 1..]
@@ -6512,12 +6596,14 @@ fn sql_tokens(sql: &str) -> Option<Vec<String>> {
                 index = skip_sql_quoted(bytes, index, b'\'')?;
             }
             b'"' => {
-                index = skip_sql_quoted(bytes, index, b'"')?;
+                let (next, identifier) = read_sql_quoted_identifier(sql, index)?;
+                tokens.push(identifier);
+                index = next;
             }
             b'$' => {
                 index = skip_sql_dollar_quote(sql, index)?;
             }
-            b'(' | b')' | b',' | b';' => {
+            b'(' | b')' | b',' | b';' | b'=' => {
                 tokens.push((bytes[index] as char).to_string());
                 index += 1;
             }
@@ -6625,7 +6711,11 @@ fn raw_outbox_insert_sites(
             let (_, end) = raw_access_window(content, idx, ".execute(pool");
             let window = &content[idx.saturating_sub(400)..end];
             if needle == "insert into outbox"
-                && let Some(exception) = allowed_fault_matrix_outbox_insert(rel, window)
+                && let Some(exception) = allowed_fault_matrix_outbox_insert(
+                    rel,
+                    enclosing_function_name(content, idx),
+                    window,
+                )
             {
                 exceptions.insert(exception);
                 continue;
@@ -6715,7 +6805,13 @@ fn raw_tenant_accesses(
             tables.sort();
             tables.dedup();
             if !tables.is_empty() {
-                if let Some(exception) = allowed_site_exception(rel, &pattern, &tables, window) {
+                if let Some(exception) = allowed_site_exception(
+                    rel,
+                    enclosing_function_name(content, idx),
+                    &pattern,
+                    &tables,
+                    window,
+                ) {
                     allowed_exceptions.insert(exception);
                     continue;
                 }
@@ -6924,11 +7020,22 @@ fn raw_store_type(ty: &syn::Type) -> Option<&'static str> {
 
 fn allowed_site_exception(
     rel: &str,
-    _pattern: &str,
+    symbol: Option<&str>,
+    pattern: &str,
     tables: &[String],
     window: &str,
 ) -> Option<&'static str> {
-    if let Some(exception) = allowed_fault_matrix_raw_tenant_site(rel, tables, window) {
+    if rel == "outbox.rs"
+        && symbol == Some("fault_matrix_claim_exact")
+        && tables == ["outbox"]
+        && ((pattern == "pool.begin().await" && window.contains("owner_pool.begin().await"))
+            || (pattern.starts_with(".fetch_optional(&mut *tx")
+                && window.contains("from claimed")
+                && window.contains(".bind(self.relay_budget.required_budget_millis())")))
+    {
+        return Some(FAULT_MATRIX_EXACT_OUTBOX_CLAIM);
+    }
+    if let Some(exception) = allowed_fault_matrix_raw_tenant_site(rel, symbol, tables, window) {
         return Some(exception);
     }
     if rel == "migrator.rs"
@@ -6983,6 +7090,7 @@ fn allowed_site_exception(
 
 fn allowed_fault_matrix_raw_tenant_site(
     rel: &str,
+    symbol: Option<&str>,
     tables: &[String],
     window: &str,
 ) -> Option<&'static str> {
@@ -6990,10 +7098,89 @@ fn allowed_fault_matrix_raw_tenant_site(
         return None;
     }
     if tables == ["outbox"]
+        && symbol == Some("seed_session_created")
         && window.contains("insert into outbox (")
+        && window.contains(".bind(input.idem_key.as_str())")
+        && window.contains(".bind(payload)")
+        && window.contains("session_created_fact.contract().schema_hash()")
+        && window.contains(".execute(pool)")
+    {
+        return Some(FAULT_MATRIX_SEED_SESSION_CREATED);
+    }
+    if tables == ["outbox"]
+        && window.contains("insert into outbox (")
+        && window.contains("decode('70', 'hex')")
         && window.contains(".execute(pool)")
     {
         return Some(FAULT_MATRIX_SEED_OUTBOX);
+    }
+    if tables == ["outbox"]
+        && symbol == Some("make_session_created_retry_due")
+        && window.contains("update outbox set retry_after = clock_timestamp()")
+        && window.contains("contract_id = $4 and status = 'pending'")
+        && window.contains(".execute(&self.owner_pool)")
+    {
+        return Some(FAULT_MATRIX_SESSION_RETRY_DUE);
+    }
+    if tables == ["outbox"]
+        && symbol == Some("run_outbox_publish_to_budget")
+        && window.contains("update outbox set retry_after = clock_timestamp()")
+        && window.contains("event_id = $2 and status = 'pending'")
+        && window.contains(".execute(&self.owner_pool)")
+    {
+        return Some(FAULT_MATRIX_PUBLISH_BUDGET_RETRY_DUE);
+    }
+    if tables == ["outbox"]
+        && symbol == Some("outbox_retry_observation")
+        && window.contains("select status, retry_count")
+        && window.contains("lease_token is null and lease_until is null")
+        && window.contains(".fetch_optional(&self.owner_pool)")
+    {
+        return Some(FAULT_MATRIX_OUTBOX_RETRY_OBSERVATION);
+    }
+    if tables == ["command_idempotency_aliases"]
+        && symbol == Some("reconcile_dispatch_key_stable")
+        && window.contains("select command_id from command_idempotency_aliases")
+        && window.contains("alias_digest = $3")
+        && window.contains(".fetch_all(&self.owner_pool)")
+    {
+        return Some(FAULT_MATRIX_RECONCILE_ALIAS_OBSERVATION);
+    }
+    if tables == ["audit_entries"]
+        && window.contains("action = 'identity:login'")
+        && window.contains("resource_kind = 'session'")
+        && window.contains("resource_id = $2")
+        && window.contains(".fetch_one(&self.owner_pool)")
+    {
+        return Some(FAULT_MATRIX_SESSION_AUDIT_COUNT);
+    }
+    if tables == ["inbox_receipts"]
+        && window.contains("consumer_group = $3")
+        && window.contains("contract_id = $5 and status = 'done'")
+        && window.contains(".fetch_one(&self.owner_pool)")
+    {
+        return Some(FAULT_MATRIX_SESSION_INBOX_DONE_COUNT);
+    }
+    if tables == ["outbox"]
+        && window.contains("update outbox set updated_at = clock_timestamp()")
+        && window.contains("returning (extract(epoch from lease_until)")
+        && window.contains(".fetch_one(&self.owner_pool)")
+    {
+        return Some(FAULT_MATRIX_EXPIRED_DEADLINE);
+    }
+    if tables == ["outbox"]
+        && window.contains("select status from outbox")
+        && window.contains("domain = $3 and contract_id = $4")
+        && window.contains(".fetch_one(&self.owner_pool)")
+    {
+        return Some(FAULT_MATRIX_OUTBOX_STATUS_OBSERVATION);
+    }
+    if tables == ["outbox"]
+        && window.contains("published_at is null and dlx_at is null")
+        && window.contains("domain = $3 and contract_id = $4")
+        && window.contains(".fetch_one(pool)")
+    {
+        return Some(FAULT_MATRIX_TERMINAL_OBSERVATION);
     }
     if tables == ["outbox"]
         && window.contains("select count(*)::bigint from outbox")
@@ -7012,15 +7199,9 @@ fn allowed_fault_matrix_raw_tenant_site(
         return Some(FAULT_MATRIX_DEAD_LETTER_OBSERVATION);
     }
     if tables == ["outbox"]
-        && window.contains("select count(*)::bigint from outbox")
-        && window.contains("topic = $2")
-        && window.contains("contract_id = $3")
-        && window.contains(".fetch_one(pool)")
-    {
-        return Some(FAULT_MATRIX_OUTBOX_CONTRACT_COUNT);
-    }
-    if tables == ["outbox"]
-        && window.contains("update outbox set updated_at")
+        && symbol == Some("age_outbox_publishing")
+        && window.contains("update outbox")
+        && window.contains("set updated_at = clock_timestamp()")
         && window.contains("status = $3")
         && window.contains(".execute(pool)")
     {
@@ -7036,9 +7217,24 @@ fn allowed_fault_matrix_raw_tenant_site(
     None
 }
 
-fn allowed_fault_matrix_outbox_insert(rel: &str, window: &str) -> Option<&'static str> {
+fn allowed_fault_matrix_outbox_insert(
+    rel: &str,
+    symbol: Option<&str>,
+    window: &str,
+) -> Option<&'static str> {
+    if rel == FAULT_MATRIX_FILE
+        && symbol == Some("seed_session_created")
+        && window.contains("insert into outbox (")
+        && window.contains(".bind(input.idem_key.as_str())")
+        && window.contains(".bind(payload)")
+        && window.contains("session_created_fact.contract().schema_hash()")
+        && window.contains(".execute(pool)")
+    {
+        return Some(FAULT_MATRIX_SEED_SESSION_CREATED);
+    }
     if rel == FAULT_MATRIX_FILE
         && window.contains("insert into outbox (")
+        && window.contains("decode('70', 'hex')")
         && window.contains(".execute(pool)")
     {
         return Some(FAULT_MATRIX_SEED_OUTBOX);
@@ -7127,12 +7323,126 @@ fn fault_matrix_exception_staleness(files: &[(String, String)]) -> Vec<Finding> 
         ));
     }
 
+    if let Some((_, outbox)) = files.iter().find(|(rel, _)| rel == "outbox.rs") {
+        let outbox = strip_rust_comment_lines(&strip_cfg_test_modules(outbox)).to_lowercase();
+        if ![
+            "#[cfg(feature = \"fault-matrix-test-support\")]",
+            "fn fault_matrix_claim_exact",
+            "owner_pool.begin().await",
+            "with claim_clock as materialized",
+            "from claimed",
+            ".fetch_optional(&mut *tx)",
+        ]
+        .iter()
+        .all(|needle| outbox.contains(needle))
+        {
+            findings.push(finding(
+                Rule::StaleException,
+                FAULT_MATRIX_EXACT_OUTBOX_CLAIM,
+                "fault_matrix exact-claim raw-access exception target is absent or no longer exact",
+            ));
+        }
+    }
+
     let content = strip_rust_comment_lines(&strip_cfg_test_modules(fault_matrix)).to_lowercase();
     for (name, needles) in [
         (FAULT_MATRIX_OWNER_POOL, &["owner_pool: pgpool"][..]),
         (
             FAULT_MATRIX_SEED_OUTBOX,
-            &["insert into outbox (", ".execute(pool)"][..],
+            &[
+                "insert into outbox (",
+                "decode('70', 'hex')",
+                ".execute(pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_SEED_SESSION_CREATED,
+            &[
+                "insert into outbox (",
+                "serde_json::to_vec(&input.payload)",
+                ".bind(input.idem_key.as_str())",
+                ".bind(payload)",
+                "session_created_fact.contract().schema_hash()",
+                ".execute(pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_SESSION_RETRY_DUE,
+            &[
+                "update outbox set retry_after = clock_timestamp()",
+                "contract_id = $4 and status = 'pending'",
+                ".execute(&self.owner_pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_PUBLISH_BUDGET_RETRY_DUE,
+            &[
+                "fn run_outbox_publish_to_budget",
+                "update outbox set retry_after = clock_timestamp()",
+                "event_id = $2 and status = 'pending'",
+                ".execute(&self.owner_pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_OUTBOX_RETRY_OBSERVATION,
+            &[
+                "fn outbox_retry_observation",
+                "select status, retry_count",
+                "lease_token is null and lease_until is null",
+                ".fetch_optional(&self.owner_pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_RECONCILE_ALIAS_OBSERVATION,
+            &[
+                "fn reconcile_dispatch_key_stable",
+                "select command_id from command_idempotency_aliases",
+                "alias_digest = $3",
+                ".fetch_all(&self.owner_pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_SESSION_AUDIT_COUNT,
+            &[
+                "from audit_entries",
+                "action = 'identity:login'",
+                "resource_kind = 'session'",
+                "resource_id = $2",
+                ".fetch_one(&self.owner_pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_SESSION_INBOX_DONE_COUNT,
+            &[
+                "from inbox_receipts",
+                "consumer_group = $3",
+                "contract_id = $5 and status = 'done'",
+                ".fetch_one(&self.owner_pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_EXPIRED_DEADLINE,
+            &[
+                "update outbox set updated_at = clock_timestamp()",
+                "returning (extract(epoch from lease_until)",
+                ".fetch_one(&self.owner_pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_OUTBOX_STATUS_OBSERVATION,
+            &[
+                "select status from outbox",
+                "domain = $3 and contract_id = $4",
+                ".fetch_one(&self.owner_pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_TERMINAL_OBSERVATION,
+            &[
+                "published_at is null and dlx_at is null",
+                "domain = $3 and contract_id = $4",
+                ".fetch_one(pool)",
+            ][..],
         ),
         (
             FAULT_MATRIX_OUTBOX_STATUS_COUNT,
@@ -7153,18 +7463,11 @@ fn fault_matrix_exception_staleness(files: &[(String, String)]) -> Vec<Finding> 
             ][..],
         ),
         (
-            FAULT_MATRIX_OUTBOX_CONTRACT_COUNT,
-            &[
-                "select count(*)::bigint from outbox",
-                "topic = $2",
-                "contract_id = $3",
-                ".fetch_one(pool)",
-            ][..],
-        ),
-        (
             FAULT_MATRIX_AGE_OUTBOX_PUBLISHING,
             &[
-                "update outbox set updated_at",
+                "fn age_outbox_publishing",
+                "update outbox",
+                "set updated_at = clock_timestamp()",
                 "status = $3",
                 ".execute(pool)",
             ][..],
@@ -7187,6 +7490,159 @@ fn fault_matrix_exception_staleness(files: &[(String, String)]) -> Vec<Finding> 
         }
     }
     findings
+}
+
+fn fault_matrix_terminal_bypass_findings(files: &[(String, String)]) -> Vec<Finding> {
+    use syn::visit::Visit as _;
+
+    let Some((_, fault_matrix)) = files.iter().find(|(rel, _)| rel == FAULT_MATRIX_FILE) else {
+        return Vec::new();
+    };
+    let production = strip_cfg_test_modules(fault_matrix);
+    let Ok(syntax) = syn::parse_file(&production) else {
+        return vec![finding(
+            Rule::FaultMatrixTerminalBypass,
+            FAULT_MATRIX_FILE,
+            "fault_matrix production AST could not be parsed; terminal-state SQL check fails closed",
+        )];
+    };
+    let aliases = sqlx_query_aliases(&syntax);
+    let constants = sql_string_constants(&syntax);
+    struct QueryVisitor<'a> {
+        aliases: &'a BTreeSet<String>,
+        constants: &'a BTreeMap<String, String>,
+        sites: BTreeSet<SqlQuerySite>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for QueryVisitor<'_> {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let Some(site) = sqlx_query_call_site(call, self.aliases, self.constants) {
+                self.sites.insert(site);
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+
+        fn visit_expr_macro(&mut self, expression: &'ast syn::ExprMacro) {
+            if let Some(site) = sqlx_query_macro_site(expression, self.aliases, self.constants) {
+                self.sites.insert(site);
+            }
+            syn::visit::visit_expr_macro(self, expression);
+        }
+    }
+    let mut visitor = QueryVisitor {
+        aliases: &aliases,
+        constants: &constants,
+        sites: BTreeSet::new(),
+    };
+    visitor.visit_file(&syntax);
+    visitor
+        .sites
+        .into_iter()
+        .filter_map(|site| {
+            let detail = match site.sql {
+                Some(sql) => fault_matrix_terminal_sql_violation(&sql),
+                None => Some(
+                    "fault_matrix SQL must be statically resolvable so terminal writes cannot hide behind dynamic text"
+                        .to_string(),
+                ),
+            }?;
+            Some(finding(
+                Rule::FaultMatrixTerminalBypass,
+                site_subject(FAULT_MATRIX_FILE, site.line),
+                detail,
+            ))
+        })
+        .collect()
+}
+
+fn fault_matrix_terminal_sql_violation(sql: &str) -> Option<String> {
+    let tokens = sql_tokens(sql)?;
+    for (index, token) in tokens.iter().enumerate() {
+        if token == "INSERT"
+            && let Some(into) = tokens[index + 1..]
+                .iter()
+                .position(|candidate| candidate == "INTO")
+                .map(|offset| index + offset + 1)
+            && tokens[into + 1..]
+                .iter()
+                .take_while(|candidate| candidate.as_str() != "(")
+                .any(|candidate| sql_identifier_is(candidate, "AUDIT_ENTRIES"))
+        {
+            return Some(
+                "fault_matrix must author audit business effects through the production ConsumerTx"
+                    .to_string(),
+            );
+        }
+        if token != "UPDATE" {
+            continue;
+        }
+        let Some(set) = tokens[index + 1..]
+            .iter()
+            .position(|candidate| candidate == "SET")
+            .map(|offset| index + offset + 1)
+        else {
+            return Some("fault_matrix UPDATE SQL could not be classified safely".to_string());
+        };
+        let target = &tokens[index + 1..set];
+        if target
+            .iter()
+            .any(|candidate| sql_identifier_is(candidate, "OUTBOX"))
+            && update_assigns_any(&tokens[set + 1..], &["STATUS", "PUBLISHED_AT", "DLX_AT"])
+        {
+            return Some(
+                "fault_matrix must settle outbox status and terminal timestamps through the production settlement funnel"
+                    .to_string(),
+            );
+        }
+        if target
+            .iter()
+            .any(|candidate| sql_identifier_is(candidate, "INBOX_RECEIPTS"))
+            && update_assigns_any(&tokens[set + 1..], &["STATUS"])
+        {
+            return Some(
+                "fault_matrix must commit Inbox Done through the production Inbox/ConsumerTx funnel"
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
+fn update_assigns_any(tokens: &[String], forbidden: &[&str]) -> bool {
+    let mut depth = 0_i32;
+    let mut assignment_start = 0;
+    for index in 0..=tokens.len() {
+        let token = tokens.get(index).map(String::as_str);
+        let boundary = index == tokens.len()
+            || (depth == 0 && matches!(token, Some("," | "WHERE" | "RETURNING" | "FROM" | ";")));
+        if boundary {
+            let assignment = &tokens[assignment_start..index];
+            let lhs_end = assignment
+                .iter()
+                .position(|candidate| candidate == "=")
+                .unwrap_or(assignment.len());
+            if assignment[..lhs_end].iter().any(|candidate| {
+                forbidden
+                    .iter()
+                    .any(|column| sql_identifier_is(candidate, column))
+            }) {
+                return true;
+            }
+            if matches!(token, Some("WHERE" | "RETURNING" | "FROM" | ";") | None) {
+                break;
+            }
+            assignment_start = index + 1;
+        }
+        match token {
+            Some("(") => depth += 1,
+            Some(")") => depth -= 1,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn sql_identifier_is(token: &str, expected: &str) -> bool {
+    token.rsplit('.').next() == Some(expected)
 }
 
 fn site_subject(rel: &str, line: usize) -> String {
@@ -8662,7 +9118,8 @@ pub mod fault_matrix;
                     "fault_matrix.rs",
                     "struct Harness { owner_pool: PgPool } \
                      async fn seed(pool: &PgPool) { \
-                         sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(pool).await; \
+                         sqlx::query(\"INSERT INTO outbox (event_id, payload) \
+                                      VALUES ($1, decode('70', 'hex'))\").execute(pool).await; \
                          sqlx::query(\"DELETE FROM inbox_receipts WHERE tenant_id = $1\").execute(pool).await; \
                      }",
                 ),
@@ -8703,6 +9160,187 @@ pub mod fault_matrix;
                 .iter()
                 .any(|finding| finding.rule == Rule::RawTenantTableAccess),
             "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_fault_matrix_cannot_write_outbox_terminal_status_directly() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "role_repo.rs",
+                    "fn safe_site(){ sqlx::query(\"SELECT id FROM roles WHERE tenant_id = $1\"); }",
+                ),
+                (
+                    "fault_matrix.rs",
+                    "struct Harness { owner_pool: PgPool } \
+                     async fn bypass(&self) { \
+                         sqlx::query(\"UPDATE outbox SET status = 'published' \
+                                      WHERE tenant_id = $1::uuid AND event_id = $2\") \
+                             .execute(&self.owner_pool).await; \
+                     }",
+                ),
+            ]),
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::FaultMatrixTerminalBypass),
+            "fault harness terminal writes must go through production settlement: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_fault_matrix_terminal_column_is_rejected_when_not_first_assignment() {
+        let findings = fault_matrix_terminal_bypass_findings(&files(&[(
+            "fault_matrix.rs",
+            "async fn bypass(pool: &PgPool) { \
+                 sqlx::query(\"UPDATE outbox SET retry_after = now(), published_at = now() \
+                              WHERE event_id = $1\") \
+                     .execute(pool).await; \
+             }",
+        )]));
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::FaultMatrixTerminalBypass),
+            "non-first terminal assignment passed: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_fault_matrix_schema_qualified_inbox_status_is_rejected() {
+        let findings = fault_matrix_terminal_bypass_findings(&files(&[(
+            "fault_matrix.rs",
+            "async fn bypass(pool: &PgPool) { \
+                 sqlx::query(\"UPDATE public.inbox_receipts \
+                              SET claimed_at = now(), status = 'done' WHERE event_id = $1\") \
+                     .execute(pool).await; \
+             }",
+        )]));
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::FaultMatrixTerminalBypass),
+            "schema-qualified Inbox terminal assignment passed: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_fault_matrix_schema_qualified_audit_insert_is_rejected() {
+        let findings = fault_matrix_terminal_bypass_findings(&files(&[(
+            "fault_matrix.rs",
+            "async fn bypass(pool: &PgPool) { \
+                 sqlx::query(\"INSERT INTO public.audit_entries (tenant_id) VALUES ($1)\") \
+                     .execute(pool).await; \
+             }",
+        )]));
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::FaultMatrixTerminalBypass),
+            "schema-qualified audit mutation passed: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_real_fault_matrix_loader_feeds_specialized_terminal_check() -> Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("rss-pg-guard-fault-loader-{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(
+            root.join("lib.rs"),
+            "#[cfg(feature = \"fault-matrix-test-support\")]\npub mod fault_matrix;\n",
+        )?;
+        std::fs::write(
+            root.join("fault_matrix.rs"),
+            "async fn bypass(pool: &PgPool) { \
+                 sqlx::query(\"UPDATE outbox SET retry_after = now(), dlx_at = now()\") \
+                     .execute(pool).await; \
+             }",
+        )?;
+        let findings = load_fault_matrix_governance_findings(&migrations(), &root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::FaultMatrixTerminalBypass),
+            "real fault_matrix loader omitted the specialized terminal check: {findings:?}"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn red_real_fault_matrix_loader_feeds_raw_tenant_scan() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "rss-pg-guard-fault-raw-loader-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(
+            root.join("lib.rs"),
+            "#[cfg(feature = \"fault-matrix-test-support\")]\npub mod fault_matrix;\n",
+        )?;
+        std::fs::write(
+            root.join("fault_matrix.rs"),
+            "struct Harness { owner_pool: PgPool } \
+             impl Harness { \
+                 async fn accidental(&self) { \
+                     sqlx::query(\"DELETE FROM roles WHERE tenant_id = $1\") \
+                         .execute(&self.owner_pool).await; \
+                 } \
+             }",
+        )?;
+        let findings = load_fault_matrix_governance_findings(&migrations(), &root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::RawTenantTableAccess),
+            "real fault_matrix loader omitted the shared raw tenant scan: {findings:?}"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn real_fault_matrix_loader_accepts_only_registered_exact_sites() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let migrations = load_sql_files(&root.join("adapters/postgres/migrations"))?;
+        let findings = load_fault_matrix_governance_findings(
+            &migrations,
+            &root.join("adapters/postgres/src"),
+        )?;
+        assert!(
+            findings.is_empty(),
+            "registered feature-gated fault-matrix sites drifted or a raw access escaped the exact allowlist: {findings:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn green_fault_matrix_setup_time_and_read_only_sql_pass_terminal_check() {
+        let findings = fault_matrix_terminal_bypass_findings(&files(&[(
+            "fault_matrix.rs",
+            "async fn allowed(pool: &PgPool) { \
+                 sqlx::query(\"UPDATE public.outbox SET retry_after = now(), updated_at = now() \
+                              WHERE status = 'pending'\").execute(pool).await; \
+                 sqlx::query(\"UPDATE inbox_receipts SET claimed_at = now() \
+                              WHERE status = 'processing'\").execute(pool).await; \
+                 sqlx::query(\"INSERT INTO outbox (event_id, status) VALUES ($1, 'pending')\") \
+                     .execute(pool).await; \
+                 sqlx::query_scalar(\"SELECT count(*) FROM audit_entries\").fetch_one(pool).await; \
+             }",
+        )]));
+        assert!(
+            findings.is_empty(),
+            "fixture seed/time injection/read-only observation must remain allowed: {findings:?}"
         );
     }
 

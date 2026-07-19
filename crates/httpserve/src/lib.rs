@@ -38,6 +38,7 @@ pub use routes::{
 pub use routes::{
     LocalOnlyMountedRouteProof, LocalOnlyRouteNotMounted, StatelessLocalOnlyMountedRouteProof,
     prove_local_only_mounted_route_state, prove_stateless_local_only_mounted_route,
+    with_producer_witness_for_test,
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use routes::{TestPrimaryRoute, TestRoute, TestRoutePermission, TestRouteResourceScope};

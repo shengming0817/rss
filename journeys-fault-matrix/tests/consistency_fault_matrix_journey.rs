@@ -7,32 +7,43 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use amqp::{AmqpPublisher, AmqpSubscriber};
 use anyhow::{Context, Result, anyhow, bail};
-use consistency::SeenState;
+use consistency::{Disposition, IdemKey, SeenState};
 use deadpool_redis::{Config as RedisConfig, Runtime as RedisRuntime};
 use diport::{
-    AckAction, AckableSubscriber, Acker, DynPublisher, EnvelopeSubjectId, MessageId, OpaqueActorId,
-    OutboxActor, PublishRequest, Publisher, Topic,
+    AckAction, AckableSubscriber, Acker, DynPublisher, EnvelopeSubjectId, ManagedResource,
+    MessageId, OpaqueActorId, OutboxActor, PublishRequest, Publisher, PublisherError, Topic,
 };
 use eventexec::RelayBudget;
 use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use futures::StreamExt;
 use futures::future::LocalBoxFuture;
 use postgres::fault_matrix::{
-    FaultMatrixDeadLetterEncoding, FaultMatrixDeadLetterSource, FaultMatrixDeadLetterSummary,
+    FaultMatrixConsumerDelivery, FaultMatrixDeadLetterEncoding, FaultMatrixDeadLetterSource,
+    FaultMatrixDeadLetterSummary, FaultMatrixExpiredSettlementObservation,
     FaultMatrixOutboxRetryObservation, FaultMatrixOutboxStatus, FaultMatrixPublishOutcome,
-    PgFaultMatrixConfig, PgFaultMatrixHarness, PgFaultMatrixLoginCredentials,
+    FaultMatrixSessionCreatedEffectObservation, FaultMatrixSessionCreatedInput,
+    FaultMatrixSessionCreatedRelayObservation, FaultMatrixSettlementOutcome,
+    FaultMatrixStaleSettlementObservation, PgFaultMatrixConfig, PgFaultMatrixHarness,
+    PgFaultMatrixLoginCredentials,
 };
 use redis::RedisRuntimeDeps;
 use testkit::crash_matrix::{CrashCase, CrashFaultSpec, CrashMatrix, CrashRunner, CrashStatus};
+use testkit::eventing_conformance::{
+    ConsumerDuplicateEffectConformancePassed, ConsumerDuplicateEffectObservation, EventingIds,
+    PublishAmbiguityConformancePassed, PublishAmbiguityObservation, SettleAction,
+    assert_consumer_duplicate_effect_conformance, assert_publish_ambiguity_conformance,
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const RABBIT_VHOST: &str = "rss_fault_matrix";
 const PROJECTION_OWNER: &str = "fault-matrix-projection";
+const TEST_OCCURRED_AT: i64 = 1_700_000_000;
 
 fn relay_budget() -> Result<RelayBudget> {
     Ok(RelayBudget::new(
@@ -49,6 +60,63 @@ struct ReadyCaseRunner {
     fault_spec: CrashFaultSpec,
     runner: CrashRunner,
     contract: vocab::ContractBinding,
+    run: CaseRunnerFn,
+}
+
+type NormalCaseRunnerFn = for<'a> fn(
+    &'a ReadyCaseRunner,
+    &'a CrashCase,
+    &'a PgHarness,
+    &'a RabbitHarness,
+    &'a RedisHarness,
+    &'a RunScope,
+) -> LocalBoxFuture<'a, Result<()>>;
+
+type ConfirmLostCaseRunnerFn =
+    for<'a> fn(
+        &'a ReadyCaseRunner,
+        &'a CrashCase,
+        &'a PgHarness,
+        &'a RabbitHarness,
+        &'a RedisHarness,
+        &'a RunScope,
+    ) -> LocalBoxFuture<'a, Result<ConfirmLostCriticalEvidence>>;
+
+type StaleContenderCaseRunnerFn =
+    for<'a> fn(
+        &'a ReadyCaseRunner,
+        &'a CrashCase,
+        &'a PgHarness,
+        &'a RabbitHarness,
+        &'a RedisHarness,
+        &'a RunScope,
+    ) -> LocalBoxFuture<'a, Result<FaultMatrixStaleSettlementObservation>>;
+
+type DeadlineExpiredCaseRunnerFn =
+    for<'a> fn(
+        &'a ReadyCaseRunner,
+        &'a CrashCase,
+        &'a PgHarness,
+        &'a RabbitHarness,
+        &'a RedisHarness,
+        &'a RunScope,
+    ) -> LocalBoxFuture<'a, Result<FaultMatrixExpiredSettlementObservation>>;
+
+#[derive(Clone, Copy)]
+enum CaseRunnerFn {
+    Normal(NormalCaseRunnerFn),
+    ConfirmLost(ConfirmLostCaseRunnerFn),
+    StaleContender(StaleContenderCaseRunnerFn),
+    DeadlineExpired(DeadlineExpiredCaseRunnerFn),
+}
+
+#[derive(Debug)]
+struct ConfirmLostCriticalEvidence {
+    _first_relay: FaultMatrixSessionCreatedRelayObservation,
+    _retry_relay: FaultMatrixSessionCreatedRelayObservation,
+    _effect: FaultMatrixSessionCreatedEffectObservation,
+    _publish_conformance: PublishAmbiguityConformancePassed,
+    _duplicate_conformance: ConsumerDuplicateEffectConformancePassed,
 }
 
 impl ReadyCaseRunner {
@@ -57,12 +125,62 @@ impl ReadyCaseRunner {
         fault_spec: CrashFaultSpec,
         runner: CrashRunner,
         contract: vocab::ContractBinding,
+        run: NormalCaseRunnerFn,
     ) -> Self {
         Self {
             id,
             fault_spec,
             runner,
             contract,
+            run: CaseRunnerFn::Normal(run),
+        }
+    }
+
+    const fn confirm_lost(
+        id: &'static str,
+        fault_spec: CrashFaultSpec,
+        runner: CrashRunner,
+        contract: vocab::ContractBinding,
+        run: ConfirmLostCaseRunnerFn,
+    ) -> Self {
+        Self {
+            id,
+            fault_spec,
+            runner,
+            contract,
+            run: CaseRunnerFn::ConfirmLost(run),
+        }
+    }
+
+    const fn stale_contender(
+        id: &'static str,
+        fault_spec: CrashFaultSpec,
+        runner: CrashRunner,
+        contract: vocab::ContractBinding,
+        run: StaleContenderCaseRunnerFn,
+    ) -> Self {
+        Self {
+            id,
+            fault_spec,
+            runner,
+            contract,
+            run: CaseRunnerFn::StaleContender(run),
+        }
+    }
+
+    const fn deadline_expired(
+        id: &'static str,
+        fault_spec: CrashFaultSpec,
+        runner: CrashRunner,
+        contract: vocab::ContractBinding,
+        run: DeadlineExpiredCaseRunnerFn,
+    ) -> Self {
+        Self {
+            id,
+            fault_spec,
+            runner,
+            contract,
+            run: CaseRunnerFn::DeadlineExpired(run),
         }
     }
 
@@ -110,6 +228,28 @@ impl ReadyCaseRunner {
         }
         Ok(())
     }
+
+    fn execute<'a>(
+        &'a self,
+        case: &'a CrashCase,
+        pg: &'a PgHarness,
+        rabbit: &'a RabbitHarness,
+        redis: &'a RedisHarness,
+        scope: &'a RunScope,
+    ) -> LocalBoxFuture<'a, Result<()>> {
+        match self.run {
+            CaseRunnerFn::Normal(run) => run(self, case, pg, rabbit, redis, scope),
+            CaseRunnerFn::ConfirmLost(run) => {
+                Box::pin(async move { run(self, case, pg, rabbit, redis, scope).await.map(|_| ()) })
+            }
+            CaseRunnerFn::StaleContender(run) => {
+                Box::pin(async move { run(self, case, pg, rabbit, redis, scope).await.map(|_| ()) })
+            }
+            CaseRunnerFn::DeadlineExpired(run) => {
+                Box::pin(async move { run(self, case, pg, rabbit, redis, scope).await.map(|_| ()) })
+            }
+        }
+    }
 }
 
 const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
@@ -118,90 +258,119 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         CrashFaultSpec::OutboxAfterPublishBeforeSettle,
         CrashRunner::PostgresRabbitmq,
         generated::event::identity_v1::session_created::CONTRACT,
+        run_outbox_after_publish_before_settle,
     ),
     ReadyCaseRunner::new(
         "outbox-transient-publish-failure",
         CrashFaultSpec::OutboxTransientPublishFailure,
         CrashRunner::Postgres,
         generated::event::settings_v1::CONTRACT,
+        run_outbox_transient_publish_failure,
     ),
-    ReadyCaseRunner::new(
-        "outbox-ambiguous-publish-failure",
-        CrashFaultSpec::OutboxAmbiguousPublishFailure,
+    ReadyCaseRunner::confirm_lost(
+        "outbox-confirm-lost-channel-close",
+        CrashFaultSpec::OutboxConfirmLostChannelClose,
+        CrashRunner::PostgresRabbitmq,
+        generated::event::identity_v1::session_created::CONTRACT,
+        run_outbox_confirm_lost_channel_close,
+    ),
+    ReadyCaseRunner::stale_contender(
+        "outbox-stale-contender-settle",
+        CrashFaultSpec::OutboxStaleLeaseContender,
         CrashRunner::Postgres,
         generated::event::identity_v1::session_created::CONTRACT,
+        run_outbox_stale_contender_settle,
+    ),
+    ReadyCaseRunner::deadline_expired(
+        "outbox-deadline-expired-settle",
+        CrashFaultSpec::OutboxLeaseDeadlineExpired,
+        CrashRunner::Postgres,
+        generated::event::identity_v1::session_created::CONTRACT,
+        run_outbox_deadline_expired_settle,
     ),
     ReadyCaseRunner::new(
         "outbox-permanent-publish-failure",
         CrashFaultSpec::OutboxPermanentPublishFailure,
         CrashRunner::Postgres,
         generated::event::identity_v1::role_assigned::CONTRACT,
+        run_outbox_permanent_publish_failure,
     ),
     ReadyCaseRunner::new(
         "outbox-policy-updated-transient-publish-failure",
         CrashFaultSpec::OutboxTransientPublishFailure,
         CrashRunner::Postgres,
         generated::event::identity_v1::policy_updated::CONTRACT,
+        run_outbox_transient_publish_failure,
     ),
     ReadyCaseRunner::new(
         "outbox-role-revoked-permanent-publish-failure",
         CrashFaultSpec::OutboxPermanentPublishFailure,
         CrashRunner::Postgres,
         generated::event::identity_v1::role_revoked::CONTRACT,
+        run_outbox_permanent_publish_failure,
     ),
     ReadyCaseRunner::new(
         "inbox-claim-crash-before-commit",
         CrashFaultSpec::InboxClaimCrashBeforeCommit,
         CrashRunner::Postgres,
         generated::event::identity_v1::session_created::CONTRACT,
+        run_inbox_claim_crash_before_commit,
     ),
     ReadyCaseRunner::new(
         "inbox-commit-before-ack-crash",
         CrashFaultSpec::InboxCommitBeforeAckCrash,
         CrashRunner::PostgresRabbitmq,
         generated::event::identity_v1::session_created::CONTRACT,
+        run_inbox_commit_before_ack_crash,
     ),
     ReadyCaseRunner::new(
         "inbox-lease-lost-before-commit",
         CrashFaultSpec::InboxLeaseLostBeforeCommit,
         CrashRunner::Postgres,
         generated::event::identity_v1::session_created::CONTRACT,
+        run_inbox_lease_lost_before_commit,
     ),
     ReadyCaseRunner::new(
         "saga-forward-completed-before-checkpoint",
         CrashFaultSpec::SagaForwardCompletedBeforeCheckpoint,
         CrashRunner::PostgresRedis,
         generated::saga::billing_v1::CONTRACT,
+        run_saga_forward_completed_before_checkpoint,
     ),
     ReadyCaseRunner::new(
         "saga-compensation-interrupted",
         CrashFaultSpec::SagaCompensationInterrupted,
         CrashRunner::PostgresRedis,
         generated::saga::billing_v1::CONTRACT,
+        run_saga_compensation_interrupted,
     ),
     ReadyCaseRunner::new(
         "projection-after-apply-before-checkpoint",
         CrashFaultSpec::ProjectionAfterApplyBeforeCheckpoint,
         CrashRunner::Postgres,
         generated::http::audit_v2::CONTRACT,
+        run_projection_after_apply_before_checkpoint,
     ),
     ReadyCaseRunner::new(
         "projection-stale-checkpoint-writer",
         CrashFaultSpec::ProjectionStaleCheckpointWriter,
         CrashRunner::Postgres,
         generated::http::settings_v3::CONTRACT,
+        run_projection_stale_checkpoint_writer,
     ),
     ReadyCaseRunner::new(
         "reconcile-dispatch-before-result-record",
         CrashFaultSpec::ReconcileDispatchBeforeResultRecord,
         CrashRunner::Postgres,
         generated::http::identity_v2::CONTRACT,
+        run_reconcile_dispatch_before_result_record,
     ),
     ReadyCaseRunner::new(
         "reconcile-lease-lost-before-write",
         CrashFaultSpec::ReconcileLeaseLostBeforeWrite,
         CrashRunner::Postgres,
         generated::http::identity_v2::CONTRACT,
+        run_reconcile_lease_lost_before_write,
     ),
 ];
 
@@ -325,57 +494,207 @@ async fn connect_subscriber(url: &str, name: &str) -> Result<AmqpSubscriber> {
     Ok(AmqpSubscriber::connect(&amqp_endpoint(url)?, name).await?)
 }
 
-async fn rabbit_unsettled_redelivers(
+#[derive(Clone)]
+struct SharedAmqpPublisher(Arc<AmqpPublisher>);
+
+impl Publisher for SharedAmqpPublisher {
+    async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
+        Publisher::publish(self.0.as_ref(), request).await
+    }
+
+    async fn shutdown(&self) -> Result<(), PublisherError> {
+        Publisher::shutdown(self.0.as_ref()).await
+    }
+}
+
+async fn shutdown_amqp(
+    token: &CancellationToken,
+    subscriber: Option<&AmqpSubscriber>,
+    publisher: &AmqpPublisher,
+) -> Result<()> {
+    token.cancel();
+    let subscriber_result = match subscriber {
+        Some(subscriber) => AckableSubscriber::shutdown(subscriber)
+            .await
+            .map_err(anyhow::Error::new),
+        None => Ok(()),
+    };
+    let publisher_channel_result = Publisher::shutdown(publisher)
+        .await
+        .map_err(anyhow::Error::new);
+    let publisher_resource_result = ManagedResource::shutdown(publisher)
+        .await
+        .map_err(anyhow::Error::new);
+
+    let result = finish_with_cleanup(
+        subscriber_result,
+        publisher_channel_result,
+        "shut down AMQP publisher channels",
+    );
+    finish_with_cleanup(
+        result,
+        publisher_resource_result,
+        "shut down AMQP publisher transport",
+    )
+}
+
+fn session_created_payload(
+    tenant: vocab::TenantId,
+    session_id: Uuid,
+) -> generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
+    generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
+        occurred_at: TEST_OCCURRED_AT,
+        session_id: session_id.to_string(),
+        subject: Uuid::new_v4(),
+        tenant_id: tenant.to_string(),
+    }
+}
+
+async fn wait_for_fresh_generation(
+    publisher: &AmqpPublisher,
+    retired_generation: u64,
+) -> Result<u64> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(generation) = publisher.transport_generation_for_test()
+                && generation > retired_generation
+            {
+                return generation;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("publisher transport replacement timed out")
+}
+
+async fn next_consumer_tx_delivery(
+    pg: &PgHarness,
+    tenant: vocab::TenantId,
+    ids: &EventingIds,
+    deliveries: &mut diport::DeliveryStream,
+    expected: FaultMatrixConsumerDelivery,
+    wait_context: &'static str,
+) -> Result<diport::Delivery> {
+    let delivery = tokio::time::timeout(Duration::from_secs(5), deliveries.next())
+        .await
+        .context(wait_context)?
+        .ok_or_else(|| anyhow!("session-created delivery stream closed"))?;
+    if delivery.message.id.as_str() != ids.event_id {
+        bail!(
+            "session-created delivery id = {}, expected {}",
+            delivery.message.id.as_str(),
+            ids.event_id
+        );
+    }
+    let observed = pg
+        .harness
+        .consume_session_created_delivery(tenant, &ids.consumer_group, delivery.message.clone())
+        .await?;
+    if observed != expected {
+        bail!("session-created ConsumerTx delivery = {observed:?}, expected {expected:?}");
+    }
+    Ok(delivery)
+}
+
+async fn rabbit_unsettled_redelivers_through_consumer_tx(
+    pg: &PgHarness,
     rabbit: &RabbitHarness,
     scope: &RunScope,
     topic_raw: &str,
     event_id: &str,
+    group: &str,
+    session_id: Uuid,
 ) -> Result<()> {
+    let ids = EventingIds::new(event_id, event_id, group, "redelivery-lease");
     let topic = Topic::new(topic_raw);
-    let sub1 = connect_subscriber(&rabbit.url, &scope.name("fault-matrix-sub1")).await?;
-    let token1 = CancellationToken::new();
-    let mut stream1 = sub1
-        .subscribe_ackable(topic.clone(), token1.clone())
-        .await?;
     let publisher = connect_publisher(&rabbit.url, &scope.name("fault-matrix-pub")).await?;
+    let mut token = CancellationToken::new();
+    let mut subscriber =
+        match connect_subscriber(&rabbit.url, &scope.name("fault-matrix-sub1")).await {
+            Ok(subscriber) => Some(subscriber),
+            Err(error) => {
+                let cleanup = shutdown_amqp(&token, None, &publisher).await;
+                return finish_with_cleanup(
+                    Err(error),
+                    cleanup,
+                    "shut down AMQP after subscriber setup failure",
+                );
+            }
+        };
 
-    publisher
-        .publish(PublishRequest::new(
-            topic.clone(),
-            MessageId::new(event_id),
-            b"fault-matrix".to_vec(),
-        ))
+    let body_result: Result<()> = async {
+        let mut stream1 = subscriber
+            .as_ref()
+            .ok_or_else(|| anyhow!("first AMQP subscriber missing"))?
+            .subscribe_ackable(topic.clone(), token.clone())
+            .await?;
+        publisher
+            .publish(PublishRequest::new(
+                topic.clone(),
+                MessageId::new(event_id),
+                serde_json::to_vec(&session_created_payload(scope.tenant, session_id))?,
+            ))
+            .await?;
+
+        let delivery = next_consumer_tx_delivery(
+            pg,
+            scope.tenant,
+            &ids,
+            &mut stream1,
+            FaultMatrixConsumerDelivery::Committed,
+            "timeout waiting for first delivery",
+        )
         .await?;
-
-    let delivery = tokio::time::timeout(Duration::from_secs(5), stream1.next())
-        .await
-        .context("timeout waiting for first delivery")?
-        .ok_or_else(|| anyhow!("first stream closed"))?;
-    let _unsettled = delivery.acker;
-    drop(stream1);
-    token1.cancel();
-    AckableSubscriber::shutdown(&sub1).await?;
-
-    let sub2 = connect_subscriber(&rabbit.url, &scope.name("fault-matrix-sub2")).await?;
-    let token2 = CancellationToken::new();
-    let mut stream2 = sub2
-        .subscribe_ackable(topic.clone(), token2.clone())
+        let _unsettled = delivery.acker;
+        drop(stream1);
+        token.cancel();
+        AckableSubscriber::shutdown(
+            subscriber
+                .as_ref()
+                .ok_or_else(|| anyhow!("first AMQP subscriber missing during shutdown"))?,
+        )
         .await?;
-    let redelivery = tokio::time::timeout(Duration::from_secs(5), stream2.next())
-        .await
-        .context("timeout waiting for redelivery")?
-        .ok_or_else(|| anyhow!("redelivery stream closed"))?;
-    if redelivery.message.id.as_str() != event_id {
-        bail!(
-            "redelivery id = {}, expected {event_id}",
-            redelivery.message.id.as_str()
-        );
+        subscriber = None;
+
+        token = CancellationToken::new();
+        subscriber = Some(connect_subscriber(&rabbit.url, &scope.name("fault-matrix-sub2")).await?);
+        let mut stream2 = subscriber
+            .as_ref()
+            .ok_or_else(|| anyhow!("redelivery AMQP subscriber missing"))?
+            .subscribe_ackable(topic, token.clone())
+            .await?;
+        let redelivery = next_consumer_tx_delivery(
+            pg,
+            scope.tenant,
+            &ids,
+            &mut stream2,
+            FaultMatrixConsumerDelivery::Duplicate,
+            "timeout waiting for redelivery",
+        )
+        .await?;
+        redelivery.acker.settle(AckAction::Ack).await?;
+        let effect = pg
+            .harness
+            .session_created_effect_observation(scope.tenant, event_id, group, session_id)
+            .await?;
+        assert_consumer_duplicate_effect_conformance(
+            &ids,
+            &ConsumerDuplicateEffectObservation {
+                business_mutations: effect.business_mutations(),
+                inbox_done_rows: effect.inbox_done_rows(),
+                duplicate_settle: SettleAction::Ack,
+            },
+        )?;
+        Ok(())
     }
-    redelivery.acker.settle(AckAction::Ack).await?;
-    token2.cancel();
-    AckableSubscriber::shutdown(&sub2).await?;
-    Publisher::shutdown(&publisher).await?;
-    Ok(())
+    .await;
+    let cleanup_result = shutdown_amqp(&token, subscriber.as_ref(), &publisher).await;
+    finish_with_cleanup(
+        body_result,
+        cleanup_result,
+        "shut down inbox-redelivery AMQP resources",
+    )
 }
 
 #[allow(clippy::cognitive_complexity)]
@@ -461,71 +780,12 @@ async fn outbox_publish_before_settle_redelivers(
     Ok(())
 }
 
-async fn run_case(
-    case: &CrashCase,
-    pg: &PgHarness,
-    rabbit: &RabbitHarness,
-    redis: &RedisHarness,
-    scope: &RunScope,
-) -> Result<()> {
-    let runner = ready_case_runner(case.id()).ok_or_else(|| {
-        anyhow!(
-            "ready fixture has no ready-case runner mapping: {}",
-            case.id()
-        )
-    })?;
-    runner.validate_case(case)?;
-    match runner.fault_spec {
-        CrashFaultSpec::OutboxAfterPublishBeforeSettle => {
-            run_outbox_after_publish_before_settle(case, pg, rabbit, redis, scope).await
-        }
-        CrashFaultSpec::OutboxTransientPublishFailure => {
-            run_outbox_transient_publish_failure(case, runner.contract, pg, rabbit, redis, scope)
-                .await
-        }
-        CrashFaultSpec::OutboxAmbiguousPublishFailure => {
-            run_outbox_ambiguous_publish_failure(case, runner.contract, pg, rabbit, redis, scope)
-                .await
-        }
-        CrashFaultSpec::OutboxPermanentPublishFailure => {
-            run_outbox_permanent_publish_failure(case, runner.contract, pg, rabbit, redis, scope)
-                .await
-        }
-        CrashFaultSpec::InboxClaimCrashBeforeCommit => {
-            run_inbox_claim_crash_before_commit(case, pg, rabbit, redis, scope).await
-        }
-        CrashFaultSpec::InboxCommitBeforeAckCrash => {
-            run_inbox_commit_before_ack_crash(case, pg, rabbit, redis, scope).await
-        }
-        CrashFaultSpec::InboxLeaseLostBeforeCommit => {
-            run_inbox_lease_lost_before_commit(case, pg, rabbit, redis, scope).await
-        }
-        CrashFaultSpec::SagaForwardCompletedBeforeCheckpoint => {
-            run_saga_forward_completed_before_checkpoint(case, pg, rabbit, redis, scope).await
-        }
-        CrashFaultSpec::SagaCompensationInterrupted => {
-            run_saga_compensation_interrupted(case, pg, rabbit, redis, scope).await
-        }
-        CrashFaultSpec::ProjectionAfterApplyBeforeCheckpoint => {
-            run_projection_after_apply_before_checkpoint(case, pg, rabbit, redis, scope).await
-        }
-        CrashFaultSpec::ProjectionStaleCheckpointWriter => {
-            run_projection_stale_checkpoint_writer(case, pg, rabbit, redis, scope).await
-        }
-        CrashFaultSpec::ReconcileDispatchBeforeResultRecord => {
-            run_reconcile_dispatch_before_result_record(case, pg, rabbit, redis, scope).await
-        }
-        CrashFaultSpec::ReconcileLeaseLostBeforeWrite => {
-            run_reconcile_lease_lost_before_write(case, pg, rabbit, redis, scope).await
-        }
-    }
-}
-
 fn ready_case_runner(id: &str) -> Option<&'static ReadyCaseRunner> {
     READY_CASE_RUNNERS.iter().find(|runner| runner.id == id)
 }
 
 fn run_outbox_after_publish_before_settle<'a>(
+    _runner: &'a ReadyCaseRunner,
     case: &'a CrashCase,
     pg: &'a PgHarness,
     rabbit: &'a RabbitHarness,
@@ -548,14 +808,15 @@ fn run_outbox_after_publish_before_settle<'a>(
 }
 
 fn run_outbox_transient_publish_failure<'a>(
+    runner: &'a ReadyCaseRunner,
     case: &'a CrashCase,
-    contract: vocab::ContractBinding,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
     _redis: &'a RedisHarness,
     scope: &'a RunScope,
 ) -> LocalBoxFuture<'a, Result<()>> {
     Box::pin(async move {
+        let contract = runner.contract;
         let event_id = scope.event_id(case);
         pg.harness
             .run_outbox_publish(
@@ -600,56 +861,225 @@ fn assert_transient_outbox_retry(
     Ok(())
 }
 
-fn run_outbox_ambiguous_publish_failure<'a>(
+fn run_outbox_confirm_lost_channel_close<'a>(
+    _runner: &'a ReadyCaseRunner,
     case: &'a CrashCase,
-    contract: vocab::ContractBinding,
+    pg: &'a PgHarness,
+    rabbit: &'a RabbitHarness,
+    _redis: &'a RedisHarness,
+    scope: &'a RunScope,
+) -> LocalBoxFuture<'a, Result<ConfirmLostCriticalEvidence>> {
+    Box::pin(async move {
+        let event_id = scope.event_id(case);
+        let group = scope.name("audit.session-created-confirm-lost");
+        let session_id = Uuid::new_v4();
+        let topic = Topic::new(generated::event::identity_v1::session_created::TOPIC);
+        let token = CancellationToken::new();
+        let publisher = Arc::new(
+            connect_publisher(&rabbit.url, &scope.name("fault-matrix-confirm-lost-pub")).await?,
+        );
+        let subscriber =
+            match connect_subscriber(&rabbit.url, &scope.name("fault-matrix-confirm-lost-sub"))
+                .await
+            {
+                Ok(subscriber) => subscriber,
+                Err(error) => {
+                    let cleanup = shutdown_amqp(&token, None, publisher.as_ref()).await;
+                    return finish_with_cleanup(
+                        Err(error),
+                        cleanup,
+                        "shut down AMQP after confirm-lost subscriber setup failure",
+                    );
+                }
+            };
+        let body_result: Result<ConfirmLostCriticalEvidence> = async {
+            subscriber.purge_durable_queue_for_test(&topic).await?;
+            let mut deliveries = subscriber
+                .subscribe_ackable(topic.clone(), token.clone())
+                .await?;
+            let stale_message_id = scope.name("stale-confirm-lost-delivery");
+            Publisher::publish(
+                publisher.as_ref(),
+                PublishRequest::new(
+                    topic,
+                    MessageId::new(&stale_message_id),
+                    b"stale-prior-run-delivery".to_vec(),
+                ),
+            )
+            .await?;
+            let retired_generation = publisher
+                .transport_generation_for_test()
+                .ok_or_else(|| anyhow!("publisher transport generation unavailable"))?;
+            pg.harness
+                .seed_session_created(FaultMatrixSessionCreatedInput::new(
+                    session_created_payload(scope.tenant, session_id),
+                    IdemKey::parse(&event_id)?,
+                )?)
+                .await?;
+
+            publisher.inject_post_send_connection_close_once();
+            let first = pg
+                .harness
+                .relay_session_created_once(
+                    &event_id,
+                    DynPublisher::new_box(SharedAmqpPublisher(Arc::clone(&publisher))),
+                )
+                .await?;
+            if first.event_id() != event_id
+                || first.disposition() != Disposition::Requeue
+                || first.status() != FaultMatrixOutboxStatus::Pending
+            {
+                bail!("confirm-lost first relay did not requeue the same durable event: {first:?}");
+            }
+            let retry_generation =
+                wait_for_fresh_generation(publisher.as_ref(), retired_generation).await?;
+            pg.harness
+                .make_session_created_retry_due(scope.tenant, &event_id)
+                .await?;
+            let retry = pg
+                .harness
+                .relay_session_created_once(
+                    &event_id,
+                    DynPublisher::new_box(SharedAmqpPublisher(Arc::clone(&publisher))),
+                )
+                .await?;
+            if retry.event_id() != event_id
+                || retry.disposition() != Disposition::Ack
+                || retry.status() != FaultMatrixOutboxStatus::Published
+            {
+                bail!("confirm-lost retry did not publish the same durable event: {retry:?}");
+            }
+
+            let mut delivered_ids = Vec::with_capacity(2);
+            for expected in [
+                FaultMatrixConsumerDelivery::Committed,
+                FaultMatrixConsumerDelivery::Duplicate,
+            ] {
+                let delivery = loop {
+                    let delivery = tokio::time::timeout(Duration::from_secs(5), deliveries.next())
+                        .await
+                        .context("timeout waiting for confirm-lost duplicate delivery")?
+                        .ok_or_else(|| anyhow!("confirm-lost delivery stream closed"))?;
+                    if delivery.message.id.as_str() == event_id {
+                        break delivery;
+                    }
+                    delivery.acker.settle(AckAction::Ack).await?;
+                };
+                delivered_ids.push(delivery.message.id.as_str().to_string());
+                let observed = pg
+                    .harness
+                    .consume_session_created_delivery(scope.tenant, &group, delivery.message)
+                    .await?;
+                if observed != expected {
+                    bail!("confirm-lost ConsumerTx delivery = {observed:?}, expected {expected:?}");
+                }
+                delivery.acker.settle(AckAction::Ack).await?;
+            }
+            let mut delivered_ids = delivered_ids.into_iter();
+            let first_message_id = delivered_ids
+                .next()
+                .ok_or_else(|| anyhow!("confirm-lost first broker delivery missing"))?;
+            let retry_message_id = delivered_ids
+                .next()
+                .ok_or_else(|| anyhow!("confirm-lost retry broker delivery missing"))?;
+            let ids = EventingIds::new(&event_id, &event_id, &group, "confirm-lost-lease");
+            let publish_conformance = assert_publish_ambiguity_conformance(
+                &ids,
+                &PublishAmbiguityObservation {
+                    first_message_id,
+                    retry_message_id,
+                    transport_deliveries: 2,
+                    retired_generation,
+                    retry_generation,
+                },
+            )?;
+            let effect = pg
+                .harness
+                .session_created_effect_observation(scope.tenant, &event_id, &group, session_id)
+                .await?;
+            let duplicate_conformance = assert_consumer_duplicate_effect_conformance(
+                &ids,
+                &ConsumerDuplicateEffectObservation {
+                    business_mutations: effect.business_mutations(),
+                    inbox_done_rows: effect.inbox_done_rows(),
+                    duplicate_settle: SettleAction::Ack,
+                },
+            )?;
+            Ok(ConfirmLostCriticalEvidence {
+                _first_relay: first,
+                _retry_relay: retry,
+                _effect: effect,
+                _publish_conformance: publish_conformance,
+                _duplicate_conformance: duplicate_conformance,
+            })
+        }
+        .await;
+        let cleanup_result = shutdown_amqp(&token, Some(&subscriber), publisher.as_ref()).await;
+        finish_with_cleanup(
+            body_result,
+            cleanup_result,
+            "shut down confirm-lost AMQP resources",
+        )
+    })
+}
+
+fn run_outbox_stale_contender_settle<'a>(
+    _runner: &'a ReadyCaseRunner,
+    case: &'a CrashCase,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
     _redis: &'a RedisHarness,
     scope: &'a RunScope,
-) -> LocalBoxFuture<'a, Result<()>> {
+) -> LocalBoxFuture<'a, Result<FaultMatrixStaleSettlementObservation>> {
     Box::pin(async move {
-        let event_id = scope.event_id(case);
-        let attempts = pg
+        let observed = pg
             .harness
-            .run_outbox_publish_to_budget(
-                scope.tenant,
-                &event_id,
-                contract.domain(),
-                contract.contract_id(),
-                contract.contract_id(),
-                FaultMatrixPublishOutcome::Ambiguous,
-            )
+            .stale_outbox_settlement(scope.tenant, &scope.event_id(case))
             .await?;
-        if attempts.len() < 2 {
-            bail!("ambiguous publish must retry before budget DLX");
-        }
-        if attempts.iter().any(|message_id| message_id != &event_id) {
-            bail!("ambiguous publish retry changed the durable event id");
-        }
-        assert_outbox_count(pg, scope.tenant, &event_id, FaultMatrixOutboxStatus::Dlx, 1).await?;
-        let dlx = pg
-            .harness
-            .outbox_dead_letter(scope.tenant, &event_id)
-            .await?;
-        if dlx.source() != FaultMatrixDeadLetterSource::OutboxRelay
-            || dlx.summary() != FaultMatrixDeadLetterSummary::OutboxRelayPublishFailed
+        if observed.stale() != FaultMatrixSettlementOutcome::LostLease
+            || observed.current() != FaultMatrixSettlementOutcome::Settled
+            || !observed.intermediate_no_terminal()
+            || observed.final_status() != FaultMatrixOutboxStatus::Published
         {
-            bail!("ambiguous publish budget DLX must retain the closed relay summary");
+            bail!("stale contender settlement invariant failed: {observed:?}");
         }
-        Ok(())
+        Ok(observed)
+    })
+}
+
+fn run_outbox_deadline_expired_settle<'a>(
+    _runner: &'a ReadyCaseRunner,
+    case: &'a CrashCase,
+    pg: &'a PgHarness,
+    _rabbit: &'a RabbitHarness,
+    _redis: &'a RedisHarness,
+    scope: &'a RunScope,
+) -> LocalBoxFuture<'a, Result<FaultMatrixExpiredSettlementObservation>> {
+    Box::pin(async move {
+        let observed = pg
+            .harness
+            .expired_outbox_settlement(scope.tenant, &scope.event_id(case))
+            .await?;
+        if observed.outcome() != FaultMatrixSettlementOutcome::Expired
+            || !observed.still_publishing()
+            || !observed.no_terminal()
+        {
+            bail!("expired deadline settlement invariant failed: {observed:?}");
+        }
+        Ok(observed)
     })
 }
 
 fn run_outbox_permanent_publish_failure<'a>(
+    runner: &'a ReadyCaseRunner,
     case: &'a CrashCase,
-    contract: vocab::ContractBinding,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
     _redis: &'a RedisHarness,
     scope: &'a RunScope,
 ) -> LocalBoxFuture<'a, Result<()>> {
     Box::pin(async move {
+        let contract = runner.contract;
         let event_id = scope.event_id(case);
         pg.harness
             .run_outbox_publish(
@@ -694,6 +1124,7 @@ fn run_outbox_permanent_publish_failure<'a>(
 }
 
 fn run_inbox_claim_crash_before_commit<'a>(
+    _runner: &'a ReadyCaseRunner,
     case: &'a CrashCase,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
@@ -717,6 +1148,7 @@ fn run_inbox_claim_crash_before_commit<'a>(
 }
 
 fn run_inbox_commit_before_ack_crash<'a>(
+    _runner: &'a ReadyCaseRunner,
     case: &'a CrashCase,
     pg: &'a PgHarness,
     rabbit: &'a RabbitHarness,
@@ -725,28 +1157,22 @@ fn run_inbox_commit_before_ack_crash<'a>(
 ) -> LocalBoxFuture<'a, Result<()>> {
     Box::pin(async move {
         let event_id = scope.event_id(case);
-        let state = pg
-            .harness
-            .commit_then_redeliver_inbox(
-                scope.tenant,
-                &event_id,
-                &scope.name("audit.session-created"),
-            )
-            .await?;
-        if state != SeenState::Duplicate {
-            bail!("inbox redelivery should dedupe after commit, got {state:?}");
-        }
-        rabbit_unsettled_redelivers(
+        let group = scope.name("audit.session-created");
+        rabbit_unsettled_redelivers_through_consumer_tx(
+            pg,
             rabbit,
             scope,
             &scope.rabbit_topic("inbox-commit"),
             &event_id,
+            &group,
+            Uuid::new_v4(),
         )
         .await
     })
 }
 
 fn run_inbox_lease_lost_before_commit<'a>(
+    _runner: &'a ReadyCaseRunner,
     case: &'a CrashCase,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
@@ -770,6 +1196,7 @@ fn run_inbox_lease_lost_before_commit<'a>(
 }
 
 fn run_saga_forward_completed_before_checkpoint<'a>(
+    _runner: &'a ReadyCaseRunner,
     _case: &'a CrashCase,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
@@ -805,6 +1232,7 @@ fn run_saga_forward_completed_before_checkpoint<'a>(
 }
 
 fn run_saga_compensation_interrupted<'a>(
+    _runner: &'a ReadyCaseRunner,
     _case: &'a CrashCase,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
@@ -840,6 +1268,7 @@ fn run_saga_compensation_interrupted<'a>(
 }
 
 fn run_projection_after_apply_before_checkpoint<'a>(
+    _runner: &'a ReadyCaseRunner,
     case: &'a CrashCase,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
@@ -873,6 +1302,7 @@ fn run_projection_after_apply_before_checkpoint<'a>(
 }
 
 fn run_projection_stale_checkpoint_writer<'a>(
+    _runner: &'a ReadyCaseRunner,
     case: &'a CrashCase,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
@@ -892,6 +1322,7 @@ fn run_projection_stale_checkpoint_writer<'a>(
 }
 
 fn run_reconcile_dispatch_before_result_record<'a>(
+    _runner: &'a ReadyCaseRunner,
     case: &'a CrashCase,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
@@ -933,6 +1364,7 @@ fn run_reconcile_dispatch_before_result_record<'a>(
 }
 
 fn run_reconcile_lease_lost_before_write<'a>(
+    _runner: &'a ReadyCaseRunner,
     _case: &'a CrashCase,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
@@ -965,13 +1397,17 @@ async fn assert_outbox_count(
     Ok(())
 }
 
-fn finish_with_pg_cleanup(body: Result<()>, cleanup: Result<()>) -> Result<()> {
+fn finish_with_cleanup<T>(
+    body: Result<T>,
+    cleanup: Result<()>,
+    cleanup_context: &str,
+) -> Result<T> {
     match (body, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(value), Ok(())) => Ok(value),
         (Err(body), Ok(())) => Err(body),
-        (Ok(()), Err(cleanup)) => Err(cleanup).context("shut down fault-matrix postgres"),
+        (Ok(_), Err(cleanup)) => Err(cleanup).context(cleanup_context.to_string()),
         (Err(body), Err(cleanup)) => {
-            Err(body).context(format!("postgres cleanup also failed: {cleanup:#}"))
+            Err(body).context(format!("{cleanup_context} also failed: {cleanup:#}"))
         }
     }
 }
@@ -1008,7 +1444,15 @@ async fn consistency_fault_matrix_ready_cases_execute() -> Result<()> {
         let rabbit = rabbit_harness().await?;
         let redis = redis_harness().await?;
         for case in ready {
-            run_case(case, &pg, &rabbit, &redis, &scope)
+            let runner = ready_case_runner(case.id()).ok_or_else(|| {
+                anyhow!(
+                    "ready fixture has no ready-case runner mapping: {}",
+                    case.id()
+                )
+            })?;
+            runner.validate_case(case)?;
+            runner
+                .execute(case, &pg, &rabbit, &redis, &scope)
                 .await
                 .with_context(|| format!("fault matrix case `{}` failed", case.id()))?;
         }
@@ -1018,14 +1462,22 @@ async fn consistency_fault_matrix_ready_cases_execute() -> Result<()> {
 
     let PgHarness { _fixture, harness } = pg;
     let cleanup_result = harness.shutdown().await;
-    finish_with_pg_cleanup(body_result, cleanup_result)
+    finish_with_cleanup(
+        body_result,
+        cleanup_result,
+        "shut down fault-matrix postgres",
+    )
 }
 
 #[test]
-fn pg_cleanup_result_preserves_body_error_and_reports_cleanup_failure() -> Result<()> {
-    let err = finish_with_pg_cleanup(Err(anyhow!("body failed")), Err(anyhow!("cleanup failed")))
-        .err()
-        .ok_or_else(|| anyhow!("both failures must remain an error"))?;
+fn cleanup_result_preserves_body_error_and_reports_cleanup_failure() -> Result<()> {
+    let err = finish_with_cleanup::<()>(
+        Err(anyhow!("body failed")),
+        Err(anyhow!("cleanup failed")),
+        "shut down test resource",
+    )
+    .err()
+    .ok_or_else(|| anyhow!("both failures must remain an error"))?;
     let rendered = format!("{err:#}");
     assert!(rendered.contains("body failed"));
     assert!(rendered.contains("cleanup failed"));
@@ -1033,20 +1485,28 @@ fn pg_cleanup_result_preserves_body_error_and_reports_cleanup_failure() -> Resul
 }
 
 #[test]
-fn pg_cleanup_result_returns_cleanup_only_failure() -> Result<()> {
-    let err = finish_with_pg_cleanup(Ok(()), Err(anyhow!("cleanup failed")))
-        .err()
-        .ok_or_else(|| anyhow!("cleanup failure must be returned"))?;
+fn cleanup_result_returns_cleanup_only_failure() -> Result<()> {
+    let err = finish_with_cleanup::<()>(
+        Ok(()),
+        Err(anyhow!("cleanup failed")),
+        "shut down test resource",
+    )
+    .err()
+    .ok_or_else(|| anyhow!("cleanup failure must be returned"))?;
     assert!(format!("{err:#}").contains("cleanup failed"));
     Ok(())
 }
 
 #[test]
-fn pg_cleanup_result_preserves_success_and_body_only_failure() -> Result<()> {
-    finish_with_pg_cleanup(Ok(()), Ok(()))?;
-    let err = finish_with_pg_cleanup(Err(anyhow!("body failed")), Ok(()))
-        .err()
-        .ok_or_else(|| anyhow!("body failure must be returned"))?;
+fn cleanup_result_preserves_success_and_body_only_failure() -> Result<()> {
+    finish_with_cleanup(Ok(()), Ok(()), "shut down test resource")?;
+    let err = finish_with_cleanup::<()>(
+        Err(anyhow!("body failed")),
+        Ok(()),
+        "shut down test resource",
+    )
+    .err()
+    .ok_or_else(|| anyhow!("body failure must be returned"))?;
     assert_eq!(format!("{err:#}"), "body failed");
     Ok(())
 }

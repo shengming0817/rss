@@ -4271,7 +4271,10 @@ mod tests {
         axum::Router::new()
             .route(
                 "/policies",
-                post(policies_create_handler).with_state(state.clone()),
+                httpserve::with_producer_witness_for_test(
+                    post(policies_create_handler).with_state(state.clone()),
+                    POLICIES_CREATE_PRODUCER,
+                ),
             )
             .route(
                 "/policies",
@@ -4279,7 +4282,10 @@ mod tests {
             )
             .route(
                 "/policies/{policyId}",
-                put(policies_update_handler).with_state(state.clone()),
+                httpserve::with_producer_witness_for_test(
+                    put(policies_update_handler).with_state(state.clone()),
+                    POLICIES_UPDATE_PRODUCER,
+                ),
             )
             .route(
                 "/policies/{policyId}",
@@ -4287,7 +4293,10 @@ mod tests {
             )
             .route(
                 "/policies/{policyId}/deactivate",
-                post(policies_deactivate_handler).with_state(state),
+                httpserve::with_producer_witness_for_test(
+                    post(policies_deactivate_handler).with_state(state),
+                    POLICIES_DEACTIVATE_PRODUCER,
+                ),
             )
     }
 
@@ -5679,7 +5688,10 @@ mod tests {
         let router = with_auth(
             axum::Router::new().route(
                 "/roles/{roleId}/bindings",
-                post(roles_assign_handler).with_state(service),
+                httpserve::with_producer_witness_for_test(
+                    post(roles_assign_handler).with_state(service),
+                    ROLES_ASSIGN_PRODUCER,
+                ),
             ),
             admin_evidence(CANON_USER),
         );
@@ -6719,7 +6731,10 @@ mod tests {
         let router = with_auth(
             axum::Router::new().route(
                 "/roles/{roleId}/bindings",
-                post(roles_assign_handler).with_state(service),
+                httpserve::with_producer_witness_for_test(
+                    post(roles_assign_handler).with_state(service),
+                    ROLES_ASSIGN_PRODUCER,
+                ),
             ),
             admin_evidence(CANON_USER),
         );
@@ -6758,7 +6773,10 @@ mod tests {
             rbac_state_with_role(role("role-admin", "Admin", &["identity:role:assign"])).await;
         let router = axum::Router::new().route(
             "/roles/{roleId}/bindings",
-            post(roles_assign_handler).with_state(service),
+            httpserve::with_producer_witness_for_test(
+                post(roles_assign_handler).with_state(service),
+                ROLES_ASSIGN_PRODUCER,
+            ),
         );
         let resp = testkit::call(
             router,
@@ -6798,7 +6816,10 @@ mod tests {
         let router = with_auth(
             axum::Router::new().route(
                 "/roles/{roleId}/bindings/{subject}",
-                delete(roles_revoke_handler).with_state(state),
+                httpserve::with_producer_witness_for_test(
+                    delete(roles_revoke_handler).with_state(state),
+                    ROLES_REVOKE_PRODUCER,
+                ),
             ),
             admin_evidence(CANON_USER),
         );
@@ -6848,7 +6869,10 @@ mod tests {
         let state = RbacHandlerState { service };
         let router = axum::Router::new().route(
             "/roles/{roleId}/bindings/{subject}",
-            delete(roles_revoke_handler).with_state(state),
+            httpserve::with_producer_witness_for_test(
+                delete(roles_revoke_handler).with_state(state),
+                ROLES_REVOKE_PRODUCER,
+            ),
         );
 
         let missing_auth = testkit::call(

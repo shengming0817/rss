@@ -16,6 +16,8 @@ use diport::{
 };
 use futures::StreamExt;
 use lapin::message::Delivery;
+#[cfg(feature = "integration-test-support")]
+use lapin::options::QueuePurgeOptions;
 use lapin::options::{
     BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicQosOptions, QueueDeclareOptions,
 };
@@ -54,6 +56,33 @@ impl AmqpSubscriber {
         // conn::connect 拿连接 + redaction 日志，其返回的初始 channel 不用于订阅，drop 即可。
         let (conn, _channel) = conn::connect(endpoint, &name, false).await?;
         Ok(Self { conn, name })
+    }
+
+    /// Purge the durable queue owned by one generated topic before an integration run.
+    ///
+    /// Long-lived test brokers retain durable messages, and closing a manual-ack channel
+    /// requeues every unsettled delivery. Fault-injection tests use this typed, test-only seam
+    /// before subscribing so a failed prior run cannot enter the next run's ConsumerTx.
+    #[cfg(feature = "integration-test-support")]
+    pub async fn purge_durable_queue_for_test(
+        &self,
+        topic: &Topic,
+    ) -> Result<u32, SubscriberError> {
+        let channel = self
+            .conn
+            .create_channel()
+            .await
+            .map_err(SubscriberError::new)?;
+        declare_durable_queue(&channel, topic.as_str()).await?;
+        let purged = channel
+            .queue_purge(topic.as_str().into(), QueuePurgeOptions::default())
+            .await
+            .map_err(SubscriberError::new)?;
+        channel
+            .close(REPLY_SUCCESS, "test queue purge complete".into())
+            .await
+            .map_err(SubscriberError::new)?;
+        Ok(purged)
     }
 }
 

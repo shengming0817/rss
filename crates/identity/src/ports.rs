@@ -32,6 +32,14 @@ pub use generated::event::identity_v1::role_assigned::CONTRACT as ROLE_ASSIGNED_
 pub use generated::event::identity_v1::role_revoked::CONTRACT as ROLE_REVOKED_CONTRACT;
 pub use generated::event::identity_v1::session_created::CONTRACT as SESSION_CREATED_CONTRACT;
 
+/// Exact generated payload admitted by the L2 fault-matrix seam.
+///
+/// The alias is absent from normal production builds. Downstream adapters can accept this
+/// concrete generated DTO without adding an adapter→generated dependency edge.
+#[cfg(feature = "fault-matrix-test-support")]
+pub type FaultMatrixSessionCreatedPayload =
+    generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
+
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造器仍 `pub(crate)` funnel）。
 // reason: account-security aggregate/mutation are current port entities used by the mandatory
 // authentication and refresh gate. AccountLockout is not a port method entity, but PgCredentialRepo

@@ -5267,7 +5267,8 @@ mod tests {
             &self,
             _scope: IdentityTenantRepoScope,
             _mutation: identity::ports::RefreshRotationMutation,
-        ) -> Result<bool, identity::ports::IdentityError> {
+        ) -> Result<identity::ports::RefreshRotationOutcome, identity::ports::IdentityError>
+        {
             Err(identity_storage_error(
                 "runtime test refresh store must not be called",
             ))

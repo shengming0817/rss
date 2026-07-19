@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use testkit::crash_matrix::{
-    CrashCase, CrashLevel, CrashMatrix, CrashMechanism, CrashRunner, CrashStatus,
+    CrashCase, CrashFaultSpec, CrashLevel, CrashMatrix, CrashMechanism, CrashRunner, CrashStatus,
     TenantAuthorityState,
 };
 
@@ -280,16 +280,17 @@ fn plaintext_payload_fields_are_rejected_without_raw_key_leak() -> TestResult {
 }
 
 #[test]
-fn real_fixture_directory_has_at_least_twelve_ready_cases() -> TestResult {
+fn real_fixture_directory_has_exactly_seventeen_ready_cases() -> TestResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .ok_or("testkit manifest should be under crates/testkit")?;
     let matrix = CrashMatrix::from_fixture_dir(root.join("fixtures").join("consistency"))?;
 
-    assert!(
-        matrix.ready_count() >= 12,
-        "N-028 requires at least twelve ready consistency crash fixtures"
+    assert_eq!(
+        matrix.ready_count(),
+        17,
+        "L2-GA requires the exact reviewed READY fixture corpus"
     );
     assert!(
         matrix
@@ -298,5 +299,72 @@ fn real_fixture_directory_has_at_least_twelve_ready_cases() -> TestResult {
             .any(|case| case.mechanism() == CrashMechanism::Outbox),
         "outbox fixture should be present"
     );
+    Ok(())
+}
+
+#[test]
+fn l2_ga_fault_specs_are_closed_and_old_ambiguity_contract_is_retired() {
+    let cases = [
+        (
+            "post-send-close-before-confirm",
+            "outbox-ambiguous-retry-consumer-effect-once",
+            CrashFaultSpec::OutboxConfirmLostChannelClose,
+            CrashRunner::PostgresRabbitmq,
+        ),
+        (
+            "stale-contender-settle",
+            "outbox-stale-lease-settle-rejected",
+            CrashFaultSpec::OutboxStaleLeaseContender,
+            CrashRunner::Postgres,
+        ),
+        (
+            "deadline-expired-settle",
+            "outbox-expired-deadline-settle-rejected",
+            CrashFaultSpec::OutboxLeaseDeadlineExpired,
+            CrashRunner::Postgres,
+        ),
+    ];
+
+    for (crash_point, invariant, expected, runner) in cases {
+        let actual = CrashFaultSpec::from_parts(CrashMechanism::Outbox, crash_point, invariant);
+        assert_eq!(actual, Some(expected));
+        assert_eq!(expected.expected_runner(), runner);
+    }
+    assert_eq!(
+        CrashFaultSpec::from_parts(
+            CrashMechanism::Outbox,
+            "during-ambiguous-publish",
+            "outbox-ambiguous-stable-id-budget-dlx",
+        ),
+        None,
+        "the fake ambiguity fixture contract must not remain as an alias"
+    );
+}
+
+#[test]
+fn real_fixture_directory_has_exact_l2_ga_critical_cases() -> TestResult {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("testkit manifest should be under crates/testkit")?;
+    let matrix = CrashMatrix::from_fixture_dir(root.join("fixtures").join("consistency"))?;
+    let actual = matrix
+        .cases()
+        .iter()
+        .filter(|case| {
+            matches!(
+                case.id(),
+                "outbox-confirm-lost-channel-close"
+                    | "outbox-stale-contender-settle"
+                    | "outbox-deadline-expired-settle"
+            )
+        })
+        .map(|case| (case.id(), case.fault_spec(), case.runner()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(actual.len(), 3, "critical L2-GA fixture identity drifted");
+    for (_, fault_spec, _) in actual {
+        assert!(fault_spec.is_ok());
+    }
     Ok(())
 }

@@ -440,6 +440,75 @@ async fn integration_ackable_requeue_redelivers_message() -> Result<(), FixtureE
     Ok(())
 }
 
+/// A long-lived broker can retain a durable, unacked delivery from an interrupted prior run.
+/// The integration-only typed seam must purge that queue before the next run consumes anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_test_queue_purge_removes_requeued_prior_run_delivery()
+-> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_ack_purge").await?;
+    let topic = Topic::new("rss.it.ack-purge");
+
+    let first_subscriber = connect_subscriber(&url, "amqp-it-purge-sub1").await?;
+    first_subscriber
+        .purge_durable_queue_for_test(&topic)
+        .await?;
+    let first_token = CancellationToken::new();
+    let mut first_stream = first_subscriber
+        .subscribe_ackable(topic.clone(), first_token.clone())
+        .await?;
+    let publisher = connect_publisher(&url, "amqp-it-purge-pub").await?;
+    publisher
+        .publish(PublishRequest::new(
+            topic.clone(),
+            MessageId::new("evt-prior-run"),
+            b"prior-run".to_vec(),
+        ))
+        .await?;
+
+    let prior = tokio::time::timeout(Duration::from_secs(5), first_stream.next())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for prior-run delivery"))?
+        .ok_or_else(|| anyhow!("prior-run delivery stream closed"))?;
+    assert_eq!(prior.message.id.as_str(), "evt-prior-run");
+    drop(prior);
+    first_token.cancel();
+    AckableSubscriber::shutdown(&first_subscriber).await?;
+
+    let next_subscriber = connect_subscriber(&url, "amqp-it-purge-sub2").await?;
+    let purged = next_subscriber.purge_durable_queue_for_test(&topic).await?;
+    assert_eq!(
+        purged, 1,
+        "the interrupted prior-run delivery must be purged"
+    );
+
+    let next_token = CancellationToken::new();
+    let mut next_stream = next_subscriber
+        .subscribe_ackable(topic.clone(), next_token.clone())
+        .await?;
+    let stale = tokio::time::timeout(Duration::from_secs(1), next_stream.next()).await;
+    assert!(stale.is_err(), "purged prior-run delivery was redelivered");
+
+    publisher
+        .publish(PublishRequest::new(
+            topic,
+            MessageId::new("evt-current-run"),
+            b"current-run".to_vec(),
+        ))
+        .await?;
+    let current = tokio::time::timeout(Duration::from_secs(5), next_stream.next())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for current-run delivery"))?
+        .ok_or_else(|| anyhow!("current-run delivery stream closed"))?;
+    assert_eq!(current.message.id.as_str(), "evt-current-run");
+    current.acker.settle(AckAction::Ack).await?;
+
+    next_token.cancel();
+    AckableSubscriber::shutdown(&next_subscriber).await?;
+    Publisher::shutdown(&publisher).await?;
+    Ok(())
+}
+
 /// (c) at-least-once 核心：consume 一条后**不 settle，直接 drop 流 / 断 channel**（模拟消费者崩溃）→
 /// 新 consumer 能再次收到该消息（未 ack 的在途消息 broker channel-close 后自动 requeue）。
 #[tokio::test(flavor = "multi_thread")]

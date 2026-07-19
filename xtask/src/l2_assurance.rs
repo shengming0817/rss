@@ -972,14 +972,6 @@ fn named_fault_carriers(
     evidence: &[consistency_fixtures::ReadyL2FaultEvidence],
 ) -> Result<Vec<Carrier>> {
     let mut carriers = Vec::new();
-    let runner_paths = evidence
-        .iter()
-        .map(|item| item.runner_carrier.as_str())
-        .collect::<BTreeSet<_>>();
-    ensure!(
-        runner_paths.len() == 1,
-        "named fault evidence must use one closed runner table, got {runner_paths:?}"
-    );
     for item in evidence {
         carriers.push(Carrier::new(
             root,
@@ -987,16 +979,13 @@ fn named_fault_carriers(
             &item.fixture_carrier,
             &item.case_id,
         )?);
+        carriers.push(Carrier::new(
+            root,
+            CarrierKind::RustSymbol,
+            &item.runner_carrier,
+            &item.runner_symbol,
+        )?);
     }
-    let runner_path = runner_paths
-        .first()
-        .context("named fault evidence must not be empty")?;
-    carriers.push(Carrier::new(
-        root,
-        CarrierKind::RustSymbol,
-        runner_path,
-        "READY_CASE_RUNNERS",
-    )?);
     Ok(carriers)
 }
 
@@ -2090,6 +2079,47 @@ impl DemoProvider {
         assert!(!text.contains("_seed"));
         assert!(!text.contains("/Users/"));
         assert!(!text.contains("schemaHash\": \"HEAD"));
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_fault_evidence_uses_exact_runner_symbols() -> anyhow::Result<()> {
+        let inventory = build_inventory(&workspace_root()?)?;
+        let session_created = inventory
+            .contracts
+            .iter()
+            .find_map(|record| match record {
+                AssuranceRecord::Fact(record)
+                    if record.contract_id == "identity.session-created" =>
+                {
+                    Some(record)
+                }
+                _ => None,
+            })
+            .context("identity.session-created fact disappeared")?;
+        let runner_symbols = session_created
+            .evidence
+            .fault
+            .carriers
+            .iter()
+            .filter(|carrier| carrier.kind == CarrierKind::RustSymbol)
+            .map(|carrier| carrier.symbol.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(
+            !runner_symbols.contains("READY_CASE_RUNNERS"),
+            "the runner table must not masquerade as case execution evidence"
+        );
+        for expected in [
+            "run_outbox_confirm_lost_channel_close",
+            "run_outbox_stale_contender_settle",
+            "run_outbox_deadline_expired_settle",
+        ] {
+            assert!(
+                runner_symbols.contains(expected),
+                "missing exact runner carrier `{expected}`: {runner_symbols:?}"
+            );
+        }
         Ok(())
     }
 

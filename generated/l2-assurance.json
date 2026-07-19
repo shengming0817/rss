@@ -710,7 +710,7 @@
             {
               "kind": "rust-symbol",
               "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
-              "symbol": "READY_CASE_RUNNERS"
+              "symbol": "run_outbox_transient_publish_failure"
             }
           ]
         }
@@ -802,7 +802,7 @@
             {
               "kind": "rust-symbol",
               "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
-              "symbol": "READY_CASE_RUNNERS"
+              "symbol": "run_outbox_permanent_publish_failure"
             }
           ]
         }
@@ -894,7 +894,7 @@
             {
               "kind": "rust-symbol",
               "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
-              "symbol": "READY_CASE_RUNNERS"
+              "symbol": "run_outbox_permanent_publish_failure"
             }
           ]
         }
@@ -1308,13 +1308,53 @@
             },
             {
               "kind": "fault-fixture",
-              "path": "fixtures/consistency/outbox/fixture-outbox-ambiguous-publish-failure.toml",
-              "symbol": "outbox-ambiguous-publish-failure"
+              "path": "fixtures/consistency/outbox/fixture-outbox-confirm-lost-channel-close.toml",
+              "symbol": "outbox-confirm-lost-channel-close"
+            },
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-deadline-expired-settle.toml",
+              "symbol": "outbox-deadline-expired-settle"
+            },
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-stale-contender-settle.toml",
+              "symbol": "outbox-stale-contender-settle"
             },
             {
               "kind": "rust-symbol",
               "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
-              "symbol": "READY_CASE_RUNNERS"
+              "symbol": "run_inbox_claim_crash_before_commit"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "run_inbox_commit_before_ack_crash"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "run_inbox_lease_lost_before_commit"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "run_outbox_after_publish_before_settle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "run_outbox_confirm_lost_channel_close"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "run_outbox_deadline_expired_settle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "run_outbox_stale_contender_settle"
             }
           ]
         }
@@ -1873,7 +1913,7 @@
             {
               "kind": "rust-symbol",
               "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
-              "symbol": "READY_CASE_RUNNERS"
+              "symbol": "run_outbox_transient_publish_failure"
             }
           ]
         }

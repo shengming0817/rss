@@ -38,6 +38,7 @@ use eventexec::{
     SagaExecutorDeps, SagaExecutorImpl, SagaOutcome, SagaRuntimeLock, TenantAuthority,
     TypedSagaActionFactory,
 };
+use identity::ports::FaultMatrixSessionCreatedPayload;
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use secure::Plaintext;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -52,9 +53,161 @@ mod saga_fixture;
 const RSS_APP_ROLE: &str = "rss_app";
 const RSS_APP_READ_ROLE: &str = "rss_app_read";
 const SCHEMA_HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const SESSION_CREATED_FACT: vocab::EventFactBinding =
+    <FaultMatrixSessionCreatedPayload as vocab::GeneratedEventPayload>::FACT;
 
 /// Error returned by the fault-matrix harness.
 pub type FaultMatrixResult<T> = anyhow::Result<T>;
+
+/// Closed generated `identity.session-created` fixture accepted by the real-backend matrix.
+pub struct FaultMatrixSessionCreatedInput {
+    tenant: vocab::TenantId,
+    session_id: uuid::Uuid,
+    payload: FaultMatrixSessionCreatedPayload,
+    idem_key: IdemKey,
+}
+
+impl std::fmt::Debug for FaultMatrixSessionCreatedInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FaultMatrixSessionCreatedInput")
+            .field("tenant", &self.tenant)
+            .field("session_id", &"<redacted>")
+            .field("event_id", &self.idem_key.as_str())
+            .finish()
+    }
+}
+
+impl FaultMatrixSessionCreatedInput {
+    /// Build the closed fixture from the exact generated payload type.
+    ///
+    /// Tenant and session identity are derived from the payload; callers cannot pair a typed
+    /// payload with parallel identity arguments.
+    pub fn new(
+        payload: FaultMatrixSessionCreatedPayload,
+        idem_key: IdemKey,
+    ) -> FaultMatrixResult<Self> {
+        let tenant = vocab::TenantId::parse(&payload.tenant_id)?;
+        let session_id = ids::SessionId::parse(&payload.session_id)?.as_uuid();
+        Ok(Self {
+            tenant,
+            session_id,
+            payload,
+            idem_key,
+        })
+    }
+
+    pub fn event_id(&self) -> &str {
+        self.idem_key.as_str()
+    }
+}
+
+/// One production relay attempt observed through the durable session-created row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultMatrixSessionCreatedRelayObservation {
+    event_id: String,
+    disposition: Disposition,
+    status: FaultMatrixOutboxStatus,
+}
+
+impl FaultMatrixSessionCreatedRelayObservation {
+    pub fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    pub fn disposition(&self) -> Disposition {
+        self.disposition
+    }
+
+    pub fn status(&self) -> FaultMatrixOutboxStatus {
+        self.status
+    }
+}
+
+/// Closed result of dispatching one real broker delivery through the Postgres ConsumerTx.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultMatrixConsumerDelivery {
+    Committed,
+    Duplicate,
+}
+
+/// Durable duplicate-effect evidence for one exact session-created delivery identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultMatrixSessionCreatedEffectObservation {
+    business_mutations: u64,
+    inbox_done_rows: u64,
+}
+
+impl FaultMatrixSessionCreatedEffectObservation {
+    pub fn business_mutations(&self) -> u64 {
+        self.business_mutations
+    }
+
+    pub fn inbox_done_rows(&self) -> u64 {
+        self.inbox_done_rows
+    }
+}
+
+/// Closed production settlement outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultMatrixSettlementOutcome {
+    Settled,
+    Expired,
+    LostLease,
+}
+
+/// Stale contender settlement evidence without exposing lease material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultMatrixStaleSettlementObservation {
+    stale: FaultMatrixSettlementOutcome,
+    current: FaultMatrixSettlementOutcome,
+    intermediate_no_terminal: bool,
+    final_status: FaultMatrixOutboxStatus,
+}
+
+impl FaultMatrixStaleSettlementObservation {
+    pub fn stale(&self) -> FaultMatrixSettlementOutcome {
+        self.stale
+    }
+
+    pub fn current(&self) -> FaultMatrixSettlementOutcome {
+        self.current
+    }
+
+    pub fn intermediate_no_terminal(&self) -> bool {
+        self.intermediate_no_terminal
+    }
+
+    pub fn final_status(&self) -> FaultMatrixOutboxStatus {
+        self.final_status
+    }
+}
+
+/// Exact-deadline expiry evidence without exposing the persisted deadline or token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultMatrixExpiredSettlementObservation {
+    outcome: FaultMatrixSettlementOutcome,
+    persisted_deadline_evaluated: bool,
+    still_publishing: bool,
+    no_terminal: bool,
+}
+
+impl FaultMatrixExpiredSettlementObservation {
+    pub fn outcome(&self) -> FaultMatrixSettlementOutcome {
+        self.outcome
+    }
+
+    pub fn persisted_deadline_evaluated(&self) -> bool {
+        self.persisted_deadline_evaluated
+    }
+
+    pub fn still_publishing(&self) -> bool {
+        self.still_publishing
+    }
+
+    pub fn no_terminal(&self) -> bool {
+        self.no_terminal
+    }
+}
 
 /// Connection settings for the postgres fault-matrix harness.
 #[derive(Clone)]
@@ -377,6 +530,239 @@ impl PgFaultMatrixHarness {
         Ok(())
     }
 
+    /// Seed one provenance-checked generated `identity.session-created` durable fact.
+    pub async fn seed_session_created(
+        &self,
+        input: FaultMatrixSessionCreatedInput,
+    ) -> FaultMatrixResult<()> {
+        seed_session_created(&self.owner_pool, input).await
+    }
+
+    /// Drive one production relay attempt for an already-seeded session-created fact.
+    pub async fn relay_session_created_once(
+        &self,
+        event_id: &str,
+        publisher: Box<DynPublisher<'static>>,
+    ) -> FaultMatrixResult<FaultMatrixSessionCreatedRelayObservation> {
+        let outbox = self.outbox_for_domain(SESSION_CREATED_FACT.contract().domain(), publisher)?;
+        let claimed = outbox
+            .fault_matrix_claim_exact(&self.owner_pool, event_id)
+            .await?
+            .ok_or_else(|| anyhow!("seeded session-created outbox row was not claimed"))?;
+        let tenant = claimed.subject().tenant_id();
+        let disposition = outbox.relay(claimed).await?;
+        let status = self.outbox_status(tenant, event_id).await?;
+        Ok(FaultMatrixSessionCreatedRelayObservation {
+            event_id: event_id.to_string(),
+            disposition,
+            status,
+        })
+    }
+
+    /// Make the exact pending session-created retry immediately claimable.
+    pub async fn make_session_created_retry_due(
+        &self,
+        tenant: vocab::TenantId,
+        event_id: &str,
+    ) -> FaultMatrixResult<()> {
+        let affected = sqlx::query(
+            "UPDATE outbox SET retry_after = clock_timestamp() - interval '1 microsecond' \
+             WHERE tenant_id = $1::uuid AND event_id = $2 AND domain = $3 \
+               AND contract_id = $4 AND status = 'pending'",
+        )
+        .bind(tenant.to_string())
+        .bind(event_id)
+        .bind(SESSION_CREATED_FACT.contract().domain())
+        .bind(SESSION_CREATED_FACT.contract().contract_id())
+        .execute(&self.owner_pool)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            bail!("session-created retry row was not pending");
+        }
+        Ok(())
+    }
+
+    /// Dispatch one real delivery through Inbox and the real audit ConsumerTx.
+    #[cfg(feature = "domain-audit")]
+    pub async fn consume_session_created_delivery(
+        &self,
+        tenant: vocab::TenantId,
+        group: &str,
+        message: diport::Message,
+    ) -> FaultMatrixResult<FaultMatrixConsumerDelivery> {
+        let store = self.deps.handle().infra().inbox();
+        let ctx = session_created_inbox_ctx(tenant, group)?;
+        let key = IdemKey::parse(message.id.as_str())?;
+        let lease = LeaseToken::mint();
+        match store.try_claim(&ctx, &key, &lease).await? {
+            SeenState::Duplicate => Ok(FaultMatrixConsumerDelivery::Duplicate),
+            SeenState::Fresh => {
+                let hasher = audit::ports::AuditChainHasher::new(
+                    TestMac,
+                    MacKey::from_bytes(vec![0x42; 32]),
+                )
+                .ok_or_else(|| anyhow!("fault-matrix audit chain key was rejected"))?;
+                let consumer = Arc::new(
+                    self.deps
+                        .handle()
+                        .for_domain::<crate::caps::Audit>()
+                        .session_created_consumer_tx(hasher),
+                );
+                match consumer.handle(message, ctx, key, lease).await {
+                    crate::PgConsumerTxOutcome::Committed(_) => {
+                        Ok(FaultMatrixConsumerDelivery::Committed)
+                    }
+                    crate::PgConsumerTxOutcome::Requeue(_)
+                    | crate::PgConsumerTxOutcome::LeaseLost { .. }
+                    | crate::PgConsumerTxOutcome::Reject { .. } => {
+                        bail!("session-created ConsumerTx did not commit")
+                    }
+                }
+            }
+            _ => bail!("unknown Inbox seen state"),
+        }
+    }
+
+    /// Observe the exact audit business effect and Inbox Done row for one delivery identity.
+    pub async fn session_created_effect_observation(
+        &self,
+        tenant: vocab::TenantId,
+        event_id: &str,
+        group: &str,
+        session_id: uuid::Uuid,
+    ) -> FaultMatrixResult<FaultMatrixSessionCreatedEffectObservation> {
+        let business_mutations: i64 = sqlx::query_scalar(
+            "SELECT count(*)::bigint FROM audit_entries \
+             WHERE tenant_id = $1::uuid AND action = 'identity:login' \
+               AND resource_kind = 'session' AND resource_id = $2 AND outcome = 'success'",
+        )
+        .bind(tenant.to_string())
+        .bind(session_id.to_string())
+        .fetch_one(&self.owner_pool)
+        .await?;
+        let inbox_done_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*)::bigint FROM inbox_receipts \
+             WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3 \
+               AND domain = $4 AND contract_id = $5 AND status = 'done'",
+        )
+        .bind(tenant.to_string())
+        .bind(event_id)
+        .bind(group)
+        .bind(SESSION_CREATED_FACT.contract().domain())
+        .bind(SESSION_CREATED_FACT.contract().contract_id())
+        .fetch_one(&self.owner_pool)
+        .await?;
+        Ok(FaultMatrixSessionCreatedEffectObservation {
+            business_mutations: non_negative_count(business_mutations, "audit mutation")?,
+            inbox_done_rows: non_negative_count(inbox_done_rows, "Inbox Done")?,
+        })
+    }
+
+    /// Exercise stale-holder fencing and current-holder settlement through the production funnel.
+    pub async fn stale_outbox_settlement(
+        &self,
+        tenant: vocab::TenantId,
+        event_id: &str,
+    ) -> FaultMatrixResult<FaultMatrixStaleSettlementObservation> {
+        seed_outbox(
+            &self.owner_pool,
+            tenant,
+            event_id,
+            SESSION_CREATED_FACT.contract().domain(),
+            SESSION_CREATED_FACT.topic(),
+            SESSION_CREATED_FACT.contract().contract_id(),
+            FaultMatrixOutboxStatus::Pending,
+        )
+        .await?;
+        let outbox = self.outbox_for_domain(
+            SESSION_CREATED_FACT.contract().domain(),
+            FaultMatrixPublishOutcome::Ok.publisher(),
+        )?;
+        let claim_a = claim_exact(&self.owner_pool, &outbox, event_id).await?;
+        age_outbox_publishing(&self.owner_pool, tenant, event_id, self.relay_budget).await?;
+        let claim_b = claim_exact(&self.owner_pool, &outbox, event_id).await?;
+
+        let stale = parse_settlement_outcome(
+            outbox
+                .fault_matrix_published_settlement_outcome(&claim_a)
+                .await?,
+        )?;
+        let intermediate = outbox_terminal_observation(&self.owner_pool, tenant, event_id).await?;
+        let current = parse_settlement_outcome(
+            outbox
+                .fault_matrix_published_settlement_outcome(&claim_b)
+                .await?,
+        )?;
+        let final_status = self.outbox_status(tenant, event_id).await?;
+        Ok(FaultMatrixStaleSettlementObservation {
+            stale,
+            current,
+            intermediate_no_terminal: intermediate.status == "publishing"
+                && intermediate.no_terminal,
+            final_status,
+        })
+    }
+
+    /// Exercise an expired current exact deadline through the production settlement funnel.
+    pub async fn expired_outbox_settlement(
+        &self,
+        tenant: vocab::TenantId,
+        event_id: &str,
+    ) -> FaultMatrixResult<FaultMatrixExpiredSettlementObservation> {
+        seed_outbox(
+            &self.owner_pool,
+            tenant,
+            event_id,
+            SESSION_CREATED_FACT.contract().domain(),
+            SESSION_CREATED_FACT.topic(),
+            SESSION_CREATED_FACT.contract().contract_id(),
+            FaultMatrixOutboxStatus::Pending,
+        )
+        .await?;
+        let outbox = self.outbox_for_domain(
+            SESSION_CREATED_FACT.contract().domain(),
+            FaultMatrixPublishOutcome::Ok.publisher(),
+        )?;
+        let mut claimed = claim_exact(&self.owner_pool, &outbox, event_id).await?;
+        let expired_deadline_epoch_micros: i64 = sqlx::query_scalar(
+            "UPDATE outbox SET updated_at = clock_timestamp() - interval '61 seconds', \
+                    lease_until = clock_timestamp() - interval '1 second' \
+             WHERE tenant_id = $1::uuid AND event_id = $2 AND domain = $3 \
+               AND contract_id = $4 AND status = 'publishing' \
+             RETURNING (EXTRACT(EPOCH FROM lease_until) * 1000000)::bigint",
+        )
+        .bind(tenant.to_string())
+        .bind(event_id)
+        .bind(SESSION_CREATED_FACT.contract().domain())
+        .bind(SESSION_CREATED_FACT.contract().contract_id())
+        .fetch_one(&self.owner_pool)
+        .await?;
+        claimed.fault_matrix_expire_persisted_deadline(
+            expired_deadline_epoch_micros,
+            self.relay_budget,
+        );
+        let outcome = match outbox
+            .fault_matrix_persisted_deadline_settlement_evidence(&claimed)
+            .await?
+        {
+            crate::outbox::FaultMatrixPublishedSettlementEvidence::PersistedDeadlineExpired => {
+                FaultMatrixSettlementOutcome::Expired
+            }
+            unexpected => bail!(
+                "fault-matrix exact persisted deadline did not expire in SQL settlement: \
+                 {unexpected:?}"
+            ),
+        };
+        let observed = outbox_terminal_observation(&self.owner_pool, tenant, event_id).await?;
+        Ok(FaultMatrixExpiredSettlementObservation {
+            outcome,
+            persisted_deadline_evaluated: true,
+            still_publishing: observed.status == "publishing",
+            no_terminal: observed.no_terminal,
+        })
+    }
+
     /// Seed a pending outbox row as fixture input, then claim and drive `PgOutbox::relay`.
     pub async fn run_outbox_publish(
         &self,
@@ -399,10 +785,8 @@ impl PgFaultMatrixHarness {
         .await?;
         let outbox = self.outbox_for_domain(domain, outcome.publisher())?;
         let claimed = outbox
-            .claim_batch(10)
+            .fault_matrix_claim_exact(&self.owner_pool, event_id)
             .await?
-            .into_iter()
-            .find(|entry| entry.idem_key().as_str() == event_id)
             .ok_or_else(|| anyhow!("seeded outbox row was not claimed"))?;
         outbox.relay(claimed).await?;
         Ok(())
@@ -422,7 +806,7 @@ impl PgFaultMatrixHarness {
         outcome: FaultMatrixPublishOutcome,
     ) -> FaultMatrixResult<Vec<String>> {
         match outcome {
-            FaultMatrixPublishOutcome::Transient | FaultMatrixPublishOutcome::Ambiguous => {}
+            FaultMatrixPublishOutcome::Transient => {}
             FaultMatrixPublishOutcome::Ok | FaultMatrixPublishOutcome::Permanent => {
                 bail!("publish-to-budget requires a closed retryable outcome")
             }
@@ -460,10 +844,8 @@ impl PgFaultMatrixHarness {
             }
 
             let claimed = outbox
-                .claim_batch(10)
+                .fault_matrix_claim_exact(&self.owner_pool, event_id)
                 .await?
-                .into_iter()
-                .find(|entry| entry.idem_key().as_str() == event_id)
                 .ok_or_else(|| {
                     anyhow!("retryable outbox row was not claimed at attempt {attempt}")
                 })?;
@@ -543,7 +925,7 @@ impl PgFaultMatrixHarness {
             event_id,
             "identity",
             topic,
-            "identity.session-created",
+            SESSION_CREATED_FACT.contract().contract_id(),
             FaultMatrixOutboxStatus::Pending,
         )
         .await?;
@@ -593,10 +975,8 @@ impl PgFaultMatrixHarness {
             _ => bail!("unsupported fault-matrix outbox domain `{domain}`"),
         };
         let claimed = outbox
-            .claim_batch(10)
+            .fault_matrix_claim_exact(&self.owner_pool, event_id)
             .await?
-            .into_iter()
-            .find(|entry| entry.entry().idem_key().as_str() == event_id)
             .ok_or_else(|| anyhow!("stale publishing outbox row was not reclaimed"))?;
         outbox.relay(claimed).await?;
         Ok(())
@@ -618,6 +998,25 @@ impl PgFaultMatrixHarness {
         .fetch_one(&self.owner_pool)
         .await?;
         Ok(row.get::<i64, _>(0))
+    }
+
+    async fn outbox_status(
+        &self,
+        tenant: vocab::TenantId,
+        event_id: &str,
+    ) -> FaultMatrixResult<FaultMatrixOutboxStatus> {
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM outbox \
+             WHERE tenant_id = $1::uuid AND event_id = $2 \
+               AND domain = $3 AND contract_id = $4",
+        )
+        .bind(tenant.to_string())
+        .bind(event_id)
+        .bind(SESSION_CREATED_FACT.contract().domain())
+        .bind(SESSION_CREATED_FACT.contract().contract_id())
+        .fetch_one(&self.owner_pool)
+        .await?;
+        FaultMatrixOutboxStatus::parse(&status)
     }
 
     /// Read the authoritative retry state for one tenant-scoped outbox event.
@@ -670,31 +1069,11 @@ impl PgFaultMatrixHarness {
         group: &str,
     ) -> FaultMatrixResult<SeenState> {
         let store = self.deps.handle().infra().inbox();
-        let ctx = inbox_ctx(tenant, group)?;
+        let ctx = session_created_inbox_ctx(tenant, group)?;
         let first = LeaseToken::mint();
         let key = IdemKey::parse(event_id)?;
         let _ = store.try_claim(&ctx, &key, &first).await?;
         age_inbox_claim(&self.owner_pool, tenant, event_id, group).await?;
-        let second = LeaseToken::mint();
-        Ok(store.try_claim(&ctx, &key, &second).await?)
-    }
-
-    /// Drive claim+commit, then replay the same key through `PgInboxStore`.
-    pub async fn commit_then_redeliver_inbox(
-        &self,
-        tenant: vocab::TenantId,
-        event_id: &str,
-        group: &str,
-    ) -> FaultMatrixResult<SeenState> {
-        let store = self.deps.handle().infra().inbox();
-        let ctx = inbox_ctx(tenant, group)?;
-        let key = IdemKey::parse(event_id)?;
-        let first = LeaseToken::mint();
-        let _ = store.try_claim(&ctx, &key, &first).await?;
-        let committed = store.commit(&ctx, &key, &first).await?;
-        if committed != LeaseOutcome::Held {
-            bail!("inbox commit lost lease");
-        }
         let second = LeaseToken::mint();
         Ok(store.try_claim(&ctx, &key, &second).await?)
     }
@@ -707,7 +1086,7 @@ impl PgFaultMatrixHarness {
         group: &str,
     ) -> FaultMatrixResult<LeaseOutcome> {
         let store = self.deps.handle().infra().inbox();
-        let ctx = inbox_ctx(tenant, group)?;
+        let ctx = session_created_inbox_ctx(tenant, group)?;
         let key = IdemKey::parse(event_id)?;
         let lease = LeaseToken::mint();
         let _ = store.try_claim(&ctx, &key, &lease).await?;
@@ -1053,7 +1432,6 @@ pub enum FaultMatrixPublishOutcome {
     Ok,
     Transient,
     Permanent,
-    Ambiguous,
 }
 
 impl FaultMatrixPublishOutcome {
@@ -1062,7 +1440,6 @@ impl FaultMatrixPublishOutcome {
             Self::Ok => RecordingPublisher::ok(),
             Self::Transient => RecordingPublisher::transient(),
             Self::Permanent => RecordingPublisher::permanent(),
-            Self::Ambiguous => RecordingPublisher::ambiguous(),
         })
     }
 
@@ -1102,6 +1479,93 @@ async fn owner_pool(config: &PgFaultMatrixConfig) -> FaultMatrixResult<PgPool> {
         .acquire_timeout(Duration::from_secs(5))
         .connect_with(options)
         .await?)
+}
+
+async fn seed_session_created(
+    pool: &PgPool,
+    input: FaultMatrixSessionCreatedInput,
+) -> FaultMatrixResult<()> {
+    let payload = serde_json::to_vec(&input.payload)?;
+    let metadata = serde_json::json!({
+        "tenantId": input.tenant.to_string(),
+        "schemaVersion": SESSION_CREATED_FACT.contract().version(),
+        "schemaHash": SESSION_CREATED_FACT.contract().schema_hash(),
+    })
+    .to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO outbox (
+            event_id, tenant_id, domain, topic, contract_id, payload, metadata,
+            status, contract_version, schema_hash, partition_key
+        )
+        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7::jsonb,
+                'pending', $8, $9, $10)
+        "#,
+    )
+    .bind(input.idem_key.as_str())
+    .bind(input.tenant.to_string())
+    .bind(SESSION_CREATED_FACT.contract().domain())
+    .bind(SESSION_CREATED_FACT.topic())
+    .bind(SESSION_CREATED_FACT.contract().contract_id())
+    .bind(payload)
+    .bind(metadata)
+    .bind(SESSION_CREATED_FACT.contract().version())
+    .bind(SESSION_CREATED_FACT.contract().schema_hash())
+    .bind(format!("session-{}", input.session_id))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn claim_exact(
+    owner_pool: &PgPool,
+    outbox: &crate::PgOutbox,
+    event_id: &str,
+) -> FaultMatrixResult<crate::outbox::PgClaimedOutboxEntry> {
+    outbox
+        .fault_matrix_claim_exact(owner_pool, event_id)
+        .await?
+        .ok_or_else(|| anyhow!("fault-matrix outbox row was not claimed"))
+}
+
+struct OutboxTerminalObservation {
+    status: String,
+    no_terminal: bool,
+}
+
+async fn outbox_terminal_observation(
+    pool: &PgPool,
+    tenant: vocab::TenantId,
+    event_id: &str,
+) -> FaultMatrixResult<OutboxTerminalObservation> {
+    let row: (String, bool) = sqlx::query_as(
+        "SELECT status, published_at IS NULL AND dlx_at IS NULL \
+         FROM outbox WHERE tenant_id = $1::uuid AND event_id = $2 \
+           AND domain = $3 AND contract_id = $4",
+    )
+    .bind(tenant.to_string())
+    .bind(event_id)
+    .bind(SESSION_CREATED_FACT.contract().domain())
+    .bind(SESSION_CREATED_FACT.contract().contract_id())
+    .fetch_one(pool)
+    .await?;
+    Ok(OutboxTerminalObservation {
+        status: row.0,
+        no_terminal: row.1,
+    })
+}
+
+fn parse_settlement_outcome(raw: &str) -> FaultMatrixResult<FaultMatrixSettlementOutcome> {
+    match raw {
+        "settled" => Ok(FaultMatrixSettlementOutcome::Settled),
+        "expired" => Ok(FaultMatrixSettlementOutcome::Expired),
+        "lost_lease" => Ok(FaultMatrixSettlementOutcome::LostLease),
+        _ => bail!("unknown fault-matrix settlement outcome"),
+    }
+}
+
+fn non_negative_count(value: i64, label: &str) -> FaultMatrixResult<u64> {
+    u64::try_from(value).map_err(|_| anyhow!("negative fault-matrix {label} count"))
 }
 
 async fn seed_outbox(
@@ -1178,15 +1642,18 @@ async fn age_inbox_claim(
     Ok(())
 }
 
-fn inbox_ctx(tenant: vocab::TenantId, group: &str) -> FaultMatrixResult<InboxReceiptContext> {
+fn session_created_inbox_ctx(
+    tenant: vocab::TenantId,
+    group: &str,
+) -> FaultMatrixResult<InboxReceiptContext> {
     Ok(InboxReceiptContext::new(
         tenant,
         ConsumerGroup::parse(group)?,
-        "identity",
-        "identity.session-created",
-        "identity.session-created",
-        "v1",
-        SCHEMA_HASH,
+        SESSION_CREATED_FACT.contract().domain(),
+        SESSION_CREATED_FACT.topic(),
+        SESSION_CREATED_FACT.contract().contract_id(),
+        SESSION_CREATED_FACT.contract().version(),
+        SESSION_CREATED_FACT.contract().schema_hash(),
         None,
         None,
     )?)
@@ -1469,13 +1936,6 @@ impl RecordingPublisher {
             message_ids: None,
         }
     }
-
-    fn ambiguous() -> Self {
-        Self {
-            result: FaultMatrixPublishOutcome::Ambiguous,
-            message_ids: None,
-        }
-    }
 }
 
 impl Publisher for RecordingPublisher {
@@ -1494,9 +1954,6 @@ impl Publisher for RecordingPublisher {
             FaultMatrixPublishOutcome::Permanent => Err(PublisherError::permanent(
                 std::io::Error::other("fault matrix permanent publish failure"),
             )),
-            FaultMatrixPublishOutcome::Ambiguous => Err(PublisherError::ambiguous(
-                std::io::Error::other("fault matrix ambiguous publish failure"),
-            )),
         }
     }
 
@@ -1510,9 +1967,12 @@ struct TestMac;
 
 impl MacVerifier for TestMac {
     fn sign(&self, key: &MacKey, _algorithm: MacAlgorithm, message: &[u8]) -> Mac {
-        let mut tag = Vec::from(key.as_bytes());
-        tag.extend_from_slice(message);
-        Mac::from_bytes(tag)
+        use sha2::Digest as _;
+
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(key.as_bytes());
+        hasher.update(message);
+        Mac::from_bytes(hasher.finalize().to_vec())
     }
 
     fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
@@ -1588,7 +2048,77 @@ fn test_dlx_payload_protector() -> FaultMatrixResult<DlxPayloadProtector> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FaultMatrixOutboxRetryObservation, FaultMatrixOutboxStatus, FaultMatrixResult};
+    use consistency::IdemKey;
+    use identity::ports::FaultMatrixSessionCreatedPayload;
+
+    use super::{
+        FaultMatrixOutboxRetryObservation, FaultMatrixOutboxStatus, FaultMatrixResult,
+        FaultMatrixSessionCreatedInput,
+    };
+
+    fn generated_session_payload(
+        tenant: vocab::TenantId,
+        session_id: uuid::Uuid,
+    ) -> FaultMatrixSessionCreatedPayload {
+        FaultMatrixSessionCreatedPayload {
+            occurred_at: 1_700_000_000,
+            session_id: session_id.to_string(),
+            subject: uuid::Uuid::from_u128(7),
+            tenant_id: tenant.to_string(),
+        }
+    }
+
+    #[test]
+    fn session_created_input_derives_identity_from_exact_generated_payload() -> FaultMatrixResult<()>
+    {
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let session_id = uuid::Uuid::from_u128(9);
+        let input = FaultMatrixSessionCreatedInput::new(
+            generated_session_payload(tenant, session_id),
+            IdemKey::parse("fault-matrix-session-created")?,
+        )?;
+        assert_eq!(input.event_id(), "fault-matrix-session-created");
+        assert_eq!(input.tenant, tenant);
+        assert_eq!(input.session_id, session_id);
+        Ok(())
+    }
+
+    #[test]
+    fn session_created_input_rejects_invalid_payload_tenant_identity() -> FaultMatrixResult<()> {
+        let payload = FaultMatrixSessionCreatedPayload {
+            occurred_at: 1_700_000_000,
+            session_id: uuid::Uuid::from_u128(9).to_string(),
+            subject: uuid::Uuid::from_u128(7),
+            tenant_id: "not-a-tenant".to_string(),
+        };
+        assert!(
+            FaultMatrixSessionCreatedInput::new(
+                payload,
+                IdemKey::parse("fault-matrix-invalid-tenant")?,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn session_created_input_rejects_invalid_payload_session_identity() -> FaultMatrixResult<()> {
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let payload = FaultMatrixSessionCreatedPayload {
+            occurred_at: 1_700_000_000,
+            session_id: "not-a-session".to_string(),
+            subject: uuid::Uuid::from_u128(7),
+            tenant_id: tenant.to_string(),
+        };
+        assert!(
+            FaultMatrixSessionCreatedInput::new(
+                payload,
+                IdemKey::parse("fault-matrix-invalid-session")?,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn outbox_retry_observation_accepts_closed_retry_state() -> FaultMatrixResult<()> {

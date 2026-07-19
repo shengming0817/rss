@@ -7143,6 +7143,82 @@ async fn claim_entry_for_relay(
         .ok_or_else(|| format!("provider-bound claim did not return event {event_id}"))
 }
 
+#[cfg(feature = "fault-matrix-test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn fault_matrix_exact_claim_does_not_mutate_other_eligible_rows() -> TestResult {
+    type DurableClaimState = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    );
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("fault_matrix_exact_claim");
+    let other_id = unique_event_id("fault-matrix-other");
+    let target_id = unique_event_id("fault-matrix-target");
+    for event_id in [&other_id, &target_id] {
+        let entry = make_entry(event_id);
+        let domain = domain.clone();
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                Box::pin(async move {
+                    let _outcome =
+                        append_outbox(cap, &entry, &make_test_env(&domain, "contract-1"))
+                            .await
+                            .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+
+    let outbox = make_pg_outbox_for_domain(
+        &store,
+        &domain,
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+    let other_before: DurableClaimState = sqlx::query_as(
+        "SELECT status, lease_token::text, lease_until::text, \
+                automatic_retry_deadline::text, published_at::text, dlx_at::text, \
+                updated_at::text \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(&other_id)
+    .fetch_one(&store.pool)
+    .await?;
+    let claimed = outbox
+        .fault_matrix_claim_exact(&store.pool, &target_id)
+        .await?
+        .ok_or("target row was not claimed")?;
+    assert_eq!(claimed.idem_key().as_str(), target_id);
+
+    let other_after: DurableClaimState = sqlx::query_as(
+        "SELECT status, lease_token::text, lease_until::text, \
+                automatic_retry_deadline::text, published_at::text, dlx_at::text, \
+                updated_at::text \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(&other_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        other_after, other_before,
+        "exact target claim must leave every durable state/lease column of another eligible row unchanged"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 fn summarize_backlog(samples: &[BacklogMetricSample]) -> BacklogSample {
     let depth = samples.iter().map(|s| s.sample().depth()).sum();
     let oldest_age_seconds = samples

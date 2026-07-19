@@ -95,8 +95,10 @@ pub enum CrashRunner {
 pub enum CrashFaultSpec {
     OutboxAfterPublishBeforeSettle,
     OutboxTransientPublishFailure,
-    OutboxAmbiguousPublishFailure,
+    OutboxConfirmLostChannelClose,
     OutboxPermanentPublishFailure,
+    OutboxStaleLeaseContender,
+    OutboxLeaseDeadlineExpired,
     InboxClaimCrashBeforeCommit,
     InboxCommitBeforeAckCrash,
     InboxLeaseLostBeforeCommit,
@@ -128,12 +130,22 @@ impl CrashFaultSpec {
             ) => Some(Self::OutboxTransientPublishFailure),
             (
                 CrashMechanism::Outbox,
-                "during-ambiguous-publish",
-                "outbox-ambiguous-stable-id-budget-dlx",
-            ) => Some(Self::OutboxAmbiguousPublishFailure),
+                "post-send-close-before-confirm",
+                "outbox-ambiguous-retry-consumer-effect-once",
+            ) => Some(Self::OutboxConfirmLostChannelClose),
             (CrashMechanism::Outbox, "during-permanent-publish", "outbox-dlx-summary-redacted") => {
                 Some(Self::OutboxPermanentPublishFailure)
             }
+            (
+                CrashMechanism::Outbox,
+                "stale-contender-settle",
+                "outbox-stale-lease-settle-rejected",
+            ) => Some(Self::OutboxStaleLeaseContender),
+            (
+                CrashMechanism::Outbox,
+                "deadline-expired-settle",
+                "outbox-expired-deadline-settle-rejected",
+            ) => Some(Self::OutboxLeaseDeadlineExpired),
             (
                 CrashMechanism::Inbox,
                 "after-claim-before-commit",
@@ -184,8 +196,10 @@ impl CrashFaultSpec {
         match value {
             "OutboxAfterPublishBeforeSettle" => Some(Self::OutboxAfterPublishBeforeSettle),
             "OutboxTransientPublishFailure" => Some(Self::OutboxTransientPublishFailure),
-            "OutboxAmbiguousPublishFailure" => Some(Self::OutboxAmbiguousPublishFailure),
+            "OutboxConfirmLostChannelClose" => Some(Self::OutboxConfirmLostChannelClose),
             "OutboxPermanentPublishFailure" => Some(Self::OutboxPermanentPublishFailure),
+            "OutboxStaleLeaseContender" => Some(Self::OutboxStaleLeaseContender),
+            "OutboxLeaseDeadlineExpired" => Some(Self::OutboxLeaseDeadlineExpired),
             "InboxClaimCrashBeforeCommit" => Some(Self::InboxClaimCrashBeforeCommit),
             "InboxCommitBeforeAckCrash" => Some(Self::InboxCommitBeforeAckCrash),
             "InboxLeaseLostBeforeCommit" => Some(Self::InboxLeaseLostBeforeCommit),
@@ -208,15 +222,16 @@ impl CrashFaultSpec {
     /// Expected real-backend runner for this closed fault.
     pub fn expected_runner(self) -> CrashRunner {
         match self {
-            Self::OutboxAfterPublishBeforeSettle | Self::InboxCommitBeforeAckCrash => {
-                CrashRunner::PostgresRabbitmq
-            }
+            Self::OutboxAfterPublishBeforeSettle
+            | Self::OutboxConfirmLostChannelClose
+            | Self::InboxCommitBeforeAckCrash => CrashRunner::PostgresRabbitmq,
             Self::SagaForwardCompletedBeforeCheckpoint | Self::SagaCompensationInterrupted => {
                 CrashRunner::PostgresRedis
             }
             Self::OutboxTransientPublishFailure
-            | Self::OutboxAmbiguousPublishFailure
             | Self::OutboxPermanentPublishFailure
+            | Self::OutboxStaleLeaseContender
+            | Self::OutboxLeaseDeadlineExpired
             | Self::InboxClaimCrashBeforeCommit
             | Self::InboxLeaseLostBeforeCommit
             | Self::ProjectionAfterApplyBeforeCheckpoint

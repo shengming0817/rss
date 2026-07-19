@@ -308,6 +308,24 @@ impl<M> ProducerMarker<M> {
     }
 }
 
+/// Install the same route-bound producer witness used by
+/// [`GeneratedPrimaryEndpoint::new_producer`] on a raw test method router.
+///
+/// This residual surface is available only with `test-util`. Callers must still name the exact
+/// generated producer binding, so handler tests exercise the fail-closed extractor instead of
+/// bypassing it with a directly constructed marker.
+#[cfg(any(test, feature = "test-util"))]
+pub fn with_producer_witness_for_test<M, S>(
+    router: axum::routing::MethodRouter<S>,
+    producer: HttpProducerBinding<M>,
+) -> axum::routing::MethodRouter<S>
+where
+    M: Send + Sync + 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(axum::Extension(ProducerRouteWitness(producer)))
+}
+
 /// Move-only receipt proving a request passed through the matching generated producer route.
 ///
 /// Its fields and constructor are private. Transaction orchestration consumes it while selecting

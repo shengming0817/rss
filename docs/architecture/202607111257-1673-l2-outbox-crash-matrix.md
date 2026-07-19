@@ -67,12 +67,13 @@ cargo xtask consistency-fixtures
 
 #1641 起落地的真实后端 journey 位于
 `journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs`。每条 ready fixture 都与 generated
-`ContractBinding`、闭合 `CrashFaultSpec` dispatch 和真实 backend runner 同源绑定；当前 active L2 fact 的
-direct ready evidence 已达到 5/5：
+`ContractBinding`、闭合 `CrashFaultSpec` 和具体 `CaseRunnerFn` 同源绑定；runner table 本身就是执行入口，
+不存在第二套 `match` dispatch。L2 assurance 为每条 fixture 记录精确 `run_*` symbol，而不是只记录整张
+runner table。当前 active L2 fact 的 direct ready evidence 已达到 5/5：
 
 | Fact | Direct ready evidence | 真实后端断言 |
 |---|---|---|
-| `identity.session-created` | publish 成功后、settle 前崩溃 | PostgreSQL lease/CAS 恢复、稳定身份重发及 RabbitMQ delivery/ack |
+| `identity.session-created` | publish 成功后 settle 前崩溃；confirm-lost/channel close；stale contender；exact deadline expiry | PostgreSQL lease/CAS 恢复；RabbitMQ 在 post-send、confirm poll 前断连后以新 generation 同 ID 重投；旧 holder=`LostLease`、当前 holder=`Settled`、过期 deadline=`Expired`；两次 delivery 经 `PgAuditConsumerTx` 后 audit mutation 与 Inbox Done 各为 1 |
 | `identity.policy-updated` | transient publish failure | PostgreSQL outbox 精确读取为 `pending`、`retry_count = 1`、`retry_after > updated_at`，且 lease 已清除 |
 | `identity.role-assigned` | permanent publish failure | PostgreSQL outbox 进入 DLX，摘要脱敏且 payload 使用受保护编码 |
 | `identity.role-revoked` | permanent publish failure | PostgreSQL outbox 进入 DLX，摘要脱敏且 payload 使用受保护编码 |
@@ -80,7 +81,24 @@ direct ready evidence 已达到 5/5：
 
 其中新增的 `identity.policy-updated` transient 场景通过 tenant + event 精确 owner-pool observation
 证明失败后已进入合法退避且没有残留 lease；新增的
-`identity.role-revoked` permanent 场景证明进入受保护 DLX summary。该 journey 属于 opt-in lane，不进入默认快测：
+`identity.role-revoked` permanent 场景证明进入受保护 DLX summary。`identity.session-created` 的
+confirm-lost 场景先建立 queue/binding，再通过真实 `PgOutbox::relay → AmqpPublisher` 注入一次
+post-send connection close；首投以 `Ambiguous/Requeue` 收敛，transport generation 替换后同一 durable
+event ID 重投并 `Ack/published`。两条 broker delivery 都进入真实 audit ConsumerTx，第二条只命中
+Inbox `Duplicate`，不会再次写业务表。独立 stale/deadline 场景只用 owner SQL 注入时间和读取 observation，
+终态写仍走生产 settlement。
+
+关键 runner 不再由方法尾名和调用次数充当“真实 seam”证据：runner table 以三个不同的 typed
+function-pointer constructor 注册 confirm-lost、stale contender 与 deadline expiry，函数必须返回
+Postgres 私有字段 observation 或 testkit conformance 成功后才能取得的 sealed witness，随后才在统一执行
+入口擦除为 `()`。Fault harness 对单一 event 的驱动也只经 test-only exact claim seam 原子取得该 event，
+不会把 `claim_batch` 已租出的非目标 capability 丢弃。`identity.session-created` 的 contract/topic 全部从
+generated `EventFactBinding` 派生，不再平行手写 topic。
+
+长存 `RSS_AMQP_TEST_URL` 路径在订阅前经 integration-only typed seam purge 固定 durable queue；消费循环先
+核对本轮 event ID，非本轮 delivery 直接 ACK 且绝不进入 ConsumerTx。这样上次中断后由 channel-close
+重新入队的消息既不会毒化重跑，也不会以当前 run 的 tenant/group 产生业务副作用。该 journey 属于 opt-in
+lane，不进入默认快测：
 
 ```bash
 cargo xtask ci run --job integration/consistency-fault
@@ -91,8 +109,8 @@ cargo xtask ci run --job integration/consistency-fault
 | 证据 | 能证明 | 不能证明 |
 |---|---|---|
 | 默认 hermetic 测试 | fixture/闭枚举及 status/domain/contract/runner 绑定；公共 relay loop 的 crash 中间态、显式 lease 恢复、fake 重发、最终 settle、未过期对照行保持不变；生产 `publish_request` 对同一 durable event 的 broker identity 不漂移；实际 inbox 纯状态机去重 | PostgreSQL SQL、RLS、真实 tenant/partition scope、真实时钟 TTL、AMQP confirm/channel redelivery、网络结果 |
-| 5/5 direct ready journey | 5 个 active fact 的具名真实 PostgreSQL fault evidence；其中 session-created 另覆盖 RabbitMQ publish/redelivery/ack | confirm-lost、#1826 的完整 channel retirement / mutation-count 范围、任意网络分区、进程被 SIGKILL 的所有时点、broker 集群灾难 |
-| 尚未覆盖 | publish 请求已到 broker、client 在 confirm 前断线等 confirm-lost / ambiguous outcome 组合；40s timeout 的每种 broker 结果；跨节点时钟/网络分区组合 | 不得据 5/5 fact inventory 宣称已完成整个 #1826 或 broker exactly-once；timeout 仍须保守按可能已 delivery 处理 |
+| 5/5 direct ready journey | 5 个 active fact 的具名真实 PostgreSQL fault evidence；session-created 另覆盖 post-send/confirm-before-poll connection close、完整 transport generation retirement、同 ID broker duplicate、具体 ConsumerTx mutation=1、stale contender 与 exact deadline fencing | 任意网络分区、进程被 SIGKILL 的所有时点、40s timeout 的每种 broker 结果、broker 集群灾难 |
+| 尚未覆盖 | 40s timeout 的全部 broker 结果组合；跨节点时钟/网络分区组合；broker 集群级故障 | 不得据 #1826 的具名场景宣称 broker exactly-once；timeout 仍须保守按可能已 delivery 处理 |
 
 因此运行期与文档统一采用 at-least-once 术语。任何依赖“CAS 使 broker 至多 publish 一次”的实现或运维
 假设都不成立；稳定事件身份与 consumer inbox 幂等是 L2 闭环不可删减的组成部分。
