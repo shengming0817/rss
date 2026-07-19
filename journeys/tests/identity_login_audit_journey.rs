@@ -257,15 +257,20 @@ type LoginBundle = (
 /// 登录服务（注入 MemSessionLifecycle co-tx 替身 + 固定时钟 + 种子凭据）。
 /// 同时构造 seed refresh service 并返回，供 `IdentityDomain::new` 注入。
 fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginBundle> {
-    let refresh = identity::seed_refresh_service(
-        || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
-        Duration::from_secs(TTL_SECS),
-    );
+    let mut refresh = None;
     let login = Arc::new(LoginService::with_seed_credential(
         Arc::from(DynSessionLifecycle::new_box(
             MemSessionLifecycle::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
         )),
-        Arc::clone(&refresh),
+        |accounts| {
+            let service = identity::seed_refresh_service(
+                accounts,
+                || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+                Duration::from_secs(TTL_SECS),
+            );
+            refresh = Some(Arc::clone(&service));
+            service
+        },
         password_policy(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
@@ -274,6 +279,8 @@ fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginBundle> {
         PASSWORD,
         tenant,
     )?);
+    let refresh =
+        refresh.ok_or_else(|| anyhow::anyhow!("seed refresh service was not constructed"))?;
     Ok((login, refresh))
 }
 

@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `identity::ActiveAccountSecurity`
+ --> tests/ui/account_security_active_receipt_private_fail.rs:1:5
+  |
+1 | use identity::ActiveAccountSecurity;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ActiveAccountSecurity` in the root

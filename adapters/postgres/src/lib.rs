@@ -21,6 +21,8 @@
 //! INVARIANT: PG-DOMAIN-FEATURES-01 { level = "Hard", exec = "native-compile", source = "code", native = "Cargo optional dependencies and explicit domain features remove inactive domain APIs from the selected package graph" } ——
 //! `domain-settings` / `domain-identity` / `domain-audit` 是无默认值的闭合选择；未启用时对应 dependency、module 与 public API 均不进入 rustc 输入。
 
+#[cfg(feature = "domain-identity")]
+mod account_security_repo;
 #[cfg(feature = "domain-audit")]
 mod audit_repo;
 #[cfg(feature = "domain-audit")]
@@ -86,6 +88,8 @@ pub use audit_repo::{PgAuditAdminRepo, PgAuditRepo};
 #[cfg(feature = "domain-audit")]
 pub use auth_audit_sink::PgAuthAuditSink;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
+#[cfg(feature = "domain-identity")]
+pub use account_security_repo::PgAccountSecurityRepo;
 #[cfg(feature = "domain-settings")]
 pub use bundle::PgSettingsBundle;
 pub use bundle::{

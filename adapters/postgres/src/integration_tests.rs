@@ -451,6 +451,372 @@ async fn migrator_applies_and_is_idempotent() -> TestResult {
     Ok(())
 }
 
+async fn run_migrations_through(store: &PgStore, last_version: i64) -> TestResult {
+    use std::borrow::Cow;
+
+    let embedded = sqlx::migrate!("./migrations");
+    let migrations = embedded
+        .iter()
+        .filter(|migration| migration.version <= last_version)
+        .cloned()
+        .collect();
+    let migrator = sqlx::migrate::Migrator {
+        migrations: Cow::Owned(migrations),
+        ignore_missing: false,
+        locking: true,
+        no_tx: embedded.no_tx,
+    };
+    migrator.run(&store.pool).await?;
+    Ok(())
+}
+
+async fn insert_account_security_pair(
+    store: &PgStore,
+    tenant_id: &str,
+    user_id: &str,
+    login: &str,
+) -> TestResult {
+    let mut tx = store.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO public.credentials \
+         (tenant_id, user_id, login, password_hash, version) \
+         VALUES ($1::uuid, $2::uuid, $3, 'phc-for-migration-contract', 1)",
+    )
+    .bind(tenant_id)
+    .bind(user_id)
+    .bind(login)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO public.account_security_states \
+         (tenant_id, user_id, status, authn_epoch, version, status_changed_at, updated_at) \
+         VALUES ($1::uuid, $2::uuid, 'active', 0, 1, now(), now())",
+    )
+    .bind(tenant_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[allow(clippy::panic)]
+fn assert_database_constraint<T>(result: Result<T, sqlx::Error>, expected: &str) {
+    match result {
+        Err(sqlx::Error::Database(error)) => {
+            assert_eq!(
+                error.constraint(),
+                Some(expected),
+                "statement failed through the wrong database constraint: {error}"
+            );
+        }
+        Err(error) => panic!("expected database constraint {expected}, got {error}"),
+        Ok(_) => panic!("expected database constraint {expected}, statement succeeded"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0069_backfills_every_existing_credential_exactly_once() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    run_migrations_through(&store, 68).await?;
+
+    let tenant_id = uuid::Uuid::new_v4().to_string();
+    let user_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO public.credentials \
+         (tenant_id, user_id, login, password_hash, version) \
+         VALUES ($1::uuid, $2::uuid, 'pre-0069-user', 'phc-before-cutover', 1)",
+    )
+    .bind(&tenant_id)
+    .bind(&user_id)
+    .execute(&store.pool)
+    .await?;
+    let table_before: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('public.account_security_states')::text")
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(
+        table_before.is_none(),
+        "upgrade proof must begin on the exact 0068 schema"
+    );
+
+    store.run_migrations().await?;
+
+    let row: (String, i64, i64, bool) = sqlx::query_as(
+        "SELECT status, authn_epoch, version, status_changed_at = updated_at \
+         FROM public.account_security_states \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(&tenant_id)
+    .bind(&user_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(row, ("active".to_string(), 0, 1, true));
+
+    let (credentials, states, missing, duplicate): (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM public.credentials), \
+           (SELECT count(*) FROM public.account_security_states), \
+           (SELECT count(*) FROM public.credentials AS c \
+              LEFT JOIN public.account_security_states AS s \
+                USING (tenant_id, user_id) \
+             WHERE s.user_id IS NULL), \
+           (SELECT count(*) FROM ( \
+                SELECT tenant_id, user_id \
+                  FROM public.account_security_states \
+                 GROUP BY tenant_id, user_id \
+                HAVING count(*) <> 1 \
+           ) AS invalid)",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(states, credentials, "every credential must have one state");
+    assert_eq!(
+        missing, 0,
+        "backfill must leave no credential without state"
+    );
+    assert_eq!(
+        duplicate, 0,
+        "composite primary key must preclude duplicates"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0069_enforces_closed_state_and_strict_one_to_one() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant_id = uuid::Uuid::new_v4().to_string();
+    let user_id = uuid::Uuid::new_v4().to_string();
+    let login = "account-security-constraints";
+
+    let orphan_state = sqlx::query(
+        "INSERT INTO public.account_security_states \
+         (tenant_id, user_id, status, authn_epoch, version, status_changed_at, updated_at) \
+         VALUES ($1::uuid, $2::uuid, 'active', 0, 1, now(), now())",
+    )
+    .bind(&tenant_id)
+    .bind(&user_id)
+    .execute(&store.pool)
+    .await;
+    assert!(
+        orphan_state.is_err(),
+        "security row without credential must be rejected"
+    );
+
+    let mut credential_only = store.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO public.credentials \
+         (tenant_id, user_id, login, password_hash, version) \
+         VALUES ($1::uuid, $2::uuid, $3, 'phc', 1)",
+    )
+    .bind(&tenant_id)
+    .bind(&user_id)
+    .bind(login)
+    .execute(&mut *credential_only)
+    .await?;
+    assert!(
+        credential_only.commit().await.is_err(),
+        "deferred reverse FK must reject a credential-only commit"
+    );
+
+    insert_account_security_pair(&store, &tenant_id, &user_id, login).await?;
+
+    for (column, invalid_value) in [
+        ("status", "'unknown'"),
+        ("authn_epoch", "-1"),
+        ("version", "0"),
+        ("updated_at", "status_changed_at - interval '1 second'"),
+    ] {
+        let sql = format!(
+            "UPDATE public.account_security_states SET {column} = {invalid_value} \
+             WHERE tenant_id = $1::uuid AND user_id = $2::uuid"
+        );
+        let result = sqlx::query(&sql)
+            .bind(&tenant_id)
+            .bind(&user_id)
+            .execute(&store.pool)
+            .await;
+        assert!(
+            result.is_err(),
+            "0069 CHECK must reject invalid {column}={invalid_value}"
+        );
+    }
+
+    let rebound_user = uuid::Uuid::new_v4().to_string();
+    let rebind = sqlx::query(
+        "UPDATE public.credentials SET user_id = $3::uuid \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(&tenant_id)
+    .bind(&user_id)
+    .bind(&rebound_user)
+    .execute(&store.pool)
+    .await;
+    assert!(rebind.is_err(), "credential user rebind must be rejected");
+
+    let state_only_delete = sqlx::query(
+        "DELETE FROM public.account_security_states \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(&tenant_id)
+    .bind(&user_id)
+    .execute(&store.pool)
+    .await;
+    assert!(
+        state_only_delete.is_err(),
+        "reverse FK must reject deleting state while credential exists"
+    );
+
+    sqlx::query(
+        "DELETE FROM public.credentials \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(&tenant_id)
+    .bind(&user_id)
+    .execute(&store.pool)
+    .await?;
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM public.account_security_states \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(&tenant_id)
+    .bind(&user_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        remaining, 0,
+        "credential deletion must cascade to its state"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0069_forces_canonical_rls_and_minimal_acl() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+
+    let acl: (bool, bool, bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT \
+           has_table_privilege('rss_app', 'public.account_security_states', 'SELECT'), \
+           has_table_privilege('rss_app', 'public.account_security_states', 'INSERT'), \
+           has_table_privilege('rss_app', 'public.account_security_states', 'UPDATE'), \
+           has_table_privilege('rss_app', 'public.account_security_states', 'DELETE'), \
+           has_table_privilege('rss_app_read', 'public.account_security_states', 'SELECT'), \
+           has_table_privilege('rss_app_read', 'public.account_security_states', 'INSERT'), \
+           has_table_privilege('rss_app_read', 'public.account_security_states', 'UPDATE'), \
+           has_table_privilege('rss_app_read', 'public.account_security_states', 'DELETE'), \
+           (SELECT relrowsecurity FROM pg_catalog.pg_class \
+             WHERE oid = 'public.account_security_states'::regclass), \
+           (SELECT relforcerowsecurity FROM pg_catalog.pg_class \
+             WHERE oid = 'public.account_security_states'::regclass)",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        acl,
+        (
+            true, true, true, false, true, false, false, false, true, true
+        ),
+        "writer/reader ACL and ENABLE/FORCE RLS must be exact"
+    );
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let user_a = uuid::Uuid::new_v4().to_string();
+    let user_b = uuid::Uuid::new_v4().to_string();
+    insert_account_security_pair(&owner, &tenant_a, &user_a, "rls-security-a").await?;
+    insert_account_security_pair(&owner, &tenant_b, &user_b, "rls-security-b").await?;
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&owner.pool)
+        .await?;
+
+    let mut tenant_a_tx = owner.pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE rss_app")
+        .execute(&mut *tenant_a_tx)
+        .await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(&tenant_a)
+        .execute(&mut *tenant_a_tx)
+        .await?;
+    let visible_a: i64 = sqlx::query_scalar("SELECT count(*) FROM public.account_security_states")
+        .fetch_one(&mut *tenant_a_tx)
+        .await?;
+    assert_eq!(visible_a, 1, "writer must see only its bound tenant");
+    let cross_tenant_update = sqlx::query(
+        "UPDATE public.account_security_states SET tenant_id = $1::uuid \
+         WHERE tenant_id = $2::uuid AND user_id = $3::uuid",
+    )
+    .bind(&tenant_b)
+    .bind(&tenant_a)
+    .bind(&user_a)
+    .execute(&mut *tenant_a_tx)
+    .await;
+    assert!(
+        cross_tenant_update.is_err(),
+        "WITH CHECK must reject a cross-tenant update"
+    );
+    tenant_a_tx.rollback().await?;
+
+    let mut empty_scope_tx = owner.pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE rss_app")
+        .execute(&mut *empty_scope_tx)
+        .await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', '', true)")
+        .execute(&mut *empty_scope_tx)
+        .await?;
+    let empty_visible: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM public.account_security_states")
+            .fetch_one(&mut *empty_scope_tx)
+            .await?;
+    assert_eq!(
+        empty_visible, 0,
+        "empty tenant setting must fail closed without a uuid cast error"
+    );
+    empty_scope_tx.rollback().await?;
+
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let unset_visible: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM public.account_security_states")
+            .fetch_one(&app.pool)
+            .await?;
+    assert_eq!(unset_visible, 0, "unset tenant setting must fail closed");
+    let direct_delete = sqlx::query("DELETE FROM public.account_security_states")
+        .execute(&app.pool)
+        .await;
+    assert!(
+        direct_delete.is_err(),
+        "writer role must have no direct state deletion capability"
+    );
+
+    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let mut reader_tx = reader.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(&tenant_b)
+        .execute(&mut *reader_tx)
+        .await?;
+    let reader_visible: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM public.account_security_states")
+            .fetch_one(&mut *reader_tx)
+            .await?;
+    assert_eq!(
+        reader_visible, 1,
+        "reader must see only its tenant through SELECT"
+    );
+    reader_tx.rollback().await?;
+
+    reader.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> TestResult {
     let (fixture, admin) = connect_pg().await?;
@@ -2990,11 +3356,12 @@ impl RefreshLocalTxCase {
         let old = identity::ports::RefreshTokenRecord::hydrate(
             old_id.clone(),
             tenant,
-            "localtx-refresh",
+            old_id.clone(),
             vocab::PrincipalKind::User,
             hash,
             None,
             old_id,
+            identity::ports::AuthnEpoch::ZERO,
             identity::ports::RefreshStatus::Active,
             issued,
             issued + std::time::Duration::from_secs(3_600),
@@ -3005,11 +3372,12 @@ impl RefreshLocalTxCase {
         let next = identity::ports::RefreshTokenRecord::hydrate(
             uuid::Uuid::new_v4().to_string(),
             tenant,
-            "localtx-refresh",
+            old.subject(),
             vocab::PrincipalKind::User,
             next_hash,
             Some(old.id().as_str().to_owned()),
             old.lineage_id().as_str().to_owned(),
+            identity::ports::AuthnEpoch::ZERO,
             identity::ports::RefreshStatus::Active,
             issued + std::time::Duration::from_secs(1),
             issued + std::time::Duration::from_secs(3_601),
@@ -3031,6 +3399,9 @@ impl RefreshLocalTxCase {
     }
 
     async fn seed(&self, app: &PgStore) -> Result<(), identity::ports::IdentityError> {
+        seed_refresh_account(app, self.tenant, self.old.subject(), 0)
+            .await
+            .map_err(|error| identity::ports::IdentityError::Storage(Box::new(error)))?;
         crate::PgRefreshTokenStore::from_unverified_for_test(app)
             .insert(identity_scope(self.tenant), self.old.clone())
             .await
@@ -3044,8 +3415,11 @@ impl RefreshLocalTxCase {
             .rotate(identity_scope(self.tenant), self.mutation())
             .await?
         {
-            true => Ok(()),
-            false => Err(identity::ports::IdentityError::VersionConflict),
+            identity::ports::RefreshRotationOutcome::Applied => Ok(()),
+            identity::ports::RefreshRotationOutcome::Replay
+            | identity::ports::RefreshRotationOutcome::AccountStale => {
+                Err(identity::ports::IdentityError::VersionConflict)
+            }
         }
     }
 
@@ -28580,11 +28954,13 @@ async fn t22b_rls_role_bindings_enforces_tenant_isolation() -> TestResult {
 
 // ── RT: PgRefreshTokenStore 集成验证（#1325）────────────────────────────────────
 //
-// 覆盖：insert→find_by_hash 往返；rotate CAS（Active→true, 再次 rotate same old→false）；
+// 覆盖：insert→find_by_hash 往返；rotate CAS（Active→Applied, 再次 rotate same old→Replay）；
 // rotate 后 old 变 consumed（find 仍可查到，status=consumed）；revoke_lineage 整条谱系变 revoked；
 // 跨租隔离（tenant B 查 tenant A 的 hash → None）。
 
-use identity::ports::{RefreshTokenStore, TenantId as RtTenantId};
+use identity::ports::{
+    AuthnEpoch, RefreshRotationOutcome, RefreshTokenStore, TenantId as RtTenantId,
+};
 use vocab::PrincipalKind;
 
 use crate::PgRefreshTokenStore;
@@ -28592,6 +28968,37 @@ use crate::PgRefreshTokenStore;
 /// 构造测试用固定 hash（32 字节全 0xAB 填充，可识别但不冲突）。
 fn test_hash_for(suffix: u8) -> [u8; 32] {
     [suffix; 32]
+}
+
+async fn seed_refresh_account(
+    store: &PgStore,
+    tenant: RtTenantId,
+    user_id: &str,
+    authn_epoch: i64,
+) -> Result<(), sqlx::Error> {
+    let tenant = tenant.as_uuid().to_string();
+    let mut tx = store.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO credentials \
+         (tenant_id, user_id, login, password_hash, version) \
+         VALUES ($1::uuid, $2::uuid, $3, 'refresh-test-phc-not-used', 1)",
+    )
+    .bind(&tenant)
+    .bind(user_id)
+    .bind(format!("refresh-{user_id}"))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO account_security_states \
+         (tenant_id, user_id, status, authn_epoch, version, status_changed_at, updated_at) \
+         VALUES ($1::uuid, $2::uuid, 'active', $3, 1, now(), now())",
+    )
+    .bind(&tenant)
+    .bind(user_id)
+    .bind(authn_epoch)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
 }
 
 /// RT-1：insert → find_by_hash 往返——record 各字段正确重建。
@@ -28621,6 +29028,7 @@ async fn rt1_insert_then_find_by_hash_roundtrip() -> TestResult {
         hash_bytes,
         None, // 签发根 parent_id = None
         lineage.clone(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued,
         expires,
@@ -28672,7 +29080,7 @@ async fn rt1_insert_then_find_by_hash_roundtrip() -> TestResult {
     Ok(())
 }
 
-/// RT-2：rotate CAS（Active → consumed + new 写入）返 true；再次 rotate 同 old → false（already consumed）。
+/// RT-2：rotate CAS（Active → consumed + new 写入）返 Applied；再次 rotate 同 old → Replay。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 // reason: uuid / TenantId parse 已知合法值；old/new record 必定可查到；集成测试 happy-path；item-level carve-out。
@@ -28686,6 +29094,7 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
     let tenant_str = uuid::Uuid::new_v4().to_string();
     let tenant = RtTenantId::parse(&tenant_str).unwrap();
     let old_id_str = uuid::Uuid::new_v4().to_string();
+    let subject = uuid::Uuid::new_v4().to_string();
     let lineage_str = old_id_str.clone();
     let hash_old = test_hash_for(0xB1);
     let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_100_000);
@@ -28695,11 +29104,12 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
     let old_record = RefreshTokenRecord::hydrate(
         old_id_str.clone(),
         tenant,
-        "bob",
+        subject.clone(),
         PrincipalKind::User,
         hash_old,
         None,
         lineage_str.clone(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued,
         expires,
@@ -28708,6 +29118,7 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
     // sealed command: clone 源 record 供 begin_rotation（移动前保留引用，rotate 不再接受裸 id/record）。
     let old_for_rotate = old_record.clone();
     let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
+    seed_refresh_account(&store, tenant, &subject, 0).await?;
     rt_store.insert(identity_scope(tenant), old_record).await?;
 
     // 构造 new record（rotation 子节点），clone hash 供后续 find 使用。
@@ -28716,18 +29127,19 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
     let new_record = RefreshTokenRecord::hydrate(
         new_id_str.clone(),
         tenant,
-        "bob",
+        subject.clone(),
         PrincipalKind::User,
         hash_new,
         Some(old_id_str.clone()),
         lineage_str.clone(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued + Duration::from_secs(1),
         expires + Duration::from_secs(1),
     );
     let hash_new_typed = new_record.token_hash().clone();
 
-    // 首次 rotate：old Active → CAS 命中 → true，new 已写入。
+    // 首次 rotate：old Active → CAS 命中 → Applied，new 已写入。
     // begin_rotation 从 old_for_rotate（同一 tenant）派生 sealed 命令（REFRESH-ROTATE-LINEAGE-01）。
     let rotation1 = old_for_rotate.begin_rotation(
         new_record.id().clone(),
@@ -28741,7 +29153,11 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
             identity::ports::RefreshRotationMutation::for_test(rotation1),
         )
         .await?;
-    assert!(result, "rt2: 首次 rotate 应返回 true（CAS 命中）");
+    assert_eq!(
+        result,
+        RefreshRotationOutcome::Applied,
+        "rt2: 首次 rotate 应返回 Applied（CAS 命中）"
+    );
 
     // 验证 old 变 consumed。
     let old_found = rt_store
@@ -28765,15 +29181,16 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
         "rt2: new 应为 active"
     );
 
-    // 再次 rotate 同 old（已 consumed）→ CAS miss → false，new2 不写入。
+    // 再次 rotate 同 old（已 consumed）→ CAS miss → Replay，new2 不写入。
     let new2_record = RefreshTokenRecord::hydrate(
         uuid::Uuid::new_v4().to_string(),
         tenant,
-        "bob",
+        subject,
         PrincipalKind::User,
         test_hash_for(0xB3),
         Some(old_id_str.clone()),
         lineage_str.clone(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued + Duration::from_secs(2),
         expires + Duration::from_secs(2),
@@ -28791,9 +29208,10 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
             identity::ports::RefreshRotationMutation::for_test(rotation2),
         )
         .await?;
-    assert!(
-        !result2,
-        "rt2: 再次 rotate consumed old 应返回 false（CAS miss）"
+    assert_eq!(
+        result2,
+        RefreshRotationOutcome::Replay,
+        "rt2: 再次 rotate consumed old 应返回 Replay（CAS miss）"
     );
 
     // new2 不应被写入。
@@ -28801,6 +29219,132 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
         .find_by_hash(identity_scope(tenant), hash_new2_typed)
         .await?;
     assert!(new2_found.is_none(), "rt2: CAS miss 时 new2 不应写入");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RT-2b：application 读门之后账号 epoch 变化，最终 writer 事务返回 AccountStale，
+/// old 不消费且 new 不写入，闭合 read-to-CAS TOCTOU。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+async fn rt2b_rotate_final_writer_rejects_stale_account_epoch() -> TestResult {
+    use identity::ports::{RefreshStatus, RefreshTokenRecord};
+    use std::time::{Duration, SystemTime};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = RtTenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let subject = uuid::Uuid::new_v4().to_string();
+    let old_id = uuid::Uuid::new_v4().to_string();
+    let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_150_000);
+    let expires = issued + Duration::from_secs(3_600);
+    let old = RefreshTokenRecord::hydrate(
+        old_id.clone(),
+        tenant,
+        subject.clone(),
+        PrincipalKind::User,
+        test_hash_for(0xB4),
+        None,
+        old_id,
+        AuthnEpoch::ZERO,
+        RefreshStatus::Active,
+        issued,
+        expires,
+    );
+    let old_hash = old.token_hash().clone();
+    let old_for_rotation = old.clone();
+    let new_seed = RefreshTokenRecord::hydrate(
+        uuid::Uuid::new_v4().to_string(),
+        tenant,
+        subject.clone(),
+        PrincipalKind::User,
+        test_hash_for(0xB5),
+        Some(old.id().as_str().to_owned()),
+        old.lineage_id().as_str().to_owned(),
+        AuthnEpoch::ZERO,
+        RefreshStatus::Active,
+        issued + Duration::from_secs(1),
+        expires + Duration::from_secs(1),
+    );
+    let new_hash = new_seed.token_hash().clone();
+    let rotation = old_for_rotation.begin_rotation(
+        new_seed.id().clone(),
+        new_seed.token_hash().clone(),
+        new_seed.issued_at(),
+        new_seed.expires_at(),
+    );
+
+    seed_refresh_account(&store, tenant, &subject, 0).await?;
+    let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
+    rt_store.insert(identity_scope(tenant), old).await?;
+
+    let mut account_change = store.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *account_change)
+        .await?;
+    sqlx::query(
+        "UPDATE account_security_states \
+         SET authn_epoch = 1, version = version + 2, updated_at = now() \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(&subject)
+    .execute(&mut *account_change)
+    .await?;
+
+    let rotate_task = tokio::spawn(async move {
+        let outcome = rt_store
+            .rotate(
+                identity_scope(tenant),
+                identity::ports::RefreshRotationMutation::for_test(rotation),
+            )
+            .await;
+        (rt_store, outcome)
+    });
+    let mut writer_waited_on_account = false;
+    for _ in 0..100 {
+        writer_waited_on_account = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+               SELECT 1 FROM pg_stat_activity AS activity \
+                WHERE $1 = ANY(pg_blocking_pids(activity.pid)) \
+                  AND activity.wait_event_type = 'Lock' \
+                  AND activity.query LIKE '%SELECT status, authn_epoch FROM account_security_states%' \
+             )",
+        )
+        .bind(blocker_pid)
+        .fetch_one(&store.pool)
+        .await?;
+        if writer_waited_on_account {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        writer_waited_on_account,
+        "rotate must wait on the account-security FOR UPDATE lock before refresh CAS"
+    );
+    account_change.commit().await?;
+    let (rt_store, outcome) = tokio::time::timeout(Duration::from_secs(10), rotate_task).await??;
+    let outcome = outcome?;
+    assert_eq!(outcome, RefreshRotationOutcome::AccountStale);
+    assert_eq!(
+        rt_store
+            .find_by_hash(identity_scope(tenant), old_hash)
+            .await?
+            .expect("old remains")
+            .status(),
+        RefreshStatus::Active,
+        "final account gate failure must not consume the old refresh"
+    );
+    assert!(
+        rt_store
+            .find_by_hash(identity_scope(tenant), new_hash)
+            .await?
+            .is_none(),
+        "final account gate failure must not insert the child refresh"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -28835,6 +29379,7 @@ async fn rt3_revoke_lineage_revokes_all_and_is_idempotent() -> TestResult {
         test_hash_for(0xC1),
         None,
         lineage_str.clone(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued,
         expires,
@@ -28851,6 +29396,7 @@ async fn rt3_revoke_lineage_revokes_all_and_is_idempotent() -> TestResult {
         test_hash_for(0xC2),
         Some(root_id.clone()),
         lineage_str.clone(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Consumed,
         issued + Duration::from_secs(1),
         expires + Duration::from_secs(1),
@@ -28925,6 +29471,7 @@ async fn rt4_cross_tenant_isolation() -> TestResult {
         test_hash_for(0xD1),
         None,
         id_a.clone(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued,
         expires,
@@ -28953,15 +29500,16 @@ async fn rt4_cross_tenant_isolation() -> TestResult {
     Ok(())
 }
 
-/// RT-5：nonexistent old_id → rotate CAS miss → Ok(false)，new 不写入。
+/// RT-5：账号 Active 且 epoch 匹配时，nonexistent old_id → [`RefreshRotationOutcome::Replay`]，new 不写入。
 ///
 /// sealed [`RefreshRotation`] 命令（`begin_rotation` 从源 record 派生）使跨租 rotate 在类型层不可表达
 /// （REFRESH-ROTATE-LINEAGE-01）——直接 rotate 未入库的"幽灵" old_id 是 DB 层 CAS miss 的正规路径。
-/// 验证：`do_rotate_tx` 在找不到匹配的 `(tenant_id, old_id, status=active)` 行时正确返回 false。
+/// 验证：最终账号门控通过后，`do_rotate_tx` 找不到匹配的
+/// `(tenant_id, old_id, status=active, authn_epoch_at_issue)` 行时返回 Replay。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: uuid / TenantId parse 是已知合法值；集成测试 happy-path；item-level carve-out。
-async fn rt5_rotate_nonexistent_old_id_returns_false() -> TestResult {
+async fn rt5_rotate_nonexistent_old_id_returns_replay() -> TestResult {
     use identity::ports::{RefreshStatus, RefreshTokenRecord};
     use std::time::{Duration, SystemTime};
 
@@ -28970,6 +29518,7 @@ async fn rt5_rotate_nonexistent_old_id_returns_false() -> TestResult {
 
     let tenant_str = uuid::Uuid::new_v4().to_string();
     let tenant = RtTenantId::parse(&tenant_str).unwrap();
+    let subject = uuid::Uuid::new_v4().to_string();
     let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_500_000);
     let expires = issued + Duration::from_secs(3_600);
 
@@ -28977,11 +29526,12 @@ async fn rt5_rotate_nonexistent_old_id_returns_false() -> TestResult {
     let phantom = RefreshTokenRecord::hydrate(
         uuid::Uuid::new_v4().to_string(),
         tenant,
-        "ghost-subj",
+        subject.clone(),
         PrincipalKind::User,
         test_hash_for(0xE1),
         None,
         uuid::Uuid::new_v4().to_string(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued,
         expires,
@@ -28990,18 +29540,19 @@ async fn rt5_rotate_nonexistent_old_id_returns_false() -> TestResult {
     let new_seed = RefreshTokenRecord::hydrate(
         uuid::Uuid::new_v4().to_string(),
         tenant,
-        "ghost-subj",
+        subject.clone(),
         PrincipalKind::User,
         test_hash_for(0xE2),
         None,
         uuid::Uuid::new_v4().to_string(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued + Duration::from_secs(1),
         expires + Duration::from_secs(1),
     );
     let new_hash_typed = new_seed.token_hash().clone();
 
-    // phantom 未插入 DB → CAS UPDATE 0 行 → rotate 返 false，new_seed 不写入。
+    // phantom 未插入 DB → CAS UPDATE 0 行 → rotate 返 Replay，new_seed 不写入。
     let rotation = phantom.begin_rotation(
         new_seed.id().clone(),
         new_seed.token_hash().clone(),
@@ -29009,15 +29560,17 @@ async fn rt5_rotate_nonexistent_old_id_returns_false() -> TestResult {
         expires + Duration::from_secs(1),
     );
     let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
+    seed_refresh_account(&store, tenant, &subject, 0).await?;
     let result = rt_store
         .rotate(
             identity_scope(tenant),
             identity::ports::RefreshRotationMutation::for_test(rotation),
         )
         .await?;
-    assert!(
-        !result,
-        "rt5: 未入库 old_id → CAS miss → rotate 应返回 false"
+    assert_eq!(
+        result,
+        RefreshRotationOutcome::Replay,
+        "rt5: 账号门控通过但 old 不存在时返回 Replay"
     );
 
     // new_seed 也未被写入（CAS miss 不写 new）。
@@ -29061,6 +29614,7 @@ async fn rt6_revoke_lineage_cross_tenant_noop() -> TestResult {
         test_hash_for(0xF1),
         None,
         lineage.clone(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued,
         expires,
@@ -29114,6 +29668,7 @@ async fn rt6b_refresh_token_store_tenant_noop_conformance() -> TestResult {
         test_hash_for(0xF6),
         None,
         id_str,
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued,
         expires,
@@ -29166,7 +29721,7 @@ async fn rt6b_refresh_token_store_tenant_noop_conformance() -> TestResult {
 
 /// RT-7：并发 rotate CAS fencing——两个 `PgRefreshTokenStore` 实例 `tokio::join!` 并发 rotate 同一 Active 记录。
 ///
-/// 验证：恰一个 rotate 返回 `true`（CAS 命中），一个返回 `false`（miss）；
+/// 验证：恰一个 rotate 返回 `Applied`（CAS 命中），一个返回 `Replay`（miss）；
 /// old 变 Consumed，new 恰一条（CAS miss 的 rotate 不写 new）。
 /// INVARIANT：`UPDATE ... WHERE ... AND status = $4`（CAS）保证行级互斥（同 fosite `flow_refresh.go`）。
 #[tokio::test(flavor = "multi_thread")]
@@ -29183,6 +29738,7 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
     let tenant = RtTenantId::parse(&tenant_str).unwrap();
 
     let old_id_str = uuid::Uuid::new_v4().to_string();
+    let subject = uuid::Uuid::new_v4().to_string();
     let lineage = old_id_str.clone();
     let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_700_000);
     let expires = issued + Duration::from_secs(3_600);
@@ -29191,11 +29747,12 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
     let old_record = RefreshTokenRecord::hydrate(
         old_id_str.clone(),
         tenant,
-        "concurrent-subj",
+        subject.clone(),
         PrincipalKind::User,
         test_hash_for(0xA7),
         None,
         lineage.clone(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued,
         expires,
@@ -29205,17 +29762,19 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
     let old_for_rotate = old_record.clone();
 
     let rt_store1 = PgRefreshTokenStore::from_unverified_for_test(&store);
+    seed_refresh_account(&store, tenant, &subject, 0).await?;
     rt_store1.insert(identity_scope(tenant), old_record).await?;
 
     // 两个不同 new record（不同 id + hash 避免 PK / unique 冲突；只有 CAS 命中的会被写入）
     let new_record_1 = RefreshTokenRecord::hydrate(
         uuid::Uuid::new_v4().to_string(),
         tenant,
-        "concurrent-subj",
+        subject.clone(),
         PrincipalKind::User,
         test_hash_for(0xB7),
         Some(old_id_str.clone()),
         lineage.clone(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued + Duration::from_secs(1),
         expires + Duration::from_secs(1),
@@ -29225,11 +29784,12 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
     let new_record_2 = RefreshTokenRecord::hydrate(
         uuid::Uuid::new_v4().to_string(),
         tenant,
-        "concurrent-subj",
+        subject,
         PrincipalKind::User,
         test_hash_for(0xC7),
         Some(old_id_str.clone()),
         lineage.clone(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued + Duration::from_secs(2),
         expires + Duration::from_secs(2),
@@ -29266,11 +29826,19 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
     let r1 = r1?;
     let r2 = r2?;
 
-    // 恰一个 true（CAS 命中），一个 false（CAS miss）
-    assert!(r1 || r2, "rt7: 至少一个 rotate 应成功（CAS 命中）");
+    // 恰一个 Applied（CAS 命中），一个 Replay（CAS miss）。
     assert!(
-        !(r1 && r2),
-        "rt7: 两个 rotate 不能都成功（CAS fencing：同一 old_id 只能消费一次）"
+        matches!(
+            (r1, r2),
+            (
+                RefreshRotationOutcome::Applied,
+                RefreshRotationOutcome::Replay
+            ) | (
+                RefreshRotationOutcome::Replay,
+                RefreshRotationOutcome::Applied
+            )
+        ),
+        "rt7: 并发 rotate 必须恰一 Applied、一 Replay"
     );
 
     // old 应已变 Consumed
@@ -29318,6 +29886,7 @@ async fn rt8_refresh_token_rotate_rollback_conformance() -> TestResult {
 
     let tenant = RtTenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let old_id = uuid::Uuid::new_v4().to_string();
+    let subject = uuid::Uuid::new_v4().to_string();
     let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_800_000);
     let expires = issued + Duration::from_secs(3_600);
     let overflow_expires = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000_000_000);
@@ -29325,11 +29894,12 @@ async fn rt8_refresh_token_rotate_rollback_conformance() -> TestResult {
     let old_record = RefreshTokenRecord::hydrate(
         old_id.clone(),
         tenant,
-        "rollback-subj",
+        subject.clone(),
         PrincipalKind::User,
         test_hash_for(0xD8),
         None,
         old_id,
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued,
         expires,
@@ -29340,11 +29910,12 @@ async fn rt8_refresh_token_rotate_rollback_conformance() -> TestResult {
     let new_seed = RefreshTokenRecord::hydrate(
         uuid::Uuid::new_v4().to_string(),
         tenant,
-        "rollback-subj",
+        subject.clone(),
         PrincipalKind::User,
         test_hash_for(0xE8),
         Some(old_for_rotate.id().as_str().to_string()),
         old_for_rotate.lineage_id().as_str().to_string(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         issued + Duration::from_secs(1),
         expires + Duration::from_secs(1),
@@ -29358,6 +29929,7 @@ async fn rt8_refresh_token_rotate_rollback_conformance() -> TestResult {
     );
 
     let rt_store = PgRefreshTokenStore::from_unverified_for_test(&store);
+    seed_refresh_account(&store, tenant, &subject, 0).await?;
     rt_store.insert(identity_scope(tenant), old_record).await?;
 
     let result = rt_store
@@ -29408,6 +29980,7 @@ async fn rt9_refresh_token_store_storage_error_conformance() -> TestResult {
         test_hash_for(0xF9),
         None,
         uuid::Uuid::new_v4().to_string(),
+        AuthnEpoch::ZERO,
         RefreshStatus::Active,
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_900_000),
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_903_600),
@@ -29640,11 +30213,12 @@ async fn sampling_loop_marks_down_when_reader_pool_is_closed() -> TestResult {
 // ───────────────────────────────────────────────────────────────────────────
 
 use identity::ports::{
+    AccountSecurityLifecycle, AccountSecurityReadRepo, AccountSecurityState, AccountStatus,
     AuthOutcome, Credential, CredentialRepo, LoginIdentifier, PasswordChangeMutation,
 };
 
-use crate::PgCredentialRepo;
 use crate::credential_repo::CredentialMutationFault;
+use crate::{PgAccountSecurityRepo, PgCredentialRepo};
 
 const CRED_TENANT_A: &str = "a1a2a3a4-b1b2-4c3c-8d4d-e1e2e3e4e5e6";
 const CRED_TENANT_B: &str = "b9b8b7b6-c5c4-4a3a-8f2f-d1d2d3d4d5d6";
@@ -29664,6 +30238,13 @@ fn cred_tenant(raw: &str) -> CredHelperResult<TenantId> {
 
 fn cred_uid(raw: &str) -> CredHelperResult<ids::UserId> {
     Ok(ids::UserId::parse(raw)?)
+}
+
+fn authenticated_user(outcome: AuthOutcome) -> CredHelperResult<ids::UserId> {
+    match outcome {
+        AuthOutcome::Authenticated(state) => Ok(state.user_id()),
+        other => Err(format!("expected authenticated outcome, got {other:?}").into()),
+    }
 }
 
 // 登录查找键（经 test-support funnel；known 主体亦可 `cred.login().clone()`，未知主体仅经此入口）。
@@ -29718,6 +30299,298 @@ fn password_change(expected: u32, next: Credential) -> PasswordChangeMutation {
 
 fn cred_epoch(secs: u64) -> std::time::SystemTime {
     std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_security_save_transition_and_authentication_gate_are_atomic() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let credentials = PgCredentialRepo::from_unverified_for_test(&store);
+    let security = PgAccountSecurityRepo::from_unverified_for_test(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let user = cred_uid(CRED_USER_ALICE)?;
+    let scope = identity_scope(tenant);
+
+    credentials
+        .save(
+            scope,
+            make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
+        )
+        .await?;
+    let initial = security
+        .find(scope, user)
+        .await?
+        .ok_or("account security row missing after credential save")?;
+    assert_eq!(initial.status(), AccountStatus::Active);
+    assert_eq!(initial.authn_epoch().get(), 0);
+    assert_eq!(initial.version().get(), 1);
+
+    let changed_at = initial
+        .updated_at()
+        .checked_add(std::time::Duration::from_secs(1))
+        .ok_or("account-security test time overflow")?;
+    let suspended = security
+        .apply_transition(
+            scope,
+            initial
+                .transition(AccountStatus::Suspended, changed_at)
+                .map_err(|error| format!("transition failed: {error}"))?,
+        )
+        .await?;
+    assert_eq!(suspended.authn_epoch().get(), 1);
+    assert_eq!(suspended.version().get(), 2);
+
+    credentials
+        .save(
+            scope,
+            make_cred("alice", CRED_USER_ALICE, "correct", 2, tenant)?,
+        )
+        .await?;
+    let after_resave = security
+        .find(scope, user)
+        .await?
+        .ok_or("state disappeared")?;
+    assert_eq!(after_resave.status(), suspended.status());
+    assert_eq!(after_resave.authn_epoch(), suspended.authn_epoch());
+    assert_eq!(
+        after_resave.version(),
+        suspended.version(),
+        "credential save must not reset lifecycle"
+    );
+    assert_eq!(
+        credentials
+            .authenticate(
+                scope,
+                login_id("alice"),
+                raw_password("correct"),
+                changed_at
+            )
+            .await?,
+        AuthOutcome::RejectedKnown,
+        "durably suspended account cannot authenticate"
+    );
+    assert_eq!(
+        db_failure_count(&store, CRED_TENANT_A, "alice").await?,
+        0,
+        "durable rejection does not advance brute-force state"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_security_lifecycle_uses_version_cas() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let credentials = PgCredentialRepo::from_unverified_for_test(&store);
+    let security = PgAccountSecurityRepo::from_unverified_for_test(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let user = cred_uid(CRED_USER_ALICE)?;
+    let scope = identity_scope(tenant);
+    credentials
+        .save(
+            scope,
+            make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
+        )
+        .await?;
+    let initial = security.find(scope, user).await?.ok_or("missing state")?;
+    let mutation = initial
+        .transition(
+            AccountStatus::Locked,
+            initial
+                .updated_at()
+                .checked_add(std::time::Duration::from_secs(1))
+                .ok_or("account-security test time overflow")?,
+        )
+        .map_err(|error| format!("transition failed: {error}"))?;
+    security.apply_transition(scope, mutation.clone()).await?;
+    assert!(matches!(
+        security.apply_transition(scope, mutation).await,
+        Err(identity::ports::IdentityError::VersionConflict)
+    ));
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_security_lifecycle_persists_every_legal_transition() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let credentials = PgCredentialRepo::from_unverified_for_test(&store);
+    let security = PgAccountSecurityRepo::from_unverified_for_test(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let scope = identity_scope(tenant);
+    let cases = [
+        (AccountStatus::Active, AccountStatus::Suspended),
+        (AccountStatus::Active, AccountStatus::Locked),
+        (AccountStatus::Active, AccountStatus::Deactivated),
+        (AccountStatus::Suspended, AccountStatus::Active),
+        (AccountStatus::Suspended, AccountStatus::Deactivated),
+        (AccountStatus::Locked, AccountStatus::Active),
+        (AccountStatus::Locked, AccountStatus::Deactivated),
+    ];
+
+    for (index, (from, to)) in cases.into_iter().enumerate() {
+        let user_raw = uuid::Uuid::new_v4().to_string();
+        let user = cred_uid(&user_raw)?;
+        let login = format!("security-transition-{index}");
+        credentials
+            .save(scope, make_cred(&login, &user_raw, "correct", 1, tenant)?)
+            .await?;
+        let initial = security.find(scope, user).await?.ok_or("missing state")?;
+        let current = if from == AccountStatus::Active {
+            initial
+        } else {
+            let changed_at = initial
+                .updated_at()
+                .checked_add(std::time::Duration::from_secs(1))
+                .ok_or("account-security test time overflow")?;
+            security
+                .apply_transition(
+                    scope,
+                    initial
+                        .transition(from, changed_at)
+                        .map_err(|error| format!("setup transition failed: {error}"))?,
+                )
+                .await?
+        };
+        let next_at = current
+            .updated_at()
+            .checked_add(std::time::Duration::from_secs(1))
+            .ok_or("account-security test time overflow")?;
+        let expected_epoch = current.authn_epoch().get() + u64::from(to != AccountStatus::Active);
+        let expected_version = current.version().get() + 1;
+        let applied = security
+            .apply_transition(
+                scope,
+                current.transition(to, next_at).map_err(|error| {
+                    format!("legal transition {from:?}->{to:?} failed: {error}")
+                })?,
+            )
+            .await?;
+        let persisted = security
+            .find(scope, user)
+            .await?
+            .ok_or("transition removed state")?;
+
+        assert_eq!(applied.status(), to, "{from:?}->{to:?}");
+        assert_eq!(
+            applied.authn_epoch().get(),
+            expected_epoch,
+            "{from:?}->{to:?}"
+        );
+        assert_eq!(
+            applied.version().get(),
+            expected_version,
+            "{from:?}->{to:?}"
+        );
+        assert_eq!(persisted, applied, "{from:?}->{to:?}");
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_security_cas_rejects_same_version_with_forged_expected_status() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let credentials = PgCredentialRepo::from_unverified_for_test(&store);
+    let security = PgAccountSecurityRepo::from_unverified_for_test(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let user = cred_uid(CRED_USER_ALICE)?;
+    let scope = identity_scope(tenant);
+    credentials
+        .save(
+            scope,
+            make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
+        )
+        .await?;
+    let initial = security.find(scope, user).await?.ok_or("missing state")?;
+    let deactivated_at = initial
+        .updated_at()
+        .checked_add(std::time::Duration::from_secs(1))
+        .ok_or("account-security test time overflow")?;
+    let deactivated = security
+        .apply_transition(
+            scope,
+            initial
+                .transition(AccountStatus::Deactivated, deactivated_at)
+                .map_err(|error| format!("deactivation failed: {error}"))?,
+        )
+        .await?;
+
+    let forged_suspended =
+        AccountSecurityState::try_from(identity::ports::AccountSecuritySnapshot {
+            tenant,
+            user_id: user,
+            status: AccountStatus::Suspended,
+            authn_epoch: deactivated.authn_epoch().get(),
+            version: deactivated.version().get(),
+            status_changed_at: deactivated.status_changed_at(),
+            updated_at: deactivated.updated_at(),
+        })?;
+    let forged_mutation = forged_suspended.transition(
+        AccountStatus::Active,
+        forged_suspended
+            .updated_at()
+            .checked_add(std::time::Duration::from_secs(1))
+            .ok_or("account-security test time overflow")?,
+    )?;
+    assert!(matches!(
+        security.apply_transition(scope, forged_mutation).await,
+        Err(IdentityError::VersionConflict)
+    ));
+    assert_eq!(
+        security.find(scope, user).await?.ok_or("missing state")?,
+        deactivated,
+        "matching version must not revive a terminal row when the expected status differs"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_authentication_missing_security_state_is_storage_error() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let credentials = PgCredentialRepo::from_unverified_for_test(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    credentials
+        .save(
+            identity_scope(tenant),
+            make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
+        )
+        .await?;
+
+    let mut tx = store.pool.begin().await?;
+    sqlx::query("SET CONSTRAINTS credentials_account_security_state_fk DEFERRED")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "DELETE FROM account_security_states WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(CRED_TENANT_A)
+    .bind(CRED_USER_ALICE)
+    .execute(&mut *tx)
+    .await?;
+    let result = crate::credential_repo::authenticate_in_tx(
+        &mut tx,
+        CRED_TENANT_A,
+        "alice",
+        raw_password("correct"),
+        cred_epoch(1_700_000_002),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(identity::ports::IdentityError::Storage(_))
+    ));
+    tx.rollback().await?;
+    store.shutdown().await?;
+    Ok(())
 }
 
 // 直查持久化 failure_count（断言锁定态原子推进 / 清零）。
@@ -29850,8 +30723,77 @@ async fn credential_repo_save_find_roundtrip_and_upsert() -> TestResult {
     Ok(())
 }
 
-// authenticate 三态：已知+正确 → Authenticated(canonical user_id)；已知+错 → InvalidKnownUser；
-// 查无凭据 → InvalidUnknown（当前档 KDF 仍跑，不 panic）。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_save_rebind_rolls_back_credential_and_security_together() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let credentials = PgCredentialRepo::from_unverified_for_test(&store);
+    let security = PgAccountSecurityRepo::from_unverified_for_test(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let scope = identity_scope(tenant);
+    let user_a = cred_uid(CRED_USER_ALICE)?;
+    let user_b = cred_uid(CRED_USER_BOB)?;
+    credentials
+        .save(
+            scope,
+            make_cred("alice", CRED_USER_ALICE, "original", 7, tenant)?,
+        )
+        .await?;
+    let initial_security = security
+        .find(scope, user_a)
+        .await?
+        .ok_or("initial security missing")?;
+    let suspended = security
+        .apply_transition(
+            scope,
+            initial_security.transition(
+                AccountStatus::Suspended,
+                initial_security
+                    .updated_at()
+                    .checked_add(std::time::Duration::from_secs(1))
+                    .ok_or("account-security test time overflow")?,
+            )?,
+        )
+        .await?;
+    let credential_before = owner_credential_snapshot(&store, tenant, "alice")
+        .await?
+        .ok_or("initial credential missing")?;
+
+    assert!(matches!(
+        credentials
+            .save(
+                scope,
+                make_cred("alice", CRED_USER_BOB, "replacement", 99, tenant)?,
+            )
+            .await,
+        Err(IdentityError::Storage(_))
+    ));
+    assert_eq!(
+        owner_credential_snapshot(&store, tenant, "alice")
+            .await?
+            .ok_or("credential disappeared")?,
+        credential_before,
+        "failed user rebind must preserve the original hash and version"
+    );
+    assert_eq!(
+        security
+            .find(scope, user_a)
+            .await?
+            .ok_or("security disappeared")?,
+        suspended,
+        "failed user rebind must preserve the original lifecycle row"
+    );
+    assert!(
+        security.find(scope, user_b).await?.is_none(),
+        "failed user rebind must not leave a security row for the rejected subject"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// authenticate 三态：已知+正确 → Authenticated(canonical user_id)；已知+错 → RejectedKnown；
+// 查无凭据 → RejectedUnknown（当前档 KDF 仍跑，不 panic）。
 #[tokio::test(flavor = "multi_thread")]
 async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -29866,14 +30808,16 @@ async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
     let now = cred_epoch(CRED_BASE_SECS);
 
     assert_eq!(
-        repo.authenticate(
-            identity_scope(tenant),
-            login_id("alice"),
-            raw_password("correct"),
-            now
-        )
-        .await?,
-        AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?),
+        authenticated_user(
+            repo.authenticate(
+                identity_scope(tenant),
+                login_id("alice"),
+                raw_password("correct"),
+                now
+            )
+            .await?
+        )?,
+        cred_uid(CRED_USER_ALICE)?,
         "已知+正确 → Authenticated(canonical user_id)"
     );
     assert_eq!(
@@ -29884,8 +30828,8 @@ async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
             now
         )
         .await?,
-        AuthOutcome::InvalidKnownUser,
-        "已知+错 → InvalidKnownUser"
+        AuthOutcome::RejectedKnown,
+        "已知+错 → RejectedKnown"
     );
     assert_eq!(
         repo.authenticate(
@@ -29895,8 +30839,153 @@ async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
             now
         )
         .await?,
-        AuthOutcome::InvalidUnknown,
-        "查无凭据 → InvalidUnknown"
+        AuthOutcome::RejectedUnknown,
+        "查无凭据 → RejectedUnknown"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_authenticate_post_write_fault_rolls_back_lockout_and_security() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let seed = PgCredentialRepo::from_unverified_for_test(&store);
+    let security = PgAccountSecurityRepo::from_unverified_for_test(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let scope = identity_scope(tenant);
+    let user = cred_uid(CRED_USER_ALICE)?;
+    seed.save(
+        scope,
+        make_cred("alice", CRED_USER_ALICE, "correct", 11, tenant)?,
+    )
+    .await?;
+    let credential_before = owner_credential_auth_state(&store, tenant, "alice")
+        .await?
+        .ok_or("credential missing")?;
+    let security_before = security
+        .find(scope, user)
+        .await?
+        .ok_or("security missing")?;
+    let repo = PgCredentialRepo::from_unverified_for_test(&store)
+        .with_authenticate_post_write_fault("alice");
+
+    assert!(matches!(
+        repo.authenticate(
+            scope,
+            login_id("alice"),
+            raw_password("wrong"),
+            cred_epoch(CRED_BASE_SECS),
+        )
+        .await,
+        Err(IdentityError::Storage(_))
+    ));
+    assert_eq!(
+        owner_credential_auth_state(&store, tenant, "alice")
+            .await?
+            .ok_or("credential missing after rollback")?,
+        credential_before,
+        "failure after lockout write must roll the complete credential row back"
+    );
+    assert_eq!(
+        security
+            .find(scope, user)
+            .await?
+            .ok_or("security missing after rollback")?,
+        security_before,
+        "authenticate rollback must not mutate durable lifecycle state"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_authenticate_holds_credential_while_waiting_for_security_lock() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = Arc::new(PgCredentialRepo::from_unverified_for_test(&store));
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let scope = identity_scope(tenant);
+    repo.save(
+        scope,
+        make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
+    )
+    .await?;
+
+    let mut security_blocker = store.pool.begin().await?;
+    let _: String = sqlx::query_scalar(
+        "SELECT user_id::text FROM account_security_states \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid FOR UPDATE",
+    )
+    .bind(CRED_TENANT_A)
+    .bind(CRED_USER_ALICE)
+    .fetch_one(&mut *security_blocker)
+    .await?;
+
+    let auth_repo = Arc::clone(&repo);
+    let auth_task = tokio::spawn(async move {
+        auth_repo
+            .authenticate(
+                scope,
+                login_id("alice"),
+                raw_password("correct"),
+                cred_epoch(CRED_BASE_SECS),
+            )
+            .await
+    });
+
+    let mut credential_lock_observed = false;
+    let mut unexpected_probe_error = None;
+    for _ in 0..80 {
+        let mut probe = store.pool.begin().await?;
+        let result = sqlx::query(
+            "SELECT user_id FROM credentials \
+             WHERE tenant_id = $1::uuid AND login = $2 FOR UPDATE NOWAIT",
+        )
+        .bind(CRED_TENANT_A)
+        .bind("alice")
+        .execute(&mut *probe)
+        .await;
+        match result {
+            Ok(_) => {
+                probe.rollback().await?;
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            Err(error)
+                if error
+                    .as_database_error()
+                    .and_then(|database| database.code())
+                    .is_some_and(|code| code.as_ref() == "55P03") =>
+            {
+                probe.rollback().await?;
+                credential_lock_observed = true;
+                break;
+            }
+            Err(error) => {
+                probe.rollback().await?;
+                unexpected_probe_error = Some(error);
+                break;
+            }
+        }
+    }
+    security_blocker.rollback().await?;
+    if let Some(error) = unexpected_probe_error {
+        auth_task.abort();
+        return Err(error.into());
+    }
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), auth_task).await??;
+    assert!(
+        credential_lock_observed,
+        "authenticate must hold credentials FOR UPDATE while blocked on account security"
+    );
+    assert_eq!(
+        authenticated_user(outcome?)?,
+        cred_uid(CRED_USER_ALICE)?,
+        "authentication must complete after the security lock is released"
     );
 
     store.shutdown().await?;
@@ -29926,7 +31015,7 @@ async fn credential_repo_rehash_upgrades_weak_phc_without_bumping_version() -> T
             cred_epoch(CRED_BASE_SECS),
         )
         .await?,
-        AuthOutcome::InvalidKnownUser
+        AuthOutcome::RejectedKnown
     );
     assert_eq!(
         owner_credential_snapshot(&store, tenant, "alice")
@@ -29936,14 +31025,16 @@ async fn credential_repo_rehash_upgrades_weak_phc_without_bumping_version() -> T
         "failed verification must not replace PHC"
     );
     assert_eq!(
-        repo.authenticate(
-            identity_scope(tenant),
-            login_id("alice"),
-            raw_password("legacy-short"),
-            cred_epoch(CRED_BASE_SECS),
-        )
-        .await?,
-        AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?)
+        authenticated_user(
+            repo.authenticate(
+                identity_scope(tenant),
+                login_id("alice"),
+                raw_password("legacy-short"),
+                cred_epoch(CRED_BASE_SECS),
+            )
+            .await?
+        )?,
+        cred_uid(CRED_USER_ALICE)?
     );
 
     let (version, upgraded_phc) = owner_credential_snapshot(&store, tenant, "alice")
@@ -29990,14 +31081,16 @@ async fn credential_repo_rehash_preserves_current_and_stronger_phc() -> TestResu
         )
         .await?;
         assert_eq!(
-            repo.authenticate(
-                identity_scope(tenant),
-                login_id(login),
-                raw_password(password),
-                cred_epoch(CRED_BASE_SECS),
-            )
-            .await?,
-            AuthOutcome::Authenticated(cred_uid(user)?)
+            authenticated_user(
+                repo.authenticate(
+                    identity_scope(tenant),
+                    login_id(login),
+                    raw_password(password),
+                    cred_epoch(CRED_BASE_SECS),
+                )
+                .await?
+            )?,
+            cred_uid(user)?
         );
         let (version, stored_phc) = owner_credential_snapshot(&store, tenant, login)
             .await?
@@ -30075,13 +31168,12 @@ async fn credential_repo_rehash_commit_failure_rolls_back_hash_and_lockout_clear
     .await?;
     sqlx::query(
         "UPDATE credentials SET failure_count = 4, \
-         lockout_window_start = to_timestamp($3), locked_until = to_timestamp($4) \
+         lockout_window_start = to_timestamp($3), locked_until = NULL \
          WHERE tenant_id = $1::uuid AND login = $2",
     )
     .bind(tenant.as_uuid().to_string())
     .bind("alice")
     .bind(i64::try_from(CRED_BASE_SECS - 60)?)
-    .bind(i64::try_from(CRED_BASE_SECS + 900)?)
     .execute(&store.pool)
     .await?;
     let before = owner_credential_auth_state(&store, tenant, "alice")
@@ -30197,10 +31289,12 @@ async fn credential_repo_rehash_concurrent_logins_upgrade_weak_phc_once() -> Tes
     }
     for handle in handles {
         assert_eq!(
-            handle
-                .await
-                .map_err(|error| format!("join failed: {error}"))??,
-            AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?)
+            authenticated_user(
+                handle
+                    .await
+                    .map_err(|error| format!("join failed: {error}"))??
+            )?,
+            cred_uid(CRED_USER_ALICE)?
         );
     }
 
@@ -30248,7 +31342,7 @@ async fn credential_repo_unknown_subject_creates_no_row() -> TestResult {
                 now
             )
             .await?,
-            AuthOutcome::InvalidUnknown
+            AuthOutcome::RejectedUnknown
         );
     }
     // 仅 alice 一行（未知主体未建任何行 ⇒ lockout 表不随枚举增长，F2）。
@@ -30262,8 +31356,7 @@ async fn credential_repo_unknown_subject_creates_no_row() -> TestResult {
     Ok(())
 }
 
-// 跨租 fail-closed：A 种入 alice，B 视角 find → None / authenticate → InvalidUnknown / lockout_status → false
-// （即使 A 已锁定 alice）。
+// 跨租 fail-closed：A 种入并临时锁定 alice，B 仍只观察到 unknown。
 #[tokio::test(flavor = "multi_thread")]
 async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -30285,7 +31378,7 @@ async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
             .is_none(),
         "跨租 find → None"
     );
-    // 跨租 authenticate → InvalidUnknown（跨租即未知）。
+    // 跨租 authenticate → RejectedUnknown（跨租即未知）。
     assert_eq!(
         repo.authenticate(
             identity_scope(b),
@@ -30294,10 +31387,10 @@ async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
             now
         )
         .await?,
-        AuthOutcome::InvalidUnknown,
-        "跨租 authenticate → InvalidUnknown"
+        AuthOutcome::RejectedUnknown,
+        "跨租 authenticate → RejectedUnknown"
     );
-    // 在 A 锁定 alice（5 次错），B 视角 lockout_status 仍 false（隔离）。
+    // 在 A 锁定 alice（5 次错）；A/B 经统一 authenticate 各自 fail-closed。
     for i in 1..=5 {
         repo.authenticate(
             identity_scope(a),
@@ -30307,24 +31400,25 @@ async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
         )
         .await?;
     }
-    assert!(
-        repo.lockout_status(
+    assert_eq!(
+        repo.authenticate(
             identity_scope(a),
             login_id("alice"),
+            raw_password("correct"),
             cred_epoch(CRED_BASE_SECS + 5)
         )
         .await?,
-        "A 视角 alice 已锁"
+        AuthOutcome::RejectedKnown
     );
-    assert!(
-        !repo
-            .lockout_status(
-                identity_scope(b),
-                login_id("alice"),
-                cred_epoch(CRED_BASE_SECS + 5)
-            )
-            .await?,
-        "B 视角不受 A 锁定影响（跨租隔离）"
+    assert_eq!(
+        repo.authenticate(
+            identity_scope(b),
+            login_id("alice"),
+            raw_password("correct"),
+            cred_epoch(CRED_BASE_SECS + 5)
+        )
+        .await?,
+        AuthOutcome::RejectedUnknown
     );
 
     store.shutdown().await?;
@@ -30370,7 +31464,7 @@ async fn credential_repo_tenant_noop_conformance() -> TestResult {
                     now,
                 )
                 .await?;
-            if outcome == AuthOutcome::InvalidUnknown {
+            if outcome == AuthOutcome::RejectedUnknown {
                 Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
             } else {
                 Err(format!("cross-tenant authenticate returned {outcome:?}").into())
@@ -30412,18 +31506,13 @@ async fn credential_repo_accumulate_failures_then_locks() -> TestResult {
                 cred_epoch(CRED_BASE_SECS + i)
             )
             .await?,
-            AuthOutcome::InvalidKnownUser,
+            AuthOutcome::RejectedKnown,
             "第 {i} 次失败"
         );
         assert!(
-            !repo
-                .lockout_status(
-                    identity_scope(a),
-                    login_id("alice"),
-                    cred_epoch(CRED_BASE_SECS + i)
-                )
-                .await?,
-            "未达阈值仍未锁"
+            db_locked_until(&store, CRED_TENANT_A, "alice")
+                .await?
+                .is_none()
         );
     }
     // 第 5 次（窗口内）→ 达阈值锁定（DB 持久化失败计数 = 5）。
@@ -30435,13 +31524,9 @@ async fn credential_repo_accumulate_failures_then_locks() -> TestResult {
     )
     .await?;
     assert!(
-        repo.lockout_status(
-            identity_scope(a),
-            login_id("alice"),
-            cred_epoch(CRED_BASE_SECS + 5)
-        )
-        .await?,
-        "第 5 次达阈值锁定"
+        db_locked_until(&store, CRED_TENANT_A, "alice")
+            .await?
+            .is_some()
     );
     assert_eq!(
         db_failure_count(&store, CRED_TENANT_A, "alice").await?,
@@ -30453,7 +31538,7 @@ async fn credential_repo_accumulate_failures_then_locks() -> TestResult {
     Ok(())
 }
 
-// lazy-unlock：TTL 内仍锁；TTL 后 lockout_status 原子解锁（持久化清 locked_until）+ 计数从 1 重计。
+// lazy-unlock：TTL 内统一认证拒绝；TTL 后 authenticate 原子解锁。
 #[tokio::test(flavor = "multi_thread")]
 async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -30477,25 +31562,28 @@ async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
     let lock_at = CRED_BASE_SECS + 5;
 
     // TTL 内仍锁。
-    assert!(
-        repo.lockout_status(
+    assert_eq!(
+        repo.authenticate(
             identity_scope(a),
             login_id("alice"),
+            raw_password("correct"),
             cred_epoch(lock_at + LOCK_TTL_SECS - 1)
         )
         .await?,
-        "TTL 内仍锁"
+        AuthOutcome::RejectedKnown
     );
-    // TTL 后 lazy-unlock → false + 持久化清 locked_until。
-    assert!(
-        !repo
-            .lockout_status(
+    // TTL 后 lazy-unlock + 正确密码成功并持久化清锁。
+    assert_eq!(
+        authenticated_user(
+            repo.authenticate(
                 identity_scope(a),
                 login_id("alice"),
+                raw_password("correct"),
                 cred_epoch(lock_at + LOCK_TTL_SECS + 1)
             )
-            .await?,
-        "TTL 后 lazy-unlock 解锁"
+            .await?
+        )?,
+        cred_uid(CRED_USER_ALICE)?
     );
     assert!(
         db_locked_until(&store, CRED_TENANT_A, "alice")
@@ -30503,7 +31591,7 @@ async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
             .is_none(),
         "lazy-unlock 持久化清 locked_until"
     );
-    // 解锁后再失败从 1 重计（不沿用旧计数）→ InvalidKnownUser、未锁。
+    // 解锁后再失败从 1 重计（不沿用旧计数）→ RejectedKnown、未锁。
     let after = lock_at + LOCK_TTL_SECS + 2;
     assert_eq!(
         repo.authenticate(
@@ -30513,13 +31601,12 @@ async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
             cred_epoch(after)
         )
         .await?,
-        AuthOutcome::InvalidKnownUser
+        AuthOutcome::RejectedKnown
     );
     assert!(
-        !repo
-            .lockout_status(identity_scope(a), login_id("alice"), cred_epoch(after))
-            .await?,
-        "重计未达阈值未锁"
+        db_locked_until(&store, CRED_TENANT_A, "alice")
+            .await?
+            .is_none()
     );
 
     store.shutdown().await?;
@@ -30556,14 +31643,16 @@ async fn credential_repo_authenticate_success_clears_lockout() -> TestResult {
     );
     // 正确密码 → Authenticated + 原子清零失败计数。
     assert_eq!(
-        repo.authenticate(
-            identity_scope(a),
-            login_id("alice"),
-            raw_password("correct"),
-            cred_epoch(CRED_BASE_SECS + 5)
-        )
-        .await?,
-        AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?)
+        authenticated_user(
+            repo.authenticate(
+                identity_scope(a),
+                login_id("alice"),
+                raw_password("correct"),
+                cred_epoch(CRED_BASE_SECS + 5)
+            )
+            .await?
+        )?,
+        cred_uid(CRED_USER_ALICE)?
     );
     assert_eq!(
         db_failure_count(&store, CRED_TENANT_A, "alice").await?,
@@ -30632,14 +31721,16 @@ async fn credential_repo_apply_password_change_cas() -> TestResult {
     };
     assert_eq!(got.version(), 2, "CAS 命中后 version = 2");
     assert_eq!(
-        repo.authenticate(
-            identity_scope(a),
-            login_id("alice"),
-            raw_password("pw2"),
-            now
-        )
-        .await?,
-        AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?),
+        authenticated_user(
+            repo.authenticate(
+                identity_scope(a),
+                login_id("alice"),
+                raw_password("pw2"),
+                now
+            )
+            .await?
+        )?,
+        cred_uid(CRED_USER_ALICE)?,
         "新密码验签真"
     );
     // 查无凭据 → CredentialNotFound。
@@ -31718,10 +32809,9 @@ async fn ts_credentials_no_plaintext_password_column() -> TestResult {
     Ok(())
 }
 
-// 已锁定（达阈值，locked_until 持久化非 NULL）→ 正确密码 authenticate → Authenticated + 原子清锁。
-// （authenticate 成功分支无视锁定态、只负责清锁；「已锁拒绝」由上层 lockout_status 门控承载，#1277）。
+// 已临时锁定时，正确密码也必须经统一 authenticate 拒绝且不得清锁。
 #[tokio::test(flavor = "multi_thread")]
-async fn credential_repo_authenticate_correct_clears_active_lock() -> TestResult {
+async fn credential_repo_authenticate_correct_rejects_active_lock() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let repo = PgCredentialRepo::from_unverified_for_test(&store);
@@ -31749,7 +32839,7 @@ async fn credential_repo_authenticate_correct_clears_active_lock() -> TestResult
         "达阈值后 locked_until 持久化"
     );
 
-    // 正确密码 → Authenticated + 原子清锁（locked_until + failure_count 持久化清零）。
+    // 正确密码仍拒绝，锁定状态不变。
     assert_eq!(
         repo.authenticate(
             identity_scope(a),
@@ -31758,18 +32848,18 @@ async fn credential_repo_authenticate_correct_clears_active_lock() -> TestResult
             cred_epoch(CRED_BASE_SECS + 6)
         )
         .await?,
-        AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?)
+        AuthOutcome::RejectedKnown
     );
     assert!(
         db_locked_until(&store, CRED_TENANT_A, "alice")
             .await?
-            .is_none(),
-        "成功登录清 locked_until（解锁持久化）"
+            .is_some(),
+        "temporary lock is not bypassed by a correct password"
     );
     assert_eq!(
         db_failure_count(&store, CRED_TENANT_A, "alice").await?,
-        0,
-        "成功登录清 failure_count"
+        5,
+        "temporary lock rejection preserves failure count"
     );
 
     store.shutdown().await?;
@@ -31819,6 +32909,16 @@ async fn t24_rls_credentials_enforces_tenant_isolation() -> TestResult {
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("Tx1 INSERT tenant_a credential failed (should succeed): {e}"))?;
+        sqlx::query(
+            "INSERT INTO account_security_states \
+             (tenant_id, user_id, status, authn_epoch, version, status_changed_at, updated_at) \
+             VALUES ($1::uuid, $2::uuid, 'active', 0, 1, now(), now())",
+        )
+        .bind(&tenant_a)
+        .bind(&user_a)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Tx1 INSERT tenant_a security state failed: {e}"))?;
         tx.commit().await?;
     }
 
@@ -31900,61 +33000,59 @@ async fn credential_repo_db_check_constraints_reject_invalid() -> TestResult {
     let u = CRED_USER_ALICE;
 
     // 正例基线（合法行 INSERT 成功 → 证下列拒绝非因其它列约束，anti-vacuity）。
-    sqlx::query(
-        "INSERT INTO credentials (tenant_id, user_id, login, password_hash, version) \
-         VALUES ($1::uuid, $2::uuid, 'ok', 'phc', 1)",
-    )
-    .bind(t)
-    .bind(u)
-    .execute(&store.pool)
-    .await?;
+    insert_account_security_pair(&store, t, u, "ok").await?;
 
     // 非法：version < 0 → credentials_version_u32 拒。
+    let mut neg_ver_tx = store.pool.begin().await?;
     let neg_ver = sqlx::query(
         "INSERT INTO credentials (tenant_id, user_id, login, password_hash, version) \
          VALUES ($1::uuid, $2::uuid, 'bad1', 'phc', -1)",
     )
     .bind(t)
-    .bind(u)
-    .execute(&store.pool)
+    .bind(uuid::Uuid::new_v4().to_string())
+    .execute(&mut *neg_ver_tx)
     .await;
-    assert!(neg_ver.is_err(), "version < 0 应被 CHECK 拒");
+    assert_database_constraint(neg_ver, "credentials_version_u32");
+    neg_ver_tx.rollback().await?;
 
     // 非法：version > u32::MAX（4294967296）→ credentials_version_u32 拒。
+    let mut over_ver_tx = store.pool.begin().await?;
     let over_ver = sqlx::query(
         "INSERT INTO credentials (tenant_id, user_id, login, password_hash, version) \
          VALUES ($1::uuid, $2::uuid, 'bad2', 'phc', 4294967296)",
     )
     .bind(t)
-    .bind(u)
-    .execute(&store.pool)
+    .bind(uuid::Uuid::new_v4().to_string())
+    .execute(&mut *over_ver_tx)
     .await;
-    assert!(over_ver.is_err(), "version > u32::MAX 应被 CHECK 拒");
+    assert_database_constraint(over_ver, "credentials_version_u32");
+    over_ver_tx.rollback().await?;
 
     // 非法：failure_count < 0 → credentials_failure_count_u32 拒。
+    let mut neg_fc_tx = store.pool.begin().await?;
     let neg_fc = sqlx::query(
         "INSERT INTO credentials (tenant_id, user_id, login, password_hash, version, failure_count) \
          VALUES ($1::uuid, $2::uuid, 'bad3', 'phc', 1, -1)",
     )
     .bind(t)
-    .bind(u)
-    .execute(&store.pool)
+    .bind(uuid::Uuid::new_v4().to_string())
+    .execute(&mut *neg_fc_tx)
     .await;
-    assert!(neg_fc.is_err(), "failure_count < 0 应被 CHECK 拒");
+    assert_database_constraint(neg_fc, "credentials_failure_count_u32");
+    neg_fc_tx.rollback().await?;
 
     // 非法：locked_until 非空但 lockout_window_start 为空 → credentials_lock_requires_window 拒。
+    let mut lock_tx = store.pool.begin().await?;
     let lock_no_window = sqlx::query(
         "INSERT INTO credentials (tenant_id, user_id, login, password_hash, version, locked_until) \
          VALUES ($1::uuid, $2::uuid, 'bad4', 'phc', 1, now())",
     )
     .bind(t)
-    .bind(u)
-    .execute(&store.pool)
+    .bind(uuid::Uuid::new_v4().to_string())
+    .execute(&mut *lock_tx)
     .await;
-    assert!(
-        lock_no_window.is_err(),
-        "locked_until 非空但 lockout_window_start 为空应被 CHECK 拒"
-    );
+    assert_database_constraint(lock_no_window, "credentials_lock_requires_window");
+    lock_tx.rollback().await?;
 
     store.shutdown().await?;
     Ok(())
@@ -31993,12 +33091,12 @@ async fn credential_repo_concurrent_failures_no_lost_update() -> TestResult {
         }));
     }
     for h in handles {
-        // 每路均应返回 InvalidKnownUser（已知主体 + 错），无 task panic / Storage 错。
+        // 每路均应返回 RejectedKnown（已知主体 + 错），无 task panic / Storage 错。
         let outcome = h.await.map_err(|e| format!("join failed: {e}"))??;
         assert_eq!(
             outcome,
-            AuthOutcome::InvalidKnownUser,
-            "并发错密码各路 InvalidKnownUser"
+            AuthOutcome::RejectedKnown,
+            "并发错密码各路 RejectedKnown"
         );
     }
 
@@ -32009,9 +33107,9 @@ async fn credential_repo_concurrent_failures_no_lost_update() -> TestResult {
         "5 路并发错密码 → 失败计数恰 5（FOR UPDATE 无丢更新）"
     );
     assert!(
-        repo.lockout_status(identity_scope(a), login_id("alice"), now)
-            .await?,
-        "达阈值后锁定"
+        db_locked_until(&store, CRED_TENANT_A, "alice")
+            .await?
+            .is_some()
     );
 
     store.shutdown().await?;

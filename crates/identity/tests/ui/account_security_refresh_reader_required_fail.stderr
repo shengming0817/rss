@@ -1,0 +1,16 @@
+error[E0308]: mismatched types
+  --> tests/ui/account_security_refresh_reader_required_fail.rs:13:9
+   |
+11 |     let _service = identity::RefreshService::<S>::new(
+   |                    ---------------------------------- arguments to this function are incorrect
+12 |         store,
+13 |         None,
+   |         ^^^^ expected `Box<DynAccountSecurityReadRepo<'_>>`, found `Option<_>`
+   |
+   = note: expected struct `Box<DynAccountSecurityReadRepo<'static>>`
+                found enum `Option<_>`
+note: associated function defined here
+  --> src/application/mod.rs
+   |
+   |     pub fn new(
+   |            ^^^

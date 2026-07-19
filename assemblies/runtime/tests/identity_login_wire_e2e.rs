@@ -5,6 +5,7 @@
 //! ① login → 201 + accessToken/refreshToken/accessExpiresAt/sessionId（vault mock 真实签发，生产 wire 通路）；
 //! ② refresh → 201 + 新 token bundle（rotation 闭环：旧 token 轮换、新 token 铸出）；
 //! ③ 同 refreshToken 再用 → 401（one-shot rotation reuse detection，refresh store 已废弃旧 token）。
+//! ④ 持久 Suspended/Locked 状态经 production account-security reader 拒绝 refresh，且零 rotation。
 //!
 //! hermetic：wiremock 模拟 vault Transit（无 live vault），postgres testcontainer 或 env pg。
 //! 不做 JWT oidc 验签（login/refresh 是 Public 端点，verify bridge 不拦截）；仅证生产 wire 通路
@@ -30,8 +31,11 @@ use generated::http::identity_v1::roles_list::SPEC as ROLES_LIST_SPEC;
 use generated::http::identity_v1::roles_revoke::SPEC as ROLES_REVOKE_SPEC;
 use generated::http::settings_v1::SPEC as SETTINGS_CONFIG_SPEC;
 use httpserve::ProducerMarker;
-use identity::ports::{Credential, CredentialRepo as _, DynRoleBindingLifecycle, DynRoleReadRepo};
-use identity::ports::{Role, RoleWriteRepo as _, TenantId, TenantRepoScope};
+use identity::ports::{
+    AccountSecurityLifecycle as _, AccountSecurityReadRepo as _, AccountStatus, Credential,
+    CredentialRepo as _, DynRoleBindingLifecycle, DynRoleReadRepo, Role, RoleWriteRepo as _,
+    TenantId, TenantRepoScope,
+};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
 use primitives::ListenerKind;
@@ -46,11 +50,15 @@ use vault::{TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecre
 use wiremock::matchers::{body_partial_json, method as match_method, path};
 use wiremock::{Mock, MockServer, Request as MockRequest, Respond, ResponseTemplate};
 
-type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
+const SUSPENDED_USER: &str = "22222222-3333-4444-8555-666666666666";
+const LOCKED_USER: &str = "33333333-4444-4555-8666-777777777777";
 const LOGIN_USERNAME: &str = "alice";
+const SUSPENDED_USERNAME: &str = "suspended-alice";
+const LOCKED_USERNAME: &str = "locked-alice";
 const PASSWORD: &str = "correct-horse";
 const TEST_APP_ROLE: &str = "rss_app";
 const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
@@ -326,6 +334,96 @@ fn identity_test_values(vault_addr: &str) -> IdentityTestValues {
     }
 }
 
+async fn login_refresh_token(app: &axum::Router, username: &str) -> TestResult<String> {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(LOGIN_SPEC.route.path())
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Tenant-ID", CANON_TENANT)
+                .body(Body::from(
+                    serde_json::json!({
+                        "username": username,
+                        "password": PASSWORD,
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "{username} login must issue a refresh token before the durable status transition"
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+    Ok(body["data"]["refreshToken"]
+        .as_str()
+        .ok_or("login response missing data.refreshToken")?
+        .to_owned())
+}
+
+async fn refresh_rotation_snapshot(
+    pool: &PgPool,
+    secret: &str,
+) -> TestResult<Option<(String, i64)>> {
+    Ok(sqlx::query_as::<_, (String, i64)>(
+        "SELECT root.status, count(child.id)::bigint \
+         FROM refresh_tokens AS root \
+         LEFT JOIN refresh_tokens AS child \
+           ON child.tenant_id = root.tenant_id AND child.parent_id = root.id \
+         WHERE root.tenant_id = $1::uuid AND root.token_hash = $2 \
+         GROUP BY root.id, root.status",
+    )
+    .bind(CANON_TENANT)
+    .bind(secure::digest(secret).as_slice())
+    .fetch_optional(pool)
+    .await?)
+}
+
+async fn assert_refresh_rejected_without_rotation(
+    app: &axum::Router,
+    pool: &PgPool,
+    token: &str,
+    status: AccountStatus,
+) -> TestResult {
+    let before = refresh_rotation_snapshot(pool, token)
+        .await?
+        .ok_or("seeded refresh token is missing before account-security rejection")?;
+    assert_eq!(
+        before,
+        ("active".to_owned(), 0),
+        "precondition: initial refresh token must be active with no successor"
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(REFRESH_SPEC.route.path())
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Tenant-ID", CANON_TENANT)
+                .body(Body::from(
+                    serde_json::json!({ "refreshToken": token }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "{status:?} account must be rejected through the production refresh wiring"
+    );
+    assert_eq!(
+        refresh_rotation_snapshot(pool, token).await?,
+        Some(before),
+        "{status:?} rejection must leave the original refresh active with zero successors"
+    );
+    Ok(())
+}
+
 async fn outbox_topic_count(
     pool: &PgPool,
     domain: &str,
@@ -392,7 +490,8 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     let vault_uri = vault_server.uri();
 
     // 2. postgres fixture + credential seed（login 凭据）。
-    let (_fixture, pg_owner) = connect_pg().await?;
+    let (fixture, pg_owner) = connect_pg().await?;
+    let observation_pool = assertion_pool(fixture.params()).await?;
     let pg = pg_owner.handle();
     let tenant = TenantId::parse(CANON_TENANT)?;
     let tenant_scope = TenantRepoScope::for_test(tenant);
@@ -407,6 +506,24 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         .credential_repo()
         .save(tenant_scope, credential)
         .await?;
+    for (username, user_id) in [
+        (SUSPENDED_USERNAME, SUSPENDED_USER),
+        (LOCKED_USERNAME, LOCKED_USER),
+    ] {
+        pg.for_domain::<caps::Identity>()
+            .credential_repo()
+            .save(
+                TenantRepoScope::for_test(tenant),
+                Credential::hydrate(
+                    username,
+                    ids::UserId::parse(user_id)?,
+                    tenant,
+                    secure::PasswordHash::for_test(secure::RawPassword::new(PASSWORD.to_owned()))?,
+                    1,
+                ),
+            )
+            .await?;
+    }
 
     // 3. vault bundle（#1498）：pre-GA 空 allowlist，secret resolver 不触 vault；仅构造器结构满足
     //    SharedRuntimeDeps.vault 字段。mock http URL 可用（resolver 仅构造期校验 URL，无连接）。
@@ -474,6 +591,37 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         }
     }
     let app = primary.ok_or("identity domain did not produce Primary router")?;
+
+    // Login while both accounts are Active so each receives a durable refresh record, then move
+    // the authoritative rows to non-Active states. A decoy/wrong production reader would return
+    // Active and make the following HTTP assertions fail with 201 instead of 401.
+    let suspended_refresh = login_refresh_token(&app, SUSPENDED_USERNAME).await?;
+    let locked_refresh = login_refresh_token(&app, LOCKED_USERNAME).await?;
+    let account_security = pg.for_domain::<caps::Identity>().account_security_repo();
+    for (user_id, next_status, token) in [
+        (
+            SUSPENDED_USER,
+            AccountStatus::Suspended,
+            suspended_refresh.as_str(),
+        ),
+        (LOCKED_USER, AccountStatus::Locked, locked_refresh.as_str()),
+    ] {
+        let user_id = ids::UserId::parse(user_id)?;
+        let scope = TenantRepoScope::for_test(tenant);
+        let current = account_security
+            .find(scope, user_id)
+            .await?
+            .ok_or("credential save omitted its account-security state")?;
+        let transitioned = account_security
+            .apply_transition(
+                TenantRepoScope::for_test(tenant),
+                current.transition(next_status, current.updated_at() + Duration::from_secs(1))?,
+            )
+            .await?;
+        assert_eq!(transitioned.status(), next_status);
+        assert_refresh_rejected_without_rotation(&app, &observation_pool, token, next_status)
+            .await?;
+    }
 
     // ── 断言 a: login → 201 + token bundle ────────────────────────────────────────────────────
     let login_body = format!(r#"{{"username":"{LOGIN_USERNAME}","password":"{PASSWORD}"}}"#);

@@ -5193,14 +5193,18 @@ mod tests {
                 "runtime test credential repo is read-only",
             ))
         }
+    }
 
-        async fn lockout_status(
+    struct UnusedAccountSecurityRepo;
+
+    impl identity::ports::AccountSecurityReadRepo for UnusedAccountSecurityRepo {
+        async fn find(
             &self,
             _scope: IdentityTenantRepoScope,
-            _login: identity::ports::LoginIdentifier,
-            _now: SystemTime,
-        ) -> Result<bool, identity::ports::IdentityError> {
-            Ok(false)
+            _user_id: ids::UserId,
+        ) -> Result<Option<identity::ports::AccountSecurityState>, identity::ports::IdentityError>
+        {
+            Ok(None)
         }
     }
 
@@ -5394,6 +5398,7 @@ mod tests {
         );
         let refresh = Arc::new(identity::RefreshService::new(
             identity::ports::DynRefreshTokenStore::new_box(UnusedRefreshStore),
+            identity::ports::DynAccountSecurityReadRepo::new_box(UnusedAccountSecurityRepo),
             issuer,
             Box::new(SystemClock),
             Duration::from_secs(900),

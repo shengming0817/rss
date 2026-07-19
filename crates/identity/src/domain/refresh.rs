@@ -19,6 +19,8 @@ use std::time::SystemTime;
 
 use vocab::{PrincipalKind, TenantId};
 
+use super::AuthnEpoch;
+
 // ---------------------------------------------------------------------------
 // RefreshTokenId — 记录稳定标识（lineage 锚点 / 撤销键）
 // ---------------------------------------------------------------------------
@@ -168,6 +170,7 @@ pub struct RefreshTokenRecord {
     token_hash: RefreshTokenHash,
     parent_id: Option<RefreshTokenId>,
     lineage_id: RefreshTokenId,
+    issuance_epoch: AuthnEpoch,
     status: RefreshStatus,
     issued_at: SystemTime,
     expires_at: SystemTime,
@@ -183,6 +186,7 @@ impl std::fmt::Debug for RefreshTokenRecord {
             .field("token_hash", &self.token_hash)
             .field("parent_id", &self.parent_id)
             .field("lineage_id", &self.lineage_id)
+            .field("issuance_epoch", &"<redacted>")
             .field("status", &self.status)
             .field("issued_at", &self.issued_at)
             .field("expires_at", &self.expires_at)
@@ -204,6 +208,7 @@ impl RefreshTokenRecord {
         token_hash: RefreshTokenHash,
         parent_id: Option<RefreshTokenId>,
         lineage_id: RefreshTokenId,
+        issuance_epoch: AuthnEpoch,
         status: RefreshStatus,
         issued_at: SystemTime,
         expires_at: SystemTime,
@@ -216,6 +221,7 @@ impl RefreshTokenRecord {
             token_hash,
             parent_id,
             lineage_id,
+            issuance_epoch,
             status,
             issued_at,
             expires_at,
@@ -236,6 +242,7 @@ impl RefreshTokenRecord {
         token_hash: [u8; 32],
         parent_id: Option<String>,
         lineage_id: impl Into<String>,
+        issuance_epoch: AuthnEpoch,
         status: RefreshStatus,
         issued_at: SystemTime,
         expires_at: SystemTime,
@@ -248,6 +255,7 @@ impl RefreshTokenRecord {
             RefreshTokenHash::new(token_hash),
             parent_id.map(RefreshTokenId::new),
             RefreshTokenId::new(lineage_id),
+            issuance_epoch,
             status,
             issued_at,
             expires_at,
@@ -291,6 +299,7 @@ impl RefreshTokenRecord {
             new_hash,
             Some(self.id.clone()),
             self.lineage_id.clone(),
+            self.issuance_epoch,
             RefreshStatus::Active,
             issued_at,
             expires_at,
@@ -335,6 +344,10 @@ impl RefreshTokenRecord {
     pub fn lineage_id(&self) -> &RefreshTokenId {
         &self.lineage_id
     }
+    /// Authentication epoch at which this refresh family was issued.
+    pub fn issuance_epoch(&self) -> AuthnEpoch {
+        self.issuance_epoch
+    }
     /// 生命周期状态。
     pub fn status(&self) -> RefreshStatus {
         self.status
@@ -364,6 +377,14 @@ pub struct RefreshRotation {
     new: RefreshTokenRecord,
 }
 
+/// Result of the final account-security check and refresh CAS in one transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshRotationOutcome {
+    Applied,
+    Replay,
+    AccountStale,
+}
+
 impl RefreshRotation {
     /// CAS 消费目标（源 record id）。
     pub fn old_id(&self) -> &RefreshTokenId {
@@ -382,8 +403,8 @@ impl RefreshRotation {
 #[cfg(test)]
 mod tests {
     use super::{
-        PrincipalKind, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
-        kind_from_db, kind_to_db,
+        AuthnEpoch, PrincipalKind, RefreshStatus, RefreshTokenHash, RefreshTokenId,
+        RefreshTokenRecord, kind_from_db, kind_to_db,
     };
     use std::time::{Duration, SystemTime};
     use vocab::tenant::TenantId;
@@ -406,6 +427,7 @@ mod tests {
             RefreshTokenHash::new([7u8; 32]),
             None,
             id,
+            AuthnEpoch::ZERO,
             status,
             issued,
             issued + Duration::from_secs(3_600),
@@ -467,6 +489,7 @@ mod tests {
             [3u8; 32],
             Some("parent-id".to_string()),
             "root-id",
+            AuthnEpoch::ZERO,
             RefreshStatus::Active,
             issued,
             issued + Duration::from_secs(7_200),
@@ -518,6 +541,7 @@ mod tests {
             RefreshTokenHash::new([1u8; 32]),
             None,
             RefreshTokenId::new("lineage-root"),
+            AuthnEpoch::ZERO,
             RefreshStatus::Active,
             issued,
             issued + Duration::from_secs(3_600),

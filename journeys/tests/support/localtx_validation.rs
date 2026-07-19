@@ -36,11 +36,11 @@ use generated::http::identity_v1::{
 };
 use generated::http::settings_v2::{SettingsSecretPublishRequest, SettingsSecretPublishResponse};
 use identity::ports::{
-    AuthOutcome, Credential, CredentialRepo, DynCredentialRepo, DynRefreshTokenStore,
-    DynSessionLifecycle, IdentityError, LoginIdentifier, PasswordChangeMutation,
-    RefreshRotationMutation, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
-    RefreshTokenStore, Session, SessionId, SessionLifecycle, SessionLogoutMutation,
-    TenantRepoScope as IdentityScope,
+    AuthOutcome, AuthnEpoch, Credential, CredentialRepo, DynAccountSecurityReadRepo,
+    DynCredentialRepo, DynRefreshTokenStore, DynSessionLifecycle, IdentityError, LoginIdentifier,
+    PasswordChangeMutation, RefreshRotationMutation, RefreshRotationOutcome, RefreshStatus,
+    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenStore, Session, SessionId,
+    SessionLifecycle, SessionLogoutMutation, TenantRepoScope as IdentityScope,
 };
 use identity::{LoginService, RefreshService, SeedSigner};
 use memory::{FixedClock, MemBus, MemEmitter};
@@ -396,15 +396,6 @@ impl CredentialRepo for BarrierCredentialRepo {
         mutation: PasswordChangeMutation,
     ) -> Result<(), IdentityError> {
         self.inner.apply_password_change(scope, mutation).await
-    }
-
-    async fn lockout_status(
-        &self,
-        scope: IdentityScope,
-        login: LoginIdentifier,
-        now: SystemTime,
-    ) -> Result<bool, IdentityError> {
-        self.inner.lockout_status(scope, login, now).await
     }
 }
 
@@ -1577,6 +1568,7 @@ async fn build_identity_harness(
             find_barrier: Arc::clone(&session_find_barrier),
         }));
     let refresh = identity::seed_refresh_service(
+        DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
         || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
     );
@@ -1881,6 +1873,7 @@ async fn seed_logout_session(harness: &IdentityHarness) -> Result<String> {
     Ok(harness
         .login
         .login(
+            identity::test_support::login_producer_receipt(),
             harness.tenant_a,
             IdentityLoginRequest {
                 username: "session-login".to_owned(),
@@ -2184,6 +2177,7 @@ impl RefreshSeed {
             secure::digest(&self.secret),
             None,
             self.id.clone(),
+            AuthnEpoch::ZERO,
             RefreshStatus::Active,
             SystemTime::UNIX_EPOCH + Duration::from_secs(NOW_SECS),
             SystemTime::UNIX_EPOCH + Duration::from_secs(NOW_SECS + TTL_SECS),
@@ -2223,7 +2217,7 @@ impl RefreshTokenStore for BarrierRefreshStore {
         &self,
         scope: IdentityScope,
         mutation: RefreshRotationMutation,
-    ) -> Result<bool, IdentityError> {
+    ) -> Result<RefreshRotationOutcome, IdentityError> {
         self.inner.rotate(scope, mutation).await
     }
 
@@ -2238,6 +2232,7 @@ impl RefreshTokenStore for BarrierRefreshStore {
 
 fn refresh_service(
     store: Box<DynRefreshTokenStore<'static>>,
+    accounts: Box<DynAccountSecurityReadRepo<'static>>,
 ) -> Result<Arc<RefreshService<SeedSigner>>> {
     let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
         Arc::new(SeedSigner),
@@ -2252,6 +2247,7 @@ fn refresh_service(
     )?;
     Ok(Arc::new(RefreshService::new(
         store,
+        accounts,
         Arc::new(issuer),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
@@ -2263,7 +2259,10 @@ fn refresh_router(
     store: Box<DynRefreshTokenStore<'static>>,
 ) -> Result<axum::Router> {
     let identity_deps = deps.handle().for_domain::<caps::Identity>();
-    let refresh = refresh_service(store)?;
+    let refresh = refresh_service(
+        store,
+        DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
+    )?;
     let login = Arc::new(LoginService::new(
         Arc::from(DynCredentialRepo::new_box(identity_deps.credential_repo())),
         Arc::from(DynSessionLifecycle::new_box(
@@ -3240,6 +3239,18 @@ pub(crate) async fn drive_logout_journey(cases: LogoutCases) -> Result<()> {
 
 pub(crate) async fn drive_refresh_journey(cases: RefreshCases) -> Result<()> {
     let runtime = LocalTxJourneyRuntime::setup().await?;
+    seed_credential(
+        &runtime
+            .deps
+            .handle()
+            .for_domain::<caps::Identity>()
+            .credential_repo(),
+        runtime.tenant_a,
+        ids::UserId::parse(HAPPY_USER)?,
+        "refresh-active-user",
+        CURRENT_PASSWORD,
+    )
+    .await?;
     let body = drive_refresh(&runtime.deps, &runtime.observer, runtime.tenant_a, cases).await;
     runtime.finish(body).await
 }

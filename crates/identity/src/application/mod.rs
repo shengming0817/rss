@@ -111,20 +111,21 @@ use vocab::{
 };
 
 use crate::domain::{
-    AbacAttribute, AttributeKey, AttributeValue, AuthOutcome, IdentityError, LoginIdentifier,
-    POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
+    AbacAttribute, ActiveAccountSecurity, AttributeKey, AttributeValue, AuthOutcome, IdentityError,
+    LoginIdentifier, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
     POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy,
-    PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, RefreshStatus,
-    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttributeKey,
+    PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, RefreshRotationOutcome,
+    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttributeKey,
     ResourceAttributeResolution, ResourceAttributeResourceId, ResourcePolicyAttributeKey, RoleId,
     Session, SessionId, evaluate_policies_for_tenant,
 };
 use crate::ports::{
-    CredentialRepo, DynCredentialRepo, DynPolicyRepo, DynResourceAttributeReadRepo,
-    DynRoleBindingReadRepo, DynRoleReadRepo, DynSessionLifecycle, LoginProducerReceipt, Operator,
-    PasswordChangeMutation, PolicyPage, PolicyRepo, RefreshRotationMutation, RefreshTokenStore,
-    ResourceAttributeReadRepo, RoleBindingReadRepo, RolePage, RoleReadRepo, SessionLifecycle,
-    SessionLogoutMutation, TenantRepoScope,
+    AccountSecurityReadRepo, CredentialRepo, DynAccountSecurityReadRepo, DynCredentialRepo,
+    DynPolicyRepo, DynResourceAttributeReadRepo, DynRoleBindingReadRepo, DynRoleReadRepo,
+    DynSessionLifecycle, LoginProducerReceipt, Operator, PasswordChangeMutation, PolicyPage,
+    PolicyRepo, RefreshRotationMutation, RefreshTokenStore, ResourceAttributeReadRepo,
+    RoleBindingReadRepo, RolePage, RoleReadRepo, SessionLifecycle, SessionLogoutMutation,
+    TenantRepoScope,
 };
 #[cfg(test)]
 use crate::ports::{DynRoleBindingLifecycle, RoleWriteRepo};
@@ -263,9 +264,9 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
     // reason: seed-login 构造器含 9 个必填位置参（lifecycle/refresh/password_policy/clock/ttl/login/user_id/password/tenant），
     // 每个均为不可省略的域依赖，不拆 builder（YAGNI；test-only / seed-login feature-gated，非业务 public API）。
     #[allow(clippy::too_many_arguments)]
-    pub fn with_seed_credential(
+    pub fn with_seed_credential<F>(
         lifecycle: Arc<DynSessionLifecycle<'static>>,
-        refresh: Arc<RefreshService<S>>,
+        make_refresh: F,
         password_policy: secure::PasswordPolicy,
         clock: Box<dyn Clock>,
         session_ttl: Duration,
@@ -273,10 +274,14 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         user_id: ids::UserId,
         password: &str,
         tenant: TenantId,
-    ) -> Result<Self, secure::PasswordError> {
+    ) -> Result<Self, secure::PasswordError>
+    where
+        F: FnOnce(Box<DynAccountSecurityReadRepo<'static>>) -> Arc<RefreshService<S>>,
+    {
         let creds = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
             login, user_id, password, tenant,
         )?;
+        let refresh = make_refresh(DynAccountSecurityReadRepo::new_box(creds.clone()));
         // 会话生命周期 provider 由组合根注入（journeys 注 MemSessionLifecycle / PgSessionLifecycle；单测注
         // CapturingSessionLifecycle）——不再自建独立空 session store（原 InMemSessionRepo 与注入 UoW 异 store
         // 即 #1278 F3 接缝根因）；单一 lifecycle ⇒ create/find/logout 同源。
@@ -316,19 +321,9 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         let login = LoginIdentifier::new(request.username);
         let now = self.clock.now();
 
-        // 1. lockout 门控（验签前；已锁 → fail-closed InvalidCredentials，不验密码/零 UoW 写）
-        if self
-            .credentials
-            .lockout_status(tenant_scope, login.clone(), now)
-            .await
-            .map_err(LoginError::Credential)?
-        {
-            return Err(LoginError::InvalidCredentials);
-        }
-
-        // 2. 有界 KDF 验签 + 原子锁定记账（F1+F2）：provider 据 outcome 分流——已知+错已推进 lockout、
+        // 1. 有界 KDF 验签 + durable state + temporary lockout 原子门控：provider 据 outcome 分流——已知+错已推进 lockout、
         //    未知不建锁、成功清零并返回 canonical actor subject；对外一律 InvalidCredentials（防枚举）。
-        let user_id = match self
+        let active = match self
             .credentials
             .authenticate(
                 tenant_scope,
@@ -339,11 +334,19 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             .await
             .map_err(LoginError::Credential)?
         {
-            AuthOutcome::Authenticated(user_id) => user_id,
-            AuthOutcome::InvalidKnownUser | AuthOutcome::InvalidUnknown => {
+            AuthOutcome::Authenticated(state) => {
+                if state.tenant() != tenant {
+                    return Err(LoginError::InvalidCredentials);
+                }
+                state
+                    .try_into_active()
+                    .ok_or(LoginError::InvalidCredentials)?
+            }
+            AuthOutcome::RejectedKnown | AuthOutcome::RejectedUnknown => {
                 return Err(LoginError::InvalidCredentials);
             }
         };
+        let user_id = active.user_id();
 
         // 3. canonical subject（F1）：来自 credential 的 ids::UserId。payload.subject 是 typed `uuid::Uuid`
         //    （下方直接 `user_id.as_uuid()`，schema `format:uuid`）；此 hyphenated 串供 envelope.subject_id /
@@ -394,12 +397,16 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         //    `subject` = canonical user uuid（JWT `sub`），typed User（ES256 路径，alg↔kind 一致）。
         let bundle = self
             .refresh
-            .issue_initial(RefreshPrincipal::User {
-                subject: &subject,
-                tenant,
-            })
+            .issue_initial(active)
             .await
-            .map_err(LoginError::TokenIssue)?;
+            .map_err(|error| match error {
+                RefreshError::Invalid | RefreshError::Replayed | RefreshError::Expired => {
+                    LoginError::InvalidCredentials
+                }
+                error @ (RefreshError::Store(_) | RefreshError::Mint(_)) => {
+                    LoginError::TokenIssue(error)
+                }
+            })?;
 
         // 6. L2 co-tx（session 行 + outbox 行同一事务原子写入，FR-003）
         let session = Session::new(session_id.clone(), subject.clone(), tenant, expires_at, now);
@@ -550,123 +557,6 @@ pub struct RefreshBundle {
     pub refresh: authn::RefreshToken,
 }
 
-/// 可进入 refresh/session issuance 的主体。
-///
-/// 该类型把“哪些 principal kind 能获得 access+refresh bundle”收紧到编译期：User/Device/Admin 必须携带
-/// tenant；SuperAdmin 只携带 refresh record 的存储/查找 tenant，转换为 access JWT 时不会携带 ambient
-/// tenant。Service/Anonymous 不可构造，因而不能经 session issuance 冒充生产主体。
-///
-/// INVARIANT: REFRESH-PRINCIPAL-TYPED-01 { level = "Hard", exec = "native-compile", source = "code", native = "typed function choice / input struct field exclusion" }
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum RefreshPrincipal<'a> {
-    /// 租户内用户主体。
-    User {
-        subject: &'a str,
-        tenant: vocab::TenantId,
-    },
-    /// 租户内设备主体。
-    Device {
-        subject: &'a str,
-        tenant: vocab::TenantId,
-    },
-    /// 租户内管理员主体。
-    Admin {
-        subject: &'a str,
-        tenant: vocab::TenantId,
-    },
-    /// 跨租户 super-admin；`refresh_tenant` 仅用于 refresh record 存储/查找，不写入 access JWT。
-    SuperAdmin {
-        subject: &'a str,
-        refresh_tenant: vocab::TenantId,
-    },
-}
-
-impl std::fmt::Debug for RefreshPrincipal<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::User { tenant, .. } => f
-                .debug_struct("User")
-                .field("subject", &"<redacted>")
-                .field("tenant", tenant)
-                .finish(),
-            Self::Device { tenant, .. } => f
-                .debug_struct("Device")
-                .field("subject", &"<redacted>")
-                .field("tenant", tenant)
-                .finish(),
-            Self::Admin { tenant, .. } => f
-                .debug_struct("Admin")
-                .field("subject", &"<redacted>")
-                .field("tenant", tenant)
-                .finish(),
-            Self::SuperAdmin { refresh_tenant, .. } => f
-                .debug_struct("SuperAdmin")
-                .field("subject", &"<redacted>")
-                .field("refresh_tenant", refresh_tenant)
-                .finish(),
-        }
-    }
-}
-
-impl<'a> RefreshPrincipal<'a> {
-    fn tenant(self) -> vocab::TenantId {
-        match self {
-            Self::User { tenant, .. }
-            | Self::Device { tenant, .. }
-            | Self::Admin { tenant, .. } => tenant,
-            Self::SuperAdmin { refresh_tenant, .. } => refresh_tenant,
-        }
-    }
-
-    fn subject(self) -> &'a str {
-        match self {
-            Self::User { subject, .. }
-            | Self::Device { subject, .. }
-            | Self::Admin { subject, .. }
-            | Self::SuperAdmin { subject, .. } => subject,
-        }
-    }
-
-    fn kind(self) -> vocab::PrincipalKind {
-        match self {
-            Self::User { .. } => vocab::PrincipalKind::User,
-            Self::Device { .. } => vocab::PrincipalKind::Device,
-            Self::Admin { .. } => vocab::PrincipalKind::Admin,
-            Self::SuperAdmin { .. } => vocab::PrincipalKind::SuperAdmin,
-        }
-    }
-
-    fn access_principal(self) -> authn::JwtAccessPrincipal<'a> {
-        match self {
-            Self::User { subject, tenant } => authn::JwtAccessPrincipal::User { subject, tenant },
-            Self::Device { subject, tenant } => {
-                authn::JwtAccessPrincipal::Device { subject, tenant }
-            }
-            Self::Admin { subject, tenant } => authn::JwtAccessPrincipal::Admin { subject, tenant },
-            Self::SuperAdmin { subject, .. } => authn::JwtAccessPrincipal::SuperAdmin { subject },
-        }
-    }
-}
-
-#[allow(unknown_lints)]
-#[allow(rss_handler_local_principal_authz)] // reason: refresh rotation maps persisted issuer claim kind into typed JwtAccessPrincipal; it is not an authorization branch.
-fn access_principal_from_refresh_record<'a>(
-    subject: &'a str,
-    tenant: vocab::TenantId,
-    kind: vocab::PrincipalKind,
-) -> Result<authn::JwtAccessPrincipal<'a>, authn::JwtIssueError> {
-    match kind {
-        vocab::PrincipalKind::User => Ok(authn::JwtAccessPrincipal::User { subject, tenant }),
-        vocab::PrincipalKind::Device => Ok(authn::JwtAccessPrincipal::Device { subject, tenant }),
-        vocab::PrincipalKind::Admin => Ok(authn::JwtAccessPrincipal::Admin { subject, tenant }),
-        vocab::PrincipalKind::SuperAdmin => Ok(authn::JwtAccessPrincipal::SuperAdmin { subject }),
-        vocab::PrincipalKind::Service | vocab::PrincipalKind::Anonymous => {
-            Err(authn::JwtIssueError::KindNotIssuable)
-        }
-        _ => Err(authn::JwtIssueError::KindNotIssuable),
-    }
-}
-
 /// Refresh token 应用服务：签发 / 轮换 / 撤销。必填依赖走构造器位置参（缺失即编译错误）。
 ///
 /// ## rotate 设计决策：mint 先于 CAS（#284 F1）
@@ -680,53 +570,49 @@ fn access_principal_from_refresh_record<'a>(
 /// ref: ory/fosite handler/oauth2/flow_refresh.go@master（先生成 token 再事务内 Rotate/Create）。
 pub struct RefreshService<S> {
     store: Box<crate::ports::DynRefreshTokenStore<'static>>,
+    accounts: Box<DynAccountSecurityReadRepo<'static>>,
     issuer: std::sync::Arc<authn::JwtIssuer<diport::RssAccessProfile, S>>,
     clock: Box<dyn diport::Clock>,
     refresh_ttl: Duration,
 }
 
 impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
-    /// 组合根构造：4 必填依赖位置参（缺失即编译错误）。
+    /// 组合根构造：account-security reader is mandatory and has no fallback.
     pub fn new(
         store: Box<crate::ports::DynRefreshTokenStore<'static>>,
+        accounts: Box<DynAccountSecurityReadRepo<'static>>,
         issuer: std::sync::Arc<authn::JwtIssuer<diport::RssAccessProfile, S>>,
         clock: Box<dyn diport::Clock>,
         refresh_ttl: Duration,
     ) -> Self {
         Self {
             store,
+            accounts,
             issuer,
             clock,
             refresh_ttl,
         }
     }
 
-    /// 签发新 refresh token（CSPRNG secret，存摘要）。返回 bearer secret（仅此时暴露一次）。
-    ///
-    /// [`RefreshPrincipal`] 作为 rotation 重签 access JWT 的 claim 源持久化至 store。
-    /// `skip_all`：secret / subject 不入 span（零信任；subject 可含 PII，observability.md §redaction）。
-    #[tracing::instrument(
-        skip_all,
-        fields(domain = SESSION_DOMAIN, operation = "refresh_issue", tenant_id = %principal.tenant()),
-        err
-    )]
-    pub async fn issue(
+    async fn issue(
         &self,
-        principal: RefreshPrincipal<'_>,
+        active: &ActiveAccountSecurity,
     ) -> Result<authn::RefreshToken, RefreshError> {
         let secret = secure::OpaqueToken::generate();
         let hash = RefreshTokenHash::new(secure::digest(secret.expose()));
         let now = self.clock.now();
         let id = RefreshTokenId::generate();
-        let tenant = principal.tenant();
+        let tenant = active.tenant();
+        let subject = active.user_id().as_uuid().hyphenated().to_string();
         let record = RefreshTokenRecord::new(
             id.clone(),
             tenant,
-            principal.subject(),
-            principal.kind(),
+            subject,
+            vocab::PrincipalKind::User,
             hash,
             None,
             id,
+            active.authn_epoch(),
             RefreshStatus::Active,
             now,
             now + self.refresh_ttl,
@@ -742,25 +628,40 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     /// token，组成 [`RefreshBundle`]。供 [`LoginService`] 登录成功后调用——令 minted JWT 有生产消费方（#1252）。
     ///
     /// 顺序同 `rotate` 的「mint 先于持久副作用」：先 mint access（失败 ⇒ 无 refresh 记录残留、客户端重登即可），
-    /// 成功后 `issue` 落库 refresh token。`RefreshPrincipal` 是 access JWT 与 refresh 记录的同源 claim。
+    /// 成功后 `issue` 落库 refresh token。Only an active account receipt can reach this method.
     ///
     /// `skip_all`：subject 不入 span（零信任；可含 PII，observability.md §redaction）。
     #[tracing::instrument(
         skip_all,
-        fields(domain = SESSION_DOMAIN, operation = "refresh_issue_initial", tenant_id = %principal.tenant()),
+        fields(domain = SESSION_DOMAIN, operation = "refresh_issue_initial", tenant_id = %expected.tenant()),
         err
     )]
-    pub async fn issue_initial(
+    async fn issue_initial(
         &self,
-        principal: RefreshPrincipal<'_>,
+        expected: ActiveAccountSecurity,
     ) -> Result<RefreshBundle, RefreshError> {
+        let current = self
+            .accounts
+            .find(tenant_repo_scope(expected.tenant()), expected.user_id())
+            .await
+            .map_err(RefreshError::Store)?
+            .ok_or(RefreshError::Invalid)?
+            .try_into_active()
+            .ok_or(RefreshError::Invalid)?;
+        if current != expected {
+            return Err(RefreshError::Invalid);
+        }
+        let subject = current.user_id().as_uuid().hyphenated().to_string();
         // mint 先于落库：access mint 失败 ⇒ 未写任何 refresh 记录、客户端重登即可（无悬挂 token）。
         let access = self
             .issuer
-            .issue_access(principal.access_principal())
+            .issue_access(authn::JwtAccessPrincipal::User {
+                subject: &subject,
+                tenant: current.tenant(),
+            })
             .await
             .map_err(RefreshError::Mint)?;
-        let refresh = self.issue(principal).await?;
+        let refresh = self.issue(&current).await?;
         Ok(RefreshBundle { access, refresh })
     }
 
@@ -797,7 +698,14 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
             .map_err(RefreshError::Store)?
             .ok_or(RefreshError::Invalid)?;
 
-        // 2. 重放检测：status != Active ⇒ 级联撤销 + Replayed
+        // Legacy non-User records have no local issuance capability. Reject them before replay,
+        // expiry, signer, or CAS behavior so they cannot enter a compatibility side path.
+        if rec.tenant() != tenant || rec.kind() != vocab::PrincipalKind::User {
+            return Err(RefreshError::Invalid);
+        }
+        let user_id = ids::UserId::parse(rec.subject()).map_err(|_| RefreshError::Invalid)?;
+
+        // 2. User-record 重放检测：status != Active ⇒ 级联撤销 + Replayed
         if rec.status() != RefreshStatus::Active {
             self.store
                 .revoke_lineage(tenant_scope, rec.lineage_id().clone())
@@ -818,6 +726,22 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
             return Err(RefreshError::Expired);
         }
 
+        let active = self
+            .accounts
+            .find(tenant_scope, user_id)
+            .await
+            .map_err(RefreshError::Store)?
+            .ok_or(RefreshError::Invalid)?
+            .try_into_active()
+            .ok_or(RefreshError::Invalid)?;
+        if active.tenant() != tenant
+            || active.user_id() != user_id
+            || active.authn_epoch() != rec.issuance_epoch()
+        {
+            return Err(RefreshError::Invalid);
+        }
+        let subject = active.user_id().as_uuid().hyphenated().to_string();
+
         // 4. 由源 record 派生 sealed 轮换命令（tenant/parent/lineage 从源派生，错位类型层不可表达，#284 F2）
         let new_secret = secure::OpaqueToken::generate();
         let new_hash = RefreshTokenHash::new(secure::digest(new_secret.expose()));
@@ -829,39 +753,39 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         );
 
         // 5. mint access JWT（先于 CAS，#284 F1）：mint 失败 ⇒ 旧 refresh 未消费、客户端可重试、无锁死。
-        //    claim source 必须来自持久化 record；请求 tenant 只作 lookup scope，且需与 record tenant 一致。
-        let record_tenant = rec.tenant();
-        if record_tenant != tenant {
-            return Err(RefreshError::Invalid);
-        }
-        let principal =
-            access_principal_from_refresh_record(rec.subject(), record_tenant, rec.kind())
-                .map_err(RefreshError::Mint)?;
+        //    claim source is the current Active account receipt, not caller-selected input.
         let access = self
             .issuer
-            .issue_access(principal)
+            .issue_access(authn::JwtAccessPrincipal::User {
+                subject: &subject,
+                tenant: active.tenant(),
+            })
             .await
             .map_err(RefreshError::Mint)?;
 
         // 6. 原子 CAS：旧 token 一次性失效（mint 成功后才提交不可回滚的消费）
-        let applied = self
+        let outcome = self
             .store
             .rotate(tenant_scope, RefreshRotationMutation::new(rotation))
             .await
             .map_err(RefreshError::Store)?;
-        if !applied {
-            // 并发双换 / CAS miss ⇒ 重放处理：级联撤销 + Replayed（已 mint 的 access 丢弃，无害——未交付客户端）
-            self.store
-                .revoke_lineage(tenant_scope, rec.lineage_id().clone())
-                .await
-                .map_err(RefreshError::Store)?;
-            tracing::warn!(
-                tenant_id = %tenant,
-                lineage_id = %rec.lineage_id().as_str(),
-                operation = "refresh_replay_detected",
-                "refresh token replay detected; lineage revoked"
-            );
-            return Err(RefreshError::Replayed);
+        match outcome {
+            RefreshRotationOutcome::Applied => {}
+            RefreshRotationOutcome::AccountStale => return Err(RefreshError::Invalid),
+            RefreshRotationOutcome::Replay => {
+                // 并发双换 / CAS miss ⇒ 重放处理：级联撤销 + Replayed（已 mint 的 access 丢弃，无害——未交付客户端）
+                self.store
+                    .revoke_lineage(tenant_scope, rec.lineage_id().clone())
+                    .await
+                    .map_err(RefreshError::Store)?;
+                tracing::warn!(
+                    tenant_id = %tenant,
+                    lineage_id = %rec.lineage_id().as_str(),
+                    operation = "refresh_replay_detected",
+                    "refresh token replay detected; lineage revoked"
+                );
+                return Err(RefreshError::Replayed);
+            }
         }
 
         Ok(RefreshBundle {
@@ -934,6 +858,7 @@ impl diport::Signer for SeedSigner {
 #[cfg(any(test, feature = "seed-login"))]
 #[allow(clippy::expect_used)]
 pub fn seed_refresh_service(
+    accounts: Box<DynAccountSecurityReadRepo<'static>>,
     mk_clock: impl Fn() -> Box<dyn diport::Clock>,
     refresh_ttl: Duration,
 ) -> Arc<RefreshService<SeedSigner>> {
@@ -954,6 +879,7 @@ pub fn seed_refresh_service(
         crate::ports::DynRefreshTokenStore::new_box(
             crate::internal::mem::InMemRefreshTokenStore::new(),
         ),
+        accounts,
         Arc::new(issuer),
         mk_clock(),
         refresh_ttl,
@@ -2979,8 +2905,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::ports::{
-        Credential, DynPolicyLifecycle, Operator, Policy, PolicyCondition, PolicyEffect,
-        PolicyObligations, PolicyRule, Role,
+        AccountSecurityLifecycle, AccountSecurityReadRepo, AccountSecurityState, Credential,
+        DynPolicyLifecycle, Operator, Policy, PolicyCondition, PolicyEffect, PolicyObligations,
+        PolicyRule, Role,
     };
     use diport::OutboxEmitError;
     use testkit::ContractRequest;
@@ -3052,7 +2979,6 @@ mod tests {
         save: AtomicUsize,
         bump_attempts: AtomicUsize,
         bump_commits: AtomicUsize,
-        lockout_status: AtomicUsize,
     }
 
     /// 改密路径的最小 test-only probe：所有存储行为委托给 `InMemCredentialRepo`，
@@ -3087,7 +3013,6 @@ mod tests {
                 + self.calls.authenticate.load(Ordering::SeqCst)
                 + self.calls.save.load(Ordering::SeqCst)
                 + self.calls.bump_attempts.load(Ordering::SeqCst)
-                + self.calls.lockout_status.load(Ordering::SeqCst)
         }
 
         fn find_calls(&self) -> usize {
@@ -3109,6 +3034,24 @@ mod tests {
                 .await
                 .expect("probe read succeeds")
                 .expect("seed credential remains")
+        }
+
+        #[allow(clippy::expect_used)]
+        async fn suspend(&self, now: SystemTime) {
+            let scope = tenant_repo_scope(tid(CANON_TENANT));
+            let state = self
+                .inner
+                .find(scope, uid(CANON_USER))
+                .await
+                .expect("read security")
+                .expect("security exists");
+            let mutation = state
+                .transition(crate::AccountStatus::Suspended, now)
+                .expect("active can suspend");
+            self.inner
+                .apply_transition(scope, mutation)
+                .await
+                .expect("suspend account");
         }
     }
 
@@ -3156,16 +3099,6 @@ mod tests {
                 self.calls.bump_commits.fetch_add(1, Ordering::SeqCst);
             }
             result
-        }
-
-        async fn lockout_status(
-            &self,
-            scope: TenantRepoScope,
-            login: LoginIdentifier,
-            now: SystemTime,
-        ) -> Result<bool, IdentityError> {
-            self.calls.lockout_status.fetch_add(1, Ordering::SeqCst);
-            self.inner.lockout_status(scope, login, now).await
         }
     }
 
@@ -3329,15 +3262,6 @@ mod tests {
         TenantId::parse(raw).expect("canonical tenant")
     }
 
-    #[allow(clippy::expect_used)]
-    fn access_claims(jwt: &authn::MintedJwt) -> serde_json::Value {
-        let payload = jwt.as_str().split('.').nth(1).expect("jwt payload segment");
-        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(payload)
-            .expect("base64url payload");
-        serde_json::from_slice(&bytes).expect("json payload")
-    }
-
     fn uid(raw: &str) -> ids::UserId {
         #[allow(clippy::expect_used)]
         ids::UserId::parse(raw).expect("canonical user id")
@@ -3357,15 +3281,17 @@ mod tests {
         now_secs: u64,
         ttl_secs: u64,
     ) -> LoginService<TestSigner> {
-        let refresh = Arc::new(make_refresh_svc(
-            crate::internal::mem::InMemRefreshTokenStore::new(),
-            make_clock(now_secs),
-            Duration::from_secs(2_592_000),
-        ));
         #[allow(clippy::expect_used)]
         LoginService::with_seed_credential(
             Arc::from(DynSessionLifecycle::new_box(capture.clone())),
-            refresh,
+            move |accounts| {
+                Arc::new(make_refresh_svc_with_accounts(
+                    crate::internal::mem::InMemRefreshTokenStore::new(),
+                    accounts,
+                    make_clock(now_secs),
+                    Duration::from_secs(2_592_000),
+                ))
+            },
             seed_password_policy(),
             make_clock(now_secs),
             Duration::from_secs(ttl_secs),
@@ -3404,32 +3330,34 @@ mod tests {
         seed_domain_with_profile_permissions(capture, now_secs, ttl_secs, &[])
     }
 
+    #[allow(clippy::expect_used)]
     fn seed_domain_with_profile_permissions(
         capture: CapturingSessionLifecycle,
         now_secs: u64,
         ttl_secs: u64,
         profile_permissions: &[&str],
     ) -> IdentityDomain<TestSigner> {
-        let refresh = Arc::new(make_refresh_svc(
+        let credentials = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(CANON_USER),
+            "correct-horse",
+            tid(CANON_TENANT),
+        )
+        .expect("seed domain credential");
+        let refresh = Arc::new(make_refresh_svc_with_accounts(
             crate::internal::mem::InMemRefreshTokenStore::new(),
+            DynAccountSecurityReadRepo::new_box(credentials.clone()),
             make_clock(now_secs),
             Duration::from_secs(2_592_000),
         ));
-        #[allow(clippy::expect_used)]
-        let login = Arc::new(
-            LoginService::with_seed_credential(
-                Arc::from(DynSessionLifecycle::new_box(capture)),
-                Arc::clone(&refresh),
-                seed_password_policy(),
-                make_clock(now_secs),
-                Duration::from_secs(ttl_secs),
-                "alice",
-                uid(CANON_USER),
-                "correct-horse",
-                tid(CANON_TENANT),
-            )
-            .expect("seed_domain login ok"),
-        );
+        let login = Arc::new(LoginService::new(
+            Arc::from(DynCredentialRepo::new_box(credentials)),
+            Arc::from(DynSessionLifecycle::new_box(capture)),
+            Arc::clone(&refresh),
+            seed_password_policy(),
+            make_clock(now_secs),
+            Duration::from_secs(ttl_secs),
+        ));
         let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
@@ -3919,27 +3847,29 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn identity_local_only_ancillary_services() -> IdentityLocalOnlyAncillaryServices {
-        let refresh = Arc::new(make_refresh_svc(
+        let credentials = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(CANON_USER),
+            "correct-horse",
+            tid(CANON_TENANT),
+        )
+        .expect("seed ancillary credential");
+        let refresh = Arc::new(make_refresh_svc_with_accounts(
             crate::internal::mem::InMemRefreshTokenStore::new(),
+            DynAccountSecurityReadRepo::new_box(credentials.clone()),
             make_clock(1_000),
             Duration::from_secs(2_592_000),
         ));
-        let login = Arc::new(
-            LoginService::with_seed_credential(
-                Arc::from(DynSessionLifecycle::new_box(
-                    CapturingSessionLifecycle::default(),
-                )),
-                Arc::clone(&refresh),
-                seed_password_policy(),
-                make_clock(1_000),
-                Duration::from_secs(3_600),
-                "alice",
-                uid(CANON_USER),
-                "correct-horse",
-                tid(CANON_TENANT),
-            )
-            .expect("seed identity LocalOnly login"),
-        );
+        let login = Arc::new(LoginService::new(
+            Arc::from(DynCredentialRepo::new_box(credentials)),
+            Arc::from(DynSessionLifecycle::new_box(
+                CapturingSessionLifecycle::default(),
+            )),
+            Arc::clone(&refresh),
+            seed_password_policy(),
+            make_clock(1_000),
+            Duration::from_secs(3_600),
+        ));
         let rbac_admin = Arc::new(RbacAdminService::new(
             Arc::from(DynRoleReadRepo::new_box(
                 crate::internal::mem::InMemRoleRepo::new(),
@@ -4777,6 +4707,320 @@ mod tests {
 
         assert!(matches!(err, LoginError::InvalidCredentials));
         assert_eq!(capture.count(), 0, "密码错 → 零 co-tx 写");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn login_suspended_account_with_valid_password_returns_invalid_credentials_and_zero_effects()
+     {
+        let capture = CapturingSessionLifecycle::default();
+        let credentials = CredentialRepoProbe::seeded(false);
+        credentials
+            .suspend(SystemTime::UNIX_EPOCH + Duration::from_secs(999))
+            .await;
+        let svc = probed_service(credentials, &capture);
+
+        let err = svc
+            .login(
+                login_receipt(),
+                tid(CANON_TENANT),
+                IdentityLoginRequest {
+                    username: "alice".to_owned(),
+                    password: "correct-horse".to_owned(),
+                },
+            )
+            .await
+            .expect_err("suspended account must reject");
+
+        assert!(matches!(err, LoginError::InvalidCredentials));
+        assert_eq!(capture.count(), 0, "rejection creates no session or outbox");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn login_second_account_gate_rejection_is_unauthenticated_not_internal_error() {
+        let tenant = tid(CANON_TENANT);
+        let user = uid(CANON_USER);
+        let credentials = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            user,
+            "correct-horse",
+            tenant,
+        )
+        .expect("seed login credential");
+        let second_gate = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            user,
+            "correct-horse",
+            tenant,
+        )
+        .expect("seed second gate");
+        let current = second_gate
+            .find(tenant_repo_scope(tenant), user)
+            .await
+            .expect("read second gate")
+            .expect("second gate state");
+        second_gate
+            .apply_transition(
+                tenant_repo_scope(tenant),
+                current
+                    .transition(
+                        crate::AccountStatus::Suspended,
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(1_001),
+                    )
+                    .expect("suspend second gate"),
+            )
+            .await
+            .expect("persist second gate");
+
+        let capture = CapturingSessionLifecycle::default();
+        let service = Arc::new(LoginService::new(
+            Arc::from(DynCredentialRepo::new_box(credentials)),
+            Arc::from(DynSessionLifecycle::new_box(capture.clone())),
+            Arc::new(make_refresh_svc_with_accounts(
+                crate::internal::mem::InMemRefreshTokenStore::new(),
+                DynAccountSecurityReadRepo::new_box(second_gate),
+                make_clock(1_000),
+                Duration::from_secs(3_600),
+            )),
+            seed_password_policy(),
+            make_clock(1_000),
+            Duration::from_secs(3_600),
+        ));
+        let body = Bytes::from(
+            serde_json::to_vec(&IdentityLoginRequest {
+                username: "alice".to_owned(),
+                password: "correct-horse".to_owned(),
+            })
+            .expect("encode login"),
+        );
+
+        let response =
+            login_handler_bytes(service, login_receipt(), tenant, body, "rid-second-gate").await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(capture.count(), 0, "second gate rejection has zero effects");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn login_all_non_active_states_and_password_results_have_zero_downstream_effects() {
+        #[derive(Clone)]
+        struct CountingSigner(Arc<AtomicUsize>);
+        impl diport::Signer for CountingSigner {
+            async fn sign(
+                &self,
+                _request: diport::SignRequest,
+            ) -> Result<diport::Signature, diport::SignerError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(diport::Signature::new(b"unexpected-signature".to_vec()))
+            }
+
+            async fn shutdown(&self) -> Result<(), diport::SignerError> {
+                Ok(())
+            }
+        }
+
+        let tenant = tid(CANON_TENANT);
+        for status in [
+            crate::AccountStatus::Suspended,
+            crate::AccountStatus::Locked,
+            crate::AccountStatus::Deactivated,
+        ] {
+            for password in ["correct-horse", "wrong"] {
+                let credentials = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+                    "alice",
+                    uid(CANON_USER),
+                    "correct-horse",
+                    tenant,
+                )
+                .expect("seed");
+                let state = credentials
+                    .find(tenant_repo_scope(tenant), uid(CANON_USER))
+                    .await
+                    .expect("read")
+                    .expect("state");
+                credentials
+                    .apply_transition(
+                        tenant_repo_scope(tenant),
+                        state
+                            .transition(status, SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+                            .expect("enter non-active state"),
+                    )
+                    .await
+                    .expect("persist state");
+
+                let sign_calls = Arc::new(AtomicUsize::new(0));
+                let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
+                    Arc::new(CountingSigner(Arc::clone(&sign_calls))),
+                    make_clock(1_000),
+                    authn::JwtIssuerConfig::rss_access(
+                        diport::KeyId::new("test-key"),
+                        diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+                        "https://test.example",
+                        "test-audience",
+                        Duration::from_secs(900),
+                    ),
+                )
+                .expect("issuer");
+                let refresh_store = crate::internal::mem::InMemRefreshTokenStore::new();
+                let refresh = Arc::new(RefreshService::new(
+                    crate::ports::DynRefreshTokenStore::new_box(refresh_store.clone()),
+                    DynAccountSecurityReadRepo::new_box(credentials.clone()),
+                    Arc::new(issuer),
+                    make_clock(1_000),
+                    Duration::from_secs(3_600),
+                ));
+                let capture = CapturingSessionLifecycle::default();
+                let service = LoginService::new(
+                    Arc::from(DynCredentialRepo::new_box(credentials)),
+                    Arc::from(DynSessionLifecycle::new_box(capture.clone())),
+                    refresh,
+                    seed_password_policy(),
+                    make_clock(1_000),
+                    Duration::from_secs(3_600),
+                );
+
+                let result = service
+                    .login(
+                        login_receipt(),
+                        tenant,
+                        IdentityLoginRequest {
+                            username: "alice".to_owned(),
+                            password: password.to_owned(),
+                        },
+                    )
+                    .await;
+                assert!(
+                    matches!(result, Err(LoginError::InvalidCredentials)),
+                    "{status:?}/{password}"
+                );
+                assert_eq!(
+                    sign_calls.load(Ordering::SeqCst),
+                    0,
+                    "{status:?}/{password}"
+                );
+                assert_eq!(refresh_store.len(), 0, "{status:?}/{password}");
+                assert_eq!(
+                    capture.count(),
+                    0,
+                    "{status:?}/{password} creates no session or outbox"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn login_rejects_authenticated_state_tenant_mismatch_before_downstream_effects() {
+        struct TenantMismatchCredentialRepo(AccountSecurityState);
+        impl CredentialRepo for TenantMismatchCredentialRepo {
+            async fn find_by_user_id(
+                &self,
+                _scope: TenantRepoScope,
+                _user_id: ids::UserId,
+            ) -> Result<Option<Credential>, IdentityError> {
+                unreachable!("login does not split credential reads")
+            }
+
+            async fn authenticate(
+                &self,
+                _scope: TenantRepoScope,
+                _login: LoginIdentifier,
+                _candidate: secure::RawPassword,
+                _now: SystemTime,
+            ) -> Result<AuthOutcome, IdentityError> {
+                Ok(AuthOutcome::Authenticated(self.0.clone()))
+            }
+
+            async fn save(
+                &self,
+                _scope: TenantRepoScope,
+                _credential: Credential,
+            ) -> Result<(), IdentityError> {
+                unreachable!("login does not save credentials")
+            }
+
+            async fn apply_password_change(
+                &self,
+                _scope: TenantRepoScope,
+                _mutation: PasswordChangeMutation,
+            ) -> Result<(), IdentityError> {
+                unreachable!("login does not change passwords")
+            }
+        }
+
+        struct PanicSigner;
+        impl diport::Signer for PanicSigner {
+            async fn sign(
+                &self,
+                _request: diport::SignRequest,
+            ) -> Result<diport::Signature, diport::SignerError> {
+                panic!("tenant mismatch must precede token signing")
+            }
+
+            async fn shutdown(&self) -> Result<(), diport::SignerError> {
+                Ok(())
+            }
+        }
+
+        let mismatched = AccountSecurityState::try_from(crate::AccountSecuritySnapshot {
+            tenant: tid(OTHER_TENANT),
+            user_id: uid(CANON_USER),
+            status: crate::AccountStatus::Active,
+            authn_epoch: 0,
+            version: 1,
+            status_changed_at: SystemTime::UNIX_EPOCH,
+            updated_at: SystemTime::UNIX_EPOCH,
+        })
+        .expect("mismatched state");
+        let refresh_store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
+            Arc::new(PanicSigner),
+            make_clock(1_000),
+            authn::JwtIssuerConfig::rss_access(
+                diport::KeyId::new("test-key"),
+                diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+                "https://test.example",
+                "test-audience",
+                Duration::from_secs(900),
+            ),
+        )
+        .expect("issuer");
+        let refresh = Arc::new(RefreshService::new(
+            crate::ports::DynRefreshTokenStore::new_box(refresh_store.clone()),
+            seeded_account_reader(),
+            Arc::new(issuer),
+            make_clock(1_000),
+            Duration::from_secs(3_600),
+        ));
+        let capture = CapturingSessionLifecycle::default();
+        let service = LoginService::new(
+            Arc::from(DynCredentialRepo::new_box(TenantMismatchCredentialRepo(
+                mismatched,
+            ))),
+            Arc::from(DynSessionLifecycle::new_box(capture.clone())),
+            refresh,
+            seed_password_policy(),
+            make_clock(1_000),
+            Duration::from_secs(3_600),
+        );
+
+        assert!(matches!(
+            service
+                .login(
+                    login_receipt(),
+                    tid(CANON_TENANT),
+                    IdentityLoginRequest {
+                        username: "alice".to_owned(),
+                        password: "correct-horse".to_owned(),
+                    },
+                )
+                .await,
+            Err(LoginError::InvalidCredentials)
+        ));
+        assert_eq!(refresh_store.len(), 0);
+        assert_eq!(capture.count(), 0, "no session or outbox write");
     }
 
     // ── 测试 3：login 未知用户 ────────────────────────────────────────────────
@@ -8493,146 +8737,604 @@ mod tests {
         clock: Box<dyn diport::Clock>,
         refresh_ttl: Duration,
     ) -> RefreshService<TestSigner> {
+        make_refresh_svc_with_accounts(store, seeded_account_reader(), clock, refresh_ttl)
+    }
+
+    fn make_refresh_svc_with_accounts(
+        store: crate::internal::mem::InMemRefreshTokenStore,
+        accounts: Box<DynAccountSecurityReadRepo<'static>>,
+        clock: Box<dyn diport::Clock>,
+        refresh_ttl: Duration,
+    ) -> RefreshService<TestSigner> {
         let issuer = make_jwt_issuer(make_clock(1_700_000_000));
         RefreshService::new(
             crate::ports::DynRefreshTokenStore::new_box(store),
+            accounts,
             std::sync::Arc::new(issuer),
             clock,
             refresh_ttl,
         )
     }
 
-    #[test]
-    fn refresh_principal_debug_redacts_subject() {
-        let debug = format!(
-            "{:?}",
-            RefreshPrincipal::SuperAdmin {
-                subject: "root-secret-subject",
-                refresh_tenant: tid(CANON_TENANT),
-            }
-        );
-
-        assert!(debug.contains("<redacted>"));
-        assert!(
-            !debug.contains("root-secret-subject"),
-            "Debug must not leak refresh principal subject"
-        );
+    #[allow(clippy::expect_used)]
+    fn seeded_account_reader() -> Box<DynAccountSecurityReadRepo<'static>> {
+        let accounts = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(CANON_USER),
+            "correct-horse",
+            tid(CANON_TENANT),
+        )
+        .expect("seed refresh account");
+        DynAccountSecurityReadRepo::new_box(accounts)
     }
 
-    #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn refresh_issue_initial_device_mints_scoped_access_claims() {
-        let store = crate::internal::mem::InMemRefreshTokenStore::new();
-        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
+    async fn issue_test_user<S: diport::Signer + Send + Sync + 'static>(
+        svc: &RefreshService<S>,
+    ) -> authn::RefreshToken {
         let tenant = tid(CANON_TENANT);
-
-        let bundle = svc
-            .issue_initial(RefreshPrincipal::Device {
-                subject: "device-subject",
-                tenant,
-            })
+        let state = svc
+            .accounts
+            .find(tenant_repo_scope(tenant), uid(CANON_USER))
             .await
-            .expect("device initial issue ok");
-        let claims = access_claims(&bundle.access);
-
-        assert_eq!(claims["sub"], "device-subject");
-        assert_eq!(claims["kind"], "device");
-        assert_eq!(claims["tenant_id"], CANON_TENANT);
+            .expect("read account")
+            .expect("seed account");
+        let active = state.try_into_active().expect("active account");
+        svc.issue(&active).await.expect("issue refresh")
     }
 
     #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn refresh_issue_initial_super_admin_mints_unscoped_access_claims() {
-        let store = crate::internal::mem::InMemRefreshTokenStore::new();
-        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
-        let refresh_tenant = tid(CANON_TENANT);
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn refresh_initial_rechecks_active_receipt_before_sign_or_insert() {
+        struct PanicSigner;
 
-        let bundle = svc
-            .issue_initial(RefreshPrincipal::SuperAdmin {
-                subject: "root-subject",
-                refresh_tenant,
-            })
+        impl diport::Signer for PanicSigner {
+            async fn sign(
+                &self,
+                _request: diport::SignRequest,
+            ) -> Result<diport::Signature, diport::SignerError> {
+                panic!("signer must not be called after account state changes")
+            }
+
+            async fn shutdown(&self) -> Result<(), diport::SignerError> {
+                Ok(())
+            }
+        }
+
+        let tenant = tid(CANON_TENANT);
+        let user = uid(CANON_USER);
+        let accounts = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            user,
+            "correct-horse",
+            tenant,
+        )
+        .expect("seed account");
+        let state = accounts
+            .find(tenant_repo_scope(tenant), user)
             .await
-            .expect("super-admin initial issue ok");
-        let claims = access_claims(&bundle.access);
-
-        assert_eq!(claims["sub"], "root-subject");
-        assert_eq!(claims["kind"], "superAdmin");
-        assert!(
-            claims.get("tenant_id").is_none(),
-            "super-admin access JWT must not carry ambient tenant"
+            .expect("read account")
+            .expect("account");
+        let receipt = state.clone().try_into_active().expect("active receipt");
+        let suspended = accounts
+            .apply_transition(
+                tenant_repo_scope(tenant),
+                state
+                    .transition(
+                        crate::AccountStatus::Suspended,
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                    )
+                    .expect("suspend"),
+            )
+            .await
+            .expect("persist suspend");
+        let restored = accounts
+            .apply_transition(
+                tenant_repo_scope(tenant),
+                suspended
+                    .transition(
+                        crate::AccountStatus::Active,
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+                    )
+                    .expect("restore"),
+            )
+            .await
+            .expect("persist restore");
+        assert_eq!(restored.status(), crate::AccountStatus::Active);
+        assert_ne!(
+            restored.clone().try_into_active(),
+            Some(receipt.clone()),
+            "suspend/restore must leave an Active state with a newer epoch"
         );
+
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
+            Arc::new(PanicSigner),
+            make_clock(1_700_000_000),
+            authn::JwtIssuerConfig::rss_access(
+                diport::KeyId::new("test-key"),
+                diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+                "https://test.example",
+                "test-audience",
+                Duration::from_secs(900),
+            ),
+        )
+        .expect("issuer");
+        let service = RefreshService::new(
+            crate::ports::DynRefreshTokenStore::new_box(store.clone()),
+            DynAccountSecurityReadRepo::new_box(accounts),
+            Arc::new(issuer),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        );
+
+        assert!(matches!(
+            service.issue_initial(receipt).await,
+            Err(RefreshError::Invalid)
+        ));
+        assert_eq!(store.len(), 0, "rejected receipt writes no refresh record");
     }
 
-    #[allow(clippy::expect_used)]
-    async fn assert_refresh_rotate_access_claims(
-        principal: RefreshPrincipal<'_>,
-        tenant: TenantId,
-        expected_subject: &str,
-        expected_kind: &str,
-        expected_tenant_claim: Option<&str>,
-    ) {
-        let store = crate::internal::mem::InMemRefreshTokenStore::new();
-        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
-        let old_refresh = svc.issue(principal).await.expect("issue refresh ok");
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn refresh_rotate_rejects_family_issued_before_suspend_or_lock_restore() {
+        struct PanicSigner;
 
-        let bundle = svc.rotate(tenant, &old_refresh).await.expect("rotate ok");
-        let claims = access_claims(&bundle.access);
+        impl diport::Signer for PanicSigner {
+            async fn sign(
+                &self,
+                _request: diport::SignRequest,
+            ) -> Result<diport::Signature, diport::SignerError> {
+                panic!("stale refresh family must be rejected before mint")
+            }
 
-        assert_eq!(claims["sub"], expected_subject);
-        assert_eq!(claims["kind"], expected_kind);
-        match expected_tenant_claim {
-            Some(expected) => assert_eq!(claims["tenant_id"], expected),
-            None => assert!(
-                claims.get("tenant_id").is_none(),
-                "unscoped rotated access JWT must not carry ambient tenant"
-            ),
+            async fn shutdown(&self) -> Result<(), diport::SignerError> {
+                Ok(())
+            }
+        }
+
+        let tenant = tid(CANON_TENANT);
+        let user = uid(CANON_USER);
+        for blocked_status in [
+            crate::AccountStatus::Suspended,
+            crate::AccountStatus::Locked,
+        ] {
+            let accounts = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+                "alice",
+                user,
+                "correct-horse",
+                tenant,
+            )
+            .expect("seed account");
+            let initial = accounts
+                .find(tenant_repo_scope(tenant), user)
+                .await
+                .expect("read account")
+                .expect("account");
+            let initial_active = initial.clone().try_into_active().expect("active");
+            let store = crate::internal::mem::InMemRefreshTokenStore::new();
+            let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
+                Arc::new(PanicSigner),
+                make_clock(1_700_000_000),
+                authn::JwtIssuerConfig::rss_access(
+                    diport::KeyId::new("test-key"),
+                    diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+                    "https://test.example",
+                    "test-audience",
+                    Duration::from_secs(900),
+                ),
+            )
+            .expect("issuer");
+            let service = RefreshService::new(
+                crate::ports::DynRefreshTokenStore::new_box(store.clone()),
+                DynAccountSecurityReadRepo::new_box(accounts.clone()),
+                Arc::new(issuer),
+                make_clock(1_700_000_000),
+                Duration::from_secs(3_600),
+            );
+            let refresh = service
+                .issue(&initial_active)
+                .await
+                .expect("issue epoch-zero family");
+
+            let blocked = accounts
+                .apply_transition(
+                    tenant_repo_scope(tenant),
+                    initial
+                        .transition(
+                            blocked_status,
+                            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                        )
+                        .expect("block account"),
+                )
+                .await
+                .expect("persist blocked state");
+            let restored = accounts
+                .apply_transition(
+                    tenant_repo_scope(tenant),
+                    blocked
+                        .transition(
+                            crate::AccountStatus::Active,
+                            SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+                        )
+                        .expect("restore"),
+                )
+                .await
+                .expect("persist restore");
+            assert_ne!(
+                restored.authn_epoch(),
+                initial_active.authn_epoch(),
+                "{blocked_status:?}/restore must advance the issuance epoch"
+            );
+
+            assert!(matches!(
+                service.rotate(tenant, &refresh).await,
+                Err(RefreshError::Invalid)
+            ));
+            assert_eq!(
+                store.len(),
+                1,
+                "epoch-stale family is rejected without CAS consumption or child insert"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn refresh_initial_missing_or_failed_reader_rejects_before_sign_or_insert() {
+        #[derive(Clone, Copy)]
+        enum ReadResult {
+            Missing,
+            Failed,
+        }
+
+        struct ScriptedReader(ReadResult);
+        impl AccountSecurityReadRepo for ScriptedReader {
+            async fn find(
+                &self,
+                _scope: TenantRepoScope,
+                _user_id: ids::UserId,
+            ) -> Result<Option<AccountSecurityState>, IdentityError> {
+                match self.0 {
+                    ReadResult::Missing => Ok(None),
+                    ReadResult::Failed => Err(IdentityError::Storage(Box::new(
+                        std::io::Error::other("scripted account read failure"),
+                    ))),
+                }
+            }
+        }
+
+        struct PanicSigner;
+        impl diport::Signer for PanicSigner {
+            async fn sign(
+                &self,
+                _request: diport::SignRequest,
+            ) -> Result<diport::Signature, diport::SignerError> {
+                panic!("reader rejection must precede signing")
+            }
+
+            async fn shutdown(&self) -> Result<(), diport::SignerError> {
+                Ok(())
+            }
+        }
+
+        let tenant = tid(CANON_TENANT);
+        let receipt = AccountSecurityState::try_from(crate::AccountSecuritySnapshot {
+            tenant,
+            user_id: uid(CANON_USER),
+            status: crate::AccountStatus::Active,
+            authn_epoch: 0,
+            version: 1,
+            status_changed_at: SystemTime::UNIX_EPOCH,
+            updated_at: SystemTime::UNIX_EPOCH,
+        })
+        .expect("state")
+        .try_into_active()
+        .expect("active receipt");
+
+        for scripted in [ReadResult::Missing, ReadResult::Failed] {
+            let store = crate::internal::mem::InMemRefreshTokenStore::new();
+            let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
+                Arc::new(PanicSigner),
+                make_clock(1_700_000_000),
+                authn::JwtIssuerConfig::rss_access(
+                    diport::KeyId::new("test-key"),
+                    diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+                    "https://test.example",
+                    "test-audience",
+                    Duration::from_secs(900),
+                ),
+            )
+            .expect("issuer");
+            let service = RefreshService::new(
+                crate::ports::DynRefreshTokenStore::new_box(store.clone()),
+                DynAccountSecurityReadRepo::new_box(ScriptedReader(scripted)),
+                Arc::new(issuer),
+                make_clock(1_700_000_000),
+                Duration::from_secs(3_600),
+            );
+
+            let result = service.issue_initial(receipt.clone()).await;
+            match scripted {
+                ReadResult::Missing => assert!(matches!(result, Err(RefreshError::Invalid))),
+                ReadResult::Failed => assert!(matches!(result, Err(RefreshError::Store(_)))),
+            }
+            assert_eq!(store.len(), 0, "reader rejection writes no refresh record");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn refresh_rotate_rejects_non_active_and_malformed_users_before_sign_or_cas() {
+        struct PanicSigner;
+
+        impl diport::Signer for PanicSigner {
+            async fn sign(
+                &self,
+                _request: diport::SignRequest,
+            ) -> Result<diport::Signature, diport::SignerError> {
+                panic!("signer must not be called for a rejected refresh record")
+            }
+
+            async fn shutdown(&self) -> Result<(), diport::SignerError> {
+                Ok(())
+            }
+        }
+
+        mockall::mock! {
+            GateStore {}
+            impl RefreshTokenStore for GateStore {
+                async fn insert(&self, scope: TenantRepoScope, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+                async fn find_by_hash(
+                    &self,
+                    scope: TenantRepoScope,
+                    hash: RefreshTokenHash,
+                ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
+                async fn rotate(
+                    &self,
+                    scope: TenantRepoScope,
+                    mutation: crate::ports::RefreshRotationMutation,
+                ) -> Result<RefreshRotationOutcome, IdentityError>;
+                async fn revoke_lineage(
+                    &self,
+                    scope: TenantRepoScope,
+                    lineage_id: RefreshTokenId,
+                ) -> Result<(), IdentityError>;
+            }
+        }
+
+        let tenant = tid(CANON_TENANT);
+        let user = uid(CANON_USER);
+        for (status, subject) in [
+            (Some(crate::AccountStatus::Suspended), CANON_USER),
+            (Some(crate::AccountStatus::Locked), CANON_USER),
+            (Some(crate::AccountStatus::Deactivated), CANON_USER),
+            (None, "malformed-user-subject"),
+        ] {
+            let accounts = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+                "alice",
+                user,
+                "correct-horse",
+                tenant,
+            )
+            .expect("seed account");
+            if let Some(status) = status {
+                let state = accounts
+                    .find(tenant_repo_scope(tenant), user)
+                    .await
+                    .expect("read account")
+                    .expect("account");
+                accounts
+                    .apply_transition(
+                        tenant_repo_scope(tenant),
+                        state
+                            .transition(status, SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+                            .expect("valid transition"),
+                    )
+                    .await
+                    .expect("persist state");
+            }
+
+            let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+            let record = RefreshTokenRecord::hydrate(
+                "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                tenant,
+                subject,
+                vocab::PrincipalKind::User,
+                [0xAA; 32],
+                None,
+                "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                crate::AuthnEpoch::ZERO,
+                RefreshStatus::Active,
+                issued,
+                issued + Duration::from_secs(3_600),
+            );
+            let mut store = MockGateStore::new();
+            store
+                .expect_find_by_hash()
+                .times(1)
+                .returning(move |_scope, _hash| Ok(Some(record.clone())));
+            store.expect_insert().times(0);
+            store.expect_rotate().times(0);
+            store.expect_revoke_lineage().times(0);
+            let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
+                Arc::new(PanicSigner),
+                make_clock(1_700_000_000),
+                authn::JwtIssuerConfig::rss_access(
+                    diport::KeyId::new("test-key"),
+                    diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+                    "https://test.example",
+                    "test-audience",
+                    Duration::from_secs(900),
+                ),
+            )
+            .expect("issuer");
+            let service = RefreshService::new(
+                crate::ports::DynRefreshTokenStore::new_box(store),
+                DynAccountSecurityReadRepo::new_box(accounts),
+                Arc::new(issuer),
+                make_clock(1_700_000_000),
+                Duration::from_secs(3_600),
+            );
+
+            assert!(matches!(
+                service
+                    .rotate(tenant, &authn::RefreshToken::new("presented"))
+                    .await,
+                Err(RefreshError::Invalid)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn refresh_rotate_rejects_missing_outage_and_mismatched_account_before_sign_or_cas() {
+        #[derive(Clone)]
+        enum ScriptedRead {
+            Missing,
+            Failed,
+            State(AccountSecurityState),
+        }
+
+        struct ScriptedReader(ScriptedRead);
+        impl AccountSecurityReadRepo for ScriptedReader {
+            async fn find(
+                &self,
+                _scope: TenantRepoScope,
+                _user_id: ids::UserId,
+            ) -> Result<Option<AccountSecurityState>, IdentityError> {
+                match &self.0 {
+                    ScriptedRead::Missing => Ok(None),
+                    ScriptedRead::Failed => Err(IdentityError::Storage(Box::new(
+                        std::io::Error::other("scripted account reader outage"),
+                    ))),
+                    ScriptedRead::State(state) => Ok(Some(state.clone())),
+                }
+            }
+        }
+
+        struct PanicSigner;
+        impl diport::Signer for PanicSigner {
+            async fn sign(
+                &self,
+                _request: diport::SignRequest,
+            ) -> Result<diport::Signature, diport::SignerError> {
+                panic!("account reader rejection must precede signing")
+            }
+
+            async fn shutdown(&self) -> Result<(), diport::SignerError> {
+                Ok(())
+            }
+        }
+
+        mockall::mock! {
+            AccountGateStore {}
+            impl RefreshTokenStore for AccountGateStore {
+                async fn insert(&self, scope: TenantRepoScope, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+                async fn find_by_hash(
+                    &self,
+                    scope: TenantRepoScope,
+                    hash: RefreshTokenHash,
+                ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
+                async fn rotate(
+                    &self,
+                    scope: TenantRepoScope,
+                    mutation: crate::ports::RefreshRotationMutation,
+                ) -> Result<RefreshRotationOutcome, IdentityError>;
+                async fn revoke_lineage(
+                    &self,
+                    scope: TenantRepoScope,
+                    lineage_id: RefreshTokenId,
+                ) -> Result<(), IdentityError>;
+            }
+        }
+
+        let tenant = tid(CANON_TENANT);
+        let user = uid(CANON_USER);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let other_tenant_state = AccountSecurityState::try_from(crate::AccountSecuritySnapshot {
+            tenant: tid(OTHER_TENANT),
+            user_id: user,
+            status: crate::AccountStatus::Active,
+            authn_epoch: 0,
+            version: 1,
+            status_changed_at: SystemTime::UNIX_EPOCH,
+            updated_at: SystemTime::UNIX_EPOCH,
+        })
+        .expect("other tenant state");
+        let other_user_state = AccountSecurityState::try_from(crate::AccountSecuritySnapshot {
+            tenant,
+            user_id: uid(GHOST_USER),
+            status: crate::AccountStatus::Active,
+            authn_epoch: 0,
+            version: 1,
+            status_changed_at: SystemTime::UNIX_EPOCH,
+            updated_at: SystemTime::UNIX_EPOCH,
+        })
+        .expect("other user state");
+
+        for scripted in [
+            ScriptedRead::Missing,
+            ScriptedRead::Failed,
+            ScriptedRead::State(other_tenant_state),
+            ScriptedRead::State(other_user_state),
+        ] {
+            let record = RefreshTokenRecord::hydrate(
+                "eeeeeeee-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                tenant,
+                CANON_USER,
+                vocab::PrincipalKind::User,
+                [0xEE; 32],
+                None,
+                "eeeeeeee-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                crate::AuthnEpoch::ZERO,
+                RefreshStatus::Active,
+                now,
+                now + Duration::from_secs(3_600),
+            );
+            let mut store = MockAccountGateStore::new();
+            store
+                .expect_find_by_hash()
+                .times(1)
+                .returning(move |_scope, _hash| Ok(Some(record.clone())));
+            store.expect_insert().times(0);
+            store.expect_rotate().times(0);
+            store.expect_revoke_lineage().times(0);
+
+            let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
+                Arc::new(PanicSigner),
+                make_clock(1_700_000_000),
+                authn::JwtIssuerConfig::rss_access(
+                    diport::KeyId::new("test-key"),
+                    diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+                    "https://test.example",
+                    "test-audience",
+                    Duration::from_secs(900),
+                ),
+            )
+            .expect("issuer");
+            let service = RefreshService::new(
+                crate::ports::DynRefreshTokenStore::new_box(store),
+                DynAccountSecurityReadRepo::new_box(ScriptedReader(scripted.clone())),
+                Arc::new(issuer),
+                make_clock(1_700_000_000),
+                Duration::from_secs(3_600),
+            );
+
+            let result = service
+                .rotate(tenant, &authn::RefreshToken::new("presented"))
+                .await;
+            if matches!(scripted, ScriptedRead::Failed) {
+                assert!(matches!(result, Err(RefreshError::Store(_))));
+            } else {
+                assert!(matches!(result, Err(RefreshError::Invalid)));
+            }
         }
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn refresh_rotate_device_admin_and_super_admin_preserve_record_kind_claims() {
-        let tenant = tid(CANON_TENANT);
-
-        assert_refresh_rotate_access_claims(
-            RefreshPrincipal::Device {
-                subject: "device-subject",
-                tenant,
-            },
-            tenant,
-            "device-subject",
-            "device",
-            Some(CANON_TENANT),
-        )
-        .await;
-        assert_refresh_rotate_access_claims(
-            RefreshPrincipal::Admin {
-                subject: "admin-subject",
-                tenant,
-            },
-            tenant,
-            "admin-subject",
-            "admin",
-            Some(CANON_TENANT),
-        )
-        .await;
-        assert_refresh_rotate_access_claims(
-            RefreshPrincipal::SuperAdmin {
-                subject: "root-subject",
-                refresh_tenant: tenant,
-            },
-            tenant,
-            "root-subject",
-            "superAdmin",
-            None,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn refresh_rotate_rejects_service_and_anonymous_record_kinds_before_cas() {
+    async fn refresh_rotate_rejects_every_non_user_record_kind_before_replay_or_cas() {
         use crate::ports::DynRefreshTokenStore;
 
         mockall::mock! {
@@ -8648,7 +9350,7 @@ mod tests {
                     &self,
                     scope: TenantRepoScope,
                     mutation: crate::ports::RefreshRotationMutation,
-                ) -> Result<bool, IdentityError>;
+                ) -> Result<RefreshRotationOutcome, IdentityError>;
                 async fn revoke_lineage(
                     &self,
                     scope: TenantRepoScope,
@@ -8658,10 +9360,10 @@ mod tests {
         }
 
         macro_rules! assert_non_issuable_kind {
-            ($kind:expr, $lineage:literal, $subject:literal, $presented:literal) => {{
+            ($kind:expr, $status:expr, $lineage:literal, $subject:literal, $presented:literal) => {{
                 let tenant = tid(CANON_TENANT);
                 let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-                let active_rec = RefreshTokenRecord::hydrate(
+                let record = RefreshTokenRecord::hydrate(
                     $lineage,
                     tenant,
                     $subject,
@@ -8669,19 +9371,29 @@ mod tests {
                     [0xCC; 32],
                     None,
                     $lineage,
-                    RefreshStatus::Active,
+                    crate::AuthnEpoch::ZERO,
+                    $status,
                     issued,
                     issued + Duration::from_secs(3_600),
                 );
                 let mut mock = MockNonIssuableStore::new();
                 mock.expect_find_by_hash()
                     .times(1)
-                    .returning(move |_tenant, _hash| Ok(Some(active_rec.clone())));
+                    .returning(move |_tenant, _hash| Ok(Some(record.clone())));
                 mock.expect_rotate().times(0);
                 mock.expect_revoke_lineage().times(0);
 
                 let svc = RefreshService::new(
                     DynRefreshTokenStore::new_box(mock),
+                    DynAccountSecurityReadRepo::new_box(
+                        crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+                            "alice",
+                            uid(CANON_USER),
+                            "correct-horse",
+                            tenant,
+                        )
+                        .expect("seed account"),
+                    ),
                     std::sync::Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
                     make_clock(1_700_000_000),
                     Duration::from_secs(3_600),
@@ -8693,23 +9405,43 @@ mod tests {
                     .expect_err("non-access refresh record kind must not rotate");
 
                 assert!(
-                    matches!(
-                        err,
-                        RefreshError::Mint(authn::JwtIssueError::KindNotIssuable)
-                    ),
+                    matches!(err, RefreshError::Invalid),
                     "non-access kind must fail before CAS: {err:?}"
                 );
             }};
         }
 
         assert_non_issuable_kind!(
+            vocab::PrincipalKind::Device,
+            RefreshStatus::Active,
+            "aaaaaaaa-1111-4ccc-8ddd-eeeeeeeeeeee",
+            "device-subject",
+            "device-refresh-token"
+        );
+        assert_non_issuable_kind!(
+            vocab::PrincipalKind::Admin,
+            RefreshStatus::Active,
+            "aaaaaaaa-2222-4ccc-8ddd-eeeeeeeeeeee",
+            "admin-subject",
+            "admin-refresh-token"
+        );
+        assert_non_issuable_kind!(
+            vocab::PrincipalKind::SuperAdmin,
+            RefreshStatus::Active,
+            "aaaaaaaa-3333-4ccc-8ddd-eeeeeeeeeeee",
+            "super-admin-subject",
+            "super-admin-refresh-token"
+        );
+        assert_non_issuable_kind!(
             vocab::PrincipalKind::Service,
+            RefreshStatus::Consumed,
             "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
             "service-subject",
             "service-refresh-token"
         );
         assert_non_issuable_kind!(
             vocab::PrincipalKind::Anonymous,
+            RefreshStatus::Active,
             "dddddddd-bbbb-4ccc-8ddd-eeeeeeeeeeee",
             "anonymous-subject",
             "anonymous-refresh-token"
@@ -8727,13 +9459,7 @@ mod tests {
         let ta = tid(CANON_TENANT);
 
         // issue → rotate 成功
-        let old_rf = svc
-            .issue(RefreshPrincipal::User {
-                subject: "alice-subject",
-                tenant: ta,
-            })
-            .await
-            .expect("issue ok");
+        let old_rf = issue_test_user(&svc).await;
         let bundle = svc.rotate(ta, &old_rf).await.expect("rotate ok");
         assert!(
             !bundle.access.as_str().is_empty(),
@@ -8772,13 +9498,7 @@ mod tests {
         let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
         let ta = tid(CANON_TENANT);
 
-        let token_a = svc
-            .issue(RefreshPrincipal::User {
-                subject: "alice-subject",
-                tenant: ta,
-            })
-            .await
-            .expect("issue ok");
+        let token_a = issue_test_user(&svc).await;
         let bundle_b = svc.rotate(ta, &token_a).await.expect("A→B ok");
 
         // 用 A 重放 ⇒ Replayed（A 已 Consumed）+ 级联 Revoke 整条 lineage
@@ -8802,13 +9522,7 @@ mod tests {
         let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
         let ta = tid(CANON_TENANT);
 
-        let old_rf = svc
-            .issue(RefreshPrincipal::User {
-                subject: "alice-subject",
-                tenant: ta,
-            })
-            .await
-            .expect("issue ok");
+        let old_rf = issue_test_user(&svc).await;
         let _bundle = svc.rotate(ta, &old_rf).await.expect("rotate ok");
 
         // 旧 refresh 已 Consumed，不可再轮换
@@ -8825,13 +9539,7 @@ mod tests {
         let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
         let ta = tid(CANON_TENANT);
 
-        let rf = svc
-            .issue(RefreshPrincipal::User {
-                subject: "alice-subject",
-                tenant: ta,
-            })
-            .await
-            .expect("issue ok");
+        let rf = issue_test_user(&svc).await;
 
         // 第一次 revoke Ok
         svc.revoke(ta, &rf).await.expect("revoke 1 ok");
@@ -8854,13 +9562,7 @@ mod tests {
         // 签发服务：clock = T=1000，ttl = 1s（token 于 T+1 过期）
         let issue_svc = make_refresh_svc(store.clone(), make_clock(1_000), Duration::from_secs(1));
         let ta = tid(CANON_TENANT);
-        let rf = issue_svc
-            .issue(RefreshPrincipal::User {
-                subject: "alice-subject",
-                tenant: ta,
-            })
-            .await
-            .expect("issue ok");
+        let rf = issue_test_user(&issue_svc).await;
 
         // 轮换服务：clock = T+10（token 已过期），ttl 无关（不会到达写新 record 步骤）
         let expire_svc = make_refresh_svc(store, make_clock(1_010), Duration::from_secs(3_600));
@@ -8878,13 +9580,7 @@ mod tests {
         let ta = tid(CANON_TENANT);
         let tb = tid(OTHER_TENANT);
 
-        let rf = svc
-            .issue(RefreshPrincipal::User {
-                subject: "alice-subject",
-                tenant: ta,
-            })
-            .await
-            .expect("issue ok");
+        let rf = issue_test_user(&svc).await;
 
         // tenant B 用 tenant A 的 token ⇒ find_by_hash 跨租 → None → Invalid
         let err = svc.rotate(tb, &rf).await.expect_err("cross-tenant");
@@ -8923,12 +9619,12 @@ mod tests {
             .expect("revoke unknown is idempotent");
     }
 
-    // ── 测试 R9：CAS-miss 分支 — store.rotate 返回 Ok(false) → revoke_lineage 被调用一次 + Replayed ──
+    // ── 测试 R9：CAS-miss 分支 — store.rotate 返回 Replay → revoke_lineage 被调用一次 + Replayed ──
     //
     // 验证 `rotate` 的步骤 5 if !applied 分支：
     // ①  `revoke_lineage` 以正确 lineage_id 被调用恰一次；
     // ②  rotate 返回 `Err(RefreshError::Replayed)`。
-    // 用 mockall 控制 store 行为（`find_by_hash` 返回 Active 记录，`rotate` 返回 Ok(false)）。
+    // 用 mockall 控制 store 行为（`find_by_hash` 返回 Active 记录，`rotate` 返回 Replay）。
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
@@ -8948,7 +9644,7 @@ mod tests {
                     &self,
                     scope: TenantRepoScope,
                     mutation: crate::ports::RefreshRotationMutation,
-                ) -> Result<bool, IdentityError>;
+                ) -> Result<RefreshRotationOutcome, IdentityError>;
                 async fn revoke_lineage(
                     &self,
                     scope: TenantRepoScope,
@@ -8965,11 +9661,12 @@ mod tests {
         let active_rec = RefreshTokenRecord::hydrate(
             lineage_str, // id
             ta,
-            "alice-subj",
+            CANON_USER,
             vocab::PrincipalKind::User,
             [0xAA; 32],
             None,        // parent_id = None（根 token）
             lineage_str, // lineage_id = id（根 token）
+            crate::AuthnEpoch::ZERO,
             RefreshStatus::Active,
             issued,
             issued + Duration::from_secs(3_600),
@@ -8981,9 +9678,9 @@ mod tests {
         mock.expect_find_by_hash()
             .returning(move |_t, _h| Ok(Some(active_rec.clone())));
 
-        // rotate → Ok(false)（CAS miss，步骤 6）
+        // rotate → Replay（CAS miss，步骤 6）
         mock.expect_rotate()
-            .returning(|_scope, _rotation| Ok(false));
+            .returning(|_scope, _rotation| Ok(RefreshRotationOutcome::Replay));
 
         // revoke_lineage 须以正确 lineage_id 被调用恰一次（步骤 5 if !applied 分支）
         mock.expect_revoke_lineage()
@@ -8993,6 +9690,7 @@ mod tests {
 
         let svc = RefreshService::new(
             DynRefreshTokenStore::new_box(mock),
+            seeded_account_reader(),
             std::sync::Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
             make_clock(1_700_000_000),
             Duration::from_secs(3_600),
@@ -9024,7 +9722,7 @@ mod tests {
                     &self,
                     scope: TenantRepoScope,
                     mutation: crate::ports::RefreshRotationMutation,
-                ) -> Result<bool, IdentityError>;
+                ) -> Result<RefreshRotationOutcome, IdentityError>;
                 async fn revoke_lineage(
                     &self,
                     scope: TenantRepoScope,
@@ -9045,6 +9743,7 @@ mod tests {
             [0xBB; 32],
             None,
             lineage_str,
+            crate::AuthnEpoch::ZERO,
             RefreshStatus::Active,
             issued,
             issued + Duration::from_secs(3_600),
@@ -9057,6 +9756,7 @@ mod tests {
 
         let svc = RefreshService::new(
             DynRefreshTokenStore::new_box(mock),
+            seeded_account_reader(),
             std::sync::Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
             make_clock(1_700_000_000),
             Duration::from_secs(3_600),
@@ -9115,19 +9815,14 @@ mod tests {
         .expect("valid jwt issuer config");
         let svc = RefreshService::new(
             crate::ports::DynRefreshTokenStore::new_box(store),
+            seeded_account_reader(),
             std::sync::Arc::new(issuer),
             make_clock(1_700_000_000),
             Duration::from_secs(3_600),
         );
 
         // issue 不 mint（仅 insert）⇒ 成功签发旧 refresh
-        let old_rf = svc
-            .issue(RefreshPrincipal::User {
-                subject: "alice-subject",
-                tenant: ta,
-            })
-            .await
-            .expect("issue ok");
+        let old_rf = issue_test_user(&svc).await;
 
         // rotate ⇒ mint 失败（FailingSigner）⇒ Err(Mint)，CAS 从未执行
         let err = svc
@@ -9304,16 +9999,8 @@ mod tests {
                 make_clock(1_700_000_000),
                 Duration::from_secs(3_600),
             ));
-            let ta = tid(CANON_TENANT);
-
             // 先签发一个 refresh token 落库，供 handler 轮换。
-            let rf = svc
-                .issue(RefreshPrincipal::User {
-                    subject: "alice-subject",
-                    tenant: ta,
-                })
-                .await
-                .expect("issue ok");
+            let rf = issue_test_user(&svc).await;
 
             let router = refresh_router_for_test(Arc::clone(&svc));
 
@@ -9426,7 +10113,7 @@ mod tests {
                     &self,
                     scope: TenantRepoScope,
                     mutation: crate::ports::RefreshRotationMutation,
-                ) -> Result<bool, IdentityError>;
+                ) -> Result<RefreshRotationOutcome, IdentityError>;
                 async fn revoke_lineage(
                     &self,
                     scope: TenantRepoScope,
@@ -9442,6 +10129,7 @@ mod tests {
         store.expect_revoke_lineage().times(0);
         let svc = Arc::new(RefreshService::new(
             DynRefreshTokenStore::new_box(store),
+            seeded_account_reader(),
             Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
             make_clock(1_700_000_000),
             Duration::from_secs(3_600),
@@ -9567,19 +10255,20 @@ mod tests {
         )
         .expect("valid jwt issuer config");
 
-        let refresh_svc = Arc::new(RefreshService::new(
-            crate::ports::DynRefreshTokenStore::new_box(
-                crate::internal::mem::InMemRefreshTokenStore::new(),
-            ),
-            std::sync::Arc::new(issuer),
-            make_clock(1_700_000_000),
-            Duration::from_secs(2_592_000),
-        ));
-
         let capture = CapturingSessionLifecycle::default();
         let svc = LoginService::with_seed_credential(
             Arc::from(DynSessionLifecycle::new_box(capture.clone())),
-            refresh_svc,
+            move |accounts| {
+                Arc::new(RefreshService::new(
+                    crate::ports::DynRefreshTokenStore::new_box(
+                        crate::internal::mem::InMemRefreshTokenStore::new(),
+                    ),
+                    accounts,
+                    std::sync::Arc::new(issuer),
+                    make_clock(1_700_000_000),
+                    Duration::from_secs(2_592_000),
+                ))
+            },
             seed_password_policy(),
             make_clock(1_700_000_000),
             Duration::from_secs(3_600),
@@ -9623,23 +10312,27 @@ mod tests {
     async fn login_initial_refresh_token_is_seeded_in_store() {
         let capture = CapturingSessionLifecycle::default();
         let store = crate::internal::mem::InMemRefreshTokenStore::new();
-        let refresh_svc = Arc::new(make_refresh_svc(
-            store.clone(),
-            make_clock(1_700_000_000),
-            Duration::from_secs(2_592_000),
-        ));
-        let login_svc = LoginService::with_seed_credential(
-            Arc::from(DynSessionLifecycle::new_box(capture)),
-            Arc::clone(&refresh_svc),
-            seed_password_policy(),
-            make_clock(1_700_000_000),
-            Duration::from_secs(3_600),
+        let credentials = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
             "alice",
             uid(CANON_USER),
             "correct-horse",
             tid(CANON_TENANT),
         )
-        .expect("seed ok");
+        .expect("seed credential");
+        let refresh_svc = Arc::new(make_refresh_svc_with_accounts(
+            store.clone(),
+            DynAccountSecurityReadRepo::new_box(credentials.clone()),
+            make_clock(1_700_000_000),
+            Duration::from_secs(2_592_000),
+        ));
+        let login_svc = LoginService::new(
+            Arc::from(DynCredentialRepo::new_box(credentials)),
+            Arc::from(DynSessionLifecycle::new_box(capture)),
+            Arc::clone(&refresh_svc),
+            seed_password_policy(),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        );
         let ta = tid(CANON_TENANT);
 
         let resp = login_svc

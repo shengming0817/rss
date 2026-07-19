@@ -13,14 +13,14 @@
 //!   匹配 + 表驱动测试；newtype 严格白名单 parse）——PR1。
 //! - **ABAC（`domain::abac`：`evaluate_abac` / `Policy` / typed `Operator` + `PolicyEffect`）已写实**
 //!   （deny-overrides + 租户门 + 重复 key / 类型不匹配 fail-closed + 表驱动测试）——PR2。
-//! - **账号子域（`domain::account`：`AccountStatus` 迁移 + argon2 哈希 `Credential` + `AccountLockout`
-//!   滑窗/锁定 TTL/lazy-unlock）已写实**（表驱动测试）——PR3；生产持久化消费（postgres adapter 直读）待 W（#1258）。
+//! - **账号安全子域（`domain::account_security` + `domain::account`）已写实**：durable 四值 lifecycle、
+//!   authn epoch/version/CAS、sealed active receipt/mutation，以及与 lifecycle 分轨的临时暴破阻断。
 //!
 //! `application`（登录生命周期：[`LoginService`] / [`IdentityDomain`]）**已写实**——哈希凭据使用
 //! constant-time digest 比较与有界 KDF（未知/弱档至少支付当前档工作）+ lockout 门控/原子推进 + L2 co-tx
 //! （session + `identity.session-created` outbox 同一事务）+ 密码变更
-//! CAS + logout 软撤销；in-mem DI 替身（`with_seed_credential` 哈希种子）覆盖单测/journey。余下（真实 JWT 颁发、
-//! postgres 持久化接缝）留 W。`application` 模块私有，只 re-export facade。
+//! CAS + logout 软撤销；in-mem DI 替身覆盖单测/journey，生产由 PostgreSQL 原子认证漏斗与持久状态真源承载。
+//! `application` 模块私有，只 re-export facade。
 //!
 //! # 对标
 //!
@@ -40,18 +40,22 @@ pub mod ports;
 pub use application::{
     ChangePasswordError, FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain,
     IdentityDomainDeps, LoginError, LoginService, PolicyManageError, PolicyManageService,
-    RbacAdminError, RbacAdminService, RefreshBundle, RefreshError, RefreshPrincipal,
-    RefreshService,
+    RbacAdminError, RbacAdminService, RefreshBundle, RefreshError, RefreshService,
 };
 /// Demo/journey 首发 token 装配（seed-login/test 门控；生产经组合根注入 vault `Signer`，#1252）。
 #[cfg(any(test, feature = "seed-login"))]
 pub use application::{SeedSigner, seed_refresh_service};
+pub use domain::{
+    AccountSecurityHydrationError, AccountSecurityMutation, AccountSecuritySnapshot,
+    AccountSecurityState, AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus,
+    AuthnEpoch, RefreshRotationOutcome,
+};
 
 /// 测试支撑——仅 `test-support` feature（test/dev 构建）启用，生产不编译（funnel seal 不变）。
 ///
 /// 下游 adapter crate（postgres）集成测试需构造 [`ports::Session`](crate::ports::Session) 驱动
 /// `ports::SessionLifecycle`，及 [`ports::LoginIdentifier`](crate::ports::LoginIdentifier) 驱动
-/// `ports::CredentialRepo::{authenticate, lockout_status}`（#1316），但 `Session::new` / `SessionId::new` /
+/// `ports::CredentialRepo::authenticate`（#1316），但 `Session::new` / `SessionId::new` /
 /// `LoginIdentifier::new` 均为 `pub(crate)` funnel（生产不可伪造）。本模块经 feature 门控暴露受控构造器——与
 /// `authn::test_support` 同信任模型（生产构建不编译 ⇒ funnel seal 不变）。
 #[cfg(feature = "test-support")]
@@ -96,7 +100,7 @@ pub mod test_support {
     }
 
     /// 构造测试用 [`LoginIdentifier`]（登录查找键；经域 funnel；仅 test/dev 构建）。下游 adapter 集成测试需
-    /// 为任意 login（含未种子化的「未知主体」）构造查找键传入 `authenticate` / `lockout_status`——而 known
+    /// 为任意 login（含未种子化的「未知主体」）构造查找键传入 `authenticate`——而 known
     /// 主体可经 `credential.login().clone()` 取得，故本入口主要服务 unknown / 跨租 fail-closed 用例（#1316 F2）。
     pub fn login_identifier(raw: &str) -> LoginIdentifier {
         LoginIdentifier::new(raw)

@@ -1067,6 +1067,15 @@ impl PgDomainDeps<caps::Identity> {
         )
     }
 
+    /// Durable account-security state provider for mandatory auth gates and sealed lifecycle CAS.
+    #[must_use]
+    pub fn account_security_repo(&self) -> crate::PgAccountSecurityRepo {
+        crate::PgAccountSecurityRepo::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+        )
+    }
+
     /// 角色仓储（roles 表 + tenant scope）。
     #[must_use]
     pub fn role_repo(&self) -> PgRoleRepo {

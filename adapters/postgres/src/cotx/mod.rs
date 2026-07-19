@@ -247,6 +247,7 @@ pub(crate) struct PgReadPool<L> {
     _lane: std::marker::PhantomData<fn() -> L>,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum ServingReadLane {}
 #[allow(dead_code)]
 pub(crate) enum AuditAdminReadLane {}
@@ -345,6 +346,7 @@ pub(crate) struct PgWritePool<L> {
     _lane: std::marker::PhantomData<fn() -> L>,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum ServingWriteLane {}
 pub(crate) enum MaintenanceWriteLane {}
 

@@ -61,16 +61,16 @@ description: "Task list — identity 域 crate body 兑现"
 
 ---
 
-## Phase 5: User Story 3 - 身份/凭据管理 + 账户锁定（PR3 · P2 · Wave 2，∥ PR2，子 PBI：#1188）
+## Phase 5: User Story 3 - 身份/凭据管理 + 账户安全门控（PR3 · P2 · Wave 2，∥ PR2，子 PBI：#1188）
 
-**Goal**: `CredentialRepo` 域形 port + 密码哈希校验 + version pin + `AccountStatus` 状态机 + `AccountLockout`。
+**Goal**: `CredentialRepo` 单一认证漏斗 + 密码哈希校验 + version pin + durable `AccountSecurityState` + 独立 temporary `AccountLockout`。
 
-**Independent Test**: in-mem `CredentialRepo` 替身 + 表驱动覆盖校验/锁定/状态迁移/脱敏。覆盖率命令：`cargo llvm-cov --lib -p identity`。
+**Independent Test**: in-mem `CredentialRepo` 替身 + 表驱动覆盖凭据校验、四值状态/epoch/version、临时阻断、非 Active 登录拒绝和脱敏。覆盖率命令：`cargo llvm-cov --lib -p identity`。
 
-- [ ] T012 [PR3][US3] 先写测试（`domain/account.rs` + `internal/mem.rs`）：密码校验正确/错误/版本不匹配（constant-time）、`AccountStatus` 合法迁移、`AccountLockout` 计数/阈值5/窗口15min/锁定TTL15min/lazy-unlock、密码 Debug 脱敏；fake Clock 推进时间验证窗口/TTL；窗口恰好到期 + 锁定 TTL 恰好到期临界值边界测试；跨租红用例（`principal.tenant ≠ credential.tenant` → Deny）。运行确认 FAIL。
-- [ ] T013 [PR3][US3] 定义 `CredentialRepo`（`ports.rs`，域形 DI port + dynosaur Send 变体 + `DynCredentialRepo`，ADR-005 范式）：`find_by_user_id`/`authenticate`/`apply_password_change`(CAS)/`save`/`lockout_status`（AccountLockout 持久化）。
-- [ ] T014 [PR3][US3] 实现 `Credential`/`AccountStatus`/`AccountLockout` 域类型（`domain/account.rs`）+ argon2/bcrypt 哈希（复用 `secure` 或最小封装，注 ref）；`AccountLockout` 窗口/TTL 判定经注入 `Clock` 计算，禁止 `SystemTime::now()`。
-- [ ] T015 [PR3][US3] `internal/mem.rs` 补 in-mem `CredentialRepo` 替身（`#[cfg(test)]`/`seed-login`）；清理 G1 tracer `UserRepo` + `InMemUserRepo` 明文比对（由 CredentialRepo 替代后删除）。
+- [ ] T012 [PR3][US3] 先写测试（`domain/account.rs` + `domain/account_security.rs` + `internal/mem.rs`）：密码校验正确/错误/版本不匹配（constant-time）、完整状态迁移矩阵、epoch/version/CAS/溢出、`AccountLockout` 阈值/窗口/临时阻断 TTL、非 Active 正确密码拒绝、password/receipt Debug 脱敏；确认暴破阈值和 TTL 到期都不迁移 durable status。运行确认 FAIL。
+- [ ] T013 [PR3][US3] 定义 `CredentialRepo` 的 combined `authenticate`，删除 `lockout_status`；新增只读 `AccountSecurityReadRepo` 与只消费 sealed mutation 的 `AccountSecurityLifecycle`，所有依赖为必填非 `Option`。
+- [ ] T014 [PR3][US3] 在 `domain/account_security.rs` 实现 `AccountSecurityState`、四值 `AccountStatus`、`AuthnEpoch`、`AccountSecurityVersion`、sealed mutation/active receipt；在 `domain/account.rs` 保留 `Credential` 与独立 `AccountLockout`，其 `record_failure` 返回 `AllowRetry|TemporarilyBlocked`。
+- [ ] T015 [PR3][US3] `internal/mem.rs` 以一个 inner lock 原子承载 credential/security/lockout；unknown path 保留 dummy KDF，缺失/损坏 security state 完成 KDF floor 后 fail-closed；清理旧明文比对与拆分状态预检。
 - [ ] T015b [PR3][US3] 核查 `deny.toml` `wrappers` 集合与 xtask `EXTERNAL_CONFINEMENT_WRAPPERS` 相等（DIPORT-MACRO-CONFINE-01′，identity 已在白名单，作显式核查）。clippy/dylint/fmt/`cargo llvm-cov --lib -p identity`。
 
 ---
@@ -81,9 +81,9 @@ description: "Task list — identity 域 crate body 兑现"
 
 **Independent Test**: tokio 异步单测 + fake 替身：登录成功发一条事件 / 错误不发 / CAS 冲突拒绝 / logout 撤销。覆盖率命令：`cargo llvm-cov --lib -p identity`。
 
-- [ ] T016 [PR4][US4] 先写测试（`application/login.rs` + `domain/session.rs`）：login 成功创建会话+发 session-created；密码错误返 InvalidCredentials 不发事件；change_password CAS 版本冲突拒绝；logout 撤销会话；L2 outbox consumer 幂等红用例（同 event 重复投递只处理一次）；跨租红用例（`X-Tenant-ID: tenantB` + tenantA 凭据 → Deny，不创建会话，不发事件）；login tenant 来源验证（body 无 tenantId，仅 header）。运行确认 FAIL。
+- [ ] T016 [PR4][US4] 先写测试（`application/login.rs` + `domain/session.rs`）：Active login 成功创建会话+发 session-created；Suspended/Locked/Deactivated 即使密码正确也返回 InvalidCredentials 且零 token/session/outbox；密码错误、跨租、storage failure 和缺失 security state 均 fail-closed；change_password CAS、logout 和 tenant header 边界继续覆盖。运行确认 FAIL。
 - [ ] T017 [PR4][US4] 定义 `SessionRepo`（`ports.rs`，域形 port）：`create`(L1)/`revoke`/`find`；`Session` 域类型（`domain/session.rs`）。
-- [ ] T018 [PR4][US4] `LoginService` 真实 `login`：从 `X-Tenant-ID` header 获取 tenant（不从 body 取）→ `CredentialRepo` 校验 → `SessionRepo::create`(L1) → 同事务 `Publisher::publish(identity.session-created)`(L2)；响应 `data: {sessionId, expiresAt}`（无 JWT）；构造器位置参注入 4 依赖。
+- [ ] T018 [PR4][US4] `LoginService` 真实 `login`：从 `X-Tenant-ID` header 获取 tenant → combined authenticate 产出 active receipt → refresh pre-mint 重读并核对 Active/epoch → `SessionRepo::create`(L1) → 同事务 `Publisher::publish(identity.session-created)`(L2)；任一失败发生在 mint/session/outbox 之前。
 - [ ] T019 [PR4][US4] `change_password`（version pin CAS）+ `logout`（`SessionRepo::revoke`，域侧软撤销）。clippy/dylint/fmt/`cargo llvm-cov --lib -p identity` + L1/L2 原子性测试。
 
 ---

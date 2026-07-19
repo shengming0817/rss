@@ -6,11 +6,163 @@ const DLX_LIFECYCLE: &str = include_str!("../migrations/0063_dead_letter_lifecyc
 const LOCALONLY_READ_ROLE: &str = include_str!("../migrations/0067_localonly_read_role.sql");
 const SERVICE_TOKEN_REPLAY_MIGRATION: &str =
     include_str!("../migrations/0068_replace_service_token_replay_store.sql");
+const ACCOUNT_SECURITY_MIGRATION: &str =
+    include_str!("../migrations/0069_create_account_security_states.sql");
+const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
+    include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
+const ACCOUNT_SECURITY_CAPACITY_SELFTEST: &str =
+    include_str!("../../../docs/ops/0069-account-security-capacity-gate.selftest.sh");
 const SERVICE_TOKEN_REPLAY_ADAPTER: &str = include_str!("../src/service_token_replay.rs");
 const READER_PROVISIONING: &str =
     include_str!("../../../deploy/postgres-upgrade/provision-reader-role.sh");
 const READER_UPGRADE_SMOKE: &str =
     include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
+
+#[test]
+fn account_security_migration_is_strict_closed_and_least_privilege() {
+    let normalized = ACCOUNT_SECURITY_MIGRATION
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for required in [
+        "CREATE TABLE public.account_security_states",
+        "PRIMARY KEY (tenant_id, user_id)",
+        "REFERENCES public.credentials (tenant_id, user_id) ON DELETE CASCADE",
+        "CHECK (status IN ('active', 'suspended', 'locked', 'deactivated'))",
+        "CHECK (authn_epoch >= 0)",
+        "CHECK (version >= 1)",
+        "CHECK (status_changed_at <= updated_at)",
+        "INSERT INTO public.account_security_states",
+        "'active', 0, 1",
+        "ALTER TABLE public.credentials",
+        "DEFERRABLE INITIALLY DEFERRED",
+        "ENABLE ROW LEVEL SECURITY",
+        "FORCE ROW LEVEL SECURITY",
+        "NULLIF(current_setting('rss.tenant_id', true), '')::uuid",
+        "WHERE status = 'active'",
+        "DELETE FROM public.refresh_tokens",
+        "ADD COLUMN authn_epoch_at_issue bigint NOT NULL",
+        "CHECK (authn_epoch_at_issue >= 0)",
+        "GRANT SELECT, INSERT, UPDATE ON TABLE public.account_security_states TO rss_app",
+        "GRANT SELECT ON TABLE public.account_security_states TO rss_app_read",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "0069 omits account-security hard constraint: {required}"
+        );
+    }
+
+    for forbidden in [
+        "GRANT DELETE ON TABLE public.account_security_states",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.account_security_states",
+        "CREATE POLICY account_security_tenant_isolation ON public.account_security_states USING ( tenant_id = current_setting",
+        "ON CONFLICT",
+    ] {
+        assert!(
+            !normalized.contains(forbidden),
+            "0069 contains compatibility or excess-privilege path: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn account_security_cutover_has_bounded_locking_and_executable_runbook() {
+    for required in [
+        "SET LOCAL lock_timeout = '5s'",
+        "SET LOCAL statement_timeout = '5min'",
+    ] {
+        assert!(
+            ACCOUNT_SECURITY_MIGRATION.contains(required),
+            "0069 omits bounded migration timeout: {required}"
+        );
+    }
+
+    let runbook = MIGRATION_README
+        .split_once("### 0069 account security state 原子切换")
+        .map_or(MIGRATION_README, |(_, runbook)| runbook);
+    for required in [
+        "零参数 `rss` bootstrap",
+        "pg_catalog.pg_stat_activity",
+        "pg_catalog.pg_locks",
+        "docs/ops/0069-account-security-capacity-gate.sh",
+        "EXPECTED_REPLICAS",
+        "MAINTENANCE_WINDOW_SECONDS",
+        "0069 account-security capacity gate: PASS",
+        "rss-postgres-migrator",
+        "_sqlx_migrations=69",
+        "missing_state",
+        "pg_catalog.pg_constraint",
+        "relforcerowsecurity",
+        "pg_catalog.pg_policies",
+        "information_schema.role_table_grants",
+        "active_legacy_refresh_families",
+        "WHERE status = 'active'",
+        "不得手工 DELETE",
+        "若 ledger 已为 `69`，禁止启动旧 binary",
+    ] {
+        assert!(
+            runbook.contains(required),
+            "0069 cutover runbook omits executable evidence token: {required}"
+        );
+    }
+
+    let blocker_list = runbook
+        .split_once("mode IN (")
+        .and_then(|(_, tail)| tail.split_once(");").map(|(list, _)| list))
+        .expect("0069 runbook must contain a closed lock blocker list");
+    let actual = blocker_list
+        .split('\'')
+        .skip(1)
+        .step_by(2)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = [
+        "RowExclusiveLock",
+        "ShareUpdateExclusiveLock",
+        "ShareLock",
+        "ShareRowExclusiveLock",
+        "ExclusiveLock",
+        "AccessExclusiveLock",
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual, expected,
+        "0069 preflight blockers must exactly match SHARE ROW EXCLUSIVE conflicts"
+    );
+
+    for required in [
+        "set -eu",
+        "SELECT count(*) FROM public.credentials",
+        "pg_total_relation_size('public.credentials'::regclass)",
+        "DATA_BUDGET",
+        "WAL_BUDGET",
+        "ARCHIVE_BUDGET",
+        "SELECT count(*) FROM pg_stat_replication",
+        "sample.byte_lag = 0",
+        "sample.reply_time >= sample.checked_at - interval '60 seconds'",
+        "pg_switch_wal()",
+        "archive_target_present",
+        "MINIMUM_WINDOW_SECONDS=480",
+    ] {
+        assert!(
+            ACCOUNT_SECURITY_CAPACITY_GATE.contains(required),
+            "0069 capacity gate omits fail-closed carrier: {required}"
+        );
+    }
+    for required in [
+        "short maintenance window must fail closed",
+        "credential row overflow must fail closed",
+        "credential byte overflow must fail closed",
+        "replica inventory mismatch must fail closed",
+        "unhealthy replica must fail closed",
+        "archive failure-count change must fail closed",
+    ] {
+        assert!(
+            ACCOUNT_SECURITY_CAPACITY_SELFTEST.contains(required),
+            "0069 capacity selftest omits red case: {required}"
+        );
+    }
+}
 
 #[test]
 fn service_token_replay_store_is_async_fixed_shape_and_least_privilege() {

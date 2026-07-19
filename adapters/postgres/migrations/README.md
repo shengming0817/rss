@@ -186,6 +186,114 @@ reader 密码并启动新 binary。该命令只用 migrator 凭据，保留 SQLx
 调用 `rss_service_token_replay_sweep_expired()`；每次最多删除 1000 行，并保留 5 分钟安全余量，禁止在每次
 认证时附带清理。
 
+### 0069 account security state 原子切换
+
+`0069` 为每个 credential 建立唯一 durable lifecycle 真源
+`account_security_states`。迁移先阻断 credential writer，再把全部既有 credential 一次性回填为
+`active / authn_epoch=0 / version=1`；随后安装双向复合 FK：security→credential 使用
+`ON DELETE CASCADE`，credential→security 使用 `DEFERRABLE INITIALLY DEFERRED`。因此事务提交时两表严格
+一对一，credential save 可以在同一事务内按 credential→security 顺序写入，但缺失 state、跨主体 rebind
+或单独删除 state 都无法提交。status、epoch、version 与时间顺序同时由 closed CHECK/NOT NULL 固定。
+
+这是 non-rolling、forward-only cutover：执行 migration 前必须停止仍会单表写 credential 的旧 binary；
+迁移成功后只能启动在同一 writer 事务内共同写入 credential/security 的新 binary，不提供 trigger、默认
+state、双写或自动补行 fallback。表启用并强制 RLS，policy 使用 canonical
+`NULLIF(current_setting('rss.tenant_id', true), '')::uuid`；`rss_app` 仅获 SELECT/INSERT/UPDATE，
+`rss_app_read` 仅获 SELECT，两者都没有 security DELETE。
+
+既有 refresh family 无法可靠反推出签发时的 authentication epoch。切换前必须在旧 binary 仍运行时通过正常
+撤销流程把所有 `status='active'` legacy family 置为 revoked，再停止 writer。迁移锁定 `refresh_tokens` 后
+若仍有 active 行就 fail-closed；通过门后在同一事务删除已 consumed/revoked 的无 epoch 历史行，再增加非负、
+非空 `authn_epoch_at_issue`。它不会用当前 account epoch 猜测回填，也不保留 legacy decoder；新 binary 的
+初始签发和每次轮换都继承该 family epoch。
+
+唯一正式 runner 是待发布镜像的**零参数 `rss` bootstrap**；不得使用旧 binary、maintenance CLI、手工
+`psql -f` 或通用迁移脚本。按以下 non-rolling runbook 执行：
+
+1. **停止旧 writer 并做迁移前探针。** 将全部旧 runtime 缩容到 0。用 migrator 凭据确认 ledger 为 `68`，
+   `pg_stat_activity` 中没有 `rss-postgres-writer` / `rss-postgres-maintenance` 会话，并确认
+   `pg_locks` 中没有授予在 `public.credentials` / `public.refresh_tokens` 上的冲突锁，并确认 active legacy
+   refresh family 已全部通过正常流程撤销；任一结果不满足即中止。已 consumed/revoked 的历史行由 `0069`
+   锁内清理，不得手工 DELETE。
+
+   ```sql
+   SELECT max(version) FROM public._sqlx_migrations;
+   SELECT count(*) FROM pg_catalog.pg_stat_activity
+    WHERE application_name IN ('rss-postgres-writer', 'rss-postgres-maintenance');
+   SELECT count(*) FROM pg_catalog.pg_locks
+    WHERE relation IN ('public.credentials'::regclass, 'public.refresh_tokens'::regclass)
+      AND granted
+      AND mode IN ('RowExclusiveLock', 'ShareUpdateExclusiveLock',
+                   'ShareLock', 'ShareRowExclusiveLock',
+                   'ExclusiveLock', 'AccessExclusiveLock');
+   SELECT count(*) AS active_legacy_refresh_families
+     FROM public.refresh_tokens
+    WHERE status = 'active';
+   ```
+
+2. **容量与复制 fail-closed gate。** 在旧 writer 已停止、singleton 尚未启动时，在 primary DB host
+   运行 [`docs/ops/0069-account-security-capacity-gate.sh`](../../../docs/ops/0069-account-security-capacity-gate.sh)。
+   `EXPECTED_REPLICAS` 必须来自部署 inventory，`MAINTENANCE_WINDOW_SECONDS` 是此刻剩余窗口；gate 会拒绝
+   credential 行数/字节超过演练 envelope、data/`pg_wal`/archive 余量不足、archive 不可读、replica
+   数量或 streaming/byte/replay lag 不符，以及不足 8 分钟的剩余窗口。凭据只能经 named libpq service
+   与 `0600` passfile 提供。只有打印 `0069 account-security capacity gate: PASS` 的同次运行可授权下一步，
+   输出须随 rollout receipt 保存；不得复用旧 PASS。
+
+   ```sh
+   PGSERVICE=rss-owner \
+   PGSERVICEFILE=/run/rss/pg_service.conf \
+   PGPASSFILE=/run/rss/pgpass \
+   EXPECTED_REPLICAS=2 \
+   MAINTENANCE_WINDOW_SECONDS=900 \
+   WAL_ARCHIVE_DIR=/var/lib/postgresql/wal-archive \
+   docs/ops/0069-account-security-capacity-gate.sh
+   docs/ops/0069-account-security-capacity-gate.selftest.sh
+   ```
+
+3. **运行 singleton。** 只启动一个待发布镜像的零参数 `rss` 实例，等待
+   `rss-postgres-migrator` 完成；`0069` 内置 `lock_timeout=5s`、`statement_timeout=5min`，任一超时或
+   migration/startup 非零退出都不得继续扩容。运行期间若 data、`pg_wal`、archive 或 replica 指标越过
+   gate receipt 的预算，立即停止扩容流程并等待该事务按 timeout 回滚；不得把已失效的 preflight 当作授权。
+4. **迁移后验证。** 仍以 migrator 凭据确认 `_sqlx_migrations=69`，credential/security 缺失计数为 0，
+   双向 FK（含 deferred 反向 FK）、四项 CHECK、FORCE RLS/policy 均存在；同时确认 `rss_app` 只有
+   SELECT/INSERT/UPDATE、`rss_app_read` 只有 SELECT，二者均无 DELETE，并确认 refresh epoch 列及 CHECK
+   已安装。至少执行：
+
+   ```sql
+   SELECT max(version) AS _sqlx_migrations FROM public._sqlx_migrations;
+   SELECT count(*) AS missing_state
+     FROM public.credentials AS credential
+     LEFT JOIN public.account_security_states AS security
+       USING (tenant_id, user_id)
+    WHERE security.user_id IS NULL;
+   SELECT conname, contype, condeferrable, condeferred,
+          pg_catalog.pg_get_constraintdef(oid)
+     FROM pg_catalog.pg_constraint
+    WHERE conrelid IN ('public.credentials'::regclass,
+                       'public.account_security_states'::regclass)
+      AND (contype = 'f' OR conname LIKE 'account_security_states_%')
+    ORDER BY conname;
+   SELECT relrowsecurity, relforcerowsecurity
+     FROM pg_catalog.pg_class
+    WHERE oid = 'public.account_security_states'::regclass;
+   SELECT policyname, qual, with_check
+     FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public' AND tablename = 'account_security_states';
+   SELECT grantee, privilege_type
+     FROM information_schema.role_table_grants
+    WHERE table_schema = 'public' AND table_name = 'account_security_states'
+      AND grantee IN ('rss_app', 'rss_app_read')
+    ORDER BY grantee, privilege_type;
+   SELECT column_name, is_nullable, data_type
+     FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'refresh_tokens'
+      AND column_name = 'authn_epoch_at_issue';
+   ```
+
+5. **恢复分支。** 若 singleton 在提交 `0069` 前失败，只在重跑步骤 1–2 并确认 ledger 仍为 `68` 后修复锁或
+   容量前置条件并重跑；需要恢复服务时只能恢复旧 binary。若 ledger 已为 `69`，禁止启动旧 binary：完成
+   步骤 4 的 catalog/ACL/缺失-state 验证后，只能修复新版本启动配置并启动同一待发布镜像。
+
 `0034` 新增 `abac_policies` tenant 表并授予 `rss_app` SELECT/INSERT/UPDATE；policy delete 经 versioned
 tombstone UPDATE，不授表级 DELETE，防止同 id 删除后重建把 CAS version 水位重置。
 

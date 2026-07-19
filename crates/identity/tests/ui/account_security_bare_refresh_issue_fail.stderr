@@ -1,0 +1,27 @@
+error[E0624]: method `issue` is private
+  --> tests/ui/account_security_bare_refresh_issue_fail.rs:10:21
+   |
+10 |       let _ = service.issue(tenant, user_id).await;
+   |                       ^^^^^ private method
+   |
+  ::: src/application/mod.rs
+   |
+   | /     async fn issue(
+   | |         &self,
+   | |         active: &ActiveAccountSecurity,
+   | |     ) -> Result<authn::RefreshToken, RefreshError> {
+   | |__________________________________________________- private method defined here
+
+error[E0624]: method `issue_initial` is private
+  --> tests/ui/account_security_bare_refresh_issue_fail.rs:11:21
+   |
+11 |       let _ = service.issue_initial(tenant, user_id).await;
+   |                       ^^^^^^^^^^^^^ private method
+   |
+  ::: src/application/mod.rs
+   |
+   | /     async fn issue_initial(
+   | |         &self,
+   | |         expected: ActiveAccountSecurity,
+   | |     ) -> Result<RefreshBundle, RefreshError> {
+   | |____________________________________________- private method defined here

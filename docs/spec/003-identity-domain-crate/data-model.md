@@ -30,28 +30,44 @@
 
 > `PolicyRule` 扩 operator/effect 是在冻结签名内补字段语义；若 `vocab::Decision` 需 Obligations/FieldMask 才能表达 effect 之外的义务，则 PR2 内最小扩展 `vocab`（base crate，PR body 标注），否则用现有 `Decision::{Allow,Deny}`。
 
-## 身份 / 凭据子域（`domain/account.rs` + `ports.rs` CredentialRepo）
+## 身份 / 凭据与账户安全子域（`domain/account.rs` + `domain/account_security.rs`）
 
 | 实体 | 字段 | 不变式 / 校验 | 当前 |
 |------|------|--------------|------|
-| `AccountStatus` | enum `Active|Suspended|Locked|Deactivated` | 4 值闭值集；合法状态迁移 | 签名冻结（仅 enum 值） |
 | `Credential` | `subject + tenant + password_hash + version` | argon2/bcrypt 哈希；version pin；Debug 脱敏；明文永不存 | 新增域类型 |
-| `AccountLockout` | `failure_count + window_start + locked_until` | 阈值 5 / 窗口 15min / 锁定 TTL 15min；`record_failure` / `try_lazy_unlock`；窗口/TTL 判定经注入 `Clock` 计算（禁 `SystemTime::now()`）；状态经 `CredentialRepo` port 持久化（多实例安全） | 新增（P1-12） |
+| `AccountSecurityState` | `tenant_id + user_id + status + authn_epoch + version + status_changed_at + updated_at` | status 为四值闭集；epoch/version checked increment；hydrate 拒绝非法持久值 | #1833 持久真源 |
+| `AccountStatus` | enum `Active|Suspended|Locked|Deactivated` | `Active→Suspended|Locked|Deactivated`；`Suspended|Locked→Active|Deactivated`；Deactivated 终态；同态拒绝 | `account_security` 聚合闭值 |
+| `AuthnEpoch` | PostgreSQL-safe unsigned newtype | 进入任一非 Active 状态递增；恢复 Active 保留；溢出拒绝 | #1833 |
+| `AccountSecurityVersion` | PostgreSQL-safe unsigned newtype | 每个成功 transition 递增；CAS expected version 不匹配拒绝 | #1833 |
+| `AccountSecurityMutation` | `expected_version + next_state` | 字段私有；只能从当前 state 的合法 transition 构造 | #1833 sealed command |
+| `ActiveAccountSecurity` | `tenant + user + authn_epoch` | 只能由 Active state 铸造；crate-private；Debug 不泄漏 subject/epoch | #1833 sealed receipt |
+| `AccountLockout` | `failure_count + window_start + locked_until` | 阈值 5 / 窗口 15min / 临时阻断 TTL 15min；`record_failure` 返回 `AllowRetry|TemporarilyBlocked`；TTL 到期只清零自身，不迁移 `AccountStatus` 或 epoch | 新增（P1-12） |
 | `IdentityError` | enum（pub，non_exhaustive） | 3 值错误 | 签名冻结 |
 
-**port `CredentialRepo`**（`identity::ports`，域形 DI port，dynosaur Send 变体）：`find_by_user_id(scope, user_id) -> Option<Credential>` / `authenticate(...)`（constant-time）/ `apply_password_change(scope, PasswordChangeMutation)`（CAS）/ `save(...)`。
+**ports**（`identity::ports`，域形 DI port，dynosaur Send 变体）：
+
+- `CredentialRepo`：`find_by_user_id` / `authenticate` / `apply_password_change` / `save`。`authenticate` 是唯一登录漏斗，在一个 tenant writer transaction 中按 credential→account-security 固定锁序执行 KDF、状态门控和临时 lockout 更新；不存在独立 `lockout_status`。
+- `AccountSecurityReadRepo`：只读 scoped state；RefreshService 只获得该能力。
+- `AccountSecurityLifecycle`：只消费 sealed `AccountSecurityMutation`，以 version CAS 返回新状态或冲突。
+- `RefreshTokenStore`：record 持久化 family `authn_epoch_at_issue`；sealed rotation 继承该值。PostgreSQL
+  writer 在同一事务锁定 account-security、校验 Active + epoch，再 CAS consume old + insert child，返回
+  `Applied|Replay|AccountStale`。
 
 ## 会话子域（`domain/session.rs` + `ports.rs` SessionRepo）
 
 | 实体 | 字段 | 不变式 | 当前 |
 |------|------|--------|------|
-| `Session` | `id + principal + expires_at`（authz_epoch 由 authn 提供，不在本 crate 增字段） | TTL 计算用注入 `Clock` | authn::Session 三字段已存（本 crate 编排） |
+| `Session` | `id + principal + expires_at` | TTL 计算用注入 `Clock`；`authn_epoch_at_issue` 由后续 PR-07 的 AuthGrant 持久化 | authn::Session 三字段已存（本 crate 编排） |
 
 **port `SessionRepo`**（`identity::ports`）：`create(principal, ttl) -> Session`（L1）/ `revoke(session_id)`（logout）/ `find(session_id)`。
 
 ## 凭据 / 应用编排（`application/`）
 
-- `LoginService`（已部分实现 G1）：注入 `CredentialRepo` + `SessionRepo` + `DynPublisher` + `Clock`（构造器位置参）。真实 `login`：从 `X-Tenant-ID` header 取 tenant（body 禁 tenantId）→ 校验密码 → 首发 token mint（`issue_initial`，#1252 已接线）→ `SessionRepo::create`（L1）→ 同事务 `Publisher::publish(identity.session-created)`（L2）；响应 `data:{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}`（#1252 首发 access JWT + refresh token bundle；vault Signer 经 authn::JwtIssuer 签）。`change_password`：CAS（version pin → bump）。`logout`：`SessionRepo::revoke`（域侧软撤销，已颁发 JWT 在 TTL 内仍有效，硬吊销延 #1003）。
+- `LoginService`：注入 `CredentialRepo` + `SessionRepo` + token/session/outbox 事务能力。真实 `login`：从 `X-Tenant-ID` header 取 tenant → 原子校验密码、durable Active 状态和临时 lockout → 获得 active receipt → refresh pre-mint 重读并核对 Active/epoch → 创建会话并发布 `identity.session-created`。任一门控失败均零 mint、零 session、零 outbox。
+- `RefreshService`：构造时必填 `AccountSecurityReadRepo`；initial issuance 只接受 crate-private active receipt，
+  rotate 只接受 canonical User record，并在 mint 前重读 Active 状态与 family issuance epoch。PostgreSQL
+  rotation writer 再做最终 Active + epoch fence；session epoch、JWT grant claims、安全事件撤销与 session
+  final fence 分别由后续 PR-07、PR-08、PR-13、PR-14 完成。
 - `RbacAdminService`（PR5）：注入 `RoleRepo` + `DynPublisher`。`assign_role` / `revoke_role`：落绑定 + 发 `identity.role-{assigned,revoked}`（L2）。
 - `IdentityDomain`（bootstrap `Domain`）：`init` 声明路由组（Primary listener，`/api/v1/identity`，login opt-out Public）+ 注册 handler；fail-fast，无 panic。
 

@@ -14,7 +14,10 @@ use generated::http::identity_v1::login::{IdentityLoginRequest, IdentityLoginRes
 use testkit::ContractRequest;
 
 use crate::application::{RefreshService, login_router_for_test};
-use crate::{LoginService, ports::DynSessionLifecycle};
+use crate::{
+    LoginService,
+    ports::{DynAccountSecurityReadRepo, DynSessionLifecycle},
+};
 
 const SEED_USER: &str = "alice";
 const SEED_PASSWORD: &str = "correct-horse";
@@ -64,7 +67,9 @@ impl diport::Signer for ContractSigner {
     }
 }
 
-fn make_refresh_svc() -> Arc<RefreshService<ContractSigner>> {
+fn make_refresh_svc(
+    accounts: Box<DynAccountSecurityReadRepo<'static>>,
+) -> Arc<RefreshService<ContractSigner>> {
     #[allow(clippy::expect_used)]
     let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
         Arc::new(ContractSigner),
@@ -82,6 +87,7 @@ fn make_refresh_svc() -> Arc<RefreshService<ContractSigner>> {
         crate::ports::DynRefreshTokenStore::new_box(
             crate::internal::mem::InMemRefreshTokenStore::new(),
         ),
+        accounts,
         Arc::new(issuer),
         clock(),
         Duration::from_secs(2_592_000),
@@ -94,7 +100,7 @@ fn login_router() -> axum::Router {
         Arc::from(DynSessionLifecycle::new_box(
             crate::internal::mem::InMemSessionLifecycle::default(),
         )),
-        make_refresh_svc(),
+        make_refresh_svc,
         crate::application::seed_password_policy(),
         clock(),
         Duration::from_secs(SESSION_TTL_SECS),

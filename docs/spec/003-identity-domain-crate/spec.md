@@ -8,6 +8,8 @@
 
 > **[已超越 #1278]** 本 spec 文内 `SessionRepo`（`create`/`find`/`revoke`）+ `SessionUnitOfWork` 双端口为 PR4 设计快照；#1278 已合并为单一域形 port `SessionLifecycle`（create/find/revoke 同源），权威记录见 ADR-005 §10。本 spec 作历史规划留存，不随后续重构逐处更新。
 
+> **[#1833 安全语义修订]** `AccountStatus` 是持久账户生命周期状态；`AccountLockout` 只表示有 TTL 的暴力破解临时阻断，二者不互相驱动。登录与 refresh 的当前门控以 [ADR-018](../../architecture/202607181623-018-account-security-authentication-gate.md) 为准。
+
 **Input**: User description: "identity 域 crate（身份/会话/RBAC/ABAC/密码变更 CAS）：在 #997 冻结签名内兑现 domain L0（RBAC/ABAC deny-overrides）+ application（真实登录/会话/密码 CAS/账户锁定/角色管理）+ ports（CredentialRepo/SessionRepo）+ 新事件契约 + handler + contract test。拆成 5 个 ≤2000 行可执行 PR，挂 Azure Boards #1012。"
 
 **Tracking**: Azure Boards Feature #1012（容器，跨 5 PR；子 PBI #1186–#1190）（`[RW-W-identity]`）· Epic #991（GoCell→Rust 迁移 · W 宽扇出阶段）· Blocked-by #999（G1 追踪弹，已闭环）
@@ -20,8 +22,8 @@
 
 「用户」= 两类框架消费者：
 
-- **域 crate 作者 / 组合根**（bins/server、其它域 crate）：需要可用的 RBAC/ABAC 授权决策（纯计算、fail-closed）、真实登录与会话生命周期、密码变更并发安全、账户锁定、角色管理与角色变更事件——且非法用法在编译期 / 构造期不可表达。
-- **平台运维 / 零信任治理**：需要跨租户 fail-closed、密码不落明文 / 不进日志、登录失败可锁定、角色变更可审计、会话事件可被 audit 消费。
+- **域 crate 作者 / 组合根**（bins/server、其它域 crate）：需要可用的 RBAC/ABAC 授权决策（纯计算、fail-closed）、真实登录与会话生命周期、密码变更并发安全、账户安全状态、暴力破解临时阻断、角色管理与角色变更事件——且非法用法在编译期 / 构造期不可表达。
+- **平台运维 / 零信任治理**：需要跨租户 fail-closed、密码不落明文 / 不进日志、登录失败可触发临时阻断、角色变更可审计、会话事件可被 audit 消费。
 
 「demo 拓扑」= 进程内 in-mem（`seed-login` feature / 测试 / 样例）；「durable 拓扑」= 真实持久化（postgres adapter，**非本 feature 范围**，见 §范围边界）。
 
@@ -32,7 +34,7 @@
 **In（#1012 = identity 域 crate 本体，`crates/identity/`）**：
 
 - domain L0：RBAC（`authorize_rbac`）+ ABAC（`evaluate_abac` deny-overrides）+ 全部 newtype funnel 实现。
-- application：真实登录路径、会话生命周期域侧编排、密码变更 CAS、账户锁定策略、RBAC 角色管理。
+- application：真实登录路径、会话生命周期域侧编排、密码变更 CAS、账户安全状态门控、暴力破解临时阻断策略、RBAC 角色管理。
 - ports：`RoleRepo`（已存）+ 新增 `CredentialRepo` / `SessionRepo`（ADR-005 Option 2 域形 port）。
 - internal/mem：测试 / `seed-login` 用 in-mem 替身。
 - 新契约：`identity.role-assigned` / `identity.role-revoked`（event L2）+ 新 HTTP 端点契约；`identity.login` / `identity.session-created` draft→active（pre-GA 窗口原地改）。
@@ -40,7 +42,7 @@
 
 **Out（属其它 W 单元，作为依赖 / 前置，不在本 feature 实现）**：
 
-- jwt 签发验证 / refresh token / PDP 实现 / CredentialFence → **#1003 authn**（本 feature 仅**消费**其已冻结签名 `Principal` / `PrincipalKind` / `diport::{Pdp,Publisher,Clock}`）。
+- jwt 签发验证 / refresh token / PDP 实现 / CredentialFence → **#1003 authn**（本 feature 仅**消费**其已冻结签名 `Principal` / `PrincipalKind` / `diport::{Pdp,Publisher,Clock}`）；后续 #1833 只在 identity refresh 签发前增加账户安全门控，不改变 JWT wire。
 - 真实持久化（postgres `RoleRepo` / `CredentialRepo` / `SessionRepo` impl）→ **adapter 单元（#1009–1011 / #1083 / #1116）**；本 feature 只定义 port + in-mem 替身。
 - EST 设备注册 / 证书签发 / CredentialFence sealed 令牌 → 独立 `deviceidentity` crate + authn（后期，非 #1012）。
 - `vocab::Decision` 增 Obligations/FieldMask 通道（P0-6 完整态）→ 若 ABAC deny-overrides 最小可用不需要，则不在本 feature 引入；需要则 PR2 内最小改动并在 PR body 标注（base crate 改动）。
@@ -88,33 +90,39 @@
 
 ---
 
-### User Story 3 - 身份 / 凭据管理 + 账户锁定（identity mgmt，L0/L1）(Priority: P2)
+### User Story 3 - 身份 / 凭据管理 + 账户安全门控（identity mgmt，L0/L1）(Priority: P2)
 
-组合根经 `CredentialRepo`（新增域形 port）校验主体凭据：密码用 argon2/bcrypt 哈希 + constant-time 比对（不落明文、不进日志），支持凭据版本 pin。`AccountStatus`（Active/Suspended/Locked/Deactivated）驱动账户生命周期；`AccountLockout` 策略在连续失败达阈值（5 次 / 15min 窗口）时锁定（TTL 15min），并提供 lazy-unlock。
+组合根经 `CredentialRepo`（新增域形 port）校验主体凭据：密码用 argon2/bcrypt 哈希 + constant-time 比对（不落明文、不进日志），支持凭据版本 pin。持久 `AccountSecurityState` 以 `AccountStatus`（Active/Suspended/Locked/Deactivated）、`authn_epoch` 与 `version` 驱动账户生命周期；只有 Active 可以登录或签发 refresh。`AccountLockout` 独立记录连续失败窗口（5 次 / 15min）和临时阻断 TTL（15min），到期只清零临时状态，不改变 `AccountStatus` 或 epoch。
 
-**Why this priority**: 是真实登录（US4）的前置——US4 的密码校验消费 `CredentialRepo`。账户锁定是生产可辨性与暴力破解防御的硬需求（P1-12）。独占 `domain/account.rs` + `ports.rs`(CredentialRepo) + `internal/mem.rs`，可与 US2 并行。
+**Why this priority**: 是真实登录（US4）的前置——US4 的密码校验消费 `CredentialRepo`。持久生命周期门控和多实例共享的临时暴破阻断都是生产认证的硬要求，但安全含义不能混用。
 
-**Independent Test**: 表驱动覆盖密码哈希校验正确/错误/版本不匹配、`AccountStatus` 状态机合法迁移、`AccountLockout` 计数/阈值/窗口过期/锁定 TTL/lazy-unlock；in-mem `CredentialRepo` 替身在 `#[cfg(test)]`；密码值 Debug 脱敏断言。
+**Independent Test**: 表驱动覆盖密码哈希校验正确/错误/版本不匹配、`AccountStatus` 状态机及 epoch/version、`AccountLockout` 计数/阈值/窗口过期/阻断 TTL、非 Active 正确密码拒绝；in-mem `CredentialRepo` 替身在 `#[cfg(test)]`；密码与 active receipt 的 Debug 脱敏断言。
 
 **Acceptance Scenarios**:
 
-1. **Given** 正确密码 + 当前版本，**When** `CredentialRepo` 校验，**Then** 通过；错误密码或过期版本 pin → 拒绝（constant-time）。
-2. **Given** 连续 5 次失败在 15min 窗口内，**When** 记录第 5 次失败，**Then** 账户置 `Locked` 且后续登录在 TTL 内被拒。
-3. **Given** 账户锁定已超 TTL，**When** 触发 lazy-unlock 检查，**Then** 账户恢复可登录、失败计数清零。
-4. **Given** 任一携带密码的类型，**When** 打印 Debug，**Then** 密码字段脱敏（不泄明文，observability.md §日志）。
+1. **Given** 正确密码 + 当前版本 + Active 状态，**When** `CredentialRepo` 原子认证，**Then** 返回携带当前 epoch 的 Active 证明；错误密码或过期版本 pin → 拒绝（constant-time）。
+2. **Given** 连续 5 次失败在 15min 窗口内，**When** 记录第 5 次失败，**Then** 返回 `TemporarilyBlocked` 并在 TTL 内拒绝登录，但 durable `AccountStatus` 与 epoch 不变。
+3. **Given** 临时阻断 TTL 已到期，**When** 触发 lazy-unlock 检查，**Then** 仅清零暴破计数和 `locked_until`；Suspended/Locked/Deactivated 不会因此变为 Active。
+4. **Given** 正确密码 + 任一非 Active 状态，**When** 登录或 refresh 签发前门控，**Then** 统一拒绝且不 mint token、不创建会话、不发事件。
+5. **Given** 任一携带密码或 Active 证明的类型，**When** 打印 Debug，**Then** password、subject 与 epoch 脱敏。
 
 **附加验收要求（Acceptance addendum）**：
 
-- **Clock 注入**：`AccountLockout` 的窗口到期 / 锁定 TTL 判定 MUST 经构造器注入的 `Clock` 计算，禁止调用 `SystemTime::now()` 或 `sleep`；测试使用 fake `Clock` 推进时间，不依赖真实时间流逝。
-- **CredentialRepo 持久化**：`AccountLockout` 状态（失败计数、锁定时刻）MUST 经 `CredentialRepo` port 持久化，不能仅存内存——多实例部署下内存态无法共享，暴力破解防御将失效。
-- **临界值边界测试**：必须覆盖「窗口恰好到期」与「锁定 TTL 恰好到期」两个临界点，确认计数与解锁判定行为确定性。
+- **Clock 注入**：`AccountLockout` 的窗口到期 / 临时阻断 TTL 判定 MUST 经构造器注入的 `Clock` 计算，禁止调用 `SystemTime::now()` 或 `sleep`；测试使用 fake `Clock` 推进时间，不依赖真实时间流逝。
+- **CredentialRepo 持久化**：`AccountLockout` 状态（失败计数、临时阻断时刻）MUST 经 `CredentialRepo` port 持久化，不能仅存内存——多实例部署下内存态无法共享，暴力破解防御将失效。
+- **单一认证漏斗**：`CredentialRepo::authenticate` MUST 在一个事务中按 credential→account-security 固定锁序完成 KDF、durable status 门控与临时 lockout 更新；不存在独立 `lockout_status` 检查入口。
+- **持久状态 fail-closed**：credential 存在但 account-security row 缺失、损坏或跨租时，完成 KDF floor 后返回 storage failure，不能补建或按 Active 继续。
+- **临界值边界测试**：必须覆盖「窗口恰好到期」与「临时阻断 TTL 恰好到期」两个临界点，确认计数与解锁判定行为确定性。
 - **跨租红用例**：`principal.tenant ≠ credential.tenant` 时 MUST Deny，不创建任何会话，不推进锁定计数。
+- **Refresh family epoch fence**：根 refresh MUST 持久化签发时 `authn_epoch`，sealed rotation MUST 继承该值；
+  application pre-mint 与 PostgreSQL 最终 writer 事务都必须校验当前账号 Active 且 epoch 匹配。Suspend→Active
+  后旧 family 必须 fail-closed，final writer 拒绝不得消费 old 或写 child。
 
 ---
 
 ### User Story 4 - 会话登录生命周期 + 密码变更 CAS + logout（application，L1/L2）(Priority: P2)
 
-`LoginService` 兑现真实登录路径（超越 seed-login）：经 `CredentialRepo` 校验密码（消费 US3）→ 创建会话（`SessionRepo`，L1）→ 在同事务发布 `identity.session-created` outbox fact（L2，已存契约）。密码变更走 CAS（凭据版本 pin → bump，并发安全）。logout 撤销会话（域侧编排，真实 epoch/CredentialFence 由 authn #1003 提供运行期接线）。
+`LoginService` 兑现真实登录路径（超越 seed-login）：经 `CredentialRepo` 原子完成密码与 Active 状态门控（消费 US3）→ refresh pre-mint 重读 Active 状态并核对 epoch → 创建会话（`SessionRepo`，L1）→ 在同事务发布 `identity.session-created` outbox fact（L2，已存契约）。密码变更走 CAS（凭据版本 pin → bump，并发安全）。logout 撤销会话。
 
 **Tenant 来源**：login 请求的 tenant 来源为 `X-Tenant-ID` header（pre-auth 路径，tenancy.md Hard），**request body 不得含 `tenantId` 字段**——body 含 tenantId 是 tenancy Hard 违规。
 
@@ -128,7 +136,7 @@
 
 **Acceptance Scenarios**:
 
-1. **Given** 合法凭据 + 合法 `X-Tenant-ID` header，**When** `login`，**Then** 创建会话 + 发布一条 `identity.session-created`（subject/tenant/occurred_at），响应 `data: {sessionId, expiresAt, accessToken, refreshToken, accessExpiresAt}`（#1252 首发 access JWT + refresh token bundle）。
+1. **Given** 合法凭据 + Active 状态 + 合法 `X-Tenant-ID` header，**When** `login`，**Then** 在 token mint 前再次确认 Active/epoch，创建会话 + 发布一条 `identity.session-created`，响应 token bundle。
 2. **Given** 错误凭据，**When** `login`，**Then** 返回 `LoginError::InvalidCredentials`，**不**创建会话、**不**发事件（无孤立事件）。
 3. **Given** 密码变更请求携带旧版本号，**When** 并发两次变更，**Then** 仅一次成功（CAS），另一次因版本不匹配被拒。
 4. **Given** 活动会话，**When** `logout`，**Then** 会话被域侧软撤销（`SessionRepo::revoke`），已颁发 JWT 在 TTL 内仍有效（无硬吊销，硬吊销延 #1003）。
@@ -173,7 +181,7 @@
 - **密码 / 凭据**：永不落明文、永不进日志 / Debug / wire；哈希比对 constant-time 防时序侧信道。
 - **并发**：密码变更 / 凭据版本 pin 用 CAS，版本冲突拒绝而非后写覆盖。
 - **事件原子性**：登录失败 / 业务回滚时 outbox 无孤立事件；发布失败按 relay 重试 / DLX（eventexec 已提供）。
-- **锁定边界**：失败窗口刚过期 / 锁定 TTL 刚过期的临界点，计数与解锁判定确定（fake Clock 推进验证）。
+- **临时阻断边界**：失败窗口刚过期 / 临时阻断 TTL 刚过期的临界点，计数与解锁判定确定；不得迁移 durable `AccountStatus`。
 - **`like` operator**：glob 模式最大 256 字节，超长或含非法字符在 parse 阶段 fail-closed 拒绝，不推迟到求值——防 ReDoS。
 
 ## Requirements *(mandatory)*
@@ -184,15 +192,15 @@
 - **FR-002**: 系统 MUST 实现 `authorize_rbac`，对同租户匹配权限的绑定返回 Allow，跨租 / 无匹配 / 空集返回 Deny（默认拒绝）。
 - **FR-003**: 系统 MUST 实现 `evaluate_abac`，支持 operator（eq/ne/like/gt/lt/eq_attr）+ deny-overrides + 默认 Deny + 跨租 fail-closed。
 - **FR-004**: 系统 MUST 经 `CredentialRepo` 用 argon2/bcrypt + constant-time 校验密码、支持凭据版本 pin，且密码永不进明文 / 日志 / wire。
-- **FR-005**: 系统 MUST 实现 `AccountStatus` 状态机 + `AccountLockout`（阈值 5 / 窗口 15min / 锁定 TTL 15min + lazy-unlock）。
-- **FR-006**: 系统 MUST 在 `LoginService` 真实登录路径上：校验凭据 → 创建会话（L1）→ 同事务发布 `identity.session-created`（L2）；失败不创建会话、不发事件。
+- **FR-005**: 系统 MUST 分离持久 `AccountSecurityState`（四值状态 + epoch/version）与临时 `AccountLockout`（阈值 5 / 窗口 15min / 阻断 TTL 15min）；暴破阈值与 TTL 到期都不得迁移 durable 状态。
+- **FR-006**: 系统 MUST 在 `LoginService` 真实登录路径上：原子校验凭据和 Active 状态 → token mint 前重读 Active/epoch → 创建会话（L1）→ 同事务发布 `identity.session-created`（L2）；失败不 mint、不创建会话、不发事件。
 - **FR-007**: 系统 MUST 用 CAS（凭据版本 pin）实现密码变更并发安全。
 - **FR-008**: 系统 MUST 提供 `RoleRepo` 角色 CRUD，并在分配 / 撤销时发布 `identity.role-assigned` / `identity.role-revoked`（L2 OutboxFact，扇出闭环完整）。
 - **FR-009**: 系统 MUST 为新 HTTP 端点（roles / profile / password-change / logout）提供契约 + 真实 axum handler + typed response envelope（业务 4xx/5xx 不返裸 framework 5xx）。
 - **FR-010**: 系统 MUST 经 contract-level 测试覆盖每个 served contract 的正常 schema / 参数错误码 / 鉴权边界 / path 参数校验。
 - **FR-011**: 系统 MUST 保留 #997 冻结签名与 INVARIANT（IDENTITY-AUTHZ-TENANT-01 等），不弱化既有 sealed / newtype / `pub(crate)` 静态强制。
 - **FR-012**: 系统 MUST NOT 给 domain 类型 derive `Serialize`（`rss_domain_no_serialize` dylint）；wire 类型只经 contract / generated。
-- **FR-013**: 系统 MUST 经构造器必填位置参注入 `CredentialRepo` / `SessionRepo` / `Publisher` / `Clock`（缺失即编译错误），不用 `Option` 静默 noop。
+- **FR-013**: 系统 MUST 经构造器必填位置参注入 `CredentialRepo` / `AccountSecurityReadRepo` / `SessionRepo` / `Publisher` / `Clock`（缺失即编译错误），不用 `Option` 静默 noop。
 - **FR-014**: public 端点降级只经 generated `HttpRouteEvidence::auth() == HttpRouteAuth::Public` +
   `GeneratedPrimaryEndpoint`（login 端点），新增受保护端点默认鉴权（AUTH-OPTOUT-PRIMARYONLY-01）。
 - **FR-015**: 列表端点（如 roles 列表）MUST 分页，`limit` 上限 500（rust-standards.md §安全检查点）。
@@ -200,12 +208,18 @@
 - **FR-017**: 每个 active + codegen HTTP 契约 MUST 声明恰一个 AuthZ mode（permission overlay 值 或 显式 opt-out + reason）；缺声明的端点被 codegen fail-closed 拒绝。
 - **FR-018**: 列表响应格式 MUST 为 `{data, nextCursor, hasMore}`（rust-standards.md §API）。
 - **FR-019**: logout MUST 仅做域侧软撤销（`SessionRepo::revoke`）；本阶段无硬吊销，已颁发 JWT 在 TTL 内仍有效；硬吊销（CredentialFence）延 #1003 落地后在 Join #1017 接线。
+- **FR-020**: `CredentialRepo::authenticate` MUST 是 credential + account-security 的唯一事务认证漏斗；不得提供可拆分的 `lockout_status` 或状态预检 port。
+- **FR-021**: 系统 MUST 只允许 Active 账户登录和签发 User refresh；缺失/损坏状态、非 User refresh record 和存储异常均 fail-closed。
+- **FR-023**: refresh family MUST 持久化不可改写的 issuance epoch；rotation 最终 writer MUST 在同一事务锁定
+  account-security、校验 Active + epoch 后才允许 refresh CAS + child insert，并以 typed outcome 区分 replay
+  与 account-stale。
+- **FR-022**: `AccountSecurityLifecycle` MUST 只消费 sealed CAS mutation；进入非 Active 状态递增 epoch，恢复 Active 保留 epoch，Deactivated 为终态。
 
 ### Key Entities *(详见 data-model.md)*
 
 - **Role / Permission / RoleBinding**：RBAC 三元——角色、权限（action + resource_pattern）、主体↔角色↔租户绑定。
 - **Policy / PolicyRule / AbacAttribute**：ABAC 策略集、单条规则（operator + key + expected）、属性键值对。
-- **Credential / AccountStatus / AccountLockout**：凭据（哈希 + 版本）、账户状态机、锁定计数器。
+- **Credential / AccountSecurityState / AccountLockout**：凭据（哈希 + 版本）、持久账户状态（status + authn_epoch + version）、独立的临时暴破计数器。
 - **Session**：会话聚合（id / principal / expires_at；epoch 字段由 authn 提供）。
 - **事件**：`identity.session-created`（已存）、`identity.role-assigned` / `identity.role-revoked`（新增，L2）。
 

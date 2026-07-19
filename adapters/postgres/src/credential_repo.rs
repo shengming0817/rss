@@ -1,6 +1,6 @@
 //! `PgCredentialRepo` —— identity 凭据仓储的 postgres adapter（#1316）。
 //!
-//! impl `identity::ports::CredentialRepo`（find_by_user_id / authenticate / save / apply_password_change / lockout_status），
+//! impl `identity::ports::CredentialRepo`（find_by_user_id / authenticate / save / apply_password_change），
 //! 作 durable login 密码校验真依赖，替换 in-mem `InMemCredentialRepo`（test/seed 门控）。adapter→域 DIP 内向边
 //! （postgres 依赖 identity、native AFIT impl 其域形 port，经 deny.toml identity wrapper + `allows(Adapter,Domain)`
 //! 放行；adapter 仍不被域依赖）。
@@ -10,8 +10,8 @@
 //! （#1277 F2「未知主体不可预置锁定、不撑大 lockout 表」**结构层**天然成立，无独立锁定表）。明文密码**永不落库**，
 //! 仅 `password_hash`（argon2 PHC，经 `secure::PasswordHash`）。
 //!
-//! 原子性：authenticate / lockout_status / apply_password_change 经 `SELECT ... FOR UPDATE` 单行事务做原子 read-modify-write
-//! （跨实例行级锁，避免负载均衡下各实例独立计数 / 并发丢更新）。策略阈值（5 次 / 15min 滑窗 / 15min 锁定 TTL）
+//! 原子性：authenticate 固定锁序 `credentials → account_security_states`，在一个 writer 事务内完成
+//! lifecycle/temporary-lock/KDF/rehash；apply_password_change 仍以 credential 行锁做 CAS。策略阈值（5 次 / 15min 滑窗 / 15min 锁定 TTL）
 //! 域内单源（`identity::ports::AccountLockout`），adapter 仅 I/O：`from_parts` 重建 → `record_failure` /
 //! `try_lazy_unlock` 推进 → 访问器回写三列。
 //!
@@ -29,17 +29,18 @@
 //! ref: adapters/postgres/src/session_lifecycle.rs（#1278 epoch↔SystemTime 编码对称）
 
 #[cfg(all(test, feature = "integration"))]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(all(test, feature = "integration"))]
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use identity::ports::{
-    AccountLockout, AuthOutcome, Credential, CredentialRepo, IdentityError, LoginIdentifier,
-    PasswordChangeMutation, TenantId, TenantRepoScope,
+    AccountLockout, AccountStatus, AuthOutcome, BruteForceDecision, Credential, CredentialRepo,
+    IdentityError, LoginIdentifier, PasswordChangeMutation, TenantId, TenantRepoScope,
 };
 use sqlx::{PgConnection, Row};
 
+use crate::account_security_repo::SecurityRow;
 use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
 use crate::outbox::{epoch_secs_to_time, unix_secs};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
@@ -48,7 +49,7 @@ use crate::tx_retry::{classify_identity_error, run_pg_localtx_retry};
 /// identity 凭据仓储的 PostgreSQL adapter。
 ///
 /// 仅由已验证 reader/writer capability 构造（同 [`crate::PgRoleRepo`]）。
-/// 不持 `Clock`：authenticate / lockout_status 的 `now` 由调用方（`LoginService`，经注入 `Clock`）传入
+/// 不持 `Clock`：authenticate 的 `now` 由调用方（`LoginService`，经注入 `Clock`）传入
 /// （域类型不持 clock，rust-standards §工程护栏；时间判定全经入参 `now`）。
 pub struct PgCredentialRepo {
     read_pool: PgTenantReadPool,
@@ -57,6 +58,8 @@ pub struct PgCredentialRepo {
     password_change_post_update_gate: Option<Arc<PasswordChangeCasPauseGate>>,
     #[cfg(all(test, feature = "integration"))]
     password_change_faults: Arc<Mutex<CredentialFaultState>>,
+    #[cfg(all(test, feature = "integration"))]
+    authenticate_post_write_faults: Arc<Mutex<HashSet<String>>>,
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -124,6 +127,8 @@ impl PgCredentialRepo {
             password_change_post_update_gate: None,
             #[cfg(all(test, feature = "integration"))]
             password_change_faults: Arc::new(Mutex::new(CredentialFaultState::default())),
+            #[cfg(all(test, feature = "integration"))]
+            authenticate_post_write_faults: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -134,6 +139,7 @@ impl PgCredentialRepo {
             write_pool: PgTenantWritePool::from_unverified_for_test(store),
             password_change_post_update_gate: None,
             password_change_faults: Arc::new(Mutex::new(CredentialFaultState::default())),
+            authenticate_post_write_faults: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -172,6 +178,17 @@ impl PgCredentialRepo {
             .copied()
             .unwrap_or_default()
     }
+
+    /// Inject one failure after authentication has applied its credential-row writes but before
+    /// the enclosing transaction commits.
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn with_authenticate_post_write_fault(self, login: &str) -> Self {
+        self.authenticate_post_write_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(login.to_owned());
+        self
+    }
 }
 
 /// sqlx 错误 → 域 storage 错误（装箱保留 source；域 crate 不依赖 sqlx，adapter 边界收口；同 `PgRoleRepo`）。
@@ -206,6 +223,14 @@ fn take_credential_fault_if(
         state.plans.remove(login);
     }
     Some(fault)
+}
+
+#[cfg(all(test, feature = "integration"))]
+fn take_authenticate_post_write_fault(state: &Mutex<HashSet<String>>, login: &str) -> bool {
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(login)
 }
 
 /// `TenantId` → SQL bind 参数（stringify UUID 绑 `$N::uuid` server-side cast；不给 sqlx 加 uuid feature）。
@@ -344,13 +369,31 @@ impl CredentialRepo for PgCredentialRepo {
         let tenant = scope.tenant();
         let tenant_uuid = tenant_param(tenant);
         let login_str = login.as_str().to_owned();
+        #[cfg(all(test, feature = "integration"))]
+        let authenticate_post_write_faults = Arc::clone(&self.authenticate_post_write_faults);
         self.write_pool
             .write(
                 scope,
                 move |conn| {
                     Box::pin(async move {
-                        authenticate_in_tx(conn.conn(), &tenant_uuid, &login_str, candidate, now)
-                            .await
+                        let outcome = authenticate_in_tx(
+                            conn.conn(),
+                            &tenant_uuid,
+                            &login_str,
+                            candidate,
+                            now,
+                        )
+                        .await?;
+                        #[cfg(all(test, feature = "integration"))]
+                        if take_authenticate_post_write_fault(
+                            &authenticate_post_write_faults,
+                            &login_str,
+                        ) {
+                            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                                "injected authenticate post-write failure",
+                            ))));
+                        }
+                        Ok(outcome)
                     })
                 },
                 storage,
@@ -493,35 +536,13 @@ impl CredentialRepo for PgCredentialRepo {
         )
         .await
     }
-
-    async fn lockout_status(
-        &self,
-        scope: TenantRepoScope,
-        login: LoginIdentifier,
-        now: SystemTime,
-    ) -> Result<bool, IdentityError> {
-        let tenant = scope.tenant();
-        let tenant_uuid = tenant_param(tenant);
-        let login_str = login.as_str().to_owned();
-        self.write_pool
-            .write(
-                scope,
-                move |conn| {
-                    Box::pin(async move {
-                        lockout_status_in_tx(conn.conn(), &tenant_uuid, &login_str, now).await
-                    })
-                },
-                storage,
-            )
-            .await
-    }
 }
 
 /// 行类型：已知主体 SELECT FOR UPDATE 读出（user_id PHC + 锁定三列）；未知主体 → None。
 type AuthRow = (String, String, i64, Option<i64>, Option<i64>);
 
 /// authenticate 事务体（SET LOCAL → 单行 FOR UPDATE → 有界 KDF 验签 → 原子分流；#1277 F1+F2+F3）。
-async fn authenticate_in_tx(
+pub(crate) async fn authenticate_in_tx(
     tx: &mut PgConnection,
     tenant_uuid: &str,
     login: &str,
@@ -529,6 +550,10 @@ async fn authenticate_in_tx(
     now: SystemTime,
 ) -> Result<AuthOutcome, IdentityError> {
     let found = auth_row(tx, tenant_uuid, login).await?;
+    let security = match &found {
+        Some((user_id, ..)) => security_row_for_update(tx, tenant_uuid, user_id).await?,
+        None => None,
+    };
     // PHC parse（已知主体）。损坏 PHC = 存储完整性问题 → fail-closed `Storage`，但**先跑当前档 KDF 再早退**：
     // 否则「已知主体 + 损坏 PHC」走 ~0 成本早退，与「未知主体」跑满 argon2 KDF 的耗时可区分，泄漏主体存在性
     // （#1277 F3 边缘时序盲区）。与 `application.rs` change_password not-found 路径同款「dummy KDF 后早退」防御。
@@ -545,28 +570,60 @@ async fn authenticate_in_tx(
     // 有界 KDF 验签（F3）：未知主体亦跑当前档 KDF，关闭无主体零成本快路径。
     let verification = secure::verify_password(candidate, hash.as_ref())
         .map_err(|error| IdentityError::Storage(Box::new(error)))?;
-    match (found, verification) {
-        // 已知 + 正确：原子清锁 + 返回 canonical actor subject。
-        (Some((user_id_str, ..)), secure::PasswordVerification::Verified(receipt)) => {
-            if let Some(replacement) = receipt.upgraded_hash() {
-                replace_password_hash(tx, tenant_uuid, login, &replacement).await?;
-            }
-            clear_lockout(tx, tenant_uuid, login).await?;
-            let user_id = ids::UserId::parse(&user_id_str)
-                .map_err(|e| IdentityError::Storage(Box::new(e)))?;
-            Ok(AuthOutcome::Authenticated(user_id))
+    let security = match (&found, security) {
+        (Some((user_id, ..)), Some(row)) => {
+            let user_id = ids::UserId::parse(user_id)
+                .map_err(|error| IdentityError::Storage(Box::new(error)))?;
+            let tenant = TenantId::parse(tenant_uuid)
+                .map_err(|error| IdentityError::Storage(Box::new(error)))?;
+            Some(crate::account_security_repo::hydrate_security(
+                tenant, user_id, row,
+            )?)
         }
-        // 已知 + 错：原子推进 lockout（达阈值即锁），回写三列；对外仍 InvalidCredentials。
-        // 注：本分支较 InvalidUnknown 多一次 write_lockout（RTT 差），但两路径均已跑满 argon2 KDF（~100ms）主导
-        // 耗时，该写差在 KDF 噪音量级内——属 `ports.rs` 标注的 SHOULD-level 容忍（与 in-mem 替身同语义，#1277）。
-        (Some((_, _, failure_count, window, until)), secure::PasswordVerification::Invalid) => {
+        (Some(_), None) => {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "credential is missing account security state",
+            ))));
+        }
+        (None, None) => None,
+        (None, Some(_)) => {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "account security state exists without credential",
+            ))));
+        }
+    };
+    match (found, verification) {
+        // 已知主体始终先门控 durable lifecycle 与 temporary brute-force lock.
+        (Some((_, _, failure_count, window, until)), verification) => {
+            let state = security.ok_or_else(|| {
+                IdentityError::Storage(Box::new(std::io::Error::other(
+                    "credential is missing account security state",
+                )))
+            })?;
             let mut lockout = rebuild_lockout(failure_count, window, until, now);
-            lockout.record_failure(now);
-            write_lockout(tx, tenant_uuid, login, &lockout).await?;
-            Ok(AuthOutcome::InvalidKnownUser)
+            if lockout.try_lazy_unlock(now) {
+                write_lockout(tx, tenant_uuid, login, &lockout).await?;
+            }
+            if state.status() != AccountStatus::Active || lockout.is_locked(now) {
+                return Ok(AuthOutcome::RejectedKnown);
+            }
+            match verification {
+                secure::PasswordVerification::Verified(receipt) => {
+                    if let Some(replacement) = receipt.upgraded_hash() {
+                        replace_password_hash(tx, tenant_uuid, login, &replacement).await?;
+                    }
+                    clear_lockout(tx, tenant_uuid, login).await?;
+                    Ok(AuthOutcome::Authenticated(state))
+                }
+                secure::PasswordVerification::Invalid => {
+                    let _decision: BruteForceDecision = lockout.record_failure(now);
+                    write_lockout(tx, tenant_uuid, login, &lockout).await?;
+                    Ok(AuthOutcome::RejectedKnown)
+                }
+            }
         }
         // 查无凭据：KDF 已跑；**不建 / 不动** lockout（F2：未知主体无行 ⇒ 无锁可建）。
-        (None, secure::PasswordVerification::Invalid) => Ok(AuthOutcome::InvalidUnknown),
+        (None, secure::PasswordVerification::Invalid) => Ok(AuthOutcome::RejectedUnknown),
         (None, secure::PasswordVerification::Verified(_)) => Err(IdentityError::Storage(Box::new(
             std::io::Error::other("dummy password verification returned success"),
         ))),
@@ -630,21 +687,46 @@ async fn auth_row(
     }
 }
 
-/// save 事务体：upsert key = (tenant_id, login)（F2：key 派生自 credential 自身）；ON CONFLICT 只更
-/// user_id / password_hash / version，**不触锁定列**（与 in-mem save 不动 lockout 一致；新行锁定列取默认）。
+/// The second and final row lock in authentication's fixed
+/// `credentials -> account_security_states` order.
+async fn security_row_for_update(
+    tx: &mut PgConnection,
+    tenant_uuid: &str,
+    user_id: &str,
+) -> Result<Option<SecurityRow>, IdentityError> {
+    sqlx::query_as::<_, SecurityRow>(
+        r#"
+        SELECT status,
+               authn_epoch,
+               version,
+               extract(epoch from status_changed_at)::bigint AS status_changed_at,
+               extract(epoch from updated_at)::bigint AS updated_at
+        FROM account_security_states
+        WHERE tenant_id = $1::uuid AND user_id = $2::uuid
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_uuid)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(storage)
+}
+
+/// Save credential and its mandatory initial account-security row in one transaction.
 async fn save_in_tx(
     tx: &mut PgConnection,
     tenant_uuid: &str,
     credential: &Credential,
 ) -> Result<(), IdentityError> {
-    sqlx::query(
+    let saved = sqlx::query(
         r#"
         INSERT INTO credentials (tenant_id, user_id, login, password_hash, version)
         VALUES ($1::uuid, $2::uuid, $3, $4, $5)
         ON CONFLICT (tenant_id, login) DO UPDATE
-        SET user_id = EXCLUDED.user_id,
-            password_hash = EXCLUDED.password_hash,
+        SET password_hash = EXCLUDED.password_hash,
             version = EXCLUDED.version
+        WHERE credentials.user_id = EXCLUDED.user_id
         "#,
     )
     .bind(tenant_uuid)
@@ -652,6 +734,26 @@ async fn save_in_tx(
     .bind(credential.login().as_str())
     .bind(credential.password_hash().as_str())
     .bind(i64::from(credential.version()))
+    .execute(&mut *tx)
+    .await
+    .map_err(storage)?;
+    if saved.rows_affected() != 1 {
+        return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+            "credential login cannot be rebound to a different user",
+        ))));
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO account_security_states (
+            tenant_id, user_id, status, authn_epoch, version,
+            status_changed_at, updated_at
+        )
+        VALUES ($1::uuid, $2::uuid, 'active', 0, 1, clock_timestamp(), clock_timestamp())
+        ON CONFLICT (tenant_id, user_id) DO NOTHING
+        "#,
+    )
+    .bind(tenant_uuid)
+    .bind(credential.user_id().as_uuid().to_string())
     .execute(&mut *tx)
     .await
     .map_err(storage)?;
@@ -695,46 +797,4 @@ async fn apply_password_change_in_tx(
     .await
     .map_err(storage)?;
     Ok(())
-}
-
-/// lockout_status 事务体：单行 FOR UPDATE → locked_until NULL / 无行 → false；否则原子 lazy-unlock（TTL 过则
-/// 回写清零持久化）→ 返 is_locked（同 in-mem `try_lazy_unlock` + `is_locked`）。
-async fn lockout_status_in_tx(
-    tx: &mut PgConnection,
-    tenant_uuid: &str,
-    login: &str,
-    now: SystemTime,
-) -> Result<bool, IdentityError> {
-    let row = sqlx::query(
-        r#"
-        SELECT failure_count,
-               extract(epoch from lockout_window_start)::bigint AS lockout_window_start,
-               extract(epoch from locked_until)::bigint AS locked_until
-        FROM credentials
-        WHERE tenant_id = $1::uuid AND login = $2
-        FOR UPDATE
-        "#,
-    )
-    .bind(tenant_uuid)
-    .bind(login)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(storage)?;
-    // 无行 = 未锁定（查无凭据 / 跨租 fail-closed）。
-    let Some(r) = row else {
-        return Ok(false);
-    };
-    let until: Option<i64> = r.try_get("locked_until").map_err(storage)?;
-    // 未锁定（locked_until NULL）→ 直接 false（无需 lazy-unlock；与 is_locked 语义一致）。
-    if until.is_none() {
-        return Ok(false);
-    }
-    let failure_count: i64 = r.try_get("failure_count").map_err(storage)?;
-    let window: Option<i64> = r.try_get("lockout_window_start").map_err(storage)?;
-    let mut lockout = rebuild_lockout(failure_count, window, until, now);
-    // 原子 lazy-unlock：TTL 过则回写清零（持久化解锁，无后台 job）。
-    if lockout.try_lazy_unlock(now) {
-        write_lockout(tx, tenant_uuid, login, &lockout).await?;
-    }
-    Ok(lockout.is_locked(now))
 }

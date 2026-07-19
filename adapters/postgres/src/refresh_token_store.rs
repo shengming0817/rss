@@ -3,9 +3,10 @@
 //! **哈希存储（不存明文）**：`token_hash` 列只持 SHA-256 摘要（`bytea`，32 字节）；secret 生成 / 摘要计算在
 //! `secure::refresh`（base 层 crypto），编排在 `application::RefreshService`（adapter 只做透传落库）。
 //!
-//! **原子 CAS 轮换**（`rotate`）：单事务内 `UPDATE status='consumed' WHERE ... AND status='active'`（CAS）；
-//! 0 行更新即 CAS miss（old 已非 Active）→ 返 `false`，不写 new；1 行即命中 → 在同一事务 INSERT new → 返 `true`。
-//! 杜绝 TOCTOU 双换（两次并发 rotate 只有一个能成功 CAS）。
+//! **原子 CAS 轮换**（`rotate`）：单事务先锁定 account-security 并校验 Active + family issuance epoch，
+//! 再执行 `UPDATE status='consumed' WHERE ... AND status='active'`（CAS）+ 条件 INSERT。typed outcome
+//! `Applied|Replay|AccountStale` 区分成功、refresh CAS miss 与最终账号 fence 拒绝；后两者均不写 new。
+//! 杜绝 TOCTOU 双换与 pre-mint read→CAS 之间的账号状态竞态。
 //!
 //! **谱系级联撤销**（`revoke_lineage`）：`UPDATE status='revoked' WHERE lineage_id=$2`（幂等，0 行也 Ok）；
 //! logout / reuse-detection 共用此路径（整条 rotation 链一次撤销）。
@@ -23,8 +24,9 @@
 use std::time::{Duration, SystemTime};
 
 use identity::ports::{
-    IdentityError, RefreshRotationMutation, RefreshStatus, RefreshTokenHash, RefreshTokenId,
-    RefreshTokenRecord, RefreshTokenStore, TenantRepoScope, kind_from_db, kind_to_db,
+    AuthnEpoch, IdentityError, RefreshRotationMutation, RefreshRotationOutcome, RefreshStatus,
+    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenStore, TenantRepoScope,
+    kind_from_db, kind_to_db,
 };
 use sqlx::Row;
 
@@ -197,10 +199,10 @@ async fn do_insert(
         r#"
         INSERT INTO refresh_tokens
             (id, tenant_id, subject, kind, token_hash,
-             parent_id, lineage_id, status, issued_at, expires_at)
+             parent_id, lineage_id, authn_epoch_at_issue, status, issued_at, expires_at)
         VALUES
             ($1::uuid, $2::uuid, $3, $4, $5,
-             $6::uuid, $7::uuid, $8, to_timestamp($9), to_timestamp($10))
+             $6::uuid, $7::uuid, $8, $9, to_timestamp($10), to_timestamp($11))
         "#,
     )
     .bind(record.id().as_str())
@@ -210,6 +212,9 @@ async fn do_insert(
     .bind(record.token_hash().as_bytes() as &[u8])
     .bind(record.parent_id().map(|p| p.as_str()))
     .bind(record.lineage_id().as_str())
+    .bind(i64::try_from(record.issuance_epoch().get()).map_err(|_| {
+        sqlx::Error::Protocol("refresh issuance epoch exceeds PostgreSQL bigint".to_owned())
+    })?)
     .bind(record.status().as_db_str())
     .bind(unix_secs(record.issued_at()))
     .bind(unix_secs(record.expires_at()))
@@ -221,29 +226,53 @@ async fn do_insert(
 /// CAS UPDATE（old active→consumed）+ 条件写 new，纯 sqlx 错误返回（调用方负责 tx rollback/commit）。
 /// 抽取以控制 [`RefreshTokenStore::rotate`] 认知复杂度（≤ 15，CLAUDE.md §认知复杂度）。
 ///
-/// 返回：`Ok(true)` = CAS 命中 + new 写入；`Ok(false)` = miss（old 非 Active），不写 new；
-/// `Err(_)` = SQL 错误（调用方需 rollback）。
+/// 返回 [`RefreshRotationOutcome::Applied`] = CAS 命中 + new 写入；
+/// [`RefreshRotationOutcome::Replay`] = old 非 Active；
+/// [`RefreshRotationOutcome::AccountStale`] = 最终锁内账号非 Active 或签发 epoch 已过期；
+/// 后两者均不写 new，`Err(_)` = SQL 错误（调用方需 rollback）。
 async fn do_rotate_tx(
     tenant_uuid: &str,
     tx: &mut sqlx::PgConnection,
     old_id: &RefreshTokenId,
     new: &RefreshTokenRecord,
-) -> Result<bool, sqlx::Error> {
+) -> Result<RefreshRotationOutcome, sqlx::Error> {
+    let expected_epoch = i64::try_from(new.issuance_epoch().get()).map_err(|_| {
+        sqlx::Error::Protocol("refresh issuance epoch exceeds PostgreSQL bigint".to_owned())
+    })?;
+    let account = sqlx::query(
+        "SELECT status, authn_epoch FROM account_security_states \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid FOR UPDATE",
+    )
+    .bind(tenant_uuid)
+    .bind(new.subject())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(account) = account else {
+        return Ok(RefreshRotationOutcome::AccountStale);
+    };
+    let status: String = account.try_get("status")?;
+    let current_epoch: i64 = account.try_get("authn_epoch")?;
+    if status != "active" || current_epoch != expected_epoch {
+        return Ok(RefreshRotationOutcome::AccountStale);
+    }
+
     let res = sqlx::query(
         "UPDATE refresh_tokens SET status = $3 \
-         WHERE tenant_id = $1::uuid AND id = $2::uuid AND status = $4",
+         WHERE tenant_id = $1::uuid AND id = $2::uuid AND status = $4 \
+           AND authn_epoch_at_issue = $5",
     )
     .bind(tenant_uuid)
     .bind(old_id.as_str())
     .bind(RefreshStatus::Consumed.as_db_str())
     .bind(RefreshStatus::Active.as_db_str())
+    .bind(expected_epoch)
     .execute(&mut *tx)
     .await?;
     if res.rows_affected() == 0 {
-        return Ok(false); // CAS miss：old 已非 Active，不写 new。
+        return Ok(RefreshRotationOutcome::Replay);
     }
     do_insert(tx, new).await?;
-    Ok(true)
+    Ok(RefreshRotationOutcome::Applied)
 }
 
 impl RefreshTokenStore for PgRefreshTokenStore {
@@ -289,7 +318,8 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                 Box::pin(async move {
                     let row = sqlx::query(
                         r#"
-                    SELECT id::text, subject, kind, parent_id::text, lineage_id::text, status,
+                    SELECT id::text, subject, kind, parent_id::text, lineage_id::text,
+                           authn_epoch_at_issue, status,
                            extract(epoch from issued_at)::bigint AS issued_at,
                            extract(epoch from expires_at)::bigint AS expires_at
                     FROM refresh_tokens
@@ -308,6 +338,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                             let kind_str: String = r.try_get("kind")?;
                             let parent_id: Option<String> = r.try_get("parent_id")?;
                             let lineage_id: String = r.try_get("lineage_id")?;
+                            let issuance_epoch: i64 = r.try_get("authn_epoch_at_issue")?;
                             let status_str: String = r.try_get("status")?;
                             let issued_secs: i64 = r.try_get("issued_at")?;
                             let expires_secs: i64 = r.try_get("expires_at")?;
@@ -317,6 +348,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                                 kind_str,
                                 parent_id,
                                 lineage_id,
+                                issuance_epoch,
                                 status_str,
                                 issued_secs,
                                 expires_secs,
@@ -336,6 +368,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                 kind_str,
                 parent_id,
                 lineage_id,
+                issuance_epoch,
                 status_str,
                 issued_secs,
                 expires_secs,
@@ -350,6 +383,16 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                         "corrupt refresh_tokens.status",
                     ))
                 })?;
+                let issuance_epoch = u64::try_from(issuance_epoch)
+                    .map_err(|_| {
+                        IdentityError::Storage(Box::new(std::io::Error::other(
+                            "negative refresh issuance epoch",
+                        )))
+                    })
+                    .and_then(|epoch| {
+                        AuthnEpoch::hydrate(epoch)
+                            .map_err(|error| IdentityError::Storage(Box::new(error)))
+                    })?;
                 Ok(Some(RefreshTokenRecord::hydrate(
                     id,
                     tenant,
@@ -358,6 +401,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                     hash_bytes,
                     parent_id,
                     lineage_id,
+                    issuance_epoch,
                     status,
                     epoch_secs_to_time(issued_secs),
                     epoch_secs_to_time(expires_secs),
@@ -366,7 +410,8 @@ impl RefreshTokenStore for PgRefreshTokenStore {
         }
     }
 
-    /// **原子 CAS 轮换**：`do_rotate_tx`（CAS UPDATE + 条件 INSERT）→ `Ok(true)` 命中 / `Ok(false)` miss。
+    /// **原子 CAS 轮换**：`do_rotate_tx` 在同一 writer 事务锁定账号安全态、校验 Active + 签发
+    /// epoch，再执行 refresh CAS + 条件 INSERT，返回 typed [`RefreshRotationOutcome`]。
     /// CAS 逻辑已提取到 [`do_rotate_tx`]（认知复杂度分离，≤15；rotate 本身只做 tx 生命周期管理）。
     ///
     /// 入参 [`RefreshRotation`] 是 sealed command（`begin_rotation` 从源 record 派生）——tenant 从
@@ -375,7 +420,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
         &self,
         scope: TenantRepoScope,
         mutation: RefreshRotationMutation,
-    ) -> Result<bool, IdentityError> {
+    ) -> Result<RefreshRotationOutcome, IdentityError> {
         let (rotation, observation) = mutation.into_parts();
         let old_id = rotation.old_id().clone();
         let new = rotation.new_record().clone();

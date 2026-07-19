@@ -9,7 +9,8 @@
 //! - `rbac`：`Permission` / `Role` / `RoleBinding` + `authorize_rbac`。【PR1 实现】
 //! - `abac`：`AbacAttribute` / `PolicyRule`（typed `Operator` + `PolicyEffect`）/ `Policy` +
 //!   `evaluate_abac`（deny-overrides，fail-closed）。【PR2 实现】
-//! - `account`：`AccountStatus` + `Credential` + `AccountLockout`（凭据 / 锁定 / CAS）。【PR3 实现】
+//! - `account`：`Credential` + `AccountLockout`（凭据 / 临时暴破锁 / CAS）。【PR3 实现】
+//! - `account_security`：durable account lifecycle + authentication epoch。【#1833】
 //! - `session`：`Session` / `SessionId`（会话持久化 UoW）。【PR4 部分】
 //!
 //! # newtype funnel 校验（严格白名单，fail-closed）
@@ -29,6 +30,7 @@
 
 mod abac;
 mod account;
+mod account_security;
 mod rbac;
 mod refresh;
 mod resource_attr;
@@ -44,8 +46,8 @@ pub use session::{Session, SessionId};
 // 签名实体，跨 crate 命名）；kind_to_db / kind_from_db 是 PrincipalKind↔text 单源映射（postgres adapter 消费）。
 // 字段私有 + 构造经 pub(crate) funnel / pub hydrate，外部不可伪造（ADR-005 Option 2，同 Session）。
 pub use refresh::{
-    RefreshRotation, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
-    kind_from_db, kind_to_db,
+    RefreshRotation, RefreshRotationOutcome, RefreshStatus, RefreshTokenHash, RefreshTokenId,
+    RefreshTokenRecord, kind_from_db, kind_to_db,
 };
 // reason: pub(crate) re-export 经 facade 暴露域词汇；生产消费方（handler / authz 接线）待 W 阶段，
 // 当前仅 #[cfg(test)] smoke / 子模块测试消费 ⇒ 非 test lib target 视作 unused（ADR-004 C8 遗留期）。
@@ -65,11 +67,15 @@ pub use resource_attr::{
     ResourcePolicyAttributeKey,
 };
 // Credential（find/authenticate/save/bump 签名实体）/ LoginIdentifier（查找键签名实体）/ AuthOutcome
-// （authenticate 返回）/ AccountStatus 是 pub——经 ports facade 跨 crate 收发；字段私有 + 构造器 pub(crate)
-// funnel，外部不可伪造（ADR-005 Option 2）。AccountLockout 虽不在 port 签名（锁定推进折叠进 authenticate /
-// lockout_status 内部承载），但 #1316 PgCredentialRepo 须在事务内 from_parts 重建 / record_failure 推进 /
-// 访问器回写三列 ⇒ 升 pub（经 ports facade 跨 crate 收发；策略阈值仍域内单源、字段私有不可伪造）。
-pub use account::{AccountLockout, AccountStatus, AuthOutcome, Credential, LoginIdentifier};
+// （authenticate 返回）是 pub。AccountLockout/BruteForceDecision 供 postgres adapter 在 authenticate
+// transaction 内重建与推进临时暴破锁。
+pub use account::{AccountLockout, AuthOutcome, BruteForceDecision, Credential, LoginIdentifier};
+pub(crate) use account_security::ActiveAccountSecurity;
+pub use account_security::{
+    AccountSecurityHydrationError, AccountSecurityMutation, AccountSecuritySnapshot,
+    AccountSecurityState, AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus,
+    AuthnEpoch,
+};
 // reason: 同上（facade re-export，生产消费方待 W；ADR-004 C8 遗留期）。
 #[allow(unused_imports)]
 pub(crate) use rbac::{Permission, authorize_rbac};

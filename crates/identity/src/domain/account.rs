@@ -1,9 +1,9 @@
-//! identity::domain::account — 账号状态机 / 凭据 / 账户锁定（dylint rss_domain_no_serialize 守护区）。
+//! identity::domain::account — 凭据与临时暴力破解锁定（dylint rss_domain_no_serialize 守护区）。
 //!
 //! 子域类型（spec 003 US3，PR3 独占本文件；#1277 增 LoginIdentifier / AuthOutcome 分层）：
-//! - [`AccountStatus`]：账号生命周期闭值集 + 合法迁移判定（fail-closed）。
 //! - [`LoginIdentifier`]：登录标识 newtype（不透明查找键；与 canonical [`ids::UserId`] 类型层不可混淆，F1）。
-//! - [`AuthOutcome`]：验签原子结果三态（`Authenticated(UserId)` / `InvalidKnownUser` / `InvalidUnknown`），
+//! - [`AuthOutcome`]：验签原子结果三态（`Authenticated(AccountSecurityState)` / `RejectedKnown` /
+//!   `RejectedUnknown`），
 //!   provider 内「验签 + 仅对已知主体推进 lockout」单一出口（F1+F2）。
 //! - [`Credential`]：[`LoginIdentifier`] 查找键 + canonical [`ids::UserId`] subject + argon2 哈希凭据（经
 //!   `secure::password`）+ 版本 pin（CAS）+ constant-time digest 比较 / 有界 KDF 验签；明文永不存、`password_hash` 经
@@ -18,56 +18,6 @@
 //! ref: OWASP ASVS V2.2 / NIST 800-63B §5.2.2（失败计数 + 窗口 + 锁定 TTL + lazy-unlock，无后台 job）
 
 use std::time::{Duration, SystemTime};
-
-// ---------------------------------------------------------------------------
-// AccountStatus — 账号状态（fail-closed）+ 合法迁移
-// ---------------------------------------------------------------------------
-
-/// 账号状态（闭值集，fail-closed）。
-///
-/// `pub`（账户状态闭值集，被独立 adapter / 组合根跨 crate 收发）；账户门控生产消费方待 PR5/W，当前由
-/// [`AccountLockout::record_failure`] 作推进结果返回（域内）。`#[non_exhaustive]`：对外保留扩展窗口
-/// （外部 crate match 须带 `_` 兜底）；域内穷举 match 仍由编译器守完整性（lib.rs smoke）。
-///
-/// 合法迁移（[`AccountStatus::can_transition_to`]，其余皆拒，含同态自迁——非迁移）：
-/// - `Active` → `Suspended`（管理员暂停）/ `Locked`（[`AccountLockout`] 阈值触发）/ `Deactivated`（注销）。
-/// - `Suspended` → `Active`（恢复）/ `Deactivated`。
-/// - `Locked` → `Active`（lazy-unlock / 管理员解锁）/ `Deactivated`。
-/// - `Deactivated` → ∅（终态，不可逆）。
-// reason: 迁移判定（can_transition_to）生产消费方（账户门控）待 PR5/W；当前仅 test / smoke 消费 ⇒
-// 非 test 构建 dead（ADR-004 C8 遗留期）。
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum AccountStatus {
-    /// 正常激活。
-    Active,
-    /// 暂停（可恢复）。
-    Suspended,
-    /// 锁定（lazy-unlock 或管理员解锁；如多次登录失败）。
-    Locked,
-    /// 已注销（终态，不可逆）。
-    Deactivated,
-}
-
-// reason: 同 enum（迁移判定生产消费方待 PR5/W 账户门控；当前仅 test 消费）。
-#[allow(dead_code)]
-impl AccountStatus {
-    /// 合法状态迁移判定（fail-closed：白名单外一律 `false`，含 `Deactivated` 终态与同态自迁）。
-    pub(crate) fn can_transition_to(self, next: AccountStatus) -> bool {
-        use AccountStatus::{Active, Deactivated, Locked, Suspended};
-        matches!(
-            (self, next),
-            (Active, Suspended)
-                | (Active, Locked)
-                | (Active, Deactivated)
-                | (Suspended, Active)
-                | (Suspended, Deactivated)
-                | (Locked, Active)
-                | (Locked, Deactivated)
-        )
-    }
-}
 
 // ---------------------------------------------------------------------------
 // LoginIdentifier — 登录标识（opaque 查找键，与 canonical UserId 类型层不可混淆，#1277 F1）
@@ -114,24 +64,23 @@ impl LoginIdentifier {
 
 /// 验签结果（[`crate::ports::CredentialRepo::authenticate`] 返回；消费方据此分流，#1277 F1+F2）。
 ///
-/// `pub`（adapter 跨 crate 构造/返回）。`#[non_exhaustive]` 保留扩展窗口。三态语义：
-/// - [`Authenticated`](AuthOutcome::Authenticated)：已知主体 + 密码正确——携 canonical [`ids::UserId`]
-///   （写 payload/envelope/session subject，audit 必可 `UserId::parse`）；provider 已原子清零失败计数。
-/// - [`InvalidKnownUser`](AuthOutcome::InvalidKnownUser)：已知主体 + 密码错——provider 已**原子推进** lockout。
-/// - [`InvalidUnknown`](AuthOutcome::InvalidUnknown)：查无凭据——当前 profile KDF 已跑（关闭零 KDF 快路径），但
+/// `pub`（adapter 跨 crate 构造/返回）。三态语义：
+/// - [`Authenticated`](AuthOutcome::Authenticated)：已知 Active 主体 + 密码正确——携当前
+///   [`super::AccountSecurityState`]；provider 已原子清零失败计数。
+/// - [`RejectedKnown`](AuthOutcome::RejectedKnown)：已知主体被 durable 状态、临时锁定或密码拒绝。
+/// - [`RejectedUnknown`](AuthOutcome::RejectedUnknown)：查无凭据——当前 profile KDF 已跑，但
 ///   **不建 / 不动 lockout 态**（#1277 F2：未知主体不可被预置锁定、不撑大 lockout 表）。
 ///
-/// 消费方对 `InvalidKnownUser` / `InvalidUnknown` 一律对外返回 `InvalidCredentials`（不向客户端区分以防枚举）；
+/// 消费方对 `RejectedKnown` / `RejectedUnknown` 一律对外返回 `InvalidCredentials`（不向客户端区分以防枚举）；
 /// 二者之别只用于 provider 内 lockout 推进决策（已收进本 outcome，不外泄）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum AuthOutcome {
-    /// 已知主体 + 密码正确：canonical actor subject（写 wire / audit）。
-    Authenticated(ids::UserId),
-    /// 已知主体 + 密码错（provider 已推进 lockout）。
-    InvalidKnownUser,
+    /// 已知 Active 主体 + 密码正确。
+    Authenticated(super::AccountSecurityState),
+    /// 已知主体被 durable state、临时 lockout 或密码拒绝。
+    RejectedKnown,
     /// 查无凭据（当前 profile KDF 已跑；不动 lockout 态）。
-    InvalidUnknown,
+    RejectedUnknown,
 }
 
 // ---------------------------------------------------------------------------
@@ -295,27 +244,36 @@ const WINDOW: Duration = Duration::from_secs(15 * 60);
 /// 锁定 TTL（达阈值后锁定时长，lazy-unlock，无后台 job）。RSS 取 15min。
 const LOCK_TTL: Duration = Duration::from_secs(15 * 60);
 
+/// Temporary brute-force result, deliberately distinct from durable account lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BruteForceDecision {
+    /// The credential remains below the temporary blocking threshold.
+    AllowRetry,
+    /// The credential is temporarily blocked until its lockout deadline.
+    TemporarilyBlocked,
+}
+
 /// 账户锁定态：失败计数 + 滑窗起点 + 锁定截止时刻。
 ///
 /// **adapter-facing 辅助类型**（`pub`，经 `ports` facade re-export，#1316）：**不在任何 port 方法签名**——锁定推进
-/// 经 `CredentialRepo::authenticate`/`lockout_status` 内部**原子**承载（#1277 折叠后无独立 `record_failure`/
+/// 经 `CredentialRepo::authenticate` 内部**原子**承载（无独立 `record_failure`/
 /// `clear_lockout` port 方法，见 ports.rs）。升 `pub` 是 ADR-005「最小实体集」之外的**必要扩展**（区别于 port 签名
 /// 实体 `Credential`/`LoginIdentifier`/`AuthOutcome`）：`PgCredentialRepo` 须在事务/行锁内 `from_parts` 重建 →
 /// `record_failure`/`try_lazy_unlock` 推进 → 访问器回写持久化三列，策略阈值仍域内单源、字段私有不可伪造，无法收敛。
 /// 窗口 / TTL 判定全经
 /// **调用方注入 `Clock` 读出的 `now: SystemTime`** 计算——域类型不持 `Clock`、不调 `SystemTime::now()`
-/// （rust-standards §工程护栏；`authenticate`/`lockout_status` 的 `now` 参亦经注入 `Clock`，调用方禁直调
+/// （rust-standards §工程护栏；`authenticate` 的 `now` 参经注入 `Clock`，调用方禁直调
 /// `SystemTime::now()`——clippy `disallowed-methods` 静态守）。
 ///
 /// **多实例持久化契约（#1189 + #1277 消费方义务）**：失败计数 = 安全关键状态，须经 `CredentialRepo` 跨实例
 /// 共享且**原子**推进（非外部读-改-写，F1），否则负载均衡下各实例独立计数 / 并发丢更新、暴破防御失效。
-/// `LoginService` 登录路径：验签前 `CredentialRepo::lockout_status(now)` 拒绝已锁账户；`authenticate(now)`
-/// 内部据 `AuthOutcome` 原子完成「已知+错推进失败计数（达阈值即锁）/ 已知+正确清零 / 未知不动」——验签与
-/// lockout 推进收进单一原子调用（不再外部分步 record/clear，#1277）。postgres adapter（W #1258）须在
-/// 事务/行锁内等价实现该原子性；缺失则多实例暴破防御静默失效。
+/// `LoginService` 登录路径仅调用 `authenticate(now)`；其内部原子完成 durable lifecycle、temporary
+/// lockout 与 `AuthOutcome` 分流：「Active+未锁+错误」推进、「Active+未锁+正确」清零、未知不动——验签与
+/// lockout 推进收进单一原子调用（不再外部分步 record/clear，#1277）。postgres adapter 在固定
+/// credential→account-security 行锁顺序的一次 writer 事务内实现同等原子性。
 // AccountLockout 升 `pub` 公共 API（经 ports facade re-export，#1316）：`PgCredentialRepo` 在事务内
 // `from_parts` 重建 → `record_failure`/`try_lazy_unlock` 推进 → 访问器回写三列；策略阈值（5/15min/15min）
-// 域内单源、adapter 仅 I/O。锁定推进不在 port 签名（折叠进 `authenticate`/`lockout_status` 内部承载），但
+// 域内单源、adapter 仅 I/O。锁定推进折叠进 `authenticate` 内部承载，但
 // 类型本身跨 crate 收发。全方法 `pub` ⇒ 公共 API 可达，非 dead（无需 allow）。
 #[derive(Debug, Clone)]
 pub struct AccountLockout {
@@ -347,16 +305,17 @@ impl AccountLockout {
         }
     }
 
-    /// 记录一次失败，返回结果账号状态（`Locked` 当且仅当达阈值）。
+    /// 记录一次失败，返回临时暴破锁结果。
     ///
     /// 滑窗语义：窗口过期（`now ≥ window_start + WINDOW`）→ 重开滑窗（计数清零、锚定 `now`）；累加；
-    /// 达 [`MAX_FAILURES`] → `locked_until = now + LOCK_TTL` 返回 `Locked`，否则 `Active`。窗口锚定于
+    /// 达 [`MAX_FAILURES`] → `locked_until = now + LOCK_TTL` 返回 `TemporarilyBlocked`，否则
+    /// `AllowRetry`。窗口锚定于
     /// [`AccountLockout::new`] 创建时刻（首次失败不重锚）。「窗口恰好到期」（`now == window_start + WINDOW`）
     /// 按过期处理（计数重置，第 N 次失败不触发锁定）。时钟回拨（`now < window_start`）按过期 fail-safe 重锚。
     ///
     /// **边界安全语义**：窗口重锚不放宽锁定判定——当次失败仍记入新窗口第 1 次，攻击者精准踩窗口边界
     /// **不能**额外获益（重锚后仍需累计 `MAX_FAILURES` 次才锁定，「免费重置」只把计数清零、不增可用尝试）。
-    pub fn record_failure(&mut self, now: SystemTime) -> AccountStatus {
+    pub fn record_failure(&mut self, now: SystemTime) -> BruteForceDecision {
         let window_expired = match now.duration_since(self.window_start) {
             Ok(elapsed) => elapsed >= WINDOW,
             // 时钟回拨：fail-safe 重锚滑窗（不沿用旧计数）。
@@ -369,9 +328,9 @@ impl AccountLockout {
         self.failure_count = self.failure_count.saturating_add(1);
         if self.failure_count >= MAX_FAILURES {
             self.locked_until = Some(now + LOCK_TTL);
-            AccountStatus::Locked
+            BruteForceDecision::TemporarilyBlocked
         } else {
-            AccountStatus::Active
+            BruteForceDecision::AllowRetry
         }
     }
 
@@ -422,11 +381,10 @@ impl AccountLockout {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        AccountLockout, AccountStatus, Credential, LOCK_TTL, LoginIdentifier, MAX_FAILURES, WINDOW,
+        AccountLockout, BruteForceDecision, Credential, LOCK_TTL, LoginIdentifier, MAX_FAILURES,
+        WINDOW,
     };
     use std::time::{Duration, SystemTime};
-
-    use rstest::rstest;
 
     // canonical UUID 种子租户（vocab::TenantId::parse 接受形态）。
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -470,30 +428,6 @@ mod tests {
             hash,
             version,
         )
-    }
-
-    // --- AccountStatus 合法迁移（表驱动，含同态自迁与终态 fail-closed） ---
-
-    #[rstest]
-    #[case::active_suspend(AccountStatus::Active, AccountStatus::Suspended, true)]
-    #[case::active_lock(AccountStatus::Active, AccountStatus::Locked, true)]
-    #[case::active_deactivate(AccountStatus::Active, AccountStatus::Deactivated, true)]
-    #[case::suspend_resume(AccountStatus::Suspended, AccountStatus::Active, true)]
-    #[case::suspend_deactivate(AccountStatus::Suspended, AccountStatus::Deactivated, true)]
-    #[case::locked_unlock(AccountStatus::Locked, AccountStatus::Active, true)]
-    #[case::locked_deactivate(AccountStatus::Locked, AccountStatus::Deactivated, true)]
-    // fail-closed：非法边
-    #[case::active_self(AccountStatus::Active, AccountStatus::Active, false)]
-    #[case::suspend_lock(AccountStatus::Suspended, AccountStatus::Locked, false)]
-    #[case::locked_suspend(AccountStatus::Locked, AccountStatus::Suspended, false)]
-    #[case::deactivated_terminal(AccountStatus::Deactivated, AccountStatus::Active, false)]
-    #[case::deactivated_self(AccountStatus::Deactivated, AccountStatus::Deactivated, false)]
-    fn account_status_transition(
-        #[case] from: AccountStatus,
-        #[case] to: AccountStatus,
-        #[case] allowed: bool,
-    ) {
-        assert_eq!(from.can_transition_to(to), allowed, "{from:?} → {to:?}");
     }
 
     // --- Credential 验签 + 版本 + 脱敏 ---
@@ -573,12 +507,12 @@ mod tests {
         // 前 4 次失败：仍 Active，未锁定。
         for i in 1..MAX_FAILURES {
             let st = lk.record_failure(t0 + Duration::from_secs(i.into()));
-            assert_eq!(st, AccountStatus::Active, "第 {i} 次失败仍 Active");
+            assert_eq!(st, BruteForceDecision::AllowRetry);
             assert!(!lk.is_locked(t0 + Duration::from_secs(i.into())));
         }
         // 第 5 次（窗口内）：锁定。
         let st = lk.record_failure(t0 + Duration::from_secs(5));
-        assert_eq!(st, AccountStatus::Locked);
+        assert_eq!(st, BruteForceDecision::TemporarilyBlocked);
         assert_eq!(lk.failure_count(), MAX_FAILURES);
         assert!(lk.is_locked(t0 + Duration::from_secs(5)));
         assert_eq!(
@@ -599,7 +533,7 @@ mod tests {
         // 下一次失败发生在窗口**之后** → lazy-reset，计数从 1 重新计。
         let after_window = t0 + WINDOW + Duration::from_secs(1);
         let st = lk.record_failure(after_window);
-        assert_eq!(st, AccountStatus::Active, "窗口过期重置后单次失败不锁定");
+        assert_eq!(st, BruteForceDecision::AllowRetry);
         assert_eq!(lk.failure_count(), 1);
     }
 
@@ -618,7 +552,7 @@ mod tests {
         let st = lk.record_failure(t0 + WINDOW);
         assert_eq!(
             st,
-            AccountStatus::Active,
+            BruteForceDecision::AllowRetry,
             "窗口恰好到期 → 重置，第 5 次不锁定"
         );
         assert_eq!(lk.failure_count(), 1);
@@ -675,7 +609,7 @@ mod tests {
         assert_eq!(lk.failure_count(), MAX_FAILURES - 1);
         let past = epoch_plus(500); // now < window_start ⇒ duration_since Err
         let st = lk.record_failure(past);
-        assert_eq!(st, AccountStatus::Active, "回拨重锚后单次失败不锁定");
+        assert_eq!(st, BruteForceDecision::AllowRetry);
         assert_eq!(lk.failure_count(), 1);
         assert_eq!(lk.window_start(), past, "滑窗重锚到回拨时刻");
     }

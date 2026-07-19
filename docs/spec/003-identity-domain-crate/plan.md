@@ -6,7 +6,7 @@
 
 ## Summary
 
-在 #997 冻结签名内兑现 `identity` 域 crate 的 body：domain L0（RBAC `authorize_rbac` + ABAC `evaluate_abac` deny-overrides + 全部 newtype funnel）、application（真实登录 / 会话 L1·L2 / 密码 CAS / 账户锁定 / 角色管理）、ports（`RoleRepo` 已存 + 新增 `CredentialRepo` / `SessionRepo`）、新事件契约（`identity.role-{assigned,revoked}`）+ HTTP handler + contract test。技术路线：先把单文件 `domain/mod.rs`（556 行）/`application.rs`（291 行）按子域拆模块（PR1 基座），确立各 PR 的**独占文件归属**以解耦并行；其余 PR 在独占模块内填实现 + 表驱动测试。拆成 **5 个 ≤2000 行可执行 PR**（PR5 特殊可例外），按 4 个 wave 调度。
+在 #997 冻结签名内兑现 `identity` 域 crate 的 body：domain L0（RBAC `authorize_rbac` + ABAC `evaluate_abac` deny-overrides + 全部 newtype funnel）、application（真实登录 / 会话 L1·L2 / 密码 CAS / 账户安全状态 / 暴破临时阻断 / 角色管理）、ports（`RoleRepo` 已存 + 新增 `CredentialRepo` / `SessionRepo`）、新事件契约（`identity.role-{assigned,revoked}`）+ HTTP handler + contract test。#1833 在该基线之上补齐持久 `AccountSecurityState`、单事务认证漏斗和 refresh pre-mint Active/epoch 门控；`AccountLockout` 不迁移 durable 状态。技术路线：先把单文件 `domain/mod.rs`（556 行）/`application.rs`（291 行）按子域拆模块（PR1 基座），确立各 PR 的**独占文件归属**以解耦并行；其余 PR 在独占模块内填实现 + 表驱动测试。
 
 ## Technical Context
 
@@ -14,7 +14,7 @@
 
 **Primary Dependencies**: `vocab`/`ids`/`secure`/`support`/`runctx`（基础）、`consistency`/`primitives`（引擎）、`authn`/`httpserve`/`bootstrap`/`eventexec`（服务，消费冻结签名）、`diport`（DI port：`Publisher`/`Clock`/`Pdp`）、`generated`（契约派生）；`dynosaur` + `trait-variant`（域形 repo port async dyn）；`thiserror` / `serde_json` / `tracing`；dev：`tokio` / `mockall` / `rstest`
 
-**Storage**: 本 feature 仅 in-mem 替身（`internal/mem.rs`，`#[cfg(test)]` / `seed-login` feature）；真实持久化（postgres `*Repo` impl）属 adapter 单元，Out of scope
+**Storage**: 原 feature 只含 in-mem 替身；#1833 新增 PostgreSQL `account_security_states`，以双向 FK、CHECK、FORCE RLS 和最小 GRANT 保证提交时 credential/security 严格一对一
 
 **Testing**: `cargo nextest run`（进程隔离）+ 表驱动 `rstest`（domain L0）+ `tokio` 异步单测（application）+ `axum::http`/`tower::ServiceExt::oneshot`（handler/contract test）
 
@@ -36,10 +36,10 @@
 |----|------|
 | 跨域只经 contract（crate 图 + deny.toml） | ✅ 仅消费 `generated` + `diport` + 服务冻结签名；不依赖兄弟域 crate |
 | identity → authn（服务层依赖） | ✅ 域可依赖服务层，authn::Principal 已 deny.toml 放行 |
-| 域形 repo port 归属（ADR-005 Option 2） | ✅ `CredentialRepo`/`SessionRepo` 定义在 `identity::ports`（`pub mod ports`），非 diport（签名引域内实体） |
+| 域形 repo port 归属（ADR-005 Option 2） | ✅ `CredentialRepo`/`AccountSecurityReadRepo`/`AccountSecurityLifecycle`/`SessionRepo` 定义在 `identity::ports`，非 diport |
 | domain 不 derive `Serialize`（`rss_domain_no_serialize`） | ✅ wire 类型只经 contract/generated；domain newtype 字段 `pub(crate)` + funnel |
 | 一致性等级在 contract.toml | ✅ session-created/role-* event 的 consistencyLevel 在 `contract.toml`，非 manifest |
-| 必填依赖构造器位置参（非 Option）+ Clock 位参 | ✅ `CredentialRepo`/`SessionRepo`/`Publisher`/`Clock` 均位置参 |
+| 必填依赖构造器位置参（非 Option）+ Clock 位参 | ✅ `CredentialRepo`/`AccountSecurityReadRepo`/`SessionRepo`/`Publisher`/`Clock` 均位置参 |
 | public 降级仅 generated Public evidence + GeneratedPrimaryEndpoint（AUTH-OPTOUT-PRIMARYONLY-01） | ✅ 仅 login/refresh 为 Public；其余端点默认鉴权 |
 | 契约扇出闭环（contract-fanout.md） | ✅ 新角色事件走 schema→generated→metadata→test→docs |
 | AI-robust 新机制 ≥ Medium | ✅ 不新增 Soft；保留既有 Hard/Medium 守卫，新增覆盖率/契约 governance 为 Medium |
@@ -73,14 +73,15 @@ crates/identity/
     │   ├── mod.rs                # 共享 newtype（RoleId/PermissionId/PolicyId/ResourcePattern/AttributeKey/AttributeValue）+ IdentityError + re-export 枢纽 [PR1]
     │   ├── rbac.rs               # Permission/Role/RoleBinding + authorize_rbac [PR1]
     │   ├── abac.rs               # AbacAttribute/PolicyRule(+operator 枚举)/Policy + evaluate_abac(deny-overrides) [PR2]
-    │   ├── account.rs            # AccountStatus + AccountLockout + 凭据/密码 CAS 域类型 [PR3]
+    │   ├── account.rs            # Credential + 独立的临时 AccountLockout + 密码 CAS 域类型 [PR3/#1833]
+    │   ├── account_security.rs   # durable AccountSecurityState + epoch/version + sealed CAS mutation [#1833]
     │   └── session.rs            # Session 域类型 + 生命周期 [PR4]
     ├── application/
     │   ├── mod.rs                # IdentityDomain(bootstrap Domain) + re-export [PR1 微调; PR5 接线路由组]
     │   ├── login.rs              # LoginService 真实登录 + logout + 密码变更 CAS 编排 [PR4]
     │   └── rbac_admin.rs         # 角色分配/撤销 service + 角色事件发布 [PR5]
     ├── handler.rs                # axum handler（login/roles/profile/password/logout）+ contract test [PR5]
-    ├── ports.rs                  # RoleRepo[已存] + CredentialRepo[PR3] + SessionRepo[PR4]（域形 DI port，dynosaur Send 变体）
+    ├── ports.rs                  # Role/Credential/AccountSecurity/Session 最小能力 ports（域形 DI port）
     └── internal/
         ├── mod.rs
         └── mem.rs                # in-mem 替身（各 PR 补自己的）
@@ -100,7 +101,7 @@ generated/src/{event,http}/identity_v1.rs   # 扇出派生 [PR5]
 |----|--------|---------|---------|------|-------|-----------|
 | **PR1** 基座+RBAC | #1186 | US1 | `domain/mod.rs`(拆) `domain/rbac.rs` `lib.rs` | ~1250 | area-auth·type-enhancement·**cx-3**·pri-p1 | （基座；仅承 #1012/#999） |
 | **PR2** ABAC | #1187 | US2 | `domain/abac.rs`（+`vocab::Decision` 视需最小改） | ~1230 | area-auth·type-enhancement·cx-3·pri-p1 | PR1 |
-| **PR3** 身份/凭据+锁定 | #1188 | US3 | `domain/account.rs` `ports.rs`(+CredentialRepo) `internal/mem.rs` | ~1520 | area-auth·type-enhancement·cx-3·pri-p2 | PR1 |
+| **PR3** 身份/凭据+暴破临时阻断 | #1188 | US3 | `domain/account.rs` `ports.rs`(+CredentialRepo) `internal/mem.rs` | ~1520 | area-auth·type-enhancement·cx-3·pri-p2 | PR1 |
 | **PR4** 会话+密码CAS | #1189 | US4 | `application/login.rs` `domain/session.rs` `ports.rs`(+SessionRepo) | ~1520 | area-auth·type-enhancement·cx-3·pri-p2 | PR1, PR3 |
 | **PR5a** 角色事件契约+RbacAdminService | #1190 | US5（前半） | `contracts/event/identity/*` `generated/*` `application/rbac_admin.rs` | ~1000 | area-auth·type-enhancement·**cx-4**·pri-p2 | PR1, PR2, PR4 |
 | **PR5b** HTTP端点契约+handler+contract test+生命周期升级 | #1190 | US5（后半） | `contracts/http/identity/*` `handler.rs` contract test + 生命周期升级 | ~1100 | area-auth·type-enhancement·cx-4·pri-p2 | PR5a |
@@ -123,6 +124,7 @@ generated/src/{event,http}/identity_v1.rs   # 扇出派生 [PR5]
 
 1. **dynosaur/trait-variant wrapper 集合等价（DIPORT-MACRO-CONFINE-01′）**：定义新域形 repo port 后，确认 `deny.toml` `wrappers` 集合 与 xtask `EXTERNAL_CONFINEMENT_WRAPPERS` 两侧相等（identity 已在白名单，作显式核查，防漂移）。
 2. **PolicyRule 冻结边界澄清**：#997 冻结的是跨 crate 接缝（`evaluate_abac` 公开签名，PR2 不改）；`PolicyRule` / `Policy` 是 `pub(crate)` 域类型、无跨 crate 消费方、无 public-api golden——PR2 扩 operator/effect 字段 + 同步更新 identity 自己的 `lib.rs` smoke test 属合法 crate 内 body 工作，**无需 ADR amendment**。
+3. **#1833 认证安全漏斗**：删除 `lockout_status` 独立预检；`authenticate` 在一次事务中固定锁定 credential→account-security。Active receipt、合法 lifecycle mutation 和 refresh 初始签发入口由私有字段/可见性 Hard 约束；SQL 锁序与生产接线集合事实由并发、故障注入和 anti-vacuity 集成测试作 Medium 载体，不建立 Soft 约束。
 
 ## 调度风险备注
 

@@ -9,9 +9,9 @@ use identity::{
     FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps,
     LoginService, PolicyManageService, RbacAdminService, RefreshService,
     ports::{
-        DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynRefreshTokenStore,
-        DynResourceAttributeReadRepo, DynRoleBindingLifecycle, DynRoleBindingReadRepo,
-        DynRoleReadRepo, DynSessionLifecycle,
+        DynAccountSecurityReadRepo, DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo,
+        DynRefreshTokenStore, DynResourceAttributeReadRepo, DynRoleBindingLifecycle,
+        DynRoleBindingReadRepo, DynRoleReadRepo, DynSessionLifecycle,
     },
 };
 use postgres::{PgDomainDeps, caps};
@@ -143,6 +143,7 @@ where
     } = deps;
 
     let credentials = Arc::from(DynCredentialRepo::new_box(pg.credential_repo()));
+    let account_security_reads = DynAccountSecurityReadRepo::new_box(pg.account_security_repo());
     let lifecycle = Arc::from(DynSessionLifecycle::new_box(
         pg.session_lifecycle(boxed_clock(&clock)),
     ));
@@ -154,6 +155,7 @@ where
     );
     let refresh = Arc::new(RefreshService::new(
         DynRefreshTokenStore::new_box(pg.refresh_token_store()),
+        account_security_reads,
         issuer,
         boxed_clock(&clock),
         refresh_ttl,

@@ -33,21 +33,22 @@ pub use generated::event::identity_v1::role_revoked::CONTRACT as ROLE_REVOKED_CO
 pub use generated::event::identity_v1::session_created::CONTRACT as SESSION_CREATED_CONTRACT;
 
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造器仍 `pub(crate)` funnel）。
-// reason: AccountStatus 自 #1277 起不再是任一 port 方法的入/出参（lockout 推进折叠进 `authenticate`，
-// 返回 AuthOutcome）；保留 `pub` 导出是为后续账户门控 handler（PR5/W）跨 crate 消费的账户状态闭值集，
-// 当前作 `AccountLockout::record_failure` 的域内推进结果类型。AccountLockout 亦非 port 方法入/出参，但 #1316
-// PgCredentialRepo 须在事务内对其 from_parts 重建 / record_failure 推进 / 访问器回写锁定三列 ⇒ 经本 facade
-// 跨 crate 暴露（策略阈值仍域内单源、字段私有不可伪造）。其余符号均为现役 port 签名实体。
+// reason: account-security aggregate/mutation are current port entities used by the mandatory
+// authentication and refresh gate. AccountLockout is not a port method entity, but PgCredentialRepo
+// rebuilds and advances it inside the authentication transaction; its fields remain private.
 pub use crate::domain::{
-    AbacAttribute, AccountLockout, AccountStatus, AttributeKey, AttributeValue, AuthOutcome,
-    Credential, GlobPattern, IdentityError, LoginIdentifier, Operator, POLICY_ATTR_CONTRACT_ID,
-    POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND,
-    POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy, PolicyCondition, PolicyEffect,
-    PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion, RefreshRotation,
-    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttribute,
-    ResourceAttributeKey, ResourceAttributeKeyError, ResourceAttributeResolution,
-    ResourceAttributeResourceId, ResourceAttributeVersion, Role, RoleBinding, RoleId, Session,
-    SessionId, kind_from_db, kind_to_db,
+    AbacAttribute, AccountLockout, AccountSecurityHydrationError, AccountSecurityMutation,
+    AccountSecuritySnapshot, AccountSecurityState, AccountSecurityTransitionError,
+    AccountSecurityVersion, AccountStatus, AttributeKey, AttributeValue, AuthOutcome, AuthnEpoch,
+    BruteForceDecision, Credential, GlobPattern, IdentityError, LoginIdentifier, Operator,
+    POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
+    POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy,
+    PolicyCondition, PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule,
+    PolicyVersion, RefreshRotation, RefreshRotationOutcome, RefreshStatus, RefreshTokenHash,
+    RefreshTokenId, RefreshTokenRecord, ResourceAttribute, ResourceAttributeKey,
+    ResourceAttributeKeyError, ResourceAttributeResolution, ResourceAttributeResourceId,
+    ResourceAttributeVersion, Role, RoleBinding, RoleId, Session, SessionId, kind_from_db,
+    kind_to_db,
 };
 pub use vocab::TenantId;
 
@@ -497,6 +498,40 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
     ) -> Result<bool, OutboxEmitError>;
 }
 
+/// Tenant-scoped read-only account-security capability.
+///
+/// INVARIANT: ACCOUNT-SECURITY-READ-CAPABILITY-01 { level = "Hard", exec = "native-compile", source = "code", native = "refresh receives read-only dyn port rather than lifecycle capability" }.
+#[trait_variant::make(AccountSecurityReadRepo: Send)]
+#[dynosaur(
+    pub DynAccountSecurityReadRepo = dyn(box) AccountSecurityReadRepo,
+    bridge(dyn)
+)]
+#[allow(async_fn_in_trait)]
+pub trait AccountSecurityReadRepoLocal: Send + Sync {
+    /// Find the durable state for a canonical subject inside the sealed tenant scope.
+    async fn find(
+        &self,
+        scope: TenantRepoScope,
+        user_id: ids::UserId,
+    ) -> Result<Option<AccountSecurityState>, IdentityError>;
+}
+
+/// Tenant-scoped account-security lifecycle capability.
+#[trait_variant::make(AccountSecurityLifecycle: Send)]
+#[dynosaur(
+    pub DynAccountSecurityLifecycle = dyn(box) AccountSecurityLifecycle,
+    bridge(dyn)
+)]
+#[allow(async_fn_in_trait)]
+pub trait AccountSecurityLifecycleLocal: Send + Sync {
+    /// Apply a sealed optimistic-concurrency transition.
+    async fn apply_transition(
+        &self,
+        scope: TenantRepoScope,
+        mutation: AccountSecurityMutation,
+    ) -> Result<AccountSecurityState, IdentityError>;
+}
+
 /// 凭据仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
 ///
 /// 公开 [`CredentialRepo`] 是 **Send 变体**（adapter `impl CredentialRepo for ...`），[`DynCredentialRepo`]
@@ -506,18 +541,17 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
 /// `LoginService::login().await` future 必须为 `Send`（axum handler 要求）。
 ///
 /// **租户隔离由签名承载（fail-closed）**：所有方法接收 [`TenantRepoScope`] 做 RLS / store scope；跨租
-/// 经 tenant-keyed 查找天然失败——`find(t ≠ cred.tenant)` → `None`，`authenticate` → `InvalidUnknown`，
+/// 经 tenant-keyed 查找天然失败——`find(t ≠ cred.tenant)` → `None`，`authenticate` → `RejectedUnknown`，
 /// 不创建会话、不推进锁定计数（spec 003 US3 跨租红用例）。
 ///
 /// **与 `RoleReadRepo` 差异**：本 port 在 PR3 已有写实 in-mem 替身（[`crate::internal`]），非纯签名冻结——
 /// 锁定态推进是多实例暴破防御的硬需求（内存态多实例不共享则失效），由**原子 port 方法**承载（见下）。
-/// 生产 postgres adapter impl 仍留 W（随 #1116 postgres adapter 落地）；届时 `Credential` / `AccountLockout`
-/// 的跨 crate 重建 + 只读 accessor 公开化与 `RoleReadRepo` 同步走 W（accessor 升 `pub` / `from_persisted` funnel，
-/// 见 #1258）——本 PR 编译证明阶段无独立 adapter，替身在同 crate 用 `pub(crate)`。
+/// 生产 PostgreSQL adapter 与 in-memory 替身实现相同的 combined authentication contract；
+/// `Credential` / `AccountLockout` 只经受控 hydrate/accessor 跨 crate 持久化。
 ///
 /// **租户/主体一致性 = 类型层 Hard（F2）**：携带完整 `Credential` 的写方法（`save` / `apply_password_change`）**不收**
 /// 独立 `tenant`/`login` 参，store key 直接派生自 `credential.tenant()` / `.login()`——错位组合不可表达
-/// （零信任租户隔离不靠调用方约定 / debug_assert）。只持标识的方法：`authenticate` / `lockout_status` 收
+/// （零信任租户隔离不靠调用方约定 / debug_assert）。只持标识的方法 `authenticate` 收
 /// [`TenantRepoScope`] + [`LoginIdentifier`]（登录路径，攻击者可控查找键）；`find_by_user_id` 收 [`TenantRepoScope`] +
 /// `ids::UserId`（self-scoped 改密路径，认证主体锚点，#1277 F2）——二者皆经 tenant-keyed 查找天然 fail-closed。
 ///
@@ -525,12 +559,12 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
 /// `authenticate` 在 provider 内单次原子完成「有界 KDF 验签 + 据已知/未知主体分流推进 lockout」，返回
 /// [`AuthOutcome`]——已知+正确清零、已知+错推进、未知不动；登录枚举防御（禁止未知主体零 KDF 快路径）与真实账号
 /// lockout 推进收进**单一原子结果**，「对未知主体建锁」从此无 API 可表达（F2 Hard：未知主体不可预置锁定、
-/// 不撑大 lockout 表）。`lockout_status` 仅做验签前预门控的原子 lazy-unlock 查询。in-mem = 锁内、
-/// postgres = 事务/行锁/条件 upsert。
+/// 不撑大 lockout 表）。durable state、lazy-unlock 与 KDF 不可拆分；in-mem = 单锁，
+/// postgres = 同一 writer 事务内固定行锁顺序。
 /// ref: kubernetes client-go RetryOnConflict（并发更新显式版本化）。
 /// ref: keycloak DefaultBruteForceProtector.java@main（`failedLogin` 入参为已解析 `UserModel` +
 /// `permanentUserLockOut` 的 `getUserById != null` guard：brute-force 计数仅对已知主体推进；RSS 以
-/// `AuthOutcome` typed 分流强化为类型层 Hard——`InvalidUnknown` 变体在类型层即与计数路径隔离）。
+/// `AuthOutcome` typed 分流强化为类型层 Hard——`RejectedUnknown` 变体在类型层即与计数路径隔离）。
 ///
 /// **owned 参数**：与既有 DI port（diport / `RoleReadRepo`）一致——async dyn port 用 owned 参规避借用生命周期、简化
 /// dynosaur `bridge(dyn)` 装配；消费方调用即弃，代价仅一次 `LoginIdentifier::new`。
@@ -554,15 +588,16 @@ pub trait CredentialRepoLocal: Send + Sync {
     /// profile 的工作（经 typed `secure::verify_password`）——关闭「无此主体时跳过 KDF」的快速枚举路径；
     /// 弱档会额外验证 stored KDF，更强档在硬上限内验证，因此不宣称不同 PHC profile 严格等时。
     /// provider 内据 `(tenant, login)` 查得凭据与否，**原子**分流返回 [`AuthOutcome`]：
-    /// - 已知 + 密码正确 → `Authenticated(user_id)`（canonical actor subject，写 wire/audit）+ 清零失败计数；
-    /// - 已知 + 密码错 → `InvalidKnownUser` + 原子推进 lockout（达阈值即锁）；
-    /// - 查无凭据 → `InvalidUnknown`，**不建/不动 lockout 态**（F2：未知主体不可被预置锁定、不撑大 lockout 表）。
+    /// - 已知 + Active + 密码正确 → `Authenticated(AccountSecurityState)`（含 scoped canonical
+    ///   actor subject 与认证 epoch）+ 清零失败计数；
+    /// - 已知 + 密码错 → `RejectedKnown` + 原子推进 lockout（达阈值即锁）；
+    /// - 查无凭据 → `RejectedUnknown`，**不建/不动 lockout 态**（F2：未知主体不可被预置锁定、不撑大 lockout 表）。
     ///
     /// `now` 由调用方注入 `Clock` 读出（禁 `SystemTime::now()`，clippy 静态守）。消费方（`LoginService`）对
-    /// `InvalidKnownUser` / `InvalidUnknown` 一律对外 `InvalidCredentials`（不向客户端区分以防枚举）。
+    /// `RejectedKnown` / `RejectedUnknown` 一律对外 `InvalidCredentials`（不向客户端区分以防枚举）。
     ///
     /// **provider 实现要求（postgres adapter W，#1258）**：① 验签 + lockout 推进须在**单次原子**（事务/行锁/
-    /// 条件 upsert）内完成；② `InvalidKnownUser` 与 `InvalidUnknown` 的 RTT 差异 SHOULD 不超过 argon2 KDF 噪音
+    /// 条件 upsert）内完成；② `RejectedKnown` 与 `RejectedUnknown` 的 RTT 差异 SHOULD 不超过 argon2 KDF 噪音
     /// 量级——即 lockout 写（仅已知主体路径有）不得引入主体枚举可观测时序差（必要时未知主体路径补等价空写
     /// 或已知主体路径异步推进）。in-mem 替身经 Mutex 内 KDF 主导，天然满足。
     async fn authenticate(
@@ -590,15 +625,6 @@ pub trait CredentialRepoLocal: Send + Sync {
         scope: TenantRepoScope,
         mutation: PasswordChangeMutation,
     ) -> Result<(), IdentityError>;
-
-    /// **原子**锁定态查询（F1，验签前门控）：provider 内 RMW 完成「读 → `try_lazy_unlock(now)`（TTL 过则解锁
-    /// 并持久化）→ 返回 `is_locked(now)`」。无锁定态（查无）→ `Ok(false)`。`now` 经注入 `Clock`。
-    async fn lockout_status(
-        &self,
-        scope: TenantRepoScope,
-        login: LoginIdentifier,
-        now: SystemTime,
-    ) -> Result<bool, IdentityError>;
 }
 
 /// 会话**生命周期** DI port（域形；provider 可换：prod postgres / demo in-mem）——会话**创建（co-tx，L2）**、
@@ -733,14 +759,17 @@ pub trait RefreshTokenStoreLocal: Send + Sync {
     /// 已从源 record 派生，错位组合类型层不可表达（REFRESH-ROTATE-LINEAGE-01，#284 F2）。store 据
     /// `rotation.new_record().tenant()` 注入 scope（无独立 `tenant` 入参可错位）。
     ///
-    /// 返回 `Ok(true)` = CAS 命中（old 当时仍 Active，已消费 + 写入 new）；`Ok(false)` = old 已非 Active
-    /// （并发轮换 / 重放胜出者已消费它）——**不写 new**，由 application 据此触发 reuse-detection 级联撤销。
+    /// 返回 [`RefreshRotationOutcome::Applied`] = CAS 命中（old 当时仍 Active，已消费 + 写入 new）；
+    /// [`RefreshRotationOutcome::Replay`] = old 已非 Active（并发轮换 / 重放胜出者已消费它）——
+    /// **不写 new**，由 application 据此触发 reuse-detection 级联撤销；
+    /// [`RefreshRotationOutcome::AccountStale`] = 最终 writer 事务观察到账号非 Active 或签发 epoch 已过期，
+    /// old 保持未消费且不写 new。
     /// 旧 refresh 一次性失效在类型层 + 事务 CAS 双重保证（杜绝 TOCTOU 双换）。
     async fn rotate(
         &self,
         scope: TenantRepoScope,
         mutation: RefreshRotationMutation,
-    ) -> Result<bool, IdentityError>;
+    ) -> Result<RefreshRotationOutcome, IdentityError>;
 
     /// **级联撤销整条谱系**（reuse-detection + logout）：把 `lineage_id` 家族全部记录置 `Revoked`。幂等
     /// （未知 / 跨租 / 已撤销均 `Ok` 且 no-op）。
@@ -880,6 +909,8 @@ classify_identity_ports! {
     DynRoleBindingReadRepo => diport::AuthEffect,
     DynRoleReadRepo => diport::ReadEffect,
     DynRoleWriteRepo => diport::BusinessWriteEffect,
+    DynAccountSecurityReadRepo => diport::AuthEffect,
+    DynAccountSecurityLifecycle => diport::BusinessWriteEffect,
     DynCredentialRepo => diport::BusinessWriteEffect,
     DynRefreshTokenStore => diport::BusinessWriteEffect,
     DynPolicyLifecycle => diport::OutboxEffect,
@@ -911,6 +942,44 @@ where
 {
     type Effect = T::Effect;
     type Privilege = T::Privilege;
+}
+
+#[cfg(test)]
+mod identity_port_effect_registry_tests {
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn canonical_dyn_wrappers_and_effect_registry_are_an_exact_set() {
+        let source = include_str!("ports.rs");
+        let canonical = source
+            .lines()
+            .filter_map(|line| {
+                let (_, suffix) = line.split_once("pub Dyn")?;
+                let name = suffix
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                    .collect::<String>();
+                (!name.is_empty()).then(|| format!("Dyn{name}"))
+            })
+            .collect::<BTreeSet<_>>();
+        let registry_body = source
+            .split_once("classify_identity_ports! {")
+            .and_then(|(_, suffix)| suffix.split_once("\n}"))
+            .map(|(body, _)| body)
+            .expect("identity effect registry must remain present");
+        let classified = registry_body
+            .lines()
+            .filter_map(|line| {
+                let (name, _) = line.trim().split_once(" => ")?;
+                name.starts_with("Dyn").then(|| name.to_owned())
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            canonical, classified,
+            "every canonical Dyn wrapper must have exactly one owner-sealed effect classification"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1136,14 +1205,6 @@ mod smoke_credential {
         ) -> Result<(), IdentityError> {
             todo!()
         }
-        async fn lockout_status(
-            &self,
-            _scope: TenantRepoScope,
-            _login: LoginIdentifier,
-            _now: SystemTime,
-        ) -> Result<bool, IdentityError> {
-            todo!()
-        }
     }
 
     fn assert_send_sync<T: Send + Sync>(_: &T) {}
@@ -1188,7 +1249,6 @@ mod smoke_credential {
             async fn authenticate(&self, scope: TenantRepoScope, login: LoginIdentifier, candidate: secure::RawPassword, now: SystemTime) -> Result<AuthOutcome, IdentityError>;
             async fn save(&self, scope: TenantRepoScope, credential: Credential) -> Result<(), IdentityError>;
             async fn apply_password_change(&self, scope: TenantRepoScope, mutation: PasswordChangeMutation) -> Result<(), IdentityError>;
-            async fn lockout_status(&self, scope: TenantRepoScope, login: LoginIdentifier, now: SystemTime) -> Result<bool, IdentityError>;
         }
     }
 }
@@ -1226,7 +1286,7 @@ mod smoke_refresh {
             &self,
             _scope: TenantRepoScope,
             _mutation: RefreshRotationMutation,
-        ) -> Result<bool, IdentityError> {
+        ) -> Result<crate::RefreshRotationOutcome, IdentityError> {
             todo!()
         }
         async fn revoke_lineage(
@@ -1277,7 +1337,7 @@ mod smoke_refresh {
         impl RefreshTokenStore for TestRefreshTokenStore {
             async fn insert(&self, scope: TenantRepoScope, record: RefreshTokenRecord) -> Result<(), IdentityError>;
             async fn find_by_hash(&self, scope: TenantRepoScope, hash: RefreshTokenHash) -> Result<Option<RefreshTokenRecord>, IdentityError>;
-            async fn rotate(&self, scope: TenantRepoScope, mutation: RefreshRotationMutation) -> Result<bool, IdentityError>;
+            async fn rotate(&self, scope: TenantRepoScope, mutation: RefreshRotationMutation) -> Result<crate::RefreshRotationOutcome, IdentityError>;
             async fn revoke_lineage(&self, scope: TenantRepoScope, lineage_id: RefreshTokenId) -> Result<(), IdentityError>;
         }
     }

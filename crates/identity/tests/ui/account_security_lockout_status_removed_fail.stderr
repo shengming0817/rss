@@ -1,0 +1,9 @@
+error[E0599]: no method named `lockout_status` found for reference `&R` in the current scope
+ --> tests/ui/account_security_lockout_status_removed_fail.rs:9:10
+  |
+8 |       let _ = repo
+  |  _____________-
+9 | |         .lockout_status(scope, login, std::time::SystemTime::UNIX_EPOCH)
+  | |         -^^^^^^^^^^^^^^ method not found in `&R`
+  | |_________|
+  |
