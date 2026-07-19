@@ -38,9 +38,9 @@ use identity::ports::{
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
-use primitives::ListenerKind;
 use runtime::test_support::{
-    IdentityTestValues, build_s3_runtime_deps_from_values, wire_identity_with, wire_settings,
+    IdentityTestValues, build_s3_runtime_deps_from_values, finalize_rss_listener,
+    wire_identity_with, wire_settings,
 };
 use runtime::{SharedRuntimeDeps, SystemClock, TracingAuthAuditSink};
 use sqlx::PgPool;
@@ -575,22 +575,14 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     // 5. 装配 Primary router（compose → assemble_authed_routers → into_router_for_test）。
     let mut bindings = vec![identity_binding];
     let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;
-    let mut primary = None;
-    for assembled in runtime::routes::assemble_authed_routers_from_values(
+    let primary = finalize_rss_listener(
         &mut registry,
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
-        "mtls",
-        None,
-        None,
-    )? {
-        let (listener, routes) = assembled.into_parts();
-        if listener == ListenerKind::Primary {
-            primary = Some(routes.into_router_for_test());
-        }
-    }
-    let app = primary.ok_or("identity domain did not produce Primary router")?;
+        assembly_schema::AssemblyListenerKind::Primary,
+    )?;
+    let app = primary.into_router_for_test();
 
     // Login while both accounts are Active so each receives a durable refresh record, then move
     // the authoritative rows to non-Active states. A decoy/wrong production reader would return
@@ -833,22 +825,14 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     let settings_binding = wire_settings(&deps).await?;
     let mut bindings = vec![identity_binding, settings_binding];
     let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;
-    let mut primary = None;
-    for assembled in runtime::routes::assemble_authed_routers_from_values(
+    let primary = finalize_rss_listener(
         &mut registry,
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
-        "mtls",
-        None,
-        None,
-    )? {
-        let (listener, routes) = assembled.into_parts();
-        if listener == ListenerKind::Primary {
-            primary = Some(routes.into_router_for_test());
-        }
-    }
-    let app = primary.ok_or("identity domain did not produce Primary router")?;
+        assembly_schema::AssemblyListenerKind::Primary,
+    )?;
+    let app = primary.into_router_for_test();
 
     // 4. POST /roles/{roleId}/bindings：operator JWT 无 role:assign 权限 → route gate 403，且 zero-write。
     let assign_path = ROLES_ASSIGN_SPEC

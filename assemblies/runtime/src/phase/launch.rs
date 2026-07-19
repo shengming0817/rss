@@ -8,7 +8,6 @@ impl Finalized<'_> {
             mut context,
             pg_owner,
             deps: _deps,
-            token_profiles: _token_profiles,
             runtime_rss_access: _runtime_rss_access,
             runtime_federated_access: _runtime_federated_access,
             runtime_service_token: _runtime_service_token,

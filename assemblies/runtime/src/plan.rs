@@ -7,8 +7,10 @@ mod provider;
 
 use crate::config::SnapshotConfig;
 use assembly_schema::{
-    AssemblyManifest, ParsedAssemblyLock, RuntimePlan as TypedRuntimePlan, RuntimePlanV1Input,
+    AssemblyDomain, AssemblyListenerKind, AssemblyManifest, ListenerAuth, ParsedAssemblyLock,
+    RuntimePlan as TypedRuntimePlan, RuntimePlanV1Input,
 };
+use primitives::{AuthScheme, ListenerKind};
 use std::fmt;
 
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
@@ -16,6 +18,58 @@ const BUNDLED_ASSEMBLY_LOCK: &[u8] = include_bytes!("../assembly.lock.json");
 
 /// Runtime-owned entrypoint around the shared, sealed protocol value.
 pub struct RuntimePlan(TypedRuntimePlan);
+
+/// A validated listener projection that can only be minted from [`RuntimePlan`].
+///
+/// INVARIANT: RUNTIME-LISTENER-PLAN-EXECUTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private execution fields plus RuntimePlan-only mint and consuming FinalizedListenerSet handoff" } -- runtime listener identity, domain placement, authentication and launch membership cross the composition root only through this plan-derived capability.
+pub(crate) struct ListenerExecutionPlan {
+    listeners: Vec<ListenerExecutionSpec>,
+}
+
+pub(crate) struct ListenerExecutionSpec {
+    id: String,
+    kind: ListenerKind,
+    auth_scheme: AuthScheme,
+    domains: Vec<AssemblyDomain>,
+}
+
+impl ListenerExecutionPlan {
+    pub(crate) fn listeners(&self) -> &[ListenerExecutionSpec] {
+        &self.listeners
+    }
+
+    pub(crate) fn into_listeners(self) -> Vec<ListenerExecutionSpec> {
+        self.listeners
+    }
+}
+
+impl ListenerExecutionSpec {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) const fn kind(&self) -> ListenerKind {
+        self.kind
+    }
+
+    pub(crate) const fn auth_scheme(&self) -> AuthScheme {
+        self.auth_scheme
+    }
+
+    pub(crate) fn domains(&self) -> &[AssemblyDomain] {
+        &self.domains
+    }
+
+    #[cfg(test)]
+    pub(crate) fn health_for_test() -> Self {
+        Self {
+            id: "health-main".to_owned(),
+            kind: ListenerKind::Health,
+            auth_scheme: AuthScheme::NoAuth,
+            domains: Vec::new(),
+        }
+    }
+}
 
 impl RuntimePlan {
     /// Build the exact bundled plan from the committed manifest, lock and captured configuration.
@@ -48,6 +102,59 @@ impl RuntimePlan {
 
     pub const fn as_typed(&self) -> &TypedRuntimePlan {
         &self.0
+    }
+
+    pub(crate) fn listener_execution_plan(&self) -> ListenerExecutionPlan {
+        listener_execution_plan_from_typed(&self.0)
+    }
+}
+
+fn listener_execution_plan_from_typed(plan: &TypedRuntimePlan) -> ListenerExecutionPlan {
+    ListenerExecutionPlan {
+        listeners: plan
+            .listener_plans()
+            .iter()
+            .map(|listener| ListenerExecutionSpec {
+                id: listener.id().to_owned(),
+                kind: runtime_listener_kind(listener.kind()),
+                auth_scheme: runtime_auth_scheme(listener.auth()),
+                domains: listener.domains().to_vec(),
+            })
+            .collect(),
+    }
+}
+
+#[cfg(feature = "integration")]
+pub(crate) fn fixture_listener_spec(
+    kind: AssemblyListenerKind,
+) -> anyhow::Result<ListenerExecutionSpec> {
+    let parsed = assembly_schema::ParsedRuntimePlan::from_json_slice(include_bytes!(
+        "../tests/fixtures/runtime-plan-v1.json"
+    ))
+    .map_err(|error| anyhow::anyhow!("parse fingerprint-verified RuntimePlan fixture: {error}"))?;
+    listener_execution_plan_from_typed(parsed.as_plan())
+        .into_listeners()
+        .into_iter()
+        .find(|listener| listener.kind() == runtime_listener_kind(kind))
+        .ok_or_else(|| anyhow::anyhow!("RuntimePlan fixture does not declare requested listener"))
+}
+
+const fn runtime_listener_kind(kind: AssemblyListenerKind) -> ListenerKind {
+    match kind {
+        AssemblyListenerKind::Primary => ListenerKind::Primary,
+        AssemblyListenerKind::Internal => ListenerKind::Internal,
+        AssemblyListenerKind::Admin => ListenerKind::Admin,
+        AssemblyListenerKind::Health => ListenerKind::Health,
+    }
+}
+
+const fn runtime_auth_scheme(auth: ListenerAuth) -> AuthScheme {
+    match auth {
+        ListenerAuth::NoAuth => AuthScheme::NoAuth,
+        ListenerAuth::RssAccessToken => AuthScheme::RssAccessToken,
+        ListenerAuth::FederatedAccessToken => AuthScheme::FederatedAccessToken,
+        ListenerAuth::Mtls => AuthScheme::Mtls,
+        ListenerAuth::ServiceToken => AuthScheme::ServiceToken,
     }
 }
 
@@ -550,5 +657,91 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/runtime-plan-v1.json"))
                 .expect("runtime plan golden");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn listener_plan_execution_projects_bundled_four_listener_baseline() {
+        let runtime_plan = bundled(&[]);
+        let execution = runtime_plan.listener_execution_plan();
+        let actual = execution
+            .listeners()
+            .iter()
+            .map(|listener| {
+                (
+                    listener.id(),
+                    listener.kind(),
+                    listener.auth_scheme(),
+                    listener.domains().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    "admin-main",
+                    primitives::ListenerKind::Admin,
+                    primitives::AuthScheme::RssAccessToken,
+                    vec![AssemblyDomain::Audit],
+                ),
+                (
+                    "health-main",
+                    primitives::ListenerKind::Health,
+                    primitives::AuthScheme::NoAuth,
+                    vec![],
+                ),
+                (
+                    "internal-main",
+                    primitives::ListenerKind::Internal,
+                    primitives::AuthScheme::Mtls,
+                    vec![],
+                ),
+                (
+                    "primary-main",
+                    primitives::ListenerKind::Primary,
+                    primitives::AuthScheme::RssAccessToken,
+                    vec![AssemblyDomain::Settings, AssemblyDomain::Identity],
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn auth_plan_execution_projects_every_closed_listener_scheme() {
+        let service_token = bundled(&[("RSS_INTERNAL_AUTH_SCHEME", "service-token")]);
+        let service_token_schemes = service_token
+            .listener_execution_plan()
+            .listeners()
+            .iter()
+            .map(|listener| (listener.kind(), listener.auth_scheme()))
+            .collect::<Vec<_>>();
+        assert!(service_token_schemes.contains(&(
+            primitives::ListenerKind::Internal,
+            primitives::AuthScheme::ServiceToken,
+        )));
+
+        let federated = bundled(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "federated-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "federated-access"),
+        ]);
+        let federated_schemes = federated
+            .listener_execution_plan()
+            .listeners()
+            .iter()
+            .map(|listener| (listener.kind(), listener.auth_scheme()))
+            .collect::<Vec<_>>();
+        assert!(federated_schemes.contains(&(
+            primitives::ListenerKind::Primary,
+            primitives::AuthScheme::FederatedAccessToken,
+        )));
+        assert!(federated_schemes.contains(&(
+            primitives::ListenerKind::Admin,
+            primitives::AuthScheme::FederatedAccessToken,
+        )));
+        assert!(federated_schemes.contains(&(
+            primitives::ListenerKind::Health,
+            primitives::AuthScheme::NoAuth,
+        )));
     }
 }

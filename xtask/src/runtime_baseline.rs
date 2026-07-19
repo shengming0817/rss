@@ -22,7 +22,9 @@
 //!
 //! INVARIANT: EVENT-TRANSPORT-OUTPUT-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::event_transport_output_funnel_rejects_legacy_and_bypasses", anti_vacuity = "tests::event_transport_output_funnel_accepts_unified_live_path" } -- event transport must return one crate-private `DomainModuleResult`, merge it once into runtime assembly, and register AMQP resources plus workers only through the common lifecycle funnel.
 //!
-//! INVARIANT: RUNTIME-PHASE-TRANSITION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_phase_transition_rejects_missing_reordered_drop_plan_and_bait", anti_vacuity = "tests::runtime_phase_transition_accepts_canonical_live_path" } -- the unique production `run_startup()` delegates only to `phase::execute`; that executor consumes the exact five associated-`Next` transitions in order, every transition uses its associated `RuntimePhaseState::PHASE` through the directly redacting private `phase_result` funnel, the runtime plan stays owned by `PhaseContext`, state trait impls are closed across the complete production module graph, and launch inputs validate before the sole launch phase constructs `LaunchPlan`. Tuple/drop/skip/reorder paths, direct or aliased `LaunchPlan`/`ShutdownStack` access, legacy root phase bodies, cross-file impls, macros, dead branches, comments, strings, and test-only bait fail closed.
+//! INVARIANT: RUNTIME-PHASE-TRANSITION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_phase_transition_rejects_missing_reordered_drop_plan_and_bait", anti_vacuity = "tests::runtime_phase_transition_accepts_canonical_live_path" } -- the unique production `run_startup()` delegates only to `phase::execute`; that executor consumes the exact five associated-`Next` transitions in order, every transition uses its associated `RuntimePhaseState::PHASE` through the directly redacting private `phase_result` funnel, the runtime plan stays owned by `PhaseContext` while its single listener execution projection is carried as a mandatory phase-state field into Finalize, state trait impls are closed across the complete production module graph, and launch inputs validate before the sole launch phase constructs `LaunchPlan`. Tuple/drop/skip/reorder paths, direct or aliased `LaunchPlan`/`ShutdownStack` access, legacy root phase bodies, cross-file impls, macros, dead branches, comments, strings, and test-only bait fail closed.
+//!
+//! INVARIANT: RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_listener_plan_execution_rejects_legacy_and_structural_bypasses", anti_vacuity = "tests::runtime_listener_plan_execution_accepts_workspace" } -- across the complete production module graph, AST must expose exactly one RuntimePlan listener projection call, one consuming finalizer and phase call, and one `FinalizedListenerSet` construction expression in their canonical owners with no constructor/trait seam; `ListenerExecutionPlan`, `ListenerExecutionSpec`, `AssembledListener`, and `FinalizedListenerSet` remain exact `pub(crate)` types with inherited-private fields and no public re-export; launch accepts only that set, while raw-value auth assemblers, manual Health append, legacy config auth accessors, public listener/routes modules, and ordinary `Vec<AssembledListener>` launch inputs remain forbidden.
 //!
 //! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- the only production service-token constructor accepts the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps` plus `PgMaintenanceDeps`. Serving and the five operator paths call that typed constructor directly at their run-reachable sites. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 
@@ -63,6 +65,12 @@ const RUNTIME_PHASE_DOMAINS_PATH: &str = "assemblies/runtime/src/phase/domains.r
 const RUNTIME_PHASE_FINALIZE_PATH: &str = "assemblies/runtime/src/phase/finalize.rs";
 const RUNTIME_PHASE_LAUNCH_PATH: &str = "assemblies/runtime/src/phase/launch.rs";
 const RUNTIME_SECRET_CONFIG_PATH: &str = "assemblies/runtime/src/secret_config.rs";
+const RUNTIME_PLAN_PATH: &str = "assemblies/runtime/src/plan.rs";
+const RUNTIME_ROUTES_PATH: &str = "assemblies/runtime/src/routes.rs";
+#[cfg(test)]
+const RUNTIME_LISTENERS_PATH: &str = "assemblies/runtime/src/listeners.rs";
+#[cfg(test)]
+const RUNTIME_CONFIG_PATH: &str = "assemblies/runtime/src/config.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -222,6 +230,7 @@ fn collect_report(root: &Path) -> Result<Report> {
     findings.extend(generated_domains_live_findings(root)?);
     findings.extend(provider_outputs_live_findings(root)?);
     findings.extend(event_transport_output_findings(root)?);
+    findings.extend(listener_plan_execution_findings(root)?);
 
     Ok(Report {
         rendered: render_baseline(
@@ -239,6 +248,413 @@ fn collect_report(root: &Path) -> Result<Report> {
         anchors: anchors.len(),
         findings,
     })
+}
+
+fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    // Historical unit fixtures exercise unrelated baseline rules and intentionally do not model
+    // the listener-plan source graph. A real runtime tree always contains plan.rs.
+    if !root.join(RUNTIME_PLAN_PATH).exists() {
+        return Ok(Vec::new());
+    }
+    let production_files = runtime_production_source_files(root)?;
+    let sources = production_files
+        .keys()
+        .map(|path| {
+            fs::read_to_string(root.join(path))
+                .with_context(|| format!("读 listener-plan gate source {path} 失败"))
+                .map(|source| (path.clone(), source))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let source = |path: &str| sources.get(path).map(String::as_str).unwrap_or_default();
+    let plan = source(RUNTIME_PLAN_PATH);
+    let routes = source(RUNTIME_ROUTES_PATH);
+    let finalize = source(RUNTIME_PHASE_FINALIZE_PATH);
+    let phase = source(RUNTIME_PHASE_PATH);
+    let launch = source(RUNTIME_LAUNCH_PATH);
+    let lib = source(RUNTIME_LIB_PATH);
+    let inventories = production_files
+        .iter()
+        .map(|(path, file)| (path.clone(), listener_plan_execution_inventory(file)))
+        .collect::<BTreeMap<_, _>>();
+    let total_inventory = inventories.values().fold(
+        ListenerPlanExecutionInventory::default(),
+        |mut total, inventory| {
+            total.absorb(inventory);
+            total
+        },
+    );
+    let inventory_count = |path: &str, field: fn(&ListenerPlanExecutionInventory) -> usize| {
+        inventories.get(path).map(field).unwrap_or_default()
+    };
+
+    let mut findings = Vec::new();
+    let checks = [
+        (
+            plan.matches("fn listener_execution_plan(&self)").count() == 1
+                && plan.contains("pub(crate) struct ListenerExecutionPlan")
+                && plan.contains("pub(crate) struct ListenerExecutionSpec")
+                && plan.contains("RUNTIME-LISTENER-PLAN-EXECUTION-01"),
+            RUNTIME_PLAN_PATH,
+            "RuntimePlan 必须唯一 mint 私有 listener execution capability",
+        ),
+        (
+            routes
+                .matches("pub(crate) fn finalize_listener_plan(")
+                .count()
+                == 1
+                && routes.contains("execution_plan.into_listeners()")
+                && routes.contains("pub(crate) struct FinalizedListenerSet")
+                && routes.contains("providers.validate_exact_presence(&execution_plan)"),
+            RUNTIME_ROUTES_PATH,
+            "必须只有一个消费 ListenerExecutionPlan 的 finalizer，并产出 FinalizedListenerSet",
+        ),
+        (
+            total_inventory.projection_calls == 1
+                && inventory_count(RUNTIME_PHASE_PROVIDER_PATH, |item| item.projection_calls) == 1
+                && total_inventory.set_returning_functions == 1
+                && total_inventory.canonical_finalizers == 1
+                && total_inventory.finalizer_calls == 1
+                && inventory_count(RUNTIME_PHASE_FINALIZE_PATH, |item| item.finalizer_calls) == 1
+                && total_inventory.set_literals == 1
+                && inventory_count(RUNTIME_ROUTES_PATH, |item| item.set_literals) == 1
+                && total_inventory.set_constructor_methods == 0
+                && total_inventory.set_trait_impls == 0,
+            RUNTIME_ROUTES_PATH,
+            "production AST 必须精确锁定唯一 plan projection、单 finalizer/call/set literal，且无额外 constructor/From seam",
+        ),
+        (
+            finalize.contains("listener_execution_plan,")
+                && finalize.contains("let listeners = finalize_listener_plan("),
+            RUNTIME_PHASE_FINALIZE_PATH,
+            "Finalize phase 必须消费 plan capability 后调用唯一 listener finalizer",
+        ),
+        (
+            phase.contains("listeners: crate::routes::FinalizedListenerSet")
+                && !phase.contains("listeners: Vec<crate::routes::AssembledListener>"),
+            RUNTIME_PHASE_PATH,
+            "Finalized phase state 只能持有 FinalizedListenerSet",
+        ),
+        (
+            launch
+                .matches("listeners: routes::FinalizedListenerSet")
+                .count()
+                >= 2
+                && !launch.contains("\n    listeners: Vec<routes::AssembledListener>"),
+            RUNTIME_LAUNCH_PATH,
+            "LaunchPlanParts 与 LaunchPlan 必须只接受 FinalizedListenerSet",
+        ),
+        (
+            lib.contains("\nmod listeners;")
+                && lib.contains("\nmod routes;")
+                && !lib.contains("\npub mod listeners;")
+                && !lib.contains("\npub mod routes;"),
+            RUNTIME_LIB_PATH,
+            "listeners/routes 必须保持 crate-private",
+        ),
+    ];
+    for (ok, path, detail) in checks {
+        if !ok {
+            findings.push(finding(Rule::ForbiddenWiring, path, detail));
+        }
+    }
+    findings.extend(listener_capability_visibility_findings(&production_files));
+
+    for (path, source) in &sources {
+        for forbidden in [
+            "assemble_authed_routers_from_values",
+            "assemble_authed_routers_with_bindings",
+            "health_listener(reporter, metrics_exporter)",
+            "health_auth_scheme",
+            "pub(crate) const fn admin(&self)",
+            "pub(crate) const fn internal(&self)",
+            "AssembledListener::plain",
+            "pub fn health_listener",
+        ] {
+            if !source.contains(forbidden) {
+                continue;
+            }
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                path,
+                format!("listener plan production path 禁止 legacy bypass `{forbidden}`"),
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+#[derive(Default)]
+struct ListenerPlanExecutionInventory {
+    projection_calls: usize,
+    finalizer_calls: usize,
+    set_returning_functions: usize,
+    canonical_finalizers: usize,
+    set_constructor_methods: usize,
+    set_trait_impls: usize,
+    set_literals: usize,
+    inside_set_impl: bool,
+}
+
+impl ListenerPlanExecutionInventory {
+    fn absorb(&mut self, other: &Self) {
+        self.projection_calls += other.projection_calls;
+        self.finalizer_calls += other.finalizer_calls;
+        self.set_returning_functions += other.set_returning_functions;
+        self.canonical_finalizers += other.canonical_finalizers;
+        self.set_constructor_methods += other.set_constructor_methods;
+        self.set_trait_impls += other.set_trait_impls;
+        self.set_literals += other.set_literals;
+    }
+}
+
+const LISTENER_CAPABILITY_TYPES: &[(&str, &str)] = &[
+    ("ListenerExecutionPlan", RUNTIME_PLAN_PATH),
+    ("ListenerExecutionSpec", RUNTIME_PLAN_PATH),
+    ("AssembledListener", RUNTIME_ROUTES_PATH),
+    ("FinalizedListenerSet", RUNTIME_ROUTES_PATH),
+];
+
+#[derive(Default)]
+struct ListenerCapabilityInventory {
+    declarations: BTreeMap<String, Vec<(bool, bool)>>,
+    public_reexports: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for ListenerCapabilityInventory {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+        if !attrs_may_be_production(&item.attrs) {
+            return;
+        }
+        let name = item.ident.to_string();
+        if LISTENER_CAPABILITY_TYPES
+            .iter()
+            .any(|(protected, _)| *protected == name)
+        {
+            self.declarations.entry(name).or_default().push((
+                is_exact_pub_crate(&item.vis),
+                item.fields
+                    .iter()
+                    .all(|field| matches!(field.vis, syn::Visibility::Inherited)),
+            ));
+        }
+        syn::visit::visit_item_struct(self, item);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if !attrs_may_be_production(&item.attrs) || !matches!(item.vis, syn::Visibility::Public(_))
+        {
+            return;
+        }
+        collect_public_listener_capability_reexports(
+            &item.tree,
+            &mut Vec::new(),
+            &mut self.public_reexports,
+        );
+    }
+}
+
+fn is_exact_pub_crate(visibility: &syn::Visibility) -> bool {
+    matches!(
+        visibility,
+        syn::Visibility::Restricted(restricted)
+            if restricted.in_token.is_none() && restricted.path.is_ident("crate")
+    )
+}
+
+fn collect_public_listener_capability_reexports(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    exposed: &mut BTreeSet<String>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_public_listener_capability_reexports(&path.tree, prefix, exposed);
+            prefix.pop();
+        }
+        syn::UseTree::Name(name) => {
+            let ident = name.ident.to_string();
+            if LISTENER_CAPABILITY_TYPES
+                .iter()
+                .any(|(protected, _)| *protected == ident)
+            {
+                exposed.insert(ident);
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            let ident = rename.ident.to_string();
+            if LISTENER_CAPABILITY_TYPES
+                .iter()
+                .any(|(protected, _)| *protected == ident)
+            {
+                exposed.insert(ident);
+            }
+        }
+        syn::UseTree::Glob(_) => {
+            if prefix
+                .last()
+                .is_some_and(|module| matches!(module.as_str(), "plan" | "routes"))
+            {
+                exposed.extend(
+                    LISTENER_CAPABILITY_TYPES
+                        .iter()
+                        .map(|(protected, _)| (*protected).to_owned()),
+                );
+            }
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_public_listener_capability_reexports(item, prefix, exposed);
+            }
+        }
+    }
+}
+
+fn listener_capability_visibility_findings(
+    production_files: &BTreeMap<String, syn::File>,
+) -> Vec<Finding<Rule>> {
+    let mut declarations: BTreeMap<String, Vec<(&str, bool, bool)>> = BTreeMap::new();
+    let mut public_reexports = Vec::new();
+    for (path, file) in production_files {
+        let mut inventory = ListenerCapabilityInventory::default();
+        inventory.visit_file(file);
+        for (name, observed) in inventory.declarations {
+            declarations
+                .entry(name)
+                .or_default()
+                .extend(observed.into_iter().map(|(crate_visible, private_fields)| {
+                    (path.as_str(), crate_visible, private_fields)
+                }));
+        }
+        public_reexports.extend(
+            inventory
+                .public_reexports
+                .into_iter()
+                .map(|name| (path.as_str(), name)),
+        );
+    }
+
+    let mut findings = Vec::new();
+    for (name, owner) in LISTENER_CAPABILITY_TYPES {
+        let observed = declarations
+            .get(*name)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if !matches!(
+            observed,
+            [(path, true, true)] if *path == *owner
+        ) {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                *owner,
+                format!(
+                    "`{name}` 必须只在 canonical owner 定义一次、精确使用 pub(crate) 且所有字段保持 inherited-private"
+                ),
+            ));
+        }
+    }
+    for (path, name) in public_reexports {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            path,
+            format!("listener execution capability `{name}` 禁止 public re-export"),
+        ));
+    }
+    findings
+}
+
+fn listener_plan_execution_inventory(file: &syn::File) -> ListenerPlanExecutionInventory {
+    let mut inventory = ListenerPlanExecutionInventory::default();
+    inventory.visit_file(&file);
+    inventory
+}
+
+fn return_type_mentions(output: &syn::ReturnType, ident: &str) -> bool {
+    matches!(output, syn::ReturnType::Type(_, ty) if compact_tokens(ty).contains(ident))
+}
+
+fn signature_input_mentions(signature: &syn::Signature, ident: &str) -> bool {
+    signature.inputs.iter().any(|input| {
+        matches!(input, syn::FnArg::Typed(argument) if compact_tokens(&argument.ty).contains(ident))
+    })
+}
+
+impl<'ast> Visit<'ast> for ListenerPlanExecutionInventory {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if !attrs_may_be_production(&item.attrs) {
+            return;
+        }
+        if return_type_mentions(&item.sig.output, "FinalizedListenerSet") {
+            self.set_returning_functions += 1;
+            if item.sig.ident == "finalize_listener_plan"
+                && signature_input_mentions(&item.sig, "ListenerExecutionPlan")
+            {
+                self.canonical_finalizers += 1;
+            }
+        }
+        syn::visit::visit_item_fn(self, item);
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if !attrs_may_be_production(&item.attrs) {
+            return;
+        }
+        let is_set_impl =
+            type_last_ident(&item.self_ty).is_some_and(|ident| ident == "FinalizedListenerSet");
+        if is_set_impl && item.trait_.is_some() {
+            self.set_trait_impls += 1;
+        }
+        let previous = self.inside_set_impl;
+        self.inside_set_impl = is_set_impl;
+        syn::visit::visit_item_impl(self, item);
+        self.inside_set_impl = previous;
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if !attrs_may_be_production(&item.attrs) {
+            return;
+        }
+        if self.inside_set_impl
+            && (return_type_mentions(&item.sig.output, "FinalizedListenerSet")
+                || return_type_mentions(&item.sig.output, "Self"))
+        {
+            self.set_constructor_methods += 1;
+        }
+        syn::visit::visit_impl_item_fn(self, item);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "listener_execution_plan" {
+            self.projection_calls += 1;
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if expr_path_last(&call.func).is_some_and(|ident| ident == "finalize_listener_plan") {
+            self.finalizer_calls += 1;
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_struct(&mut self, expression: &'ast syn::ExprStruct) {
+        if path_last_ident(&expression.path).is_some_and(|ident| ident == "FinalizedListenerSet") {
+            self.set_literals += 1;
+        }
+        syn::visit::visit_expr_struct(self, expression);
+    }
 }
 
 #[derive(Default)]
@@ -10177,48 +10593,17 @@ fn launch_lifecycle_calls_are_canonical(file: &syn::File) -> bool {
             || method_call_count_in_block(block, "register_with_token") != 0
     }
 
-    let mtls_helpers = file
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Fn(function)
-                if function.sig.ident == "register_mtls_server"
-                    && attrs_may_be_production(&function.attrs) =>
-            {
-                Some(function)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let split_mtls_registration = mtls_helpers.len() == 1
-        && method_call_count_in_block(&mtls_helpers[0].block, "register_detached") == 0
-        && method_call_count_in_block(&mtls_helpers[0].block, "register_with_token") == 1;
+    let mut listener_activation_count = 0usize;
 
     for item in &file.items {
         match item {
             syn::Item::Fn(function) if attrs_may_be_production(&function.attrs) => {
-                let detached = method_call_count_in_block(&function.block, "register_detached");
-                let with_token = method_call_count_in_block(&function.block, "register_with_token");
-                if function.sig.ident == "bind_and_register" {
-                    let inline = mtls_helpers.is_empty() && with_token == 2;
-                    let split = split_mtls_registration
-                        && with_token == 1
-                        && exact_named_path_call_count(&function.block, &["register_mtls_server"])
-                            == 1;
-                    if detached != 0 || (!inline && !split) {
-                        return false;
-                    }
-                } else if function.sig.ident == "register_mtls_server" {
-                    if !split_mtls_registration {
-                        return false;
-                    }
-                } else if detached != 0 || with_token != 0 {
+                if has_lifecycle_calls(&function.block) {
                     return false;
                 }
             }
             syn::Item::Impl(item) if attrs_may_be_production(&item.attrs) => {
-                let is_launch_plan =
-                    type_last_ident(&item.self_ty).is_some_and(|ident| ident == "LaunchPlan");
+                let owner = type_last_ident(&item.self_ty);
                 for method in item.items.iter().filter_map(|item| match item {
                     syn::ImplItem::Fn(method) if attrs_may_be_production(&method.attrs) => {
                         Some(method)
@@ -10228,12 +10613,22 @@ fn launch_lifecycle_calls_are_canonical(file: &syn::File) -> bool {
                     let detached = method_call_count_in_block(&method.block, "register_detached");
                     let with_token =
                         method_call_count_in_block(&method.block, "register_with_token");
-                    let canonical = is_launch_plan
+                    let launch_plan_method = owner.is_some_and(|ident| ident == "LaunchPlan")
                         && ((method.sig.ident == "register" && detached == 1 && with_token == 0)
                             || (method.sig.ident == "register_module_output"
                                 && detached == 1
                                 && with_token == 1));
-                    if has_lifecycle_calls(&method.block) && !canonical {
+                    let listener_activation = owner.is_some_and(|ident| ident == "BoundListener")
+                        && method.sig.ident == "activate"
+                        && detached == 0
+                        && with_token == 2;
+                    if listener_activation {
+                        listener_activation_count += 1;
+                    }
+                    if has_lifecycle_calls(&method.block)
+                        && !launch_plan_method
+                        && !listener_activation
+                    {
                         return false;
                     }
                 }
@@ -10241,7 +10636,7 @@ fn launch_lifecycle_calls_are_canonical(file: &syn::File) -> bool {
             _ => {}
         }
     }
-    true
+    listener_activation_count == 1
 }
 
 fn method_call_count_in_block(block: &syn::Block, method: &str) -> usize {
@@ -11971,6 +12366,11 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "crate::plan::RuntimePlan::bundled(self.runtime_inputs.config())",
     },
     AnchorSpec {
+        id: "run.listener.execution-plan",
+        path: RUNTIME_PHASE_PROVIDER_PATH,
+        pattern: "let listener_execution_plan = runtime_plan.listener_execution_plan();",
+    },
+    AnchorSpec {
         id: "run.config.serving",
         path: RUNTIME_PHASE_PROVIDER_PATH,
         pattern: "RuntimeServingConfig::from_snapshot(config)",
@@ -12121,14 +12521,9 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "for (name, probe) in std::mem::take(&mut module.probes)",
     },
     AnchorSpec {
-        id: "run.auth.routers-capability",
+        id: "run.listener.finalizer",
         path: RUNTIME_PHASE_FINALIZE_PATH,
-        pattern: "let mut listeners = assemble_authed_routers(",
-    },
-    AnchorSpec {
-        id: "run.health.listener",
-        path: RUNTIME_PHASE_FINALIZE_PATH,
-        pattern: "health_listener(reporter, metrics_exporter)",
+        pattern: "let listeners = finalize_listener_plan(",
     },
     AnchorSpec {
         id: "run.provider-output.pg",
@@ -12181,9 +12576,14 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "let listeners = plan.register(&mut stack)?;",
     },
     AnchorSpec {
-        id: "launch.listeners",
+        id: "launch.listener-prepare",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "bind_and_register(&mut stack, listener, budget, &addr_resolver).await?;",
+        pattern: "let bound = BoundListenerSet::prepare(listeners, budget, &addr_resolver).await?;",
+    },
+    AnchorSpec {
+        id: "launch.listener-activate",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "bound.activate(&mut stack)?;",
     },
 ];
 
@@ -12276,7 +12676,10 @@ fn anchor_search_scope<'a>(spec: &AnchorSpec, text: &'a str) -> AnchorSearchScop
         if spec.id.starts_with("launch.shutdown.") {
             return launch_plan_register_scope(text).unwrap_or_else(|| empty_scope(text));
         }
-        if matches!(spec.id, "launch.register-plan" | "launch.listeners") {
+        if matches!(
+            spec.id,
+            "launch.register-plan" | "launch.listener-prepare" | "launch.listener-activate"
+        ) {
             return extract_braced_body_at(text, 0, "async fn launch_until_observed")
                 .unwrap_or_else(|| empty_scope(text));
         }
@@ -12326,7 +12729,10 @@ fn anchor_order_key(spec: &AnchorSpec) -> (&'static str, &'static str) {
         return (spec.path, "register");
     }
     if spec.path == RUNTIME_LAUNCH_PATH
-        && matches!(spec.id, "launch.register-plan" | "launch.listeners")
+        && matches!(
+            spec.id,
+            "launch.register-plan" | "launch.listener-prepare" | "launch.listener-activate"
+        )
     {
         return (spec.path, "launch_until_observed");
     }
@@ -13556,7 +13962,12 @@ impl DomainModuleResult {
             .iter()
             .filter(|anchor| {
                 anchor.path == RUNTIME_LAUNCH_PATH
-                    && matches!(anchor.id, "launch.register-plan" | "launch.listeners")
+                    && matches!(
+                        anchor.id,
+                        "launch.register-plan"
+                            | "launch.listener-prepare"
+                            | "launch.listener-activate"
+                    )
             })
             .filter(|anchor| omit != Some(anchor.id))
             .map(|anchor| anchor.pattern)
@@ -13672,7 +14083,8 @@ serde = workspace=true; features=[derive]
             "01 | prepare.config.snapshot | assemblies/runtime/src/lib.rs | RuntimeConfigSnapshot::capture_process_snapshot()"
         ));
         assert!(report.rendered.contains("| launch.register-plan |"));
-        assert!(report.rendered.contains("| launch.listeners |"));
+        assert!(report.rendered.contains("| launch.listener-prepare |"));
+        assert!(report.rendered.contains("| launch.listener-activate |"));
         Ok(())
     }
 
@@ -13999,6 +14411,13 @@ impl LaunchPlan {
     fn register_module_output(stack: &mut ShutdownStack, output: DomainModuleResult) {
         for resource in output.resources { stack.register_detached(resource); }
         for worker in output.workers { stack.register_with_token(worker); }
+    }
+}
+struct BoundListener;
+impl BoundListener {
+    fn activate(self, stack: &mut ShutdownStack) {
+        stack.register_with_token(plain_server);
+        stack.register_with_token(mtls_server);
     }
 }
 "#,
@@ -17391,7 +17810,8 @@ for resource in resources
 }}
 async fn launch_until_observed() {
 let listeners = plan.register(&mut stack)?;
-bind_and_register(&mut stack, listener, budget, &addr_resolver).await?;
+let bound = BoundListenerSet::prepare(listeners, budget, &addr_resolver).await?;
+bound.activate(&mut stack)?;
 }
 "#,
         )?;
@@ -17464,12 +17884,12 @@ bind_and_register(&mut stack, listener, budget, &addr_resolver).await?;
     }
 
     #[test]
-    fn runtime_baseline_requires_plan_register_before_listener_bind() -> Result<()> {
-        let root = fixture_root("runtime-baseline-launch-plan-before-bind")?;
+    fn runtime_baseline_requires_plan_register_before_listener_prepare() -> Result<()> {
+        let root = fixture_root("runtime-baseline-launch-plan-before-prepare")?;
         write(
             &root.join(RUNTIME_LAUNCH_PATH),
             &format!(
-                "impl LaunchPlan {{ fn register() {{\n{}\n}}\nfn register_module_output() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\nbind_and_register(&mut stack, listener, budget, &addr_resolver).await?;\nlet listeners = plan.register(&mut stack)?;\n}}\n",
+                "impl LaunchPlan {{ fn register() {{\n{}\n}}\nfn register_module_output() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\nlet bound = BoundListenerSet::prepare(listeners, budget, &addr_resolver).await?;\nlet listeners = plan.register(&mut stack)?;\nbound.activate(&mut stack)?;\n}}\n",
                 launch_register_anchor_lines(None),
                 launch_module_registration_anchor_lines(None)
             ),
@@ -17477,16 +17897,16 @@ bind_and_register(&mut stack, listener, budget, &addr_resolver).await?;
         let report = collect_report(&root)?;
         assert!(
             report.findings.iter().any(|f| {
-                f.rule == Rule::MissingAnchor && f.detail.contains("launch.listeners")
+                f.rule == Rule::MissingAnchor && f.detail.contains("launch.listener-prepare")
             }),
-            "listener bind before plan.register must be out-of-order: {:?}",
+            "listener prepare before plan.register must be out-of-order: {:?}",
             report.findings
         );
         assert!(
             report
                 .rendered
-                .contains("launch.listeners | assemblies/runtime/src/launch.rs | bind_and_register(&mut stack, listener, budget, &addr_resolver).await?; | status=out-of-order"),
-            "out-of-order listener bind must be rendered explicitly: {}",
+                .contains("launch.listener-prepare | assemblies/runtime/src/launch.rs | let bound = BoundListenerSet::prepare(listeners, budget, &addr_resolver).await?; | status=out-of-order"),
+            "out-of-order listener prepare must be rendered explicitly: {}",
             report.rendered
         );
         Ok(())
@@ -17585,6 +18005,227 @@ impl DomainModuleResult {
             }),
             "commented merge extend must not satisfy DomainModuleResult merge baseline"
         );
+        Ok(())
+    }
+
+    fn listener_plan_fixture(name: &str) -> Result<PathBuf> {
+        let root = unique_tmp(name);
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .context("xtask workspace root")?;
+        for path in [
+            RUNTIME_PLAN_PATH,
+            RUNTIME_ROUTES_PATH,
+            RUNTIME_PHASE_FINALIZE_PATH,
+            RUNTIME_PHASE_PATH,
+            RUNTIME_PHASE_PROVIDER_PATH,
+            RUNTIME_PHASE_INFRA_PATH,
+            RUNTIME_PHASE_DOMAINS_PATH,
+            RUNTIME_PHASE_LAUNCH_PATH,
+            RUNTIME_LAUNCH_PATH,
+            RUNTIME_LIB_PATH,
+            RUNTIME_CONFIG_PATH,
+            RUNTIME_LISTENERS_PATH,
+        ] {
+            write(&root.join(path), &fs::read_to_string(workspace.join(path))?)?;
+        }
+        Ok(root)
+    }
+
+    #[test]
+    fn runtime_listener_plan_execution_accepts_workspace() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .context("xtask workspace root")?;
+        assert_eq!(listener_plan_execution_findings(root)?, Vec::new());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_listener_plan_execution_rejects_legacy_and_structural_bypasses() -> Result<()> {
+        for (case, path, mutation) in [
+            (
+                "raw-value-assembler",
+                RUNTIME_ROUTES_PATH,
+                "\npub fn assemble_authed_routers_from_values() {}\n",
+            ),
+            (
+                "manual-health",
+                RUNTIME_PHASE_FINALIZE_PATH,
+                "\nfn bypass() { health_listener(reporter, metrics_exporter); }\n",
+            ),
+            (
+                "legacy-config-decision",
+                RUNTIME_CONFIG_PATH,
+                "\nfn health_auth_scheme() {}\n",
+            ),
+        ] {
+            let root = listener_plan_fixture(&format!("runtime-listener-plan-{case}"))?;
+            let source = fs::read_to_string(root.join(path))?;
+            write(&root.join(path), &(source + mutation))?;
+            let findings = listener_plan_execution_findings(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ForbiddenWiring),
+                "{case} must fail listener-plan execution gate"
+            );
+        }
+
+        let root = listener_plan_fixture("runtime-listener-plan-vec-launch")?;
+        let source = fs::read_to_string(root.join(RUNTIME_LAUNCH_PATH))?;
+        let mutated = source.replacen(
+            "\n    listeners: routes::FinalizedListenerSet,",
+            "\n    listeners: Vec<routes::AssembledListener>,",
+            1,
+        );
+        anyhow::ensure!(mutated != source, "Vec launch mutation must be live");
+        write(&root.join(RUNTIME_LAUNCH_PATH), &mutated)?;
+        assert!(
+            listener_plan_execution_findings(&root)?
+                .iter()
+                .any(|finding| finding.rule == Rule::ForbiddenWiring),
+            "ordinary Vec launch input must fail listener-plan execution gate"
+        );
+
+        for (case, path, mutation) in [
+            (
+                "duplicate-projection",
+                RUNTIME_PLAN_PATH,
+                "\nfn duplicate_projection(plan: &RuntimePlan) { let _ = plan.listener_execution_plan(); }\n",
+            ),
+            (
+                "alternate-finalizer",
+                RUNTIME_ROUTES_PATH,
+                "\nfn alternate_finalizer(plan: ListenerExecutionPlan) -> anyhow::Result<FinalizedListenerSet> { let _ = plan; unreachable!() }\n",
+            ),
+            (
+                "alternate-set-constructor",
+                RUNTIME_ROUTES_PATH,
+                "\nimpl FinalizedListenerSet { fn alternate_constructor(listeners: Vec<AssembledListener>) -> Self { Self { listeners } } }\n",
+            ),
+            (
+                "set-from-conversion",
+                RUNTIME_ROUTES_PATH,
+                "\nimpl From<Vec<AssembledListener>> for FinalizedListenerSet { fn from(listeners: Vec<AssembledListener>) -> Self { Self { listeners } } }\n",
+            ),
+            (
+                "duplicate-phase-call",
+                RUNTIME_PHASE_FINALIZE_PATH,
+                "\nfn duplicate_phase_call() { finalize_listener_plan(); }\n",
+            ),
+        ] {
+            let root = listener_plan_fixture(&format!("runtime-listener-plan-{case}"))?;
+            let source = fs::read_to_string(root.join(path))?;
+            write(&root.join(path), &(source + mutation))?;
+            assert!(
+                listener_plan_execution_findings(&root)?
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ForbiddenWiring),
+                "{case} must fail listener-plan execution AST gate"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_listener_plan_execution_scans_new_production_modules() -> Result<()> {
+        let root = listener_plan_fixture("runtime-listener-plan-new-production-module")?;
+        let lib_path = root.join(RUNTIME_LIB_PATH);
+        let lib = fs::read_to_string(&lib_path)?;
+        write(&lib_path, &(lib + "\nmod listener_plan_bypass;\n"))?;
+        write(
+            &root.join("assemblies/runtime/src/listener_plan_bypass.rs"),
+            "fn duplicate_projection(plan: &RuntimePlan) {\n\
+                 let _ = plan.listener_execution_plan();\n\
+             }\n",
+        )?;
+
+        assert!(
+            listener_plan_execution_findings(&root)?
+                .iter()
+                .any(|finding| finding.rule == Rule::ForbiddenWiring),
+            "a newly reachable production module must not bypass listener-plan inventory"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_listener_plan_execution_locks_capability_visibility() -> Result<()> {
+        for (case, path, from, to) in [
+            (
+                "public-assembled-listener",
+                RUNTIME_ROUTES_PATH,
+                "pub(crate) struct AssembledListener",
+                "pub struct AssembledListener",
+            ),
+            (
+                "public-execution-plan-field",
+                RUNTIME_PLAN_PATH,
+                "    listeners: Vec<ListenerExecutionSpec>,",
+                "    pub listeners: Vec<ListenerExecutionSpec>,",
+            ),
+            (
+                "public-execution-spec-field",
+                RUNTIME_PLAN_PATH,
+                "    auth_scheme: AuthScheme,",
+                "    pub auth_scheme: AuthScheme,",
+            ),
+            (
+                "public-assembled-listener-field",
+                RUNTIME_ROUTES_PATH,
+                "    routes: httpserve::AuthenticatedRoutes,",
+                "    pub routes: httpserve::AuthenticatedRoutes,",
+            ),
+            (
+                "public-finalized-listener-set-field",
+                RUNTIME_ROUTES_PATH,
+                "    listeners: Vec<AssembledListener>,",
+                "    pub listeners: Vec<AssembledListener>,",
+            ),
+        ] {
+            let root = listener_plan_fixture(&format!("runtime-listener-plan-{case}"))?;
+            let source = fs::read_to_string(root.join(path))?;
+            let mutated = source.replacen(from, to, 1);
+            anyhow::ensure!(mutated != source, "{case} mutation must be live");
+            write(&root.join(path), &mutated)?;
+            assert!(
+                listener_plan_execution_findings(&root)?
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ForbiddenWiring),
+                "{case} must fail listener-plan visibility gate"
+            );
+        }
+
+        for (case, export) in [
+            (
+                "execution-plan-reexport",
+                "pub use crate::plan::ListenerExecutionPlan;",
+            ),
+            (
+                "execution-spec-reexport",
+                "pub use crate::plan::ListenerExecutionSpec;",
+            ),
+            (
+                "assembled-listener-reexport",
+                "pub use crate::routes::AssembledListener;",
+            ),
+            (
+                "finalized-listener-set-reexport",
+                "pub use crate::routes::FinalizedListenerSet;",
+            ),
+        ] {
+            let root = listener_plan_fixture(&format!("runtime-listener-plan-{case}"))?;
+            let lib_path = root.join(RUNTIME_LIB_PATH);
+            let source = fs::read_to_string(&lib_path)?;
+            write(&lib_path, &format!("{source}\n{export}\n"))?;
+            assert!(
+                listener_plan_execution_findings(&root)?
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ForbiddenWiring),
+                "{case} must fail listener-plan public re-export gate"
+            );
+        }
         Ok(())
     }
 }

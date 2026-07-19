@@ -3,9 +3,8 @@
 use crate::{
     SPIFFE_ENDPOINT_SOCKET_ENV,
     auth_bridge::{self, ProfileBinding},
-    config::{
-        AccessTokenProfileSelection, InternalAuthSelection, SnapshotConfig, TokenProfilesConfig,
-    },
+    config::SnapshotConfig,
+    plan::{ListenerExecutionPlan, ListenerExecutionSpec},
 };
 
 use std::future::Future;
@@ -42,64 +41,50 @@ impl TokenProviderBindings {
         }
     }
 
-    fn validate_exact_presence(&self, config: &TokenProfilesConfig) -> anyhow::Result<()> {
-        let rss_required = matches!(config.primary(), AccessTokenProfileSelection::RssAccess)
-            || matches!(config.admin(), AccessTokenProfileSelection::RssAccess);
-        let federated_required =
-            matches!(
-                config.primary(),
-                AccessTokenProfileSelection::FederatedAccess
-            ) || matches!(config.admin(), AccessTokenProfileSelection::FederatedAccess);
-        let service_required = matches!(config.internal(), InternalAuthSelection::ServiceToken);
+    fn validate_exact_presence(&self, plan: &ListenerExecutionPlan) -> anyhow::Result<()> {
+        let requires = |scheme| {
+            plan.listeners()
+                .iter()
+                .any(|listener| listener.auth_scheme() == scheme)
+        };
         anyhow::ensure!(
-            self.rss_access.is_some() == rss_required,
-            "RSS access provider presence does not match listener profile selection"
+            self.rss_access.is_some() == requires(AuthScheme::RssAccessToken),
+            "RSS access provider presence does not match RuntimePlan"
         );
         anyhow::ensure!(
-            self.federated_access.is_some() == federated_required,
-            "federated access provider presence does not match listener profile selection"
+            self.federated_access.is_some() == requires(AuthScheme::FederatedAccessToken),
+            "federated access provider presence does not match RuntimePlan"
         );
         anyhow::ensure!(
-            self.service_token.is_some() == service_required,
-            "service-token provider presence does not match Internal listener selection"
+            self.service_token.is_some() == requires(AuthScheme::ServiceToken),
+            "service-token provider presence does not match RuntimePlan"
         );
         Ok(())
     }
 
-    fn access_binding(
-        &self,
-        selection: AccessTokenProfileSelection,
-    ) -> anyhow::Result<ProfileBinding> {
-        match selection {
-            AccessTokenProfileSelection::RssAccess => self
+    fn profile_binding(&self, scheme: AuthScheme) -> anyhow::Result<ProfileBinding> {
+        match scheme {
+            AuthScheme::RssAccessToken => self
                 .rss_access
                 .as_ref()
                 .map(|provider| ProfileBinding::RssAccess(Arc::clone(provider)))
                 .context("RSS access listener selected without RSS access provider"),
-            AccessTokenProfileSelection::FederatedAccess => self
+            AuthScheme::FederatedAccessToken => self
                 .federated_access
                 .as_ref()
                 .map(|provider| ProfileBinding::FederatedAccess(Arc::clone(provider)))
                 .context("federated listener selected without federated provider"),
+            AuthScheme::ServiceToken => self
+                .service_token
+                .as_ref()
+                .map(|provider| ProfileBinding::ServiceToken(Arc::clone(provider)))
+                .context("service-token listener selected without service-token provider"),
+            AuthScheme::NoAuth | AuthScheme::Mtls => {
+                anyhow::bail!("listener auth scheme has no token profile binding")
+            }
+            _ => anyhow::bail!("unknown listener auth scheme; refusing provider inference"),
         }
     }
-
-    fn service_binding(&self) -> anyhow::Result<ProfileBinding> {
-        self.service_token
-            .as_ref()
-            .map(|provider| ProfileBinding::ServiceToken(Arc::clone(provider)))
-            .context("service-token listener selected without service-token provider")
-    }
-}
-
-pub(crate) struct RouteAssemblyContext<'a> {
-    pub(crate) audit_sink: httpserve::AuditSinkHandle,
-    pub(crate) audit_clock: Arc<dyn diport::Clock>,
-    pub(crate) primary: AccessTokenProfileSelection,
-    pub(crate) admin: AccessTokenProfileSelection,
-    pub(crate) internal: InternalAuthSelection,
-    pub(crate) internal_mtls_allow_set: Option<&'a str>,
-    pub(crate) spiffe_endpoint: Option<&'a str>,
 }
 
 enum ListenerAuthBinding {
@@ -116,11 +101,18 @@ impl ListenerAuthBinding {
     }
 }
 
-pub struct AssembledListener {
-    pub(crate) listener: ListenerKind,
-    pub(crate) scheme: AuthScheme,
-    pub(crate) routes: httpserve::AuthenticatedRoutes,
-    pub(crate) transport: ListenerTransport,
+pub(crate) struct AssembledListener {
+    spec: ListenerExecutionSpec,
+    routes: httpserve::AuthenticatedRoutes,
+    transport: ListenerTransport,
+}
+
+/// The exact, plan-ordered listener set accepted by launch.
+///
+/// Private fields and the absence of a `Vec` conversion keep launch membership coupled to the
+/// consuming plan finalizer.
+pub(crate) struct FinalizedListenerSet {
+    listeners: Vec<AssembledListener>,
 }
 
 /// Transport material resolved during route assembly from the same captured generation.
@@ -137,25 +129,58 @@ pub(crate) enum ListenerTransport {
 }
 
 impl AssembledListener {
-    pub fn listener(&self) -> ListenerKind {
-        self.listener
+    #[cfg(test)]
+    pub(crate) fn listener(&self) -> ListenerKind {
+        self.spec.kind()
     }
 
-    pub fn auth_scheme(&self) -> AuthScheme {
-        self.scheme
+    #[cfg(test)]
+    pub(crate) fn auth_scheme(&self) -> AuthScheme {
+        self.spec.auth_scheme()
     }
 
-    pub fn into_parts(self) -> (ListenerKind, httpserve::AuthenticatedRoutes) {
-        (self.listener, self.routes)
+    #[cfg(any(test, feature = "integration"))]
+    pub(crate) fn into_parts(self) -> (ListenerKind, httpserve::AuthenticatedRoutes) {
+        (self.spec.kind(), self.routes)
     }
 
-    pub(crate) fn plain(listener: ListenerKind, routes: httpserve::AuthenticatedRoutes) -> Self {
-        Self {
-            listener,
-            scheme: AuthScheme::NoAuth,
-            routes,
-            transport: ListenerTransport::Plaintext,
-        }
+    pub(crate) fn into_launch_parts(
+        self,
+    ) -> (
+        ListenerKind,
+        AuthScheme,
+        httpserve::AuthenticatedRoutes,
+        ListenerTransport,
+    ) {
+        (
+            self.spec.kind(),
+            self.spec.auth_scheme(),
+            self.routes,
+            self.transport,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn health_for_test(
+        reporter: Arc<bootstrap::HealthReporter>,
+        metrics: Arc<dyn diport::MetricsExporter>,
+    ) -> anyhow::Result<Self> {
+        finalize_health_spec(ListenerExecutionSpec::health_for_test(), reporter, metrics)
+    }
+}
+
+impl FinalizedListenerSet {
+    pub(crate) fn len(&self) -> usize {
+        self.listeners.len()
+    }
+
+    pub(crate) fn into_listeners(self) -> Vec<AssembledListener> {
+        self.listeners
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(listeners: Vec<AssembledListener>) -> Self {
+        Self { listeners }
     }
 }
 
@@ -277,89 +302,25 @@ fn default_rate_quota() -> ratelimit::QuotaConfig {
 /// → rate-limit（本函数 verify-bridge 后叠）→ 验签桥 → trace → enforce → handler。rate-limit outer 于验签桥保证限流在 auth 计算前生效
 /// （INVARIANT RATELIMIT-BEFORE-AUTH-01：组合根在 verify-bridge 后 .layer ⇒ outer 于桥）。
 ///
-/// Health listener 由 [`health_listener`] 单独构造、**不经本函数、不叠限流**——探针不限速（k8s
-/// liveness/readiness 在高负载下不应被限流触发级联重启），有意设计。
+/// Health is produced only from the consumed plan entry and does not receive token bridges or
+/// rate limiting, so liveness/readiness probes remain isolated from authenticated traffic.
 ///
 /// 借 `&mut Registry`，一次性消费 Primary authorizer 并 drain `finalize_routes`；registry 的探针在此后仍存活，组合根经
 /// [`bootstrap::Registry::take_health_reporter`] 取出探针装入 `Arc<HealthReporter>`（`Send + Sync`）注入
-/// Health listener 的 readyz handler（每请求 `report`，[`health_listener`]）；整体非 `Sync` 的 `Registry`
+/// Health listener 的 readyz handler（每请求 `report`）；整体非 `Sync` 的 `Registry`
 /// 无法进 axum handler 闭包。
-pub(crate) fn assemble_authed_routers(
+pub(crate) fn finalize_listener_plan(
+    execution_plan: ListenerExecutionPlan,
     config: SnapshotConfig<'_>,
-    token_profiles: &TokenProfilesConfig,
     registry: &mut bootstrap::Registry,
     providers: &TokenProviderBindings,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
-) -> anyhow::Result<Vec<AssembledListener>> {
-    providers.validate_exact_presence(token_profiles)?;
-    assemble_authed_routers_with_bindings(
-        registry,
-        providers,
-        RouteAssemblyContext {
-            audit_sink,
-            audit_clock,
-            primary: token_profiles.primary(),
-            admin: token_profiles.admin(),
-            internal: token_profiles.internal(),
-            internal_mtls_allow_set: config.value(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV),
-            spiffe_endpoint: config.value(SPIFFE_ENDPOINT_SOCKET_ENV),
-        },
-    )
-}
-
-/// Explicit-value assembly core for integration tests that cannot mint [`SnapshotConfig`].
-///
-/// Production must enter through [`assemble_authed_routers`]. This boundary accepts only the
-/// three raw values owned by route/listener transport assembly; it cannot accept an ambient reader
-/// and therefore cannot introduce late environment reads.
-#[cfg(feature = "integration")]
-pub fn assemble_authed_routers_from_values(
-    registry: &mut bootstrap::Registry,
-    rss_access_provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
-    audit_sink: httpserve::AuditSinkHandle,
-    audit_clock: Arc<dyn diport::Clock>,
-    internal_auth_scheme: &str,
-    internal_mtls_allow_set: Option<&str>,
-    spiffe_endpoint: Option<&str>,
-) -> anyhow::Result<Vec<AssembledListener>> {
-    let internal = match internal_auth_scheme {
-        "mtls" => InternalAuthSelection::Mtls,
-        "service-token" => anyhow::bail!(
-            "integration RSS-only assembly cannot select service-token without its typed provider"
-        ),
-        _ => anyhow::bail!("internal auth scheme must be exactly mtls for RSS-only assembly"),
-    };
-    let providers = TokenProviderBindings::new(Some(rss_access_provider), None, None);
-    assemble_authed_routers_with_bindings(
-        registry,
-        &providers,
-        RouteAssemblyContext {
-            audit_sink,
-            audit_clock,
-            primary: AccessTokenProfileSelection::RssAccess,
-            admin: AccessTokenProfileSelection::RssAccess,
-            internal,
-            internal_mtls_allow_set,
-            spiffe_endpoint,
-        },
-    )
-}
-
-pub(crate) fn assemble_authed_routers_with_bindings(
-    registry: &mut bootstrap::Registry,
-    providers: &TokenProviderBindings,
-    context: RouteAssemblyContext<'_>,
-) -> anyhow::Result<Vec<AssembledListener>> {
-    let RouteAssemblyContext {
-        audit_sink,
-        audit_clock,
-        primary,
-        admin,
-        internal,
-        internal_mtls_allow_set,
-        spiffe_endpoint,
-    } = context;
+    metrics: Arc<dyn diport::MetricsExporter>,
+) -> anyhow::Result<FinalizedListenerSet> {
+    providers.validate_exact_presence(&execution_plan)?;
+    let internal_mtls_allow_set = config.value(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV);
+    let spiffe_endpoint = config.value(SPIFFE_ENDPOINT_SOCKET_ENV);
     crate::modules_gen::register_framework_routes(registry).context("register framework routes")?;
     let primary_authorizer = registry
         .take_primary_authorizer()
@@ -371,93 +332,187 @@ pub(crate) fn assemble_authed_routers_with_bindings(
     // 每实例独立配额（全局视图 ≈ N × 单实例率）；全局一致限流须 redis-distributed provider（future）。
     // 叠加 peer-IP-after-proxy 退化（RealIP follow-up），本限流当前为单实例 best-effort 防护。
     let rate_limiter = Arc::new(GovernorLimiter::new(default_rate_quota()));
-    let mut out = Vec::new();
-    let finalized_routes = registry.finalize_routes().context("finalize_routes")?;
-    bootstrap::validate_framework_serving(
-        &finalized_routes,
-        crate::modules_gen::FRAMEWORK_HTTP_ROUTES,
-    )
-    .context("validate framework serving")?;
-    for (listener, routes) in finalized_routes {
-        let binding = match listener {
-            ListenerKind::Primary => ListenerAuthBinding::Token(providers.access_binding(primary)?),
-            ListenerKind::Admin => ListenerAuthBinding::Token(providers.access_binding(admin)?),
-            ListenerKind::Internal => match internal {
-                InternalAuthSelection::Mtls => ListenerAuthBinding::Mtls,
-                InternalAuthSelection::ServiceToken => {
-                    ListenerAuthBinding::Token(providers.service_binding()?)
-                }
-            },
-            ListenerKind::Health => {
-                anyhow::bail!("Health routes must use the dedicated NoAuth assembly path")
-            }
-            _ => anyhow::bail!(
-                "unknown ListenerKind {listener:?}; refusing to infer an authentication binding"
+    let mut live_routes = registry.finalize_routes().context("finalize_routes")?;
+    bootstrap::validate_framework_serving(&live_routes, crate::modules_gen::FRAMEWORK_HTTP_ROUTES)
+        .context("validate framework serving")?;
+    for (listener, _) in &live_routes {
+        anyhow::ensure!(
+            execution_plan
+                .listeners()
+                .iter()
+                .any(|spec| spec.kind() == *listener && spec.kind() != ListenerKind::Health),
+            "live listener {listener:?} is not declared by RuntimePlan"
+        );
+    }
+
+    let mut finalized = Vec::with_capacity(execution_plan.listeners().len());
+    let mut health = None;
+    for (plan_index, spec) in execution_plan.into_listeners().into_iter().enumerate() {
+        let listener = spec.kind();
+        let scheme = spec.auth_scheme();
+        if listener == ListenerKind::Health {
+            anyhow::ensure!(
+                scheme == AuthScheme::NoAuth && spec.domains().is_empty(),
+                "Health RuntimePlan entry must be NoAuth and domain-free"
+            );
+            anyhow::ensure!(
+                health.replace((plan_index, spec)).is_none(),
+                "RuntimePlan declares Health listener more than once"
+            );
+            continue;
+        }
+        anyhow::ensure!(
+            scheme != AuthScheme::NoAuth,
+            "non-Health RuntimePlan listener cannot use NoAuth"
+        );
+        let routes = match live_routes
+            .iter()
+            .position(|(live_listener, _)| *live_listener == listener)
+        {
+            Some(index) => live_routes.swap_remove(index).1,
+            None if spec.domains().is_empty() => httpserve::UnfinalizedRoutes::empty(),
+            None => anyhow::bail!(
+                "RuntimePlan listener {listener:?} declares domains but produced no live routes"
             ),
         };
-        let scheme = binding.scheme();
-        let plan = AuthPlan::new(listener, scheme).context("build auth plan")?;
-        let transport = if scheme == AuthScheme::Mtls {
-            let allow_set = mtls_allow_set_from_value(listener, internal_mtls_allow_set)?;
-            let spiffe_endpoint = mtls_spiffe_endpoint_from_value(spiffe_endpoint)?;
-            let slot = Arc::new(MtlsHealthSlot::new());
-            let probe_name = mtls_probe_name(listener)?;
-            registry
-                .probe(
-                    probe_name.clone(),
-                    Box::new(MtlsSourceHealthProbe::new(probe_name, slot.clone())),
-                )
-                .context("register mtls source health probe")?;
-            ListenerTransport::Mtls {
-                allow_set,
+        finalized.push((
+            plan_index,
+            finalize_non_health_spec(
+                spec,
+                routes,
+                registry,
+                providers,
+                &audit_sink,
+                &audit_clock,
+                &primary_authorizer,
+                &rate_limiter,
+                internal_mtls_allow_set,
                 spiffe_endpoint,
-                health: slot,
-            }
-        } else {
-            ListenerTransport::Plaintext
-        };
-        let mtls_authorizer = match &transport {
-            ListenerTransport::Mtls { allow_set, .. } => Some(allow_set.clone()),
-            ListenerTransport::Plaintext => None,
-        };
-        let authed = finalize_listener_auth_with_mtls(
-            listener,
-            routes,
-            plan,
-            audit_sink.clone(),
-            audit_clock.clone(),
-            primary_authorizer.clone(),
-            mtls_authorizer,
-        )
-        .context("finalize_auth")?;
-        let wired = match binding {
-            ListenerAuthBinding::Token(profile) => {
-                auth_bridge::apply_verify_bridge(authed, profile)
-            }
-            ListenerAuthBinding::Mtls => auth_bridge::apply_mtls_verify_bridge(authed),
-        };
-        // INVARIANT RATELIMIT-BEFORE-AUTH-01 —— rate-limit 在 verify-bridge 之后 .layer，
-        // 层序上 outer 于桥（请求方向先 rate-limit 后验签），在 auth 计算前拦截超额请求。
-        let wired = wired.layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&rate_limiter),
-            httpserve::rate_limit::<GovernorLimiter>,
+            )?,
         ));
-        // 装配决策可观测：operator 启动时从日志核查每 listener 的 auth scheme + 是否挂验签桥
-        //（闭值枚举，无 PII）——否则「Primary 究竟 Jwt+桥 还是意外 NoAuth」从日志无从核查。
-        tracing::info!(
-            listener = ?listener,
-            auth_scheme = ?scheme,
-            verify_bridge = true,
-            "listener auth wiring assembled"
-        );
-        out.push(AssembledListener {
-            listener,
-            scheme,
-            routes: wired,
-            transport,
-        });
     }
-    Ok(out)
+    anyhow::ensure!(
+        live_routes.is_empty(),
+        "live route finalization left undeclared listener routes"
+    );
+
+    let (health_index, health_spec) =
+        health.context("RuntimePlan does not declare the required Health listener")?;
+    let reporter = Arc::new(registry.take_health_reporter());
+    let health = finalize_health_spec(health_spec, reporter, metrics)?;
+    finalized.push((health_index, health));
+    finalized.sort_by_key(|(plan_index, _)| *plan_index);
+    Ok(FinalizedListenerSet {
+        listeners: finalized
+            .into_iter()
+            .map(|(_, listener)| listener)
+            .collect(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_non_health_spec(
+    spec: ListenerExecutionSpec,
+    routes: httpserve::UnfinalizedRoutes,
+    registry: &mut bootstrap::Registry,
+    providers: &TokenProviderBindings,
+    audit_sink: &httpserve::AuditSinkHandle,
+    audit_clock: &Arc<dyn diport::Clock>,
+    primary_authorizer: &Arc<dyn httpserve::RouteAuthorizer>,
+    rate_limiter: &Arc<GovernorLimiter>,
+    internal_mtls_allow_set: Option<&str>,
+    spiffe_endpoint: Option<&str>,
+) -> anyhow::Result<AssembledListener> {
+    let listener = spec.kind();
+    let scheme = spec.auth_scheme();
+    let binding = match scheme {
+        AuthScheme::RssAccessToken
+        | AuthScheme::FederatedAccessToken
+        | AuthScheme::ServiceToken => {
+            ListenerAuthBinding::Token(providers.profile_binding(scheme)?)
+        }
+        AuthScheme::Mtls => ListenerAuthBinding::Mtls,
+        AuthScheme::NoAuth => anyhow::bail!("non-Health listener cannot use NoAuth"),
+        _ => anyhow::bail!("unknown RuntimePlan auth scheme; refusing auth inference"),
+    };
+    anyhow::ensure!(
+        binding.scheme() == scheme,
+        "RuntimePlan auth scheme does not match selected provider binding"
+    );
+    let plan = AuthPlan::new(listener, scheme).context("build auth plan")?;
+    let transport = if scheme == AuthScheme::Mtls {
+        let allow_set = mtls_allow_set_from_value(listener, internal_mtls_allow_set)?;
+        let spiffe_endpoint = mtls_spiffe_endpoint_from_value(spiffe_endpoint)?;
+        let slot = Arc::new(MtlsHealthSlot::new());
+        let probe_name = mtls_probe_name(listener)?;
+        registry
+            .probe(
+                probe_name.clone(),
+                Box::new(MtlsSourceHealthProbe::new(probe_name, slot.clone())),
+            )
+            .context("register mtls source health probe")?;
+        ListenerTransport::Mtls {
+            allow_set,
+            spiffe_endpoint,
+            health: slot,
+        }
+    } else {
+        ListenerTransport::Plaintext
+    };
+    let mtls_authorizer = match &transport {
+        ListenerTransport::Mtls { allow_set, .. } => Some(allow_set.clone()),
+        ListenerTransport::Plaintext => None,
+    };
+    let authed = finalize_listener_auth_with_mtls(
+        listener,
+        routes,
+        plan,
+        audit_sink.clone(),
+        Arc::clone(audit_clock),
+        Arc::clone(primary_authorizer),
+        mtls_authorizer,
+    )
+    .context("finalize_auth")?;
+    let wired = match binding {
+        ListenerAuthBinding::Token(profile) => auth_bridge::apply_verify_bridge(authed, profile),
+        ListenerAuthBinding::Mtls => auth_bridge::apply_mtls_verify_bridge(authed),
+    };
+    let wired = wired.layer(axum::middleware::from_fn_with_state(
+        Arc::clone(rate_limiter),
+        httpserve::rate_limit::<GovernorLimiter>,
+    ));
+    tracing::info!(
+        plan_id = spec.id(),
+        listener = ?listener,
+        auth_scheme = ?scheme,
+        verify_bridge = true,
+        "listener auth wiring assembled"
+    );
+    Ok(AssembledListener {
+        spec,
+        routes: wired,
+        transport,
+    })
+}
+
+fn finalize_health_spec(
+    spec: ListenerExecutionSpec,
+    reporter: Arc<bootstrap::HealthReporter>,
+    metrics: Arc<dyn diport::MetricsExporter>,
+) -> anyhow::Result<AssembledListener> {
+    anyhow::ensure!(
+        spec.kind() == ListenerKind::Health
+            && spec.auth_scheme() == AuthScheme::NoAuth
+            && spec.domains().is_empty(),
+        "Health RuntimePlan entry must be Health + NoAuth and domain-free"
+    );
+    let routes = httpserve::health::routes(move || reporter.report(), move || metrics.render());
+    let plan = AuthPlan::new(spec.kind(), spec.auth_scheme()).context("build Health auth plan")?;
+    Ok(AssembledListener {
+        spec,
+        routes: httpserve::finalize_auth(routes, plan).context("finalize_auth Health")?,
+        transport: ListenerTransport::Plaintext,
+    })
 }
 
 #[cfg(test)]
@@ -561,10 +616,70 @@ fn mtls_spiffe_endpoint_from_value(raw: Option<&str>) -> anyhow::Result<String> 
     crate::required_spiffe_endpoint_from_value(raw)
 }
 
+#[cfg(feature = "integration")]
+pub(crate) fn finalize_rss_fixture_listener(
+    registry: &mut bootstrap::Registry,
+    provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
+    audit_sink: httpserve::AuditSinkHandle,
+    audit_clock: Arc<dyn diport::Clock>,
+    kind: assembly_schema::AssemblyListenerKind,
+) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
+    let spec = crate::plan::fixture_listener_spec(kind)?;
+    anyhow::ensure!(
+        matches!(spec.kind(), ListenerKind::Primary | ListenerKind::Admin)
+            && spec.auth_scheme() == AuthScheme::RssAccessToken,
+        "RSS integration fixture requires a plan-declared RSS access listener"
+    );
+    crate::modules_gen::register_framework_routes(registry).context("register framework routes")?;
+    let primary_authorizer = registry
+        .take_primary_authorizer()
+        .context("take Primary route authorizer")?;
+    let mut live_routes = registry.finalize_routes().context("finalize_routes")?;
+    bootstrap::validate_framework_serving(&live_routes, crate::modules_gen::FRAMEWORK_HTTP_ROUTES)
+        .context("validate framework serving")?;
+    let index = live_routes
+        .iter()
+        .position(|(listener, _)| *listener == spec.kind())
+        .context("selected RuntimePlan listener produced no live routes")?;
+    let routes = live_routes.swap_remove(index).1;
+    anyhow::ensure!(
+        live_routes.is_empty(),
+        "integration fixture contains live routes for an unselected listener"
+    );
+    let providers = TokenProviderBindings::new(Some(provider), None, None);
+    let rate_limiter = Arc::new(GovernorLimiter::new(default_rate_quota()));
+    finalize_non_health_spec(
+        spec,
+        routes,
+        registry,
+        &providers,
+        &audit_sink,
+        &audit_clock,
+        &primary_authorizer,
+        &rate_limiter,
+        None,
+        None,
+    )
+    .map(|listener| listener.into_parts().1)
+}
+
+#[cfg(feature = "integration")]
+pub(crate) fn finalize_health_fixture(
+    reporter: Arc<bootstrap::HealthReporter>,
+    metrics: Arc<dyn diport::MetricsExporter>,
+) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
+    finalize_health_spec(
+        crate::plan::fixture_listener_spec(assembly_schema::AssemblyListenerKind::Health)?,
+        reporter,
+        metrics,
+    )
+    .map(|listener| listener.into_parts().1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::listeners::health_listener;
+    use crate::config::test_snapshot;
     use crate::{
         KeyedEs256StaticKey, RssAccessStaticProviderConfig, SystemClock, TracingAuthAuditSink,
         rss_access_provider_from_static_config,
@@ -581,6 +696,7 @@ mod tests {
     use primitives::RequiredScheme;
     use std::future::Future;
     use std::pin::Pin;
+    use std::time::Duration;
     use tower::ServiceExt as _;
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -680,6 +796,38 @@ mod tests {
         Arc::new(oidc::OidcProvider::new(config, Box::new(SystemClock)))
     }
 
+    struct TestReplayStore;
+
+    impl diport::ServiceTokenReplayStore for TestReplayStore {
+        async fn check_and_record(
+            &self,
+            _key: &diport::ServiceTokenReplayKey,
+            _expires_at: std::time::SystemTime,
+            _deadline: diport::ServiceTokenReplayDeadline,
+        ) -> Result<diport::ServiceTokenReplayDisposition, diport::ServiceTokenReplayStoreError>
+        {
+            Ok(diport::ServiceTokenReplayDisposition::Recorded)
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn runtime_test_service_provider() -> Arc<oidc::OidcProvider<diport::ServiceTokenProfile>> {
+        let keys = oidc::ServiceTokenKeySource::builder()
+            .add_hs256_secret("runtime-test-service", &[0x55; 32])
+            .expect("service-token key")
+            .build();
+        let replay_store = diport::DynServiceTokenReplayStore::new_arc(TestReplayStore);
+        let config = oidc::VerifierConfigBuilder::<diport::ServiceTokenProfile>::new(
+            "https://service.issuer.test",
+            "service-test",
+        )
+        .keys_hs256(keys)
+        .replay_store(replay_store, Duration::from_secs(5))
+        .build()
+        .expect("service-token provider config");
+        Arc::new(oidc::OidcProvider::new(config, Box::new(SystemClock)))
+    }
+
     #[test]
     #[allow(clippy::expect_used)]
     fn primary_and_admin_selections_derive_the_exact_typed_profile_bindings() {
@@ -688,58 +836,281 @@ mod tests {
             Some(runtime_test_federated_provider()),
             None,
         );
-        for (selection, expected_scheme) in [
-            (
-                AccessTokenProfileSelection::RssAccess,
-                AuthScheme::RssAccessToken,
-            ),
-            (
-                AccessTokenProfileSelection::FederatedAccess,
-                AuthScheme::FederatedAccessToken,
-            ),
-        ] {
+        for expected_scheme in [AuthScheme::RssAccessToken, AuthScheme::FederatedAccessToken] {
             let binding = providers
-                .access_binding(selection)
+                .profile_binding(expected_scheme)
                 .expect("selected typed provider");
             assert_eq!(binding.auth_scheme(), expected_scheme);
             assert!(matches!(
-                (selection, binding),
-                (
-                    AccessTokenProfileSelection::RssAccess,
-                    ProfileBinding::RssAccess(_)
-                ) | (
-                    AccessTokenProfileSelection::FederatedAccess,
-                    ProfileBinding::FederatedAccess(_)
-                )
+                binding,
+                ProfileBinding::RssAccess(_) | ProfileBinding::FederatedAccess(_)
             ));
         }
+    }
+
+    fn assemble_test_plan(
+        registry: &mut bootstrap::Registry,
+        values: &[(&str, &str)],
+        providers: &TokenProviderBindings,
+    ) -> anyhow::Result<FinalizedListenerSet> {
+        let live = registry.route_groups();
+        if !live
+            .iter()
+            .any(|(listener, _)| *listener == ListenerKind::Primary)
+        {
+            registry.route_group::<httpserve::Primary>("/test-primary", Ok)?;
+        }
+        if !live
+            .iter()
+            .any(|(listener, _)| *listener == ListenerKind::Admin)
+        {
+            registry.route_group::<httpserve::Admin>("/test-admin", Ok)?;
+        }
+        let snapshot = test_snapshot(values)?;
+        let execution_plan =
+            crate::plan::RuntimePlan::bundled(snapshot.view())?.listener_execution_plan();
+        finalize_listener_plan(
+            execution_plan,
+            snapshot.view(),
+            registry,
+            providers,
+            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            Arc::new(SystemClock),
+            noop_metrics(),
+        )
     }
 
     fn assemble_rss_mtls_test(
         registry: &mut bootstrap::Registry,
         internal_mtls_allow_set: Option<&str>,
         spiffe_endpoint: Option<&str>,
-    ) -> anyhow::Result<Vec<AssembledListener>> {
+    ) -> anyhow::Result<FinalizedListenerSet> {
+        let mut values = vec![
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ];
+        if let Some(allow_set) = internal_mtls_allow_set {
+            values.push((INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV, allow_set));
+        }
+        if let Some(endpoint) = spiffe_endpoint {
+            values.push((SPIFFE_ENDPOINT_SOCKET_ENV, endpoint));
+        }
         let providers = TokenProviderBindings::new(Some(runtime_test_provider()), None, None);
-        assemble_authed_routers_with_bindings(
-            registry,
-            &providers,
-            RouteAssemblyContext {
-                audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-                audit_clock: Arc::new(SystemClock),
-                primary: AccessTokenProfileSelection::RssAccess,
-                admin: AccessTokenProfileSelection::RssAccess,
-                internal: InternalAuthSelection::Mtls,
-                internal_mtls_allow_set,
-                spiffe_endpoint,
-            },
-        )
+        assemble_test_plan(registry, &values, &providers)
     }
 
+    #[test]
     #[allow(clippy::expect_used)]
-    fn test_reporter() -> Arc<bootstrap::HealthReporter> {
-        let mut reg = bootstrap::compose(&[]).expect("compose");
-        Arc::new(reg.take_health_reporter())
+    fn bundled_plan_finalizes_exact_four_listeners_and_keeps_internal_empty_router() {
+        let mut registry = bootstrap::Registry::new();
+        registry
+            .register_primary_authorizer(allow_authorizer())
+            .expect("Primary authorizer registered");
+
+        let listeners = assemble_rss_mtls_test(
+            &mut registry,
+            Some("spiffe://example.org/ns/rss/sa/internal"),
+            Some("unix:///run/spire/test.sock"),
+        )
+        .expect("finalize bundled listener plan")
+        .into_listeners();
+        let actual = listeners
+            .iter()
+            .map(|listener| (listener.listener(), listener.auth_scheme()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                (ListenerKind::Admin, AuthScheme::RssAccessToken),
+                (ListenerKind::Health, AuthScheme::NoAuth),
+                (ListenerKind::Internal, AuthScheme::Mtls),
+                (ListenerKind::Primary, AuthScheme::RssAccessToken),
+            ]
+        );
+        let internal = listeners
+            .iter()
+            .find(|listener| listener.listener() == ListenerKind::Internal)
+            .expect("Internal listener");
+        assert!(matches!(internal.transport, ListenerTransport::Mtls { .. }));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn listener_finalizer_rejects_declared_missing_and_live_health_routes_before_launch() {
+        fn snapshot() -> crate::config::RuntimeConfigSnapshot {
+            test_snapshot(&[
+                ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+                ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+                ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+                (
+                    INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV,
+                    "spiffe://example.org/ns/rss/sa/internal",
+                ),
+                (SPIFFE_ENDPOINT_SOCKET_ENV, "unix:///run/spire/test.sock"),
+            ])
+            .expect("listener snapshot")
+        }
+
+        let providers = TokenProviderBindings::new(Some(runtime_test_provider()), None, None);
+        let mut missing = bootstrap::Registry::new();
+        missing
+            .route_group::<httpserve::Primary>("/primary", Ok)
+            .expect("Primary group");
+        missing
+            .register_primary_authorizer(allow_authorizer())
+            .expect("Primary authorizer");
+        let config = snapshot();
+        let error = finalize_listener_plan(
+            crate::plan::RuntimePlan::bundled(config.view())
+                .expect("RuntimePlan")
+                .listener_execution_plan(),
+            config.view(),
+            &mut missing,
+            &providers,
+            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            Arc::new(SystemClock),
+            noop_metrics(),
+        )
+        .err()
+        .expect("declared Admin without live routes must fail");
+        assert!(error.to_string().contains("produced no live routes"));
+
+        let mut manual_health = bootstrap::Registry::new();
+        manual_health
+            .route_group::<httpserve::Primary>("/primary", Ok)
+            .expect("Primary group");
+        manual_health
+            .route_group::<httpserve::Admin>("/admin", Ok)
+            .expect("Admin group");
+        manual_health
+            .route_group::<httpserve::Health>("/manual-health", Ok)
+            .expect("manual Health group");
+        manual_health
+            .register_primary_authorizer(allow_authorizer())
+            .expect("Primary authorizer");
+        let config = snapshot();
+        let error = finalize_listener_plan(
+            crate::plan::RuntimePlan::bundled(config.view())
+                .expect("RuntimePlan")
+                .listener_execution_plan(),
+            config.view(),
+            &mut manual_health,
+            &providers,
+            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            Arc::new(SystemClock),
+            noop_metrics(),
+        )
+        .err()
+        .expect("manual live Health routes must fail");
+        assert!(error.to_string().contains("not declared by RuntimePlan"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn provider_presence_is_an_exact_projection_of_plan_auth() {
+        let rss = test_snapshot(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ])
+        .expect("RSS plan snapshot");
+        let rss_plan = crate::plan::RuntimePlan::bundled(rss.view())
+            .expect("RSS RuntimePlan")
+            .listener_execution_plan();
+        assert!(
+            TokenProviderBindings::new(Some(runtime_test_provider()), None, None)
+                .validate_exact_presence(&rss_plan)
+                .is_ok()
+        );
+        assert!(
+            TokenProviderBindings::new(
+                Some(runtime_test_provider()),
+                Some(runtime_test_federated_provider()),
+                None,
+            )
+            .validate_exact_presence(&rss_plan)
+            .is_err()
+        );
+
+        let service = test_snapshot(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "service-token"),
+        ])
+        .expect("service-token plan snapshot");
+        let service_plan = crate::plan::RuntimePlan::bundled(service.view())
+            .expect("service-token RuntimePlan")
+            .listener_execution_plan();
+        assert!(
+            TokenProviderBindings::new(Some(runtime_test_provider()), None, None)
+                .validate_exact_presence(&service_plan)
+                .is_err()
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn federated_and_service_token_plans_finalize_through_typed_provider_bridges() {
+        let mut federated_registry = bootstrap::Registry::new();
+        federated_registry
+            .register_primary_authorizer(allow_authorizer())
+            .expect("Federated Primary authorizer");
+        let federated_providers =
+            TokenProviderBindings::new(None, Some(runtime_test_federated_provider()), None);
+        let federated = assemble_test_plan(
+            &mut federated_registry,
+            &[
+                ("RSS_PRIMARY_TOKEN_PROFILE", "federated-access"),
+                ("RSS_ADMIN_TOKEN_PROFILE", "federated-access"),
+                ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+                (
+                    INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV,
+                    "spiffe://example.org/ns/rss/sa/internal",
+                ),
+                (SPIFFE_ENDPOINT_SOCKET_ENV, "unix:///run/spire/test.sock"),
+            ],
+            &federated_providers,
+        )
+        .expect("Federated listener plan finalizes");
+        let federated_schemes = federated
+            .into_listeners()
+            .into_iter()
+            .map(|listener| (listener.listener(), listener.auth_scheme()))
+            .collect::<Vec<_>>();
+        assert!(
+            federated_schemes.contains(&(ListenerKind::Primary, AuthScheme::FederatedAccessToken))
+        );
+        assert!(
+            federated_schemes.contains(&(ListenerKind::Admin, AuthScheme::FederatedAccessToken))
+        );
+
+        let mut service_registry = bootstrap::Registry::new();
+        service_registry
+            .register_primary_authorizer(allow_authorizer())
+            .expect("ServiceToken Primary authorizer");
+        let service_providers = TokenProviderBindings::new(
+            Some(runtime_test_provider()),
+            None,
+            Some(runtime_test_service_provider()),
+        );
+        let service = assemble_test_plan(
+            &mut service_registry,
+            &[
+                ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+                ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+                ("RSS_INTERNAL_AUTH_SCHEME", "service-token"),
+            ],
+            &service_providers,
+        )
+        .expect("ServiceToken listener plan finalizes");
+        let internal = service
+            .into_listeners()
+            .into_iter()
+            .find(|listener| listener.listener() == ListenerKind::Internal)
+            .expect("ServiceToken Internal listener");
+        assert_eq!(internal.auth_scheme(), AuthScheme::ServiceToken);
+        assert!(matches!(internal.transport, ListenerTransport::Plaintext));
     }
 
     #[derive(Clone)]
@@ -769,6 +1140,64 @@ mod tests {
         assert_eq!(check.status(), HealthStatus::Unhealthy);
         assert_eq!(check.detail(), "not-bound");
         assert_eq!(check.name().as_str(), MTLS_SOURCE_READY_PROBE_NAME);
+    }
+
+    struct HealthyProbe;
+
+    impl bootstrap::HealthProbe for HealthyProbe {
+        fn check(&self) -> HealthCheck {
+            HealthCheck::new(
+                ProbeName::parse("healthy-before-mtls")
+                    .unwrap_or_else(|_| unreachable!("static probe name")),
+                HealthStatus::Healthy,
+                "ready",
+            )
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn health_reporter_captures_mtls_probe_before_health_routes_finalize() {
+        let mut registry = bootstrap::Registry::new();
+        registry
+            .register_primary_authorizer(allow_authorizer())
+            .expect("Primary authorizer");
+        let healthy_name =
+            ProbeName::parse("healthy-before-mtls").expect("static healthy probe name");
+        registry
+            .probe(healthy_name, Box::new(HealthyProbe))
+            .expect("healthy probe");
+
+        let health = assemble_rss_mtls_test(
+            &mut registry,
+            Some("spiffe://example.org/ns/rss/sa/internal"),
+            Some("unix:///run/spire/test.sock"),
+        )
+        .expect("finalize plan with mTLS probe")
+        .into_listeners()
+        .into_iter()
+        .find(|listener| listener.listener() == ListenerKind::Health)
+        .expect("Health listener");
+        let (_, routes) = health.into_parts();
+        let response = routes
+            .into_router_for_test()
+            .oneshot(
+                Request::builder()
+                    .uri("/health/v1/readyz")
+                    .body(Body::empty())
+                    .expect("readyz request"),
+            )
+            .await
+            .expect("readyz response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("readyz body");
+        let body = std::str::from_utf8(&body).expect("readyz JSON");
+        assert!(
+            body.contains(MTLS_SOURCE_READY_PROBE_NAME),
+            "Health reporter must retain the pre-bind mTLS probe: {body}"
+        );
     }
 
     #[test]
@@ -878,7 +1307,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn assemble_authed_routers_smoke_segregates_listeners_and_finalizes_auth() {
+    async fn listener_plan_finalizer_smoke_segregates_listeners_and_finalizes_auth() {
         let mut registry = bootstrap::Registry::new();
         registry
             .route_group::<httpserve::Primary>("/api/v1/p", |rb| {
@@ -930,15 +1359,12 @@ mod tests {
             Some("unix:///run/spire/test.sock"),
         )
         .expect("assemble listeners");
-        let (health_listener_kind, health_routes) =
-            health_listener(test_reporter(), noop_metrics()).expect("health listener");
-        assert_eq!(health_listener_kind, ListenerKind::Health);
-
         let mut primary = None;
         let mut admin = None;
         let mut internal = None;
+        let mut health = None;
         let mut unexpected = Vec::new();
-        for assembled in listeners {
+        for assembled in listeners.into_listeners() {
             if assembled.listener() == ListenerKind::Internal {
                 let carried = match &assembled.transport {
                     ListenerTransport::Mtls {
@@ -965,6 +1391,7 @@ mod tests {
                 ListenerKind::Primary => primary = Some(routes.into_router_for_test()),
                 ListenerKind::Admin => admin = Some(routes.into_router_for_test()),
                 ListenerKind::Internal => internal = Some(routes.into_router_for_test()),
+                ListenerKind::Health => health = Some(routes.into_router_for_test()),
                 other => unexpected.push(other),
             }
         }
@@ -975,7 +1402,7 @@ mod tests {
         let primary = primary.expect("primary listener");
         let admin = admin.expect("admin listener");
         let internal = internal.expect("internal listener");
-        let health = health_routes.into_router_for_test();
+        let health = health.expect("health listener");
 
         async fn status(router: axum::Router, uri: &str) -> StatusCode {
             router

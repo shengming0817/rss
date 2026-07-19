@@ -1,6 +1,9 @@
 # Runtime Assembly Baseline
 
-This document records the current runtime assembly shape after the `runtime::run()` decomposition, #1677 PG lifecycle-ownership hardening, and the startup owner funnel. The machine-readable inventory lives in `runtime-baseline/runtime.txt` and is regenerated with:
+This document records the current runtime assembly shape after the `runtime::run()` decomposition,
+#1677 PG lifecycle-ownership hardening, the startup owner funnel, and #1790 plan-driven listener
+execution. The machine-readable inventory lives in `runtime-baseline/runtime.txt` and is
+regenerated with:
 
 ```bash
 cargo xtask runtime-baseline list > runtime-baseline/runtime.txt
@@ -27,9 +30,11 @@ cleanup. `run_startup()` contains no assembly body or compatibility path: it ent
 `phase::execute`, whose exact consuming chain is
 `Planned → ProvidersBuilt → InfraBuilt → DomainsWired → Finalized → RuntimeOutputs`.
 The private `PhaseContext` retains the same mutable serving input and owned `RuntimePlan` through
-launch. Each phase file owns one transition: listener-selected RSS/Federated access-token provider
-preflight, infrastructure construction plus Service Token replay-store completion, domain wiring,
-listener finalization, then launch. The selected profiles retain distinct typed providers,
+launch. The provider transition projects the sole private `ListenerExecutionPlan`; the mandatory
+carrier then moves through `ProvidersBuilt → InfraBuilt → DomainsWired` and is consumed by the
+single listener finalizer. Each phase file owns one transition: plan-selected RSS/Federated
+access-token provider preflight, infrastructure construction plus Service Token replay-store
+completion, domain wiring, listener finalization, then launch. The selected profiles retain distinct typed providers,
 resources, and readiness signals throughout that chain. Infrastructure capabilities are complete
 before domain composition begins; module probes enter the registry before listener finalization;
 and only the launch phase may consume `Finalized` and transfer lifecycle ownership to the sole
@@ -79,9 +84,18 @@ result cannot silently leave a lifecycle carrier behind.
 
 ## Listener, Health, And Shutdown Order
 
-Authenticated listeners are built through `assemble_authed_routers`. Health and metrics use a
-dedicated plain listener from `health_listener`, after route groups are drained. Only
-`phase/launch.rs` can consume `Finalized` into a `LaunchPlan` and hand it to `launch::launch`.
+`RuntimePlan → ListenerExecutionPlan → FinalizedListenerSet → LaunchPlan` is the only listener
+execution path. The execution projection carries private listener id, kind, auth, and ordered
+domains. Domain wiring compares the plan, generated bindings, and live registry exactly; the
+finalizer drains live groups, consumes every plan spec in canonical order, derives provider,
+auth bridge, and transport selection from plan auth, and rejects leftovers or drift before address
+resolution or bind. A domain-free Internal spec still produces an empty router and reaches bind.
+
+Health has no separate constructor or append path. Only a plan-declared domain-free
+`Health + NoAuth` spec can produce it, and the finalizer does so after non-Health listener
+finalization and mTLS probe registration. `FinalizedListenerSet` and the launch input have private
+fields, so `phase/launch.rs` can only hand the consumed finalized set to `launch::launch`; a plain
+`Vec<AssembledListener>` cannot enter launch.
 
 `LaunchPlan::register` transfers both lifecycle batches into `ShutdownStack` before propagating
 either batch's validation result, so an earlier invalid batch cannot synchronously drop the later
@@ -105,5 +119,8 @@ provider resources, with tracing flushed last. Exact registration anchors and th
   crate, extracts channels outside `phase/domains.rs`, bypasses the single merge, or registers
   lifecycle primitives outside the common helper
 - `DomainModuleResult::merge` is absent or stops merging a field
+- listener execution gains a second projection/finalizer, loses its mandatory private carrier,
+  accepts a plain listener vector at launch, restores raw-value/config auth decisions or manual
+  Health construction, or stops enforcing exact plan/generated/live domain evidence
 
 `cargo xtask verify --fast` and `cargo xtask ci full` run this gate before `archrules`, so `RUNTIME-BASELINE-DRIFT-01` is indexed by `cargo xtask archrules verify`.

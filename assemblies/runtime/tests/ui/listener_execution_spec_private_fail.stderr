@@ -1,0 +1,11 @@
+error[E0603]: struct `ListenerExecutionSpec` is private
+ --> tests/ui/listener_execution_spec_private_fail.rs:1:20
+  |
+1 | use runtime::plan::ListenerExecutionSpec;
+  |                    ^^^^^^^^^^^^^^^^^^^^^ private struct
+  |
+note: the struct `ListenerExecutionSpec` is defined here
+ --> src/plan.rs
+  |
+  | pub(crate) struct ListenerExecutionSpec {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

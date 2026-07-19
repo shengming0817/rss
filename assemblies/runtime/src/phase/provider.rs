@@ -9,6 +9,7 @@ impl<'a> Planned<'a> {
         let result = async move {
             let runtime_plan = crate::plan::RuntimePlan::bundled(self.runtime_inputs.config())
                 .context("build RuntimePlan")?;
+            let listener_execution_plan = runtime_plan.listener_execution_plan();
             let context = PhaseContext::new(self.runtime_inputs, runtime_plan);
             let typed_runtime_plan = context.runtime_plan.as_typed();
             tracing::info!(
@@ -57,6 +58,7 @@ impl<'a> Planned<'a> {
 
             Ok(ProvidersBuilt {
                 context,
+                listener_execution_plan,
                 serving_config,
                 runtime_rss_access,
                 runtime_federated_access,

@@ -37,7 +37,7 @@ pub(crate) fn server_request_budget(
 
 /// Resources owned by the launch phase, grouped by lifecycle dependency.
 pub(crate) struct LaunchPlanParts {
-    pub(crate) listeners: Vec<routes::AssembledListener>,
+    pub(crate) listeners: routes::FinalizedListenerSet,
     pub(crate) trace_exporter: Option<Box<DynManagedResource<'static>>>,
     pub(crate) pg_runtime_module: DomainModuleResult,
     pub(crate) domain_module: DomainModuleResult,
@@ -45,7 +45,7 @@ pub(crate) struct LaunchPlanParts {
 
 /// Launch plan consumed by [`launch`] to register shutdown resources and serve listeners.
 pub(crate) struct LaunchPlan {
-    listeners: Vec<routes::AssembledListener>,
+    listeners: routes::FinalizedListenerSet,
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
     pg_runtime_module: DomainModuleResult,
     domain_module: DomainModuleResult,
@@ -87,7 +87,7 @@ impl LaunchPlan {
         pg_result?;
         domain_result?;
 
-        Ok(listeners)
+        Ok(listeners.into_listeners())
     }
 
     /// Registers one lifecycle output batch through the common resources-then-workers funnel.
@@ -165,9 +165,8 @@ where
             listener_count > 0,
             "no listener has routes to serve (refusing to start with zero bound sockets)"
         );
-        for listener in listeners {
-            bind_and_register(&mut stack, listener, budget, &addr_resolver).await?;
-        }
+        let bound = BoundListenerSet::prepare(listeners, budget, &addr_resolver).await?;
+        bound.activate(&mut stack)?;
         observe_ready_stack(&stack);
         tracing::info!(listener_count, "all listeners bound; server ready");
         shutdown.await
@@ -200,53 +199,135 @@ fn preserve_launch_error(
     }
 }
 
-/// Bind one listener socket and register the serve task through the shutdown token funnel.
-// reason: this is the per-listener assembly junction; keeping bind, auth-scheme selection, and
-// plaintext/mTLS ShutdownStack registration together makes fail-fast startup order explicit.
-#[allow(clippy::cognitive_complexity)]
-async fn bind_and_register<R>(
-    stack: &mut ShutdownStack,
-    listener: routes::AssembledListener,
-    budget: httpserve::ServerRequestBudget,
-    addr_resolver: &R,
-) -> anyhow::Result<()>
-where
-    R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
-{
-    let routes::AssembledListener {
-        listener,
-        scheme,
-        routes,
-        transport,
-    } = listener;
-    let transport = resolve_listener_transport(listener, scheme, transport)?;
-    let name = listeners::listener_name(listener);
-    let addr = addr_resolver(listener, scheme)?;
-    let bound = HttpServer::bind(name, addr)
-        .await
-        .with_context(|| format!("bind {name} listener at {addr}"))?;
-    tracing::info!(listener = ?listener, name, addr = %bound.local_addr(), "listener bound");
-    let svc = routes.into_make_service(budget);
-    match transport {
-        ResolvedListenerTransport::Mtls(material) => {
-            let mtls = mtls_config(listener, material.allow_set, &material.spiffe_endpoint)
-                .await
-                .with_context(|| format!("build {name} mTLS config"))?;
-            register_mtls_server(stack, bound, svc, mtls, material.health)?;
-        }
-        ResolvedListenerTransport::Plaintext => {
-            if listener == ListenerKind::Internal && scheme == AuthScheme::ServiceToken {
-                tracing::warn!(
-                    listener = ?listener,
-                    "binding local-test Internal service-token listener; mTLS is the production default"
-                );
+/// Fully prepared listener set. Private fields make partial activation unrepresentable outside this
+/// module: every socket and transport must prepare successfully before the set can be consumed.
+struct BoundListenerSet {
+    non_health: Vec<BoundListener>,
+    health: Vec<BoundListener>,
+}
+
+struct BoundListener {
+    listener: ListenerKind,
+    scheme: AuthScheme,
+    bound: httpd::BoundHttpServer,
+    svc: httpserve::ServerMakeService,
+    transport: PreparedListenerTransport,
+}
+
+enum PreparedListenerTransport {
+    Plaintext,
+    Mtls {
+        config: httpd::MtlsServerConfig,
+        health: std::sync::Arc<routes::MtlsHealthSlot>,
+    },
+}
+
+impl BoundListenerSet {
+    async fn prepare<R>(
+        listeners: Vec<routes::AssembledListener>,
+        budget: httpserve::ServerRequestBudget,
+        addr_resolver: &R,
+    ) -> anyhow::Result<Self>
+    where
+        R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
+    {
+        let mut non_health = Vec::with_capacity(listeners.len());
+        let mut health = Vec::new();
+        for listener in listeners {
+            let listener = BoundListener::prepare(listener, budget, addr_resolver).await?;
+            if listener.listener == ListenerKind::Health {
+                health.push(listener);
+            } else {
+                non_health.push(listener);
             }
-            stack.register_with_token(move |token| {
-                DynManagedResource::new_box(bound.serve(svc, token))
-            });
+        }
+        Ok(Self { non_health, health })
+    }
+
+    fn activate(self, stack: &mut ShutdownStack) -> anyhow::Result<()> {
+        for listener in self.non_health.iter().chain(&self.health) {
+            listener.preflight_activation()?;
+        }
+        for listener in self.non_health.into_iter().chain(self.health) {
+            listener.activate(stack);
+        }
+        Ok(())
+    }
+}
+
+impl BoundListener {
+    #[allow(clippy::cognitive_complexity)]
+    async fn prepare<R>(
+        listener: routes::AssembledListener,
+        budget: httpserve::ServerRequestBudget,
+        addr_resolver: &R,
+    ) -> anyhow::Result<Self>
+    where
+        R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
+    {
+        let (listener, scheme, routes, transport) = listener.into_launch_parts();
+        let transport = resolve_listener_transport(listener, scheme, transport)?;
+        let name = listeners::listener_name(listener);
+        let addr = addr_resolver(listener, scheme)?;
+        let bound = HttpServer::bind(name, addr)
+            .await
+            .with_context(|| format!("bind {name} listener at {addr}"))?;
+        tracing::info!(listener = ?listener, name, addr = %bound.local_addr(), "listener bound");
+        let transport = match transport {
+            ResolvedListenerTransport::Mtls(material) => {
+                let mtls = mtls_config(listener, material.allow_set, &material.spiffe_endpoint)
+                    .await
+                    .with_context(|| format!("build {name} mTLS config"))?;
+                PreparedListenerTransport::Mtls {
+                    config: mtls,
+                    health: material.health,
+                }
+            }
+            ResolvedListenerTransport::Plaintext => PreparedListenerTransport::Plaintext,
+        };
+        Ok(Self {
+            listener,
+            scheme,
+            bound,
+            svc: routes.into_make_service(budget),
+            transport,
+        })
+    }
+
+    fn preflight_activation(&self) -> anyhow::Result<()> {
+        match &self.transport {
+            PreparedListenerTransport::Plaintext => Ok(()),
+            PreparedListenerTransport::Mtls { config, health } => health.set(config.clone()),
         }
     }
-    Ok(())
+
+    fn activate(self, stack: &mut ShutdownStack) {
+        let Self {
+            listener,
+            scheme,
+            bound,
+            svc,
+            transport,
+        } = self;
+        match transport {
+            PreparedListenerTransport::Mtls { config, health: _ } => {
+                stack.register_with_token(move |token| {
+                    DynManagedResource::new_box(bound.serve_mtls(svc, config, token))
+                });
+            }
+            PreparedListenerTransport::Plaintext => {
+                if listener == ListenerKind::Internal && scheme == AuthScheme::ServiceToken {
+                    tracing::warn!(
+                        listener = ?listener,
+                        "binding local-test Internal service-token listener; mTLS is the production default"
+                    );
+                }
+                stack.register_with_token(move |token| {
+                    DynManagedResource::new_box(bound.serve(svc, token))
+                });
+            }
+        }
+    }
 }
 
 struct MtlsLaunchMaterial {
@@ -293,20 +374,6 @@ fn resolve_listener_transport(
             Ok(ResolvedListenerTransport::Plaintext)
         }
     }
-}
-
-fn register_mtls_server(
-    stack: &mut ShutdownStack,
-    bound: httpd::BoundHttpServer,
-    svc: httpserve::ServerMakeService,
-    mtls: httpd::MtlsServerConfig,
-    health: std::sync::Arc<routes::MtlsHealthSlot>,
-) -> anyhow::Result<()> {
-    health.set(mtls.clone())?;
-    stack.register_with_token(move |token| {
-        DynManagedResource::new_box(bound.serve_mtls(svc, mtls, token))
-    });
-    Ok(())
 }
 
 async fn mtls_config(
@@ -366,12 +433,11 @@ async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::config::test_snapshot;
-    use crate::listeners::health_listener;
 
     use diport::{ManagedResource, ShutdownError};
     use primitives::{HealthCheck, HealthStatus, ProbeName};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
     use tracing_subscriber::prelude::*;
 
@@ -497,6 +563,15 @@ mod tests {
         Arc::new(reg.take_health_reporter())
     }
 
+    #[allow(clippy::expect_used)]
+    fn healthy_test_reporter() -> Arc<bootstrap::HealthReporter> {
+        let mut reg = bootstrap::compose(&[]).expect("compose");
+        let name = ProbeName::parse("launch-test").expect("static probe name");
+        reg.probe(name, Box::new(NoopProbe))
+            .expect("register healthy launch probe");
+        Arc::new(reg.take_health_reporter())
+    }
+
     #[derive(Clone)]
     struct FixedMetrics(&'static str);
 
@@ -512,9 +587,14 @@ mod tests {
 
     #[allow(clippy::expect_used)] // reason: test fixture health listener must assemble or the test setup is invalid.
     fn test_health_assembled() -> routes::AssembledListener {
-        let (listener, routes) =
-            health_listener(test_reporter(), noop_metrics()).expect("health listener");
-        routes::AssembledListener::plain(listener, routes)
+        routes::AssembledListener::health_for_test(test_reporter(), noop_metrics())
+            .expect("health listener")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn healthy_test_health_assembled() -> routes::AssembledListener {
+        routes::AssembledListener::health_for_test(healthy_test_reporter(), noop_metrics())
+            .expect("healthy health listener")
     }
 
     fn ephemeral_addr(_l: ListenerKind, _scheme: AuthScheme) -> anyhow::Result<SocketAddr> {
@@ -552,7 +632,7 @@ mod tests {
 
     fn minimal_plan(listeners: Vec<routes::AssembledListener>) -> LaunchPlan {
         LaunchPlan::new(LaunchPlanParts {
-            listeners,
+            listeners: routes::FinalizedListenerSet::for_test(listeners),
             trace_exporter: None,
             pg_runtime_module: pg_runtime_module(false),
             domain_module: DomainModuleResult::default(),
@@ -561,7 +641,7 @@ mod tests {
 
     fn full_plan(trace: bool, audit_guard: bool) -> LaunchPlan {
         LaunchPlan::new(LaunchPlanParts {
-            listeners: vec![test_health_assembled()],
+            listeners: routes::FinalizedListenerSet::for_test(vec![test_health_assembled()]),
             trace_exporter: trace.then(|| resource("trace-exporter")),
             pg_runtime_module: pg_runtime_module(audit_guard),
             domain_module: DomainModuleResult {
@@ -694,6 +774,168 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn default_launch_serves_request_id_then_drains_and_releases_socket() {
+        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve Health address");
+        let addr = reservation.local_addr().expect("reserved Health address");
+        drop(reservation);
+
+        let request = async move {
+            let client = reqwest::Client::new();
+            let response = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match client
+                        .get(format!("http://{addr}/health/v1/readyz"))
+                        .send()
+                        .await
+                    {
+                        Ok(response) => break response,
+                        Err(_) => tokio::task::yield_now().await,
+                    }
+                }
+            })
+            .await
+            .expect("Health listener must accept a request before timeout");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert!(
+                response.headers().get("x-request-id").is_some(),
+                "production launch path must preserve request-id middleware"
+            );
+            let liveness = client
+                .get(format!("http://{addr}/health/v1/healthz"))
+                .send()
+                .await
+                .context("Health liveness request")?;
+            assert_eq!(liveness.status(), reqwest::StatusCode::OK);
+            anyhow::Ok(())
+        };
+
+        launch_until(
+            minimal_plan(vec![healthy_test_health_assembled()]),
+            test_budget(),
+            move |listener, scheme| {
+                assert_eq!(listener, ListenerKind::Health);
+                assert_eq!(scheme, AuthScheme::NoAuth);
+                Ok(addr)
+            },
+            request,
+        )
+        .await
+        .expect("real Health request then graceful drain");
+
+        let after = reqwest::Client::new()
+            .get(format!("http://{addr}/health/v1/healthz"))
+            .send()
+            .await;
+        assert!(after.is_err(), "drained listener must reject new requests");
+        let rebound = tokio::net::TcpListener::bind(addr)
+            .await
+            .expect("graceful drain must release Health socket");
+        drop(rebound);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn default_launch_serves_metrics_exposition_over_real_socket() {
+        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve Health address");
+        let addr = reservation.local_addr().expect("reserved Health address");
+        drop(reservation);
+        let metrics: Arc<dyn diport::MetricsExporter> =
+            Arc::new(FixedMetrics("rss_launch_e2e_total 7\n"));
+        let listener = routes::AssembledListener::health_for_test(test_reporter(), metrics)
+            .expect("metrics Health listener");
+
+        launch_until(
+            minimal_plan(vec![listener]),
+            test_budget(),
+            move |_, _| Ok(addr),
+            async move {
+                let response = reqwest::Client::new()
+                    .get(format!("http://{addr}/health/v1/metrics"))
+                    .send()
+                    .await
+                    .context("metrics request over real socket")?;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                assert_eq!(
+                    response
+                        .headers()
+                        .get("content-type")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("text/plain; version=0.0.4; charset=utf-8")
+                );
+                let body = response.text().await.context("metrics response body")?;
+                assert!(body.contains("rss_launch_e2e_total"));
+                anyhow::Ok(())
+            },
+        )
+        .await
+        .expect("metrics request then graceful drain");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn default_launch_empty_probe_readyz_fails_closed_over_real_socket() {
+        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve Health address");
+        let addr = reservation.local_addr().expect("reserved Health address");
+        drop(reservation);
+
+        launch_until(
+            minimal_plan(vec![test_health_assembled()]),
+            test_budget(),
+            move |_, _| Ok(addr),
+            async move {
+                let response = reqwest::Client::new()
+                    .get(format!("http://{addr}/health/v1/readyz"))
+                    .send()
+                    .await
+                    .context("empty-probe readyz request")?;
+                assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+                anyhow::Ok(())
+            },
+        )
+        .await
+        .expect("empty-probe request then graceful drain");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn bound_listener_set_activates_through_shutdown_stack_funnel() {
+        let bound = BoundListenerSet::prepare(
+            vec![healthy_test_health_assembled()],
+            test_budget(),
+            &ephemeral_addr,
+        )
+        .await
+        .expect("prepare Health listener set");
+        let addr = bound.health[0].bound.local_addr();
+        let mut stack = ShutdownStack::new(CancellationToken::new());
+
+        bound
+            .activate(&mut stack)
+            .expect("activate fully prepared Health set");
+        assert_eq!(
+            stack.registered_names().collect::<Vec<_>>(),
+            ["http-health"]
+        );
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/health/v1/readyz"))
+            .send()
+            .await
+            .expect("readyz over funnel-served socket");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(
+            stack.shutdown().await.is_empty(),
+            "ShutdownStack funnel must drain the listener cleanly"
+        );
+    }
+
+    #[tokio::test]
     #[allow(clippy::expect_used)] // reason: direct async test assertion for fail-fast listener validation.
     async fn launch_plan_empty_listeners_errs() {
         let shutdowns = Arc::new(AtomicUsize::new(0));
@@ -801,6 +1043,82 @@ mod tests {
         drop(occupied);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::expect_used)]
+    async fn health_is_not_served_before_every_listener_is_bound() {
+        let health_reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve Health listener address");
+        let health_addr = health_reservation
+            .local_addr()
+            .expect("Health local address");
+        drop(health_reservation);
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("occupy later listener address");
+        let occupied_addr = occupied.local_addr().expect("occupied local address");
+
+        let resolver_index = Arc::new(AtomicUsize::new(0));
+        let second_resolver_reached = Arc::new(tokio::sync::Notify::new());
+        let release_second_resolver = Arc::new((Mutex::new(false), Condvar::new()));
+        let launch = {
+            let resolver_index = Arc::clone(&resolver_index);
+            let second_resolver_reached = Arc::clone(&second_resolver_reached);
+            let release_second_resolver = Arc::clone(&release_second_resolver);
+            tokio::spawn(launch_until(
+                minimal_plan(vec![
+                    healthy_test_health_assembled(),
+                    test_health_assembled(),
+                ]),
+                test_budget(),
+                move |_, _| {
+                    let index = resolver_index.fetch_add(1, Ordering::SeqCst);
+                    if index == 1 {
+                        second_resolver_reached.notify_one();
+                        tokio::task::block_in_place(|| {
+                            let (released, wake) = &*release_second_resolver;
+                            let mut released = released.lock().expect("release lock");
+                            while !*released {
+                                released = wake.wait(released).expect("release wait");
+                            }
+                        });
+                    }
+                    [health_addr, occupied_addr]
+                        .get(index)
+                        .copied()
+                        .context("unexpected listener address request")
+                },
+                std::future::pending::<anyhow::Result<()>>(),
+            ))
+        };
+
+        second_resolver_reached.notified().await;
+        let premature_response = tokio::time::timeout(
+            Duration::from_millis(300),
+            reqwest::Client::new()
+                .get(format!("http://{health_addr}/health/v1/healthz"))
+                .send(),
+        )
+        .await;
+
+        {
+            let (released, wake) = &*release_second_resolver;
+            *released.lock().expect("release lock") = true;
+            wake.notify_one();
+        }
+        let error = launch
+            .await
+            .expect("launch task must not panic")
+            .expect_err("later listener bind must fail");
+        assert!(format!("{error:#}").contains("bind http-health listener"));
+        assert!(
+            !matches!(premature_response, Ok(Ok(_))),
+            "Health must not serve before every listener socket and transport is ready: \
+             {premature_response:?}"
+        );
+        drop(occupied);
+    }
+
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn launch_plan_shutdown_trigger_error_preserves_error_and_drains_once() {
@@ -865,7 +1183,7 @@ mod tests {
         let domain_shutdowns = Arc::new(AtomicUsize::new(0));
         let probe_name = ProbeName::parse("leftover-probe").expect("valid probe name");
         let plan = LaunchPlan::new(LaunchPlanParts {
-            listeners: vec![test_health_assembled()],
+            listeners: routes::FinalizedListenerSet::for_test(vec![test_health_assembled()]),
             trace_exporter: Some(recording_resource(
                 "trace-exporter",
                 Arc::clone(&trace_shutdowns),
@@ -981,13 +1299,12 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn successful_mtls_registration_sets_readiness_registers_and_drains_resource() {
+    async fn bound_mtls_activation_preflights_readiness_then_registers_and_drains() {
         let allow_set = authn::MtlsAllowSet::new(["spiffe://example.org/ns/rss/sa/internal"])
             .expect("allow-set");
         let mtls = httpd::MtlsServerConfig::for_test(allow_set).expect("hermetic mTLS config");
         let health = Arc::new(routes::MtlsHealthSlot::new());
-        let (_, routes) =
-            health_listener(test_reporter(), noop_metrics()).expect("health routes fixture");
+        let (_, routes) = test_health_assembled().into_parts();
         let bound = HttpServer::bind(
             "http-internal",
             "127.0.0.1:0".parse().expect("ephemeral address"),
@@ -996,14 +1313,26 @@ mod tests {
         .expect("bind hermetic mTLS listener");
         let mut stack = ShutdownStack::new(CancellationToken::new());
 
-        register_mtls_server(
-            &mut stack,
-            bound,
-            routes.into_make_service(test_budget()),
-            mtls,
-            Arc::clone(&health),
-        )
-        .expect("register mTLS serve resource");
+        assert_eq!(
+            health.check().1,
+            "not-bound",
+            "socket and transport preparation must not publish readiness"
+        );
+        BoundListenerSet {
+            non_health: vec![BoundListener {
+                listener: ListenerKind::Internal,
+                scheme: AuthScheme::Mtls,
+                bound,
+                svc: routes.into_make_service(test_budget()),
+                transport: PreparedListenerTransport::Mtls {
+                    config: mtls,
+                    health: Arc::clone(&health),
+                },
+            }],
+            health: Vec::new(),
+        }
+        .activate(&mut stack)
+        .expect("preflight and activate mTLS set");
 
         assert_ne!(health.check().1, "not-bound", "readiness slot must be set");
         assert_eq!(

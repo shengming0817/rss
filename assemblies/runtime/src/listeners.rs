@@ -1,45 +1,13 @@
-//! Runtime health listener and listener bind-address policy.
+//! Runtime listener bind-address and plaintext policy.
 
 use crate::{config::SnapshotConfig, infra::plaintext_endpoint_policy_from_value};
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Context as _;
-use primitives::{AuthPlan, AuthScheme, ListenerKind};
+use primitives::{AuthScheme, ListenerKind};
 use secure::PlaintextEndpointPolicy;
-
-// ── Health listener（框架/组合根归属：healthz + readyz）─────────────────────────────────────────
-
-/// 构造 Health listener 的已认证路由（`/health/v1/healthz` liveness + `/health/v1/readyz` readiness）。
-///
-/// Health 是**框架/组合根**归属：域 crate 不声明 health 路由组，组合根在此经公开 funnel
-/// （`UnfinalizedRoutes::empty().nest_group::<Health>` → `finalize_auth`）挂载——产物仍是 `AuthenticatedRoutes`
-/// （ROUTE-AUTH-FUNNEL：health router 也经 finalize_auth + request_id/correlation 封口；trace 由
-/// `httpserve` 的 listener policy 对 Health 禁用，避免 probe/scrape span 噪声）。
-/// `NoAuth` plan（Health listener 无验签桥）。readyz handler 闭包持 `Arc<HealthReporter>`（`Send + Sync`，
-/// 整体非 `Sync` 的 `Registry` 无法进 handler）每请求 `report`（worst-of 聚合所有已注册探针，含 `configs_ready`）。
-///
-/// `metrics` 是组合根注入的 `Arc<dyn diport::MetricsExporter>`（生产 = Prometheus，测试 = 替身）——`/metrics`
-/// scrape handler 每请求 `render()` 取 exposition body。**必填**（非 `Option`/silent-noop，runtime-api Option 范式）。
-///
-/// **scrape 路径**：metrics 与 healthz/readyz 同组挂在 [`HEALTH_ROUTE_PREFIX`] 下，完整路径
-/// `/health/v1/metrics`（非 Prometheus 默认 `/metrics`）——运维须在 scrape target 显式配
-/// `metrics_path: /health/v1/metrics`（否则默认 `/metrics` 抓取得 404、被记空抓取）。挂 Health listener（内部
-/// 网络面）而非对外 Primary：scrape 流量与 health probe 同隔离，且非-Primary `Route` 类型层无法降级 Public。
-///
-/// `pub`：供冒烟 e2e（`tests/runtime_serve_e2e.rs`）经真实 socket 绑定验证 serve + readyz + `/metrics` + 优雅关停闭环。
-pub fn health_listener(
-    reporter: Arc<bootstrap::HealthReporter>,
-    metrics: Arc<dyn diport::MetricsExporter>,
-) -> anyhow::Result<(ListenerKind, httpserve::AuthenticatedRoutes)> {
-    let routes = httpserve::health::routes(move || reporter.report(), move || metrics.render());
-    let plan =
-        AuthPlan::new(ListenerKind::Health, AuthScheme::NoAuth).context("health auth plan")?;
-    let authed = httpserve::finalize_auth(routes, plan).context("finalize_auth health")?;
-    Ok((ListenerKind::Health, authed))
-}
 
 // ── listener bind 地址（per-listener env，缺配 fail-fast）─────────────────────────────────────────
 
@@ -179,6 +147,7 @@ mod tests {
     use super::*;
     use crate::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
 
+    use std::sync::Arc;
     use std::time::Duration;
 
     use axum::body::Body;
@@ -207,6 +176,14 @@ mod tests {
 
     fn noop_metrics() -> Arc<dyn diport::MetricsExporter> {
         Arc::new(FixedMetrics("# noop\n"))
+    }
+
+    #[allow(clippy::expect_used)]
+    fn health_routes(reporter: Arc<bootstrap::HealthReporter>) -> httpserve::AuthenticatedRoutes {
+        crate::routes::AssembledListener::health_for_test(reporter, noop_metrics())
+            .expect("health listener")
+            .into_parts()
+            .1
     }
 
     fn listener_addr_from(
@@ -487,7 +464,7 @@ mod tests {
     async fn health_listener_readyz_reflects_probes() {
         let mut empty_reg = bootstrap::compose(&[]).expect("compose empty");
         let empty = Arc::new(empty_reg.take_health_reporter());
-        let (_, authed) = health_listener(empty, noop_metrics()).expect("health listener");
+        let authed = health_routes(empty);
         let resp = authed
             .into_router_for_test()
             .oneshot(
@@ -521,7 +498,7 @@ mod tests {
         )
         .expect("register probe");
         let reporter = Arc::new(reg.take_health_reporter());
-        let (_, authed) = health_listener(reporter, noop_metrics()).expect("health listener");
+        let authed = health_routes(reporter);
         let resp = authed
             .into_router_for_test()
             .oneshot(
@@ -548,8 +525,7 @@ mod tests {
         .expect("register probe");
         let reporter = Arc::new(reg.take_health_reporter());
 
-        let (_listener, authed) =
-            health_listener(reporter, noop_metrics()).expect("health listener");
+        let authed = health_routes(reporter);
         let resp = authed
             .into_router_for_test()
             .oneshot(
@@ -571,9 +547,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used, clippy::unwrap_used)]
     async fn health_listener_healthz_is_200() {
-        let (listener, authed) =
-            health_listener(test_reporter(), noop_metrics()).expect("health listener");
-        assert_eq!(listener, ListenerKind::Health);
+        let authed = health_routes(test_reporter());
         let resp = authed
             .into_router_for_test()
             .oneshot(

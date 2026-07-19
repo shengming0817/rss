@@ -11,9 +11,9 @@ use p256::ecdsa::{Signature, SigningKey};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{
-    AccessPrincipalKind, AccessTokenProfileSelection, CapturedConfigValue, InternalAuthSelection,
-    RuntimeConfigKey, RuntimeConfigSnapshot, RuntimeConfigSource, RuntimeServingConfig,
-    ServiceTokenConfig, ServingConfigMapper, TokenProfilesConfig, WorkerRuntimeConfig,
+    AccessPrincipalKind, CapturedConfigValue, RuntimeConfigKey, RuntimeConfigSnapshot,
+    RuntimeConfigSource, RuntimeServingConfig, ServiceTokenConfig, ServingConfigMapper,
+    TokenProfilesConfig, WorkerRuntimeConfig,
 };
 
 #[derive(Clone)]
@@ -291,14 +291,6 @@ fn complete_serving_config_accepts_federated_primary_and_admin_without_local_rss
         .expect("federated-only serving config")
         .into_parts();
 
-    assert_eq!(
-        parts.token_profiles.primary(),
-        AccessTokenProfileSelection::FederatedAccess
-    );
-    assert_eq!(
-        parts.token_profiles.admin(),
-        AccessTokenProfileSelection::FederatedAccess
-    );
     assert!(parts.token_profiles.rss_access().is_none());
     assert!(parts.token_profiles.federated_access().is_some());
     assert!(parts.domain_modules.identity.is_federated_access());
@@ -757,6 +749,14 @@ fn snapshot_capability_reuses_one_generation_for_serving_decisions() {
     let source = FakeSource::new([
         ("RUST_LOG", FakeValue::Present("runtime=debug".to_owned())),
         (
+            "RSS_PRIMARY_TOKEN_PROFILE",
+            FakeValue::Present("rss-access".to_owned()),
+        ),
+        (
+            "RSS_ADMIN_TOKEN_PROFILE",
+            FakeValue::Present("rss-access".to_owned()),
+        ),
+        (
             "RSS_INTERNAL_AUTH_SCHEME",
             FakeValue::Present("service-token".to_owned()),
         ),
@@ -773,8 +773,13 @@ fn snapshot_capability_reuses_one_generation_for_serving_decisions() {
     let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
     let config = snapshot.view();
 
-    let scheme = super::config::InternalAuthSelection::parse(config)
-        .expect("generation-one internal auth selection")
+    let scheme = crate::plan::RuntimePlan::bundled(config)
+        .expect("generation-one RuntimePlan")
+        .listener_execution_plan()
+        .listeners()
+        .iter()
+        .find(|listener| listener.kind() == primitives::ListenerKind::Internal)
+        .expect("Internal listener")
         .auth_scheme();
     let addr = crate::listeners::listener_addr_for_scheme_at(
         config,
@@ -1142,24 +1147,8 @@ fn access_profiles_reject_two_lexical_paths_with_the_same_startup_identity() {
 }
 
 #[test]
-fn token_profile_config_requires_closed_listener_selections_and_fixes_health_to_no_auth() {
+fn token_profile_config_builds_only_the_selected_provider_material() {
     let config = token_profiles_from(rss_token_profile_values()).expect("valid RSS profile config");
-
-    assert_eq!(config.primary(), AccessTokenProfileSelection::RssAccess);
-    assert_eq!(config.admin(), AccessTokenProfileSelection::RssAccess);
-    assert_eq!(config.internal(), InternalAuthSelection::Mtls);
-    assert_eq!(
-        config.primary().auth_scheme(),
-        primitives::AuthScheme::RssAccessToken
-    );
-    assert_eq!(
-        config.internal().auth_scheme(),
-        primitives::AuthScheme::Mtls
-    );
-    assert_eq!(
-        TokenProfilesConfig::health_auth_scheme(),
-        primitives::AuthScheme::NoAuth
-    );
 
     let rss = config.rss_access().expect("RSS profile is active");
     assert_eq!(rss.issuer(), "https://rss.issuer.test");
@@ -1289,8 +1278,6 @@ fn token_profile_config_accepts_distinct_active_profiles_and_service_token() {
     add_service_token_profile(&mut values);
 
     let config = token_profiles_from(values).expect("three distinct profiles");
-    assert_eq!(config.admin(), AccessTokenProfileSelection::FederatedAccess);
-    assert_eq!(config.internal(), InternalAuthSelection::ServiceToken);
     let federated = config
         .federated_access()
         .expect("federated profile is active");

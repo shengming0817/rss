@@ -40,6 +40,7 @@ impl<'a> ProvidersBuilt<'a> {
     pub(super) async fn build_infra(self) -> anyhow::Result<<Self as RuntimePhaseState>::Next> {
         let ProvidersBuilt {
             context,
+            listener_execution_plan,
             serving_config,
             runtime_rss_access,
             runtime_federated_access,
@@ -256,6 +257,7 @@ impl<'a> ProvidersBuilt<'a> {
 
             Ok(InfraBuilt {
                 context,
+                listener_execution_plan,
                 pg_owner,
                 deps,
                 s3_canary_config,
@@ -266,7 +268,6 @@ impl<'a> ProvidersBuilt<'a> {
                 pg_readiness_period,
                 redis_readiness_period,
                 command_idempotency_keyring,
-                token_profiles,
                 runtime_rss_access,
                 runtime_federated_access,
                 runtime_service_token,

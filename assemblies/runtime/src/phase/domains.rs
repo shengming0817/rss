@@ -45,14 +45,50 @@ pub(crate) fn assemble_runtime_module_outputs(
 }
 
 pub(crate) fn validate_domain_listener_evidence(
+    plan: &crate::plan::ListenerExecutionPlan,
     actual: &[bootstrap::DomainListenerBinding],
 ) -> anyhow::Result<()> {
+    validate_binding_projection(
+        plan,
+        crate::modules_gen::DOMAIN_LISTENER_BINDINGS,
+        "generated",
+    )?;
+    validate_binding_projection(plan, actual, "live")?;
+    Ok(())
+}
+
+fn validate_binding_projection(
+    plan: &crate::plan::ListenerExecutionPlan,
+    bindings: &[bootstrap::DomainListenerBinding],
+    source: &'static str,
+) -> anyhow::Result<()> {
+    let expected_count = plan
+        .listeners()
+        .iter()
+        .map(|listener| listener.domains().len())
+        .sum::<usize>();
     anyhow::ensure!(
-        actual == crate::modules_gen::DOMAIN_LISTENER_BINDINGS,
-        "runtime domain-listener evidence drift: expected {}, observed {}",
-        crate::modules_gen::DOMAIN_LISTENER_BINDINGS.len(),
-        actual.len()
+        bindings.len() == expected_count,
+        "{source} domain-listener binding count drifts from RuntimePlan: plan {expected_count}, {source} {}",
+        bindings.len()
     );
+    for listener in plan.listeners() {
+        let actual_domains = bindings
+            .iter()
+            .filter(|binding| binding.listener == listener.kind())
+            .map(|binding| binding.domain)
+            .collect::<Vec<_>>();
+        let expected_domains = listener
+            .domains()
+            .iter()
+            .map(assembly_schema::AssemblyDomain::as_str)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            actual_domains == expected_domains,
+            "{source} domain order or placement drifts from RuntimePlan for listener {:?}",
+            listener.kind()
+        );
+    }
     Ok(())
 }
 
@@ -86,6 +122,7 @@ impl<'a> InfraBuilt<'a> {
     pub(super) async fn wire_domains(self) -> anyhow::Result<<Self as RuntimePhaseState>::Next> {
         let InfraBuilt {
             context,
+            listener_execution_plan,
             pg_owner,
             deps,
             s3_canary_config,
@@ -96,7 +133,6 @@ impl<'a> InfraBuilt<'a> {
             pg_readiness_period,
             redis_readiness_period,
             command_idempotency_keyring,
-            token_profiles,
             runtime_rss_access,
             runtime_federated_access,
             runtime_service_token,
@@ -121,8 +157,11 @@ impl<'a> InfraBuilt<'a> {
                 .context("wire generated domains")?;
             let (mut registry, domains_module) = bootstrap::compose_bindings(&mut domain_bindings)
                 .context("compose generated domains")?;
-            validate_domain_listener_evidence(&registry.domain_listener_bindings())
-                .context("validate runtime domain-listener evidence")?;
+            validate_domain_listener_evidence(
+                &listener_execution_plan,
+                &registry.domain_listener_bindings(),
+            )
+            .context("validate runtime domain-listener evidence")?;
 
             let session_sweeper_module = wire_session_sweeper(&deps.pg, session_sweep_interval)
                 .context("wire session sweeper")?;
@@ -252,9 +291,9 @@ impl<'a> InfraBuilt<'a> {
 
             Result::<_, anyhow::Error>::Ok(DomainsWired {
                 context,
+                listener_execution_plan,
                 pg_owner,
                 deps,
-                token_profiles,
                 runtime_rss_access,
                 runtime_federated_access,
                 runtime_service_token,
@@ -269,5 +308,49 @@ impl<'a> InfraBuilt<'a> {
         .await;
 
         phase_result(<Self as RuntimePhaseState>::PHASE, result)
+    }
+}
+
+#[cfg(test)]
+mod listener_plan_tests {
+    use super::validate_domain_listener_evidence;
+
+    #[allow(clippy::expect_used)]
+    fn plan() -> crate::plan::ListenerExecutionPlan {
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ])
+        .expect("listener plan snapshot");
+        crate::plan::RuntimePlan::bundled(snapshot.view())
+            .expect("bundled RuntimePlan")
+            .listener_execution_plan()
+    }
+
+    #[test]
+    fn listener_plan_rejects_missing_extra_wrong_duplicate_and_reordered_live_domains() {
+        let plan = plan();
+        let expected = crate::modules_gen::DOMAIN_LISTENER_BINDINGS;
+        assert!(validate_domain_listener_evidence(&plan, expected).is_ok());
+
+        let missing = &expected[1..];
+        assert!(validate_domain_listener_evidence(&plan, missing).is_err());
+
+        let mut duplicate = expected.to_vec();
+        duplicate.push(expected[0]);
+        assert!(validate_domain_listener_evidence(&plan, &duplicate).is_err());
+
+        let mut wrong_listener = expected.to_vec();
+        wrong_listener[0].listener = primitives::ListenerKind::Admin;
+        assert!(validate_domain_listener_evidence(&plan, &wrong_listener).is_err());
+
+        let mut wrong_domain = expected.to_vec();
+        wrong_domain[0].domain = "audit";
+        assert!(validate_domain_listener_evidence(&plan, &wrong_domain).is_err());
+
+        let mut reordered = expected.to_vec();
+        reordered.reverse();
+        assert!(validate_domain_listener_evidence(&plan, &reordered).is_err());
     }
 }

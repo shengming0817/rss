@@ -2,11 +2,13 @@
 //! `finalize_routes → finalize_auth → .layer(verify_bridge)` 的认证接线接缝，并驱动运行时入口
 //! （tokio 运行时 + per-listener socket bind + `axum::serve` + 信号优雅关停 + generated domain wiring，#1320）。
 //!
-//! 运行时入口（[`run`]，#1320 Join）：构造 provider bundle → generated domains → `compose_bindings`
-//! → 聚合 `DomainModuleResult` → `assemble_authed_routers`
-//! → 组合根挂 Health listener（healthz/readyz）→ 逐 listener bind socket + serve（经 `httpd::HttpServer`
-//! + `bootstrap::ShutdownStack`）→ SIGTERM/SIGINT 优雅 drain。各域 typed handle 经 Registry 的 route/subscriber
-//!   funnel 一次性交接，不进入共享依赖或生命周期输出。JWT 验签 key 经本地
+//! 运行时入口（[`run`]，#1320 Join）：从 fingerprint-verified `RuntimePlan` 投影 listener execution plan
+//! → 构造 plan 要求的 provider bundle → generated domains → `compose_bindings`
+//! → 聚合 `DomainModuleResult` → 按 plan 唯一 finalizer 产出 `FinalizedListenerSet`
+//! → `LaunchPlan` 逐 listener bind socket + serve（经 `httpd::HttpServer`
+//! + `bootstrap::ShutdownStack`）→ SIGTERM/SIGINT 优雅 drain。Health 也只由 plan 中的
+//! `Health + NoAuth` 项创建，没有手写 append 旁路。各域 typed handle 经 Registry 的 route/subscriber
+//! funnel 一次性交接，不进入共享依赖或生命周期输出。JWT 验签 key 经本地
 //!   JWKS 文件源 + 外部 agent 轮转注入；Internal listener 默认走 SPIFFE/mTLS，service-token 仅保留 loopback
 //!   本地测试路径。
 //!
@@ -31,7 +33,7 @@ mod domains;
 pub mod event_transport;
 pub mod infra;
 pub(crate) mod launch;
-pub mod listeners;
+mod listeners;
 pub mod module;
 #[path = "generated/modules_gen.rs"]
 mod modules_gen;
@@ -41,7 +43,7 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
 pub mod phase;
 pub mod plan;
 mod provider_output;
-pub mod routes;
+mod routes;
 pub mod saga_runtime;
 mod secret_config;
 
@@ -68,6 +70,32 @@ pub mod test_support {
 
     pub use crate::domains::identity::IdentityTestValues;
     pub use crate::event_transport::{EventTransportTestValues, EventWorkerTestValues};
+
+    /// Finalize one closed listener selected from the committed, fingerprint-verified RuntimePlan
+    /// fixture through the production auth finalization core.
+    pub fn finalize_rss_listener(
+        registry: &mut bootstrap::Registry,
+        provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
+        audit_sink: httpserve::AuditSinkHandle,
+        audit_clock: Arc<dyn diport::Clock>,
+        kind: assembly_schema::AssemblyListenerKind,
+    ) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
+        crate::routes::finalize_rss_fixture_listener(
+            registry,
+            provider,
+            audit_sink,
+            audit_clock,
+            kind,
+        )
+    }
+
+    /// Finalize the plan-declared `Health + NoAuth` fixture through the production Health core.
+    pub fn finalize_health_listener(
+        reporter: Arc<bootstrap::HealthReporter>,
+        metrics: Arc<dyn diport::MetricsExporter>,
+    ) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
+        crate::routes::finalize_health_fixture(reporter, metrics)
+    }
 
     /// Build the exact production service-token verifier from explicit integration-test values.
     ///
@@ -4498,8 +4526,6 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AccessTokenProfileSelection, InternalAuthSelection};
-    use crate::routes::AssembledListener;
 
     use audit::ports::TenantRepoScope as AuditTenantRepoScope;
     use axum::http::Method;
@@ -4693,7 +4719,16 @@ mod tests {
 
         let missing_provider = provider_output::provider_output_bindings();
         assert!(validate_provider_output_bindings(&missing_provider).is_err());
-        assert!(validate_domain_listener_evidence(&[]).is_err());
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ])
+        .unwrap_or_else(|_| unreachable!());
+        let listener_plan = plan::RuntimePlan::bundled(snapshot.view())
+            .unwrap_or_else(|_| unreachable!())
+            .listener_execution_plan();
+        assert!(validate_domain_listener_evidence(&listener_plan, &[]).is_err());
     }
 
     #[test]
@@ -5573,8 +5608,11 @@ mod tests {
         format!("{signing_input}.{}", B64.encode(sig.to_bytes()))
     }
 
-    fn extract_admin_router(assembled: Vec<AssembledListener>) -> anyhow::Result<axum::Router> {
+    fn extract_admin_router(
+        assembled: routes::FinalizedListenerSet,
+    ) -> anyhow::Result<axum::Router> {
         assembled
+            .into_listeners()
             .into_iter()
             .find_map(|assembled| {
                 let (listener, routes) = assembled.into_parts();
@@ -5604,18 +5642,33 @@ mod tests {
         let mut registry = bootstrap::compose(&domains)?;
         let providers =
             routes::TokenProviderBindings::new(Some(runtime_test_provider()), None, None);
-        let app = extract_admin_router(routes::assemble_authed_routers_with_bindings(
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+            (
+                routes::INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV,
+                "spiffe://example.org/ns/rss/sa/internal",
+            ),
+            (SPIFFE_ENDPOINT_SOCKET_ENV, "unix:///run/spire/test.sock"),
+        ])?;
+        let execution_plan = plan::RuntimePlan::bundled(snapshot.view())?.listener_execution_plan();
+        #[derive(Clone)]
+        struct NoopMetrics;
+        impl diport::MetricsExporter for NoopMetrics {
+            fn render(&self) -> String {
+                String::new()
+            }
+        }
+        let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(NoopMetrics);
+        let app = extract_admin_router(routes::finalize_listener_plan(
+            execution_plan,
+            snapshot.view(),
             &mut registry,
             &providers,
-            routes::RouteAssemblyContext {
-                audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-                audit_clock: Arc::new(SystemClock),
-                primary: AccessTokenProfileSelection::RssAccess,
-                admin: AccessTokenProfileSelection::RssAccess,
-                internal: InternalAuthSelection::Mtls,
-                internal_mtls_allow_set: Some("spiffe://example.org/ns/rss/sa/internal"),
-                spiffe_endpoint: Some("unix:///run/spire/test.sock"),
-            },
+            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            Arc::new(SystemClock),
+            metrics,
         )?)?;
 
         let scoped_response = app

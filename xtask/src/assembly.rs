@@ -1700,8 +1700,7 @@ struct SecurityCloseoutEvidence {
     typed_primary_access_binding_carrier_call: bool,
     typed_admin_access_binding_carrier_call: bool,
     typed_service_binding_carrier_call: bool,
-    exact_access_binding_mapping: bool,
-    exact_service_binding_mapping: bool,
+    exact_profile_binding_mapping: bool,
     profile_carrier_bound_to_verify_bridge: bool,
     legacy_token_surface: bool,
     mixed_key_provider: bool,
@@ -1751,8 +1750,7 @@ impl SecurityCloseoutEvidence {
         self.typed_admin_access_binding_carrier_call |=
             other.typed_admin_access_binding_carrier_call;
         self.typed_service_binding_carrier_call |= other.typed_service_binding_carrier_call;
-        self.exact_access_binding_mapping |= other.exact_access_binding_mapping;
-        self.exact_service_binding_mapping |= other.exact_service_binding_mapping;
+        self.exact_profile_binding_mapping |= other.exact_profile_binding_mapping;
         self.profile_carrier_bound_to_verify_bridge |= other.profile_carrier_bound_to_verify_bridge;
         self.legacy_token_surface |= other.legacy_token_surface;
         self.mixed_key_provider |= other.mixed_key_provider;
@@ -1782,7 +1780,7 @@ impl SecurityCloseoutEvidence {
                 && (self.rss_access_packed_in_profile_carrier
                     || (self.typed_primary_access_binding_carrier_call
                         && self.typed_admin_access_binding_carrier_call
-                        && self.exact_access_binding_mapping)))
+                        && self.exact_profile_binding_mapping)))
     }
 
     fn federated_access_reaches_verify_bridge(&self) -> bool {
@@ -1791,7 +1789,7 @@ impl SecurityCloseoutEvidence {
                 && (self.federated_access_packed_in_profile_carrier
                     || (self.typed_primary_access_binding_carrier_call
                         && self.typed_admin_access_binding_carrier_call
-                        && self.exact_access_binding_mapping)))
+                        && self.exact_profile_binding_mapping)))
     }
 
     fn service_token_reaches_verify_bridge(&self) -> bool {
@@ -1799,7 +1797,7 @@ impl SecurityCloseoutEvidence {
             || (self.profile_carrier_bound_to_verify_bridge
                 && (self.service_token_packed_in_profile_carrier
                     || (self.typed_service_binding_carrier_call
-                        && self.exact_service_binding_mapping)))
+                        && self.exact_profile_binding_mapping)))
     }
 }
 
@@ -1827,9 +1825,8 @@ fn source_contains_legacy_token_surface(source: &str) -> bool {
     // Intentionally scan raw source rather than string literals alone: the destructive migration
     // requires the old vocabulary to disappear, and comments/cfg(test) must not preserve bait that
     // makes grep-based reviews ambiguous.
-    const FORBIDDEN: &[&str] = &[
-        "RSS_JWT_",
-        "RSS_OIDC_",
+    const FORBIDDEN_SUBSTRINGS: &[&str] = &["RSS_JWT_", "RSS_OIDC_", "AssembledListener::plain"];
+    const FORBIDDEN_IDENTIFIERS: &[&str] = &[
         "OIDC_JWKS_READY_PROBE_NAME",
         "oidc_jwks_ready",
         "OidcJwksReadyProbe",
@@ -1837,17 +1834,40 @@ fn source_contains_legacy_token_surface(source: &str) -> bool {
         "PreparedRuntimeOidcProvider",
         "build_runtime_oidc_provider",
         "required_scheme_for_auth_scheme",
+        "RouteAssemblyContext",
+        "assemble_authed_routers_from_values",
+        "assemble_authed_routers",
+        "health_listener",
+        "health_auth_scheme",
     ];
-    FORBIDDEN.iter().any(|needle| source.contains(needle))
+    FORBIDDEN_SUBSTRINGS
+        .iter()
+        .any(|needle| source.contains(needle))
+        || FORBIDDEN_IDENTIFIERS
+            .iter()
+            .any(|identifier| source_contains_exact_rust_identifier(source, identifier))
+}
+
+fn source_contains_exact_rust_identifier(source: &str, identifier: &str) -> bool {
+    source.match_indices(identifier).any(|(start, matched)| {
+        let before = source[..start].chars().next_back();
+        let after = source[start + matched.len()..].chars().next();
+        before.is_none_or(|ch| !is_rust_identifier_continue(ch))
+            && after.is_none_or(|ch| !is_rust_identifier_continue(ch))
+    })
+}
+
+fn is_rust_identifier_continue(ch: char) -> bool {
+    ch == '_'
+        || ch.is_ascii_alphanumeric()
+        || (!ch.is_ascii() && syn::parse_str::<syn::Ident>(&format!("a{ch}")).is_ok())
 }
 
 #[derive(Default)]
 struct SecurityCloseoutProgram {
     functions: BTreeMap<String, SecurityFunctionEvidence>,
-    access_binding_definitions: usize,
-    exact_access_binding_definitions: usize,
-    service_binding_definitions: usize,
-    exact_service_binding_definitions: usize,
+    profile_binding_definitions: usize,
+    exact_profile_binding_definitions: usize,
     legacy_service_token_migration: bool,
     legacy_token_surface: bool,
     mixed_key_provider: bool,
@@ -1856,18 +1876,12 @@ struct SecurityCloseoutProgram {
 
 impl SecurityCloseoutProgram {
     fn merge(&mut self, other: Self) {
-        self.access_binding_definitions = self
-            .access_binding_definitions
-            .saturating_add(other.access_binding_definitions);
-        self.exact_access_binding_definitions = self
-            .exact_access_binding_definitions
-            .saturating_add(other.exact_access_binding_definitions);
-        self.service_binding_definitions = self
-            .service_binding_definitions
-            .saturating_add(other.service_binding_definitions);
-        self.exact_service_binding_definitions = self
-            .exact_service_binding_definitions
-            .saturating_add(other.exact_service_binding_definitions);
+        self.profile_binding_definitions = self
+            .profile_binding_definitions
+            .saturating_add(other.profile_binding_definitions);
+        self.exact_profile_binding_definitions = self
+            .exact_profile_binding_definitions
+            .saturating_add(other.exact_profile_binding_definitions);
         self.legacy_service_token_migration |= other.legacy_service_token_migration;
         self.legacy_token_surface |= other.legacy_token_surface;
         self.mixed_key_provider |= other.mixed_key_provider;
@@ -1897,10 +1911,8 @@ impl SecurityCloseoutProgram {
             out.merge(info.evidence.clone());
             stack.extend(info.calls.iter().cloned());
         }
-        out.exact_access_binding_mapping =
-            self.access_binding_definitions == 1 && self.exact_access_binding_definitions == 1;
-        out.exact_service_binding_mapping =
-            self.service_binding_definitions == 1 && self.exact_service_binding_definitions == 1;
+        out.exact_profile_binding_mapping =
+            self.profile_binding_definitions == 1 && self.exact_profile_binding_definitions == 1;
         out.legacy_service_token_migration = self.legacy_service_token_migration;
         out.legacy_token_surface = self.legacy_token_surface;
         out.mixed_key_provider = self.mixed_key_provider;
@@ -1937,10 +1949,8 @@ struct SecurityCloseoutVisitor {
     profile_binding_locals: Vec<BTreeMap<String, TokenProfileBridgeKind>>,
     profile_carrier_bindings: Vec<BTreeSet<String>>,
     typed_token_provider_bindings: Vec<BTreeSet<String>>,
-    typed_route_assembly_contexts: Vec<BTreeSet<String>>,
-    route_assembly_selections: Vec<BTreeMap<String, RouteAssemblySelectionKind>>,
-    listener_arms: Vec<Option<ListenerSelectionKind>>,
-    internal_selection_matches: Vec<bool>,
+    typed_listener_spec_bindings: Vec<BTreeSet<String>>,
+    plan_auth_scheme_locals: Vec<BTreeSet<String>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1948,20 +1958,6 @@ enum TokenProfileBridgeKind {
     RssAccess,
     FederatedAccess,
     ServiceToken,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum RouteAssemblySelectionKind {
-    Primary,
-    Admin,
-    Internal,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ListenerSelectionKind {
-    Primary,
-    Admin,
-    InternalServiceToken,
 }
 
 impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
@@ -1982,12 +1978,12 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         self.profile_binding_locals.push(BTreeMap::new());
         self.typed_token_provider_bindings
             .push(token_provider_binding_parameters(&node.sig));
-        self.typed_route_assembly_contexts
-            .push(route_assembly_context_parameters(&node.sig));
-        self.route_assembly_selections.push(BTreeMap::new());
+        self.typed_listener_spec_bindings
+            .push(listener_execution_spec_parameters(&node.sig));
+        self.plan_auth_scheme_locals.push(BTreeSet::new());
         syn::visit::visit_item_fn(self, node);
-        self.route_assembly_selections.pop();
-        self.typed_route_assembly_contexts.pop();
+        self.plan_auth_scheme_locals.pop();
+        self.typed_listener_spec_bindings.pop();
         self.typed_token_provider_bindings.pop();
         self.profile_binding_locals.pop();
         self.finish_function_key_apis();
@@ -2022,25 +2018,21 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         };
         if owner == "TokenProviderBindings" {
             match node.sig.ident.to_string().as_str() {
-                "access_binding" => {
-                    self.program.access_binding_definitions =
-                        self.program.access_binding_definitions.saturating_add(1);
-                    if exact_access_binding_definition(node) {
-                        self.program.exact_access_binding_definitions = self
+                "profile_binding" => {
+                    self.program.profile_binding_definitions =
+                        self.program.profile_binding_definitions.saturating_add(1);
+                    if exact_profile_binding_definition(node) {
+                        self.program.exact_profile_binding_definitions = self
                             .program
-                            .exact_access_binding_definitions
+                            .exact_profile_binding_definitions
                             .saturating_add(1);
                     }
                 }
+                "access_binding" => {
+                    self.program.legacy_token_surface = true;
+                }
                 "service_binding" => {
-                    self.program.service_binding_definitions =
-                        self.program.service_binding_definitions.saturating_add(1);
-                    if exact_service_binding_definition(node) {
-                        self.program.exact_service_binding_definitions = self
-                            .program
-                            .exact_service_binding_definitions
-                            .saturating_add(1);
-                    }
+                    self.program.legacy_token_surface = true;
                 }
                 _ => {}
             }
@@ -2051,12 +2043,12 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         self.profile_binding_locals.push(BTreeMap::new());
         self.typed_token_provider_bindings
             .push(token_provider_binding_parameters(&node.sig));
-        self.typed_route_assembly_contexts
-            .push(route_assembly_context_parameters(&node.sig));
-        self.route_assembly_selections.push(BTreeMap::new());
+        self.typed_listener_spec_bindings
+            .push(listener_execution_spec_parameters(&node.sig));
+        self.plan_auth_scheme_locals.push(BTreeSet::new());
         syn::visit::visit_impl_item_fn(self, node);
-        self.route_assembly_selections.pop();
-        self.typed_route_assembly_contexts.pop();
+        self.plan_auth_scheme_locals.pop();
+        self.typed_listener_spec_bindings.pop();
         self.typed_token_provider_bindings.pop();
         self.profile_binding_locals.pop();
         self.finish_function_key_apis();
@@ -2156,12 +2148,6 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
     }
 
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        if let Some(selections) =
-            route_assembly_context_destructure(node, self.typed_route_assembly_contexts.last())
-            && let Some(current) = self.route_assembly_selections.last_mut()
-        {
-            current.extend(selections);
-        }
         let local_binding = match (&node.pat, &node.init) {
             (syn::Pat::Ident(pattern), Some(init)) => self
                 .profile_binding_kind(init.expr.as_ref())
@@ -2173,18 +2159,24 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         {
             locals.insert(name, kind);
         }
+        if let (syn::Pat::Ident(pattern), Some(init)) = (&node.pat, &node.init)
+            && let syn::Expr::MethodCall(call) = ungroup_profile_expression(init.expr.as_ref())
+            && call.method == "auth_scheme"
+            && call.args.is_empty()
+            && let Some(receiver) =
+                simple_path_ident(ungroup_profile_expression(call.receiver.as_ref()))
+            && self
+                .typed_listener_spec_bindings
+                .last()
+                .is_some_and(|bindings| bindings.contains(&receiver))
+            && let Some(locals) = self.plan_auth_scheme_locals.last_mut()
+        {
+            locals.insert(pattern.ident.to_string());
+        }
         syn::visit::visit_local(self, node);
     }
 
     fn visit_arm(&mut self, node: &'ast syn::Arm) {
-        let listener = listener_selection_pattern_kind(
-            &node.pat,
-            self.internal_selection_matches
-                .last()
-                .copied()
-                .unwrap_or(false),
-        );
-        self.listener_arms.push(listener);
         let carrier = profile_carrier_binding(&node.pat);
         if let Some(binding) = carrier.as_ref() {
             self.profile_carrier_bindings
@@ -2194,20 +2186,6 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         if carrier.is_some() {
             self.profile_carrier_bindings.pop();
         }
-        self.listener_arms.pop();
-    }
-
-    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
-        let internal_match =
-            simple_path_ident(ungroup_profile_expression(node.expr.as_ref())).and_then(|name| {
-                self.route_assembly_selections
-                    .last()
-                    .and_then(|selections| selections.get(&name))
-                    .copied()
-            }) == Some(RouteAssemblySelectionKind::Internal);
-        self.internal_selection_matches.push(internal_match);
-        syn::visit::visit_expr_match(self, node);
-        self.internal_selection_matches.pop();
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
@@ -2240,6 +2218,11 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         }
         if node.method == "probe" {
             self.record_evidence(|e| e.jwks_probe_registered = true);
+        }
+        if node.method == "profile_binding"
+            && self.receiver_is_typed_token_provider(node.receiver.as_ref())
+        {
+            self.record_call("TokenProviderBindings::profile_binding");
         }
         syn::visit::visit_expr_method_call(self, node);
     }
@@ -2291,6 +2274,9 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
 
     fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
         for segment in &node.path.segments {
+            if segment.ident == "RouteAssemblyContext" {
+                self.program.legacy_token_surface = true;
+            }
             if segment.ident == "StaticKeySource" {
                 self.program.mixed_key_provider = true;
             }
@@ -2384,40 +2370,23 @@ impl SecurityCloseoutVisitor {
             return;
         }
         match call.method.to_string().as_str() {
-            "access_binding" if call.args.len() == 1 => {
-                let Some(selection) = call
+            "profile_binding" if call.args.len() == 1 => {
+                let plan_auth = call
                     .args
                     .first()
                     .and_then(|argument| simple_path_ident(ungroup_profile_expression(argument)))
-                else {
-                    return;
-                };
-                let selected_kind = self
-                    .route_assembly_selections
-                    .last()
-                    .and_then(|selections| selections.get(&selection))
-                    .copied();
-                let listener_kind = self.listener_arms.last().copied().flatten();
-                self.record_evidence(|evidence| match (listener_kind, selected_kind) {
-                    (
-                        Some(ListenerSelectionKind::Primary),
-                        Some(RouteAssemblySelectionKind::Primary),
-                    ) => evidence.typed_primary_access_binding_carrier_call = true,
-                    (
-                        Some(ListenerSelectionKind::Admin),
-                        Some(RouteAssemblySelectionKind::Admin),
-                    ) => evidence.typed_admin_access_binding_carrier_call = true,
-                    _ => {}
-                });
-            }
-            "service_binding" => {
-                let exact_service_selection = call.args.is_empty()
-                    && self.listener_arms.last().copied().flatten()
-                        == Some(ListenerSelectionKind::InternalServiceToken);
+                    .is_some_and(|name| {
+                        self.plan_auth_scheme_locals
+                            .last()
+                            .is_some_and(|locals| locals.contains(&name))
+                    });
                 self.record_evidence(|evidence| {
-                    evidence.typed_service_binding_carrier_call = exact_service_selection;
+                    evidence.typed_primary_access_binding_carrier_call |= plan_auth;
+                    evidence.typed_admin_access_binding_carrier_call |= plan_auth;
+                    evidence.typed_service_binding_carrier_call |= plan_auth;
                 });
             }
+            "access_binding" | "service_binding" => self.program.legacy_token_surface = true,
             _ => {}
         }
     }
@@ -2532,7 +2501,7 @@ fn token_provider_binding_parameters(signature: &syn::Signature) -> BTreeSet<Str
         .collect()
 }
 
-fn route_assembly_context_parameters(signature: &syn::Signature) -> BTreeSet<String> {
+fn listener_execution_spec_parameters(signature: &syn::Signature) -> BTreeSet<String> {
     signature
         .inputs
         .iter()
@@ -2540,7 +2509,7 @@ fn route_assembly_context_parameters(signature: &syn::Signature) -> BTreeSet<Str
             let syn::FnArg::Typed(argument) = input else {
                 return None;
             };
-            if !type_contains_ident(argument.ty.as_ref(), "RouteAssemblyContext") {
+            if !type_contains_ident(argument.ty.as_ref(), "ListenerExecutionSpec") {
                 return None;
             }
             let syn::Pat::Ident(pattern) = argument.pat.as_ref() else {
@@ -2551,84 +2520,17 @@ fn route_assembly_context_parameters(signature: &syn::Signature) -> BTreeSet<Str
         .collect()
 }
 
-fn route_assembly_context_destructure(
-    local: &syn::Local,
-    typed_contexts: Option<&BTreeSet<String>>,
-) -> Option<BTreeMap<String, RouteAssemblySelectionKind>> {
-    let init = local.init.as_ref()?;
-    let source = simple_path_ident(ungroup_profile_expression(init.expr.as_ref()))?;
-    if !typed_contexts.is_some_and(|contexts| contexts.contains(&source)) {
-        return None;
-    }
-    let syn::Pat::Struct(pattern) = &local.pat else {
-        return None;
-    };
-    if !path_contains_segment(&pattern.path, "RouteAssemblyContext") || pattern.rest.is_some() {
-        return None;
-    }
-    let mut selections = BTreeMap::new();
-    for field in &pattern.fields {
-        let syn::Member::Named(member) = &field.member else {
-            continue;
-        };
-        let kind = match member.to_string().as_str() {
-            "primary" => RouteAssemblySelectionKind::Primary,
-            "admin" => RouteAssemblySelectionKind::Admin,
-            "internal" => RouteAssemblySelectionKind::Internal,
-            _ => continue,
-        };
-        let syn::Pat::Ident(binding) = field.pat.as_ref() else {
-            return None;
-        };
-        if selections.insert(binding.ident.to_string(), kind).is_some() {
-            return None;
-        }
-    }
-    let observed = selections.values().copied().collect::<BTreeSet<_>>();
-    (observed
-        == BTreeSet::from([
-            RouteAssemblySelectionKind::Primary,
-            RouteAssemblySelectionKind::Admin,
-            RouteAssemblySelectionKind::Internal,
-        ]))
-    .then_some(selections)
-}
-
-fn listener_selection_pattern_kind(
-    pattern: &syn::Pat,
-    internal_selection_match: bool,
-) -> Option<ListenerSelectionKind> {
-    let syn::Pat::Path(path) = pattern else {
-        return None;
-    };
-    match path.path.segments.last()?.ident.to_string().as_str() {
-        "Primary" if path_contains_segment(&path.path, "ListenerKind") => {
-            Some(ListenerSelectionKind::Primary)
-        }
-        "Admin" if path_contains_segment(&path.path, "ListenerKind") => {
-            Some(ListenerSelectionKind::Admin)
-        }
-        "ServiceToken"
-            if internal_selection_match
-                && path_contains_segment(&path.path, "InternalAuthSelection") =>
-        {
-            Some(ListenerSelectionKind::InternalServiceToken)
-        }
-        _ => None,
-    }
-}
-
-fn exact_access_binding_definition(function: &syn::ImplItemFn) -> bool {
+fn exact_profile_binding_definition(function: &syn::ImplItemFn) -> bool {
     if function.sig.receiver().is_none()
         || !return_type_contains_ident(&function.sig.output, "ProfileBinding")
     {
         return false;
     }
-    let mut selection_names = function.sig.inputs.iter().filter_map(|input| {
+    let mut scheme_names = function.sig.inputs.iter().filter_map(|input| {
         let syn::FnArg::Typed(argument) = input else {
             return None;
         };
-        if !type_contains_ident(argument.ty.as_ref(), "AccessTokenProfileSelection") {
+        if !type_contains_ident(argument.ty.as_ref(), "AuthScheme") {
             return None;
         }
         let syn::Pat::Ident(pattern) = argument.pat.as_ref() else {
@@ -2636,29 +2538,37 @@ fn exact_access_binding_definition(function: &syn::ImplItemFn) -> bool {
         };
         Some(pattern.ident.to_string())
     });
-    let Some(selection) = selection_names.next() else {
+    let Some(scheme) = scheme_names.next() else {
         return false;
     };
-    if selection_names.next().is_some() {
+    if scheme_names.next().is_some() {
         return false;
     }
     let Some(syn::Expr::Match(mapping)) = sole_block_expression(&function.block) else {
         return false;
     };
     if simple_path_ident(ungroup_profile_expression(mapping.expr.as_ref())).as_deref()
-        != Some(selection.as_str())
-        || mapping.arms.len() != 2
+        != Some(scheme.as_str())
     {
         return false;
     }
-
     let mut observed = BTreeSet::new();
     for arm in &mapping.arms {
         if arm.guard.is_some() || matches!(arm.body.as_ref(), syn::Expr::Block(_)) {
             return false;
         }
-        let Some(kind) = access_selection_pattern_kind(&arm.pat) else {
-            return false;
+        let kind = match auth_scheme_profile_pattern_kind(&arm.pat) {
+            Some(kind) => kind,
+            None => {
+                let mut evidence = ProfileMappingExpressionEvidence::default();
+                syn::visit::Visit::visit_expr(&mut evidence, arm.body.as_ref());
+                if evidence.rss_variants + evidence.federated_variants + evidence.service_variants
+                    != 0
+                {
+                    return false;
+                }
+                continue;
+            }
         };
         if !profile_mapping_expression_is_exact(arm.body.as_ref(), kind) {
             return false;
@@ -2669,44 +2579,28 @@ fn exact_access_binding_definition(function: &syn::ImplItemFn) -> bool {
         == BTreeSet::from([
             TokenProfileBridgeKind::RssAccess,
             TokenProfileBridgeKind::FederatedAccess,
+            TokenProfileBridgeKind::ServiceToken,
         ])
 }
 
-fn exact_service_binding_definition(function: &syn::ImplItemFn) -> bool {
-    if function.sig.receiver().is_none()
-        || function
-            .sig
-            .inputs
-            .iter()
-            .any(|input| matches!(input, syn::FnArg::Typed(_)))
-        || !return_type_contains_ident(&function.sig.output, "ProfileBinding")
-    {
-        return false;
-    }
-    let Some(expression) = sole_block_expression(&function.block) else {
-        return false;
+fn auth_scheme_profile_pattern_kind(pattern: &syn::Pat) -> Option<TokenProfileBridgeKind> {
+    let syn::Pat::Path(path) = pattern else {
+        return None;
     };
-    !matches!(expression, syn::Expr::Block(_))
-        && profile_mapping_expression_is_exact(expression, TokenProfileBridgeKind::ServiceToken)
+    if !path_contains_segment(&path.path, "AuthScheme") {
+        return None;
+    }
+    match path.path.segments.last()?.ident.to_string().as_str() {
+        "RssAccessToken" => Some(TokenProfileBridgeKind::RssAccess),
+        "FederatedAccessToken" => Some(TokenProfileBridgeKind::FederatedAccess),
+        "ServiceToken" => Some(TokenProfileBridgeKind::ServiceToken),
+        _ => None,
+    }
 }
 
 fn sole_block_expression(block: &syn::Block) -> Option<&syn::Expr> {
     match block.stmts.as_slice() {
         [syn::Stmt::Expr(expression, None)] => Some(expression),
-        _ => None,
-    }
-}
-
-fn access_selection_pattern_kind(pattern: &syn::Pat) -> Option<TokenProfileBridgeKind> {
-    let syn::Pat::Path(path) = pattern else {
-        return None;
-    };
-    if !path_contains_segment(&path.path, "AccessTokenProfileSelection") {
-        return None;
-    }
-    match path.path.segments.last()?.ident.to_string().as_str() {
-        "RssAccess" => Some(TokenProfileBridgeKind::RssAccess),
-        "FederatedAccess" => Some(TokenProfileBridgeKind::FederatedAccess),
         _ => None,
     }
 }
@@ -4283,7 +4177,7 @@ fn run_startup() {
     let cfg = ();
     let distributed = wire_distributed(deps);
     let _ = wire_event_transport(&pg, distributed, subscribers, cfg);
-    let _ = assemble_authed_routers();
+    let _ = finalize_listener_plan();
 }
 
 fn run() {
@@ -4299,23 +4193,23 @@ struct TokenProviderBindings {
 }
 
 impl TokenProviderBindings {
-    fn access_binding(
+    fn profile_binding(
         &self,
-        selection: AccessTokenProfileSelection,
+        scheme: AuthScheme,
     ) -> ProfileBinding {
-        match selection {
-            AccessTokenProfileSelection::RssAccess => self
+        match scheme {
+            AuthScheme::RssAccessToken => self
                 .rss_access
                 .map(|provider| ProfileBinding::RssAccess(provider)),
-            AccessTokenProfileSelection::FederatedAccess => self
+            AuthScheme::FederatedAccessToken => self
                 .federated_access
                 .map(|provider| ProfileBinding::FederatedAccess(provider)),
+            AuthScheme::ServiceToken => self
+                .service_token
+                .map(|provider| ProfileBinding::ServiceToken(provider)),
+            AuthScheme::Mtls | AuthScheme::NoAuth => fail(),
+            _ => fail(),
         }
-    }
-
-    fn service_binding(&self) -> ProfileBinding {
-        self.service_token
-            .map(|provider| ProfileBinding::ServiceToken(provider))
     }
 }
 
@@ -4329,27 +4223,10 @@ fn apply_verify_bridge(routes: Routes, binding: ProfileBinding) {
 
 fn assemble(
     providers: &TokenProviderBindings,
-    context: RouteAssemblyContext,
+    spec: ListenerExecutionSpec,
 ) {
-    let RouteAssemblyContext {
-        primary,
-        admin,
-        internal,
-    } = context;
-    let binding = match listener {
-        ListenerKind::Primary => {
-            ListenerAuthBinding::Token(providers.access_binding(primary))
-        }
-        ListenerKind::Admin => {
-            ListenerAuthBinding::Token(providers.access_binding(admin))
-        }
-        ListenerKind::Internal => match internal {
-            InternalAuthSelection::Mtls => ListenerAuthBinding::Mtls,
-            InternalAuthSelection::ServiceToken => {
-                ListenerAuthBinding::Token(providers.service_binding())
-            }
-        },
-    };
+    let scheme = spec.auth_scheme();
+    let binding = ListenerAuthBinding::Token(providers.profile_binding(scheme));
     match binding {
         ListenerAuthBinding::Token(profile) => apply_verify_bridge(routes, profile),
         ListenerAuthBinding::Mtls => apply_mtls_verify_bridge(routes),
@@ -4357,14 +4234,14 @@ fn assemble(
 }
 
 fn run() {
-    assemble(&providers, context);
+    assemble(&providers, spec);
 }
 "#;
 
     fn security_closeout_run_to_launch_source() -> String {
         SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
-            "    let _ = assemble_authed_routers();",
-            "    let _ = assemble_authed_routers();\n    launch();",
+            "    let _ = finalize_listener_plan();",
+            "    let _ = finalize_listener_plan();\n    launch();",
         )
     }
 
@@ -5272,7 +5149,7 @@ mod tests {
         let domain_transport = wire_domain_transport_from();
         module.merge(domain_transport.module_result().unwrap());
         let _ = mtls_config_from_env();
-        let _ = assemble_authed_routers(provider);
+        let _ = finalize_listener_plan(provider);
     }
 }
 "#,
@@ -5454,6 +5331,13 @@ mod tests {
                 Rule::TokenProfileLegacySurface,
             ),
             (
+                "legacy-listener-config-decision",
+                format!(
+                    "{SECURITY_CLOSEOUT_RUN_PATH_SOURCE}\nfn legacy(context: RouteAssemblyContext) {{ drop(context); }}"
+                ),
+                Rule::TokenProfileLegacySurface,
+            ),
+            (
                 "mixed-key-provider",
                 SECURITY_CLOSEOUT_RUN_PATH_SOURCE
                     .replace(".keys_hs256(service_keys)", ".keys(service_keys)"),
@@ -5489,6 +5373,59 @@ mod tests {
                 "{case} must fail with {expected:?}: {findings:?}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn token_profile_legacy_surface_uses_exact_identifier_boundaries() -> anyhow::Result<()> {
+        for collision in [
+            "finalize_health_listener",
+            "health_listener_v2",
+            "my_health_listener",
+            "éhealth_listener",
+        ] {
+            let root = unique_tmp(&format!("assembly-token-profile-collision-{collision}"));
+            write_assembly(
+                &root,
+                &production_security_manifest("production", true, true, true),
+                CARGO_SECURITY_BACKEND,
+            )?;
+            write_runtime_src(
+                &root,
+                "lib.rs",
+                &format!("{SECURITY_CLOSEOUT_RUN_PATH_SOURCE}\nfn {collision}() {{}}"),
+            )?;
+            let (_count, findings) = validate_root(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .all(|finding| finding.rule != Rule::TokenProfileLegacySurface),
+                "identifier collision `{collision}` must not be treated as legacy: {findings:?}"
+            );
+        }
+
+        let root = unique_tmp("assembly-token-profile-exact-health-listener");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        write_runtime_src(
+            &root,
+            "lib.rs",
+            &format!(
+                "{SECURITY_CLOSEOUT_RUN_PATH_SOURCE}\n\
+                 #[cfg(test)] fn health_listener() {{}}\n\
+                 // health_listener remains forbidden even in comments"
+            ),
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::TokenProfileLegacySurface),
+            "the exact legacy identifier must remain forbidden in cfg(test) and comments"
+        );
         Ok(())
     }
 
@@ -5545,15 +5482,13 @@ mod tests {
                 "ProfileBinding::FederatedAccess(provider)),",
                 1,
             );
-        let wildcard = PROFILE_BINDING_MAPPING_SOURCE.replace(
-            "AccessTokenProfileSelection::FederatedAccess => self",
-            "_ => self",
-        );
+        let wildcard = PROFILE_BINDING_MAPPING_SOURCE
+            .replace("AuthScheme::FederatedAccessToken => self", "_ => self");
         let alias = PROFILE_BINDING_MAPPING_SOURCE.replace(
-            r#"AccessTokenProfileSelection::RssAccess => self
+            r#"AuthScheme::RssAccessToken => self
                 .rss_access
                 .map(|provider| ProfileBinding::RssAccess(provider)),"#,
-            r#"AccessTokenProfileSelection::RssAccess => {
+            r#"AuthScheme::RssAccessToken => {
                 let alias = self
                     .rss_access
                     .map(|provider| ProfileBinding::RssAccess(provider));
@@ -5561,37 +5496,22 @@ mod tests {
             },"#,
         );
         let wrong_receiver = PROFILE_BINDING_MAPPING_SOURCE.replace(
-            "providers.access_binding(primary)",
-            "decoy.access_binding(primary)",
+            "providers.profile_binding(scheme)",
+            "decoy.profile_binding(scheme)",
         );
         let hardcoded = PROFILE_BINDING_MAPPING_SOURCE.replace(
-            "providers.access_binding(primary)",
-            "providers.access_binding(AccessTokenProfileSelection::RssAccess)",
+            "providers.profile_binding(scheme)",
+            "providers.profile_binding(AuthScheme::RssAccessToken)",
         );
-        let swapped_selection = PROFILE_BINDING_MAPPING_SOURCE
-            .replace(
-                "providers.access_binding(primary)",
-                "providers.access_binding(__PrimaryPlaceholder)",
-            )
-            .replace(
-                "providers.access_binding(admin)",
-                "providers.access_binding(primary)",
-            )
-            .replace(
-                "providers.access_binding(__PrimaryPlaceholder)",
-                "providers.access_binding(admin)",
-            );
         let selection_alias = PROFILE_BINDING_MAPPING_SOURCE
             .replace(
-                "let binding = match listener {",
-                "let selected = primary;\n    let binding = match listener {",
+                "let scheme = spec.auth_scheme();",
+                "let scheme = spec.auth_scheme();\n    let selected = scheme;",
             )
             .replace(
-                "providers.access_binding(primary)",
-                "providers.access_binding(selected)",
+                "providers.profile_binding(scheme)",
+                "providers.profile_binding(selected)",
             );
-        let listener_wildcard =
-            PROFILE_BINDING_MAPPING_SOURCE.replace("ListenerKind::Admin => {", "_ => {");
         let service_mismatch = PROFILE_BINDING_MAPPING_SOURCE.replacen(
             "ProfileBinding::ServiceToken(provider))",
             "ProfileBinding::RssAccess(provider))",
@@ -5604,9 +5524,7 @@ mod tests {
             ("alias", alias),
             ("wrong-receiver", wrong_receiver),
             ("hardcoded-selection", hardcoded),
-            ("swapped-selection", swapped_selection),
             ("selection-alias", selection_alias),
-            ("listener-wildcard", listener_wildcard),
         ] {
             let evidence = profile_binding_mapping_evidence(case, &source)?;
             assert!(

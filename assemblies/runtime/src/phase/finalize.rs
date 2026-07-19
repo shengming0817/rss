@@ -1,7 +1,6 @@
 use super::{DomainsWired, Finalized, RuntimePhaseState, phase_result};
 use crate::SystemClock;
-use crate::listeners::health_listener;
-use crate::routes::{AssembledListener, assemble_authed_routers};
+use crate::routes::finalize_listener_plan;
 use anyhow::Context as _;
 use postgres::caps;
 use std::sync::Arc;
@@ -10,9 +9,9 @@ impl<'a> DomainsWired<'a> {
     pub(super) async fn finalize(self) -> anyhow::Result<<Self as RuntimePhaseState>::Next> {
         let DomainsWired {
             context,
+            listener_execution_plan,
             pg_owner,
             deps,
-            token_profiles,
             runtime_rss_access,
             runtime_federated_access,
             runtime_service_token,
@@ -41,28 +40,21 @@ impl<'a> DomainsWired<'a> {
                     .as_ref()
                     .map(|provider| provider.provider()),
             );
-            let mut listeners = assemble_authed_routers(
+            let listeners = finalize_listener_plan(
+                listener_execution_plan,
                 context.config(),
-                &token_profiles,
                 &mut registry,
                 &token_provider_bindings,
                 auth_audit_sink,
                 auth_audit_clock,
+                metrics_exporter,
             )
-            .context("assemble authed routers")?;
-
-            // Route groups are drained before the reporter is taken, so readyz owns every domain
-            // and runtime probe registered by WireDomains.
-            let reporter = Arc::new(registry.take_health_reporter());
-            let (listener, routes) =
-                health_listener(reporter, metrics_exporter).context("build health listener")?;
-            listeners.push(AssembledListener::plain(listener, routes));
+            .context("finalize RuntimePlan listeners")?;
 
             Ok(Finalized {
                 context,
                 pg_owner,
                 deps,
-                token_profiles,
                 runtime_rss_access,
                 runtime_federated_access,
                 runtime_service_token,

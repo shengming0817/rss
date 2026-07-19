@@ -215,6 +215,7 @@ pub(crate) struct Planned<'a> {
 #[must_use]
 pub(crate) struct ProvidersBuilt<'a> {
     context: PhaseContext<'a>,
+    listener_execution_plan: crate::plan::ListenerExecutionPlan,
     serving_config: crate::config::RuntimeServingConfigParts,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:
@@ -224,6 +225,7 @@ pub(crate) struct ProvidersBuilt<'a> {
 #[must_use]
 pub(crate) struct InfraBuilt<'a> {
     context: PhaseContext<'a>,
+    listener_execution_plan: crate::plan::ListenerExecutionPlan,
     pg_owner: postgres::PgRuntimeDeps,
     deps: crate::SharedRuntimeDeps,
     s3_canary_config: crate::infra::s3::S3CanaryConfig,
@@ -234,7 +236,6 @@ pub(crate) struct InfraBuilt<'a> {
     pg_readiness_period: Duration,
     redis_readiness_period: Duration,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
-    token_profiles: crate::config::TokenProfilesConfig,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:
         Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
@@ -244,9 +245,9 @@ pub(crate) struct InfraBuilt<'a> {
 #[must_use]
 pub(crate) struct DomainsWired<'a> {
     context: PhaseContext<'a>,
+    listener_execution_plan: crate::plan::ListenerExecutionPlan,
     pg_owner: postgres::PgRuntimeDeps,
     deps: crate::SharedRuntimeDeps,
-    token_profiles: crate::config::TokenProfilesConfig,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:
         Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
@@ -264,7 +265,6 @@ pub(crate) struct Finalized<'a> {
     context: PhaseContext<'a>,
     pg_owner: postgres::PgRuntimeDeps,
     deps: crate::SharedRuntimeDeps,
-    token_profiles: crate::config::TokenProfilesConfig,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:
         Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
@@ -273,7 +273,7 @@ pub(crate) struct Finalized<'a> {
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
     pg_readiness_period: Duration,
     domain_module: bootstrap::DomainModuleResult,
-    listeners: Vec<crate::routes::AssembledListener>,
+    listeners: crate::routes::FinalizedListenerSet,
 }
 
 impl sealed::Sealed for Planned<'_> {}

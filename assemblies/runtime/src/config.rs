@@ -304,14 +304,6 @@ impl AccessTokenProfileSelection {
             _ => anyhow::bail!("{name} must be exactly rss-access or federated-access"),
         }
     }
-
-    #[cfg(test)]
-    pub(crate) const fn auth_scheme(self) -> primitives::AuthScheme {
-        match self {
-            Self::RssAccess => primitives::AuthScheme::RssAccessToken,
-            Self::FederatedAccess => primitives::AuthScheme::FederatedAccessToken,
-        }
-    }
 }
 
 /// Authentication selected for the Internal listener.
@@ -327,14 +319,6 @@ impl InternalAuthSelection {
             "mtls" => Ok(Self::Mtls),
             "service-token" => Ok(Self::ServiceToken),
             _ => anyhow::bail!("{INTERNAL_AUTH_SCHEME_ENV} must be exactly mtls or service-token"),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn auth_scheme(self) -> primitives::AuthScheme {
-        match self {
-            Self::Mtls => primitives::AuthScheme::Mtls,
-            Self::ServiceToken => primitives::AuthScheme::ServiceToken,
         }
     }
 }
@@ -607,8 +591,6 @@ impl ServiceTokenConfig {
 /// One process-wide, mutually exclusive token-profile configuration generation.
 pub(crate) struct TokenProfilesConfig {
     primary: AccessTokenProfileSelection,
-    admin: AccessTokenProfileSelection,
-    internal: InternalAuthSelection,
     rss_access: Option<RssAccessTokenConfig>,
     federated_access: Option<FederatedAccessTokenConfig>,
     service_token: Option<ServiceTokenConfig>,
@@ -677,29 +659,10 @@ impl TokenProfilesConfig {
 
         Ok(Self {
             primary,
-            admin,
-            internal,
             rss_access,
             federated_access,
             service_token,
         })
-    }
-
-    pub(crate) const fn primary(&self) -> AccessTokenProfileSelection {
-        self.primary
-    }
-
-    pub(crate) const fn admin(&self) -> AccessTokenProfileSelection {
-        self.admin
-    }
-
-    pub(crate) const fn internal(&self) -> InternalAuthSelection {
-        self.internal
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn health_auth_scheme() -> primitives::AuthScheme {
-        primitives::AuthScheme::NoAuth
     }
 
     pub(crate) fn rss_access(&self) -> Option<&RssAccessTokenConfig> {

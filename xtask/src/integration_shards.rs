@@ -256,6 +256,7 @@ integration_shard_catalog! {
             ("runtime", "configs_ready_e2e", Test, Serial),
             ("runtime", "identity_login_wire_e2e", Test, Serial),
             ("runtime", "infra_builders_api", Test, Parallel),
+            ("runtime", "listener_plan_trybuild", Test, Parallel),
             ("runtime", "refresh_mint_e2e", Test, Parallel),
             ("runtime", "runtime_outputs_trybuild", Test, Parallel),
             ("runtime", "runtime_serve_e2e", Test, Parallel),

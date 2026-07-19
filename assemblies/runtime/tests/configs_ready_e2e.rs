@@ -99,8 +99,7 @@ async fn configs_ready_sampling_loop_drives_to_ready_readyz_200() -> TestResult 
     )?;
     let reporter = Arc::new(reg.take_health_reporter());
 
-    let (_listener, authed) =
-        runtime::listeners::health_listener(reporter, common::noop_metrics())?;
+    let authed = runtime::test_support::finalize_health_listener(reporter, common::noop_metrics())?;
     let resp = authed
         .into_router_for_test()
         .oneshot(

@@ -5,7 +5,7 @@ This rule governs how runtime-deployment target constraints select enforcement c
 ## 当前事实
 
 - Assembly manifest validation, generated domain ordering, generated typed provider constructor catalogs, and committed v1 AssemblyLock drift are governed by typed repository gates. The provider catalog is assembly-crate-internal identity evidence; it does not yet drive live construction.
-- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Listener/auth/tracing/serving-OIDC, the operator OIDC static provider, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is typed, fingerprinted, and retained by the unique consuming runtime phase chain; it still supplies identity/diagnostics rather than driving the remaining handwritten live decisions. Subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
+- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Tracing/serving-OIDC, the operator OIDC static provider, provider material, listener addresses and mTLS material, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is typed, fingerprinted, retained by the unique consuming runtime phase chain, and is now the sole source of listener membership, ordered domain placement, and auth selection. Subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
 - `cargo xtask archrules list` and its generated matrix derive implemented rules from real carrier anchors. Planning documents are not a second index.
 - The active forge does not make the existing `ci-gate` a required check.
 
@@ -28,8 +28,8 @@ profile input; serving transfers ownership to `run()`, while all operator arms c
 explicit `shutdown_operator_runtime()` call.
 
 `SnapshotConfig<'_>` is a crate-private borrowed capability with a private field. Only
-`RuntimeConfigSnapshot::view()` can mint it. Serving OIDC/JWKS construction, listener auth,
-listener address policy, route assembly, launch, and the private PostgreSQL/Redis/Vault/S3 typed
+`RuntimeConfigSnapshot::view()` can mint it. Serving OIDC/JWKS and provider construction, listener
+address policy and mTLS material, launch, and the private PostgreSQL/Redis/Vault/S3 typed
 configuration constructors accept this capability directly, so an ambient getter cannot
 type-check at those production boundaries. RSS operator commands accept the already prepared
 `OperatorRuntimeInputs` and borrow the same capability; OIDC JWKS export and Vault-backed settings
@@ -44,8 +44,10 @@ Outbound domain transport resolves its URL/mTLS targets and mandatory non-empty
 `SPIFFE_ENDPOINT_SOCKET` from the same serving snapshot. Its typed carrier owns the endpoint and
 always passes it explicitly to the HTTP adapter, so the upstream `spiffe` ambient endpoint fallback
 is unreachable from runtime production wiring.
-The explicit-value route-assembly core used by the identity wire e2e is compiled only under the
-test-only `integration` feature; it is absent from the default production library API.
+The integration-only test-support façade selects a closed listener kind from a committed,
+fingerprint-verified RuntimePlan fixture and calls the same projection/finalization core. It
+accepts neither raw auth values nor a handwritten scheme and is absent from the default production
+library API.
 
 The catalog is an explicit runtime configuration universe: fixed listener/auth/OIDC/tracing,
 PG/Redis, Vault/S3, identity/audit, event/DLX/worker keys; generated event-domain AMQP keys; the
@@ -181,6 +183,34 @@ Medium/codegen backstop is exact manifest-to-registry validation, the restricted
 The existing `modules_gen.rs` live output carrier is not a fallback. #1792 owns live dispatch,
 handwritten bypass deletion, and output bijection.
 
+The landed #1790 Hard carrier is `RUNTIME-LISTENER-PLAN-EXECUTION-01`.
+`RuntimePlan` is the sole mint for private `ListenerExecutionPlan` and
+`ListenerExecutionSpec` values; the single finalizer consumes that capability and alone produces
+the private-field `FinalizedListenerSet`, which is the mandatory listener field in both
+`Finalized` and `LaunchPlan`. Assembly listener/auth conversion is exhaustive. No public
+listener constructor, raw-value assembler, manual Health append, compatibility wrapper, or plain
+listener vector can re-enter the chain. Compile-fail tests lock all three construction boundaries.
+
+Medium `RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01` binds the type proof to dynamic facts. Domain
+wiring validates plan, generated `DOMAIN_LISTENER_BINDINGS`, and live registry membership and
+per-listener order exactly. Finalization rejects undeclared live groups, missing declared
+non-empty groups, duplicate/incorrect kind or auth, provider-presence drift, transport drift, and
+leftovers before address resolution or socket bind. Domain-free Internal plans produce an empty
+router and still finalize auth/transport. Health is created only for plan-declared
+`Health + NoAuth`, after non-Health finalization and mTLS probe registration. Synthetic reds cover
+legacy config decisions, raw-value assembly, manual Health construction, plain-vector launch,
+duplicate projection/finalizer calls, alternate finalizer/set constructors, and trait conversion
+seams. The complete production-module AST inventory locks the unique canonical owners and call
+sites, the exact `pub(crate)` capability types with inherited-private fields, the sole set literal,
+and the absence of public re-exports independently of spelling; the workspace green case is the
+anti-vacuity proof.
+
+Launch consumes the finalized set into a private, consuming `BoundListenerSet`. It resolves and
+binds every socket and prepares every transport before any serve task exists. Only after the set is
+complete does activation publish mTLS readiness, start non-Health listeners, and start Health last.
+Any address, bind, transport, or activation-preflight failure therefore exposes zero partially
+started HTTP listeners and drops the prepared sockets before lifecycle cleanup completes.
+
 Medium `RUNTIME-PHASE-TRANSITION-LIVE-01` binds that type-level proof to production source. Its
 crate-wide production AST inventory verifies the unique entry, five-step order, consuming
 receivers, associated closed phase labels, common redaction funnel, closed state trait impls, and
@@ -190,6 +220,10 @@ path, direct or aliased `LaunchPlan`/`ShutdownStack` construction, cross-file st
 dead branches, and compliant comment/test bait. The lifecycle contract remains unchanged:
 pre-launch trace cleanup stays in `RuntimeLifecycleOwner`, while the top-level launch executor
 creates and consumes the only `ShutdownStack`.
+
+#1790 changes no RuntimePlan schema, fingerprint, AssemblyLock, generated module/provider catalog,
+wire contract, database, configuration, or deployment artifact. Rollback is one whole-change
+revert; it must not add an old reader, dual path, alias, fallback, or compatibility feature.
 
 ## AssemblyLock committed workflow
 
