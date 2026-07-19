@@ -14,7 +14,7 @@ pub use lock::{
 pub use provider::{
     DiportPort, DiportProvider, LifecycleChannel, ProviderCapabilityEvidence, ProviderCatalogEntry,
     ProviderConstructor, ProviderConsumer, ProviderDurability, ProviderFactorySymbol,
-    ProviderLifecycle, ProviderRole,
+    ProviderFailurePosture, ProviderLifecycle, ProviderRole, ProviderScope,
 };
 pub use runtime_plan::{
     DomainLifecyclePhase, DomainPlan, ListenerAuth, ListenerPlan, ParsedRuntimePlan, PlacementPlan,

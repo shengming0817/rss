@@ -105,6 +105,8 @@ providerCrate = "postgres"
 consumer = "oidc"
 lifecycle = "active"
 durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-closed"
 purpose = "service-token-atomic-replay-consume"
 outputs = ["probes", "resources", "workers"]
 

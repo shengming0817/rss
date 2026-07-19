@@ -3,7 +3,8 @@
 
 use assembly_schema::{
     AssemblyManifest, DiportPort, LifecycleChannel, ProviderCatalogEntry, ProviderConstructor,
-    ProviderConsumer, ProviderDurability, ProviderFactorySymbol, ProviderRole,
+    ProviderConsumer, ProviderDurability, ProviderFactorySymbol, ProviderFailurePosture,
+    ProviderRole, ProviderScope,
 };
 
 const RUNTIME_MANIFEST: &str = include_str!("../../../assemblies/runtime/assembly.toml");
@@ -147,7 +148,27 @@ const RATE_LIMITER_ENTRY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     &[],
     ProviderConsumer::Httpserve,
     ProviderDurability::EphemeralMemory,
+    None,
+    None,
     &[],
+);
+
+const REPLAY_ENTRY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+    ProviderRole::ServiceTokenReplayStore,
+    DiportPort::ServiceTokenReplayStore,
+    ProviderConstructor::PostgresServiceTokenReplayStore,
+    ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore,
+    "postgres",
+    &[],
+    ProviderConsumer::Oidc,
+    ProviderDurability::Persistent,
+    Some(ProviderScope::ClusterGlobal),
+    Some(ProviderFailurePosture::FailClosed),
+    &[
+        LifecycleChannel::Probes,
+        LifecycleChannel::Resources,
+        LifecycleChannel::Workers,
+    ],
 );
 
 #[test]
@@ -170,6 +191,8 @@ fn checked_entry_exposes_only_canonical_capability_evidence() {
         RATE_LIMITER_ENTRY.evidence().durability(),
         ProviderDurability::EphemeralMemory
     );
+    assert_eq!(RATE_LIMITER_ENTRY.evidence().scope(), None);
+    assert_eq!(RATE_LIMITER_ENTRY.evidence().failure_posture(), None);
     assert_eq!(
         RATE_LIMITER_ENTRY.evidence().required_features(),
         &[] as &[&str]
@@ -179,4 +202,16 @@ fn checked_entry_exposes_only_canonical_capability_evidence() {
         DiportPort::RateLimiter
     );
     assert_eq!(LifecycleChannel::Resources.as_str(), "resources");
+}
+
+#[test]
+fn replay_catalog_evidence_is_cluster_global_and_fail_closed() {
+    assert_eq!(
+        REPLAY_ENTRY.evidence().scope(),
+        Some(ProviderScope::ClusterGlobal)
+    );
+    assert_eq!(
+        REPLAY_ENTRY.evidence().failure_posture(),
+        Some(ProviderFailurePosture::FailClosed)
+    );
 }

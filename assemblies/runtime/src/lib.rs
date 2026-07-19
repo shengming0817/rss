@@ -61,10 +61,37 @@ pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 /// through the committed generated module list.
 #[cfg(feature = "integration")]
 pub mod test_support {
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use super::{DistributedRuntimeDeps, SharedRuntimeDeps};
 
     pub use crate::domains::identity::IdentityTestValues;
     pub use crate::event_transport::{EventTransportTestValues, EventWorkerTestValues};
+
+    /// Build the exact production service-token verifier from explicit integration-test values.
+    ///
+    /// The seam exists only with the `integration` feature and delegates to the production
+    /// constructor, so HTTP/PG tests cannot rebuild or weaken replay policy.
+    pub fn build_service_token_provider_from_values(
+        issuer: &str,
+        audience: &str,
+        key_id: &str,
+        secret: &[u8],
+        pg_owner: &postgres::PgRuntimeDeps,
+        replay_timeout: Duration,
+        clock: Box<dyn diport::Clock>,
+    ) -> anyhow::Result<Arc<oidc::OidcProvider<diport::ServiceTokenProfile>>> {
+        crate::infra::oidc::build_service_token_provider_from_values_for_test(
+            issuer,
+            audience,
+            key_id,
+            secret,
+            pg_owner.service_token_replay_store(),
+            replay_timeout,
+            clock,
+        )
+    }
 
     /// Builds the production S3 capability bundle from explicit integration-test values.
     pub fn build_s3_runtime_deps_from_values(
@@ -165,7 +192,7 @@ use phase::OperatorRuntimeCapability;
 pub use phase::{OperatorRuntimeInputs, ServingRuntimeInputs};
 
 use bootstrap::DomainModuleResult;
-use infra::oidc::build_service_token_provider;
+use infra::oidc::ServiceTokenReplayOwner;
 #[cfg(test)]
 use infra::oidc::{
     FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME, RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
@@ -606,12 +633,16 @@ const SERVICE_TOKEN_REPLAY_SWEEP_TIMEOUT: Duration = Duration::from_secs(25);
 fn build_operator_service_token_provider(
     config: SnapshotConfig<'_>,
     _operator: OperatorRuntimeCapability<'_>,
-    replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+    replay_owner: &impl ServiceTokenReplayOwner,
 ) -> anyhow::Result<Arc<oidc::OidcProvider<diport::ServiceTokenProfile>>> {
     let config =
         ServiceTokenConfig::from_snapshot(config).context("parse service-token configuration")?;
-    build_service_token_provider(&config, replay_store, SERVICE_TOKEN_REPLAY_STORE_TIMEOUT)
-        .map(|runtime| runtime.provider())
+    crate::infra::oidc::build_service_token_provider(
+        &config,
+        replay_owner,
+        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+    )
+    .map(|runtime| runtime.provider())
 }
 
 /// `rss` binary 是否请求 PostgreSQL operator namespace；具体 subcommand 由 runner 精确校验。
@@ -1594,26 +1625,24 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
         parsed: &ProjectionCliArgs,
         resource_id: &str,
     ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
-        let provider = match build_operator_service_token_provider(
-            self.config,
-            self.operator,
-            session.service_token_replay_store(),
-        ) {
-            Ok(provider) => provider,
-            Err(err) => {
-                record_projection_maintenance_finish_audit(
-                    session,
-                    UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR,
-                    &format!("projection.{}.finish", parsed.command.action().as_str()),
-                    resource_id,
-                    MaintenanceAuditOutcome::Failure {
-                        reason: "operator_provider_config",
-                    },
-                )
-                .await?;
-                return Err(err).context("projection maintenance operator verifier");
-            }
-        };
+        let provider =
+            match crate::build_operator_service_token_provider(self.config, self.operator, session)
+            {
+                Ok(provider) => provider,
+                Err(err) => {
+                    record_projection_maintenance_finish_audit(
+                        session,
+                        UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR,
+                        &format!("projection.{}.finish", parsed.command.action().as_str()),
+                        resource_id,
+                        MaintenanceAuditOutcome::Failure {
+                            reason: "operator_provider_config",
+                        },
+                    )
+                    .await?;
+                    return Err(err).context("projection maintenance operator verifier");
+                }
+            };
         let principal = authenticate_projection_maintenance_operator(
             session,
             diport::DynPdp::from_ref(provider.as_ref()),
@@ -2059,25 +2088,23 @@ impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime<'_> {
         parsed: &AuditLedgerVerifyArgs,
         resource_id: &str,
     ) -> anyhow::Result<String> {
-        let provider = match build_operator_service_token_provider(
-            self.config,
-            self.operator,
-            session.service_token_replay_store(),
-        ) {
-            Ok(provider) => provider,
-            Err(err) => {
-                record_audit_ledger_verify_finish_audit(
-                    session,
-                    UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR,
-                    resource_id,
-                    MaintenanceAuditOutcome::Failure {
-                        reason: "operator_provider_config",
-                    },
-                )
-                .await?;
-                return Err(err).context("audit ledger verify operator verifier");
-            }
-        };
+        let provider =
+            match crate::build_operator_service_token_provider(self.config, self.operator, session)
+            {
+                Ok(provider) => provider,
+                Err(err) => {
+                    record_audit_ledger_verify_finish_audit(
+                        session,
+                        UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR,
+                        resource_id,
+                        MaintenanceAuditOutcome::Failure {
+                            reason: "operator_provider_config",
+                        },
+                    )
+                    .await?;
+                    return Err(err).context("audit ledger verify operator verifier");
+                }
+            };
         let subject = authenticate_audit_ledger_verify_operator(
             session,
             diport::DynPdp::from_ref(provider.as_ref()),
@@ -3205,26 +3232,24 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
         parsed: &DlqCliArgs,
         resource_id: &str,
     ) -> anyhow::Result<VerifiedOperatorSubject> {
-        let provider = match build_operator_service_token_provider(
-            self.config,
-            self.operator,
-            session.service_token_replay_store(),
-        ) {
-            Ok(provider) => provider,
-            Err(err) => {
-                record_dlq_maintenance_finish_audit(
-                    session,
-                    UNVERIFIED_DLQ_OPERATOR,
-                    &format!("dlq.{}.finish", parsed.command.action().as_str()),
-                    resource_id,
-                    MaintenanceAuditOutcome::Failure {
-                        reason: "operator_provider_config",
-                    },
-                )
-                .await?;
-                return Err(err).context("DLQ maintenance operator verifier");
-            }
-        };
+        let provider =
+            match crate::build_operator_service_token_provider(self.config, self.operator, session)
+            {
+                Ok(provider) => provider,
+                Err(err) => {
+                    record_dlq_maintenance_finish_audit(
+                        session,
+                        UNVERIFIED_DLQ_OPERATOR,
+                        &format!("dlq.{}.finish", parsed.command.action().as_str()),
+                        resource_id,
+                        MaintenanceAuditOutcome::Failure {
+                            reason: "operator_provider_config",
+                        },
+                    )
+                    .await?;
+                    return Err(err).context("DLQ maintenance operator verifier");
+                }
+            };
         let principal = authenticate_dlq_operator(
             session,
             diport::DynPdp::from_ref(provider.as_ref()),
@@ -3588,11 +3613,7 @@ pub async fn run_reconcile_target_command(
         return Err(error);
     }
     let operator = runtime_inputs.operator_capability();
-    let provider = match build_operator_service_token_provider(
-        config,
-        operator,
-        pg.service_token_replay_store(),
-    ) {
+    let provider = match crate::build_operator_service_token_provider(config, operator, &pg) {
         Ok(provider) => provider,
         Err(error) => {
             record_reconcile_audit(
@@ -3821,11 +3842,8 @@ async fn settings_config_value_maintenance_operator_subject(
     parsed: &SettingsConfigValueMaintenanceArgs,
     resource_id: &str,
 ) -> anyhow::Result<String> {
-    let operator_provider = match build_operator_service_token_provider(
-        config,
-        operator,
-        pg.service_token_replay_store(),
-    ) {
+    let operator_provider = match crate::build_operator_service_token_provider(config, operator, pg)
+    {
         Ok(provider) => provider,
         Err(err) => {
             record_config_value_maintenance_finish_audit(
@@ -8077,60 +8095,6 @@ mod tests {
             assert!(!rendered.contains(forbidden), "must not expose {forbidden}");
         }
         Ok(())
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn maintenance_operator_providers_use_durable_replay_store() {
-        let source = include_str!("lib.rs");
-        let function = source
-            .split("impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {")
-            .nth(1)
-            .and_then(|rest| rest.split("fn dlq_store(").next())
-            .expect("production DLQ operator_subject source slice");
-
-        assert!(
-            function.contains("build_operator_service_token_provider(")
-                && function.contains("self.config,")
-                && function.contains("self.operator,")
-                && function.contains("session.service_token_replay_store()"),
-            "DLQ operator verifier must consume the captured operator capability and inject the durable PG service-token replay store"
-        );
-        assert!(
-            !function.contains("std::env"),
-            "DLQ operator verifier must not revive ambient configuration"
-        );
-        assert!(
-            !function.contains("VerifierConfigBuilder"),
-            "DLQ operator verifier must use the typed runtime builder instead of rebuilding verifier policy"
-        );
-        assert!(
-            source
-                .split("async fn settings_config_value_maintenance_operator_subject(")
-                .nth(1)
-                .and_then(|rest| {
-                    rest.split("async fn run_settings_config_value_maintenance(")
-                        .next()
-                })
-                .is_some_and(|function| {
-                    function.contains("build_operator_service_token_provider")
-                        && function.contains("config,")
-                        && function.contains("operator,")
-                        && function.contains("pg.service_token_replay_store()")
-                        && !function.contains("std::env")
-                }),
-            "settings config maintenance must consume the snapshot capability and inject the durable replay store"
-        );
-        let provider_phase = include_str!("phase/provider.rs");
-        let infra_phase = include_str!("phase/infra.rs");
-        assert!(
-            provider_phase.contains("build_rss_access_provider(")
-                && provider_phase.contains("build_federated_access_provider(")
-                && infra_phase.contains("build_service_token_provider(")
-                && infra_phase.contains("pg_owner.service_token_replay_store(),")
-                && infra_phase.contains("SERVICE_TOKEN_REPLAY_STORE_TIMEOUT"),
-            "serving access-token providers must preflight before migration and the typed service-token verifier must receive the owner replay store with an explicit bounded timeout"
-        );
     }
 
     #[tokio::test]

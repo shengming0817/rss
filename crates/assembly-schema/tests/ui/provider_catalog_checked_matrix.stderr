@@ -7,8 +7,8 @@ error[E0080]: evaluation panicked: draft provider roles cannot enter an active c
  8 | |     DiportPort::RevocationStore,
  9 | |     ProviderConstructor::SoftcaInMemRevocationLedger,
 ...  |
-15 | |     &[],
-16 | | );
+17 | |     &[],
+18 | | );
    | |_^ evaluation of `DRAFT` failed inside this call
    |
 note: inside `ProviderCatalogEntry::checked`
@@ -25,16 +25,16 @@ note: inside `ProviderCatalogEntry::checked`
    | |_________- in this macro invocation
 
 error[E0080]: evaluation panicked: provider constructor drift
-  --> tests/ui/provider_catalog_checked_matrix.rs:18:43
+  --> tests/ui/provider_catalog_checked_matrix.rs:20:43
    |
-18 |   const CONSTRUCTOR: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+20 |   const CONSTRUCTOR: ProviderCatalogEntry = ProviderCatalogEntry::checked(
    |  ___________________________________________^
-19 | |     ProviderRole::EventPublisher,
-20 | |     DiportPort::Publisher,
-21 | |     ProviderConstructor::AmqpSubscriber,
+21 | |     ProviderRole::EventPublisher,
+22 | |     DiportPort::Publisher,
+23 | |     ProviderConstructor::AmqpSubscriber,
 ...  |
-31 | |     ],
-32 | | );
+35 | |     ],
+36 | | );
    | |_^ evaluation of `CONSTRUCTOR` failed inside this call
    |
 note: inside `ProviderCatalogEntry::checked`
@@ -51,16 +51,16 @@ note: inside `ProviderCatalogEntry::checked`
    | |_________- in this macro invocation
 
 error[E0080]: evaluation panicked: provider factory drift
-  --> tests/ui/provider_catalog_checked_matrix.rs:34:39
+  --> tests/ui/provider_catalog_checked_matrix.rs:38:39
    |
-34 |   const FACTORY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+38 |   const FACTORY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
    |  _______________________________________^
-35 | |     ProviderRole::EventPublisher,
-36 | |     DiportPort::Publisher,
-37 | |     ProviderConstructor::AmqpPublisher,
+39 | |     ProviderRole::EventPublisher,
+40 | |     DiportPort::Publisher,
+41 | |     ProviderConstructor::AmqpPublisher,
 ...  |
-47 | |     ],
-48 | | );
+53 | |     ],
+54 | | );
    | |_^ evaluation of `FACTORY` failed inside this call
    |
 note: inside `ProviderCatalogEntry::checked`
@@ -77,16 +77,16 @@ note: inside `ProviderCatalogEntry::checked`
    | |_________- in this macro invocation
 
 error[E0080]: evaluation panicked: provider crate drift
-  --> tests/ui/provider_catalog_checked_matrix.rs:50:46
+  --> tests/ui/provider_catalog_checked_matrix.rs:56:46
    |
-50 |   const PROVIDER_CRATE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+56 |   const PROVIDER_CRATE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
    |  ______________________________________________^
-51 | |     ProviderRole::EventPublisher,
-52 | |     DiportPort::Publisher,
-53 | |     ProviderConstructor::AmqpPublisher,
+57 | |     ProviderRole::EventPublisher,
+58 | |     DiportPort::Publisher,
+59 | |     ProviderConstructor::AmqpPublisher,
 ...  |
-63 | |     ],
-64 | | );
+71 | |     ],
+72 | | );
    | |_^ evaluation of `PROVIDER_CRATE` failed inside this call
    |
 note: inside `ProviderCatalogEntry::checked`
@@ -103,16 +103,16 @@ note: inside `ProviderCatalogEntry::checked`
    | |_________- in this macro invocation
 
 error[E0080]: evaluation panicked: provider feature drift
-  --> tests/ui/provider_catalog_checked_matrix.rs:66:40
+  --> tests/ui/provider_catalog_checked_matrix.rs:74:40
    |
-66 |   const FEATURES: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+74 |   const FEATURES: ProviderCatalogEntry = ProviderCatalogEntry::checked(
    |  ________________________________________^
-67 | |     ProviderRole::EventPublisher,
-68 | |     DiportPort::Publisher,
-69 | |     ProviderConstructor::AmqpPublisher,
+75 | |     ProviderRole::EventPublisher,
+76 | |     DiportPort::Publisher,
+77 | |     ProviderConstructor::AmqpPublisher,
 ...  |
-79 | |     ],
-80 | | );
+89 | |     ],
+90 | | );
    | |_^ evaluation of `FEATURES` failed inside this call
    |
 note: inside `ProviderCatalogEntry::checked`
@@ -129,42 +129,42 @@ note: inside `ProviderCatalogEntry::checked`
    | |_________- in this macro invocation
 
 error[E0080]: evaluation panicked: provider consumer drift
-  --> tests/ui/provider_catalog_checked_matrix.rs:82:40
-   |
-82 |   const CONSUMER: ProviderCatalogEntry = ProviderCatalogEntry::checked(
-   |  ________________________________________^
-83 | |     ProviderRole::EventPublisher,
-84 | |     DiportPort::Publisher,
-85 | |     ProviderConstructor::AmqpPublisher,
-...  |
-95 | |     ],
-96 | | );
-   | |_^ evaluation of `CONSUMER` failed inside this call
-   |
+   --> tests/ui/provider_catalog_checked_matrix.rs:92:40
+    |
+ 92 |   const CONSUMER: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+    |  ________________________________________^
+ 93 | |     ProviderRole::EventPublisher,
+ 94 | |     DiportPort::Publisher,
+ 95 | |     ProviderConstructor::AmqpPublisher,
+...   |
+107 | |     ],
+108 | | );
+    | |_^ evaluation of `CONSUMER` failed inside this call
+    |
 note: inside `ProviderCatalogEntry::checked`
-  --> $RUST/core/src/panic.rs
-   |
-   = note: the failure occurred here
-   |
-  ::: src/provider.rs
-   |
-   | /         assert!(
-   | |             spec.consumer as u8 == consumer as u8,
-   | |             "provider consumer drift"
-   | |         );
-   | |_________- in this macro invocation
+   --> $RUST/core/src/panic.rs
+    |
+    = note: the failure occurred here
+    |
+   ::: src/provider.rs
+    |
+    | /         assert!(
+    | |             spec.consumer as u8 == consumer as u8,
+    | |             "provider consumer drift"
+    | |         );
+    | |_________- in this macro invocation
 
 error[E0080]: evaluation panicked: provider durability drift
-   --> tests/ui/provider_catalog_checked_matrix.rs:98:42
+   --> tests/ui/provider_catalog_checked_matrix.rs:110:42
     |
- 98 |   const DURABILITY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+110 |   const DURABILITY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     |  __________________________________________^
- 99 | |     ProviderRole::EventPublisher,
-100 | |     DiportPort::Publisher,
-101 | |     ProviderConstructor::AmqpPublisher,
+111 | |     ProviderRole::EventPublisher,
+112 | |     DiportPort::Publisher,
+113 | |     ProviderConstructor::AmqpPublisher,
 ...   |
-111 | |     ],
-112 | | );
+125 | |     ],
+126 | | );
     | |_^ evaluation of `DURABILITY` failed inside this call
     |
 note: inside `ProviderCatalogEntry::checked`
@@ -181,16 +181,16 @@ note: inside `ProviderCatalogEntry::checked`
     | |_________- in this macro invocation
 
 error[E0080]: evaluation panicked: provider output drift
-   --> tests/ui/provider_catalog_checked_matrix.rs:114:39
+   --> tests/ui/provider_catalog_checked_matrix.rs:128:39
     |
-114 |   const OUTPUTS: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+128 |   const OUTPUTS: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     |  _______________________________________^
-115 | |     ProviderRole::EventPublisher,
-116 | |     DiportPort::Publisher,
-117 | |     ProviderConstructor::AmqpPublisher,
+129 | |     ProviderRole::EventPublisher,
+130 | |     DiportPort::Publisher,
+131 | |     ProviderConstructor::AmqpPublisher,
 ...   |
-123 | |     &[LifecycleChannel::Resources],
-124 | | );
+139 | |     &[LifecycleChannel::Resources],
+140 | | );
     | |_^ evaluation of `OUTPUTS` failed inside this call
     |
 note: inside `ProviderCatalogEntry::checked`
@@ -203,5 +203,54 @@ note: inside `ProviderCatalogEntry::checked`
     | /         assert!(
     | |             channel_slice_eq(spec.outputs, outputs),
     | |             "provider output drift"
+    | |         );
+    | |_________- in this macro invocation
+
+error[E0080]: evaluation panicked: provider scope drift
+   --> tests/ui/provider_catalog_checked_matrix.rs:142:37
+    |
+142 |   const SCOPE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+    |  _____________________________________^
+143 | |     ProviderRole::ServiceTokenReplayStore,
+144 | |     DiportPort::ServiceTokenReplayStore,
+145 | |     ProviderConstructor::PostgresServiceTokenReplayStore,
+...   |
+157 | |     ],
+158 | | );
+    | |_^ evaluation of `SCOPE` failed inside this call
+    |
+note: inside `ProviderCatalogEntry::checked`
+   --> $RUST/core/src/panic.rs
+    |
+    = note: the failure occurred here
+    |
+   ::: src/provider.rs
+    |
+    |         assert!(optional_scope_eq(spec.scope, scope), "provider scope drift");
+    |         --------------------------------------------------------------------- in this macro invocation
+
+error[E0080]: evaluation panicked: provider failure posture drift
+   --> tests/ui/provider_catalog_checked_matrix.rs:160:47
+    |
+160 |   const FAILURE_POSTURE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+    |  _______________________________________________^
+161 | |     ProviderRole::ServiceTokenReplayStore,
+162 | |     DiportPort::ServiceTokenReplayStore,
+163 | |     ProviderConstructor::PostgresServiceTokenReplayStore,
+...   |
+175 | |     ],
+176 | | );
+    | |_^ evaluation of `FAILURE_POSTURE` failed inside this call
+    |
+note: inside `ProviderCatalogEntry::checked`
+   --> $RUST/core/src/panic.rs
+    |
+    = note: the failure occurred here
+    |
+   ::: src/provider.rs
+    |
+    | /         assert!(
+    | |             optional_failure_posture_eq(spec.failure_posture, failure_posture),
+    | |             "provider failure posture drift"
     | |         );
     | |_________- in this macro invocation

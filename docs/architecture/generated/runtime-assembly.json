@@ -11,14 +11,14 @@
       "path": "assemblies/runtime/assembly.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "294d772dfc04cb231efbb82bfa10c2961848bb611b2157cd0ba9e7d0929ba75e"
+        "value": "3a537b690aff17efb45c6dee6cae5b3e31b219533012f016d09ddb0d098332a2"
       }
     },
     {
       "path": "assemblies/runtime/src/generated/modules_gen.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "9ba417b0b07091bfb351e48688220cd4707853f6184e42e4695b14b870991bc7"
+        "value": "6ea18a085d8a9979c988b053b1a013214915ccd449b42bdf28451e2bb9f7d191"
       }
     },
     {
@@ -222,6 +222,8 @@
       "port": "diport::ServiceTokenReplayStore",
       "lifecycle": "active",
       "durability": "persistent",
+      "scope": "cluster-global",
+      "failurePosture": "fail-closed",
       "purpose": "service-token-atomic-replay-consume"
     },
     {

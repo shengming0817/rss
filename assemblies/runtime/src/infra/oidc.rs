@@ -267,21 +267,71 @@ pub(crate) fn build_federated_access_provider(
     )
 }
 
-/// Build the service-token verifier from only the service-token namespace.
+/// Closed production owner set for durable service-token replay.
+///
+/// Keeping this trait inside the private runtime OIDC module makes an in-memory or process-local
+/// replay store unrepresentable at every production service-token composition site.
+mod service_token_replay_owner_sealed {
+    pub trait Sealed {}
+
+    impl Sealed for postgres::PgRuntimeDeps {}
+    impl Sealed for postgres::PgMaintenanceDeps {}
+}
+
+pub(crate) trait ServiceTokenReplayOwner: service_token_replay_owner_sealed::Sealed {
+    fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>>;
+}
+
+impl ServiceTokenReplayOwner for postgres::PgRuntimeDeps {
+    fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        postgres::PgRuntimeDeps::service_token_replay_store(self)
+    }
+}
+
+impl ServiceTokenReplayOwner for postgres::PgMaintenanceDeps {
+    fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        postgres::PgMaintenanceDeps::service_token_replay_store(self)
+    }
+}
+
+/// Build the service-token verifier from only the service-token namespace and the closed durable
+/// PostgreSQL replay-owner set.
 pub(crate) fn build_service_token_provider(
     config: &ServiceTokenConfig,
-    replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+    replay_owner: &impl ServiceTokenReplayOwner,
     replay_timeout: Duration,
 ) -> anyhow::Result<RuntimeServiceTokenProvider> {
-    build_service_token_provider_from_values(
+    self::build_service_token_provider_from_values(
         config.issuer(),
         config.audience(),
         config.hs256_kid(),
         config.hs256_secret(),
-        replay_store,
+        replay_owner.service_token_replay_store(),
         replay_timeout,
         Box::new(SystemClock),
     )
+}
+
+#[cfg(feature = "integration")]
+pub(crate) fn build_service_token_provider_from_values_for_test(
+    issuer: &str,
+    audience: &str,
+    key_id: &str,
+    secret: &[u8],
+    replay_store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+    replay_timeout: Duration,
+    clock: Box<dyn diport::Clock>,
+) -> anyhow::Result<Arc<OidcProvider<ServiceTokenProfile>>> {
+    build_service_token_provider_from_values(
+        issuer,
+        audience,
+        key_id,
+        secret,
+        replay_store,
+        replay_timeout,
+        clock,
+    )
+    .map(|runtime| runtime.provider())
 }
 
 fn build_rss_access_provider_from_values<'a>(

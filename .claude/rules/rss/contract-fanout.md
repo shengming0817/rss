@@ -39,7 +39,7 @@ DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不�
 
 | 载体 | 必查内容 |
 |------|----------|
-| `assemblies/{name}/assembly.toml` | `[[diportProviders]]` 的 port / provider / providerCrate / requiredFeatures / consumer / lifecycle / durability / purpose |
+| `assemblies/{name}/assembly.toml` | `[[diportProviders]]` 的 port / provider / providerCrate / requiredFeatures / consumer / lifecycle / durability / scope / failurePosture / purpose |
 | assembly `Cargo.toml` | `lifecycle=active` 的 providerCrate 必须是 `[dependencies]` 直接依赖，且启用 provider symbol 所需 feature |
 | adapter docs/tests | dev/demo provider 边界、持久 provider 行为与 shutdown 语义 |
 | governance | `cargo xtask assembly validate` 是否覆盖新 port 的 active 约束 |
@@ -47,6 +47,9 @@ DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不�
 现行硬约束：每个 `assemblies/{name}/Cargo.toml` 必须有同目录 `assembly.toml`，且
 `diportProviders` 不得为空。`profile="production"` 的 `diport::RevocationStore` provider 必须
 `durability = "persistent"`；`ephemeral-memory` 只能用于 demo/test assembly 的 draft/dev-demo 声明。
+生产 `service-token-replay-store` 还必须同时声明 `durability = "persistent"`、
+`scope = "cluster-global"`、`failurePosture = "fail-closed"`；缺失或弱化任一事实均由
+`PdpReplayStoreCapability` assembly guard fail-closed 拒绝。
 
 ## 契约归属（域 crate vs framework）
 

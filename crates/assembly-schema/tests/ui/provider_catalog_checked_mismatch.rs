@@ -12,6 +12,8 @@ const FORGED: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     &[],
     ProviderConsumer::Httpserve,
     ProviderDurability::EphemeralMemory,
+    None,
+    None,
     &[],
 );
 

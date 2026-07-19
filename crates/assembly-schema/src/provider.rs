@@ -20,6 +20,10 @@ pub struct DiportProvider {
     pub consumer: ProviderConsumer,
     pub lifecycle: ProviderLifecycle,
     pub durability: ProviderDurability,
+    #[serde(default)]
+    pub scope: Option<ProviderScope>,
+    #[serde(default, rename = "failurePosture")]
+    pub failure_posture: Option<ProviderFailurePosture>,
     pub purpose: String,
     pub outputs: Vec<LifecycleChannel>,
 }
@@ -77,6 +81,20 @@ impl DiportProvider {
                 self.durability.as_str(),
             ));
         }
+        if self.scope != expected.scope {
+            mismatches.push(ProviderRegistryMismatch::new(
+                "diportProviders.scope",
+                render_optional(expected.scope.map(ProviderScope::as_str)),
+                render_optional(self.scope.map(ProviderScope::as_str)),
+            ));
+        }
+        if self.failure_posture != expected.failure_posture {
+            mismatches.push(ProviderRegistryMismatch::new(
+                "diportProviders.failurePosture",
+                render_optional(expected.failure_posture.map(ProviderFailurePosture::as_str)),
+                render_optional(self.failure_posture.map(ProviderFailurePosture::as_str)),
+            ));
+        }
         if !same_channel_set(&self.outputs, expected.outputs) {
             mismatches.push(ProviderRegistryMismatch::new(
                 "diportProviders.outputs",
@@ -86,6 +104,10 @@ impl DiportProvider {
         }
         mismatches
     }
+}
+
+fn render_optional(value: Option<&str>) -> String {
+    value.map_or_else(|| "unset".to_owned(), ToOwned::to_owned)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -525,6 +547,46 @@ impl ProviderDurability {
     }
 }
 
+/// Provider state visibility across runtime replicas.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
+)]
+#[repr(u8)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderScope {
+    ProcessLocal,
+    ClusterGlobal,
+}
+
+impl ProviderScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessLocal => "process-local",
+            Self::ClusterGlobal => "cluster-global",
+        }
+    }
+}
+
+/// Authentication behavior when a required provider cannot complete.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
+)]
+#[repr(u8)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderFailurePosture {
+    FailOpen,
+    FailClosed,
+}
+
+impl ProviderFailurePosture {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FailOpen => "fail-open",
+            Self::FailClosed => "fail-closed",
+        }
+    }
+}
+
 macro_rules! display_as_str {
     ($($ty:ty),+ $(,)?) => {$(
         impl fmt::Display for $ty {
@@ -544,6 +606,8 @@ display_as_str!(
     DiportPort,
     ProviderLifecycle,
     ProviderDurability,
+    ProviderScope,
+    ProviderFailurePosture,
 );
 
 #[derive(Debug, Clone, Copy)]
@@ -556,6 +620,8 @@ struct ProviderRoleSpec {
     required_features: &'static [&'static str],
     consumer: ProviderConsumer,
     durability: ProviderDurability,
+    scope: Option<ProviderScope>,
+    failure_posture: Option<ProviderFailurePosture>,
     outputs: &'static [LifecycleChannel],
     factory: Option<ProviderFactorySymbol>,
 }
@@ -574,6 +640,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &["backend"],
         consumer: ProviderConsumer::Deviceloop,
         durability: ProviderDurability::EphemeralMemory,
+        scope: None,
+        failure_posture: None,
         outputs: &[],
         factory: None,
     },
@@ -586,6 +654,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &["backend"],
         consumer: ProviderConsumer::Eventexec,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[P, R, W],
         factory: Some(ProviderFactorySymbol::EventexecAmqpPublisher),
     },
@@ -598,6 +668,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &["backend"],
         consumer: ProviderConsumer::Eventexec,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[P, R, W],
         factory: Some(ProviderFactorySymbol::EventexecAmqpSubscriber),
     },
@@ -610,6 +682,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &["backend"],
         consumer: ProviderConsumer::Identity,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[R],
         factory: Some(ProviderFactorySymbol::IdentityVaultSigner),
     },
@@ -622,6 +696,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &["backend"],
         consumer: ProviderConsumer::Settings,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[R],
         factory: Some(ProviderFactorySymbol::SettingsVaultKeyProvider),
     },
@@ -634,6 +710,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &["backend"],
         consumer: ProviderConsumer::Httpserve,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[R],
         factory: Some(ProviderFactorySymbol::HttpserveOidcPdp),
     },
@@ -646,6 +724,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &[],
         consumer: ProviderConsumer::Oidc,
         durability: ProviderDurability::Persistent,
+        scope: Some(ProviderScope::ClusterGlobal),
+        failure_posture: Some(ProviderFailurePosture::FailClosed),
         outputs: &[P, R, W],
         factory: Some(ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore),
     },
@@ -658,6 +738,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &[],
         consumer: ProviderConsumer::Httpserve,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[R, W],
         factory: Some(ProviderFactorySymbol::HttpservePostgresAuthAuditSink),
     },
@@ -670,6 +752,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &[],
         consumer: ProviderConsumer::Httpserve,
         durability: ProviderDurability::EphemeralMemory,
+        scope: None,
+        failure_posture: None,
         outputs: &[],
         factory: Some(ProviderFactorySymbol::HttpserveGovernorRateLimiter),
     },
@@ -682,6 +766,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &["backend"],
         consumer: ProviderConsumer::Distributed,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[R],
         factory: Some(ProviderFactorySymbol::DistributedRedisLockStore),
     },
@@ -694,6 +780,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &[],
         consumer: ProviderConsumer::Distributed,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[R, W],
         factory: Some(ProviderFactorySymbol::DistributedPostgresCasStore),
     },
@@ -706,6 +794,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &["backend"],
         consumer: ProviderConsumer::Distributed,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[R],
         factory: None,
     },
@@ -718,6 +808,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &["backend"],
         consumer: ProviderConsumer::Runtime,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[R],
         factory: Some(ProviderFactorySymbol::RuntimeS3ObjectStore),
     },
@@ -730,6 +822,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &[],
         consumer: ProviderConsumer::Eventexec,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[P, R, W],
         factory: Some(ProviderFactorySymbol::EventexecPostgresDlxLifecycleRepository),
     },
@@ -742,6 +836,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &["backend"],
         consumer: ProviderConsumer::Eventexec,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[P, W],
         factory: Some(ProviderFactorySymbol::EventexecS3DlxArchiveStore),
     },
@@ -754,6 +850,8 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         required_features: &["backend"],
         consumer: ProviderConsumer::Eventexec,
         durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
         outputs: &[W],
         factory: Some(ProviderFactorySymbol::EventexecVaultArchiveKeyProvider),
     },
@@ -868,6 +966,8 @@ pub struct ProviderCapabilityEvidence {
     required_features: &'static [&'static str],
     consumer: ProviderConsumer,
     durability: ProviderDurability,
+    scope: Option<ProviderScope>,
+    failure_posture: Option<ProviderFailurePosture>,
     outputs: &'static [LifecycleChannel],
 }
 
@@ -896,6 +996,14 @@ impl ProviderCapabilityEvidence {
         self.durability
     }
 
+    pub const fn scope(&self) -> Option<ProviderScope> {
+        self.scope
+    }
+
+    pub const fn failure_posture(&self) -> Option<ProviderFailurePosture> {
+        self.failure_posture
+    }
+
     pub const fn outputs(&self) -> &'static [LifecycleChannel] {
         self.outputs
     }
@@ -920,6 +1028,8 @@ impl ProviderCatalogEntry {
         required_features: &'static [&'static str],
         consumer: ProviderConsumer,
         durability: ProviderDurability,
+        scope: Option<ProviderScope>,
+        failure_posture: Option<ProviderFailurePosture>,
         outputs: &'static [LifecycleChannel],
     ) -> Self {
         let spec = provider_role_spec(role);
@@ -962,6 +1072,11 @@ impl ProviderCatalogEntry {
             spec.durability as u8 == durability as u8,
             "provider durability drift"
         );
+        assert!(optional_scope_eq(spec.scope, scope), "provider scope drift");
+        assert!(
+            optional_failure_posture_eq(spec.failure_posture, failure_posture),
+            "provider failure posture drift"
+        );
         assert!(
             channel_slice_eq(spec.outputs, outputs),
             "provider output drift"
@@ -976,6 +1091,8 @@ impl ProviderCatalogEntry {
                 required_features: spec.required_features,
                 consumer: spec.consumer,
                 durability: spec.durability,
+                scope: spec.scope,
+                failure_posture: spec.failure_posture,
                 outputs: spec.outputs,
             },
         }
@@ -991,6 +1108,25 @@ impl ProviderCatalogEntry {
 
     pub const fn evidence(&self) -> &ProviderCapabilityEvidence {
         &self.evidence
+    }
+}
+
+const fn optional_scope_eq(left: Option<ProviderScope>, right: Option<ProviderScope>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left as u8 == right as u8,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+const fn optional_failure_posture_eq(
+    left: Option<ProviderFailurePosture>,
+    right: Option<ProviderFailurePosture>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left as u8 == right as u8,
+        (None, None) => true,
+        _ => false,
     }
 }
 

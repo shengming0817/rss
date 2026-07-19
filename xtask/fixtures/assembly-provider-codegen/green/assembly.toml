@@ -32,6 +32,19 @@ purpose = "active-empty-output"
 outputs = []
 
 [[diportProviders]]
+id = "service-token-replay-store"
+port = "diport::ServiceTokenReplayStore"
+provider = "postgres::PgServiceTokenReplayStore"
+providerCrate = "postgres"
+consumer = "oidc"
+lifecycle = "active"
+durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-closed"
+purpose = "cluster-global fail-closed replay protection"
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
 id = "dlx-archive-key-provider"
 port = "diport::KeyProvider"
 provider = "vault::VaultKeyProvider"

@@ -9,7 +9,7 @@ use assembly_schema::{
     AssemblyDomain, AssemblyListenerKind, AssemblyManifest, CanonicalAssemblyManifestV1,
     DiportPort, GENERATED_MODULE_OWNERSHIP_MARKER, GENERATED_PROVIDER_OWNERSHIP_MARKER,
     LifecycleChannel, ProviderConstructor, ProviderConsumer, ProviderDurability,
-    ProviderFactorySymbol, ProviderLifecycle, ProviderRole,
+    ProviderFactorySymbol, ProviderFailurePosture, ProviderLifecycle, ProviderRole, ProviderScope,
 };
 use std::fs;
 use std::io;
@@ -488,12 +488,6 @@ fn read_owned_target(path: &Path, kind: ArtifactKind) -> Result<Option<Vec<u8>>>
     }
     let bytes = fs::read(path).with_context(|| format!("读取 {} 失败", path.display()))?;
     ensure_owned(path, &bytes, kind)?;
-    if kind == ArtifactKind::Providers {
-        let source = std::str::from_utf8(&bytes)
-            .with_context(|| format!("{} provider catalog 不是 UTF-8", path.display()))?;
-        validate_provider_catalog_syntax(source)
-            .with_context(|| format!("{} provider catalog 结构非法", path.display()))?;
-    }
     Ok(Some(bytes))
 }
 
@@ -561,6 +555,20 @@ fn render_providers(manifest: &CanonicalAssemblyManifestV1, source_label: &str) 
             "        ProviderDurability::{},\n",
             durability_variant(provider.durability)
         ));
+        match provider.scope {
+            Some(scope) => code.push_str(&format!(
+                "        Some(assembly_schema::ProviderScope::{}),\n",
+                scope_variant(scope)
+            )),
+            None => code.push_str("        None,\n"),
+        }
+        match provider.failure_posture {
+            Some(posture) => code.push_str(&format!(
+                "        Some(assembly_schema::ProviderFailurePosture::{}),\n",
+                failure_posture_variant(posture)
+            )),
+            None => code.push_str("        None,\n"),
+        }
         code.push_str("        &[");
         for output in &provider.outputs {
             code.push_str(&format!("LifecycleChannel::{}, ", channel_variant(*output)));
@@ -630,8 +638,8 @@ fn validate_provider_catalog_entry(expression: &syn::Expr) -> Result<()> {
         "provider catalog entry 只允许 ProviderCatalogEntry::checked"
     );
     ensure!(
-        call.args.len() == 9,
-        "ProviderCatalogEntry::checked 参数数量必须为 9"
+        call.args.len() == 11,
+        "ProviderCatalogEntry::checked 参数数量必须为 11"
     );
     let args = call.args.iter().collect::<Vec<_>>();
     ensure_enum_variant(args[0], "ProviderRole")?;
@@ -651,7 +659,9 @@ fn validate_provider_catalog_entry(expression: &syn::Expr) -> Result<()> {
     ensure_string_slice(args[5])?;
     ensure_enum_variant(args[6], "ProviderConsumer")?;
     ensure_enum_variant(args[7], "ProviderDurability")?;
-    ensure_enum_slice(args[8], "LifecycleChannel")?;
+    ensure_optional_enum_variant(args[8], "ProviderScope")?;
+    ensure_optional_enum_variant(args[9], "ProviderFailurePosture")?;
+    ensure_enum_slice(args[10], "LifecycleChannel")?;
     Ok(())
 }
 
@@ -681,6 +691,47 @@ fn ensure_string_slice(expression: &syn::Expr) -> Result<()> {
             })
         )),
         "requiredFeatures 只允许字符串字面量"
+    );
+    Ok(())
+}
+
+fn ensure_optional_enum_variant(expression: &syn::Expr, enum_name: &str) -> Result<()> {
+    if matches!(
+        expression,
+        syn::Expr::Path(path) if exact_path(&path.path, &["None"])
+    ) {
+        return Ok(());
+    }
+    let syn::Expr::Call(call) = expression else {
+        bail!("provider catalog optional 参数必须是 None 或 Some({enum_name}::<variant>)");
+    };
+    ensure!(
+        matches!(
+            call.func.as_ref(),
+            syn::Expr::Path(path) if exact_path(&path.path, &["Some"])
+        ) && call.args.len() == 1,
+        "provider catalog optional 参数必须是 None 或 Some({enum_name}::<variant>)"
+    );
+    ensure_schema_enum_variant(&call.args[0], enum_name)
+}
+
+fn ensure_schema_enum_variant(expression: &syn::Expr, enum_name: &str) -> Result<()> {
+    ensure!(
+        matches!(
+            expression,
+            syn::Expr::Path(path)
+                if path.qself.is_none()
+                    && path.path.leading_colon.is_none()
+                    && path.path.segments.len() == 3
+                    && path.path.segments[0].ident == "assembly_schema"
+                    && path.path.segments[1].ident == enum_name
+                    && path
+                        .path
+                        .segments
+                        .iter()
+                        .all(|segment| matches!(segment.arguments, syn::PathArguments::None))
+        ),
+        "provider catalog optional 参数必须是 None 或 Some(assembly_schema::{enum_name}::<variant>)"
     );
     Ok(())
 }
@@ -830,6 +881,20 @@ const fn durability_variant(durability: ProviderDurability) -> &'static str {
     match durability {
         ProviderDurability::EphemeralMemory => "EphemeralMemory",
         ProviderDurability::Persistent => "Persistent",
+    }
+}
+
+const fn scope_variant(scope: ProviderScope) -> &'static str {
+    match scope {
+        ProviderScope::ProcessLocal => "ProcessLocal",
+        ProviderScope::ClusterGlobal => "ClusterGlobal",
+    }
+}
+
+const fn failure_posture_variant(posture: ProviderFailurePosture) -> &'static str {
+    match posture {
+        ProviderFailurePosture::FailOpen => "FailOpen",
+        ProviderFailurePosture::FailClosed => "FailClosed",
     }
 }
 
@@ -1574,6 +1639,37 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
     }
 
     #[test]
+    fn assembly_provider_codegen_optional_metadata_uses_qualified_paths_for_every_matrix()
+    -> Result<()> {
+        let root = provider_fixture_root("green")?;
+        let source = fs::read_to_string(root.join("assemblies/runtime/assembly.toml"))?;
+        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
+        let rendered = render_providers(&manifest, "assemblies/runtime/assembly.toml")?;
+
+        assert!(rendered.contains("Some(assembly_schema::ProviderScope::ClusterGlobal)"));
+        assert!(rendered.contains("Some(assembly_schema::ProviderFailurePosture::FailClosed)"));
+        assert!(!rendered.contains("ProviderFailurePosture,"));
+        assert!(!rendered.contains("ProviderScope,"));
+        let scope_only = rendered.replace(
+            "Some(assembly_schema::ProviderFailurePosture::FailClosed)",
+            "None",
+        );
+        let posture_only = rendered.replace(
+            "Some(assembly_schema::ProviderScope::ClusterGlobal)",
+            "None",
+        );
+        let all_none = scope_only.replace(
+            "Some(assembly_schema::ProviderScope::ClusterGlobal)",
+            "None",
+        );
+        validate_provider_catalog_syntax(&scope_only)?;
+        validate_provider_catalog_syntax(&posture_only)?;
+        validate_provider_catalog_syntax(&all_none)?;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn assembly_provider_codegen_rejects_closed_registry_mismatches_before_output() -> Result<()> {
         for name in [
             "missing-factory",
@@ -1663,6 +1759,8 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
                     required_features,
                     provider.consumer,
                     provider.durability,
+                    provider.scope,
+                    provider.failure_posture,
                     outputs,
                 )
             }));
@@ -1813,6 +1911,14 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             ))
             .is_err()
         );
+        assert!(
+            validate_provider_catalog_syntax(&rendered.replacen(
+                "None",
+                "Some(scope_from_env())",
+                1
+            ))
+            .is_err()
+        );
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1828,6 +1934,9 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             format!("{GENERATED_PROVIDER_OWNERSHIP_MARKER}\n// tampered\n"),
         )?;
         assert!(generate_providers_root(&root, true).is_err());
+        generate_providers_root(&root, false)?;
+        validate_provider_catalog_syntax(&fs::read_to_string(&target)?)?;
+        generate_providers_root(&root, true)?;
 
         fs::remove_file(&target)?;
         assert!(generate_providers_root(&root, true).is_err());

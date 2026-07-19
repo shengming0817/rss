@@ -528,6 +528,41 @@ impl core::marker::Unpin for assembly_schema::ProviderFactorySymbol
 impl core::marker::UnsafeUnpin for assembly_schema::ProviderFactorySymbol
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderFactorySymbol
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderFactorySymbol
+#[repr(u8)] pub enum assembly_schema::ProviderFailurePosture
+pub assembly_schema::ProviderFailurePosture::FailClosed
+pub assembly_schema::ProviderFailurePosture::FailOpen
+impl assembly_schema::ProviderFailurePosture
+pub const fn assembly_schema::ProviderFailurePosture::as_str(self) -> &'static str
+impl core::clone::Clone for assembly_schema::ProviderFailurePosture
+pub fn assembly_schema::ProviderFailurePosture::clone(&self) -> assembly_schema::ProviderFailurePosture
+impl core::cmp::Eq for assembly_schema::ProviderFailurePosture
+impl core::cmp::Ord for assembly_schema::ProviderFailurePosture
+pub fn assembly_schema::ProviderFailurePosture::cmp(&self, &assembly_schema::ProviderFailurePosture) -> core::cmp::Ordering
+impl core::cmp::PartialEq for assembly_schema::ProviderFailurePosture
+pub fn assembly_schema::ProviderFailurePosture::eq(&self, &assembly_schema::ProviderFailurePosture) -> bool
+impl core::cmp::PartialOrd for assembly_schema::ProviderFailurePosture
+pub fn assembly_schema::ProviderFailurePosture::partial_cmp(&self, &assembly_schema::ProviderFailurePosture) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for assembly_schema::ProviderFailurePosture
+pub fn assembly_schema::ProviderFailurePosture::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for assembly_schema::ProviderFailurePosture
+pub fn assembly_schema::ProviderFailurePosture::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::ProviderFailurePosture
+impl core::marker::StructuralPartialEq for assembly_schema::ProviderFailurePosture
+impl schemars::JsonSchema for assembly_schema::ProviderFailurePosture
+pub fn assembly_schema::ProviderFailurePosture::json_schema(&mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema
+pub fn assembly_schema::ProviderFailurePosture::schema_id() -> alloc::borrow::Cow<'static, str>
+pub fn assembly_schema::ProviderFailurePosture::schema_name() -> alloc::string::String
+impl serde_core::ser::Serialize for assembly_schema::ProviderFailurePosture
+pub fn assembly_schema::ProviderFailurePosture::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::ProviderFailurePosture
+pub fn assembly_schema::ProviderFailurePosture::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::ProviderFailurePosture
+impl core::marker::Send for assembly_schema::ProviderFailurePosture
+impl core::marker::Sync for assembly_schema::ProviderFailurePosture
+impl core::marker::Unpin for assembly_schema::ProviderFailurePosture
+impl core::marker::UnsafeUnpin for assembly_schema::ProviderFailurePosture
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderFailurePosture
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderFailurePosture
 #[repr(u8)] pub enum assembly_schema::ProviderLifecycle
 pub assembly_schema::ProviderLifecycle::Active
 pub assembly_schema::ProviderLifecycle::Deprecated
@@ -615,6 +650,41 @@ impl core::marker::Unpin for assembly_schema::ProviderRole
 impl core::marker::UnsafeUnpin for assembly_schema::ProviderRole
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderRole
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderRole
+#[repr(u8)] pub enum assembly_schema::ProviderScope
+pub assembly_schema::ProviderScope::ClusterGlobal
+pub assembly_schema::ProviderScope::ProcessLocal
+impl assembly_schema::ProviderScope
+pub const fn assembly_schema::ProviderScope::as_str(self) -> &'static str
+impl core::clone::Clone for assembly_schema::ProviderScope
+pub fn assembly_schema::ProviderScope::clone(&self) -> assembly_schema::ProviderScope
+impl core::cmp::Eq for assembly_schema::ProviderScope
+impl core::cmp::Ord for assembly_schema::ProviderScope
+pub fn assembly_schema::ProviderScope::cmp(&self, &assembly_schema::ProviderScope) -> core::cmp::Ordering
+impl core::cmp::PartialEq for assembly_schema::ProviderScope
+pub fn assembly_schema::ProviderScope::eq(&self, &assembly_schema::ProviderScope) -> bool
+impl core::cmp::PartialOrd for assembly_schema::ProviderScope
+pub fn assembly_schema::ProviderScope::partial_cmp(&self, &assembly_schema::ProviderScope) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for assembly_schema::ProviderScope
+pub fn assembly_schema::ProviderScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for assembly_schema::ProviderScope
+pub fn assembly_schema::ProviderScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::ProviderScope
+impl core::marker::StructuralPartialEq for assembly_schema::ProviderScope
+impl schemars::JsonSchema for assembly_schema::ProviderScope
+pub fn assembly_schema::ProviderScope::json_schema(&mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema
+pub fn assembly_schema::ProviderScope::schema_id() -> alloc::borrow::Cow<'static, str>
+pub fn assembly_schema::ProviderScope::schema_name() -> alloc::string::String
+impl serde_core::ser::Serialize for assembly_schema::ProviderScope
+pub fn assembly_schema::ProviderScope::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::ProviderScope
+pub fn assembly_schema::ProviderScope::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::ProviderScope
+impl core::marker::Send for assembly_schema::ProviderScope
+impl core::marker::Sync for assembly_schema::ProviderScope
+impl core::marker::Unpin for assembly_schema::ProviderScope
+impl core::marker::UnsafeUnpin for assembly_schema::ProviderScope
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderScope
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderScope
 pub enum assembly_schema::RuntimePlanErrorStage
 pub assembly_schema::RuntimePlanErrorStage::AssemblyIdentity
 pub assembly_schema::RuntimePlanErrorStage::CanonicalSerialization
@@ -844,6 +914,7 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::CanonicalAssembly
 pub struct assembly_schema::DiportProvider
 pub assembly_schema::DiportProvider::consumer: assembly_schema::ProviderConsumer
 pub assembly_schema::DiportProvider::durability: assembly_schema::ProviderDurability
+pub assembly_schema::DiportProvider::failure_posture: core::option::Option<assembly_schema::ProviderFailurePosture>
 pub assembly_schema::DiportProvider::id: assembly_schema::ProviderRole
 pub assembly_schema::DiportProvider::lifecycle: assembly_schema::ProviderLifecycle
 pub assembly_schema::DiportProvider::outputs: alloc::vec::Vec<assembly_schema::LifecycleChannel>
@@ -852,6 +923,7 @@ pub assembly_schema::DiportProvider::provider: assembly_schema::ProviderConstruc
 pub assembly_schema::DiportProvider::provider_crate: alloc::string::String
 pub assembly_schema::DiportProvider::purpose: alloc::string::String
 pub assembly_schema::DiportProvider::required_features: alloc::vec::Vec<alloc::string::String>
+pub assembly_schema::DiportProvider::scope: core::option::Option<assembly_schema::ProviderScope>
 impl core::clone::Clone for assembly_schema::DiportProvider
 pub fn assembly_schema::DiportProvider::clone(&self) -> assembly_schema::DiportProvider
 impl core::cmp::Eq for assembly_schema::DiportProvider
@@ -994,10 +1066,12 @@ impl assembly_schema::ProviderCapabilityEvidence
 pub const fn assembly_schema::ProviderCapabilityEvidence::constructor(&self) -> assembly_schema::ProviderConstructor
 pub const fn assembly_schema::ProviderCapabilityEvidence::consumer(&self) -> assembly_schema::ProviderConsumer
 pub const fn assembly_schema::ProviderCapabilityEvidence::durability(&self) -> assembly_schema::ProviderDurability
+pub const fn assembly_schema::ProviderCapabilityEvidence::failure_posture(&self) -> core::option::Option<assembly_schema::ProviderFailurePosture>
 pub const fn assembly_schema::ProviderCapabilityEvidence::outputs(&self) -> &'static [assembly_schema::LifecycleChannel]
 pub const fn assembly_schema::ProviderCapabilityEvidence::port(&self) -> assembly_schema::DiportPort
 pub const fn assembly_schema::ProviderCapabilityEvidence::provider_crate(&self) -> &'static str
 pub const fn assembly_schema::ProviderCapabilityEvidence::required_features(&self) -> &'static [&'static str]
+pub const fn assembly_schema::ProviderCapabilityEvidence::scope(&self) -> core::option::Option<assembly_schema::ProviderScope>
 impl core::clone::Clone for assembly_schema::ProviderCapabilityEvidence
 pub fn assembly_schema::ProviderCapabilityEvidence::clone(&self) -> assembly_schema::ProviderCapabilityEvidence
 impl core::cmp::Eq for assembly_schema::ProviderCapabilityEvidence
@@ -1016,7 +1090,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderCapabi
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderCapabilityEvidence
 pub struct assembly_schema::ProviderCatalogEntry
 impl assembly_schema::ProviderCatalogEntry
-pub const fn assembly_schema::ProviderCatalogEntry::checked(assembly_schema::ProviderRole, assembly_schema::DiportPort, assembly_schema::ProviderConstructor, assembly_schema::ProviderFactorySymbol, &'static str, &'static [&'static str], assembly_schema::ProviderConsumer, assembly_schema::ProviderDurability, &'static [assembly_schema::LifecycleChannel]) -> Self
+pub const fn assembly_schema::ProviderCatalogEntry::checked(assembly_schema::ProviderRole, assembly_schema::DiportPort, assembly_schema::ProviderConstructor, assembly_schema::ProviderFactorySymbol, &'static str, &'static [&'static str], assembly_schema::ProviderConsumer, assembly_schema::ProviderDurability, core::option::Option<assembly_schema::ProviderScope>, core::option::Option<assembly_schema::ProviderFailurePosture>, &'static [assembly_schema::LifecycleChannel]) -> Self
 pub const fn assembly_schema::ProviderCatalogEntry::evidence(&self) -> &assembly_schema::ProviderCapabilityEvidence
 pub const fn assembly_schema::ProviderCatalogEntry::factory(&self) -> assembly_schema::ProviderFactorySymbol
 pub const fn assembly_schema::ProviderCatalogEntry::role(&self) -> assembly_schema::ProviderRole

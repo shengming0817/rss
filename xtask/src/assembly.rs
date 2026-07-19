@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use assembly_schema::{
     AssemblyDomain, AssemblyManifest, AssemblyProfile, AssemblyTopology, DiportPort,
     DiportProvider, ManifestValidationError, ProviderConstructor, ProviderConsumer,
-    ProviderDurability, ProviderLifecycle,
+    ProviderDurability, ProviderFailurePosture, ProviderLifecycle, ProviderScope,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -541,12 +541,20 @@ fn validate_pdp_replay_store_capability(a: &DiscoveredAssembly, findings: &mut V
 
     let provider = ProviderConstructor::PostgresServiceTokenReplayStore;
     let consumer = "oidc";
-    if !has_active_persistent_provider(a, provider, consumer) {
+    let has_required_posture = a.manifest.diport_providers.iter().any(|candidate| {
+        candidate.provider == provider
+            && candidate.consumer.as_str() == consumer
+            && candidate.lifecycle == ProviderLifecycle::Active
+            && candidate.durability == ProviderDurability::Persistent
+            && candidate.scope == Some(ProviderScope::ClusterGlobal)
+            && candidate.failure_posture == Some(ProviderFailurePosture::FailClosed)
+    });
+    if !has_required_posture {
         findings.push(finding(
             Rule::PdpReplayStoreCapability,
             &a.manifest_label,
             format!(
-                "field=diportProviders capability=PdpReplayStore expected active persistent `{provider}` for `{}` providerCrate `{}` consumer `{consumer}`; actual={}",
+                "field=diportProviders capability=PdpReplayStore expected active persistent cluster-global fail-closed `{provider}` for `{}` providerCrate `{}` consumer `{consumer}`; actual={}",
                 provider.port(),
                 provider.provider_crate(),
                 provider_actual(a, provider, consumer)
@@ -3294,6 +3302,8 @@ providerCrate = "postgres"
 consumer = "oidc"
 lifecycle = "active"
 durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-closed"
 purpose = "service-token-atomic-replay-consume"
 outputs = ["probes", "resources", "workers"]
 "#,
@@ -3529,6 +3539,8 @@ providerCrate = "postgres"
 consumer = "oidc"
 lifecycle = "active"
 durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-closed"
 purpose = "service-token-atomic-replay-consume"
 outputs = ["probes", "resources", "workers"]
 "#;
@@ -3698,6 +3710,61 @@ outputs = []
     }
 
     #[test]
+    fn runtime_pdp_rejects_replay_store_without_cluster_global_fail_closed_posture()
+    -> anyhow::Result<()> {
+        let replay_without_posture = CAPABILITY_REPLAY_STORE_PROVIDER
+            .replace("scope = \"cluster-global\"\n", "")
+            .replace("failurePosture = \"fail-closed\"\n", "");
+        let manifest = capability_manifest(
+            "demo",
+            "durable-shared",
+            &["identity"],
+            &format!("{CAPABILITY_DOMAIN_PROVIDERS}{replay_without_posture}"),
+        );
+        let root = unique_tmp("assembly-runtime-pdp-replay-posture-missing");
+        write_assembly(&root, &manifest, CAPABILITY_CARGO_FULL)?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::PdpReplayStoreCapability),
+            "runtime replay store without cluster-global fail-closed posture must fail: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_pdp_rejects_process_local_or_fail_open_replay_posture() -> anyhow::Result<()> {
+        for (name, replay_provider) in [
+            (
+                "assembly-runtime-pdp-process-local-replay",
+                CAPABILITY_REPLAY_STORE_PROVIDER.replace("cluster-global", "process-local"),
+            ),
+            (
+                "assembly-runtime-pdp-fail-open-replay",
+                CAPABILITY_REPLAY_STORE_PROVIDER.replace("fail-closed", "fail-open"),
+            ),
+        ] {
+            let manifest = capability_manifest(
+                "demo",
+                "durable-shared",
+                &["identity"],
+                &format!("{CAPABILITY_DOMAIN_PROVIDERS}{replay_provider}"),
+            );
+            let root = unique_tmp(name);
+            write_assembly(&root, &manifest, CAPABILITY_CARGO_FULL)?;
+            let (_count, findings) = validate_root(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::PdpReplayStoreCapability),
+                "weak replay posture must fail: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn assembly_capabilities_identityaudit_closure_is_non_vacuous() -> anyhow::Result<()> {
         let findings = required_capability_findings(IDENTITYAUDIT_MANIFEST, IDENTITYAUDIT_CARGO)?;
         assert!(
@@ -3835,6 +3902,8 @@ providerCrate = "postgres"
 consumer = "oidc"
 lifecycle = "active"
 durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-closed"
 purpose = "service-token-atomic-replay-consume"
 outputs = ["probes", "resources", "workers"]
 "#,
@@ -6690,6 +6759,8 @@ providerCrate = "postgres"
 consumer = "oidc"
 lifecycle = "active"
 durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-closed"
 purpose = "service-token-atomic-replay-consume"
 outputs = ["probes", "resources", "workers"]
 "#,

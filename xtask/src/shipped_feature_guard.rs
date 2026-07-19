@@ -1,10 +1,11 @@
 //! Actual shipped feature-graph guard for production binaries.
 //!
-//! `httpserve` intentionally exposes raw route helpers behind `test-util`. An isolated consumer
-//! proves the default crate surface, but only Cargo's root-specific resolved graph can prove that
-//! feature unification did not re-enable the helpers in a shipped binary. This guard runs
-//! `cargo tree` for both production package roots and reports the complete inverse dependency
-//! chain when the forbidden feature is present.
+//! `httpserve` intentionally exposes raw route helpers behind `test-util`, while `runtime` exposes
+//! integration-only construction seams behind `integration`. Isolated consumers prove default
+//! crate surfaces, but only Cargo's root-specific resolved graph can prove that feature unification
+//! did not re-enable either surface in a shipped binary. This guard runs `cargo tree` for both
+//! production package roots and reports the complete inverse dependency chain when a forbidden
+//! feature is present.
 //!
 //! INVARIANT: ROUTE-MOUNT-SHIPPED-FEATURES-01 { level = "Medium", exec = "verify", source = "code" }.
 
@@ -14,12 +15,30 @@ use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::workspace_root;
 
 const SHIPPED_PACKAGES: &[&str] = &["server", "rss"];
-const GUARDED_CRATE: &str = "httpserve";
-const FORBIDDEN_FEATURE: &str = "test-util";
+const GUARDED_FEATURES: &[GuardedFeature] = &[
+    GuardedFeature {
+        crate_name: "httpserve",
+        feature: "test-util",
+        rule: Rule::TestFeatureLeak,
+    },
+    GuardedFeature {
+        crate_name: "runtime",
+        feature: "integration",
+        rule: Rule::RuntimeIntegrationLeak,
+    },
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
     TestFeatureLeak,
+    RuntimeIntegrationLeak,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuardedFeature {
+    crate_name: &'static str,
+    feature: &'static str,
+    rule: Rule,
 }
 
 pub(crate) struct ShippedFeatureGuard;
@@ -35,20 +54,27 @@ impl GovernanceCheck for ShippedFeatureGuard {
         let root = workspace_root()?;
         let mut findings = Vec::new();
         for package in SHIPPED_PACKAGES {
-            let tree = shipped_feature_tree(&root, package)?;
-            findings.extend(findings_for_tree_output(package, &tree));
+            for guarded in GUARDED_FEATURES {
+                let tree = shipped_feature_tree(&root, package, guarded.crate_name)?;
+                findings.extend(findings_for_tree_output(package, &tree, *guarded));
+            }
         }
         Ok((
             format!(
-                "{} shipped binaries 的 `{GUARDED_CRATE}` feature graph 未启用 `{FORBIDDEN_FEATURE}`",
-                SHIPPED_PACKAGES.len()
+                "{} shipped binaries 的 production feature graph 未启用 {} 个 test-only feature",
+                SHIPPED_PACKAGES.len(),
+                GUARDED_FEATURES.len()
             ),
             findings,
         ))
     }
 }
 
-fn shipped_feature_tree(root: &std::path::Path, package: &str) -> Result<String> {
+fn shipped_feature_tree(
+    root: &std::path::Path,
+    package: &str,
+    guarded_crate: &str,
+) -> Result<String> {
     let output = crate::cmd::cargo_cmd(
         crate::cmd::CargoSubcommand::Tree,
         &[
@@ -60,7 +86,7 @@ fn shipped_feature_tree(root: &std::path::Path, package: &str) -> Result<String>
             "--edges",
             "features",
             "--invert",
-            GUARDED_CRATE,
+            guarded_crate,
         ],
         &[],
         Some(root),
@@ -69,7 +95,7 @@ fn shipped_feature_tree(root: &std::path::Path, package: &str) -> Result<String>
     .with_context(|| format!("执行 `{package}` shipped feature graph 失败"))?;
     if !output.status.success() {
         bail!(
-            "`cargo tree -p {package} -e features -i {GUARDED_CRATE}` 失败：\n{}",
+            "`cargo tree -p {package} -e features -i {guarded_crate}` 失败：\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -77,8 +103,12 @@ fn shipped_feature_tree(root: &std::path::Path, package: &str) -> Result<String>
         .with_context(|| format!("`{package}` shipped feature graph 不是 UTF-8"))
 }
 
-fn findings_for_tree_output(package: &str, tree: &str) -> Vec<Finding<Rule>> {
-    let forbidden = format!(r#"{GUARDED_CRATE} feature "{FORBIDDEN_FEATURE}""#);
+fn findings_for_tree_output(
+    package: &str,
+    tree: &str,
+    guarded: GuardedFeature,
+) -> Vec<Finding<Rule>> {
+    let forbidden = format!(r#"{} feature "{}""#, guarded.crate_name, guarded.feature);
     let enabled = tree.lines().any(|line| {
         let node = line.trim_start_matches(|ch: char| {
             ch.is_whitespace() || matches!(ch, '│' | '├' | '└' | '─')
@@ -88,11 +118,12 @@ fn findings_for_tree_output(package: &str, tree: &str) -> Vec<Finding<Rule>> {
     enabled
         .then(|| {
             finding(
-                Rule::TestFeatureLeak,
+                guarded.rule,
                 format!("bins/{package}"),
                 format!(
-                    "shipped `{package}` feature graph 启用了 `{GUARDED_CRATE}/{FORBIDDEN_FEATURE}`；\
-                     移除以下依赖链中的 production feature activation：\n{tree}"
+                    "shipped `{package}` feature graph 启用了 `{}/{}`；移除以下依赖链中的 \
+                     production feature activation：\n{tree}",
+                    guarded.crate_name, guarded.feature
                 ),
             )
         })
@@ -115,10 +146,32 @@ mod tests {
         └── runtime v0.0.0 (/repo/assemblies/runtime)
             └── server v0.0.0 (/repo/bins/server)
 "#;
-        let findings = findings_for_tree_output("server", tree);
+        let findings = findings_for_tree_output("server", tree, GUARDED_FEATURES[0]);
         assert_eq!(findings.len(), 1, "test-util must fail: {findings:?}");
         assert_eq!(findings[0].rule, Rule::TestFeatureLeak);
         assert!(findings[0].detail.contains("identity v0.0.0"));
+        assert!(findings[0].detail.contains("server v0.0.0"));
+    }
+
+    #[test]
+    fn synthetic_feature_tree_reports_runtime_integration_with_dependency_chain() {
+        let tree = r#"runtime v0.0.0 (/repo/assemblies/runtime)
+├── runtime feature "default"
+│   └── server v0.0.0 (/repo/bins/server)
+└── runtime feature "integration"
+    └── server v0.0.0 (/repo/bins/server)
+"#;
+        let findings = findings_for_tree_output("server", tree, GUARDED_FEATURES[1]);
+        assert_eq!(
+            findings.len(),
+            1,
+            "runtime/integration must fail: {findings:?}"
+        );
+        assert!(
+            findings[0]
+                .detail
+                .contains("runtime feature \"integration\"")
+        );
         assert!(findings[0].detail.contains("server v0.0.0"));
     }
 
@@ -127,26 +180,40 @@ mod tests {
         let tree = r#"httpserve v0.0.0 (/repo/crates/httpserve)
 └── httpserve feature "default"
     └── runtime v0.0.0 (/repo/assemblies/runtime)
-        └── rss v0.0.0 (/repo/bins/rss)
+    └── rss v0.0.0 (/repo/bins/rss)
 "#;
-        assert!(findings_for_tree_output("rss", tree).is_empty());
+        assert!(findings_for_tree_output("rss", tree, GUARDED_FEATURES[0]).is_empty());
     }
 
     #[test]
     fn shipped_package_roots_are_server_and_rss() {
         assert_eq!(SHIPPED_PACKAGES, &["server", "rss"]);
-        assert_eq!(GUARDED_CRATE, "httpserve");
-        assert_eq!(FORBIDDEN_FEATURE, "test-util");
+        assert_eq!(
+            GUARDED_FEATURES,
+            &[
+                GuardedFeature {
+                    crate_name: "httpserve",
+                    feature: "test-util",
+                    rule: Rule::TestFeatureLeak,
+                },
+                GuardedFeature {
+                    crate_name: "runtime",
+                    feature: "integration",
+                    rule: Rule::RuntimeIntegrationLeak,
+                },
+            ]
+        );
     }
 
     #[test]
-    fn actual_shipped_feature_graphs_exclude_test_util() -> anyhow::Result<()> {
+    fn actual_shipped_feature_graphs_exclude_test_only_features() -> anyhow::Result<()> {
         let (summary, findings) = ShippedFeatureGuard.check()?;
         assert!(
             findings.is_empty(),
             "server/rss shipped graphs must stay clean: {findings:?}"
         );
         assert!(summary.contains("2 shipped binaries"));
+        assert!(summary.contains("2 个 test-only feature"));
         Ok(())
     }
 }

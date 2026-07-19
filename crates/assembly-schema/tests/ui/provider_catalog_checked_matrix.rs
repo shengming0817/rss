@@ -1,6 +1,6 @@
 use assembly_schema::{
     DiportPort, LifecycleChannel, ProviderCatalogEntry, ProviderConstructor, ProviderConsumer,
-    ProviderDurability, ProviderFactorySymbol, ProviderRole,
+    ProviderDurability, ProviderFactorySymbol, ProviderFailurePosture, ProviderRole, ProviderScope,
 };
 
 const DRAFT: ProviderCatalogEntry = ProviderCatalogEntry::checked(
@@ -12,6 +12,8 @@ const DRAFT: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     &["backend"],
     ProviderConsumer::Deviceloop,
     ProviderDurability::EphemeralMemory,
+    None,
+    None,
     &[],
 );
 
@@ -24,6 +26,8 @@ const CONSTRUCTOR: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     &["backend"],
     ProviderConsumer::Eventexec,
     ProviderDurability::Persistent,
+    None,
+    None,
     &[
         LifecycleChannel::Probes,
         LifecycleChannel::Resources,
@@ -40,6 +44,8 @@ const FACTORY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     &["backend"],
     ProviderConsumer::Eventexec,
     ProviderDurability::Persistent,
+    None,
+    None,
     &[
         LifecycleChannel::Probes,
         LifecycleChannel::Resources,
@@ -56,6 +62,8 @@ const PROVIDER_CRATE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     &["backend"],
     ProviderConsumer::Eventexec,
     ProviderDurability::Persistent,
+    None,
+    None,
     &[
         LifecycleChannel::Probes,
         LifecycleChannel::Resources,
@@ -72,6 +80,8 @@ const FEATURES: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     &[],
     ProviderConsumer::Eventexec,
     ProviderDurability::Persistent,
+    None,
+    None,
     &[
         LifecycleChannel::Probes,
         LifecycleChannel::Resources,
@@ -88,6 +98,8 @@ const CONSUMER: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     &["backend"],
     ProviderConsumer::Runtime,
     ProviderDurability::Persistent,
+    None,
+    None,
     &[
         LifecycleChannel::Probes,
         LifecycleChannel::Resources,
@@ -104,6 +116,8 @@ const DURABILITY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     &["backend"],
     ProviderConsumer::Eventexec,
     ProviderDurability::EphemeralMemory,
+    None,
+    None,
     &[
         LifecycleChannel::Probes,
         LifecycleChannel::Resources,
@@ -120,7 +134,45 @@ const OUTPUTS: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     &["backend"],
     ProviderConsumer::Eventexec,
     ProviderDurability::Persistent,
+    None,
+    None,
     &[LifecycleChannel::Resources],
+);
+
+const SCOPE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+    ProviderRole::ServiceTokenReplayStore,
+    DiportPort::ServiceTokenReplayStore,
+    ProviderConstructor::PostgresServiceTokenReplayStore,
+    ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore,
+    "postgres",
+    &[],
+    ProviderConsumer::Oidc,
+    ProviderDurability::Persistent,
+    Some(ProviderScope::ProcessLocal),
+    Some(ProviderFailurePosture::FailClosed),
+    &[
+        LifecycleChannel::Probes,
+        LifecycleChannel::Resources,
+        LifecycleChannel::Workers,
+    ],
+);
+
+const FAILURE_POSTURE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+    ProviderRole::ServiceTokenReplayStore,
+    DiportPort::ServiceTokenReplayStore,
+    ProviderConstructor::PostgresServiceTokenReplayStore,
+    ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore,
+    "postgres",
+    &[],
+    ProviderConsumer::Oidc,
+    ProviderDurability::Persistent,
+    Some(ProviderScope::ClusterGlobal),
+    Some(ProviderFailurePosture::FailOpen),
+    &[
+        LifecycleChannel::Probes,
+        LifecycleChannel::Resources,
+        LifecycleChannel::Workers,
+    ],
 );
 
 fn main() {
@@ -133,5 +185,7 @@ fn main() {
         CONSUMER,
         DURABILITY,
         OUTPUTS,
+        SCOPE,
+        FAILURE_POSTURE,
     );
 }

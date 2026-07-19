@@ -1,6 +1,5 @@
 use super::{InfraBuilt, ProvidersBuilt, RuntimePhaseState, phase_result};
 use crate::config::RuntimeServingConfigParts;
-use crate::infra::oidc::build_service_token_provider;
 use crate::infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
 use crate::infra::redis::{RedisRuntimeConfig, build_redis_runtime_deps};
 use crate::infra::s3::{S3RuntimeConfig, S3RuntimeConfigParts, build_s3_runtime_deps};
@@ -246,9 +245,9 @@ impl<'a> ProvidersBuilt<'a> {
             let runtime_service_token = token_profiles
                 .service_token()
                 .map(|config| {
-                    build_service_token_provider(
+                    crate::infra::oidc::build_service_token_provider(
                         config,
-                        pg_owner.service_token_replay_store(),
+                        &pg_owner,
                         crate::SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
                     )
                     .context("build service-token verifier with durable replay")

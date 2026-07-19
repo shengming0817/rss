@@ -210,6 +210,10 @@ struct ProviderDetails {
     port: String,
     lifecycle: ProviderLifecycle,
     durability: ProviderDurability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_posture: Option<String>,
     purpose: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     required_features: Vec<String>,
@@ -429,6 +433,8 @@ fn build_model(root: &Path, assembly_name: &str) -> Result<GraphModel> {
             port: provider.port.as_str().into(),
             lifecycle: provider_lifecycle(provider.lifecycle),
             durability: provider_durability(provider.durability),
+            scope: provider.scope.map(|scope| scope.to_string()),
+            failure_posture: provider.failure_posture.map(|posture| posture.to_string()),
             purpose: provider.purpose.clone(),
             required_features: provider.required_features.clone(),
         };
@@ -579,11 +585,21 @@ fn mermaid_node_label(node: &Node) -> String {
         ""
     };
     let provider = match &node.details {
-        Some(NodeDetails::Provider(details)) => format!(
-            " {} {}",
-            provider_lifecycle_label(details.lifecycle),
-            provider_durability_label(details.durability)
-        ),
+        Some(NodeDetails::Provider(details)) => {
+            let scope = details
+                .scope
+                .as_deref()
+                .map_or(String::new(), |scope| format!(" {scope}"));
+            let posture = details
+                .failure_posture
+                .as_deref()
+                .map_or(String::new(), |posture| format!(" {posture}"));
+            format!(
+                " {} {}{scope}{posture}",
+                provider_lifecycle_label(details.lifecycle),
+                provider_durability_label(details.durability)
+            )
+        }
         _ => String::new(),
     };
     format!(
@@ -1277,6 +1293,8 @@ providerCrate = "postgres"
 consumer = "oidc"
 lifecycle = "active"
 durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-closed"
 purpose = "service-token-atomic-replay-consume"
 outputs = ["probes", "resources", "workers"]
 "#

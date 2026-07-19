@@ -23,6 +23,8 @@
 //! INVARIANT: EVENT-TRANSPORT-OUTPUT-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::event_transport_output_funnel_rejects_legacy_and_bypasses", anti_vacuity = "tests::event_transport_output_funnel_accepts_unified_live_path" } -- event transport must return one crate-private `DomainModuleResult`, merge it once into runtime assembly, and register AMQP resources plus workers only through the common lifecycle funnel.
 //!
 //! INVARIANT: RUNTIME-PHASE-TRANSITION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_phase_transition_rejects_missing_reordered_drop_plan_and_bait", anti_vacuity = "tests::runtime_phase_transition_accepts_canonical_live_path" } -- the unique production `run_startup()` delegates only to `phase::execute`; that executor consumes the exact five associated-`Next` transitions in order, every transition uses its associated `RuntimePhaseState::PHASE` through the directly redacting private `phase_result` funnel, the runtime plan stays owned by `PhaseContext`, state trait impls are closed across the complete production module graph, and launch inputs validate before the sole launch phase constructs `LaunchPlan`. Tuple/drop/skip/reorder paths, direct or aliased `LaunchPlan`/`ShutdownStack` access, legacy root phase bodies, cross-file impls, macros, dead branches, comments, strings, and test-only bait fail closed.
+//!
+//! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- the only production service-token constructor accepts the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps` plus `PgMaintenanceDeps`. Serving and the five operator paths call that typed constructor directly at their run-reachable sites. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::localtx_coverage::attrs_may_be_production;
@@ -53,6 +55,7 @@ const RUNTIME_LAUNCH_PATH: &str = "assemblies/runtime/src/launch.rs";
 const RUNTIME_EVENT_PATH: &str = "assemblies/runtime/src/event_transport.rs";
 const RUNTIME_S3_PATH: &str = "assemblies/runtime/src/infra/s3.rs";
 const RUNTIME_VAULT_PATH: &str = "assemblies/runtime/src/infra/vault.rs";
+const RUNTIME_OIDC_PATH: &str = "assemblies/runtime/src/infra/oidc.rs";
 const RUNTIME_PHASE_PATH: &str = "assemblies/runtime/src/phase.rs";
 const RUNTIME_PHASE_PROVIDER_PATH: &str = "assemblies/runtime/src/phase/provider.rs";
 const RUNTIME_PHASE_INFRA_PATH: &str = "assemblies/runtime/src/phase/infra.rs";
@@ -215,6 +218,7 @@ fn collect_report(root: &Path) -> Result<Report> {
     findings.extend(runtime_binary_config_findings(root)?);
     findings.extend(runtime_secret_transfer_live_findings(root)?);
     findings.extend(runtime_phase_transition_findings(root)?);
+    findings.extend(runtime_service_token_replay_live_findings(root)?);
     findings.extend(generated_domains_live_findings(root)?);
     findings.extend(provider_outputs_live_findings(root)?);
     findings.extend(event_transport_output_findings(root)?);
@@ -8520,6 +8524,482 @@ fn out_of_line_module_candidates(base: &Path, module: &syn::ItemMod) -> Vec<Path
     ]
 }
 
+fn runtime_service_token_replay_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let root_path = root.join(RUNTIME_LIB_PATH);
+    let oidc_path = root.join(RUNTIME_OIDC_PATH);
+    let infra_path = root.join(RUNTIME_PHASE_INFRA_PATH);
+    if !root_path.exists() || !oidc_path.exists() || !infra_path.exists() {
+        // Generic runtime-baseline fixtures do not model OIDC. The real workspace cannot delete
+        // any of these compiled modules without failing native compilation.
+        return Ok(Vec::new());
+    }
+    let runtime = parse_rust_file(&root_path)?;
+    let oidc = parse_rust_file(&oidc_path)?;
+    let infra = parse_rust_file(&infra_path)?;
+    if service_token_replay_live_is_canonical(&runtime, &oidc, &infra) {
+        Ok(Vec::new())
+    } else {
+        Ok(vec![finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_OIDC_PATH,
+            "service-token verifier 必须只接受闭合 PostgreSQL replay owner；serving 与五条 operator live path 必须直接调用该 typed seam，禁止 process-local guard、平行/死 helper 与 macro 旁路",
+        )])
+    }
+}
+
+fn service_token_replay_live_is_canonical(
+    runtime: &syn::File,
+    oidc: &syn::File,
+    infra: &syn::File,
+) -> bool {
+    let operator_builders =
+        production_functions_named(runtime, "build_operator_service_token_provider");
+    let service_builders = production_functions_named(oidc, "build_service_token_provider");
+    let Some(operator_builder) = (operator_builders.len() == 1).then(|| operator_builders[0])
+    else {
+        return false;
+    };
+    let Some(service_builder) = (service_builders.len() == 1).then(|| service_builders[0]) else {
+        return false;
+    };
+    if !replay_owner_trait_is_closed(oidc)
+        || !exact_named_typed_input(
+            &operator_builder.sig,
+            2,
+            "replay_owner",
+            "&implServiceTokenReplayOwner",
+        )
+        || !exact_named_typed_input(
+            &service_builder.sig,
+            1,
+            "replay_owner",
+            "&implServiceTokenReplayOwner",
+        )
+        || exact_path_call_argument_count(
+            &operator_builder.block,
+            &["crate", "infra", "oidc", "build_service_token_provider"],
+            1,
+            "replay_owner",
+        ) != 1
+        || !service_builder_consumes_owner_once(&service_builder.block)
+    {
+        return false;
+    }
+
+    let operator_receipts = production_impl_methods_named(runtime, "operator_receipt");
+    let operator_subjects = production_impl_methods_named(runtime, "operator_subject");
+    if operator_receipts.len() != 1
+        || operator_subjects.len() != 2
+        || operator_receipts.iter().any(|method| {
+            exact_path_call_argument_count(
+                &method.block,
+                &["crate", "build_operator_service_token_provider"],
+                2,
+                "session",
+            ) != 1
+        })
+        || operator_subjects.iter().any(|method| {
+            exact_path_call_argument_count(
+                &method.block,
+                &["crate", "build_operator_service_token_provider"],
+                2,
+                "session",
+            ) != 1
+        })
+    {
+        return false;
+    }
+    for (function_name, owner) in [
+        ("run_reconcile_target_command", "&pg"),
+        ("settings_config_value_maintenance_operator_subject", "pg"),
+    ] {
+        let functions = production_functions_named(runtime, function_name);
+        if functions.len() != 1
+            || exact_path_call_argument_count(
+                &functions[0].block,
+                &["crate", "build_operator_service_token_provider"],
+                2,
+                owner,
+            ) != 1
+        {
+            return false;
+        }
+    }
+
+    let Some(build_infra) =
+        unique_production_inherent_method(infra, "ProvidersBuilt", "build_infra")
+    else {
+        return false;
+    };
+    let exact_inventory = production_exact_path_call_count_in_file(
+        runtime,
+        &["crate", "build_operator_service_token_provider"],
+    ) == 5
+        && production_exact_path_call_count_in_file(
+            runtime,
+            &["crate", "infra", "oidc", "build_service_token_provider"],
+        ) == 1
+        && production_exact_path_call_count_in_file(
+            infra,
+            &["crate", "infra", "oidc", "build_service_token_provider"],
+        ) == 1
+        && exact_path_call_argument_count(
+            &build_infra.block,
+            &["crate", "infra", "oidc", "build_service_token_provider"],
+            1,
+            "&pg_owner",
+        ) == 1;
+    exact_inventory && !production_replay_bypass_present(&[runtime, oidc, infra])
+}
+
+fn exact_named_typed_input(
+    signature: &syn::Signature,
+    index: usize,
+    name: &str,
+    expected_type: &str,
+) -> bool {
+    matches!(
+        signature.inputs.iter().nth(index),
+        Some(syn::FnArg::Typed(input))
+            if matches!(input.pat.as_ref(), syn::Pat::Ident(binding)
+                if binding.ident == name
+                    && binding.by_ref.is_none()
+                    && binding.mutability.is_none()
+                    && binding.subpat.is_none())
+                && compact_tokens(input.ty.as_ref()) == expected_type
+    )
+}
+
+fn production_impl_methods_named<'a>(file: &'a syn::File, name: &str) -> Vec<&'a syn::ImplItemFn> {
+    file.items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) if attrs_may_be_production(&item.attrs) => Some(item),
+            _ => None,
+        })
+        .flat_map(|item| &item.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(method)
+                if method.sig.ident == name && attrs_may_be_production(&method.attrs) =>
+            {
+                Some(method)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn exact_path_call_argument_count(
+    block: &syn::Block,
+    path: &[&str],
+    argument_index: usize,
+    expected_argument: &str,
+) -> usize {
+    struct Counter<'a> {
+        path: &'a [&'a str],
+        argument_index: usize,
+        expected_argument: &'a str,
+        count: usize,
+    }
+    impl Visit<'_> for Counter<'_> {
+        fn visit_expr_call(&mut self, call: &syn::ExprCall) {
+            if is_exact_path(&call.func, self.path)
+                && call
+                    .args
+                    .iter()
+                    .nth(self.argument_index)
+                    .is_some_and(|argument| compact_tokens(argument) == self.expected_argument)
+            {
+                self.count += 1;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut counter = Counter {
+        path,
+        argument_index,
+        expected_argument,
+        count: 0,
+    };
+    counter.visit_block(block);
+    counter.count
+}
+
+fn service_builder_consumes_owner_once(block: &syn::Block) -> bool {
+    struct Inventory {
+        lower_calls: usize,
+        canonical_calls: usize,
+    }
+    impl Visit<'_> for Inventory {
+        fn visit_expr_call(&mut self, call: &syn::ExprCall) {
+            if is_exact_path(
+                &call.func,
+                &["self", "build_service_token_provider_from_values"],
+            ) {
+                self.lower_calls += 1;
+                if call.args.iter().nth(4).is_some_and(|argument| {
+                    matches!(argument, syn::Expr::MethodCall(method)
+                        if method.method == "service_token_replay_store"
+                            && method.args.is_empty()
+                            && expr_path_last(&method.receiver)
+                                .is_some_and(|ident| ident == "replay_owner"))
+                }) {
+                    self.canonical_calls += 1;
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut inventory = Inventory {
+        lower_calls: 0,
+        canonical_calls: 0,
+    };
+    inventory.visit_block(block);
+    inventory.lower_calls == 1 && inventory.canonical_calls == 1
+}
+
+fn replay_owner_trait_is_closed(file: &syn::File) -> bool {
+    let traits = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Trait(item)
+                if item.ident == "ServiceTokenReplayOwner"
+                    && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(owner_trait) = (traits.len() == 1).then(|| traits[0]) else {
+        return false;
+    };
+    let exact_trait = compact_tokens(&owner_trait.vis) == "pub(crate)"
+        && owner_trait.supertraits.len() == 1
+        && owner_trait.supertraits.first().is_some_and(|bound| {
+            compact_tokens(bound) == "service_token_replay_owner_sealed::Sealed"
+        })
+        && owner_trait.items.len() == 1
+        && matches!(&owner_trait.items[0], syn::TraitItem::Fn(method)
+            if method.sig.ident == "service_token_replay_store"
+                && method.sig.inputs.len() == 1
+                && matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver))
+                    if receiver.reference.is_some()
+                        && receiver.mutability.is_none())
+                && matches!(&method.sig.output, syn::ReturnType::Type(_, ty)
+                    if compact_tokens(ty.as_ref())
+                        == "Arc<diport::DynServiceTokenReplayStore<'static>>"));
+    if !exact_trait {
+        return false;
+    }
+    let sealed_modules = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(item)
+                if item.ident == "service_token_replay_owner_sealed"
+                    && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if sealed_modules.len() != 1 || !sealed_replay_owner_module_is_exact(sealed_modules[0]) {
+        return false;
+    }
+
+    let implementations = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if attrs_may_be_production(&item.attrs)
+                    && item.trait_.as_ref().is_some_and(|(_, path, _)| {
+                        path.segments
+                            .last()
+                            .is_some_and(|segment| segment.ident == "ServiceTokenReplayOwner")
+                    }) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let expected = BTreeSet::from([
+        "postgres::PgMaintenanceDeps".to_owned(),
+        "postgres::PgRuntimeDeps".to_owned(),
+    ]);
+    implementations.len() == 2
+        && implementations
+            .iter()
+            .map(|implementation| compact_tokens(implementation.self_ty.as_ref()))
+            .collect::<BTreeSet<_>>()
+            == expected
+        && implementations.iter().all(|implementation| {
+            let owner = compact_tokens(implementation.self_ty.as_ref());
+            implementation.items.len() == 1
+                && matches!(&implementation.items[0], syn::ImplItem::Fn(method)
+                    if method.sig.ident == "service_token_replay_store"
+                        && compact_tokens(&method.block)
+                            == format!("{{{owner}::service_token_replay_store(self)}}"))
+        })
+}
+
+fn sealed_replay_owner_module_is_exact(module: &syn::ItemMod) -> bool {
+    let Some((_, items)) = &module.content else {
+        return false;
+    };
+    let traits = items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Trait(item) if item.ident == "Sealed" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(sealed_trait) = (traits.len() == 1).then(|| traits[0]) else {
+        return false;
+    };
+    let implementations = items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if item.trait_.as_ref().is_some_and(|(polarity, path, _)| {
+                    polarity.is_none()
+                        && path.segments.len() == 1
+                        && path.segments[0].ident == "Sealed"
+                }) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let expected = BTreeSet::from([
+        "postgres::PgMaintenanceDeps".to_owned(),
+        "postgres::PgRuntimeDeps".to_owned(),
+    ]);
+    matches!(module.vis, syn::Visibility::Inherited)
+        && items.len() == 3
+        && compact_tokens(&sealed_trait.vis) == "pub"
+        && sealed_trait.items.is_empty()
+        && sealed_trait.supertraits.is_empty()
+        && implementations.len() == 2
+        && implementations.iter().all(|implementation| {
+            implementation.items.is_empty() && implementation.generics.params.is_empty()
+        })
+        && implementations
+            .iter()
+            .map(|implementation| compact_tokens(implementation.self_ty.as_ref()))
+            .collect::<BTreeSet<_>>()
+            == expected
+}
+
+#[derive(Default)]
+struct ProductionReplayBypass {
+    process_local_guard: bool,
+    macro_indirection: bool,
+}
+
+impl<'ast> Visit<'ast> for ProductionReplayBypass {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_impl(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+        if attrs_may_be_production(&item.attrs) {
+            if item.ident == "RuntimeServiceTokenReplayGuard" {
+                self.process_local_guard = true;
+            }
+            syn::visit::visit_item_struct(self, item);
+        }
+    }
+
+    fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+        if attrs_may_be_production(&item.attrs) {
+            if item.ident == "RuntimeServiceTokenReplayGuard" {
+                self.process_local_guard = true;
+            }
+            syn::visit::visit_item_enum(self, item);
+        }
+    }
+
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        if attrs_may_be_production(&item.attrs) {
+            if item.ident == "RuntimeServiceTokenReplayGuard" {
+                self.process_local_guard = true;
+            }
+            syn::visit::visit_item_type(self, item);
+        }
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        if path
+            .segments
+            .iter()
+            .any(|segment| segment.ident == "RuntimeServiceTokenReplayGuard")
+        {
+            self.process_local_guard = true;
+        }
+        syn::visit::visit_path(self, path);
+    }
+
+    fn visit_macro(&mut self, item: &'ast syn::Macro) {
+        if token_stream_contains_ident(
+            item.tokens.clone(),
+            &[
+                "RuntimeServiceTokenReplayGuard",
+                "build_service_token_provider",
+                "build_operator_service_token_provider",
+            ],
+        ) {
+            self.macro_indirection = true;
+        }
+        syn::visit::visit_macro(self, item);
+    }
+}
+
+fn token_stream_contains_ident(stream: proc_macro2::TokenStream, protected: &[&str]) -> bool {
+    stream.into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Ident(ident) => {
+            protected.iter().any(|protected| ident == *protected)
+        }
+        proc_macro2::TokenTree::Group(group) => {
+            token_stream_contains_ident(group.stream(), protected)
+        }
+        _ => false,
+    })
+}
+
+fn production_replay_bypass_present(files: &[&syn::File]) -> bool {
+    let mut visitor = ProductionReplayBypass::default();
+    for file in files {
+        visitor.visit_file(file);
+    }
+    visitor.process_local_guard || visitor.macro_indirection
+}
+
 fn event_transport_output_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     if !root.join("Cargo.toml").exists() {
         return Ok(Vec::new());
@@ -11269,6 +11749,8 @@ struct ProviderEntry {
     consumer: String,
     lifecycle: String,
     durability: String,
+    scope: String,
+    failure_posture: String,
     purpose: String,
 }
 
@@ -11320,6 +11802,12 @@ fn assembly_providers(root: &Path) -> Result<Vec<ProviderEntry>> {
             consumer: provider.consumer.as_str().to_owned(),
             lifecycle: provider.lifecycle.to_string(),
             durability: provider.durability.to_string(),
+            scope: provider
+                .scope
+                .map_or_else(|| "unset".to_owned(), |scope| scope.to_string()),
+            failure_posture: provider
+                .failure_posture
+                .map_or_else(|| "unset".to_owned(), |posture| posture.to_string()),
             purpose: provider.purpose.clone(),
         });
     }
@@ -12133,7 +12621,7 @@ fn render_baseline(
         push_line(
             &mut out,
             format_args!(
-                "{:02} | id={} | port={} | provider={} | providerCrate={} | requiredFeatures={} | consumer={} | lifecycle={} | durability={} | purpose={}",
+                "{:02} | id={} | port={} | provider={} | providerCrate={} | requiredFeatures={} | consumer={} | lifecycle={} | durability={} | scope={} | failurePosture={} | purpose={}",
                 provider.index,
                 provider.id,
                 provider.port,
@@ -12143,6 +12631,8 @@ fn render_baseline(
                 provider.consumer,
                 provider.lifecycle,
                 provider.durability,
+                provider.scope,
+                provider.failure_posture,
                 provider.purpose
             ),
         );
@@ -12229,6 +12719,123 @@ mod tests {
             fs::create_dir_all(parent)?;
         }
         fs::write(path, text)?;
+        Ok(())
+    }
+
+    fn repository_replay_sources() -> Result<(String, String, String)> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("xtask manifest must have a repository parent"))?;
+        Ok((
+            fs::read_to_string(root.join(RUNTIME_LIB_PATH))?,
+            fs::read_to_string(root.join(RUNTIME_OIDC_PATH))?,
+            fs::read_to_string(root.join(RUNTIME_PHASE_INFRA_PATH))?,
+        ))
+    }
+
+    fn replay_sources_are_canonical(runtime: &str, oidc: &str, infra: &str) -> Result<bool> {
+        Ok(service_token_replay_live_is_canonical(
+            &syn::parse_file(runtime)?,
+            &syn::parse_file(oidc)?,
+            &syn::parse_file(infra)?,
+        ))
+    }
+
+    fn replace_nth(
+        source: &str,
+        needle: &str,
+        occurrence: usize,
+        replacement: &str,
+    ) -> Result<String> {
+        let start = source
+            .match_indices(needle)
+            .nth(occurrence)
+            .map(|(start, _)| start)
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing occurrence {occurrence} of replay test needle `{needle}`")
+            })?;
+        Ok(format!(
+            "{}{}{}",
+            &source[..start],
+            replacement,
+            &source[start + needle.len()..]
+        ))
+    }
+
+    #[test]
+    fn runtime_service_token_replay_live_accepts_typed_pg_composition() -> Result<()> {
+        let (runtime, oidc, infra) = repository_replay_sources()?;
+        assert!(
+            replay_sources_are_canonical(&runtime, &oidc, &infra)?,
+            "real runtime service-token composition is the anti-vacuity green"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards()
+    -> Result<()> {
+        let (runtime, oidc, infra) = repository_replay_sources()?;
+        assert!(replay_sources_are_canonical(&runtime, &oidc, &infra)?);
+
+        let missing_live_call = replace_nth(
+            &runtime,
+            "build_operator_service_token_provider(",
+            1,
+            "missing_operator_service_token_provider(",
+        )? + r#"
+const REPLAY_STRING_BAIT: &str = "build_operator_service_token_provider(";
+// build_operator_service_token_provider(
+"#;
+        assert!(
+            !replay_sources_are_canonical(&missing_live_call, &oidc, &infra)?,
+            "comments and strings must not replace a missing live call"
+        );
+
+        let dead_helper = format!(
+            "{runtime}\nfn dead_replay_bait(config: Config, operator: Operator, owner: Owner) {{\n\
+             let _ = crate::build_operator_service_token_provider(config, operator, owner);\n}}\n"
+        );
+        assert!(
+            !replay_sources_are_canonical(&dead_helper, &oidc, &infra)?,
+            "a dead helper must violate the closed call inventory"
+        );
+
+        let test_only = format!(
+            "{runtime}\n#[cfg(test)] fn test_only_replay_bait(config: Config, operator: Operator, owner: Owner) {{\n\
+             struct RuntimeServiceTokenReplayGuard;\n\
+             let _ = crate::build_operator_service_token_provider(config, operator, owner);\n}}\n"
+        );
+        assert!(
+            replay_sources_are_canonical(&test_only, &oidc, &infra)?,
+            "test-only evidence must be ignored rather than counted as production"
+        );
+
+        let process_local = format!("{runtime}\nstruct RuntimeServiceTokenReplayGuard;\n");
+        assert!(
+            !replay_sources_are_canonical(&process_local, &oidc, &infra)?,
+            "a production process-local replay guard must fail closed"
+        );
+
+        let widened_owner_set = replace_nth(
+            &oidc,
+            "impl Sealed for postgres::PgMaintenanceDeps {}",
+            0,
+            "impl Sealed for postgres::PgMaintenanceDeps {}\n\
+             impl Sealed for memory::RuntimeServiceTokenReplayGuard {}",
+        )?;
+        assert!(
+            !replay_sources_are_canonical(&runtime, &widened_owner_set, &infra)?,
+            "the native sealed owner set must remain exactly the two PostgreSQL owners"
+        );
+
+        let macro_bypass = format!(
+            "{runtime}\nfn replay_macro_bypass() {{ replay!(build_operator_service_token_provider); }}\n"
+        );
+        assert!(
+            !replay_sources_are_canonical(&macro_bypass, &oidc, &infra)?,
+            "macro indirection around a protected constructor must fail closed"
+        );
         Ok(())
     }
 

@@ -5,9 +5,9 @@
     "profile": "demo"
   },
   "digests": {
-    "manifest": "sha256:f9fdfb7c159288b60574ba7635a3f31080c187549c4ee793b51cbdf521e12e35",
-    "generated": "sha256:c3eb5413d405afdbc5d085a021c4e1ab918558035d2c1ecbbf599a4abc615ebe",
+    "manifest": "sha256:58d74664ef1f9a7d947f95b38a16e1bd9d80833b76e351bd011273a2dd7fb497",
+    "generated": "sha256:a0aa0882c6adeabe8613e3db6964e0f8d1614656b1e7092d02dec7c31340c607",
     "contracts": "sha256:b2caf7284b08d44d4cd7ce583c30b49192b686839ff47f55212bfa895205e0c0"
   },
-  "fingerprint": "sha256:f751b0283a2003c830a8fe95753b2ad6d5b22e8d32dab3bab23112d4c7622a64"
+  "fingerprint": "sha256:20af64918af5316dd14d1c4f22afede730423891ba57111e45034fc90bc99ad6"
 }
