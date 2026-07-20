@@ -255,6 +255,18 @@ impl<'a> ProvidersBuilt<'a> {
                 })
                 .transpose()?;
 
+            let signing_rotation_probe =
+                match (runtime_rss_access.as_ref(), token_profiles.rss_access()) {
+                    (Some(provider), Some(rss)) => {
+                        Some(crate::infra::signing_rotation::signing_rotation_probe(
+                            rss,
+                            provider.jwks_readiness().handle(),
+                            Box::new(SystemClock),
+                        ))
+                    }
+                    _ => None,
+                };
+
             Ok(InfraBuilt {
                 context,
                 listener_execution_plan,
@@ -268,6 +280,7 @@ impl<'a> ProvidersBuilt<'a> {
                 pg_readiness_period,
                 redis_readiness_period,
                 command_idempotency_keyring,
+                signing_rotation_probe,
                 runtime_rss_access,
                 runtime_federated_access,
                 runtime_service_token,

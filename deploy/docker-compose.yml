@@ -160,7 +160,7 @@ services:
           no_default_policy=true \
           no_parent=true \
           renewable=false >/dev/null
-        vault write -f "$${RSS_VAULT_TRANSIT_MOUNT}/keys/$${RSS_ACCESS_TOKEN_ES256_KEY_ID}" type=ecdsa-p256
+        vault write -f "$${RSS_VAULT_TRANSIT_MOUNT}/keys/$${RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID}" type=ecdsa-p256
 
   rss-access-jwks-init:
     build:

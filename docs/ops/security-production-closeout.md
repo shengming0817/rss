@@ -15,7 +15,7 @@ The current `assemblies/runtime/assembly.toml` remains `profile = "demo"` until 
 
 - Flip an assembly to `profile = "production"` only in the same PR that proves the above gates.
 - Rotate each access profile's JWKS independently and atomically; failed refresh must keep last-good keys and lower only that profile's readyz signal.
-- For Vault Transit RSS Access signing, export the current public key for `RSS_ACCESS_TOKEN_ES256_KEY_ID` into `RSS_ACCESS_TOKEN_JWKS_PATH` before starting server.
+- For Vault Transit RSS Access signing, export the current public key for `RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID` into `RSS_ACCESS_TOKEN_JWKS_PATH` before starting server.
 - Reject deployment if active RSS/Federated issuer, audience or canonical JWKS path overlaps, if Service issuer/audience overlaps either access profile, or if an unselected profile namespace is present.
 - Remove any deployment use of `RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET` or `RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX`; they are no longer supported.
 

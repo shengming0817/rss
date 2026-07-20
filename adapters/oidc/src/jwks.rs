@@ -86,11 +86,13 @@ impl JwksError {
 
 /// 可 clone 的 JWKS readiness 句柄（运维观测面，与资源所有权**解耦**）：组合根在 [`JwksKeySource`] 被 move 进
 /// `VerifierConfig`/`OidcProvider` **之前**取本句柄，move 后仍能读 `is_ready()`（readyz probe 注册，#1109/T004）。
-/// 持共享 `ready` 标志 + 低基数 `source_id`（多 IdP/多源时定位哪个源 degraded；**无 PII**——operator 控制的稳定标识）。
+/// 持共享 `ready` 标志 + 低基数 `source_id`（多 IdP/多源时定位哪个源 degraded；**无 PII**——operator 控制的稳定标识）
+/// + 当前快照引用（[`Self::has_kid`] 供轮转 readiness 探测，不改变 ready 语义）。
 #[derive(Clone)]
 pub struct JwksReadinessHandle {
     ready: Arc<AtomicBool>,
     source_id: Arc<str>,
+    snapshot: Arc<JwksSnapshotStore>,
 }
 
 impl JwksReadinessHandle {
@@ -101,6 +103,10 @@ impl JwksReadinessHandle {
     /// operator 控制的低基数源标识（日志 / probe detail 用）。
     pub fn source_id(&self) -> &str {
         &self.source_id
+    }
+    /// Whether the current JWKS snapshot contains an exact `kid` match.
+    pub fn has_kid(&self, kid: &str) -> bool {
+        self.snapshot.snapshot().has_kid(kid)
     }
 }
 
@@ -456,6 +462,7 @@ impl JwksKeySource {
         JwksReadinessHandle {
             ready: Arc::clone(&self.ready),
             source_id: Arc::clone(&self.source_id),
+            snapshot: Arc::clone(&self.snapshot),
         }
     }
 
@@ -1590,6 +1597,30 @@ mod tests {
             .expect("config");
         // src 已 move 进 config，句柄仍读共享 ready（组合根据此注册 profile-specific probe）。
         assert!(handle.is_ready(), "move 后句柄仍反映 readiness");
+    }
+
+    // ── has_kid：快照存在 / 不存在 exact kid ─────────────────────────────────────
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn readiness_handle_has_kid_reflects_snapshot() {
+        let tmp = TempJwks::new(&jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "k1")]));
+        let src = JwksKeySource::load_and_watch(
+            "primary-idp",
+            tmp.path(),
+            Duration::from_secs(3600),
+            CancellationToken::new(),
+        )
+        .expect("initial load");
+        let handle = src.readiness_handle();
+        assert!(handle.has_kid("k1"));
+        assert!(!handle.has_kid("k2"));
+        assert!(!handle.has_kid(""));
+
+        tmp.rewrite(&jwks_doc(&[ec_jwk(&sk(&SK2_BYTES), "k2")]));
+        assert!(src.reload());
+        assert!(!handle.has_kid("k1"), "rotated-out kid must disappear");
+        assert!(handle.has_kid("k2"), "rotated-in kid must appear");
+        src.shutdown().await.expect("shutdown");
     }
 
     // ── F2：未 shutdown 直接 drop → Drop 兜底 cancel token（防后台任务泄漏）──────────

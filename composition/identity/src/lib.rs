@@ -253,7 +253,8 @@ pub mod test_support {
             Arc::new(TestSigner),
             Arc::new(TestClock),
             authn::JwtIssuerConfig::rss_access(
-                diport::KeyId::new("identity-composition-test-key"),
+                authn::SigningKeyRing::single(diport::KeyId::new("identity-composition-test-key"))
+                    .expect("non-empty signing key id"),
                 diport::SigningPurpose::new("auth.jwt.access"),
                 "https://issuer.test",
                 "rss",
@@ -298,7 +299,8 @@ mod tests {
     async fn invalid_jwt_configuration_fails_closed() {
         let mut deps = test_support::deps().expect("test dependencies build");
         deps.jwt = authn::JwtIssuerConfig::rss_access(
-            diport::KeyId::new("identity-composition-test-key"),
+            authn::SigningKeyRing::single(diport::KeyId::new("identity-composition-test-key"))
+                .expect("non-empty signing key id"),
             diport::SigningPurpose::new("auth.jwt.access"),
             "",
             "rss",

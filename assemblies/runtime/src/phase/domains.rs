@@ -5,6 +5,7 @@ use crate::infra::oidc::{
 };
 use crate::infra::redis::{REDIS_READY_PROBE_NAME, RedisReadyProbe, spawn_redis_readiness_sampler};
 use crate::infra::s3::wire_s3_canary;
+use crate::infra::signing_rotation::RSS_ACCESS_TOKEN_SIGNING_ROTATION_PROBE_NAME;
 use crate::{
     RLS_READY_PROBE_NAME, RlsReadyProbe, wire_auth_grant_sweeper, wire_service_token_replay_sweeper,
 };
@@ -133,6 +134,7 @@ impl<'a> InfraBuilt<'a> {
             pg_readiness_period,
             redis_readiness_period,
             command_idempotency_keyring,
+            signing_rotation_probe,
             runtime_rss_access,
             runtime_federated_access,
             runtime_service_token,
@@ -213,6 +215,13 @@ impl<'a> InfraBuilt<'a> {
                         )),
                     )
                     .context("register RSS access-token JWKS readiness probe")?;
+            }
+            if let Some(probe) = signing_rotation_probe {
+                let name = ProbeName::parse(RSS_ACCESS_TOKEN_SIGNING_ROTATION_PROBE_NAME)
+                    .context("parse RSS access signing rotation probe name")?;
+                registry
+                    .probe(name, Box::new(probe))
+                    .context("register RSS access signing rotation probe")?;
             }
             if let Some(provider) = runtime_federated_access.as_ref() {
                 let name = ProbeName::parse(FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)

@@ -2,6 +2,7 @@ pub mod oidc;
 pub mod pg;
 pub mod redis;
 pub mod s3;
+pub mod signing_rotation;
 pub mod vault;
 
 use secure::PlaintextEndpointPolicy;

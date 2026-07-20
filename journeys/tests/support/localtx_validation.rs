@@ -2251,7 +2251,8 @@ fn refresh_service(
         Arc::new(SeedSigner),
         Box::new(FixedClock::new(observed_at)),
         authn::JwtIssuerConfig::rss_access(
-            diport::KeyId::new("journey-refresh-key"),
+            authn::SigningKeyRing::single(diport::KeyId::new("journey-refresh-key"))
+                .expect("non-empty signing key id"),
             diport::SigningPurpose::new("journey-refresh-signing"),
             "https://journey.local",
             "rss-journey",
@@ -2285,7 +2286,8 @@ fn refresh_router(
             Arc::new(SeedSigner),
             Box::new(FixedClock::new(observed_at)),
             authn::JwtIssuerConfig::rss_access(
-                diport::KeyId::new("journey-login-key"),
+                authn::SigningKeyRing::single(diport::KeyId::new("journey-login-key"))
+                    .expect("non-empty signing key id"),
                 diport::SigningPurpose::new("journey-login-signing"),
                 "https://journey.local",
                 "rss-journey",

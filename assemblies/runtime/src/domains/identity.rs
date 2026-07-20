@@ -103,7 +103,8 @@ impl IdentityModuleInput {
             values.vault_allow_http,
         )?);
         let rss_access_issuer = authn::JwtIssuerConfig::rss_access(
-            diport::KeyId::new(values.access_token_key_id),
+            authn::SigningKeyRing::single(diport::KeyId::new(values.access_token_key_id))
+                .expect("non-empty signing key id"),
             diport::SigningPurpose::new("auth.rss-access"),
             values.access_token_issuer,
             values.access_token_audience,
@@ -405,7 +406,8 @@ pub(crate) mod tests {
         .expect("capture explicit invalid lifetime relation");
         let mapper = ServingConfigMapper::for_test(snapshot.view());
         let issuer = authn::JwtIssuerConfig::rss_access(
-            diport::KeyId::new("ttl-relation-test"),
+            authn::SigningKeyRing::single(diport::KeyId::new("ttl-relation-test"))
+                .expect("non-empty signing key id"),
             diport::SigningPurpose::new("auth.rss-access"),
             "https://issuer.test",
             "rss",

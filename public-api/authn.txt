@@ -97,6 +97,26 @@ impl core::marker::Unpin for authn::JwtIssueError
 impl core::marker::UnsafeUnpin for authn::JwtIssueError
 impl !core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssueError
 impl !core::panic::unwind_safe::UnwindSafe for authn::JwtIssueError
+#[non_exhaustive] pub enum authn::KeyRingError
+pub authn::KeyRingError::DuplicateKeyId
+pub authn::KeyRingError::EmptyKeyId
+pub authn::KeyRingError::InsufficientOverlap
+impl core::cmp::Eq for authn::KeyRingError
+impl core::cmp::PartialEq for authn::KeyRingError
+pub fn authn::KeyRingError::eq(&self, &authn::KeyRingError) -> bool
+impl core::error::Error for authn::KeyRingError
+impl core::fmt::Debug for authn::KeyRingError
+pub fn authn::KeyRingError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for authn::KeyRingError
+pub fn authn::KeyRingError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for authn::KeyRingError
+impl core::marker::Freeze for authn::KeyRingError
+impl core::marker::Send for authn::KeyRingError
+impl core::marker::Sync for authn::KeyRingError
+impl core::marker::Unpin for authn::KeyRingError
+impl core::marker::UnsafeUnpin for authn::KeyRingError
+impl core::panic::unwind_safe::RefUnwindSafe for authn::KeyRingError
+impl core::panic::unwind_safe::UnwindSafe for authn::KeyRingError
 #[non_exhaustive] pub enum authn::MtlsIdentityError
 pub authn::MtlsIdentityError::EmptyAllowSet
 pub authn::MtlsIdentityError::EmptyPath
@@ -159,6 +179,25 @@ impl core::marker::Unpin for authn::ProjectionMaintenanceGrantError
 impl core::marker::UnsafeUnpin for authn::ProjectionMaintenanceGrantError
 impl core::panic::unwind_safe::RefUnwindSafe for authn::ProjectionMaintenanceGrantError
 impl core::panic::unwind_safe::UnwindSafe for authn::ProjectionMaintenanceGrantError
+pub enum authn::RotationMode
+pub authn::RotationMode::Emergency
+pub authn::RotationMode::Planned
+impl core::clone::Clone for authn::RotationMode
+pub fn authn::RotationMode::clone(&self) -> authn::RotationMode
+impl core::cmp::Eq for authn::RotationMode
+impl core::cmp::PartialEq for authn::RotationMode
+pub fn authn::RotationMode::eq(&self, &authn::RotationMode) -> bool
+impl core::fmt::Debug for authn::RotationMode
+pub fn authn::RotationMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for authn::RotationMode
+impl core::marker::StructuralPartialEq for authn::RotationMode
+impl core::marker::Freeze for authn::RotationMode
+impl core::marker::Send for authn::RotationMode
+impl core::marker::Sync for authn::RotationMode
+impl core::marker::Unpin for authn::RotationMode
+impl core::marker::UnsafeUnpin for authn::RotationMode
+impl core::panic::unwind_safe::RefUnwindSafe for authn::RotationMode
+impl core::panic::unwind_safe::UnwindSafe for authn::RotationMode
 pub struct authn::AccessToken(_)
 impl authn::AccessToken
 pub fn authn::AccessToken::as_str(&self) -> &str
@@ -224,9 +263,9 @@ impl<P, S> !core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssuer<P, S>
 impl<P, S> !core::panic::unwind_safe::UnwindSafe for authn::JwtIssuer<P, S>
 pub struct authn::JwtIssuerConfig<P: diport::pdp::TokenProfileMarker>
 impl authn::JwtIssuerConfig<diport::pdp::RssAccessProfile>
-pub fn authn::JwtIssuerConfig<diport::pdp::RssAccessProfile>::rss_access(diport::signer::KeyId, diport::signer::SigningPurpose, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::time::Duration) -> Self
+pub fn authn::JwtIssuerConfig<diport::pdp::RssAccessProfile>::rss_access(authn::SigningKeyRing, diport::signer::SigningPurpose, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::time::Duration) -> Self
 impl authn::JwtIssuerConfig<diport::pdp::ServiceTokenProfile>
-pub fn authn::JwtIssuerConfig<diport::pdp::ServiceTokenProfile>::service_token(diport::signer::KeyId, diport::signer::SigningPurpose, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::time::Duration) -> Self
+pub fn authn::JwtIssuerConfig<diport::pdp::ServiceTokenProfile>::service_token(authn::SigningKeyRing, diport::signer::SigningPurpose, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::time::Duration) -> Self
 impl<P> core::marker::Freeze for authn::JwtIssuerConfig<P>
 impl<P> core::marker::Send for authn::JwtIssuerConfig<P>
 impl<P> core::marker::Sync for authn::JwtIssuerConfig<P>
@@ -404,6 +443,52 @@ impl core::marker::Unpin for authn::RefreshToken
 impl core::marker::UnsafeUnpin for authn::RefreshToken
 impl core::panic::unwind_safe::RefUnwindSafe for authn::RefreshToken
 impl core::panic::unwind_safe::UnwindSafe for authn::RefreshToken
+pub struct authn::RotationOverlapPolicy
+pub authn::RotationOverlapPolicy::clock_skew: core::time::Duration
+pub authn::RotationOverlapPolicy::jwks_propagation_slo: core::time::Duration
+pub authn::RotationOverlapPolicy::margin: core::time::Duration
+pub authn::RotationOverlapPolicy::max_access_ttl: core::time::Duration
+impl authn::RotationOverlapPolicy
+pub fn authn::RotationOverlapPolicy::min_overlap(&self) -> core::time::Duration
+pub fn authn::RotationOverlapPolicy::validate_overlap(&self, i64, i64, authn::RotationMode) -> core::result::Result<(), authn::KeyRingError>
+impl core::clone::Clone for authn::RotationOverlapPolicy
+pub fn authn::RotationOverlapPolicy::clone(&self) -> authn::RotationOverlapPolicy
+impl core::cmp::Eq for authn::RotationOverlapPolicy
+impl core::cmp::PartialEq for authn::RotationOverlapPolicy
+pub fn authn::RotationOverlapPolicy::eq(&self, &authn::RotationOverlapPolicy) -> bool
+impl core::fmt::Debug for authn::RotationOverlapPolicy
+pub fn authn::RotationOverlapPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for authn::RotationOverlapPolicy
+impl core::marker::StructuralPartialEq for authn::RotationOverlapPolicy
+impl core::marker::Freeze for authn::RotationOverlapPolicy
+impl core::marker::Send for authn::RotationOverlapPolicy
+impl core::marker::Sync for authn::RotationOverlapPolicy
+impl core::marker::Unpin for authn::RotationOverlapPolicy
+impl core::marker::UnsafeUnpin for authn::RotationOverlapPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for authn::RotationOverlapPolicy
+impl core::panic::unwind_safe::UnwindSafe for authn::RotationOverlapPolicy
+pub struct authn::SigningKeyRing
+impl authn::SigningKeyRing
+pub fn authn::SigningKeyRing::active(&self) -> &diport::signer::KeyId
+pub fn authn::SigningKeyRing::next(&self) -> core::option::Option<&diport::signer::KeyId>
+pub fn authn::SigningKeyRing::retiring(&self) -> &[(diport::signer::KeyId, i64)]
+pub fn authn::SigningKeyRing::single(diport::signer::KeyId) -> core::result::Result<Self, authn::KeyRingError>
+pub fn authn::SigningKeyRing::with_rotation(diport::signer::KeyId, core::option::Option<diport::signer::KeyId>, alloc::vec::Vec<(diport::signer::KeyId, i64)>) -> core::result::Result<Self, authn::KeyRingError>
+impl core::clone::Clone for authn::SigningKeyRing
+pub fn authn::SigningKeyRing::clone(&self) -> authn::SigningKeyRing
+impl core::cmp::Eq for authn::SigningKeyRing
+impl core::cmp::PartialEq for authn::SigningKeyRing
+pub fn authn::SigningKeyRing::eq(&self, &authn::SigningKeyRing) -> bool
+impl core::fmt::Debug for authn::SigningKeyRing
+pub fn authn::SigningKeyRing::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for authn::SigningKeyRing
+impl core::marker::Freeze for authn::SigningKeyRing
+impl core::marker::Send for authn::SigningKeyRing
+impl core::marker::Sync for authn::SigningKeyRing
+impl core::marker::Unpin for authn::SigningKeyRing
+impl core::marker::UnsafeUnpin for authn::SigningKeyRing
+impl core::panic::unwind_safe::RefUnwindSafe for authn::SigningKeyRing
+impl core::panic::unwind_safe::UnwindSafe for authn::SigningKeyRing
 pub struct authn::SpiffeId
 impl authn::SpiffeId
 pub fn authn::SpiffeId::as_str(&self) -> &str

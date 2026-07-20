@@ -10,7 +10,7 @@
 //! 路径隔离（防 alg-confusion，INVARIANT: OIDC-ALG-KEYPATH-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）：ES256 公钥集只服务 JWT 路径，HS256 密钥集
 //! 只服务 service-token 路径——[`crate::verify`] 按 scheme 选 key 集 + 校 token alg 匹配。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,6 +61,9 @@ pub enum ConfigError {
     /// Every static key requires a non-empty exact key id.
     #[error("oidc key id must not be empty")]
     EmptyKid,
+    /// Retirement schedule entries must use unique key ids.
+    #[error("oidc retirement schedule key ids must be unique")]
+    DuplicateKid,
     /// leeway 超过上限（> 300s）。极大 leeway 近似关闭 exp/nbf 时间校验，安全边界前移 fail-fast 拒。
     #[error("oidc leeway exceeds maximum (300s)")]
     LeewayTooLarge,
@@ -138,6 +141,11 @@ impl KeySet {
     /// 两集是否都空（builder fail-fast / JWKS 刷新「绝不 swap 空集」guard 用）。
     pub(crate) fn is_empty(&self) -> bool {
         self.es256.is_empty() && self.hs256.is_empty()
+    }
+
+    /// Exact-kid presence in the current snapshot (ES256 or HS256).
+    pub(crate) fn has_kid(&self, kid: &str) -> bool {
+        self.es256.iter().any(|e| e.kid == kid) || self.hs256.iter().any(|e| e.kid == kid)
     }
 
     /// Canonical key-material fingerprints for access-profile isolation.
@@ -285,6 +293,45 @@ impl ServiceTokenKeySourceBuilder {
     }
 }
 
+/// Immutable kid → verify-until (unix seconds) map for signing-key retirement.
+///
+/// Keys past their deadline (`now_unix > verify_until`) are rejected at verify time even if still
+/// present in the JWKS/static snapshot. Deadline instant itself remains verifiable.
+#[derive(Clone, Debug, Default)]
+pub struct RetirementSchedule {
+    deadlines: HashMap<String, i64>,
+}
+
+impl RetirementSchedule {
+    /// Build from `(kid, verify_until)` entries. Empty / whitespace-only kid is rejected.
+    /// Duplicate kids fail fast (same uniqueness rule as the signing key ring).
+    pub fn from_entries(
+        entries: impl IntoIterator<Item = (String, i64)>,
+    ) -> Result<Self, ConfigError> {
+        let mut deadlines = HashMap::new();
+        for (kid, verify_until) in entries {
+            if kid.trim().is_empty() {
+                return Err(ConfigError::EmptyKid);
+            }
+            if deadlines.insert(kid, verify_until).is_some() {
+                return Err(ConfigError::DuplicateKid);
+            }
+        }
+        Ok(Self { deadlines })
+    }
+
+    /// Configured verify-until deadline for `kid`, if any.
+    pub fn verify_until_for(&self, kid: &str) -> Option<i64> {
+        self.deadlines.get(kid).copied()
+    }
+
+    /// `true` when `kid` has a deadline and `now_unix` is strictly after it.
+    pub fn is_retired(&self, kid: &str, now_unix: i64) -> bool {
+        self.verify_until_for(kid)
+            .is_some_and(|verify_until| now_unix > verify_until)
+    }
+}
+
 struct VerifierCore {
     issuer: String,
     audience: String,
@@ -295,6 +342,8 @@ struct VerifierCore {
     kind_allowlist: HashSet<String>,
     leeway_secs: u64,
     keys: KeySource,
+    /// Optional retirement deadlines; `None` = no deadline filtering (legacy behavior).
+    retirement_schedule: Option<RetirementSchedule>,
     service_token_replay: ServiceTokenReplayProtection,
 }
 
@@ -335,6 +384,9 @@ impl<P: TokenProfileMarker> VerifierConfig<P> {
     pub(crate) fn keys(&self) -> &KeySource {
         &self.core.keys
     }
+    pub(crate) fn retirement_schedule(&self) -> Option<&RetirementSchedule> {
+        self.core.retirement_schedule.as_ref()
+    }
     pub(crate) fn service_token_replay_store(
         &self,
     ) -> Option<(&diport::DynServiceTokenReplayStore<'static>, Duration)> {
@@ -356,6 +408,7 @@ pub struct VerifierConfigBuilder<P: TokenProfileMarker> {
     kind_allowlist: HashSet<String>,
     leeway_secs: u64,
     keys: Option<KeySource>,
+    retirement_schedule: Option<RetirementSchedule>,
     service_token_replay_store:
         Option<(Arc<diport::DynServiceTokenReplayStore<'static>>, Duration)>,
     /// 是否重复设置 key 源（`keys`/`keys_jwks` 二次调用即 true）→ `build` fail-fast 拒（互斥不静默覆盖，#254 F3）。
@@ -373,10 +426,18 @@ impl<P: TokenProfileMarker> VerifierConfigBuilder<P> {
             kind_allowlist: HashSet::new(),
             leeway_secs: DEFAULT_LEEWAY_SECS,
             keys: None,
+            retirement_schedule: None,
             service_token_replay_store: None,
             key_source_conflict: false,
             profile: PhantomData,
         }
+    }
+
+    /// Attach an optional retirement schedule. Absent schedule preserves legacy verify behavior.
+    #[must_use]
+    pub fn retirement_schedule(mut self, schedule: RetirementSchedule) -> Self {
+        self.retirement_schedule = Some(schedule);
+        self
     }
 
     fn set_key_source(&mut self, source: KeySource) {
@@ -458,6 +519,7 @@ impl<P: TokenProfileMarker> VerifierConfigBuilder<P> {
                 kind_allowlist: self.kind_allowlist,
                 leeway_secs: self.leeway_secs,
                 keys,
+                retirement_schedule: self.retirement_schedule,
                 service_token_replay,
             },
             profile: PhantomData,
@@ -801,5 +863,55 @@ mod tests {
             .tenant_claim("   ")
             .build();
         assert!(matches!(result, Err(ConfigError::EmptyClaimName)));
+    }
+
+    #[test]
+    fn retirement_schedule_rejects_empty_kid() {
+        let result = RetirementSchedule::from_entries([("".into(), 1_700_000_000)]);
+        assert!(matches!(result, Err(ConfigError::EmptyKid)));
+        let whitespace = RetirementSchedule::from_entries([("  \t".into(), 1)]);
+        assert!(matches!(whitespace, Err(ConfigError::EmptyKid)));
+    }
+
+    #[test]
+    fn retirement_schedule_rejects_duplicate_kid() {
+        let result = RetirementSchedule::from_entries([("k1".into(), 100), ("k1".into(), 200)]);
+        assert!(matches!(result, Err(ConfigError::DuplicateKid)));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn retirement_schedule_deadline_window_and_lookup() {
+        let schedule = RetirementSchedule::from_entries([("k1".into(), 100), ("k2".into(), 200)])
+            .expect("valid schedule");
+        assert_eq!(schedule.verify_until_for("k1"), Some(100));
+        assert_eq!(schedule.verify_until_for("missing"), None);
+        // Deadline instant itself is still verifiable (`now > until` is false at equality).
+        assert!(!schedule.is_retired("k1", 100));
+        assert!(schedule.is_retired("k1", 101));
+        assert!(!schedule.is_retired("missing", 10_000));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn retirement_schedule_optional_on_builder() {
+        let schedule =
+            RetirementSchedule::from_entries([("test-es256".into(), 1_700_000_000)]).expect("ok");
+        let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new("https://iss", "aud")
+            .keys_static(es256_key_source())
+            .retirement_schedule(schedule)
+            .build()
+            .expect("valid config");
+        assert_eq!(
+            config
+                .retirement_schedule()
+                .and_then(|s| s.verify_until_for("test-es256")),
+            Some(1_700_000_000)
+        );
+        let without = VerifierConfigBuilder::<diport::RssAccessProfile>::new("https://iss", "aud")
+            .keys_static(es256_key_source())
+            .build()
+            .expect("valid config");
+        assert!(without.retirement_schedule().is_none());
     }
 }

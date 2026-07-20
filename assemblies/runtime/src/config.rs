@@ -24,6 +24,21 @@ const DOMAIN_TRANSPORT_URL_ENV_SUFFIX: &str = "DOMAIN_TRANSPORT_URL";
 const DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET_ENV_SUFFIX: &str =
     "DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET";
 
+/// RSS access-token signing / rotation env keys (single source for parse + error copy).
+pub(crate) const RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV: &str =
+    "RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID";
+pub(crate) const RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID_ENV: &str =
+    "RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID";
+pub(crate) const RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV: &str = "RSS_ACCESS_TOKEN_SIGNING_RETIRING";
+pub(crate) const RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT_ENV: &str =
+    "RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT";
+pub(crate) const RSS_ACCESS_TOKEN_ROTATION_MODE_ENV: &str = "RSS_ACCESS_TOKEN_ROTATION_MODE";
+const RSS_ACCESS_TOKEN_ROTATION_CLOCK_SKEW_SECS_ENV: &str =
+    "RSS_ACCESS_TOKEN_ROTATION_CLOCK_SKEW_SECS";
+const RSS_ACCESS_TOKEN_ROTATION_JWKS_PROPAGATION_SLO_SECS_ENV: &str =
+    "RSS_ACCESS_TOKEN_ROTATION_JWKS_PROPAGATION_SLO_SECS";
+const RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS_ENV: &str = "RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS";
+
 /// Closed set of non-domain-specific process keys used by the serving runtime.
 ///
 /// Maintenance grants, CI/Forge credentials, AWS dynamic credentials, and SPIFFE rotation
@@ -50,10 +65,17 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_IDENTITY_AUTH_GRANT_TTL_SECS",
     "RSS_ADMIN_TOKEN_PROFILE",
     "RSS_ACCESS_TOKEN_AUDIENCE",
-    "RSS_ACCESS_TOKEN_ES256_KEY_ID",
     "RSS_ACCESS_TOKEN_ISSUER",
     "RSS_ACCESS_TOKEN_JWKS_PATH",
     "RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+    RSS_ACCESS_TOKEN_ROTATION_CLOCK_SKEW_SECS_ENV,
+    RSS_ACCESS_TOKEN_ROTATION_JWKS_PROPAGATION_SLO_SECS_ENV,
+    RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS_ENV,
+    RSS_ACCESS_TOKEN_ROTATION_MODE_ENV,
+    RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV,
+    RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID_ENV,
+    RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV,
+    RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT_ENV,
     "RSS_ACCESS_TOKEN_TRUSTED_KINDS",
     "RSS_ACCESS_TOKEN_TTL_SECS",
     "RSS_FEDERATED_ACCESS_TOKEN_AUDIENCE",
@@ -261,15 +283,27 @@ const PRIMARY_TOKEN_PROFILE_ENV: &str = "RSS_PRIMARY_TOKEN_PROFILE";
 const ADMIN_TOKEN_PROFILE_ENV: &str = "RSS_ADMIN_TOKEN_PROFILE";
 const INTERNAL_AUTH_SCHEME_ENV: &str = "RSS_INTERNAL_AUTH_SCHEME";
 
-const RSS_ACCESS_TOKEN_ENV: [&str; 7] = [
+const RSS_ACCESS_TOKEN_ENV: [&str; 14] = [
     "RSS_ACCESS_TOKEN_ISSUER",
     "RSS_ACCESS_TOKEN_AUDIENCE",
-    "RSS_ACCESS_TOKEN_ES256_KEY_ID",
+    RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV,
+    RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID_ENV,
+    RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV,
+    RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT_ENV,
     "RSS_ACCESS_TOKEN_TTL_SECS",
     "RSS_ACCESS_TOKEN_TRUSTED_KINDS",
     "RSS_ACCESS_TOKEN_JWKS_PATH",
     "RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+    RSS_ACCESS_TOKEN_ROTATION_CLOCK_SKEW_SECS_ENV,
+    RSS_ACCESS_TOKEN_ROTATION_JWKS_PROPAGATION_SLO_SECS_ENV,
+    RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS_ENV,
+    RSS_ACCESS_TOKEN_ROTATION_MODE_ENV,
 ];
+
+const DEFAULT_ROTATION_CLOCK_SKEW_SECS: u64 = 60;
+const DEFAULT_ROTATION_JWKS_PROPAGATION_SLO_SECS: u64 = 300;
+const DEFAULT_ROTATION_MARGIN_SECS: u64 = 60;
+const MAX_ROTATION_POLICY_SECS: u64 = 86_400;
 const FEDERATED_ACCESS_TOKEN_ENV: [&str; 5] = [
     "RSS_FEDERATED_ACCESS_TOKEN_ISSUER",
     "RSS_FEDERATED_ACCESS_TOKEN_AUDIENCE",
@@ -419,7 +453,8 @@ impl AccessVerifierConfigCore {
 /// Closed RSS access-token configuration.
 pub(crate) struct RssAccessTokenConfig {
     verifier: AccessVerifierConfigCore,
-    es256_key_id: String,
+    signing_key_ring: authn::SigningKeyRing,
+    rotation_mode: authn::RotationMode,
     ttl: Duration,
 }
 
@@ -433,7 +468,6 @@ impl RssAccessTokenConfig {
             "RSS_ACCESS_TOKEN_JWKS_PATH",
             "RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
         )?;
-        let es256_key_id = required_scalar(config, "RSS_ACCESS_TOKEN_ES256_KEY_ID")?.to_owned();
         let ttl = required_duration_secs(
             config,
             "RSS_ACCESS_TOKEN_TTL_SECS",
@@ -443,9 +477,11 @@ impl RssAccessTokenConfig {
                 .maximum_lifetime()
                 .as_secs(),
         )?;
+        let (signing_key_ring, rotation_mode) = parse_rss_signing_rotation(config, ttl)?;
         Ok(Self {
             verifier,
-            es256_key_id,
+            signing_key_ring,
+            rotation_mode,
             ttl,
         })
     }
@@ -470,9 +506,26 @@ impl RssAccessTokenConfig {
         self.verifier.jwks_refresh_interval
     }
 
-    #[cfg(test)]
-    pub(crate) fn es256_key_id(&self) -> &str {
-        &self.es256_key_id
+    /// Signing key ring for mint / rotation probe wiring.
+    pub(crate) fn signing_key_ring(&self) -> &authn::SigningKeyRing {
+        &self.signing_key_ring
+    }
+
+    /// Retirement deadlines derived from the signing key ring (single source).
+    #[allow(clippy::expect_used)]
+    pub(crate) fn retirement_schedule(&self) -> oidc::RetirementSchedule {
+        oidc::RetirementSchedule::from_entries(
+            self.signing_key_ring
+                .retiring()
+                .iter()
+                .map(|(kid, until)| (kid.as_str().to_owned(), *until)),
+        )
+        .expect("SigningKeyRing retiring entries are already validated")
+    }
+
+    /// Planned vs emergency rotation mode.
+    pub(crate) const fn rotation_mode(&self) -> authn::RotationMode {
+        self.rotation_mode
     }
 
     #[cfg(test)]
@@ -482,12 +535,155 @@ impl RssAccessTokenConfig {
 
     fn issuer_config(&self) -> authn::JwtIssuerConfig<diport::RssAccessProfile> {
         authn::JwtIssuerConfig::rss_access(
-            diport::KeyId::new(self.es256_key_id.clone()),
+            self.signing_key_ring.clone(),
             diport::SigningPurpose::new("auth.rss-access"),
             self.issuer(),
             self.audience(),
             self.ttl,
         )
+    }
+}
+
+fn parse_rss_signing_rotation(
+    config: SnapshotConfig<'_>,
+    max_access_ttl: Duration,
+) -> anyhow::Result<(authn::SigningKeyRing, authn::RotationMode)> {
+    let active = required_scalar(config, RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV)?;
+    let next = optional_scalar(config, RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID_ENV)?;
+    let retiring = parse_signing_retiring(config)?;
+    let rotated_at = optional_i64(config, RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT_ENV)?;
+    let rotation_mode = parse_rotation_mode(config)?;
+    let policy = authn::RotationOverlapPolicy {
+        max_access_ttl,
+        clock_skew: optional_duration_secs_with_default(
+            config,
+            RSS_ACCESS_TOKEN_ROTATION_CLOCK_SKEW_SECS_ENV,
+            DEFAULT_ROTATION_CLOCK_SKEW_SECS,
+            0,
+            MAX_ROTATION_POLICY_SECS,
+        )?,
+        jwks_propagation_slo: optional_duration_secs_with_default(
+            config,
+            RSS_ACCESS_TOKEN_ROTATION_JWKS_PROPAGATION_SLO_SECS_ENV,
+            DEFAULT_ROTATION_JWKS_PROPAGATION_SLO_SECS,
+            0,
+            MAX_ROTATION_POLICY_SECS,
+        )?,
+        margin: optional_duration_secs_with_default(
+            config,
+            RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS_ENV,
+            DEFAULT_ROTATION_MARGIN_SECS,
+            0,
+            MAX_ROTATION_POLICY_SECS,
+        )?,
+    };
+
+    if !retiring.is_empty() {
+        let rotated_at = rotated_at.ok_or_else(|| {
+            anyhow::anyhow!(
+                "{RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT_ENV} is required when {RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV} is set"
+            )
+        })?;
+        for (_, verify_until) in &retiring {
+            policy
+                .validate_overlap(rotated_at, *verify_until, rotation_mode)
+                .map_err(|error| {
+                    map_rotation_overlap_error(error, &policy, rotated_at, *verify_until)
+                })?;
+        }
+    }
+
+    let ring = authn::SigningKeyRing::with_rotation(
+        diport::KeyId::new(active.to_owned()),
+        next.map(|kid| diport::KeyId::new(kid.to_owned())),
+        retiring
+            .into_iter()
+            .map(|(kid, until)| (diport::KeyId::new(kid), until))
+            .collect(),
+    )
+    .map_err(signing_key_ring_error)?;
+
+    Ok((ring, rotation_mode))
+}
+
+fn parse_signing_retiring(config: SnapshotConfig<'_>) -> anyhow::Result<Vec<(String, i64)>> {
+    let Some(raw) = optional_scalar(config, RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV)? else {
+        return Ok(Vec::new());
+    };
+    parse_signing_retiring_raw(raw)
+}
+
+/// Parse `kid=unixSeconds` comma-separated retiring entries (shared with JWKS export).
+pub(crate) fn parse_signing_retiring_raw(raw: &str) -> anyhow::Result<Vec<(String, i64)>> {
+    let mut entries = Vec::new();
+    for part in raw.split(',') {
+        anyhow::ensure!(
+            !part.is_empty(),
+            "{RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV} must not contain empty entries"
+        );
+        let (kid, until_raw) = part.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!(
+                "{RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV} entries must be kid=unixSeconds"
+            )
+        })?;
+        anyhow::ensure!(
+            !kid.is_empty(),
+            "{RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV} key id must not be empty"
+        );
+        let verify_until = until_raw.parse::<i64>().map_err(|_| {
+            anyhow::anyhow!(
+                "{RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV} verify-until must be unix seconds"
+            )
+        })?;
+        entries.push((kid.to_owned(), verify_until));
+    }
+    anyhow::ensure!(
+        !entries.is_empty(),
+        "{RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV} must list at least one entry when set"
+    );
+    Ok(entries)
+}
+
+fn parse_rotation_mode(config: SnapshotConfig<'_>) -> anyhow::Result<authn::RotationMode> {
+    match optional_scalar(config, RSS_ACCESS_TOKEN_ROTATION_MODE_ENV)? {
+        None | Some("planned") => Ok(authn::RotationMode::Planned),
+        Some("emergency") => {
+            tracing::warn!(
+                reason = "RSS_ACCESS_TOKEN_ROTATION_MODE=emergency",
+                "signing-key rotation running in emergency mode; planned overlap checks are skipped"
+            );
+            Ok(authn::RotationMode::Emergency)
+        }
+        Some(_) => {
+            anyhow::bail!(
+                "{RSS_ACCESS_TOKEN_ROTATION_MODE_ENV} must be exactly planned or emergency"
+            )
+        }
+    }
+}
+
+fn signing_key_ring_error(error: authn::KeyRingError) -> anyhow::Error {
+    anyhow::anyhow!("{error}")
+}
+
+fn map_rotation_overlap_error(
+    error: authn::KeyRingError,
+    policy: &authn::RotationOverlapPolicy,
+    rotated_at: i64,
+    verify_until: i64,
+) -> anyhow::Error {
+    match error {
+        authn::KeyRingError::InsufficientOverlap => {
+            let need = policy.min_overlap().as_secs();
+            let have = verify_until.saturating_sub(rotated_at);
+            anyhow::anyhow!(
+                "rotation verify overlap is insufficient: need {need}s have {have}s \
+                 (knobs: RSS_ACCESS_TOKEN_TTL_SECS, RSS_ACCESS_TOKEN_ROTATION_CLOCK_SKEW_SECS, \
+                 RSS_ACCESS_TOKEN_ROTATION_JWKS_PROPAGATION_SLO_SECS, \
+                 RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS)"
+            )
+        }
+        other => signing_key_ring_error(other),
     }
 }
 
@@ -719,6 +915,39 @@ fn required_scalar<'a>(config: SnapshotConfig<'a>, name: &'static str) -> anyhow
         "{name} must not contain leading, trailing, whitespace, or control characters"
     );
     Ok(value)
+}
+
+fn optional_scalar<'a>(
+    config: SnapshotConfig<'a>,
+    name: &'static str,
+) -> anyhow::Result<Option<&'a str>> {
+    match config.value(name) {
+        None => Ok(None),
+        Some(_) => required_scalar(config, name).map(Some),
+    }
+}
+
+fn optional_i64(config: SnapshotConfig<'_>, name: &'static str) -> anyhow::Result<Option<i64>> {
+    match optional_scalar(config, name)? {
+        None => Ok(None),
+        Some(raw) => raw
+            .parse::<i64>()
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("{name} must be unix seconds")),
+    }
+}
+
+fn optional_duration_secs_with_default(
+    config: SnapshotConfig<'_>,
+    name: &'static str,
+    default: u64,
+    min: u64,
+    max: u64,
+) -> anyhow::Result<Duration> {
+    match optional_scalar(config, name)? {
+        None => Ok(Duration::from_secs(default)),
+        Some(_) => required_duration_secs(config, name, min, max),
+    }
 }
 
 fn required_duration_secs(

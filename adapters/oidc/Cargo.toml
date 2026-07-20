@@ -44,10 +44,13 @@ thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["time", "sync"] }
 # JWKS 刷新任务取消信号 + ManagedResource 关闭编排（CancellationToken；对齐 bootstrap ShutdownStack / grpc 范式）。
 tokio-util = { workspace = true, optional = true }
+# kid 拒绝 / retiring 窗口验签计数（仅 backend）：经 metrics facade 发射；无 recorder 时 no-op。
+# label 闭值（reason=unknown|retired），**绝不**把 kid 放进 label（沿用 HS_KID 排除先例）。
+metrics = { workspace = true, optional = true }
 
 [features]
 default = []
-backend = ["dep:p256", "dep:hmac", "dep:sha2", "dep:primitives", "dep:vocab", "dep:base64", "dep:serde", "dep:serde_json", "dep:tracing", "dep:thiserror", "dep:tokio", "dep:tokio-util"]
+backend = ["dep:p256", "dep:hmac", "dep:sha2", "dep:primitives", "dep:vocab", "dep:base64", "dep:serde", "dep:serde_json", "dep:tracing", "dep:thiserror", "dep:tokio", "dep:tokio-util", "dep:metrics"]
 
 [dev-dependencies]
 # 验签器 async path + dyn 注入冒烟（multi_thread 真验 Send future 可跨 worker 调度）；
@@ -57,3 +60,5 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"
 rstest = { workspace = true }
 # 脱敏回归：捕获 tracing 输出，断言原始 token 不入日志（DIPORT-ERR 同源 PII 边界）。
 tracing-subscriber = { workspace = true }
+# Local recorder assertions for kid-rejection / retiring-key metrics (with_local_recorder + render).
+metrics-exporter-prometheus = { workspace = true }

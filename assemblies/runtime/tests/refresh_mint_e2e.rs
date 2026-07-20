@@ -140,7 +140,8 @@ fn vault_jwt_issuer(vault_uri: &str) -> authn::JwtIssuer<diport::RssAccessProfil
         Arc::new(signer),
         Box::new(FixedClock(NOW)),
         authn::JwtIssuerConfig::rss_access(
-            diport::KeyId::new(KEY_ID),
+            authn::SigningKeyRing::single(diport::KeyId::new(KEY_ID))
+                .expect("non-empty signing key id"),
             diport::SigningPurpose::new("auth.rss-access"),
             ISS,
             AUD,

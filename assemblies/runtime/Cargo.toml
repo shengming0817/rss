@@ -124,6 +124,7 @@ integration = [
 [dev-dependencies]
 aws-smithy-http-client = { workspace = true, features = ["test-util"] }
 http = "1"
+metrics-exporter-prometheus = { workspace = true }
 settings-composition = { path = "../../composition/settings", features = ["test-support"] }
 # Direct service tests bypass the HTTP router only through the explicitly test-gated receipt mint.
 settings = { path = "../../crates/settings", features = ["test-support"] }

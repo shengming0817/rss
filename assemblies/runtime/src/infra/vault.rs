@@ -257,7 +257,7 @@ pub(crate) const VAULT_TRANSIT_MOUNT_ENV: &str = "RSS_VAULT_TRANSIT_MOUNT";
 pub(crate) const SETTINGS_CONFIG_VALUE_KEY_NAME_ENV: &str = "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME";
 /// Optional PEM CA cert path for private/dev Vault HTTPS endpoints.
 pub(crate) const VAULT_CA_CERT_PEM_PATH_ENV: &str = "RSS_VAULT_CA_CERT_PEM_PATH";
-const RSS_ACCESS_TOKEN_KEY_ID_ENV: &str = "RSS_ACCESS_TOKEN_ES256_KEY_ID";
+const RSS_ACCESS_TOKEN_KEY_ID_ENV: &str = crate::config::RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV;
 
 /// 从注入的配置读取器构造 vault `VaultSigner`（Transit ES256 签 access JWT）。
 ///
@@ -340,30 +340,80 @@ async fn run_rss_access_jwks_export_command_from(
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TOKEN_ENV}"))?;
     let mount = get(VAULT_TRANSIT_MOUNT_ENV)
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TRANSIT_MOUNT_ENV}"))?;
-    let key_id = get(RSS_ACCESS_TOKEN_KEY_ID_ENV).ok_or_else(|| {
-        anyhow::anyhow!("missing required env var: {RSS_ACCESS_TOKEN_KEY_ID_ENV}")
-    })?;
+    let export_kids = rss_access_jwks_export_kids(&get)?;
     let client = build_vault_tls_client_from(&get)?;
-    let url = vault_transit_key_metadata_url(&addr, &mount, &key_id, allow_http)?;
-    let response = client
-        .get(url)
-        .header("X-Vault-Token", token.trim())
-        .timeout(DEFAULT_VAULT_TIMEOUT)
-        .send()
-        .await
-        .context("read Vault Transit key metadata")?;
-    let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .context("read Vault Transit key metadata response")?;
-    anyhow::ensure!(
-        status.is_success(),
-        "Vault Transit key metadata request returned non-success status"
-    );
-    let jwks = vault_transit_key_response_to_rss_access_jwks(key_id.trim(), &body)?;
+    let mut keys = Vec::with_capacity(export_kids.len());
+    for kid in &export_kids {
+        let url = vault_transit_key_metadata_url(&addr, &mount, kid, allow_http)?;
+        let response = client
+            .get(url)
+            .header("X-Vault-Token", token.trim())
+            .timeout(DEFAULT_VAULT_TIMEOUT)
+            .send()
+            .await
+            .with_context(|| "read Vault Transit key metadata for a configured signing kid")?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .context("read Vault Transit key metadata response")?;
+        anyhow::ensure!(
+            status.is_success(),
+            "Vault Transit key metadata request returned non-success status for a configured signing kid"
+        );
+        keys.push(vault_transit_key_response_to_rss_access_jwk(kid, &body)?);
+    }
+    let jwks = serialize_rss_access_jwks(&keys)?;
     write_jwks_atomic(&out, &jwks)
         .with_context(|| format!("write RSS access-token JWKS to {}", out.display()))
+}
+
+/// Kids that must appear in the exported JWKS: active + optional next + all retiring.
+fn rss_access_jwks_export_kids(
+    get: &impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Vec<String>> {
+    use crate::config::{
+        RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV, RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID_ENV,
+        RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV, parse_signing_retiring_raw,
+    };
+
+    let active = get(RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "missing required env var: {RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV}"
+            )
+        })?;
+    let active = active.trim().to_owned();
+
+    let mut kids = vec![active];
+    let mut seen = std::collections::BTreeSet::from([kids[0].clone()]);
+
+    if let Some(next) = get(RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID_ENV)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        anyhow::ensure!(
+            seen.insert(next.clone()),
+            "{RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID_ENV} must not duplicate active or retiring kids"
+        );
+        kids.push(next);
+    }
+
+    if let Some(raw) = get(RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        for (kid, _) in parse_signing_retiring_raw(&raw)? {
+            anyhow::ensure!(
+                seen.insert(kid.clone()),
+                "{RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV} kids must be unique across active/next/retiring"
+            );
+            kids.push(kid);
+        }
+    }
+
+    Ok(kids)
 }
 
 fn rss_access_jwks_export_output_path(
@@ -462,10 +512,18 @@ fn vault_transit_key_response_to_rss_access_jwks(
     kid: &str,
     body: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
+    let jwk = vault_transit_key_response_to_rss_access_jwk(kid, body)?;
+    serialize_rss_access_jwks(&[jwk])
+}
+
+fn vault_transit_key_response_to_rss_access_jwk(
+    kid: &str,
+    body: &[u8],
+) -> anyhow::Result<serde_json::Value> {
     let response: VaultTransitKeyResponse =
         serde_json::from_slice(body).context("parse Vault Transit key metadata response")?;
     let public_key_pem = current_vault_public_key(&response.data)?;
-    es256_public_key_pem_to_rss_access_jwks(kid, public_key_pem)
+    es256_public_key_pem_to_rss_access_jwk(kid, public_key_pem)
 }
 
 fn current_vault_public_key(data: &VaultTransitKeyData) -> anyhow::Result<&str> {
@@ -486,10 +544,10 @@ fn current_vault_public_key(data: &VaultTransitKeyData) -> anyhow::Result<&str> 
         .ok_or_else(|| anyhow::anyhow!("Vault Transit current key version is missing public_key"))
 }
 
-fn es256_public_key_pem_to_rss_access_jwks(
+fn es256_public_key_pem_to_rss_access_jwk(
     kid: &str,
     public_key_pem: &str,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<serde_json::Value> {
     use p256::elliptic_curve::sec1::ToEncodedPoint as _;
     use p256::pkcs8::DecodePublicKey as _;
 
@@ -503,17 +561,19 @@ fn es256_public_key_pem_to_rss_access_jwks(
         .y()
         .ok_or_else(|| anyhow::anyhow!("P-256 public key missing y coordinate"))?;
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let jwks = serde_json::json!({
-        "keys": [{
-            "kty": "EC",
-            "crv": "P-256",
-            "kid": kid,
-            "alg": "ES256",
-            "use": "sig",
-            "x": b64.encode(x),
-            "y": b64.encode(y)
-        }]
-    });
+    Ok(serde_json::json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "kid": kid,
+        "alg": "ES256",
+        "use": "sig",
+        "x": b64.encode(x),
+        "y": b64.encode(y)
+    }))
+}
+
+fn serialize_rss_access_jwks(keys: &[serde_json::Value]) -> anyhow::Result<Vec<u8>> {
+    let jwks = serde_json::json!({ "keys": keys });
     serde_json::to_vec_pretty(&jwks).context("serialize RSS access-token JWKS")
 }
 
@@ -935,6 +995,47 @@ mod tests {
             key.get("k").is_none(),
             "access JWT verifier JWKS must not fall back to HS256 oct key"
         );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn rss_access_jwks_export_kids_merges_active_next_and_retiring() {
+        let get = |name: &str| match name {
+            crate::config::RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV => Some("active".to_owned()),
+            crate::config::RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID_ENV => Some("next".to_owned()),
+            crate::config::RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV => {
+                Some("old=1800000000,older=1900000000".to_owned())
+            }
+            _ => None,
+        };
+        let kids = rss_access_jwks_export_kids(&get).expect("kids");
+        assert_eq!(kids, vec!["active", "next", "old", "older"]);
+    }
+
+    #[test]
+    fn rss_access_jwks_export_kids_rejects_overlapping_roles() {
+        let get = |name: &str| match name {
+            crate::config::RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV => Some("active".to_owned()),
+            crate::config::RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV => {
+                Some("active=1800000000".to_owned())
+            }
+            _ => None,
+        };
+        assert!(rss_access_jwks_export_kids(&get).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn serialize_rss_access_jwks_keeps_all_kids() {
+        let keys = vec![
+            serde_json::json!({"kid":"a","kty":"EC"}),
+            serde_json::json!({"kid":"b","kty":"EC"}),
+        ];
+        let bytes = serialize_rss_access_jwks(&keys).expect("serialize");
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(doc["keys"].as_array().expect("keys").len(), 2);
+        assert_eq!(doc["keys"][0]["kid"], "a");
+        assert_eq!(doc["keys"][1]["kid"], "b");
     }
 
     #[test]

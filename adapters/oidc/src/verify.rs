@@ -17,13 +17,23 @@ use hmac::{Hmac, Mac};
 use p256::ecdsa::Signature;
 use p256::ecdsa::signature::Verifier;
 use sha2::Sha256;
+use std::time::UNIX_EPOCH;
 
 use crate::claims;
-use crate::config::{KeySet, VerifierConfig};
+use crate::config::{KeySet, RetirementSchedule, VerifierConfig};
 use crate::jws::{self, Jws, JwsError, SupportedAlg};
 
 /// tracing `target:` / `resource =` 固定标签（同义串 ≥3 次抽 const，rust-standards §护栏）。
 pub(crate) const LOG_TARGET: &str = "oidc";
+
+/// Closed-reason metric label: kid absent from the trusted snapshot.
+const KID_REJECT_UNKNOWN: &str = "unknown";
+/// Closed-reason metric label: kid past its configured verify-until deadline.
+const KID_REJECT_RETIRED: &str = "retired";
+
+const METRIC_OIDC_VERIFY_KID_REJECTED_TOTAL: &str = "oidc_verify_kid_rejected_total";
+const METRIC_OIDC_VERIFY_RETIRING_KEY_VERIFIED_TOTAL: &str =
+    "oidc_verify_retiring_key_verified_total";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -35,6 +45,7 @@ pub(crate) enum TelemetryReason {
     TypProfileMismatch,
     AlgProfileMismatch,
     KidNoCandidate,
+    KidRetired,
     BadSignature,
     ReplayScopeInvalid,
     MissingReplayStore,
@@ -74,6 +85,7 @@ impl TelemetryReason {
             Self::TypProfileMismatch => "typ_profile_mismatch",
             Self::AlgProfileMismatch => "alg_profile_mismatch",
             Self::KidNoCandidate => "kid_no_candidate",
+            Self::KidRetired => "kid_retired",
             Self::BadSignature => "bad_signature",
             Self::ReplayScopeInvalid => "replay_scope_invalid",
             Self::MissingReplayStore => "missing_replay_store",
@@ -164,6 +176,11 @@ async fn verify_path<P: TokenProfileMarker>(
     }
     // kid 缩小候选集（JWKS 轮转按 id 选 key；无 kid → untagged 盲扫）。kid 是 hint、非信任根——下方仍须签名校验。
     let kid = jws.kid.as_str();
+    let now = now_unix_secs(clock).ok_or_else(|| {
+        log_fail_without_keys(TelemetryReason::ClockBeforeEpoch);
+        PdpError::InvalidSignature
+    })?;
+    reject_if_kid_retired(config.retirement_schedule(), kid, now, &snapshot)?;
     match match expected {
         SupportedAlg::Es256 => verify_es256(&snapshot, kid, &jws),
         SupportedAlg::Hs256 => match service_token_binding {
@@ -171,10 +188,17 @@ async fn verify_path<P: TokenProfileMarker>(
             None => VerifyOutcome::BadSignature,
         },
     } {
-        VerifyOutcome::Verified => {}
+        VerifyOutcome::Verified => {
+            record_retiring_key_verified(config.retirement_schedule(), kid, now);
+        }
         VerifyOutcome::NoCandidate => {
             // kid 不在当前快照（未知 / JWKS 轮转出）→ 签名 key 不在受信集 → `Untrusted`（区别于签名结构坏的
             // `InvalidSignature`；同 iss/aud 不受信，spec R2 / SC-005：kid 无匹配 → Untrusted）。
+            metrics::counter!(
+                METRIC_OIDC_VERIFY_KID_REJECTED_TOTAL,
+                "reason" => KID_REJECT_UNKNOWN
+            )
+            .increment(1);
             log_fail(TelemetryReason::KidNoCandidate, &snapshot);
             return Err(PdpError::Untrusted);
         }
@@ -229,6 +253,47 @@ async fn verify_path<P: TokenProfileMarker>(
 
 fn raw_profile_for_config<P: TokenProfileMarker>(_config: &VerifierConfig<P>) -> TokenProfile {
     P::PROFILE
+}
+
+/// Injected clock → UNIX seconds. Before epoch / overflow → `None` (fail-closed).
+fn now_unix_secs(clock: &dyn Clock) -> Option<i64> {
+    clock
+        .now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+}
+
+/// Schedule-driven retirement gate: past `verify_until` → treat as no candidate (`Untrusted`).
+fn reject_if_kid_retired(
+    schedule: Option<&RetirementSchedule>,
+    kid: &str,
+    now: i64,
+    snapshot: &KeySet,
+) -> Result<(), PdpError> {
+    let Some(schedule) = schedule else {
+        return Ok(());
+    };
+    if !schedule.is_retired(kid, now) {
+        return Ok(());
+    }
+    metrics::counter!(
+        METRIC_OIDC_VERIFY_KID_REJECTED_TOTAL,
+        "reason" => KID_REJECT_RETIRED
+    )
+    .increment(1);
+    log_fail(TelemetryReason::KidRetired, snapshot);
+    Err(PdpError::Untrusted)
+}
+
+/// Successful verify while kid is still inside its retirement window.
+fn record_retiring_key_verified(schedule: Option<&RetirementSchedule>, kid: &str, now: i64) {
+    let Some(schedule) = schedule else {
+        return;
+    };
+    if schedule.verify_until_for(kid).is_some() && !schedule.is_retired(kid, now) {
+        metrics::counter!(METRIC_OIDC_VERIFY_RETIRING_KEY_VERIFIED_TOTAL).increment(1);
+    }
 }
 
 /// 单路径验签三态（区分 fail-closed 语义）：候选为空 = kid 不在受信集（未知 / 轮转出）→ `Untrusted`；候选存在
@@ -366,7 +431,8 @@ mod tests {
         verify_es256,
     };
     use crate::config::{
-        AccessStaticKeySource, ServiceTokenKeySource, VerifierConfig, VerifierConfigBuilder,
+        AccessStaticKeySource, RetirementSchedule, ServiceTokenKeySource, VerifierConfig,
+        VerifierConfigBuilder,
     };
     use crate::jws::{Jws, SupportedAlg};
 
@@ -625,8 +691,12 @@ mod tests {
 
     /// 用 ES256 私钥签发 token（header alg=ES256）。RFC6979 确定性签名，无需 RNG。
     fn mint_es256(sk: &SigningKey, payload_json: &str) -> String {
+        mint_es256_with_kid(sk, "test-es256", payload_json)
+    }
+
+    fn mint_es256_with_kid(sk: &SigningKey, kid: &str, payload_json: &str) -> String {
         let header =
-            URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","typ":"at+jwt","kid":"test-es256"}"#);
+            URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"ES256","typ":"at+jwt","kid":"{kid}"}}"#));
         let body = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         let signing_input = format!("{header}.{body}");
         let sig: Signature = sk.sign(signing_input.as_bytes());
@@ -1436,6 +1506,242 @@ mod tests {
             &RawCredential::rss_access(token),
         );
         assert!(matches!(result, Err(PdpError::Untrusted)));
+    }
+
+    // ── Retirement schedule: deadline window + unknown vs retired metrics ───────
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn es256_retirement_deadline_accepts_at_t_rejects_after() {
+        const DEADLINE: i64 = NOW;
+        let keys = AccessStaticKeySource::builder()
+            .add_es256_sec1("k1", &sec1_of(&test_sk()))
+            .expect("k1")
+            .add_es256_sec1("k2", &sec1_of(&test_sk2()))
+            .expect("k2")
+            .build();
+        let schedule = RetirementSchedule::from_entries([("k1".into(), DEADLINE)]).expect("sched");
+        let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
+            .keys_static(keys)
+            .retirement_schedule(schedule)
+            .trust_kind("user")
+            .build()
+            .expect("config");
+        let token = mint_es256_with_kid(&test_sk(), "k1", &payload(NOW + 600, ISS, AUD, ""));
+
+        // At deadline instant: still verifiable (`now > verify_until` is false).
+        assert!(
+            verify_credential(
+                &config,
+                &FixedClock(DEADLINE),
+                &RawCredential::rss_access(token.clone()),
+            )
+            .is_ok(),
+            "clock=T must still verify"
+        );
+        // Past deadline: Untrusted even though key remains in snapshot.
+        let retired = verify_credential(
+            &config,
+            &FixedClock(DEADLINE + 1),
+            &RawCredential::rss_access(token),
+        );
+        assert!(
+            matches!(retired, Err(PdpError::Untrusted)),
+            "clock=T+1 must reject retired kid: {retired:?}"
+        );
+
+        // Sibling kid still in snapshot and not on the schedule remains verifiable.
+        let sibling = mint_es256_with_kid(&test_sk2(), "k2", &payload(NOW + 600, ISS, AUD, ""));
+        assert!(
+            verify_credential(
+                &config,
+                &FixedClock(DEADLINE + 1),
+                &RawCredential::rss_access(sibling),
+            )
+            .is_ok(),
+            "unscheduled sibling kid must still verify after peer retirement"
+        );
+
+        // Without schedule, the same past-deadline clock still verifies (legacy weak path).
+        let legacy_keys = AccessStaticKeySource::builder()
+            .add_es256_sec1("k1", &sec1_of(&test_sk()))
+            .expect("k1")
+            .build();
+        let legacy = es256_config_with(legacy_keys);
+        let legacy_token = mint_es256_with_kid(&test_sk(), "k1", &payload(NOW + 600, ISS, AUD, ""));
+        assert!(
+            verify_credential(
+                &legacy,
+                &FixedClock(DEADLINE + 1),
+                &RawCredential::rss_access(legacy_token),
+            )
+            .is_ok(),
+            "no schedule must keep legacy verify-after-deadline behavior"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn es256_clock_before_epoch_is_invalid_signature_without_retired_metric() {
+        struct BeforeEpochClock;
+        impl Clock for BeforeEpochClock {
+            fn now(&self) -> SystemTime {
+                UNIX_EPOCH
+                    .checked_sub(Duration::from_secs(1))
+                    .expect("construct pre-epoch clock")
+            }
+        }
+
+        let keys = AccessStaticKeySource::builder()
+            .add_es256_sec1("k1", &sec1_of(&test_sk()))
+            .expect("k1")
+            .build();
+        let schedule = RetirementSchedule::from_entries([("k1".into(), NOW + 600)]).expect("sched");
+        let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
+            .keys_static(keys)
+            .retirement_schedule(schedule)
+            .trust_kind("user")
+            .build()
+            .expect("config");
+        let token = mint_es256_with_kid(&test_sk(), "k1", &payload(NOW + 600, ISS, AUD, ""));
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let result = metrics::with_local_recorder(&recorder, || {
+            verify_credential(
+                &config,
+                &BeforeEpochClock,
+                &RawCredential::rss_access(token),
+            )
+        });
+        assert!(
+            matches!(result, Err(PdpError::InvalidSignature)),
+            "pre-epoch clock must fail closed as InvalidSignature: {result:?}"
+        );
+        let rendered = handle.render();
+        assert!(
+            !rendered.contains("oidc_verify_retiring_key_verified_total"),
+            "pre-epoch path must not count retiring verified: {rendered}"
+        );
+        assert!(
+            !rendered.contains(r#"reason="retired""#),
+            "pre-epoch path must not emit retired reject: {rendered}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn es256_unknown_kid_emits_unknown_reject_metric_without_kid_label() {
+        const UNKNOWN_KID: &str = "marker-unknown-kid-must-never-label";
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let token = mint_es256_with_kid(&test_sk(), UNKNOWN_KID, &payload(NOW + 600, ISS, AUD, ""));
+        let result = metrics::with_local_recorder(&recorder, || {
+            verify_credential(
+                &es256_config(),
+                &FixedClock(NOW),
+                &RawCredential::rss_access(token),
+            )
+        });
+        assert!(matches!(result, Err(PdpError::Untrusted)));
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("oidc_verify_kid_rejected_total"),
+            "missing reject counter: {rendered}"
+        );
+        assert!(
+            rendered.contains(r#"reason="unknown""#),
+            "unknown reason missing: {rendered}"
+        );
+        assert!(
+            !rendered.contains(UNKNOWN_KID),
+            "kid must never appear in metric labels: {rendered}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn es256_retired_kid_emits_retired_reject_metric_without_kid_in_logs() {
+        const RETIRED_KID: &str = "marker-retired-kid-must-never-leak";
+        const DEADLINE: i64 = NOW;
+        capture::install();
+        capture::reset();
+        let keys = AccessStaticKeySource::builder()
+            .add_es256_sec1(RETIRED_KID, &sec1_of(&test_sk()))
+            .expect("key")
+            .build();
+        let schedule =
+            RetirementSchedule::from_entries([(RETIRED_KID.into(), DEADLINE)]).expect("sched");
+        let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
+            .keys_static(keys)
+            .retirement_schedule(schedule)
+            .trust_kind("user")
+            .build()
+            .expect("config");
+        let token = mint_es256_with_kid(&test_sk(), RETIRED_KID, &payload(NOW + 600, ISS, AUD, ""));
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let result = metrics::with_local_recorder(&recorder, || {
+            verify_credential(
+                &config,
+                &FixedClock(DEADLINE + 1),
+                &RawCredential::rss_access(token),
+            )
+        });
+        assert!(matches!(result, Err(PdpError::Untrusted)));
+        let rendered = handle.render();
+        assert!(
+            rendered.contains(r#"reason="retired""#),
+            "retired reason missing: {rendered}"
+        );
+        assert!(
+            !rendered.contains(RETIRED_KID),
+            "kid must never appear in metric labels: {rendered}"
+        );
+        let logs = capture::captured();
+        assert!(
+            logs.contains("kid_retired"),
+            "should log closed kid_retired reason: {logs}"
+        );
+        assert!(
+            !logs.contains(RETIRED_KID),
+            "kid must never appear in failure logs: {logs}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn es256_retiring_window_success_increments_retiring_verified_metric() {
+        const DEADLINE: i64 = NOW + 3_600;
+        let keys = AccessStaticKeySource::builder()
+            .add_es256_sec1("k1", &sec1_of(&test_sk()))
+            .expect("k1")
+            .build();
+        let schedule = RetirementSchedule::from_entries([("k1".into(), DEADLINE)]).expect("sched");
+        let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
+            .keys_static(keys)
+            .retirement_schedule(schedule)
+            .trust_kind("user")
+            .build()
+            .expect("config");
+        let token = mint_es256_with_kid(&test_sk(), "k1", &payload(NOW + 600, ISS, AUD, ""));
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let result = metrics::with_local_recorder(&recorder, || {
+            verify_credential(&config, &FixedClock(NOW), &RawCredential::rss_access(token))
+        });
+        assert!(
+            result.is_ok(),
+            "retiring window must still verify: {result:?}"
+        );
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("oidc_verify_retiring_key_verified_total"),
+            "retiring verified counter missing: {rendered}"
+        );
+        assert!(
+            !rendered.contains("k1"),
+            "kid must never appear in metric labels: {rendered}"
+        );
     }
 
     // ── RFC 7515 known-answer 向量 ──────────────────────────────────────────────

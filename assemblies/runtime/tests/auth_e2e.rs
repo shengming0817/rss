@@ -216,7 +216,8 @@ fn production_access_jwt(principal: authn::JwtAccessPrincipal<'_>) -> String {
         Arc::new(P256JwtSigner),
         Box::new(FixedClock(NOW)),
         authn::JwtIssuerConfig::rss_access(
-            diport::KeyId::new(RSS_KID),
+            authn::SigningKeyRing::single(diport::KeyId::new(RSS_KID))
+                .expect("non-empty signing key id"),
             diport::SigningPurpose::new("auth.rss-access"),
             ISS,
             AUD,
@@ -243,7 +244,8 @@ fn production_service_token(secret: &[u8]) -> String {
         }),
         Box::new(FixedClock(NOW)),
         authn::JwtIssuerConfig::service_token(
-            diport::KeyId::new(HS_KID),
+            authn::SigningKeyRing::single(diport::KeyId::new(HS_KID))
+                .expect("non-empty signing key id"),
             diport::SigningPurpose::new("auth.service-token"),
             ISS,
             AUD,

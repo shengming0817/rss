@@ -179,7 +179,7 @@ fn complete_shared_serving_values() -> Vec<(String, String)> {
         ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
         ("RSS_ACCESS_TOKEN_ISSUER", "https://issuer.test"),
         ("RSS_ACCESS_TOKEN_AUDIENCE", "rss"),
-        ("RSS_ACCESS_TOKEN_ES256_KEY_ID", "runtime-es256"),
+        ("RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID", "runtime-es256"),
         ("RSS_ACCESS_TOKEN_TTL_SECS", "900"),
         ("RSS_ACCESS_TOKEN_TRUSTED_KINDS", "user,admin"),
         ("RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS", "60"),
@@ -846,7 +846,7 @@ fn rss_token_profile_values() -> Vec<(String, String)> {
             "rss-access-audience".to_owned(),
         ),
         (
-            "RSS_ACCESS_TOKEN_ES256_KEY_ID".to_owned(),
+            "RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID".to_owned(),
             "rss-access-es256".to_owned(),
         ),
         ("RSS_ACCESS_TOKEN_TTL_SECS".to_owned(), "900".to_owned()),
@@ -1189,7 +1189,14 @@ fn token_profile_config_builds_only_the_selected_provider_material() {
     let rss = config.rss_access().expect("RSS profile is active");
     assert_eq!(rss.issuer(), "https://rss.issuer.test");
     assert_eq!(rss.audience(), "rss-access-audience");
-    assert_eq!(rss.es256_key_id(), "rss-access-es256");
+    assert_eq!(rss.signing_key_ring().active().as_str(), "rss-access-es256");
+    assert!(rss.signing_key_ring().next().is_none());
+    assert!(
+        rss.retirement_schedule()
+            .verify_until_for("rss-access-es256")
+            .is_none()
+    );
+    assert_eq!(rss.rotation_mode(), authn::RotationMode::Planned);
     assert_eq!(rss.ttl(), std::time::Duration::from_secs(900));
     assert_eq!(
         rss.jwks_refresh_interval(),
@@ -1274,6 +1281,289 @@ fn token_profile_config_enforces_rss_ttl_and_jwks_refresh_bounds() {
         replace_serving_value(&mut values, "RSS_ACCESS_TOKEN_TTL_SECS", ttl);
         token_profiles_from(values).expect("TTL boundary must be accepted");
     }
+}
+
+#[test]
+fn token_profile_config_rejects_retiring_without_rotated_at() {
+    let mut values = rss_token_profile_values();
+    values.push((
+        "RSS_ACCESS_TOKEN_SIGNING_RETIRING".to_owned(),
+        "old-key=1700001320".to_owned(),
+    ));
+    let error = token_profiles_from(values).expect_err("retiring requires rotated_at");
+    let message = error.to_string();
+    assert!(
+        message.contains("RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT"),
+        "{message}"
+    );
+    assert!(!message.contains("old-key"), "{message}");
+}
+
+#[test]
+fn token_profile_config_rejects_duplicate_signing_kids() {
+    let retiring_kid = "dup-retiring-kid";
+    let cases = [
+        (
+            "active/next",
+            vec![(
+                "RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID".to_owned(),
+                "rss-access-es256".to_owned(),
+            )],
+            "rss-access-es256",
+        ),
+        (
+            "active/retiring",
+            vec![
+                (
+                    "RSS_ACCESS_TOKEN_SIGNING_RETIRING".to_owned(),
+                    format!("{retiring_kid}=1700001320"),
+                ),
+                (
+                    "RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT".to_owned(),
+                    "1700000000".to_owned(),
+                ),
+            ],
+            retiring_kid,
+        ),
+    ];
+    for (case, extras, kid) in cases {
+        let mut values = rss_token_profile_values();
+        if case == "active/retiring" {
+            replace_serving_value(
+                &mut values,
+                "RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID",
+                retiring_kid,
+            );
+        }
+        values.extend(extras);
+        let error = token_profiles_from(values).expect_err(case);
+        let message = error.to_string();
+        assert!(
+            message.contains("signing key ids in the ring must be unique"),
+            "{case}: {message}"
+        );
+        assert!(!message.contains(kid), "{case}: {message}");
+    }
+}
+
+#[test]
+fn token_profile_config_parses_multiple_retiring_kids() {
+    const ROTATED_AT: i64 = 1_700_000_000;
+    const MIN_OVERLAP: i64 = 1_320;
+    let mut values = rss_token_profile_values();
+    values.extend([
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_RETIRING".to_owned(),
+            format!(
+                "old-a={},old-b={}",
+                ROTATED_AT + MIN_OVERLAP,
+                ROTATED_AT + MIN_OVERLAP + 60
+            ),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT".to_owned(),
+            ROTATED_AT.to_string(),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID".to_owned(),
+            "next-kid".to_owned(),
+        ),
+    ]);
+    let config = token_profiles_from(values).expect("multi retiring parse");
+    let rss = config.rss_access().expect("rss profile");
+    assert_eq!(
+        rss.signing_key_ring().next().map(diport::KeyId::as_str),
+        Some("next-kid")
+    );
+    assert_eq!(rss.signing_key_ring().retiring().len(), 2);
+    assert_eq!(
+        rss.retirement_schedule().verify_until_for("old-a"),
+        Some(ROTATED_AT + MIN_OVERLAP)
+    );
+    assert_eq!(
+        rss.retirement_schedule().verify_until_for("old-b"),
+        Some(ROTATED_AT + MIN_OVERLAP + 60)
+    );
+}
+
+#[test]
+fn token_profile_config_enforces_planned_rotation_overlap_bounds() {
+    // min_overlap = ttl(900) + skew(60) + jwks SLO(300) + margin(60) = 1320
+    const ROTATED_AT: i64 = 1_700_000_000;
+    const MIN_OVERLAP: i64 = 1_320;
+    let retiring_kid = "retiring-overlap-kid";
+
+    let mut short = rss_token_profile_values();
+    short.extend([
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_RETIRING".to_owned(),
+            format!("{retiring_kid}={}", ROTATED_AT + MIN_OVERLAP - 1),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT".to_owned(),
+            ROTATED_AT.to_string(),
+        ),
+    ]);
+    let error = token_profiles_from(short).expect_err("overlap one second short");
+    let message = error.to_string();
+    assert!(
+        message.contains("rotation verify overlap is insufficient"),
+        "{message}"
+    );
+    assert!(
+        message.contains("need 1320s") && message.contains("have 1319s"),
+        "{message}"
+    );
+    assert!(
+        message.contains("RSS_ACCESS_TOKEN_TTL_SECS")
+            && message.contains("RSS_ACCESS_TOKEN_ROTATION_CLOCK_SKEW_SECS")
+            && message.contains("RSS_ACCESS_TOKEN_ROTATION_JWKS_PROPAGATION_SLO_SECS")
+            && message.contains("RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS"),
+        "{message}"
+    );
+    assert!(!message.contains(retiring_kid), "{message}");
+
+    let mut exact = rss_token_profile_values();
+    exact.extend([
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID".to_owned(),
+            "next-staging-kid".to_owned(),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_RETIRING".to_owned(),
+            format!("{retiring_kid}={}", ROTATED_AT + MIN_OVERLAP),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT".to_owned(),
+            ROTATED_AT.to_string(),
+        ),
+    ]);
+    let config = token_profiles_from(exact).expect("exact overlap boundary");
+    let rss = config.rss_access().expect("rss active");
+    assert_eq!(
+        rss.signing_key_ring().next().map(diport::KeyId::as_str),
+        Some("next-staging-kid")
+    );
+    assert_eq!(
+        rss.retirement_schedule().verify_until_for(retiring_kid),
+        Some(ROTATED_AT + MIN_OVERLAP)
+    );
+    assert_eq!(rss.rotation_mode(), authn::RotationMode::Planned);
+}
+
+#[test]
+fn token_profile_config_emergency_rotation_skips_overlap() {
+    const ROTATED_AT: i64 = 1_700_000_000;
+    let retiring_kid = "emergency-retiring-kid";
+    let mut values = rss_token_profile_values();
+    values.extend([
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_RETIRING".to_owned(),
+            format!("{retiring_kid}={ROTATED_AT}"),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT".to_owned(),
+            ROTATED_AT.to_string(),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_ROTATION_MODE".to_owned(),
+            "emergency".to_owned(),
+        ),
+    ]);
+    let config = token_profiles_from(values).expect("emergency exempts overlap");
+    let rss = config.rss_access().expect("rss active");
+    assert_eq!(rss.rotation_mode(), authn::RotationMode::Emergency);
+    assert_eq!(
+        rss.retirement_schedule().verify_until_for(retiring_kid),
+        Some(ROTATED_AT)
+    );
+}
+
+#[test]
+fn token_profile_config_rejects_malformed_retiring_and_rotation_mode() {
+    let cases = [
+        (
+            "empty entry",
+            "RSS_ACCESS_TOKEN_SIGNING_RETIRING",
+            "old-key=1700001320,",
+            "empty entries",
+        ),
+        (
+            "missing equals",
+            "RSS_ACCESS_TOKEN_SIGNING_RETIRING",
+            "old-key-1700001320",
+            "kid=unixSeconds",
+        ),
+        (
+            "non-unix until",
+            "RSS_ACCESS_TOKEN_SIGNING_RETIRING",
+            "old-key=not-a-unix",
+            "unix seconds",
+        ),
+        (
+            "illegal mode",
+            "RSS_ACCESS_TOKEN_ROTATION_MODE",
+            "gradual",
+            "planned or emergency",
+        ),
+    ];
+    for (case, key, value, expected) in cases {
+        let mut values = rss_token_profile_values();
+        if key == "RSS_ACCESS_TOKEN_SIGNING_RETIRING" {
+            values.push((
+                "RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT".to_owned(),
+                "1700000000".to_owned(),
+            ));
+        }
+        values.push((key.to_owned(), value.to_owned()));
+        let error = token_profiles_from(values).expect_err(case);
+        assert!(error.to_string().contains(expected), "{case}: {error}");
+    }
+}
+
+#[test]
+fn token_profile_config_custom_overlap_knobs_change_boundary() {
+    // Defaults would require 1320s; skew=0 + slo=0 + margin=0 → need ttl only (900).
+    const ROTATED_AT: i64 = 1_700_000_000;
+    let retiring_kid = "custom-knob-retiring";
+    let mut short_default = rss_token_profile_values();
+    short_default.extend([
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_RETIRING".to_owned(),
+            format!("{retiring_kid}={}", ROTATED_AT + 900),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT".to_owned(),
+            ROTATED_AT.to_string(),
+        ),
+    ]);
+    let error = token_profiles_from(short_default).expect_err("default knobs still require 1320");
+    assert!(error.to_string().contains("need 1320s"), "{error}");
+
+    let mut custom_ok = rss_token_profile_values();
+    custom_ok.extend([
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_RETIRING".to_owned(),
+            format!("{retiring_kid}={}", ROTATED_AT + 900),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT".to_owned(),
+            ROTATED_AT.to_string(),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_ROTATION_CLOCK_SKEW_SECS".to_owned(),
+            "0".to_owned(),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_ROTATION_JWKS_PROPAGATION_SLO_SECS".to_owned(),
+            "0".to_owned(),
+        ),
+        (
+            "RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS".to_owned(),
+            "0".to_owned(),
+        ),
+    ]);
+    token_profiles_from(custom_ok).expect("zeroed knobs accept ttl-sized overlap");
 }
 
 #[test]

@@ -127,6 +127,11 @@ impl<P: TokenProfileMarker> ProfileJwksReadiness<P> {
     pub(crate) fn is_ready(&self) -> bool {
         self.handle.is_ready()
     }
+
+    /// Clone the underlying JWKS readiness handle (kid presence for rotation probes).
+    pub(crate) fn handle(&self) -> JwksReadinessHandle {
+        self.handle.clone()
+    }
 }
 
 impl<P: TokenProfileMarker> Clone for ProfileJwksReadiness<P> {
@@ -243,6 +248,7 @@ pub(crate) fn build_rss_access_provider(
             .map(crate::config::AccessPrincipalKind::as_str),
         config.jwks_path(),
         config.jwks_refresh_interval(),
+        config.retirement_schedule(),
         AccessProviderBuildContext::new(cancellation, isolation, Box::new(SystemClock)),
     )
 }
@@ -263,6 +269,7 @@ pub(crate) fn build_federated_access_provider(
             .map(crate::config::AccessPrincipalKind::as_str),
         config.jwks_path(),
         config.jwks_refresh_interval(),
+        oidc::RetirementSchedule::default(),
         AccessProviderBuildContext::new(cancellation, isolation, Box::new(SystemClock)),
     )
 }
@@ -340,6 +347,7 @@ fn build_rss_access_provider_from_values<'a>(
     trusted_kinds: impl IntoIterator<Item = &'a str>,
     jwks_path: &std::path::Path,
     refresh_interval: Duration,
+    retirement_schedule: oidc::RetirementSchedule,
     context: AccessProviderBuildContext<RssAccessProfile>,
 ) -> anyhow::Result<RuntimeAccessProvider<RssAccessProfile>> {
     let AccessProviderBuildContext {
@@ -380,6 +388,7 @@ fn build_rss_access_provider_from_values<'a>(
     let builder = trusted_kinds
         .into_iter()
         .fold(builder, |builder, kind| builder.trust_kind(kind));
+    let builder = builder.retirement_schedule(retirement_schedule);
     let provider = finish_provider(builder.build(), clock)?;
     Ok(RuntimeAccessProvider {
         provider: Arc::new(provider),
@@ -394,6 +403,7 @@ fn build_federated_access_provider_from_values<'a>(
     trusted_kinds: impl IntoIterator<Item = &'a str>,
     jwks_path: &std::path::Path,
     refresh_interval: Duration,
+    retirement_schedule: oidc::RetirementSchedule,
     context: AccessProviderBuildContext<FederatedAccessProfile>,
 ) -> anyhow::Result<RuntimeAccessProvider<FederatedAccessProfile>> {
     let AccessProviderBuildContext {
@@ -436,6 +446,7 @@ fn build_federated_access_provider_from_values<'a>(
     let builder = trusted_kinds
         .into_iter()
         .fold(builder, |builder, kind| builder.trust_kind(kind));
+    let builder = builder.retirement_schedule(retirement_schedule);
     let provider = finish_provider(builder.build(), clock)?;
     Ok(RuntimeAccessProvider {
         provider: Arc::new(provider),
@@ -632,6 +643,7 @@ mod tests {
             ["user", "device", "admin", "superAdmin"],
             &rss_path,
             Duration::from_secs(5),
+            oidc::RetirementSchedule::default(),
             AccessProviderBuildContext::new(
                 CancellationToken::new(),
                 Some(rss_isolation),
@@ -645,6 +657,7 @@ mod tests {
             ["user", "device"],
             &federated_path,
             Duration::from_secs(5),
+            oidc::RetirementSchedule::default(),
             AccessProviderBuildContext::new(
                 CancellationToken::new(),
                 Some(federated_isolation),
@@ -696,6 +709,7 @@ mod tests {
             ["user"],
             &rss_path,
             Duration::from_secs(5),
+            oidc::RetirementSchedule::default(),
             AccessProviderBuildContext::new(
                 CancellationToken::new(),
                 Some(rss_isolation),
@@ -709,6 +723,7 @@ mod tests {
             ["user"],
             &federated_path,
             Duration::from_secs(5),
+            oidc::RetirementSchedule::default(),
             AccessProviderBuildContext::new(
                 CancellationToken::new(),
                 Some(federated_isolation),
@@ -741,6 +756,7 @@ mod tests {
             ["user"],
             &path,
             Duration::from_secs(5),
+            oidc::RetirementSchedule::default(),
             AccessProviderBuildContext::new(CancellationToken::new(), None, Box::new(SystemClock)),
         )
         .err()
@@ -795,6 +811,7 @@ mod tests {
             ["user"],
             &rss_path,
             Duration::from_secs(5),
+            oidc::RetirementSchedule::default(),
             AccessProviderBuildContext::new(
                 CancellationToken::new(),
                 Some(rss_isolation),
@@ -808,6 +825,7 @@ mod tests {
             ["user"],
             &federated_path,
             Duration::from_secs(5),
+            oidc::RetirementSchedule::default(),
             AccessProviderBuildContext::new(
                 CancellationToken::new(),
                 Some(federated_isolation),
@@ -880,5 +898,78 @@ mod tests {
         .unwrap_or_default();
         assert!(error.contains("invalid service-token key configuration"));
         assert!(!error.contains("private"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn rss_access_provider_schedule_rejects_retired_kid_at_t_plus_one() {
+        use diport::Pdp as _;
+        use p256::ecdsa::signature::Signer;
+        use p256::ecdsa::{Signature, SigningKey};
+        use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
+
+        const KID: &str = "glue-retiring";
+        const DEADLINE: u64 = 1_700_000_000;
+        const ISS: &str = "https://rss.issuer.test";
+        const AUD: &str = "rss-audience";
+        const SCALAR: [u8; 32] = [0x42; 32];
+
+        struct FixedClock(SystemTime);
+        impl diport::Clock for FixedClock {
+            fn now(&self) -> SystemTime {
+                self.0
+            }
+        }
+
+        let (jwks, _) = es256_fixture_with_scalar(KID, SCALAR);
+        let path = write_temp_file("retire-glue-jwks.json", jwks.as_bytes());
+        let schedule =
+            oidc::RetirementSchedule::from_entries([(KID.into(), DEADLINE as i64)]).expect("sched");
+        let (isolation, _) = oidc::AccessJwksKeyIsolationGeneration::new().into_bindings();
+        let runtime = build_rss_access_provider_from_values(
+            ISS,
+            AUD,
+            ["user"],
+            &path,
+            StdDuration::from_secs(5),
+            schedule,
+            AccessProviderBuildContext::new(
+                CancellationToken::new(),
+                Some(isolation),
+                Box::new(FixedClock(
+                    UNIX_EPOCH + StdDuration::from_secs(DEADLINE + 1),
+                )),
+            ),
+        )
+        .expect("rss access provider with schedule");
+
+        let sk = SigningKey::from_slice(&SCALAR).expect("scalar");
+        let payload = format!(
+            r#"{{"sub":"alice","iat":{iat},"exp":{exp},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user","tenant_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}}"#,
+            iat = DEADLINE,
+            exp = DEADLINE + 600,
+        );
+        let header =
+            URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"ES256","typ":"at+jwt","kid":"{KID}"}}"#));
+        let body = URL_SAFE_NO_PAD.encode(payload.as_bytes());
+        let signing_input = format!("{header}.{body}");
+        let sig: Signature = sk.sign(signing_input.as_bytes());
+        let token = format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()));
+
+        let result = runtime
+            .provider()
+            .verify(&diport::RawCredential::rss_access(token))
+            .await;
+        assert!(
+            matches!(result, Err(diport::PdpError::Untrusted)),
+            "T+1 must reject via build_rss_access_provider_from_values schedule glue: {result:?}"
+        );
+
+        runtime
+            .managed_resource()
+            .shutdown()
+            .await
+            .expect("shutdown");
+        let _ = std::fs::remove_file(path);
     }
 }

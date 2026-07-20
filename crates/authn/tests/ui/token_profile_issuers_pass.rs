@@ -24,14 +24,14 @@ fn service_can_only_sign_service<S>(
 
 fn main() {
     let _: JwtIssuerConfig<RssAccessProfile> = JwtIssuerConfig::rss_access(
-        KeyId::new("rss-kid"),
+        authn::SigningKeyRing::single(KeyId::new("rss-kid")).expect("non-empty signing key id"),
         SigningPurpose::new("auth.rss-access"),
         "https://rss.example",
         "rss-api",
         Duration::from_secs(900),
     );
     let _: JwtIssuerConfig<ServiceTokenProfile> = JwtIssuerConfig::service_token(
-        KeyId::new("service-kid"),
+        authn::SigningKeyRing::single(KeyId::new("service-kid")).expect("non-empty signing key id"),
         SigningPurpose::new("auth.service-token"),
         "https://service.rss.example",
         "rss-internal",

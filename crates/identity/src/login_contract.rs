@@ -73,7 +73,8 @@ fn make_auth_grant_services(
         Arc::new(ContractSigner),
         clock(),
         authn::JwtIssuerConfig::rss_access(
-            diport::KeyId::new("contract-test-key"),
+            authn::SigningKeyRing::single(diport::KeyId::new("contract-test-key"))
+                .expect("non-empty signing key id"),
             diport::SigningPurpose::new("auth.jwt.access"),
             "https://test.example",
             "test-audience",

@@ -5524,7 +5524,8 @@ mod tests {
                 Arc::new(TestSigner),
                 Box::new(SystemClock),
                 authn::JwtIssuerConfig::rss_access(
-                    diport::KeyId::new("runtime-test-key"),
+                    authn::SigningKeyRing::single(diport::KeyId::new("runtime-test-key"))
+                        .expect("non-empty signing key id"),
                     diport::SigningPurpose::new("runtime-test"),
                     "https://issuer.test",
                     "rss-test",

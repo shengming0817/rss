@@ -928,7 +928,8 @@ fn seed_issuer(
             Arc::new(SeedSigner),
             clock,
             authn::JwtIssuerConfig::rss_access(
-                diport::KeyId::new("seed-jwt-key"),
+                authn::SigningKeyRing::single(diport::KeyId::new("seed-jwt-key"))
+                    .expect("non-empty signing key id"),
                 diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 "https://seed.local",
                 "rss-seed",
@@ -4965,7 +4966,8 @@ mod tests {
                     Arc::new(CountingSigner(Arc::clone(&sign_calls))),
                     make_clock(1_000),
                     authn::JwtIssuerConfig::rss_access(
-                        diport::KeyId::new("test-key"),
+                        authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
+                            .expect("non-empty signing key id"),
                         diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                         "https://test.example",
                         "test-audience",
@@ -5086,7 +5088,8 @@ mod tests {
             Arc::new(PanicSigner),
             make_clock(1_000),
             authn::JwtIssuerConfig::rss_access(
-                diport::KeyId::new("test-key"),
+                authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
+                    .expect("non-empty signing key id"),
                 diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 "https://test.example",
                 "test-audience",
@@ -8861,7 +8864,8 @@ mod tests {
             std::sync::Arc::new(TestSigner),
             clock,
             authn::JwtIssuerConfig::rss_access(
-                diport::KeyId::new("test-key"),
+                authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
+                    .expect("non-empty signing key id"),
                 diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 "https://test.example",
                 "test-audience",
@@ -9033,7 +9037,8 @@ mod tests {
             Arc::new(PanicSigner),
             make_clock(1_700_000_000),
             authn::JwtIssuerConfig::rss_access(
-                diport::KeyId::new("test-key"),
+                authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
+                    .expect("non-empty signing key id"),
                 diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 "https://test.example",
                 "test-audience",
@@ -9151,7 +9156,8 @@ mod tests {
                 Arc::new(PanicSigner),
                 make_clock(1_700_000_000),
                 authn::JwtIssuerConfig::rss_access(
-                    diport::KeyId::new("test-key"),
+                    authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
+                        .expect("non-empty signing key id"),
                     diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                     "https://test.example",
                     "test-audience",
@@ -9237,7 +9243,8 @@ mod tests {
                 Arc::new(PanicSigner),
                 make_clock(1_700_000_000),
                 authn::JwtIssuerConfig::rss_access(
-                    diport::KeyId::new("test-key"),
+                    authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
+                        .expect("non-empty signing key id"),
                     diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                     "https://test.example",
                     "test-audience",
@@ -9372,7 +9379,8 @@ mod tests {
                 Arc::new(PanicSigner),
                 make_clock(1_700_000_000),
                 authn::JwtIssuerConfig::rss_access(
-                    diport::KeyId::new("test-key"),
+                    authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
+                        .expect("non-empty signing key id"),
                     diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                     "https://test.example",
                     "test-audience",
@@ -9516,7 +9524,8 @@ mod tests {
                 Arc::new(PanicSigner),
                 make_clock(1_700_000_000),
                 authn::JwtIssuerConfig::rss_access(
-                    diport::KeyId::new("test-key"),
+                    authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
+                        .expect("non-empty signing key id"),
                     diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                     "https://test.example",
                     "test-audience",
@@ -9929,7 +9938,8 @@ mod tests {
             std::sync::Arc::new(FailingSigner),
             make_clock(1_700_000_000),
             authn::JwtIssuerConfig::rss_access(
-                diport::KeyId::new("test-key"),
+                authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
+                    .expect("non-empty signing key id"),
                 diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 "https://test.example",
                 "test-audience",
@@ -10363,7 +10373,8 @@ mod tests {
             std::sync::Arc::new(FailingSigner),
             make_clock(1_700_000_000),
             authn::JwtIssuerConfig::rss_access(
-                diport::KeyId::new("test-key"),
+                authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
+                    .expect("non-empty signing key id"),
                 diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 "https://test.example",
                 "test-audience",

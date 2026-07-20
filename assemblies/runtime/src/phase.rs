@@ -236,6 +236,7 @@ pub(crate) struct InfraBuilt<'a> {
     pg_readiness_period: Duration,
     redis_readiness_period: Duration,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
+    signing_rotation_probe: Option<crate::infra::signing_rotation::SigningKeyRotationProbe>,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:
         Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,

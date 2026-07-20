@@ -93,7 +93,8 @@ mod domains {
                 Arc::clone(&deps.signer),
                 Arc::new(SystemClock),
                 authn::JwtIssuerConfig::rss_access(
-                    diport::KeyId::new(DEMO_JWT_KEY_ID),
+                    authn::SigningKeyRing::single(diport::KeyId::new(DEMO_JWT_KEY_ID))
+                        .expect("non-empty signing key id"),
                     diport::SigningPurpose::new("auth.jwt.access"),
                     DEMO_JWT_ISSUER,
                     DEMO_JWT_AUDIENCE,
