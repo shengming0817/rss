@@ -34,6 +34,8 @@
 //!                                      active LocalTx static proof inventory（只读）
 //!   `cargo xtask l2-assurance [--check]`
 //!                                      deterministic active L2 producer/fact assurance inventory
+//!   `cargo xtask provider-capabilities [--check]`
+//!                                      deterministic L2 provider conformance enrollment matrix
 //!   `cargo xtask runtime-baseline list|verify`
 //!                                      runtime assembly baseline 清单 / 漂移门（#1656，CI 门）
 //!   `cargo xtask runtime-deps guard`    SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）
@@ -120,6 +122,7 @@ mod postgres_feature_matrix;
 mod producer_assurance;
 mod production_composition;
 mod promtool;
+mod provider_capabilities;
 mod publicapi;
 mod reconcile_outbox_command_guard;
 mod repo_scope_guard;
@@ -189,6 +192,9 @@ enum Command {
         format: ReportFormat,
     },
     L2Assurance {
+        check: bool,
+    },
+    ProviderCapabilities {
         check: bool,
     },
     Verify {
@@ -285,6 +291,13 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["l2-assurance", ..] => {
             bail!(
                 "invalid l2-assurance arguments; use `./hack/cargo.sh xtask l2-assurance [--check]`"
+            )
+        }
+        ["provider-capabilities"] => Ok(Command::ProviderCapabilities { check: false }),
+        ["provider-capabilities", "--check"] => Ok(Command::ProviderCapabilities { check: true }),
+        ["provider-capabilities", ..] => {
+            bail!(
+                "invalid provider-capabilities arguments; use `./hack/cargo.sh xtask provider-capabilities [--check]`"
             )
         }
         ["verify", rest @ ..] => parse_verify(rest),
@@ -687,6 +700,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::LocalTxReport { format } => localtx_report::run_report(format),
         Command::LocalTxCoverage => diagnostic::run_check(&localtx_coverage::LocalTxCoverage),
         Command::L2Assurance { check } => l2_assurance::run(check),
+        Command::ProviderCapabilities { check } => provider_capabilities::run(check),
         Command::Verify {
             fast,
             allow_missing_tools,
@@ -1894,6 +1908,35 @@ mod tests {
                 error
                     .to_string()
                     .contains("./hack/cargo.sh xtask l2-assurance [--check]"),
+                "missing dedicated recovery hint for {invalid:?}: {error}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_provider_capabilities_is_closed() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["provider-capabilities"]))?,
+            Command::ProviderCapabilities { check: false }
+        );
+        assert_eq!(
+            parse_command(&s(&["provider-capabilities", "--check"]))?,
+            Command::ProviderCapabilities { check: true }
+        );
+        for invalid in [
+            vec!["provider-capabilities", "--check", "--check"],
+            vec!["provider-capabilities", "--output", "matrix.json"],
+            vec!["provider-capabilities", "--bogus"],
+            vec!["provider-capabilities", "extra"],
+        ] {
+            let Err(error) = parse_command(&s(&invalid)) else {
+                anyhow::bail!("accepted invalid provider-capabilities argv: {invalid:?}");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("./hack/cargo.sh xtask provider-capabilities [--check]"),
                 "missing dedicated recovery hint for {invalid:?}: {error}"
             );
         }

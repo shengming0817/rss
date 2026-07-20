@@ -74,6 +74,8 @@ cargo xtask layer-deps                                 # source-centric 分层�
 cargo xtask codegen --check                            # 契约 codegen 漂移门
 ./hack/cargo.sh xtask l2-assurance                     # 生成 9 producer + 5 fact 的 L2 assurance inventory
 ./hack/cargo.sh xtask l2-assurance --check             # 只读检查 committed inventory 的逐字节漂移
+./hack/cargo.sh xtask provider-capabilities            # 生成 L2 provider conformance enrollment matrix
+./hack/cargo.sh xtask provider-capabilities --check    # 声明、runner、shard 与 committed matrix 漂移门
 cargo build --workspace                                # 编译全 workspace（分层有环即失败）
 cargo clippy --workspace --all-targets -- -D warnings  # lint（clock 注入 / panic 纪律）
 cargo deny check                                       # 分层禁依赖 + license + advisory
@@ -125,6 +127,35 @@ JSON v3 的紧凑 wire 约定如下；v2 不再读取或双写：
 ./hack/cargo.sh xtask l2-assurance
 ./hack/cargo.sh xtask l2-assurance --check
 ```
+
+`generated/provider-capability-matrix.json` 是 L2 provider conformance 的唯一 committed catalog。
+provider owner 中的 `provider_conformance_catalog!` 是声明单源：sealed tuple 在编译期固定每个
+provider 的适用能力全集与顺序；宏为每项生成 live wrapper，wrapper 只能 await 唯一 canonical
+provider behavior，且没有可伪造的 catalog receipt/mint API。`provider-capabilities --check` 再以
+Rust AST 精确验证 wrapper→behavior 唯一边、能力专属语义锚点与行为摘要、tracked-source 闭集、
+crate-root module/feature 可达性及 typed integration shard 归属。
+矩阵 schema v1 的每条 capability 都携带唯一 `{status: enrolled, carrier}` receipt，不把静态 artifact
+伪装成当前 checkout 的运行结果；只接受
+PostgreSQL 7 项、AMQP 4 项与 S3 3 项共 14 条 enrollment，不读取旧 schema、alias、shim 或双写输出。
+
+受控入口只接受以下两种形态；重复 flag、输出路径、兼容别名和其他参数均拒绝：
+
+```bash
+./hack/cargo.sh xtask provider-capabilities
+./hack/cargo.sh xtask provider-capabilities --check
+```
+
+新 provider / capability enroll 步骤：
+
+1. 在 `crates/testkit/src/eventing_conformance.rs` 扩展闭集枚举、`capabilities()` 与
+   `SealedCompleteSet` exact tuple（macro token 用 snake_case，wire 用 kebab-case）。
+2. 在对应 adapter owner 源文件调用 `provider_conformance_catalog!`，每项指向唯一 canonical
+   behavior；compile-fail 负例放 `crates/testkit/tests/ui/`。
+3. 运行 `./hack/cargo.sh xtask provider-capabilities` 重写矩阵，再用 `--check` 验收。
+4. 通过 typed integration shard 跑该 provider 的 enrollment wrappers（shard 归属由矩阵
+   `carrier.shard` 与 `xtask` integration lane 约束）。
+
+完整语义与不变式见 `docs/rules/eventbus.md` §L2 provider conformance catalog。
 
 工具链由 `rust-toolchain.toml` 钉定（首次进入目录自动安装）。治理工具的版本、安装 backend 与 CI lane
 映射由 adapter catalog 单源维护；查看完整精确版本：

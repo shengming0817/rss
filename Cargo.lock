@@ -5155,6 +5155,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "vocab",
 ]
 
 [[package]]
@@ -6258,6 +6259,7 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tower",
+ "trybuild",
  "url",
  "uuid",
 ]

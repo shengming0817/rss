@@ -728,6 +728,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            ProviderCapabilitiesCheck => (step_provider_capabilities_check, Some("xtask/src/provider_capabilities.rs"),
+                gate(
+                        GateId::ProviderCapabilitiesCheck,
+                        "provider-capabilities-check",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             LocalTxCoverage => (step_localtx_coverage, Some("xtask/src/localtx_coverage.rs"),
                 gate(
                         GateId::LocalTxCoverage,

@@ -38,3 +38,4 @@ integration = ["containers"]
 [dev-dependencies]
 tokio = { workspace = true }                         # harness 自测的 async runtime
 uuid = { workspace = true }                          # 自测：path 参数 newtype（UUID 解析）维度
+trybuild = { workspace = true }                      # provider owner-private receipt compile reds

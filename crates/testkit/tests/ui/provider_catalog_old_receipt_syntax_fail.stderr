@@ -1,0 +1,11 @@
+error: no rules expected `family`
+ --> tests/ui/provider_catalog_old_receipt_syntax_fail.rs:7:5
+  |
+7 |     family: owner::Family,
+  |     ^^^^^^ no rules expected this token in macro call
+  |
+note: while trying to match `error`
+ --> src/eventing_conformance.rs
+  |
+  |         error: $error:ty,
+  |         ^^^^^

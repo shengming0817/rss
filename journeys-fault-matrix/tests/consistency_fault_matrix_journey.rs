@@ -35,8 +35,7 @@ use redis::RedisRuntimeDeps;
 use testkit::crash_matrix::{CrashCase, CrashFaultSpec, CrashMatrix, CrashRunner, CrashStatus};
 use testkit::eventing_conformance::{
     ConsumerDuplicateEffectConformancePassed, ConsumerDuplicateEffectObservation, EventingIds,
-    PublishAmbiguityConformancePassed, PublishAmbiguityObservation, SettleAction,
-    assert_consumer_duplicate_effect_conformance, assert_publish_ambiguity_conformance,
+    SettleAction, assert_consumer_duplicate_effect_conformance,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -115,7 +114,6 @@ struct ConfirmLostCriticalEvidence {
     _first_relay: FaultMatrixSessionCreatedRelayObservation,
     _retry_relay: FaultMatrixSessionCreatedRelayObservation,
     _effect: FaultMatrixSessionCreatedEffectObservation,
-    _publish_conformance: PublishAmbiguityConformancePassed,
     _duplicate_conformance: ConsumerDuplicateEffectConformancePassed,
 }
 
@@ -550,24 +548,6 @@ fn session_created_payload(
     }
 }
 
-async fn wait_for_fresh_generation(
-    publisher: &AmqpPublisher,
-    retired_generation: u64,
-) -> Result<u64> {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(generation) = publisher.transport_generation_for_test()
-                && generation > retired_generation
-            {
-                return generation;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .context("publisher transport replacement timed out")
-}
-
 async fn next_consumer_tx_delivery(
     pg: &PgHarness,
     tenant: vocab::TenantId,
@@ -907,9 +887,6 @@ fn run_outbox_confirm_lost_channel_close<'a>(
                 ),
             )
             .await?;
-            let retired_generation = publisher
-                .transport_generation_for_test()
-                .ok_or_else(|| anyhow!("publisher transport generation unavailable"))?;
             pg.harness
                 .seed_session_created(FaultMatrixSessionCreatedInput::new(
                     session_created_payload(scope.tenant, session_id),
@@ -931,8 +908,9 @@ fn run_outbox_confirm_lost_channel_close<'a>(
             {
                 bail!("confirm-lost first relay did not requeue the same durable event: {first:?}");
             }
-            let retry_generation =
-                wait_for_fresh_generation(publisher.as_ref(), retired_generation).await?;
+            if !publisher.wait_until_publish_ready_for_test().await {
+                bail!("publisher did not become publish-ready after confirm-lost recovery");
+            }
             pg.harness
                 .make_session_created_retry_due(scope.tenant, &event_id)
                 .await?;
@@ -975,24 +953,12 @@ fn run_outbox_confirm_lost_channel_close<'a>(
                 }
                 delivery.acker.settle(AckAction::Ack).await?;
             }
-            let mut delivered_ids = delivered_ids.into_iter();
-            let first_message_id = delivered_ids
-                .next()
-                .ok_or_else(|| anyhow!("confirm-lost first broker delivery missing"))?;
-            let retry_message_id = delivered_ids
-                .next()
-                .ok_or_else(|| anyhow!("confirm-lost retry broker delivery missing"))?;
+            if delivered_ids.as_slice() != [event_id.as_str(), event_id.as_str()] {
+                bail!(
+                    "confirm-lost broker deliveries did not preserve the same durable event id: {delivered_ids:?}"
+                );
+            }
             let ids = EventingIds::new(&event_id, &event_id, &group, "confirm-lost-lease");
-            let publish_conformance = assert_publish_ambiguity_conformance(
-                &ids,
-                &PublishAmbiguityObservation {
-                    first_message_id,
-                    retry_message_id,
-                    transport_deliveries: 2,
-                    retired_generation,
-                    retry_generation,
-                },
-            )?;
             let effect = pg
                 .harness
                 .session_created_effect_observation(scope.tenant, &event_id, &group, session_id)
@@ -1009,7 +975,6 @@ fn run_outbox_confirm_lost_channel_close<'a>(
                 _first_relay: first,
                 _retry_relay: retry,
                 _effect: effect,
-                _publish_conformance: publish_conformance,
                 _duplicate_conformance: duplicate_conformance,
             })
         }

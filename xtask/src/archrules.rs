@@ -781,6 +781,7 @@ fn scan_record_granular_xtask_invariants(
         "xtask/src/localonly_evidence.rs" => LOCALONLY_EVIDENCE_INVARIANT_BINDINGS,
         "xtask/src/assembly_lock.rs" => ASSEMBLY_LOCK_INVARIANT_BINDINGS,
         "xtask/src/l2_assurance.rs" => L2_ASSURANCE_INVARIANT_BINDINGS,
+        "xtask/src/provider_capabilities.rs" => PROVIDER_CAPABILITIES_INVARIANT_BINDINGS,
         "xtask/src/producer_assurance.rs" => PRODUCER_ASSURANCE_INVARIANT_BINDINGS,
         "xtask/src/production_composition.rs" => PRODUCTION_COMPOSITION_INVARIANT_BINDINGS,
         _ => return Ok(false),
@@ -1280,6 +1281,25 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "path escape and symlink synthetic red with real repository carriers",
+        gates: "verify,ci,ci-meta",
+    },
+];
+
+const PROVIDER_CAPABILITIES_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/provider_capabilities.rs",
+        id: "L2-PROVIDER-CAPABILITY-ENROLLMENT-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "exact provider declaration, live runner, owner target, and typed integration shard closure",
+        gates: "verify,ci,ci-meta",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/provider_capabilities.rs",
+        id: "L2-PROVIDER-CAPABILITY-WIRE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "typed schema v1 capability receipts with raw-byte golden drift and no-write synthetic reds",
         gates: "verify,ci,ci-meta",
     },
 ];
@@ -2784,6 +2804,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
     GateDeclaration {
         path: "xtask/src/l2_assurance.rs",
         tokens: "native-compile,verify,ci,ci-meta",
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/provider_capabilities.rs",
+        tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,
     },
     GateDeclaration {

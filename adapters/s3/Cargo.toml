@@ -44,3 +44,4 @@ uuid = { workspace = true, features = ["v4"] }
 # 依赖面（production lib 仍不持 HTTP connector / hyper）。
 aws-sdk-s3 = { workspace = true, features = ["test-util"] }
 testkit = { path = "../../crates/testkit" }
+vocab = { path = "../../crates/vocab" }

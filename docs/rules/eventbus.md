@@ -106,6 +106,31 @@ manifest `emits` 精确相等；任一调用边、注入或 terminal 多义/缺�
 provider/transaction、rollback、commit-unknown、rollback-failed 与 production no-replay carrier，不能
 复用 consumer/relay fault fixture 代替 producer settlement。
 
+### L2 provider conformance catalog
+
+provider-neutral 能力闭集为 `identity / conflict / fencing / budget / commit-ack / ambiguity /
+archive-receipt`。适用子集固定为 PostgreSQL 全 7 项、AMQP 的
+`identity/fencing/budget/ambiguity`、S3 的 `identity/conflict/archive-receipt`；provider 不得以
+`unsupported`、空 runner 或 noop 测试冒充不适用能力。
+
+每个 provider owner 只有一个 `provider_conformance_catalog!` enrollment。宏的 sealed exact tuple
+在编译期拒绝缺失、重复、额外或重排能力，并为每项能力生成唯一 live wrapper。wrapper 直接 await
+唯一 canonical provider behavior，编译期要求精确 `async Result<(), Error>`；catalog 不再提供
+`ReceiptFamily`、`Seal` 或 `mint`，因此不存在 owner 内 alias/macro 绕过的自造证明面。
+
+`cargo xtask provider-capabilities --check` 只扫描系统 Git 枚举的 tracked Rust 闭集，并以有界、
+no-follow 稳定读取验证 wrapper→behavior 唯一边、behavior 非 test/cfg/ignore/`should_panic`、
+能力专属语义锚点与 SHA-256 摘要、owner crate-root module/feature 可达性及 typed integration shard，
+再把精确集合投影为
+`generated/provider-capability-matrix.json` schema v1。
+committed matrix 的 `enrolled` 只表示 CI 有可执行 carrier，不表示测试已运行或通过；实际通过状态只由
+对应 `postgres-domain`、`event-transport`、`object-storage` shard 的运行回执证明。
+
+测试 API 不提供 claim、archive receipt、AMQP channel/connection/generation 的构造或注入入口。
+PostgreSQL claim 与 DLX archive receipt 继续由 owner-private capability 铸造并按值消费；AMQP 的
+generation 只在 adapter owner 内部 ambiguity/fencing carrier 中观察，跨 crate journey 只能等待
+bounded readiness，不能读取或伪造 transport generation。
+
 ### Outbox relay 投递语义（at-least-once）
 
 Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event/message ID 发布；publish 成功、settle 前崩溃允许 broker duplicate，broker confirm 的 ambiguous outcome 也必须按可能已发布处理并重试，不能换 ID 或假定消息尚未到达。

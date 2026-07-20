@@ -983,16 +983,27 @@ impl AmqpPublisher {
         false
     }
 
-    /// Integration evidence seam: exposes only the ready generation, never endpoint/connection/channel.
+    /// Integration-only high-level recovery barrier. It proves only that a publish can take a
+    /// fresh ready snapshot before the publisher's bounded recovery budget expires; generation,
+    /// connection, channel, and any constructible recovery evidence remain adapter-private.
     #[cfg(feature = "integration-test-support")]
-    pub fn transport_generation_for_test(&self) -> Option<u64> {
-        let lifecycle = self.transports.lock().ok()?;
-        match &lifecycle.slot {
-            TransportSlot::Ready { generation, .. } => Some(*generation),
-            TransportSlot::Recovering { .. }
-            | TransportSlot::Unavailable { .. }
-            | TransportSlot::ShuttingDown { .. } => None,
-        }
+    pub async fn wait_until_publish_ready_for_test(&self) -> bool {
+        tokio::time::timeout(self.publish_timeout, async {
+            loop {
+                match self.transport_snapshot() {
+                    Ok(snapshot) => {
+                        drop(snapshot);
+                        return true;
+                    }
+                    Err(
+                        PublisherTransportError::Recovering | PublisherTransportError::Unavailable,
+                    ) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    Err(_) => return false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false)
     }
 }
 
@@ -1530,6 +1541,37 @@ impl ManagedResource for AmqpPublisher {
     }
 }
 
+#[cfg(all(test, feature = "integration"))]
+type ProviderConformanceError = testkit::FixtureError;
+
+#[cfg(all(test, feature = "integration"))]
+testkit::provider_conformance_catalog! {
+    provider: amqp,
+    error: ProviderConformanceError,
+    capabilities: {
+        identity => {
+            #[tokio::test(flavor = "multi_thread")]
+            integration_broker_roundtrip_preserves_message_identity
+                => publisher_transport_replacement_integration_tests::broker_roundtrip_preserves_message_identity_behavior
+        },
+        fencing => {
+            #[tokio::test]
+            publish_pipeline_transport_recovery_is_single_flight_and_generation_fenced
+                => publish_pipeline_red_tests::transport_recovery_is_single_flight_and_generation_fenced_behavior
+        },
+        budget => {
+            #[tokio::test(start_paused = true)]
+            basic_publish_elapsed_time_is_deducted_from_confirm_budget
+                => publish_deadline_tests::elapsed_time_is_deducted_from_confirm_budget_behavior
+        },
+        ambiguity => {
+            #[tokio::test(flavor = "multi_thread")]
+            integration_post_send_close_is_ambiguous_and_allows_same_id_retry
+                => publisher_transport_replacement_integration_tests::post_send_close_is_ambiguous_and_allows_same_id_retry_behavior
+        },
+    }
+}
+
 #[cfg(test)]
 mod classify_tests {
     //! #1212 lapin 错误瞬态/永久分类表驱动：永久错误首投即 DLX，瞬态退避重试。无需真实 broker——
@@ -1873,10 +1915,10 @@ mod publish_deadline_tests {
         assert_eq!(err.timeout_phase(), Some(PublishPhase::Confirm));
     }
 
-    #[tokio::test(start_paused = true)]
     // reason: 若 confirm 错获完整 10s，此 case 会成功；expect_err 锁定第一阶段耗时已扣减。
     #[allow(clippy::expect_used)]
-    async fn basic_publish_elapsed_time_is_deducted_from_confirm_budget() {
+    pub(super) async fn elapsed_time_is_deducted_from_confirm_budget_behavior()
+    -> Result<(), testkit::FixtureError> {
         let err = run_publish_pipeline(
             Duration::from_secs(10),
             async {
@@ -1892,6 +1934,7 @@ mod publish_deadline_tests {
         .expect_err("confirm must only receive the remaining three seconds");
 
         assert_eq!(err.timeout_phase(), Some(PublishPhase::Confirm));
+        Ok(())
     }
 }
 
@@ -2152,10 +2195,10 @@ mod publish_pipeline_red_tests {
         }
     }
 
-    #[test]
     #[allow(clippy::expect_used)]
     // reason: the test must identify the exact generation transition that violated fencing.
-    fn publish_pipeline_transport_recovery_is_single_flight_and_generation_fenced() {
+    pub(super) async fn transport_recovery_is_single_flight_and_generation_fenced_behavior()
+    -> Result<(), testkit::FixtureError> {
         let retired = transport("connection-0", "confirm-0");
         let replacement = transport("connection-1", "confirm-1");
         let mut slot = TransportSlot::ready(retired.clone());
@@ -2197,6 +2240,7 @@ mod publish_pipeline_red_tests {
             1,
             "dropping a stale-generation permit must not affect replacement admission"
         );
+        Ok(())
     }
 
     #[tokio::test(start_paused = true)]
@@ -2633,16 +2677,54 @@ mod publisher_transport_replacement_integration_tests {
     use lapin::options::{BasicGetOptions, QueueDeclareOptions};
     use lapin::types::FieldTable;
     use testkit::FixtureError;
-    use testkit::eventing_conformance::{
-        EventingIds, PublishAmbiguityObservation, assert_publish_ambiguity_conformance,
-    };
     use tokio_util::sync::CancellationToken;
 
     use super::AmqpPublisher;
     use crate::AmqpSubscriber;
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn integration_post_send_close_is_ambiguous_and_allows_same_id_retry()
+    pub(super) async fn broker_roundtrip_preserves_message_identity_behavior()
+    -> Result<(), FixtureError> {
+        let rmq = testkit::env_or_rabbitmq().await?;
+        let url = rmq.vhost_url("rss_publisher_identity_roundtrip").await?;
+        let endpoint =
+            secure::AmqpEndpoint::parse(&url, secure::PlaintextEndpointPolicy::AllowLoopback)?;
+        let publisher =
+            AmqpPublisher::connect(&endpoint, "amqp-it-identity-pub", Duration::from_secs(6))
+                .await?;
+        let subscriber = AmqpSubscriber::connect(&endpoint, "amqp-it-identity-sub").await?;
+        let topic = Topic::new("rss.it.publisher.identity");
+        let token = CancellationToken::new();
+        let mut deliveries = subscriber
+            .subscribe_ackable(topic.clone(), token.clone())
+            .await?;
+        let event_id = MessageId::new("evt-publisher-identity-roundtrip-1");
+
+        publisher
+            .publish(PublishRequest::new(
+                topic,
+                event_id.clone(),
+                b"identity-roundtrip".to_vec(),
+            ))
+            .await?;
+        let delivery = tokio::time::timeout(Duration::from_secs(5), deliveries.next())
+            .await?
+            .ok_or_else(|| anyhow!("identity roundtrip delivery missing"))?;
+        assert_eq!(delivery.message.id, event_id);
+        delivery
+            .acker
+            .settle(AckAction::Ack)
+            .await
+            .map_err(|error| anyhow!("identity roundtrip ack failed: {error}"))?;
+
+        token.cancel();
+        AckableSubscriber::shutdown(&subscriber).await?;
+        Publisher::shutdown(&publisher).await?;
+        ManagedResource::shutdown(&publisher).await?;
+        Ok(())
+    }
+
+    #[allow(clippy::cognitive_complexity)]
+    pub(super) async fn post_send_close_is_ambiguous_and_allows_same_id_retry_behavior()
     -> Result<(), FixtureError> {
         let rmq = testkit::env_or_rabbitmq().await?;
         let url = rmq.vhost_url("rss_confirm_rotation").await?;
@@ -2701,7 +2783,11 @@ mod publisher_transport_replacement_integration_tests {
         drop(replacement);
 
         publisher
-            .publish(PublishRequest::new(topic, event_id, b"same-id".to_vec()))
+            .publish(PublishRequest::new(
+                topic,
+                event_id.clone(),
+                b"same-id".to_vec(),
+            ))
             .await?;
 
         let mut delivered_ids = Vec::with_capacity(2);
@@ -2716,30 +2802,15 @@ mod publisher_transport_replacement_integration_tests {
                 .await
                 .map_err(|error| anyhow!("same-ID delivery ack failed: {error}"))?;
         }
-        let ids = EventingIds::new(
-            "evt-confirm-timeout-retry-1",
-            "amqp-transport-only",
-            "amqp-transport-only",
-            "amqp-transport-only",
+        assert_eq!(
+            delivered_ids,
+            vec![event_id.as_str().to_string(), event_id.as_str().to_string()],
+            "ambiguous attempt and retry must produce two broker-visible deliveries with the original message id"
         );
-        let transport_deliveries = delivered_ids.len() as u64;
-        let mut delivered_ids = delivered_ids.into_iter();
-        let first_message_id = delivered_ids
-            .next()
-            .ok_or_else(|| anyhow!("ambiguous attempt delivery id missing"))?;
-        let retry_message_id = delivered_ids
-            .next()
-            .ok_or_else(|| anyhow!("retry delivery id missing"))?;
-        assert_publish_ambiguity_conformance(
-            &ids,
-            &PublishAmbiguityObservation {
-                first_message_id,
-                retry_message_id,
-                transport_deliveries,
-                retired_generation: before_generation,
-                retry_generation: replacement_generation,
-            },
-        )?;
+        assert!(
+            replacement_generation > before_generation,
+            "ambiguous generation must be retired before same-id retry"
+        );
 
         token.cancel();
         AckableSubscriber::shutdown(&subscriber).await?;

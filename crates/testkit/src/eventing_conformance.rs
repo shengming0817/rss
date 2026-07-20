@@ -6,9 +6,273 @@
 //! 不替代生产 API 的类型层 Hard 约束。
 //!
 //! ref: serverlesstechnology/cqrs persistence/postgres-es/src/event_repository.rs@d6bc03ca1cd7a6538fedb51fd4c592126527a3c0
+//! INVARIANT: L2-PROVIDER-CATALOG-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed provider/capability enums and exact tuples reject enrollment drift; macro-generated wrappers require the canonical behavior to be a zero-argument async Result<(), Error>, with no receipt/mint API to forge" }.
 
 use std::future::Future;
 use std::pin::Pin;
+
+/// Durable L2 providers covered by the conformance catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProviderId {
+    /// PostgreSQL durable state and transaction provider.
+    Postgres,
+    /// AMQP publisher/subscriber provider.
+    Amqp,
+    /// S3 verified WORM archive provider.
+    S3,
+}
+
+impl ProviderId {
+    /// Closed provider universe.
+    pub const ALL: [Self; 3] = [Self::Postgres, Self::Amqp, Self::S3];
+
+    /// Stable wire identifier.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+            Self::Amqp => "amqp",
+            Self::S3 => "s3",
+        }
+    }
+
+    /// Exact capability subset applicable to this provider.
+    pub const fn capabilities(self) -> &'static [CapabilityId] {
+        match self {
+            Self::Postgres => &CapabilityId::ALL,
+            Self::Amqp => &[
+                CapabilityId::Identity,
+                CapabilityId::Fencing,
+                CapabilityId::Budget,
+                CapabilityId::Ambiguity,
+            ],
+            Self::S3 => &[
+                CapabilityId::Identity,
+                CapabilityId::Conflict,
+                CapabilityId::ArchiveReceipt,
+            ],
+        }
+    }
+}
+
+/// Closed provider-neutral L2 behavior taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CapabilityId {
+    /// Stable durable identity survives retries and transport boundaries.
+    Identity,
+    /// Same identity with different stable facts is rejected.
+    Conflict,
+    /// Stale ownership or a retired transport generation cannot settle new work.
+    Fencing,
+    /// A single deadline/lease budget is shared across provider stages, and an insufficient
+    /// preflight remainder performs no external I/O.
+    Budget,
+    /// Broker acknowledgement follows durable commit.
+    CommitAck,
+    /// A possibly accepted publish keeps the same identity and retires its transport.
+    Ambiguity,
+    /// Immutable archive verification produces the only purge-authorizing receipt.
+    ArchiveReceipt,
+}
+
+impl CapabilityId {
+    /// Closed capability universe in canonical output order.
+    pub const ALL: [Self; 7] = [
+        Self::Identity,
+        Self::Conflict,
+        Self::Fencing,
+        Self::Budget,
+        Self::CommitAck,
+        Self::Ambiguity,
+        Self::ArchiveReceipt,
+    ];
+
+    /// Stable wire identifier.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Conflict => "conflict",
+            Self::Fencing => "fencing",
+            Self::Budget => "budget",
+            Self::CommitAck => "commit-ack",
+            Self::Ambiguity => "ambiguity",
+            Self::ArchiveReceipt => "archive-receipt",
+        }
+    }
+}
+
+/// Macro implementation types. They are public only because exported macros expand in adapter
+/// crates; the sealed trait prevents external implementations.
+#[doc(hidden)]
+pub mod __catalog {
+    /// PostgreSQL provider marker.
+    pub enum Postgres {}
+    /// AMQP provider marker.
+    pub enum Amqp {}
+    /// S3 provider marker.
+    pub enum S3 {}
+
+    /// Stable identity capability marker.
+    pub enum Identity {}
+    /// Stable fact conflict capability marker.
+    pub enum Conflict {}
+    /// Ownership fencing capability marker.
+    pub enum Fencing {}
+    /// Deadline/lease budget capability marker.
+    pub enum Budget {}
+    /// Commit-before-ack capability marker.
+    pub enum CommitAck {}
+    /// Ambiguous publish capability marker.
+    pub enum Ambiguity {}
+    /// Verified archive receipt capability marker.
+    pub enum ArchiveReceipt {}
+
+    mod private {
+        pub trait SealedCompleteSet<Provider> {}
+
+        impl SealedCompleteSet<super::Postgres>
+            for (
+                super::Identity,
+                super::Conflict,
+                super::Fencing,
+                super::Budget,
+                super::CommitAck,
+                super::Ambiguity,
+                super::ArchiveReceipt,
+            )
+        {
+        }
+
+        impl SealedCompleteSet<super::Amqp>
+            for (
+                super::Identity,
+                super::Fencing,
+                super::Budget,
+                super::Ambiguity,
+            )
+        {
+        }
+
+        impl SealedCompleteSet<super::S3> for (super::Identity, super::Conflict, super::ArchiveReceipt) {}
+    }
+
+    /// Sealed proof that a tuple is the exact applicable capability set for one provider.
+    pub trait CompleteSet<Provider>: private::SealedCompleteSet<Provider> {}
+
+    impl<Provider, Set> CompleteSet<Provider> for Set where Set: private::SealedCompleteSet<Provider> {}
+
+    /// Compile-time enrollment assertion used by [`crate::provider_conformance_catalog!`].
+    pub fn assert_complete<Provider, Set>()
+    where
+        Set: CompleteSet<Provider>,
+    {
+    }
+
+    /// Compile-time assertion that a zero-argument async behavior returns the declared error type.
+    pub fn assert_async_behavior<Behavior, BehaviorFuture, Error>(_behavior: Behavior)
+    where
+        Behavior: FnOnce() -> BehaviorFuture,
+        BehaviorFuture: std::future::Future<Output = Result<(), Error>>,
+    {
+    }
+}
+
+/// Atomically defines and enrolls one provider's exact live test wrappers.
+///
+/// The capability tuple must exactly match [`ProviderId::capabilities`]; unsupported, missing,
+/// duplicate, or reordered entries do not satisfy the sealed [`__catalog::CompleteSet`] bound.
+/// Every wrapper is generated here and awaits exactly one canonical provider behavior. The
+/// repository drift gate validates the wrapper attributes, the unique capability-to-behavior
+/// edge, the behavior's semantic anchors, and its test-binary reachability before projecting the
+/// declaration into the committed capability matrix. There is deliberately no public or
+/// owner-local catalog receipt/mint API to forge.
+///
+/// # Capability tokens
+///
+/// Macro enrollment keys are **snake_case Rust idents**. Wire / matrix labels remain **kebab-case**
+/// (`CapabilityId::as_str`). Keep this table next to `docs/rules/eventbus.md` when adding a
+/// capability:
+///
+/// | macro token (`snake`) | wire (`kebab`) |
+/// |-----------------------|----------------|
+/// | `identity` | `identity` |
+/// | `conflict` | `conflict` |
+/// | `fencing` | `fencing` |
+/// | `budget` | `budget` |
+/// | `commit_ack` | `commit-ack` |
+/// | `ambiguity` | `ambiguity` |
+/// | `archive_receipt` | `archive-receipt` |
+#[macro_export]
+macro_rules! provider_conformance_catalog {
+    (@provider postgres) => {
+        $crate::eventing_conformance::__catalog::Postgres
+    };
+    (@provider amqp) => {
+        $crate::eventing_conformance::__catalog::Amqp
+    };
+    (@provider s3) => {
+        $crate::eventing_conformance::__catalog::S3
+    };
+    (@capability identity) => {
+        $crate::eventing_conformance::__catalog::Identity
+    };
+    (@capability conflict) => {
+        $crate::eventing_conformance::__catalog::Conflict
+    };
+    (@capability fencing) => {
+        $crate::eventing_conformance::__catalog::Fencing
+    };
+    (@capability budget) => {
+        $crate::eventing_conformance::__catalog::Budget
+    };
+    (@capability commit_ack) => {
+        $crate::eventing_conformance::__catalog::CommitAck
+    };
+    (@capability ambiguity) => {
+        $crate::eventing_conformance::__catalog::Ambiguity
+    };
+    (@capability archive_receipt) => {
+        $crate::eventing_conformance::__catalog::ArchiveReceipt
+    };
+    (
+        provider: $provider:ident,
+        error: $error:ty,
+        capabilities: {
+            $(
+                $capability:ident => {
+                    $(#[$test_attr:meta])*
+                    $runner:ident => $behavior:path
+                }
+            ),+ $(,)?
+        }
+    ) => {
+        const _: () = {
+            #[allow(dead_code)]
+            fn __rss_provider_conformance_catalog_compile_guard() {
+                $crate::eventing_conformance::__catalog::assert_complete::<
+                    $crate::provider_conformance_catalog!(@provider $provider),
+                    (
+                        $(
+                            $crate::provider_conformance_catalog!(@capability $capability),
+                        )+
+                    ),
+                >();
+                $(
+                    $crate::eventing_conformance::__catalog::assert_async_behavior::<
+                        _,
+                        _,
+                        $error,
+                    >($behavior);
+                )+
+            }
+        };
+        $(
+            $(#[$test_attr])*
+            async fn $runner() -> ::core::result::Result<(), $error> {
+                $behavior().await
+            }
+        )+
+    };
+}
 
 type CaseFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + 'a>>;
 type OutboxSeedFn<'a> = Box<dyn FnMut(OutboxSeedArgs) -> CaseFuture<'a, ()> + 'a>;
@@ -327,62 +591,6 @@ pub struct RelayObservation {
     /// Broker-visible message id. This should equal the outbox event id.
     pub message_id: Option<String>,
     pub publish_count: u64,
-}
-
-/// Provider-neutral evidence for an ambiguous publish followed by a retry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublishAmbiguityObservation {
-    /// Broker-visible message id used by the attempt whose outcome was ambiguous.
-    pub first_message_id: String,
-    /// Broker-visible message id used by the retry.
-    pub retry_message_id: String,
-    /// Number of broker-visible deliveries produced by the two attempts.
-    pub transport_deliveries: u64,
-    /// Generation retired after the ambiguous outcome.
-    pub retired_generation: u64,
-    /// Generation used by the retry.
-    pub retry_generation: u64,
-}
-
-/// Unforgeable evidence that the publish-ambiguity conformance assertion passed.
-#[derive(Debug)]
-pub struct PublishAmbiguityConformancePassed {
-    _private: (),
-}
-
-/// Assert same-id retry, visible duplication, and retirement of the ambiguous generation.
-pub fn assert_publish_ambiguity_conformance(
-    ids: &EventingIds,
-    observation: &PublishAmbiguityObservation,
-) -> Result<PublishAmbiguityConformancePassed, EventingConformanceError> {
-    expect(
-        "publish.ambiguity.same-id",
-        ids,
-        observation.first_message_id == ids.event_id
-            && observation.retry_message_id == ids.event_id,
-        "both publish attempts use the original event id",
-        format!(
-            "first_message_id={:?} retry_message_id={:?}",
-            observation.first_message_id, observation.retry_message_id
-        ),
-    )?;
-    expect_eq(
-        "publish.ambiguity.transport-duplicate",
-        ids,
-        observation.transport_deliveries,
-        2,
-    )?;
-    expect(
-        "publish.ambiguity.fresh-generation",
-        ids,
-        observation.retry_generation > observation.retired_generation,
-        "retry_generation > retired_generation",
-        format!(
-            "retired_generation={} retry_generation={}",
-            observation.retired_generation, observation.retry_generation
-        ),
-    )?;
-    Ok(PublishAmbiguityConformancePassed { _private: () })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1315,11 +1523,10 @@ mod tests {
         BacklogSample, ConsumerConformanceCase, ConsumerDuplicateEffectObservation,
         ConsumerObservation, ConsumerTxPolicyObservation, DlxFields, DomainArgs, EventIdArgs,
         EventingConformanceError, EventingIds, OutboxRelayArgs, OutboxRelayCase, OutboxSeedArgs,
-        OutboxState, OutboxStatus, OutboxTerminalArgs, PublishAmbiguityObservation, PublishMode,
-        RelayDisposition, RelayObservation, SettleAction, TerminalStatus,
-        assert_consumer_conformance, assert_consumer_duplicate_effect_conformance,
-        assert_consumer_tx_policy_conformance, assert_outbox_relay_conformance,
-        assert_publish_ambiguity_conformance,
+        OutboxState, OutboxStatus, OutboxTerminalArgs, PublishMode, RelayDisposition,
+        RelayObservation, SettleAction, TerminalStatus, assert_consumer_conformance,
+        assert_consumer_duplicate_effect_conformance, assert_consumer_tx_policy_conformance,
+        assert_outbox_relay_conformance,
     };
 
     fn ids() -> EventingIds {
@@ -1512,16 +1719,6 @@ mod tests {
         );
     }
 
-    fn publish_ambiguity_observation() -> PublishAmbiguityObservation {
-        PublishAmbiguityObservation {
-            first_message_id: "evt-1".to_string(),
-            retry_message_id: "evt-1".to_string(),
-            transport_deliveries: 2,
-            retired_generation: 7,
-            retry_generation: 8,
-        }
-    }
-
     fn consumer_duplicate_effect_observation() -> ConsumerDuplicateEffectObservation {
         ConsumerDuplicateEffectObservation {
             business_mutations: 1,
@@ -1615,65 +1812,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_ambiguity_conformance_accepts_same_id_duplicate_on_fresh_generation()
-    -> Result<(), EventingConformanceError> {
-        assert_publish_ambiguity_conformance(&ids(), &publish_ambiguity_observation())?;
-        Ok(())
-    }
-
-    #[test]
-    fn publish_ambiguity_conformance_catches_changed_retry_id() {
-        let mut observation = publish_ambiguity_observation();
-        observation.retry_message_id = "evt-replacement".to_string();
-
-        let result = assert_publish_ambiguity_conformance(&ids(), &observation);
-
-        assert!(
-            matches!(
-                result,
-                Err(EventingConformanceError::Mismatch(ref detail))
-                    if detail.stage == "publish.ambiguity.same-id"
-            ),
-            "changed retry id must fail, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn publish_ambiguity_conformance_catches_missing_transport_duplicate() {
-        let mut observation = publish_ambiguity_observation();
-        observation.transport_deliveries = 1;
-
-        let result = assert_publish_ambiguity_conformance(&ids(), &observation);
-
-        assert!(
-            matches!(
-                result,
-                Err(EventingConformanceError::Mismatch(ref detail))
-                    if detail.stage == "publish.ambiguity.transport-duplicate"
-            ),
-            "missing transport duplicate must fail, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn publish_ambiguity_conformance_catches_retired_generation_reuse() {
-        let mut observation = publish_ambiguity_observation();
-        observation.retry_generation = observation.retired_generation;
-
-        let result = assert_publish_ambiguity_conformance(&ids(), &observation);
-
-        assert!(
-            matches!(
-                result,
-                Err(EventingConformanceError::Mismatch(ref detail))
-                    if detail.stage == "publish.ambiguity.fresh-generation"
-            ),
-            "retired generation reuse must fail, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn publish_ambiguity_conformance_accepts_single_consumer_effect()
+    fn consumer_duplicate_effect_conformance_accepts_single_effect()
     -> Result<(), EventingConformanceError> {
         assert_consumer_duplicate_effect_conformance(
             &ids(),
@@ -1683,7 +1822,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_ambiguity_conformance_catches_duplicate_business_mutation() {
+    fn consumer_duplicate_effect_conformance_catches_duplicate_business_mutation() {
         let mut observation = consumer_duplicate_effect_observation();
         observation.business_mutations = 2;
 
@@ -1700,7 +1839,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_ambiguity_conformance_catches_wrong_inbox_done_count() {
+    fn consumer_duplicate_effect_conformance_catches_wrong_inbox_done_count() {
         for inbox_done_rows in [0, 2] {
             let mut observation = consumer_duplicate_effect_observation();
             observation.inbox_done_rows = inbox_done_rows;
@@ -1719,7 +1858,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_ambiguity_conformance_catches_unacked_duplicate() {
+    fn consumer_duplicate_effect_conformance_catches_unacked_duplicate() {
         for duplicate_settle in [SettleAction::Requeue, SettleAction::Reject] {
             let mut observation = consumer_duplicate_effect_observation();
             observation.duplicate_settle = duplicate_settle;

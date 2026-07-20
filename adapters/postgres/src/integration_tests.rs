@@ -39,6 +39,48 @@ use crate::{
 type TestError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult = Result<(), TestError>;
 
+testkit::provider_conformance_catalog! {
+    provider: postgres,
+    error: TestError,
+    capabilities: {
+        identity => {
+            #[tokio::test(flavor = "multi_thread")]
+            eventing_conformance_outbox_enrolls_postgres
+                => eventing_conformance_outbox_behavior
+        },
+        conflict => {
+            #[tokio::test(flavor = "multi_thread")]
+            outbox_append_distinguishes_same_fact_from_conflict
+                => outbox_append_distinguishes_same_fact_from_conflict_behavior
+        },
+        fencing => {
+            #[tokio::test(flavor = "multi_thread")]
+            t9_settle_rejects_stale_lease_token
+                => settle_rejects_stale_lease_token_behavior
+        },
+        budget => {
+            #[tokio::test(flavor = "multi_thread")]
+            insufficient_preflight_budget_never_calls_publisher
+                => insufficient_preflight_budget_never_calls_publisher_behavior
+        },
+        commit_ack => {
+            #[tokio::test(flavor = "multi_thread")]
+            postgres_consumer_commits_before_ack_and_never_acks_uncommitted
+                => postgres_consumer_commit_ack_behavior
+        },
+        ambiguity => {
+            #[tokio::test(flavor = "multi_thread")]
+            t4b_relay_ambiguous_retries_with_the_original_event_id
+                => relay_ambiguous_retries_with_original_event_id_behavior
+        },
+        archive_receipt => {
+            #[tokio::test(flavor = "multi_thread")]
+            t_dlx_verified_receipt_concurrent_cas_is_single_winner
+                => dlx_verified_receipt_concurrent_cas_behavior
+        },
+    }
+}
+
 const TEST_APP_ROLE: &str = "rss_app";
 const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
 const TEST_READ_ROLE: &str = "rss_app_read";
@@ -7405,8 +7447,7 @@ async fn assert_seed_fact_unchanged(
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn outbox_append_distinguishes_same_fact_from_conflict() -> TestResult {
+async fn outbox_append_distinguishes_same_fact_from_conflict_behavior() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
     let event_id = unique_event_id("outbox-fact-conflict");
@@ -9045,8 +9086,7 @@ async fn conf_seed_terminal(
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn eventing_conformance_outbox_enrolls_postgres() -> TestResult {
+async fn eventing_conformance_outbox_behavior() -> TestResult {
     let _sweep_guard = OUTBOX_SWEEP_TEST_LOCK.lock().await;
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
@@ -9429,6 +9469,57 @@ impl ConformanceAcker {
                 many.len()
             )),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommitAckAtSettle {
+    committed: bool,
+    action: AckAction,
+}
+
+struct CommitObservingAcker {
+    pool: sqlx::PgPool,
+    event_id: String,
+    consumer_group: String,
+    observations: Arc<Mutex<Vec<CommitAckAtSettle>>>,
+}
+
+impl CommitObservingAcker {
+    fn observe(
+        store: &PgStore,
+        event_id: String,
+        consumer_group: String,
+    ) -> (Arc<Mutex<Vec<CommitAckAtSettle>>>, Box<DynAcker<'static>>) {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let acker = Self {
+            pool: store.pool.clone(),
+            event_id,
+            consumer_group,
+            observations: Arc::clone(&observations),
+        };
+        (observations, DynAcker::new_box(acker))
+    }
+}
+
+impl Acker for CommitObservingAcker {
+    async fn settle(&self, action: AckAction) -> Result<(), diport::AckError> {
+        let committed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM inbox_receipts \
+             WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3 \
+             AND status = 'done')",
+        )
+        .bind(test_tenant().to_string())
+        .bind(&self.event_id)
+        .bind(&self.consumer_group)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(diport::AckError::new)?;
+        self.observations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(CommitAckAtSettle { committed, action });
+        Ok(())
     }
 }
 
@@ -9836,6 +9927,86 @@ async fn eventing_conformance_consumer_enrolls_postgres() -> TestResult {
     Ok(())
 }
 
+async fn postgres_consumer_commit_ack_behavior() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let group = unique_domain("provider-commit-ack-group");
+
+    let committed_event = unique_event_id("provider-commit-before-ack");
+    let (committed_observations, committed_acker) =
+        CommitObservingAcker::observe(&store, committed_event.clone(), group.clone());
+    let committed_message = Message::new_with_metadata(
+        &committed_event,
+        b"provider-commit-before-ack".to_vec(),
+        conf_consumer_metadata(&committed_event),
+    );
+    run_consumer_ackable(
+        Box::pin(futures::stream::iter(vec![Delivery::new(
+            committed_message,
+            committed_acker,
+        )])),
+        Arc::new(store.inbox()),
+        DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
+        conf_consumer_meta(&group),
+        conf_ack_handler(Arc::new(AtomicU32::new(0))),
+        conf_lease_cfg(),
+    )
+    .await;
+
+    let uncommitted_event = unique_event_id("provider-uncommitted-non-ack");
+    let (uncommitted_observations, uncommitted_acker) =
+        CommitObservingAcker::observe(&store, uncommitted_event.clone(), group.clone());
+    let uncommitted_message = Message::new_with_metadata(
+        &uncommitted_event,
+        b"provider-uncommitted-non-ack".to_vec(),
+        conf_consumer_metadata(&uncommitted_event),
+    );
+    run_consumer_ackable(
+        Box::pin(futures::stream::iter(vec![Delivery::new(
+            uncommitted_message,
+            uncommitted_acker,
+        )])),
+        Arc::new(store.inbox()),
+        DynDeadLetterStore::new_box(FailingDlx::new(Arc::new(Mutex::new(None)))),
+        conf_consumer_meta(&group),
+        conf_requeue_handler(Arc::new(AtomicU32::new(0))),
+        conf_lease_cfg(),
+    )
+    .await;
+
+    let committed = committed_observations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let uncommitted = uncommitted_observations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    assert_eq!(
+        committed,
+        vec![CommitAckAtSettle {
+            committed: true,
+            action: AckAction::Ack,
+        }],
+        "broker Ack must observe the durable inbox commit"
+    );
+    assert!(
+        uncommitted
+            .iter()
+            .any(|observation| !observation.committed && observation.action != AckAction::Ack),
+        "an uncommitted delivery must reach a non-Ack settlement"
+    );
+    assert!(
+        uncommitted
+            .iter()
+            .all(|observation| observation.committed || observation.action != AckAction::Ack),
+        "broker Ack was attempted without a durable inbox commit"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 // ── T1: INVARIANT OUTBOX-ATOMIC-IDEM-01：回滚→无 entry ──────────────────────
 
 /// INVARIANT: OUTBOX-ATOMIC-IDEM-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
@@ -10061,8 +10232,8 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
 
 // ── T4b: ambiguous relay 保持 event ID 重试 ───────────────────────────────────
 
-#[tokio::test(flavor = "multi_thread")]
-async fn t4b_relay_ambiguous_retries_with_the_original_event_id() -> TestResult {
+#[allow(clippy::cognitive_complexity)]
+async fn relay_ambiguous_retries_with_original_event_id_behavior() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
@@ -10801,8 +10972,7 @@ async fn relay_budget_sql_boundary_is_fail_closed_and_claim_uses_configured_ttl(
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn insufficient_preflight_budget_never_calls_publisher() -> TestResult {
+async fn insufficient_preflight_budget_never_calls_publisher_behavior() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
     let budget = RelayBudget::new(
@@ -13187,10 +13357,9 @@ async fn t_dlx_receipt_retention_boundary_and_hot_row_rearchive_recovery() -> Te
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: integration fixture uses a known-valid tenant UUID.
-async fn t_dlx_verified_receipt_concurrent_cas_is_single_winner() -> TestResult {
+async fn dlx_verified_receipt_concurrent_cas_behavior() -> TestResult {
     use diport::{
         DeadLetterProvenance, DeadLetterRecord, DeadLetterStore, DeadLetterSummary,
         EnvelopeMetadata,
@@ -15330,8 +15499,8 @@ async fn expired_outbox_compensation_requires_published_causation_and_resolution
 //
 // spec data-model §outbox 强制「CAS：status 转移以 lease_token 比对（防并发双发）」。
 
-#[tokio::test(flavor = "multi_thread")]
-async fn t9_settle_rejects_stale_lease_token() -> TestResult {
+#[allow(clippy::cognitive_complexity)]
+async fn settle_rejects_stale_lease_token_behavior() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 

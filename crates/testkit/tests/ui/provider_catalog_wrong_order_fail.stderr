@@ -1,0 +1,27 @@
+error[E0277]: the trait bound `(testkit::eventing_conformance::__catalog::Conflict, testkit::eventing_conformance::__catalog::Identity, testkit::eventing_conformance::__catalog::ArchiveReceipt): testkit::eventing_conformance::__catalog::CompleteSet<testkit::eventing_conformance::__catalog::S3>` is not satisfied
+  --> tests/ui/provider_catalog_wrong_order_fail.rs:5:1
+   |
+ 5 | / testkit::provider_conformance_catalog! {
+ 6 | |     provider: s3,
+ 7 | |     error: (),
+ 8 | |     capabilities: {
+...  |
+13 | | }
+   | |_^ unsatisfied trait bound
+   |
+   = help: the trait `testkit::eventing_conformance::__catalog::private::SealedCompleteSet<testkit::eventing_conformance::__catalog::S3>` is not implemented for `(testkit::eventing_conformance::__catalog::Conflict, testkit::eventing_conformance::__catalog::Identity, testkit::eventing_conformance::__catalog::ArchiveReceipt)`
+help: the trait `testkit::eventing_conformance::__catalog::private::SealedCompleteSet<testkit::eventing_conformance::__catalog::S3>` is implemented for `(testkit::eventing_conformance::__catalog::Identity, testkit::eventing_conformance::__catalog::Conflict, testkit::eventing_conformance::__catalog::ArchiveReceipt)`
+  --> src/eventing_conformance.rs
+   |
+   |         impl SealedCompleteSet<super::S3> for (super::Identity, super::Conflict, super::ArchiveReceipt) {}
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: required for `(testkit::eventing_conformance::__catalog::Conflict, testkit::eventing_conformance::__catalog::Identity, testkit::eventing_conformance::__catalog::ArchiveReceipt)` to implement `testkit::eventing_conformance::__catalog::CompleteSet<testkit::eventing_conformance::__catalog::S3>`
+note: required by a bound in `testkit::eventing_conformance::__catalog::assert_complete`
+  --> src/eventing_conformance.rs
+   |
+   |     pub fn assert_complete<Provider, Set>()
+   |            --------------- required by a bound in this function
+   |     where
+   |         Set: CompleteSet<Provider>,
+   |              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_complete`
+   = note: this error originates in the macro `testkit::provider_conformance_catalog` (in Nightly builds, run with -Z macro-backtrace for more info)

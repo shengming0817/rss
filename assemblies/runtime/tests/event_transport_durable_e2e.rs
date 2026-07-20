@@ -1034,16 +1034,14 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // ── 步骤 11：断言 B（Ambiguous + PG inbox 幂等去重）──────────────────────────────────────
 
     // integration-only barrier 在真实 basic_publish frame write 完成后、poll confirm 前关闭该 snapshot 的
-    // connection。调用方必须看到 Ambiguous；旧 generation 整体退休，随后只允许 fresh generation 用原 ID
-    // 重试。tracer 使用不同 event/session ID：单 queue 单 consumer FIFO 下 tracer 被 audit，正向证明前面的
-    // same-ID duplicate 已被消费并 Ack；原 session audit count 仍为 1 才证明 ConsumerTx 未重复业务写。
+    // connection。调用方必须看到 Ambiguous；generation fencing 只由 AMQP owner-private carrier 观察，
+    // 跨 crate e2e 只等待 bounded publish readiness 后以原 ID 重试。tracer 使用不同 event/session ID：
+    // 单 queue 单 consumer FIFO 下 tracer 被 audit，正向证明前面的 same-ID duplicate 已被消费并 Ack；
+    // 原 session audit count 仍为 1 才证明 ConsumerTx 未重复业务写。
     let redeliver_endpoint = amqp_endpoint(&vhost_url)?;
     let pubr =
         amqp::AmqpPublisher::connect(&redeliver_endpoint, "e2e-redeliver", TEST_PUBLISH_TIMEOUT)
             .await?;
-    let retired_generation = pubr
-        .transport_generation_for_test()
-        .context("publisher must start Ready")?;
     pubr.inject_post_send_connection_close_once();
     let ambiguous = match pubr
         .publish(
@@ -1071,23 +1069,9 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "post-send close must be retryable Ambiguous"
     );
 
-    let retry_generation = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(generation) = pubr.transport_generation_for_test()
-                && generation > retired_generation
-            {
-                break generation;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!("AMQP publisher transport 未在 20s 内完成 generation replacement")
-    })?;
     assert!(
-        retry_generation > retired_generation,
-        "Ambiguous 后重试必须使用 fresh transport generation"
+        pubr.wait_until_publish_ready_for_test().await,
+        "AMQP publisher transport 未在 bounded recovery budget 内恢复 publish readiness"
     );
 
     pubr.publish(

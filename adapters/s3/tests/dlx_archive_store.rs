@@ -636,35 +636,6 @@ async fn verified_put_maps_provider_failure_to_transient() {
 }
 
 #[tokio::test]
-async fn verified_get_validates_checksum_and_restores_key_ref() {
-    let rules = ProbeRules::healthy();
-    let body = b"existing-ciphertext";
-    let get = mock!(aws_sdk_s3::Client::get_object)
-        .match_requests(|request| request.version_id() == Some(VERSION_ID))
-        .then_output(|| {
-            GetObjectOutput::builder()
-                .body(ByteStream::from_static(body))
-                .checksum_sha256(checksum_header(body))
-                .version_id(VERSION_ID)
-                .metadata("rss-dlx-key-ref", "dlx-archive:7")
-                .build()
-        });
-    let mut refs = rules.refs();
-    refs.push(&get);
-    let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
-
-    let result = store
-        .get_ciphertext(&object_key(), &archive_version_id())
-        .await;
-    assert!(matches!(
-        result,
-        Ok(Some(ref ciphertext))
-            if ciphertext.ciphertext().as_bytes() == body
-                && ciphertext.key_ref().to_token() == "dlx-archive:7"
-    ));
-}
-
-#[tokio::test]
 async fn verified_get_rejects_checksum_mismatch_as_invariant() {
     let rules = ProbeRules::healthy();
     let get = mock!(aws_sdk_s3::Client::get_object).then_output(|| {
@@ -718,6 +689,444 @@ async fn verified_get_maps_no_such_key_to_none() {
             .await,
         Ok(None)
     ));
+}
+
+testkit::provider_conformance_catalog! {
+    provider: s3,
+    error: provider_conformance_cases::CaseError,
+    capabilities: {
+        identity => {
+            #[tokio::test]
+            verified_get_validates_checksum_and_restores_key_ref
+                => provider_conformance_cases::identity
+        },
+        conflict => {
+            #[tokio::test]
+            lifecycle_rejects_same_identity_with_different_canonical_facts
+                => provider_conformance_cases::conflict
+        },
+        archive_receipt => {
+            #[tokio::test]
+            lifecycle_records_opaque_verified_receipt_before_purge
+                => provider_conformance_cases::archive_receipt
+        },
+    }
+}
+
+mod provider_conformance_cases {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use aws_sdk_s3::operation::get_object::GetObjectOutput;
+    use aws_sdk_s3::operation::head_object::HeadObjectOutput;
+    use aws_sdk_s3::operation::put_object::PutObjectOutput;
+    use aws_sdk_s3::primitives::{ByteStream, DateTime};
+    use aws_sdk_s3::types::ObjectLockMode;
+    use aws_smithy_mocks::{mock, mock_client};
+    use diport::{
+        ArchiveClaimSettleOutcome, ClaimedArchiveCandidate, DlxArchiveBacklog, DlxArchiveStore,
+        DlxLifecycleError, DlxLifecycleOperation, DlxLifecycleReason, DlxLifecycleRepository,
+        EncryptOutput, KeyName, KeyProvider, KeyProviderError, KeyRef, KeyVersion,
+        ReceiptCasOutcome, RedactedBytes,
+    };
+    use eventexec::{
+        DeadLetterId, DlxArchiveCandidate, DlxArchiveKeyName, DlxArchiveSafeMetadata,
+        DlxArchiveSafeMetadataInput, DlxLifecycle, DlxLifecycleHealth, DlxMetadataDigest,
+        ExpiredArchiveReceipt, MissingArchiveProof, VerifiedArchiveReceipt,
+    };
+    use secure::Plaintext;
+
+    use super::{
+        NOW, ProbeRules, RETAIN_UNTIL, VERSION_ID, archive_version_id, checksum_header, object_key,
+        precondition_failed, unverified, verified,
+    };
+
+    pub(super) type CaseError = Box<dyn std::error::Error + Send + Sync>;
+
+    pub(super) async fn identity() -> Result<(), CaseError> {
+        let rules = ProbeRules::healthy();
+        let body = b"existing-ciphertext";
+        let get = mock!(aws_sdk_s3::Client::get_object)
+            .match_requests(|request| request.version_id() == Some(VERSION_ID))
+            .then_output(|| {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from_static(body))
+                    .checksum_sha256(checksum_header(body))
+                    .version_id(VERSION_ID)
+                    .metadata("rss-dlx-key-ref", "dlx-archive:7")
+                    .build()
+            });
+        let mut refs = rules.refs();
+        refs.push(&get);
+        let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
+
+        let result = store
+            .get_ciphertext(&object_key(), &archive_version_id())
+            .await;
+        assert!(matches!(
+            result,
+            Ok(Some(ref ciphertext))
+                if ciphertext.ciphertext().as_bytes() == body
+                    && ciphertext.key_ref().to_token() == "dlx-archive:7"
+        ));
+        Ok(())
+    }
+
+    pub(super) async fn conflict() -> Result<(), CaseError> {
+        let id = dead_letter_id()?;
+        let existing = candidate(id.clone(), b"stable-fact-a")?;
+        let conflicting = candidate(id, b"stable-fact-b")?;
+        let existing_plaintext = existing.canonical().encode().expose().to_vec();
+        let checksum = checksum_header(&existing_plaintext);
+        let key = eventexec::DlxArchiveObjectKey::from_dead_letter(
+            conflicting.canonical().dead_letter_id(),
+        )
+        .as_str()
+        .to_string();
+
+        let put_key = key.clone();
+        let put = mock!(aws_sdk_s3::Client::put_object)
+            .match_requests(move |request| request.key() == Some(put_key.as_str()))
+            .then_error(precondition_failed);
+        let head_key = key.clone();
+        let head_checksum = checksum.clone();
+        let head = mock!(aws_sdk_s3::Client::head_object)
+            .match_requests(move |request| request.key() == Some(head_key.as_str()))
+            .then_output(move || {
+                HeadObjectOutput::builder()
+                    .checksum_sha256(head_checksum.clone())
+                    .version_id(VERSION_ID)
+                    .object_lock_mode(ObjectLockMode::Compliance)
+                    .object_lock_retain_until_date(DateTime::from_secs(RETAIN_UNTIL))
+                    .metadata("rss-dlx-key-ref", "dlx-archive:1")
+                    .build()
+            });
+        let get_key = key;
+        let get_checksum = checksum;
+        let get_body = existing_plaintext;
+        let get = mock!(aws_sdk_s3::Client::get_object)
+            .match_requests(move |request| {
+                request.key() == Some(get_key.as_str()) && request.version_id() == Some(VERSION_ID)
+            })
+            .then_output(move || {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from(get_body.clone()))
+                    .checksum_sha256(get_checksum.clone())
+                    .version_id(VERSION_ID)
+                    .metadata("rss-dlx-key-ref", "dlx-archive:1")
+                    .build()
+            });
+        let probes = ProbeRules::healthy();
+        let mut refs = probes.refs();
+        refs.extend([&put, &head, &get]);
+        let store = unverified(mock_client!(aws_sdk_s3, refs.as_slice()))
+            .verify()
+            .await?;
+        let repository = LifecycleRepository::new(conflicting);
+        let lifecycle = DlxLifecycle::new(
+            repository.clone(),
+            store,
+            PassthroughKeyProvider,
+            archive_key()?,
+        );
+
+        let report = lifecycle.tick(NOW).await;
+        assert_eq!(report.health(), DlxLifecycleHealth::Unhealthy);
+        assert_eq!(
+            report.primary_failure(),
+            Some(DlxLifecycleError::new(
+                DlxLifecycleOperation::VerifyArchive,
+                DlxLifecycleReason::CanonicalMismatch,
+            ))
+        );
+        assert_eq!(report.purged(), 0);
+        assert_eq!(repository.receipt_count(), 0);
+        assert_eq!(repository.purge_calls(), 0);
+        assert_eq!(
+            repository.events(),
+            vec!["claim", "settle_failure"],
+            "canonical conflict must fail before receipt and purge"
+        );
+        Ok(())
+    }
+
+    pub(super) async fn archive_receipt() -> Result<(), CaseError> {
+        let candidate = candidate(dead_letter_id()?, b"stable-archive-fact")?;
+        let plaintext = candidate.canonical().encode().expose().to_vec();
+        let checksum = checksum_header(&plaintext);
+        let key = eventexec::DlxArchiveObjectKey::from_dead_letter(
+            candidate.canonical().dead_letter_id(),
+        )
+        .as_str()
+        .to_string();
+        let put_key = key.clone();
+        let put_checksum = checksum.clone();
+        let put = mock!(aws_sdk_s3::Client::put_object)
+            .match_requests(move |request| {
+                request.key() == Some(put_key.as_str())
+                    && request.if_none_match() == Some("*")
+                    && request.metadata().is_some_and(|metadata| {
+                        metadata.get("rss-dlx-key-ref").map(String::as_str) == Some("dlx-archive:1")
+                    })
+            })
+            .then_output(move || {
+                PutObjectOutput::builder()
+                    .checksum_sha256(put_checksum.clone())
+                    .version_id(VERSION_ID)
+                    .build()
+            });
+        let head_key = key;
+        let head_checksum = checksum;
+        let head = mock!(aws_sdk_s3::Client::head_object)
+            .match_requests(move |request| request.key() == Some(head_key.as_str()))
+            .then_output(move || {
+                HeadObjectOutput::builder()
+                    .checksum_sha256(head_checksum.clone())
+                    .version_id(VERSION_ID)
+                    .object_lock_mode(ObjectLockMode::Compliance)
+                    .object_lock_retain_until_date(DateTime::from_secs(RETAIN_UNTIL))
+                    .metadata("rss-dlx-key-ref", "dlx-archive:1")
+                    .build()
+            });
+        let probes = ProbeRules::healthy();
+        let mut refs = probes.refs();
+        refs.extend([&put, &head]);
+        let store = unverified(mock_client!(aws_sdk_s3, refs.as_slice()))
+            .verify()
+            .await?;
+        let repository = LifecycleRepository::new(candidate);
+        let lifecycle = DlxLifecycle::new(
+            repository.clone(),
+            store,
+            PassthroughKeyProvider,
+            archive_key()?,
+        );
+
+        let report = lifecycle.tick(NOW).await;
+        assert_eq!(report.health(), DlxLifecycleHealth::Healthy);
+        assert_eq!(report.archived(), 1);
+        assert_eq!(report.purged(), 1);
+        assert_eq!(repository.receipt_count(), 1);
+        assert_eq!(repository.purge_calls(), 1);
+        assert_eq!(
+            repository.events(),
+            vec!["claim", "receipt", "reconcile", "purge"],
+            "opaque receipt must be consumed before purge authorization"
+        );
+        Ok(())
+    }
+
+    fn dead_letter_id() -> Result<DeadLetterId, CaseError> {
+        Ok(DeadLetterId::parse("018f31a8-893d-7a52-8e17-3ca9df50120b")?)
+    }
+
+    fn tenant() -> Result<vocab::TenantId, CaseError> {
+        Ok(vocab::TenantId::parse(
+            "11111111-2222-4333-8444-555555555555",
+        )?)
+    }
+
+    fn safe_metadata() -> Result<DlxArchiveSafeMetadata, DlxLifecycleError> {
+        DlxArchiveSafeMetadata::try_new(DlxArchiveSafeMetadataInput {
+            message_id: "message-17".to_string(),
+            producer_domain: "identity".to_string(),
+            consumer_domain: Some("audit".to_string()),
+            contract_id: "identity.session-created.v1".to_string(),
+            topic: "identity.session.created".to_string(),
+            consumer_group: Some("audit.projector".to_string()),
+            source_kind: diport::DeadLetterSource::Consumer,
+            error_summary: "retry budget exhausted".to_string(),
+            num_attempts: 10,
+            first_attempt_epoch_micros: 1_700_000_000_123_456,
+            last_attempt_epoch_micros: 1_700_000_100_654_321,
+            payload_len: 42,
+            metadata_digest: DlxMetadataDigest::from_sha256_bytes([0xAB; 32]),
+        })
+    }
+
+    fn candidate(id: DeadLetterId, payload: &[u8]) -> Result<DlxArchiveCandidate, CaseError> {
+        Ok(DlxArchiveCandidate::try_new(
+            id,
+            tenant()?,
+            safe_metadata()?,
+            Plaintext::new(payload.to_vec()),
+        )?)
+    }
+
+    fn archive_key() -> Result<DlxArchiveKeyName, CaseError> {
+        Ok(DlxArchiveKeyName::try_new("dlx-archive")?)
+    }
+
+    #[derive(Clone)]
+    struct LifecycleRepository {
+        state: Arc<LifecycleRepositoryState>,
+    }
+
+    struct LifecycleRepositoryState {
+        candidates: Mutex<VecDeque<DlxArchiveCandidate>>,
+        receipt_count: AtomicUsize,
+        purge_calls: AtomicUsize,
+        events: Mutex<Vec<&'static str>>,
+    }
+
+    impl LifecycleRepository {
+        fn new(candidate: DlxArchiveCandidate) -> Self {
+            Self {
+                state: Arc::new(LifecycleRepositoryState {
+                    candidates: Mutex::new(VecDeque::from([candidate])),
+                    receipt_count: AtomicUsize::new(0),
+                    purge_calls: AtomicUsize::new(0),
+                    events: Mutex::new(Vec::new()),
+                }),
+            }
+        }
+
+        fn push(&self, event: &'static str) {
+            self.state
+                .events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(event);
+        }
+
+        fn events(&self) -> Vec<&'static str> {
+            self.state
+                .events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        }
+
+        fn receipt_count(&self) -> usize {
+            self.state.receipt_count.load(Ordering::Acquire)
+        }
+
+        fn purge_calls(&self) -> usize {
+            self.state.purge_calls.load(Ordering::Acquire)
+        }
+    }
+
+    impl DlxLifecycleRepository for LifecycleRepository {
+        type ArchiveClaim = DeadLetterId;
+        type ArchiveCandidate = DlxArchiveCandidate;
+        type VerifiedReceipt = VerifiedArchiveReceipt;
+        type ExpiredReceipt = ExpiredArchiveReceipt;
+        type MissingProof = MissingArchiveProof;
+
+        async fn archive_backlog(&self) -> Result<DlxArchiveBacklog, DlxLifecycleError> {
+            Ok(DlxArchiveBacklog::new(0, 0))
+        }
+
+        async fn claim_archive_candidates(
+            &self,
+        ) -> Result<
+            Vec<ClaimedArchiveCandidate<Self::ArchiveClaim, Self::ArchiveCandidate>>,
+            DlxLifecycleError,
+        > {
+            self.push("claim");
+            let candidates = self
+                .state
+                .candidates
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .drain(..)
+                .map(|candidate| {
+                    ClaimedArchiveCandidate::new(
+                        candidate.canonical().dead_letter_id().clone(),
+                        candidate,
+                    )
+                })
+                .collect();
+            Ok(candidates)
+        }
+
+        async fn record_verified_receipt(
+            &self,
+            claim: &Self::ArchiveClaim,
+            receipt: Self::VerifiedReceipt,
+        ) -> Result<ReceiptCasOutcome, DlxLifecycleError> {
+            assert_eq!(claim, receipt.dead_letter_id());
+            assert_eq!(receipt.archive_version_id().as_str(), VERSION_ID);
+            assert_eq!(receipt.archive_key_ref().to_token(), "dlx-archive:1");
+            assert_eq!(receipt.retain_until_epoch_secs(), RETAIN_UNTIL);
+            self.state.receipt_count.fetch_add(1, Ordering::AcqRel);
+            self.push("receipt");
+            Ok(ReceiptCasOutcome::Applied)
+        }
+
+        async fn settle_archive_failure(
+            &self,
+            _claim: Self::ArchiveClaim,
+            failure: DlxLifecycleError,
+        ) -> Result<ArchiveClaimSettleOutcome, DlxLifecycleError> {
+            assert_eq!(failure.kind(), diport::DlxLifecycleErrorKind::Invariant);
+            self.push("settle_failure");
+            Ok(ArchiveClaimSettleOutcome::Applied)
+        }
+
+        async fn purge_verified(&self) -> Result<u64, DlxLifecycleError> {
+            self.state.purge_calls.fetch_add(1, Ordering::AcqRel);
+            self.push("purge");
+            Ok(1)
+        }
+
+        async fn claim_expired_receipts(
+            &self,
+        ) -> Result<Vec<Self::ExpiredReceipt>, DlxLifecycleError> {
+            self.push("reconcile");
+            Ok(Vec::new())
+        }
+
+        async fn delete_expired_receipt(
+            &self,
+            _proof: Self::MissingProof,
+        ) -> Result<ReceiptCasOutcome, DlxLifecycleError> {
+            Err(DlxLifecycleError::new(
+                DlxLifecycleOperation::DeleteExpiredReceipt,
+                DlxLifecycleReason::InternalInvariant,
+            ))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct PassthroughKeyProvider;
+
+    impl KeyProvider for PassthroughKeyProvider {
+        async fn encrypt(
+            &self,
+            key: KeyName,
+            plaintext: Plaintext,
+            _aad: secure::DerivedAad,
+        ) -> Result<EncryptOutput, KeyProviderError> {
+            Ok(EncryptOutput::new(
+                plaintext.expose().to_vec(),
+                KeyRef::new(key, KeyVersion::new(1)),
+            ))
+        }
+
+        async fn decrypt(
+            &self,
+            ciphertext: RedactedBytes,
+            _key: KeyRef,
+            _aad: secure::DerivedAad,
+        ) -> Result<Plaintext, KeyProviderError> {
+            Ok(Plaintext::new(ciphertext.into_bytes()))
+        }
+
+        async fn rewrap(
+            &self,
+            ciphertext: RedactedBytes,
+            key: KeyRef,
+            _aad: secure::DerivedAad,
+        ) -> Result<EncryptOutput, KeyProviderError> {
+            Ok(EncryptOutput::new(ciphertext.into_bytes(), key))
+        }
+
+        async fn shutdown(&self) -> Result<(), KeyProviderError> {
+            Ok(())
+        }
+    }
 }
 
 #[tokio::test]

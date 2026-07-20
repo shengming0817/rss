@@ -128,6 +128,8 @@ enum InternalCheck {
     CodegenCheck,
     /// committed L2 assurance inventory raw-byte drift gate.
     L2AssuranceCheck,
+    /// provider declaration ↔ live runner ↔ integration shard ↔ committed matrix drift gate.
+    ProviderCapabilitiesCheck,
     /// active LocalTx manifest/generated/owner route/test typed marker closure.
     LocalTxCoverage,
     /// active LocalOnly effect closure + canonical source receipt coverage
@@ -413,6 +415,14 @@ fn step_l2_assurance_check() -> Step {
         id: GateId::L2AssuranceCheck,
         args: &[],
         kind: StepKind::Internal(InternalCheck::L2AssuranceCheck),
+        env: &[],
+    }
+}
+fn step_provider_capabilities_check() -> Step {
+    Step {
+        id: GateId::ProviderCapabilitiesCheck,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::ProviderCapabilitiesCheck),
         env: &[],
     }
 }
@@ -1277,6 +1287,7 @@ fn run_internal(check: InternalCheck, contract_against: &str) -> Result<()> {
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::L2AssuranceCheck => crate::l2_assurance::run(true),
+        InternalCheck::ProviderCapabilitiesCheck => crate::provider_capabilities::run(true),
         InternalCheck::LocalTxCoverage => run_check(&crate::localtx_coverage::LocalTxCoverage),
         InternalCheck::LocalOnlyEffects => run_check(&consistency_effects::LocalOnlyEffects),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
@@ -1984,7 +1995,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 39);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 40);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -2093,14 +2104,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_58_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_59_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 58);
+        assert_eq!(plan.len(), 59);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 58);
+        assert_eq!(ids.len(), 59);
     }
 
     #[test]
@@ -2143,6 +2154,7 @@ mod tests {
                 "archrules",
                 "codegen-check",
                 "l2-assurance-check",
+                "provider-capabilities-check",
                 "localtx-coverage",
                 "local-only-effects",
                 "local-only-execution",
@@ -2468,6 +2480,7 @@ mod tests {
                 "archrules",
                 "codegen-check",
                 "l2-assurance-check",
+                "provider-capabilities-check",
                 "localtx-coverage",
                 "local-only-effects",
                 "pdp-allow-guard",
@@ -2532,6 +2545,7 @@ mod tests {
                     "archrules",
                     "codegen-check",
                     "l2-assurance-check",
+                    "provider-capabilities-check",
                     "localtx-coverage",
                     "local-only-effects",
                     "pdp-allow-guard",
@@ -2573,11 +2587,15 @@ mod tests {
 
     #[test]
     fn l0_l1_closeout_gates_have_typed_membership_and_order() -> anyhow::Result<()> {
-        const GATES: [(GateId, InternalCheck); 6] = [
+        const GATES: [(GateId, InternalCheck); 7] = [
             (GateId::ContractValidate, InternalCheck::ContractValidate),
             (GateId::ContractBreaking, InternalCheck::ContractBreaking),
             (GateId::CodegenCheck, InternalCheck::CodegenCheck),
             (GateId::L2AssuranceCheck, InternalCheck::L2AssuranceCheck),
+            (
+                GateId::ProviderCapabilitiesCheck,
+                InternalCheck::ProviderCapabilitiesCheck,
+            ),
             (GateId::LocalTxCoverage, InternalCheck::LocalTxCoverage),
             (GateId::LocalOnlyEffects, InternalCheck::LocalOnlyEffects),
         ];
@@ -2619,10 +2637,10 @@ mod tests {
                 positions.windows(2).all(|pair| pair[0] < pair[1]),
                 "{name} contract/codegen/L2-assurance/L0/L1 order drift: {positions:?}"
             );
-            assert_eq!(positions[4], positions[3] + 1, "{name} LocalTx order drift");
+            assert_eq!(positions[5], positions[3] + 2, "{name} LocalTx order drift");
             assert_eq!(
-                positions[5],
-                positions[3] + 2,
+                positions[6],
+                positions[3] + 3,
                 "{name} LocalOnly order drift"
             );
         }
@@ -2927,6 +2945,97 @@ mod tests {
             .context("committed fast plan lacks L2 assurance check")?
             .kind = StepKind::Internal(InternalCheck::CodegenCheck);
         assert!(validate_l2_assurance_gate(&wrong_executor).is_err());
+        Ok(())
+    }
+
+    fn validate_provider_capabilities_gate(plan: &[Step]) -> anyhow::Result<()> {
+        let registry = REGISTRY
+            .iter()
+            .filter(|spec| spec.id() == GateId::ProviderCapabilitiesCheck)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            registry.len() == 1,
+            "expected exactly one provider capabilities registry entry"
+        );
+        let spec = *registry[0];
+        anyhow::ensure!(
+            spec.label() == "provider-capabilities-check"
+                && spec.id().carrier_file() == Some("xtask/src/provider_capabilities.rs")
+                && spec.evidence() == crate::ci_lanes::EvidenceKind::Source,
+            "provider capabilities registry binding drift"
+        );
+        anyhow::ensure!(
+            matches!(
+                step_for_id(GateId::ProviderCapabilitiesCheck).kind,
+                StepKind::Internal(InternalCheck::ProviderCapabilitiesCheck)
+            ),
+            "provider capabilities catalog executor drift"
+        );
+        let gates = plan
+            .iter()
+            .filter(|step| step.id == GateId::ProviderCapabilitiesCheck)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            gates.len() == 1,
+            "expected exactly one provider capabilities gate"
+        );
+        let gate = gates[0];
+        anyhow::ensure!(
+            !gate.needs_compile()
+                && matches!(
+                    gate.kind,
+                    StepKind::Internal(InternalCheck::ProviderCapabilitiesCheck)
+                ),
+            "provider capabilities executor drift"
+        );
+        let assurance = plan
+            .iter()
+            .position(|step| step.id == GateId::L2AssuranceCheck)
+            .context("plan lacks L2 assurance check")?;
+        let provider = plan
+            .iter()
+            .position(|step| step.id == GateId::ProviderCapabilitiesCheck)
+            .context("plan lacks provider capabilities check")?;
+        anyhow::ensure!(
+            provider == assurance + 1,
+            "provider capabilities must immediately follow L2 assurance"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn provider_capabilities_gate_is_typed_once_and_ordered_in_all_aggregate_plans()
+    -> anyhow::Result<()> {
+        for (name, plan) in [
+            ("verify", plan_for(PlanTarget::Verify)),
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
+            validate_provider_capabilities_gate(&plan).with_context(|| format!("{name} plan"))?;
+        }
+
+        let real_plan = verify_plan(&opts(true, false));
+        let mut omitted = real_plan.clone();
+        omitted.retain(|step| step.id != GateId::ProviderCapabilitiesCheck);
+        assert!(validate_provider_capabilities_gate(&omitted).is_err());
+
+        let mut duplicated = real_plan.clone();
+        let duplicate = real_plan
+            .iter()
+            .find(|step| step.id == GateId::ProviderCapabilitiesCheck)
+            .context("committed fast plan lacks provider capabilities check")?
+            .clone();
+        duplicated.push(duplicate);
+        assert!(validate_provider_capabilities_gate(&duplicated).is_err());
+
+        let mut wrong_executor = real_plan;
+        wrong_executor
+            .iter_mut()
+            .find(|step| step.id == GateId::ProviderCapabilitiesCheck)
+            .context("committed fast plan lacks provider capabilities check")?
+            .kind = StepKind::Internal(InternalCheck::CodegenCheck);
+        assert!(validate_provider_capabilities_gate(&wrong_executor).is_err());
         Ok(())
     }
 
@@ -3298,6 +3407,7 @@ mod tests {
                 "archrules",
                 "codegen-check",
                 "l2-assurance-check",
+                "provider-capabilities-check",
                 "localtx-coverage",
                 "local-only-effects",
                 "pdp-allow-guard",
@@ -3423,6 +3533,7 @@ mod tests {
             "archrules",
             "codegen-check",
             "l2-assurance-check",
+            "provider-capabilities-check",
             "localtx-coverage",
             "local-only-effects",
             "pdp-allow-guard",

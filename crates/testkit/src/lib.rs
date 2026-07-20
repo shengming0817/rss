@@ -1,8 +1,16 @@
-//! testkit — RSS HTTP 契约测试脚手架（`tower::ServiceExt::oneshot` 薄封装）。
+//! testkit — RSS HTTP 契约测试脚手架（`tower::ServiceExt::oneshot` 薄封装）+ L2 provider
+//! conformance catalog 宏入口。
 //!
 //! 给 per-contract 契约测试（`domain-patterns.md §Contract test`）提供可复用 harness：声明式构造请求、
 //! oneshot 驱动**已构建好的** axum [`Router`](axum::Router)、收集完整响应，并断言状态码 / 反序列化进
 //! generated wire 类型（schema 对齐）/ 解析统一 wire error envelope（`error-handling.md §Wire 格式`）。
+//!
+//! ## L2 provider conformance catalog
+//!
+//! Adapter owners enroll exact capability wrappers with [`provider_conformance_catalog!`]
+//! (`eventing_conformance` 模块)。Macro token 为 snake_case，wire/matrix 为 kebab-case；compile-fail
+//! 负例见 `tests/ui/provider_catalog_*.rs`（经 `tests/provider_catalog_trybuild.rs`）。受控矩阵入口：
+//! `./hack/cargo.sh xtask provider-capabilities` / `--check`（语义见 `docs/rules/eventbus.md`）。
 //!
 //! 边界（按层职责切分）：
 //! - **不依赖任何 adapter crate**——域 crate 经 `[dev-dependencies]` 消费本 crate 写契约测试，不拉
@@ -110,10 +118,12 @@ pub use containers::{
     env_or_postgres, env_or_rabbitmq, env_or_redis, provision_postgres_test_logins,
 };
 
+// Provider-neutral eventing taxonomy/assertions are dependency-free and intentionally available
+// without the container feature. Real provider runners remain integration-gated in each adapter.
+pub mod eventing_conformance;
+
 // tenant-scope repository conformance 骨架（#1437 PERSIST-016 种子；#1426 在此扩展全套 repo conformance）。
 // 仅 `containers` feature（其唯一消费方是启用 containers 的 adapter 集成测试）；不增 default public-api 面。
-#[cfg(feature = "containers")]
-pub mod eventing_conformance;
 #[cfg(feature = "containers")]
 pub mod localtx;
 #[cfg(feature = "containers")]
