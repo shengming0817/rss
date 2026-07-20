@@ -20,7 +20,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -33,6 +32,7 @@ use syn::{
     ItemType, ItemUse, Lit, Meta, Signature, Token, Type, TypePath, UseTree,
 };
 
+use crate::cmd::{CargoSubcommand, cargo_cmd};
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::src_scan::rs_files;
 use crate::workspace_root;
@@ -143,17 +143,19 @@ struct CargoTarget {
 }
 
 fn workspace_member_roots(root: &Path) -> Result<Vec<PathBuf>> {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = Command::new(cargo)
-        .current_dir(root)
-        .args(["metadata", "--format-version", "1", "--no-deps"])
-        .output()
-        .with_context(|| {
-            format!(
-                "contract-binding-guard: run cargo metadata below {}",
-                root.display()
-            )
-        })?;
+    let output = cargo_cmd(
+        CargoSubcommand::Metadata,
+        &["--format-version", "1", "--no-deps"],
+        &[],
+        Some(root),
+    )
+    .output()
+    .with_context(|| {
+        format!(
+            "contract-binding-guard: run cargo metadata below {}",
+            root.display()
+        )
+    })?;
     ensure!(
         output.status.success(),
         "contract-binding-guard: cargo metadata failed below {}: {}",

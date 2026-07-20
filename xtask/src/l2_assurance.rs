@@ -4,9 +4,9 @@
 //! producer and fact records have distinct closed evidence types. A producer can only be authored
 //! with contract/generated/execution/fault；fact effect evidence 则由 active subscription 动态发现
 //! registration/plan/handler/executor 四阶段真实 carrier，generated SPEC 不得冒充执行证据。
-//! INVARIANT: L2-ASSURANCE-CONSUMER-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "event_transport_guard::tests::consumer_policy_guard_rejects_raw_effect_bypass_matrix", anti_vacuity = "tests::workspace_fact_effect_evidence_closes_all_policy_stages" }——
-//! active ConsumerTx handler 数从 generated subscriptions 计算且当前精确为 5；每条 policy capability
-//! 必须在四个执行阶段都有唯一、非测试 Rust symbol carrier。
+//! INVARIANT: L2-ASSURANCE-CONSUMER-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::policy_carrier_rejects_dead_helper_bait + tests::policy_carrier_rejects_nested_dead_helper_bait + tests::policy_carrier_rejects_if_false_bait + tests::policy_executor_rejects_symbol_without_worker_edge", anti_vacuity = "tests::workspace_fact_effect_evidence_closes_all_policy_stages" }——
+//! active ConsumerTx handler 数从 generated subscriptions 计算且当前精确为 5；每条 subscription identity
+//! 必须映射到 registration/plan/handler/executor 的精确 Rust symbol 与闭合调用链，任意死 helper 不得冒充。
 //! INVARIANT: L2-ASSURANCE-WIRE-01 { level = "Hard", exec = "verify", source = "codegen", golden = "generated/l2-assurance.json", synthetic_red = "tests::check_rejects_missing_tampered_and_crlf_without_writing", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
 //! the typed JSON v3 projection and committed golden are byte-for-byte deterministic and reject
 //! missing, tampered, or non-LF output without writing in check mode.
@@ -35,6 +35,7 @@ use generated::event::{
     SubscriptionExecution as GeneratedSubscriptionExecution,
 };
 use serde::Serialize;
+use syn::visit::Visit;
 use vocab::{
     ExternalEffectPolicy as GeneratedExternalEffectPolicy, HttpConsistencyLevel, HttpEffectKind,
 };
@@ -825,39 +826,25 @@ fn fact_effect_policy_carriers(
     root: &Path,
     subscriptions: &[SubscriptionIdentity],
 ) -> Result<Vec<Carrier>> {
+    verify_runtime_policy_edge(
+        root,
+        "policy executor",
+        "consumer_tx_worker_spec",
+        PolicyCallRequirement::exact("spawn_consumer_ackable_tx_subscriber", ["", ""]),
+    )?;
     let mut carriers = Vec::new();
     for subscription in subscriptions {
-        let (registration_marker, handler_marker) = match subscription.external_effect_policy {
-            AssuranceExternalEffectPolicy::TransactionalOnly => (
-                "SubscriberCapability::AdapterNativeTransactional",
-                "ConsumerTxHandler<policy::TransactionalOnly>",
-            ),
-            AssuranceExternalEffectPolicy::Reconcile => (
-                "SubscriberCapability::DomainReconcile",
-                "ConsumerTxHandler<policy::Reconcile>",
-            ),
-            AssuranceExternalEffectPolicy::IdempotencyKey
-            | AssuranceExternalEffectPolicy::Compensated => {
-                bail!(
-                    "active subscription {}/{} has no production policy capability/executor",
-                    subscription.consumer,
-                    subscription.group
-                )
-            }
-        };
-        let registration_path = format!("crates/{}/src/application.rs", subscription.consumer);
+        let spec = subscription_policy_chain(subscription)?;
+        if let Some(entrypoint) = spec.registration_entrypoint {
+            verify_policy_symbol(root, "registration entrypoint", entrypoint)?;
+        }
         carriers.push(discover_policy_carrier(
             root,
-            &registration_path,
             "registration",
-            registration_marker,
+            spec.registration,
         )?);
-        carriers.push(discover_policy_carrier(
-            root,
-            "assemblies/runtime/src/consumer_tx.rs",
-            "handler",
-            handler_marker,
-        )?);
+        verify_runtime_policy_route(root, spec.route)?;
+        carriers.push(discover_policy_carrier(root, "handler", spec.handler)?);
     }
     carriers.push(Carrier::new(
         root,
@@ -876,87 +863,574 @@ fn fact_effect_policy_carriers(
     Ok(carriers)
 }
 
-fn discover_policy_carrier(
+#[derive(Clone, Copy)]
+struct PolicySymbolSpec {
+    repo_path: &'static str,
+    symbol: &'static str,
+    required_trait: Option<&'static str>,
+    required_call: Option<PolicyCallRequirement>,
+}
+
+#[derive(Clone, Copy)]
+enum PolicyCalleeMatch {
+    Exact,
+    Prefix,
+    Suffix,
+}
+
+#[derive(Clone, Copy)]
+struct PolicyCallRequirement {
+    callee: &'static str,
+    callee_match: PolicyCalleeMatch,
+    required_args: [&'static str; 2],
+}
+
+impl PolicyCallRequirement {
+    const fn exact(callee: &'static str, required_args: [&'static str; 2]) -> Self {
+        Self {
+            callee,
+            callee_match: PolicyCalleeMatch::Exact,
+            required_args,
+        }
+    }
+
+    const fn prefix(callee: &'static str) -> Self {
+        Self {
+            callee,
+            callee_match: PolicyCalleeMatch::Prefix,
+            required_args: ["", ""],
+        }
+    }
+
+    const fn suffix(callee: &'static str) -> Self {
+        Self {
+            callee,
+            callee_match: PolicyCalleeMatch::Suffix,
+            required_args: ["", ""],
+        }
+    }
+
+    fn matches(self, call: &ReachableCall) -> bool {
+        let callee_matches = match self.callee_match {
+            PolicyCalleeMatch::Exact => call.callee == self.callee,
+            PolicyCalleeMatch::Prefix => call.callee.starts_with(self.callee),
+            PolicyCalleeMatch::Suffix => call.callee.ends_with(self.callee),
+        };
+        callee_matches
+            && self
+                .required_args
+                .into_iter()
+                .filter(|required| !required.is_empty())
+                .all(|required| call.args.iter().any(|argument| argument == required))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SubscriptionPolicyChain {
+    registration_entrypoint: Option<PolicySymbolSpec>,
+    registration: PolicySymbolSpec,
+    route: PolicyRouteSpec,
+    handler: PolicySymbolSpec,
+}
+
+#[derive(Clone, Copy)]
+struct PolicyRouteSpec {
+    dispatch_pattern: &'static str,
+    plan_pattern: &'static str,
+    resolver_call: PolicyCallRequirement,
+    handler_call: PolicyCallRequirement,
+    worker_call: PolicyCallRequirement,
+}
+
+impl PolicyRouteSpec {
+    const fn audit(
+        dispatch_pattern: &'static str,
+        plan_pattern: &'static str,
+        handler_constructor: &'static str,
+    ) -> Self {
+        Self {
+            dispatch_pattern,
+            plan_pattern,
+            resolver_call: PolicyCallRequirement::exact("adapter_native_plan", [plan_pattern, ""]),
+            handler_call: PolicyCallRequirement::suffix(handler_constructor),
+            worker_call: PolicyCallRequirement::prefix(
+                "consumer_tx_worker_spec::<policy::TransactionalOnly,",
+            ),
+        }
+    }
+
+    const fn settings() -> Self {
+        Self {
+            dispatch_pattern: "SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings",
+            plan_pattern: "ConsumerTxPlan::SettingsConfigVersionChanged(effect)",
+            resolver_call: PolicyCallRequirement::exact("settings_config_refresh_plan", ["", ""]),
+            handler_call: PolicyCallRequirement::suffix(".config_version_changed_consumer_tx"),
+            worker_call: PolicyCallRequirement::prefix(
+                "consumer_tx_worker_spec::<policy::Reconcile,",
+            ),
+        }
+    }
+}
+
+fn subscription_policy_chain(
+    subscription: &SubscriptionIdentity,
+) -> Result<SubscriptionPolicyChain> {
+    let chain = match (
+        subscription.consumer.as_str(),
+        subscription.group.as_str(),
+        subscription.external_effect_policy,
+    ) {
+        ("audit", "audit.session-created", AssuranceExternalEffectPolicy::TransactionalOnly) => {
+            audit_policy_chain(
+                "SESSION_CREATED_SPEC",
+                PolicyRouteSpec::audit(
+                    "SubscriptionDispatchKey::IdentitySessionCreatedV1Audit",
+                    "ConsumerTxPlan::AuditSessionCreated",
+                    ".session_created_consumer_tx",
+                ),
+            )
+        }
+        ("audit", "audit.role-assigned", AssuranceExternalEffectPolicy::TransactionalOnly) => {
+            audit_policy_chain(
+                "ROLE_ASSIGNED_SPEC",
+                PolicyRouteSpec::audit(
+                    "SubscriptionDispatchKey::IdentityRoleAssignedV1Audit",
+                    "ConsumerTxPlan::AuditRoleAssigned",
+                    ".role_assigned_consumer_tx",
+                ),
+            )
+        }
+        ("audit", "audit.role-revoked", AssuranceExternalEffectPolicy::TransactionalOnly) => {
+            audit_policy_chain(
+                "ROLE_REVOKED_SPEC",
+                PolicyRouteSpec::audit(
+                    "SubscriptionDispatchKey::IdentityRoleRevokedV1Audit",
+                    "ConsumerTxPlan::AuditRoleRevoked",
+                    ".role_revoked_consumer_tx",
+                ),
+            )
+        }
+        ("audit", "audit.policy-updated", AssuranceExternalEffectPolicy::TransactionalOnly) => {
+            audit_policy_chain(
+                "POLICY_UPDATED_SPEC",
+                PolicyRouteSpec::audit(
+                    "SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit",
+                    "ConsumerTxPlan::AuditPolicyUpdated",
+                    ".policy_updated_consumer_tx",
+                ),
+            )
+        }
+        (
+            "settings",
+            "settings.config-version-changed",
+            AssuranceExternalEffectPolicy::Reconcile,
+        ) => settings_policy_chain(),
+        _ => {
+            bail!(
+                "active subscription {}/{} with policy {:?} has no closed production policy chain",
+                subscription.consumer,
+                subscription.group,
+                subscription.external_effect_policy
+            )
+        }
+    };
+    Ok(chain)
+}
+
+const fn audit_policy_chain(
+    registration_spec: &'static str,
+    route: PolicyRouteSpec,
+) -> SubscriptionPolicyChain {
+    SubscriptionPolicyChain {
+        registration_entrypoint: Some(PolicySymbolSpec {
+            repo_path: "crates/audit/src/application.rs",
+            symbol: "AuditDomain::init",
+            required_trait: None,
+            required_call: Some(PolicyCallRequirement::exact(
+                "register_audit_subscriber",
+                ["reg", registration_spec],
+            )),
+        }),
+        registration: PolicySymbolSpec {
+            repo_path: "crates/audit/src/application.rs",
+            symbol: "register_audit_subscriber",
+            required_trait: None,
+            required_call: Some(PolicyCallRequirement::exact(
+                "reg.subscriber",
+                ["SubscriberCapability::AdapterNativeTransactional", ""],
+            )),
+        },
+        route,
+        handler: PolicySymbolSpec {
+            repo_path: "assemblies/runtime/src/consumer_tx.rs",
+            symbol: "PgAuditConsumerTx::handle",
+            required_trait: Some("ConsumerTxHandler<policy::TransactionalOnly>"),
+            required_call: Some(PolicyCallRequirement::exact(
+                "postgres::PgAuditConsumerTx::handle",
+                ["", ""],
+            )),
+        },
+    }
+}
+
+const fn settings_policy_chain() -> SubscriptionPolicyChain {
+    SubscriptionPolicyChain {
+        registration_entrypoint: None,
+        registration: PolicySymbolSpec {
+            repo_path: "crates/settings/src/application.rs",
+            symbol: "SettingsDomain::init",
+            required_trait: None,
+            required_call: Some(PolicyCallRequirement::exact(
+                "reg.subscriber",
+                [
+                    "VERSION_CHANGED_SPEC.contract_id()",
+                    "SubscriberCapability::DomainReconcile(effect)",
+                ],
+            )),
+        },
+        route: PolicyRouteSpec::settings(),
+        handler: PolicySymbolSpec {
+            repo_path: "assemblies/runtime/src/consumer_tx.rs",
+            symbol: "PgSettingsConsumerTx::handle",
+            required_trait: Some("ConsumerTxHandler<policy::Reconcile>"),
+            required_call: Some(PolicyCallRequirement::exact(
+                "postgres::PgSettingsConsumerTx::handle",
+                ["", ""],
+            )),
+        },
+    }
+}
+
+fn verify_runtime_policy_route(root: &Path, route: PolicyRouteSpec) -> Result<()> {
+    verify_policy_match_arm(
+        root,
+        "policy plan dispatch",
+        "resolve_consumer_tx_plan_parts",
+        "dispatch",
+        route.dispatch_pattern,
+        &[route.resolver_call],
+    )?;
+    verify_policy_match_arm(
+        root,
+        "policy worker selection",
+        "consumer_tx_worker_for_subscription",
+        "&subscription.consumer_tx",
+        route.plan_pattern,
+        &[route.handler_call, route.worker_call],
+    )?;
+    Ok(())
+}
+
+fn verify_policy_match_arm(
     root: &Path,
-    repo_path: &str,
     stage: &str,
-    marker: &str,
-) -> Result<Carrier> {
-    let source_path = root.join(repo_path);
+    function_name: &str,
+    match_input: &str,
+    arm_pattern: &str,
+    required_calls: &[PolicyCallRequirement],
+) -> Result<()> {
+    const RUNTIME_PATH: &str = "assemblies/runtime/src/event_transport.rs";
+    let source = generated_file::read_stable_utf8_file(
+        &root.join(RUNTIME_PATH),
+        MAX_RUST_CARRIER_BYTES,
+        "ConsumerTx policy carrier",
+    )?;
+    let syntax = syn::parse_file(&source)
+        .with_context(|| format!("cannot parse ConsumerTx policy carrier {RUNTIME_PATH}"))?;
+    let functions = syntax
+        .items
+        .iter()
+        .filter_map(|item| {
+            let syn::Item::Fn(function) = item else {
+                return None;
+            };
+            (function.sig.ident == function_name && !attrs_are_conditional(&function.attrs))
+                .then_some(function)
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        functions.len() == 1,
+        "ConsumerTx {stage} must resolve exact production carrier {RUNTIME_PATH}::{function_name} once, got {}",
+        functions.len()
+    );
+    let matches = functions[0]
+        .block
+        .stmts
+        .iter()
+        .filter_map(|statement| {
+            let syn::Stmt::Expr(syn::Expr::Match(expression), _) = statement else {
+                return None;
+            };
+            (policy_tokens(&expression.expr) == match_input).then_some(expression)
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        matches.len() == 1,
+        "ConsumerTx {stage} carrier {RUNTIME_PATH}::{function_name} must match exact input `{match_input}` once, got {}",
+        matches.len()
+    );
+    let arms = matches[0]
+        .arms
+        .iter()
+        .filter(|arm| policy_tokens(&arm.pat) == arm_pattern)
+        .collect::<Vec<_>>();
+    ensure!(
+        arms.len() == 1 && arms[0].guard.is_none(),
+        "ConsumerTx {stage} carrier {RUNTIME_PATH}::{function_name} must contain one unguarded `{arm_pattern}` arm"
+    );
+    let calls = reachable_calls_in_expr(&arms[0].body);
+    for required in required_calls {
+        ensure!(
+            calls.iter().any(|call| required.matches(call)),
+            "ConsumerTx {stage} arm `{arm_pattern}` is outside the closed execution chain: missing reachable call `{}`",
+            required.callee
+        );
+    }
+    Ok(())
+}
+
+fn verify_runtime_policy_edge(
+    root: &Path,
+    stage: &str,
+    function_name: &str,
+    required_call: PolicyCallRequirement,
+) -> Result<()> {
+    const RUNTIME_PATH: &str = "assemblies/runtime/src/event_transport.rs";
+    let source = generated_file::read_stable_utf8_file(
+        &root.join(RUNTIME_PATH),
+        MAX_RUST_CARRIER_BYTES,
+        "ConsumerTx policy carrier",
+    )?;
+    let syntax = syn::parse_file(&source)
+        .with_context(|| format!("cannot parse ConsumerTx policy carrier {RUNTIME_PATH}"))?;
+    verify_policy_call_edge_in_syntax(&syntax, stage, RUNTIME_PATH, function_name, required_call)
+}
+
+fn verify_policy_call_edge_in_syntax(
+    syntax: &syn::File,
+    stage: &str,
+    repo_path: &str,
+    function_name: &str,
+    required_call: PolicyCallRequirement,
+) -> Result<()> {
+    let functions = syntax
+        .items
+        .iter()
+        .filter_map(|item| {
+            let syn::Item::Fn(function) = item else {
+                return None;
+            };
+            (function.sig.ident == function_name && !attrs_are_conditional(&function.attrs))
+                .then_some(function)
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        functions.len() == 1,
+        "ConsumerTx {stage} must resolve exact production carrier {repo_path}::{function_name} once, got {}",
+        functions.len()
+    );
+    let calls = reachable_calls_in_block(&functions[0].block);
+    ensure!(
+        calls.iter().any(|call| required_call.matches(call)),
+        "ConsumerTx {stage} carrier {repo_path}::{function_name} is outside the closed execution chain: missing reachable call `{}`",
+        required_call.callee
+    );
+    Ok(())
+}
+
+fn discover_policy_carrier(root: &Path, stage: &str, spec: PolicySymbolSpec) -> Result<Carrier> {
+    verify_policy_symbol(root, stage, spec)?;
+    Carrier::new(root, CarrierKind::RustSymbol, spec.repo_path, spec.symbol)
+}
+
+fn verify_policy_symbol(root: &Path, stage: &str, spec: PolicySymbolSpec) -> Result<()> {
+    let source_path = root.join(spec.repo_path);
     let source = generated_file::read_stable_utf8_file(
         &source_path,
         MAX_RUST_CARRIER_BYTES,
         "ConsumerTx policy carrier",
     )?;
     let syntax = syn::parse_file(&source)
-        .with_context(|| format!("cannot parse ConsumerTx policy carrier {repo_path}"))?;
-    let mut symbols = Vec::new();
-    collect_policy_carrier_symbols(&syntax.items, marker, &mut symbols);
-    ensure!(
-        symbols.len() == 1,
-        "ConsumerTx {stage} marker `{marker}` must identify one production carrier in {repo_path}, got {symbols:?}"
-    );
-    Carrier::new(root, CarrierKind::RustSymbol, repo_path, &symbols.remove(0))
+        .with_context(|| format!("cannot parse ConsumerTx policy carrier {}", spec.repo_path))?;
+    verify_policy_symbol_in_syntax(&syntax, stage, spec)
 }
 
-fn collect_policy_carrier_symbols(items: &[syn::Item], marker: &str, symbols: &mut Vec<String>) {
+fn verify_policy_symbol_in_syntax(
+    syntax: &syn::File,
+    stage: &str,
+    spec: PolicySymbolSpec,
+) -> Result<()> {
+    let matches = exact_policy_symbol_evidence(&syntax.items, spec.symbol);
+    ensure!(
+        matches.len() == 1,
+        "ConsumerTx {stage} must resolve exact production carrier {}::{} once, got {}",
+        spec.repo_path,
+        spec.symbol,
+        matches.len()
+    );
+    let evidence = &matches[0];
+    if let Some(required_trait) = spec.required_trait {
+        ensure!(
+            evidence.trait_path.as_deref() == Some(required_trait),
+            "ConsumerTx {stage} carrier {}::{} is outside the closed execution chain: missing exact trait `{required_trait}`",
+            spec.repo_path,
+            spec.symbol
+        );
+    }
+    if let Some(required_call) = spec.required_call {
+        ensure!(
+            evidence
+                .calls
+                .iter()
+                .any(|call| required_call.matches(call)),
+            "ConsumerTx {stage} carrier {}::{} is outside the closed execution chain: missing reachable call `{}`",
+            spec.repo_path,
+            spec.symbol,
+            required_call.callee
+        );
+    }
+    Ok(())
+}
+
+struct PolicySymbolEvidence {
+    trait_path: Option<String>,
+    calls: Vec<ReachableCall>,
+}
+
+fn exact_policy_symbol_evidence(items: &[syn::Item], symbol: &str) -> Vec<PolicySymbolEvidence> {
+    let segments = symbol.split("::").collect::<Vec<_>>();
+    let mut matches = Vec::new();
     for item in items {
-        let conditionally_compiled = match item {
-            syn::Item::Fn(item) => attrs_are_conditional(&item.attrs),
-            syn::Item::Impl(item) => attrs_are_conditional(&item.attrs),
-            syn::Item::Mod(item) => attrs_are_conditional(&item.attrs),
-            _ => false,
-        };
-        if conditionally_compiled {
-            continue;
-        }
-        match item {
-            syn::Item::Fn(function)
-                if policy_tokens(&function.sig).contains(marker)
-                    || policy_tokens(&function.block).contains(marker) =>
+        match (segments.as_slice(), item) {
+            ([function], syn::Item::Fn(item))
+                if item.sig.ident == *function && !attrs_are_conditional(&item.attrs) =>
             {
-                symbols.push(function.sig.ident.to_string());
+                matches.push(PolicySymbolEvidence {
+                    trait_path: None,
+                    calls: reachable_calls_in_block(&item.block),
+                });
             }
-            syn::Item::Impl(item) => {
-                let Some(owner) = type_last_ident(&item.self_ty) else {
-                    continue;
-                };
-                let trait_carries_marker = item
+            ([owner, method], syn::Item::Impl(item))
+                if !attrs_are_conditional(&item.attrs)
+                    && type_last_ident(&item.self_ty).as_deref() == Some(*owner) =>
+            {
+                let trait_tokens = item
                     .trait_
                     .as_ref()
-                    .is_some_and(|(_, path, _)| policy_tokens(path).contains(marker));
-                if trait_carries_marker
-                    && let Some(method) = item.items.iter().find_map(|item| {
-                        let syn::ImplItem::Fn(method) = item else {
-                            return None;
-                        };
-                        (method.sig.ident == "handle" && !attrs_are_conditional(&method.attrs))
-                            .then_some(method)
-                    })
-                {
-                    symbols.push(format!("{owner}::{}", method.sig.ident));
-                    continue;
-                }
-                for method in &item.items {
-                    let syn::ImplItem::Fn(method) = method else {
+                    .map_or_else(String::new, |(_, path, _)| policy_tokens(path));
+                for impl_item in &item.items {
+                    let syn::ImplItem::Fn(function) = impl_item else {
                         continue;
                     };
-                    if attrs_are_conditional(&method.attrs) {
-                        continue;
+                    if function.sig.ident == *method && !attrs_are_conditional(&function.attrs) {
+                        matches.push(PolicySymbolEvidence {
+                            trait_path: (!trait_tokens.is_empty()).then_some(trait_tokens.clone()),
+                            calls: reachable_calls_in_block(&function.block),
+                        });
                     }
-                    if policy_tokens(&method.sig).contains(marker)
-                        || policy_tokens(&method.block).contains(marker)
-                    {
-                        symbols.push(format!("{owner}::{}", method.sig.ident));
-                    }
-                }
-            }
-            syn::Item::Mod(module) => {
-                if let Some((_, nested)) = &module.content {
-                    collect_policy_carrier_symbols(nested, marker, symbols);
                 }
             }
             _ => {}
+        }
+    }
+    matches
+}
+
+struct ReachableCall {
+    callee: String,
+    args: Vec<String>,
+}
+
+#[derive(Default)]
+struct ReachableCallVisitor {
+    calls: Vec<ReachableCall>,
+}
+
+impl<'ast> Visit<'ast> for ReachableCallVisitor {
+    fn visit_stmt(&mut self, statement: &'ast syn::Stmt) {
+        if matches!(statement, syn::Stmt::Item(_)) {
+            return;
+        }
+        syn::visit::visit_stmt(self, statement);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        self.calls.push(ReachableCall {
+            callee: policy_tokens(&call.func),
+            args: call.args.iter().map(policy_tokens).collect(),
+        });
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.calls.push(ReachableCall {
+            callee: format!(
+                "{}.{}",
+                policy_tokens(&call.receiver),
+                policy_tokens(&call.method)
+            ),
+            args: call.args.iter().map(policy_tokens).collect(),
+        });
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_if(&mut self, expression: &'ast syn::ExprIf) {
+        match bool_literal(&expression.cond) {
+            Some(true) => self.visit_block(&expression.then_branch),
+            Some(false) => {
+                if let Some((_, otherwise)) = &expression.else_branch {
+                    self.visit_expr(otherwise);
+                }
+            }
+            None => syn::visit::visit_expr_if(self, expression),
+        }
+    }
+
+    fn visit_expr_while(&mut self, expression: &'ast syn::ExprWhile) {
+        if bool_literal(&expression.cond) != Some(false) {
+            syn::visit::visit_expr_while(self, expression);
+        }
+    }
+
+    fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
+}
+
+fn bool_literal(expression: &syn::Expr) -> Option<bool> {
+    let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Bool(value),
+        ..
+    }) = expression
+    else {
+        return None;
+    };
+    Some(value.value)
+}
+
+fn reachable_calls_in_block(block: &syn::Block) -> Vec<ReachableCall> {
+    let mut visitor = ReachableCallVisitor::default();
+    visitor.visit_block(block);
+    if let Some(syn::Stmt::Expr(tail, None)) = block.stmts.last() {
+        visit_returned_boxed_closure(tail, &mut visitor);
+    }
+    visitor.calls
+}
+
+fn reachable_calls_in_expr(expression: &syn::Expr) -> Vec<ReachableCall> {
+    let mut visitor = ReachableCallVisitor::default();
+    visitor.visit_expr(expression);
+    visitor.calls
+}
+
+fn visit_returned_boxed_closure(expression: &syn::Expr, visitor: &mut ReachableCallVisitor) {
+    let syn::Expr::Call(call) = expression else {
+        return;
+    };
+    if policy_tokens(&call.func) != "Box::new" {
+        return;
+    }
+    for argument in &call.args {
+        if let syn::Expr::Closure(closure) = argument {
+            visitor.visit_expr(&closure.body);
         }
     }
 }
@@ -1728,7 +2202,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn policy_carrier_discovers_marker_on_assembly_private_trait_impl() -> anyhow::Result<()> {
+    fn policy_carrier_accepts_exact_assembly_private_trait_impl() -> anyhow::Result<()> {
         let syntax = syn::parse_file(
             r#"
             struct PgAuditConsumerTx;
@@ -1738,13 +2212,173 @@ mod tests {
             }
             "#,
         )?;
-        let mut symbols = Vec::new();
-        collect_policy_carrier_symbols(
-            &syntax.items,
-            "ConsumerTxHandler<policy::TransactionalOnly>",
-            &mut symbols,
+        verify_policy_symbol_in_syntax(
+            &syntax,
+            "handler",
+            PolicySymbolSpec {
+                repo_path: "synthetic.rs",
+                symbol: "PgAuditConsumerTx::handle",
+                required_trait: Some("ConsumerTxHandler<policy::TransactionalOnly>"),
+                required_call: None,
+            },
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn policy_chain_rejects_unknown_subscription_identity() -> anyhow::Result<()> {
+        let subscription = SubscriptionIdentity {
+            consumer: "audit".to_string(),
+            group: "audit.dead-helper".to_string(),
+            external_effect_policy: AssuranceExternalEffectPolicy::TransactionalOnly,
+        };
+        let Err(error) = subscription_policy_chain(&subscription) else {
+            bail!("unknown group inherited a known consumer policy chain");
+        };
+        assert!(
+            error.to_string().contains(
+                "active subscription audit/audit.dead-helper with policy TransactionalOnly has no closed production policy chain"
+            ),
+            "unexpected error: {error:#}"
         );
-        assert_eq!(symbols, ["PgAuditConsumerTx::handle"]);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_carrier_rejects_dead_helper_bait() -> anyhow::Result<()> {
+        let syntax = syn::parse_file(
+            r#"
+            fn register_audit_subscriber() {
+                reg.subscriber();
+            }
+
+            fn dead_helper() {
+                let _ = SubscriberCapability::AdapterNativeTransactional;
+            }
+            "#,
+        )?;
+        let Err(error) = verify_policy_symbol_in_syntax(
+            &syntax,
+            "registration",
+            PolicySymbolSpec {
+                repo_path: "synthetic.rs",
+                symbol: "register_audit_subscriber",
+                required_trait: None,
+                required_call: Some(PolicyCallRequirement::exact(
+                    "reg.subscriber",
+                    ["SubscriberCapability::AdapterNativeTransactional", ""],
+                )),
+            },
+        ) else {
+            bail!("unreachable helper masqueraded as policy evidence");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("register_audit_subscriber is outside the closed execution chain"),
+            "unexpected error: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn policy_carrier_rejects_nested_dead_helper_bait() -> anyhow::Result<()> {
+        let syntax = syn::parse_file(
+            r#"
+            fn register_audit_subscriber() {
+                fn dead_helper() {
+                    reg.subscriber(SubscriberCapability::AdapterNativeTransactional);
+                }
+                live_registration();
+            }
+            "#,
+        )?;
+        let Err(error) = verify_policy_symbol_in_syntax(
+            &syntax,
+            "registration",
+            PolicySymbolSpec {
+                repo_path: "synthetic.rs",
+                symbol: "register_audit_subscriber",
+                required_trait: None,
+                required_call: Some(PolicyCallRequirement::exact(
+                    "reg.subscriber",
+                    ["SubscriberCapability::AdapterNativeTransactional", ""],
+                )),
+            },
+        ) else {
+            bail!("nested unreachable helper masqueraded as policy evidence");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("register_audit_subscriber is outside the closed execution chain"),
+            "unexpected error: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn policy_carrier_rejects_if_false_bait() -> anyhow::Result<()> {
+        let syntax = syn::parse_file(
+            r#"
+            fn register_audit_subscriber() {
+                if false {
+                    reg.subscriber(SubscriberCapability::AdapterNativeTransactional);
+                }
+                live_registration();
+            }
+            "#,
+        )?;
+        let Err(error) = verify_policy_symbol_in_syntax(
+            &syntax,
+            "registration",
+            PolicySymbolSpec {
+                repo_path: "synthetic.rs",
+                symbol: "register_audit_subscriber",
+                required_trait: None,
+                required_call: Some(PolicyCallRequirement::exact(
+                    "reg.subscriber",
+                    ["SubscriberCapability::AdapterNativeTransactional", ""],
+                )),
+            },
+        ) else {
+            bail!("statically unreachable branch masqueraded as policy evidence");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("register_audit_subscriber is outside the closed execution chain"),
+            "unexpected error: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn policy_executor_rejects_symbol_without_worker_edge() -> anyhow::Result<()> {
+        let syntax = syn::parse_file(
+            r#"
+            fn consumer_tx_worker_spec() {
+                build_worker();
+            }
+
+            fn spawn_consumer_ackable_tx_subscriber() {}
+            "#,
+        )?;
+        let Err(error) = verify_policy_call_edge_in_syntax(
+            &syntax,
+            "policy executor",
+            "synthetic.rs",
+            "consumer_tx_worker_spec",
+            PolicyCallRequirement::exact("spawn_consumer_ackable_tx_subscriber", ["", ""]),
+        ) else {
+            bail!("executor symbol existence masqueraded as a worker call edge");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("missing reachable call `spawn_consumer_ackable_tx_subscriber`"),
+            "unexpected error: {error:#}"
+        );
         Ok(())
     }
 
@@ -2144,49 +2778,61 @@ impl DemoProvider {
             "active handler count must come from generated fact subscriptions"
         );
         for fact in facts {
-            let carrier_paths = fact
+            let carriers = fact
                 .evidence
                 .effect
                 .carriers
                 .iter()
-                .map(|carrier| carrier.path.0.as_str())
+                .map(|carrier| (carrier.path.0.as_str(), carrier.symbol.as_str()))
                 .collect::<BTreeSet<_>>();
             for subscription in &fact.subscriptions {
-                let registration_root = format!("crates/{}/", subscription.consumer);
-                assert!(
-                    carrier_paths
+                let registration_path =
+                    format!("crates/{}/src/application.rs", subscription.consumer);
+                assert_eq!(
+                    carriers
                         .iter()
-                        .any(|path| path.starts_with(&registration_root)),
-                    "{} effect evidence lacks registration capability for {}",
+                        .filter(|(path, _)| *path == registration_path)
+                        .count(),
+                    1,
+                    "{} effect evidence must have one exact registration capability for {}: {carriers:?}",
                     fact.contract_id,
                     subscription.consumer
                 );
+                let handler = match subscription.external_effect_policy {
+                    AssuranceExternalEffectPolicy::TransactionalOnly => "PgAuditConsumerTx::handle",
+                    AssuranceExternalEffectPolicy::Reconcile => "PgSettingsConsumerTx::handle",
+                    AssuranceExternalEffectPolicy::IdempotencyKey
+                    | AssuranceExternalEffectPolicy::Compensated => {
+                        bail!(
+                            "active subscription {}/{} has unsupported policy {:?}",
+                            subscription.consumer,
+                            subscription.group,
+                            subscription.external_effect_policy
+                        )
+                    }
+                };
+                for expected in [
+                    (
+                        "assemblies/runtime/src/event_transport.rs",
+                        "resolve_consumer_tx_plan",
+                    ),
+                    ("assemblies/runtime/src/consumer_tx.rs", handler),
+                    (
+                        "assemblies/runtime/src/consumer_tx.rs",
+                        "spawn_consumer_ackable_tx_subscriber",
+                    ),
+                ] {
+                    assert!(
+                        carriers.contains(&expected),
+                        "{} effect evidence lacks exact policy carrier {expected:?}: {carriers:?}",
+                        fact.contract_id
+                    );
+                }
             }
             assert!(
-                carrier_paths
+                carriers
                     .iter()
-                    .any(|path| path == &"assemblies/runtime/src/event_transport.rs"),
-                "{} effect evidence lacks policy-bound plan",
-                fact.contract_id
-            );
-            assert!(
-                carrier_paths
-                    .iter()
-                    .any(|path| path.starts_with("adapters/postgres/")),
-                "{} effect evidence lacks policy-bound handler",
-                fact.contract_id
-            );
-            assert!(
-                carrier_paths
-                    .iter()
-                    .any(|path| path.starts_with("crates/eventexec/")),
-                "{} effect evidence lacks policy-bound executor",
-                fact.contract_id
-            );
-            assert!(
-                carrier_paths
-                    .iter()
-                    .all(|path| !path.starts_with("generated/src/event/")),
+                    .all(|(path, _)| !path.starts_with("generated/src/event/")),
                 "{} generated SPEC must not masquerade as effect execution evidence",
                 fact.contract_id
             );

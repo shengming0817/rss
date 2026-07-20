@@ -51,6 +51,8 @@ impl LocalClock for SystemLocalClock {
     }
 }
 const MACHINE_INPUT_PATHS: &[&str] = &[
+    "docs/ops/0069-account-security-capacity-gate.selftest.sh",
+    "docs/ops/0069-account-security-capacity-gate.sh",
     "docs/ops/localtx-alerts.rules.yaml",
     "docs/ops/202607082104-1642-consistency-dashboard-checklist.md",
     "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
@@ -59,6 +61,7 @@ const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/ops/localtx-proof-report.md",
     "docs/rules/localtx.md",
     "docs/spec/007-runtime-deployment-executable-plan/contracts/assembly-lock.schema.json",
+    "docs/spec/007-runtime-deployment-executable-plan/contracts/runtime-plan.schema.json",
     "docs/spec/007-runtime-deployment-executable-plan/fixtures/fingerprint-v1-vectors.json",
 ];
 const POLICY_BEHAVIOR_SPEC: &str = include_str!("../tests/golden/ci-impact-policy.json");
@@ -3002,15 +3005,22 @@ mod tests {
         for source in rust_sources(&canonical_root)? {
             let text = fs::read_to_string(&source)
                 .with_context(|| format!("read Rust source {}", source.display()))?;
-            let syntax = syn::parse_file(&text)
-                .with_context(|| format!("parse Rust source {}", source.display()))?;
             let mut visitor = IncludeVisitor {
                 root: &canonical_root,
                 source: &source,
                 docs: BTreeSet::new(),
                 errors: Vec::new(),
             };
-            visitor.visit_file(&syntax);
+            match syn::parse_file(&text) {
+                Ok(syntax) => visitor.visit_file(&syntax),
+                Err(file_error) => match syn::parse_str::<syn::Expr>(&text) {
+                    Ok(syntax) => visitor.visit_expr(&syntax),
+                    Err(expression_error) => bail!(
+                        "parse Rust source {} as file or expression: file: {file_error}; expression: {expression_error}",
+                        source.display()
+                    ),
+                },
+            }
             docs.append(&mut visitor.docs);
             errors.append(&mut visitor.errors);
         }
@@ -3784,6 +3794,42 @@ mod tests {
             &extra,
             &golden
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn machine_consumed_docs_discovers_includes_in_expression_fragments() -> Result<()> {
+        let root = crate::testutil::unique_tmp("ci-impact-expression-fragment");
+        fs::create_dir_all(root.join("docs"))?;
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("docs/machine.json"), "{}")?;
+        fs::write(
+            root.join("src/included_expr.rs"),
+            r#"include_str!("../docs/machine.json")"#,
+        )?;
+
+        assert_eq!(
+            machine_consumed_docs(&root)?,
+            BTreeSet::from(["docs/machine.json".to_owned()])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn machine_consumed_docs_rejects_invalid_rust_fragments_with_source_path() -> Result<()> {
+        let root = crate::testutil::unique_tmp("ci-impact-invalid-fragment");
+        fs::create_dir_all(root.join("src"))?;
+        let source = root.join("src/invalid.rs");
+        fs::write(&source, "let = ;")?;
+
+        let Err(error) = machine_consumed_docs(&root) else {
+            bail!("invalid Rust must fail closed");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains(&source.display().to_string()),
+            "parse error must identify its source: {error}"
+        );
         Ok(())
     }
 

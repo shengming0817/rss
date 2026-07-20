@@ -7,8 +7,8 @@
 //! → 聚合 `DomainModuleResult` → 按 plan 唯一 finalizer 产出 `FinalizedListenerSet`
 //! → `LaunchPlan` 逐 listener bind socket + serve（经 `httpd::HttpServer`
 //! + `bootstrap::ShutdownStack`）→ SIGTERM/SIGINT 优雅 drain。Health 也只由 plan 中的
-//! `Health + NoAuth` 项创建，没有手写 append 旁路。各域 typed handle 经 Registry 的 route/subscriber
-//! funnel 一次性交接，不进入共享依赖或生命周期输出。JWT 验签 key 经本地
+//!   `Health + NoAuth` 项创建，没有手写 append 旁路。各域 typed handle 经 Registry 的 route/subscriber
+//!   funnel 一次性交接，不进入共享依赖或生命周期输出。JWT 验签 key 经本地
 //!   JWKS 文件源 + 外部 agent 轮转注入；Internal listener 默认走 SPIFFE/mTLS，service-token 仅保留 loopback
 //!   本地测试路径。
 //!

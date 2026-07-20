@@ -571,7 +571,7 @@ fn listener_capability_visibility_findings(
 
 fn listener_plan_execution_inventory(file: &syn::File) -> ListenerPlanExecutionInventory {
     let mut inventory = ListenerPlanExecutionInventory::default();
-    inventory.visit_file(&file);
+    inventory.visit_file(file);
     inventory
 }
 
@@ -14072,7 +14072,7 @@ serde = workspace=true; features=[derive]
                 .contains("listeners = [primary,internal,admin,health]")
         );
         assert!(report.rendered.contains(
-            "01 | id=listener-pdp | port=diport::Pdp | provider=oidc::OidcProvider | providerCrate=oidc | requiredFeatures=[backend] | consumer=httpserve | lifecycle=active | durability=persistent | purpose=jwt-credential-verification"
+            "01 | id=listener-pdp | port=diport::Pdp | provider=oidc::OidcProvider | providerCrate=oidc | requiredFeatures=[backend] | consumer=httpserve | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=jwt-credential-verification"
         ));
         assert!(
             report

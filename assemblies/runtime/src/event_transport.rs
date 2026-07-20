@@ -2391,7 +2391,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_plan_rejects_wide_owner_wrapper() {
+    fn settings_plan_rejects_wide_owner_wrapper() -> anyhow::Result<()> {
         let spec = generated::event::EVENTS
             .iter()
             .flat_map(|event| event.subscriptions())
@@ -2399,20 +2399,20 @@ mod tests {
                 spec.dispatch() == SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings
             })
             .copied()
-            .expect("settings config-version subscription exists");
+            .context("settings config-version subscription must exist")?;
         let capability = SubscriberCapability::DomainReconcile(
             ReconcileSubscriberOwner::from_owner(WideSettingsWrapper { _service: None }),
         );
 
-        let error = match resolve_consumer_tx_plan(spec, capability) {
-            Ok(_) => panic!("wide settings wrapper must fail exact owner activation"),
-            Err(error) => error,
+        let Err(error) = resolve_consumer_tx_plan(spec, capability) else {
+            anyhow::bail!("wide settings wrapper must fail exact owner activation");
         };
 
         assert!(
             error.to_string().contains("owner capability mismatch"),
             "{error:#}"
         );
+        Ok(())
     }
 
     #[allow(clippy::unwrap_used)]
@@ -2680,30 +2680,32 @@ mod tests {
     }
 
     #[test]
-    fn inactive_external_effect_policies_fail_closed_before_worker_activation() {
+    fn inactive_external_effect_policies_fail_closed_before_worker_activation() -> anyhow::Result<()>
+    {
         let audit = generated::event::identity_v1::session_created::SPEC.subscriptions()[0];
         for policy in [
             vocab::ExternalEffectPolicy::IdempotencyKey,
             vocab::ExternalEffectPolicy::Compensated,
         ] {
-            let error = resolve_consumer_tx_plan_parts(
+            let Err(error) = resolve_consumer_tx_plan_parts(
                 audit.dispatch(),
                 audit.execution(),
                 audit.effect(),
                 policy,
                 SubscriberCapability::AdapterNativeTransactional,
-            )
-            .err()
-            .unwrap_or_else(|| panic!("{policy:?} must not produce an active ConsumerTx plan"));
+            ) else {
+                anyhow::bail!("{policy:?} must not produce an active ConsumerTx plan");
+            };
             assert!(
                 error.to_string().contains("unsupported") || error.to_string().contains("mismatch"),
                 "inactive policy must fail closed with an actionable error: {error:#}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn all_active_generated_handlers_select_their_policy_bound_plan() {
+    fn all_active_generated_handlers_select_their_policy_bound_plan() -> anyhow::Result<()> {
         let mut transactional = 0;
         let mut reconcile = 0;
 
@@ -2718,23 +2720,24 @@ mod tests {
                 vocab::ExternalEffectPolicy::Reconcile => reconcile_capability(),
                 vocab::ExternalEffectPolicy::IdempotencyKey
                 | vocab::ExternalEffectPolicy::Compensated => {
-                    panic!("inactive policy unexpectedly appears in generated topology")
+                    anyhow::bail!("inactive policy unexpectedly appears in generated topology");
                 }
             };
             let plan = resolve_consumer_tx_plan(*spec, capability)
-                .unwrap_or_else(|error| panic!("active generated handler must resolve: {error:#}"));
+                .context("active generated handler must resolve")?;
             match plan.policy() {
                 vocab::ExternalEffectPolicy::TransactionalOnly => transactional += 1,
                 vocab::ExternalEffectPolicy::Reconcile => reconcile += 1,
                 vocab::ExternalEffectPolicy::IdempotencyKey
                 | vocab::ExternalEffectPolicy::Compensated => {
-                    panic!("unsupported policy unexpectedly selected an active handler")
+                    anyhow::bail!("unsupported policy unexpectedly selected an active handler");
                 }
             }
         }
 
         assert_eq!(transactional, 4);
         assert_eq!(reconcile, 1);
+        Ok(())
     }
 
     #[allow(clippy::unwrap_used)]
