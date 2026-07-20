@@ -389,7 +389,7 @@ fn trait_names(item: &syn::ItemTrait) -> Result<BTreeSet<String>> {
 
 fn composition_port(method: &TraitMethod) -> Result<ProducerCompositionPort> {
     match method.trait_name.as_str() {
-        "SessionLifecycleLocal" => Ok(ProducerCompositionPort::SessionLifecycleLocal),
+        "AuthGrantLifecycleLocal" => Ok(ProducerCompositionPort::AuthGrantLifecycleLocal),
         "PolicyLifecycleLocal" => Ok(ProducerCompositionPort::PolicyLifecycleLocal),
         "RoleBindingLifecycleLocal" => Ok(ProducerCompositionPort::RoleBindingLifecycleLocal),
         "ConfigUnitOfWorkLocal" => Ok(ProducerCompositionPort::ConfigUnitOfWorkLocal),

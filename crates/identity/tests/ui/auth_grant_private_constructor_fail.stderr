@@ -1,0 +1,16 @@
+error[E0624]: associated function `new_active` is private
+ --> tests/ui/auth_grant_private_constructor_fail.rs:6:24
+  |
+6 |       let _ = AuthGrant::new_active;
+  |                          ^^^^^^^^^^ private associated function
+  |
+ ::: src/domain/auth_grant.rs
+  |
+  | /     pub(crate) fn new_active(
+  | |         id: AuthGrantId,
+  | |         tenant: TenantId,
+  | |         user_id: UserId,
+... |
+  | |         created_at: SystemTime,
+  | |     ) -> Result<Self, AuthGrantStateError> {
+  | |__________________________________________- private associated function defined here

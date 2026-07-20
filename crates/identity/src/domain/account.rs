@@ -94,8 +94,9 @@ pub enum AuthOutcome {
 /// **永不进入本类型**（仅 [`secure::PasswordHash`] 封装持久化 PHC）。
 ///
 /// **登录标识 vs canonical subject（#1277 F1）**：`login` 是凭据查找键（攻击者可控的不透明输入）；`user_id`
-/// 是稳定 canonical actor subject——登录成功后**仅** `user_id` 写入 session / `IdentitySessionCreatedPayload`
-/// / outbox envelope（audit `ids::UserId::parse` 必通），`login`（准 PII）永不进 wire / broker metadata。
+/// 是稳定 canonical actor subject——登录成功后**仅** `user_id` 写入 AuthGrant /
+/// `IdentitySessionCreatedPayload` / outbox envelope（audit `ids::UserId::parse` 必通），`login`（准 PII）
+/// 永不进 wire / broker metadata。
 ///
 /// `Debug` 手写脱敏：`password_hash` 经 [`secure::PasswordHash`] 类型层已脱敏，`login`（[`LoginIdentifier`]）
 /// 亦脱敏（准 PII）。`tenant` / `user_id` 有意保留原值：均为 audit/tracing 合法可观测标识、非凭据
@@ -208,7 +209,7 @@ impl Credential {
         &self.login
     }
 
-    /// canonical actor subject（稳定 UUID；登录成功后写 payload/envelope/session subject，audit actor，#1277 F1）。
+    /// canonical actor subject（稳定 UUID；登录成功后写 payload/envelope/AuthGrant，audit actor，#1277 F1）。
     /// `pub`（#1316 adapter 绑 `credentials.user_id` 列）。
     pub fn user_id(&self) -> ids::UserId {
         self.user_id

@@ -10,9 +10,30 @@
 
 > **[#1833 安全语义修订]** `AccountStatus` 是持久账户生命周期状态；`AccountLockout` 只表示有 TTL 的暴力破解临时阻断，二者不互相驱动。登录与 refresh 的当前门控以 [ADR-018](../../architecture/202607181623-018-account-security-authentication-gate.md) 为准。
 
+> **[#1834 AuthGrant 破坏性修订]** 内部 `Session` / `SessionId` / `SessionLifecycle` 已被
+> `AuthGrant` / `AuthGrantId` / `AuthGrantLifecycle` 完整取代，不提供 alias 或兼容存储。登录原子持久化
+> AuthGrant、初始 refresh 和 `identity.session-created` outbox，并在成功 receipt 后才释放 bearer；
+> refresh 通过 tenant/grant/user/epoch/status 绑定根。权威记录见
+> [ADR-019](../../architecture/202607191202-019-auth-grant-root.md)。本 spec 下文 Session 接口仅为历史快照。
+
 **Input**: User description: "identity 域 crate（身份/会话/RBAC/ABAC/密码变更 CAS）：在 #997 冻结签名内兑现 domain L0（RBAC/ABAC deny-overrides）+ application（真实登录/会话/密码 CAS/账户锁定/角色管理）+ ports（CredentialRepo/SessionRepo）+ 新事件契约 + handler + contract test。拆成 5 个 ≤2000 行可执行 PR，挂 Azure Boards #1012。"
 
 **Tracking**: Azure Boards Feature #1012（容器，跨 5 PR；子 PBI #1186–#1190）（`[RW-W-identity]`）· Epic #991（GoCell→Rust 迁移 · W 宽扇出阶段）· Blocked-by #999（G1 追踪弹，已闭环）
+
+---
+
+## AuthGrant 当前权威模型（#1834）
+
+- 领域根使用强类型 `UserId`，持有 `auth_time`、账户签发 epoch、过期时间以及
+  `Active | Revoked | Compromised` 闭值状态；关闭原因/时间由根转换与数据库 CHECK 双重验证。
+- `RefreshTokenRecord` 不再保存 `PrincipalKind/kind/subject`，必须完整绑定 AuthGrant；轮换继承绑定。
+- 登录只允许 `prepare_initial` 生成内存 bearer/hash，唯一初始持久化 API 是 combined
+  `persist_login_grant`；根、refresh、outbox all-or-none，提交未知不返回 bearer。
+- `AuthGrantLifecycle::close` 在同一事务先撤销 refresh family，再关闭根；同一 memory store 同时实现
+  lifecycle 与 refresh port。
+- 本 PR 只保持 HTTP/event 现有的 `sessionId` 与 `identity.session-created` event wire；access JWT 的
+  `sid`、`authn_epoch` 等 grant claims 尚未交付，由 #1840 完成。外部 wire 不构成内部旧 Session 抽象的
+  兼容 shim。
 
 ---
 

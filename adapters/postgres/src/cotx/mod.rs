@@ -1,7 +1,7 @@
 //! `producer_tx` —— active HTTP producer 的唯一事务骨架：begin → SET LOCAL tenant → 业务写闭包返回
 //! typed outcome → 授权校验 → canonical append → 单 commit；任一步 Err ⇒ rollback + warn。
 //!
-//! 抽取自 session co-tx 范式（`session_lifecycle.rs`），供 session 创建与配置写
+//! 抽取自 session co-tx 范式（`auth_grant_lifecycle.rs`），供 session 创建与配置写
 //! `PgConfigUnitOfWork` 复用。
 //!
 //! 错误泛型 `E`：业务写闭包返回 `Result<ProducerTxOutcome<M, T>, E>`（如 CAS 0 行 → 域
@@ -1347,15 +1347,6 @@ static TEST_ROLLBACK_TIMEOUT_ENTERED: tokio::sync::Notify = tokio::sync::Notify:
 static TEST_LOCALTX_PAUSE_SEAM: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(all(test, feature = "integration"))]
-static TEST_BEGIN_PAUSE_ENTERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
-
-#[cfg(all(test, feature = "integration"))]
-static TEST_SETUP_PAUSE_ENTERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
-
-#[cfg(all(test, feature = "integration"))]
-static TEST_COMMIT_PAUSE_ENTERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
-
-#[cfg(all(test, feature = "integration"))]
 tokio::task_local! {
     static TEST_LOCALTX_PAUSE_STAGE: LocalTxTestPauseStage;
 }
@@ -1382,21 +1373,7 @@ async fn pause_localtx_stage_for_test(stage: LocalTxTestPauseStage) {
         .try_with(|requested| *requested == stage)
         .unwrap_or(false)
     {
-        match stage {
-            LocalTxTestPauseStage::Begin => TEST_BEGIN_PAUSE_ENTERED.notify_one(),
-            LocalTxTestPauseStage::Setup => TEST_SETUP_PAUSE_ENTERED.notify_one(),
-            LocalTxTestPauseStage::Commit => TEST_COMMIT_PAUSE_ENTERED.notify_one(),
-        }
         std::future::pending::<()>().await;
-    }
-}
-
-#[cfg(all(test, feature = "integration"))]
-pub(crate) async fn wait_for_localtx_pause_for_test(stage: LocalTxTestPauseStage) {
-    match stage {
-        LocalTxTestPauseStage::Begin => TEST_BEGIN_PAUSE_ENTERED.notified().await,
-        LocalTxTestPauseStage::Setup => TEST_SETUP_PAUSE_ENTERED.notified().await,
-        LocalTxTestPauseStage::Commit => TEST_COMMIT_PAUSE_ENTERED.notified().await,
     }
 }
 

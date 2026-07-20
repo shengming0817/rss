@@ -14,7 +14,7 @@
 //! `current_setting('rss.tenant_id', true)` 对齐（#1298）；写路径另经 co-tx SET LOCAL 锚点。
 //!
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型：save 以 version+1 守乐观并发）
-//! ref: crates/identity 域形 UoW 端口范式 + adapters/postgres/src/session_lifecycle.rs（co-tx 范式）
+//! ref: crates/identity 域形 UoW 端口范式 + adapters/postgres/src/auth_grant_lifecycle.rs（co-tx 范式）
 
 use std::sync::Arc;
 #[cfg(all(test, feature = "integration"))]
@@ -62,7 +62,7 @@ static CONFIG_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
 ///
 /// `clock` 是注入的 [`Clock`]（必填构造器位置参，`Arc<dyn Clock>`）：co-tx outbox envelope `occurred_at`
 /// 时间源（#1129/#262 F1——settings 的 `settings.config-version-changed` 生产 outbox 路径，本是第三条漏接
-/// occurred_at 的构造点）。用 `Arc`（非 `Box`，区别于 [`crate::PgEmitter`] / [`crate::PgSessionLifecycle`]）：
+/// occurred_at 的构造点）。用 `Arc`（非 `Box`，区别于 [`crate::PgEmitter`] / [`crate::PgAuthGrantLifecycle`]）：
 /// settings bundle 以**单一**注入 clock 经 `Arc::clone` 扇出到 read/write 两个实例（PERSIST-003，#1424）。
 pub struct PgConfigRepo {
     read_pool: PgTenantReadPool,
@@ -460,7 +460,7 @@ fn producer_authorization_storage_error(path: &'static str) -> ConfigRepoError {
 }
 
 /// `TenantId` → SQL bind 参数（stringify UUID，绑 `$N::uuid` server-side cast；不给 sqlx 加 uuid feature，
-/// 同 `session_lifecycle` / outbox.event_id 范式）。收口此处避免 `as_uuid().to_string()` 在各查询点漂移。
+/// 同 `auth_grant_lifecycle` / outbox.event_id 范式）。收口此处避免 `as_uuid().to_string()` 在各查询点漂移。
 fn tenant_param(tenant: TenantId) -> String {
     tenant.as_uuid().to_string()
 }
@@ -1273,7 +1273,7 @@ impl PgConfigRepo {
         M: Send + 'static,
     {
         let tenant = scope.tenant();
-        // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgSessionLifecycle）。
+        // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgAuthGrantLifecycle）。
         // `contract` 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at
         // 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：settings 生产 outbox 路径补齐
         // occurred_at；漏接编译期不可表达）。

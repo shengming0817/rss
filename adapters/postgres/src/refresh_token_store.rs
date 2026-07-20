@@ -3,30 +3,30 @@
 //! **哈希存储（不存明文）**：`token_hash` 列只持 SHA-256 摘要（`bytea`，32 字节）；secret 生成 / 摘要计算在
 //! `secure::refresh`（base 层 crypto），编排在 `application::RefreshService`（adapter 只做透传落库）。
 //!
-//! **原子 CAS 轮换**（`rotate`）：单事务先锁定 account-security 并校验 Active + family issuance epoch，
-//! 再执行 `UPDATE status='consumed' WHERE ... AND status='active'`（CAS）+ 条件 INSERT。typed outcome
-//! `Applied|Replay|AccountStale` 区分成功、refresh CAS miss 与最终账号 fence 拒绝；后两者均不写 new。
-//! 杜绝 TOCTOU 双换与 pre-mint read→CAS 之间的账号状态竞态。
+//! **原子 CAS 轮换**（`rotate`）：单事务先锁定 account-security 与绑定的 AuthGrant，校验二者均
+//! Active、未过期且 issuance epoch 一致，再执行 `UPDATE status='consumed' ...`（CAS）+ 条件 INSERT。
+//! `Applied|Replay|AccountStale|Expired` 区分成功、refresh CAS miss、账号 fence 与最终 writer 过期 fence。
 //!
 //! **谱系级联撤销**（`revoke_lineage`）：`UPDATE status='revoked' WHERE lineage_id=$2`（幂等，0 行也 Ok）；
 //! logout / reuse-detection 共用此路径（整条 rotation 链一次撤销）。
 //!
 //! **租户隔离**：写路径先 `set_local_tenant`（RLS SET LOCAL 锚点，tenancy.md §RLS 与 PG scope）；
-//! 读路径显式 `WHERE tenant_id=$1::uuid`（与 `PgSessionLifecycle::find` / `PgRoleRepo::find` 一致，pre-GA 双重隔离）。
+//! 读路径显式 `WHERE tenant_id=$1::uuid`（与 `PgAuthGrantLifecycle::find_active` /
+//! `PgRoleRepo::find` 一致，pre-GA 双重隔离）。
 //!
-//! **Clock 不注入**：issued_at / expires_at 来自 `RefreshTokenRecord`（由 `RefreshService` 的 Clock 派生），
-//! adapter 只做透传落库（`to_timestamp(unix_secs(record.issued_at()))`）——与注释「不写 outbox、不需要 Clock」对齐。
+//! **最终时钟归 writer**：record 的 issued/expires 时间来自 `RefreshService` 注入的 Clock；轮换提交仍在
+//! 持锁事务内以 PostgreSQL `clock_timestamp()` 复核 old refresh 与 AuthGrant 未过期，消除应用预检 TOCTOU。
 //!
 //! ref: ory/fosite handler/oauth2/flow_refresh.go@master（refresh rotation + reuse-detection，概念谱系）
 //! ref: adapters/postgres/src/role_repo.rs（pool 注入 / SET LOCAL / storage 收口 / hydrate 范本）
-//! ref: adapters/postgres/src/session_lifecycle.rs（epoch 列编解码 + rollback warn 范式）
+//! ref: adapters/postgres/src/auth_grant_lifecycle.rs（epoch 列编解码 + rollback warn 范式）
 
 use std::time::{Duration, SystemTime};
 
 use identity::ports::{
-    AuthnEpoch, IdentityError, RefreshRotationMutation, RefreshRotationOutcome, RefreshStatus,
-    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenStore, TenantRepoScope,
-    kind_from_db, kind_to_db,
+    AuthGrantStatus, AuthnEpoch, IdentityError, RefreshRotationMutation, RefreshRotationOutcome,
+    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot,
+    RefreshTokenStore, TenantRepoScope,
 };
 use sqlx::Row;
 
@@ -43,7 +43,7 @@ use crate::tx_retry::{classify_identity_error, run_pg_localtx_retry};
 /// refresh token 持久化 PostgreSQL adapter（impl [`RefreshTokenStore`]，#1325）。
 ///
 /// 仅由已验证 reader/writer capability 构造（同 [`crate::PgRoleRepo`]）。
-/// **Clock 不注入**：issued_at/expires_at 来自 record，由 `RefreshService` 的 Clock 派生，adapter 只透传落库。
+/// record 时间来自 `RefreshService`；安全相关的最终过期判定由 writer 事务的数据库时钟完成。
 pub struct PgRefreshTokenStore {
     read_pool: PgTenantReadPool,
     write_pool: PgTenantWritePool,
@@ -101,7 +101,7 @@ impl RefreshRotationAttemptProbe {
 }
 
 impl PgRefreshTokenStore {
-    /// 由已验证 reader/writer capability 构造。Clock 不注入（issued_at/expires_at 来自 record）。
+    /// 由已验证 reader/writer capability 构造。最终过期判定使用 writer 事务的数据库时钟。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::refresh_token_store` 收口。
     pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
@@ -184,13 +184,13 @@ fn storage(e: sqlx::Error) -> IdentityError {
 }
 
 /// 持久化 epoch 秒（`extract(epoch ...)::bigint`）→ `SystemTime`（与写路径 `unix_secs` 编码对称；
-/// 负值——早于 epoch，理论不可达——收口为 epoch 0，不 panic；同 `session_lifecycle::epoch_secs_to_time`）。
+/// 负值——早于 epoch，理论不可达——收口为 epoch 0，不 panic）。
 fn epoch_secs_to_time(secs: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).unwrap_or(0))
 }
 
-/// refresh_tokens INSERT 写体（提取以控认知复杂度；供 [`RefreshTokenStore::insert`] 和
-/// [`RefreshTokenStore::rotate`] CAS 成功路径共用；同 `session_lifecycle::write_session_and_outbox`）。
+/// refresh_tokens INSERT 写体。初始记录只能由 AuthGrant login co-tx 写入；本函数仅供既有
+/// refresh family 的 [`RefreshTokenStore::rotate`] CAS 成功路径使用。
 async fn do_insert(
     conn: &mut sqlx::PgConnection,
     record: &RefreshTokenRecord,
@@ -198,23 +198,24 @@ async fn do_insert(
     sqlx::query(
         r#"
         INSERT INTO refresh_tokens
-            (id, tenant_id, subject, kind, token_hash,
-             parent_id, lineage_id, authn_epoch_at_issue, status, issued_at, expires_at)
+            (id, tenant_id, auth_grant_id, user_id, authn_epoch_at_issue,
+             auth_grant_status, token_hash, parent_id, lineage_id, status, issued_at, expires_at)
         VALUES
-            ($1::uuid, $2::uuid, $3, $4, $5,
-             $6::uuid, $7::uuid, $8, $9, to_timestamp($10), to_timestamp($11))
+            ($1::uuid, $2::uuid, $3, $4::uuid, $5,
+             $6, $7, $8::uuid, $9::uuid, $10, to_timestamp($11), to_timestamp($12))
         "#,
     )
     .bind(record.id().as_str())
     .bind(record.tenant().as_uuid().to_string())
-    .bind(record.subject())
-    .bind(kind_to_db(record.kind()))
-    .bind(record.token_hash().as_bytes() as &[u8])
-    .bind(record.parent_id().map(|p| p.as_str()))
-    .bind(record.lineage_id().as_str())
+    .bind(record.auth_grant_id().as_str())
+    .bind(record.user_id().as_uuid().to_string())
     .bind(i64::try_from(record.issuance_epoch().get()).map_err(|_| {
         sqlx::Error::Protocol("refresh issuance epoch exceeds PostgreSQL bigint".to_owned())
     })?)
+    .bind(record.auth_grant_status().as_db_str())
+    .bind(record.token_hash().as_bytes() as &[u8])
+    .bind(record.parent_id().map(|p| p.as_str()))
+    .bind(record.lineage_id().as_str())
     .bind(record.status().as_db_str())
     .bind(unix_secs(record.issued_at()))
     .bind(unix_secs(record.expires_at()))
@@ -223,13 +224,15 @@ async fn do_insert(
     .map(|_| ())
 }
 
-/// CAS UPDATE（old active→consumed）+ 条件写 new，纯 sqlx 错误返回（调用方负责 tx rollback/commit）。
+/// 锁内复核 old/root 过期 + CAS UPDATE（old active→consumed）+ 条件写 new，纯 sqlx 错误返回
+/// （调用方负责 tx rollback/commit）。
 /// 抽取以控制 [`RefreshTokenStore::rotate`] 认知复杂度（≤ 15，CLAUDE.md §认知复杂度）。
 ///
 /// 返回 [`RefreshRotationOutcome::Applied`] = CAS 命中 + new 写入；
 /// [`RefreshRotationOutcome::Replay`] = old 非 Active；
 /// [`RefreshRotationOutcome::AccountStale`] = 最终锁内账号非 Active 或签发 epoch 已过期；
-/// 后两者均不写 new，`Err(_)` = SQL 错误（调用方需 rollback）。
+/// [`RefreshRotationOutcome::Expired`] = 最终锁内 old refresh/AuthGrant 已过期或根不能覆盖 family 绝对期限；
+/// fence 结果均不写 new，`Err(_)` = SQL 错误（调用方需 rollback）。
 async fn do_rotate_tx(
     tenant_uuid: &str,
     tx: &mut sqlx::PgConnection,
@@ -239,12 +242,53 @@ async fn do_rotate_tx(
     let expected_epoch = i64::try_from(new.issuance_epoch().get()).map_err(|_| {
         sqlx::Error::Protocol("refresh issuance epoch exceeds PostgreSQL bigint".to_owned())
     })?;
+    // Lock the consumed edge first. AuthGrant close uses refresh-family -> root lock order too, so
+    // rotation and close cannot invert the two locks. The database clock is intentionally read
+    // inside this final writer transaction: the application-layer expiry check is only an early
+    // rejection and cannot authorize a later commit.
+    let old = sqlx::query(
+        r#"
+        SELECT status,
+               auth_grant_status,
+               expires_at > clock_timestamp() AS unexpired
+        FROM refresh_tokens
+        WHERE tenant_id = $1::uuid
+          AND id = $2::uuid
+          AND authn_epoch_at_issue = $3
+          AND auth_grant_id = $4
+          AND user_id = $5::uuid
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_uuid)
+    .bind(old_id.as_str())
+    .bind(expected_epoch)
+    .bind(new.auth_grant_id().as_str())
+    .bind(new.user_id().as_uuid().to_string())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(old) = old else {
+        return Ok(RefreshRotationOutcome::Replay);
+    };
+    let old_grant_status: String = old.try_get("auth_grant_status")?;
+    if old_grant_status != AuthGrantStatus::Active.as_db_str() {
+        return Ok(RefreshRotationOutcome::AccountStale);
+    }
+    let old_status: String = old.try_get("status")?;
+    if old_status != RefreshStatus::Active.as_db_str() {
+        return Ok(RefreshRotationOutcome::Replay);
+    }
+    let old_unexpired: bool = old.try_get("unexpired")?;
+    if !old_unexpired {
+        return Ok(RefreshRotationOutcome::Expired);
+    }
+
     let account = sqlx::query(
         "SELECT status, authn_epoch FROM account_security_states \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid FOR UPDATE",
     )
     .bind(tenant_uuid)
-    .bind(new.subject())
+    .bind(new.user_id().as_uuid().to_string())
     .fetch_optional(&mut *tx)
     .await?;
     let Some(account) = account else {
@@ -256,49 +300,67 @@ async fn do_rotate_tx(
         return Ok(RefreshRotationOutcome::AccountStale);
     }
 
+    let grant = sqlx::query(
+        r#"
+        SELECT status,
+               expires_at > clock_timestamp() AS unexpired,
+               expires_at >= to_timestamp($5) AS covers_family
+        FROM auth_grants
+        WHERE tenant_id = $1::uuid
+          AND grant_id = $2
+          AND user_id = $3::uuid
+          AND authn_epoch_at_issue = $4
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_uuid)
+    .bind(new.auth_grant_id().as_str())
+    .bind(new.user_id().as_uuid().to_string())
+    .bind(expected_epoch)
+    .bind(unix_secs(new.expires_at()))
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(grant) = grant else {
+        return Ok(RefreshRotationOutcome::AccountStale);
+    };
+    let grant_status: String = grant.try_get("status")?;
+    if grant_status != AuthGrantStatus::Active.as_db_str()
+        || new.auth_grant_status() != AuthGrantStatus::Active
+    {
+        return Ok(RefreshRotationOutcome::AccountStale);
+    }
+    let grant_unexpired: bool = grant.try_get("unexpired")?;
+    let grant_covers_family: bool = grant.try_get("covers_family")?;
+    if !grant_unexpired || !grant_covers_family {
+        return Ok(RefreshRotationOutcome::Expired);
+    }
+
     let res = sqlx::query(
         "UPDATE refresh_tokens SET status = $3 \
          WHERE tenant_id = $1::uuid AND id = $2::uuid AND status = $4 \
-           AND authn_epoch_at_issue = $5",
+           AND authn_epoch_at_issue = $5 \
+           AND auth_grant_id = $6 \
+           AND user_id = $7::uuid \
+           AND auth_grant_status = 'active' \
+           AND expires_at > clock_timestamp()",
     )
     .bind(tenant_uuid)
     .bind(old_id.as_str())
     .bind(RefreshStatus::Consumed.as_db_str())
     .bind(RefreshStatus::Active.as_db_str())
     .bind(expected_epoch)
+    .bind(new.auth_grant_id().as_str())
+    .bind(new.user_id().as_uuid().to_string())
     .execute(&mut *tx)
     .await?;
     if res.rows_affected() == 0 {
-        return Ok(RefreshRotationOutcome::Replay);
+        return Ok(RefreshRotationOutcome::Expired);
     }
     do_insert(tx, new).await?;
     Ok(RefreshRotationOutcome::Applied)
 }
 
 impl RefreshTokenStore for PgRefreshTokenStore {
-    /// 持久化新签发记录（tenant-scoped 事务，SET LOCAL 锚点，`do_insert` 写体）。
-    async fn insert(
-        &self,
-        scope: TenantRepoScope,
-        record: RefreshTokenRecord,
-    ) -> Result<(), IdentityError> {
-        let tenant = scope.tenant();
-        if record.tenant() != tenant {
-            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
-                "refresh insert tenant scope mismatch",
-            ))));
-        }
-        self.write_pool
-            .write(
-                scope,
-                move |conn| {
-                    Box::pin(async move { do_insert(conn.conn(), &record).await.map_err(storage) })
-                },
-                storage,
-            )
-            .await
-    }
-
     /// 按 secret 摘要查找（`tenant_scoped_read` RLS-safe 读；跨租 → None；
     /// INVARIANT RLS-TENANT-SCOPE-READ-01：SET LOCAL rss.tenant_id 注入到同一事务后 RLS 策略生效，
     /// 与 `PgRoleRepo::find` 模式一致；hydrate 在事务外进行，不持有 conn）。
@@ -318,8 +380,8 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                 Box::pin(async move {
                     let row = sqlx::query(
                         r#"
-                    SELECT id::text, subject, kind, parent_id::text, lineage_id::text,
-                           authn_epoch_at_issue, status,
+                    SELECT id::text, auth_grant_id, user_id::text, authn_epoch_at_issue,
+                           auth_grant_status, parent_id::text, lineage_id::text, status,
                            extract(epoch from issued_at)::bigint AS issued_at,
                            extract(epoch from expires_at)::bigint AS expires_at
                     FROM refresh_tokens
@@ -334,8 +396,9 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                         None => Ok(None),
                         Some(r) => {
                             let id: String = r.try_get("id")?;
-                            let subject: String = r.try_get("subject")?;
-                            let kind_str: String = r.try_get("kind")?;
+                            let auth_grant_id: String = r.try_get("auth_grant_id")?;
+                            let user_id: String = r.try_get("user_id")?;
+                            let auth_grant_status: String = r.try_get("auth_grant_status")?;
                             let parent_id: Option<String> = r.try_get("parent_id")?;
                             let lineage_id: String = r.try_get("lineage_id")?;
                             let issuance_epoch: i64 = r.try_get("authn_epoch_at_issue")?;
@@ -344,8 +407,9 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                             let expires_secs: i64 = r.try_get("expires_at")?;
                             Ok(Some((
                                 id,
-                                subject,
-                                kind_str,
+                                auth_grant_id,
+                                user_id,
+                                auth_grant_status,
                                 parent_id,
                                 lineage_id,
                                 issuance_epoch,
@@ -364,8 +428,9 @@ impl RefreshTokenStore for PgRefreshTokenStore {
             None => Ok(None),
             Some((
                 id,
-                subject,
-                kind_str,
+                auth_grant_id,
+                user_id,
+                auth_grant_status,
                 parent_id,
                 lineage_id,
                 issuance_epoch,
@@ -373,11 +438,17 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                 issued_secs,
                 expires_secs,
             )) => {
-                let kind = kind_from_db(&kind_str).ok_or_else(|| {
+                let user_id = ids::UserId::parse(&user_id).map_err(|_| {
                     IdentityError::Storage(Box::<dyn std::error::Error + Send + Sync>::from(
-                        "corrupt refresh_tokens.kind",
+                        "corrupt refresh_tokens.user_id",
                     ))
                 })?;
+                let auth_grant_status = AuthGrantStatus::from_db_str(&auth_grant_status)
+                    .ok_or_else(|| {
+                        IdentityError::Storage(Box::<dyn std::error::Error + Send + Sync>::from(
+                            "corrupt refresh_tokens.auth_grant_status",
+                        ))
+                    })?;
                 let status = RefreshStatus::from_db_str(&status_str).ok_or_else(|| {
                     IdentityError::Storage(Box::<dyn std::error::Error + Send + Sync>::from(
                         "corrupt refresh_tokens.status",
@@ -393,19 +464,26 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                         AuthnEpoch::hydrate(epoch)
                             .map_err(|error| IdentityError::Storage(Box::new(error)))
                     })?;
-                Ok(Some(RefreshTokenRecord::hydrate(
-                    id,
+                RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
+                    id: RefreshTokenId::hydrate(id),
                     tenant,
-                    subject,
-                    kind,
-                    hash_bytes,
-                    parent_id,
-                    lineage_id,
-                    issuance_epoch,
+                    auth_grant_id: identity::ports::AuthGrantId::hydrate(auth_grant_id),
+                    user_id,
+                    authn_epoch_at_issue: issuance_epoch,
+                    auth_grant_status,
+                    token_hash: RefreshTokenHash::hydrate(hash_bytes),
+                    parent_id: parent_id.map(RefreshTokenId::hydrate),
+                    lineage_id: RefreshTokenId::hydrate(lineage_id),
                     status,
-                    epoch_secs_to_time(issued_secs),
-                    epoch_secs_to_time(expires_secs),
-                )))
+                    issued_at: epoch_secs_to_time(issued_secs),
+                    expires_at: epoch_secs_to_time(expires_secs),
+                })
+                .map(Some)
+                .ok_or_else(|| {
+                    IdentityError::Storage(Box::<dyn std::error::Error + Send + Sync>::from(
+                        "corrupt refresh_tokens time order",
+                    ))
+                })
             }
         }
     }

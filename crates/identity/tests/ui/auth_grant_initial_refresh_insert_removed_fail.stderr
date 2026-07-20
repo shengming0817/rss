@@ -1,0 +1,13 @@
+error[E0599]: no method named `insert` found for reference `&S` in the current scope
+  --> tests/ui/auth_grant_initial_refresh_insert_removed_fail.rs:12:11
+   |
+12 |     store.insert(scope, initial).await
+   |           ^^^^^^ method not found in `&S`
+   |
+   = help: items from traits can only be used if the type parameter is bounded by the trait
+help: the following traits define an item `insert`, perhaps you need to restrict type parameter `S` with one of them:
+   |
+ 7 | async fn insert_initial<S: RefreshTokenStore + bitflags::traits::Flags>(
+   |                                              +++++++++++++++++++++++++
+ 7 | async fn insert_initial<S: RefreshTokenStore + tonic::metadata::map::into_metadata_key::Sealed</* VE */>>(
+   |                                              +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

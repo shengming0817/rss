@@ -6,12 +6,12 @@ use std::time::Duration;
 use bootstrap::{DomainBinding, DomainModuleResult};
 use diport::{Clock, Signer};
 use identity::{
-    FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps,
-    LoginService, PolicyManageService, RbacAdminService, RefreshService,
+    AuthGrantServices, FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain,
+    IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
     ports::{
         DynAccountSecurityReadRepo, DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo,
-        DynRefreshTokenStore, DynResourceAttributeReadRepo, DynRoleBindingLifecycle,
-        DynRoleBindingReadRepo, DynRoleReadRepo, DynSessionLifecycle,
+        DynResourceAttributeReadRepo, DynRoleBindingLifecycle, DynRoleBindingReadRepo,
+        DynRoleReadRepo,
     },
 };
 use postgres::{PgDomainDeps, caps};
@@ -23,7 +23,7 @@ pub struct IdentityModuleDeps<S> {
     signer: Arc<S>,
     clock: Arc<dyn Clock>,
     jwt: authn::JwtIssuerConfig<diport::RssAccessProfile>,
-    session_ttl: Duration,
+    auth_grant_ttl: Duration,
     refresh_ttl: Duration,
     blocklist: Arc<secure::DigestPasswordBlocklist>,
 }
@@ -35,7 +35,7 @@ impl<S> IdentityModuleDeps<S> {
         signer: Arc<S>,
         clock: Arc<dyn Clock>,
         jwt: authn::JwtIssuerConfig<diport::RssAccessProfile>,
-        session_ttl: Duration,
+        auth_grant_ttl: Duration,
         refresh_ttl: Duration,
         blocklist: Arc<secure::DigestPasswordBlocklist>,
     ) -> Self {
@@ -44,7 +44,7 @@ impl<S> IdentityModuleDeps<S> {
             signer,
             clock,
             jwt,
-            session_ttl,
+            auth_grant_ttl,
             refresh_ttl,
             blocklist,
         }
@@ -53,8 +53,8 @@ impl<S> IdentityModuleDeps<S> {
 
 /// Identity composition inputs for a Primary listener fixed to federated access tokens.
 ///
-/// No signer, RSS issuer, refresh lifetime, session lifetime, or password blocklist can enter this
-/// path, so local RSS session routes cannot be assembled accidentally.
+/// No signer, RSS issuer, AuthGrant/refresh lifetime, or password blocklist can enter this path, so
+/// RSS-local login and refresh mutation routes cannot be assembled accidentally.
 pub struct FederatedIdentityModuleDeps {
     pg: PgDomainDeps<caps::Identity>,
     clock: Arc<dyn Clock>,
@@ -137,37 +137,35 @@ where
         signer,
         clock,
         jwt,
-        session_ttl,
+        auth_grant_ttl,
         refresh_ttl,
         blocklist,
     } = deps;
 
     let credentials = Arc::from(DynCredentialRepo::new_box(pg.credential_repo()));
     let account_security_reads = DynAccountSecurityReadRepo::new_box(pg.account_security_repo());
-    let lifecycle = Arc::from(DynSessionLifecycle::new_box(
-        pg.session_lifecycle(boxed_clock(&clock)),
-    ));
     let common = common_identity_services(&pg, &clock);
 
     let issuer = Arc::new(
         authn::JwtIssuer::<diport::RssAccessProfile, _>::new(signer, boxed_clock(&clock), jwt)
             .map_err(|error| anyhow::anyhow!("jwt issuer config error: {error}"))?,
     );
-    let refresh = Arc::new(RefreshService::new(
-        DynRefreshTokenStore::new_box(pg.refresh_token_store()),
+    let auth_grant_provider = pg.auth_grant_provider(boxed_clock(&clock));
+    let auth_grants = AuthGrantServices::from_provider(
+        auth_grant_provider,
         account_security_reads,
         issuer,
         boxed_clock(&clock),
         refresh_ttl,
-    ));
+    );
+    let refresh = auth_grants.refresh_service();
     let password_policy = secure::PasswordPolicy::new(blocklist);
     let login = Arc::new(LoginService::new(
         credentials,
-        lifecycle,
-        Arc::clone(&refresh),
+        auth_grants,
         password_policy,
         boxed_clock(&clock),
-        session_ttl,
+        auth_grant_ttl,
     ));
     let domain = IdentityDomain::new(IdentityDomainDeps {
         login,
@@ -188,7 +186,7 @@ where
     ))
 }
 
-/// Build the identity domain without RSS-local session issuance or mutation routes.
+/// Build the identity domain without RSS-local login, AuthGrant issuance, or refresh mutation routes.
 ///
 /// # Errors
 /// Returns an error if the domain binding cannot be assembled.

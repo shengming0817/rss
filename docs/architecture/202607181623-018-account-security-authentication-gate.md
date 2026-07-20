@@ -2,7 +2,7 @@
 
 - **状态**：Accepted
 - **日期**：2026-07-18
-- **关联**：issue #1833，AuthN hardening PR-06
+- **关联**：issue #1833，AuthN hardening PR-06；由 ADR-019 / #1834 扩展 AuthGrant 根绑定
 - **对标**：Keycloak `services/src/main/java/org/keycloak/services/managers/DefaultBruteForceProtector.java`
 
 ## 背景
@@ -81,20 +81,24 @@ epoch；因此 Suspend→Active 后旧 family 即使账号已恢复 Active 也�
 
 pre-mint read 不能关闭 read-to-CAS TOCTOU，所以 PostgreSQL `rotate` writer transaction 以账号安全行为最终
 fence：先 `FOR UPDATE` 读取同 tenant/user 的 account-security row，要求 `status='active'` 且 epoch 等于
-family issuance epoch，再执行 old refresh CAS 与 child INSERT。结果是 typed
+family issuance epoch，并要求五列复合外键指向仍为 Active 的 AuthGrant，再执行 old refresh CAS 与 child INSERT。结果是 typed
 `Applied | Replay | AccountStale`；AccountStale 不消费 old，也不插 child。0069 切换不猜测 legacy issuance
 epoch：旧 binary 先通过正常流程撤销全部 active family，迁移锁内拒绝遗留 active 行、删除 consumed/revoked
 历史行，然后一次性安装 non-null/nonnegative epoch 列。
 
 ## 后续 PR 边界
 
-- **PR-07**：把 Session 升级为 AuthGrant，并持久化 session 的 `authn_epoch_at_issue`，将 family 绑定 session。
-- **PR-08**：为 RSS access JWT 增加 `sid/jti/auth_time/authn_epoch`，并保留 verified grant facts。
+- **PR-07（已由 #1834 / ADR-019 交付）**：Session 已升级为 AuthGrant；根持久化
+  `authn_epoch_at_issue`，refresh family 通过 tenant/grant/user/epoch/status 复合外键绑定根。
+- **PR-08（#1840，尚未交付）**：为 RSS access JWT 增加 `sid/jti/auth_time/authn_epoch`，并保留
+  verified grant facts。
 - **PR-13**：把密码和账户状态变更接入统一安全事件事务，原子递增 epoch、撤销 grant/family 并写 outbox。
-- **PR-14**：在 refresh rotation CAS 的同一事务中增加 session/grant fence，并闭合 reuse compromise。
+- **PR-14**：AuthGrant Active fence 与关闭顺序已由 #1834 交付；refresh reuse 自动标记
+  Compromised 的完整事件闭环仍由 #1843 完成。
 
-本 PR 已通过 refresh record epoch 与最终 account writer fence 消除账号状态的 read-to-CAS TOCTOU；尚未把
-epoch 写入 session/JWT，也不声称已有安全事件原子撤销或 session/grant final fence。
+ADR-018 已通过 refresh record epoch 与最终 account writer fence 消除账号状态的 read-to-CAS TOCTOU；
+ADR-019 进一步把 epoch 写入 AuthGrant 并建立 grant final fence。epoch 尚未进入 JWT，也不声称已有全部账户
+安全事件原子撤销或 reuse compromise 事件闭环。
 
 ## AI-HARD 载体
 
@@ -106,6 +110,7 @@ epoch 写入 session/JWT，也不声称已有安全事件原子撤销或 session
 | refresh 不能缺少 security reader | 非 `Option` 构造器依赖 | Hard |
 | 裸 subject/tenant 不能签 initial refresh | 非公开 initial funnel + typed Active receipt | Hard |
 | refresh child 不能改写 family issuance epoch | 私有字段 + sealed rotation 继承 | Hard |
+| refresh 不能绑定错误 AuthGrant/user/epoch/status | ADR-019 五列复合 FK + CHECK | 数据库 Hard |
 | credential/security 严格一对一与跨租隔离 | 双向 FK、CHECK、FORCE RLS、最小 GRANT | 数据库 Hard |
 | final writer 必须在 refresh CAS 前锁内校验 Active + epoch | 单事务 SQL 锁序 + typed outcome + PostgreSQL 集成测试 | Medium |
 | PostgreSQL 共事务和 credential→security 锁序 | 并发、故障注入、missing-row 反空测试 | Medium |

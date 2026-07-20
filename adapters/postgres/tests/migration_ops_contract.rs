@@ -8,6 +8,7 @@ const SERVICE_TOKEN_REPLAY_MIGRATION: &str =
     include_str!("../migrations/0068_replace_service_token_replay_store.sql");
 const ACCOUNT_SECURITY_MIGRATION: &str =
     include_str!("../migrations/0069_create_account_security_states.sql");
+const AUTH_GRANT_MIGRATION: &str = include_str!("../migrations/0070_create_auth_grants.sql");
 const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
 const ACCOUNT_SECURITY_CAPACITY_SELFTEST: &str =
@@ -17,6 +18,170 @@ const READER_PROVISIONING: &str =
     include_str!("../../../deploy/postgres-upgrade/provision-reader-role.sh");
 const READER_UPGRADE_SMOKE: &str =
     include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
+
+#[test]
+fn auth_grant_cutover_is_strict_atomic_and_least_privilege() {
+    let normalized = AUTH_GRANT_MIGRATION
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    for required in [
+        "SET LOCAL lock_timeout = '5s'",
+        "SET LOCAL statement_timeout = '5min'",
+        "LOCK TABLE public.sessions IN SHARE ROW EXCLUSIVE MODE",
+        "LOCK TABLE public.refresh_tokens IN SHARE ROW EXCLUSIVE MODE",
+        "DELETE FROM public.refresh_tokens",
+        "DROP FUNCTION public.rss_sweep_expired_sessions()",
+        "DROP TABLE public.sessions",
+        "DROP ROLE rss_session_maintenance",
+        "CREATE TABLE public.auth_grants",
+        "PRIMARY KEY (tenant_id, grant_id)",
+        "user_id uuid NOT NULL",
+        "authn_epoch_at_issue bigint NOT NULL",
+        "CHECK (authn_epoch_at_issue >= 0)",
+        "status = 'active' AND closed_at IS NULL AND close_reason IS NULL",
+        "status = 'compromised' AND closed_at IS NOT NULL AND close_reason = 'refresh_reuse_detected'",
+        "ADD COLUMN auth_grant_id text NOT NULL",
+        "ADD COLUMN user_id uuid NOT NULL",
+        "ADD COLUMN auth_grant_status text NOT NULL",
+        "CHECK (auth_grant_status = 'active' OR status = 'revoked')",
+        "FOREIGN KEY ( tenant_id, auth_grant_id, user_id, authn_epoch_at_issue, auth_grant_status )",
+        "ON UPDATE CASCADE ON DELETE CASCADE",
+        "ENABLE ROW LEVEL SECURITY",
+        "FORCE ROW LEVEL SECURITY",
+        "REVOKE UPDATE ON TABLE public.auth_grants FROM rss_app, rss_app_read",
+        "GRANT UPDATE (status, closed_at, close_reason) ON TABLE public.auth_grants TO rss_app",
+        "REVOKE DELETE ON TABLE public.auth_grants FROM rss_app, rss_app_read",
+        "REVOKE UPDATE ON TABLE public.refresh_tokens FROM rss_app, rss_app_read",
+        "GRANT UPDATE (status) ON TABLE public.refresh_tokens TO rss_app",
+        "REVOKE DELETE ON TABLE public.refresh_tokens FROM rss_app, rss_app_read",
+        "CREATE FUNCTION public.rss_sweep_expired_auth_grants()",
+        "LIMIT 1000",
+        "FOR UPDATE SKIP LOCKED",
+        "OWNER TO rss_auth_grant_maintenance",
+        "GRANT SELECT, UPDATE, DELETE ON TABLE public.auth_grants TO rss_auth_grant_maintenance",
+        "GRANT DELETE ON TABLE public.refresh_tokens TO rss_auth_grant_maintenance",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "0070 omits AuthGrant hard-cutover constraint: {required}"
+        );
+    }
+
+    for forbidden in [
+        "CREATE VIEW public.sessions",
+        "CREATE TABLE public.sessions",
+        "CREATE TRIGGER",
+        "DELETE FROM public.sessions",
+        "ADD COLUMN auth_grant_id text",
+        "ADD COLUMN user_id uuid",
+        "ADD COLUMN auth_grant_status text",
+        "GRANT SELECT, INSERT, UPDATE ON TABLE public.auth_grants TO rss_app",
+        "GRANT UPDATE ON TABLE public.auth_grants TO rss_app",
+        "GRANT UPDATE ON TABLE public.refresh_tokens TO rss_app",
+        "GRANT DELETE ON TABLE public.auth_grants TO rss_app",
+        "GRANT DELETE ON TABLE public.refresh_tokens TO rss_app",
+        "rss_sweep_expired_sessions() TO rss_app",
+    ] {
+        let forbidden_is_nullable_column = matches!(
+            forbidden,
+            "ADD COLUMN auth_grant_id text"
+                | "ADD COLUMN user_id uuid"
+                | "ADD COLUMN auth_grant_status text"
+        );
+        let present = if forbidden_is_nullable_column {
+            normalized.contains(forbidden) && !normalized.contains(&format!("{forbidden} NOT NULL"))
+        } else {
+            normalized.contains(forbidden)
+        };
+        assert!(
+            !present,
+            "0070 contains compatibility or excess-privilege path: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn auth_grant_cutover_runbook_is_non_rolling_and_executable() {
+    let runbook = MIGRATION_README
+        .split_once("### 0070 AuthGrant root 破坏性切换")
+        .and_then(|(_, tail)| {
+            tail.split_once("## Append-only 表（REVOKE 强制）")
+                .map(|(runbook, _)| runbook)
+        })
+        .expect("0070 runbook must be a non-empty, independently scoped section");
+    assert!(
+        !runbook.trim().is_empty(),
+        "0070 runbook section must not be vacuous"
+    );
+
+    for required in [
+        "停止全部旧 binary",
+        "禁止滚动混跑",
+        "sessions",
+        "refresh_tokens",
+        "REFRESH_ROW_BUDGET",
+        "REFRESH_BYTE_BUDGET",
+        "WAL_FREE_BUDGET",
+        "ARCHIVE_FREE_BUDGET",
+        "EXPECTED_REPLICAS",
+        "RSS_IDENTITY_AUTH_GRANT_TTL_SECS",
+        "RSS_REFRESH_TTL_SECS",
+        "AuthGrant TTL 必须大于等于 refresh TTL",
+        "最大 365 天",
+        "set -eu",
+        "SELECT count(*) AS refresh_rows",
+        "pg_total_relation_size('public.refresh_tokens'::regclass)",
+        "pg_catalog.pg_stat_archiver",
+        "pg_catalog.pg_stat_replication",
+        "SELECT max(version) FROM public._sqlx_migrations",
+        "_sqlx_migrations` 必须为 `69`",
+        "_sqlx_migrations` 必须为 `70`",
+        "to_regclass('public.sessions') IS NULL",
+        "to_regclass('public.auth_grants') IS NOT NULL",
+        "rss_sweep_expired_auth_grants",
+        "rss_auth_grant_maintenance",
+        "relforcerowsecurity",
+        "has_table_privilege('rss_app', 'public.auth_grants', 'DELETE') = false",
+        "has_table_privilege('rss_app', 'public.auth_grants', 'UPDATE') = false",
+        "has_table_privilege('rss_app', 'public.refresh_tokens', 'UPDATE') = false",
+        "information_schema.column_privileges",
+        "旧 session/refresh 数据必须为 `0`",
+        "只允许 forward-only 修复",
+        "ledger 仍为 `69`",
+        "ledger 已为 `70`",
+    ] {
+        assert!(
+            runbook.contains(required),
+            "0070 cutover runbook omits executable evidence token: {required}"
+        );
+    }
+
+    let ordered_steps = [
+        "1. **停止旧 binary 并做迁移前探针。**",
+        "2. **容量、WAL、archive 与 replica fail-closed preflight。**",
+        "3. **执行唯一迁移。**",
+        "4. **迁移后精确探针。**",
+        "5. **核验根约束。**",
+        "6. **只启动新世界。**",
+        "7. **按 ledger 恢复。**",
+    ];
+    let positions = ordered_steps
+        .iter()
+        .map(|step| runbook.find(step))
+        .collect::<Vec<_>>();
+    assert!(
+        positions.iter().all(Option::is_some),
+        "0070 runbook must contain every ordered cutover step: {positions:?}"
+    );
+    assert!(
+        positions
+            .windows(2)
+            .all(|pair| matches!(pair, [Some(left), Some(right)] if left < right)),
+        "0070 cutover steps are not in executable order: {positions:?}"
+    );
+}
 
 #[test]
 fn account_security_migration_is_strict_closed_and_least_privilege() {

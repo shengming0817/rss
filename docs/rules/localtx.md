@@ -192,11 +192,11 @@ boundary 的 retry-loop 指标；LocalTx contract 必须改用 `run_pg_localtx_r
 `LocalTxObservation<M>`。每个 LocalTx generated module 暴露非可选 `LOCAL_TX`，并令 `SPEC.local_tx =
 Some(LOCAL_TX)`；非 LocalTx module 不生成该常量。observation 由 typed
 `HttpRouteBinding<Marker, LocalTx>` 构造并用私有 `PhantomData<M>` 保留 route marker。identity 应用层分别把
-generated logout/password-change `ROUTE + LOCAL_TX.boundary` 封装进私有字段 `SessionLogoutMutation` /
+generated logout/password-change `ROUTE + LOCAL_TX.boundary` 封装进私有字段 `AuthGrantCloseCommand` /
 `PasswordChangeMutation`；settings 同样封装进 `SecretPublishCommand`。生产 adapter 只能消费
 `command.into_parts()`，不得调用 domain factory、替换 observation 或手制 evidence；Postgres 不建立被分层禁止的
 production generated 依赖，而是消费 domain port 暴露的 marker alias。`PgSecretUnitOfWork::publish`、
-`PgCredentialRepo::apply_password_change` 与 `PgSessionLifecycle::logout` 使用 `run_pg_localtx_retry` 发射 HTTP
+`PgCredentialRepo::apply_password_change` 与 `PgAuthGrantLifecycle::close` 使用 `run_pg_localtx_retry` 发射 HTTP
 contract telemetry；`publish_internal` 与 rollback `republish` 不携带该 command，
 只经 `run_pg_tx_retry` 发射 generic `settings.secret` retry telemetry，不能冒充 HTTP 调用。non-retry
 outbox producer 则必须消费 move-only `ProducerTxAttempt`，在压平为领域 `Result` 前与 generic runner 共用唯一
@@ -300,7 +300,7 @@ const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
 > = ::generated::http::identity_v1::logout::ROUTE;
 const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
     ::generated::http::identity_v1::logout::RouteMarker,
-    crate::PgSessionLifecycle,
+    crate::PgAuthGrantLifecycle,
 )> = ::std::marker::PhantomData;
 ```
 

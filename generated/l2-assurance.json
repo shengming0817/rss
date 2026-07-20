@@ -68,12 +68,12 @@
               "portMethod": {
                 "kind": "rust-symbol",
                 "path": "crates/identity/src/ports.rs",
-                "symbol": "SessionLifecycleLocal::persist_session_and_emit"
+                "symbol": "AuthGrantLifecycleLocal::persist_login_grant"
               },
               "providerMethod": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/session_lifecycle.rs",
-                "symbol": "PgSessionLifecycle::persist_session_and_emit"
+                "path": "adapters/postgres/src/auth_grant_lifecycle.rs",
+                "symbol": "PgAuthGrantLifecycle::persist_login_grant"
               },
               "productionComposition": {
                 "runtimeEntry": {
@@ -97,7 +97,7 @@
                   "symbol": "wire"
                 },
                 "serviceConstructor": "LoginService::new",
-                "providerFactory": "PgDomainDeps::session_lifecycle"
+                "providerFactory": "PgDomainDeps::auth_grant_provider"
               },
               "transaction": {
                 "kind": "rust-symbol",
@@ -129,8 +129,8 @@
               "factId": "identity.session-created",
               "providerMethod": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/session_lifecycle.rs",
-                "symbol": "PgSessionLifecycle::persist_session_and_emit"
+                "path": "adapters/postgres/src/auth_grant_lifecycle.rs",
+                "symbol": "PgAuthGrantLifecycle::persist_login_grant"
               },
               "transaction": {
                 "kind": "rust-symbol",

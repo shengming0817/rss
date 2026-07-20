@@ -45,7 +45,7 @@ const SAGA_BINDING_TEST_SUPPORT_FILES: &[&str] =
 const PROJECTION_DB_FUNCTIONS: &[&str] =
     &["rss_append_projection_event", "rss_read_projection_events"];
 const ACTIVE_PRODUCER_PROVIDER_FILES: &[&str] = &[
-    "adapters/postgres/src/session_lifecycle.rs",
+    "adapters/postgres/src/auth_grant_lifecycle.rs",
     "adapters/postgres/src/policy_repo.rs",
     "adapters/postgres/src/role_binding_lifecycle.rs",
     "adapters/postgres/src/config_repo.rs",
@@ -1925,7 +1925,10 @@ mod tests {
                 emitter.emit(parts()).await;
             }
         "#;
-        let findings = scan_file(Path::new("adapters/postgres/src/session_lifecycle.rs"), src)?;
+        let findings = scan_file(
+            Path::new("adapters/postgres/src/auth_grant_lifecycle.rs"),
+            src,
+        )?;
         let raw_findings = findings
             .iter()
             .filter(|finding| finding.rule == Rule::RawProducerTransport)
@@ -1965,7 +1968,7 @@ mod tests {
         )?;
         std::fs::write(postgres_src.join("lib.rs"), "")?;
         std::fs::write(
-            postgres_src.join("session_lifecycle.rs"),
+            postgres_src.join("auth_grant_lifecycle.rs"),
             r#"
                 use crate::producer_transport_helper::publish_raw as dispatch;
 

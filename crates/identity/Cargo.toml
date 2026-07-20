@@ -12,9 +12,9 @@ workspace = true
 # 经 feature 门控做编译期边界：生产组合根不启用即不编译，防种子凭据路径误入生产（machine boundary）。
 [features]
 seed-login = ["secure/test-support"]
-# test-support：暴露 `test_support::session` 供**下游 adapter crate**（如 postgres）集成测试构造
-# `ports::Session`（funnel `Session::new` 为 pub(crate)，生产不可伪造）。生产构建不启用即不编译——funnel
-# seal 不变。与 authn / runctx 的 `test-support` 同信任模型。
+# test-support：暴露受控 AuthGrant/refresh/login 构造器，供**下游 adapter crate**（如 postgres）集成
+# 测试跨 crate 驱动密封的领域 funnel。生产构建不启用即不编译，seal 不变；与 authn / runctx 的
+# `test-support` 同信任模型。
 test-support = ["httpserve/test-util"]
 # Exposes only the generated `identity.session-created` payload type needed by the closed L2
 # fault-matrix seam. This is deliberately separate from the broader domain test-support bundle.
@@ -43,7 +43,7 @@ thiserror = { workspace = true }
 # （DIPORT-MACRO-CONFINE-02：diport + 定义 repo port 的域 crate）。
 dynosaur = { workspace = true }
 trait-variant = { workspace = true }
-# 登录服务：注入 diport::Publisher（发 session-created outbox fact）+ Clock（会话到期）。
+# 登录服务：注入 provider/Clock，原子持久化 AuthGrant、初始 refresh 与 session-created outbox fact。
 diport = { path = "../diport" }
 # session-created event payload 编码为 provider-agnostic 字节（PublishRequest.payload）。
 serde = { workspace = true, features = ["derive"] }

@@ -22,8 +22,8 @@ topology_durable = ["bootstrap", "eventexec", "identity", "audit", "postgres"]
 steps = [
   "bootstrap::compose 跑 identity/audit 的 Domain::init，Registry 收集登录路由组 + session-created 订阅（订阅元数据单源自 generated SPEC.subscriptions()）",
   "Registry 只声明 generated subscription identity；journey 复用 audit decode + repo append 构造测试 handler，ConsumerBase 驱动 MemBus 订阅流（claim→handle→commit/release 幂等）",
-  "LoginService 校验凭据 → mint Session（authn::SessionId::generate 桥接域 SessionId）→ 构造 EventEntry（EventId=独立 opaque UUID，非 session_id）→ 经 SessionLifecycle co-tx 把 session 行 + outbox 行落同一本地事务",
-  "（durable）relay CAS 中继 outbox entry 到 broker，message_id=EventId；（demo）MemSessionLifecycle 直发 MemBus，Message.id=EventId",
+  "LoginService 校验凭据与账户 epoch → 构造 AuthGrant + EventEntry（EventId=独立 opaque UUID，非 session_id）→ prepare 初始 bearer/hash → 经 AuthGrantLifecycle co-tx 把 auth_grant、initial refresh 与 outbox 落同一本地事务 → 成功后释放 bearer",
+  "（durable）relay CAS 中继 outbox entry 到 broker，message_id=EventId；（demo）共享 MemAuthGrantStore 同时承载 lifecycle/refresh 并直发 MemBus，Message.id=EventId",
   "audit 消费路径以 EventId 幂等去重（ConsumerBase claim）后解码 payload → AuditRecord → AuditWriteRepo.append",
 ]
 
@@ -42,7 +42,7 @@ rejected_login_audits = 0       # 负路径：登录失败不产生审计事件
 # 显式留 W（不在本闭环范围）。
 [out_of_scope]
 http_axum = "httpserve generated endpoint mount/finalize_auth 逐字节 HTTP journey（topology 仅经 route_group 声明参与，未跑 axum）"
-jwt = "真实 JWT 签发/校验、密码哈希、authn::Session/Principal 聚合（authn 仅 SessionId::generate 入链）"
+jwt = "真实 JWT 签发/校验、密码哈希与 authn::Principal；AuthGrantId 由 identity 自身 funnel 生成"
 audit_chain = "audit domain 哈希链（link_hash/verify_chain/AuditEntry）+ 域内持久化"
 correlation = "outbox envelope trace/correlation/occurred_at reserved-key 受控注入（funnel 现 fail-closed 拒 reserved、无 sealed setter）；payload→AuditEvent correlation 透传需 payload schema 升版，留 W"
 projection_rebuild = "L3 CQRS 投影读模型 + 断点续投重建测试（投影基建 T010/P10 未落地）——本轮交付 L2 replay-via-redelivery 幂等收敛"

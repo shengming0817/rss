@@ -429,17 +429,13 @@ name = "authn"
 version = "0.0.0"
 dependencies = [
  "base64",
- "consistency",
  "diport",
- "ids",
  "primitives",
  "rstest",
  "runctx",
- "secure",
  "serde",
  "serde_json",
  "spiffe",
- "support",
  "thiserror",
  "tokio",
  "trybuild",

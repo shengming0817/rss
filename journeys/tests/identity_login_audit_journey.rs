@@ -5,7 +5,8 @@
 //!
 //! 接缝覆盖：
 //! - bootstrap 组装：`compose` 跑 identity/audit 的 `Domain::init` → Registry 收集 route_group + subscriber。
-//! - DI 注入：identity 经 `Arc<DynSessionLifecycle>`（`MemSessionLifecycle`）co-tx 写 session + 发射 outbox
+//! - DI 注入：identity 经同一 `MemAuthGrantStore` provider co-tx 写 AuthGrant、首发
+//!   refresh + outbox
 //!   fact（demo 拓扑）；audit 经注入的链 `MacVerifier`（journey 捕获 verifier）落**域内哈希链**（W：无外部
 //!   sink）；幂等 store 经 `memory::InMemClaimer` 注入、DLX 经 `memory::MemDeadLetterStore` 注入。
 //! - 跨域事件：identity emit `identity.session-created` → MemBus（Message.id = EventId）→ audit 订阅消费。
@@ -62,11 +63,9 @@ use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, WorkerHealth, s
 use futures::future::BoxFuture;
 use generated::http::identity_v1::login::{IdentityLoginRequest, PRODUCER as LOGIN_PRODUCER};
 use httpserve::ProducerMarker;
-use identity::ports::{DynSessionLifecycle, LoginProducerReceipt};
+use identity::ports::LoginProducerReceipt;
 use identity::{LoginService, RefreshService, SeedSigner};
-use memory::{
-    FixedClock, InMemClaimer, MemBus, MemDeadLetterStore, MemEmitter, MemSessionLifecycle,
-};
+use memory::{FixedClock, InMemClaimer, MemAuthGrantStore, MemBus, MemDeadLetterStore, MemEmitter};
 use primitives::ListenerKind;
 use primitives::healthz::HealthStatus;
 use tokio_util::sync::CancellationToken;
@@ -254,22 +253,25 @@ type LoginBundle = (
     Arc<RefreshService<SeedSigner>>,
 );
 
-/// 登录服务（注入 MemSessionLifecycle co-tx 替身 + 固定时钟 + 种子凭据）。
+/// 登录服务（同一个 MemAuthGrantStore provider 同时提供 lifecycle + refresh store）。
 /// 同时构造 seed refresh service 并返回，供 `IdentityDomain::new` 注入。
 fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginBundle> {
     let mut refresh = None;
+    let grants = MemAuthGrantStore::with_tenant_metadata_signer(
+        bus.clone(),
+        memory_tenant_signer(),
+        Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+    );
     let login = Arc::new(LoginService::with_seed_credential(
-        Arc::from(DynSessionLifecycle::new_box(
-            MemSessionLifecycle::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
-        )),
         |accounts| {
-            let service = identity::seed_refresh_service(
+            let services = identity::seed_auth_grant_services(
+                grants,
                 accounts,
                 || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
                 Duration::from_secs(TTL_SECS),
             );
-            refresh = Some(Arc::clone(&service));
-            service
+            refresh = Some(services.refresh_service());
+            services
         },
         password_policy(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),

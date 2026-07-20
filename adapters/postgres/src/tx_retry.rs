@@ -324,7 +324,7 @@ pub(crate) enum PgTxRetryBoundary {
     #[cfg(feature = "domain-identity")]
     IdentityCredential,
     #[cfg(feature = "domain-identity")]
-    IdentitySession,
+    IdentityAuthGrant,
     #[cfg(feature = "domain-identity")]
     IdentityRefresh,
     #[cfg(feature = "domain-audit")]
@@ -345,7 +345,7 @@ impl PgTxRetryBoundary {
             #[cfg(feature = "domain-identity")]
             Self::IdentityCredential => "identity.credential",
             #[cfg(feature = "domain-identity")]
-            Self::IdentitySession => "identity.session",
+            Self::IdentityAuthGrant => "identity.auth-grant",
             #[cfg(feature = "domain-identity")]
             Self::IdentityRefresh => "identity.refresh",
             #[cfg(feature = "domain-audit")]
@@ -369,9 +369,10 @@ pub(crate) const SETTINGS_SECRET_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary
 #[cfg(feature = "domain-identity")]
 pub(crate) const IDENTITY_CREDENTIAL_BOUNDARY: PgTxRetryBoundary =
     PgTxRetryBoundary::IdentityCredential;
-/// Retry boundary for identity session logout writes.
+/// Retry boundary for identity AuthGrant close writes.
 #[cfg(feature = "domain-identity")]
-pub(crate) const IDENTITY_SESSION_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::IdentitySession;
+pub(crate) const IDENTITY_AUTH_GRANT_BOUNDARY: PgTxRetryBoundary =
+    PgTxRetryBoundary::IdentityAuthGrant;
 /// Retry boundary for identity refresh-token rotation writes.
 #[cfg(feature = "domain-identity")]
 pub(crate) const IDENTITY_REFRESH_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::IdentityRefresh;
@@ -403,8 +404,8 @@ impl PgLocalTxOperation for identity::ports::PasswordChangeRouteMarker {
 }
 
 #[cfg(feature = "domain-identity")]
-impl PgLocalTxOperation for identity::ports::SessionLogoutRouteMarker {
-    const BOUNDARY: PgTxRetryBoundary = IDENTITY_SESSION_BOUNDARY;
+impl PgLocalTxOperation for identity::ports::AuthGrantCloseRouteMarker {
+    const BOUNDARY: PgTxRetryBoundary = IDENTITY_AUTH_GRANT_BOUNDARY;
 }
 
 #[cfg(feature = "domain-identity")]

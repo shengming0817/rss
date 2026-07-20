@@ -648,10 +648,11 @@ async fn wire_domain_transport(
     ))
 }
 
-// ── Session expiry sweeper helper ─────────────────────────────────────────────────────────────
+// ── Auth-grant expiry sweeper helper ──────────────────────────────────────────────────────────
 
-pub const SESSION_SWEEPER_PROBE_NAME: &str = "session_sweeper";
-const SESSION_SWEEPER_WORKER_NAME: &str = "session-sweeper";
+pub const AUTH_GRANT_SWEEPER_PROBE_NAME: &str = "auth_grant_sweeper";
+const AUTH_GRANT_SWEEPER_WORKER_NAME: &str = "auth-grant-sweeper";
+const AUTH_GRANT_SWEEP_TIMEOUT: Duration = Duration::from_secs(25);
 pub const SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME: &str = "service_token_replay_sweeper";
 const SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME: &str = "service-token-replay-sweeper";
 const SERVICE_TOKEN_REPLAY_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
@@ -4118,76 +4119,80 @@ impl bootstrap::HealthProbe for RlsReadyProbe {
     }
 }
 
-// ── SessionSweeperProbe / worker ──────────────────────────────────────────────────────────────
+// ── AuthGrant sweeper probe / shared sweeper worker ───────────────────────────────────────────
 
-const SESSION_SWEEPER_HEALTHY: u8 = 0;
-const SESSION_SWEEPER_DEGRADED: u8 = 1;
-const SESSION_SWEEPER_STOPPED: u8 = 2;
+const SWEEPER_STARTING: u8 = 0;
+const SWEEPER_HEALTHY: u8 = 1;
+const SWEEPER_DEGRADED: u8 = 2;
+const SWEEPER_STOPPED: u8 = 3;
 
-struct SessionSweeperHealth(std::sync::atomic::AtomicU8);
+struct SweeperHealth(std::sync::atomic::AtomicU8);
 
-impl SessionSweeperHealth {
-    fn healthy() -> Self {
-        Self(std::sync::atomic::AtomicU8::new(SESSION_SWEEPER_HEALTHY))
+impl SweeperHealth {
+    fn starting() -> Self {
+        Self(std::sync::atomic::AtomicU8::new(SWEEPER_STARTING))
     }
 
     fn mark_healthy(&self) {
-        self.0.store(
-            SESSION_SWEEPER_HEALTHY,
-            std::sync::atomic::Ordering::Release,
-        );
+        self.0
+            .store(SWEEPER_HEALTHY, std::sync::atomic::Ordering::Release);
     }
 
     fn mark_degraded(&self) {
-        self.0.store(
-            SESSION_SWEEPER_DEGRADED,
-            std::sync::atomic::Ordering::Release,
-        );
+        self.0
+            .store(SWEEPER_DEGRADED, std::sync::atomic::Ordering::Release);
     }
 
     fn mark_stopped(&self) {
-        self.0.store(
-            SESSION_SWEEPER_STOPPED,
-            std::sync::atomic::Ordering::Release,
-        );
+        self.0
+            .store(SWEEPER_STOPPED, std::sync::atomic::Ordering::Release);
+    }
+
+    fn observe_result<T, E>(&self, result: &Result<T, E>) {
+        if result.is_ok() {
+            self.mark_healthy();
+        } else {
+            self.mark_degraded();
+        }
     }
 
     fn status_detail(&self) -> (HealthStatus, &'static str) {
         match self.0.load(std::sync::atomic::Ordering::Acquire) {
-            SESSION_SWEEPER_HEALTHY => (HealthStatus::Healthy, "worker"),
-            SESSION_SWEEPER_DEGRADED => (HealthStatus::Degraded, "degraded"),
-            _ => (HealthStatus::Unhealthy, "stopped"),
+            SWEEPER_HEALTHY => (HealthStatus::Healthy, "worker"),
+            SWEEPER_DEGRADED => (HealthStatus::Degraded, "degraded"),
+            SWEEPER_STOPPED => (HealthStatus::Unhealthy, "stopped"),
+            _ => (HealthStatus::Unhealthy, "starting"),
         }
     }
 }
 
-struct SessionSweeperStoppedGuard(Arc<SessionSweeperHealth>);
+struct SweeperStoppedGuard(Arc<SweeperHealth>);
 
-impl Drop for SessionSweeperStoppedGuard {
+impl Drop for SweeperStoppedGuard {
     fn drop(&mut self) {
         self.0.mark_stopped();
     }
 }
 
-struct SessionSweeperProbe {
+struct AuthGrantSweeperProbe {
     name: ProbeName,
-    health: Arc<SessionSweeperHealth>,
+    health: Arc<SweeperHealth>,
 }
 
-impl bootstrap::HealthProbe for SessionSweeperProbe {
+impl bootstrap::HealthProbe for AuthGrantSweeperProbe {
     fn check(&self) -> HealthCheck {
         let (status, detail) = self.health.status_detail();
         HealthCheck::new(self.name.clone(), status, detail)
     }
 }
 
-struct SessionSweeperWorker {
+struct SweeperWorker {
     name: &'static str,
     handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     token: CancellationToken,
 }
 
-impl ManagedResource for SessionSweeperWorker {
+impl ManagedResource for SweeperWorker {
     fn name(&self) -> &str {
         self.name
     }
@@ -4198,69 +4203,147 @@ impl ManagedResource for SessionSweeperWorker {
         if let Some(handle) = handle.take()
             && let Err(err) = handle.await
         {
-            tracing::warn!(error = %err, "session sweeper worker join failed");
+            tracing::warn!(error = %err, "sweeper worker join failed");
         }
         Ok(())
     }
 }
 
-fn spawn_session_sweeper(
-    sweeper: postgres::PgSessionSweeper,
+type AuthGrantSweepFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<u64, consistency::EngineError>> + Send + 'a>,
+>;
+
+trait AuthGrantSweepRunner: Send {
+    fn sweep(&mut self, deadline: postgres::AuthGrantSweepDeadline) -> AuthGrantSweepFuture<'_>;
+}
+
+impl AuthGrantSweepRunner for postgres::PgAuthGrantSweeper {
+    fn sweep(&mut self, deadline: postgres::AuthGrantSweepDeadline) -> AuthGrantSweepFuture<'_> {
+        Box::pin(self.sweep_expired(deadline))
+    }
+}
+
+async fn run_auth_grant_sweeper_loop(
+    mut sweeper: impl AuthGrantSweepRunner,
     period: Duration,
-    token: CancellationToken,
-    health: Arc<SessionSweeperHealth>,
-) -> SessionSweeperWorker {
-    let child = token.child_token();
-    let worker_token = child.clone();
-    let handle = tokio::spawn(async move {
-        let _stopped = SessionSweeperStoppedGuard(Arc::clone(&health));
-        let mut ticker = tokio::time::interval(period);
-        loop {
-            tokio::select! {
-                biased;
-                () = worker_token.cancelled() => break,
-                _ = ticker.tick() => {
-                    tokio::select! {
-                        biased;
-                        () = worker_token.cancelled() => break,
-                        deleted = sweeper.sweep_expired() => {
-                            match deleted {
-                                Ok(deleted) => {
-                                    tracing::debug!(target_table = "sessions", deleted, "session sweeper: tick completed");
-                                    health.mark_healthy();
-                                }
-                                Err(err) => {
-                                    tracing::warn!(
-                                        target_table = "sessions",
-                                        error = %err,
-                                        "session sweeper: sweep failed, marking worker degraded; backing off to next tick"
-                                    );
-                                    health.mark_degraded();
-                                }
-                            }
-                        }
-                    }
+    timeout: Duration,
+    worker_token: CancellationToken,
+    health: Arc<SweeperHealth>,
+) {
+    let _stopped = SweeperStoppedGuard(Arc::clone(&health));
+    let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            () = worker_token.cancelled() => break,
+            _ = ticker.tick() => {
+                let Some(deadline) = auth_grant_sweep_deadline(timeout, &health) else {
+                    ticker.reset();
+                    continue;
+                };
+                if run_auth_grant_sweep_tick(&mut sweeper, deadline, &worker_token, &health).await {
+                    break;
                 }
+                ticker.reset();
             }
         }
-    });
-    SessionSweeperWorker {
-        name: SESSION_SWEEPER_WORKER_NAME,
+    }
+}
+
+fn auth_grant_sweep_deadline(
+    timeout: Duration,
+    health: &SweeperHealth,
+) -> Option<postgres::AuthGrantSweepDeadline> {
+    match postgres::AuthGrantSweepDeadline::from_timeout(timeout) {
+        Ok(deadline) => Some(deadline),
+        Err(error) => {
+            tracing::warn!(
+                target_table = "auth_grants",
+                error = %error,
+                "auth-grant sweeper: deadline setup failed"
+            );
+            health.mark_degraded();
+            None
+        }
+    }
+}
+
+async fn run_auth_grant_sweep_tick(
+    sweeper: &mut impl AuthGrantSweepRunner,
+    deadline: postgres::AuthGrantSweepDeadline,
+    worker_token: &CancellationToken,
+    health: &SweeperHealth,
+) -> bool {
+    tokio::select! {
+        biased;
+        () = worker_token.cancelled() => true,
+        result = sweeper.sweep(deadline) => {
+            report_auth_grant_sweep_result(result, health);
+            false
+        }
+    }
+}
+
+fn report_auth_grant_sweep_result(
+    result: Result<u64, consistency::EngineError>,
+    health: &SweeperHealth,
+) {
+    health.observe_result(&result);
+    match result {
+        Ok(deleted) => log_auth_grant_sweep_success(deleted),
+        Err(error) => log_auth_grant_sweep_error(&error),
+    }
+}
+
+fn log_auth_grant_sweep_success(deleted: u64) {
+    tracing::debug!(
+        target_table = "auth_grants",
+        deleted,
+        "auth-grant sweeper: tick completed"
+    );
+}
+
+fn log_auth_grant_sweep_error(error: &consistency::EngineError) {
+    tracing::warn!(
+        target_table = "auth_grants",
+        error = %error,
+        "auth-grant sweeper: sweep failed, marking worker degraded; backing off to next tick"
+    );
+}
+
+fn spawn_auth_grant_sweeper(
+    sweeper: postgres::PgAuthGrantSweeper,
+    period: Duration,
+    token: CancellationToken,
+    health: Arc<SweeperHealth>,
+) -> SweeperWorker {
+    let child = token.child_token();
+    let worker_token = child.clone();
+    let handle = tokio::spawn(run_auth_grant_sweeper_loop(
+        sweeper,
+        period,
+        AUTH_GRANT_SWEEP_TIMEOUT,
+        worker_token,
+        health,
+    ));
+    SweeperWorker {
+        name: AUTH_GRANT_SWEEPER_WORKER_NAME,
         handle: tokio::sync::Mutex::new(Some(handle)),
         token: child,
     }
 }
 
-fn session_sweeper_module_result(
+fn sweeper_module_result(
     worker: bootstrap::WorkerSpec,
-    health: Arc<SessionSweeperHealth>,
+    health: Arc<SweeperHealth>,
     probe_name: &'static str,
 ) -> anyhow::Result<DomainModuleResult> {
     let probe_name = ProbeName::parse(probe_name).context("sweeper probe name is invalid")?;
     Ok(DomainModuleResult {
         probes: vec![(
             probe_name.clone(),
-            Box::new(SessionSweeperProbe {
+            Box::new(AuthGrantSweeperProbe {
                 name: probe_name,
                 health,
             }),
@@ -4270,34 +4353,40 @@ fn session_sweeper_module_result(
     })
 }
 
-fn wire_session_sweeper(
+fn wire_auth_grant_sweeper(
     pg: &PgRuntimeHandle,
     period: Duration,
 ) -> anyhow::Result<DomainModuleResult> {
-    let sweeper = pg.infra().session_sweeper();
-    let health = Arc::new(SessionSweeperHealth::healthy());
+    let sweeper = pg.infra().auth_grant_sweeper();
+    let health = Arc::new(SweeperHealth::starting());
     let worker_health = Arc::clone(&health);
     let worker: bootstrap::WorkerSpec = Box::new(move |token| {
-        DynManagedResource::new_box(spawn_session_sweeper(sweeper, period, token, worker_health))
+        DynManagedResource::new_box(spawn_auth_grant_sweeper(
+            sweeper,
+            period,
+            token,
+            worker_health,
+        ))
     });
     tracing::info!(
         interval_ms = period.as_millis(),
-        "session sweeper interval configured"
+        "auth-grant sweeper interval configured"
     );
-    session_sweeper_module_result(worker, health, SESSION_SWEEPER_PROBE_NAME)
+    sweeper_module_result(worker, health, AUTH_GRANT_SWEEPER_PROBE_NAME)
 }
 
 fn wire_service_token_replay_sweeper(pg: &PgRuntimeHandle) -> anyhow::Result<DomainModuleResult> {
     let sweeper = pg.infra().service_token_replay_sweeper();
-    let health = Arc::new(SessionSweeperHealth::healthy());
+    let health = Arc::new(SweeperHealth::starting());
     let worker_health = Arc::clone(&health);
     let worker: bootstrap::WorkerSpec = Box::new(move |token| {
         let child = token.child_token();
         let worker_token = child.clone();
         let health = worker_health;
         let handle = tokio::spawn(async move {
-            let _stopped = SessionSweeperStoppedGuard(Arc::clone(&health));
+            let _stopped = SweeperStoppedGuard(Arc::clone(&health));
             let mut ticker = tokio::time::interval(SERVICE_TOKEN_REPLAY_SWEEP_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     biased;
@@ -4318,31 +4407,34 @@ fn wire_service_token_replay_sweeper(pg: &PgRuntimeHandle) -> anyhow::Result<Dom
                                             "replay sweeper: deadline setup failed"
                                         );
                                         health.mark_degraded();
+                                        ticker.reset();
                                         continue;
                                     }
                                 }
-                            ) => match result {
-                                Ok(deleted) => {
-                                    tracing::debug!(target_table = "service_token_replay_keys", deleted, "replay sweeper: tick completed");
-                                    health.mark_healthy();
+                            ) => {
+                                health.observe_result(&result);
+                                match result {
+                                    Ok(deleted) => {
+                                        tracing::debug!(target_table = "service_token_replay_keys", deleted, "replay sweeper: tick completed");
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(target_table = "service_token_replay_keys", error = %error, "replay sweeper: sweep failed");
+                                    }
                                 }
-                                Err(error) => {
-                                    tracing::warn!(target_table = "service_token_replay_keys", error = %error, "replay sweeper: sweep failed");
-                                    health.mark_degraded();
-                                }
+                                ticker.reset();
                             }
                         }
                     }
                 }
             }
         });
-        DynManagedResource::new_box(SessionSweeperWorker {
+        DynManagedResource::new_box(SweeperWorker {
             name: SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME,
             handle: tokio::sync::Mutex::new(Some(handle)),
             token: child,
         })
     });
-    session_sweeper_module_result(worker, health, SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME)
+    sweeper_module_result(worker, health, SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME)
 }
 
 /// otel OTLP/gRPC 导出端点环境变量（**按需开启**：未设 → 不导出 trace，仅 fmt 日志；设了 → 按 scheme 派发 typed endpoint）。
@@ -4536,6 +4628,7 @@ mod tests {
     use identity::ports::TenantRepoScope as IdentityTenantRepoScope;
     use oidc::OidcProvider;
     use primitives::ListenerKind;
+    use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4737,10 +4830,10 @@ mod tests {
             runtime_module_harness_transcript(),
             [
                 "phase-order: build_provider -> build_infra -> wire_domains -> finalize -> launch",
-                "module-probes: configs_ready, keyprovider_ready, session_sweeper, service_token_replay_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
+                "module-probes: configs_ready, keyprovider_ready, auth_grant_sweeper, service_token_replay_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
                 "module-resources: redis, s3, vault-secret-resolver, vault-key-provider, rss_access_token_verifier, federated_access_token_verifier, service_token_verifier, domain-http-transport, identity-pub, identity-sub, settings-pub, settings-sub, postgres-dlx-lifecycle",
-                "module-workers: keyprovider-readiness-sampler, session-sweeper, service-token-replay-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, dlx-lifecycle, dlx-archive-readiness, redis-readiness-sampler",
-                "readyz-probes-before-reporter: rls_ready, redis_ready, rss_access_token_jwks_ready, federated_access_token_jwks_ready, configs_ready, keyprovider_ready, session_sweeper, service_token_replay_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
+                "module-workers: keyprovider-readiness-sampler, auth-grant-sweeper, service-token-replay-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, dlx-lifecycle, dlx-archive-readiness, redis-readiness-sampler",
+                "readyz-probes-before-reporter: rls_ready, redis_ready, rss_access_token_jwks_ready, federated_access_token_jwks_ready, configs_ready, keyprovider_ready, auth_grant_sweeper, service_token_replay_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
                 "reporter-probe-count: 22",
                 "registry-probe-count-after-take: 0",
             ]
@@ -4800,10 +4893,10 @@ mod tests {
                 &[],
                 &["keyprovider-readiness-sampler"],
             ),
-            session_sweeper_module: harness_module(
-                &[SESSION_SWEEPER_PROBE_NAME],
+            auth_grant_sweeper_module: harness_module(
+                &[AUTH_GRANT_SWEEPER_PROBE_NAME],
                 &[],
-                &["session-sweeper"],
+                &[AUTH_GRANT_SWEEPER_WORKER_NAME],
             ),
             service_token_replay_sweeper_module: harness_module(
                 &[SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME],
@@ -5261,52 +5354,42 @@ mod tests {
         }
     }
 
-    struct UnusedSessionLifecycle;
+    #[derive(Clone, Copy)]
+    struct UnusedAuthGrantProvider;
 
-    impl identity::ports::SessionLifecycle for UnusedSessionLifecycle {
-        async fn persist_session_and_emit(
+    impl identity::ports::AuthGrantLifecycle for UnusedAuthGrantProvider {
+        async fn persist_login_grant(
             &self,
             _receipt: identity::ports::LoginProducerReceipt,
             _scope: IdentityTenantRepoScope,
-            _session: identity::ports::Session,
+            _mutation: identity::ports::LoginGrantMutation,
             _entry: consistency::EventEntry,
             _envelope: diport::OutboxEnvelopeParts,
-        ) -> Result<(), diport::OutboxEmitError> {
+        ) -> Result<identity::ports::PersistedLoginGrantReceipt, diport::OutboxEmitError> {
             Err(diport::OutboxEmitError::new(std::io::Error::other(
-                "runtime test session lifecycle must not be called",
+                "runtime test auth-grant lifecycle must not be called",
             )))
         }
 
-        async fn find(
+        async fn find_active(
             &self,
             _scope: IdentityTenantRepoScope,
-            _session_id: identity::ports::SessionId,
-        ) -> Result<Option<identity::ports::Session>, identity::ports::IdentityError> {
+            _grant_id: identity::ports::AuthGrantId,
+            _observed_at: SystemTime,
+        ) -> Result<Option<identity::ports::AuthGrant>, identity::ports::IdentityError> {
             Ok(None)
         }
 
-        async fn logout(
+        async fn close(
             &self,
             _scope: IdentityTenantRepoScope,
-            _mutation: identity::ports::SessionLogoutMutation,
+            _command: identity::ports::AuthGrantCloseCommand,
         ) -> Result<(), identity::ports::IdentityError> {
             Ok(())
         }
     }
 
-    struct UnusedRefreshStore;
-
-    impl identity::ports::RefreshTokenStore for UnusedRefreshStore {
-        async fn insert(
-            &self,
-            _scope: IdentityTenantRepoScope,
-            _record: identity::ports::RefreshTokenRecord,
-        ) -> Result<(), identity::ports::IdentityError> {
-            Err(identity_storage_error(
-                "runtime test refresh store must not be called",
-            ))
-        }
-
+    impl identity::ports::RefreshTokenStore for UnusedAuthGrantProvider {
         async fn find_by_hash(
             &self,
             _scope: IdentityTenantRepoScope,
@@ -5450,21 +5533,19 @@ mod tests {
             )
             .expect("jwt issuer"),
         );
-        let refresh = Arc::new(identity::RefreshService::new(
-            identity::ports::DynRefreshTokenStore::new_box(UnusedRefreshStore),
+        let auth_grants = identity::AuthGrantServices::from_provider(
+            UnusedAuthGrantProvider,
             identity::ports::DynAccountSecurityReadRepo::new_box(UnusedAccountSecurityRepo),
             issuer,
             Box::new(SystemClock),
             Duration::from_secs(900),
-        ));
+        );
+        let refresh = auth_grants.refresh_service();
         let login = Arc::new(identity::LoginService::new(
             Arc::from(identity::ports::DynCredentialRepo::new_box(
                 UnusedCredentialRepo,
             )),
-            Arc::from(identity::ports::DynSessionLifecycle::new_box(
-                UnusedSessionLifecycle,
-            )),
-            Arc::clone(&refresh),
+            auth_grants,
             secure::PasswordPolicy::new(Arc::new(
                 crypto::load_password_blocklist_from_reader(std::io::Cursor::new(include_bytes!(
                     "../../../deploy/password-blocklist.demo.sha256"
@@ -8685,11 +8766,11 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn identity_maintenance_module_emits_session_sweeper_probe_and_worker() {
+    fn identity_maintenance_module_emits_auth_grant_sweeper_probe_and_worker() {
         struct NoopResource;
         impl diport::ManagedResource for NoopResource {
             fn name(&self) -> &str {
-                "noop-session-sweeper"
+                "noop-auth-grant-sweeper"
             }
 
             async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
@@ -8697,35 +8778,176 @@ mod tests {
             }
         }
 
-        let health = Arc::new(SessionSweeperHealth::healthy());
+        let health = Arc::new(SweeperHealth::starting());
         let worker: bootstrap::WorkerSpec =
             Box::new(|_| diport::DynManagedResource::new_box(NoopResource));
-        let result = session_sweeper_module_result(worker, health, SESSION_SWEEPER_PROBE_NAME)
-            .expect("session sweeper module result");
+        let result = sweeper_module_result(worker, health, AUTH_GRANT_SWEEPER_PROBE_NAME)
+            .expect("auth-grant sweeper module result");
         assert_eq!(result.probes.len(), 1);
-        assert_eq!(result.probes[0].0.as_str(), SESSION_SWEEPER_PROBE_NAME);
+        assert_eq!(result.probes[0].0.as_str(), AUTH_GRANT_SWEEPER_PROBE_NAME);
         assert!(result.resources.is_empty());
         assert_eq!(
             result.workers.len(),
             1,
-            "session sweeper must be registered as a managed worker"
+            "auth-grant sweeper must be registered as a managed worker"
         );
+    }
+
+    struct ScriptedAuthGrantSweeper {
+        calls: Arc<AtomicUsize>,
+        outcomes: VecDeque<tokio::sync::oneshot::Receiver<Result<u64, consistency::EngineError>>>,
+    }
+
+    impl AuthGrantSweepRunner for ScriptedAuthGrantSweeper {
+        fn sweep(
+            &mut self,
+            _deadline: postgres::AuthGrantSweepDeadline,
+        ) -> AuthGrantSweepFuture<'_> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let receiver = self.outcomes.pop_front();
+            Box::pin(async move {
+                let Some(receiver) = receiver else {
+                    return Err(consistency::EngineError::new(
+                        consistency::EngineErrorKind::Invariant,
+                    ));
+                };
+                receiver.await.unwrap_or_else(|_| {
+                    Err(consistency::EngineError::new(
+                        consistency::EngineErrorKind::Invariant,
+                    ))
+                })
+            })
+        }
+    }
+
+    async fn wait_for_sweeper_calls(calls: &AtomicUsize, expected: usize) {
+        for _ in 0..32 {
+            if calls.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            expected,
+            "sweeper loop did not reach expected call count"
+        );
+    }
+
+    async fn wait_for_sweeper_health(
+        health: &SweeperHealth,
+        expected: (HealthStatus, &'static str),
+    ) {
+        for _ in 0..32 {
+            if health.status_detail() == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            health.status_detail(),
+            expected,
+            "sweeper loop did not reach expected health state"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auth_grant_sweeper_health_tracks_first_success_error_and_exit() {
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let (second_tx, second_rx) = tokio::sync::oneshot::channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let health = Arc::new(SweeperHealth::starting());
+        let token = CancellationToken::new();
+        let handle = tokio::spawn(run_auth_grant_sweeper_loop(
+            ScriptedAuthGrantSweeper {
+                calls: Arc::clone(&calls),
+                outcomes: VecDeque::from([first_rx, second_rx]),
+            },
+            Duration::from_secs(10),
+            Duration::from_secs(100),
+            token.clone(),
+            Arc::clone(&health),
+        ));
+
+        wait_for_sweeper_calls(&calls, 1).await;
+        assert_eq!(
+            health.status_detail(),
+            (HealthStatus::Unhealthy, "starting"),
+            "readiness must fail closed while the first sweep is in flight"
+        );
+        assert!(first_tx.send(Ok(1)).is_ok());
+        wait_for_sweeper_health(&health, (HealthStatus::Healthy, "worker")).await;
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        wait_for_sweeper_calls(&calls, 2).await;
+        assert!(
+            second_tx
+                .send(Err(consistency::EngineError::new(
+                    consistency::EngineErrorKind::Transient,
+                )))
+                .is_ok()
+        );
+        wait_for_sweeper_health(&health, (HealthStatus::Degraded, "degraded")).await;
+
+        token.cancel();
+        assert!(handle.await.is_ok());
+        assert_eq!(health.status_detail(), (HealthStatus::Unhealthy, "stopped"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auth_grant_sweeper_delays_missed_ticks_instead_of_bursting() {
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let (_second_tx, second_rx) = tokio::sync::oneshot::channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let health = Arc::new(SweeperHealth::starting());
+        let token = CancellationToken::new();
+        let handle = tokio::spawn(run_auth_grant_sweeper_loop(
+            ScriptedAuthGrantSweeper {
+                calls: Arc::clone(&calls),
+                outcomes: VecDeque::from([first_rx, second_rx]),
+            },
+            Duration::from_secs(10),
+            Duration::from_secs(100),
+            token.clone(),
+            Arc::clone(&health),
+        ));
+
+        wait_for_sweeper_calls(&calls, 1).await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(first_tx.send(Ok(1)).is_ok());
+        tokio::task::yield_now().await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "Delay policy must not issue a catch-up burst after a long sweep"
+        );
+
+        tokio::time::advance(Duration::from_secs(9)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_for_sweeper_calls(&calls, 2).await;
+
+        token.cancel();
+        assert!(handle.await.is_ok());
+        assert_eq!(health.status_detail(), (HealthStatus::Unhealthy, "stopped"));
     }
 
     #[test]
     #[allow(clippy::expect_used)]
     // reason: 静态回归守卫切分当前源码；缺目标函数时测试应硬失败。
-    fn session_sweeper_worker_cancellation_races_inflight_sweep() {
+    fn service_token_sweeper_delays_missed_ticks() {
         let source = include_str!("lib.rs");
-        let function = source
-            .split("fn spawn_session_sweeper(")
+        let service_token = source
+            .split("fn wire_service_token_replay_sweeper(")
             .nth(1)
-            .and_then(|rest| rest.split("fn session_sweeper_module_result(").next())
-            .expect("spawn_session_sweeper source slice");
+            .and_then(|rest| rest.split("/// otel OTLP/gRPC").next())
+            .expect("service-token sweeper source slice");
         assert!(
-            function.contains("deleted = sweeper.sweep_expired()")
-                && function.contains("() = worker_token.cancelled() => break"),
-            "session sweeper worker must race cancellation against an in-flight sweep"
+            service_token.contains(
+                "ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay)"
+            ),
+            "service-token sweeper must not burst missed maintenance ticks"
         );
     }
 

@@ -1,0 +1,10 @@
+error[E0308]: mismatched types
+  --> tests/ui/auth_grant_split_provider_constructor_fail.rs:34:60
+   |
+34 |     let _split_provider_constructor: OldSplitConstructor = LoginService::new;
+   |                                      -------------------   ^^^^^^^^^^^^^^^^^ incorrect number of function parameters
+   |                                      |
+   |                                      expected due to this
+   |
+   = note: expected fn pointer `fn(Arc<DynCredentialRepo<'static>>, Arc<DynAuthGrantLifecycle<'static>>, Arc<RefreshService<TestSigner>>, PasswordPolicy, Box<(dyn Clock + 'static)>, std::time::Duration) -> LoginService<TestSigner>`
+                 found fn item `fn(Arc<DynCredentialRepo<'static>>, AuthGrantServices<_>, PasswordPolicy, Box<(dyn Clock + 'static)>, std::time::Duration) -> LoginService<_> {LoginService::<_>::new}`

@@ -1,6 +1,6 @@
 //! authn — RSS 认证主体词汇与 profile-typed token funnel。
 //!
-//! 本 crate 承载认证侧的核心值类型与错误枚举；DI port（PDP / session store）归 `diport`（ADR-003）。
+//! 本 crate 承载认证侧的核心值类型与错误枚举；认证 DI port（PDP 等）归 `diport`（ADR-003）。
 //! 所有类型字段私有，只经显式构造 funnel 创建——外部不可伪造，fail-closed（ADR-001）。
 //! [`JwtIssuer`] / [`JwtIssuerConfig`] 以 sealed profile marker 固定算法、`typ`、`token_use` 与最大
 //! TTL：RSS access 只暴露 access mint，service-token 只暴露 service mint，federated access
@@ -262,8 +262,7 @@ fn decode_claims(raw: &str) -> Result<Claims, AuthnError> {
 /// `row_visibility` 从已认证 principal + ctx 派生行级可见域（ADR-002）。
 pub struct Principal {
     kind: PrincipalKind,
-    /// subject 标识（内部，不入 wire）；经 [`Principal::matches_subject`] 受控比较（不泄露明文）；
-    /// session store / audit 读路径待 W 阶段接缝落地。
+    /// subject 标识（内部，不入 wire）；经 [`Principal::matches_subject`] 受控比较（不泄露明文）。
     subject: String,
     /// 所属租户（`None` 仅限 `Service` / `SuperAdmin` 跨租户场景）。
     tenant: Option<TenantId>,
@@ -758,7 +757,7 @@ pub async fn verify_service_token(
 }
 
 // ---------------------------------------------------------------------------
-// JWT / token / session 值类型
+// JWT / token 值类型
 // ---------------------------------------------------------------------------
 
 /// JWT 原始令牌（私有字段；不 derive `Serialize`；构造经结构闸 funnel）。
@@ -799,7 +798,7 @@ impl Jwt {
 /// 私有字段、也不能调 `pub(crate)` 构造，故无法伪造已验证主体。`Debug` 脱敏。
 ///
 /// **单一 canonical 身份源（F1）**：载体内 `claims`（验签产物 [`diport::VerifiedClaims`]，verifier =
-/// 信任原点）是**唯一**身份源；`raw` 仅是原始 token 串（供下游 token relay / session），**不派生身份**。
+/// 信任原点）是**唯一**身份源；`raw` 仅是原始 token 串（供下游 token relay），**不派生身份**。
 /// 故一个 `VerifiedJwt` 只能经 `from_verified_jwt` 导出**一个** principal——无第二（raw 重解析）身份源、
 /// 无分歧。access bridge 与 `from_verified_jwt` 读同一 `claims`。
 ///
@@ -807,7 +806,7 @@ impl Jwt {
 /// 改 `pub` 须经 ADR amendment；机器守（`cargo public-api` golden）跟踪见 #1151。**生产端**经 authn-owned
 /// access verification funnels 闭环；外部 crate 不可达（`tests/ui/` compile-fail 锁）。
 pub struct VerifiedJwt {
-    /// 原始已验证 token 串（供下游 token relay / session；**不派生身份**——身份用 [`Principal::from_verified_jwt`]）。
+    /// 原始已验证 token 串（供下游 token relay；**不派生身份**——身份用 [`Principal::from_verified_jwt`]）。
     raw: String,
     /// 验签产物 = 单一 canonical 身份源。
     claims: diport::VerifiedClaims,
@@ -909,57 +908,6 @@ impl RefreshToken {
     }
 }
 
-/// 会话 ID newtype（私有内容；不 derive `Serialize`）。
-pub struct SessionId(String);
-
-impl SessionId {
-    /// 生成新会话 ID（UUID v4 随机值）。
-    ///
-    /// 不取系统时钟（满足 clippy clock 纪律）；会话生命周期由持有 [`Session`] 的应用服务管理。
-    pub fn generate() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
-    }
-
-    /// 取 ID 字符串引用。
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// 会话快照（私有字段；不 derive `Serialize`；构造经位置参 funnel）。
-pub struct Session {
-    id: SessionId,
-    principal: Principal,
-    /// 会话到期时间（与 deviceloop CertLifecycleState 的 SystemTime 类型一致）。
-    expires_at: std::time::SystemTime,
-}
-
-impl Session {
-    /// 构造会话（`expires_at` 来自时钟注入，不在此取系统时间）。
-    pub fn new(id: SessionId, principal: Principal, expires_at: std::time::SystemTime) -> Self {
-        Self {
-            id,
-            principal,
-            expires_at,
-        }
-    }
-
-    /// 取会话 ID 引用。
-    pub fn id(&self) -> &SessionId {
-        &self.id
-    }
-
-    /// 取 principal 引用。
-    pub fn principal(&self) -> &Principal {
-        &self.principal
-    }
-
-    /// 取到期时间。
-    pub fn expires_at(&self) -> std::time::SystemTime {
-        self.expires_at
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 错误枚举
 // ---------------------------------------------------------------------------
@@ -999,9 +947,6 @@ pub enum AuthnError {
     /// 以便 runtime 返回可重试的 503，而不是把基础设施故障伪装成调用方 401。
     #[error("authentication provider is unavailable")]
     ProviderUnavailable,
-    /// 会话不存在。**本 crate 当前不可达**——由 W session store（`diport` 仓储 port）产生。
-    #[error("session not found")]
-    SessionNotFound,
     /// 主体已认证但无权（403 insufficient permission）。**本 crate 当前不可达**——由后续 authz / ABAC 层
     /// 产生；verify→mint bridge **不**产此态（凭据不可信 / 无效归 401 拒绝态 `TokenInvalid` / `TokenUntrusted` /
     /// `PrincipalInvalid` / `TokenExpired`，RFC 6750 §3.1）。
@@ -1885,19 +1830,15 @@ mod verify_bridge_tests {
 
 #[cfg(test)]
 mod value_type_tests {
-    //! token newtype / `Session` 聚合 / `Principal` 访问器 / Send / Debug 脱敏。
-    use super::{
-        AccessToken, CANON_TENANT, Principal, PrincipalKind, RefreshToken, Session, SessionId,
-    };
-    use std::time::{Duration, SystemTime};
+    //! token newtype / `Principal` 访问器 / Send / Debug 脱敏。
+    use super::{AccessToken, CANON_TENANT, Principal, PrincipalKind, RefreshToken};
     use vocab::tenant::TenantId;
 
     fn _assert_send<T: Send>() {}
 
     #[test]
-    fn principal_and_session_are_send() {
+    fn principal_is_send() {
         _assert_send::<Principal>();
-        _assert_send::<Session>();
     }
 
     #[test]
@@ -1915,21 +1856,6 @@ mod value_type_tests {
             !format!("{rt:?}").contains("refresh-secret"),
             "RefreshToken Debug 不得泄露内容"
         );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn session_aggregates_id_principal_and_expiry() {
-        let tid = TenantId::parse(CANON_TENANT).expect("tenant");
-        let principal = Principal::for_test(PrincipalKind::User, "alice", Some(tid));
-        let id = SessionId::generate();
-        let id_str = id.as_str().to_string();
-        let expires_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
-
-        let session = Session::new(id, principal, expires_at);
-        assert_eq!(session.id().as_str(), id_str);
-        assert_eq!(session.principal().kind(), PrincipalKind::User);
-        assert_eq!(session.expires_at(), expires_at);
     }
 
     #[test]
@@ -1956,7 +1882,6 @@ mod enum_exhaustiveness {
             AuthnError::PrincipalInvalid,
             AuthnError::TokenExpired,
             AuthnError::ProviderUnavailable,
-            AuthnError::SessionNotFound,
             AuthnError::Forbidden,
         ] {
             assert!(!e.to_string().is_empty(), "错误 message 非空");
@@ -1966,7 +1891,6 @@ mod enum_exhaustiveness {
                 | AuthnError::PrincipalInvalid
                 | AuthnError::TokenExpired
                 | AuthnError::ProviderUnavailable
-                | AuthnError::SessionNotFound
                 | AuthnError::Forbidden => {}
             }
         }
@@ -2017,24 +1941,5 @@ mod enum_exhaustiveness {
         match error {
             CrossTenantGrantError::NotSuperAdmin => {}
         }
-    }
-}
-
-#[cfg(test)]
-mod session_id {
-    //! `SessionId::generate`（RW-G1 已写实）：UUID v4，唯一 + 非空。
-    use super::SessionId;
-
-    #[test]
-    fn generate_is_unique_and_canonical_uuid() {
-        let a = SessionId::generate();
-        let b = SessionId::generate();
-        assert!(!a.as_str().is_empty());
-        assert_ne!(a.as_str(), b.as_str());
-        // 锁定格式契约：session id 是 canonical UUID（贯穿到 audit resource_id，不可退化为递增整数）。
-        assert!(
-            uuid::Uuid::parse_str(a.as_str()).is_ok(),
-            "session id must be a parseable uuid"
-        );
     }
 }

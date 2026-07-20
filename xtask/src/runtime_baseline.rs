@@ -1145,10 +1145,10 @@ impl RunRuntimeConfigWiring {
                 call.args.len() == 2
                     && self.serving_argument_is_canonical(call, 1, "domain_modules"),
             ),
-            "wire_session_sweeper" => self.record_serving_sink(
-                "session_sweep_interval",
+            "wire_auth_grant_sweeper" => self.record_serving_sink(
+                "auth_grant_sweep_interval",
                 call.args.len() == 2
-                    && self.serving_argument_is_canonical(call, 1, "session_sweep_interval"),
+                    && self.serving_argument_is_canonical(call, 1, "auth_grant_sweep_interval"),
             ),
             "wire_distributed" => self.record_serving_sink(
                 "distributed_worker",
@@ -1426,7 +1426,7 @@ const SERVING_RUNTIME_PART_FIELDS: &[&str] = &[
     "domain_transport",
     "domain_modules",
     "audit_consumer_key",
-    "session_sweep_interval",
+    "auth_grant_sweep_interval",
 ];
 
 const SERVING_RUNTIME_SINK_FIELDS: &[&str] = &[
@@ -1437,7 +1437,7 @@ const SERVING_RUNTIME_SINK_FIELDS: &[&str] = &[
     "domain_transport",
     "domain_modules",
     "audit_consumer_key",
-    "session_sweep_interval",
+    "auth_grant_sweep_interval",
 ];
 
 const RUNTIME_WIRING_INPUT_FIELDS: &[&str] = &[
@@ -1447,7 +1447,7 @@ const RUNTIME_WIRING_INPUT_FIELDS: &[&str] = &[
     "distributed_worker",
     "domain_modules",
     "audit_consumer_key",
-    "session_sweep_interval",
+    "auth_grant_sweep_interval",
 ];
 
 fn canonical_serving_parts_initializer(expr: &syn::Expr, config: &syn::Ident) -> bool {
@@ -12441,9 +12441,9 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "bootstrap::compose_bindings(&mut domain_bindings)",
     },
     AnchorSpec {
-        id: "run.module.input.session-sweeper",
+        id: "run.module.input.auth-grant-sweeper",
         path: RUNTIME_PHASE_DOMAINS_PATH,
-        pattern: "let session_sweeper_module =",
+        pattern: "let auth_grant_sweeper_module =",
     },
     AnchorSpec {
         id: "run.module.input.s3-canary",
@@ -15551,7 +15551,7 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
         domain_transport,
         domain_modules,
         audit_consumer_key,
-        session_sweep_interval,
+        auth_grant_sweep_interval,
     } = RuntimeServingConfig::from_snapshot(config)?
         .into_parts();
     let pg_config = PgRuntimeConfig::from_snapshot(config)?;
@@ -15585,7 +15585,7 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
         distributed_worker,
         domain_modules,
         audit_consumer_key,
-        session_sweep_interval,
+        auth_grant_sweep_interval,
     };
     let RuntimeWiringInputs {
         event_transport,
@@ -15594,10 +15594,10 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
         distributed_worker,
         domain_modules,
         audit_consumer_key,
-        session_sweep_interval,
+        auth_grant_sweep_interval,
     } = wiring_inputs;
     modules_gen::wire_domains(&deps, domain_modules);
-    wire_session_sweeper(&pg, session_sweep_interval);
+    wire_auth_grant_sweeper(&pg, auth_grant_sweep_interval);
     let distributed = wire_distributed(&deps, distributed_worker);
     wire_event_transport(
         &pg,
@@ -15685,7 +15685,7 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
         domain_transport,
         domain_modules,
         audit_consumer_key,
-        session_sweep_interval,
+        auth_grant_sweep_interval,
     } = RuntimeServingConfig::from_snapshot(config)?
         .into_parts();
 "#;
@@ -15739,8 +15739,8 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
             (
                 "serving sink hidden in dead closure",
                 canonical.replace(
-                    "    wire_session_sweeper(&pg, session_sweep_interval);",
-                    "    let _dead = || wire_session_sweeper(&pg, session_sweep_interval);",
+                    "    wire_auth_grant_sweeper(&pg, auth_grant_sweep_interval);",
+                    "    let _dead = || wire_auth_grant_sweeper(&pg, auth_grant_sweep_interval);",
                 ),
             ),
             (
@@ -16479,7 +16479,7 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         domain_transport,
         domain_modules,
         audit_consumer_key,
-        session_sweep_interval,
+        auth_grant_sweep_interval,
     } = RuntimeServingConfig::from_snapshot(config)?
         .into_parts();
     let pg_config = PgRuntimeConfig::from_snapshot(config)?;
@@ -16513,7 +16513,7 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         distributed_worker,
         domain_modules,
         audit_consumer_key,
-        session_sweep_interval,
+        auth_grant_sweep_interval,
     };
     let RuntimeWiringInputs {
         event_transport,
@@ -16522,10 +16522,10 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         distributed_worker,
         domain_modules,
         audit_consumer_key,
-        session_sweep_interval,
+        auth_grant_sweep_interval,
     } = wiring_inputs;
     modules_gen::wire_domains(&deps, domain_modules);
-    wire_session_sweeper(&pg, session_sweep_interval);
+    wire_auth_grant_sweeper(&pg, auth_grant_sweep_interval);
     let distributed = wire_distributed(&deps, distributed_worker);
     wire_event_transport(
         &pg,

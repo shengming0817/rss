@@ -21,7 +21,7 @@ pub(super) struct RuntimeWiringInputs {
     pub(super) distributed_worker: crate::distributed_runtime::DistributedWorkerConfig,
     pub(super) domain_modules: crate::domains::DomainModuleInputs,
     pub(super) audit_consumer_key: primitives::MacKey,
-    pub(super) session_sweep_interval: Duration,
+    pub(super) auth_grant_sweep_interval: Duration,
 }
 
 pub(crate) async fn after_required_preflight<Capability, Output, Preflight, Migrate>(
@@ -57,7 +57,7 @@ impl<'a> ProvidersBuilt<'a> {
                 domain_transport: domain_transport_config,
                 domain_modules,
                 audit_consumer_key,
-                session_sweep_interval,
+                auth_grant_sweep_interval,
             } = serving_config;
             let pg_config = PgRuntimeConfig::from_snapshot(config)
                 .context("build snapshot-backed postgres config")?;
@@ -240,7 +240,7 @@ impl<'a> ProvidersBuilt<'a> {
                 distributed_worker,
                 domain_modules,
                 audit_consumer_key,
-                session_sweep_interval,
+                auth_grant_sweep_interval,
             };
 
             let runtime_service_token = token_profiles

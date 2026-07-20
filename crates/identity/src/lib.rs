@@ -18,8 +18,8 @@
 //!
 //! `application`（登录生命周期：[`LoginService`] / [`IdentityDomain`]）**已写实**——哈希凭据使用
 //! constant-time digest 比较与有界 KDF（未知/弱档至少支付当前档工作）+ lockout 门控/原子推进 + L2 co-tx
-//! （session + `identity.session-created` outbox 同一事务）+ 密码变更
-//! CAS + logout 软撤销；in-mem DI 替身覆盖单测/journey，生产由 PostgreSQL 原子认证漏斗与持久状态真源承载。
+//! （AuthGrant + 初始 refresh + `identity.session-created` outbox 同一事务）+ 密码变更
+//! CAS + AuthGrant 关闭；in-mem DI 替身覆盖单测/journey，生产由 PostgreSQL 原子认证漏斗与持久状态真源承载。
 //! `application` 模块私有，只 re-export facade。
 //!
 //! # 对标
@@ -38,24 +38,26 @@ mod internal;
 pub mod ports;
 
 pub use application::{
-    ChangePasswordError, FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain,
-    IdentityDomainDeps, LoginError, LoginService, PolicyManageError, PolicyManageService,
-    RbacAdminError, RbacAdminService, RefreshBundle, RefreshError, RefreshService,
+    AuthGrantServices, ChangePasswordError, FederatedIdentityDomain, FederatedIdentityDomainDeps,
+    IdentityDomain, IdentityDomainDeps, LoginError, LoginService, PolicyManageError,
+    PolicyManageService, RbacAdminError, RbacAdminService, RefreshBundle, RefreshError,
+    RefreshService,
 };
 /// Demo/journey 首发 token 装配（seed-login/test 门控；生产经组合根注入 vault `Signer`，#1252）。
 #[cfg(any(test, feature = "seed-login"))]
-pub use application::{SeedSigner, seed_refresh_service};
+pub use application::{SeedSigner, seed_auth_grant_services, seed_refresh_service};
 pub use domain::{
     AccountSecurityHydrationError, AccountSecurityMutation, AccountSecuritySnapshot,
     AccountSecurityState, AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus,
     AuthnEpoch, RefreshRotationOutcome,
 };
+pub use ports::AuthGrantProvider;
 
 /// 测试支撑——仅 `test-support` feature（test/dev 构建）启用，生产不编译（funnel seal 不变）。
 ///
-/// 下游 adapter crate（postgres）集成测试需构造 [`ports::Session`](crate::ports::Session) 驱动
-/// `ports::SessionLifecycle`，及 [`ports::LoginIdentifier`](crate::ports::LoginIdentifier) 驱动
-/// `ports::CredentialRepo::authenticate`（#1316），但 `Session::new` / `SessionId::new` /
+/// 下游 adapter crate（postgres）集成测试需构造 [`ports::AuthGrant`](crate::ports::AuthGrant) 驱动
+/// `ports::AuthGrantLifecycle`，及 [`ports::LoginIdentifier`](crate::ports::LoginIdentifier) 驱动
+/// `ports::CredentialRepo::authenticate`（#1316），但 `AuthGrant::new` / `AuthGrantId::new` /
 /// `LoginIdentifier::new` 均为 `pub(crate)` funnel（生产不可伪造）。本模块经 feature 门控暴露受控构造器——与
 /// `authn::test_support` 同信任模型（生产构建不编译 ⇒ funnel seal 不变）。
 #[cfg(feature = "test-support")]
@@ -71,7 +73,16 @@ pub mod test_support {
             .into_receipt()
     }
 
-    use crate::domain::{LoginIdentifier, Session, SessionId};
+    /// Parse a canonical user id for downstream adapter tests without adding a direct `ids` edge.
+    #[allow(clippy::expect_used)]
+    pub fn user_id(raw: &str) -> ids::UserId {
+        ids::UserId::parse(raw).expect("test user id must be canonical")
+    }
+
+    use crate::domain::{
+        AuthGrant, AuthGrantId, AuthnEpoch, LoginIdentifier, RefreshTokenHash, RefreshTokenId,
+        RefreshTokenRecord,
+    };
 
     /// Mount the production logout handler for downstream adapter integration tests.
     pub fn logout_router<S: diport::Signer + Send + Sync + 'static>(
@@ -82,21 +93,81 @@ pub mod test_support {
         crate::application::logout_router_for_test(service, tenant, actor)
     }
 
-    /// 构造测试用 [`Session`]（经域 funnel；仅 test/dev 构建）。
-    pub fn session(
-        session_id: &str,
-        subject: &str,
+    /// 构造测试用 [`AuthGrant`]（经域 funnel；仅 test/dev 构建）。
+    #[allow(clippy::expect_used)]
+    pub fn auth_grant(
+        grant_id: &str,
+        user_id: ids::UserId,
         tenant: TenantId,
+        auth_time: SystemTime,
+        authn_epoch_at_issue: AuthnEpoch,
         expires_at: SystemTime,
         created_at: SystemTime,
-    ) -> Session {
-        Session::new(
-            SessionId::new(session_id),
-            subject,
+    ) -> AuthGrant {
+        AuthGrant::new_active(
+            AuthGrantId::new(grant_id),
             tenant,
+            user_id,
+            auth_time,
+            authn_epoch_at_issue,
             expires_at,
             created_at,
         )
+        .expect("test auth grant must satisfy state invariants")
+    }
+
+    /// Construct an initial refresh record derived from the exact test AuthGrant binding.
+    #[allow(clippy::expect_used)]
+    pub fn initial_refresh(
+        grant: &AuthGrant,
+        refresh_id: &str,
+        token_hash: [u8; 32],
+        issued_at: SystemTime,
+        expires_at: SystemTime,
+    ) -> RefreshTokenRecord {
+        RefreshTokenRecord::new_initial(
+            grant,
+            RefreshTokenId::new(refresh_id),
+            RefreshTokenHash::new(token_hash),
+            issued_at,
+            expires_at,
+        )
+        .expect("test initial refresh must satisfy grant and time invariants")
+    }
+
+    /// Derive a test rotation through the same source-bound domain funnel used in production.
+    #[allow(clippy::expect_used)]
+    pub fn refresh_rotation(
+        source: &RefreshTokenRecord,
+        refresh_id: &str,
+        token_hash: [u8; 32],
+        issued_at: SystemTime,
+    ) -> crate::ports::RefreshRotation {
+        source
+            .begin_rotation(
+                RefreshTokenId::new(refresh_id),
+                RefreshTokenHash::new(token_hash),
+                issued_at,
+            )
+            .expect("test rotation must satisfy source binding and time invariants")
+    }
+
+    /// Build the generated `identity.session-created` fact carried by a login-grant mutation.
+    #[allow(clippy::expect_used)]
+    pub fn session_created_entry(event_id: &str, grant: &AuthGrant) -> consistency::EventEntry {
+        let payload =
+            generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
+                session_id: grant.id().as_str().to_owned(),
+                subject: grant.user_id().as_uuid(),
+                tenant_id: grant.tenant().to_string(),
+                occurred_at: crate::application::unix_secs(grant.created_at()),
+            };
+        consistency::EventEntry::from_generated_payload(
+            &payload,
+            consistency::IdemKey::parse(event_id)
+                .expect("test event id must satisfy idempotency-key shape"),
+        )
+        .expect("generated session-created payload must encode")
     }
 
     /// 构造测试用 [`LoginIdentifier`]（登录查找键；经域 funnel；仅 test/dev 构建）。下游 adapter 集成测试需
@@ -122,12 +193,12 @@ mod smoke {
     //! 行为正确性由各子模块（`domain::{rbac,abac}`）的表驱动单测覆盖。
 
     use crate::domain::{
-        AbacAttribute, AccountLockout, AccountStatus, AttributeKey, AttributeValue, Credential,
-        IdentityError, Operator, Permission, PermissionId, Policy, PolicyCondition, PolicyEffect,
-        PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion,
-        ResourceAttribute, ResourceAttributeKey, ResourceAttributeResourceId,
-        ResourceAttributeVersion, ResourcePattern, Role, RoleBinding, RoleId, Session, SessionId,
-        authorize_rbac, evaluate_abac,
+        AbacAttribute, AccountLockout, AccountStatus, AttributeKey, AttributeValue, AuthGrant,
+        AuthGrantId, Credential, IdentityError, Operator, Permission, PermissionId, Policy,
+        PolicyCondition, PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule,
+        PolicyVersion, ResourceAttribute, ResourceAttributeKey, ResourceAttributeResourceId,
+        ResourceAttributeVersion, ResourcePattern, Role, RoleBinding, RoleId, authorize_rbac,
+        evaluate_abac,
     };
 
     // 证明主要类型是 Send（跨 await 点传播）。
@@ -157,8 +228,8 @@ mod smoke {
         _assert_send::<ResourceAttribute>();
         _assert_send::<Credential>();
         _assert_send::<AccountLockout>();
-        _assert_send::<SessionId>();
-        _assert_send::<Session>();
+        _assert_send::<AuthGrantId>();
+        _assert_send::<AuthGrant>();
     }
 
     #[test]

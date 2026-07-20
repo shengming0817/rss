@@ -25,7 +25,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use diport::{
     DynKeyProvider, EncryptOutput, KeyName, KeyProvider, KeyProviderError, KeyRef, KeyVersion,
-    ManagedResource, OutboxEmitError, OutboxEnvelopeParts, RedactedBytes,
+    ManagedResource, OutboxEmitError, RedactedBytes,
 };
 use generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse;
 use generated::http::identity_v1::{
@@ -36,17 +36,18 @@ use generated::http::identity_v1::{
 };
 use generated::http::settings_v2::{SettingsSecretPublishRequest, SettingsSecretPublishResponse};
 use identity::ports::{
-    AuthOutcome, AuthnEpoch, Credential, CredentialRepo, DynAccountSecurityReadRepo,
-    DynCredentialRepo, DynRefreshTokenStore, DynSessionLifecycle, IdentityError, LoginIdentifier,
-    PasswordChangeMutation, RefreshRotationMutation, RefreshRotationOutcome, RefreshStatus,
-    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenStore, Session, SessionId,
-    SessionLifecycle, SessionLogoutMutation, TenantRepoScope as IdentityScope,
+    AuthGrant, AuthGrantCloseCommand, AuthGrantId, AuthGrantLifecycle, AuthOutcome, Credential,
+    CredentialRepo, DynAccountSecurityReadRepo, DynCredentialRepo, DynRefreshTokenStore,
+    IdentityError, LoginGrantMutation, LoginIdentifier, PasswordChangeMutation,
+    RefreshRotationMutation, RefreshRotationOutcome, RefreshTokenHash, RefreshTokenId,
+    RefreshTokenRecord, RefreshTokenStore, TenantRepoScope as IdentityScope,
 };
-use identity::{LoginService, RefreshService, SeedSigner};
+use identity::{AuthGrantProvider, AuthGrantServices, LoginService, RefreshService, SeedSigner};
 use memory::{FixedClock, MemBus, MemEmitter};
 use postgres::{
-    ConfigValueProtections, PgAuditAdminRepo, PgConfig, PgCredentialRepo, PgPassword,
-    PgRefreshTokenStore, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps,
+    ConfigValueProtections, PgAuditAdminRepo, PgAuthGrantLifecycle, PgAuthGrantProvider, PgConfig,
+    PgCredentialRepo, PgPassword, PgRefreshTokenStore, PgRuntimeDeps, PgSslMode,
+    PgTenantReadConfig, caps,
 };
 use primitives::{AuthPlan, AuthScheme, ListenerKind, MacKey, RequiredScheme};
 use serde::Deserialize;
@@ -399,12 +400,12 @@ impl CredentialRepo for BarrierCredentialRepo {
     }
 }
 
-struct SessionFindBarrier {
+struct AuthGrantFindBarrier {
     target: Mutex<Option<String>>,
     barrier: Barrier,
 }
 
-impl SessionFindBarrier {
+impl AuthGrantFindBarrier {
     fn new() -> Self {
         Self {
             target: Mutex::new(None),
@@ -417,18 +418,18 @@ impl SessionFindBarrier {
             .target
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ensure!(target.is_none(), "session find barrier is already armed");
+        ensure!(target.is_none(), "auth-grant find barrier is already armed");
         *target = Some(session_id.to_owned());
         Ok(())
     }
 
-    async fn wait_if_armed(&self, session_id: &SessionId) {
+    async fn wait_if_armed(&self, grant_id: &AuthGrantId) {
         let armed = self
             .target
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_deref()
-            .is_some_and(|target| target == session_id.as_str());
+            .is_some_and(|target| target == grant_id.as_str());
         if armed && self.barrier.wait().await.is_leader() {
             self.target
                 .lock()
@@ -438,41 +439,66 @@ impl SessionFindBarrier {
     }
 }
 
-struct BarrierSessionLifecycle {
-    inner: Arc<DynSessionLifecycle<'static>>,
-    find_barrier: Arc<SessionFindBarrier>,
+struct BarrierAuthGrantProvider {
+    inner: PgAuthGrantProvider,
+    find_barrier: Arc<AuthGrantFindBarrier>,
 }
 
-impl SessionLifecycle for BarrierSessionLifecycle {
-    async fn persist_session_and_emit(
+struct BarrierAuthGrantLifecycle {
+    inner: PgAuthGrantLifecycle,
+    find_barrier: Arc<AuthGrantFindBarrier>,
+}
+
+impl AuthGrantLifecycle for BarrierAuthGrantLifecycle {
+    async fn persist_login_grant(
         &self,
         receipt: identity::ports::LoginProducerReceipt,
         scope: IdentityScope,
-        session: Session,
+        mutation: LoginGrantMutation,
         entry: consistency::EventEntry,
-        envelope: OutboxEnvelopeParts,
-    ) -> Result<(), OutboxEmitError> {
+        envelope: diport::OutboxEnvelopeParts,
+    ) -> Result<identity::ports::PersistedLoginGrantReceipt, OutboxEmitError> {
         self.inner
-            .persist_session_and_emit(receipt, scope, session, entry, envelope)
+            .persist_login_grant(receipt, scope, mutation, entry, envelope)
             .await
     }
 
-    async fn find(
+    async fn find_active(
         &self,
         scope: IdentityScope,
-        session_id: SessionId,
-    ) -> Result<Option<Session>, IdentityError> {
-        let session = self.inner.find(scope, session_id.clone()).await?;
-        self.find_barrier.wait_if_armed(&session_id).await;
-        Ok(session)
+        grant_id: AuthGrantId,
+        observed_at: SystemTime,
+    ) -> Result<Option<AuthGrant>, IdentityError> {
+        let grant = self
+            .inner
+            .find_active(scope, grant_id.clone(), observed_at)
+            .await?;
+        self.find_barrier.wait_if_armed(&grant_id).await;
+        Ok(grant)
     }
 
-    async fn logout(
+    async fn close(
         &self,
         scope: IdentityScope,
-        mutation: SessionLogoutMutation,
+        command: AuthGrantCloseCommand,
     ) -> Result<(), IdentityError> {
-        self.inner.logout(scope, mutation).await
+        self.inner.close(scope, command).await
+    }
+}
+
+impl AuthGrantProvider for BarrierAuthGrantProvider {
+    type Lifecycle = BarrierAuthGrantLifecycle;
+    type RefreshStore = PgRefreshTokenStore;
+
+    fn into_auth_grant_parts(self) -> (Self::Lifecycle, Self::RefreshStore) {
+        let (lifecycle, refresh) = self.inner.into_auth_grant_parts();
+        (
+            BarrierAuthGrantLifecycle {
+                inner: lifecycle,
+                find_barrier: self.find_barrier,
+            },
+            refresh,
+        )
     }
 }
 
@@ -1114,26 +1140,27 @@ async fn credential_snapshot(
 }
 
 #[derive(PartialEq, Eq)]
-struct SessionSnapshot(Vec<bool>);
+struct AuthGrantSnapshot(Vec<bool>);
 
-async fn session_snapshot(
+async fn auth_grant_snapshot(
     pool: &sqlx::PgPool,
     tenants: [TenantId; 2],
-    session_id: &str,
-) -> Result<SessionSnapshot> {
+    grant_id: &str,
+) -> Result<AuthGrantSnapshot> {
     let mut rows = Vec::with_capacity(2);
     for tenant in tenants {
         let state = sqlx::query_scalar::<_, bool>(
-            "SELECT NOT revoked FROM sessions WHERE tenant_id = $1::uuid AND session_id = $2",
+            "SELECT status = 'active' FROM auth_grants \
+             WHERE tenant_id = $1::uuid AND grant_id = $2",
         )
         .bind(tenant.to_string())
-        .bind(session_id)
+        .bind(grant_id)
         .fetch_optional(pool)
         .await?
         .unwrap_or(false);
         rows.push(state);
     }
-    Ok(SessionSnapshot(rows))
+    Ok(AuthGrantSnapshot(rows))
 }
 
 async fn seed_credential(
@@ -1496,7 +1523,7 @@ struct IdentityHarness {
     session_identity: axum::Router,
     tenant_b_identity: axum::Router,
     credential_observer: PgCredentialRepo,
-    session_find_barrier: Arc<SessionFindBarrier>,
+    grant_find_barrier: Arc<AuthGrantFindBarrier>,
 }
 
 async fn build_identity_harness(
@@ -1558,24 +1585,18 @@ async fn build_identity_harness(
             conflict_user,
             barrier: Arc::new(Barrier::new(2)),
         }));
-    let lifecycle: Arc<DynSessionLifecycle<'static>> = Arc::from(DynSessionLifecycle::new_box(
-        identity_deps.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
-    ));
-    let session_find_barrier = Arc::new(SessionFindBarrier::new());
-    let lifecycle: Arc<DynSessionLifecycle<'static>> =
-        Arc::from(DynSessionLifecycle::new_box(BarrierSessionLifecycle {
-            inner: lifecycle,
-            find_barrier: Arc::clone(&session_find_barrier),
-        }));
-    let refresh = identity::seed_refresh_service(
+    let grant_find_barrier = Arc::new(AuthGrantFindBarrier::new());
+    let auth_grants = seed_auth_grant_services(
+        BarrierAuthGrantProvider {
+            inner: identity_deps.auth_grant_provider(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
+            find_barrier: Arc::clone(&grant_find_barrier),
+        },
         DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
-        || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
-        Duration::from_secs(TTL_SECS),
     );
+    let refresh = auth_grants.refresh_service();
     let login = Arc::new(LoginService::new(
         credentials,
-        lifecycle,
-        Arc::clone(&refresh),
+        auth_grants,
         common::password_policy(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
@@ -1625,7 +1646,7 @@ async fn build_identity_harness(
             None,
         )?,
         credential_observer: identity_deps.credential_repo(),
-        session_find_barrier,
+        grant_find_barrier,
     })
 }
 
@@ -1854,14 +1875,14 @@ async fn drive_password(harness: &IdentityHarness, cases: PasswordCases) -> Resu
     drive_password_conflict(harness, &cases.conflict).await
 }
 
-fn session_commit_delta(before: &SessionSnapshot, after: &SessionSnapshot) -> Result<u16> {
+fn auth_grant_commit_delta(before: &AuthGrantSnapshot, after: &AuthGrantSnapshot) -> Result<u16> {
     ensure!(
         before.0.len() == 2 && after.0.len() == 2,
-        "session snapshot shape drift"
+        "auth-grant snapshot shape drift"
     );
     let mut commits = 0_u16;
     for (old, new) in before.0.iter().zip(&after.0) {
-        ensure!(*old || !*new, "revoked session became active");
+        ensure!(*old || !*new, "closed auth grant became active");
         if *old && !new {
             commits += 1;
         }
@@ -1924,7 +1945,7 @@ async fn drive_logout_error_case(
         .any(|sentinel| sentinel == "$sessionId")
         .then_some(observed_session);
     let sentinels = case_sentinels(case, &[&body], sentinel_session)?;
-    let before = session_snapshot(observation_pool, probes, observed_session).await?;
+    let before = auth_grant_snapshot(observation_pool, probes, observed_session).await?;
     let response = send_recorded(
         router,
         generated::http::identity_v1::logout::PATH,
@@ -1934,7 +1955,7 @@ async fn drive_logout_error_case(
     )
     .await?;
     assert_case_error(case, &response.response, request_id, &sentinels)?;
-    let after = session_snapshot(observation_pool, probes, observed_session).await?;
+    let after = auth_grant_snapshot(observation_pool, probes, observed_session).await?;
     ensure!(before == after, "logout rejection mutated durable state");
     assert_accounting(case, &[&response.localtx], 0, ExpectedLocalTxFinal::None)
 }
@@ -1947,7 +1968,7 @@ async fn drive_logout_cross_tenant(
     let session = seed_logout_session(harness).await?;
     let (body, sentinels) = logout_payload(case, &session)?;
     let probes = [harness.tenant_a, harness.tenant_b];
-    let before = session_snapshot(observation_pool, probes, &session).await?;
+    let before = auth_grant_snapshot(observation_pool, probes, &session).await?;
     let response = send_recorded(
         &harness.tenant_b_identity,
         generated::http::identity_v1::logout::PATH,
@@ -1962,7 +1983,7 @@ async fn drive_logout_cross_tenant(
         "rid-logout-cross-tenant",
         &sentinels,
     )?;
-    let after = session_snapshot(observation_pool, probes, &session).await?;
+    let after = auth_grant_snapshot(observation_pool, probes, &session).await?;
     ensure!(
         after.0 == vec![true, false],
         "cross-tenant logout must preserve owner session"
@@ -1970,7 +1991,7 @@ async fn drive_logout_cross_tenant(
     assert_accounting(
         case,
         &[&response.localtx],
-        session_commit_delta(&before, &after)?,
+        auth_grant_commit_delta(&before, &after)?,
         ExpectedLocalTxFinal::None,
     )
 }
@@ -1985,7 +2006,7 @@ async fn drive_logout_happy_and_repeat(
     let probes = [harness.tenant_a, harness.tenant_b];
 
     let (happy_body, happy_sentinels) = logout_payload(happy_case, &session)?;
-    let before = session_snapshot(observation_pool, probes, &session).await?;
+    let before = auth_grant_snapshot(observation_pool, probes, &session).await?;
     let happy = send_recorded(
         &harness.session_identity,
         generated::http::identity_v1::logout::PATH,
@@ -2000,11 +2021,11 @@ async fn drive_logout_happy_and_repeat(
         "rid-logout-happy",
         &happy_sentinels,
     )?;
-    let after = session_snapshot(observation_pool, probes, &session).await?;
+    let after = auth_grant_snapshot(observation_pool, probes, &session).await?;
     assert_accounting(
         happy_case,
         &[&happy.localtx],
-        session_commit_delta(&before, &after)?,
+        auth_grant_commit_delta(&before, &after)?,
         ExpectedLocalTxFinal::Committed,
     )?;
 
@@ -2024,7 +2045,7 @@ async fn drive_logout_happy_and_repeat(
         "rid-logout-repeat",
         &repeat_sentinels,
     )?;
-    let after = session_snapshot(observation_pool, probes, &session).await?;
+    let after = auth_grant_snapshot(observation_pool, probes, &session).await?;
     ensure!(
         after.0 == vec![false, false],
         "repeat logout must converge to revoked"
@@ -2032,7 +2053,7 @@ async fn drive_logout_happy_and_repeat(
     assert_accounting(
         repeat_case,
         &[&repeat.localtx],
-        session_commit_delta(&before, &after)?,
+        auth_grant_commit_delta(&before, &after)?,
         ExpectedLocalTxFinal::None,
     )
 }
@@ -2045,8 +2066,8 @@ async fn drive_logout_contention(
     let session = seed_logout_session(harness).await?;
     let (body, sentinels) = logout_payload(case, &session)?;
     let probes = [harness.tenant_a, harness.tenant_b];
-    let before = session_snapshot(observation_pool, probes, &session).await?;
-    harness.session_find_barrier.arm(&session)?;
+    let before = auth_grant_snapshot(observation_pool, probes, &session).await?;
+    harness.grant_find_barrier.arm(&session)?;
     let pair = tokio::time::timeout(Duration::from_secs(15), async {
         tokio::join!(
             send_recorded(
@@ -2080,7 +2101,7 @@ async fn drive_logout_contention(
         "rid-logout-contention-b",
         &sentinels,
     )?;
-    let after = session_snapshot(observation_pool, probes, &session).await?;
+    let after = auth_grant_snapshot(observation_pool, probes, &session).await?;
     ensure!(
         after.0 == vec![false, false],
         "concurrent logout must converge to revoked"
@@ -2088,7 +2109,7 @@ async fn drive_logout_contention(
     assert_accounting(
         case,
         &[&response_a.localtx, &response_b.localtx],
-        session_commit_delta(&before, &after)?,
+        auth_grant_commit_delta(&before, &after)?,
         ExpectedLocalTxFinal::Committed,
     )
 }
@@ -2167,39 +2188,15 @@ impl RefreshSeed {
     fn hash(&self) -> [u8; 32] {
         secure::digest(&self.secret)
     }
-
-    fn record(&self, tenant: TenantId) -> RefreshTokenRecord {
-        RefreshTokenRecord::hydrate(
-            self.id.clone(),
-            tenant,
-            HAPPY_USER,
-            PrincipalKind::User,
-            secure::digest(&self.secret),
-            None,
-            self.id.clone(),
-            AuthnEpoch::ZERO,
-            RefreshStatus::Active,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(NOW_SECS),
-            SystemTime::UNIX_EPOCH + Duration::from_secs(NOW_SECS + TTL_SECS),
-        )
-    }
 }
 
 struct BarrierRefreshStore {
-    inner: PgRefreshTokenStore,
+    inner: Box<DynRefreshTokenStore<'static>>,
     gated_hash: [u8; 32],
     barrier: Arc<Barrier>,
 }
 
 impl RefreshTokenStore for BarrierRefreshStore {
-    async fn insert(
-        &self,
-        scope: IdentityScope,
-        record: RefreshTokenRecord,
-    ) -> Result<(), IdentityError> {
-        self.inner.insert(scope, record).await
-    }
-
     async fn find_by_hash(
         &self,
         scope: IdentityScope,
@@ -2230,13 +2227,29 @@ impl RefreshTokenStore for BarrierRefreshStore {
     }
 }
 
+fn seed_auth_grant_services<P>(
+    provider: P,
+    accounts: Box<DynAccountSecurityReadRepo<'static>>,
+) -> AuthGrantServices<SeedSigner>
+where
+    P: AuthGrantProvider,
+{
+    identity::seed_auth_grant_services(
+        provider,
+        accounts,
+        || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Duration::from_secs(TTL_SECS),
+    )
+}
+
 fn refresh_service(
     store: Box<DynRefreshTokenStore<'static>>,
     accounts: Box<DynAccountSecurityReadRepo<'static>>,
+    observed_at: SystemTime,
 ) -> Result<Arc<RefreshService<SeedSigner>>> {
     let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
         Arc::new(SeedSigner),
-        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Box::new(FixedClock::new(observed_at)),
         authn::JwtIssuerConfig::rss_access(
             diport::KeyId::new("journey-refresh-key"),
             diport::SigningPurpose::new("journey-refresh-signing"),
@@ -2249,7 +2262,7 @@ fn refresh_service(
         store,
         accounts,
         Arc::new(issuer),
-        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Box::new(FixedClock::new(observed_at)),
         Duration::from_secs(TTL_SECS),
     )))
 }
@@ -2257,34 +2270,90 @@ fn refresh_service(
 fn refresh_router(
     deps: &PgRuntimeDeps,
     store: Box<DynRefreshTokenStore<'static>>,
+    observed_at: SystemTime,
 ) -> Result<axum::Router> {
     let identity_deps = deps.handle().for_domain::<caps::Identity>();
     let refresh = refresh_service(
         store,
         DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
+        observed_at,
     )?;
+    let auth_grants = AuthGrantServices::from_provider(
+        identity_deps.auth_grant_provider(Box::new(FixedClock::new(observed_at))),
+        DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
+        Arc::new(authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
+            Arc::new(SeedSigner),
+            Box::new(FixedClock::new(observed_at)),
+            authn::JwtIssuerConfig::rss_access(
+                diport::KeyId::new("journey-login-key"),
+                diport::SigningPurpose::new("journey-login-signing"),
+                "https://journey.local",
+                "rss-journey",
+                Duration::from_secs(900),
+            ),
+        )?),
+        Box::new(FixedClock::new(observed_at)),
+        Duration::from_secs(TTL_SECS),
+    );
     let login = Arc::new(LoginService::new(
         Arc::from(DynCredentialRepo::new_box(identity_deps.credential_repo())),
-        Arc::from(DynSessionLifecycle::new_box(
-            identity_deps.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
-        )),
-        Arc::clone(&refresh),
+        auth_grants,
         common::password_policy(),
-        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Box::new(FixedClock::new(observed_at)),
         Duration::from_secs(TTL_SECS),
     ));
     let domain = common::identity_domain(login, refresh);
     finalized_router(&domain, None, None)
 }
 
+async fn database_now(pool: &sqlx::PgPool) -> Result<SystemTime> {
+    let secs =
+        sqlx::query_scalar::<_, i64>("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(pool)
+            .await?;
+    Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(secs)?))
+}
+
 async fn seed_refresh(
-    store: &PgRefreshTokenStore,
+    pool: &sqlx::PgPool,
     tenant: TenantId,
     seed: &RefreshSeed,
+    observed_at: SystemTime,
 ) -> Result<()> {
-    store
-        .insert(IdentityScope::for_test(tenant), seed.record(tenant))
-        .await?;
+    let observed_secs = observed_at
+        .duration_since(SystemTime::UNIX_EPOCH)?
+        .as_secs();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO auth_grants \
+         (tenant_id, grant_id, user_id, auth_time, authn_epoch_at_issue, status, \
+          expires_at, created_at, closed_at, close_reason) \
+         VALUES ($1::uuid, $2, $3::uuid, to_timestamp($4), 0, 'active', \
+                 to_timestamp($5), to_timestamp($4), NULL, NULL)",
+    )
+    .bind(tenant.to_string())
+    .bind(&seed.id)
+    .bind(HAPPY_USER)
+    .bind(i64::try_from(observed_secs)?)
+    .bind(i64::try_from(observed_secs + TTL_SECS)?)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO refresh_tokens \
+         (id, tenant_id, user_id, auth_grant_id, auth_grant_status, token_hash, parent_id, \
+          lineage_id, authn_epoch_at_issue, status, issued_at, expires_at) \
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $1::uuid::text, 'active', $4, NULL, \
+                 $1::uuid, 0, 'active', to_timestamp($5), to_timestamp($6))",
+    )
+    .bind(&seed.id)
+    .bind(tenant.to_string())
+    .bind(HAPPY_USER)
+    .bind(secure::digest(&seed.secret).as_slice())
+    .bind(i64::try_from(observed_secs)?)
+    .bind(i64::try_from(observed_secs + TTL_SECS)?)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -2394,12 +2463,14 @@ async fn drive_refresh_happy(
     case: &JourneyCase,
 ) -> Result<()> {
     let seed = RefreshSeed::unique("refresh-happy-secret-sentinel");
-    let store = deps
+    let observed_at = database_now(observation_pool).await?;
+    let (_, store) = deps
         .handle()
         .for_domain::<caps::Identity>()
-        .refresh_token_store();
-    seed_refresh(&store, tenant, &seed).await?;
-    let router = refresh_router(deps, DynRefreshTokenStore::new_box(store))?;
+        .auth_grant_provider(Box::new(FixedClock::new(observed_at)))
+        .into_auth_grant_parts();
+    seed_refresh(observation_pool, tenant, &seed, observed_at).await?;
+    let router = refresh_router(deps, DynRefreshTokenStore::new_box(store), observed_at)?;
     let response = send_refresh_recorded(
         &router,
         refresh_body(&seed.secret)?,
@@ -2433,13 +2504,17 @@ async fn drive_refresh_rejections(
     malformed: &JourneyCase,
 ) -> Result<()> {
     let before = refresh_row_count(observation_pool, tenant).await?;
+    let observed_at = database_now(observation_pool).await?;
     let router = refresh_router(
         deps,
         DynRefreshTokenStore::new_box(
             deps.handle()
                 .for_domain::<caps::Identity>()
-                .refresh_token_store(),
+                .auth_grant_provider(Box::new(FixedClock::new(observed_at)))
+                .into_auth_grant_parts()
+                .1,
         ),
+        observed_at,
     )?;
     let unknown_secret = format!("refresh-unknown-secret-sentinel-{}", Uuid::new_v4());
     let unknown_response = send_refresh_recorded(
@@ -2486,18 +2561,21 @@ async fn drive_refresh_contention(
 ) -> Result<()> {
     let success_status = StatusCode::from_u16(winner_case.http_status)?;
     let seed = RefreshSeed::unique("refresh-contention-secret-sentinel");
-    let store = deps
+    let observed_at = database_now(observation_pool).await?;
+    let (_, store) = deps
         .handle()
         .for_domain::<caps::Identity>()
-        .refresh_token_store();
-    seed_refresh(&store, tenant, &seed).await?;
+        .auth_grant_provider(Box::new(FixedClock::new(observed_at)))
+        .into_auth_grant_parts();
+    seed_refresh(observation_pool, tenant, &seed, observed_at).await?;
     let router = refresh_router(
         deps,
         DynRefreshTokenStore::new_box(BarrierRefreshStore {
-            inner: store,
+            inner: DynRefreshTokenStore::new_box(store),
             gated_hash: seed.hash(),
             barrier: Arc::new(Barrier::new(2)),
         }),
+        observed_at,
     )?;
     let body = refresh_body(&seed.secret)?;
     let pair = tokio::time::timeout(Duration::from_secs(15), async {
@@ -2558,12 +2636,13 @@ async fn drive_refresh_commit_unknown(
     case: &JourneyCase,
 ) -> Result<()> {
     let seed = RefreshSeed::unique("refresh-commit-unknown-secret-sentinel");
+    let observed_at = database_now(observation_pool).await?;
     let store = deps
         .handle()
         .for_domain::<caps::Identity>()
         .refresh_token_store_with_commit_unknown_once(&seed.id);
-    seed_refresh(&store, tenant, &seed).await?;
-    let router = refresh_router(deps, DynRefreshTokenStore::new_box(store))?;
+    seed_refresh(observation_pool, tenant, &seed, observed_at).await?;
+    let router = refresh_router(deps, DynRefreshTokenStore::new_box(store), observed_at)?;
     let response = send_refresh_recorded(
         &router,
         refresh_body(&seed.secret)?,

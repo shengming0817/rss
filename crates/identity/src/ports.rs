@@ -47,27 +47,28 @@ pub type FaultMatrixSessionCreatedPayload =
 pub use crate::domain::{
     AbacAttribute, AccountLockout, AccountSecurityHydrationError, AccountSecurityMutation,
     AccountSecuritySnapshot, AccountSecurityState, AccountSecurityTransitionError,
-    AccountSecurityVersion, AccountStatus, AttributeKey, AttributeValue, AuthOutcome, AuthnEpoch,
-    BruteForceDecision, Credential, GlobPattern, IdentityError, LoginIdentifier, Operator,
-    POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
-    POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy,
-    PolicyCondition, PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule,
-    PolicyVersion, RefreshRotation, RefreshRotationOutcome, RefreshStatus, RefreshTokenHash,
-    RefreshTokenId, RefreshTokenRecord, ResourceAttribute, ResourceAttributeKey,
-    ResourceAttributeKeyError, ResourceAttributeResolution, ResourceAttributeResourceId,
-    ResourceAttributeVersion, Role, RoleBinding, RoleId, Session, SessionId, kind_from_db,
-    kind_to_db,
+    AccountSecurityVersion, AccountStatus, AttributeKey, AttributeValue, AuthGrant,
+    AuthGrantCloseMutation, AuthGrantCloseReason, AuthGrantId, AuthGrantSnapshot,
+    AuthGrantStateError, AuthGrantStatus, AuthOutcome, AuthnEpoch, BruteForceDecision, Credential,
+    GlobPattern, IdentityError, LoginIdentifier, Operator, POLICY_ATTR_CONTRACT_ID,
+    POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND,
+    POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy, PolicyCondition, PolicyEffect,
+    PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion, RefreshRotation,
+    RefreshRotationOutcome, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
+    RefreshTokenSnapshot, ResourceAttribute, ResourceAttributeKey, ResourceAttributeKeyError,
+    ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion, Role,
+    RoleBinding, RoleId,
 };
 pub use vocab::TenantId;
 
 /// Generated route marker retained by the logout LocalTx command.
-pub type SessionLogoutRouteMarker = generated::http::identity_v1::logout::RouteMarker;
+pub type AuthGrantCloseRouteMarker = generated::http::identity_v1::logout::RouteMarker;
 /// Generated route marker retained by the password-change LocalTx command.
 pub type PasswordChangeRouteMarker = generated::http::identity_v1::password_change::RouteMarker;
 /// Generated route marker retained by the refresh rotation LocalTx command.
 pub type RefreshRotationRouteMarker = generated::http::identity_v1::refresh::RouteMarker;
 
-/// `identity.login` request-scoped producer assurance carried into the session co-tx funnel.
+/// `identity.login` request-scoped producer assurance carried into the AuthGrant co-tx funnel.
 pub type LoginProducerReceipt =
     httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::login::RouteMarker>;
 /// `identity.roles-assign` request-scoped producer assurance.
@@ -87,19 +88,67 @@ pub type PoliciesDeactivateProducerReceipt = httpserve::ProducerAssuranceReceipt
     generated::http::identity_v1::policies_deactivate::RouteMarker,
 >;
 
-/// `identity.logout` 的不可伪造 LocalTx 写命令。
+/// 密封的登录持久化 mutation。
 ///
-/// session id 与 generated route marker observation 同一构造 funnel 产生；外部 adapter 只能消费，
-/// 不能把其它 HTTP contract 的 observation 塞进 logout 写路径。
-pub struct SessionLogoutMutation {
-    session_id: SessionId,
-    observation: observ::LocalTxObservation<SessionLogoutRouteMarker>,
+/// 只携带 AuthGrant、初始 refresh 哈希记录和线性 persistence capability；不携带 bearer secret。
+/// 构造器仅对 identity application 可见，adapter 只能消费。
+pub struct LoginGrantMutation {
+    grant: AuthGrant,
+    initial_refresh: RefreshTokenRecord,
+    persistence: PendingLoginGrantPersistence,
 }
 
-impl SessionLogoutMutation {
-    pub(crate) fn new(session_id: SessionId) -> Self {
+impl LoginGrantMutation {
+    pub(crate) fn new(grant: AuthGrant, initial_refresh: RefreshTokenRecord) -> Self {
         Self {
-            session_id,
+            grant,
+            initial_refresh,
+            persistence: PendingLoginGrantPersistence(()),
+        }
+    }
+
+    pub fn grant(&self) -> &AuthGrant {
+        &self.grant
+    }
+
+    pub fn initial_refresh(&self) -> &RefreshTokenRecord {
+        &self.initial_refresh
+    }
+
+    pub fn into_parts(self) -> (AuthGrant, RefreshTokenRecord, PendingLoginGrantPersistence) {
+        (self.grant, self.initial_refresh, self.persistence)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(grant: AuthGrant, initial_refresh: RefreshTokenRecord) -> Self {
+        Self::new(grant, initial_refresh)
+    }
+}
+
+/// Linear capability carried only by a sealed login mutation.
+#[must_use]
+pub struct PendingLoginGrantPersistence(());
+
+impl PendingLoginGrantPersistence {
+    /// Confirm this capability after the provider persistence boundary succeeds.
+    pub fn confirm(self) -> PersistedLoginGrantReceipt {
+        PersistedLoginGrantReceipt(())
+    }
+}
+
+/// Unforgeable proof that the login persistence boundary acknowledged success.
+#[must_use]
+pub struct PersistedLoginGrantReceipt(());
+
+pub struct AuthGrantCloseCommand {
+    mutation: AuthGrantCloseMutation,
+    observation: observ::LocalTxObservation<AuthGrantCloseRouteMarker>,
+}
+
+impl AuthGrantCloseCommand {
+    pub(crate) fn new(mutation: AuthGrantCloseMutation) -> Self {
+        Self {
+            mutation,
             observation: observ::LocalTxObservation::new(LOGOUT_ROUTE, LOGOUT_LOCAL_TX.boundary),
         }
     }
@@ -108,15 +157,15 @@ impl SessionLogoutMutation {
     pub fn into_parts(
         self,
     ) -> (
-        SessionId,
-        observ::LocalTxObservation<SessionLogoutRouteMarker>,
+        AuthGrantCloseMutation,
+        observ::LocalTxObservation<AuthGrantCloseRouteMarker>,
     ) {
-        (self.session_id, self.observation)
+        (self.mutation, self.observation)
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn for_test(session_id: SessionId) -> Self {
-        Self::new(session_id)
+    pub fn for_test(mutation: AuthGrantCloseMutation) -> Self {
+        Self::new(mutation)
     }
 }
 
@@ -450,13 +499,13 @@ pub trait RoleBindingReadRepoLocal: Send + Sync {
 /// 公开 [`RoleBindingLifecycle`] 是 **Send 变体**（adapter `impl RoleBindingLifecycle for ...`），
 /// [`DynRoleBindingLifecycle`] 是其 dyn-compatible wrapper（组合根经 `Arc<DynRoleBindingLifecycle>` 注入，
 /// 供 [`crate::RbacAdminService`] 作 axum handler state 间接共享）。归属为域形 port（签名引用 [`RoleBinding`]
-/// / [`RoleId`]）→ 本域 crate `ports`，非 diport（ADR-005 category line，同 [`SessionLifecycle`]）。
+/// / [`RoleId`]）→ 本域 crate `ports`，非 diport（ADR-005 category line，同 [`AuthGrantLifecycle`]）。
 ///
 /// **co-tx（L2，both-or-neither）**：binding 行写 / 删与 outbox(`identity.role-{assigned,revoked}`) 行须
 /// **同一本地事务**原子落地——域构造 `entry`（事件语义归域：topic + opaque-UUID EventId + 编码 payload）
 /// 与 `envelope`，adapter 在单事务内先注入 tenant scope（SET LOCAL）、写/删 binding、`append_outbox`，单
 /// commit；任一步失败整体 rollback。**唯一 binding-写 API**（域无 `save`/`emit` 分调、无半开事务句柄；co-tx
-/// 不可拆解在类型层成立，同 [`SessionLifecycle`] 的 OUTBOX-COTX-SESSION-01）。
+/// 不可拆解在类型层成立，同 [`AuthGrantLifecycle`] 的 OUTBOX-COTX-SESSION-01）。
 ///
 /// INVARIANT: OUTBOX-COTX-BINDING-API-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }— 域只暴露
 /// combined-method funnel，调用方无法把 binding 行写/删与 role-event outbox append 拆成两个 port 调用。
@@ -479,7 +528,7 @@ pub trait RoleBindingReadRepoLocal: Send + Sync {
 #[allow(async_fn_in_trait)]
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `RoleBindingLifecycle` 变体 +
 // dynosaur `DynRoleBindingLifecycle` 承载。`Send + Sync` supertrait 使 `Arc<DynRoleBindingLifecycle>` 可
-// 被 RbacAdminService 跨 await 持有 / 作 handler state 共享（同 SessionLifecycle）。
+// 被 RbacAdminService 跨 await 持有 / 作 handler state 共享（同 AuthGrantLifecycle）。
 pub trait RoleBindingLifecycleLocal: Send + Sync {
     /// **分配（co-tx，L2）**：把 [`RoleBinding`] 行（upsert）与 outbox(`identity.role-assigned`) 行同一本地
     /// 事务原子写入。tenant scope 来自 `binding.tenant()`（无独立 tenant 入参可错位）。
@@ -635,81 +684,56 @@ pub trait CredentialRepoLocal: Send + Sync {
     ) -> Result<(), IdentityError>;
 }
 
-/// 会话**生命周期** DI port（域形；provider 可换：prod postgres / demo in-mem）——会话**创建（co-tx，L2）**、
-/// **查询（L1）**、**软撤销（L1）**收敛为**单一 provider**，create / find / logout 同源。
+/// AuthGrant 生命周期域端口：原子登录持久化、活跃根查询和原子关闭收敛到一个 provider。
 ///
-/// 公开 [`SessionLifecycle`] 是 **Send 变体**（adapter `impl SessionLifecycle for ...`），
-/// [`DynSessionLifecycle`] 是其 dyn-compatible wrapper（组合根经 `Arc<DynSessionLifecycle>` 注入）。
-/// 基 trait 带 `Send + Sync` supertrait：登录 handler 需 clone 共享同一 lifecycle store，且
-/// `LoginService::login().await` future 必须为 `Send`（axum handler 要求）。
+/// `persist_login_grant` 是唯一的初始 refresh 写入口。其必填参数同时携带：
 ///
-/// **为何单一 provider（合并原 `SessionUnitOfWork` + `SessionRepo`，#1278）**：会话「创建写」与「查询/撤销」
-/// 分属**两个未绑定的存储端口**时，组合根可注入分属不同底座的实例（persist 写 store A、find/logout 查 store B）
-/// ——login 写入的会话无法被同一 service 的 logout 撤销，且类型系统无法阻止该 bug（PR #255 F3）。收敛为单一
-/// `SessionLifecycle` 后，**「两个未绑定 store」从类型层不可表达**：单一必填注入端口 ⇒ create / find / logout 必
-/// 同源（AI-robust **Hard**：构造器必填参数 + typed function choice）。工业 Rust 一致采用单一会话存储接口
-/// （tower-sessions `SessionStore`：create+save+load+delete 同 trait；omicron `DataStore` console_session：
-/// session_create / lookup / hard_delete 同 impl）。
-/// ref: maxcountryman/tower-sessions tower-sessions-core/src/session_store.rs@main
-/// ref: oxidecomputer/omicron nexus/db-queries/src/db/datastore/console_session.rs@main
+/// - 路由精确的 [`LoginProducerReceipt`]；
+/// - 密封的 [`LoginGrantMutation`]（AuthGrant + 初始 refresh 哈希记录）；
+/// - 精确 [`EventEntry`] 与 [`OutboxEnvelopeParts`]。
 ///
-/// **co-tx 原子性 INVARIANT OUTBOX-COTX-SESSION-01 不受合并影响**（L2 OutboxFact，FR-003）：原子性来自
-/// [`persist_session_and_emit`](SessionLifecycleLocal::persist_session_and_emit) 的**方法签名形状**
-/// （combined 单方法、域无半开事务句柄），**非** trait 边界——它与 `find` / `logout` 并列于同一 trait 后仍是
-/// 唯一 session-写 API（无 `save` / `emit` 分调）。adapter 在其 impl body 内独占事务边界（begin → 写 session →
-/// append_outbox → 单 commit）；拆成 `SessionRepo::save` + `OutboxEmitter::emit` 两 provider-agnostic 调用，域
-/// 无法绑同一事务（端口签名不容 `&mut PgConnection`，否则 `ports`→adapter 反向耦合），closure-UoW 把事务句柄
-/// 回传给域同样泄漏 provider 类型并**重开 split-tx 洞**——故保留 combined 方法（co-tx 不可拆解在类型层成立，
-/// Hard）。adapter same-tx 接线由 postgres `PgSessionLifecycle` 的 **INVARIANT: OUTBOX-COTX-SESSION-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }** +
-/// 集成测试 anti-vacuity（commit 两行皆在 ↔ rollback 两行皆无）守。
+/// PostgreSQL provider 独占事务句柄，在同一 producer transaction 中提交根、refresh 与 outbox。业务层没有
+/// `save_grant`、`insert_initial_refresh` 或裸事务句柄，因此 split transaction 从端口形状上不可表达。L2
+/// producer assurance 静态检查 receipt → generated fact → authorization → transaction outcome 的完整能力链。
 ///
-/// 租户隔离由签名承载（fail-closed，同 `CredentialRepo`）：`find` / `logout` 接收 [`TenantRepoScope`]，跨租
-/// find→None（不泄露存在性）/ logout→幂等 no-op。失败通道：`persist_session_and_emit` 经 [`OutboxEmitError`]
-/// （diport infra 错误，source 已 PII-redacted）冒泡（co-tx 写失败任一步均不暴露原始错误明文，zero-trust；
-/// 复用 infra 错误因签名已桥接 [`Entry`] / [`OutboxEnvelopeParts`]、失败本质是持久化层错误）；`find` / `logout`
-/// 经 [`IdentityError`] 冒泡。
+/// `close` 消费由根状态机产生的密封命令；provider 必须先撤销绑定 refresh 族，再关闭根，且两步同事务。
+/// `find_active` 对缺失、终态及跨租户统一返回 `None`。单一 provider 同时实现 lifecycle 与 refresh port，
+/// 避免测试/demo 中出现根与刷新族落入两个互不一致的 store。
 ///
-/// 归属：域形 port（签名引用域内实体 [`Session`]）→ 本 crate `ports`，非 diport（ADR-005 category line，同
-/// [`RoleReadRepo`]）。durable `find` / `logout` 由 postgres `PgSessionLifecycle` 实写（tenant-scope SELECT/UPDATE +
-/// `sessions.revoked` 列，#1278——补齐原 #1116 session durable 闭合，provider 无 `todo!()` 半实现）。
-///
-/// ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable）
-/// ref: MassTransit Bus Outbox（一应用方法 co-persist 实体 + outbox 经共享事务/scoped DbContext）
-/// ref: Cockburn Hexagonal Ports&Adapters（repo 归域核心，adapter DIP 实现）
-#[trait_variant::make(SessionLifecycle: Send)]
-#[dynosaur(pub DynSessionLifecycle = dyn(box) SessionLifecycle, bridge(dyn))]
+/// 公开 [`AuthGrantLifecycle`] 是 Send 变体，[`DynAuthGrantLifecycle`] 是组合根使用的 dyn wrapper。
+/// ref: ADR-019 AuthGrant root
+/// ref: Cockburn Hexagonal Ports&Adapters
+#[trait_variant::make(AuthGrantLifecycle: Send)]
+#[dynosaur(pub DynAuthGrantLifecycle = dyn(box) AuthGrantLifecycle, bridge(dyn))]
 #[allow(async_fn_in_trait)]
-// reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `SessionLifecycle` 变体 +
-// dynosaur `DynSessionLifecycle` 承载（DI 注入走 Send wrapper）。`Send + Sync` supertrait 使
-// `Arc<DynSessionLifecycle>` 可被 axum handler state 间接共享。
-pub trait SessionLifecycleLocal: Send + Sync {
-    /// **创建（co-tx，L2）**：把 [`Session`] 行与 outbox(`identity.session-created`) 行**同一本地事务**原子
-    /// 写入（FR-003）。域构造 `entry`（事件语义归域：topic + opaque-UUID EventId + 编码 payload）与 `envelope`
-    /// （opaque envelope 字段），并提供 `session` 业务实体；adapter 在单事务内先注入 tenant scope（SET LOCAL）、
-    /// 写 session、`append_outbox`，单 commit。任一步失败 → 整体 rollback（both-or-neither）。**唯一 session-写
-    /// API**（OUTBOX-COTX-SESSION-01：域无 `save`/`emit` 分调、无半开事务句柄）。
-    async fn persist_session_and_emit(
+// reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `AuthGrantLifecycle` 变体 +
+// dynosaur `DynAuthGrantLifecycle` 承载（DI 注入走 Send wrapper）。`Send + Sync` supertrait 使
+// `Arc<DynAuthGrantLifecycle>` 可被 axum handler state 间接共享。
+pub trait AuthGrantLifecycleLocal: Send + Sync {
+    /// Persist the grant root, initial refresh record and `identity.session-created` outbox row in
+    /// one provider-owned transaction. This is the only initial-refresh persistence API.
+    async fn persist_login_grant(
         &self,
         receipt: LoginProducerReceipt,
         scope: TenantRepoScope,
-        session: Session,
+        mutation: LoginGrantMutation,
         entry: EventEntry,
         envelope: OutboxEnvelopeParts,
-    ) -> Result<(), OutboxEmitError>;
+    ) -> Result<PersistedLoginGrantReceipt, OutboxEmitError>;
 
-    /// **查询（L1）**：按 id 查会话（不存在 / 已撤销 / 跨租 → `Ok(None)`，不泄露存在性）。
-    async fn find(
+    /// Find an active grant. Missing, terminal and cross-tenant rows are indistinguishable.
+    async fn find_active(
         &self,
         scope: TenantRepoScope,
-        session_id: SessionId,
-    ) -> Result<Option<Session>, IdentityError>;
+        grant_id: AuthGrantId,
+        observed_at: SystemTime,
+    ) -> Result<Option<AuthGrant>, IdentityError>;
 
-    /// **软撤销（L1，logout）**：域侧软撤销会话（幂等——重复 / 未知 / 跨租均 `Ok` 且 no-op）。已颁 JWT 在 TTL
-    /// 内仍有效（硬吊销延 #1003）。
-    async fn logout(
+    /// Revoke the full refresh family and close the grant atomically.
+    async fn close(
         &self,
         scope: TenantRepoScope,
-        mutation: SessionLogoutMutation,
+        command: AuthGrantCloseCommand,
     ) -> Result<(), IdentityError>;
 }
 
@@ -718,9 +742,9 @@ pub trait SessionLifecycleLocal: Send + Sync {
 /// 公开 [`RefreshTokenStore`] 是 **Send 变体**（adapter `impl RefreshTokenStore for ...`），
 /// [`DynRefreshTokenStore`] 是其 dyn-compatible wrapper（组合根经 `Box<DynRefreshTokenStore>` 注入，ADR-004 C1/C5）。
 /// 归属为域形 port（签名引用 [`RefreshTokenRecord`]/[`RefreshTokenId`]/[`RefreshTokenHash`]）→ 本域 crate
-/// `ports`，非 diport（ADR-005 category line，同 [`SessionLifecycle`]）。
+/// `ports`，非 diport（ADR-005 category line，同 [`AuthGrantLifecycle`]）。
 ///
-/// 基 trait 带 `Send + Sync` supertrait（同 `CredentialRepo`/`SessionLifecycle`）：refresh / login handler 经
+/// 基 trait 带 `Send + Sync` supertrait（同 `CredentialRepo`/`AuthGrantLifecycle`）：refresh / login handler 经
 /// `Arc<RefreshService<S>>` 共享同一 store 作 axum handler state，且 `rotate().await` future 须为 `Send`
 /// （axum handler 要求）——故 `Box<DynRefreshTokenStore>` 须 `Sync`（#1252 接线 refresh/login 端点）。
 ///
@@ -728,7 +752,7 @@ pub trait SessionLifecycleLocal: Send + Sync {
 /// refresh token（摘要不可逆）。secret 生成 / 摘要计算在 `secure::refresh`（base 层 crypto），编排在
 /// `application::RefreshService`（域 / store 不做 crypto）。
 ///
-/// **租户隔离由签名承载（fail-closed，同 `CredentialRepo`/`SessionLifecycle`）**：所有方法接
+/// **租户隔离由签名承载（fail-closed，同 `CredentialRepo`/`AuthGrantLifecycle`）**：所有方法接
 /// [`TenantRepoScope`] 做 store scope；跨租 `find_by_hash`→`None`（不泄露存在性）、`rotate`→CAS miss、
 /// `revoke`/`revoke_lineage`→幂等 no-op。
 ///
@@ -743,15 +767,8 @@ pub trait SessionLifecycleLocal: Send + Sync {
 #[allow(async_fn_in_trait)]
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `RefreshTokenStore` 变体 +
 // dynosaur `DynRefreshTokenStore` 承载（DI 注入走 Send wrapper）。`Send + Sync` supertrait 使
-// `Box<DynRefreshTokenStore>` 为 `Sync`、`RefreshService<S>` 可作共享 handler state（同 SessionLifecycle，#1252）。
+// `Box<DynRefreshTokenStore>` 为 `Sync`、`RefreshService<S>` 可作共享 handler state（同 AuthGrantLifecycle，#1252）。
 pub trait RefreshTokenStoreLocal: Send + Sync {
-    /// 持久化新签发记录（`status = Active`；签发链根 `lineage_id == id`）。
-    async fn insert(
-        &self,
-        scope: TenantRepoScope,
-        record: RefreshTokenRecord,
-    ) -> Result<(), IdentityError>;
-
     /// 按 secret 摘要查找（不存在 / 跨租 → `Ok(None)`，不泄露存在性）。返回的记录含 status——application 据此
     /// 判活跃 / 重放（命中非 Active = 重放）。
     async fn find_by_hash(
@@ -770,8 +787,9 @@ pub trait RefreshTokenStoreLocal: Send + Sync {
     /// 返回 [`RefreshRotationOutcome::Applied`] = CAS 命中（old 当时仍 Active，已消费 + 写入 new）；
     /// [`RefreshRotationOutcome::Replay`] = old 已非 Active（并发轮换 / 重放胜出者已消费它）——
     /// **不写 new**，由 application 据此触发 reuse-detection 级联撤销；
-    /// [`RefreshRotationOutcome::AccountStale`] = 最终 writer 事务观察到账号非 Active 或签发 epoch 已过期，
-    /// old 保持未消费且不写 new。
+    /// [`RefreshRotationOutcome::AccountStale`] = 最终 writer 事务观察到账号非 Active 或签发 epoch 已过期；
+    /// [`RefreshRotationOutcome::Expired`] = 最终 writer 事务观察到 old refresh 或其 AuthGrant 已过期。
+    /// 两种 fence 结果都让 old 保持未消费且不写 new。
     /// 旧 refresh 一次性失效在类型层 + 事务 CAS 双重保证（杜绝 TOCTOU 双换）。
     async fn rotate(
         &self,
@@ -789,6 +807,30 @@ pub trait RefreshTokenStoreLocal: Send + Sync {
         scope: TenantRepoScope,
         lineage_id: RefreshTokenId,
     ) -> Result<(), IdentityError>;
+}
+
+/// Consumed owner that yields the lifecycle and refresh capabilities of one AuthGrant backend.
+///
+/// Login composition accepts this owner instead of two independent ports. Implementations decide
+/// how both views share one backing store; the production PostgreSQL implementation constructs
+/// both from the same verified capability bundle.
+pub trait AuthGrantProvider: Send + Sync + 'static {
+    type Lifecycle: AuthGrantLifecycle + 'static;
+    type RefreshStore: RefreshTokenStore + 'static;
+
+    fn into_auth_grant_parts(self) -> (Self::Lifecycle, Self::RefreshStore);
+}
+
+impl<T> AuthGrantProvider for T
+where
+    T: AuthGrantLifecycle + RefreshTokenStore + Clone + 'static,
+{
+    type Lifecycle = T;
+    type RefreshStore = T;
+
+    fn into_auth_grant_parts(self) -> (Self::Lifecycle, Self::RefreshStore) {
+        (self.clone(), self)
+    }
 }
 
 impl<T> PolicyRepo for std::sync::Arc<T>
@@ -923,7 +965,7 @@ classify_identity_ports! {
     DynRefreshTokenStore => diport::BusinessWriteEffect,
     DynPolicyLifecycle => diport::OutboxEffect,
     DynRoleBindingLifecycle => diport::OutboxEffect,
-    DynSessionLifecycle => diport::OutboxEffect,
+    DynAuthGrantLifecycle => diport::OutboxEffect,
 }
 
 impl<T> identity_port_effect_sealed::Sealed for std::sync::Arc<T> where
@@ -953,6 +995,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod identity_port_effect_registry_tests {
     use std::collections::BTreeSet;
 
@@ -1000,9 +1043,10 @@ mod smoke {
     //! smoke **只构造 Dyn wrapper + 断言 `Send`，不 `.await`**（不触 repo `todo!()`）。async future 的 Send + 跨
     //! `tokio::spawn` 调度由 diport `signer.rs` `mockall_mock_loads_into_dyn_signer` 同范式已证（dynosaur Send 变体保证）。
     use super::{
-        DynRoleReadRepo, DynSessionLifecycle, EventEntry, IdentityError, LoginProducerReceipt,
-        OutboxEmitError, OutboxEnvelopeParts, Role, RoleId, RoleReadRepo, Session, SessionId,
-        SessionLifecycle, SessionLogoutMutation, TenantRepoScope,
+        AuthGrant, AuthGrantCloseCommand, AuthGrantId, AuthGrantLifecycle, DynAuthGrantLifecycle,
+        DynRoleReadRepo, EventEntry, IdentityError, LoginGrantMutation, LoginProducerReceipt,
+        OutboxEmitError, OutboxEnvelopeParts, PersistedLoginGrantReceipt, Role, RoleId,
+        RoleReadRepo, TenantRepoScope,
     };
     use std::sync::Arc;
 
@@ -1074,58 +1118,56 @@ mod smoke {
         }
     }
 
-    // ── SessionLifecycle（co-tx 创建 + 查询 + 软撤销，单一域形 port，#1278）PORT-SHAPE ────────────
-    // 与 RoleReadRepo 不同：本 port 在 postgres adapter 有**真实 impl**（PgSessionLifecycle 的 co-tx 创建；
-    // find/logout 冻结 #1116），但本 smoke 仍只构造 Dyn wrapper + 断言 `Send`（不 `.await` → 不触 Noop
-    // `todo!()`）；co-tx 行为由 adapter 集成测试守。三方法（create/find/logout）同一 trait，证明合并后仍
-    // 经单一 `Arc<DynSessionLifecycle>` 注入。
-    struct NoopSessionLifecycle;
-    impl SessionLifecycle for NoopSessionLifecycle {
-        async fn persist_session_and_emit(
+    // ── AuthGrantLifecycle（原子 login + 查询 + 关闭，单一域形 port）PORT-SHAPE ────────────
+    struct NoopAuthGrantLifecycle;
+    impl AuthGrantLifecycle for NoopAuthGrantLifecycle {
+        async fn persist_login_grant(
             &self,
             _receipt: LoginProducerReceipt,
             _scope: TenantRepoScope,
-            _session: Session,
+            _mutation: LoginGrantMutation,
             _entry: EventEntry,
             _envelope: OutboxEnvelopeParts,
-        ) -> Result<(), OutboxEmitError> {
+        ) -> Result<PersistedLoginGrantReceipt, OutboxEmitError> {
             todo!()
         }
-        async fn find(
+        async fn find_active(
             &self,
             _scope: TenantRepoScope,
-            _session_id: SessionId,
-        ) -> Result<Option<Session>, IdentityError> {
+            _grant_id: AuthGrantId,
+            _observed_at: std::time::SystemTime,
+        ) -> Result<Option<AuthGrant>, IdentityError> {
             todo!()
         }
-        async fn logout(
+        async fn close(
             &self,
             _scope: TenantRepoScope,
-            _mutation: SessionLogoutMutation,
+            _command: AuthGrantCloseCommand,
         ) -> Result<(), IdentityError> {
             todo!()
         }
     }
 
     // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send+Sync 变体，
-    // 可经 `Arc<DynSessionLifecycle>` 共享给 axum handler。
+    // 可经 `Arc<DynAuthGrantLifecycle>` 共享给 axum handler。
     #[test]
-    fn session_lifecycle_impls_load_into_dyn_wrapper() {
-        let from_impl: Arc<DynSessionLifecycle> =
-            Arc::from(DynSessionLifecycle::new_box(NoopSessionLifecycle));
+    fn auth_grant_lifecycle_impls_load_into_dyn_wrapper() {
+        let from_impl: Arc<DynAuthGrantLifecycle> =
+            Arc::from(DynAuthGrantLifecycle::new_box(NoopAuthGrantLifecycle));
         assert_send_sync(&from_impl);
-        let from_mock: Arc<DynSessionLifecycle> =
-            Arc::from(DynSessionLifecycle::new_box(MockTestSessionLifecycle::new()));
+        let from_mock: Arc<DynAuthGrantLifecycle> = Arc::from(DynAuthGrantLifecycle::new_box(
+            MockTestAuthGrantLifecycle::new(),
+        ));
         assert_send_sync(&from_mock);
     }
 
-    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——`Arc<DynSessionLifecycle>` 作必填位置参（非 Option），
+    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——`Arc<DynAuthGrantLifecycle>` 作必填位置参（非 Option），
     // 缺失即编译错误（ADR-004 C5；LoginService 即如此持有单一 lifecycle，见 application.rs）。
-    struct SessionService {
-        _lifecycle: Arc<DynSessionLifecycle<'static>>,
+    struct AuthGrantService {
+        _lifecycle: Arc<DynAuthGrantLifecycle<'static>>,
     }
-    impl SessionService {
-        fn new(lifecycle: Arc<DynSessionLifecycle<'static>>) -> Self {
+    impl AuthGrantService {
+        fn new(lifecycle: Arc<DynAuthGrantLifecycle<'static>>) -> Self {
             Self {
                 _lifecycle: lifecycle,
             }
@@ -1133,37 +1175,38 @@ mod smoke {
     }
 
     #[test]
-    fn session_lifecycle_is_required_ctor_injectable() {
-        let from_impl = SessionService::new(Arc::from(DynSessionLifecycle::new_box(
-            NoopSessionLifecycle,
+    fn auth_grant_lifecycle_is_required_ctor_injectable() {
+        let from_impl = AuthGrantService::new(Arc::from(DynAuthGrantLifecycle::new_box(
+            NoopAuthGrantLifecycle,
         )));
         assert_send_sync(&from_impl._lifecycle);
-        let from_mock = SessionService::new(Arc::from(DynSessionLifecycle::new_box(
-            MockTestSessionLifecycle::new(),
+        let from_mock = AuthGrantService::new(Arc::from(DynAuthGrantLifecycle::new_box(
+            MockTestAuthGrantLifecycle::new(),
         )));
         assert_send_sync(&from_mock._lifecycle);
     }
 
     mockall::mock! {
-        TestSessionLifecycle {}
-        impl SessionLifecycle for TestSessionLifecycle {
-            async fn persist_session_and_emit(
+        TestAuthGrantLifecycle {}
+        impl AuthGrantLifecycle for TestAuthGrantLifecycle {
+            async fn persist_login_grant(
                 &self,
                 receipt: LoginProducerReceipt,
                 scope: TenantRepoScope,
-                session: Session,
+                mutation: LoginGrantMutation,
                 entry: EventEntry,
                 envelope: OutboxEnvelopeParts,
-            ) -> Result<(), OutboxEmitError>;
-            async fn find(
+            ) -> Result<PersistedLoginGrantReceipt, OutboxEmitError>;
+            async fn find_active(
                 &self,
                 scope: TenantRepoScope,
-                session_id: SessionId,
-            ) -> Result<Option<Session>, IdentityError>;
-            async fn logout(
+                grant_id: AuthGrantId,
+                observed_at: std::time::SystemTime,
+            ) -> Result<Option<AuthGrant>, IdentityError>;
+            async fn close(
                 &self,
                 scope: TenantRepoScope,
-                mutation: SessionLogoutMutation,
+                command: AuthGrantCloseCommand,
             ) -> Result<(), IdentityError>;
         }
     }
@@ -1276,13 +1319,6 @@ mod smoke_refresh {
 
     struct NoopRefreshTokenStore;
     impl RefreshTokenStore for NoopRefreshTokenStore {
-        async fn insert(
-            &self,
-            _scope: TenantRepoScope,
-            _record: RefreshTokenRecord,
-        ) -> Result<(), IdentityError> {
-            todo!()
-        }
         async fn find_by_hash(
             &self,
             _scope: TenantRepoScope,
@@ -1343,7 +1379,6 @@ mod smoke_refresh {
     mockall::mock! {
         TestRefreshTokenStore {}
         impl RefreshTokenStore for TestRefreshTokenStore {
-            async fn insert(&self, scope: TenantRepoScope, record: RefreshTokenRecord) -> Result<(), IdentityError>;
             async fn find_by_hash(&self, scope: TenantRepoScope, hash: RefreshTokenHash) -> Result<Option<RefreshTokenRecord>, IdentityError>;
             async fn rotate(&self, scope: TenantRepoScope, mutation: RefreshRotationMutation) -> Result<crate::RefreshRotationOutcome, IdentityError>;
             async fn revoke_lineage(&self, scope: TenantRepoScope, lineage_id: RefreshTokenId) -> Result<(), IdentityError>;

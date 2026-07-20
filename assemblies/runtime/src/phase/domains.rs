@@ -6,7 +6,7 @@ use crate::infra::oidc::{
 use crate::infra::redis::{REDIS_READY_PROBE_NAME, RedisReadyProbe, spawn_redis_readiness_sampler};
 use crate::infra::s3::wire_s3_canary;
 use crate::{
-    RLS_READY_PROBE_NAME, RlsReadyProbe, wire_service_token_replay_sweeper, wire_session_sweeper,
+    RLS_READY_PROBE_NAME, RlsReadyProbe, wire_auth_grant_sweeper, wire_service_token_replay_sweeper,
 };
 use anyhow::{Context as _, Result};
 use bootstrap::DomainModuleResult;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 pub(crate) struct RuntimeModuleAssemblyInputs {
     pub(crate) domains_module: DomainModuleResult,
-    pub(crate) session_sweeper_module: DomainModuleResult,
+    pub(crate) auth_grant_sweeper_module: DomainModuleResult,
     pub(crate) service_token_replay_sweeper_module: DomainModuleResult,
     pub(crate) s3_canary_module: DomainModuleResult,
     pub(crate) provider_module: DomainModuleResult,
@@ -32,7 +32,7 @@ pub(crate) fn assemble_runtime_module_outputs(
 ) -> DomainModuleResult {
     let mut module = DomainModuleResult::default();
     module.merge(inputs.domains_module);
-    module.merge(inputs.session_sweeper_module);
+    module.merge(inputs.auth_grant_sweeper_module);
     module.merge(inputs.service_token_replay_sweeper_module);
     module.merge(inputs.s3_canary_module);
     module.merge(inputs.provider_module);
@@ -145,7 +145,7 @@ impl<'a> InfraBuilt<'a> {
                 distributed_worker,
                 domain_modules,
                 audit_consumer_key,
-                session_sweep_interval,
+                auth_grant_sweep_interval,
             } = wiring_inputs;
 
             // assembly.toml ordering becomes the live source through generated glue. Typed route
@@ -163,8 +163,9 @@ impl<'a> InfraBuilt<'a> {
             )
             .context("validate runtime domain-listener evidence")?;
 
-            let session_sweeper_module = wire_session_sweeper(&deps.pg, session_sweep_interval)
-                .context("wire session sweeper")?;
+            let auth_grant_sweeper_module =
+                wire_auth_grant_sweeper(&deps.pg, auth_grant_sweep_interval)
+                    .context("wire AuthGrant sweeper")?;
             let service_token_replay_sweeper_module =
                 wire_service_token_replay_sweeper(&deps.pg)
                     .context("wire service-token replay sweeper")?;
@@ -261,7 +262,7 @@ impl<'a> InfraBuilt<'a> {
             });
             let mut module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
                 domains_module,
-                session_sweeper_module,
+                auth_grant_sweeper_module,
                 service_token_replay_sweeper_module,
                 s3_canary_module,
                 provider_module,

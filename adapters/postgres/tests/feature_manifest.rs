@@ -40,6 +40,9 @@ fn expected_domain_feature_members(domain: &str) -> BTreeSet<String> {
     if matches!(domain, "settings" | "identity" | "audit") {
         expected.insert("dep:observ".to_owned());
     }
+    if matches!(domain, "settings" | "identity") {
+        expected.insert("dep:httpserve".to_owned());
+    }
     expected
 }
 
@@ -112,11 +115,19 @@ fn domain_dependencies_are_optional_and_features_are_explicit()
 fn domain_feature_shared_capability_allowlist_is_closed() {
     assert_eq!(
         expected_domain_feature_members("settings"),
-        BTreeSet::from(["dep:observ".to_owned(), "dep:settings".to_owned()])
+        BTreeSet::from([
+            "dep:httpserve".to_owned(),
+            "dep:observ".to_owned(),
+            "dep:settings".to_owned(),
+        ])
     );
     assert_eq!(
         expected_domain_feature_members("identity"),
-        BTreeSet::from(["dep:identity".to_owned(), "dep:observ".to_owned()])
+        BTreeSet::from([
+            "dep:httpserve".to_owned(),
+            "dep:identity".to_owned(),
+            "dep:observ".to_owned(),
+        ])
     );
     assert_eq!(
         expected_domain_feature_members("audit"),

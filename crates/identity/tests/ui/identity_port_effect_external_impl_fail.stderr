@@ -15,10 +15,10 @@ help: the trait `ports::identity_port_effect_sealed::Sealed` is not implemented 
             Box<T>
             DynAccountSecurityLifecycle<'a>
             DynAccountSecurityReadRepo<'a>
+            DynAuthGrantLifecycle<'a>
             DynCredentialRepo<'a>
             DynPolicyLifecycle<'a>
             DynPolicyRepo<'a>
-            DynRefreshTokenStore<'a>
           and $N others
 note: required by a bound in `IdentityPortEffect`
  --> src/ports.rs

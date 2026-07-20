@@ -3,7 +3,6 @@ pub mod authn
 pub authn::AuthnError::Forbidden
 pub authn::AuthnError::PrincipalInvalid
 pub authn::AuthnError::ProviderUnavailable
-pub authn::AuthnError::SessionNotFound
 pub authn::AuthnError::TokenExpired
 pub authn::AuthnError::TokenInvalid
 pub authn::AuthnError::TokenUntrusted
@@ -405,30 +404,6 @@ impl core::marker::Unpin for authn::RefreshToken
 impl core::marker::UnsafeUnpin for authn::RefreshToken
 impl core::panic::unwind_safe::RefUnwindSafe for authn::RefreshToken
 impl core::panic::unwind_safe::UnwindSafe for authn::RefreshToken
-pub struct authn::Session
-impl authn::Session
-pub fn authn::Session::expires_at(&self) -> std::time::SystemTime
-pub fn authn::Session::id(&self) -> &authn::SessionId
-pub fn authn::Session::new(authn::SessionId, authn::Principal, std::time::SystemTime) -> Self
-pub fn authn::Session::principal(&self) -> &authn::Principal
-impl core::marker::Freeze for authn::Session
-impl core::marker::Send for authn::Session
-impl core::marker::Sync for authn::Session
-impl core::marker::Unpin for authn::Session
-impl core::marker::UnsafeUnpin for authn::Session
-impl core::panic::unwind_safe::RefUnwindSafe for authn::Session
-impl core::panic::unwind_safe::UnwindSafe for authn::Session
-pub struct authn::SessionId(_)
-impl authn::SessionId
-pub fn authn::SessionId::as_str(&self) -> &str
-pub fn authn::SessionId::generate() -> Self
-impl core::marker::Freeze for authn::SessionId
-impl core::marker::Send for authn::SessionId
-impl core::marker::Sync for authn::SessionId
-impl core::marker::Unpin for authn::SessionId
-impl core::marker::UnsafeUnpin for authn::SessionId
-impl core::panic::unwind_safe::RefUnwindSafe for authn::SessionId
-impl core::panic::unwind_safe::UnwindSafe for authn::SessionId
 pub struct authn::SpiffeId
 impl authn::SpiffeId
 pub fn authn::SpiffeId::as_str(&self) -> &str

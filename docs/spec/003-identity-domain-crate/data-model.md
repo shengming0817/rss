@@ -53,21 +53,25 @@
   writer 在同一事务锁定 account-security、校验 Active + epoch，再 CAS consume old + insert child，返回
   `Applied|Replay|AccountStale`。
 
-## 会话子域（`domain/session.rs` + `ports.rs` SessionRepo）
+## AuthGrant 子域（`domain/auth_grant.rs` + `ports.rs`）
 
 | 实体 | 字段 | 不变式 | 当前 |
 |------|------|--------|------|
-| `Session` | `id + principal + expires_at` | TTL 计算用注入 `Clock`；`authn_epoch_at_issue` 由后续 PR-07 的 AuthGrant 持久化 | authn::Session 三字段已存（本 crate 编排） |
+| `AuthGrant` | `grant_id + tenant + user_id + auth_time + authn_epoch_at_issue + expires_at + status + terminal metadata` | 强类型 user/epoch；Active/Revoked/Compromised 闭值；关闭原因/时间与状态一致 | #1834 / ADR-019 已交付 |
 
-**port `SessionRepo`**（`identity::ports`）：`create(principal, ttl) -> Session`（L1）/ `revoke(session_id)`（logout）/ `find(session_id)`。
+**port `AuthGrantLifecycle`**（`identity::ports`）：`persist_login_grant` 原子写 AuthGrant、初始 refresh 与
+`identity.session-created` outbox；`find_active` 按当前观察时间过滤；`close` 先撤销 refresh family 再关闭根。
 
 ## 凭据 / 应用编排（`application/`）
 
-- `LoginService`：注入 `CredentialRepo` + `SessionRepo` + token/session/outbox 事务能力。真实 `login`：从 `X-Tenant-ID` header 取 tenant → 原子校验密码、durable Active 状态和临时 lockout → 获得 active receipt → refresh pre-mint 重读并核对 Active/epoch → 创建会话并发布 `identity.session-created`。任一门控失败均零 mint、零 session、零 outbox。
+- `LoginService`：注入 `CredentialRepo` + `AuthGrantLifecycle` + `RefreshService`。真实 `login`：从
+  `X-Tenant-ID` header 取 tenant → 原子校验密码、durable Active 状态和临时 lockout → 获得 active receipt
+  → refresh pre-mint 重读并核对 Active/epoch → 构造 AuthGrant → 原子持久化根、初始 refresh 与
+  `identity.session-created`。任一门控失败均零 mint、零 AuthGrant、零 outbox。
 - `RefreshService`：构造时必填 `AccountSecurityReadRepo`；initial issuance 只接受 crate-private active receipt，
   rotate 只接受 canonical User record，并在 mint 前重读 Active 状态与 family issuance epoch。PostgreSQL
-  rotation writer 再做最终 Active + epoch fence；session epoch、JWT grant claims、安全事件撤销与 session
-  final fence 分别由后续 PR-07、PR-08、PR-13、PR-14 完成。
+  rotation writer 再做最终 Active + epoch + AuthGrant fence；JWT grant claims 与账户安全事件批量撤销由后续
+  #1840 完成。
 - `RbacAdminService`（PR5）：注入 `RoleRepo` + `DynPublisher`。`assign_role` / `revoke_role`：落绑定 + 发 `identity.role-{assigned,revoked}`（L2）。
 - `IdentityDomain`（bootstrap `Domain`）：`init` 声明路由组（Primary listener，`/api/v1/identity`，login opt-out Public）+ 注册 handler；fail-fast，无 panic。
 
@@ -85,7 +89,7 @@
 
 | 端点 | method/path | 一致性 | 鉴权 | Permission | 当前 |
 |------|-------------|--------|------|------------|------|
-| login | POST `/api/v1/identity/login` | **L2 OutboxFact**（与权威 contract.toml 同源：同事务写会话 + 发 session-created；`SessionRepo::create` 仅 L1 子步骤，不单独成契约边界） | Public（opt_out） | — | ✓ draft→active；tenant 来源 X-Tenant-ID header，body 禁 tenantId；响应含 `{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}`（#1252 首发 JWT bundle 已接线） |
+| login | POST `/api/v1/identity/login` | **L2 OutboxFact**（与权威 contract.toml 同源：同事务写 AuthGrant、初始 refresh 与 `identity.session-created`） | Public（opt_out） | — | ✓ draft→active；tenant 来源 X-Tenant-ID header，body 禁 tenantId；响应含 `{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}`（#1252 首发 JWT bundle 已接线） |
 | password-change | POST `/api/v1/identity/password/change` | L1 | 鉴权（selfScoped） | `identity:profile:write` | 新增 |
 | logout | POST `/api/v1/identity/logout` | L1 | 鉴权（selfScoped） | `identity:session:write` | 新增；仅域侧软撤销，硬吊销延 #1003 |
 | roles assign | POST `/api/v1/identity/roles/{roleId}/bindings` | L2 | 鉴权 | `identity:role:assign` | 新增 |

@@ -8,7 +8,7 @@
 //!
 //! **单事实 emit 语义（#1100）**：本 adapter 将一条 [`consistency::EventEntry`] 原子落库（单事务），用于**无
 //! co-located 业务写**的 OutboxFact 事件（纯通知）。与业务写（如 session 持久化）同事务的 **co-tx 原子性**
-//! （FR-003 完整 L2）**已交付**（#1083/#1192）：经 [`crate::PgSessionLifecycle`]（复用 `append_outbox` + 同
+//! （FR-003 完整 L2）**已交付**（#1083/#1192）：经 [`crate::PgAuthGrantLifecycle`]（复用 `append_outbox` + 同
 //! 一事务写 session 行，INVARIANT OUTBOX-COTX-SESSION-01）承载，与本 emit-only adapter 语义正交。本 adapter
 //! 的单事实写语义不变。
 //!

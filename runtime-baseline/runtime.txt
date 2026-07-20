@@ -126,7 +126,7 @@ mergeExtends = probes,resources,workers
 19 | run.wire.generated-domains | assemblies/runtime/src/phase/domains.rs | crate::modules_gen::wire_domains(&deps, domain_modules) | status=ok
 20 | run.module.input.domains | assemblies/runtime/src/phase/domains.rs | let (mut registry, domains_module) = | status=ok
 21 | run.compose.generated-domains | assemblies/runtime/src/phase/domains.rs | bootstrap::compose_bindings(&mut domain_bindings) | status=ok
-22 | run.module.input.session-sweeper | assemblies/runtime/src/phase/domains.rs | let session_sweeper_module = | status=ok
+22 | run.module.input.auth-grant-sweeper | assemblies/runtime/src/phase/domains.rs | let auth_grant_sweeper_module = | status=ok
 23 | run.module.input.s3-canary | assemblies/runtime/src/phase/domains.rs | let s3_canary_module = | status=ok
 24 | run.provider-output.module | assemblies/runtime/src/phase/domains.rs | let provider_module = crate::provider_output::build_provider_module(&deps) | status=ok
 25 | run.resources.rss-access-token | assemblies/runtime/src/phase/domains.rs | if let Some(provider) = runtime_rss_access.as_ref() {

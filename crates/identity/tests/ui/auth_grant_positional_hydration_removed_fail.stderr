@@ -1,0 +1,57 @@
+error[E0061]: this function takes 1 argument but 10 arguments were supplied
+  --> tests/ui/auth_grant_positional_hydration_removed_fail.rs:15:18
+   |
+15 |     let _grant = AuthGrant::hydrate(
+   |                  ^^^^^^^^^^^^^^^^^^
+16 |         "grant",
+   |         ------- expected `AuthGrantSnapshot`, found `&str`
+   |
+note: associated function defined here
+  --> src/domain/auth_grant.rs
+   |
+   |     pub fn hydrate(snapshot: AuthGrantSnapshot) -> Result<Self, AuthGrantStateError> {
+   |            ^^^^^^^
+help: remove the extra arguments
+   |
+16 -         "grant",
+17 -         tenant,
+18 -         user_id,
+19 -         SystemTime::UNIX_EPOCH,
+20 -         epoch,
+21 -         AuthGrantStatus::Revoked,
+22 -         SystemTime::UNIX_EPOCH,
+23 -         SystemTime::UNIX_EPOCH,
+24 -         Some(SystemTime::UNIX_EPOCH),
+25 -         Some(AuthGrantCloseReason::LogoutCurrent),
+16 +         /* AuthGrantSnapshot */,
+   |
+
+error[E0061]: this function takes 1 argument but 12 arguments were supplied
+  --> tests/ui/auth_grant_positional_hydration_removed_fail.rs:27:20
+   |
+27 |     let _refresh = RefreshTokenRecord::hydrate(
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+28 |         "refresh",
+   |         --------- expected `RefreshTokenSnapshot`, found `&str`
+   |
+note: associated function defined here
+  --> src/domain/refresh.rs
+   |
+   |     pub fn hydrate(snapshot: RefreshTokenSnapshot) -> Option<Self> {
+   |            ^^^^^^^
+help: remove the extra arguments
+   |
+28 -         "refresh",
+29 -         tenant,
+30 -         "grant",
+31 -         user_id,
+32 -         epoch,
+33 -         AuthGrantStatus::Active,
+34 -         [0_u8; 32],
+35 -         None,
+36 -         "refresh",
+37 -         RefreshStatus::Active,
+38 -         SystemTime::UNIX_EPOCH,
+39 -         SystemTime::UNIX_EPOCH,
+28 +         /* RefreshTokenSnapshot */,
+   |

@@ -31,7 +31,7 @@ const MAX_RUNTIME_PHASE_BYTES: u64 = 512 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[allow(clippy::enum_variant_names)]
 pub(crate) enum ProducerCompositionPort {
-    SessionLifecycleLocal,
+    AuthGrantLifecycleLocal,
     PolicyLifecycleLocal,
     RoleBindingLifecycleLocal,
     ConfigUnitOfWorkLocal,
@@ -40,7 +40,7 @@ pub(crate) enum ProducerCompositionPort {
 impl ProducerCompositionPort {
     pub(crate) fn trait_symbol(self) -> &'static str {
         match self {
-            Self::SessionLifecycleLocal => "SessionLifecycleLocal",
+            Self::AuthGrantLifecycleLocal => "AuthGrantLifecycleLocal",
             Self::PolicyLifecycleLocal => "PolicyLifecycleLocal",
             Self::RoleBindingLifecycleLocal => "RoleBindingLifecycleLocal",
             Self::ConfigUnitOfWorkLocal => "ConfigUnitOfWorkLocal",
@@ -81,7 +81,7 @@ pub(crate) fn collect_producer_composition(
         );
     }
     let expected = [
-        ProducerCompositionPort::SessionLifecycleLocal,
+        ProducerCompositionPort::AuthGrantLifecycleLocal,
         ProducerCompositionPort::PolicyLifecycleLocal,
         ProducerCompositionPort::RoleBindingLifecycleLocal,
         ProducerCompositionPort::ConfigUnitOfWorkLocal,
@@ -124,7 +124,7 @@ fn collect_runtime_lineage(
     validate_settings_runtime_module(&settings)?;
     Ok(BTreeMap::from([
         (
-            ProducerCompositionPort::SessionLifecycleLocal,
+            ProducerCompositionPort::AuthGrantLifecycleLocal,
             RuntimeLineage {
                 repo_path: IDENTITY_RUNTIME_MODULE.to_string(),
             },
@@ -1125,8 +1125,8 @@ struct IdentityInjection {
 
 const IDENTITY_INJECTIONS: &[IdentityInjection] = &[
     IdentityInjection {
-        port: ProducerCompositionPort::SessionLifecycleLocal,
-        provider_method: "session_lifecycle",
+        port: ProducerCompositionPort::AuthGrantLifecycleLocal,
+        provider_method: "auth_grant_provider",
         service_type: "LoginService",
         domain_field: "login",
     },
@@ -1208,7 +1208,7 @@ fn collect_identity_wire(
     for injection in IDENTITY_INJECTIONS {
         let canonical_service = format!("identity::{}", injection.service_type);
         let service_binding = ensure_canonical_import(&imports, &canonical_service, repo_path)?;
-        let injection_wire = if injection.port == ProducerCompositionPort::SessionLifecycleLocal {
+        let injection_wire = if injection.port == ProducerCompositionPort::AuthGrantLifecycleLocal {
             wire
         } else {
             common_wire
@@ -1220,21 +1220,75 @@ fn collect_identity_wire(
                     injection.provider_method
                 )
             })?;
-        let constructor = unique_constructor(injection_wire, &service_binding, "new")
-            .with_context(|| format!("{repo_path}: resolve {}::new", injection.service_type))?;
-        ensure!(
+        let constructor = if injection.port == ProducerCompositionPort::AuthGrantLifecycleLocal {
+            let auth_grant_services =
+                ensure_canonical_import(&imports, "identity::AuthGrantServices", repo_path)?;
+            let services =
+                unique_constructor(injection_wire, &auth_grant_services, "from_provider")
+                    .with_context(|| {
+                        format!("{repo_path}: resolve AuthGrantServices::from_provider")
+                    })?;
+            ensure!(
+                services
+                    .call
+                    .args
+                    .iter()
+                    .filter(|argument| simple_expr_ident(argument).as_deref() == Some(&binding))
+                    .count()
+                    == 1,
+                "{repo_path}: AuthGrantServices::from_provider must consume the exact `{binding}` returned by PgDomainDeps::{}",
+                injection.provider_method
+            );
+            let login = unique_constructor(injection_wire, &service_binding, "new")
+                .with_context(|| format!("{repo_path}: resolve {}::new", injection.service_type))?;
+            ensure!(
+                login
+                    .call
+                    .args
+                    .iter()
+                    .filter(|argument| {
+                        simple_expr_ident(argument).as_deref() == Some(&services.binding)
+                    })
+                    .count()
+                    == 1,
+                "{repo_path}: LoginService::new must consume the exact AuthGrantServices binding `{}`",
+                services.binding
+            );
+            let refresh =
+                unique_method_result_binding(injection_wire, &services.binding, "refresh_service")
+                    .with_context(|| {
+                        format!(
+                            "{repo_path}: resolve {}.refresh_service() binding",
+                            services.binding
+                        )
+                    })?;
+            ensure!(
+                domain_fields
+                    .get("refresh")
+                    .and_then(simple_expr_ident)
+                    .as_deref()
+                    == Some(&refresh),
+                "{repo_path}: IdentityDomainDeps.refresh must consume `{refresh}` derived from the same AuthGrantServices binding"
+            );
+            login
+        } else {
+            let constructor = unique_constructor(injection_wire, &service_binding, "new")
+                .with_context(|| format!("{repo_path}: resolve {}::new", injection.service_type))?;
+            ensure!(
+                constructor
+                    .call
+                    .args
+                    .iter()
+                    .filter(|argument| simple_expr_ident(argument).as_deref() == Some(&binding))
+                    .count()
+                    == 1,
+                "{repo_path}: {}::new must consume the exact `{binding}` returned by PgDomainDeps::{}",
+                injection.service_type,
+                injection.provider_method
+            );
             constructor
-                .call
-                .args
-                .iter()
-                .filter(|argument| simple_expr_ident(argument).as_deref() == Some(&binding))
-                .count()
-                == 1,
-            "{repo_path}: {}::new must consume the exact `{binding}` returned by PgDomainDeps::{}",
-            injection.service_type,
-            injection.provider_method
-        );
-        if injection.port == ProducerCompositionPort::SessionLifecycleLocal {
+        };
+        if injection.port == ProducerCompositionPort::AuthGrantLifecycleLocal {
             ensure!(
                 domain_fields
                     .get(injection.domain_field)
@@ -1287,7 +1341,7 @@ fn collect_identity_wire(
                 runtime_module_path: String::new(),
                 runtime_module: String::new(),
                 repo_path: repo_path.to_string(),
-                wire: if injection.port == ProducerCompositionPort::SessionLifecycleLocal {
+                wire: if injection.port == ProducerCompositionPort::AuthGrantLifecycleLocal {
                     "wire"
                 } else {
                     "common_identity_services"
@@ -1678,6 +1732,36 @@ fn unique_provider_binding(wire: &ItemFn, method: &str) -> Result<String> {
     Ok(binding.clone())
 }
 
+fn unique_method_result_binding(wire: &ItemFn, receiver: &str, method: &str) -> Result<String> {
+    let bindings = wire
+        .block
+        .stmts
+        .iter()
+        .filter_map(|statement| {
+            let Stmt::Local(local) = statement else {
+                return None;
+            };
+            let binding = simple_pat_ident(&local.pat)?;
+            let init = local.init.as_ref()?;
+            let calls = method_calls(&init.expr)
+                .into_iter()
+                .filter(|call| {
+                    call.method == method
+                        && simple_expr_ident(&call.receiver).as_deref() == Some(receiver)
+                })
+                .count();
+            (calls == 1).then_some(binding)
+        })
+        .collect::<Vec<_>>();
+    let [binding] = bindings.as_slice() else {
+        bail!(
+            "`{receiver}.{method}()` must initialize exactly one direct binding, found {}",
+            bindings.len()
+        )
+    };
+    Ok(binding.clone())
+}
+
 fn unique_common_identity_services_binding(wire: &ItemFn) -> Result<String> {
     let candidates = wire
         .block
@@ -1987,8 +2071,9 @@ mod tests {
             r#"
             use std::sync::Arc;
             use identity::{{
-                FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain,
-                IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
+                AuthGrantServices, FederatedIdentityDomain, FederatedIdentityDomainDeps,
+                IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService,
+                RbacAdminService,
             }};
             use postgres::PgDomainDeps;
             pub struct IdentityModuleDeps {{ pg: PgDomainDeps }}
@@ -2023,20 +2108,26 @@ mod tests {
 
             pub fn wire(deps: IdentityModuleDeps) {{
                 let IdentityModuleDeps {{ pg, .. }} = deps;
-                let lifecycle = Arc::from(DynSessionLifecycle::new_box(
-                    pg.session_lifecycle(boxed_clock(&clock)),
-                ));
+                let provider = pg.auth_grant_provider(boxed_clock(&clock));
                 let common = common_identity_services(&pg, &clock);
+                let auth_grants = AuthGrantServices::from_provider(
+                    {session_argument},
+                    accounts,
+                    issuer,
+                    boxed_clock(&clock),
+                    refresh_ttl,
+                );
+                let refresh = auth_grants.refresh_service();
                 let login = Arc::new(LoginService::new(
                     credentials,
-                    {session_argument},
-                    refresh,
+                    auth_grants,
                     password_policy,
                     clock,
-                    session_ttl,
+                    auth_grant_ttl,
                 ));
                 let domain = IdentityDomain::new(IdentityDomainDeps {{
                     login: {domain_login},
+                    refresh,
                     rbac_admin: common.rbac_admin,
                     policy_manage: common.policy_manage,
                 }});
@@ -2056,9 +2147,9 @@ mod tests {
 
     #[test]
     fn identity_wire_rejects_an_uninjected_correct_provider() -> anyhow::Result<()> {
-        let valid = identity_wire("lifecycle", "login");
+        let valid = identity_wire("provider", "login");
         assert!(collect_identity_wire(&valid, IDENTITY_COMPOSITION).is_ok());
-        let source = identity_wire("other_lifecycle", "login");
+        let source = identity_wire("other_provider", "login");
 
         assert!(
             collect_identity_wire(&source, IDENTITY_COMPOSITION).is_err(),
@@ -2069,7 +2160,7 @@ mod tests {
 
     #[test]
     fn identity_wire_rejects_a_constructed_service_dropped_before_the_domain() {
-        let source = identity_wire("lifecycle", "decoy_login");
+        let source = identity_wire("provider", "decoy_login");
 
         assert!(
             collect_identity_wire(&source, IDENTITY_COMPOSITION).is_err(),
@@ -2137,7 +2228,7 @@ mod tests {
                 .map(|port| port.trait_symbol())
                 .collect::<Vec<_>>(),
             [
-                "SessionLifecycleLocal",
+                "AuthGrantLifecycleLocal",
                 "PolicyLifecycleLocal",
                 "RoleBindingLifecycleLocal",
                 "ConfigUnitOfWorkLocal",

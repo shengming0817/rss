@@ -18,7 +18,7 @@ const DEMO_JWT_ISSUER: &str = "https://identityaudit.demo.invalid";
 const DEMO_JWT_AUDIENCE: &str = "rss-identityaudit-demo";
 const DEMO_JWT_KEY_ID: &str = "identityaudit-demo-es256";
 const DEMO_JWT_ACCESS_TTL: Duration = Duration::from_secs(15 * 60);
-const DEMO_SESSION_TTL: Duration = Duration::from_secs(60 * 60);
+const DEMO_AUTH_GRANT_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const DEMO_REFRESH_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 pub struct SystemClock;
@@ -80,8 +80,8 @@ mod domains {
         use bootstrap::DomainBinding;
 
         use crate::{
-            DEMO_JWT_ACCESS_TTL, DEMO_JWT_AUDIENCE, DEMO_JWT_ISSUER, DEMO_JWT_KEY_ID,
-            DEMO_REFRESH_TTL, DEMO_SESSION_TTL, SharedRuntimeDeps, SystemClock,
+            DEMO_AUTH_GRANT_TTL, DEMO_JWT_ACCESS_TTL, DEMO_JWT_AUDIENCE, DEMO_JWT_ISSUER,
+            DEMO_JWT_KEY_ID, DEMO_REFRESH_TTL, SharedRuntimeDeps, SystemClock,
         };
 
         pub(crate) async fn module(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainBinding> {
@@ -99,7 +99,7 @@ mod domains {
                     DEMO_JWT_AUDIENCE,
                     DEMO_JWT_ACCESS_TTL,
                 ),
-                DEMO_SESSION_TTL,
+                DEMO_AUTH_GRANT_TTL,
                 DEMO_REFRESH_TTL,
                 Arc::new(blocklist),
             ))

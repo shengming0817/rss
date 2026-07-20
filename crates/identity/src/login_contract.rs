@@ -2,7 +2,7 @@
 //!
 //! These tests exercise the real axum handler backed by [`LoginService`]. There
 //! is intentionally no inline credential stub here: credential verification,
-//! session minting, and `expiresAt` semantics all come from the application
+//! AuthGrant minting, and `expiresAt` semantics all come from the application
 //! service.
 
 use std::sync::Arc;
@@ -13,18 +13,15 @@ use diport::Clock;
 use generated::http::identity_v1::login::{IdentityLoginRequest, IdentityLoginResponse, SPEC};
 use testkit::ContractRequest;
 
-use crate::application::{RefreshService, login_router_for_test};
-use crate::{
-    LoginService,
-    ports::{DynAccountSecurityReadRepo, DynSessionLifecycle},
-};
+use crate::application::login_router_for_test;
+use crate::{AuthGrantServices, LoginService, ports::DynAccountSecurityReadRepo};
 
 const SEED_USER: &str = "alice";
 const SEED_PASSWORD: &str = "correct-horse";
 const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
 const NOW_SECS: u64 = 1_000;
-const SESSION_TTL_SECS: u64 = 3_600;
+const AUTH_GRANT_TTL_SECS: u64 = 3_600;
 
 struct FixedClock(SystemTime);
 
@@ -67,9 +64,10 @@ impl diport::Signer for ContractSigner {
     }
 }
 
-fn make_refresh_svc(
+fn make_auth_grant_services(
+    store: crate::internal::mem::InMemAuthGrantStore,
     accounts: Box<DynAccountSecurityReadRepo<'static>>,
-) -> Arc<RefreshService<ContractSigner>> {
+) -> AuthGrantServices<ContractSigner> {
     #[allow(clippy::expect_used)]
     let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
         Arc::new(ContractSigner),
@@ -83,27 +81,23 @@ fn make_refresh_svc(
         ),
     )
     .expect("valid jwt issuer config");
-    Arc::new(RefreshService::new(
-        crate::ports::DynRefreshTokenStore::new_box(
-            crate::internal::mem::InMemRefreshTokenStore::new(),
-        ),
+    AuthGrantServices::from_provider(
+        store,
         accounts,
         Arc::new(issuer),
         clock(),
         Duration::from_secs(2_592_000),
-    ))
+    )
 }
 
 fn login_router() -> axum::Router {
+    let grant_store = crate::internal::mem::InMemAuthGrantStore::new();
     #[allow(clippy::expect_used)]
     let service = LoginService::with_seed_credential(
-        Arc::from(DynSessionLifecycle::new_box(
-            crate::internal::mem::InMemSessionLifecycle::default(),
-        )),
-        make_refresh_svc,
+        move |accounts| make_auth_grant_services(grant_store, accounts),
         crate::application::seed_password_policy(),
         clock(),
-        Duration::from_secs(SESSION_TTL_SECS),
+        Duration::from_secs(AUTH_GRANT_TTL_SECS),
         SEED_USER,
         user_id(),
         SEED_PASSWORD,
@@ -132,7 +126,7 @@ async fn login_ok_returns_session_matching_generated_schema()
     assert!(!decoded.data.session_id.is_empty(), "返回会话 id");
     assert_eq!(
         decoded.data.expires_at,
-        i64::try_from(NOW_SECS + SESSION_TTL_SECS)?,
+        i64::try_from(NOW_SECS + AUTH_GRANT_TTL_SECS)?,
         "expiresAt 须是 UNIX epoch 秒，而非 TTL 秒 stub"
     );
     // #1252：login 响应包含首发 access JWT + refresh token bundle。

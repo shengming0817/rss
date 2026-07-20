@@ -114,7 +114,7 @@ fn worker_runtime_config_uses_one_snapshot_generation_for_every_interval() {
         ("RSS_RELAY_POLL_INTERVAL_MS", "275"),
         ("RSS_RELAY_SAMPLE_INTERVAL_MS", "31000"),
         ("RSS_OUTBOX_SWEEP_INTERVAL_MS", "320000"),
-        ("RSS_SESSION_SWEEP_INTERVAL_MS", "330000"),
+        ("RSS_AUTH_GRANT_SWEEP_INTERVAL_MS", "330000"),
         ("RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS", "7"),
     ];
     let source =
@@ -123,7 +123,7 @@ fn worker_runtime_config_uses_one_snapshot_generation_for_every_interval() {
     let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
 
     let mapper = ServingConfigMapper::for_test(snapshot.view());
-    let (event, session_sweep_interval, keyprovider_readiness_interval) =
+    let (event, auth_grant_sweep_interval, keyprovider_readiness_interval) =
         WorkerRuntimeConfig::from_mapper(&mapper)
             .expect("worker config")
             .into_test_parts();
@@ -133,7 +133,7 @@ fn worker_runtime_config_uses_one_snapshot_generation_for_every_interval() {
             event.relay_poll_interval(),
             event.relay_sample_interval(),
             event.outbox_sweep_interval(),
-            session_sweep_interval,
+            auth_grant_sweep_interval,
             keyprovider_readiness_interval.get(),
         ],
         [
@@ -195,7 +195,7 @@ fn complete_shared_serving_values() -> Vec<(String, String)> {
         ),
         ("SPIFFE_ENDPOINT_SOCKET", "unix:///run/spire/agent.sock"),
         ("RSS_RELAY_POLL_INTERVAL_MS", "275"),
-        ("RSS_SESSION_SWEEP_INTERVAL_MS", "330000"),
+        ("RSS_AUTH_GRANT_SWEEP_INTERVAL_MS", "330000"),
         ("RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS", "7"),
     ]
     .into_iter()
@@ -248,7 +248,7 @@ fn runtime_config_serving_event_domain_dlx_and_worker_inputs_share_one_captured_
         std::time::Duration::from_millis(275)
     );
     assert_eq!(
-        parts.session_sweep_interval,
+        parts.auth_grant_sweep_interval,
         std::time::Duration::from_secs(330)
     );
     assert_eq!(parts.audit_consumer_key.as_bytes(), &[0x42; 32]);
@@ -584,7 +584,7 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
                     FakeValue::Present("identity,audit,IDENTITY".to_owned()),
                 ),
                 (
-                    "RSS_SESSION_SWEEP_INTERVAL_MS".to_owned(),
+                    "RSS_AUTH_GRANT_SWEEP_INTERVAL_MS".to_owned(),
                     FakeValue::Present("1000".to_owned()),
                 ),
             ]),
@@ -604,7 +604,7 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
                     FakeValue::Present("identity".to_owned()),
                 ),
                 (
-                    "RSS_SESSION_SWEEP_INTERVAL_MS".to_owned(),
+                    "RSS_AUTH_GRANT_SWEEP_INTERVAL_MS".to_owned(),
                     FakeValue::Present("999".to_owned()),
                 ),
             ]),
@@ -617,7 +617,7 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
                     FakeValue::NonUnicode,
                 ),
                 (
-                    "RSS_SESSION_SWEEP_INTERVAL_MS".to_owned(),
+                    "RSS_AUTH_GRANT_SWEEP_INTERVAL_MS".to_owned(),
                     FakeValue::NonUnicode,
                 ),
             ]),
@@ -630,7 +630,7 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
                     FakeValue::Present(String::new()),
                 ),
                 (
-                    "RSS_SESSION_SWEEP_INTERVAL_MS".to_owned(),
+                    "RSS_AUTH_GRANT_SWEEP_INTERVAL_MS".to_owned(),
                     FakeValue::Present(String::new()),
                 ),
             ]),
@@ -643,7 +643,7 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
                     FakeValue::Present("identity audit".to_owned()),
                 ),
                 (
-                    "RSS_SESSION_SWEEP_INTERVAL_MS".to_owned(),
+                    "RSS_AUTH_GRANT_SWEEP_INTERVAL_MS".to_owned(),
                     FakeValue::Present("   ".to_owned()),
                 ),
             ]),
@@ -945,6 +945,42 @@ fn service_token_env_example_values() -> Vec<(String, String)> {
                 .then(|| (key.to_owned(), value.to_owned()))
         })
         .collect()
+}
+
+#[test]
+fn auth_grant_and_refresh_ttl_are_paired_in_deploy_and_ops_contracts() {
+    let env_example = include_str!("../../../deploy/.env.example");
+    let value = |key: &str| {
+        env_example.lines().find_map(|line| {
+            let (candidate, value) = line.split_once('=')?;
+            (candidate == key).then_some(value)
+        })
+    };
+    let auth_grant_ttl = value("RSS_IDENTITY_AUTH_GRANT_TTL_SECS")
+        .expect("deploy example must set the AuthGrant TTL")
+        .parse::<u64>()
+        .expect("AuthGrant TTL example must be seconds");
+    let refresh_ttl = value("RSS_REFRESH_TTL_SECS")
+        .expect("deploy example must set the refresh TTL")
+        .parse::<u64>()
+        .expect("refresh TTL example must be seconds");
+    assert!(
+        auth_grant_ttl >= refresh_ttl,
+        "deploy example must satisfy AuthGrant TTL >= refresh TTL"
+    );
+
+    let ops = include_str!("../../../docs/ops/202606271438-003-container-image.md");
+    for required in [
+        "RSS_IDENTITY_AUTH_GRANT_TTL_SECS",
+        "默认 30 天",
+        "最大 365 天",
+        "必须大于等于 `RSS_REFRESH_TTL_SECS`",
+    ] {
+        assert!(
+            ops.contains(required),
+            "container-image operations contract omits AuthGrant TTL rule: {required}"
+        );
+    }
 }
 
 static CONFIG_TEMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

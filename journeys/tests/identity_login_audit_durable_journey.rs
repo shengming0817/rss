@@ -52,7 +52,7 @@ use generated::event::identity_v1::session_created::IdentitySessionCreatedPayloa
 use generated::http::identity_v1::login::{IdentityLoginRequest, PRODUCER as LOGIN_PRODUCER};
 use httpserve::ProducerMarker;
 use identity::LoginService;
-use identity::ports::{DynSessionLifecycle, LoginProducerReceipt};
+use identity::ports::LoginProducerReceipt;
 use memory::{FixedClock, MemBus};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
 use primitives::MacKey;
@@ -65,7 +65,7 @@ const RSS_APP_ROLE: &str = "rss_app";
 const RSS_APP_PASSWORD: &str = "rss_app_test_pw";
 const RSS_APP_READ_ROLE: &str = "rss_app_read";
 const RSS_APP_READ_PASSWORD: &str = "rss_app_read_test_pw";
-/// #1160：注入的 correlation——经 diagctx ambient → PgSessionLifecycle emit → outbox.metadata 列 → relay
+/// #1160：注入的 correlation——经 diagctx ambient → PgAuthGrantLifecycle emit → outbox.metadata 列 → relay
 /// hydrate → MemBus → consumer `Message.metadata` 端到端保真断言（白名单字符，CorrelationId::parse 必通）。
 const JOURNEY_CORR: &str = "journey-corr-1160";
 
@@ -242,7 +242,7 @@ async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
     Ok(())
 }
 
-/// durable 端到端：login → PgSessionLifecycle co-tx（session 行 + outbox(pending) 同事务）→ relay CAS →
+/// durable 端到端：login → PgAuthGrantLifecycle co-tx（grant + initial refresh + outbox 同事务）→ relay CAS →
 /// MemBus(message_id=EventId) → run_consumer(PgInbox 幂等) → audit append；再投递同一 EventId → PgInbox
 /// Duplicate → audit 仍 1（acc #2）。session 行持久化/原子性由 postgres t11/t12 守（见上方 with_seed_user 注释）。
 ///
@@ -290,17 +290,15 @@ async fn login_audit_durable_topology() -> Result<()> {
         // 组装 audit 订阅（contract/topic/group 单源自 generated SPEC.subscriptions()）。
         let mut refresh_identity = None;
         let login_identity = Arc::new(LoginService::with_seed_credential(
-            Arc::from(DynSessionLifecycle::new_box(
-                id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
-            )),
             |accounts| {
-                let service = identity::seed_refresh_service(
+                let services = identity::seed_auth_grant_services(
+                    id.auth_grant_provider(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
                     accounts,
                     || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
                     Duration::from_secs(TTL_SECS),
                 );
-                refresh_identity = Some(Arc::clone(&service));
-                service
+                refresh_identity = Some(services.refresh_service());
+                services
             },
             password_policy(),
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
@@ -350,16 +348,14 @@ async fn login_audit_durable_topology() -> Result<()> {
             LeaseConfig::from_ttl(claimer.lease_ttl()),
         );
 
-        // 生产侧：login → PgSessionLifecycle **co-tx**（session 行 + outbox 行同事务）durable 落库；relay
-        // （MemBus 作 in-test broker）CAS 中继。session 行持久化 + co-tx 原子性由 postgres 集成测试 t11/t12 守
-        // （pool 为 pub(crate)，journey 不直查 sessions 表）；本 journey 验 co-tx provider 端到端贯通到 audit。
+        // 生产侧：login → PgAuthGrantLifecycle **co-tx**（grant + initial refresh + outbox）durable 落库；relay
+        // （MemBus 作 in-test broker）CAS 中继。持久化 + co-tx 原子性由 postgres 集成测试守；
+        // 本 journey 验 co-tx provider 端到端贯通到 audit。
         let tenant = TenantId::parse(CANON_TENANT)?;
         let login = LoginService::with_seed_credential(
-            Arc::from(DynSessionLifecycle::new_box(
-                id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
-            )),
             |accounts| {
-                identity::seed_refresh_service(
+                identity::seed_auth_grant_services(
+                    id.auth_grant_provider(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
                     accounts,
                     || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
                     Duration::from_secs(TTL_SECS),
@@ -390,7 +386,7 @@ async fn login_audit_durable_topology() -> Result<()> {
         );
 
         let drive = async {
-            // #1160：login emit（PgSessionLifecycle co-tx）在 diagctx scope 内执行 ⇒ correlation 经 ambient
+            // #1160：login emit（PgAuthGrantLifecycle co-tx）在 diagctx scope 内执行 ⇒ correlation 经 ambient
             // 信道盖进 outbox.metadata 列（fail-open；scope 外则省略）。
             let response = diagctx::scope(
                 DiagnosticCtx::new(CorrelationId::parse(JOURNEY_CORR)?),

@@ -324,7 +324,7 @@ fn producer_funnel_findings(files: &[(String, String)]) -> Vec<Finding> {
     }
 
     for (path, producer_tx, retry_producer_tx) in [
-        ("session_lifecycle.rs", 1, 0),
+        ("auth_grant_lifecycle.rs", 1, 0),
         ("policy_repo.rs", 3, 0),
         ("role_binding_lifecycle.rs", 2, 0),
         ("config_repo.rs", 0, 1),
@@ -3114,7 +3114,7 @@ fn retry_placement_findings(
     let allowed = match rel {
         "config_repo.rs" => Some(("commit_authorized", "settings-config-commit")),
         "credential_repo.rs" => Some(("apply_password_change", "identity-password-change")),
-        "session_lifecycle.rs" => Some(("logout", "identity-session-logout")),
+        "auth_grant_lifecycle.rs" => Some(("close", "identity-session-logout")),
         "refresh_token_store.rs" => Some(("rotate", "identity-refresh-rotate")),
         "audit_repo.rs" => Some(("append", "audit-append")),
         "auth_audit_sink.rs" => Some(("append", "audit-list-tenant-append")),
@@ -3149,7 +3149,7 @@ fn retry_placement_findings(
         && match rel {
             "config_repo.rs" => valid_settings_retry(calls[0]),
             "credential_repo.rs" => valid_identity_password_retry(calls[0]),
-            "session_lifecycle.rs" => valid_identity_logout_retry(calls[0]),
+            "auth_grant_lifecycle.rs" => valid_identity_logout_retry(calls[0]),
             "refresh_token_store.rs" => valid_identity_refresh_retry(calls[0]),
             "audit_repo.rs" => valid_audit_append_retry(calls[0]),
             "auth_audit_sink.rs" => valid_audit_list_tenant_retry(calls[0]),
@@ -3860,7 +3860,7 @@ fn typed_command_param(signature: &syn::Signature) -> Option<(String, CommandEvi
         let factory = match path.path.segments.last()?.ident.to_string().as_str() {
             "SecretPublishCommand" => CommandEvidence::SecretPublish,
             "PasswordChangeMutation" => CommandEvidence::PasswordChange,
-            "SessionLogoutMutation" => CommandEvidence::SessionLogout,
+            "AuthGrantCloseCommand" => CommandEvidence::SessionLogout,
             "RefreshRotationMutation" => CommandEvidence::RefreshRotation,
             "AuditListTenantAppend" => CommandEvidence::AuditListTenantAppend,
             _ => return None,
@@ -7833,7 +7833,7 @@ mod tests {
                 "impl<L> PgWritePool<L> { fn producer_tx() {} fn retry_producer_tx() {} }",
             ),
             (
-                "session_lifecycle.rs",
+                "auth_grant_lifecycle.rs",
                 "async fn persist(pool: P) { pool.write(scope, operation, storage).await; }",
             ),
             ("policy_repo.rs", ""),
@@ -7860,7 +7860,7 @@ mod tests {
         let mut files = load_prod_rs(&root.join("adapters/postgres/src"))?;
         let session = files
             .iter_mut()
-            .find(|(path, _)| path == "session_lifecycle.rs")
+            .find(|(path, _)| path == "auth_grant_lifecycle.rs")
             .context("session provider")?;
         session.1.push_str(
             r#"
@@ -8906,7 +8906,7 @@ pub mod fault_matrix;
                     "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
                 ),
                 (
-                    "session_lifecycle.rs",
+                    "auth_grant_lifecycle.rs",
                     "async fn f(){ let c = pool.acquire().await; store.run_global_transaction(|_| sqlx::query(\"UPDATE roles SET id=id\")); }",
                 ),
             ]),
@@ -9009,7 +9009,7 @@ pub mod fault_matrix;
                     "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
                 ),
                 (
-                    "session_lifecycle.rs",
+                    "auth_grant_lifecycle.rs",
                     "async fn write_session(conn: &mut PgConnection){ sqlx::query(\"INSERT INTO roles VALUES (1)\").execute(&mut *conn).await; }\n\
                      async fn f(){ store.run_global_transaction(|conn| write_session(conn)); }",
                 ),
@@ -10667,8 +10667,8 @@ pub trait SecretRepoLocal: Send + Sync {
         );
         assert_retry_shape(
             &mut sites,
-            "session_lifecycle.rs",
-            "impl Repo { async fn logout(&self, mutation: SessionLogoutMutation){ let (_, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, |_attempt, deadline| async { self.pool.retry_write(scope, deadline) }, classify).await; } }",
+            "auth_grant_lifecycle.rs",
+            "impl Repo { async fn close(&self, mutation: AuthGrantCloseCommand){ let (_, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, |_attempt, deadline| async { self.pool.retry_write(scope, deadline) }, classify).await; } }",
         );
         assert_retry_shape(
             &mut sites,
@@ -10751,7 +10751,7 @@ pub trait SecretRepoLocal: Send + Sync {
                     | "config_repo.rs"
                     | "secret_repo.rs"
                     | "credential_repo.rs"
-                    | "session_lifecycle.rs"
+                    | "auth_grant_lifecycle.rs"
                     | "refresh_token_store.rs"
                     | "audit_repo.rs"
                     | "auth_audit_sink.rs"
@@ -10965,7 +10965,7 @@ async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
                     | "config_repo.rs"
                     | "secret_repo.rs"
                     | "credential_repo.rs"
-                    | "session_lifecycle.rs"
+                    | "auth_grant_lifecycle.rs"
                     | "refresh_token_store.rs"
                     | "audit_repo.rs"
                     | "auth_audit_sink.rs"

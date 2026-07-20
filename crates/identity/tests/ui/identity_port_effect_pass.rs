@@ -8,7 +8,7 @@ use identity::ports::{
     DynAccountSecurityLifecycle, DynAccountSecurityReadRepo, DynCredentialRepo,
     DynPolicyLifecycle, DynPolicyRepo, DynRefreshTokenStore, DynResourceAttributeReadRepo,
     DynResourceAttributeWriteRepo, DynRoleBindingLifecycle, DynRoleBindingReadRepo,
-    DynRoleReadRepo, DynRoleWriteRepo, DynSessionLifecycle, IdentityPortEffect,
+    DynRoleReadRepo, DynRoleWriteRepo, DynAuthGrantLifecycle, IdentityPortEffect,
 };
 
 fn assert_effect<T, E, P>()
@@ -34,7 +34,7 @@ fn main() {
 
     assert_effect::<DynPolicyLifecycle<'static>, OutboxEffect, LocalPrivilege>();
     assert_effect::<DynRoleBindingLifecycle<'static>, OutboxEffect, LocalPrivilege>();
-    assert_effect::<DynSessionLifecycle<'static>, OutboxEffect, LocalPrivilege>();
+    assert_effect::<DynAuthGrantLifecycle<'static>, OutboxEffect, LocalPrivilege>();
 
     assert_effect::<Arc<DynPolicyRepo<'static>>, AuthEffect, LocalPrivilege>();
     assert_effect::<Box<DynRoleReadRepo<'static>>, ReadEffect, LocalPrivilege>();

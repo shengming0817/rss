@@ -481,7 +481,7 @@ fn assert_producer_fault(
 
 fn evidence_provider_path(contract_id: &str) -> &'static str {
     match contract_id {
-        "identity.login" => "adapters/postgres/src/session_lifecycle.rs",
+        "identity.login" => "adapters/postgres/src/auth_grant_lifecycle.rs",
         "identity.policies-create"
         | "identity.policies-deactivate"
         | "identity.policies-update" => "adapters/postgres/src/policy_repo.rs",

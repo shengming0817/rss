@@ -1,8 +1,7 @@
 //! identity 域内部接缝（in-memory 仓储替身，test / seed-login 门控）。
 //!
 //! `mem`：in-memory 实现——`InMemCredentialRepo`（`CredentialRepo` 域形 DI port 哈希凭据 / 锁定替身，PR3）+
-//! `InMemSessionLifecycle`（`SessionLifecycle` 域形 DI port 创建 / 查询 / 软撤销替身，合并原 `InMemSessionRepo`，
-//! #1278；`#[cfg(test)]` 门控）。
+//! `InMemAuthGrantStore`（同一共享状态实现 `AuthGrantLifecycle` 与 `RefreshTokenStore`）。
 //! G1 tracer（`InMemUserRepo` / `UserRepo`）已随 PR4 #1189 删除。
 //! 生产持久化由 postgres adapter 实现；本模块不进入生产依赖图。
 

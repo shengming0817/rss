@@ -92,8 +92,8 @@ deny = [
   #   `journeys` 是验收 journey 组合根（RW-G1，#999）——故出现在每条域/adapter/generated wrappers。
   #   `examples/*` 是收窄示例层，只能依赖基础/引擎/DI-infra/服务；不进这些全权限 wrappers。
   #   adapter wrapper 经 LAYER-DEPS-06 反向②补强：必须有真实 adapter→domain source edge。
-  # postgres impl RoleRepo + SessionLifecycle（合并 co-tx 创建 + find/revoke，#1083/#1192/#1278）；memory impl
-  #   SessionLifecycle（demo provider，#1192/#1278）——均 adapter→域 DIP 内向边（Option 2/ADR-005），故加入 identity wrapper。
+  # postgres impl RoleRepo + AuthGrantLifecycle（合并 co-tx 创建 + find/revoke，#1083/#1192/#1278）；memory impl
+  #   AuthGrantLifecycle（demo provider，#1192/#1278）——均 adapter→域 DIP 内向边（Option 2/ADR-005），故加入 identity wrapper。
   { crate = "identity", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "settingsonly", "identityaudit", "xtask", "journeys", "journeys-fault-matrix", "postgres", "memory"] },
   # postgres impl ConfigRepo + ConfigUnitOfWork（co-tx，#1249）+ SecretRepo（#1274）——adapter→域 DIP 内向边（Option 2/ADR-005），故加入 settings wrapper；
   # memory impl SecretResolver 是 diport::SecretResolver provider（provider-agnostic infra port）——impl 归 adapter/组合根，与 settings 域形 SecretRepo 不同 crate。

@@ -26,7 +26,7 @@
 //!   有意偏离其纯内存 softlock——多实例 PostgreSQL 须持久化 + 行锁原子 RMW，kanidm 自身注释亦承认内存方案分布式 bypass）
 //! ref: RustCrypto/password-hashes argon2/src/lib.rs@master（PHC string at-rest，经 `secure::PasswordHash`）
 //! ref: adapters/postgres/src/role_repo.rs（#1250 pool 注入 / SET LOCAL / storage 收口 / hydrate 范本）
-//! ref: adapters/postgres/src/session_lifecycle.rs（#1278 epoch↔SystemTime 编码对称）
+//! ref: adapters/postgres/src/auth_grant_lifecycle.rs（#1278 epoch↔SystemTime 编码对称）
 
 #[cfg(all(test, feature = "integration"))]
 use std::collections::{HashMap, HashSet};

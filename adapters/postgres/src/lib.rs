@@ -27,6 +27,11 @@ mod account_security_repo;
 mod audit_repo;
 #[cfg(feature = "domain-audit")]
 mod auth_audit_sink;
+#[cfg(feature = "domain-identity")]
+mod auth_grant_lifecycle;
+#[cfg(feature = "domain-identity")]
+mod auth_grant_provider;
+mod auth_grant_sweeper;
 mod bundle;
 mod cas_store;
 mod checkpoint;
@@ -72,9 +77,6 @@ mod saga_candidates;
 #[cfg(feature = "domain-settings")]
 mod secret_repo;
 mod service_token_replay;
-#[cfg(feature = "domain-identity")]
-mod session_lifecycle;
-mod session_sweeper;
 mod tx;
 #[cfg(any(
     feature = "domain-settings",
@@ -131,6 +133,11 @@ pub use projection_control::{
 // Projection writer 不 re-export raw append DTO：写入口经 outbox writer funnel + generated registry +
 // DB SECURITY DEFINER function 收口（eventbus.md §Projection sealed 写入）。读路径返回 consistency
 // engine-owned ProjectionEventRecord，不公开 adapter DTO。
+#[cfg(feature = "domain-identity")]
+pub use auth_grant_lifecycle::PgAuthGrantLifecycle;
+#[cfg(feature = "domain-identity")]
+pub use auth_grant_provider::PgAuthGrantProvider;
+pub use auth_grant_sweeper::{AuthGrantSweepDeadline, PgAuthGrantSweeper};
 pub use projection_events::{PgProjectionEvents, ProjectionEventsError};
 pub use reconcile::{
     PgReconcileStore, ReconcileActionErrorKind, ReconcileAttemptInsert,
@@ -152,9 +159,6 @@ pub use saga::{PgSagaInstanceStore, PgSagaJournal};
 #[cfg(feature = "domain-settings")]
 pub use secret_repo::{PgSecretRepo, PgSecretUnitOfWork};
 pub use service_token_replay::{PgServiceTokenReplayStore, PgServiceTokenReplaySweeper};
-#[cfg(feature = "domain-identity")]
-pub use session_lifecycle::PgSessionLifecycle;
-pub use session_sweeper::PgSessionSweeper;
 
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests;
@@ -258,13 +262,13 @@ mod smoke {
     //! 编译证明。PhantomData 绑定检查，不构造、不执行 body。
     //! INVARIANT: ADAPTER-PORT-FREEZE-06 { level = "Medium", exec = "manual/opt-in", source = "code" }—— ManagedResource on PgStore + RoleReadRepo on PgRoleRepo（真实 impl，#1250）+
     //! InboxStore/InboxBacklog on PgInboxStore + SagaJournal on PgSagaJournal + CasStore on PgCasStore +
-    //! OwnerCheckpointStore on PgCheckpointStore + SessionLifecycle on PgSessionLifecycle（完整 durable impl：co-tx 创建 #1083/#1192 + find/revoke #1278）+
+    //! OwnerCheckpointStore on PgCheckpointStore + AuthGrantLifecycle on PgAuthGrantLifecycle（login co-tx + find/close）+
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
     //! SecretRepo on PgSecretRepo + SecretUnitOfWork on PgSecretUnitOfWork（真实 impl，#1274）+
     //! CredentialRepo on PgCredentialRepo（真实 impl，credentials 表 + 折叠锁定态 + 行锁原子 RMW，#1316）+
     //! RefreshTokenStore on PgRefreshTokenStore（真实 impl：哈希存储 + CAS rotation + RLS，#1325）+
     //! read/write ports on PgAuditRepo（真实 impl：append-only per-tenant keyed-HMAC chain + RLS，#1230）+
-    //! PgSessionSweeper concrete maintenance type（#1233，不新增 identity 域端口）；
+    //! PgAuthGrantSweeper concrete maintenance type（不新增 identity 域端口）；
     //! 去掉任一即编译失败（anti-vacuity）。
     //! INVARIANT: PG-BUNDLE-DOMAIN-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— `caps::Settings` / `caps::Identity` / `caps::Audit` 均满足 sealed `PgDomain`
     //! bound（正向）；跨域 accessor 误用的负向 anti-vacuity = `bundle::PgDomainDeps` 的 `compile_fail` doctest。
@@ -276,7 +280,7 @@ mod smoke {
     fn assert_role_write_repo<T: identity::ports::RoleWriteRepo>(_: PhantomData<T>) {}
     fn assert_policy_repo<T: identity::ports::PolicyRepo>(_: PhantomData<T>) {}
     fn assert_credential_repo<T: identity::ports::CredentialRepo>(_: PhantomData<T>) {}
-    fn assert_session_lifecycle<T: identity::ports::SessionLifecycle>(_: PhantomData<T>) {}
+    fn assert_auth_grant_lifecycle<T: identity::ports::AuthGrantLifecycle>(_: PhantomData<T>) {}
     fn assert_inbox_store<T: consistency::InboxStore>(_: PhantomData<T>) {}
     fn assert_inbox_backlog<T: consistency::InboxBacklog>(_: PhantomData<T>) {}
     fn assert_outbox_backlog<T: consistency::OutboxBacklog>(_: PhantomData<T>) {}
@@ -309,9 +313,9 @@ mod smoke {
         // `PgCredentialRepo: CredentialRepo` 真实 impl（非 edge proof）——credentials 表 + 折叠锁定态 +
         // SELECT FOR UPDATE 原子 RMW（#1316）；类型级 anti-vacuity 只检查 trait 满足、不执行 body。
         assert_credential_repo(PhantomData::<super::PgCredentialRepo>);
-        // `PgSessionLifecycle: SessionLifecycle` 完整 durable impl（非 edge proof）——co-tx 创建（#1083/#1192）
-        // + find/revoke（#1278，0009 revoked 列）；类型级 anti-vacuity 只检查 trait 满足、不执行 body。
-        assert_session_lifecycle(PhantomData::<super::PgSessionLifecycle>);
+        // `PgAuthGrantLifecycle: AuthGrantLifecycle` 完整 durable impl；类型级 anti-vacuity
+        // 只检查 trait 满足、不执行 body。
+        assert_auth_grant_lifecycle(PhantomData::<super::PgAuthGrantLifecycle>);
         // `PgInboxStore: InboxStore + InboxBacklog` 类型级 anti-vacuity edge proof（不构造、不执行 body）。
         assert_inbox_store(PhantomData::<super::PgInboxStore>);
         assert_inbox_backlog(PhantomData::<super::PgInboxStore>);
@@ -341,9 +345,9 @@ mod smoke {
         assert_send_sync(
             PhantomData::<super::PgAuditConsumerTx<super::audit_repo::test_support::TestVerifier>>,
         );
-        // `PgSessionSweeper` 是 concrete postgres maintenance 能力，不 impl identity 域端口；Send+Sync smoke
+        // `PgAuthGrantSweeper` 是 concrete postgres maintenance 能力，不 impl identity 域端口；Send+Sync smoke
         // 锁住可进入 runtime worker 的形状。
-        assert_send_sync(PhantomData::<super::PgSessionSweeper>);
+        assert_send_sync(PhantomData::<super::PgAuthGrantSweeper>);
         // PG-BUNDLE-DOMAIN-02：三个 per-domain marker 均满足 sealed `PgDomain`（去掉任一 impl 即编译失败）。
         assert_pg_domain(PhantomData::<super::caps::Settings>);
         assert_pg_domain(PhantomData::<super::caps::Identity>);

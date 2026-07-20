@@ -44,8 +44,8 @@ use generated::http::settings_v1::SettingsConfigPublishRequest;
 use httpserve::ProducerMarker;
 use identity::ports::{
     AttributeKey, AttributeValue, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
-    DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleReadRepo, DynSessionLifecycle,
-    Operator, POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyLifecycle,
+    DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleReadRepo, Operator,
+    POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyLifecycle,
     PolicyObligations, PolicyRouteScope, PolicyRule, TenantId, TenantRepoScope,
 };
 use identity::{IdentityDomain, IdentityDomainDeps, LoginService};
@@ -537,20 +537,18 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     let (audit_domain_inst, _audit) = audit_domain();
 
-    // identity 域：with_seed_credential 注入 in-mem 凭据 + PgSessionLifecycle durable co-tx。
+    // identity 域：with_seed_credential 注入 in-mem 凭据 + PgAuthGrantLifecycle durable co-tx。
     let mut refresh_identity = None;
     let login_identity = Arc::new(LoginService::with_seed_credential(
-        Arc::from(DynSessionLifecycle::new_box(
-            id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
-        )),
         |accounts| {
-            let service = identity::seed_refresh_service(
+            let services = identity::seed_auth_grant_services(
+                id.auth_grant_provider(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
                 accounts,
                 || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
                 Duration::from_secs(TTL_SECS),
             );
-            refresh_identity = Some(Arc::clone(&service));
-            service
+            refresh_identity = Some(services.refresh_service());
+            services
         },
         test_password_policy()?,
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
@@ -945,15 +943,13 @@ async fn event_transport_durable_e2e() -> Result<()> {
         anyhow::anyhow!("timeout 20s 内 audit 未收到 policy-updated 事件（policy_id={policy_id}）")
     })?;
 
-    // ── 步骤 8：生产侧登录（PgSessionLifecycle co-tx：session 行 + outbox(pending) 同事务落库）──
+    // ── 步骤 8：生产侧登录（PgAuthGrantLifecycle co-tx：session 行 + outbox(pending) 同事务落库）──
 
     // 第二个 LoginService 实例（同种子凭据），用于直接调用 .login()。
     let login_svc = LoginService::with_seed_credential(
-        Arc::from(DynSessionLifecycle::new_box(
-            id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
-        )),
         |accounts| {
-            identity::seed_refresh_service(
+            identity::seed_auth_grant_services(
+                id.auth_grant_provider(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
                 accounts,
                 || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
                 Duration::from_secs(TTL_SECS),

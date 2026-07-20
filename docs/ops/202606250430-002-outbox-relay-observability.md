@@ -238,16 +238,17 @@ outbox/inbox 使用 bounded retention sweep；dead_letter 使用独立 archive-b
   `target/outcome` 来自闭枚举；不伪造未单独计时的 phase 粒度，并禁止
   tenant/id/object key/payload/error text 标签。
 
-## Session expiry sweeper（#1233）
+## AuthGrant expiry sweeper（#1233，#1834）
 
-`sessions` 过期清理是 identity 之外的 postgres/runtime maintenance 能力：runtime 的 `session-sweeper`
-worker 调用固定 `SECURITY DEFINER` 函数 `rss_sweep_expired_sessions()`，删除 `expires_at <= now()` 的行。
-该函数 owner 是 NOLOGIN `rss_session_maintenance`（BYPASSRLS），`rss_app` 只持 `EXECUTE`，不新增表级
+`auth_grants` 过期清理是 identity 之外的 postgres/runtime maintenance 能力：runtime 的
+`auth-grant-sweeper` worker 调用固定 `SECURITY DEFINER` 函数
+`rss_sweep_expired_auth_grants()`，删除 `expires_at <= now()` 的根；复合外键级联清理已关闭刷新族。
+该函数 owner 是 NOLOGIN `rss_auth_grant_maintenance`（BYPASSRLS），`rss_app` 只持 `EXECUTE`，不新增表级
 maintenance 权限，也不暴露 tenant / raw SQL / retain 参数入口。
 
-- readyz probe：`session_sweeper`。tick 成功为 Healthy，sweep 失败为 Degraded，worker 停止为 Unhealthy。
-- 调度 env：`RSS_SESSION_SWEEP_INTERVAL_MS`，默认 300000ms，最小 1000ms；误配 warn + 默认。
-- 删除谓词固定为 `expires_at <= now()`，无 grace period；保留 future session 和 revoked-but-future session。
+- readyz probe：`auth_grant_sweeper`。tick 成功为 Healthy，sweep 失败为 Degraded，worker 停止为 Unhealthy。
+- 调度 env：`RSS_AUTH_GRANT_SWEEP_INTERVAL_MS`，默认 300000ms，最小 1000ms；误配 warn + 默认。
+- 删除谓词固定为 `expires_at <= now()`，无 grace period；保留 future AuthGrant。
 
 ## 接线（#1429）
 

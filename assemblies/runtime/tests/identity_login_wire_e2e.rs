@@ -1,5 +1,5 @@
 //! identity login + refresh 生产 wire e2e（#1252）：wiremock vault Transit mock（动态 ES256 签）+
-//! postgres credential/session/refresh store → `wire_identity_with` → Primary router handler。
+//! postgres credential/AuthGrant/refresh store → `wire_identity_with` → Primary router handler。
 //!
 //! 覆盖：
 //! ① login → 201 + accessToken/refreshToken/accessExpiresAt/sessionId（vault mock 真实签发，生产 wire 通路）；
@@ -328,7 +328,7 @@ fn identity_test_values(vault_addr: &str) -> IdentityTestValues {
         access_token_audience: "rss".to_string(),
         access_token_key_id: "rss-jwt-es256".to_string(),
         access_token_ttl: Duration::from_secs(900),
-        session_ttl: Duration::from_secs(3_600),
+        auth_grant_ttl: Duration::from_secs(2_592_000),
         refresh_ttl: Duration::from_secs(2_592_000),
         vault_allow_http: true,
     }

@@ -44,8 +44,10 @@ use diport::{
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
 use identity::ports::{
-    IdentityError, LoginProducerReceipt, Session, SessionId, SessionLifecycle,
-    SessionLogoutMutation, TenantRepoScope,
+    AuthGrant, AuthGrantCloseCommand, AuthGrantId, AuthGrantLifecycle, AuthGrantStatus,
+    IdentityError, LoginGrantMutation, RefreshRotationMutation, RefreshRotationOutcome,
+    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot,
+    RefreshTokenStore, TenantRepoScope,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -53,6 +55,22 @@ use tokio_util::sync::CancellationToken;
 // 且 lib 代码禁 unwrap/expect（clippy deny）。`unwrap_or_else(into_inner)` 取回 guard，clippy-clean。
 
 // ── MemBus：publisher / subscriber 共享的 in-mem 事件总线 ──────────────────────
+
+#[cfg(test)]
+struct PublishProbe {
+    enqueued: std::sync::Barrier,
+    release: std::sync::Barrier,
+}
+
+#[cfg(test)]
+impl PublishProbe {
+    fn new() -> Self {
+        Self {
+            enqueued: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        }
+    }
+}
 
 #[derive(Default)]
 struct BusInner {
@@ -66,6 +84,8 @@ struct BusInner {
 #[derive(Clone, Default)]
 pub struct MemBus {
     inner: Arc<Mutex<BusInner>>,
+    #[cfg(test)]
+    publish_probe: Option<Arc<PublishProbe>>,
 }
 
 impl MemBus {
@@ -83,6 +103,38 @@ impl MemBus {
     pub fn subscriber(&self) -> MemSubscriber {
         MemSubscriber { bus: self.clone() }
     }
+
+    #[cfg(test)]
+    fn with_publish_probe(mut self, probe: Arc<PublishProbe>) -> Self {
+        self.publish_probe = Some(probe);
+        self
+    }
+
+    fn publish_sync(&self, request: PublishRequest) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.seq += 1;
+        let id = if request.event_id().as_str().is_empty() {
+            format!("mem-{}", inner.seq)
+        } else {
+            request.event_id().as_str().to_string()
+        };
+        let topic = request.topic().as_str().to_string();
+        let metadata = transport_metadata(request.metadata());
+        let payload = request.into_payload();
+        inner.topics.entry(topic).or_default().retain(|tx| {
+            tx.unbounded_send(Message::new_with_metadata(
+                id.clone(),
+                payload.clone(),
+                metadata.clone(),
+            ))
+            .is_ok()
+        });
+        #[cfg(test)]
+        if let Some(probe) = &self.publish_probe {
+            probe.enqueued.wait();
+            probe.release.wait();
+        }
+    }
 }
 
 /// in-mem 发布端口。
@@ -92,30 +144,7 @@ pub struct MemPublisher {
 
 impl Publisher for MemPublisher {
     async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
-        let mut inner = self.bus.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.seq += 1;
-        // event_id（去重锚点 / EventId）作 Message.id，使消费侧 `run_consumer` 的幂等键与 durable
-        // 路径一致（重投同一 EventId → Duplicate 短路）。event_id 空才回退单调 seq（保旧 demo 行为）。
-        let id = if request.event_id().as_str().is_empty() {
-            format!("mem-{}", inner.seq)
-        } else {
-            request.event_id().as_str().to_string()
-        };
-        let topic = request.topic().as_str().to_string();
-        // Memory bus is a broker substitute: expose only transport-safe metadata
-        // to consumers, matching AMQP/MQTT header semantics.
-        let metadata = transport_metadata(request.metadata());
-        let payload = request.into_payload();
-        let senders = inner.topics.entry(topic).or_default();
-        // 投递 clone 给每个订阅者；receiver 已 drop（unbounded_send Err）则剔除（对标 gochannel 退订清理）。
-        senders.retain(|tx| {
-            tx.unbounded_send(Message::new_with_metadata(
-                id.clone(),
-                payload.clone(),
-                metadata.clone(),
-            ))
-            .is_ok()
-        });
+        self.bus.publish_sync(request);
         Ok(())
     }
 
@@ -263,7 +292,7 @@ impl<'a> TenantMetadataBinding<'a> {
 }
 
 /// Broker-visible envelope metadata emitted by in-mem outbox paths. Keep `MemEmitter` and
-/// `MemSessionLifecycle` aligned so demo providers exercise transport-safe tenant metadata.
+/// `MemAuthGrantStore` aligned so demo providers exercise transport-safe tenant metadata.
 fn envelope_metadata(
     envelope: &OutboxEnvelopeParts,
     topic: &str,
@@ -320,66 +349,114 @@ impl OutboxEmitter for MemEmitter {
     }
 }
 
-// ── MemSessionLifecycle：in-mem 会话生命周期替身（demo 拓扑）────────────────────
+// ── MemAuthGrantStore：统一认证授权根 / refresh family provider（demo 拓扑）─────
 
-/// in-mem 会话生命周期 provider（impl [`identity::ports::SessionLifecycle`]，合并原 `MemSessionUnitOfWork`，
-/// #1278）：`persist_session_and_emit` 把 session 存入进程内 store 并把 [`Entry`] fan-out 到 [`MemBus`]，
-/// `find` / `logout` 在同一 store 操作——demo / 单进程 / 测试用；生产走 postgres `PgSessionLifecycle`
-/// （单事务 session + outbox co-tx）。
+#[derive(Default)]
+struct AuthGrantStoreState {
+    grants: HashMap<AuthGrantId, AuthGrant>,
+    refresh: HashMap<RefreshTokenId, RefreshTokenRecord>,
+}
+
+/// Demo-only unified provider. One shared state implements both [`AuthGrantLifecycle`] and
+/// [`RefreshTokenStore`], so login cannot persist an initial refresh token into an unrelated store.
 ///
 /// # WARNING / DEMO-ONLY
 ///
-/// session store 是**进程内 in-mem**（同 [`MemEmitter`] 的 demo 哲学）：单进程内 login 写入的会话可被
-/// 后续 logout / 查询查回（合并端口后 demo 也能验 logout 闭环），但**重启即丢、多实例不共享**——不是
-/// durable 会话存储。需验 durable「session 跨进程可读 / 撤销」的验收**勿用本替身**——走 postgres 路径。
-///
-/// co-tx 原子性（both-or-neither：session 行 + outbox 行同事务）与 durable 持久化由 postgres
-/// `PgSessionLifecycle`（INVARIANT OUTBOX-COTX-SESSION-01）+ 集成测试守。envelope metadata 经 `MemEmitter`
-/// 同一 helper 注入，保证 demo consumer DLX 路径也能读取 tenantId。
-pub struct MemSessionLifecycle {
+/// State is process-local and disappears on restart. Durable grant/refresh/outbox guarantees are
+/// provided by PostgreSQL; this provider exists for journeys and single-process demos.
+#[derive(Clone)]
+pub struct MemAuthGrantStore {
     bus: MemBus,
     tenant_signer: Option<Arc<dyn TenantMetadataSigner>>,
-    /// `SessionId` → `(Session, revoked_flag)`：进程内会话 store（demo logout/查询可见 login 写入）。
-    sessions: Arc<Mutex<HashMap<SessionId, (Session, bool)>>>,
+    clock: Arc<dyn Clock>,
+    state: Arc<Mutex<AuthGrantStoreState>>,
 }
 
-impl MemSessionLifecycle {
-    /// 绑定 [`MemBus`] 构造（与 publisher / subscriber 共享同一总线底座）；session store 初始为空。
-    pub fn new(bus: MemBus) -> Self {
+impl MemAuthGrantStore {
+    /// Bind the provider to the same in-memory bus and clock used by the demo composition.
+    pub fn new(bus: MemBus, clock: Arc<dyn Clock>) -> Self {
         Self {
             bus,
             tenant_signer: None,
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            clock,
+            state: Arc::new(Mutex::new(AuthGrantStoreState::default())),
         }
     }
 
-    /// 绑定 tenant metadata signer，供 demo/journey provider 演练 consumer fail-closed tenantAuthority 语义。
-    pub fn with_tenant_metadata_signer(bus: MemBus, signer: Arc<dyn TenantMetadataSigner>) -> Self {
+    /// Bind a tenant metadata signer and authoritative writer clock for fail-closed journey coverage.
+    pub fn with_tenant_metadata_signer(
+        bus: MemBus,
+        signer: Arc<dyn TenantMetadataSigner>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             bus,
             tenant_signer: Some(signer),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            clock,
+            state: Arc::new(Mutex::new(AuthGrantStoreState::default())),
         }
     }
 }
 
-impl SessionLifecycle for MemSessionLifecycle {
-    async fn persist_session_and_emit(
+fn auth_grant_binding_matches(grant: &AuthGrant, refresh: &RefreshTokenRecord) -> bool {
+    grant.status() == AuthGrantStatus::Active
+        && refresh.status() == RefreshStatus::Active
+        && refresh.auth_grant_status() == AuthGrantStatus::Active
+        && refresh.tenant() == grant.tenant()
+        && refresh.auth_grant_id() == grant.id()
+        && refresh.user_id() == grant.user_id()
+        && refresh.issuance_epoch() == grant.authn_epoch_at_issue()
+        && refresh.expires_at() <= grant.expires_at()
+}
+
+fn identity_storage_error(message: &'static str) -> IdentityError {
+    IdentityError::Storage(Box::new(std::io::Error::other(message)))
+}
+
+fn transition_refresh(
+    record: &RefreshTokenRecord,
+    status: RefreshStatus,
+    grant_status: AuthGrantStatus,
+) -> Result<RefreshTokenRecord, IdentityError> {
+    RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
+        id: record.id().clone(),
+        tenant: record.tenant(),
+        auth_grant_id: record.auth_grant_id().clone(),
+        user_id: record.user_id(),
+        authn_epoch_at_issue: record.issuance_epoch(),
+        auth_grant_status: grant_status,
+        token_hash: record.token_hash().clone(),
+        parent_id: record.parent_id().cloned(),
+        lineage_id: record.lineage_id().clone(),
+        status,
+        issued_at: record.issued_at(),
+        expires_at: record.expires_at(),
+    })
+    .ok_or_else(|| identity_storage_error("persisted refresh record is invalid"))
+}
+
+impl AuthGrantLifecycle for MemAuthGrantStore {
+    async fn persist_login_grant(
         &self,
-        receipt: LoginProducerReceipt,
+        receipt: identity::ports::LoginProducerReceipt,
         scope: TenantRepoScope,
-        session: Session,
+        mutation: LoginGrantMutation,
         entry: EventEntry,
         envelope: OutboxEnvelopeParts,
-    ) -> Result<(), OutboxEmitError> {
-        if session.tenant() != scope.tenant() {
+    ) -> Result<identity::ports::PersistedLoginGrantReceipt, OutboxEmitError> {
+        let (grant, initial_refresh, persistence) = mutation.into_parts();
+        if grant.tenant() != scope.tenant()
+            || !auth_grant_binding_matches(&grant, &initial_refresh)
+            || initial_refresh.parent_id().is_some()
+            || initial_refresh.lineage_id() != initial_refresh.id()
+        {
             return Err(OutboxEmitError::new(std::io::Error::other(
-                "session persist tenant scope mismatch",
+                "login grant binding mismatch",
             )));
         }
         if envelope.tenant() != scope.tenant() {
             return Err(OutboxEmitError::new(std::io::Error::other(
-                "session persist envelope tenant scope mismatch",
+                "login grant envelope tenant scope mismatch",
             )));
         }
         let generated_fact = entry.generated_fact().ok_or_else(|| {
@@ -394,14 +471,6 @@ impl SessionLifecycle for MemSessionLifecycle {
                     "login producer does not authorize session-created envelope",
                 ))
             })?;
-        // demo：把 session 存入进程内 store（demo logout/查询可见），再复用 MemPublisher 把 entry fan 到总线
-        // （`Message.id = entry.idem_key()` = EventId，闭合 demo 侧幂等传播）。
-        // reason: 真实 co-tx both-or-neither + durable 持久化由 PgSessionLifecycle 的 OUTBOX-COTX-SESSION-01
-        // 守；本替身重启即丢，envelope 只作为 Message metadata 透传，DEMO-ONLY。
-        self.sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(session.id().clone(), (session, false));
         let topic = entry.topic().as_str();
         let message_id = entry.idem_key().as_str();
         let request = PublishRequest::new(
@@ -413,38 +482,210 @@ impl SessionLifecycle for MemSessionLifecycle {
             envelope_metadata(&envelope, topic, message_id, self.tenant_signer.as_deref())
                 .map_err(|source| OutboxEmitError::new(TenantMetadataSignFailure { source }))?,
         );
-        self.bus
-            .publisher()
-            .publish(request)
-            .await
-            .map_err(OutboxEmitError::new)
-    }
-
-    async fn find(
-        &self,
-        scope: TenantRepoScope,
-        session_id: SessionId,
-    ) -> Result<Option<Session>, IdentityError> {
-        let tenant = scope.tenant();
-        let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(guard
-            .get(&session_id)
-            .filter(|(s, revoked)| !*revoked && s.tenant() == tenant) // 跨租/已撤销 → None
-            .map(|(s, _)| s.clone()))
-    }
-
-    async fn logout(
-        &self,
-        scope: TenantRepoScope,
-        mutation: SessionLogoutMutation,
-    ) -> Result<(), IdentityError> {
-        let (session_id, _observation) = mutation.into_parts();
-        let tenant = scope.tenant();
-        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = guard.get_mut(&session_id)
-            && entry.0.tenant() == tenant
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.grants.contains_key(grant.id())
+            || state.refresh.contains_key(initial_refresh.id())
+            || state.refresh.values().any(|record| {
+                record.tenant() == initial_refresh.tenant()
+                    && record.token_hash() == initial_refresh.token_hash()
+            })
         {
-            entry.1 = true; // 跨租 no-op；幂等
+            return Err(OutboxEmitError::new(std::io::Error::other(
+                "login grant already exists",
+            )));
+        }
+        state
+            .refresh
+            .insert(initial_refresh.id().clone(), initial_refresh);
+        state.grants.insert(grant.id().clone(), grant);
+        drop(state);
+        // In-memory publish is infallible. Make aggregate state visible before an asynchronous
+        // subscriber can observe the corresponding session-created event.
+        self.bus.publish_sync(request);
+        Ok(persistence.confirm())
+    }
+
+    async fn find_active(
+        &self,
+        scope: TenantRepoScope,
+        grant_id: AuthGrantId,
+        observed_at: SystemTime,
+    ) -> Result<Option<AuthGrant>, IdentityError> {
+        let tenant = scope.tenant();
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .grants
+            .get(&grant_id)
+            .filter(|grant| {
+                grant.tenant() == tenant
+                    && grant.status() == AuthGrantStatus::Active
+                    && grant.expires_at() > observed_at
+            })
+            .cloned())
+    }
+
+    async fn close(
+        &self,
+        scope: TenantRepoScope,
+        command: AuthGrantCloseCommand,
+    ) -> Result<(), IdentityError> {
+        let (mutation, _observation) = command.into_parts();
+        let next = mutation.into_next();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(current) = state.grants.get(next.id()) else {
+            return Ok(());
+        };
+        if current.tenant() != scope.tenant() {
+            return Ok(());
+        }
+        let binding_mismatch = next.tenant() != current.tenant()
+            || next.user_id() != current.user_id()
+            || next.authn_epoch_at_issue() != current.authn_epoch_at_issue()
+            || next.auth_time() != current.auth_time()
+            || next.created_at() != current.created_at()
+            || next.expires_at() != current.expires_at();
+        if current.status() != AuthGrantStatus::Active {
+            return if !binding_mismatch
+                && current.status() == next.status()
+                && current.close_reason() == next.close_reason()
+            {
+                Ok(())
+            } else {
+                Err(identity_storage_error(
+                    "authentication grant close binding mismatch",
+                ))
+            };
+        }
+        if binding_mismatch || next.status() == AuthGrantStatus::Active {
+            return Err(identity_storage_error(
+                "authentication grant close binding mismatch",
+            ));
+        }
+        let transitioned = state
+            .refresh
+            .values()
+            .filter(|record| {
+                record.tenant() == next.tenant() && record.auth_grant_id() == next.id()
+            })
+            .map(|record| {
+                transition_refresh(record, RefreshStatus::Revoked, next.status())
+                    .map(|next| (record.id().clone(), next))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for (id, refresh) in transitioned {
+            state.refresh.insert(id, refresh);
+        }
+        state.grants.insert(next.id().clone(), next);
+        Ok(())
+    }
+}
+
+impl RefreshTokenStore for MemAuthGrantStore {
+    async fn find_by_hash(
+        &self,
+        scope: TenantRepoScope,
+        hash: RefreshTokenHash,
+    ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .refresh
+            .values()
+            .find(|record| record.tenant() == scope.tenant() && record.token_hash() == &hash)
+            .cloned())
+    }
+
+    async fn rotate(
+        &self,
+        scope: TenantRepoScope,
+        mutation: RefreshRotationMutation,
+    ) -> Result<RefreshRotationOutcome, IdentityError> {
+        let (rotation, _observation) = mutation.into_parts();
+        let old_id = rotation.old_id().clone();
+        let new = rotation.new_record().clone();
+        if new.tenant() != scope.tenant() {
+            return Err(identity_storage_error(
+                "refresh rotate tenant scope mismatch",
+            ));
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(old) = state.refresh.get(&old_id).cloned() else {
+            return Ok(RefreshRotationOutcome::Replay);
+        };
+        if old.auth_grant_status() != AuthGrantStatus::Active {
+            return Ok(RefreshRotationOutcome::AccountStale);
+        }
+        if old.status() != RefreshStatus::Active {
+            return Ok(RefreshRotationOutcome::Replay);
+        }
+        let decision_time = self.clock.now().max(new.issued_at());
+        if old.is_expired(decision_time) {
+            return Ok(RefreshRotationOutcome::Expired);
+        }
+        if old.tenant() != new.tenant()
+            || new.parent_id() != Some(old.id())
+            || new.lineage_id() != old.lineage_id()
+            || new.auth_grant_id() != old.auth_grant_id()
+            || new.user_id() != old.user_id()
+            || new.issuance_epoch() != old.issuance_epoch()
+            || new.auth_grant_status() != AuthGrantStatus::Active
+        {
+            return Err(identity_storage_error("refresh rotation binding mismatch"));
+        }
+        let Some(grant) = state.grants.get(old.auth_grant_id()) else {
+            return Err(identity_storage_error("refresh rotation grant is missing"));
+        };
+        if grant.tenant() != old.tenant()
+            || grant.user_id() != old.user_id()
+            || grant.authn_epoch_at_issue() != old.issuance_epoch()
+        {
+            return Err(identity_storage_error(
+                "refresh rotation grant binding mismatch",
+            ));
+        }
+        if grant.status() != AuthGrantStatus::Active {
+            return Ok(RefreshRotationOutcome::AccountStale);
+        }
+        if grant.expires_at() <= decision_time || new.expires_at() > grant.expires_at() {
+            return Ok(RefreshRotationOutcome::Expired);
+        }
+        if state.refresh.contains_key(new.id())
+            || state.refresh.values().any(|record| {
+                record.tenant() == new.tenant() && record.token_hash() == new.token_hash()
+            })
+        {
+            return Err(identity_storage_error(
+                "refresh rotation target already exists",
+            ));
+        }
+        let consumed = transition_refresh(&old, RefreshStatus::Consumed, AuthGrantStatus::Active)?;
+        state.refresh.insert(old_id, consumed);
+        state.refresh.insert(new.id().clone(), new);
+        Ok(RefreshRotationOutcome::Applied)
+    }
+
+    async fn revoke_lineage(
+        &self,
+        scope: TenantRepoScope,
+        lineage_id: RefreshTokenId,
+    ) -> Result<(), IdentityError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let transitioned = state
+            .refresh
+            .values()
+            .filter(|record| {
+                record.tenant() == scope.tenant() && record.lineage_id() == &lineage_id
+            })
+            .map(|record| {
+                transition_refresh(record, RefreshStatus::Revoked, record.auth_grant_status())
+                    .map(|next| (record.id().clone(), next))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for (id, record) in transitioned {
+            state.refresh.insert(id, record);
         }
         Ok(())
     }
@@ -1552,6 +1793,7 @@ impl SecretResolver for MemSecretResolver {
 mod tests {
     use super::*;
     use diport::AuditOutcome;
+    use identity::ports::AuthGrantCloseReason;
     use vocab::TenantId;
 
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -1561,6 +1803,48 @@ mod tests {
 
     fn login_receipt() -> identity::ports::LoginProducerReceipt {
         identity::test_support::login_producer_receipt()
+    }
+
+    fn test_grant(id: &str, tenant: TenantId) -> AuthGrant {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        identity::test_support::auth_grant(
+            id,
+            identity::test_support::user_id("11111111-2222-4333-8444-555555555555"),
+            tenant,
+            now,
+            identity::AuthnEpoch::ZERO,
+            now + Duration::from_secs(3_600),
+            now,
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn initial_refresh(grant: &AuthGrant, id: &str, hash: [u8; 32]) -> RefreshTokenRecord {
+        let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let id = RefreshTokenId::hydrate(id);
+        RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
+            id: id.clone(),
+            tenant: grant.tenant(),
+            auth_grant_id: grant.id().clone(),
+            user_id: grant.user_id(),
+            authn_epoch_at_issue: grant.authn_epoch_at_issue(),
+            auth_grant_status: AuthGrantStatus::Active,
+            token_hash: RefreshTokenHash::hydrate(hash),
+            parent_id: None,
+            lineage_id: id,
+            status: RefreshStatus::Active,
+            issued_at: issued,
+            expires_at: issued + Duration::from_secs(3_600),
+        })
+        .expect("valid initial refresh")
+    }
+
+    fn session_created_entry(id: &str, grant: &AuthGrant) -> EventEntry {
+        identity::test_support::session_created_entry(id, grant)
+    }
+
+    fn login_grant_mutation(grant: AuthGrant, refresh: RefreshTokenRecord) -> LoginGrantMutation {
+        LoginGrantMutation::for_test(grant, refresh)
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1812,7 +2096,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn mem_session_lifecycle_emits_tenant_metadata() {
+    async fn mem_auth_grant_store_persists_refresh_and_emits_tenant_metadata() {
         let bus = MemBus::new();
         let token = CancellationToken::new();
         let mut stream = bus
@@ -1821,20 +2105,12 @@ mod tests {
             .await
             .expect("subscribe");
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
-        let session = Session::hydrate(
-            "sess-mem-tenant",
-            "subj-opaque-session",
-            tenant,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(3600),
-            SystemTime::UNIX_EPOCH,
-        );
-        let entry = EventEntry::new(
-            EventTopic::parse(TOPIC).expect("topic"),
-            IdemKey::parse("evt-session-mem-tenant").expect("idem"),
-            consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
-        );
+        let grant = test_grant("grant-mem-tenant", tenant);
+        let refresh = initial_refresh(&grant, "refresh-mem-tenant", [7; 32]);
+        let refresh_hash = refresh.token_hash().clone();
+        let entry = session_created_entry("evt-session-mem-tenant", &grant);
         let envelope = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", TOPIC, "v1", HASH),
+            identity::ports::SESSION_CREATED_CONTRACT,
             tenant,
             diport::EnvelopeSubjectId::from_opaque("subj-opaque-session").expect("subject"),
             diport::OutboxActor::scoped(
@@ -1846,60 +2122,313 @@ mod tests {
         );
 
         let signer = Arc::new(RecordingTenantSigner::default());
-        MemSessionLifecycle::with_tenant_metadata_signer(bus.clone(), signer)
-            .persist_session_and_emit(
+        let store = MemAuthGrantStore::with_tenant_metadata_signer(
+            bus.clone(),
+            signer,
+            Arc::new(FixedClock::at_unix_secs(1_000)),
+        );
+        let _persisted = store
+            .persist_login_grant(
                 login_receipt(),
                 identity::ports::TenantRepoScope::for_test(tenant),
-                session,
+                login_grant_mutation(grant, refresh),
                 entry,
                 envelope,
             )
             .await
-            .expect("persist session and emit");
+            .expect("persist grant and emit");
 
         let msg = stream.next().await.expect("message delivered");
         assert_eq!(
             msg.metadata.tenant_id(),
             Some(tenant),
-            "MemSessionLifecycle co-tx path must carry tenantId metadata"
+            "MemAuthGrantStore co-tx path must carry tenantId metadata"
         );
         assert_eq!(
             msg.metadata.get(diport::KEY_TENANT_AUTHORITY),
             Some("signed-tenant-authority"),
-            "signed MemSessionLifecycle path must carry tenantAuthority metadata"
+            "signed MemAuthGrantStore path must carry tenantAuthority metadata"
         );
         assert_eq!(
             msg.metadata.get(diport::KEY_SUBJECT_ID),
             None,
-            "MemSessionLifecycle co-tx path must not expose persisted-only subjectId"
+            "MemAuthGrantStore co-tx path must not expose persisted-only subjectId"
         );
         assert_eq!(
             msg.metadata.get(diport::KEY_ACTOR),
             None,
-            "MemSessionLifecycle co-tx path must not expose persisted-only actor"
+            "MemAuthGrantStore co-tx path must not expose persisted-only actor"
+        );
+        assert!(
+            store
+                .find_by_hash(
+                    identity::ports::TenantRepoScope::for_test(tenant),
+                    refresh_hash,
+                )
+                .await
+                .expect("find refresh")
+                .is_some()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::expect_used)]
+    async fn mem_auth_grant_store_makes_state_visible_before_publishing_login_event() {
+        let probe = Arc::new(PublishProbe::new());
+        let bus = MemBus::new().with_publish_probe(Arc::clone(&probe));
+        let token = CancellationToken::new();
+        let mut stream = bus
+            .subscriber()
+            .subscribe(Topic::new(TOPIC), token.clone())
+            .await
+            .expect("subscribe");
+        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let scope = identity::ports::TenantRepoScope::for_test(tenant);
+        let grant = test_grant("grant-mem-publish-order", tenant);
+        let grant_id = grant.id().clone();
+        let refresh = initial_refresh(&grant, "refresh-mem-publish-order", [17; 32]);
+        let refresh_hash = refresh.token_hash().clone();
+        let store = MemAuthGrantStore::new(bus, Arc::new(FixedClock::at_unix_secs(1_000)));
+        let writer = {
+            let store = store.clone();
+            let grant = grant.clone();
+            tokio::spawn(async move {
+                store
+                    .persist_login_grant(
+                        login_receipt(),
+                        scope,
+                        login_grant_mutation(grant.clone(), refresh),
+                        session_created_entry("evt-session-mem-publish-order", &grant),
+                        OutboxEnvelopeParts::new(
+                            identity::ports::SESSION_CREATED_CONTRACT,
+                            tenant,
+                            diport::EnvelopeSubjectId::from_opaque(
+                                "subj-opaque-session-publish-order",
+                            )
+                            .expect("subject"),
+                            diport::OutboxActor::scoped(
+                                vocab::PrincipalKind::User,
+                                diport::OpaqueActorId::from_opaque(
+                                    "actor-opaque-session-publish-order",
+                                )
+                                .expect("actor"),
+                                tenant,
+                                vocab::ScopedTenant::SelfOnly,
+                            ),
+                        ),
+                    )
+                    .await
+            })
+        };
+
+        probe.enqueued.wait();
+        let message = stream.next().await.expect("event must already be enqueued");
+        assert_eq!(message.id.as_str(), "evt-session-mem-publish-order");
+
+        let visible_while_publish_is_paused = store
+            .state
+            .try_lock()
+            .map(|state| {
+                state.grants.contains_key(&grant_id)
+                    && state
+                        .refresh
+                        .values()
+                        .any(|record| record.token_hash() == &refresh_hash)
+            })
+            .unwrap_or(false);
+
+        probe.release.wait();
+        let _persisted = writer
+            .await
+            .expect("writer task")
+            .expect("persist grant and publish");
+
+        assert!(
+            visible_while_publish_is_paused,
+            "grant and refresh must be readable after the event is enqueued, before publish returns"
         );
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn mem_session_lifecycle_rejects_session_tenant_mismatch_without_write_or_emit() {
+    async fn mem_auth_grant_store_close_revokes_family_and_is_terminally_idempotent() {
+        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let grant = test_grant("grant-mem-close", tenant);
+        let refresh = initial_refresh(&grant, "refresh-mem-close", [10; 32]);
+        let refresh_hash = refresh.token_hash().clone();
+        let store =
+            MemAuthGrantStore::new(MemBus::new(), Arc::new(FixedClock::at_unix_secs(1_000)));
+        let envelope = OutboxEnvelopeParts::new(
+            identity::ports::SESSION_CREATED_CONTRACT,
+            tenant,
+            diport::EnvelopeSubjectId::from_opaque("subj-opaque-session").expect("subject"),
+            diport::OutboxActor::scoped(
+                vocab::PrincipalKind::User,
+                diport::OpaqueActorId::from_opaque("actor-opaque-session").expect("actor"),
+                tenant,
+                vocab::ScopedTenant::SelfOnly,
+            ),
+        );
+        let _persisted = store
+            .persist_login_grant(
+                login_receipt(),
+                identity::ports::TenantRepoScope::for_test(tenant),
+                login_grant_mutation(grant.clone(), refresh),
+                session_created_entry("evt-session-mem-close", &grant),
+                envelope,
+            )
+            .await
+            .expect("persist grant and refresh");
+
+        let close_at = grant.created_at() + Duration::from_secs(1);
+        let close = grant
+            .clone()
+            .close(AuthGrantCloseReason::LogoutCurrent, close_at)
+            .expect("valid close");
+        let same_terminal = grant
+            .clone()
+            .close(
+                AuthGrantCloseReason::LogoutCurrent,
+                close_at + Duration::from_secs(1),
+            )
+            .expect("valid stale close");
+        let conflicting_reason = grant
+            .clone()
+            .close(
+                AuthGrantCloseReason::LogoutAll,
+                close_at + Duration::from_secs(2),
+            )
+            .expect("valid conflicting reason");
+        let conflicting_status = grant
+            .clone()
+            .close(
+                AuthGrantCloseReason::RefreshReuseDetected,
+                close_at + Duration::from_secs(3),
+            )
+            .expect("valid conflicting status");
+        let scope = identity::ports::TenantRepoScope::for_test(tenant);
+
+        store
+            .close(scope, AuthGrantCloseCommand::for_test(close))
+            .await
+            .expect("close grant and refresh family");
+        assert!(
+            store
+                .find_active(scope, grant.id().clone(), SystemTime::UNIX_EPOCH)
+                .await
+                .expect("find active")
+                .is_none(),
+            "closed grant must be hidden from active lookup"
+        );
+        let closed_refresh = store
+            .find_by_hash(scope, refresh_hash)
+            .await
+            .expect("find refresh")
+            .expect("closed refresh family remains available for replay detection");
+        assert_eq!(closed_refresh.status(), RefreshStatus::Revoked);
+        assert_eq!(closed_refresh.auth_grant_status(), AuthGrantStatus::Revoked);
+
+        store
+            .close(scope, AuthGrantCloseCommand::for_test(same_terminal))
+            .await
+            .expect("same status and reason must be idempotent");
+        for conflict in [conflicting_reason, conflicting_status] {
+            assert!(
+                matches!(
+                    store
+                        .close(scope, AuthGrantCloseCommand::for_test(conflict))
+                        .await,
+                    Err(IdentityError::Storage(_))
+                ),
+                "different terminal status or reason must fail"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mem_auth_grant_store_rechecks_expiry_with_its_writer_clock() {
+        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let grant = test_grant("grant-mem-writer-expiry", tenant);
+        let old = initial_refresh(&grant, "refresh-mem-writer-expiry", [11; 32]);
+        let old_hash = old.token_hash().clone();
+        let new_hash = [12; 32];
+        let rotation = identity::test_support::refresh_rotation(
+            &old,
+            "refresh-mem-writer-expiry-new",
+            new_hash,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_001),
+        );
+        let new_token_hash = rotation.new_record().token_hash().clone();
+        let entry = session_created_entry("evt-session-mem-writer-expiry", &grant);
+        let store =
+            MemAuthGrantStore::new(MemBus::new(), Arc::new(FixedClock::at_unix_secs(4_600)));
+        let envelope = OutboxEnvelopeParts::new(
+            identity::ports::SESSION_CREATED_CONTRACT,
+            tenant,
+            diport::EnvelopeSubjectId::from_opaque("subj-opaque-session").expect("subject"),
+            diport::OutboxActor::scoped(
+                vocab::PrincipalKind::User,
+                diport::OpaqueActorId::from_opaque("actor-opaque-session").expect("actor"),
+                tenant,
+                vocab::ScopedTenant::SelfOnly,
+            ),
+        );
+        let scope = identity::ports::TenantRepoScope::for_test(tenant);
+        let _persisted = store
+            .persist_login_grant(
+                login_receipt(),
+                scope,
+                login_grant_mutation(grant, old),
+                entry,
+                envelope,
+            )
+            .await
+            .expect("seed prepared pair");
+
+        assert_eq!(
+            store
+                .rotate(
+                    scope,
+                    identity::ports::RefreshRotationMutation::for_test(rotation),
+                )
+                .await
+                .expect("writer fence"),
+            RefreshRotationOutcome::Expired
+        );
+        assert_eq!(
+            store
+                .find_by_hash(scope, old_hash)
+                .await
+                .expect("old lookup")
+                .expect("old remains")
+                .status(),
+            RefreshStatus::Active
+        );
+        assert!(
+            store
+                .find_by_hash(scope, new_token_hash)
+                .await
+                .expect("new lookup")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mem_auth_grant_store_rejects_grant_tenant_mismatch_without_write_or_emit() {
         let tenant_a = vocab::TenantId::parse(CANON_TENANT).expect("tenant a");
         let tenant_b = vocab::TenantId::parse(OTHER_TENANT).expect("tenant b");
-        let session = Session::hydrate(
-            "sess-mem-mismatch",
-            "subj-opaque-session",
-            tenant_b,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(3600),
-            SystemTime::UNIX_EPOCH,
-        );
-        let session_id = session.id().clone();
+        let grant = test_grant("grant-mem-mismatch", tenant_b);
+        let grant_id = grant.id().clone();
+        let refresh = initial_refresh(&grant, "refresh-mem-mismatch", [8; 32]);
         let entry = EventEntry::new(
             EventTopic::parse(TOPIC).expect("topic"),
             IdemKey::parse("evt-session-mem-mismatch").expect("idem"),
             consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
         let envelope = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", TOPIC, "v1", HASH),
+            identity::ports::SESSION_CREATED_CONTRACT,
             tenant_b,
             diport::EnvelopeSubjectId::from_opaque("subj-opaque-session").expect("subject"),
             diport::OutboxActor::scoped(
@@ -1911,13 +2440,16 @@ mod tests {
         );
 
         let signer = Arc::new(RecordingTenantSigner::default());
-        let lifecycle =
-            MemSessionLifecycle::with_tenant_metadata_signer(MemBus::new(), signer.clone());
-        let result = lifecycle
-            .persist_session_and_emit(
+        let store = MemAuthGrantStore::with_tenant_metadata_signer(
+            MemBus::new(),
+            signer.clone(),
+            Arc::new(FixedClock::at_unix_secs(1_000)),
+        );
+        let result = store
+            .persist_login_grant(
                 login_receipt(),
                 identity::ports::TenantRepoScope::for_test(tenant_a),
-                session,
+                login_grant_mutation(grant, refresh),
                 entry,
                 envelope,
             )
@@ -1926,10 +2458,11 @@ mod tests {
         assert!(result.is_err(), "tenant mismatch must fail closed");
         assert_eq!(signer.calls(), Vec::<String>::new());
         assert!(
-            lifecycle
-                .find(
+            store
+                .find_active(
                     identity::ports::TenantRepoScope::for_test(tenant_b),
-                    session_id
+                    grant_id,
+                    SystemTime::UNIX_EPOCH,
                 )
                 .await
                 .expect("find")
@@ -1939,24 +2472,19 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn mem_session_lifecycle_rejects_envelope_tenant_mismatch_without_write_or_emit() {
+    async fn mem_auth_grant_store_rejects_envelope_tenant_mismatch_without_write_or_emit() {
         let tenant_a = vocab::TenantId::parse(CANON_TENANT).expect("tenant a");
         let tenant_b = vocab::TenantId::parse(OTHER_TENANT).expect("tenant b");
-        let session = Session::hydrate(
-            "sess-mem-envelope-mismatch",
-            "subj-opaque-session",
-            tenant_a,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(3600),
-            SystemTime::UNIX_EPOCH,
-        );
-        let session_id = session.id().clone();
+        let grant = test_grant("grant-mem-envelope-mismatch", tenant_a);
+        let grant_id = grant.id().clone();
+        let refresh = initial_refresh(&grant, "refresh-mem-envelope-mismatch", [9; 32]);
         let entry = EventEntry::new(
             EventTopic::parse(TOPIC).expect("topic"),
             IdemKey::parse("evt-session-mem-envelope-mismatch").expect("idem"),
             consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
         let envelope = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", TOPIC, "v1", HASH),
+            identity::ports::SESSION_CREATED_CONTRACT,
             tenant_b,
             diport::EnvelopeSubjectId::from_opaque("subj-opaque-session").expect("subject"),
             diport::OutboxActor::scoped(
@@ -1968,13 +2496,16 @@ mod tests {
         );
 
         let signer = Arc::new(RecordingTenantSigner::default());
-        let lifecycle =
-            MemSessionLifecycle::with_tenant_metadata_signer(MemBus::new(), signer.clone());
-        let result = lifecycle
-            .persist_session_and_emit(
+        let store = MemAuthGrantStore::with_tenant_metadata_signer(
+            MemBus::new(),
+            signer.clone(),
+            Arc::new(FixedClock::at_unix_secs(1_000)),
+        );
+        let result = store
+            .persist_login_grant(
                 login_receipt(),
                 identity::ports::TenantRepoScope::for_test(tenant_a),
-                session,
+                login_grant_mutation(grant, refresh),
                 entry,
                 envelope,
             )
@@ -1983,10 +2514,11 @@ mod tests {
         assert!(result.is_err(), "envelope tenant mismatch must fail closed");
         assert_eq!(signer.calls(), Vec::<String>::new());
         assert!(
-            lifecycle
-                .find(
+            store
+                .find_active(
                     identity::ports::TenantRepoScope::for_test(tenant_a),
-                    session_id
+                    grant_id,
+                    SystemTime::UNIX_EPOCH,
                 )
                 .await
                 .expect("find")

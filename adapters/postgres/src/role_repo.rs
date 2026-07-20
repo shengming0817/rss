@@ -57,7 +57,7 @@ fn storage(e: sqlx::Error) -> IdentityError {
     IdentityError::Storage(Box::new(e))
 }
 
-/// `TenantId` → SQL bind 参数（stringify UUID 绑 `$N::uuid` server-side cast；同 config_repo / session_lifecycle，
+/// `TenantId` → SQL bind 参数（stringify UUID 绑 `$N::uuid` server-side cast；同 config_repo / auth_grant_lifecycle，
 /// 不给 sqlx 加 uuid feature）。
 fn tenant_param(tenant: TenantId) -> String {
     tenant.as_uuid().to_string()

@@ -1,21 +1,32 @@
 error[E0624]: associated function `new` is private
- --> tests/ui/identity_localtx_mutation_private_ctor_fail.rs:6:82
+ --> tests/ui/identity_localtx_mutation_private_ctor_fail.rs:8:38
   |
-6 |     let _logout: fn(SessionId) -> SessionLogoutMutation = SessionLogoutMutation::new;
-  |                                                                                  ^^^ private associated function
+8 |     let _login = LoginGrantMutation::new;
+  |                                      ^^^ private associated function
   |
  ::: src/ports.rs
   |
-  |     pub(crate) fn new(session_id: SessionId) -> Self {
-  |     ------------------------------------------------ private associated function defined here
+  |     pub(crate) fn new(grant: AuthGrant, initial_refresh: RefreshTokenRecord) -> Self {
+  |     -------------------------------------------------------------------------------- private associated function defined here
 
 error[E0624]: associated function `new` is private
- --> tests/ui/identity_localtx_mutation_private_ctor_fail.rs:7:45
+ --> tests/ui/identity_localtx_mutation_private_ctor_fail.rs:9:42
   |
-7 |     let _password = PasswordChangeMutation::new;
-  |                                             ^^^ private associated function
+9 |     let _logout = AuthGrantCloseCommand::new;
+  |                                          ^^^ private associated function
   |
  ::: src/ports.rs
   |
-  |     pub(crate) fn new(expected: u32, next: Credential) -> Self {
-  |     ---------------------------------------------------------- private associated function defined here
+  |     pub(crate) fn new(mutation: AuthGrantCloseMutation) -> Self {
+  |     ----------------------------------------------------------- private associated function defined here
+
+error[E0624]: associated function `new` is private
+  --> tests/ui/identity_localtx_mutation_private_ctor_fail.rs:10:45
+   |
+10 |     let _password = PasswordChangeMutation::new;
+   |                                             ^^^ private associated function
+   |
+  ::: src/ports.rs
+   |
+   |     pub(crate) fn new(expected: u32, next: Credential) -> Self {
+   |     ---------------------------------------------------------- private associated function defined here

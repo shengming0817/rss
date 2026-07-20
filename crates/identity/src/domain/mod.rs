@@ -11,7 +11,8 @@
 //!   `evaluate_abac`（deny-overrides，fail-closed）。【PR2 实现】
 //! - `account`：`Credential` + `AccountLockout`（凭据 / 临时暴破锁 / CAS）。【PR3 实现】
 //! - `account_security`：durable account lifecycle + authentication epoch。【#1833】
-//! - `session`：`Session` / `SessionId`（会话持久化 UoW）。【PR4 部分】
+//! - `auth_grant`：认证授权根、状态机与关闭转换。【#1834】
+//! - `refresh`：与 AuthGrant 强绑定的刷新族及轮换转换。
 //!
 //! # newtype funnel 校验（严格白名单，fail-closed）
 //!
@@ -31,23 +32,24 @@
 mod abac;
 mod account;
 mod account_security;
+mod auth_grant;
 mod rbac;
 mod refresh;
 mod resource_attr;
-mod session;
 
 // 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（lib.rs `smoke` / `ports.rs` 消费方不破）。
 // Role / RoleBinding 是 pub（ports::{RoleReadRepo, RoleBindingLifecycle} 签名实体，跨 crate 命名）。
+pub use auth_grant::{
+    AuthGrant, AuthGrantCloseMutation, AuthGrantCloseReason, AuthGrantId, AuthGrantSnapshot,
+    AuthGrantStateError, AuthGrantStatus,
+};
 pub use rbac::{Role, RoleBinding};
-// Session / SessionId 是 pub（ports::SessionLifecycle 签名实体，跨 crate 命名）；与 RoleId 不同，二者有
-// 生产消费方（application 构造 + postgres adapter 读取），非 ADR-004 C8 冻结期 dead，故不带 allow(dead_code)。
-pub use session::{Session, SessionId};
 // RefreshTokenRecord / RefreshTokenId / RefreshTokenHash / RefreshStatus 是 pub（ports::RefreshTokenStore
 // 签名实体，跨 crate 命名）；kind_to_db / kind_from_db 是 PrincipalKind↔text 单源映射（postgres adapter 消费）。
-// 字段私有 + 构造经 pub(crate) funnel / pub hydrate，外部不可伪造（ADR-005 Option 2，同 Session）。
+// 字段私有 + 构造经 pub(crate) funnel / pub hydrate，外部不可伪造（ADR-005 Option 2）。
 pub use refresh::{
     RefreshRotation, RefreshRotationOutcome, RefreshStatus, RefreshTokenHash, RefreshTokenId,
-    RefreshTokenRecord, kind_from_db, kind_to_db,
+    RefreshTokenRecord, RefreshTokenSnapshot,
 };
 // reason: pub(crate) re-export 经 facade 暴露域词汇；生产消费方（handler / authz 接线）待 W 阶段，
 // 当前仅 #[cfg(test)] smoke / 子模块测试消费 ⇒ 非 test lib target 视作 unused（ADR-004 C8 遗留期）。
@@ -70,7 +72,6 @@ pub use resource_attr::{
 // （authenticate 返回）是 pub。AccountLockout/BruteForceDecision 供 postgres adapter 在 authenticate
 // transaction 内重建与推进临时暴破锁。
 pub use account::{AccountLockout, AuthOutcome, BruteForceDecision, Credential, LoginIdentifier};
-pub(crate) use account_security::ActiveAccountSecurity;
 pub use account_security::{
     AccountSecurityHydrationError, AccountSecurityMutation, AccountSecuritySnapshot,
     AccountSecurityState, AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus,

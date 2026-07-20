@@ -26,7 +26,7 @@
 //!   checkpoint/saga/projection）均 `pub(crate)`——serving repo 只能经 `PgDomainDeps` / `PgInfraDeps` 构造，
 //!   maintenance 只能拿到限定维护能力，不暴露 pool/store。
 //! - **PG-BUNDLE-DOMAIN-02**（Hard，sealed marker + typed function choice）：per-domain 能力隔离。
-//!   anti-vacuity = 下方 `PgDomainDeps` 的 `compile_fail` doctest（Settings 句柄调 `session_lifecycle` 必败）。
+//!   anti-vacuity = 下方 `PgDomainDeps` 的 `compile_fail` doctest（Settings 句柄调 `auth_grant_lifecycle` 必败）。
 //! - **PG-BUNDLE-POOL-03**（Hard）：本模块无任何返回 `&PgStore` / `Arc<PgStore>` / `PgPool` 的公开 accessor；
 //!   `store` 字段私有，仅 in-crate repo 构造方法 clone `pub(crate) pool`。
 //! - **PG-BUNDLE-SETTINGS-04**（Hard，可见性 + sealed funnel + typed function choice）：settings 四件套
@@ -81,20 +81,20 @@ use crate::{
     PgConfigValueMaintenance, PgSecretRepo, PgSecretUnitOfWork, PgSettingsConsumerTx,
 };
 use crate::{
-    DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgCheckpointStore, PgCommandJournal,
-    PgConfig, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore,
-    PgInboxSweeper, PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionControl,
+    DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuthGrantSweeper, PgCheckpointStore,
+    PgCommandJournal, PgConfig, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
+    PgInboxStore, PgInboxSweeper, PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionControl,
     PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgSagaInstanceStore, PgSagaJournal,
-    PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgSessionSweeper, PgStore,
-    PgStoreGuard, PgTenantReadConfig,
+    PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgStore, PgStoreGuard,
+    PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo, PgAuthAuditSink};
 #[cfg(feature = "domain-identity")]
 use crate::{
-    PgCredentialRepo, PgPolicyLifecycle, PgPolicyRepo, PgRefreshTokenStore,
-    PgResourceAttributeRepo, PgRoleBindingLifecycle, PgRoleBindingReadRepo, PgRoleRepo,
-    PgSessionLifecycle,
+    PgAuthGrantLifecycle, PgAuthGrantProvider, PgCredentialRepo, PgPolicyLifecycle, PgPolicyRepo,
+    PgRefreshTokenStore, PgResourceAttributeRepo, PgRoleBindingLifecycle, PgRoleBindingReadRepo,
+    PgRoleRepo,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -850,8 +850,8 @@ pub enum MaintenanceAuditOutcome<'a> {
 ```compile_fail
 use postgres::{PgDomainDeps, caps};
 fn bad(d: PgDomainDeps<caps::Settings>) {
-    // E0599：`session_lifecycle` 不在 `PgDomainDeps<caps::Settings>` 上（仅 identity 句柄有）。
-    let _ = d.session_lifecycle(unimplemented!());
+    // E0599：`auth_grant_provider` 不在 `PgDomainDeps<caps::Settings>` 上（仅 identity 句柄有）。
+    let _ = d.auth_grant_provider(unimplemented!());
 }
 ```
 "#
@@ -872,7 +872,7 @@ fn settings_ok(
     let _ = d.settings_bundle(clock, protections);
 }
 fn identity_ok(d: PgDomainDeps<caps::Identity>, clock: Box<dyn diport::Clock>) {
-    let _ = d.session_lifecycle(clock);
+    let _ = d.auth_grant_provider(clock);
 }
 ```
 "#
@@ -1028,14 +1028,20 @@ impl PgSettingsBundle {
 
 #[cfg(feature = "domain-identity")]
 impl PgDomainDeps<caps::Identity> {
-    /// 会话生命周期仓储（co-tx 创建 + durable find/revoke）。`clock` 为 envelope 时间源（构造器位置参）。
+    /// Single-owner AuthGrant/refresh provider used by login composition.
     #[must_use]
-    pub fn session_lifecycle(&self, clock: Box<dyn Clock>) -> PgSessionLifecycle {
-        PgSessionLifecycle::new_with_projection_registry(
-            self.stores.reader_capability(),
-            self.stores.writer_capability(),
-            clock,
-            self.projection_registry,
+    pub fn auth_grant_provider(&self, clock: Box<dyn Clock>) -> PgAuthGrantProvider {
+        PgAuthGrantProvider::new(
+            PgAuthGrantLifecycle::new_with_projection_registry(
+                self.stores.reader_capability(),
+                self.stores.writer_capability(),
+                clock,
+                self.projection_registry,
+            ),
+            PgRefreshTokenStore::new(
+                self.stores.reader_capability(),
+                self.stores.writer_capability(),
+            ),
         )
     }
 
@@ -1123,15 +1129,6 @@ impl PgDomainDeps<caps::Identity> {
             self.stores.writer_capability(),
             clock,
             self.projection_registry,
-        )
-    }
-
-    /// refresh token store（哈希存储 + CAS rotation + 谱系级联撤销 + RLS）。
-    #[must_use]
-    pub fn refresh_token_store(&self) -> PgRefreshTokenStore {
-        PgRefreshTokenStore::new(
-            self.stores.reader_capability(),
-            self.stores.writer_capability(),
         )
     }
 
@@ -1250,7 +1247,7 @@ impl PgDomainDeps<caps::Audit> {
 /// framework/global postgres 基建能力句柄（`Clone`，provider-agnostic、非单域）。
 ///
 /// 私有持 `Arc<PgRuntimeStores>`，经 [`PgRuntimeHandle::infra`] 派发；只暴露 emitter / dead_letter / checkpoint /
-/// saga_journal / projection_events / cas_store / session_sweeper——这些是跨域基建（非绑某个 `caps::*` 域），
+/// saga_journal / projection_events / cas_store / auth_grant_sweeper——这些是跨域基建（非绑某个 `caps::*` 域），
 /// 故独立于 [`PgDomainDeps`]。
 /// 与 `PgDomainDeps` 一样不返回 `&PgStore` / `PgPool`（PG-BUNDLE-POOL-03）。
 ///
@@ -1339,13 +1336,13 @@ impl PgInfraDeps {
             .inbox_sweeper(self.delivery_policy)
     }
 
-    /// sessions 过期行维护清理器（全域，固定 `expires_at <= now()` 谓词，#1233）。
+    /// AuthGrant 过期根维护清理器（全域，固定 `expires_at <= now()` 谓词）。
     ///
-    /// 不返回 tenant/raw pool/SQL/retain 参数；runtime 只拿到具体 [`PgSessionSweeper`] 并调用
+    /// 不返回 tenant/raw pool/SQL/retain 参数；runtime 只拿到具体 [`PgAuthGrantSweeper`] 并调用
     /// `sweep_expired()`。
     #[must_use]
-    pub fn session_sweeper(&self) -> PgSessionSweeper {
-        self.stores.writer_store_arc().session_sweeper()
+    pub fn auth_grant_sweeper(&self) -> PgAuthGrantSweeper {
+        self.stores.writer_store_arc().auth_grant_sweeper()
     }
 
     /// Bounded service-token replay retention without replay consume authority.
@@ -1685,20 +1682,20 @@ mod tests {
     #[tokio::test]
     async fn identity_accessors_construct() {
         let i: PgDomainDeps<caps::Identity> = deps().handle().for_domain();
-        let _ = i.session_lifecycle(Box::new(EpochClock));
+        let _ = i.auth_grant_provider(Box::new(EpochClock));
         let _ = i.outbox(
             DynPublisher::new_box(StubPublisher),
             relay_budget(),
             tenant_authority(),
             payload_protector(),
         );
-        // F1 补齐的 identity 域 repo（credentials / roles / refresh tokens）——纯 pool clone，无 I/O。
+        // identity domain repos; AuthGrant lifecycle + refresh are exposed only through the
+        // single-owner provider above.
         let _ = i.credential_repo();
         let _ = i.role_repo();
         let _ = i.policy_repo();
         let _ = i.resource_attribute_repo();
         let _ = i.role_binding_read_repo();
-        let _ = i.refresh_token_store();
     }
 
     #[tokio::test]
@@ -1710,7 +1707,7 @@ mod tests {
         let _ = infra.outbox_maintenance();
         let _ = infra.dead_letter(payload_protector());
         let _ = infra.inbox_sweeper();
-        let _ = infra.session_sweeper();
+        let _ = infra.auth_grant_sweeper();
         let _ = infra.checkpoint();
         let _ = infra.saga_instance_store();
         let _ = infra.saga_journal();

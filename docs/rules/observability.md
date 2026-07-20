@@ -194,7 +194,7 @@ label 与 trace 字段纪律：
 - `domain` / `contract_id` 只能从 generated `HttpRouteBinding<Marker, LocalTx>` 内的静态
   `ContractBinding` 取得；`observ` 独占 metric 名与 label key，adapter 不暴露或手写第二条 label 路径。
 - settings HTTP publish、identity password change 与 logout 的 observation 由域层分别封装进
-  `SecretPublishCommand`、`PasswordChangeMutation` 与 `SessionLogoutMutation`，Postgres adapter 只能消费这些
+  `SecretPublishCommand`、`PasswordChangeMutation` 与 `AuthGrantCloseCommand`，Postgres adapter 只能消费这些
   opaque command；`PgSecretUnitOfWork::publish_internal` 与 `republish` 使用不携带 observation 的独立 command 并只发
   通用 `tx_retry_*` / `tx_settlement_*`。adapter 自行调用 secret-publish factory、手写 observation，或给 internal/rollback 路径发
   `localtx_*`，都属于 contract attribution 污染。

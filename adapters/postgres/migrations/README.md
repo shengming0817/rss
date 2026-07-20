@@ -570,6 +570,153 @@ instance status 与 lease token/holder/epoch/expiry，授予 `rss_app` SELECT/IN
 仅授 `rss_app` SELECT/INSERT 并显式 `REVOKE UPDATE, DELETE`。两表均在迁移内落 `FORCE RLS` 与标准 tenant
 policy。legacy global `saga_journal` 若非空则 fail-fast，不做隐式 backfill。
 
+### 0070 AuthGrant root 破坏性切换
+
+`0070` 将 pre-GA `sessions` 与独立 refresh family 一次性切换为 `auth_grants` 聚合根。旧行无法证明
+`tenant + user UUID + authentication epoch + root status` 的完整绑定，迁移因此在阻断旧 writer 后清空
+`refresh_tokens` 并直接删除 `sessions` 表、旧清理函数与旧 maintenance role；不在 `DROP TABLE` 前做冗余的
+session 行级 DELETE，也不回填、不保留 nullable 绑定、view、trigger、alias、双读写或旧 binary 兼容。
+
+1. **停止旧 binary 并做迁移前探针。** 停止全部旧 binary，禁止滚动混跑；停止 API、worker 与任何仍写
+   `sessions`/`refresh_tokens` 或调用旧 session sweep 的 job。用正式 migrator 凭据确认
+   `_sqlx_migrations` 必须为 `69`，并保存 session/refresh 行数与 relation bytes 的受控 inventory；
+   inventory 只用于证明切换范围及事务回滚完整性，不用于回填。确认两个旧表没有 serving session、长事务或
+   已授予的冲突锁。任一结果不满足即中止。
+
+   同时审查新 binary manifest 中的 `RSS_IDENTITY_AUTH_GRANT_TTL_SECS` 与 `RSS_REFRESH_TTL_SECS`。
+   两者默认 30 天、最大 365 天，均须为正整数；AuthGrant TTL 必须大于等于 refresh TTL。旧部署若曾把
+   refresh 延长到 60 天，必须成对设置
+   `RSS_IDENTITY_AUTH_GRANT_TTL_SECS=5184000`、`RSS_REFRESH_TTL_SECS=5184000`，不得依赖 30 天
+   AuthGrant 默认值。将下列配置探针输出保存到 rollout receipt；任一检查失败即在迁移前中止。
+
+   ```sh
+   set -eu
+   auth_grant_ttl_secs="${RSS_IDENTITY_AUTH_GRANT_TTL_SECS:-2592000}"
+   refresh_ttl_secs="${RSS_REFRESH_TTL_SECS:-2592000}"
+   case "${auth_grant_ttl_secs}" in
+     ''|*[!0-9]*) exit 1 ;;
+   esac
+   case "${refresh_ttl_secs}" in
+     ''|*[!0-9]*) exit 1 ;;
+   esac
+   test "${auth_grant_ttl_secs}" -gt 0
+   test "${refresh_ttl_secs}" -gt 0
+   test "${auth_grant_ttl_secs}" -le 31536000
+   test "${refresh_ttl_secs}" -le 31536000
+   test "${auth_grant_ttl_secs}" -ge "${refresh_ttl_secs}"
+   printf 'auth_grant_ttl_secs=%s refresh_ttl_secs=%s\n' \
+     "${auth_grant_ttl_secs}" "${refresh_ttl_secs}"
+   ```
+
+   ```sql
+   SELECT max(version) FROM public._sqlx_migrations;
+   SELECT count(*) FROM pg_catalog.pg_stat_activity
+    WHERE application_name IN ('rss-postgres-writer', 'rss-postgres-maintenance');
+   SELECT count(*) FROM pg_catalog.pg_locks
+    WHERE relation IN ('public.sessions'::regclass, 'public.refresh_tokens'::regclass)
+      AND granted
+      AND mode IN ('RowExclusiveLock', 'ShareUpdateExclusiveLock',
+                   'ShareLock', 'ShareRowExclusiveLock',
+                   'ExclusiveLock', 'AccessExclusiveLock');
+   SELECT count(*) AS session_rows FROM public.sessions;
+   SELECT count(*) AS refresh_rows FROM public.refresh_tokens;
+   SELECT pg_total_relation_size('public.sessions'::regclass) AS session_bytes,
+          pg_total_relation_size('public.refresh_tokens'::regclass) AS refresh_bytes;
+   ```
+
+2. **容量、WAL、archive 与 replica fail-closed preflight。** 从同次演练批准的 deployment inventory 显式
+   注入 `REFRESH_ROW_BUDGET`、`REFRESH_BYTE_BUDGET`、`WAL_FREE_BUDGET`、
+   `ARCHIVE_FREE_BUDGET`、`EXPECTED_REPLICAS` 和 archive mount；不得用默认值或复用旧 rollout 的 PASS。
+   在 primary DB host 取步骤 1 的 `refresh_rows`/`refresh_bytes`，用 `df -PB1` 分别读取
+   `data_directory/pg_wal` 与 archive mount 的可用字节，逐项确认 rows/bytes 不超过演练上限且 WAL/archive
+   可用空间不低于预算。随后保存 archive 基线，执行 `SELECT pg_switch_wal()`，必须观察到新的 archived
+   segment 且 `failed_count` 不增加；`pg_stat_replication` 中 streaming replica 数量必须精确等于
+   `EXPECTED_REPLICAS`，每个 replica 的 byte/replay lag 都须落在同次演练 envelope 内。
+
+   ```sh
+   set -eu
+   : "${REFRESH_ROW_BUDGET:?}" "${REFRESH_BYTE_BUDGET:?}"
+   : "${WAL_FREE_BUDGET:?}" "${ARCHIVE_FREE_BUDGET:?}" "${EXPECTED_REPLICAS:?}"
+   : "${PGDATA:?}" "${WAL_ARCHIVE_DIR:?}"
+   refresh_rows="$(psql service=rss-owner -Atqc \
+     "SELECT count(*) AS refresh_rows FROM public.refresh_tokens")"
+   refresh_bytes="$(psql service=rss-owner -Atqc \
+     "SELECT pg_total_relation_size('public.refresh_tokens'::regclass)")"
+   wal_free_bytes="$(df -PB1 "${PGDATA}/pg_wal" | awk 'NR == 2 { print $4 }')"
+   archive_free_bytes="$(df -PB1 "${WAL_ARCHIVE_DIR}" | awk 'NR == 2 { print $4 }')"
+   streaming_replicas="$(psql service=rss-owner -Atqc \
+     "SELECT count(*) FROM pg_catalog.pg_stat_replication WHERE state = 'streaming'")"
+   test "${refresh_rows}" -le "${REFRESH_ROW_BUDGET}"
+   test "${refresh_bytes}" -le "${REFRESH_BYTE_BUDGET}"
+   test "${wal_free_bytes}" -ge "${WAL_FREE_BUDGET}"
+   test "${archive_free_bytes}" -ge "${ARCHIVE_FREE_BUDGET}"
+   test "${streaming_replicas}" -eq "${EXPECTED_REPLICAS}"
+   ```
+
+   ```sql
+   SELECT archived_count, failed_count, last_archived_wal, last_archived_time
+     FROM pg_catalog.pg_stat_archiver;
+   SELECT pg_catalog.pg_switch_wal();
+   SELECT application_name, state, sync_state,
+          pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), replay_lsn) AS byte_lag,
+          replay_lag
+     FROM pg_catalog.pg_stat_replication
+    ORDER BY application_name;
+   ```
+
+   任何变量为空、比较失败、archive 未推进、replica 缺失/NULL lag 或维护窗口不足 5 分钟都 fail closed。
+   保存命令、预算、输出与时间戳作为 rollout receipt。
+3. **执行唯一迁移。** 只允许正式 `rss-postgres-migrator` 执行 SQLx migration；迁移以 5 秒 lock timeout
+   和 5 分钟 statement timeout fail-closed。事务失败时 schema、refresh 删除与 session DROP 原子回滚，
+   所有新 binary 保持停止；失败后只允许 forward-only 修复，不修改 0070，也不临时恢复旧写路径。
+4. **迁移后精确探针。** 再执行 `SELECT max(version) FROM public._sqlx_migrations`，结果
+   `_sqlx_migrations` 必须为 `70`；`to_regclass('public.sessions') IS NULL` 且
+   `to_regclass('public.auth_grants') IS NOT NULL`。迁移前 inventory 中的旧 session/refresh 数据必须为 `0`
+   条被保留，`retained_refresh_rows` 必须为 0；新 `refresh_tokens` 的 `auth_grant_id`、`user_id`、
+   `auth_grant_status` 均为 NOT NULL，`subject`/`kind` 均不存在。精确 ACL 必须证明 `rss_app` 对两表没有
+   表级 UPDATE，只有 `auth_grants(status, closed_at, close_reason)` 与 `refresh_tokens(status)` 的列级
+   UPDATE；`rss_app_read` 没有任何 UPDATE，两个 serving role 均无 DELETE。
+
+   ```sql
+   SELECT max(version) FROM public._sqlx_migrations;
+   SELECT to_regclass('public.sessions') IS NULL,
+          to_regclass('public.auth_grants') IS NOT NULL;
+   SELECT count(*) AS retained_refresh_rows FROM public.refresh_tokens;
+   SELECT column_name, is_nullable
+     FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'refresh_tokens'
+    ORDER BY ordinal_position;
+   SELECT has_table_privilege('rss_app', 'public.auth_grants', 'UPDATE') = false,
+          has_table_privilege('rss_app', 'public.refresh_tokens', 'UPDATE') = false,
+          has_table_privilege('rss_app', 'public.auth_grants', 'DELETE') = false,
+          has_table_privilege('rss_app', 'public.refresh_tokens', 'DELETE') = false;
+   SELECT grantee, table_name, column_name, privilege_type
+     FROM information_schema.column_privileges
+    WHERE table_schema = 'public'
+      AND table_name IN ('auth_grants', 'refresh_tokens')
+      AND grantee IN ('rss_app', 'rss_app_read')
+      AND privilege_type = 'UPDATE'
+    ORDER BY grantee, table_name, column_name;
+   ```
+5. **核验根约束。** 从 `pg_catalog.pg_constraint` 保存 AuthGrant 五列复合外键、`ON UPDATE CASCADE` /
+   `ON DELETE CASCADE`、状态/原因/时间 CHECK。用受控事务验证 orphan、跨 tenant、跨 user、错误 epoch、
+   错误 root status 的 refresh 均无法提交；验证仍有非 revoked refresh 时直接关闭 root 失败，先撤销
+   refresh family 再关闭 root 成功；这也验证 FK 的 `ON UPDATE CASCADE` 不要求 `rss_app` 获得
+   `refresh_tokens.auth_grant_status` 的直接 UPDATE。`pg_class.relforcerowsecurity` 对 `auth_grants`
+   必须为 true；保存 `rss_sweep_expired_auth_grants` 的 owner=`rss_auth_grant_maintenance`、固定 search
+   path、PUBLIC 无 EXECUTE、`rss_app` 仅有 EXECUTE，以及单 tick `LIMIT 1000` /
+   `FOR UPDATE SKIP LOCKED` 证据。
+6. **只启动新世界。** 只有 capacity receipt、ledger、catalog、约束、RLS/ACL 和真实事务探针全部通过才启动
+   新 binary。
+   启动后 login 必须通过同一事务同时产生 AuthGrant、初始 refresh 与 outbox；任一对象缺失即停止 rollout。
+   不得连接旧 binary、重建 `sessions`、恢复旧 sweep 名称或手工补造绑定。
+7. **按 ledger 恢复。** 若迁移或 singleton 在提交前失败且 ledger 仍为 `69`，保持新 binary 停止，重复
+   步骤 1–2，并确认 session/refresh 行数与 relation inventory 未因失败减少；修复锁、空间、archive 或
+   replica 前置条件后重跑唯一迁移。只有 ledger=69、旧 schema 完整且确需恢复服务时才可恢复旧 binary。
+   若 ledger 已为 `70`，这是已提交的 forward-only 状态：绝不能启动旧 binary；重复步骤 4–5，修复新
+   binary 的启动配置后只启动 0070-compatible 版本。需要 schema 修正时提交新的 forward migration，不修改
+   0070，也不从备份恢复 `sessions` 或已失效 refresh。
+
 ## Append-only 表（REVOKE 强制）
 
 append-only 表（如 `projection_events`）在前向迁移内用 `REVOKE UPDATE, DELETE ON <table> FROM <role>` 强制 DB

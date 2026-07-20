@@ -211,7 +211,7 @@ mod tests {
                 "pub fn set_local_tenant() { \
                  let _ = sqlx::query(\"SELECT set_config('rss.tenant_id', $1, true)\"); }",
             ),
-            ("session_lifecycle.rs", "pub fn create_session() {}"),
+            ("auth_grant_lifecycle.rs", "pub fn create_session() {}"),
             ("pool.rs", "pub fn pool() {}"),
         ]);
         let (_, findings) = scan_funnel(&fs);
@@ -231,7 +231,7 @@ mod tests {
                 "sqlx::query(\"SELECT set_config('rss.tenant_id', $1, true)\")",
             ),
             (
-                "session_lifecycle.rs",
+                "auth_grant_lifecycle.rs",
                 "sqlx::query(\"SELECT set_config('rss.tenant_id', $1, true)\")",
             ),
         ]);
@@ -242,7 +242,7 @@ mod tests {
             "应仅报 1 条 FunnelEscape finding: {findings:?}"
         );
         assert_eq!(findings[0].rule, Rule::FunnelEscape);
-        assert_eq!(findings[0].subject, "session_lifecycle.rs");
+        assert_eq!(findings[0].subject, "auth_grant_lifecycle.rs");
     }
 
     // ---- red：多个非 cotx/mod.rs 文件含字面量 → 多条 FunnelEscape ----
@@ -318,11 +318,11 @@ mod tests {
     #[test]
     fn is_test_file_suffix_test_and_tests() {
         assert!(
-            is_test_file(Path::new("/foo/session_lifecycle_test.rs")),
+            is_test_file(Path::new("/foo/auth_grant_lifecycle_test.rs")),
             "_test.rs 后缀应被豁免"
         );
         assert!(
-            is_test_file(Path::new("/foo/session_lifecycle_tests.rs")),
+            is_test_file(Path::new("/foo/auth_grant_lifecycle_tests.rs")),
             "_tests.rs 后缀应被豁免"
         );
     }
@@ -346,8 +346,8 @@ mod tests {
             "cotx.rs 不是测试文件"
         );
         assert!(
-            !is_test_file(Path::new("/foo/session_lifecycle.rs")),
-            "session_lifecycle.rs 不是测试文件"
+            !is_test_file(Path::new("/foo/auth_grant_lifecycle.rs")),
+            "auth_grant_lifecycle.rs 不是测试文件"
         );
         // test_pg.rs：以 test_ 开头但不以 _test.rs / _tests.rs 结尾，不豁免。
         assert!(
@@ -363,7 +363,7 @@ mod tests {
         assert!(is_cotx_path("cotx/mod.rs"));
         assert!(!is_cotx_path("cotx.rs"));
         assert!(!is_cotx_path("cotx2.rs"));
-        assert!(!is_cotx_path("session_lifecycle.rs"));
+        assert!(!is_cotx_path("auth_grant_lifecycle.rs"));
         // 嵌套同名不放行（路径精确，防基名绕过）。
         assert!(!is_cotx_path("sub/cotx.rs"));
         assert!(!is_cotx_path("nested/dir/cotx.rs"));

@@ -16,16 +16,12 @@ test-support = []
 
 [dependencies]
 vocab = { path = "../vocab" }
-ids = { path = "../ids" }
-secure = { path = "../secure" }
-support = { path = "../support" }
 runctx = { path = "../runctx" }
-consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 # verify→mint bridge：经 diport::Pdp 验签后 seal VerifiedJwt / VerifiedServiceToken（#1158, ADR-006）。
 diport = { path = "../diport" }
 thiserror = { workspace = true }
-# SessionId::generate —— UUID v4 随机会话 id（RW-G1）。
+# JWT issuer 为每个本地签发 token 生成随机 UUID v4 `jti`。
 uuid = { workspace = true, features = ["v4"] }
 # JWT / service-token 结构化解码（base64url payload + JSON claims）——不验签（验签延后 verifier DI port）。
 base64 = { workspace = true }

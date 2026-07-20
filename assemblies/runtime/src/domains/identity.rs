@@ -14,9 +14,9 @@ use crate::infra::vault::build_vault_signer_with;
 use crate::infra::vault::{VAULT_ADDR_ENV, VAULT_TOKEN_ENV, VAULT_TRANSIT_MOUNT_ENV};
 use crate::{SharedRuntimeDeps, SystemClock};
 
-const DEFAULT_IDENTITY_SESSION_TTL_SECS: u64 = 3_600;
-const MAX_IDENTITY_SESSION_TTL_SECS: u64 = 90 * 24 * 60 * 60;
-const IDENTITY_SESSION_TTL_ENV: &str = "RSS_IDENTITY_SESSION_TTL_SECS";
+const DEFAULT_IDENTITY_AUTH_GRANT_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+const MAX_IDENTITY_AUTH_GRANT_TTL_SECS: u64 = 365 * 24 * 60 * 60;
+const IDENTITY_AUTH_GRANT_TTL_ENV: &str = "RSS_IDENTITY_AUTH_GRANT_TTL_SECS";
 const REFRESH_TTL_ENV: &str = "RSS_REFRESH_TTL_SECS";
 pub(crate) const PASSWORD_BLOCKLIST_PATH_ENV: &str = "RSS_PASSWORD_BLOCKLIST_PATH";
 const DEFAULT_REFRESH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
@@ -36,15 +36,15 @@ impl IdentityTokenProfileInput {
     }
 }
 
-pub(crate) struct RssLocalSessionInput {
+pub(crate) struct RssLocalAuthGrantInput {
     signer: Arc<vault::VaultSigner>,
     rss_access_issuer: authn::JwtIssuerConfig<diport::RssAccessProfile>,
-    session_ttl: Duration,
+    auth_grant_ttl: Duration,
     refresh_ttl: Duration,
 }
 
 pub(crate) enum IdentityModuleInput {
-    RssAccess(RssLocalSessionInput),
+    RssAccess(RssLocalAuthGrantInput),
     FederatedAccess,
 }
 
@@ -58,18 +58,19 @@ impl IdentityModuleInput {
         };
         let config = mapper.config();
         // Preserve the fail-fast contract: bounded lifetimes first, then Vault, then RSS access policy.
-        let session_ttl = Duration::from_secs(identity_session_ttl_secs(
-            config.value(IDENTITY_SESSION_TTL_ENV),
+        let auth_grant_ttl = Duration::from_secs(identity_auth_grant_ttl_secs(
+            config.value(IDENTITY_AUTH_GRANT_TTL_ENV),
         )?);
         let refresh_ttl = Duration::from_secs(refresh_ttl_secs(config.value(REFRESH_TTL_ENV))?);
+        validate_auth_grant_covers_refresh(auth_grant_ttl, refresh_ttl)?;
         let signer = Arc::new(build_vault_signer_with(
             |name| config.value(name).map(str::to_owned),
             false,
         )?);
-        Ok(Self::RssAccess(RssLocalSessionInput {
+        Ok(Self::RssAccess(RssLocalAuthGrantInput {
             signer,
             rss_access_issuer,
-            session_ttl,
+            auth_grant_ttl,
             refresh_ttl,
         }))
     }
@@ -77,11 +78,12 @@ impl IdentityModuleInput {
     #[cfg(any(test, feature = "integration"))]
     fn from_test_values(values: IdentityTestValues) -> anyhow::Result<Self> {
         validate_explicit_ttl(
-            values.session_ttl,
-            IDENTITY_SESSION_TTL_ENV,
-            MAX_IDENTITY_SESSION_TTL_SECS,
+            values.auth_grant_ttl,
+            IDENTITY_AUTH_GRANT_TTL_ENV,
+            MAX_IDENTITY_AUTH_GRANT_TTL_SECS,
         )?;
         validate_explicit_ttl(values.refresh_ttl, REFRESH_TTL_ENV, MAX_REFRESH_TTL_SECS)?;
+        validate_auth_grant_covers_refresh(values.auth_grant_ttl, values.refresh_ttl)?;
         anyhow::ensure!(
             !values.access_token_ttl.is_zero(),
             "RSS access-token TTL must be > 0"
@@ -107,10 +109,10 @@ impl IdentityModuleInput {
             values.access_token_audience,
             values.access_token_ttl,
         );
-        Ok(Self::RssAccess(RssLocalSessionInput {
+        Ok(Self::RssAccess(RssLocalAuthGrantInput {
             signer,
             rss_access_issuer,
-            session_ttl: values.session_ttl,
+            auth_grant_ttl: values.auth_grant_ttl,
             refresh_ttl: values.refresh_ttl,
         }))
     }
@@ -132,7 +134,7 @@ pub struct IdentityTestValues {
     pub access_token_audience: String,
     pub access_token_key_id: String,
     pub access_token_ttl: Duration,
-    pub session_ttl: Duration,
+    pub auth_grant_ttl: Duration,
     pub refresh_ttl: Duration,
     pub vault_allow_http: bool,
 }
@@ -141,7 +143,7 @@ pub struct IdentityTestValues {
 ///
 /// # Errors
 ///
-/// Returns an error when RSS Primary requires local-session configuration and that configuration
+/// Returns an error when RSS Primary requires local AuthGrant configuration and that configuration
 /// is absent or invalid, or when the profile-specific identity composition fails.
 pub async fn module(
     deps: &SharedRuntimeDeps,
@@ -182,20 +184,20 @@ pub(crate) fn load_password_blocklist(
         .context("load required password blocklist")
 }
 
-fn identity_session_ttl_secs(raw: Option<&str>) -> anyhow::Result<u64> {
+fn identity_auth_grant_ttl_secs(raw: Option<&str>) -> anyhow::Result<u64> {
     match raw {
         Some(raw) => {
             let ttl = raw.parse::<u64>().with_context(|| {
-                format!("{IDENTITY_SESSION_TTL_ENV} must be an integer seconds value")
+                format!("{IDENTITY_AUTH_GRANT_TTL_ENV} must be an integer seconds value")
             })?;
-            anyhow::ensure!(ttl > 0, "{IDENTITY_SESSION_TTL_ENV} must be > 0");
+            anyhow::ensure!(ttl > 0, "{IDENTITY_AUTH_GRANT_TTL_ENV} must be > 0");
             anyhow::ensure!(
-                ttl <= MAX_IDENTITY_SESSION_TTL_SECS,
-                "{IDENTITY_SESSION_TTL_ENV} must be <= {MAX_IDENTITY_SESSION_TTL_SECS}"
+                ttl <= MAX_IDENTITY_AUTH_GRANT_TTL_SECS,
+                "{IDENTITY_AUTH_GRANT_TTL_ENV} must be <= {MAX_IDENTITY_AUTH_GRANT_TTL_SECS}"
             );
             Ok(ttl)
         }
-        None => Ok(DEFAULT_IDENTITY_SESSION_TTL_SECS),
+        None => Ok(DEFAULT_IDENTITY_AUTH_GRANT_TTL_SECS),
     }
 }
 
@@ -216,15 +218,26 @@ fn refresh_ttl_secs(raw: Option<&str>) -> anyhow::Result<u64> {
     }
 }
 
+fn validate_auth_grant_covers_refresh(
+    auth_grant_ttl: Duration,
+    refresh_ttl: Duration,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        auth_grant_ttl >= refresh_ttl,
+        "{IDENTITY_AUTH_GRANT_TTL_ENV} must be >= {REFRESH_TTL_ENV}"
+    );
+    Ok(())
+}
+
 fn wire_rss_access(
     pg: PgDomainDeps<caps::Identity>,
     blocklist: Arc<secure::DigestPasswordBlocklist>,
-    input: RssLocalSessionInput,
+    input: RssLocalAuthGrantInput,
 ) -> anyhow::Result<DomainBinding> {
-    let RssLocalSessionInput {
+    let RssLocalAuthGrantInput {
         signer,
         rss_access_issuer,
-        session_ttl,
+        auth_grant_ttl,
         refresh_ttl,
     } = input;
     let composition = IdentityModuleDeps::new(
@@ -232,7 +245,7 @@ fn wire_rss_access(
         signer,
         Arc::new(SystemClock),
         rss_access_issuer,
-        session_ttl,
+        auth_grant_ttl,
         refresh_ttl,
         blocklist,
     );
@@ -296,8 +309,8 @@ pub(crate) mod tests {
         )
     }
 
-    pub(crate) fn test_input() -> anyhow::Result<IdentityModuleInput> {
-        IdentityModuleInput::from_test_values(IdentityTestValues {
+    fn test_values() -> IdentityTestValues {
+        IdentityTestValues {
             vault_addr: "http://127.0.0.1:1".to_string(),
             vault_token: "module-test-token".to_string(),
             vault_transit_mount: "transit".to_string(),
@@ -305,10 +318,14 @@ pub(crate) mod tests {
             access_token_audience: "rss".to_string(),
             access_token_key_id: "module-test-es256".to_string(),
             access_token_ttl: Duration::from_secs(900),
-            session_ttl: Duration::from_secs(DEFAULT_IDENTITY_SESSION_TTL_SECS),
+            auth_grant_ttl: Duration::from_secs(DEFAULT_IDENTITY_AUTH_GRANT_TTL_SECS),
             refresh_ttl: Duration::from_secs(2_592_000),
             vault_allow_http: true,
-        })
+        }
+    }
+
+    pub(crate) fn test_input() -> anyhow::Result<IdentityModuleInput> {
+        IdentityModuleInput::from_test_values(test_values())
     }
 
     pub(crate) async fn test_binding(input: IdentityModuleInput) -> anyhow::Result<DomainBinding> {
@@ -338,26 +355,79 @@ pub(crate) mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn identity_session_ttl_defaults_and_accepts_valid_value() {
+    fn identity_auth_grant_ttl_defaults_and_accepts_valid_value() {
         assert_eq!(
-            identity_session_ttl_secs(None).expect("default ttl"),
-            DEFAULT_IDENTITY_SESSION_TTL_SECS
+            DEFAULT_IDENTITY_AUTH_GRANT_TTL_SECS, DEFAULT_REFRESH_TTL_SECS,
+            "default AuthGrant must cover the full default refresh lifetime"
         );
         assert_eq!(
-            identity_session_ttl_secs(Some("7200")).expect("valid ttl"),
+            identity_auth_grant_ttl_secs(None).expect("default ttl"),
+            DEFAULT_IDENTITY_AUTH_GRANT_TTL_SECS
+        );
+        assert_eq!(
+            identity_auth_grant_ttl_secs(Some("7200")).expect("valid ttl"),
             7_200
         );
     }
 
     #[test]
-    fn identity_session_ttl_rejects_invalid_values() {
+    fn identity_auth_grant_ttl_rejects_invalid_values() {
         for raw in [
             "not-a-number".to_string(),
             "0".to_string(),
-            (MAX_IDENTITY_SESSION_TTL_SECS + 1).to_string(),
+            (MAX_IDENTITY_AUTH_GRANT_TTL_SECS + 1).to_string(),
         ] {
-            assert!(identity_session_ttl_secs(Some(&raw)).is_err());
+            assert!(identity_auth_grant_ttl_secs(Some(&raw)).is_err());
         }
+    }
+
+    #[test]
+    fn auth_grant_ttl_must_cover_refresh_ttl() {
+        let thirty_days = Duration::from_secs(DEFAULT_REFRESH_TTL_SECS);
+        assert!(validate_auth_grant_covers_refresh(thirty_days, thirty_days).is_ok());
+        assert!(
+            validate_auth_grant_covers_refresh(thirty_days + Duration::from_secs(1), thirty_days,)
+                .is_ok()
+        );
+        assert!(
+            validate_auth_grant_covers_refresh(thirty_days - Duration::from_secs(1), thirty_days,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn production_mapper_rejects_refresh_longer_than_auth_grant_before_provider_setup() {
+        let snapshot = crate::config::test_snapshot(&[
+            (IDENTITY_AUTH_GRANT_TTL_ENV, "3600"),
+            (REFRESH_TTL_ENV, "7200"),
+        ])
+        .expect("capture explicit invalid lifetime relation");
+        let mapper = ServingConfigMapper::for_test(snapshot.view());
+        let issuer = authn::JwtIssuerConfig::rss_access(
+            diport::KeyId::new("ttl-relation-test"),
+            diport::SigningPurpose::new("auth.rss-access"),
+            "https://issuer.test",
+            "rss",
+            Duration::from_secs(900),
+        );
+
+        assert!(
+            IdentityModuleInput::from_mapper(
+                &mapper,
+                IdentityTokenProfileInput::rss_access(issuer),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn explicit_test_values_reject_refresh_longer_than_auth_grant() {
+        let mut values = test_values();
+        values.auth_grant_ttl = Duration::from_secs(3_600);
+        values.refresh_ttl = Duration::from_secs(7_200);
+
+        assert!(IdentityModuleInput::from_test_values(values).is_err());
     }
 
     #[test]
@@ -374,7 +444,7 @@ pub(crate) mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn federated_profile_does_not_read_or_construct_local_rss_session_inputs() {
+    fn federated_profile_does_not_read_or_construct_local_rss_auth_grant_inputs() {
         let snapshot = crate::config::test_snapshot(&[]).expect("empty captured generation");
         let mapper = ServingConfigMapper::for_test(snapshot.view());
         let input = IdentityModuleInput::from_mapper(

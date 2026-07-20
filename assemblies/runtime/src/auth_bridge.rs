@@ -403,7 +403,7 @@ fn log_deny_verify(err: &authn::AuthnError) {
 //   `PROVIDER_UNAVAILABLE` ← replay store 等安全关键 provider 暂不可用（503，可重试）；
 //   `TENANT_BINDING_INVALID` ← service-token tenant binding 缺失 / 非法；
 //   `MTLS_PEER_MISSING`      ← mTLS listener 缺 transport 层已验证 peer evidence；
-//   `INVALID`           ← `#[non_exhaustive]` 未来 / 本桥不可达变体（`SessionNotFound` / `Forbidden`）fail-safe 兜底。
+//   `INVALID`           ← `#[non_exhaustive]` 未来 / 本桥不可达变体（`Forbidden`）fail-safe 兜底。
 pub(crate) const DENY_REASON_SIGNATURE_INVALID: &str = "signature_invalid";
 pub(crate) const DENY_REASON_UNTRUSTED: &str = "untrusted";
 pub(crate) const DENY_REASON_EXPIRED: &str = "expired";
@@ -631,8 +631,8 @@ mod tests {
     use vocab::PrincipalKind;
 
     /// `deny_reason` 闭值映射全臂覆盖（含 `_` 兜底）：五路一一保真（含 `PrincipalInvalid`→`principal_invalid`，
-    /// #1275 review F1：验签后良性失败不记 `signature_invalid`）+ 本桥不可达的 `SessionNotFound` / `Forbidden`
-    /// （非 verify funnel 产）fail-safe 落 `INVALID`。各路**端到端**可区分性见 auth_e2e.rs
+    /// #1275 review F1：验签后良性失败不记 `signature_invalid`）+ 本桥不可达的 `Forbidden`
+    ///（非 verify funnel 产）fail-safe 落 `INVALID`。各路**端到端**可区分性见 auth_e2e.rs
     /// `tracing_deny_logs_per_variant_reason_no_pii`（断言用 literal 钉死可观测告警 label 契约）。
     #[test]
     fn deny_reason_maps_every_variant_to_closed_value() {
@@ -658,13 +658,9 @@ mod tests {
             DENY_REASON_PROVIDER_UNAVAILABLE
         );
         assert_eq!(
-            deny_reason(&authn::AuthnError::SessionNotFound),
+            deny_reason(&authn::AuthnError::Forbidden),
             DENY_REASON_INVALID,
             "本桥不可达变体 fail-safe 落 INVALID"
-        );
-        assert_eq!(
-            deny_reason(&authn::AuthnError::Forbidden),
-            DENY_REASON_INVALID
         );
     }
 

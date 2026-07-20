@@ -47,7 +47,7 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_DOMAIN_TRANSPORT_URL",
     "RSS_HEALTH_LISTEN_ADDR",
     "RSS_HTTP_SERVER_REQUEST_BUDGET_MS",
-    "RSS_IDENTITY_SESSION_TTL_SECS",
+    "RSS_IDENTITY_AUTH_GRANT_TTL_SECS",
     "RSS_ADMIN_TOKEN_PROFILE",
     "RSS_ACCESS_TOKEN_AUDIENCE",
     "RSS_ACCESS_TOKEN_ES256_KEY_ID",
@@ -116,7 +116,7 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_S3_REGION",
     "RSS_S3_SECRET_ACCESS_KEY",
     "RSS_S3_SESSION_TOKEN",
-    "RSS_SESSION_SWEEP_INTERVAL_MS",
+    "RSS_AUTH_GRANT_SWEEP_INTERVAL_MS",
     "RSS_SERVICE_TOKEN_AUDIENCE",
     "RSS_SERVICE_TOKEN_HS256_KID",
     "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL",
@@ -842,7 +842,7 @@ pub(crate) struct WorkerRuntimeConfig {
     event: crate::event_transport::EventWorkerConfig,
     dlx: crate::event_transport::DlxWorkerConfig,
     distributed: crate::distributed_runtime::DistributedWorkerConfig,
-    session_sweep_interval: std::time::Duration,
+    auth_grant_sweep_interval: std::time::Duration,
     keyprovider_readiness_interval: settings_composition::KeyProviderReadinessInterval,
 }
 
@@ -853,8 +853,8 @@ impl WorkerRuntimeConfig {
             event: crate::event_transport::EventWorkerConfig::from_mapper(mapper)?,
             dlx: crate::event_transport::DlxWorkerConfig::canonical(),
             distributed: crate::distributed_runtime::DistributedWorkerConfig::canonical(),
-            session_sweep_interval: session_sweep_interval_from_value(
-                config.value("RSS_SESSION_SWEEP_INTERVAL_MS"),
+            auth_grant_sweep_interval: auth_grant_sweep_interval_from_value(
+                config.value("RSS_AUTH_GRANT_SWEEP_INTERVAL_MS"),
             ),
             keyprovider_readiness_interval: keyprovider_readiness_interval_from_value(
                 config.value("RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS"),
@@ -872,7 +872,7 @@ impl WorkerRuntimeConfig {
     ) {
         (
             self.event,
-            self.session_sweep_interval,
+            self.auth_grant_sweep_interval,
             self.keyprovider_readiness_interval,
         )
     }
@@ -887,7 +887,7 @@ pub(crate) struct RuntimeServingConfig {
     domain_transport: crate::DomainTransportConfig,
     domain_modules: crate::domains::DomainModuleInputs,
     audit_consumer_key: primitives::MacKey,
-    session_sweep_interval: std::time::Duration,
+    auth_grant_sweep_interval: std::time::Duration,
 }
 
 pub(crate) struct RuntimeServingConfigParts {
@@ -899,7 +899,7 @@ pub(crate) struct RuntimeServingConfigParts {
     pub(crate) domain_transport: crate::DomainTransportConfig,
     pub(crate) domain_modules: crate::domains::DomainModuleInputs,
     pub(crate) audit_consumer_key: primitives::MacKey,
-    pub(crate) session_sweep_interval: std::time::Duration,
+    pub(crate) auth_grant_sweep_interval: std::time::Duration,
 }
 
 impl RuntimeServingConfig {
@@ -913,7 +913,7 @@ impl RuntimeServingConfig {
             event,
             dlx,
             distributed,
-            session_sweep_interval,
+            auth_grant_sweep_interval,
             keyprovider_readiness_interval,
         } = WorkerRuntimeConfig::from_mapper(&mapper)?;
         let domain_transport = crate::DomainTransportConfig::from_mapper(topology, &mapper)?;
@@ -932,7 +932,7 @@ impl RuntimeServingConfig {
             domain_transport,
             domain_modules,
             audit_consumer_key,
-            session_sweep_interval,
+            auth_grant_sweep_interval,
         })
     }
 
@@ -946,28 +946,28 @@ impl RuntimeServingConfig {
             domain_transport: self.domain_transport,
             domain_modules: self.domain_modules,
             audit_consumer_key: self.audit_consumer_key,
-            session_sweep_interval: self.session_sweep_interval,
+            auth_grant_sweep_interval: self.auth_grant_sweep_interval,
         }
     }
 }
 
-const DEFAULT_SESSION_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
-const MIN_SESSION_SWEEP_INTERVAL_MS: u64 = 1_000;
-fn session_sweep_interval_from_value(raw: Option<&str>) -> std::time::Duration {
+const DEFAULT_AUTH_GRANT_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+const MIN_AUTH_GRANT_SWEEP_INTERVAL_MS: u64 = 1_000;
+fn auth_grant_sweep_interval_from_value(raw: Option<&str>) -> std::time::Duration {
     match raw {
-        None => DEFAULT_SESSION_SWEEP_INTERVAL,
+        None => DEFAULT_AUTH_GRANT_SWEEP_INTERVAL,
         Some(raw) => match raw.trim().parse::<u64>() {
-            Ok(milliseconds) if milliseconds >= MIN_SESSION_SWEEP_INTERVAL_MS => {
+            Ok(milliseconds) if milliseconds >= MIN_AUTH_GRANT_SWEEP_INTERVAL_MS => {
                 std::time::Duration::from_millis(milliseconds)
             }
             _ => {
                 tracing::warn!(
-                    env = "RSS_SESSION_SWEEP_INTERVAL_MS",
-                    default_ms = DEFAULT_SESSION_SWEEP_INTERVAL.as_millis(),
-                    min_ms = MIN_SESSION_SWEEP_INTERVAL_MS,
-                    "invalid session sweep interval (expected u64 ms >= 1000); using default"
+                    env = "RSS_AUTH_GRANT_SWEEP_INTERVAL_MS",
+                    default_ms = DEFAULT_AUTH_GRANT_SWEEP_INTERVAL.as_millis(),
+                    min_ms = MIN_AUTH_GRANT_SWEEP_INTERVAL_MS,
+                    "invalid AuthGrant sweep interval (expected u64 ms >= 1000); using default"
                 );
-                DEFAULT_SESSION_SWEEP_INTERVAL
+                DEFAULT_AUTH_GRANT_SWEEP_INTERVAL
             }
         },
     }
