@@ -18,11 +18,21 @@ use std::time::Duration;
 use base64::Engine as _;
 use secure::SecretText;
 
-pub(super) const DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV: &str =
-    "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS";
 const DOMAIN_TRANSPORT_URL_ENV_SUFFIX: &str = "DOMAIN_TRANSPORT_URL";
 const DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET_ENV_SUFFIX: &str =
     "DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET";
+
+/// Shared remote domain transport endpoint fallback (`durable-shared` only).
+pub(crate) const DOMAIN_TRANSPORT_SHARED_URL_ENV: &str = "RSS_DOMAIN_TRANSPORT_URL";
+
+/// Assembly domains that always capture per-domain transport URL / allow-set keys.
+const ASSEMBLY_DOMAIN_TRANSPORT_DOMAINS: &[&str] = &["settings", "identity", "audit"];
+
+pub(crate) const SETTINGS_DOMAIN_PLACEMENT_WORKLOAD_ENV: &str =
+    "RSS_SETTINGS_DOMAIN_PLACEMENT_WORKLOAD";
+pub(crate) const IDENTITY_DOMAIN_PLACEMENT_WORKLOAD_ENV: &str =
+    "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD";
+pub(crate) const AUDIT_DOMAIN_PLACEMENT_WORKLOAD_ENV: &str = "RSS_AUDIT_DOMAIN_PLACEMENT_WORKLOAD";
 
 /// RSS access-token signing / rotation env keys (single source for parse + error copy).
 pub(crate) const RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV: &str =
@@ -58,11 +68,13 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_DLX_HOT_VAULT_TOKEN",
     "RSS_DLX_PAYLOAD_KEY_NAME",
     "RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID",
-    "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS",
-    "RSS_DOMAIN_TRANSPORT_URL",
+    DOMAIN_TRANSPORT_SHARED_URL_ENV,
     "RSS_HEALTH_LISTEN_ADDR",
     "RSS_HTTP_SERVER_REQUEST_BUDGET_MS",
     "RSS_IDENTITY_AUTH_GRANT_TTL_SECS",
+    IDENTITY_DOMAIN_PLACEMENT_WORKLOAD_ENV,
+    SETTINGS_DOMAIN_PLACEMENT_WORKLOAD_ENV,
+    AUDIT_DOMAIN_PLACEMENT_WORKLOAD_ENV,
     "RSS_ADMIN_TOKEN_PROFILE",
     "RSS_ACCESS_TOKEN_AUDIENCE",
     "RSS_ACCESS_TOKEN_ISSUER",
@@ -1053,7 +1065,7 @@ pub(crate) struct ServingConfigMapper<'a> {
 }
 
 impl<'a> ServingConfigMapper<'a> {
-    fn new(config: SnapshotConfig<'a>) -> Self {
+    pub(crate) fn new(config: SnapshotConfig<'a>) -> Self {
         Self { config }
     }
 
@@ -1113,7 +1125,6 @@ pub(crate) struct RuntimeServingConfig {
     event_worker: crate::event_transport::EventWorkerConfig,
     dlx_worker: crate::event_transport::DlxWorkerConfig,
     distributed_worker: crate::distributed_runtime::DistributedWorkerConfig,
-    domain_transport: crate::DomainTransportConfig,
     domain_modules: crate::domains::DomainModuleInputs,
     audit_consumer_key: primitives::MacKey,
     auth_grant_sweep_interval: std::time::Duration,
@@ -1125,7 +1136,6 @@ pub(crate) struct RuntimeServingConfigParts {
     pub(crate) event_worker: crate::event_transport::EventWorkerConfig,
     pub(crate) dlx_worker: crate::event_transport::DlxWorkerConfig,
     pub(crate) distributed_worker: crate::distributed_runtime::DistributedWorkerConfig,
-    pub(crate) domain_transport: crate::DomainTransportConfig,
     pub(crate) domain_modules: crate::domains::DomainModuleInputs,
     pub(crate) audit_consumer_key: primitives::MacKey,
     pub(crate) auth_grant_sweep_interval: std::time::Duration,
@@ -1137,7 +1147,6 @@ impl RuntimeServingConfig {
         let token_profiles = TokenProfilesConfig::from_snapshot(config)?;
         let identity_token_profile = token_profiles.primary_identity_profile()?;
         let event_transport = crate::event_transport::EventTransportConfig::from_mapper(&mapper)?;
-        let topology = event_transport.topology();
         let WorkerRuntimeConfig {
             event,
             dlx,
@@ -1145,7 +1154,6 @@ impl RuntimeServingConfig {
             auth_grant_sweep_interval,
             keyprovider_readiness_interval,
         } = WorkerRuntimeConfig::from_mapper(&mapper)?;
-        let domain_transport = crate::DomainTransportConfig::from_mapper(topology, &mapper)?;
         let domain_modules = crate::domains::DomainModuleInputs::from_snapshot(
             &mapper,
             keyprovider_readiness_interval,
@@ -1158,7 +1166,6 @@ impl RuntimeServingConfig {
             event_worker: event,
             dlx_worker: dlx,
             distributed_worker: distributed,
-            domain_transport,
             domain_modules,
             audit_consumer_key,
             auth_grant_sweep_interval,
@@ -1172,7 +1179,6 @@ impl RuntimeServingConfig {
             event_worker: self.event_worker,
             dlx_worker: self.dlx_worker,
             distributed_worker: self.distributed_worker,
-            domain_transport: self.domain_transport,
             domain_modules: self.domain_modules,
             audit_consumer_key: self.audit_consumer_key,
             auth_grant_sweep_interval: self.auth_grant_sweep_interval,
@@ -1255,15 +1261,10 @@ impl RuntimeConfigSnapshot {
             values.insert(key, value);
         }
 
-        let dynamic_domains = values
-            .get(DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV)
-            .and_then(present_text)
-            .and_then(|raw| domain_transport_required_domains_from_value(raw.expose()).ok())
-            .unwrap_or_default();
-        for domain in dynamic_domains {
+        for domain in ASSEMBLY_DOMAIN_TRANSPORT_DOMAINS {
             for key in [
-                domain_transport_url_env(&domain),
-                domain_transport_mtls_allow_set_env(&domain),
+                domain_transport_url_env(domain),
+                domain_transport_mtls_allow_set_env(domain),
             ] {
                 if values.contains_key(key.as_str()) {
                     continue;
@@ -1321,39 +1322,7 @@ fn add_generated_event_keys(catalog: &mut BTreeSet<RuntimeConfigKey>) {
     }
 }
 
-pub(super) fn domain_transport_required_domains_from(
-    get: &impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<Vec<String>> {
-    let raw = get(DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV).ok_or_else(|| {
-        anyhow::anyhow!("missing required env var: {DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV}")
-    })?;
-    domain_transport_required_domains_from_value(&raw)
-}
-
-fn domain_transport_required_domains_from_value(raw: &str) -> anyhow::Result<Vec<String>> {
-    let mut domains = Vec::new();
-    for part in raw.split(',') {
-        let domain = part.trim();
-        anyhow::ensure!(
-            !domain.is_empty(),
-            "{DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV} must not contain empty entries"
-        );
-        anyhow::ensure!(
-            !domain.chars().any(char::is_control) && !domain.chars().any(char::is_whitespace),
-            "{DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV} entries must not contain whitespace or control characters"
-        );
-        domains.push(domain.to_uppercase());
-    }
-    anyhow::ensure!(
-        !domains.is_empty(),
-        "{DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV} must list at least one domain"
-    );
-    domains.sort();
-    domains.dedup();
-    Ok(domains)
-}
-
-pub(super) fn domain_transport_url_env(domain: &str) -> String {
+pub(crate) fn domain_transport_url_env(domain: &str) -> String {
     format!(
         "RSS_{}_{}",
         domain.to_ascii_uppercase(),
@@ -1361,7 +1330,7 @@ pub(super) fn domain_transport_url_env(domain: &str) -> String {
     )
 }
 
-pub(super) fn domain_transport_mtls_allow_set_env(domain: &str) -> String {
+pub(crate) fn domain_transport_mtls_allow_set_env(domain: &str) -> String {
     format!(
         "RSS_{}_{}",
         domain.to_ascii_uppercase(),

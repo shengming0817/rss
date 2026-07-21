@@ -24,7 +24,7 @@
 //!
 //! INVARIANT: RUNTIME-PHASE-TRANSITION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_phase_transition_rejects_missing_reordered_drop_plan_and_bait", anti_vacuity = "tests::runtime_phase_transition_accepts_canonical_live_path" } -- the unique production `run_startup()` delegates only to `phase::execute`; that executor consumes the exact five associated-`Next` transitions in order, every transition uses its associated `RuntimePhaseState::PHASE` through the directly redacting private `phase_result` funnel, the runtime plan stays owned by `PhaseContext` while its single listener execution projection is carried as a mandatory phase-state field into Finalize, state trait impls are closed across the complete production module graph, and launch inputs validate before the sole launch phase constructs `LaunchPlan`. Tuple/drop/skip/reorder paths, direct or aliased `LaunchPlan`/`ShutdownStack` access, legacy root phase bodies, cross-file impls, macros, dead branches, comments, strings, and test-only bait fail closed.
 //!
-//! INVARIANT: RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_listener_plan_execution_rejects_legacy_and_structural_bypasses", anti_vacuity = "tests::runtime_listener_plan_execution_accepts_workspace" } -- across the complete production module graph, AST must expose exactly one RuntimePlan listener projection call, one consuming finalizer and phase call, and one `FinalizedListenerSet` construction expression in their canonical owners with no constructor/trait seam; `ListenerExecutionPlan`, `ListenerExecutionSpec`, `AssembledListener`, and `FinalizedListenerSet` remain exact `pub(crate)` types with inherited-private fields and no public re-export; launch accepts only that set, while raw-value auth assemblers, manual Health append, legacy config auth accessors, public listener/routes modules, and ordinary `Vec<AssembledListener>` launch inputs remain forbidden.
+//! INVARIANT: RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_listener_plan_execution_rejects_legacy_and_structural_bypasses + tests::runtime_placement_plan_execution_rejects_missing_anchors", anti_vacuity = "tests::runtime_listener_plan_execution_accepts_workspace" } -- across the complete production module graph, AST must expose exactly one RuntimePlan listener projection call, one consuming finalizer and phase call, and one `FinalizedListenerSet` construction expression in their canonical owners with no constructor/trait seam; `ListenerExecutionPlan`, `ListenerExecutionSpec`, `AssembledListener`, and `FinalizedListenerSet` remain exact `pub(crate)` types with inherited-private fields and no public re-export; launch accepts only that set, while raw-value auth assemblers, manual Health append, legacy config auth accessors, public listener/routes modules, and ordinary `Vec<AssembledListener>` launch inputs remain forbidden. PlacementExecutionPlan must mint once and reach outbound transport only through `reject_remote_on_local_listeners` + `from_placement`.
 //!
 //! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- the only production service-token constructor accepts the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps` plus `PgMaintenanceDeps`. Serving and the five operator paths call that typed constructor directly at their run-reachable sites. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 //!
@@ -72,6 +72,7 @@ const RUNTIME_PHASE_FINALIZE_PATH: &str = "assemblies/runtime/src/phase/finalize
 const RUNTIME_PHASE_LAUNCH_PATH: &str = "assemblies/runtime/src/phase/launch.rs";
 const RUNTIME_SECRET_CONFIG_PATH: &str = "assemblies/runtime/src/secret_config.rs";
 const RUNTIME_PLAN_PATH: &str = "assemblies/runtime/src/plan.rs";
+const RUNTIME_PLACEMENT_EXEC_PATH: &str = "assemblies/runtime/src/plan/placement_exec.rs";
 const RUNTIME_ROUTES_PATH: &str = "assemblies/runtime/src/routes.rs";
 #[cfg(test)]
 const RUNTIME_LISTENERS_PATH: &str = "assemblies/runtime/src/listeners.rs";
@@ -284,11 +285,14 @@ fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         .collect::<Result<BTreeMap<_, _>>>()?;
     let source = |path: &str| sources.get(path).map(String::as_str).unwrap_or_default();
     let plan = source(RUNTIME_PLAN_PATH);
+    let placement_exec = source(RUNTIME_PLACEMENT_EXEC_PATH);
     let routes = source(RUNTIME_ROUTES_PATH);
     let finalize = source(RUNTIME_PHASE_FINALIZE_PATH);
     let phase = source(RUNTIME_PHASE_PATH);
     let launch = source(RUNTIME_LAUNCH_PATH);
     let lib = source(RUNTIME_LIB_PATH);
+    let provider = source(RUNTIME_PHASE_PROVIDER_PATH);
+    let infra = source(RUNTIME_PHASE_INFRA_PATH);
     let inventories = production_files
         .iter()
         .map(|(path, file)| (path.clone(), listener_plan_execution_inventory(file)))
@@ -376,6 +380,20 @@ fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
                 && !lib.contains("\npub mod routes;"),
             RUNTIME_LIB_PATH,
             "listeners/routes 必须保持 crate-private",
+        ),
+        (
+            plan.matches("fn placement_execution_plan(").count() == 1
+                && placement_exec.contains("RUNTIME-PLACEMENT-PLAN-EXECUTION-01")
+                && placement_exec
+                    .matches("fn reject_remote_on_local_listeners(")
+                    .count()
+                    == 1
+                && provider.contains("runtime_plan.placement_execution_plan(")
+                && provider.contains("reject_remote_on_local_listeners(")
+                && lib.matches("fn from_placement(").count() == 1
+                && infra.contains("DomainTransportConfig::from_placement("),
+            RUNTIME_PLACEMENT_EXEC_PATH,
+            "RuntimePlan 必须唯一 mint PlacementExecutionPlan，并经 reject_remote_on_local_listeners + from_placement 进入 outbound transport",
         ),
     ];
     for (ok, path, detail) in checks {
@@ -1385,14 +1403,9 @@ impl RunRuntimeConfigWiring {
             return;
         };
         match name.as_str() {
-            "wire_domain_transport" => self.record_serving_sink(
-                "domain_transport",
-                call.args.len() == 1
-                    && self.serving_argument_is_canonical(call, 0, "domain_transport"),
-            ),
             "wire_domains" => self.record_serving_sink(
                 "domain_modules",
-                call.args.len() == 2
+                call.args.len() == 3
                     && self.serving_argument_is_canonical(call, 1, "domain_modules"),
             ),
             "wire_auth_grant_sweeper" => self.record_serving_sink(
@@ -1772,7 +1785,6 @@ const SERVING_RUNTIME_PART_FIELDS: &[&str] = &[
     "event_worker",
     "dlx_worker",
     "distributed_worker",
-    "domain_transport",
     "domain_modules",
     "audit_consumer_key",
     "auth_grant_sweep_interval",
@@ -1782,7 +1794,6 @@ const SERVING_RUNTIME_SINK_FIELDS: &[&str] = &[
     "event_transport",
     "event_worker",
     "distributed_worker",
-    "domain_transport",
     "domain_modules",
     "audit_consumer_key",
     "auth_grant_sweep_interval",
@@ -11592,6 +11603,16 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "let listener_execution_plan = runtime_plan.listener_execution_plan();",
     },
     AnchorSpec {
+        id: "run.placement.execution-plan",
+        path: RUNTIME_PHASE_PROVIDER_PATH,
+        pattern: "runtime_plan.placement_execution_plan(self.runtime_inputs.config())",
+    },
+    AnchorSpec {
+        id: "run.placement.reject-remote-on-local-listeners",
+        path: RUNTIME_PHASE_PROVIDER_PATH,
+        pattern: ".reject_remote_on_local_listeners(&listener_execution_plan)",
+    },
+    AnchorSpec {
         id: "run.config.serving",
         path: RUNTIME_PHASE_PROVIDER_PATH,
         pattern: "RuntimeServingConfig::from_snapshot(config)",
@@ -11662,6 +11683,11 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "if let Some(provider) = runtime_service_token.as_ref() {",
     },
     AnchorSpec {
+        id: "run.domain-transport.from-placement",
+        path: RUNTIME_PHASE_INFRA_PATH,
+        pattern: "crate::DomainTransportConfig::from_placement(\n                event_transport.topology(),\n                &placement_execution_plan,\n                &crate::config::ServingConfigMapper::new(config),\n            )",
+    },
+    AnchorSpec {
         id: "run.module.output.domain-transport",
         path: RUNTIME_PHASE_INFRA_PATH,
         pattern: "provider_build.record_domain(domain_transport.module_result());",
@@ -11674,7 +11700,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.wire.generated-domains",
         path: RUNTIME_PHASE_DOMAINS_PATH,
-        pattern: "crate::modules_gen::wire_domains(&deps, domain_modules)",
+        pattern: "crate::modules_gen::wire_domains(\n                &deps,\n                domain_modules,\n                &placement_execution_plan,\n            )",
     },
     AnchorSpec {
         id: "run.module.input.domains",
@@ -13148,7 +13174,7 @@ impl DomainModuleResult {
             }
             if anchor.id == "run.wire.generated-domains" {
                 lines.push(
-                    "let mut domain_bindings = modules_gen::wire_domains(&deps, domain_modules)",
+                    "let mut domain_bindings = modules_gen::wire_domains(&deps, domain_modules, &placement_execution_plan)",
                 );
             } else {
                 lines.push(anchor.pattern);
@@ -13984,7 +14010,6 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
         event_worker,
         dlx_worker,
         distributed_worker,
-        domain_transport,
         domain_modules,
         audit_consumer_key,
         auth_grant_sweep_interval,
@@ -14013,7 +14038,6 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
     let (vault, identity_signer, settings_key_name) = vault_config.into_runtime()?;
     let redis = build_redis_runtime_deps(redis_config);
     let s3 = build_s3_runtime_deps(s3_general_config);
-    wire_domain_transport(domain_transport);
     let wiring_inputs = RuntimeWiringInputs {
         event_transport,
         event_worker,
@@ -14116,7 +14140,6 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
         event_worker,
         dlx_worker,
         distributed_worker,
-        domain_transport,
         domain_modules,
         audit_consumer_key,
         auth_grant_sweep_interval,
@@ -14914,7 +14937,6 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         event_worker,
         dlx_worker,
         distributed_worker,
-        domain_transport,
         domain_modules,
         audit_consumer_key,
         auth_grant_sweep_interval,
@@ -14943,7 +14965,6 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
     let (vault, identity_signer, settings_key_name) = vault_config.into_runtime()?;
     let redis = build_redis_runtime_deps(redis_config);
     let s3 = build_s3_runtime_deps(s3_general_config);
-    wire_domain_transport(domain_transport);
     let wiring_inputs = RuntimeWiringInputs {
         event_transport,
         event_worker,
@@ -16451,6 +16472,7 @@ impl DomainModuleResult {
             .context("xtask workspace root")?;
         for path in [
             RUNTIME_PLAN_PATH,
+            RUNTIME_PLACEMENT_EXEC_PATH,
             RUNTIME_ROUTES_PATH,
             RUNTIME_PHASE_FINALIZE_PATH,
             RUNTIME_PHASE_PATH,
@@ -16474,6 +16496,49 @@ impl DomainModuleResult {
             .parent()
             .context("xtask workspace root")?;
         assert_eq!(listener_plan_execution_findings(root)?, Vec::new());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_placement_plan_execution_rejects_missing_anchors() -> Result<()> {
+        for (case, path, from, to) in [
+            (
+                "reject-remote-fn",
+                RUNTIME_PLACEMENT_EXEC_PATH,
+                "fn reject_remote_on_local_listeners(",
+                "fn reject_remote_on_local_listeners_removed(",
+            ),
+            (
+                "from-placement-fn",
+                RUNTIME_LIB_PATH,
+                "fn from_placement(",
+                "fn from_placement_removed(",
+            ),
+            (
+                "placement-execution-plan-call",
+                RUNTIME_PHASE_PROVIDER_PATH,
+                "runtime_plan.placement_execution_plan(",
+                "runtime_plan.placement_execution_plan_removed(",
+            ),
+            (
+                "from-placement-consumer",
+                RUNTIME_PHASE_INFRA_PATH,
+                "DomainTransportConfig::from_placement(",
+                "DomainTransportConfig::from_placement_removed(",
+            ),
+        ] {
+            let root = listener_plan_fixture(&format!("runtime-placement-plan-{case}"))?;
+            let source = fs::read_to_string(root.join(path))?;
+            let mutated = source.replacen(from, to, 1);
+            anyhow::ensure!(mutated != source, "{case} mutation must be live");
+            write(&root.join(path), &mutated)?;
+            assert!(
+                listener_plan_execution_findings(&root)?
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ForbiddenWiring),
+                "{case} must fail placement-plan execution gate"
+            );
+        }
         Ok(())
     }
 

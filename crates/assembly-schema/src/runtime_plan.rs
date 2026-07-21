@@ -722,7 +722,7 @@ fn validate_manifest_lock(
 
 fn validate_candidates(
     manifest: &CanonicalAssemblyManifestV1,
-    lock: &ParsedAssemblyLock,
+    _lock: &ParsedAssemblyLock,
     input: &RuntimePlanV1Input,
 ) -> Result<(), RuntimePlanError> {
     let expected_providers = manifest
@@ -784,19 +784,14 @@ fn validate_candidates(
         ));
     }
 
-    let mut expected_placements = manifest
-        .domains()
-        .iter()
-        .map(|domain| (*domain, lock.identity().name()))
-        .collect::<Vec<_>>();
-    expected_placements
-        .sort_by(|left, right| (left.0.as_str(), left.1).cmp(&(right.0.as_str(), right.1)));
-    if !input
+    let mut expected_domains = manifest.domains().to_vec();
+    expected_domains.sort_by_key(|domain| domain.as_str());
+    let actual_placement_domains = input
         .placement_plans
         .iter()
-        .map(|plan| (plan.domain, plan.workload.as_str()))
-        .eq(expected_placements)
-    {
+        .map(|plan| plan.domain)
+        .collect::<Vec<_>>();
+    if actual_placement_domains != expected_domains {
         return Err(RuntimePlanError::new(
             RuntimePlanErrorKind::DeclarationMismatch("placementPlans"),
         ));

@@ -75,8 +75,8 @@ fn runtime_config_snapshot_reads_source_once_and_replays_stable_values() {
             FakeValue::Present("generation-one".to_owned()),
         ),
         (
-            "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS",
-            FakeValue::Present("identity".to_owned()),
+            "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD",
+            FakeValue::Present("runtime".to_owned()),
         ),
     ]);
     let reads = read_log(&source);
@@ -183,7 +183,7 @@ fn complete_shared_serving_values() -> Vec<(String, String)> {
         ("RSS_ACCESS_TOKEN_TTL_SECS", "900"),
         ("RSS_ACCESS_TOKEN_TRUSTED_KINDS", "user,admin"),
         ("RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS", "60"),
-        ("RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS", "identity"),
+        ("RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD", "runtime"),
         ("RSS_DOMAIN_TRANSPORT_URL", "https://gateway.internal/rpc"),
         (
             "RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID",
@@ -260,11 +260,7 @@ fn runtime_config_serving_event_domain_dlx_and_worker_inputs_share_one_captured_
             .get(),
         std::time::Duration::from_secs(7)
     );
-    drop((
-        parts.domain_transport,
-        parts.dlx_worker,
-        parts.distributed_worker,
-    ));
+    let _ = (parts.dlx_worker, parts.distributed_worker);
 
     let reads = reads.lock().expect("read log mutex");
     for (key, _) in values {
@@ -297,7 +293,7 @@ fn complete_serving_config_accepts_federated_primary_and_admin_without_local_rss
 }
 
 #[test]
-fn runtime_serving_config_accepts_complete_isolated_transport_with_explicit_spiffe_endpoint() {
+fn runtime_serving_config_accepts_complete_isolated_event_transport() {
     const SPIFFE_ENDPOINT: &str = "unix:///run/spire/isolated-agent.sock";
     let mut values = complete_shared_serving_values();
     replace_serving_value(&mut values, "RSS_TOPOLOGY", "durable-isolated");
@@ -327,7 +323,10 @@ fn runtime_serving_config_accepts_complete_isolated_transport_with_explicit_spif
         parts.event_transport.topology(),
         bootstrap::Topology::DurableIsolated
     );
-    assert_eq!(parts.domain_transport.spiffe_endpoint, SPIFFE_ENDPOINT);
+    assert_eq!(
+        snapshot.view().value("SPIFFE_ENDPOINT_SOCKET"),
+        Some(SPIFFE_ENDPOINT)
+    );
 }
 
 #[test]
@@ -512,8 +511,8 @@ fn runtime_infra_vault_s3_snapshot_debug_is_opaque() {
 #[test]
 fn runtime_config_catalog_deduplicates_static_dynamic_keys_and_excludes_maintenance() {
     let source = FakeSource::new([(
-        "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS",
-        FakeValue::Present("identity,IDENTITY,audit".to_owned()),
+        "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD",
+        FakeValue::Present("runtime".to_owned()),
     )]);
     let reads = read_log(&source);
     let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
@@ -566,11 +565,12 @@ fn runtime_config_catalog_deduplicates_static_dynamic_keys_and_excludes_maintena
 }
 
 fn runtime_config_decision_transcript(get: &impl Fn(&str) -> Option<String>) -> String {
-    let domains = match crate::domain_transport_required_domains_from(get) {
-        Ok(domains) => domains.join(","),
-        Err(error) => format!("error:{error}"),
+    let workload = match get("RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD") {
+        Some(value) if crate::plan::is_kebab_case_workload(value.trim()) => value.trim().to_owned(),
+        Some(value) => format!("error:invalid:{value}"),
+        None => "default:runtime".to_owned(),
     };
-    format!("domains={domains}")
+    format!("identity.workload={workload}")
 }
 
 #[test]
@@ -580,8 +580,8 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
             "configured",
             BTreeMap::from([
                 (
-                    "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS".to_owned(),
-                    FakeValue::Present("identity,audit,IDENTITY".to_owned()),
+                    "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD".to_owned(),
+                    FakeValue::Present("peer-cell".to_owned()),
                 ),
                 (
                     "RSS_AUTH_GRANT_SWEEP_INTERVAL_MS".to_owned(),
@@ -589,19 +589,13 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
                 ),
             ]),
         ),
-        (
-            "default",
-            BTreeMap::from([(
-                "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS".to_owned(),
-                FakeValue::Present("identity".to_owned()),
-            )]),
-        ),
+        ("default", BTreeMap::new()),
         (
             "invalid-fail-soft",
             BTreeMap::from([
                 (
-                    "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS".to_owned(),
-                    FakeValue::Present("identity".to_owned()),
+                    "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD".to_owned(),
+                    FakeValue::Present("peer-cell".to_owned()),
                 ),
                 (
                     "RSS_AUTH_GRANT_SWEEP_INTERVAL_MS".to_owned(),
@@ -613,7 +607,7 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
             "non-unicode",
             BTreeMap::from([
                 (
-                    "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS".to_owned(),
+                    "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD".to_owned(),
                     FakeValue::NonUnicode,
                 ),
                 (
@@ -626,7 +620,7 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
             "empty",
             BTreeMap::from([
                 (
-                    "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS".to_owned(),
+                    "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD".to_owned(),
                     FakeValue::Present(String::new()),
                 ),
                 (
@@ -639,8 +633,8 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
             "whitespace",
             BTreeMap::from([
                 (
-                    "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS".to_owned(),
-                    FakeValue::Present("identity audit".to_owned()),
+                    "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD".to_owned(),
+                    FakeValue::Present("peer cell".to_owned()),
                 ),
                 (
                     "RSS_AUTH_GRANT_SWEEP_INTERVAL_MS".to_owned(),
@@ -673,17 +667,17 @@ fn runtime_config_snapshot_matches_committed_env_decision_transcript() {
     }
 
     const COMMITTED_TRANSCRIPT: &str = "[configured]\n\
-domains=AUDIT,IDENTITY\n\
+identity.workload=peer-cell\n\
 [default]\n\
-domains=IDENTITY\n\
+identity.workload=default:runtime\n\
 [invalid-fail-soft]\n\
-domains=IDENTITY\n\
+identity.workload=peer-cell\n\
 [non-unicode]\n\
-domains=error:missing required env var: RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS\n\
+identity.workload=default:runtime\n\
 [empty]\n\
-domains=error:RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS must not contain empty entries\n\
+identity.workload=error:invalid:\n\
 [whitespace]\n\
-domains=error:RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS entries must not contain whitespace or control characters\n";
+identity.workload=error:invalid:peer cell\n";
     assert_eq!(direct, COMMITTED_TRANSCRIPT);
     assert_eq!(captured, COMMITTED_TRANSCRIPT);
 }
@@ -698,8 +692,8 @@ fn runtime_config_snapshot_preserves_env_var_ok_transcript() {
             FakeValue::Present("  transit  ".to_owned()),
         ),
         (
-            "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS",
-            FakeValue::Present("identity".to_owned()),
+            "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD",
+            FakeValue::Present("runtime".to_owned()),
         ),
     ]);
     let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
@@ -719,8 +713,8 @@ fn runtime_config_snapshot_debug_is_fully_opaque() {
     let source = FakeSource::new([
         ("RSS_VAULT_TOKEN", FakeValue::Present(bait.to_owned())),
         (
-            "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS",
-            FakeValue::Present("identity".to_owned()),
+            "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD",
+            FakeValue::Present("runtime".to_owned()),
         ),
     ]);
     let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
@@ -808,22 +802,33 @@ fn snapshot_capability_reuses_one_generation_for_serving_decisions() {
 }
 
 #[test]
-fn runtime_config_invalid_required_domains_are_deferred_to_the_existing_builder() {
+fn runtime_config_always_captures_assembly_domain_transport_keys() {
     let source = FakeSource::new([(
-        "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS",
-        FakeValue::Present("identity,,audit".to_owned()),
+        "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD",
+        FakeValue::Present("runtime".to_owned()),
     )]);
+    let reads = read_log(&source);
     let snapshot =
         RuntimeConfigSnapshot::capture_test(source).expect("capture must not parse-fail");
+    drop(snapshot);
 
-    let error = crate::domain_transport_required_domains_from(&|name| {
-        snapshot.view().value(name).map(str::to_owned)
-    })
-    .expect_err("existing builder owns the parse error");
-    assert_eq!(
-        error.to_string(),
-        "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS must not contain empty entries"
-    );
+    let reads = reads.lock().expect("read log mutex");
+    for expected in [
+        "RSS_SETTINGS_DOMAIN_TRANSPORT_URL",
+        "RSS_SETTINGS_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET",
+        "RSS_IDENTITY_DOMAIN_TRANSPORT_URL",
+        "RSS_IDENTITY_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET",
+        "RSS_AUDIT_DOMAIN_TRANSPORT_URL",
+        "RSS_AUDIT_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET",
+        "RSS_SETTINGS_DOMAIN_PLACEMENT_WORKLOAD",
+        "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD",
+        "RSS_AUDIT_DOMAIN_PLACEMENT_WORKLOAD",
+    ] {
+        assert!(
+            reads.iter().any(|key| key == expected),
+            "missing {expected}"
+        );
+    }
 }
 
 fn rss_token_profile_values() -> Vec<(String, String)> {

@@ -12,6 +12,11 @@ impl<'a> Planned<'a> {
         let runtime_plan = crate::plan::RuntimePlan::bundled(self.runtime_inputs.config())
             .context("build RuntimePlan")?;
         let listener_execution_plan = runtime_plan.listener_execution_plan();
+        let placement_execution_plan =
+            runtime_plan.placement_execution_plan(self.runtime_inputs.config());
+        placement_execution_plan
+            .reject_remote_on_local_listeners(&listener_execution_plan)
+            .context("validate placement against local listeners")?;
         let context = PhaseContext::new(self.runtime_inputs, runtime_plan);
         let typed_runtime_plan = context.runtime_plan.as_typed();
         tracing::info!(
@@ -115,6 +120,7 @@ impl<'a> Planned<'a> {
                     provider_build,
                     provider_factories,
                     listener_execution_plan,
+                    placement_execution_plan,
                     rate_limiter,
                     serving_config,
                     runtime_rss_access,

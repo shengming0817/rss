@@ -17,50 +17,77 @@ struct WiredDomains {
     registry: bootstrap::Registry,
 }
 
+/// How domain-listener evidence is projected against RuntimePlan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingEvidenceMode {
+    /// Generated manifest must list every plan domain on its listener (including remote-placed).
+    GeneratedManifest,
+    /// Live registry omits remote-placed domains (they are not composed locally).
+    LiveOmitRemote,
+}
+
 pub(crate) fn validate_domain_listener_evidence(
     plan: &crate::plan::ListenerExecutionPlan,
+    placement: &crate::plan::PlacementExecutionPlan,
     actual: &[bootstrap::DomainListenerBinding],
 ) -> anyhow::Result<()> {
     validate_binding_projection(
         plan,
+        placement,
         crate::modules_gen::DOMAIN_LISTENER_BINDINGS,
         "generated",
+        BindingEvidenceMode::GeneratedManifest,
     )?;
-    validate_binding_projection(plan, actual, "live")?;
+    validate_binding_projection(
+        plan,
+        placement,
+        actual,
+        "live",
+        BindingEvidenceMode::LiveOmitRemote,
+    )?;
     Ok(())
 }
 
 fn validate_binding_projection(
     plan: &crate::plan::ListenerExecutionPlan,
+    placement: &crate::plan::PlacementExecutionPlan,
     bindings: &[bootstrap::DomainListenerBinding],
     source: &'static str,
+    mode: BindingEvidenceMode,
 ) -> anyhow::Result<()> {
-    let expected_count = plan
+    let mut expected = plan
         .listeners()
         .iter()
-        .map(|listener| listener.domains().len())
-        .sum::<usize>();
+        .flat_map(|listener| {
+            listener.domains().iter().filter_map(|domain| {
+                if matches!(mode, BindingEvidenceMode::LiveOmitRemote)
+                    && !placement.is_local(*domain)
+                {
+                    return None;
+                }
+                Some((listener.kind(), domain.as_str()))
+            })
+        })
+        .collect::<Vec<_>>();
     anyhow::ensure!(
-        bindings.len() == expected_count,
-        "{source} domain-listener binding count drifts from RuntimePlan: plan {expected_count}, {source} {}",
+        bindings.len() == expected.len(),
+        "{source} domain-listener binding count drifts from RuntimePlan: plan {}, {source} {}",
+        expected.len(),
         bindings.len()
     );
-    for listener in plan.listeners() {
-        let actual_domains = bindings
-            .iter()
-            .filter(|binding| binding.listener == listener.kind())
-            .map(|binding| binding.domain)
-            .collect::<Vec<_>>();
-        let expected_domains = listener
-            .domains()
-            .iter()
-            .map(assembly_schema::AssemblyDomain::as_str)
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            actual_domains == expected_domains,
-            "{source} domain order or placement drifts from RuntimePlan for listener {:?}",
-            listener.kind()
-        );
+    // Bijection is order-independent: RuntimePlan sorts listeners by kind, while generated /
+    // live glue may retain assembly.toml composition order.
+    for binding in bindings {
+        let Some(pos) = expected.iter().position(|(listener_kind, domain)| {
+            binding.listener == *listener_kind && binding.domain == *domain
+        }) else {
+            anyhow::bail!(
+                "{source} domain-listener binding drifts from RuntimePlan: listener={:?} domain={}",
+                binding.listener,
+                binding.domain
+            );
+        };
+        expected.swap_remove(pos);
     }
     Ok(())
 }
@@ -72,6 +99,7 @@ impl<'a> InfraBuilt<'a> {
             mut provider_build,
             mut provider_factories,
             listener_execution_plan,
+            placement_execution_plan,
             rate_limiter,
             deps,
             s3_canary_config,
@@ -99,8 +127,12 @@ impl<'a> InfraBuilt<'a> {
             // and subscriber handles enter Registry, never SharedRuntimeDeps or a service bag.
             // bootstrap 启动 tail-verify（跨租户全量巡检）defer 到 Part B；本 phase 仍只收窄
             // request/subscriber capability。
-            let mut domain_bindings = match crate::modules_gen::wire_domains(&deps, domain_modules)
-                .await
+            let mut domain_bindings = match crate::modules_gen::wire_domains(
+                &deps,
+                domain_modules,
+                &placement_execution_plan,
+            )
+            .await
             {
                 Ok(bindings) => bindings,
                 Err(failure) => {
@@ -121,6 +153,7 @@ impl<'a> InfraBuilt<'a> {
             provider_build.record_domain(domains_module);
             validate_domain_listener_evidence(
                 &listener_execution_plan,
+                &placement_execution_plan,
                 &registry.domain_listener_bindings(),
             )
             .context("validate runtime domain-listener evidence")?;
@@ -262,43 +295,89 @@ impl<'a> InfraBuilt<'a> {
 #[cfg(test)]
 mod listener_plan_tests {
     use super::validate_domain_listener_evidence;
+    use crate::config::test_snapshot;
+    use crate::plan::RuntimePlan;
 
     #[allow(clippy::expect_used)]
-    fn plan() -> crate::plan::ListenerExecutionPlan {
-        let snapshot = crate::config::test_snapshot(&[
+    fn plan() -> (
+        crate::plan::ListenerExecutionPlan,
+        crate::plan::PlacementExecutionPlan,
+    ) {
+        let snapshot = test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
         ])
         .expect("listener plan snapshot");
-        crate::plan::RuntimePlan::bundled(snapshot.view())
-            .expect("bundled RuntimePlan")
-            .listener_execution_plan()
+        let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan");
+        (
+            runtime_plan.listener_execution_plan(),
+            runtime_plan.placement_execution_plan(snapshot.view()),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn plan_with_remote_identity() -> (
+        crate::plan::ListenerExecutionPlan,
+        crate::plan::PlacementExecutionPlan,
+    ) {
+        let merged = [
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+            ("RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD", "peer-cell"),
+        ];
+        let snapshot = test_snapshot(&merged).expect("remote identity snapshot");
+        let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan");
+        (
+            runtime_plan.listener_execution_plan(),
+            runtime_plan.placement_execution_plan(snapshot.view()),
+        )
     }
 
     #[test]
-    fn listener_plan_rejects_missing_extra_wrong_duplicate_and_reordered_live_domains() {
-        let plan = plan();
+    fn listener_plan_rejects_missing_extra_wrong_duplicate_live_domains() {
+        let (plan, placement) = plan();
         let expected = crate::modules_gen::DOMAIN_LISTENER_BINDINGS;
-        assert!(validate_domain_listener_evidence(&plan, expected).is_ok());
+        assert!(validate_domain_listener_evidence(&plan, &placement, expected).is_ok());
 
         let missing = &expected[1..];
-        assert!(validate_domain_listener_evidence(&plan, missing).is_err());
+        assert!(validate_domain_listener_evidence(&plan, &placement, missing).is_err());
 
         let mut duplicate = expected.to_vec();
         duplicate.push(expected[0]);
-        assert!(validate_domain_listener_evidence(&plan, &duplicate).is_err());
+        assert!(validate_domain_listener_evidence(&plan, &placement, &duplicate).is_err());
 
         let mut wrong_listener = expected.to_vec();
         wrong_listener[0].listener = primitives::ListenerKind::Admin;
-        assert!(validate_domain_listener_evidence(&plan, &wrong_listener).is_err());
+        assert!(validate_domain_listener_evidence(&plan, &placement, &wrong_listener).is_err());
 
         let mut wrong_domain = expected.to_vec();
         wrong_domain[0].domain = "audit";
-        assert!(validate_domain_listener_evidence(&plan, &wrong_domain).is_err());
+        assert!(validate_domain_listener_evidence(&plan, &placement, &wrong_domain).is_err());
 
         let mut reordered = expected.to_vec();
         reordered.reverse();
-        assert!(validate_domain_listener_evidence(&plan, &reordered).is_err());
+        // Order may differ between RuntimePlan kind-sort and assembly composition order.
+        assert!(validate_domain_listener_evidence(&plan, &placement, &reordered).is_ok());
+    }
+
+    #[test]
+    fn listener_plan_live_omits_remote_domains_ok_full_bindings_err() {
+        let (plan, placement) = plan_with_remote_identity();
+        let generated = crate::modules_gen::DOMAIN_LISTENER_BINDINGS;
+        let live_omitted: Vec<_> = generated
+            .iter()
+            .copied()
+            .filter(|binding| binding.domain != "identity")
+            .collect();
+        assert!(
+            validate_domain_listener_evidence(&plan, &placement, &live_omitted).is_ok(),
+            "live evidence must omit remote-placed identity"
+        );
+        assert!(
+            validate_domain_listener_evidence(&plan, &placement, generated).is_err(),
+            "live evidence still listing remote identity must fail"
+        );
     }
 }

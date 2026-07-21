@@ -906,7 +906,7 @@ fn render_modules(
     let manifest_digest = manifest.manifest_digest();
     let is_runtime = manifest.name() == "runtime";
     let wire_domains_signature = if is_runtime {
-        "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n) -> Result<Vec<DomainBinding>, DomainWiringFailure>"
+        "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n    placement: &crate::plan::PlacementExecutionPlan,\n) -> Result<Vec<DomainBinding>, DomainWiringFailure>"
     } else {
         "pub async fn wire_domains(deps: &SharedRuntimeDeps) -> anyhow::Result<Vec<DomainBinding>>"
     };
@@ -934,7 +934,8 @@ fn render_modules(
         let module = module_name(*domain)?;
         if is_runtime {
             code.push_str(&format!(
-                "    match crate::domains::{module}::module(deps, {module})\n        .await\n        .context(\"wire domain '{module}'\")\n    {{\n        Ok(binding) => bindings.push(binding),\n        Err(source) => return Err(DomainWiringFailure {{ source, bindings }}),\n    }}\n"
+                "    if placement.is_local(assembly_schema::AssemblyDomain::{domain_variant}) {{\n        match crate::domains::{module}::module(deps, {module})\n            .await\n            .context(\"wire domain '{module}'\")\n        {{\n            Ok(binding) => bindings.push(binding),\n            Err(source) => return Err(DomainWiringFailure {{ source, bindings }}),\n        }}\n    }} else {{\n        let _ = {module};\n    }}\n",
+                domain_variant = domain_variant(*domain),
             ));
         } else {
             code.push_str(&format!(
@@ -1053,6 +1054,16 @@ fn listener_variant(kind: AssemblyListenerKind) -> &'static str {
         AssemblyListenerKind::Internal => "Internal",
         AssemblyListenerKind::Admin => "Admin",
         AssemblyListenerKind::Health => "Health",
+    }
+}
+
+pub(crate) fn domain_variant(domain: AssemblyDomain) -> &'static str {
+    match domain {
+        AssemblyDomain::Identity => "Identity",
+        AssemblyDomain::Settings => "Settings",
+        AssemblyDomain::Audit => "Audit",
+        AssemblyDomain::Contractreg => "Contractreg",
+        AssemblyDomain::Syshealth => "Syshealth",
     }
 }
 
@@ -1217,7 +1228,7 @@ domains = [{domains}]
         assert!(rendered.contains("// Source-Manifest-Digest: sha256:"));
         assert!(!rendered.contains("Source-SHA256"));
         assert!(rendered.contains(
-            "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n)"
+            "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n    placement: &crate::plan::PlacementExecutionPlan,\n)"
         ));
         assert!(rendered.contains("use crate::domains::DomainWiringFailure;"));
         assert!(!rendered.contains("pub struct DomainWiringFailure"));
@@ -1226,6 +1237,13 @@ domains = [{domains}]
             rendered
                 .contains("Err(source) => return Err(DomainWiringFailure { source, bindings })")
         );
+        assert!(
+            rendered.contains("if placement.is_local(assembly_schema::AssemblyDomain::Settings)")
+        );
+        assert!(
+            rendered.contains("if placement.is_local(assembly_schema::AssemblyDomain::Identity)")
+        );
+        assert!(rendered.contains("if placement.is_local(assembly_schema::AssemblyDomain::Audit)"));
         assert!(rendered.contains(
             "let crate::domains::DomainModuleInputs {\n        settings,\n        identity,\n        audit,\n    } = inputs;"
         ));

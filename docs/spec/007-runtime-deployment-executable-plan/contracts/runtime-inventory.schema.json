@@ -28,6 +28,6 @@
     },
     "listener": { "type": "object", "additionalProperties": false, "required": ["id", "kind", "endpoint", "authScheme"], "properties": { "id": { "type": "string", "minLength": 1 }, "kind": { "$ref": "#/definitions/listenerKind" }, "endpoint": { "$ref": "#/definitions/endpoint" }, "authScheme": { "$ref": "#/definitions/authScheme" } } },
     "providerPosture": { "type": "object", "additionalProperties": false, "required": ["id", "state"], "properties": { "id": { "type": "string", "minLength": 1 }, "state": { "type": "string", "enum": ["ready", "degraded", "unavailable"] } } },
-    "placement": { "type": "object", "additionalProperties": false, "required": ["domain", "workload"], "properties": { "domain": { "$ref": "#/definitions/assemblyDomain" }, "workload": { "type": "string", "minLength": 1 } } }
+    "placement": { "type": "object", "additionalProperties": false, "required": ["domain", "workload", "mode"], "properties": { "domain": { "$ref": "#/definitions/assemblyDomain" }, "workload": { "type": "string", "minLength": 1 }, "mode": { "type": "string", "enum": ["local", "remote"] }, "endpoint": { "$ref": "#/definitions/endpoint" }, "spiffeIdentity": { "type": "string", "minLength": 1 }, "readiness": { "type": "string", "enum": ["ready", "mtls-source-unavailable", "peer-endpoint-unresolved", "peer-endpoint-unavailable"] } } }
   }
 }

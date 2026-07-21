@@ -51,13 +51,16 @@ library API.
 
 The catalog is an explicit runtime configuration universe: fixed listener/auth/OIDC/tracing,
 PG/Redis, Vault/S3, identity/audit, event/DLX/worker keys; generated event-domain AMQP keys; the
-domain-transport URL/mTLS families derived in a second step from the captured required-domain
-value; and the operator OIDC static provider. It never calls `vars_os()`. Exactly four named
-command-specific maintenance grant sources are outside this catalog; no other runtime production
-ambient reader is accepted. Missing and non-Unicode values both preserve the existing
-`std::env::var(...).ok()` result; empty strings, whitespace, and case are not normalized by
-capture. Invalid required-domain syntax is retained and reported later by the existing builder,
-preserving decision and error order.
+fixed domain-transport URL/mTLS allow-set family (`RSS_<DOMAIN>_DOMAIN_TRANSPORT_URL`, optional
+shared `RSS_DOMAIN_TRANSPORT_URL` under `durable-shared`, per-domain SPIFFE allow-sets, and local
+client SPIFFE id); placement workload funnel facts
+(`RSS_<DOMAIN>_DOMAIN_PLACEMENT_WORKLOAD`) that decide Local composition vs Remote outbound binding
+and enter the RuntimePlan fingerprint; and the operator OIDC static provider. It never calls
+`vars_os()`. Exactly four named command-specific maintenance grant sources are outside this
+catalog; no other runtime production ambient reader is accepted. Missing and non-Unicode values
+both preserve the existing `std::env::var(...).ok()` result; empty strings, whitespace, and case
+are not normalized by capture. Invalid placement-workload or domain-transport syntax is retained
+and reported later by the existing builders, preserving decision and error order.
 
 All captured UTF-8 values use `secure::SecretText`: private storage, opaque `Debug`, no
 `Clone`/`Display`/serialization, and drop-time zeroization. Snapshot `Debug` and capture errors are
@@ -195,6 +198,13 @@ the private-field `FinalizedListenerSet`, which is the mandatory listener field 
 `Finalized` and `LaunchPlan`. Assembly listener/auth conversion is exhaustive. No public
 listener constructor, raw-value assembler, manual Health append, compatibility wrapper, or plain
 listener vector can re-enter the chain. Compile-fail tests lock all three construction boundaries.
+
+The landed #1793 Hard carrier is `RUNTIME-PLACEMENT-PLAN-EXECUTION-01`.
+`RuntimePlan` is the sole mint for private `PlacementExecutionPlan`. Local domains compose
+in-process modules; Remote domains bind outbound contract transport only and must not appear on
+local listeners. The remote placement set is the exclusive transport required-domain set;
+`RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS` is deleted. Placement workloads are non-secret funnel facts
+(`RSS_<DOMAIN>_DOMAIN_PLACEMENT_WORKLOAD`) that change the RuntimePlan fingerprint.
 
 Medium `RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01` binds the type proof to dynamic facts. Domain
 wiring validates plan, generated `DOMAIN_LISTENER_BINDINGS`, and live registry membership and

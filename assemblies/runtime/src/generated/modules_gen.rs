@@ -12,6 +12,7 @@ use crate::domains::DomainWiringFailure;
 pub async fn wire_domains(
     deps: &SharedRuntimeDeps,
     inputs: crate::domains::DomainModuleInputs,
+    placement: &crate::plan::PlacementExecutionPlan,
 ) -> Result<Vec<DomainBinding>, DomainWiringFailure> {
     let crate::domains::DomainModuleInputs {
         settings,
@@ -19,26 +20,38 @@ pub async fn wire_domains(
         audit,
     } = inputs;
     let mut bindings = Vec::new();
-    match crate::domains::settings::module(deps, settings)
-        .await
-        .context("wire domain 'settings'")
-    {
-        Ok(binding) => bindings.push(binding),
-        Err(source) => return Err(DomainWiringFailure { source, bindings }),
+    if placement.is_local(assembly_schema::AssemblyDomain::Settings) {
+        match crate::domains::settings::module(deps, settings)
+            .await
+            .context("wire domain 'settings'")
+        {
+            Ok(binding) => bindings.push(binding),
+            Err(source) => return Err(DomainWiringFailure { source, bindings }),
+        }
+    } else {
+        let _ = settings;
     }
-    match crate::domains::identity::module(deps, identity)
-        .await
-        .context("wire domain 'identity'")
-    {
-        Ok(binding) => bindings.push(binding),
-        Err(source) => return Err(DomainWiringFailure { source, bindings }),
+    if placement.is_local(assembly_schema::AssemblyDomain::Identity) {
+        match crate::domains::identity::module(deps, identity)
+            .await
+            .context("wire domain 'identity'")
+        {
+            Ok(binding) => bindings.push(binding),
+            Err(source) => return Err(DomainWiringFailure { source, bindings }),
+        }
+    } else {
+        let _ = identity;
     }
-    match crate::domains::audit::module(deps, audit)
-        .await
-        .context("wire domain 'audit'")
-    {
-        Ok(binding) => bindings.push(binding),
-        Err(source) => return Err(DomainWiringFailure { source, bindings }),
+    if placement.is_local(assembly_schema::AssemblyDomain::Audit) {
+        match crate::domains::audit::module(deps, audit)
+            .await
+            .context("wire domain 'audit'")
+        {
+            Ok(binding) => bindings.push(binding),
+            Err(source) => return Err(DomainWiringFailure { source, bindings }),
+        }
+    } else {
+        let _ = audit;
     }
     Ok(bindings)
 }

@@ -23,20 +23,48 @@ fail() {
 read_env_file_value() {
     awk -F= -v key="$1" '$1 == key { print $2; exit }' "$ENV_FILE"
 }
+assembly_identity_name() {
+    local lock="${SCRIPT_DIR}/../assemblies/runtime/assembly.lock.json"
+    [[ -f "$lock" ]] || fail "缺少 assembly lock：$lock"
+    local name
+    name="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["identity"]["name"])' "$lock")" \
+        || fail "无法从 assembly lock 读取 identity.name：$lock"
+    [[ -n "$name" ]] || fail "assembly lock identity.name 为空：$lock"
+    printf '%s\n' "$name"
+}
 require_spiffe_fixture_or_skip() {
+    # Optional placement workloads are not a SPIFFE gate by themselves. Only when a Remote
+    # placement is configured (workload set and differs from assembly.lock.json identity.name)
+    # do we require outbound SPIFFE fixture completeness; otherwise continue all-Local.
+    local identity_name
+    identity_name="$(assembly_identity_name)"
+    local has_remote=0
+    local key workload
+    for key in \
+        RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD \
+        RSS_SETTINGS_DOMAIN_PLACEMENT_WORKLOAD \
+        RSS_AUDIT_DOMAIN_PLACEMENT_WORKLOAD
+    do
+        workload="$(read_env_file_value "$key")"
+        if [[ -n "$workload" && "$workload" != "$identity_name" ]]; then
+            has_remote=1
+            break
+        fi
+    done
+    if [[ "$has_remote" -eq 0 ]]; then
+        return 0
+    fi
     local missing=()
-    local key
     for key in \
         SPIFFE_ENDPOINT_SOCKET \
-        RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS \
         RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID
     do
         [[ -n "$(read_env_file_value "$key")" ]] || missing+=("$key")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
-        log "SKIP：docker-smoke 需要 SPIRE/SPIFFE fixture 才能满足强制 domain transport 启动门（backlog #1649）"
+        log "SKIP：已配置 Remote domain placement，但 SPIFFE outbound fixture 不完整（backlog #1649）"
         log "缺少 ${ENV_FILE} 配置：${missing[*]}"
-        log "跳过 compose readyz 200 验收，避免把 pre-SPIFFE demo 栈误判为可运行生产闭环"
+        log "跳过 compose readyz 200 验收，避免把不完整的 Remote/SPIFFE 栈误判为可运行生产闭环"
         exit 0
     fi
 }

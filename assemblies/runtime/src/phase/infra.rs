@@ -32,7 +32,7 @@ struct BuiltInfra {
     deps: SharedRuntimeDeps,
     s3_canary_config: crate::infra::s3::S3CanaryConfig,
     wiring_inputs: RuntimeWiringInputs,
-    domain_transport: crate::DomainTransportRuntime<httpd::SharedDomainHttpTransport>,
+    domain_transport: crate::DomainTransportRuntime,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
     redis_readiness_period: Duration,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
@@ -89,7 +89,6 @@ struct PhaseACarried {
     domain_modules: crate::domains::DomainModuleInputs,
     audit_consumer_key: primitives::MacKey,
     auth_grant_sweep_interval: Duration,
-    domain_transport_config: crate::DomainTransportConfig,
     vault: vault::VaultRuntimeDeps,
     identity_signer: Arc<vault::VaultSigner>,
     settings_config_value_key_name: diport::KeyName,
@@ -121,6 +120,7 @@ impl<'a> ProvidersBuilt<'a> {
             mut provider_build,
             mut provider_factories,
             listener_execution_plan,
+            placement_execution_plan,
             rate_limiter,
             serving_config,
             runtime_rss_access,
@@ -168,7 +168,6 @@ impl<'a> ProvidersBuilt<'a> {
                 domain_modules,
                 audit_consumer_key,
                 auth_grant_sweep_interval,
-                domain_transport_config,
                 vault,
                 identity_signer,
                 settings_config_value_key_name,
@@ -275,6 +274,12 @@ impl<'a> ProvidersBuilt<'a> {
                     dlx_archive_key_provider_permit,
                 ))
                 .context("record DLX provider output")?;
+            let domain_transport_config = crate::DomainTransportConfig::from_placement(
+                event_transport.topology(),
+                &placement_execution_plan,
+                &crate::config::ServingConfigMapper::new(config),
+            )
+            .context("build placement-backed domain transport config")?;
             let domain_transport = wire_domain_transport(domain_transport_config)
                 .await
                 .context("wire outbound domain transport")?;
@@ -338,6 +343,7 @@ impl<'a> ProvidersBuilt<'a> {
                 provider_build,
                 provider_factories,
                 listener_execution_plan,
+                placement_execution_plan,
                 rate_limiter,
                 deps: built.deps,
                 s3_canary_config: built.s3_canary_config,
@@ -375,7 +381,6 @@ impl<'a> ProvidersBuilt<'a> {
             event_worker,
             dlx_worker,
             distributed_worker,
-            domain_transport: domain_transport_config,
             domain_modules,
             audit_consumer_key,
             auth_grant_sweep_interval,
@@ -503,7 +508,6 @@ impl<'a> ProvidersBuilt<'a> {
                 domain_modules,
                 audit_consumer_key,
                 auth_grant_sweep_interval,
-                domain_transport_config,
                 vault,
                 identity_signer,
                 settings_config_value_key_name,

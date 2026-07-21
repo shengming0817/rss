@@ -3,6 +3,7 @@
 mod domain;
 mod listener;
 mod placement;
+mod placement_exec;
 mod provider;
 
 use crate::config::SnapshotConfig;
@@ -16,8 +17,15 @@ use std::fmt;
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
 const BUNDLED_ASSEMBLY_LOCK: &[u8] = include_bytes!("../assembly.lock.json");
 
+pub(crate) use placement_exec::PlacementExecutionPlan;
+#[cfg(test)]
+pub(crate) use placement_exec::{PlacementExecutionSpec, PlacementMode};
+
 /// Runtime-owned entrypoint around the shared, sealed protocol value.
-pub struct RuntimePlan(TypedRuntimePlan);
+pub struct RuntimePlan {
+    plan: TypedRuntimePlan,
+    assembly_identity: String,
+}
 
 /// A validated listener projection that can only be minted from [`RuntimePlan`].
 ///
@@ -93,19 +101,38 @@ impl RuntimePlan {
         provider::append(&manifest, &mut input);
         listener::append(&manifest, config, &mut input)?;
         domain::append(&manifest, &mut input);
-        placement::append(&manifest, &lock, &mut input);
+        placement::append(&manifest, &lock, config, &mut input)?;
 
-        TypedRuntimePlan::compile_v1(&manifest, &lock, input)
-            .map(Self)
-            .map_err(RuntimePlanError::Protocol)
+        let plan = TypedRuntimePlan::compile_v1(&manifest, &lock, input)
+            .map_err(RuntimePlanError::Protocol)?;
+        Ok(Self {
+            plan,
+            assembly_identity: lock.identity().name().to_owned(),
+        })
     }
 
     pub const fn as_typed(&self) -> &TypedRuntimePlan {
-        &self.0
+        &self.plan
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    // reason: assembly identity accessor for placement matrix / inventory tests.
+    pub(crate) fn assembly_identity(&self) -> &str {
+        &self.assembly_identity
     }
 
     pub(crate) fn listener_execution_plan(&self) -> ListenerExecutionPlan {
-        listener_execution_plan_from_typed(&self.0)
+        listener_execution_plan_from_typed(&self.plan)
+    }
+
+    /// Project exclusive Local / Remote placement execution facts.
+    ///
+    /// INVARIANT: RUNTIME-PLACEMENT-PLAN-EXECUTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private execution fields plus RuntimePlan-only mint and exclusive Local composition or Remote transport binding" } -- this is the sole mint for [`PlacementExecutionPlan`].
+    pub(crate) fn placement_execution_plan(
+        &self,
+        config: SnapshotConfig<'_>,
+    ) -> PlacementExecutionPlan {
+        placement_exec::mint(&self.plan, &self.assembly_identity, config)
     }
 }
 
@@ -122,6 +149,25 @@ fn listener_execution_plan_from_typed(plan: &TypedRuntimePlan) -> ListenerExecut
             })
             .collect(),
     }
+}
+
+pub(crate) fn is_kebab_case_workload(value: &str) -> bool {
+    let mut chars = value.chars().peekable();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return false;
+    }
+    let mut prev_hyphen = false;
+    for ch in chars {
+        match ch {
+            'a'..='z' | '0'..='9' => prev_hyphen = false,
+            '-' if !prev_hyphen => prev_hyphen = true,
+            _ => return false,
+        }
+    }
+    !prev_hyphen
 }
 
 #[cfg(feature = "integration")]
@@ -160,7 +206,7 @@ const fn runtime_auth_scheme(auth: ListenerAuth) -> AuthScheme {
 
 impl fmt::Debug for RuntimePlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        self.plan.fmt(f)
     }
 }
 
@@ -176,6 +222,11 @@ pub(crate) enum RuntimePlanError {
         "resolve RSS_PRIMARY_TOKEN_PROFILE, RSS_ADMIN_TOKEN_PROFILE, or RSS_INTERNAL_AUTH_SCHEME failed; expected rss-access/federated-access and mtls/service-token"
     )]
     ListenerAuth,
+    #[error("resolve {env} failed; expected a non-empty lowercase kebab-case workload name")]
+    PlacementWorkload {
+        /// Exact `RSS_<DOMAIN>_DOMAIN_PLACEMENT_WORKLOAD` env key that failed validation.
+        env: String,
+    },
     #[error("compile bundled RuntimePlan protocol failed: {0}")]
     Protocol(#[source] assembly_schema::RuntimePlanError),
 }

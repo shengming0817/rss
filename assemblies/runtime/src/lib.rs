@@ -29,6 +29,8 @@ mod config;
 mod config_tests;
 mod consumer_tx;
 pub mod distributed_runtime;
+#[cfg(test)]
+mod domain_placement_tests;
 mod domains;
 pub mod event_transport;
 pub mod infra;
@@ -240,11 +242,9 @@ use phase::PreparedRuntimeInputs;
 #[cfg(test)]
 use phase::{RuntimePhase, after_required_preflight, validate_domain_listener_evidence};
 
-#[cfg(test)]
-use config::DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV;
 use config::{
-    RuntimeConfigSnapshot, ServiceTokenConfig, ServingConfigMapper, SnapshotConfig,
-    domain_transport_mtls_allow_set_env, domain_transport_required_domains_from,
+    DOMAIN_TRANSPORT_SHARED_URL_ENV, RuntimeConfigSnapshot, ServiceTokenConfig,
+    ServingConfigMapper, SnapshotConfig, domain_transport_mtls_allow_set_env,
     domain_transport_url_env,
 };
 
@@ -285,8 +285,6 @@ use tokio_util::sync::CancellationToken;
 
 /// SPIFFE Workload API endpoint env var consumed by the upstream `spiffe` source.
 const SPIFFE_ENDPOINT_SOCKET_ENV: &str = "SPIFFE_ENDPOINT_SOCKET";
-/// Shared remote domain transport endpoint fallback (`durable-shared` only).
-const DOMAIN_TRANSPORT_SHARED_URL_ENV: &str = "RSS_DOMAIN_TRANSPORT_URL";
 /// Local workload SPIFFE ID expected from the outbound SPIRE source.
 const DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV: &str = "RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID";
 
@@ -467,11 +465,11 @@ pub(crate) fn required_spiffe_endpoint_from_value(raw: Option<&str>) -> anyhow::
 }
 
 fn domain_transport_config_from(
-    required_domains: &[String],
+    remote_domains: &[String],
     get: &impl Fn(&str) -> Option<String>,
 ) -> bootstrap::DomainTransportConfig {
     let mut per_domain = BTreeMap::new();
-    for domain in required_domains {
+    for domain in remote_domains {
         let env = domain_transport_url_env(domain);
         if let Some(url) = get(&env) {
             per_domain.insert(domain.clone(), bootstrap::DomainTransportUrl::new(url));
@@ -504,13 +502,13 @@ fn outbound_mtls_policy_for_domain_from(
         .map_err(|e| anyhow::anyhow!("{allow_env} outbound mTLS policy invalid: {e}"))
 }
 
-fn build_domain_transport_targets_from(
+pub(crate) fn build_domain_transport_targets_from(
     topology: bootstrap::Topology,
+    remote_domains: &[String],
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<Vec<httpd::DomainHttpTargetConfig>> {
-    let required_domains = domain_transport_required_domains_from(&get)?;
-    let cfg = domain_transport_config_from(&required_domains, &get);
-    let required_refs = required_domains
+    let cfg = domain_transport_config_from(remote_domains, &get);
+    let required_refs = remote_domains
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
@@ -530,26 +528,48 @@ fn build_domain_transport_targets_from(
     Ok(targets)
 }
 
-struct DomainTransportConfig {
-    targets: Vec<httpd::DomainHttpTargetConfig>,
-    spiffe_endpoint: String,
+enum DomainTransportConfig {
+    Remote {
+        targets: Vec<httpd::DomainHttpTargetConfig>,
+        spiffe_endpoint: String,
+    },
+    InProc,
 }
 
 impl DomainTransportConfig {
-    fn from_mapper(
+    fn from_placement(
         topology: bootstrap::Topology,
+        placement: &crate::plan::PlacementExecutionPlan,
         mapper: &ServingConfigMapper<'_>,
     ) -> anyhow::Result<Self> {
         let config = mapper.config();
         let get = |name: &str| config.value(name).map(str::to_owned);
-        let targets = build_domain_transport_targets_from(topology, get)?;
-        anyhow::ensure!(
-            !targets.is_empty(),
-            "outbound domain transport must resolve remote targets"
-        );
+        let remote_domains = placement
+            .remote_domains()
+            .map(|domain| domain.as_str().to_ascii_uppercase())
+            .collect::<Vec<_>>();
+        let targets = build_domain_transport_targets_from(topology, &remote_domains, get)?;
+        if targets.is_empty() {
+            // Demo (and any topology that resolves to InProc) must not silently collapse Remote
+            // placements into the InProc stub — fail closed when remotes were declared.
+            if !remote_domains.is_empty() {
+                if matches!(topology, bootstrap::Topology::Demo) {
+                    anyhow::bail!(
+                        "demo topology does not support remote-placed domains; remotes={}",
+                        remote_domains.join(",")
+                    );
+                }
+                anyhow::bail!(
+                    "remote-placed domains require outbound transport targets (topology={}); remotes={}",
+                    topology_label(topology),
+                    remote_domains.join(",")
+                );
+            }
+            return Ok(Self::InProc);
+        }
         let spiffe_endpoint =
             required_spiffe_endpoint_from_value(config.value(SPIFFE_ENDPOINT_SOCKET_ENV))?;
-        Ok(Self {
+        Ok(Self::Remote {
             targets,
             spiffe_endpoint,
         })
@@ -568,26 +588,68 @@ impl RuntimeDomainTransport for httpd::SharedDomainHttpTransport {
     }
 }
 
-struct DomainTransportRuntime<T> {
-    transport: T,
-    probe_name: ProbeName,
+/// Fail-closed in-process stub used when every domain is Local (no remote transport targets).
+#[derive(Clone, Default)]
+struct InProcDomainTransport;
+
+impl distributed::DomainTransport for InProcDomainTransport {
+    fn dispatch(
+        &self,
+        _request: distributed::DomainRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<distributed::DomainResponse, distributed::DomainTransportError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async {
+            Err(distributed::DomainTransportError::new(
+                distributed::DomainTransportErrorKind::Dispatch,
+            ))
+        })
+    }
 }
 
-impl<T> DomainTransportRuntime<T>
+impl ManagedResource for InProcDomainTransport {
+    fn name(&self) -> &str {
+        "domain-transport-inproc"
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        Ok(())
+    }
+}
+
+impl RuntimeDomainTransport for InProcDomainTransport {
+    fn readiness(&self) -> httpd::DomainHttpReadiness {
+        httpd::DomainHttpReadiness::Ready
+    }
+}
+
+struct DomainTransportRuntimeInner<T> {
+    transport: T,
+    probe_name: ProbeName,
+    mode: distributed::TransportMode,
+}
+
+impl<T> DomainTransportRuntimeInner<T>
 where
     T: RuntimeDomainTransport,
 {
-    fn new(transport: T, probe_name: ProbeName) -> Self {
+    fn new(transport: T, probe_name: ProbeName, mode: distributed::TransportMode) -> Self {
         Self {
             transport,
             probe_name,
+            mode,
         }
     }
 
     fn dispatch_handle(&self) -> Arc<dyn distributed::DomainTransport> {
         Arc::new(distributed::InstrumentedDomainTransport::new(
             self.transport.clone(),
-            distributed::TransportMode::Remote,
+            self.mode,
             Box::new(SystemClock),
         ))
     }
@@ -603,6 +665,27 @@ where
             )],
             resources: vec![DynManagedResource::new_box(self.transport.clone())],
             workers: Vec::new(),
+        }
+    }
+}
+
+pub(crate) enum DomainTransportRuntime {
+    Remote(DomainTransportRuntimeInner<httpd::SharedDomainHttpTransport>),
+    InProc(DomainTransportRuntimeInner<InProcDomainTransport>),
+}
+
+impl DomainTransportRuntime {
+    fn dispatch_handle(&self) -> Arc<dyn distributed::DomainTransport> {
+        match self {
+            Self::Remote(inner) => inner.dispatch_handle(),
+            Self::InProc(inner) => inner.dispatch_handle(),
+        }
+    }
+
+    fn module_result(&self) -> DomainModuleResult {
+        match self {
+            Self::Remote(inner) => inner.module_result(),
+            Self::InProc(inner) => inner.module_result(),
         }
     }
 }
@@ -640,17 +723,33 @@ where
 
 async fn wire_domain_transport(
     config: DomainTransportConfig,
-) -> anyhow::Result<DomainTransportRuntime<httpd::SharedDomainHttpTransport>> {
+) -> anyhow::Result<DomainTransportRuntime> {
     let probe_name = ProbeName::parse(DOMAIN_TRANSPORT_READY_PROBE_NAME)
         .context("parse domain_transport_ready probe name")?;
-    let transport =
-        httpd::DomainHttpTransport::from_spire(config.targets, Some(&config.spiffe_endpoint))
-            .await
-            .context("build outbound domain transport mTLS client from captured endpoint")?;
-    Ok(DomainTransportRuntime::new(
-        httpd::SharedDomainHttpTransport::new(transport),
-        probe_name,
-    ))
+    match config {
+        DomainTransportConfig::InProc => Ok(DomainTransportRuntime::InProc(
+            DomainTransportRuntimeInner::new(
+                InProcDomainTransport,
+                probe_name,
+                distributed::TransportMode::InProc,
+            ),
+        )),
+        DomainTransportConfig::Remote {
+            targets,
+            spiffe_endpoint,
+        } => {
+            let transport = httpd::DomainHttpTransport::from_spire(targets, Some(&spiffe_endpoint))
+                .await
+                .context("build outbound domain transport mTLS client from captured endpoint")?;
+            Ok(DomainTransportRuntime::Remote(
+                DomainTransportRuntimeInner::new(
+                    httpd::SharedDomainHttpTransport::new(transport),
+                    probe_name,
+                    distributed::TransportMode::Remote,
+                ),
+            ))
+        }
+    }
 }
 
 // ── Auth-grant expiry sweeper helper ──────────────────────────────────────────────────────────
@@ -4816,10 +4915,11 @@ mod tests {
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
         ])
         .unwrap_or_else(|_| unreachable!());
-        let listener_plan = plan::RuntimePlan::bundled(snapshot.view())
-            .unwrap_or_else(|_| unreachable!())
-            .listener_execution_plan();
-        assert!(validate_domain_listener_evidence(&listener_plan, &[]).is_err());
+        let runtime_plan =
+            plan::RuntimePlan::bundled(snapshot.view()).unwrap_or_else(|_| unreachable!());
+        let listener_plan = runtime_plan.listener_execution_plan();
+        let placement_plan = runtime_plan.placement_execution_plan(snapshot.view());
+        assert!(validate_domain_listener_evidence(&listener_plan, &placement_plan, &[]).is_err());
     }
 
     #[test]
@@ -8985,32 +9085,21 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn domain_transport_required_domains_must_be_non_empty() {
-        let err = build_domain_transport_targets_from(bootstrap::Topology::DurableShared, |_| None)
-            .expect_err("missing required domains must fail");
-        assert!(
-            err.to_string()
-                .contains(DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV),
-            "error should name env var: {err}"
-        );
-
-        let err = build_domain_transport_targets_from(bootstrap::Topology::DurableShared, |name| {
-            (name == DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV).then(String::new)
-        })
-        .expect_err("empty required domain entry must fail");
-        assert!(
-            err.to_string()
-                .contains(DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV),
-            "error should name env var: {err}"
-        );
+    fn domain_transport_empty_remote_set_resolves_without_targets() {
+        let targets =
+            build_domain_transport_targets_from(bootstrap::Topology::DurableShared, &[], |_| None)
+                .expect("empty remote set is InProc-compatible");
+        assert!(targets.is_empty());
     }
 
     #[test]
     #[allow(clippy::expect_used)]
     fn domain_transport_per_domain_allow_set_is_required() {
-        let err = build_domain_transport_targets_from(bootstrap::Topology::DurableShared, |name| {
-            match name {
-                DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV => Some("identity".to_string()),
+        let remotes = vec!["IDENTITY".to_owned()];
+        let err = build_domain_transport_targets_from(
+            bootstrap::Topology::DurableShared,
+            &remotes,
+            |name| match name {
                 "RSS_IDENTITY_DOMAIN_TRANSPORT_URL" => {
                     Some("https://identity.internal/rpc".to_string())
                 }
@@ -9018,8 +9107,8 @@ mod tests {
                     Some("spiffe://example.org/ns/rss/sa/runtime".to_string())
                 }
                 _ => None,
-            }
-        })
+            },
+        )
         .expect_err("remote target requires exact server SPIFFE allow-set");
         assert!(
             err.to_string()
@@ -9031,17 +9120,16 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn domain_transport_isolated_topology_forbids_shared_fallback() {
-        let err =
-            build_domain_transport_targets_from(bootstrap::Topology::DurableIsolated, |name| {
-                match name {
-                    DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV => Some("identity".to_string()),
-                    DOMAIN_TRANSPORT_SHARED_URL_ENV => {
-                        Some("https://gateway.internal/rpc".to_string())
-                    }
-                    _ => None,
-                }
-            })
-            .expect_err("isolated topology must not use shared domain transport fallback");
+        let remotes = vec!["IDENTITY".to_owned()];
+        let err = build_domain_transport_targets_from(
+            bootstrap::Topology::DurableIsolated,
+            &remotes,
+            |name| match name {
+                DOMAIN_TRANSPORT_SHARED_URL_ENV => Some("https://gateway.internal/rpc".to_string()),
+                _ => None,
+            },
+        )
+        .expect_err("isolated topology must not use shared domain transport fallback");
         assert!(
             format!("{err:#}").contains(DOMAIN_TRANSPORT_SHARED_URL_ENV),
             "error should name shared fallback env: {err}"
@@ -9051,23 +9139,22 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn domain_transport_targets_build_typed_outbound_mtls_policy() {
-        let targets =
-            build_domain_transport_targets_from(bootstrap::Topology::DurableShared, |name| {
-                match name {
-                    DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV => Some("identity".to_string()),
-                    DOMAIN_TRANSPORT_SHARED_URL_ENV => {
-                        Some("https://gateway.internal/rpc".to_string())
-                    }
-                    DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV => {
-                        Some("spiffe://example.org/ns/rss/sa/runtime".to_string())
-                    }
-                    "RSS_IDENTITY_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET" => {
-                        Some("spiffe://example.org/ns/rss/sa/identity".to_string())
-                    }
-                    _ => None,
+        let remotes = vec!["IDENTITY".to_owned()];
+        let targets = build_domain_transport_targets_from(
+            bootstrap::Topology::DurableShared,
+            &remotes,
+            |name| match name {
+                DOMAIN_TRANSPORT_SHARED_URL_ENV => Some("https://gateway.internal/rpc".to_string()),
+                DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV => {
+                    Some("spiffe://example.org/ns/rss/sa/runtime".to_string())
                 }
-            })
-            .expect("valid domain transport target config");
+                "RSS_IDENTITY_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET" => {
+                    Some("spiffe://example.org/ns/rss/sa/identity".to_string())
+                }
+                _ => None,
+            },
+        )
+        .expect("valid domain transport target config");
         assert_eq!(targets.len(), 1);
     }
 
@@ -9133,24 +9220,37 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn domain_transport_runtime_exports_dispatch_resource_and_readyz() {
         let ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let runtime = DomainTransportRuntime::new(
-            NoopRuntimeDomainTransport {
-                ready: Arc::clone(&ready),
-            },
+        let runtime = DomainTransportRuntime::InProc(DomainTransportRuntimeInner::new(
+            InProcDomainTransport,
             ProbeName::parse(DOMAIN_TRANSPORT_READY_PROBE_NAME)
                 .expect("valid domain transport probe"),
-        );
+            distributed::TransportMode::InProc,
+        ));
+        // Keep a remote-shaped readiness probe path covered via the Noop adapter below.
+        let _ = ready;
         let _dispatch = runtime.dispatch_handle();
         let module = runtime.module_result();
 
         assert_eq!(module.resources.len(), 1);
-        assert_eq!(module.resources[0].name(), "domain-http-transport");
+        assert_eq!(module.resources[0].name(), "domain-transport-inproc");
         assert_eq!(module.probes.len(), 1);
         let healthy = module.probes[0].1.check();
         assert_eq!(healthy.name().as_str(), DOMAIN_TRANSPORT_READY_PROBE_NAME);
         assert_eq!(healthy.status(), HealthStatus::Healthy);
         assert_eq!(healthy.detail(), "ready");
 
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let runtime = DomainTransportRuntimeInner::new(
+            NoopRuntimeDomainTransport {
+                ready: Arc::clone(&ready),
+            },
+            ProbeName::parse(DOMAIN_TRANSPORT_READY_PROBE_NAME)
+                .expect("valid domain transport probe"),
+            distributed::TransportMode::Remote,
+        );
+        let module = runtime.module_result();
+        let healthy = module.probes[0].1.check();
+        assert_eq!(healthy.status(), HealthStatus::Healthy);
         ready.store(false, std::sync::atomic::Ordering::Release);
         let unhealthy = module.probes[0].1.check();
         assert_eq!(unhealthy.status(), HealthStatus::Unhealthy);

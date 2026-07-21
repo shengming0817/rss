@@ -11,6 +11,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
+use assembly_schema::AssemblyDomain;
 use syn::visit::{self, Visit};
 use syn::{
     Attribute, Expr, ExprCall, ExprMethodCall, ImplItem, ImplItemFn, Item, ItemFn, Pat, Stmt,
@@ -355,13 +356,16 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
                 return None;
             };
             direct_awaited_call(&wiring.expr, &wire_path, |call| {
-                call.args.len() == 2
+                call.args.len() == 3
                     && call
                         .args
                         .first()
                         .is_some_and(|argument| expr_is_shared_ref_ident(argument, "deps"))
                     && call.args.iter().nth(1).is_some_and(|argument| {
                         simple_expr_ident(argument).as_deref() == Some("domain_modules")
+                    })
+                    && call.args.iter().nth(2).is_some_and(|argument| {
+                        expr_is_shared_ref_ident(argument, "placement_execution_plan")
                     })
             })
             .then(|| {
@@ -455,6 +459,7 @@ fn validate_generated_runtime_modules(source: &str) -> Result<()> {
     ensure_wire_domains_signature(wire)?;
     ensure_local_binding_count(&wire.block, "deps", 0, RUNTIME_MODULES)?;
     ensure_local_binding_count(&wire.block, "inputs", 0, RUNTIME_MODULES)?;
+    ensure_local_binding_count(&wire.block, "placement", 0, RUNTIME_MODULES)?;
     let input_bindings = domain_module_input_bindings(wire)?;
     let tail = tail_expression(&wire.block).context("wire_domains must return Ok(bindings)")?;
     let Expr::Call(ok) = tail else {
@@ -503,7 +508,7 @@ fn validate_generated_runtime_modules(source: &str) -> Result<()> {
             .block
             .stmts
             .iter()
-            .filter_map(statement_match)
+            .filter_map(|statement| placement_gated_domain_match(statement, domain))
             .filter(|expression| {
                 direct_terminal_call_has_arguments(&expression.expr, &expected, "deps", binding)
                     && domain_wiring_match_retains_failure(expression)
@@ -512,10 +517,51 @@ fn validate_generated_runtime_modules(source: &str) -> Result<()> {
         let total = exact_path_call_count_block(&wire.block, &expected);
         ensure!(
             matches == 1 && total == 1,
-            "wire_domains must match exactly one direct crate::domains::{domain}::module(deps, {binding}) and retain prior bindings on failure, got matches={matches} total={total}"
+            "wire_domains must gate exactly one crate::domains::{domain}::module(deps, {binding}) behind placement.is_local and retain prior bindings on failure, got matches={matches} total={total}"
         );
     }
     Ok(())
+}
+
+fn placement_gated_domain_match<'a>(
+    statement: &'a Stmt,
+    domain: &str,
+) -> Option<&'a syn::ExprMatch> {
+    let Stmt::Expr(Expr::If(if_expr), _) = statement else {
+        return None;
+    };
+    let Expr::MethodCall(method) = peel_expr(&if_expr.cond) else {
+        return None;
+    };
+    if method.method != "is_local"
+        || simple_expr_ident(&method.receiver).as_deref() != Some("placement")
+        || method.args.len() != 1
+    {
+        return None;
+    }
+    let domain_path = match peel_expr(&method.args[0]) {
+        Expr::Path(path) => path,
+        _ => return None,
+    };
+    let segments = domain_path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    // Only domains with a runtime module factory; contractreg/syshealth stay out.
+    let parsed = [
+        AssemblyDomain::Identity,
+        AssemblyDomain::Settings,
+        AssemblyDomain::Audit,
+    ]
+    .into_iter()
+    .find(|candidate| candidate.as_str() == domain)?;
+    let expected_tail = crate::assembly_codegen::domain_variant(parsed);
+    if segments.last().map(String::as_str) != Some(expected_tail) {
+        return None;
+    }
+    if_expr.then_branch.stmts.iter().find_map(statement_match)
 }
 
 fn statement_match(statement: &Stmt) -> Option<&syn::ExprMatch> {
@@ -865,14 +911,17 @@ fn validate_settings_runtime_module(source: &str) -> Result<()> {
 
 fn ensure_wire_domains_signature(wire: &ItemFn) -> Result<()> {
     ensure!(
-        wire.sig.asyncness.is_some() && wire.sig.inputs.len() == 2,
-        "wire_domains must be async with exact deps and inputs parameters"
+        wire.sig.asyncness.is_some() && wire.sig.inputs.len() == 3,
+        "wire_domains must be async with exact deps, inputs, and placement parameters"
     );
     let mut parameters = wire.sig.inputs.iter();
     let deps = parameters.next().context("wire_domains deps disappeared")?;
     let inputs = parameters
         .next()
         .context("wire_domains inputs disappeared")?;
+    let placement = parameters
+        .next()
+        .context("wire_domains placement disappeared")?;
     ensure!(
         typed_argument_is(deps, "deps", |ty| {
             matches!(ty, syn::Type::Reference(reference)
@@ -887,6 +936,14 @@ fn ensure_wire_domains_signature(wire: &ItemFn) -> Result<()> {
                 if path.path.segments.last().is_some_and(|segment| segment.ident == "DomainModuleInputs"))
         }),
         "wire_domains second parameter must be `inputs: DomainModuleInputs`"
+    );
+    ensure!(
+        typed_argument_is(placement, "placement", |ty| {
+            matches!(ty, syn::Type::Reference(reference)
+                if matches!(reference.elem.as_ref(), syn::Type::Path(path)
+                    if path.path.segments.last().is_some_and(|segment| segment.ident == "PlacementExecutionPlan")))
+        }),
+        "wire_domains third parameter must be `placement: &PlacementExecutionPlan`"
     );
     Ok(())
 }
@@ -2581,7 +2638,7 @@ mod tests {
                                 bootstrap::compose_bindings(&mut domain_bindings)
                                     .context("compose generated domains")?;
                             let mut domain_bindings =
-                                crate::modules_gen::wire_domains(&deps, domain_modules)
+                                crate::modules_gen::wire_domains(&deps, domain_modules, &placement_execution_plan)
                                     .await
                                     .context("wire generated domains")?;
                             Ok::<_, anyhow::Error>(())
@@ -2599,7 +2656,7 @@ mod tests {
                     async fn wire_domains(self) {
                         let result = async move {
                             let mut domain_bindings =
-                                crate::modules_gen::wire_domains(&deps, domain_modules)
+                                crate::modules_gen::wire_domains(&deps, domain_modules, &placement_execution_plan)
                                     .await
                                     .context("wire generated domains")?;
                             let (mut registry, domains_module) =
@@ -2613,7 +2670,7 @@ mod tests {
 
                 impl<'a> InfraBuilt<'a> {
                     async fn wire_domains(self) {
-                        // crate::modules_gen::wire_domains(&deps, domain_modules)
+                        // crate::modules_gen::wire_domains(&deps, domain_modules, &placement_execution_plan)
                         let result = async move {
                             let _bait = "bootstrap::compose_bindings(&mut domain_bindings)";
                             Ok::<_, anyhow::Error>(())

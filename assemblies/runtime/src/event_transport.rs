@@ -2145,7 +2145,7 @@ fn make_consumer_probe(
 // ── parse helpers ─────────────────────────────────────────────────────────────
 
 /// `RSS_TOPOLOGY` 字符串（已 trim）→ [`bootstrap::Topology`]。
-fn parse_topology(s: &str) -> anyhow::Result<bootstrap::Topology> {
+pub(crate) fn parse_topology(s: &str) -> anyhow::Result<bootstrap::Topology> {
     match s.to_ascii_lowercase().as_str() {
         "demo" => Ok(bootstrap::Topology::Demo),
         "durable-shared" => Ok(bootstrap::Topology::DurableShared),
