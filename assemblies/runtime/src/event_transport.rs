@@ -30,10 +30,7 @@ use audit::ports::AuditChainHasher;
 use base64::Engine as _;
 #[cfg(test)]
 use bootstrap::ReconcileSubscriberOwner;
-use bootstrap::{
-    DomainModuleResult, LifecycleChannel, ProviderOutputBinding, SubscriberBinding,
-    SubscriberCapability, WorkerSpec,
-};
+use bootstrap::{DomainModuleResult, SubscriberBinding, SubscriberCapability, WorkerSpec};
 use consistency::{ConsumerGroup, RetentionSweeper};
 use crypto::RustCryptoMacVerifier;
 use diport::{
@@ -66,48 +63,6 @@ use crate::distributed_runtime::{
 use crate::infra::plaintext_endpoint_policy_from;
 use crate::infra::vault::{DEFAULT_VAULT_TIMEOUT, build_vault_tls_client_from};
 use crate::{EnvSecret, ServingConfigMapper, SnapshotConfig, SystemClock};
-
-const EVENT_CHANNELS: &[LifecycleChannel] = &[
-    LifecycleChannel::Probes,
-    LifecycleChannel::Resources,
-    LifecycleChannel::Workers,
-];
-const DLX_STORE_CHANNELS: &[LifecycleChannel] =
-    &[LifecycleChannel::Probes, LifecycleChannel::Workers];
-const DLX_KEY_PROVIDER_CHANNELS: &[LifecycleChannel] = &[LifecycleChannel::Workers];
-
-pub(crate) const PROVIDER_OUTPUT_BINDINGS: &[ProviderOutputBinding] = &[
-    ProviderOutputBinding {
-        port: "diport::Publisher",
-        provider: "amqp::AmqpPublisher",
-        consumer: "eventexec",
-        channels: EVENT_CHANNELS,
-    },
-    ProviderOutputBinding {
-        port: "diport::AckableSubscriber",
-        provider: "amqp::AmqpSubscriber",
-        consumer: "eventexec",
-        channels: EVENT_CHANNELS,
-    },
-    ProviderOutputBinding {
-        port: "diport::DlxLifecycleRepository",
-        provider: "postgres::PgDlxLifecycleRepository",
-        consumer: "eventexec",
-        channels: EVENT_CHANNELS,
-    },
-    ProviderOutputBinding {
-        port: "diport::DlxArchiveStore",
-        provider: "s3::VerifiedS3DlxArchiveStore",
-        consumer: "eventexec",
-        channels: DLX_STORE_CHANNELS,
-    },
-    ProviderOutputBinding {
-        port: "diport::KeyProvider",
-        provider: "vault::VaultKeyProvider",
-        consumer: "eventexec",
-        channels: DLX_KEY_PROVIDER_CHANNELS,
-    },
-];
 
 // ── 对外类型 ──────────────────────────────────────────────────────────────────
 
@@ -624,6 +579,13 @@ impl DlxLifecycleRuntimeDeps {
             ),
         }
     }
+
+    fn into_rollback_module(self) -> DomainModuleResult {
+        DomainModuleResult {
+            resources: vec![DynManagedResource::new_box(self.pg_owner)],
+            ..DomainModuleResult::default()
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -922,7 +884,28 @@ pub(crate) async fn wire_event_transport(
 pub(crate) fn wire_dlx_lifecycle(
     deps: DlxLifecycleRuntimeDeps,
     worker: DlxWorkerConfig,
-) -> anyhow::Result<DomainModuleResult> {
+) -> Result<DomainModuleResult, DlxLifecycleWireFailure> {
+    let probe_name =
+        match ProbeName::parse(DLX_LIFECYCLE_PROBE).context("parse DLX lifecycle probe name") {
+            Ok(name) => name,
+            Err(error) => {
+                return Err(DlxLifecycleWireFailure {
+                    deps: Box::new(deps),
+                    error,
+                });
+            }
+        };
+    let archive_probe_name = match ProbeName::parse(DLX_ARCHIVE_READINESS_PROBE)
+        .context("parse DLX archive readiness probe name")
+    {
+        Ok(name) => name,
+        Err(error) => {
+            return Err(DlxLifecycleWireFailure {
+                deps: Box::new(deps),
+                error,
+            });
+        }
+    };
     let DlxLifecycleRuntimeDeps {
         pg_owner,
         backlog_repository,
@@ -932,15 +915,13 @@ pub(crate) fn wire_dlx_lifecycle(
     let health = Arc::new(WorkerHealth::starting());
     let lifecycle_worker =
         build_dlx_lifecycle_worker(lifecycle, backlog_repository, Arc::clone(&health), worker);
-    let (probe_name, probe) = build_dlx_lifecycle_probe(health)?;
+    let probe = build_dlx_lifecycle_probe(probe_name.clone(), health);
     let archive_health = Arc::new(WorkerHealth::starting());
     let archive_worker = build_dlx_archive_readiness_worker(
         archive_store_readiness,
         Arc::clone(&archive_health),
         worker,
     );
-    let archive_probe_name = ProbeName::parse(DLX_ARCHIVE_READINESS_PROBE)
-        .context("parse DLX archive readiness probe name")?;
     let archive_probe = Box::new(WorkerHealthProbe::new(
         archive_probe_name.clone(),
         archive_health,
@@ -950,6 +931,17 @@ pub(crate) fn wire_dlx_lifecycle(
         resources: vec![DynManagedResource::new_box(pg_owner)],
         workers: vec![lifecycle_worker, archive_worker],
     })
+}
+
+pub(crate) struct DlxLifecycleWireFailure {
+    deps: Box<DlxLifecycleRuntimeDeps>,
+    error: anyhow::Error,
+}
+
+impl DlxLifecycleWireFailure {
+    pub(crate) fn into_rollback(self) -> (DomainModuleResult, anyhow::Error) {
+        ((*self.deps).into_rollback_module(), self.error)
+    }
 }
 
 trait DlxArchiveReadiness {
@@ -1123,12 +1115,10 @@ where
 }
 
 fn build_dlx_lifecycle_probe(
+    probe_name: ProbeName,
     health: Arc<WorkerHealth>,
-) -> anyhow::Result<(ProbeName, Box<dyn bootstrap::HealthProbe>)> {
-    let probe_name =
-        ProbeName::parse(DLX_LIFECYCLE_PROBE).context("parse DLX lifecycle probe name")?;
-    let probe = Box::new(WorkerHealthProbe::new(probe_name.clone(), health));
-    Ok((probe_name, probe))
+) -> Box<dyn bootstrap::HealthProbe> {
+    Box::new(WorkerHealthProbe::new(probe_name, health))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1447,21 +1437,26 @@ async fn wire_durable(
     security: EventSecurity,
     audit_key: MacKey,
 ) -> anyhow::Result<DomainModuleResult> {
-    // projection replay / shadow-swap 由 `rss projections` 离线控制面处理；本函数只装配在线传输 worker。
-
     let mut module = DomainModuleResult::default();
-
+    // projection replay / shadow-swap 由 `rss projections` 离线控制面处理；本函数只装配在线传输 worker。
     // 每个 required 域（generated producer domain ∪ subscriber 订阅 topic owner）由 resolver 保证有已校验
-    // AMQP URL → 下方 amqp_map 逐域连接；relay/consumer 取连接时 `.context(...)` 兜底 fail-closed，无需额外 guard。
-
-    // AMQP per-domain 连接（relay 发布 + consumer 订阅共用同一 vhost 连接）。
+    // AMQP URL → 下方 amqp_map 逐域连接；任一步失败都先异步关闭 module 已拥有的连接。
     let mut amqp_map: BTreeMap<String, amqp::AmqpRuntimeDeps> = BTreeMap::new();
     for (domain_upper, url) in &per_domain {
         let domain = domain_upper.to_ascii_lowercase();
-        let amqp_deps =
-            amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain, timing.budget.publish_timeout())
-                .await
-                .with_context(|| format!("connect amqp for domain '{domain}'"))?;
+        let amqp_deps = match amqp::AmqpRuntimeDeps::connect(
+            url.as_ref(),
+            &domain,
+            timing.budget.publish_timeout(),
+        )
+        .await
+        .with_context(|| format!("connect amqp for domain '{domain}'"))
+        {
+            Ok(deps) => deps,
+            Err(primary) => {
+                return Err(crate::provider_output::abort_uncommitted(module, primary).await);
+            }
+        };
         module.resources.extend(amqp_deps.runtime_resources());
         tracing::info!(domain, "durable event transport: amqp connected");
         amqp_map.insert(domain, amqp_deps);
@@ -1471,7 +1466,12 @@ async fn wire_durable(
     // postgres sealed capability。新增 producer 变体若未接 PG capability 会在此编译失败。
     for producer in generated::event::PRODUCER_DOMAINS.iter().copied() {
         let domain = producer.as_str();
-        let publisher = relay_publisher(&amqp_map, domain)?;
+        let publisher = match relay_publisher(&amqp_map, domain) {
+            Ok(publisher) => publisher,
+            Err(primary) => {
+                return Err(crate::provider_output::abort_uncommitted(module, primary).await);
+            }
+        };
         let outbox = match producer {
             generated::event::ProducerDomain::Identity => pg.for_domain::<caps::Identity>().outbox(
                 publisher,
@@ -1486,12 +1486,16 @@ async fn wire_durable(
                 security.dlx_payload_protector.clone(),
             ),
         };
-        wire_domain_relay(domain, outbox, &timing, &mut module)?;
+        if let Err(primary) = wire_domain_relay(domain, outbox, &timing, &mut module) {
+            return Err(crate::provider_output::abort_uncommitted(module, primary).await);
+        }
     }
-    wire_outbox_maintenance(pg, distributed, &timing, &mut module)?;
+    if let Err(primary) = wire_outbox_maintenance(pg, distributed, &timing, &mut module) {
+        return Err(crate::provider_output::abort_uncommitted(module, primary).await);
+    }
 
     // Consumer resource bundle（per binding PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
-    wire_consumer_resource_bundle(
+    if let Err(primary) = wire_consumer_resource_bundle(
         pg,
         subscribers,
         &amqp_map,
@@ -1499,7 +1503,9 @@ async fn wire_durable(
         &timing,
         &audit_key,
         &mut module,
-    )?;
+    ) {
+        return Err(crate::provider_output::abort_uncommitted(module, primary).await);
+    }
 
     Ok(module)
 }
@@ -3636,9 +3642,8 @@ mod tests {
     #[test]
     fn dlx_probe_builder_exposes_closed_name_and_worker_health() {
         let health = Arc::new(WorkerHealth::starting());
-        let built = build_dlx_lifecycle_probe(Arc::clone(&health));
-        assert!(built.is_ok());
-        let (name, probe) = built.unwrap_or_else(|_| unreachable!());
+        let name = ProbeName::parse(DLX_LIFECYCLE_PROBE).unwrap_or_else(|_| unreachable!());
+        let probe = build_dlx_lifecycle_probe(name.clone(), Arc::clone(&health));
         assert_eq!(name.as_str(), DLX_LIFECYCLE_PROBE);
         assert_eq!(
             probe.check().status(),

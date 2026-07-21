@@ -29,30 +29,6 @@ pub const DOMAIN_LISTENER_BINDINGS: &[bootstrap::DomainListenerBinding] = &[
     },
 ];
 
-pub const PROVIDER_OUTPUT_BINDINGS: &[bootstrap::ProviderOutputBinding] = &[
-    bootstrap::ProviderOutputBinding {
-        port: "diport::AuditSink",
-        provider: "postgres::PgAuthAuditSink",
-        consumer: "httpserve",
-        channels: &[
-            bootstrap::LifecycleChannel::Resources,
-            bootstrap::LifecycleChannel::Workers,
-        ],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::Pdp",
-        provider: "oidc::OidcProvider",
-        consumer: "httpserve",
-        channels: &[bootstrap::LifecycleChannel::Resources],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::Signer",
-        provider: "vault::VaultSigner",
-        consumer: "identity",
-        channels: &[bootstrap::LifecycleChannel::Resources],
-    },
-];
-
 #[cfg(test)]
 pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {
     Ok(vec![

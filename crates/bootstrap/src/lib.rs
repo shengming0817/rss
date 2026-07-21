@@ -57,8 +57,7 @@ pub use framework::{
     FrameworkHttpRoute, FrameworkRoutes, FrameworkServingError, validate_framework_serving,
 };
 pub use module::{
-    DomainBinding, DomainModuleResult, LifecycleChannel, ProviderOutputBinding, WorkerSpec,
-    compose_bindings,
+    DomainBinding, DomainModuleResult, WorkerSpec, compose_bindings, drain_binding_outputs,
 };
 pub use primitives::ListenerKind;
 pub use refreshstoredeps::{RefreshStoreConfig, RefreshStoreResolveError, ResolvedRefreshStore};

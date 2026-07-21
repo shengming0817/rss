@@ -4,7 +4,7 @@ This rule governs how runtime-deployment target constraints select enforcement c
 
 ## 当前事实
 
-- Assembly manifest validation, generated domain ordering, generated typed provider constructor catalogs, and committed v1 AssemblyLock drift are governed by typed repository gates. The provider catalog is assembly-crate-internal identity evidence; it does not yet drive live construction.
+- Assembly manifest validation, generated domain ordering, generated typed provider constructor catalogs, and committed v1 AssemblyLock drift are governed by typed repository gates. The assembly-crate-internal provider catalog drives live construction through one-shot typed permits and sealed lifecycle-output batches.
 - Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Tracing/serving-OIDC, the operator OIDC static provider, provider material, listener addresses and mTLS material, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is typed, fingerprinted, retained by the unique consuming runtime phase chain, and is now the sole source of listener membership, ordered domain placement, and auth selection. Subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
 - `cargo xtask archrules list` and its generated matrix derive implemented rules from real carrier anchors. Planning documents are not a second index.
 - The active forge does not make the existing `ci-gate` a required check.
@@ -70,8 +70,8 @@ fingerprint unchanged.
 
 `SecretText::expose` and `into_string` are explicit disclosure/ownership boundaries, not a claim
 that callers cannot copy. Runtime allocation handoff uses named move/copy funnels; Medium
-`SECRET-TEXT-TRANSFER-LIVE-01` closes them to seven zeroizing-owner moves plus the one required
-Vault resolver owner copy.
+`SECRET-TEXT-TRANSFER-LIVE-01` closes them to seven zeroizing-owner moves plus two required
+zeroizing-owner copies for the Vault signer and resolver.
 
 The active carriers are Hard `SECRET-TEXT-OPAQUE-01` and
 `RUNTIME-CONFIG-SNAPSHOT-01` (`SnapshotConfig`), plus Medium
@@ -180,8 +180,13 @@ The landed #1791 provider-catalog Hard carrier is the closed `ProviderRole`,
 evidence, and `ProviderCatalogEntry::checked` const validation compiled into each assembly. Its
 Medium/codegen backstop is exact manifest-to-registry validation, the restricted data-only
 `providers_gen.rs` grammar, rustc typecheck, committed goldens, and a separate provider drift gate.
-The existing `modules_gen.rs` live output carrier is not a fallback. #1792 owns live dispatch,
-handwritten bypass deletion, and output bijection.
+The landed #1792 carrier exact-joins that catalog with `RuntimePlan`, mints 14 non-interchangeable
+one-shot permits, and accepts construction evidence only through eight sealed `ProviderOutput`
+batches. `ProviderBuild` derives actual lifecycle channels from owned `DomainModuleResult`s,
+aggregates every missing receipt, retains provider and domain outputs through all fallible phases,
+and asynchronously rolls them back in dependency-safe LIFO order. The old static binding,
+generic receipt constructor, string lookup, handwritten bypass, and synchronous-drop paths do not
+exist.
 
 The landed #1790 Hard carrier is `RUNTIME-LISTENER-PLAN-EXECUTION-01`.
 `RuntimePlan` is the sole mint for private `ListenerExecutionPlan` and

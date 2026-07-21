@@ -82,12 +82,14 @@ const ISSUE_EVENT_TRANSPORT_OUTPUT: u32 = 1678;
 const ISSUE_OUTBOX_CLAIM_CAPABILITY: u32 = 1741;
 const ISSUE_SAME_ID_DELIVERY: u32 = 1742;
 const ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER: u32 = 1743;
+const ISSUE_PROVIDER_PLAN_OUTPUT_BIJECTION: u32 = 1792;
 const EXTRA_FUNNEL_ISSUES: &[u32] = &[
     ISSUE_PG_RUNTIME_CUTOVER,
     ISSUE_EVENT_TRANSPORT_OUTPUT,
     ISSUE_OUTBOX_CLAIM_CAPABILITY,
     ISSUE_SAME_ID_DELIVERY,
     ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER,
+    ISSUE_PROVIDER_PLAN_OUTPUT_BIJECTION,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -138,18 +140,21 @@ const FUNNELS: &[FunnelSpec] = &[
     },
     FunnelSpec {
         key: "pg-runtime-lifecycle",
-        source_issues: &[ISSUE_PG_RUNTIME_CUTOVER],
+        source_issues: &[
+            ISSUE_PG_RUNTIME_CUTOVER,
+            ISSUE_PROVIDER_PLAN_OUTPUT_BIJECTION,
+        ],
         upstream: &[
             invariant("PG-RUNTIME-OWNER-01"),
             invariant("PG-RUNTIME-HANDLE-02"),
         ],
         downstream: &[
             invariant("PG-RUNTIME-OUTPUT-03"),
-            invariant("RUNTIME-PROVIDER-OUTPUTS-LIVE-01"),
+            invariant("RUNTIME-PROVIDER-BIJECTION-LIVE-01"),
         ],
         residual: ResidualDisposition::AcceptedMedium {
-            risk: "跨文件 PG lifecycle 消费与 Launch 注册顺序仍可能出现 AST visitor 未识别的新语法形态",
-            why_no_low_cost_hardening: "Rust 类型系统可锁定 owner/factory 单次消费，但无法表达跨文件唯一生产调用与相对注册顺序；synthetic-red/green AST 门覆盖已知入口",
+            risk: "跨文件 plan/catalog/output exact set 与 Launch 注册顺序仍可能出现 AST visitor 未识别的新语法形态",
+            why_no_low_cost_hardening: "Rust 类型系统锁定 permit/owner 单次消费，Medium 门以真实 workspace green 和 catalog/permit/finish/rollback synthetic red 补齐跨文件集合事实",
         },
     },
     FunnelSpec {
@@ -4378,7 +4383,13 @@ members = ["rss_demo"]
         assert_eq!(issues.iter().copied().collect::<BTreeSet<_>>(), expected);
         let pg_runtime = FUNNELS
             .iter()
-            .find(|funnel| funnel.source_issues == [ISSUE_PG_RUNTIME_CUTOVER])
+            .find(|funnel| {
+                funnel.source_issues
+                    == [
+                        ISSUE_PG_RUNTIME_CUTOVER,
+                        ISSUE_PROVIDER_PLAN_OUTPUT_BIJECTION,
+                    ]
+            })
             .with_context(|| format!("#{ISSUE_PG_RUNTIME_CUTOVER} lifecycle funnel"))?;
         assert_eq!(
             pg_runtime.upstream,
@@ -4391,7 +4402,7 @@ members = ["rss_demo"]
             pg_runtime.downstream,
             [
                 invariant("PG-RUNTIME-OUTPUT-03"),
-                invariant("RUNTIME-PROVIDER-OUTPUTS-LIVE-01")
+                invariant("RUNTIME-PROVIDER-BIJECTION-LIVE-01")
             ]
         );
         assert!(matches!(

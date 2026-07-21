@@ -3798,10 +3798,17 @@ fn missing_live_seam_facts(
     required
         .iter()
         .filter_map(|required| {
-            let required = required.replace(char::is_whitespace, "");
-            (!facts.iter().any(|fact| fact.contains(&required))).then_some(required)
+            let required = canonical_live_fact(required);
+            (!facts
+                .iter()
+                .any(|fact| canonical_live_fact(fact).contains(&required)))
+            .then_some(required)
         })
         .collect()
+}
+
+fn canonical_live_fact(fact: &str) -> String {
+    fact.replace(char::is_whitespace, "").replace(",)", ")")
 }
 
 fn scan_live_seam_file(

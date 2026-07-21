@@ -62,25 +62,25 @@ The architectural boundary is that shared inputs contain infrastructure capabili
 services or repositories. `cargo xtask runtime-deps guard` enforces that semantic allowlist
 (`WIRING-DEPS-INFRA-ONLY-01`), while the baseline detects structural drift.
 
-`PgRuntimeDeps` moves by value through `InfraBuilt → DomainsWired → Finalized` as the non-Clone
-lifecycle owner; it is not a second shared input. The owner directly wraps the same
-`PgRuntimeHandle` used by capability consumers and is retained until the launch transition
-consumes it. `PgRuntimeHandle` exposes only domain/infra/readiness projections;
-the replay consume store is intentionally owner-only.
-Pool guards and the readiness sampler can only leave the owner through
-`into_runtime_parts(self, period)`.
+`PgRuntimeDeps` remains the non-Clone lifecycle owner, but `BuildInfra` now consumes it immediately
+after external preflight and migration. `build_pg_runtime_module` converts the ordered pool guards
+and non-Clone sampler factory into `DomainModuleResult`, and that output enters the same
+`ProviderBuild` transaction as Redis, S3, Vault, DLX, token, event, and zero-output providers.
+`PgRuntimeHandle` exposes only domain/infra/readiness projections; lifecycle ownership never crosses
+the phase boundary as a parallel PG field.
 
-PG intentionally does not implement the runtime-local generic `ProviderOutput` trait. The unique
-`build_pg_runtime_module` helper converts its ordered pool guards and non-Clone sampler factory
-directly into `DomainModuleResult`; no parallel PG output type exists. `LaunchPlanParts` requires the
-PG module batch and the normal domain module batch, and both use the same resources-then-workers
-registration helper. Keeping them as ordered batches preserves the PG sampler-before-domain-module
-dependency without creating a second output seam. Event transport itself returns the normal domain
-module type directly: AMQP guards are resources and event loops are workers, with no parallel runtime wrapper.
+`ProviderBuild::from_plan` is the sole active construction entry. It exact-joins every
+`RuntimePlan::provider_plans()` declaration with the generated `PROVIDER_CATALOG`, mints one private
+typed permit per factory, and accepts output only through owned `ProviderOutput` receipt bundles.
+The closed `ProviderFactoryDispatch` has one consuming accessor for each of the 14 generated
+factories, including the zero-output rate limiter. `finish(self)` rejects every declared-but-
+unproduced or produced-but-undeclared channel before creating `CompletedProviderBuild`.
 
-All domain/provider lifecycle contributions converge on one `DomainModuleResult` merge path. The
-machine baseline checks that every lifecycle field participates in that merge, so an expanded
-result cannot silently leave a lifecycle carrier behind.
+Every fallible phase keeps the transaction owner. Failure performs async LIFO cleanup of already
+constructed resources while preserving the primary startup error; worker closures are never
+started during rollback. Only the completed owner can release the provider `DomainModuleResult` to
+`LaunchPlan`. Launch registers provider output before domain output, so LIFO drains listeners and
+domain workers before provider workers/resources and flushes tracing last.
 
 ## Listener, Health, And Shutdown Order
 
@@ -97,7 +97,8 @@ finalization and mTLS probe registration. `FinalizedListenerSet` and the launch 
 fields, so `phase/launch.rs` can only hand the consumed finalized set to `launch::launch`; a plain
 `Vec<AssembledListener>` cannot enter launch.
 
-`LaunchPlan::register` transfers both lifecycle batches into `ShutdownStack` before propagating
+`LaunchPlan::register` transfers the completed provider and domain lifecycle batches into
+`ShutdownStack` before propagating
 either batch's validation result, so an earlier invalid batch cannot synchronously drop the later
 batch. Registration remains LIFO: externally visible listeners drain before background work and
 provider resources, with tracing flushed last. Exact registration anchors and their order live in
@@ -112,12 +113,14 @@ provider resources, with tracing flushed last. Exact registration anchors and th
 - runtime dependencies or assembly providers are empty
 - the exact outer `runtime::run()` owner, sole `run_startup() → phase::execute` entry, typed
   transition chain, phase-owner anchors, or `launch.rs` anchors are missing or out of order
-- the unique PG helper or its unique production call is missing/duplicated, PG implements generic
-  `ProviderOutput`, lifecycle primitives escape the helper, a parallel PG output type appears, or
-  PG module registration moves after the unified domain module
+- the generated 14-factory exact set drifts, the plan/catalog join is not unique, a typed permit is
+  missing/duplicated, one of the eight sealed output batches disappears, `finish`/async rollback/handoff
+  becomes non-unique, or a legacy static binding/trait/fallback seam returns
+- the unique PG conversion moves out of `BuildInfra`, a parallel PG lifecycle field crosses phases,
+  or provider output registers after domain output
 - event transport restores a parallel output type, exposes its production wiring API outside the
-  crate, extracts channels outside `phase/domains.rs`, bypasses the single merge, or registers
-  lifecycle primitives outside the common helper
+  crate, bypasses the publisher/subscriber receipts, or registers lifecycle primitives outside the
+  common helper
 - `DomainModuleResult::merge` is absent or stops merging a field
 - listener execution gains a second projection/finalizer, loses its mandatory private carrier,
   accepts a plain listener vector at launch, restores raw-value/config auth decisions or manual

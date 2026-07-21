@@ -1,6 +1,6 @@
 # ADR-010：持久化能力分层 — domain binding / module result / capability bundle 单源
 
-- **状态**：Accepted，2026-07-12 经 #1676 / #1677 amendment（provider output 与 PG 生命周期所有权单一路径已落）
+- **状态**：Accepted，2026-07-20 经 #1792 amendment（ProviderPlan 构造与 output bijection 已闭合）
 - **日期**：2026-06-27
 - **关联**：issue #1425 [PERSIST-004] · Parent Feature #1419 [PERSIST-FEA-A] · Parent Epic #1418 [PERSIST-EPIC] · 同批 #1432（defer gate 落地）
 - **依赖 ADR**：**ADR-003**（DI dynosaur 派发）· **ADR-005**（域形 repo/UoW port 归属 + category line，本 ADR 复用其归属判据不重证）· **ADR-009**（typed route funnel）
@@ -84,17 +84,19 @@ transport / vault signer）或 per-domain DomainDeps（域消费：vault resolve
 `Adapter → Service` 依赖仍按分层矩阵合法（包括 postgres → bootstrap），但 Redis/S3/Vault 三个 provider adapter 被精确禁止
 依赖 bootstrap，不能取得该 runtime 聚合类型。
 故 bundle 的 managed-resource/rollback 单源**不**返回 `DomainModuleResult`，而经 `runtime_resources(&self) -> Vec<Box<DynManagedResource>>`
-（仅 `diport` 类型）派生。`assemblies/runtime` 以 crate-private `ProviderOutput` 显式适配 Redis / S3 / Vault，固定返回唯一的
-`DomainModuleResult`，并由 `DomainModuleResultExt::merge_provider` 委托 §2.2 的 `merge`。trait 不泄漏到 adapter，组合根也不再裸取
-resource channel 直接扩展；注册顺序固定为 Redis → S3 → Vault，域内资源顺序原样保留。
+（仅 `diport` 类型）派生。#1792 删除旧的 generic trait、静态 output binding 与
+`DomainModuleResultExt::merge_provider` 自证明路径。`assemblies/runtime` 由唯一
+`ProviderBuild::from_plan` exact-join `RuntimePlan::provider_plans()` 与生成的 14 项
+`PROVIDER_CATALOG`，再经封闭的 `ProviderFactoryDispatch` 为每项工厂铸造一张 private one-shot permit。
+每个真实构造只能把 permit 与实际 lifecycle channels 一起封装成 owned `ProviderOutput`；零输出 rate
+limiter 同样必须回执。`finish(self)` 才能生成 `CompletedProviderBuild`，缺声明、少输出、多输出或重复消费
+均在 ready/bind 前失败。
 
-这条窄 trait 只覆盖生命周期形状相同的三项 live provider。PG readiness 需要 interval / cancel token，
-不适用此 trait。#1677 以唯一 `build_pg_runtime_module(owner, period)` 消费 owner，把 ordered pool guards 与单个 worker
-直接转换为既有 `DomainModuleResult`，不再定义平行 PG output type。`LaunchPlanParts` 必填 PG module batch；它和普通 domain
-module batch 复用同一个 resources→workers 注册 helper，但 PG batch 位于 trace 后、统一 domain module 前，以保留 sampler
-与下游 worker 的 LIFO 依赖。PG 不实现通用 `ProviderOutput`，helper 外也不直接调用 lifecycle primitives。#1678 进一步
-删除 `EventRuntime` 平行出口：crate-private `wire_event_transport` 直接返回 `DomainModuleResult`，AMQP guards 进入
-`resources`，event loops 进入 `workers`，不为表面统一引入宽泛 provider trait。
+PG readiness 仍由唯一 `build_pg_runtime_module(owner, period)` 按值消费 owner，但 output 在
+`BuildInfra` 立即进入同一 provider transaction，不再以独立 phase field 走到 Launch。Event transport
+继续 crate-private 返回 `DomainModuleResult`，随后必须同时消费 publisher/subscriber receipts。
+任一后续 phase 失败都由 transaction 对已构造 resources 做 async LIFO rollback，且不启动 worker
+closure；只有 completed owner 能把统一 provider module 交给 Launch。
 
 ### 2.5 defer gate — 散装 defer 受机器门约束
 
@@ -116,7 +118,7 @@ module batch 复用同一个 resources→workers 注册 helper，但 PG batch �
 
 1. provider-agnostic infra port + 域形 port 归属 — **已落**（ADR-003 / ADR-005）。
 2. `DomainModuleResult` + `SharedRuntimeDeps` 聚合 — **已落**（#1422）；`DomainBinding` 单一所有权形状 + result `Extend` — **已落**（#1669）。
-3. Pg capability bundle（`PgRuntimeDeps` / `PgRuntimeHandle` / `PgDomainDeps`）— **已落**（#1423 / #1677）；adapter bundle 泛化到 redis/amqp/vault — **已落**（#1498，见 §2.4）；Redis / S3 / Vault runtime-local provider output 单一路径 — **已落**（#1676）；PG 独立生命周期 output 单一路径 — **已落**（#1677）。
+3. Pg capability bundle（`PgRuntimeDeps` / `PgRuntimeHandle` / `PgDomainDeps`）— **已落**（#1423 / #1677）；adapter bundle 泛化到 redis/amqp/vault — **已落**（#1498，见 §2.4）；14 项 active provider 的 plan/catalog/output transaction bijection — **已落**（#1792）。
 4. L1/L2 repo/UoW conformance（CAS / rollback / tenant / co-tx both-or-neither）— session 维度**已落**（ADR-005 §9/§10），其余 W 阶段。
 5. 第一条 durable 闭环：settings module + routes / probes / resources / journey — **待落**（#1421）。
 6. defer gate — **本批落**（#1432）。
@@ -173,10 +175,11 @@ impl PgRuntimeHandle {
 - PG 生命周期复制威胁收敛：`PgRuntimeDeps` 与 `PgReadinessSamplerFactory` 均 non-`Clone` 且按值消费；cloneable
   `PgRuntimeHandle` 没有生命周期 API，因此能力消费者无法取得 pool guard 或重复启动 sampler。owner 只能转换为既有
   `DomainModuleResult`，不存在第二套 lifecycle output seam。
-- PG 关闭顺序漂移收敛：owner 交出的 guards 固定 primary → optional audit-admin，PG module batch 经公共 helper 固定
-  resources → workers 注册；LIFO 关闭时 sampler 先停，再关 audit-admin 与 primary。PG module 在 trace 后、统一 domain module 前注册，
-  使 event/domain/listener 均先于 sampler 排空。类型系统 Hard 锁定 owner/factory 的单次消费；无法跨文件类型化证明的唯一
-  helper 调用、无平行 output 与注册相对顺序由带 synthetic-red/green 的 Medium runtime baseline 门补齐。
+- Provider 关闭顺序漂移收敛：PG owner 交出的 guards 固定 primary → optional audit-admin，所有 provider
+  resources/workers 合并为 completed provider module；Launch 在 domain module 前注册它，LIFO 使
+  event/domain/listener 先排空。部分构造失败时 transaction 只注册已存在 resources 并逆序关闭，不启动 worker。
+  类型系统 Hard 锁定 role-specific permit/owner 的单次消费；14 项 exact set、8 个 sealed output batches、唯一 finish/async rollback/handoff
+  由 synthetic-red/anti-vacuity Medium runtime baseline 补齐。
 - Event output 分叉威胁收敛：`wire_event_transport` 的 crate-private owned 返回类型使旧 `.module/.infra_guards`
   投影不可编译（`EVENT-TRANSPORT-OUTPUT-TYPE-01`，Hard）；跨文件唯一 resource 派生、run merge 与 launch
   注册顺序由 `EVENT-TRANSPORT-OUTPUT-FUNNEL-01` 的 synthetic-red/anti-vacuity AST 门补齐（Medium）。
@@ -192,9 +195,9 @@ impl PgRuntimeHandle {
 | compose-before-drain 生命周期顺序 | **Hard（封闭 API）** | 私有 `domain/output` + 唯一公开 `compose_bindings` output 出口；成功后才 drain，失败在 drain 前返回；compile-fail rustdoc 锁定外部直接取 output 不可编译 |
 | 具体域依赖完整性 | **Hard（已有 typed 构造器处）** | settings/identity/audit 已有统一 async `module(&impl XModuleSource)` 参数 funnel；source trait 按域 sealed、生产实现仅 `SharedRuntimeDeps`，具体依赖完整性仍由各 domain typed 构造器的必填位置参承载，`DomainBinding` 本身不内省或验证这些依赖 |
 | result 三出口完整聚合与保序 | **Medium（测试 + baseline gate）** | bootstrap 单测锁定 `merge`/`Extend`；`cargo xtask runtime-baseline verify` 检查三字段与 merge 全字段覆盖 |
-| provider 输出形状与 live 集合 | **Hard（类型 + 可见性）/ Medium（精确 layer-deps deny + baseline）** | crate-private `ProviderOutput` 固定返回 `DomainModuleResult`；`LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 仅拒绝 `adapters/redis|s3|vault → bootstrap`（Cargo package 为 `redis-adapter|s3|vault`），三条 synthetic red + postgres→bootstrap/目标→diport anti-vacuity green，真实 workspace 由 `cargo xtask layer-deps` 校验；runtime baseline 锁定 Redis → S3 → Vault 集合、顺序与唯一 `provider_module` merge 路径 |
+| provider 输出形状与 live 集合 | **Hard（类型 + 所有权）/ Medium（exact-set baseline）** | private raw permit + 14 种不可互换的 role-specific consuming permit + non-Clone `ProviderBuild`/`CompletedProviderBuild`；`ProviderOutput` 只能经 8 个 sealed constructors 携带 owned `DomainModuleResult` 与对应 receipts，并从实际 module 推导 channel union；runtime baseline 锁 14 项生成 catalog、每项唯一消费、8 个 output batches、唯一 finish/async rollback/handoff，并以 synthetic red + real-workspace anti-vacuity 防空门 |
 | PG owner / handle 权限分离 | **Hard（类型 + 可见性）** | `PgRuntimeDeps` non-`Clone` 且只包 `PgRuntimeHandle`；handle `Clone` 但只暴露能力投影，生命周期字段/API 不可见；compile-fail/pass UI tests 锁 owner 不可克隆、handle 无 lifecycle API、能力投影可用 |
-| PG 生命周期单次消费 | **Hard（所有权 + `FnOnce`）/ Medium（runtime baseline）** | `into_runtime_parts(self)` 与 factory `spawn(self, token)` 按值消费（Hard）；唯一 `build_pg_runtime_module` 直接生成既有 `DomainModuleResult`，`LaunchPlanParts` 必填 PG batch，PG 不实现通用 `ProviderOutput`。公共 `register_module_output` 按 resources → workers 注册；`RUNTIME-PROVIDER-OUTPUTS-LIVE-01` 锁唯一 helper/生产调用、helper 外无 lifecycle primitive、无平行 output type，以及 PG batch 在统一 domain module 前注册（AcceptedMedium；synthetic red + anti-vacuity green） |
+| PG 生命周期单次消费 | **Hard（所有权 + `FnOnce`）/ Medium（runtime baseline）** | `into_runtime_parts(self)` 与 factory `spawn(self, token)` 按值消费；唯一 `build_pg_runtime_module` 在 BuildInfra 生成 `DomainModuleResult` 并立即进入 `ProviderBuild`，不跨 phase 暴露 PG batch；`RUNTIME-PROVIDER-BIJECTION-LIVE-01` 锁唯一生产调用与 provider-before-domain 注册 |
 | Event transport 单一 output | **Hard（类型 + 可见性）/ Medium（runtime baseline）** | `EVENT-TRANSPORT-OUTPUT-TYPE-01` 以 crate-private `wire_event_transport -> DomainModuleResult` 禁止旧字段投影；`EVENT-TRANSPORT-OUTPUT-FUNNEL-01` 以 synthetic-red/anti-vacuity AST 门锁 AMQP resources 唯一派生、run 唯一 merge、launch 公共 helper 注册（AcceptedMedium） |
 | 域形 vs infra port 归属（已立 ADR-005） | **Hard（crate 图 + 编译器）** | `allows(DiPort,Domain)=false` + cargo 未声明 import 不到 |
 

@@ -285,6 +285,10 @@ fn default_rate_quota() -> ratelimit::QuotaConfig {
     )
 }
 
+pub(crate) fn build_runtime_rate_limiter() -> Arc<GovernorLimiter> {
+    Arc::new(GovernorLimiter::new(default_rate_quota()))
+}
+
 /// 排空 registry 的 per-listener `UnfinalizedRoutes`，按 listener 装配 auth finalizer + 外层验签桥
 /// + rate-limit 中间件（组合根叠加点，INVARIANT RATELIMIT-BEFORE-AUTH-01）。
 ///
@@ -309,15 +313,30 @@ fn default_rate_quota() -> ratelimit::QuotaConfig {
 /// [`bootstrap::Registry::take_health_reporter`] 取出探针装入 `Arc<HealthReporter>`（`Send + Sync`）注入
 /// Health listener 的 readyz handler（每请求 `report`）；整体非 `Sync` 的 `Registry`
 /// 无法进 axum handler 闭包。
+pub(crate) struct FinalizeListenerPlanInputs<'config, 'borrow> {
+    pub(crate) execution_plan: ListenerExecutionPlan,
+    pub(crate) config: SnapshotConfig<'config>,
+    pub(crate) registry: &'borrow mut bootstrap::Registry,
+    pub(crate) providers: &'borrow TokenProviderBindings,
+    pub(crate) audit_sink: httpserve::AuditSinkHandle,
+    pub(crate) audit_clock: Arc<dyn diport::Clock>,
+    pub(crate) rate_limiter: Arc<GovernorLimiter>,
+    pub(crate) metrics: Arc<dyn diport::MetricsExporter>,
+}
+
 pub(crate) fn finalize_listener_plan(
-    execution_plan: ListenerExecutionPlan,
-    config: SnapshotConfig<'_>,
-    registry: &mut bootstrap::Registry,
-    providers: &TokenProviderBindings,
-    audit_sink: httpserve::AuditSinkHandle,
-    audit_clock: Arc<dyn diport::Clock>,
-    metrics: Arc<dyn diport::MetricsExporter>,
+    inputs: FinalizeListenerPlanInputs<'_, '_>,
 ) -> anyhow::Result<FinalizedListenerSet> {
+    let FinalizeListenerPlanInputs {
+        execution_plan,
+        config,
+        registry,
+        providers,
+        audit_sink,
+        audit_clock,
+        rate_limiter,
+        metrics,
+    } = inputs;
     providers.validate_exact_presence(&execution_plan)?;
     let internal_mtls_allow_set = config.value(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV);
     let spiffe_endpoint = config.value(SPIFFE_ENDPOINT_SOCKET_ENV);
@@ -331,7 +350,6 @@ pub(crate) fn finalize_listener_plan(
     // 已知限制（multi-instance）：in-mem `GovernorLimiter` 是 per-instance 独立桶，N 副本部署下
     // 每实例独立配额（全局视图 ≈ N × 单实例率）；全局一致限流须 redis-distributed provider（future）。
     // 叠加 peer-IP-after-proxy 退化（RealIP follow-up），本限流当前为单实例 best-effort 防护。
-    let rate_limiter = Arc::new(GovernorLimiter::new(default_rate_quota()));
     let mut live_routes = registry.finalize_routes().context("finalize_routes")?;
     bootstrap::validate_framework_serving(&live_routes, crate::modules_gen::FRAMEWORK_HTTP_ROUTES)
         .context("validate framework serving")?;
@@ -647,7 +665,7 @@ pub(crate) fn finalize_rss_fixture_listener(
         "integration fixture contains live routes for an unselected listener"
     );
     let providers = TokenProviderBindings::new(Some(provider), None, None);
-    let rate_limiter = Arc::new(GovernorLimiter::new(default_rate_quota()));
+    let rate_limiter = build_runtime_rate_limiter();
     finalize_non_health_spec(
         spec,
         routes,
@@ -869,15 +887,16 @@ mod tests {
         let snapshot = test_snapshot(values)?;
         let execution_plan =
             crate::plan::RuntimePlan::bundled(snapshot.view())?.listener_execution_plan();
-        finalize_listener_plan(
+        finalize_listener_plan(FinalizeListenerPlanInputs {
             execution_plan,
-            snapshot.view(),
+            config: snapshot.view(),
             registry,
             providers,
-            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-            Arc::new(SystemClock),
-            noop_metrics(),
-        )
+            audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            audit_clock: Arc::new(SystemClock),
+            rate_limiter: build_runtime_rate_limiter(),
+            metrics: noop_metrics(),
+        })
     }
 
     fn assemble_rss_mtls_test(
@@ -961,17 +980,18 @@ mod tests {
             .register_primary_authorizer(allow_authorizer())
             .expect("Primary authorizer");
         let config = snapshot();
-        let error = finalize_listener_plan(
-            crate::plan::RuntimePlan::bundled(config.view())
+        let error = finalize_listener_plan(FinalizeListenerPlanInputs {
+            execution_plan: crate::plan::RuntimePlan::bundled(config.view())
                 .expect("RuntimePlan")
                 .listener_execution_plan(),
-            config.view(),
-            &mut missing,
-            &providers,
-            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-            Arc::new(SystemClock),
-            noop_metrics(),
-        )
+            config: config.view(),
+            registry: &mut missing,
+            providers: &providers,
+            audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            audit_clock: Arc::new(SystemClock),
+            rate_limiter: build_runtime_rate_limiter(),
+            metrics: noop_metrics(),
+        })
         .err()
         .expect("declared Admin without live routes must fail");
         assert!(error.to_string().contains("produced no live routes"));
@@ -990,17 +1010,18 @@ mod tests {
             .register_primary_authorizer(allow_authorizer())
             .expect("Primary authorizer");
         let config = snapshot();
-        let error = finalize_listener_plan(
-            crate::plan::RuntimePlan::bundled(config.view())
+        let error = finalize_listener_plan(FinalizeListenerPlanInputs {
+            execution_plan: crate::plan::RuntimePlan::bundled(config.view())
                 .expect("RuntimePlan")
                 .listener_execution_plan(),
-            config.view(),
-            &mut manual_health,
-            &providers,
-            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-            Arc::new(SystemClock),
-            noop_metrics(),
-        )
+            config: config.view(),
+            registry: &mut manual_health,
+            providers: &providers,
+            audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            audit_clock: Arc::new(SystemClock),
+            rate_limiter: build_runtime_rate_limiter(),
+            metrics: noop_metrics(),
+        })
         .err()
         .expect("manual live Health routes must fail");
         assert!(error.to_string().contains("not declared by RuntimePlan"));

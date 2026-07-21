@@ -103,11 +103,13 @@ const CARRIERS: &[Carrier] = &[
     },
     Carrier {
         path: "adapters/postgres/src/bundle.rs",
-        purpose: "startup loads DB policy before closing migrator and carries it privately",
+        purpose: "startup loads DB policy inside the rollback-owned migrator transaction and carries it privately",
         anchors: &[
             "delivery_policy: EventDeliveryPolicy",
+            "let mut migrator_transaction = PgSetupTransaction::new();",
+            "migrator_transaction.register(PgStoreGuard::new_named(",
             "let delivery_policy = migrator.load_event_delivery_policy().await?",
-            "migrator.shutdown().await.ok();",
+            "let delivery_policy = migrator_transaction.close(migration_result).await?;",
         ],
     },
     Carrier {
@@ -262,8 +264,10 @@ const ORDERED_SEQUENCES: &[(&str, &[&str])] = &[
     (
         "adapters/postgres/src/bundle.rs",
         &[
+            "let mut migrator_transaction = PgSetupTransaction::new();",
+            "migrator_transaction.register(PgStoreGuard::new_named(",
             "let delivery_policy = migrator.load_event_delivery_policy().await?",
-            "migrator.shutdown().await.ok();",
+            "let delivery_policy = migrator_transaction.close(migration_result).await?;",
         ],
     ),
     (

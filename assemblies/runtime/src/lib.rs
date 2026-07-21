@@ -146,7 +146,11 @@ pub mod test_support {
         token: String,
         transit_mount: String,
         settings_key_name: String,
-    ) -> anyhow::Result<(vault::VaultRuntimeDeps, diport::KeyName)> {
+    ) -> anyhow::Result<(
+        vault::VaultRuntimeDeps,
+        Arc<vault::VaultSigner>,
+        diport::KeyName,
+    )> {
         crate::infra::vault::build_vault_runtime_from_values(
             addr,
             token,
@@ -234,11 +238,7 @@ use infra::s3::{S3RuntimeConfig, S3RuntimeConfigParts};
 use infra::vault::{VaultRuntimeConfig, VaultRuntimeConfigError};
 use phase::PreparedRuntimeInputs;
 #[cfg(test)]
-use phase::{
-    RuntimeModuleAssemblyInputs, RuntimePhase, after_required_preflight,
-    assemble_runtime_module_outputs, validate_domain_listener_evidence,
-    validate_provider_output_bindings, validate_provider_output_evidence,
-};
+use phase::{RuntimePhase, after_required_preflight, validate_domain_listener_evidence};
 
 #[cfg(test)]
 use config::DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV;
@@ -570,14 +570,18 @@ impl RuntimeDomainTransport for httpd::SharedDomainHttpTransport {
 
 struct DomainTransportRuntime<T> {
     transport: T,
+    probe_name: ProbeName,
 }
 
 impl<T> DomainTransportRuntime<T>
 where
     T: RuntimeDomainTransport,
 {
-    fn new(transport: T) -> Self {
-        Self { transport }
+    fn new(transport: T, probe_name: ProbeName) -> Self {
+        Self {
+            transport,
+            probe_name,
+        }
     }
 
     fn dispatch_handle(&self) -> Arc<dyn distributed::DomainTransport> {
@@ -588,17 +592,18 @@ where
         ))
     }
 
-    fn module_result(&self) -> anyhow::Result<DomainModuleResult> {
-        let probe_name = ProbeName::parse(DOMAIN_TRANSPORT_READY_PROBE_NAME)
-            .context("parse domain_transport_ready probe name")?;
-        Ok(DomainModuleResult {
+    fn module_result(&self) -> DomainModuleResult {
+        DomainModuleResult {
             probes: vec![(
-                probe_name,
-                Box::new(DomainTransportReadyProbe::new(self.transport.clone())),
+                self.probe_name.clone(),
+                Box::new(DomainTransportReadyProbe::new(
+                    self.transport.clone(),
+                    self.probe_name.clone(),
+                )),
             )],
             resources: vec![DynManagedResource::new_box(self.transport.clone())],
             workers: Vec::new(),
-        })
+        }
     }
 }
 
@@ -613,10 +618,7 @@ impl<T> DomainTransportReadyProbe<T>
 where
     T: RuntimeDomainTransport,
 {
-    #[allow(clippy::expect_used)]
-    fn new(transport: T) -> Self {
-        let name =
-            ProbeName::parse(DOMAIN_TRANSPORT_READY_PROBE_NAME).expect("valid probe name const");
+    fn new(transport: T, name: ProbeName) -> Self {
         Self { transport, name }
     }
 }
@@ -639,12 +641,15 @@ where
 async fn wire_domain_transport(
     config: DomainTransportConfig,
 ) -> anyhow::Result<DomainTransportRuntime<httpd::SharedDomainHttpTransport>> {
+    let probe_name = ProbeName::parse(DOMAIN_TRANSPORT_READY_PROBE_NAME)
+        .context("parse domain_transport_ready probe name")?;
     let transport =
         httpd::DomainHttpTransport::from_spire(config.targets, Some(&config.spiffe_endpoint))
             .await
             .context("build outbound domain transport mTLS client from captured endpoint")?;
     Ok(DomainTransportRuntime::new(
         httpd::SharedDomainHttpTransport::new(transport),
+        probe_name,
     ))
 }
 
@@ -4621,10 +4626,7 @@ mod tests {
 
     use audit::ports::TenantRepoScope as AuditTenantRepoScope;
     use axum::http::Method;
-    use eventexec::{
-        DlqError, EVENT_CONSUMER_PROBE, OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE,
-        OUTBOX_SWEEPER_PROBE, SWEEPER_WORKER_NAME,
-    };
+    use eventexec::DlqError;
     use identity::ports::TenantRepoScope as IdentityTenantRepoScope;
     use oidc::OidcProvider;
     use primitives::ListenerKind;
@@ -4808,10 +4810,6 @@ mod tests {
 
     #[test]
     fn generated_graph_evidence_matches_live_runtime_carriers() {
-        assert!(validate_provider_output_evidence().is_ok());
-
-        let missing_provider = provider_output::provider_output_bindings();
-        assert!(validate_provider_output_bindings(&missing_provider).is_err());
         let snapshot = crate::config::test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
@@ -4887,56 +4885,58 @@ mod tests {
     }
 
     fn runtime_module_output_harness() -> DomainModuleResult {
-        assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
-            domains_module: harness_module(
-                &[CONFIGS_READY_PROBE_NAME, KEYPROVIDER_READY_PROBE_NAME],
-                &[],
-                &["keyprovider-readiness-sampler"],
-            ),
-            auth_grant_sweeper_module: harness_module(
-                &[AUTH_GRANT_SWEEPER_PROBE_NAME],
-                &[],
-                &[AUTH_GRANT_SWEEPER_WORKER_NAME],
-            ),
-            service_token_replay_sweeper_module: harness_module(
-                &[SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME],
-                &[],
-                &[SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME],
-            ),
-            s3_canary_module: harness_module(
-                &[crate::infra::s3::S3_READY_PROBE_NAME],
-                &[],
-                &["s3-canary-sampler"],
-            ),
-            provider_module: harness_module(
-                &[],
-                &["redis", "s3", "vault-secret-resolver", "vault-key-provider"],
-                &[],
-            ),
-            token_verifier_resources: vec![
-                harness_resource("rss_access_token_verifier"),
-                harness_resource("federated_access_token_verifier"),
-                harness_resource("service_token_verifier"),
+        let mut module = DomainModuleResult::default();
+        module.merge(harness_module(
+            &[CONFIGS_READY_PROBE_NAME, KEYPROVIDER_READY_PROBE_NAME],
+            &[],
+            &["keyprovider-readiness-sampler"],
+        ));
+        module.merge(harness_module(
+            &[AUTH_GRANT_SWEEPER_PROBE_NAME],
+            &[],
+            &[AUTH_GRANT_SWEEPER_WORKER_NAME],
+        ));
+        module.merge(harness_module(
+            &[SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME],
+            &[],
+            &[SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME],
+        ));
+        module.merge(harness_module(
+            &[crate::infra::s3::S3_READY_PROBE_NAME],
+            &[],
+            &["s3-canary-sampler"],
+        ));
+        module.merge(harness_module(
+            &[],
+            &["redis", "s3", "vault-secret-resolver", "vault-key-provider"],
+            &[],
+        ));
+        module.resources.extend([
+            harness_resource("rss_access_token_verifier"),
+            harness_resource("federated_access_token_verifier"),
+            harness_resource("service_token_verifier"),
+        ]);
+        module.merge(harness_module(
+            &[DOMAIN_TRANSPORT_READY_PROBE_NAME],
+            &["domain-http-transport"],
+            &[],
+        ));
+        module.merge(event_transport_harness_module());
+        module.merge(harness_module(
+            &[
+                event_transport::DLX_LIFECYCLE_PROBE,
+                event_transport::DLX_ARCHIVE_READINESS_PROBE,
             ],
-            domain_transport_module: harness_module(
-                &[DOMAIN_TRANSPORT_READY_PROBE_NAME],
-                &["domain-http-transport"],
-                &[],
-            ),
-            event_module: event_transport_harness_module(),
-            dlx_lifecycle_module: harness_module(
-                &[
-                    event_transport::DLX_LIFECYCLE_PROBE,
-                    event_transport::DLX_ARCHIVE_READINESS_PROBE,
-                ],
-                &["postgres-dlx-lifecycle"],
-                &[
-                    event_transport::DLX_LIFECYCLE_WORKER_NAME,
-                    event_transport::DLX_ARCHIVE_READINESS_WORKER_NAME,
-                ],
-            ),
-            redis_readiness_worker: harness_worker("redis-readiness-sampler"),
-        })
+            &["postgres-dlx-lifecycle"],
+            &[
+                event_transport::DLX_LIFECYCLE_WORKER_NAME,
+                event_transport::DLX_ARCHIVE_READINESS_WORKER_NAME,
+            ],
+        ));
+        module
+            .workers
+            .push(harness_worker("redis-readiness-sampler"));
+        module
     }
 
     fn event_transport_harness_module() -> DomainModuleResult {
@@ -4951,16 +4951,23 @@ mod tests {
         }
         for domain in ["identity", "settings"] {
             module.probes.push(harness_probe_owned(format!(
-                "{OUTBOX_RELAY_PROBE}_{domain}"
+                "{}_{domain}",
+                eventexec::OUTBOX_RELAY_PROBE
             )));
             module
                 .workers
                 .push(harness_worker_owned(format!("outbox-relay-{domain}")));
         }
-        module.probes.push(harness_probe(OUTBOX_SAMPLER_PROBE));
+        module
+            .probes
+            .push(harness_probe(eventexec::OUTBOX_SAMPLER_PROBE));
         module.workers.push(harness_worker("outbox-sampler"));
-        module.probes.push(harness_probe(OUTBOX_SWEEPER_PROBE));
-        module.workers.push(harness_worker(SWEEPER_WORKER_NAME));
+        module
+            .probes
+            .push(harness_probe(eventexec::OUTBOX_SWEEPER_PROBE));
+        module
+            .workers
+            .push(harness_worker(eventexec::SWEEPER_WORKER_NAME));
         for (topic, consumer, group) in [
             (
                 "settings.config-version-changed",
@@ -4973,7 +4980,8 @@ mod tests {
             ("identity.policy-updated", "audit", "audit.policy-updated"),
         ] {
             module.probes.push(harness_probe_owned(format!(
-                "{EVENT_CONSUMER_PROBE}:{}__{}__{}",
+                "{}:{}__{}__{}",
+                eventexec::EVENT_CONSUMER_PROBE,
                 topic.replace('.', "_"),
                 consumer.replace('.', "_"),
                 group.replace('.', "_")
@@ -5744,13 +5752,16 @@ mod tests {
         }
         let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(NoopMetrics);
         let app = extract_admin_router(routes::finalize_listener_plan(
-            execution_plan,
-            snapshot.view(),
-            &mut registry,
-            &providers,
-            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-            Arc::new(SystemClock),
-            metrics,
+            routes::FinalizeListenerPlanInputs {
+                execution_plan,
+                config: snapshot.view(),
+                registry: &mut registry,
+                providers: &providers,
+                audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+                audit_clock: Arc::new(SystemClock),
+                rate_limiter: routes::build_runtime_rate_limiter(),
+                metrics,
+            },
         )?)?;
 
         let scoped_response = app
@@ -9121,13 +9132,15 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn domain_transport_runtime_exports_dispatch_resource_and_readyz() {
         let ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let runtime = DomainTransportRuntime::new(NoopRuntimeDomainTransport {
-            ready: Arc::clone(&ready),
-        });
+        let runtime = DomainTransportRuntime::new(
+            NoopRuntimeDomainTransport {
+                ready: Arc::clone(&ready),
+            },
+            ProbeName::parse(DOMAIN_TRANSPORT_READY_PROBE_NAME)
+                .expect("valid domain transport probe"),
+        );
         let _dispatch = runtime.dispatch_handle();
-        let module = runtime
-            .module_result()
-            .expect("domain transport module result");
+        let module = runtime.module_result();
 
         assert_eq!(module.resources.len(), 1);
         assert_eq!(module.resources[0].name(), "domain-http-transport");

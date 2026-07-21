@@ -18,7 +18,7 @@
       "path": "assemblies/runtime/src/generated/modules_gen.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "6ea18a085d8a9979c988b053b1a013214915ccd449b42bdf28451e2bb9f7d191"
+        "value": "9edde4f5fe70a7d8097ae79bfb9f87436a4472277c52ad247e6e2602733f71a9"
       }
     },
     {
@@ -60,7 +60,7 @@
       "path": "crates/bootstrap/src/module.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "b07f50178357ac91f1e42ee8a445f6dc412354f6dabae16bb5151f1ceac54d74"
+        "value": "4de12240db581077c11bc6ed12931b1ac5ff492313017f5f6edd685a7cc9f3d6"
       }
     }
   ],

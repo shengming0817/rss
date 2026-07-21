@@ -720,7 +720,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         true,
         true,
     )?;
-    let (vault, settings_config_value_key_name) = build_vault_runtime_from_values(
+    let (vault, identity_signer, settings_config_value_key_name) = build_vault_runtime_from_values(
         "https://vault.example:8200".to_string(),
         "s.testtoken".to_string(),
         "transit".to_string(),
@@ -732,6 +732,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         redis,
         s3,
         vault,
+        identity_signer,
         settings_config_value_key_name,
         domain_transport: noop_domain_transport(),
     };

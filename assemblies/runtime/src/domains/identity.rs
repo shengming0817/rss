@@ -9,9 +9,10 @@ use identity_composition::{FederatedIdentityModuleDeps, IdentityModuleDeps};
 use postgres::{PgDomainDeps, caps};
 
 use crate::config::{ServingConfigMapper, SnapshotConfig};
-use crate::infra::vault::build_vault_signer_with;
-#[cfg(any(test, feature = "integration"))]
-use crate::infra::vault::{VAULT_ADDR_ENV, VAULT_TOKEN_ENV, VAULT_TRANSIT_MOUNT_ENV};
+#[cfg(test)]
+use crate::infra::vault::{
+    VAULT_ADDR_ENV, VAULT_TOKEN_ENV, VAULT_TRANSIT_MOUNT_ENV, build_vault_signer_with,
+};
 use crate::{SharedRuntimeDeps, SystemClock};
 
 const DEFAULT_IDENTITY_AUTH_GRANT_TTL_SECS: u64 = 30 * 24 * 60 * 60;
@@ -37,7 +38,6 @@ impl IdentityTokenProfileInput {
 }
 
 pub(crate) struct RssLocalAuthGrantInput {
-    signer: Arc<vault::VaultSigner>,
     rss_access_issuer: authn::JwtIssuerConfig<diport::RssAccessProfile>,
     auth_grant_ttl: Duration,
     refresh_ttl: Duration,
@@ -57,18 +57,14 @@ impl IdentityModuleInput {
             return Ok(Self::FederatedAccess);
         };
         let config = mapper.config();
-        // Preserve the fail-fast contract: bounded lifetimes first, then Vault, then RSS access policy.
+        // Preserve the fail-fast contract: bounded lifetimes first, then RSS access policy. The
+        // Vault signer is injected later from the single captured provider generation.
         let auth_grant_ttl = Duration::from_secs(identity_auth_grant_ttl_secs(
             config.value(IDENTITY_AUTH_GRANT_TTL_ENV),
         )?);
         let refresh_ttl = Duration::from_secs(refresh_ttl_secs(config.value(REFRESH_TTL_ENV))?);
         validate_auth_grant_covers_refresh(auth_grant_ttl, refresh_ttl)?;
-        let signer = Arc::new(build_vault_signer_with(
-            |name| config.value(name).map(str::to_owned),
-            false,
-        )?);
         Ok(Self::RssAccess(RssLocalAuthGrantInput {
-            signer,
             rss_access_issuer,
             auth_grant_ttl,
             refresh_ttl,
@@ -93,25 +89,14 @@ impl IdentityModuleInput {
             "RSS access-token TTL exceeds the profile maximum lifetime"
         );
 
-        let signer = Arc::new(build_vault_signer_with(
-            |name| match name {
-                VAULT_ADDR_ENV => Some(values.vault_addr.clone()),
-                VAULT_TOKEN_ENV => Some(values.vault_token.clone()),
-                VAULT_TRANSIT_MOUNT_ENV => Some(values.vault_transit_mount.clone()),
-                _ => None,
-            },
-            values.vault_allow_http,
-        )?);
         let rss_access_issuer = authn::JwtIssuerConfig::rss_access(
-            authn::SigningKeyRing::single(diport::KeyId::new(values.access_token_key_id))
-                .expect("non-empty signing key id"),
+            authn::SigningKeyRing::single(diport::KeyId::new(values.access_token_key_id))?,
             diport::SigningPurpose::new("auth.rss-access"),
             values.access_token_issuer,
             values.access_token_audience,
             values.access_token_ttl,
         );
         Ok(Self::RssAccess(RssLocalAuthGrantInput {
-            signer,
             rss_access_issuer,
             auth_grant_ttl: values.auth_grant_ttl,
             refresh_ttl: values.refresh_ttl,
@@ -128,16 +113,12 @@ impl IdentityModuleInput {
 #[cfg(any(test, feature = "integration"))]
 #[allow(missing_docs)]
 pub struct IdentityTestValues {
-    pub vault_addr: String,
-    pub vault_token: String,
-    pub vault_transit_mount: String,
     pub access_token_issuer: String,
     pub access_token_audience: String,
     pub access_token_key_id: String,
     pub access_token_ttl: Duration,
     pub auth_grant_ttl: Duration,
     pub refresh_ttl: Duration,
-    pub vault_allow_http: bool,
 }
 
 /// Build the identity binding from the runtime's production providers and process configuration.
@@ -153,6 +134,7 @@ pub async fn module(
     wire_with_profile(
         deps.pg.for_domain(),
         Arc::clone(&deps.password_blocklist),
+        Arc::clone(&deps.identity_signer),
         input,
     )
 }
@@ -160,10 +142,11 @@ pub async fn module(
 fn wire_with_profile(
     pg: PgDomainDeps<caps::Identity>,
     blocklist: Arc<secure::DigestPasswordBlocklist>,
+    signer: Arc<vault::VaultSigner>,
     input: IdentityModuleInput,
 ) -> anyhow::Result<DomainBinding> {
     match input {
-        IdentityModuleInput::RssAccess(input) => wire_rss_access(pg, blocklist, input),
+        IdentityModuleInput::RssAccess(input) => wire_rss_access(pg, blocklist, signer, input),
         IdentityModuleInput::FederatedAccess => identity_composition::wire_federated(
             FederatedIdentityModuleDeps::new(pg, Arc::new(SystemClock)),
         ),
@@ -233,10 +216,10 @@ fn validate_auth_grant_covers_refresh(
 fn wire_rss_access(
     pg: PgDomainDeps<caps::Identity>,
     blocklist: Arc<secure::DigestPasswordBlocklist>,
+    signer: Arc<vault::VaultSigner>,
     input: RssLocalAuthGrantInput,
 ) -> anyhow::Result<DomainBinding> {
     let RssLocalAuthGrantInput {
-        signer,
         rss_access_issuer,
         auth_grant_ttl,
         refresh_ttl,
@@ -263,23 +246,10 @@ fn validate_explicit_ttl(ttl: Duration, name: &str, max_secs: u64) -> anyhow::Re
     Ok(())
 }
 
-#[cfg(feature = "integration")]
-fn wire_configured_from_test_values(
-    pg: PgDomainDeps<caps::Identity>,
-    blocklist: Arc<secure::DigestPasswordBlocklist>,
-    values: IdentityTestValues,
-) -> anyhow::Result<DomainBinding> {
-    wire_with_profile(
-        pg,
-        blocklist,
-        IdentityModuleInput::from_test_values(values)?,
-    )
-}
-
-/// Integration-only identity binding with explicit configuration and Vault HTTP policy.
+/// Integration-only identity binding with explicit AuthGrant/token configuration.
 ///
-/// The explicit values include the HTTP opt-in used only with a loopback mock Vault. The generated
-/// production module path is HTTPS-only and cannot receive this test-only type.
+/// The Vault signer remains the exact provider already carried by [`SharedRuntimeDeps`]; this seam
+/// only replaces process-backed identity values and cannot construct a second signer.
 ///
 /// # Errors
 ///
@@ -289,10 +259,11 @@ pub(crate) fn wire_identity_with(
     deps: &SharedRuntimeDeps,
     values: IdentityTestValues,
 ) -> anyhow::Result<DomainBinding> {
-    wire_configured_from_test_values(
+    wire_with_profile(
         deps.pg.for_domain(),
         Arc::clone(&deps.password_blocklist),
-        values,
+        Arc::clone(&deps.identity_signer),
+        IdentityModuleInput::from_test_values(values)?,
     )
 }
 
@@ -312,16 +283,12 @@ pub(crate) mod tests {
 
     fn test_values() -> IdentityTestValues {
         IdentityTestValues {
-            vault_addr: "http://127.0.0.1:1".to_string(),
-            vault_token: "module-test-token".to_string(),
-            vault_transit_mount: "transit".to_string(),
             access_token_issuer: "https://issuer.test".to_string(),
             access_token_audience: "rss".to_string(),
             access_token_key_id: "module-test-es256".to_string(),
             access_token_ttl: Duration::from_secs(900),
             auth_grant_ttl: Duration::from_secs(DEFAULT_IDENTITY_AUTH_GRANT_TTL_SECS),
             refresh_ttl: Duration::from_secs(2_592_000),
-            vault_allow_http: true,
         }
     }
 
@@ -333,6 +300,15 @@ pub(crate) mod tests {
         wire_with_profile(
             postgres::PgRuntimeHandle::for_module_test().for_domain(),
             test_blocklist(),
+            Arc::new(build_vault_signer_with(
+                |name| match name {
+                    VAULT_ADDR_ENV => Some("http://127.0.0.1:1".to_owned()),
+                    VAULT_TOKEN_ENV => Some("module-test-token".to_owned()),
+                    VAULT_TRANSIT_MOUNT_ENV => Some("transit".to_owned()),
+                    _ => None,
+                },
+                true,
+            )?),
             input,
         )
     }

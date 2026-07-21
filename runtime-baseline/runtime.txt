@@ -94,6 +94,7 @@ pg = PgRuntimeHandle
 redis = RedisRuntimeDeps
 s3 = S3RuntimeDeps
 vault = VaultRuntimeDeps
+identity_signer = Arc<vault::VaultSigner>
 settings_config_value_key_name = KeyName
 domain_transport = Arc<dyn distributed::DomainTransport>
 
@@ -114,47 +115,41 @@ mergeExtends = probes,resources,workers
 07 | run.listener.execution-plan | assemblies/runtime/src/phase/provider.rs | let listener_execution_plan = runtime_plan.listener_execution_plan(); | status=ok
 08 | run.config.serving | assemblies/runtime/src/phase/provider.rs | RuntimeServingConfig::from_snapshot(config) | status=ok
 09 | run.provider.rss-access | assemblies/runtime/src/phase/provider.rs | build_rss_access_provider( | status=ok
-10 | run.provider.federated-access | assemblies/runtime/src/phase/provider.rs | build_federated_access_provider( | status=ok
-11 | run.config.s3 | assemblies/runtime/src/phase/infra.rs | S3RuntimeConfig::from_snapshot(config) | status=ok
-12 | run.config.vault | assemblies/runtime/src/phase/infra.rs | VaultRuntimeConfig::from_snapshot(config) | status=ok
-13 | run.provider.vault | assemblies/runtime/src/phase/infra.rs | vault_config.into_runtime() | status=ok
-14 | run.provider.redis | assemblies/runtime/src/phase/infra.rs | build_redis_runtime_deps(redis_config) | status=ok
-15 | run.provider.s3 | assemblies/runtime/src/phase/infra.rs | build_s3_runtime_deps(s3_general_config) | status=ok
-16 | run.provider.pg | assemblies/runtime/src/phase/infra.rs | PgRuntimeDeps::setup_with_audit_admin_config | status=ok
-17 | run.shared-deps | assemblies/runtime/src/phase/infra.rs | let deps = SharedRuntimeDeps { | status=ok
-18 | run.provider.service-token | assemblies/runtime/src/phase/infra.rs | build_service_token_provider( | status=ok
-19 | run.wire.generated-domains | assemblies/runtime/src/phase/domains.rs | crate::modules_gen::wire_domains(&deps, domain_modules) | status=ok
-20 | run.module.input.domains | assemblies/runtime/src/phase/domains.rs | let (mut registry, domains_module) = | status=ok
-21 | run.compose.generated-domains | assemblies/runtime/src/phase/domains.rs | bootstrap::compose_bindings(&mut domain_bindings) | status=ok
-22 | run.module.input.auth-grant-sweeper | assemblies/runtime/src/phase/domains.rs | let auth_grant_sweeper_module = | status=ok
-23 | run.module.input.s3-canary | assemblies/runtime/src/phase/domains.rs | let s3_canary_module = | status=ok
-24 | run.provider-output.module | assemblies/runtime/src/phase/domains.rs | let provider_module = crate::provider_output::build_provider_module(&deps) | status=ok
-25 | run.resources.rss-access-token | assemblies/runtime/src/phase/domains.rs | if let Some(provider) = runtime_rss_access.as_ref() {
-                token_verifier_resources.push(provider.managed_resource());
-            } | status=ok
-26 | run.resources.federated-access-token | assemblies/runtime/src/phase/domains.rs | if let Some(provider) = runtime_federated_access.as_ref() {
-                token_verifier_resources.push(provider.managed_resource());
-            } | status=ok
-27 | run.resources.service-token | assemblies/runtime/src/phase/domains.rs | if let Some(provider) = runtime_service_token.as_ref() {
-                token_verifier_resources.push(provider.managed_resource());
-            } | status=ok
-28 | run.probe.rss-access-token-jwks-name | assemblies/runtime/src/phase/domains.rs | ProbeName::parse(RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME) | status=ok
-29 | run.probe.rss-access-token-jwks | assemblies/runtime/src/phase/domains.rs | Box::new(AccessTokenJwksReadyProbe::rss_access( | status=ok
-30 | run.probe.federated-access-token-jwks-name | assemblies/runtime/src/phase/domains.rs | ProbeName::parse(FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME) | status=ok
-31 | run.probe.federated-access-token-jwks | assemblies/runtime/src/phase/domains.rs | Box::new(AccessTokenJwksReadyProbe::federated_access( | status=ok
-32 | run.module.input.domain-transport | assemblies/runtime/src/phase/domains.rs | let domain_transport_module = domain_transport | status=ok
-33 | run.wire.distributed | assemblies/runtime/src/phase/domains.rs | distributed_runtime::wire_distributed(&deps, distributed_worker) | status=ok
-34 | run.event.bridge | assemblies/runtime/src/phase/domains.rs | event_transport::bridge_generated_subscriptions( | status=ok
-35 | run.event.transport | assemblies/runtime/src/phase/domains.rs | event_transport::wire_event_transport( | status=ok
-36 | run.module.assemble | assemblies/runtime/src/phase/domains.rs | assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs { | status=ok
-37 | run.probe.drain | assemblies/runtime/src/phase/domains.rs | for (name, probe) in std::mem::take(&mut module.probes) | status=ok
-38 | run.listener.finalizer | assemblies/runtime/src/phase/finalize.rs | let listeners = finalize_listener_plan( | status=ok
-39 | run.provider-output.pg | assemblies/runtime/src/phase/launch.rs | crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period) | status=ok
+10 | run.resources.rss-access-token | assemblies/runtime/src/phase/provider.rs | if let Some(provider) = runtime_rss_access.as_ref() { | status=ok
+11 | run.provider.federated-access | assemblies/runtime/src/phase/provider.rs | build_federated_access_provider( | status=ok
+12 | run.resources.federated-access-token | assemblies/runtime/src/phase/provider.rs | if let Some(provider) = runtime_federated_access.as_ref() { | status=ok
+13 | run.config.s3 | assemblies/runtime/src/phase/infra.rs | S3RuntimeConfig::from_snapshot(config) | status=ok
+14 | run.config.vault | assemblies/runtime/src/phase/infra.rs | VaultRuntimeConfig::from_snapshot(config) | status=ok
+15 | run.provider.vault | assemblies/runtime/src/phase/infra.rs | vault_config.into_runtime() | status=ok
+16 | run.provider.redis | assemblies/runtime/src/phase/infra.rs | build_redis_runtime_deps(redis_config) | status=ok
+17 | run.provider.s3 | assemblies/runtime/src/phase/infra.rs | build_s3_runtime_deps(s3_general_config) | status=ok
+18 | run.provider.pg | assemblies/runtime/src/phase/infra.rs | PgRuntimeDeps::setup_with_audit_admin_config | status=ok
+19 | run.provider.service-token | assemblies/runtime/src/phase/infra.rs | build_service_token_provider( | status=ok
+20 | run.provider-output.pg | assemblies/runtime/src/phase/infra.rs | crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period) | status=ok
+21 | run.resources.service-token | assemblies/runtime/src/phase/infra.rs | if let Some(provider) = runtime_service_token.as_ref() { | status=ok
+22 | run.module.output.domain-transport | assemblies/runtime/src/phase/infra.rs | provider_build.record_domain(domain_transport.module_result()); | status=ok
+23 | run.shared-deps | assemblies/runtime/src/phase/infra.rs | let deps = SharedRuntimeDeps { | status=ok
+24 | run.wire.generated-domains | assemblies/runtime/src/phase/domains.rs | crate::modules_gen::wire_domains(&deps, domain_modules) | status=ok
+25 | run.module.input.domains | assemblies/runtime/src/phase/domains.rs | let (mut registry, domains_module) = | status=ok
+26 | run.compose.generated-domains | assemblies/runtime/src/phase/domains.rs | bootstrap::compose_bindings(&mut domain_bindings) | status=ok
+27 | run.module.output.domains | assemblies/runtime/src/phase/domains.rs | provider_build.record_domain(domains_module); | status=ok
+28 | run.module.input.auth-grant-sweeper | assemblies/runtime/src/phase/domains.rs | let auth_grant_sweeper_module = | status=ok
+29 | run.module.input.s3-canary | assemblies/runtime/src/phase/domains.rs | let s3_canary_module = | status=ok
+30 | run.probe.rss-access-token-jwks-name | assemblies/runtime/src/phase/domains.rs | ProbeName::parse(RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME) | status=ok
+31 | run.probe.rss-access-token-jwks | assemblies/runtime/src/phase/domains.rs | Box::new(AccessTokenJwksReadyProbe::rss_access( | status=ok
+32 | run.probe.federated-access-token-jwks-name | assemblies/runtime/src/phase/domains.rs | ProbeName::parse(FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME) | status=ok
+33 | run.probe.federated-access-token-jwks | assemblies/runtime/src/phase/domains.rs | Box::new(AccessTokenJwksReadyProbe::federated_access( | status=ok
+34 | run.wire.distributed | assemblies/runtime/src/phase/domains.rs | distributed_runtime::wire_distributed(&deps, distributed_worker) | status=ok
+35 | run.event.bridge | assemblies/runtime/src/phase/domains.rs | event_transport::bridge_generated_subscriptions( | status=ok
+36 | run.event.transport | assemblies/runtime/src/phase/domains.rs | event_transport::wire_event_transport( | status=ok
+37 | run.provider-output.module | assemblies/runtime/src/phase/domains.rs | provider_build.finish() | status=ok
+38 | run.probe.transaction-drain | assemblies/runtime/src/phase/domains.rs | completed.register_probes(&mut wired.registry) | status=ok
+39 | run.listener.finalizer | assemblies/runtime/src/phase/finalize.rs | let listeners = finalize_listener_plan( | status=ok
 40 | run.launch-capability | assemblies/runtime/src/phase/launch.rs | crate::launch::launch(context.config(), request_budget, launch_plan) | status=ok
 41 | launch.shutdown.trace | assemblies/runtime/src/launch.rs | if let Some(exporter) = trace_exporter | status=ok
-42 | launch.shutdown.pg-output | assemblies/runtime/src/launch.rs | let pg_result = Self::register_module_output(stack, pg_runtime_module); | status=ok
+42 | launch.shutdown.provider-output | assemblies/runtime/src/launch.rs | let provider_result = Self::register_module_output(stack, provider_module); | status=ok
 43 | launch.shutdown.domain-output | assemblies/runtime/src/launch.rs | let domain_result = Self::register_module_output(stack, domain_module); | status=ok
-44 | launch.shutdown.pg-result | assemblies/runtime/src/launch.rs | pg_result?; | status=ok
+44 | launch.shutdown.provider-result | assemblies/runtime/src/launch.rs | provider_result?; | status=ok
 45 | launch.shutdown.domain-result | assemblies/runtime/src/launch.rs | domain_result?; | status=ok
 46 | launch.shutdown.resources | assemblies/runtime/src/launch.rs | for resource in resources | status=ok
 47 | launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in workers | status=ok

@@ -7,26 +7,40 @@ use bootstrap::DomainBinding;
 
 use crate::SharedRuntimeDeps;
 
+use crate::domains::DomainWiringFailure;
+
 pub async fn wire_domains(
     deps: &SharedRuntimeDeps,
     inputs: crate::domains::DomainModuleInputs,
-) -> anyhow::Result<Vec<DomainBinding>> {
+) -> Result<Vec<DomainBinding>, DomainWiringFailure> {
     let crate::domains::DomainModuleInputs {
         settings,
         identity,
         audit,
     } = inputs;
-    Ok(vec![
-        crate::domains::settings::module(deps, settings)
-            .await
-            .context("wire domain 'settings'")?,
-        crate::domains::identity::module(deps, identity)
-            .await
-            .context("wire domain 'identity'")?,
-        crate::domains::audit::module(deps, audit)
-            .await
-            .context("wire domain 'audit'")?,
-    ])
+    let mut bindings = Vec::new();
+    match crate::domains::settings::module(deps, settings)
+        .await
+        .context("wire domain 'settings'")
+    {
+        Ok(binding) => bindings.push(binding),
+        Err(source) => return Err(DomainWiringFailure { source, bindings }),
+    }
+    match crate::domains::identity::module(deps, identity)
+        .await
+        .context("wire domain 'identity'")
+    {
+        Ok(binding) => bindings.push(binding),
+        Err(source) => return Err(DomainWiringFailure { source, bindings }),
+    }
+    match crate::domains::audit::module(deps, audit)
+        .await
+        .context("wire domain 'audit'")
+    {
+        Ok(binding) => bindings.push(binding),
+        Err(source) => return Err(DomainWiringFailure { source, bindings }),
+    }
+    Ok(bindings)
 }
 
 pub const DOMAIN_LISTENER_BINDINGS: &[bootstrap::DomainListenerBinding] = &[
@@ -41,130 +55,6 @@ pub const DOMAIN_LISTENER_BINDINGS: &[bootstrap::DomainListenerBinding] = &[
     bootstrap::DomainListenerBinding {
         domain: "audit",
         listener: bootstrap::ListenerKind::Admin,
-    },
-];
-
-pub const PROVIDER_OUTPUT_BINDINGS: &[bootstrap::ProviderOutputBinding] = &[
-    bootstrap::ProviderOutputBinding {
-        port: "diport::AckableSubscriber",
-        provider: "amqp::AmqpSubscriber",
-        consumer: "eventexec",
-        channels: &[
-            bootstrap::LifecycleChannel::Probes,
-            bootstrap::LifecycleChannel::Resources,
-            bootstrap::LifecycleChannel::Workers,
-        ],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::AuditSink",
-        provider: "postgres::PgAuthAuditSink",
-        consumer: "httpserve",
-        channels: &[
-            bootstrap::LifecycleChannel::Resources,
-            bootstrap::LifecycleChannel::Workers,
-        ],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::CasStore",
-        provider: "postgres::PgCasStore",
-        consumer: "distributed",
-        channels: &[
-            bootstrap::LifecycleChannel::Resources,
-            bootstrap::LifecycleChannel::Workers,
-        ],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::CasStore",
-        provider: "redis::RedisCasStore",
-        consumer: "distributed",
-        channels: &[bootstrap::LifecycleChannel::Resources],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::DlxArchiveStore",
-        provider: "s3::VerifiedS3DlxArchiveStore",
-        consumer: "eventexec",
-        channels: &[
-            bootstrap::LifecycleChannel::Probes,
-            bootstrap::LifecycleChannel::Workers,
-        ],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::DlxLifecycleRepository",
-        provider: "postgres::PgDlxLifecycleRepository",
-        consumer: "eventexec",
-        channels: &[
-            bootstrap::LifecycleChannel::Probes,
-            bootstrap::LifecycleChannel::Resources,
-            bootstrap::LifecycleChannel::Workers,
-        ],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::KeyProvider",
-        provider: "vault::VaultKeyProvider",
-        consumer: "eventexec",
-        channels: &[bootstrap::LifecycleChannel::Workers],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::KeyProvider",
-        provider: "vault::VaultKeyProvider",
-        consumer: "settings",
-        channels: &[bootstrap::LifecycleChannel::Resources],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::LockStore",
-        provider: "redis::RedisLockStore",
-        consumer: "distributed",
-        channels: &[bootstrap::LifecycleChannel::Resources],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::ObjectStore",
-        provider: "s3::S3Store",
-        consumer: "runtime",
-        channels: &[bootstrap::LifecycleChannel::Resources],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::Pdp",
-        provider: "oidc::OidcProvider",
-        consumer: "httpserve",
-        channels: &[bootstrap::LifecycleChannel::Resources],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::Publisher",
-        provider: "amqp::AmqpPublisher",
-        consumer: "eventexec",
-        channels: &[
-            bootstrap::LifecycleChannel::Probes,
-            bootstrap::LifecycleChannel::Resources,
-            bootstrap::LifecycleChannel::Workers,
-        ],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::RateLimiter",
-        provider: "ratelimit::GovernorLimiter",
-        consumer: "httpserve",
-        channels: &[],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::RevocationStore",
-        provider: "softca::InMemRevocationLedger",
-        consumer: "deviceloop",
-        channels: &[],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::ServiceTokenReplayStore",
-        provider: "postgres::PgServiceTokenReplayStore",
-        consumer: "oidc",
-        channels: &[
-            bootstrap::LifecycleChannel::Probes,
-            bootstrap::LifecycleChannel::Resources,
-            bootstrap::LifecycleChannel::Workers,
-        ],
-    },
-    bootstrap::ProviderOutputBinding {
-        port: "diport::Signer",
-        provider: "vault::VaultSigner",
-        consumer: "identity",
-        channels: &[bootstrap::LifecycleChannel::Resources],
     },
 ];
 

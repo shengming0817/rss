@@ -225,10 +225,11 @@ impl AccountSecurityLifecycle for PgAccountSecurityRepo {
 #[cfg(test)]
 mod tests {
     use super::{status_from_db, status_to_db};
-    use identity::ports::AccountStatus;
+    use identity::ports::{AccountStatus, IdentityError};
 
     #[test]
-    fn account_security_status_codec_is_closed_and_roundtrips_every_variant() {
+    fn account_security_status_codec_is_closed_and_roundtrips_every_variant()
+    -> Result<(), IdentityError> {
         let cases = [
             (AccountStatus::Active, "active"),
             (AccountStatus::Suspended, "suspended"),
@@ -237,10 +238,11 @@ mod tests {
         ];
         for (status, encoded) in cases {
             assert_eq!(status_to_db(status), encoded);
-            assert_eq!(status_from_db(encoded).expect("known status"), status);
+            assert_eq!(status_from_db(encoded)?, status);
         }
 
         assert!(status_from_db("pending").is_err());
         assert!(status_from_db("").is_err());
+        Ok(())
     }
 }

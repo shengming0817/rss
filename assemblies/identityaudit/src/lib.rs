@@ -12,7 +12,7 @@ mod modules_gen;
 #[path = "generated/providers_gen.rs"]
 mod providers_gen;
 const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
-pub use modules_gen::{DOMAIN_LISTENER_BINDINGS, PROVIDER_OUTPUT_BINDINGS};
+pub use modules_gen::DOMAIN_LISTENER_BINDINGS;
 
 const DEMO_JWT_ISSUER: &str = "https://identityaudit.demo.invalid";
 const DEMO_JWT_AUDIENCE: &str = "rss-identityaudit-demo";
@@ -93,8 +93,7 @@ mod domains {
                 Arc::clone(&deps.signer),
                 Arc::new(SystemClock),
                 authn::JwtIssuerConfig::rss_access(
-                    authn::SigningKeyRing::single(diport::KeyId::new(DEMO_JWT_KEY_ID))
-                        .expect("non-empty signing key id"),
+                    authn::SigningKeyRing::single(diport::KeyId::new(DEMO_JWT_KEY_ID))?,
                     diport::SigningPurpose::new("auth.jwt.access"),
                     DEMO_JWT_ISSUER,
                     DEMO_JWT_AUDIENCE,

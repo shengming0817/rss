@@ -103,14 +103,14 @@ fn auth_grant_cutover_is_strict_atomic_and_least_privilege() {
 }
 
 #[test]
-fn auth_grant_cutover_runbook_is_non_rolling_and_executable() {
+fn auth_grant_cutover_runbook_is_non_rolling_and_executable() -> Result<(), &'static str> {
     let runbook = MIGRATION_README
         .split_once("### 0070 AuthGrant root 破坏性切换")
         .and_then(|(_, tail)| {
             tail.split_once("## Append-only 表（REVOKE 强制）")
                 .map(|(runbook, _)| runbook)
         })
-        .expect("0070 runbook must be a non-empty, independently scoped section");
+        .ok_or("0070 runbook must be a non-empty, independently scoped section")?;
     assert!(
         !runbook.trim().is_empty(),
         "0070 runbook section must not be vacuous"
@@ -181,6 +181,7 @@ fn auth_grant_cutover_runbook_is_non_rolling_and_executable() {
             .all(|pair| matches!(pair, [Some(left), Some(right)] if left < right)),
         "0070 cutover steps are not in executable order: {positions:?}"
     );
+    Ok(())
 }
 
 #[test]
@@ -231,7 +232,8 @@ fn account_security_migration_is_strict_closed_and_least_privilege() {
 }
 
 #[test]
-fn account_security_cutover_has_bounded_locking_and_executable_runbook() {
+fn account_security_cutover_has_bounded_locking_and_executable_runbook() -> Result<(), &'static str>
+{
     for required in [
         "SET LOCAL lock_timeout = '5s'",
         "SET LOCAL statement_timeout = '5min'",
@@ -274,7 +276,7 @@ fn account_security_cutover_has_bounded_locking_and_executable_runbook() {
     let blocker_list = runbook
         .split_once("mode IN (")
         .and_then(|(_, tail)| tail.split_once(");").map(|(list, _)| list))
-        .expect("0069 runbook must contain a closed lock blocker list");
+        .ok_or("0069 runbook must contain a closed lock blocker list")?;
     let actual = blocker_list
         .split('\'')
         .skip(1)
@@ -327,6 +329,7 @@ fn account_security_cutover_has_bounded_locking_and_executable_runbook() {
             "0069 capacity selftest omits red case: {required}"
         );
     }
+    Ok(())
 }
 
 #[test]

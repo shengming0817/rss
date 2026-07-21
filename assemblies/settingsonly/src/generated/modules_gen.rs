@@ -21,14 +21,6 @@ pub const DOMAIN_LISTENER_BINDINGS: &[bootstrap::DomainListenerBinding] =
         listener: bootstrap::ListenerKind::Primary,
     }];
 
-pub const PROVIDER_OUTPUT_BINDINGS: &[bootstrap::ProviderOutputBinding] =
-    &[bootstrap::ProviderOutputBinding {
-        port: "diport::KeyProvider",
-        provider: "vault::VaultKeyProvider",
-        consumer: "settings",
-        channels: &[bootstrap::LifecycleChannel::Resources],
-    }];
-
 #[cfg(test)]
 pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {
     Ok(vec![

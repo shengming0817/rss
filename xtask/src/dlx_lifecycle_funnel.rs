@@ -18,9 +18,7 @@ const ARCHIVE_PROVIDER: &str = "adapters/s3/src/dlx_archive.rs";
 const CUTOVER_MIGRATION: &str = "adapters/postgres/migrations/0062_prepare_dead_letter_cutover.sql";
 const LIFECYCLE_MIGRATION: &str = "adapters/postgres/migrations/0063_dead_letter_lifecycle.sql";
 const RUNTIME_INFRA_PHASE: &str = "assemblies/runtime/src/phase/infra.rs";
-const RUNTIME_DOMAINS_PHASE: &str = "assemblies/runtime/src/phase/domains.rs";
-const RUNTIME_INFRA_FLOW: &str = "DLX preflight→migration→ACL→runtime deps";
-const RUNTIME_DOMAINS_FLOW: &str = "DLX runtime deps→lifecycle wire";
+const RUNTIME_INFRA_FLOW: &str = "DLX preflight→migration→ACL→runtime deps→lifecycle wire";
 const RUNTIME_INFRA_REQUIRED: &[&str] = &[
     "after_required_preflight(",
     "PgDlxLifecycleRuntime::preflight_identities(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,)",
@@ -31,8 +29,8 @@ const RUNTIME_INFRA_REQUIRED: &[&str] = &[
     "PgRuntimeDeps::setup_with_audit_admin_config(",
     "PgDlxLifecycleRuntime::setup(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,hot_payload_protector,)",
     "DlxLifecycleRuntimeDeps::new(dlx_pg_owner,archive_store,archive_vault_provider,archive_key",
+    "wire_dlx_lifecycle(dlx_lifecycle,dlx_worker)",
 ];
-const RUNTIME_DOMAINS_REQUIRED: &[&str] = &["wire_dlx_lifecycle(dlx_lifecycle,dlx_worker)"];
 
 pub(crate) const FIXED_FUNCTIONS: &[&str] = &[
     "rss_dlx_claim_archive_candidates",
@@ -110,22 +108,13 @@ fn scan_workspace(root: &Path) -> Result<Vec<Finding<Rule>>> {
 }
 
 fn runtime_phase_funnel_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
-    let owners = [
-        (
-            RUNTIME_INFRA_PHASE,
-            "ProvidersBuilt",
-            "build_infra",
-            RUNTIME_INFRA_REQUIRED,
-            RUNTIME_INFRA_FLOW,
-        ),
-        (
-            RUNTIME_DOMAINS_PHASE,
-            "InfraBuilt",
-            "wire_domains",
-            RUNTIME_DOMAINS_REQUIRED,
-            RUNTIME_DOMAINS_FLOW,
-        ),
-    ];
+    let owners = [(
+        RUNTIME_INFRA_PHASE,
+        "ProvidersBuilt",
+        "build_infra",
+        RUNTIME_INFRA_REQUIRED,
+        RUNTIME_INFRA_FLOW,
+    )];
     let mut findings = Vec::new();
     for (path, owner, method, required, flow) in owners {
         match std::fs::read_to_string(root.join(path)) {
@@ -653,18 +642,6 @@ fn required_runtime_source_findings(path: &Path, content: &str) -> Vec<Finding<R
             }
             if !has_function(&file, "wire_dlx_lifecycle") {
                 missing.push("fn `wire_dlx_lifecycle`".to_owned());
-            }
-            for (port, provider) in [
-                (
-                    "diport::DlxLifecycleRepository",
-                    "postgres::PgDlxLifecycleRepository",
-                ),
-                ("diport::DlxArchiveStore", "s3::VerifiedS3DlxArchiveStore"),
-                ("diport::KeyProvider", "vault::VaultKeyProvider"),
-            ] {
-                if !has_provider_output_binding(&file, port, provider) {
-                    missing.push(format!("provider binding `{port}` -> `{provider}`"));
-                }
             }
         }
         _ => missing.push("registered runtime provider source".to_owned()),
@@ -1357,48 +1334,6 @@ fn function_has_path_call(file: &syn::File, function: &str, expected: &str) -> b
     calls.0.iter().any(|call| call == expected)
 }
 
-fn has_provider_output_binding(file: &syn::File, port: &str, provider: &str) -> bool {
-    let Some(binding_const) = file.items.iter().find_map(|item| match item {
-        syn::Item::Const(item) if item.ident == "PROVIDER_OUTPUT_BINDINGS" => Some(item),
-        _ => None,
-    }) else {
-        return false;
-    };
-    let array = match binding_const.expr.as_ref() {
-        syn::Expr::Reference(reference) => match reference.expr.as_ref() {
-            syn::Expr::Array(array) => Some(array),
-            _ => None,
-        },
-        syn::Expr::Array(array) => Some(array),
-        _ => None,
-    };
-    array.is_some_and(|array| {
-        array.elems.iter().any(|element| {
-            let syn::Expr::Struct(binding) = element else {
-                return false;
-            };
-            let field = |name: &str| {
-                binding.fields.iter().find_map(|field| {
-                    let syn::Member::Named(member) = &field.member else {
-                        return None;
-                    };
-                    if member != name {
-                        return None;
-                    }
-                    match &field.expr {
-                        syn::Expr::Lit(literal) => match &literal.lit {
-                            syn::Lit::Str(value) => Some(value.value()),
-                            _ => None,
-                        },
-                        _ => None,
-                    }
-                })
-            };
-            field("port").as_deref() == Some(port) && field("provider").as_deref() == Some(provider)
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1436,15 +1371,6 @@ mod tests {
                         archive_vault_provider,
                         archive_key,
                     );
-                }
-            }
-        "#
-    }
-
-    fn canonical_runtime_domains_phase_fixture() -> &'static str {
-        r#"
-            impl<'a> InfraBuilt<'a> {
-                async fn wire_domains(self) {
                     wire_dlx_lifecycle(dlx_lifecycle, dlx_worker);
                 }
             }
@@ -1901,10 +1827,6 @@ pub(crate) async fn build_s3_dlx_archive_store(
         let root = crate::testutil::unique_tmp("dlx-structured-red");
         std::fs::create_dir_all(root.join("assemblies/runtime/src/phase"))?;
         std::fs::write(root.join(RUNTIME_INFRA_PHASE), "fn {")?;
-        std::fs::write(
-            root.join(RUNTIME_DOMAINS_PHASE),
-            canonical_runtime_domains_phase_fixture(),
-        )?;
         assert_eq!(
             runtime_phase_funnel_findings(&root)?[0].rule,
             Rule::MissingRuntimeProvider
@@ -1917,12 +1839,6 @@ pub(crate) async fn build_s3_dlx_archive_store(
             runtime_phase_funnel_findings(&root)?[0].rule,
             Rule::MissingRuntimeProvider
         );
-        std::fs::remove_file(root.join(RUNTIME_DOMAINS_PHASE))?;
-        let findings = runtime_phase_funnel_findings(&root)?;
-        assert!(findings.iter().any(|finding| {
-            finding.subject == RUNTIME_DOMAINS_PHASE
-                && finding.detail.contains("InfraBuilt::wire_domains")
-        }));
 
         for (path, source) in [
             (
@@ -1977,10 +1893,6 @@ pub(crate) async fn build_s3_dlx_archive_store(
                 fn wrong_callee() { unrelated("one", "two"); }
                 fn non_string_argument() { build_pg_config_with_user_env(1, "two"); }
                 fn closure_call() { (|| {})(); }
-                const PROVIDER_OUTPUT_BINDINGS: &[Binding] = &[Binding {
-                    port: "diport::DlxLifecycleRepository",
-                    provider: 1,
-                }];
             "#,
         )?;
         assert!(const_string_value(&helpers, "NON_STRING").is_none());
@@ -2003,18 +1915,6 @@ pub(crate) async fn build_s3_dlx_archive_store(
             &["one", "two"],
         ));
         assert!(!function_has_path_call(&helpers, "closure_call", "missing"));
-        assert!(!has_provider_output_binding(
-            &helpers,
-            "diport::DlxLifecycleRepository",
-            "postgres::PgDlxLifecycleRepository",
-        ));
-
-        let scalar_binding = syn::parse_file("const PROVIDER_OUTPUT_BINDINGS: u8 = 1;")?;
-        assert!(!has_provider_output_binding(
-            &scalar_binding,
-            "port",
-            "provider"
-        ));
         Ok(())
     }
 

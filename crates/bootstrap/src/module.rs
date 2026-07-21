@@ -69,21 +69,6 @@ impl DomainBinding {
 /// [`ShutdownStack::register_with_token`]: crate::shutdown::ShutdownStack::register_with_token
 pub type WorkerSpec = Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum LifecycleChannel {
-    Probes,
-    Resources,
-    Workers,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProviderOutputBinding {
-    pub port: &'static str,
-    pub provider: &'static str,
-    pub consumer: &'static str,
-    pub channels: &'static [LifecycleChannel],
-}
-
 /// 域能力的标准装配出口（ADR-010 §2.2）：`module()` / `wire_X` 的可聚合产物，组合根经
 /// [`DomainModuleResult::merge`] 聚合各域 result 后逐 `Vec` 排空到 sink，不再逐项手工接线。
 ///
@@ -148,9 +133,21 @@ pub fn compose_bindings(
         registry.init_domain(binding.name, binding.domain.as_ref())?;
     }
 
+    let output = drain_binding_outputs(bindings);
+    Ok((registry, output))
+}
+
+/// Reclaim lifecycle outputs from bindings that could not be composed.
+///
+/// This is the failure-side counterpart of [`compose_bindings`]. Generated assembly glue retains
+/// every successfully built binding when a later domain constructor fails; the composition root
+/// drains those outputs into its startup transaction so managed resources are closed
+/// asynchronously instead of being synchronously dropped. The binding internals remain private,
+/// so this is the only pre-compose lifecycle escape hatch.
+pub fn drain_binding_outputs(bindings: &mut Vec<DomainBinding>) -> DomainModuleResult {
     let mut output = DomainModuleResult::default();
     output.extend(bindings.drain(..).map(|binding| binding.output));
-    Ok((registry, output))
+    output
 }
 
 #[cfg(test)]
@@ -380,7 +377,11 @@ mod result_tests {
         assert_eq!(bindings.len(), 1, "failure must not drain bindings");
         assert_eq!(bindings[0].name(), "failing");
 
-        let output = std::mem::take(&mut bindings[0].output);
+        let output = drain_binding_outputs(&mut bindings);
+        assert!(
+            bindings.is_empty(),
+            "recovery must consume all bindings once"
+        );
         assert_eq!(output.probes[0].0.as_str(), "still-owned");
         assert_eq!(output.resources[0].name(), "still-owned");
         assert_eq!(

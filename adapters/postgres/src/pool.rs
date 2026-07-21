@@ -436,7 +436,6 @@ impl VerifiedPgReadStore {
         &self.0.pool
     }
 
-    #[cfg(all(test, feature = "integration"))]
     pub(crate) fn store_arc(&self) -> Arc<PgStore> {
         Arc::clone(&self.0)
     }
@@ -445,6 +444,10 @@ impl VerifiedPgReadStore {
 impl VerifiedPgWriteStore {
     pub(crate) fn pool(&self) -> &sqlx::PgPool {
         &self.0.pool
+    }
+
+    pub(crate) fn store_arc(&self) -> Arc<PgStore> {
+        Arc::clone(&self.0)
     }
 }
 

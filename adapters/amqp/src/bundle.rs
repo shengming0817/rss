@@ -47,6 +47,7 @@
 //! （真实 RabbitMQ testcontainer）。纯函数（`build_properties`/`extract_metadata`）走 crate 内单元测试；
 //! 连接相关逻辑（bundle connect / guard shutdown）走 integration feature。
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,6 +61,25 @@ use tokio_util::sync::CancellationToken;
 use crate::conn::AmqpConnectError;
 use crate::publisher::AmqpPublisher;
 use crate::subscriber::AmqpSubscriber;
+
+async fn connect_second_or_rollback<P, S, E, Second, Rollback, RollbackFuture>(
+    first: P,
+    second: Second,
+    rollback: Rollback,
+) -> Result<(P, S), (E, Option<ShutdownError>)>
+where
+    Second: Future<Output = Result<S, E>>,
+    Rollback: FnOnce(P) -> RollbackFuture,
+    RollbackFuture: Future<Output = Result<(), ShutdownError>>,
+{
+    match second.await {
+        Ok(second) => Ok((first, second)),
+        Err(primary) => {
+            let cleanup = rollback(first).await.err();
+            Err((primary, cleanup))
+        }
+    }
+}
 
 /// 组合根级 amqp 能力包（**一个域 vhost**）：私有持 `Arc<AmqpPublisher>` + `Arc<AmqpSubscriber>`，派发
 /// transport 能力句柄并产出 shutdown 资源。经 [`AmqpRuntimeDeps::connect`] 构造。`Clone` 廉价（仅 `Arc` clone）。
@@ -88,7 +108,29 @@ impl AmqpRuntimeDeps {
         let publisher = Arc::new(
             AmqpPublisher::connect(endpoint, format!("{name}-pub"), publish_timeout).await?,
         );
-        let subscriber = Arc::new(AmqpSubscriber::connect(endpoint, format!("{name}-sub")).await?);
+        let publisher_name = ManagedResource::name(publisher.as_ref()).to_owned();
+        let (publisher, subscriber) = match connect_second_or_rollback(
+            publisher,
+            AmqpSubscriber::connect(endpoint, format!("{name}-sub")),
+            |publisher: Arc<AmqpPublisher>| async move {
+                ManagedResource::shutdown(publisher.as_ref()).await
+            },
+        )
+        .await
+        {
+            Ok((publisher, subscriber)) => (publisher, Arc::new(subscriber)),
+            Err((primary, cleanup)) => {
+                if let Some(cleanup) = cleanup {
+                    tracing::warn!(
+                        target: "amqp",
+                        resource = publisher_name,
+                        error = %secure::redact_error(&cleanup),
+                        "partial AMQP bundle cleanup failed; preserving subscriber connect error"
+                    );
+                }
+                return Err(primary);
+            }
+        };
         Ok(Self {
             publisher,
             subscriber,
@@ -232,7 +274,7 @@ mod tests {
     use diport::{AckableSubscriber, DeliveryStream, SubscriberError, Topic};
     use tokio_util::sync::CancellationToken;
 
-    use super::SharedAmqpSubscriber;
+    use super::{SharedAmqpSubscriber, connect_second_or_rollback};
 
     #[derive(Default)]
     struct RecordingSubscriber {
@@ -280,6 +322,57 @@ mod tests {
         AckableSubscriber::shutdown(&handle).await?;
 
         assert_eq!(inner.shutdown_calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn second_connect_failure_rolls_back_first_and_preserves_primary()
+    -> Result<(), &'static str> {
+        let cleanup_called = Arc::new(AtomicBool::new(false));
+        let cleanup_evidence = Arc::clone(&cleanup_called);
+
+        let result = connect_second_or_rollback(
+            "publisher",
+            async { Err::<(), _>("subscriber-primary") },
+            move |first| async move {
+                assert_eq!(first, "publisher");
+                cleanup_evidence.store(true, Ordering::SeqCst);
+                Err(diport::ShutdownError::new(std::io::Error::other(
+                    "cleanup-secondary",
+                )))
+            },
+        )
+        .await;
+
+        let Err((primary, cleanup)) = result else {
+            return Err("second connect must fail");
+        };
+        assert_eq!(primary, "subscriber-primary");
+        assert!(cleanup.is_some(), "cleanup failure must remain diagnostic");
+        assert!(cleanup_called.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn successful_second_connect_does_not_rollback_first() -> Result<(), &'static str> {
+        let cleanup_called = Arc::new(AtomicBool::new(false));
+        let cleanup_evidence = Arc::clone(&cleanup_called);
+
+        let result = connect_second_or_rollback(
+            "publisher",
+            async { Ok::<_, &'static str>("subscriber") },
+            move |_| async move {
+                cleanup_evidence.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+
+        let Ok(pair) = result else {
+            return Err("pair must succeed");
+        };
+        assert_eq!(pair, ("publisher", "subscriber"));
+        assert!(!cleanup_called.load(Ordering::SeqCst));
         Ok(())
     }
 }

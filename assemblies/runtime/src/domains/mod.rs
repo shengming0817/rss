@@ -11,6 +11,19 @@ pub mod identity;
 pub mod settings;
 
 use crate::config::ServingConfigMapper;
+use bootstrap::DomainBinding;
+
+/// Partial domain wiring failure that retains earlier successful bindings for async rollback.
+pub struct DomainWiringFailure {
+    pub(crate) source: anyhow::Error,
+    pub(crate) bindings: Vec<DomainBinding>,
+}
+
+impl DomainWiringFailure {
+    pub(crate) fn into_parts(self) -> (anyhow::Error, Vec<DomainBinding>) {
+        (self.source, self.bindings)
+    }
+}
 
 pub(crate) struct DomainModuleInputs {
     pub(crate) settings: settings::SettingsModuleInput,

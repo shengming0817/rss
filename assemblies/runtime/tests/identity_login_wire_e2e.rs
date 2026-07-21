@@ -46,11 +46,25 @@ use runtime::{SharedRuntimeDeps, SystemClock, TracingAuthAuditSink};
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tower::ServiceExt as _;
-use vault::{TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver};
+use vault::{
+    SignatureMarshaling, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps,
+    VaultSecretResolver, VaultSigner,
+};
 use wiremock::matchers::{body_partial_json, method as match_method, path};
 use wiremock::{Mock, MockServer, Request as MockRequest, Respond, ResponseTemplate};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+fn identity_signer(vault_uri: &str) -> TestResult<Arc<VaultSigner>> {
+    Ok(Arc::new(VaultSigner::new_allow_http(
+        reqwest::Client::new(),
+        vault_uri,
+        "test-token",
+        "transit",
+        Duration::from_secs(5),
+        SignatureMarshaling::Jws,
+    )?))
+}
 
 const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
@@ -319,18 +333,14 @@ fn test_provider() -> oidc::OidcProvider<diport::RssAccessProfile> {
     .expect("test provider")
 }
 
-fn identity_test_values(vault_addr: &str) -> IdentityTestValues {
+fn identity_test_values() -> IdentityTestValues {
     IdentityTestValues {
-        vault_addr: vault_addr.to_owned(),
-        vault_token: "test-token".to_string(),
-        vault_transit_mount: "transit".to_string(),
         access_token_issuer: "https://issuer.test".to_string(),
         access_token_audience: "rss".to_string(),
         access_token_key_id: "rss-jwt-es256".to_string(),
         access_token_ttl: Duration::from_secs(900),
         auth_grant_ttl: Duration::from_secs(2_592_000),
         refresh_ttl: Duration::from_secs(2_592_000),
-        vault_allow_http: true,
     }
 }
 
@@ -565,12 +575,13 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         redis,
         s3,
         vault,
+        identity_signer: identity_signer(&vault_uri)?,
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
         domain_transport: noop_domain_transport(),
     };
 
-    // 4. wire_identity_with（注入 mock vault URL + JWT 配置，vault_allow_http=true 接受 wiremock http，#1252 F3）。
-    let identity_binding = wire_identity_with(&deps, identity_test_values(&vault_uri))?;
+    // 4. wire_identity_with（复用 SharedRuntimeDeps 中的 mock-Vault signer，仅注入显式 JWT/AuthGrant 配置）。
+    let identity_binding = wire_identity_with(&deps, identity_test_values())?;
 
     // 5. 装配 Primary router（compose → assemble_authed_routers → into_router_for_test）。
     let mut bindings = vec![identity_binding];
@@ -818,10 +829,11 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         redis,
         s3,
         vault,
+        identity_signer: identity_signer(&vault_uri)?,
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
         domain_transport: noop_domain_transport(),
     };
-    let identity_binding = wire_identity_with(&deps, identity_test_values(&vault_uri))?;
+    let identity_binding = wire_identity_with(&deps, identity_test_values())?;
     let settings_binding = wire_settings(&deps).await?;
     let mut bindings = vec![identity_binding, settings_binding];
     let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;

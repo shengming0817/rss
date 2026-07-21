@@ -1,12 +1,15 @@
 {
   "schemaVersion": 1,
-  "assemblyFingerprint": "sha256:fdb5c2d88ac62710e672c9ee59fb5759a20f9100e1124ca3bc8c289a205df0e3",
-  "runtimePlanFingerprint": "sha256:900560ea3cbf71bc705ed8957d9ad20d3983cac36c6b0469e99ee5048a381674",
+  "assemblyFingerprint": "sha256:e250bb9431294d27b2c89b684c760881d867e6cd56481594b4fc462cc7630354",
+  "runtimePlanFingerprint": "sha256:1a5a595db4196302dd709af538dc6175c0563f6a0f363f5a911ca752db3031a1",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
       "constructor": "postgres::PgAuthAuditSink",
-      "outputs": ["resources", "workers"]
+      "outputs": [
+        "resources",
+        "workers"
+      ]
     },
     {
       "id": "device-revocation-store",
@@ -16,52 +19,80 @@
     {
       "id": "distributed-cas-store",
       "constructor": "postgres::PgCasStore",
-      "outputs": ["resources", "workers"]
+      "outputs": [
+        "resources",
+        "workers"
+      ]
     },
     {
       "id": "distributed-cas-store-alternative",
       "constructor": "redis::RedisCasStore",
-      "outputs": ["resources"]
+      "outputs": [
+        "resources"
+      ]
     },
     {
       "id": "distributed-lock-store",
       "constructor": "redis::RedisLockStore",
-      "outputs": ["resources"]
+      "outputs": [
+        "resources"
+      ]
     },
     {
       "id": "dlx-archive-key-provider",
       "constructor": "vault::VaultKeyProvider",
-      "outputs": ["workers"]
+      "outputs": [
+        "workers"
+      ]
     },
     {
       "id": "dlx-archive-store",
       "constructor": "s3::VerifiedS3DlxArchiveStore",
-      "outputs": ["probes", "workers"]
+      "outputs": [
+        "probes",
+        "workers"
+      ]
     },
     {
       "id": "dlx-lifecycle-repository",
       "constructor": "postgres::PgDlxLifecycleRepository",
-      "outputs": ["probes", "resources", "workers"]
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
     },
     {
       "id": "event-publisher",
       "constructor": "amqp::AmqpPublisher",
-      "outputs": ["probes", "resources", "workers"]
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
     },
     {
       "id": "event-subscriber",
       "constructor": "amqp::AmqpSubscriber",
-      "outputs": ["probes", "resources", "workers"]
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
     },
     {
       "id": "identity-signer",
       "constructor": "vault::VaultSigner",
-      "outputs": ["resources"]
+      "outputs": [
+        "resources"
+      ]
     },
     {
       "id": "listener-pdp",
       "constructor": "oidc::OidcProvider",
-      "outputs": ["resources"]
+      "outputs": [
+        "resources"
+      ]
     },
     {
       "id": "listener-rate-limiter",
@@ -71,17 +102,25 @@
     {
       "id": "runtime-object-store",
       "constructor": "s3::S3Store",
-      "outputs": ["resources"]
+      "outputs": [
+        "resources"
+      ]
     },
     {
       "id": "service-token-replay-store",
       "constructor": "postgres::PgServiceTokenReplayStore",
-      "outputs": ["probes", "resources", "workers"]
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
     },
     {
       "id": "settings-key-provider",
       "constructor": "vault::VaultKeyProvider",
-      "outputs": ["resources"]
+      "outputs": [
+        "resources"
+      ]
     }
   ],
   "listenerPlans": [
@@ -89,7 +128,9 @@
       "id": "admin-main",
       "kind": "admin",
       "auth": "rssAccessToken",
-      "domains": ["audit"]
+      "domains": [
+        "audit"
+      ]
     },
     {
       "id": "health-main",
@@ -107,26 +148,50 @@
       "id": "primary-main",
       "kind": "primary",
       "auth": "rssAccessToken",
-      "domains": ["settings", "identity"]
+      "domains": [
+        "settings",
+        "identity"
+      ]
     }
   ],
   "domainPlans": [
     {
       "id": "settings",
-      "lifecycle": ["construct", "ready", "shutdown"]
+      "lifecycle": [
+        "construct",
+        "ready",
+        "shutdown"
+      ]
     },
     {
       "id": "identity",
-      "lifecycle": ["construct", "ready", "shutdown"]
+      "lifecycle": [
+        "construct",
+        "ready",
+        "shutdown"
+      ]
     },
     {
       "id": "audit",
-      "lifecycle": ["construct", "ready", "shutdown"]
+      "lifecycle": [
+        "construct",
+        "ready",
+        "shutdown"
+      ]
     }
   ],
   "placementPlans": [
-    {"domain": "audit", "workload": "runtime"},
-    {"domain": "identity", "workload": "runtime"},
-    {"domain": "settings", "workload": "runtime"}
+    {
+      "domain": "audit",
+      "workload": "runtime"
+    },
+    {
+      "domain": "identity",
+      "workload": "runtime"
+    },
+    {
+      "domain": "settings",
+      "workload": "runtime"
+    }
   ]
 }

@@ -7,7 +7,6 @@ use assembly_schema::{
     ProviderDurability, ProviderFactorySymbol, ProviderRole,
 };
 
-#[allow(dead_code)] // Compiled catalog evidence; live dispatch is owned by #1792.
 pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ProviderCatalogEntry::checked(
         ProviderRole::AuthAuditSink,

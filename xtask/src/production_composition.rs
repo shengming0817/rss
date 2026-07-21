@@ -11,11 +11,10 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
-use syn::parse::{Parse, ParseStream};
 use syn::visit::{self, Visit};
 use syn::{
     Attribute, Expr, ExprCall, ExprMethodCall, ImplItem, ImplItemFn, Item, ItemFn, Pat, Stmt,
-    Token, UseTree, punctuated::Punctuated,
+    UseTree,
 };
 
 const IDENTITY_COMPOSITION: &str = "composition/identity/src/lib.rs";
@@ -335,6 +334,7 @@ fn validate_runtime_domains_phase(source: &str) -> Result<()> {
 
 fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
     let wire_path = ["crate", "modules_gen", "wire_domains"];
+    let drain_path = ["bootstrap", "drain_binding_outputs"];
     ensure!(
         exact_path_call_count_block(block, &wire_path) == 1,
         "{RUNTIME_DOMAINS_PHASE}: WireDomains phase must contain exactly one generated wire_domains call"
@@ -351,7 +351,10 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
                 return None;
             };
             let initializer = local.init.as_ref()?;
-            exact_awaited_context_call(&initializer.expr, &wire_path, |call| {
+            let Expr::Match(wiring) = peel_expr(&initializer.expr) else {
+                return None;
+            };
+            direct_awaited_call(&wiring.expr, &wire_path, |call| {
                 call.args.len() == 2
                     && call
                         .args
@@ -361,19 +364,28 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
                         simple_expr_ident(argument).as_deref() == Some("domain_modules")
                     })
             })
-            .then_some((index, binding))
+            .then(|| {
+                (
+                    index,
+                    binding,
+                    exact_path_call_count(&initializer.expr, &drain_path),
+                    method_call_count_expr(&initializer.expr, "into_parts"),
+                )
+            })
         })
         .collect::<Vec<_>>();
-    let [(wire_index, binding)] = wire_bindings.as_slice() else {
+    let [(wire_index, binding, wire_drains, into_parts)] = wire_bindings.as_slice() else {
         bail!(
-            "{RUNTIME_DOMAINS_PHASE}: generated wire_domains must initialize one direct awaited/propagated binding"
+            "{RUNTIME_DOMAINS_PHASE}: generated wire_domains must initialize one direct matched binding"
         )
     };
     ensure!(
         binding.ident == "domain_bindings"
             && binding.mutability.is_some()
-            && binding.subpat.is_none(),
-        "{RUNTIME_DOMAINS_PHASE}: generated wire_domains result must be the mutable `domain_bindings` carrier"
+            && binding.subpat.is_none()
+            && *wire_drains == 1
+            && *into_parts == 1,
+        "{RUNTIME_DOMAINS_PHASE}: generated failure must retain and drain prior bindings into the mutable `domain_bindings` carrier"
     );
 
     let compose_path = ["bootstrap", "compose_bindings"];
@@ -390,23 +402,33 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
                 return None;
             };
             let initializer = local.init.as_ref()?;
-            exact_context_try_call(&initializer.expr, &compose_path, |call| {
+            let Expr::Match(composition) = peel_expr(&initializer.expr) else {
+                return None;
+            };
+            direct_call(&composition.expr, &compose_path, |call| {
                 call.args.len() == 1
                     && call
                         .args
                         .first()
                         .is_some_and(|argument| expr_is_mut_ref_ident(argument, "domain_bindings"))
             })
-            .then_some((index, &local.pat))
+            .then(|| {
+                (
+                    index,
+                    &local.pat,
+                    exact_path_call_count(&initializer.expr, &drain_path),
+                )
+            })
         })
         .collect::<Vec<_>>();
-    let [(consumer_index, Pat::Tuple(result))] = consumers.as_slice() else {
+    let [(consumer_index, Pat::Tuple(result), compose_drains)] = consumers.as_slice() else {
         bail!(
-            "{RUNTIME_DOMAINS_PHASE}: domain_bindings must enter one direct propagated compose_bindings tuple"
+            "{RUNTIME_DOMAINS_PHASE}: domain_bindings must enter one directly matched compose_bindings tuple"
         )
     };
     ensure!(
         consumer_index > wire_index
+            && *compose_drains == 1
             && result.elems.len() == 2
             && matches!(
                 result.elems.first(),
@@ -418,21 +440,13 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
                 Some(Pat::Ident(module))
                     if module.ident == "domains_module" && module.mutability.is_none()
             ),
-        "{RUNTIME_DOMAINS_PHASE}: compose_bindings must directly produce `(mut registry, domains_module)` after wire_domains"
+        "{RUNTIME_DOMAINS_PHASE}: compose_bindings must produce `(mut registry, domains_module)` and drain retained outputs on failure"
     );
     ensure!(
-        expr_ident_count_block(block, "domain_bindings") == 1,
-        "{RUNTIME_DOMAINS_PHASE}: domain_bindings must have exactly one consumer"
+        exact_path_call_count_block(block, &drain_path) == 2,
+        "{RUNTIME_DOMAINS_PHASE}: constructor and compose failures must each drain retained domain outputs exactly once"
     );
     Ok(())
-}
-
-struct ExprList(Punctuated<Expr, Token![,]>);
-
-impl Parse for ExprList {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        Ok(Self(Punctuated::parse_terminated(input)?))
-    }
 }
 
 fn validate_generated_runtime_modules(source: &str) -> Result<()> {
@@ -442,45 +456,135 @@ fn validate_generated_runtime_modules(source: &str) -> Result<()> {
     ensure_local_binding_count(&wire.block, "deps", 0, RUNTIME_MODULES)?;
     ensure_local_binding_count(&wire.block, "inputs", 0, RUNTIME_MODULES)?;
     let input_bindings = domain_module_input_bindings(wire)?;
-    let tail = tail_expression(&wire.block).context("wire_domains must return Ok(vec![...])")?;
+    let tail = tail_expression(&wire.block).context("wire_domains must return Ok(bindings)")?;
     let Expr::Call(ok) = tail else {
-        bail!("wire_domains must end in direct Ok(vec![...])")
+        bail!("wire_domains must end in direct Ok(bindings)")
     };
     ensure!(
-        path_is_exact_expr(&ok.func, &["Ok"]) && ok.args.len() == 1,
-        "wire_domains must end in one direct Ok result"
+        path_is_exact_expr(&ok.func, &["Ok"])
+            && ok.args.len() == 1
+            && ok.args.first().and_then(simple_expr_ident).as_deref() == Some("bindings"),
+        "wire_domains must return the retained bindings carrier"
     );
-    let Some(Expr::Macro(vector)) = ok.args.first() else {
-        bail!("wire_domains Ok result must contain one generated vec! domain list")
-    };
+
+    let carriers = wire
+        .block
+        .stmts
+        .iter()
+        .filter_map(|statement| {
+            let Stmt::Local(local) = statement else {
+                return None;
+            };
+            let Pat::Ident(binding) = &local.pat else {
+                return None;
+            };
+            let initializer = local.init.as_ref()?;
+            (binding.ident == "bindings"
+                && binding.mutability.is_some()
+                && matches!(
+                    peel_expr(&initializer.expr),
+                    Expr::Call(call)
+                        if path_is_exact_expr(&call.func, &["Vec", "new"]) && call.args.is_empty()
+                ))
+            .then_some(())
+        })
+        .count();
     ensure!(
-        vector.mac.path.is_ident("vec"),
-        "wire_domains domain list must use the generated vec! form"
+        carriers == 1,
+        "wire_domains must initialize exactly one mutable Vec::new bindings carrier"
     );
-    let expressions = syn::parse2::<ExprList>(vector.mac.tokens.clone())
-        .context("parse generated wire_domains vec entries")?
-        .0;
-    for domain in ["identity", "settings"] {
+
+    for domain in ["settings", "identity", "audit"] {
         let expected = ["crate", "domains", domain, "module"];
         let binding = input_bindings
             .get(domain)
             .with_context(|| format!("wire_domains does not destructure `{domain}` input"))?;
-        let direct = expressions
+        let matches = wire
+            .block
+            .stmts
             .iter()
+            .filter_map(statement_match)
             .filter(|expression| {
-                direct_terminal_call_has_arguments(expression, &expected, "deps", binding)
+                direct_terminal_call_has_arguments(&expression.expr, &expected, "deps", binding)
+                    && domain_wiring_match_retains_failure(expression)
             })
             .count();
-        let total = expressions
-            .iter()
-            .map(|expression| exact_path_call_count(expression, &expected))
-            .sum::<usize>();
+        let total = exact_path_call_count_block(&wire.block, &expected);
         ensure!(
-            direct == 1 && total == 1,
-            "wire_domains must return exactly one direct crate::domains::{domain}::module(deps, {binding}) result, got direct={direct} total={total}"
+            matches == 1 && total == 1,
+            "wire_domains must match exactly one direct crate::domains::{domain}::module(deps, {binding}) and retain prior bindings on failure, got matches={matches} total={total}"
         );
     }
     Ok(())
+}
+
+fn statement_match(statement: &Stmt) -> Option<&syn::ExprMatch> {
+    match statement {
+        Stmt::Expr(Expr::Match(expression), _) => Some(expression),
+        _ => None,
+    }
+}
+
+fn domain_wiring_match_retains_failure(expression: &syn::ExprMatch) -> bool {
+    let [success, failure] = expression.arms.as_slice() else {
+        return false;
+    };
+    let Some(success_binding) = result_arm_binding(&success.pat, "Ok") else {
+        return false;
+    };
+    let Expr::MethodCall(push) = peel_expr(&success.body) else {
+        return false;
+    };
+    if push.method != "push"
+        || simple_expr_ident(&push.receiver).as_deref() != Some("bindings")
+        || push.args.len() != 1
+        || push.args.first().and_then(simple_expr_ident).as_deref()
+            != Some(success_binding.as_str())
+    {
+        return false;
+    }
+
+    let Some(failure_binding) = result_arm_binding(&failure.pat, "Err") else {
+        return false;
+    };
+    let Expr::Return(returned) = peel_expr(&failure.body) else {
+        return false;
+    };
+    let Some(returned) = returned.expr.as_deref() else {
+        return false;
+    };
+    let Expr::Call(err) = peel_expr(returned) else {
+        return false;
+    };
+    let Some(Expr::Struct(payload)) = err.args.first() else {
+        return false;
+    };
+    path_is_exact_expr(&err.func, &["Err"])
+        && err.args.len() == 1
+        && payload.path.is_ident("DomainWiringFailure")
+        && payload.rest.is_none()
+        && payload.fields.len() == 2
+        && payload.fields.iter().all(|field| {
+            let syn::Member::Named(member) = &field.member else {
+                return false;
+            };
+            let value = simple_expr_ident(&field.expr);
+            (member == "source" && value.as_deref() == Some(failure_binding.as_str()))
+                || (member == "bindings" && value.as_deref() == Some("bindings"))
+        })
+}
+
+fn result_arm_binding(pattern: &Pat, variant: &str) -> Option<String> {
+    let Pat::TupleStruct(pattern) = pattern else {
+        return None;
+    };
+    if !pattern.path.is_ident(variant) || pattern.elems.len() != 1 {
+        return None;
+    }
+    let Some(Pat::Ident(binding)) = pattern.elems.first() else {
+        return None;
+    };
+    (binding.subpat.is_none()).then(|| binding.ident.to_string())
 }
 
 fn domain_module_input_bindings(wire: &ItemFn) -> Result<BTreeMap<String, String>> {
@@ -516,7 +620,10 @@ fn domain_module_input_bindings(wire: &ItemFn) -> Result<BTreeMap<String, String
         let syn::Member::Named(member) = &field.member else {
             continue;
         };
-        if !matches!(member.to_string().as_str(), "identity" | "settings") {
+        if !matches!(
+            member.to_string().as_str(),
+            "identity" | "settings" | "audit"
+        ) {
             continue;
         }
         let Pat::Ident(binding) = field.pat.as_ref() else {
@@ -581,15 +688,23 @@ fn validate_identity_runtime_module(source: &str) -> Result<()> {
     };
     ensure!(
         path_is_exact_expr(&module_call.func, &["wire_with_profile"])
-            && module_call.args.len() == 3
+            && module_call.args.len() == 4
             && module_call.args.first().is_some_and(is_deps_pg_for_domain)
             && module_call
                 .args
+                .get(1)
+                .is_some_and(|expr| is_arc_clone_of_deps_field(expr, "password_blocklist"))
+            && module_call
+                .args
                 .get(2)
+                .is_some_and(|expr| is_arc_clone_of_deps_field(expr, "identity_signer"))
+            && module_call
+                .args
+                .get(3)
                 .and_then(simple_expr_ident)
                 .as_deref()
                 == Some("input"),
-        "identity runtime module must pass deps.pg.for_domain() and its exact input directly into wire_with_profile"
+        "identity runtime module must pass the exact pg, blocklist, signer, and input directly into wire_with_profile"
     );
     validate_identity_profile_wire(&syntax.items)?;
     validate_identity_rss_wire(&syntax.items)
@@ -638,11 +753,12 @@ fn validate_rss_profile_arm(arm: &syn::Arm) -> Result<bool> {
     };
     ensure!(
         path_is_exact_expr(&call.func, &["wire_rss_access"])
-            && call.args.len() == 3
+            && call.args.len() == 4
             && call.args.first().and_then(simple_expr_ident).as_deref() == Some("pg")
             && call.args.get(1).and_then(simple_expr_ident).as_deref() == Some("blocklist")
-            && call.args.get(2).and_then(simple_expr_ident).as_deref() == Some("input"),
-        "RSS identity profile arm must pass the exact pg, blocklist, and profile input into wire_rss_access"
+            && call.args.get(2).and_then(simple_expr_ident).as_deref() == Some("signer")
+            && call.args.get(3).and_then(simple_expr_ident).as_deref() == Some("input"),
+        "RSS identity profile arm must pass the exact pg, blocklist, signer, and profile input into wire_rss_access"
     );
     Ok(true)
 }
@@ -686,16 +802,19 @@ fn validate_identity_rss_wire(items: &[Item]) -> Result<()> {
             return None;
         };
         let initializer = local.init.as_ref()?;
-        direct_call_has_argument(
-            &initializer.expr,
-            &["IdentityModuleDeps", "new"],
-            0,
-            |expr| simple_expr_ident(expr).as_deref() == Some("pg"),
-        )
+        let Expr::Call(call) = peel_expr(&initializer.expr) else {
+            return None;
+        };
+        (path_is_exact_expr(&call.func, &["IdentityModuleDeps", "new"])
+            && call.args.len() == 7
+            && call.args.first().and_then(simple_expr_ident).as_deref() == Some("pg")
+            && call.args.get(1).and_then(simple_expr_ident).as_deref() == Some("signer")
+            && call.args.get(6).and_then(simple_expr_ident).as_deref() == Some("blocklist"))
         .then(|| binding.ident.to_string())
     });
-    let composition_binding = composition_binding
-        .context("identity runtime must bind IdentityModuleDeps::new(pg, ...)")?;
+    let composition_binding = composition_binding.context(
+        "identity runtime must bind IdentityModuleDeps::new(pg, signer, ..., blocklist)",
+    )?;
     ensure_local_binding_count(&wire.block, "pg", 0, IDENTITY_RUNTIME_MODULE)?;
     ensure_local_binding_count(
         &wire.block,
@@ -928,6 +1047,46 @@ fn method_call_count_block(block: &syn::Block, method: &str) -> usize {
     calls.count
 }
 
+fn method_call_count_expr(expression: &Expr, method: &str) -> usize {
+    struct Calls<'a> {
+        method: &'a str,
+        count: usize,
+    }
+    impl Visit<'_> for Calls<'_> {
+        fn visit_expr_method_call(&mut self, call: &ExprMethodCall) {
+            if call.method == self.method {
+                self.count += 1;
+            }
+            visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut calls = Calls { method, count: 0 };
+    calls.visit_expr(expression);
+    calls.count
+}
+
+fn direct_awaited_call(
+    expression: &Expr,
+    expected: &[&str],
+    arguments_match: impl FnOnce(&ExprCall) -> bool,
+) -> bool {
+    let Expr::Await(awaited) = expression else {
+        return false;
+    };
+    direct_call(&awaited.base, expected, arguments_match)
+}
+
+fn direct_call(
+    expression: &Expr,
+    expected: &[&str],
+    arguments_match: impl FnOnce(&ExprCall) -> bool,
+) -> bool {
+    let Expr::Call(call) = peel_expr(expression) else {
+        return false;
+    };
+    path_is_exact_expr(&call.func, expected) && arguments_match(call)
+}
+
 fn expr_is_runtime_phase_state_phase(expression: &Expr) -> bool {
     matches!(
         expression,
@@ -988,73 +1147,6 @@ fn exact_path_call_count_block(block: &syn::Block, expected: &[&str]) -> usize {
     calls.count
 }
 
-fn expr_ident_count_block(block: &syn::Block, expected: &str) -> usize {
-    struct Idents<'a> {
-        expected: &'a str,
-        count: usize,
-    }
-    impl Visit<'_> for Idents<'_> {
-        fn visit_expr_path(&mut self, path: &syn::ExprPath) {
-            if path.path.is_ident(self.expected) {
-                self.count += 1;
-            }
-            visit::visit_expr_path(self, path);
-        }
-    }
-    let mut idents = Idents { expected, count: 0 };
-    idents.visit_block(block);
-    idents.count
-}
-
-fn exact_awaited_context_call(
-    expression: &Expr,
-    expected: &[&str],
-    arguments_match: impl FnOnce(&ExprCall) -> bool,
-) -> bool {
-    let Expr::Try(propagated) = expression else {
-        return false;
-    };
-    let Expr::MethodCall(context) = propagated.expr.as_ref() else {
-        return false;
-    };
-    if context.method != "context"
-        || context.args.len() != 1
-        || !matches!(context.args.first(), Some(Expr::Lit(literal)) if matches!(literal.lit, syn::Lit::Str(_)))
-    {
-        return false;
-    }
-    let Expr::Await(awaited) = context.receiver.as_ref() else {
-        return false;
-    };
-    let Expr::Call(call) = awaited.base.as_ref() else {
-        return false;
-    };
-    path_is_exact_expr(&call.func, expected) && arguments_match(call)
-}
-
-fn exact_context_try_call(
-    expression: &Expr,
-    expected: &[&str],
-    arguments_match: impl FnOnce(&ExprCall) -> bool,
-) -> bool {
-    let Expr::Try(propagated) = expression else {
-        return false;
-    };
-    let Expr::MethodCall(context) = propagated.expr.as_ref() else {
-        return false;
-    };
-    if context.method != "context"
-        || context.args.len() != 1
-        || !matches!(context.args.first(), Some(Expr::Lit(literal)) if matches!(literal.lit, syn::Lit::Str(_)))
-    {
-        return false;
-    }
-    let Expr::Call(call) = context.receiver.as_ref() else {
-        return false;
-    };
-    path_is_exact_expr(&call.func, expected) && arguments_match(call)
-}
-
 fn expr_is_shared_ref_ident(expression: &Expr, expected: &str) -> bool {
     matches!(
         expression,
@@ -1097,6 +1189,19 @@ fn is_deps_pg_for_domain(expression: &Expr) -> bool {
     };
     matches!(&pg.member, syn::Member::Named(member) if member == "pg")
         && simple_expr_ident(&pg.base).as_deref() == Some("deps")
+}
+
+fn is_arc_clone_of_deps_field(expression: &Expr, expected: &str) -> bool {
+    let Expr::Call(call) = peel_expr(expression) else {
+        return false;
+    };
+    if !path_is_exact_expr(&call.func, &["Arc", "clone"]) || call.args.len() != 1 {
+        return false;
+    }
+    let Some(Expr::Reference(reference)) = call.args.first() else {
+        return false;
+    };
+    reference.mutability.is_none() && expression_is_field_of(&reference.expr, "deps", expected)
 }
 
 fn read_bounded(path: &Path) -> Result<String> {
@@ -2262,9 +2367,19 @@ mod tests {
                 "decoy_pg.for_domain(),",
             ),
             (
+                "module signer handoff",
+                "Arc::clone(&deps.identity_signer),",
+                "Arc::clone(&deps.decoy_identity_signer),",
+            ),
+            (
                 "RSS profile branch",
-                "IdentityModuleInput::RssAccess(input) => wire_rss_access(pg, blocklist, input),",
-                "IdentityModuleInput::RssAccess(input) => wire_rss_access(decoy_pg, blocklist, input),",
+                "IdentityModuleInput::RssAccess(input) => wire_rss_access(pg, blocklist, signer, input),",
+                "IdentityModuleInput::RssAccess(input) => wire_rss_access(pg, blocklist, decoy_signer, input),",
+            ),
+            (
+                "RSS signer consumption",
+                "\n        signer,\n        Arc::new(SystemClock),",
+                "\n        decoy_signer,\n        Arc::new(SystemClock),",
             ),
             (
                 "Federated profile branch",
@@ -2354,6 +2469,35 @@ mod tests {
         assert!(
             validate_generated_runtime_modules(&shadowed).is_err(),
             "shadowing the protected runtime deps binding must fail closed"
+        );
+
+        let dropped_prior_bindings = source.replacen(
+            "Err(source) => return Err(DomainWiringFailure { source, bindings }),",
+            "Err(source) => return Err(DomainWiringFailure { source, bindings: Vec::new() }),",
+            1,
+        );
+        assert_ne!(
+            dropped_prior_bindings, source,
+            "generated rollback mutation anchor must stay live"
+        );
+        assert!(
+            validate_generated_runtime_modules(&dropped_prior_bindings).is_err(),
+            "discarding bindings built before a later domain failure must fail closed"
+        );
+
+        let domains_source = fs::read_to_string(workspace.join(RUNTIME_DOMAINS_PHASE))?;
+        let bypassed_drain = domains_source.replacen(
+            "provider_build.record_domain(bootstrap::drain_binding_outputs(&mut bindings));",
+            "drop(bindings);",
+            1,
+        );
+        assert_ne!(
+            bypassed_drain, domains_source,
+            "runtime domain rollback mutation anchor must stay live"
+        );
+        assert!(
+            validate_runtime_domains_phase(&bypassed_drain).is_err(),
+            "synchronously dropping retained domain outputs must fail closed"
         );
         Ok(())
     }

@@ -42,15 +42,50 @@ mod launch;
 mod provider;
 
 use crate::config::{RuntimeConfigSnapshot, SnapshotConfig};
+use bootstrap::DomainModuleResult;
 use std::sync::Arc;
 use std::time::Duration;
 
+const PG_MODULE_COMMITTED_ONCE: &str = "PG module is committed once";
+const TOKEN_MODULE_COMMITTED_ONCE: &str = "token provider module is committed once";
+
+/// Option-backed module that is written during a phase and taken exactly once on the success path.
+struct UncommittedModule {
+    module: Option<DomainModuleResult>,
+    committed_once: &'static str,
+}
+
+impl UncommittedModule {
+    fn new(committed_once: &'static str) -> Self {
+        Self {
+            module: Some(DomainModuleResult::default()),
+            committed_once,
+        }
+    }
+
+    fn get_mut(&mut self) -> &mut DomainModuleResult {
+        self.module
+            .as_mut()
+            .unwrap_or_else(|| unreachable!("{}", self.committed_once))
+    }
+
+    fn take(&mut self) -> DomainModuleResult {
+        self.module
+            .take()
+            .unwrap_or_else(|| unreachable!("{}", self.committed_once))
+    }
+
+    fn take_or_default(&mut self) -> DomainModuleResult {
+        self.module.take().unwrap_or_default()
+    }
+
+    fn restore(&mut self, module: DomainModuleResult) {
+        self.module = Some(module);
+    }
+}
+
 #[cfg(test)]
-pub(crate) use domains::{
-    RuntimeModuleAssemblyInputs, assemble_runtime_module_outputs,
-    validate_domain_listener_evidence, validate_provider_output_bindings,
-    validate_provider_output_evidence,
-};
+pub(crate) use domains::validate_domain_listener_evidence;
 #[cfg(test)]
 pub(crate) use infra::after_required_preflight;
 
@@ -215,7 +250,10 @@ pub(crate) struct Planned<'a> {
 #[must_use]
 pub(crate) struct ProvidersBuilt<'a> {
     context: PhaseContext<'a>,
+    provider_build: crate::provider_output::ProviderBuild,
+    provider_factories: crate::provider_output::ProviderFactoryDispatch,
     listener_execution_plan: crate::plan::ListenerExecutionPlan,
+    rate_limiter: Arc<ratelimit::GovernorLimiter>,
     serving_config: crate::config::RuntimeServingConfigParts,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:
@@ -225,15 +263,15 @@ pub(crate) struct ProvidersBuilt<'a> {
 #[must_use]
 pub(crate) struct InfraBuilt<'a> {
     context: PhaseContext<'a>,
+    provider_build: crate::provider_output::ProviderBuild,
+    provider_factories: crate::provider_output::ProviderFactoryDispatch,
     listener_execution_plan: crate::plan::ListenerExecutionPlan,
-    pg_owner: postgres::PgRuntimeDeps,
+    rate_limiter: Arc<ratelimit::GovernorLimiter>,
     deps: crate::SharedRuntimeDeps,
     s3_canary_config: crate::infra::s3::S3CanaryConfig,
     wiring_inputs: infra::RuntimeWiringInputs,
-    dlx_lifecycle: crate::event_transport::DlxLifecycleRuntimeDeps,
     domain_transport: crate::DomainTransportRuntime<httpd::SharedDomainHttpTransport>,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
-    pg_readiness_period: Duration,
     redis_readiness_period: Duration,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
     signing_rotation_probe: Option<crate::infra::signing_rotation::SigningKeyRotationProbe>,
@@ -247,7 +285,7 @@ pub(crate) struct InfraBuilt<'a> {
 pub(crate) struct DomainsWired<'a> {
     context: PhaseContext<'a>,
     listener_execution_plan: crate::plan::ListenerExecutionPlan,
-    pg_owner: postgres::PgRuntimeDeps,
+    rate_limiter: Arc<ratelimit::GovernorLimiter>,
     deps: crate::SharedRuntimeDeps,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:
@@ -256,15 +294,14 @@ pub(crate) struct DomainsWired<'a> {
     domain_transport: crate::DomainTransportRuntime<httpd::SharedDomainHttpTransport>,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
-    pg_readiness_period: Duration,
     registry: bootstrap::Registry,
-    domain_module: bootstrap::DomainModuleResult,
+    provider_build: crate::provider_output::CompletedProviderBuild,
 }
 
 #[must_use]
 pub(crate) struct Finalized<'a> {
     context: PhaseContext<'a>,
-    pg_owner: postgres::PgRuntimeDeps,
+    provider_build: crate::provider_output::CompletedProviderBuild,
     deps: crate::SharedRuntimeDeps,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:
@@ -272,8 +309,6 @@ pub(crate) struct Finalized<'a> {
     runtime_service_token: Option<crate::infra::oidc::RuntimeServiceTokenProvider>,
     domain_transport: crate::DomainTransportRuntime<httpd::SharedDomainHttpTransport>,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
-    pg_readiness_period: Duration,
-    domain_module: bootstrap::DomainModuleResult,
     listeners: crate::routes::FinalizedListenerSet,
 }
 
@@ -477,6 +512,11 @@ mod tests {
         assert!(result.is_err());
 
         let events = recorder.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "phase failure must emit exactly one tracing event"
+        );
         let phase_error = events[0].error.as_deref().unwrap_or_default();
         assert_eq!(chain, "RuntimeConfigSnapshot(<redacted>)");
         assert_eq!(phase_error, "RuntimeConfigSnapshot(<redacted>)");

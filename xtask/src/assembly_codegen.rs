@@ -514,7 +514,7 @@ fn render_providers(manifest: &CanonicalAssemblyManifestV1, source_label: &str) 
     providers.sort_by_key(|provider| provider.id.as_str());
 
     let mut code = format!(
-        "{GENERATED_PROVIDER_OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {}\n\nuse assembly_schema::{{\n    DiportPort, LifecycleChannel, ProviderCatalogEntry, ProviderConstructor, ProviderConsumer,\n    ProviderDurability, ProviderFactorySymbol, ProviderRole,\n}};\n\n#[allow(dead_code)] // Compiled catalog evidence; live dispatch is owned by #1792.\npub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[\n",
+        "{GENERATED_PROVIDER_OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {}\n\nuse assembly_schema::{{\n    DiportPort, LifecycleChannel, ProviderCatalogEntry, ProviderConstructor, ProviderConsumer,\n    ProviderDurability, ProviderFactorySymbol, ProviderRole,\n}};\n\npub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[\n",
         manifest.manifest_digest()
     );
     for provider in providers {
@@ -594,8 +594,8 @@ fn validate_provider_catalog_syntax(source: &str) -> Result<()> {
         "provider catalog import 集合漂移：{import_tokens}"
     );
     ensure!(
-        catalog.attrs.len() == 1 && compact_tokens(&catalog.attrs[0]) == "#[allow(dead_code)]",
-        "provider catalog const 只允许 `#[allow(dead_code)]`"
+        catalog.attrs.is_empty(),
+        "live provider catalog const 禁止 cfg/allow 属性"
     );
     ensure!(
         compact_tokens(&catalog.vis) == "pub(crate)",
@@ -904,15 +904,20 @@ fn render_modules(
     source_label: &str,
 ) -> Result<String> {
     let manifest_digest = manifest.manifest_digest();
-    let wire_domains_signature = if manifest.name() == "runtime" {
-        "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n) -> anyhow::Result<Vec<DomainBinding>>"
+    let is_runtime = manifest.name() == "runtime";
+    let wire_domains_signature = if is_runtime {
+        "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n) -> Result<Vec<DomainBinding>, DomainWiringFailure>"
     } else {
         "pub async fn wire_domains(deps: &SharedRuntimeDeps) -> anyhow::Result<Vec<DomainBinding>>"
     };
     let mut code = format!(
-        "{OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {manifest_digest}\n\nuse anyhow::Context as _;\nuse bootstrap::DomainBinding;\n\nuse crate::SharedRuntimeDeps;\n\n{wire_domains_signature} {{\n"
+        "{OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {manifest_digest}\n\nuse anyhow::Context as _;\nuse bootstrap::DomainBinding;\n\nuse crate::SharedRuntimeDeps;\n\n"
     );
-    if manifest.name() == "runtime" {
+    if is_runtime {
+        code.push_str("use crate::domains::DomainWiringFailure;\n\n");
+    }
+    code.push_str(&format!("{wire_domains_signature} {{\n"));
+    if is_runtime {
         code.push_str("    let crate::domains::DomainModuleInputs {\n");
         for domain in manifest.domains() {
             let module = module_name(*domain)?;
@@ -920,12 +925,16 @@ fn render_modules(
         }
         code.push_str("    } = inputs;\n");
     }
-    code.push_str("    Ok(vec![\n");
+    if is_runtime {
+        code.push_str("    let mut bindings = Vec::new();\n");
+    } else {
+        code.push_str("    Ok(vec![\n");
+    }
     for domain in manifest.domains() {
         let module = module_name(*domain)?;
-        if manifest.name() == "runtime" {
+        if is_runtime {
             code.push_str(&format!(
-                "        crate::domains::{module}::module(deps, {module})\n            .await\n            .context(\"wire domain '{module}'\")?,\n"
+                "    match crate::domains::{module}::module(deps, {module})\n        .await\n        .context(\"wire domain '{module}'\")\n    {{\n        Ok(binding) => bindings.push(binding),\n        Err(source) => return Err(DomainWiringFailure {{ source, bindings }}),\n    }}\n"
             ));
         } else {
             code.push_str(&format!(
@@ -933,7 +942,14 @@ fn render_modules(
             ));
         }
     }
-    code.push_str("    ])\n}\n\npub const DOMAIN_LISTENER_BINDINGS: &[bootstrap::DomainListenerBinding] = &[\n");
+    if is_runtime {
+        code.push_str("    Ok(bindings)\n");
+    } else {
+        code.push_str("    ])\n");
+    }
+    code.push_str(
+        "}\n\npub const DOMAIN_LISTENER_BINDINGS: &[bootstrap::DomainListenerBinding] = &[\n",
+    );
     for listener in manifest.listeners() {
         for domain in &listener.domains {
             code.push_str(&format!(
@@ -942,24 +958,6 @@ fn render_modules(
                 listener_variant(listener.kind)
             ));
         }
-    }
-    code.push_str(
-        "];
-
-pub const PROVIDER_OUTPUT_BINDINGS: &[bootstrap::ProviderOutputBinding] = &[\n",
-    );
-    for provider in manifest.diport_providers() {
-        code.push_str(&format!(
-            "    bootstrap::ProviderOutputBinding {{ port: \"{}\", provider: \"{}\", consumer: \"{}\", channels: &[",
-            provider.port.as_str(), provider.provider, provider.consumer
-        ));
-        for channel in &provider.outputs {
-            code.push_str(&format!(
-                "bootstrap::LifecycleChannel::{}, ",
-                channel_variant(*channel)
-            ));
-        }
-        code.push_str("] },\n");
     }
     code.push_str(
         "];
@@ -1221,6 +1219,13 @@ domains = [{domains}]
         assert!(rendered.contains(
             "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n)"
         ));
+        assert!(rendered.contains("use crate::domains::DomainWiringFailure;"));
+        assert!(!rendered.contains("pub struct DomainWiringFailure"));
+        assert!(rendered.contains("Result<Vec<DomainBinding>, DomainWiringFailure>"));
+        assert!(
+            rendered
+                .contains("Err(source) => return Err(DomainWiringFailure { source, bindings })")
+        );
         assert!(rendered.contains(
             "let crate::domains::DomainModuleInputs {\n        settings,\n        identity,\n        audit,\n    } = inputs;"
         ));
@@ -1232,12 +1237,11 @@ domains = [{domains}]
         assert_eq!(rendered.matches(".context(\"wire domain '").count(), 3);
         assert!(rendered.contains("pub(crate) async fn wire_test_domains"));
         assert!(rendered.contains("let mut bindings = Vec::new();"));
-        assert_eq!(rendered.matches("bindings.push(").count(), 3);
+        assert_eq!(rendered.matches("bindings.push(").count(), 6);
         assert!(rendered.contains("Ok(bindings)"));
         assert!(rendered.contains("pub const DOMAIN_LISTENER_BINDINGS"));
         assert!(rendered.contains("bootstrap::ListenerKind::Primary"));
-        assert!(rendered.contains("pub const PROVIDER_OUTPUT_BINDINGS"));
-        assert!(rendered.contains("bootstrap::LifecycleChannel::Resources"));
+        assert!(!rendered.contains("PROVIDER_OUTPUT_BINDINGS"));
         let compact = rendered
             .chars()
             .filter(|character| !character.is_whitespace() && *character != ',')
@@ -1273,7 +1277,10 @@ domains = [{domains}]
             .find("domains::audit::tests::test_binding")
             .ok_or_else(|| anyhow::anyhow!("missing audit test call"))?;
         assert!(test_settings < test_identity && test_identity < test_audit);
-        assert!(rendered.contains("ratelimit::GovernorLimiter"));
+        assert!(
+            !rendered.contains("ratelimit::GovernorLimiter"),
+            "provider catalog belongs exclusively to providers_gen.rs"
+        );
         assert!(!rendered.contains("std::env"));
         syn::parse_file(&rendered)?;
         Ok(())

@@ -253,8 +253,7 @@ pub mod test_support {
             Arc::new(TestSigner),
             Arc::new(TestClock),
             authn::JwtIssuerConfig::rss_access(
-                authn::SigningKeyRing::single(diport::KeyId::new("identity-composition-test-key"))
-                    .expect("non-empty signing key id"),
+                authn::SigningKeyRing::single(diport::KeyId::new("identity-composition-test-key"))?,
                 diport::SigningPurpose::new("auth.jwt.access"),
                 "https://issuer.test",
                 "rss",

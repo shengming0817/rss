@@ -20,9 +20,15 @@ fn complete_budget_boundary(routes: &str, phase_launch: &str, launch: &str, http
     ) && routes.contains(
         ".layer(axum::middleware::from_fn_with_state(budget,crate::middleware::server_request_budget,))",
     ) && phase_launch.contains(
-        "letrequest_budget=crate::launch::server_request_budget(context.config())",
+        "letresult=matchcrate::launch::server_request_budget(context.config()).context(\"resolveHTTPserverrequestbudget\"){",
     ) && phase_launch.contains(
-        "crate::launch::launch(context.config(),request_budget,launch_plan)",
+        "Err(error)=>Err(provider_build.abort(error).await),",
+    ) && phase_launch.contains(
+        "Ok(request_budget)=>{",
+    ) && phase_launch.contains(
+        "let(provider_module,domain_module)=provider_build.into_modules();",
+    ) && phase_launch.contains(
+        "crate::launch::launch(context.config(),request_budget,launch_plan).await",
     )
         && launch.contains("routes.into_make_service(budget)")
         && httpd.matches("svc:httpserve::ServerMakeService").count() >= 5

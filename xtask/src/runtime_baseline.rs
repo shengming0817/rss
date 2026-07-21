@@ -10,30 +10,31 @@
 //! and fails on missing baseline, content drift, empty dependency/provider inventories, or missing
 //! required wiring anchors. Synthetic red/green tests cover every failure class.
 //!
-//! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must consume the committed generated domain list through `compose_bindings`, must merge its output, and must not restore per-domain handwritten wiring.
+//! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- the runtime phase must consume the committed generated domain list through `compose_bindings`, retain partial bindings on constructor/compose failure, record every output in `ProviderBuild`'s startup transaction, and must not restore per-domain handwritten wiring.
 //!
 //! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring" } -- the unique production `prepare_runtime()` calls exactly one closed process snapshot factory and seals the password blocklist into `ServingRuntimeInputs`, while `prepare_operator_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes one typed Vault generation. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
 //! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, while operator commands prepare only `OperatorRuntimeInputs`, every operator arm receives that exact binding, and the sole operator shutdown consumes it. No shared input type, pre-consumption early return, alias, macro, shadow path, or unreachable bait is accepted.
 //!
-//! INVARIANT: SECRET-TEXT-TRANSFER-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff", anti_vacuity = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff" } -- runtime raw secret allocation transfer/copy uses two uniquely named funnels whose seven moves plus one required copy into zeroizing Vault/S3 owners are exact, closed, and bait-resistant; both funnel definitions are independently pinned by the same allowlist.
+//! INVARIANT: SECRET-TEXT-TRANSFER-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff", anti_vacuity = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff" } -- runtime raw secret allocation transfer/copy uses two uniquely named funnels whose seven moves plus two required copies into zeroizing Vault signer/resolver and S3 owners are exact, closed, and bait-resistant; both funnel definitions are independently pinned by the same allowlist.
 //!
-//! INVARIANT: RUNTIME-PROVIDER-OUTPUTS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_provider_outputs_reject_missing_reordered_legacy_and_bait", anti_vacuity = "tests::runtime_provider_outputs_accept_unified_live_path" } -- the sole runtime-local constructor must merge Redis, S3, and Vault in order; postgres must remain outside that trait and cross the launch boundary exactly once as an owned `DomainModuleResult`, without lifecycle primitive bypasses or a parallel output type.
+//! INVARIANT: RUNTIME-PROVIDER-BIJECTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_provider_bijection_gate_rejects_drift_and_bypasses", anti_vacuity = "tests::runtime_provider_bijection_gate_accepts_live_workspace" } -- the generated active catalog must join RuntimePlan exactly once, every closed typed permit must be consumed exactly once into the transactional provider owner, every failure path must roll back, and only a completed provider module may cross into Launch.
 //!
-//! INVARIANT: EVENT-TRANSPORT-OUTPUT-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::event_transport_output_funnel_rejects_legacy_and_bypasses", anti_vacuity = "tests::event_transport_output_funnel_accepts_unified_live_path" } -- event transport must return one crate-private `DomainModuleResult`, merge it once into runtime assembly, and register AMQP resources plus workers only through the common lifecycle funnel.
+//! INVARIANT: EVENT-TRANSPORT-OUTPUT-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::event_transport_output_funnel_rejects_legacy_and_bypasses", anti_vacuity = "tests::event_transport_output_funnel_accepts_unified_live_path" } -- event transport must return one crate-private `DomainModuleResult`, consume the sealed publisher/subscriber receipt batch in `ProviderBuild`, locally roll back partial AMQP connections, and register resources plus workers only through the common lifecycle funnel.
 //!
 //! INVARIANT: RUNTIME-PHASE-TRANSITION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_phase_transition_rejects_missing_reordered_drop_plan_and_bait", anti_vacuity = "tests::runtime_phase_transition_accepts_canonical_live_path" } -- the unique production `run_startup()` delegates only to `phase::execute`; that executor consumes the exact five associated-`Next` transitions in order, every transition uses its associated `RuntimePhaseState::PHASE` through the directly redacting private `phase_result` funnel, the runtime plan stays owned by `PhaseContext` while its single listener execution projection is carried as a mandatory phase-state field into Finalize, state trait impls are closed across the complete production module graph, and launch inputs validate before the sole launch phase constructs `LaunchPlan`. Tuple/drop/skip/reorder paths, direct or aliased `LaunchPlan`/`ShutdownStack` access, legacy root phase bodies, cross-file impls, macros, dead branches, comments, strings, and test-only bait fail closed.
 //!
 //! INVARIANT: RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_listener_plan_execution_rejects_legacy_and_structural_bypasses", anti_vacuity = "tests::runtime_listener_plan_execution_accepts_workspace" } -- across the complete production module graph, AST must expose exactly one RuntimePlan listener projection call, one consuming finalizer and phase call, and one `FinalizedListenerSet` construction expression in their canonical owners with no constructor/trait seam; `ListenerExecutionPlan`, `ListenerExecutionSpec`, `AssembledListener`, and `FinalizedListenerSet` remain exact `pub(crate)` types with inherited-private fields and no public re-export; launch accepts only that set, while raw-value auth assemblers, manual Health append, legacy config auth accessors, public listener/routes modules, and ordinary `Vec<AssembledListener>` launch inputs remain forbidden.
 //!
 //! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- the only production service-token constructor accepts the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps` plus `PgMaintenanceDeps`. Serving and the five operator paths call that typed constructor directly at their run-reachable sites. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
+//!
+//! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::setup_with_audit_admin_config` must register each constructed pool immediately, close the migrator after every post-connect outcome, roll back writer/reader partial construction on reader or audit-admin failure, and commit only after the typed owner holds all serving pools. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::localtx_coverage::attrs_may_be_production;
 use crate::workspace_root;
 use anyhow::{Context, Result};
 use assembly_schema::AssemblyManifest;
-use quote::ToTokens as _;
 use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,7 +49,7 @@ const BOOTSTRAP_MODULE_PATH: &str = "crates/bootstrap/src/module.rs";
 const RUNTIME_LIB_PATH: &str = "assemblies/runtime/src/lib.rs";
 const RUNTIME_SRC_PATH: &str = "assemblies/runtime/src";
 const PROVIDER_OUTPUT_PATH: &str = "assemblies/runtime/src/provider_output.rs";
-const PROVIDER_OUTPUT_FIXTURE_MARKER: &str = ".runtime-provider-output-fixture";
+const GENERATED_PROVIDERS_PATH: &str = "assemblies/runtime/src/generated/providers_gen.rs";
 const RUNTIME_CONFIG_FIXTURE_MARKER: &str = ".runtime-config-snapshot-fixture";
 const SERVER_MAIN_PATH: &str = "bins/server/src/main.rs";
 const RSS_MAIN_PATH: &str = "bins/rss/src/main.rs";
@@ -71,6 +72,7 @@ const RUNTIME_ROUTES_PATH: &str = "assemblies/runtime/src/routes.rs";
 const RUNTIME_LISTENERS_PATH: &str = "assemblies/runtime/src/listeners.rs";
 #[cfg(test)]
 const RUNTIME_CONFIG_PATH: &str = "assemblies/runtime/src/config.rs";
+const POSTGRES_BUNDLE_PATH: &str = "adapters/postgres/src/bundle.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -227,6 +229,7 @@ fn collect_report(root: &Path) -> Result<Report> {
     findings.extend(runtime_secret_transfer_live_findings(root)?);
     findings.extend(runtime_phase_transition_findings(root)?);
     findings.extend(runtime_service_token_replay_live_findings(root)?);
+    findings.extend(postgres_setup_transaction_live_findings(root)?);
     findings.extend(generated_domains_live_findings(root)?);
     findings.extend(provider_outputs_live_findings(root)?);
     findings.extend(event_transport_output_findings(root)?);
@@ -314,7 +317,16 @@ fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
                 && total_inventory.set_returning_functions == 1
                 && total_inventory.canonical_finalizers == 1
                 && total_inventory.finalizer_calls == 1
+                && total_inventory.canonical_finalizer_calls == 1
                 && inventory_count(RUNTIME_PHASE_FINALIZE_PATH, |item| item.finalizer_calls) == 1
+                && inventory_count(RUNTIME_PHASE_FINALIZE_PATH, |item| {
+                    item.canonical_finalizer_calls
+                }) == 1
+                && total_inventory.finalizer_input_structs == 1
+                && total_inventory.canonical_finalizer_input_structs == 1
+                && inventory_count(RUNTIME_ROUTES_PATH, |item| {
+                    item.canonical_finalizer_input_structs
+                }) == 1
                 && total_inventory.set_literals == 1
                 && inventory_count(RUNTIME_ROUTES_PATH, |item| item.set_literals) == 1
                 && total_inventory.set_constructor_methods == 0
@@ -387,6 +399,9 @@ fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
 struct ListenerPlanExecutionInventory {
     projection_calls: usize,
     finalizer_calls: usize,
+    canonical_finalizer_calls: usize,
+    finalizer_input_structs: usize,
+    canonical_finalizer_input_structs: usize,
     set_returning_functions: usize,
     canonical_finalizers: usize,
     set_constructor_methods: usize,
@@ -399,6 +414,9 @@ impl ListenerPlanExecutionInventory {
     fn absorb(&mut self, other: &Self) {
         self.projection_calls += other.projection_calls;
         self.finalizer_calls += other.finalizer_calls;
+        self.canonical_finalizer_calls += other.canonical_finalizer_calls;
+        self.finalizer_input_structs += other.finalizer_input_structs;
+        self.canonical_finalizer_input_structs += other.canonical_finalizer_input_structs;
         self.set_returning_functions += other.set_returning_functions;
         self.canonical_finalizers += other.canonical_finalizers;
         self.set_constructor_methods += other.set_constructor_methods;
@@ -579,10 +597,65 @@ fn return_type_mentions(output: &syn::ReturnType, ident: &str) -> bool {
     matches!(output, syn::ReturnType::Type(_, ty) if compact_tokens(ty).contains(ident))
 }
 
-fn signature_input_mentions(signature: &syn::Signature, ident: &str) -> bool {
-    signature.inputs.iter().any(|input| {
-        matches!(input, syn::FnArg::Typed(argument) if compact_tokens(&argument.ty).contains(ident))
-    })
+fn finalizer_input_struct_is_canonical(item: &syn::ItemStruct) -> bool {
+    const FIELDS: &[(&str, &str)] = &[
+        ("execution_plan", "ListenerExecutionPlan"),
+        ("config", "SnapshotConfig<'config>"),
+        ("registry", "&'borrowmutbootstrap::Registry"),
+        ("providers", "&'borrowTokenProviderBindings"),
+        ("audit_sink", "httpserve::AuditSinkHandle"),
+        ("audit_clock", "Arc<dyndiport::Clock>"),
+        ("rate_limiter", "Arc<GovernorLimiter>"),
+        ("metrics", "Arc<dyndiport::MetricsExporter>"),
+    ];
+    item.ident == "FinalizeListenerPlanInputs"
+        && is_exact_pub_crate(&item.vis)
+        && compact_tokens(&item.generics) == "<'config,'borrow>"
+        && matches!(&item.fields, syn::Fields::Named(fields)
+        if fields.named.len() == FIELDS.len()
+            && fields.named.iter().zip(FIELDS).all(|(field, (name, ty))| {
+                field.ident.as_ref().is_some_and(|ident| ident == name)
+                    && is_exact_pub_crate(&field.vis)
+                    && compact_tokens(&field.ty) == *ty
+            }))
+}
+
+fn finalizer_signature_is_canonical(signature: &syn::Signature) -> bool {
+    matches!(signature.inputs.first(), Some(syn::FnArg::Typed(argument))
+        if signature.inputs.len() == 1
+            && matches!(argument.pat.as_ref(), syn::Pat::Ident(binding)
+                if binding.ident == "inputs"
+                    && binding.by_ref.is_none()
+                    && binding.mutability.is_none())
+            && compact_tokens(&argument.ty) == "FinalizeListenerPlanInputs<'_,'_>")
+}
+
+fn finalizer_call_is_canonical(call: &syn::ExprCall) -> bool {
+    const FIELDS: &[(&str, &str)] = &[
+        ("execution_plan", "listener_execution_plan"),
+        ("config", "context.config()"),
+        ("registry", "&mutregistry"),
+        ("providers", "&token_provider_bindings"),
+        ("audit_sink", "auth_audit_sink"),
+        ("audit_clock", "auth_audit_clock"),
+        ("rate_limiter", "rate_limiter"),
+        ("metrics", "metrics_exporter"),
+    ];
+    let Some(syn::Expr::Struct(inputs)) = call.args.first() else {
+        return false;
+    };
+    call.args.len() == 1
+        && path_last_ident(&inputs.path).is_some_and(|ident| ident == "FinalizeListenerPlanInputs")
+        && inputs.rest.is_none()
+        && inputs.fields.len() == FIELDS.len()
+        && inputs
+            .fields
+            .iter()
+            .zip(FIELDS)
+            .all(|(field, (name, expression))| {
+                matches!(&field.member, syn::Member::Named(ident) if ident == name)
+                    && compact_tokens(&field.expr) == *expression
+            })
 }
 
 impl<'ast> Visit<'ast> for ListenerPlanExecutionInventory {
@@ -599,12 +672,24 @@ impl<'ast> Visit<'ast> for ListenerPlanExecutionInventory {
         if return_type_mentions(&item.sig.output, "FinalizedListenerSet") {
             self.set_returning_functions += 1;
             if item.sig.ident == "finalize_listener_plan"
-                && signature_input_mentions(&item.sig, "ListenerExecutionPlan")
+                && finalizer_signature_is_canonical(&item.sig)
             {
                 self.canonical_finalizers += 1;
             }
         }
         syn::visit::visit_item_fn(self, item);
+    }
+
+    fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+        if !attrs_may_be_production(&item.attrs) {
+            return;
+        }
+        if item.ident == "FinalizeListenerPlanInputs" {
+            self.finalizer_input_structs += 1;
+            self.canonical_finalizer_input_structs +=
+                usize::from(finalizer_input_struct_is_canonical(item));
+        }
+        syn::visit::visit_item_struct(self, item);
     }
 
     fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
@@ -645,6 +730,7 @@ impl<'ast> Visit<'ast> for ListenerPlanExecutionInventory {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if expr_path_last(&call.func).is_some_and(|ident| ident == "finalize_listener_plan") {
             self.finalizer_calls += 1;
+            self.canonical_finalizer_calls += usize::from(finalizer_call_is_canonical(call));
         }
         syn::visit::visit_expr_call(self, call);
     }
@@ -1014,8 +1100,8 @@ impl RunRuntimeConfigWiring {
             && self.canonical_s3_dlx_flow_calls == 1
             && self.s3_canary_calls == 1
             && self.canonical_s3_canary_calls == 1
-            && self.s3_canary_assembly_fields == 1
-            && self.canonical_s3_canary_assembly_fields == 1
+            && self.s3_canary_assembly_fields == 0
+            && self.canonical_s3_canary_assembly_fields == 0
     }
 
     fn record_typed_mapping(&mut self, binding: &syn::Ident, call: &syn::ExprCall) {
@@ -1432,7 +1518,6 @@ const SERVING_RUNTIME_PART_FIELDS: &[&str] = &[
 const SERVING_RUNTIME_SINK_FIELDS: &[&str] = &[
     "event_transport",
     "event_worker",
-    "dlx_worker",
     "distributed_worker",
     "domain_transport",
     "domain_modules",
@@ -1443,7 +1528,6 @@ const SERVING_RUNTIME_SINK_FIELDS: &[&str] = &[
 const RUNTIME_WIRING_INPUT_FIELDS: &[&str] = &[
     "event_transport",
     "event_worker",
-    "dlx_worker",
     "distributed_worker",
     "domain_modules",
     "audit_consumer_key",
@@ -2104,8 +2188,8 @@ const VALUES_SEAM_SPECS: &[ValuesSeamSpec] = &[
     ValuesSeamSpec {
         name: "build_vault_runtime_from_values",
         inputs: VAULT_VALUES_INPUTS,
-        internal_output: "anyhow::Result<(VaultRuntimeDeps,KeyName)>",
-        wrapper_output: "anyhow::Result<(vault::VaultRuntimeDeps,diport::KeyName)>",
+        internal_output: "anyhow::Result<(VaultRuntimeDeps,std::sync::Arc<VaultSigner>,KeyName)>",
+        wrapper_output: "anyhow::Result<(vault::VaultRuntimeDeps,Arc<vault::VaultSigner>,diport::KeyName,)>",
         delegate_path: &["crate", "infra", "vault", "build_vault_runtime_from_values"],
     },
     ValuesSeamSpec {
@@ -3739,13 +3823,16 @@ fn vault_s3_values_boundary_findings(
         return Ok(Vec::new());
     }
     exact_internal &= observed_internal_files == VALUES_SEAM_SPECS.len();
-    if exact_internal && vault_s3_test_support_wrappers_are_exact(runtime_file) {
+    let exact_wrappers = vault_s3_test_support_wrappers_are_exact(runtime_file);
+    if exact_internal && exact_wrappers {
         return Ok(Vec::new());
     }
     Ok(vec![finding(
         Rule::ForbiddenWiring,
         RUNTIME_LIB_PATH,
-        "Vault/S3 explicit-values seams must retain their exact cfg(any(test, feature = \"integration\")) internal signatures and typed bodies; public test_support wrappers must retain exact cfg(feature = \"integration\") signatures and single direct delegation",
+        format!(
+            "Vault/S3 explicit-values seams must retain their exact cfg(any(test, feature = \"integration\")) internal signatures and typed bodies; public test_support wrappers must retain exact cfg(feature = \"integration\") signatures and single direct delegation; internal={exact_internal} wrappers={exact_wrappers}"
+        ),
     )])
 }
 
@@ -6580,54 +6667,63 @@ impl SecretFlowInventory {
 
     fn record_vault_sink(&mut self, call: &syn::ExprCall, sink: &str) {
         let callable = self.callable.as_deref();
-        let approved = match (callable, sink) {
-            (Some("build_dlx_vault_key_providers_from"), sink)
-                if sink.ends_with("VaultKeyProvider::new") =>
-            {
-                let argument = call.args.iter().nth(2);
-                for (receiver, label) in [
-                    ("hot_token", "event.hot"),
-                    ("archive_token", "event.archive"),
-                ] {
-                    if argument.is_some_and(|arg| {
-                        Self::method_arg(arg, receiver, "transfer_secret_allocation")
-                    }) {
+        let approved =
+            match (callable, sink) {
+                (Some("build_dlx_vault_key_providers_from"), sink)
+                    if sink.ends_with("VaultKeyProvider::new") =>
+                {
+                    let argument = call.args.iter().nth(2);
+                    for (receiver, label) in [
+                        ("hot_token", "event.hot"),
+                        ("archive_token", "event.archive"),
+                    ] {
+                        if argument.is_some_and(|arg| {
+                            Self::method_arg(arg, receiver, "transfer_secret_allocation")
+                        }) {
+                            *self.exact_sinks.entry(label).or_default() += 1;
+                        }
+                    }
+                    argument.is_some_and(|arg| {
+                        Self::method_arg(arg, "hot_token", "transfer_secret_allocation")
+                            || Self::method_arg(arg, "archive_token", "transfer_secret_allocation")
+                    })
+                }
+                (Some("into_runtime" | "into_settings_key_provider"), sink)
+                    if sink.ends_with("VaultKeyProvider::new") =>
+                {
+                    let approved = call.args.iter().nth(2).is_some_and(|arg| {
+                        Self::method_arg(arg, "token", "transfer_secret_allocation")
+                    });
+                    if approved {
+                        let label = if callable == Some("into_runtime") {
+                            "vault.runtime"
+                        } else {
+                            "vault.settings"
+                        };
                         *self.exact_sinks.entry(label).or_default() += 1;
                     }
+                    approved
                 }
-                argument.is_some_and(|arg| {
-                    Self::method_arg(arg, "hot_token", "transfer_secret_allocation")
-                        || Self::method_arg(arg, "archive_token", "transfer_secret_allocation")
-                })
-            }
-            (Some("into_runtime" | "into_settings_key_provider"), sink)
-                if sink.ends_with("VaultKeyProvider::new") =>
-            {
-                let approved = call.args.iter().nth(2).is_some_and(|arg| {
-                    Self::method_arg(arg, "token", "transfer_secret_allocation")
-                });
-                if approved {
-                    let label = if callable == Some("into_runtime") {
-                        "vault.runtime"
-                    } else {
-                        "vault.settings"
-                    };
-                    *self.exact_sinks.entry(label).or_default() += 1;
-                }
-                approved
-            }
-            (Some("into_runtime"), sink) if sink.ends_with("VaultSecretResolver::new") => {
-                let approved =
-                    call.args.iter().nth(2).is_some_and(|arg| {
+                (Some("into_runtime"), sink) if sink.ends_with("VaultSecretResolver::new") => {
+                    let approved = call.args.iter().nth(2).is_some_and(|arg| {
                         Self::method_arg(arg, "token", "copy_secret_allocation")
                     });
-                if approved {
-                    *self.exact_sinks.entry("vault.copy").or_default() += 1;
+                    if approved {
+                        *self.exact_sinks.entry("vault.copy").or_default() += 1;
+                    }
+                    approved
                 }
-                approved
-            }
-            _ => false,
-        };
+                (Some("into_runtime"), sink) if sink.ends_with("VaultSigner::new") => {
+                    let approved = call.args.iter().nth(2).is_some_and(|arg| {
+                        Self::method_arg(arg, "token", "copy_secret_allocation")
+                    });
+                    if approved {
+                        *self.exact_sinks.entry("vault.signer").or_default() += 1;
+                    }
+                    approved
+                }
+                _ => false,
+            };
         if approved {
             if call.args.iter().nth(2).is_some_and(|arg| matches!(transparent_expr(arg), syn::Expr::MethodCall(method) if method.method == "copy_secret_allocation")) {
                 self.copy_sinks += 1;
@@ -7044,6 +7140,11 @@ fn runtime_secret_transfer_live_findings(root: &Path) -> Result<Vec<Finding<Rule
         ),
         (
             "vault.copy",
+            RUNTIME_VAULT_PATH,
+            "VaultRuntimeConfig::into_runtime",
+        ),
+        (
+            "vault.signer",
             RUNTIME_VAULT_PATH,
             "VaultRuntimeConfig::into_runtime",
         ),
@@ -7578,6 +7679,11 @@ fn runtime_lifecycle_ownership_findings(
                 && uses.launch_plan == 1
                 && uses.launch_plan_parts == 1
                 && uses.shutdown_stack == 0
+        } else if path == PROVIDER_OUTPUT_PATH {
+            uses.phase_execute == 0
+                && uses.launch_plan == 0
+                && uses.launch_plan_parts == 0
+                && uses.shutdown_stack == 1
         } else if path == RUNTIME_LAUNCH_PATH {
             uses.phase_execute == 0
         } else if path == RUNTIME_LIB_PATH {
@@ -7590,7 +7696,7 @@ fn runtime_lifecycle_ownership_findings(
                 Rule::ForbiddenWiring,
                 path,
                 format!(
-                    "predicate=lifecycle_primitive_ownership expected=phase::execute only in {RUNTIME_LIB_PATH}; LaunchPlan/LaunchPlanParts only in {RUNTIME_PHASE_LAUNCH_PATH}; ShutdownStack excluded actual={uses:?}"
+                    "predicate=lifecycle_primitive_ownership expected=phase::execute only in {RUNTIME_LIB_PATH}; LaunchPlan/LaunchPlanParts only in {RUNTIME_PHASE_LAUNCH_PATH}; one ShutdownStack only in {PROVIDER_OUTPUT_PATH} for transactional abort actual={uses:?}"
                 ),
             ));
         }
@@ -8165,43 +8271,20 @@ fn transition_phase_funnel_is_canonical(method: &syn::ImplItemFn) -> bool {
 
 fn launch_pre_handoff_is_canonical(method: &syn::ImplItemFn) -> bool {
     let block = transition_body(&method.block);
-    let [budget, trace, pg, plan, launch] = block.stmts.as_slice() else {
-        return false;
-    };
-    let budget_is_exact = match budget {
-        syn::Stmt::Local(local)
-            if immutable_pat_ident(&local.pat).is_some_and(|ident| ident == "request_budget")
-                && local
-                    .init
-                    .as_ref()
-                    .is_some_and(|init| init.diverge.is_none()) =>
-        {
-            local
-                .init
-                .as_ref()
-                .and_then(|init| call_behind_result_context(&init.expr))
-                .is_some_and(|call| {
-                    is_exact_path(&call.func, &["crate", "launch", "server_request_budget"])
-                        && call.args.len() == 1
-                        && call.args.first().is_some_and(|argument| {
-                            matches!(transparent_expr(argument), syn::Expr::MethodCall(config)
-                                if config.method == "config"
-                                    && config.args.is_empty()
-                                    && is_exact_path(&config.receiver, &["context"]))
-                        })
-                })
-        }
-        _ => false,
-    };
-    budget_is_exact
-        && compact_tokens(trace)
-            == "lettrace_exporter=context.take_trace_export().map(DynManagedResource::new_box);"
-        && compact_tokens(pg)
-            == "letpg_runtime_module=crate::provider_output::build_pg_runtime_module(pg_owner,pg_readiness_period);"
-        && compact_tokens(plan)
-            == "letlaunch_plan=crate::launch::LaunchPlan::new(crate::launch::LaunchPlanParts{listeners,trace_exporter,pg_runtime_module,domain_module,});"
-        && compact_tokens(launch)
-            == "crate::launch::launch(context.config(),request_budget,launch_plan).await.map(|()|RuntimeOutputs::completed())"
+    let tokens = compact_tokens(block);
+    let budget = tokens.find("crate::launch::server_request_budget(");
+    let plan = tokens.find("crate::launch::LaunchPlan::new(");
+    let launch = tokens.find("crate::launch::launch(");
+    exact_named_path_call_count(block, &["crate", "launch", "server_request_budget"]) == 1
+        && exact_named_path_call_count(block, &["crate", "launch", "LaunchPlan", "new"]) == 1
+        && exact_named_path_call_count(block, &["crate", "launch", "launch"]) == 1
+        && method_call_count_in_block(block, "abort") == 1
+        && method_call_count_in_block(block, "into_modules") == 1
+        && matches!((budget, plan, launch), (Some(budget), Some(plan), Some(launch))
+            if budget < plan && plan < launch)
+        && tokens.contains("Err(error)=>Err(provider_build.abort(error).await)")
+        && tokens.contains("let(provider_module,domain_module)=provider_build.into_modules();")
+        && tokens.contains("provider_module,domain_module,")
 }
 
 fn phase_context_shape_is_canonical(phase: &syn::File) -> bool {
@@ -8724,9 +8807,18 @@ fn generated_domains_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     let canonical_wire = wire.is_some_and(|method| {
         exact_named_path_call_count(&method.block, &["crate", "modules_gen", "wire_domains"]) == 1
             && exact_named_path_call_count(&method.block, &["bootstrap", "compose_bindings"]) == 1
+            && exact_named_path_call_count(
+                &method.block,
+                &["bootstrap", "drain_binding_outputs"],
+            ) == 2
             && compact_tokens(&method.block).contains(
-                "letmutdomain_bindings=crate::modules_gen::wire_domains(&deps,domain_modules)",
+                "provider_build.record_domain(bootstrap::drain_binding_outputs(&mutbindings))",
             )
+            && compact_tokens(&method.block).contains(
+                "provider_build.record_domain(bootstrap::drain_binding_outputs(&mutdomain_bindings))",
+            )
+            && compact_tokens(&method.block)
+                .contains("provider_build.record_domain(domains_module)")
     });
     if !canonical_wire {
         findings.push(finding(
@@ -8735,21 +8827,14 @@ fn generated_domains_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
             "WireDomains 必须将唯一 generated domain 结果直接交给 compose_bindings",
         ));
     }
-    let assembly = domains.items.iter().find_map(|item| match item {
-        syn::Item::Fn(item)
-            if item.sig.ident == "assemble_runtime_module_outputs"
-                && attrs_may_be_production(&item.attrs) =>
-        {
-            Some(item)
-        }
-        _ => None,
-    });
-    if assembly.is_none_or(|item| direct_assembly_field_merges(&item.block, "domains_module") != 1)
-    {
+    if wire.is_none_or(|method| {
+        method_call_count_in_block(&method.block, "record_domain") < 5
+            || !compact_tokens(&method.block).contains("record_domain(domains_module)")
+    }) {
         findings.push(finding(
             Rule::MissingAnchor,
             RUNTIME_PHASE_DOMAINS_PATH,
-            "generated domains output 未进入 RuntimeModuleAssemblyInputs merge 路径",
+            "generated domains output 未进入 ProviderBuild domain transaction",
         ));
     }
     let root_path = root.join(RUNTIME_LIB_PATH);
@@ -9454,46 +9539,518 @@ fn event_transport_output_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
 
     let wire = unique_production_inherent_method(&domains, "InfraBuilt", "wire_domains")
         .map(|method| transition_body(&method.block));
-    let event_binding = wire.and_then(event_module_binding);
     let canonical_run = wire.is_some_and(|block| {
-        event_binding.as_ref().is_some_and(|binding| {
-            exact_named_path_call_count(
+        exact_named_path_call_count(block, &["crate", "event_transport", "wire_event_transport"])
+            == 1
+            && exact_named_path_call_count(
                 block,
-                &["crate", "event_transport", "wire_event_transport"],
+                &["crate", "provider_output", "ProviderOutput", "event"],
             ) == 1
-                && runtime_module_field_use_count(block, "event_module", binding) == 1
-                && binding_field_projection_count(block, binding) == 0
-        })
+            && method_call_count_in_block(block, "event_publisher") == 1
+            && method_call_count_in_block(block, "event_subscriber") == 1
+            && event_output_record_is_canonical(block)
     });
-    let assembly = domains.items.iter().find_map(|item| match item {
-        syn::Item::Fn(item) if item.sig.ident == "assemble_runtime_module_outputs" => Some(item),
-        _ => None,
-    });
-    if !canonical_run
-        || assembly.is_none_or(|item| {
-            direct_assembly_field_merges(&item.block, "event_module") != 1
-                || assembly_input_field_use_count(&item.block, "event_module") != 1
-        })
-    {
+    if !canonical_run {
         findings.push(finding(
             Rule::ForbiddenWiring,
             RUNTIME_PHASE_DOMAINS_PATH,
-            "WireDomains 必须恰好一次把 wire_event_transport 的 owned output 直接交给 event_module merge，不得投影或平行拆包",
+            "WireDomains 必须把唯一 event transport output 包装为 ProviderOutput，同时消费 publisher/subscriber 两个 typed permit 并交给 ProviderBuild；domain module 不得平行持有 event_module",
         ));
     }
 
-    if compact_tokens(&launch).contains("event_infra_guards")
-        || !has_canonical_pg_runtime_registration(&launch)
-        || !launch_plan_fields_are_closed(&launch)
-        || !launch_lifecycle_calls_are_canonical(&launch)
+    let launch_tokens = compact_tokens(&launch);
+    let provider = launch_tokens
+        .find("letprovider_result=Self::register_module_output(stack,provider_module);");
+    let domain =
+        launch_tokens.find("letdomain_result=Self::register_module_output(stack,domain_module);");
+    let register = unique_production_inherent_method(&launch, "LaunchPlan", "register");
+    let register_output =
+        unique_production_inherent_method(&launch, "LaunchPlan", "register_module_output");
+    let expected_fields = BTreeSet::from([
+        "listeners".to_owned(),
+        "trace_exporter".to_owned(),
+        "provider_module".to_owned(),
+        "domain_module".to_owned(),
+    ]);
+    let launch_plan_fields_are_closed = ["LaunchPlanParts", "LaunchPlan"].into_iter().all(|name| {
+        let owners = launch
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Struct(item) if item.ident == name => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        owners.len() == 1
+            && owners[0]
+                .fields
+                .iter()
+                .filter_map(|field| field.ident.as_ref().map(ToString::to_string))
+                .collect::<BTreeSet<_>>()
+                == expected_fields
+    });
+    if launch_tokens.contains("event_infra_guards")
+        || !launch_plan_fields_are_closed
+        || !matches!((provider, domain), (Some(provider), Some(domain)) if provider < domain)
+        || !launch_tokens.contains("provider_result?;domain_result?;")
+        || register.is_none_or(|method| {
+            method_call_count_in_block(&method.block, "register_detached") != 1
+                || method_call_count_in_block(&method.block, "register_with_token") != 0
+        })
+        || register_output.is_none_or(|method| {
+            method_call_count_in_block(&method.block, "register_detached") != 1
+                || method_call_count_in_block(&method.block, "register_with_token") != 1
+        })
     {
         findings.push(finding(
             Rule::ForbiddenWiring,
             RUNTIME_LAUNCH_PATH,
-            "LaunchPlan 必须按 PG module → domain module 两批调用公共 register_module_output，禁止 event 专用字段或生命周期旁路",
+            "LaunchPlan 必须按 provider module → domain module 两批调用公共 register_module_output，禁止 event 专用字段或生命周期旁路",
         ));
     }
     Ok(findings)
+}
+
+fn event_output_record_is_canonical(block: &syn::Block) -> bool {
+    #[derive(Default)]
+    struct Records {
+        canonical: usize,
+        bypass: usize,
+    }
+    impl<'ast> Visit<'ast> for Records {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if expr_path_last(&call.receiver).is_some_and(|ident| ident == "provider_build") {
+                if call.method == "record"
+                    && call.args.len() == 1
+                    && call.args.first().is_some_and(|argument| {
+                        matches!(transparent_expr(argument), syn::Expr::Call(output)
+                            if is_exact_path(
+                                &output.func,
+                                &["crate", "provider_output", "ProviderOutput", "event"],
+                            )
+                                && output.args.len() == 3
+                                && output.args.first().is_some_and(|arg| expr_path_last(arg).is_some_and(|ident| ident == "event_module"))
+                                && output.args.iter().nth(1).is_some_and(|arg| expr_path_last(arg).is_some_and(|ident| ident == "event_publisher_permit"))
+                                && output.args.iter().nth(2).is_some_and(|arg| expr_path_last(arg).is_some_and(|ident| ident == "event_subscriber_permit")))
+                    })
+                {
+                    self.canonical += 1;
+                }
+                if call.method == "record_domain"
+                    && call.args.first().is_some_and(|argument| {
+                        expr_path_last(argument).is_some_and(|ident| ident == "event_module")
+                    })
+                {
+                    self.bypass += 1;
+                }
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut records = Records::default();
+    records.visit_block(block);
+    records.canonical == 1 && records.bypass == 0
+}
+
+fn postgres_setup_transaction_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let path = root.join(POSTGRES_BUNDLE_PATH);
+    if !path.exists() {
+        return Ok(vec![finding(
+            Rule::ForbiddenWiring,
+            POSTGRES_BUNDLE_PATH,
+            "缺少 PgRuntimeDeps::setup_with_audit_admin_config 的受保护生产 carrier",
+        )]);
+    }
+    let file = parse_rust_file(&path)?;
+    let setup =
+        unique_production_inherent_method(&file, "PgRuntimeDeps", "setup_with_audit_admin_config");
+    if setup.is_some_and(|method| postgres_setup_transaction_is_canonical(&method.block)) {
+        return Ok(Vec::new());
+    }
+    Ok(vec![finding(
+        Rule::ForbiddenWiring,
+        POSTGRES_BUNDLE_PATH,
+        "PgRuntimeDeps::setup_with_audit_admin_config 必须在真实生产 AST 中按构造顺序注册 migrator/writer/reader/audit-admin，所有失败 await rollback，成功 owner 后唯一 commit",
+    )])
+}
+
+fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
+    let statements = block.stmts.as_slice();
+    if statements.len() != 15 {
+        return false;
+    }
+    let Some(migrator) = exact_local_initializer(&statements[0], "migrator", false) else {
+        return false;
+    };
+    let Some(migrator_transaction) =
+        exact_local_initializer(&statements[1], "migrator_transaction", true)
+    else {
+        return false;
+    };
+    let Some(migration_result) = exact_local_initializer(&statements[3], "migration_result", false)
+    else {
+        return false;
+    };
+    let Some(delivery_policy) = exact_local_initializer(&statements[4], "delivery_policy", false)
+    else {
+        return false;
+    };
+    let Some(serving_transaction) =
+        exact_local_initializer(&statements[5], "serving_transaction", true)
+    else {
+        return false;
+    };
+    let Some(writer) = exact_local_initializer(&statements[6], "writer", false) else {
+        return false;
+    };
+    let Some(reader) = exact_local_initializer(&statements[8], "reader", false) else {
+        return false;
+    };
+    let Some(stores) = exact_local_initializer(&statements[10], "stores", false) else {
+        return false;
+    };
+    let Some(audit_admin_store) =
+        exact_local_initializer(&statements[11], "audit_admin_store", false)
+    else {
+        return false;
+    };
+    let Some(owner) = exact_local_initializer(&statements[12], "owner", false) else {
+        return false;
+    };
+
+    compact_tokens(migrator) == "Arc::new(PgStore::connect_migrator(migrator_config).await?)"
+        && compact_tokens(migrator_transaction) == "PgSetupTransaction::new()"
+        && exact_register_statement(
+            &statements[2],
+            "migrator_transaction",
+            "Arc::clone(&migrator)",
+            "postgres-migrator",
+        )
+        && migration_result_is_canonical(migration_result)
+        && exact_awaited_method_call(
+            delivery_policy,
+            true,
+            "migrator_transaction",
+            "close",
+            &["migration_result"],
+        )
+        && compact_tokens(serving_transaction) == "PgSetupTransaction::new()"
+        && compact_tokens(writer) == "PgStore::connect_verified_writer(serving_config).await?"
+        && exact_register_statement(
+            &statements[7],
+            "serving_transaction",
+            "writer.store_arc()",
+            "postgres-writer",
+        )
+        && reader_connect_is_canonical(reader)
+        && exact_register_statement(
+            &statements[9],
+            "serving_transaction",
+            "reader.store_arc()",
+            "postgres-reader",
+        )
+        && compact_tokens(stores) == "Arc::new(PgRuntimeStores::new(writer,reader))"
+        && audit_connect_is_canonical(audit_admin_store)
+        && postgres_runtime_owner_is_canonical(owner)
+        && exact_method_statement(&statements[13], "serving_transaction", "commit", &[])
+        && exact_path_call_statement(&statements[14], "Ok", &["owner"])
+}
+
+fn exact_local_initializer<'a>(
+    statement: &'a syn::Stmt,
+    binding: &str,
+    mutable: bool,
+) -> Option<&'a syn::Expr> {
+    let syn::Stmt::Local(local) = statement else {
+        return None;
+    };
+    let syn::Pat::Ident(pattern) = &local.pat else {
+        return None;
+    };
+    (pattern.ident == binding
+        && pattern.by_ref.is_none()
+        && pattern.subpat.is_none()
+        && pattern.mutability.is_some() == mutable)
+        .then(|| local.init.as_ref().map(|init| init.expr.as_ref()))
+        .flatten()
+}
+
+fn exact_register_statement(
+    statement: &syn::Stmt,
+    transaction: &str,
+    store: &str,
+    name: &str,
+) -> bool {
+    let Some(expression) = expression_statement(statement) else {
+        return false;
+    };
+    let syn::Expr::MethodCall(call) = transparent_expr(expression) else {
+        return false;
+    };
+    call.method == "register"
+        && compact_tokens(&call.receiver) == transaction
+        && call.args.len() == 1
+        && call.args.first().is_some_and(|argument| {
+            let syn::Expr::Call(guard) = transparent_expr(argument) else {
+                return false;
+            };
+            is_exact_path(&guard.func, &["PgStoreGuard", "new_named"])
+                && guard.args.len() == 2
+                && guard
+                    .args
+                    .first()
+                    .is_some_and(|argument| compact_tokens(argument) == store)
+                && guard.args.iter().nth(1).is_some_and(|argument| {
+                    matches!(argument, syn::Expr::Lit(literal)
+                        if matches!(&literal.lit, syn::Lit::Str(value) if value.value() == name))
+                })
+        })
+}
+
+fn expression_statement(statement: &syn::Stmt) -> Option<&syn::Expr> {
+    match statement {
+        syn::Stmt::Expr(expression, _) => Some(expression),
+        _ => None,
+    }
+}
+
+fn exact_method_statement(
+    statement: &syn::Stmt,
+    receiver: &str,
+    method: &str,
+    arguments: &[&str],
+) -> bool {
+    expression_statement(statement)
+        .is_some_and(|expression| exact_method_call(expression, receiver, method, arguments))
+}
+
+fn exact_path_call_statement(statement: &syn::Stmt, path: &str, arguments: &[&str]) -> bool {
+    expression_statement(statement).is_some_and(|expression| {
+        let syn::Expr::Call(call) = transparent_expr(expression) else {
+            return false;
+        };
+        is_exact_path(&call.func, &[path])
+            && call.args.len() == arguments.len()
+            && call
+                .args
+                .iter()
+                .zip(arguments)
+                .all(|(actual, expected)| compact_tokens(actual) == *expected)
+    })
+}
+
+fn exact_method_call(
+    expression: &syn::Expr,
+    receiver: &str,
+    method: &str,
+    arguments: &[&str],
+) -> bool {
+    let syn::Expr::MethodCall(call) = transparent_expr(expression) else {
+        return false;
+    };
+    compact_tokens(&call.receiver) == receiver
+        && call.method == method
+        && call.args.len() == arguments.len()
+        && call
+            .args
+            .iter()
+            .zip(arguments)
+            .all(|(actual, expected)| compact_tokens(actual) == *expected)
+}
+
+fn exact_awaited_method_call(
+    expression: &syn::Expr,
+    fallible: bool,
+    receiver: &str,
+    method: &str,
+    arguments: &[&str],
+) -> bool {
+    let expression = transparent_expr(expression);
+    let expression = if fallible {
+        let syn::Expr::Try(try_) = expression else {
+            return false;
+        };
+        transparent_expr(&try_.expr)
+    } else {
+        expression
+    };
+    let syn::Expr::Await(await_) = expression else {
+        return false;
+    };
+    exact_method_call(&await_.base, receiver, method, arguments)
+}
+
+fn migration_result_is_canonical(expression: &syn::Expr) -> bool {
+    let syn::Expr::Await(await_) = transparent_expr(expression) else {
+        return false;
+    };
+    let syn::Expr::Async(async_) = transparent_expr(&await_.base) else {
+        return false;
+    };
+    let statements = async_.block.stmts.as_slice();
+    statements.len() == 5
+        && expression_statement(&statements[0]).is_some_and(|expression| {
+            exact_awaited_method_call(expression, true, "migrator", "run_migrations", &[])
+        })
+        && exact_local_initializer(&statements[1], "delivery_policy", false).is_some_and(
+            |expression| {
+                exact_awaited_method_call(
+                    expression,
+                    true,
+                    "migrator",
+                    "load_event_delivery_policy",
+                    &[],
+                )
+            },
+        )
+        && expression_statement(&statements[2]).is_some_and(|expression| {
+            exact_awaited_method_call(
+                expression,
+                true,
+                "migrator",
+                "verify_config_legacy_plaintext_policy",
+                &["legacy_config_plaintext_policy"],
+            )
+        })
+        && expression_statement(&statements[3]).is_some_and(|expression| {
+            compact_tokens(expression)
+                == "migrator.register_projection_input_bindings(projection_generation,projection_inputs).await.map_err(PgError::ProjectionBindings)?"
+        })
+        && exact_path_call_statement(&statements[4], "Ok", &["delivery_policy"])
+}
+
+fn reader_connect_is_canonical(expression: &syn::Expr) -> bool {
+    let syn::Expr::Match(match_) = transparent_expr(expression) else {
+        return false;
+    };
+    compact_tokens(&match_.expr) == "PgStore::connect_verified_read(tenant_read_config).await"
+        && match_.arms.len() == 2
+        && compact_tokens(&match_.arms[0].pat) == "Ok(reader)"
+        && compact_tokens(&match_.arms[0].body) == "reader"
+        && compact_tokens(&match_.arms[1].pat) == "Err(primary)"
+        && returned_failure_close_is_exact(&match_.arms[1].body)
+}
+
+fn audit_connect_is_canonical(expression: &syn::Expr) -> bool {
+    let syn::Expr::Match(match_) = transparent_expr(expression) else {
+        return false;
+    };
+    if compact_tokens(&match_.expr) != "audit_admin_config" || match_.arms.len() != 2 {
+        return false;
+    }
+    let Some(some_arm) = match_
+        .arms
+        .iter()
+        .find(|arm| compact_tokens(&arm.pat) == "Some(config)")
+    else {
+        return false;
+    };
+    let Some(none_arm) = match_
+        .arms
+        .iter()
+        .find(|arm| compact_tokens(&arm.pat) == "None")
+    else {
+        return false;
+    };
+    let syn::Expr::Block(some) = transparent_expr(&some_arm.body) else {
+        return false;
+    };
+    let statements = some.block.stmts.as_slice();
+    let Some(store) = statements
+        .first()
+        .and_then(|statement| exact_local_initializer(statement, "store", false))
+    else {
+        return false;
+    };
+    statements.len() == 3
+        && compact_tokens(&none_arm.body) == "None"
+        && audit_store_connect_is_canonical(store)
+        && exact_register_statement(
+            &statements[1],
+            "serving_transaction",
+            "store.store_arc()",
+            "postgres-audit-admin",
+        )
+        && exact_path_call_statement(&statements[2], "Some", &["store"])
+}
+
+fn audit_store_connect_is_canonical(expression: &syn::Expr) -> bool {
+    let syn::Expr::Match(match_) = transparent_expr(expression) else {
+        return false;
+    };
+    compact_tokens(&match_.expr) == "PgStore::connect_verified_audit_admin(config).await"
+        && match_.arms.len() == 2
+        && compact_tokens(&match_.arms[0].pat) == "Ok(store)"
+        && compact_tokens(&match_.arms[0].body) == "store"
+        && compact_tokens(&match_.arms[1].pat) == "Err(primary)"
+        && returned_failure_close_is_exact(&match_.arms[1].body)
+}
+
+fn returned_failure_close_is_exact(expression: &syn::Expr) -> bool {
+    let syn::Expr::Return(return_) = transparent_expr(expression) else {
+        return false;
+    };
+    return_.expr.as_deref().is_some_and(|expression| {
+        exact_awaited_method_call(
+            expression,
+            false,
+            "serving_transaction",
+            "close",
+            &["Err(primary)"],
+        )
+    })
+}
+
+fn postgres_runtime_owner_is_canonical(expression: &syn::Expr) -> bool {
+    let syn::Expr::Struct(owner) = transparent_expr(expression) else {
+        return false;
+    };
+    if !owner.path.is_ident("Self") || owner.rest.is_some() || owner.fields.len() != 1 {
+        return false;
+    }
+    let Some(handle) = owner
+        .fields
+        .iter()
+        .find(|field| matches!(&field.member, syn::Member::Named(member) if member == "handle"))
+    else {
+        return false;
+    };
+    let syn::Expr::Struct(handle) = transparent_expr(&handle.expr) else {
+        return false;
+    };
+    if !handle.path.is_ident("PgRuntimeHandle") || handle.rest.is_some() {
+        return false;
+    }
+    let exact_field = |name: &str, value: &str| {
+        handle
+            .fields
+            .iter()
+            .filter(|field| {
+                matches!(&field.member, syn::Member::Named(member) if member == name)
+                    && compact_tokens(&field.expr) == value
+            })
+            .count()
+            == 1
+    };
+    let field_names = handle
+        .fields
+        .iter()
+        .filter_map(|field| match &field.member {
+            syn::Member::Named(member) => Some(member.to_string()),
+            syn::Member::Unnamed(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+    field_names
+        == BTreeSet::from([
+            "stores".to_owned(),
+            "audit_admin_store".to_owned(),
+            "delivery_policy".to_owned(),
+            "projection_registry".to_owned(),
+            "readiness".to_owned(),
+            "rls_ready".to_owned(),
+        ])
+        && exact_field("stores", "stores")
+        && exact_field("audit_admin_store", "audit_admin_store")
 }
 
 fn parse_rust_file(path: &Path) -> Result<syn::File> {
@@ -9554,145 +10111,6 @@ fn compact_tokens(tokens: &impl quote::ToTokens) -> String {
         .collect()
 }
 
-fn event_module_binding(block: &syn::Block) -> Option<String> {
-    let bindings = block
-        .stmts
-        .iter()
-        .filter_map(|stmt| {
-            let syn::Stmt::Local(local) = stmt else {
-                return None;
-            };
-            let syn::Pat::Ident(binding) = &local.pat else {
-                return None;
-            };
-            let init = local.init.as_ref()?;
-            (binding.mutability.is_none()
-                && init.diverge.is_none()
-                && is_direct_event_transport_binding(&init.expr))
-            .then(|| binding.ident.to_string())
-        })
-        .collect::<Vec<_>>();
-    (bindings.len() == 1).then(|| bindings[0].clone())
-}
-
-fn is_direct_event_transport_binding(expr: &syn::Expr) -> bool {
-    let syn::Expr::Try(try_) = expr else {
-        return false;
-    };
-    let syn::Expr::MethodCall(context) = try_.expr.as_ref() else {
-        return false;
-    };
-    if context.method != "context" || context.args.len() != 1 {
-        return false;
-    }
-    let syn::Expr::Await(await_) = context.receiver.as_ref() else {
-        return false;
-    };
-    let syn::Expr::Call(call) = await_.base.as_ref() else {
-        return false;
-    };
-    is_exact_path(
-        &call.func,
-        &["crate", "event_transport", "wire_event_transport"],
-    ) || is_exact_path(&call.func, &["event_transport", "wire_event_transport"])
-}
-
-fn runtime_module_field_use_count(block: &syn::Block, field_name: &str, binding: &str) -> usize {
-    struct Counter<'a> {
-        field_name: &'a str,
-        binding: &'a str,
-        count: usize,
-    }
-    impl<'ast> Visit<'ast> for Counter<'_> {
-        fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
-            if item
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "RuntimeModuleAssemblyInputs")
-            {
-                self.count += item
-                    .fields
-                    .iter()
-                    .filter(|field| {
-                        matches!(&field.member, syn::Member::Named(member) if member == self.field_name)
-                            && expr_path_last(&field.expr)
-                                .is_some_and(|ident| ident == self.binding)
-                    })
-                    .count();
-            }
-            syn::visit::visit_expr_struct(self, item);
-        }
-    }
-    let mut counter = Counter {
-        field_name,
-        binding,
-        count: 0,
-    };
-    counter.visit_block(block);
-    counter.count
-}
-
-fn binding_field_projection_count(block: &syn::Block, binding: &str) -> usize {
-    struct Counter<'a> {
-        binding: &'a str,
-        count: usize,
-    }
-    impl<'ast> Visit<'ast> for Counter<'_> {
-        fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
-            if expr_path_last(&field.base).is_some_and(|ident| ident == self.binding) {
-                self.count += 1;
-            }
-            syn::visit::visit_expr_field(self, field);
-        }
-    }
-    let mut counter = Counter { binding, count: 0 };
-    counter.visit_block(block);
-    counter.count
-}
-
-fn direct_assembly_field_merges(block: &syn::Block, field_name: &str) -> usize {
-    block
-        .stmts
-        .iter()
-        .filter(|stmt| {
-            let syn::Stmt::Expr(syn::Expr::MethodCall(call), Some(_)) = stmt else {
-                return false;
-            };
-            call.method == "merge"
-                && expr_path_last(&call.receiver).is_some_and(|ident| ident == "module")
-                && call.args.first().is_some_and(|arg| {
-                    matches!(arg, syn::Expr::Field(field)
-                        if expr_path_last(&field.base).is_some_and(|ident| ident == "inputs")
-                            && matches!(&field.member, syn::Member::Named(member) if member == field_name))
-                })
-        })
-        .count()
-}
-
-fn assembly_input_field_use_count(block: &syn::Block, field_name: &str) -> usize {
-    struct Counter<'a> {
-        field_name: &'a str,
-        count: usize,
-    }
-    impl<'ast> Visit<'ast> for Counter<'_> {
-        fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
-            if expr_path_last(&field.base).is_some_and(|ident| ident == "inputs")
-                && matches!(&field.member, syn::Member::Named(member) if member == self.field_name)
-            {
-                self.count += 1;
-            }
-            syn::visit::visit_expr_field(self, field);
-        }
-    }
-    let mut counter = Counter {
-        field_name,
-        count: 0,
-    };
-    counter.visit_block(block);
-    counter.count
-}
-
 fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -9708,935 +10126,290 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 fn provider_outputs_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
-    if !root.join("Cargo.toml").exists() && !root.join(PROVIDER_OUTPUT_FIXTURE_MARKER).exists() {
-        // 通用 runtime-baseline fixture 只承载文本 anchor；专属 provider fixture 用显式 marker
-        // 启用 AST 门。真实 workspace 总有根 Cargo.toml，不能借此跳过 fail-closed 检查。
+    provider_plan_output_bijection_findings(root)
+}
+
+fn provider_plan_output_bijection_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    if !root.join("Cargo.toml").exists() {
         return Ok(Vec::new());
     }
-    if !root.join(PROVIDER_OUTPUT_PATH).exists() {
-        return Ok(vec![finding(
-            Rule::MissingAnchor,
-            PROVIDER_OUTPUT_PATH,
-            "缺 runtime-local provider output 唯一适配层",
-        )]);
+
+    const FACTORIES: &[(&str, &str)] = &[
+        ("HttpservePostgresAuthAuditSink", "auth_audit_sink"),
+        ("DistributedPostgresCasStore", "distributed_cas_store"),
+        ("DistributedRedisLockStore", "distributed_lock_store"),
+        (
+            "EventexecVaultArchiveKeyProvider",
+            "dlx_archive_key_provider",
+        ),
+        ("EventexecS3DlxArchiveStore", "dlx_archive_store"),
+        (
+            "EventexecPostgresDlxLifecycleRepository",
+            "dlx_lifecycle_repository",
+        ),
+        ("EventexecAmqpPublisher", "event_publisher"),
+        ("EventexecAmqpSubscriber", "event_subscriber"),
+        ("IdentityVaultSigner", "identity_signer"),
+        ("HttpserveOidcPdp", "listener_pdp"),
+        ("HttpserveGovernorRateLimiter", "listener_rate_limiter"),
+        ("RuntimeS3ObjectStore", "runtime_object_store"),
+        (
+            "OidcPostgresServiceTokenReplayStore",
+            "service_token_replay_store",
+        ),
+        ("SettingsVaultKeyProvider", "settings_key_provider"),
+    ];
+    const REQUIRED_PATHS: &[&str] = &[
+        PROVIDER_OUTPUT_PATH,
+        GENERATED_PROVIDERS_PATH,
+        RUNTIME_PHASE_PROVIDER_PATH,
+        RUNTIME_PHASE_INFRA_PATH,
+        RUNTIME_PHASE_DOMAINS_PATH,
+        RUNTIME_PHASE_FINALIZE_PATH,
+        RUNTIME_PHASE_LAUNCH_PATH,
+        RUNTIME_LAUNCH_PATH,
+    ];
+
+    let missing = REQUIRED_PATHS
+        .iter()
+        .copied()
+        .filter(|path| !root.join(path).exists())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Ok(missing
+            .into_iter()
+            .map(|path| {
+                finding(
+                    Rule::MissingAnchor,
+                    path,
+                    "provider plan/output bijection gate 缺生产 owner",
+                )
+            })
+            .collect());
     }
-    let domains_path = root.join(RUNTIME_PHASE_DOMAINS_PATH);
-    let phase_launch_path = root.join(RUNTIME_PHASE_LAUNCH_PATH);
+
+    let parsed = REQUIRED_PATHS
+        .iter()
+        .map(|path| Ok((*path, parse_rust_file(&root.join(path))?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let provider_output = &parsed[PROVIDER_OUTPUT_PATH];
+    let generated = &parsed[GENERATED_PROVIDERS_PATH];
+    let provider_phase = &parsed[RUNTIME_PHASE_PROVIDER_PATH];
+    let infra_phase = &parsed[RUNTIME_PHASE_INFRA_PATH];
+    let domains_phase = &parsed[RUNTIME_PHASE_DOMAINS_PATH];
+    let finalize_phase = &parsed[RUNTIME_PHASE_FINALIZE_PATH];
+    let phase_launch = &parsed[RUNTIME_PHASE_LAUNCH_PATH];
+    let launch = &parsed[RUNTIME_LAUNCH_PATH];
     let mut findings = Vec::new();
-    let domains = match parse_rust_file(&domains_path) {
-        Ok(file) => file,
-        Err(error) => {
-            return Ok(vec![finding(
-                Rule::ForbiddenWiring,
-                RUNTIME_PHASE_DOMAINS_PATH,
-                format!("runtime provider gate 无法解析 typed WireDomains owner: {error}"),
-            )]);
-        }
-    };
-    let phase_launch = match parse_rust_file(&phase_launch_path) {
-        Ok(file) => file,
-        Err(error) => {
-            return Ok(vec![finding(
-                Rule::ForbiddenWiring,
-                RUNTIME_PHASE_LAUNCH_PATH,
-                format!("runtime provider gate 无法解析 typed Launch owner: {error}"),
-            )]);
-        }
-    };
-    let launch_transition = unique_production_inherent_method(&phase_launch, "Finalized", "launch");
-    if launch_transition
-        .is_none_or(|method| !has_canonical_pg_runtime_build(transition_body(&method.block)))
-        || exact_path_call_count_in_file(
-            &phase_launch,
-            &["crate", "provider_output", "build_pg_runtime_module"],
-        ) != 1
-    {
-        findings.push(finding(
-            Rule::MissingAnchor,
-            RUNTIME_PHASE_LAUNCH_PATH,
-            "Launch phase 必须恰好一次按值消费 PG owner 构造 DomainModuleResult，并恰好一次交给 LaunchPlanParts",
-        ));
-    }
-    let wire = unique_production_inherent_method(&domains, "InfraBuilt", "wire_domains")
-        .map(|method| transition_body(&method.block));
-    if wire.is_none() {
-        findings.push(finding(
-            Rule::MissingAnchor,
-            RUNTIME_PHASE_DOMAINS_PATH,
-            "typed runtime 必须恰好包含一个 InfraBuilt::wire_domains transition",
-        ));
-    } else if let Some(block) = wire {
-        if direct_provider_constructors(block) != 1
-            || direct_provider_declarations(block) != 1
-            || exact_named_path_call_count(
-                block,
-                &["crate", "provider_output", "build_provider_module"],
-            ) != 1
-            || provider_module_path_uses(block) != 1
-        {
-            findings.push(finding(
-                Rule::MissingAnchor,
-                RUNTIME_PHASE_DOMAINS_PATH,
-                "WireDomains 必须恰好一次不可变声明 `let provider_module = crate::provider_output::build_provider_module(&deps)` 并且只消费一次",
-            ));
-        }
-        if direct_provider_registrations(block) != 1
-            || block.stmts.iter().any(|stmt| {
-                matches!(stmt, syn::Stmt::Item(syn::Item::Fn(item))
-                    if item.sig.ident == "assemble_runtime_module_outputs")
-            })
-            || (exact_named_path_call_count(block, &["assemble_runtime_module_outputs"]) != 1
-                && exact_named_path_call_count(
-                    block,
-                    &["crate", "assemble_runtime_module_outputs"],
-                ) != 1)
-        {
-            findings.push(finding(
-                Rule::MissingAnchor,
-                RUNTIME_PHASE_DOMAINS_PATH,
-                "provider_module 必须恰好一次进入 RuntimeModuleAssemblyInputs",
-            ));
-        }
-    }
 
-    let assembly = domains.items.iter().find_map(|item| match item {
-        syn::Item::Fn(item) if item.sig.ident == "assemble_runtime_module_outputs" => Some(item),
-        _ => None,
-    });
-    if assembly.is_none_or(|item| direct_assembly_provider_merges(&item.block) != 1) {
-        findings.push(finding(
-            Rule::MissingAnchor,
-            RUNTIME_PHASE_DOMAINS_PATH,
-            "assemble_runtime_module_outputs() 必须直接且恰好一次 merge inputs.provider_module",
-        ));
-    }
-
-    let mut runtime_sources = Vec::new();
-    collect_rust_sources(&root.join(RUNTIME_SRC_PATH), &mut runtime_sources)?;
-    let production_sources = production_module_sources(&runtime_sources)?;
-    for source_path in runtime_sources {
-        if !production_sources.contains(&normalize_path(&source_path)) {
-            continue;
-        }
-        let relative = source_path.strip_prefix(root).unwrap_or(&source_path);
-        let source = fs::read_to_string(&source_path)
-            .with_context(|| format!("读 {} 失败", source_path.display()))?;
-        let Ok(source_file) = syn::parse_file(&source) else {
-            findings.push(finding(
-                Rule::ForbiddenWiring,
-                relative.display().to_string(),
-                "runtime provider gate 无法解析生产 Rust",
-            ));
-            continue;
-        };
-        if relative == Path::new(PROVIDER_OUTPUT_PATH) {
-            if !has_only_canonical_provider_output_calls(&source_file) {
-                findings.push(finding(
-                    Rule::ForbiddenWiring,
-                    PROVIDER_OUTPUT_PATH,
-                    "provider_output.rs 必须保留 Redis/S3/Vault 三个 ProviderOutput impl，并将 owned PG lifecycle 转换为 DomainModuleResult",
-                ));
-            }
-            continue;
-        }
-        let is_event_transport = relative == Path::new("assemblies/runtime/src/event_transport.rs");
-        let provider_calls = provider_primitive_calls(&source_file, is_event_transport);
-        let runtime_resources_allowed = if is_event_transport {
-            !provider_calls.forbidden
-                && provider_calls.amqp_runtime_resources == 1
-                && has_only_canonical_amqp_runtime_resources(&source_file)
-        } else {
-            !provider_calls.forbidden && provider_calls.amqp_runtime_resources == 0
-        };
-        let pg_lifecycle = pg_lifecycle_calls(&source_file);
-        let extra_pg_builder = relative != Path::new(RUNTIME_PHASE_LAUNCH_PATH)
-            && exact_path_call_count_in_file(
-                &source_file,
-                &["crate", "provider_output", "build_pg_runtime_module"],
-            ) != 0;
-        let launch_is_canonical = relative != Path::new(RUNTIME_LAUNCH_PATH)
-            || has_canonical_pg_runtime_registration(&source_file);
-        if !runtime_resources_allowed
-            || provider_output_impl_count(&source_file) != 0
-            || pg_lifecycle.forbidden
-            || extra_pg_builder
-            || !launch_is_canonical
-        {
-            findings.push(finding(
-                Rule::ForbiddenWiring,
-                relative.display().to_string(),
-                "provider primitive 只能经 canonical DomainModuleResult seam；PG module 必须在 LaunchPlan 中于 trace 后、domain module 前注册一次",
-            ));
-        }
-    }
-    Ok(findings)
-}
-
-fn has_only_canonical_provider_output_calls(file: &syn::File) -> bool {
-    let mut all_calls = RuntimeResourcesCallCounter::default();
-    all_calls.visit_file(file);
-    if all_calls.calls != 3 {
-        return false;
-    }
-    let constructors = file
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Fn(item) if item.sig.ident == "build_provider_module" => Some(item),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if constructors.len() != 1 || !is_canonical_provider_constructor(constructors[0]) {
-        return false;
-    }
-    let mut all_merges = MergeProviderCallCounter::default();
-    all_merges.visit_file(file);
-    if all_merges.calls != 3 {
-        return false;
-    }
-    if provider_output_impl_count(file) != 3 {
-        return false;
-    }
-    let pg_constructors = file
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Fn(item) if item.sig.ident == "build_pg_runtime_module" => Some(item),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if pg_constructors.len() != 1 || !is_canonical_pg_runtime_constructor(pg_constructors[0]) {
-        return false;
-    }
-    let mut pg_lifecycle = PgLifecycleCalls::default();
-    pg_lifecycle.visit_file(file);
-    if pg_lifecycle.into_runtime_parts != 1 || pg_lifecycle.forbidden {
-        return false;
-    }
-    if file
-        .items
-        .iter()
-        .any(|item| matches!(item, syn::Item::Struct(item) if item.ident == "PgRuntimeOutput"))
-    {
-        return false;
-    }
-    let traits = file
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Trait(item) if item.ident == "ProviderOutput" => Some(item),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if traits.len() != 1 || !is_canonical_provider_output_trait(traits[0]) {
-        return false;
-    }
-    let mut providers = BTreeMap::new();
-    for item in &file.items {
-        let syn::Item::Impl(item) = item else {
-            continue;
-        };
-        let Some((_, trait_path, _)) = &item.trait_ else {
-            continue;
-        };
-        if trait_path
-            .segments
-            .last()
-            .is_none_or(|segment| segment.ident != "ProviderOutput")
-        {
-            continue;
-        }
-        let Some(provider) = type_last_ident(&item.self_ty).map(ToString::to_string) else {
-            return false;
-        };
-        if !matches!(
-            provider.as_str(),
-            "RedisRuntimeDeps" | "S3RuntimeDeps" | "VaultRuntimeDeps"
-        ) {
-            return false;
-        }
-        let canonical = item.items.len() == 2
-            && item.items.iter().any(|impl_item| {
-                matches!(impl_item, syn::ImplItem::Const(binding)
-                    if is_canonical_provider_output_binding_impl(binding))
-            })
-            && item.items.iter().any(|impl_item| {
-                matches!(impl_item, syn::ImplItem::Fn(method)
-                    if is_canonical_provider_output_method(method))
-            });
-        if providers.insert(provider, canonical).is_some() {
-            return false;
-        }
-    }
-    providers
-        == BTreeMap::from([
-            ("RedisRuntimeDeps".to_string(), true),
-            ("S3RuntimeDeps".to_string(), true),
-            ("VaultRuntimeDeps".to_string(), true),
-        ])
-}
-
-fn provider_output_impl_count(file: &syn::File) -> usize {
-    #[derive(Default)]
-    struct Counter(usize);
-    impl<'ast> Visit<'ast> for Counter {
-        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-            if attrs_may_be_production(&item.attrs) {
-                syn::visit::visit_item_mod(self, item);
-            }
-        }
-
-        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
-            if !attrs_may_be_production(&item.attrs) {
-                return;
-            }
-            if item.trait_.as_ref().is_some_and(|(_, path, _)| {
-                path.segments
-                    .last()
-                    .is_some_and(|segment| segment.ident == "ProviderOutput")
-            }) {
-                self.0 += 1;
-            }
-            syn::visit::visit_item_impl(self, item);
-        }
-    }
-    let mut counter = Counter::default();
-    counter.visit_file(file);
-    counter.0
-}
-
-fn is_canonical_provider_output_trait(item: &syn::ItemTrait) -> bool {
-    item.items.len() == 2
-        && item.items.iter().any(|trait_item| {
-            matches!(trait_item, syn::TraitItem::Const(binding)
-                if binding.ident == "OUTPUT_BINDINGS"
-                    && compact_tokens(&binding.ty) == "&'static[ProviderOutputBinding]"
-                    && binding.default.is_none())
-        })
-        && item.items.iter().any(|trait_item| {
-            matches!(trait_item, syn::TraitItem::Fn(method)
-                if method.sig.ident == "provider_output"
-                    && method.sig.inputs.len() == 1
-                    && matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver))
-                        if receiver.reference.is_some() && receiver.mutability.is_none())
-                    && return_type_is(&method.sig.output, "DomainModuleResult")
-                    && method.default.is_none())
-        })
-}
-
-fn is_canonical_provider_output_binding_impl(binding: &syn::ImplItemConst) -> bool {
-    if binding.ident != "OUTPUT_BINDINGS"
-        || compact_tokens(&binding.ty) != "&'static[ProviderOutputBinding]"
-    {
-        return false;
-    }
-    matches!(&binding.expr, syn::Expr::Reference(reference)
-        if matches!(reference.expr.as_ref(), syn::Expr::Array(array) if !array.elems.is_empty()))
-}
-
-fn is_canonical_provider_output_method(method: &syn::ImplItemFn) -> bool {
-    if method.sig.ident != "provider_output"
-        || method.sig.inputs.len() != 1
-        || !matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver))
-            if receiver.reference.is_some() && receiver.mutability.is_none())
-        || !return_type_is(&method.sig.output, "DomainModuleResult")
-        || method.block.stmts.len() != 1
-    {
-        return false;
-    }
-    let syn::Stmt::Expr(syn::Expr::Struct(output), None) = &method.block.stmts[0] else {
-        return false;
-    };
-    if path_last_ident(&output.path).is_none_or(|ident| ident != "DomainModuleResult") {
-        return false;
-    }
-    let resource_fields = output
-        .fields
-        .iter()
-        .filter(|field| matches!(&field.member, syn::Member::Named(name) if name == "resources"))
-        .collect::<Vec<_>>();
-    if resource_fields.len() != 1
-        || !matches!(&resource_fields[0].expr, syn::Expr::MethodCall(call)
-            if call.method == "runtime_resources"
-                && call.args.is_empty()
-                && expr_path_last(&call.receiver).is_some_and(|name| name == "self"))
-        || output.fields.iter().any(|field| {
-            !matches!(&field.member, syn::Member::Named(name)
-                if matches!(name.to_string().as_str(), "probes" | "resources" | "workers"))
-        })
-    {
-        return false;
-    }
-    output.rest.is_none()
-        || matches!(&output.rest, Some(rest)
-        if matches!(rest.as_ref(), syn::Expr::Call(call)
-            if call.args.is_empty() && is_exact_path(&call.func, &["DomainModuleResult", "default"])))
-}
-
-fn return_type_is(output: &syn::ReturnType, expected: &str) -> bool {
-    match output {
-        syn::ReturnType::Type(_, ty) => type_last_ident(ty).is_some_and(|ident| ident == expected),
-        syn::ReturnType::Default => false,
-    }
-}
-
-fn owned_input_ident(input: &syn::FnArg, ty: &str) -> Option<String> {
-    let syn::FnArg::Typed(input) = input else {
-        return None;
-    };
-    let syn::Pat::Ident(pat) = input.pat.as_ref() else {
-        return None;
-    };
-    let syn::Type::Path(path) = input.ty.as_ref() else {
-        return None;
-    };
-    if pat.mutability.is_some()
-        || pat.by_ref.is_some()
-        || path.qself.is_some()
-        || path
-            .path
-            .segments
-            .last()
-            .is_none_or(|segment| segment.ident != ty)
-    {
-        return None;
-    }
-    Some(pat.ident.to_string())
-}
-
-#[derive(Default)]
-struct PgLifecycleCalls {
-    into_runtime_parts: usize,
-    factory_spawn: usize,
-    forbidden: bool,
-}
-
-impl<'ast> Visit<'ast> for PgLifecycleCalls {
-    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-        if attrs_may_be_production(&item.attrs) {
-            syn::visit::visit_item_mod(self, item);
-        }
-    }
-
-    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        if attrs_may_be_production(&item.attrs) {
-            syn::visit::visit_item_fn(self, item);
-        }
-    }
-
-    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-        if attrs_may_be_production(&item.attrs) {
-            syn::visit::visit_impl_item_fn(self, item);
-        }
-    }
-
-    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        match call.method.to_string().as_str() {
-            "into_runtime_parts" => self.into_runtime_parts += 1,
-            "spawn"
-                if expr_path_last(&call.receiver)
-                    .is_some_and(|ident| ident == "sampler_factory") =>
-            {
-                self.factory_spawn += 1;
-            }
-            "store_guard" | "audit_admin_store_guard" | "spawn_readiness_sampler" => {
-                self.forbidden = true;
-            }
-            "setup_maintenance"
-            | "setup_maintenance_with_audit_admin_config"
-            | "run_migrations" => self.forbidden = true,
-            _ => {}
-        }
-        syn::visit::visit_expr_method_call(self, call);
-    }
-
-    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if let Some(method) = expr_path_last(&call.func).map(ToString::to_string) {
-            match method.as_str() {
-                "into_runtime_parts" => self.into_runtime_parts += 1,
-                "spawn_readiness_sampler" | "store_guard" | "audit_admin_store_guard" => {
-                    self.forbidden = true;
-                }
-                "setup_maintenance"
-                | "setup_maintenance_with_audit_admin_config"
-                | "run_migrations" => self.forbidden = true,
-                _ => {}
-            }
-        }
-        syn::visit::visit_expr_call(self, call);
-    }
-}
-
-fn pg_lifecycle_calls(file: &syn::File) -> PgLifecycleCalls {
-    let mut calls = PgLifecycleCalls::default();
-    calls.visit_file(file);
-    if calls.into_runtime_parts != 0 || calls.factory_spawn != 0 {
-        calls.forbidden = true;
-    }
-    calls
-}
-
-#[cfg(test)]
-#[test]
-fn pg_lifecycle_guard_rejects_migrating_maintenance_bypass() {
-    let bypass = syn::parse_file(
-        "fn bypass() { PgRuntimeDeps::setup_maintenance(); owner.run_migrations(); }",
-    )
-    .unwrap_or_else(|_| unreachable!());
-    assert!(pg_lifecycle_calls(&bypass).forbidden);
-
-    let connect_only =
-        syn::parse_file("fn maintenance() { PgRuntimeDeps::connect_maintenance(); }")
-            .unwrap_or_else(|_| unreachable!());
-    assert!(!pg_lifecycle_calls(&connect_only).forbidden);
-}
-
-fn is_canonical_pg_runtime_constructor(item: &syn::ItemFn) -> bool {
-    if item.sig.inputs.len() != 2 || !return_type_is(&item.sig.output, "DomainModuleResult") {
-        return false;
-    }
-    let Some(owner) = owned_input_ident(&item.sig.inputs[0], "PgRuntimeDeps") else {
-        return false;
-    };
-    let Some(period) = owned_input_ident(&item.sig.inputs[1], "Duration") else {
-        return false;
-    };
-    let Some((resources, factory)) = pg_runtime_parts_binding(item, &owner, &period) else {
-        return false;
-    };
-    let Some(worker) = pg_worker_binding(item, &factory) else {
-        return false;
-    };
-    pg_returned_module_uses(item, &resources, &worker)
-}
-
-fn pg_runtime_parts_binding(
-    item: &syn::ItemFn,
-    owner: &str,
-    period: &str,
-) -> Option<(String, String)> {
-    let bindings =
-        item.block
-            .stmts
+    let struct_count = |file: &syn::File, name: &str| {
+        file.items
             .iter()
-            .filter_map(|stmt| {
-                let syn::Stmt::Local(local) = stmt else {
-                    return None;
-                };
-                let syn::Pat::Tuple(tuple) = &local.pat else {
-                    return None;
-                };
-                let mut bindings = tuple.elems.iter();
-                let (Some(syn::Pat::Ident(resources)), Some(syn::Pat::Ident(factory)), None) =
-                    (bindings.next(), bindings.next(), bindings.next())
-                else {
-                    return None;
-                };
-                let init = local.init.as_ref()?;
-                let syn::Expr::MethodCall(call) = init.expr.as_ref() else {
-                    return None;
-                };
-                (resources.by_ref.is_none()
-                    && resources.mutability.is_none()
-                    && factory.by_ref.is_none()
-                    && factory.mutability.is_none()
-                    && init.diverge.is_none()
-                    && call.method == "into_runtime_parts"
-                    && expr_path_last(&call.receiver).is_some_and(|ident| ident == owner)
-                    && call.args.len() == 1
-                    && call.args.first().is_some_and(|arg| {
-                        expr_path_last(arg).is_some_and(|ident| ident == period)
-                    }))
-                .then(|| (resources.ident.to_string(), factory.ident.to_string()))
+            .filter(|item| {
+                matches!(item, syn::Item::Struct(item)
+                    if item.ident == name && attrs_may_be_production(&item.attrs))
             })
-            .collect::<Vec<_>>();
-    (bindings.len() == 1).then(|| bindings[0].clone())
-}
-
-fn pg_worker_binding(item: &syn::ItemFn, factory: &str) -> Option<String> {
-    let bindings = item
-        .block
-        .stmts
-        .iter()
-        .filter_map(|stmt| {
-            let syn::Stmt::Local(local) = stmt else {
-                return None;
-            };
-            let (pat, typed_as_worker) = match &local.pat {
-                syn::Pat::Ident(pat) => (pat, true),
-                syn::Pat::Type(typed) => {
-                    let syn::Pat::Ident(pat) = typed.pat.as_ref() else {
-                        return None;
-                    };
-                    (
-                        pat,
-                        type_last_ident(&typed.ty).is_some_and(|ident| ident == "WorkerSpec"),
-                    )
-                }
-                _ => return None,
-            };
-            let init = local.init.as_ref()?;
-            (typed_as_worker
-                && pat.by_ref.is_none()
-                && pat.mutability.is_none()
-                && worker_expr_consumes_factory(&init.expr, factory))
-            .then(|| pat.ident.to_string())
-        })
-        .collect::<Vec<_>>();
-    (bindings.len() == 1).then(|| bindings[0].clone())
-}
-
-fn worker_expr_consumes_factory(expr: &syn::Expr, factory: &str) -> bool {
-    let Some(closure) = returned_worker_closure(expr) else {
-        return false;
-    };
-    let Some(syn::Pat::Ident(token)) = closure.inputs.first() else {
-        return false;
-    };
-    closure.capture.is_some()
-        && closure.inputs.len() == 1
-        && returned_resource_spawn(&closure.body, factory, &token.ident.to_string())
-}
-
-fn returned_worker_closure(expr: &syn::Expr) -> Option<&syn::ExprClosure> {
-    match expr {
-        syn::Expr::Closure(closure) => Some(closure),
-        syn::Expr::Call(call) if call.args.len() == 1 => {
-            returned_worker_closure(call.args.first()?)
-        }
-        syn::Expr::Block(block) => block.block.stmts.last().and_then(|stmt| match stmt {
-            syn::Stmt::Expr(expr, _) => returned_worker_closure(expr),
-            _ => None,
-        }),
-        syn::Expr::Group(group) => returned_worker_closure(&group.expr),
-        syn::Expr::Paren(paren) => returned_worker_closure(&paren.expr),
-        syn::Expr::Try(expr) => returned_worker_closure(&expr.expr),
-        _ => None,
-    }
-}
-
-fn returned_resource_spawn(expr: &syn::Expr, factory: &str, token: &str) -> bool {
-    match expr {
-        syn::Expr::Call(call)
-            if is_exact_path(&call.func, &["DynManagedResource", "new_box"])
-                && call.args.len() == 1 =>
-        {
-            call.args
-                .first()
-                .is_some_and(|arg| returned_factory_spawn(arg, factory, token))
-        }
-        syn::Expr::Call(call) if call.args.len() == 1 => {
-            call.args
-                .first()
-                .is_some_and(|arg| returned_resource_spawn(arg, factory, token))
-        }
-        syn::Expr::Block(block) => block.block.stmts.last().is_some_and(|stmt| {
-            matches!(stmt, syn::Stmt::Expr(expr, _) if returned_resource_spawn(expr, factory, token))
-        }),
-        syn::Expr::Group(group) => returned_resource_spawn(&group.expr, factory, token),
-        syn::Expr::Paren(paren) => returned_resource_spawn(&paren.expr, factory, token),
-        syn::Expr::Try(expr) => returned_resource_spawn(&expr.expr, factory, token),
-        _ => false,
-    }
-}
-
-fn returned_factory_spawn(expr: &syn::Expr, factory: &str, token: &str) -> bool {
-    match expr {
-        syn::Expr::MethodCall(call) => {
-            call.method == "spawn"
-                && expr_path_last(&call.receiver).is_some_and(|ident| ident == factory)
-                && call.args.len() == 1
-                && call
-                    .args
-                    .first()
-                    .is_some_and(|arg| expr_path_last(arg).is_some_and(|ident| ident == token))
-        }
-        syn::Expr::Call(call) if call.args.len() == 1 => call
-            .args
-            .first()
-            .is_some_and(|arg| returned_factory_spawn(arg, factory, token)),
-        syn::Expr::Group(group) => returned_factory_spawn(&group.expr, factory, token),
-        syn::Expr::Paren(paren) => returned_factory_spawn(&paren.expr, factory, token),
-        syn::Expr::Try(expr) => returned_factory_spawn(&expr.expr, factory, token),
-        _ => false,
-    }
-}
-
-fn pg_returned_module_uses(item: &syn::ItemFn, resources: &str, worker: &str) -> bool {
-    let Some(syn::Stmt::Expr(returned, None)) = item.block.stmts.last() else {
-        return false;
-    };
-    struct OutputFlow<'a> {
-        resources: &'a str,
-        worker: &'a str,
-        outputs: usize,
-        valid: usize,
-    }
-    impl<'ast> Visit<'ast> for OutputFlow<'_> {
-        fn visit_expr_struct(&mut self, output: &'ast syn::ExprStruct) {
-            if path_last_ident(&output.path).is_some_and(|ident| ident == "DomainModuleResult") {
-                self.outputs += 1;
-                let resources = named_field_expr(output, "resources");
-                let workers = named_field_expr(output, "workers");
-                if resources.is_some_and(|expr| ident_use_count(expr, self.resources) == 1)
-                    && workers.is_some_and(|expr| ident_use_count(expr, self.worker) == 1)
-                {
-                    self.valid += 1;
-                }
-            }
-            syn::visit::visit_expr_struct(self, output);
-        }
-    }
-    fn named_field_expr<'a>(output: &'a syn::ExprStruct, name: &str) -> Option<&'a syn::Expr> {
-        output.fields.iter().find_map(|field| {
-            matches!(&field.member, syn::Member::Named(member) if member == name)
-                .then_some(&field.expr)
-        })
-    }
-    fn ident_use_count(expr: &syn::Expr, expected: &str) -> usize {
-        expr.to_token_stream()
-            .to_string()
-            .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
-            .filter(|token| *token == expected)
             .count()
-    }
-    let mut flow = OutputFlow {
-        resources,
-        worker,
-        outputs: 0,
-        valid: 0,
     };
-    flow.visit_expr(returned);
-    flow.outputs == 1 && flow.valid == 1
-}
-
-fn has_canonical_pg_runtime_build(block: &syn::Block) -> bool {
-    let declarations = block
-        .stmts
-        .iter()
-        .filter_map(|stmt| {
-            let syn::Stmt::Local(local) = stmt else {
-                return None;
-            };
-            let syn::Pat::Ident(pat) = &local.pat else {
-                return None;
-            };
-            let Some(init) = &local.init else {
-                return None;
-            };
-            (pat.mutability.is_none()
-                && init.diverge.is_none()
-                && matches!(init.expr.as_ref(), syn::Expr::Call(call)
-                    if is_exact_path(&call.func, &["crate", "provider_output", "build_pg_runtime_module"])
-                        && call.args.len() == 2
-                        && call.args.iter().all(|arg| matches!(arg, syn::Expr::Path(_)))))
-            .then(|| pat.ident.to_string())
-        })
-        .collect::<Vec<_>>();
-    declarations.len() == 1
-        && exact_named_path_call_count(
-            block,
-            &["crate", "provider_output", "build_pg_runtime_module"],
-        ) == 1
-        && launch_field_use_count(block, "pg_runtime_module", &declarations[0]) == 1
-}
-
-fn launch_field_use_count(block: &syn::Block, field_name: &str, binding: &str) -> usize {
-    struct Counter<'a> {
-        field_name: &'a str,
-        binding: &'a str,
-        count: usize,
+    let trait_count = |file: &syn::File, name: &str| {
+        file.items
+            .iter()
+            .filter(|item| {
+                matches!(item, syn::Item::Trait(item)
+                    if item.ident == name && attrs_may_be_production(&item.attrs))
+            })
+            .count()
+    };
+    let provider_tokens = compact_tokens(provider_output);
+    let owner_shape = [
+        ("ProviderOutput", 1),
+        ("ProviderBuild", 1),
+        ("ProviderFactoryDispatch", 1),
+        ("CompletedProviderBuild", 1),
+    ]
+    .into_iter()
+    .all(|(name, expected)| {
+        struct_count(provider_output, name) == expected
+            // `provider_permits!` may emit ProviderFactoryDispatch inside the macro body; the
+            // source still Hard-pins the consuming owner name without restoring a trait seam.
+            || (name == "ProviderFactoryDispatch"
+                && provider_tokens.contains("structProviderFactoryDispatch"))
+    }) && trait_count(provider_output, "ProviderOutput") == 0;
+    if !owner_shape {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            PROVIDER_OUTPUT_PATH,
+            "provider lifecycle 必须由四个 private/consuming transaction owner 承载，禁止恢复 ProviderOutput trait/self-proof",
+        ));
     }
-    impl<'ast> Visit<'ast> for Counter<'_> {
-        fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
-            if item
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "LaunchPlanParts")
-            {
-                self.count += item
-                    .fields
-                    .iter()
-                    .filter(|field| {
-                        matches!(&field.member, syn::Member::Named(member) if member == self.field_name)
-                            && expr_path_last(&field.expr)
-                                .is_some_and(|ident| ident == self.binding)
-                    })
-                    .count();
-            }
-            syn::visit::visit_expr_struct(self, item);
+
+    let generated_tokens = compact_tokens(generated);
+    let catalog_is_closed =
+        exact_path_call_count_in_file(generated, &["ProviderCatalogEntry", "checked"])
+            == FACTORIES.len()
+            && FACTORIES.iter().all(|(variant, _)| {
+                let symbol = format!("ProviderFactorySymbol::{variant}");
+                let macro_factory = format!("factory:{variant}");
+                generated_tokens.matches(&symbol).count() == 1
+                    && (provider_tokens.contains(&symbol)
+                        || provider_tokens.contains(&macro_factory))
+            })
+            && provider_tokens.contains("matchentry.factory()");
+    if !catalog_is_closed {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            GENERATED_PROVIDERS_PATH,
+            format!(
+                "generated active catalog 与 exhaustive typed dispatch 必须形成 exact set；expected={} factories",
+                FACTORIES.len()
+            ),
+        ));
+    }
+
+    let provider_phase_tokens = compact_tokens(provider_phase);
+    let plan_join_is_unique = exact_path_call_count_in_file(
+        provider_phase,
+        &["crate", "provider_output", "ProviderBuild", "from_plan"],
+    ) == 1
+        && exact_path_call_count_in_file(
+            provider_phase,
+            &[
+                "crate",
+                "provider_output",
+                "ProviderFactoryDispatch",
+                "from_catalog",
+            ],
+        ) == 1
+        && provider_phase_tokens
+            .matches("crate::providers_gen::PROVIDER_CATALOG")
+            .count()
+            == 2;
+    if !plan_join_is_unique {
+        findings.push(finding(
+            Rule::MissingAnchor,
+            RUNTIME_PHASE_PROVIDER_PATH,
+            "BuildProvider 必须恰好一次把 RuntimePlan declarations 与 generated PROVIDER_CATALOG join，再生成 typed one-shot dispatch",
+        ));
+    }
+
+    let construction_files = [provider_phase, infra_phase, domains_phase];
+    for (variant, accessor) in FACTORIES {
+        let uses = construction_files
+            .iter()
+            .map(|file| {
+                let mut count = 0;
+                for item in &file.items {
+                    if let syn::Item::Impl(item) = item {
+                        for impl_item in &item.items {
+                            if let syn::ImplItem::Fn(method) = impl_item {
+                                count += method_call_count_in_block(&method.block, accessor);
+                            }
+                        }
+                    }
+                }
+                count
+            })
+            .sum::<usize>();
+        if uses != 1 {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                PROVIDER_OUTPUT_PATH,
+                format!(
+                    "typed factory permit {variant}/{accessor} 必须在生产 phase 消费且只消费一次；observed={uses}"
+                ),
+            ));
         }
     }
-    let mut counter = Counter {
-        field_name,
-        binding,
-        count: 0,
-    };
-    counter.visit_block(block);
-    counter.count
-}
 
-fn has_canonical_pg_runtime_registration(file: &syn::File) -> bool {
-    let methods = file
-        .items
-        .iter()
-        .filter_map(|item| {
-            let syn::Item::Impl(item) = item else {
-                return None;
-            };
-            if type_last_ident(&item.self_ty).is_none_or(|ident| ident != "LaunchPlan") {
-                return None;
-            }
-            item.items.iter().find_map(|item| match item {
-                syn::ImplItem::Fn(method) if method.sig.ident == "register" => Some(method),
+    let phase_method_calls = |file: &syn::File, method_name: &str| {
+        file.items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(item) => Some(item),
                 _ => None,
             })
-        })
-        .collect::<Vec<_>>();
-    if methods.len() != 1 {
-        return false;
-    }
-    let stmts = &methods[0].block.stmts;
-    let Some(pg_binding) = launch_destructured_binding(stmts, "pg_runtime_module") else {
-        return false;
-    };
-    let Some(domain_binding) = launch_destructured_binding(stmts, "domain_module") else {
-        return false;
-    };
-    let trace = stmts.iter().position(is_trace_registration_stmt);
-    let pg = stmts
-        .iter()
-        .position(|stmt| is_module_registration_result_stmt(stmt, &pg_binding, "pg_result"));
-    let domain = stmts.iter().position(|stmt| {
-        is_module_registration_result_stmt(stmt, &domain_binding, "domain_result")
-    });
-    let pg_propagation = stmts
-        .iter()
-        .position(|stmt| is_result_propagation_stmt(stmt, "pg_result"));
-    let domain_propagation = stmts
-        .iter()
-        .position(|stmt| is_result_propagation_stmt(stmt, "domain_result"));
-    matches!(
-        (trace, pg, domain, pg_propagation, domain_propagation),
-        (
-            Some(trace),
-            Some(pg),
-            Some(domain),
-            Some(pg_propagation),
-            Some(domain_propagation)
-        ) if trace < pg
-            && pg < domain
-            && domain < pg_propagation
-            && pg_propagation < domain_propagation
-    ) && stmts
-        .iter()
-        .filter(|stmt| is_module_registration_result_stmt(stmt, &pg_binding, "pg_result"))
-        .count()
-        == 1
-        && stmts
-            .iter()
-            .filter(|stmt| {
-                is_module_registration_result_stmt(stmt, &domain_binding, "domain_result")
+            .flat_map(|item| item.items.iter())
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(method) if attrs_may_be_production(&method.attrs) => Some(method),
+                _ => None,
             })
-            .count()
-            == 1
-        && stmts
-            .iter()
-            .filter(|stmt| is_result_propagation_stmt(stmt, "pg_result"))
-            .count()
-            == 1
-        && stmts
-            .iter()
-            .filter(|stmt| is_result_propagation_stmt(stmt, "domain_result"))
-            .count()
-            == 1
-        && module_registration_call_count(file, &pg_binding) == 1
-        && module_registration_call_count(file, &domain_binding) == 1
-        && method_call_count_in_block(&methods[0].block, "register_detached") == 1
-        && method_call_count_in_block(&methods[0].block, "register_with_token") == 0
-}
-
-fn launch_plan_fields_are_closed(file: &syn::File) -> bool {
-    const ALLOWED_FIELDS: &[&str] = &[
-        "listeners",
-        "trace_exporter",
-        "pg_runtime_module",
-        "domain_module",
-    ];
-    let plans = file
-        .items
+            .map(|method| method_call_count_in_block(&method.block, method_name))
+            .sum::<usize>()
+    };
+    let record_count = construction_files
         .iter()
-        .filter_map(|item| match item {
-            syn::Item::Struct(item)
-                if item.ident == "LaunchPlanParts" || item.ident == "LaunchPlan" =>
-            {
-                Some(item)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    plans.len() == 2
-        && plans.iter().all(|plan| {
-            plan.fields.iter().all(|field| {
-                field
-                    .ident
-                    .as_ref()
-                    .is_some_and(|ident| ALLOWED_FIELDS.contains(&ident.to_string().as_str()))
-            })
-        })
-}
-
-fn launch_lifecycle_calls_are_canonical(file: &syn::File) -> bool {
-    fn has_lifecycle_calls(block: &syn::Block) -> bool {
-        method_call_count_in_block(block, "register_detached") != 0
-            || method_call_count_in_block(block, "register_with_token") != 0
+        .map(|file| phase_method_calls(file, "record"))
+        .sum::<usize>();
+    let domains_tokens = compact_tokens(domains_phase);
+    let finalize_tokens = compact_tokens(finalize_phase);
+    let phase_launch_tokens = compact_tokens(phase_launch);
+    let provider_tokens = compact_tokens(provider_phase);
+    let infra_tokens = compact_tokens(infra_phase);
+    let transaction_is_closed = record_count == 8
+        && phase_method_calls(domains_phase, "finish") == 1
+        && provider_tokens.contains("provider_build.abort_with(module,error).await")
+        && infra_tokens.contains("provider_build.abort_with(module,error).await")
+        && domains_tokens.contains("provider_build.abort(error).await")
+        && domains_tokens.contains("failure.abort().await")
+        && domains_tokens.contains("completed.abort(error).await")
+        && finalize_tokens.contains("provider_build.abort(error).await")
+        && phase_launch_tokens.contains("provider_build.abort(error).await")
+        && phase_launch_tokens.contains("provider_build.into_modules()");
+    if !transaction_is_closed {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            PROVIDER_OUTPUT_PATH,
+            format!(
+                "provider transaction 必须覆盖 8 个 sealed output batches、唯一 finish、各 fallible phase rollback 与唯一 launch handoff；record_count={record_count}"
+            ),
+        ));
     }
 
-    let mut listener_activation_count = 0usize;
+    let launch_tokens = compact_tokens(launch);
+    let pg_build_is_unique = exact_path_call_count_in_file(
+        infra_phase,
+        &["crate", "provider_output", "build_pg_runtime_module"],
+    ) == 1
+        && exact_path_call_count_in_file(
+            phase_launch,
+            &["crate", "provider_output", "build_pg_runtime_module"],
+        ) == 0;
+    let provider_registration = launch_tokens
+        .find("letprovider_result=Self::register_module_output(stack,provider_module);");
+    let domain_registration =
+        launch_tokens.find("letdomain_result=Self::register_module_output(stack,domain_module);");
+    if !pg_build_is_unique
+        || !matches!((provider_registration, domain_registration),
+            (Some(provider), Some(domain)) if provider < domain)
+        || !launch_tokens.contains("provider_result?;domain_result?;")
+    {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_LAUNCH_PATH,
+            "PG owner 必须在 BuildInfra 立即进入 ProviderOutput；Launch 只接受 completed provider module，并在 domain module 前注册",
+        ));
+    }
 
-    for item in &file.items {
-        match item {
-            syn::Item::Fn(function) if attrs_may_be_production(&function.attrs) => {
-                if has_lifecycle_calls(&function.block) {
-                    return false;
-                }
-            }
-            syn::Item::Impl(item) if attrs_may_be_production(&item.attrs) => {
-                let owner = type_last_ident(&item.self_ty);
-                for method in item.items.iter().filter_map(|item| match item {
-                    syn::ImplItem::Fn(method) if attrs_may_be_production(&method.attrs) => {
-                        Some(method)
-                    }
-                    _ => None,
-                }) {
-                    let detached = method_call_count_in_block(&method.block, "register_detached");
-                    let with_token =
-                        method_call_count_in_block(&method.block, "register_with_token");
-                    let launch_plan_method = owner.is_some_and(|ident| ident == "LaunchPlan")
-                        && ((method.sig.ident == "register" && detached == 1 && with_token == 0)
-                            || (method.sig.ident == "register_module_output"
-                                && detached == 1
-                                && with_token == 1));
-                    let listener_activation = owner.is_some_and(|ident| ident == "BoundListener")
-                        && method.sig.ident == "activate"
-                        && detached == 0
-                        && with_token == 2;
-                    if listener_activation {
-                        listener_activation_count += 1;
-                    }
-                    if has_lifecycle_calls(&method.block)
-                        && !launch_plan_method
-                        && !listener_activation
-                    {
-                        return false;
-                    }
-                }
-            }
-            _ => {}
+    for forbidden in [
+        "ProviderOutputBinding",
+        "PROVIDER_OUTPUT_BINDINGS",
+        "build_provider_module",
+        "merge_provider",
+        "trait ProviderOutput",
+        "let pg_runtime_module",
+    ] {
+        if REQUIRED_PATHS.iter().any(|path| {
+            fs::read_to_string(root.join(path)).is_ok_and(|source| source.contains(forbidden))
+        }) {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                PROVIDER_OUTPUT_PATH,
+                format!("legacy/fallback provider seam 禁止回归: {forbidden}"),
+            ));
         }
     }
-    listener_activation_count == 1
+
+    Ok(findings)
 }
 
 fn method_call_count_in_block(block: &syn::Block, method: &str) -> usize {
@@ -10655,175 +10428,6 @@ fn method_call_count_in_block(block: &syn::Block, method: &str) -> usize {
     let mut counter = Counter { method, count: 0 };
     counter.visit_block(block);
     counter.count
-}
-
-fn launch_destructured_binding(stmts: &[syn::Stmt], field_name: &str) -> Option<String> {
-    stmts.iter().find_map(|stmt| {
-        let syn::Stmt::Local(local) = stmt else {
-            return None;
-        };
-        let syn::Pat::Struct(pat) = &local.pat else {
-            return None;
-        };
-        pat.fields.iter().find_map(|field| {
-            if !matches!(&field.member, syn::Member::Named(member) if member == field_name) {
-                return None;
-            }
-            let syn::Pat::Ident(binding) = field.pat.as_ref() else {
-                return None;
-            };
-            Some(binding.ident.to_string())
-        })
-    })
-}
-
-fn module_registration_call_count(file: &syn::File, binding: &str) -> usize {
-    struct Counter<'a> {
-        binding: &'a str,
-        count: usize,
-    }
-    impl<'ast> Visit<'ast> for Counter<'_> {
-        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-            if expr_path_last(&call.func).is_some_and(|ident| ident == "register_module_output")
-                && call.args.len() == 2
-                && call.args.last().is_some_and(|arg| {
-                    expr_path_last(arg).is_some_and(|ident| ident == self.binding)
-                })
-            {
-                self.count += 1;
-            }
-            syn::visit::visit_expr_call(self, call);
-        }
-    }
-    let mut counter = Counter { binding, count: 0 };
-    counter.visit_file(file);
-    counter.count
-}
-
-fn is_trace_registration_stmt(stmt: &syn::Stmt) -> bool {
-    matches!(stmt, syn::Stmt::Expr(syn::Expr::If(expr), None)
-        if matches!(expr.cond.as_ref(), syn::Expr::Let(let_)
-            if matches!(let_.expr.as_ref(), syn::Expr::Path(path)
-                if path.path.is_ident("trace_exporter"))))
-}
-
-fn is_module_registration_result_stmt(
-    stmt: &syn::Stmt,
-    module_binding: &str,
-    result_binding: &str,
-) -> bool {
-    let syn::Stmt::Local(local) = stmt else {
-        return false;
-    };
-    let syn::Pat::Ident(result) = &local.pat else {
-        return false;
-    };
-    let Some(init) = &local.init else {
-        return false;
-    };
-    let Some(call) = direct_call_behind_runtime_context(&init.expr) else {
-        return false;
-    };
-    result.ident == result_binding
-        && result.by_ref.is_none()
-        && result.mutability.is_none()
-        && init.diverge.is_none()
-        && is_exact_path(&call.func, &["Self", "register_module_output"])
-        && call.args.len() == 2
-        && call
-            .args
-            .first()
-            .is_some_and(|arg| is_exact_path(arg, &["stack"]))
-        && call
-            .args
-            .last()
-            .is_some_and(|arg| is_exact_path(arg, &[module_binding]))
-}
-
-fn is_result_propagation_stmt(stmt: &syn::Stmt, result_binding: &str) -> bool {
-    matches!(
-        stmt,
-        syn::Stmt::Expr(syn::Expr::Try(propagation), Some(_))
-            if is_exact_path(&propagation.expr, &[result_binding])
-    )
-}
-
-#[derive(Default)]
-struct RuntimeResourcesCallCounter {
-    calls: usize,
-}
-
-impl<'ast> Visit<'ast> for RuntimeResourcesCallCounter {
-    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-        if attrs_may_be_production(&item.attrs) {
-            syn::visit::visit_item_mod(self, item);
-        }
-    }
-
-    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        if attrs_may_be_production(&item.attrs) {
-            syn::visit::visit_item_fn(self, item);
-        }
-    }
-
-    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-        if attrs_may_be_production(&item.attrs) {
-            syn::visit::visit_impl_item_fn(self, item);
-        }
-    }
-
-    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if call.method == "runtime_resources" {
-            self.calls += 1;
-        }
-        syn::visit::visit_expr_method_call(self, call);
-    }
-
-    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if expr_path_last(&call.func).is_some_and(|ident| ident == "runtime_resources") {
-            self.calls += 1;
-        }
-        syn::visit::visit_expr_call(self, call);
-    }
-}
-
-#[derive(Default)]
-struct MergeProviderCallCounter {
-    calls: usize,
-}
-
-impl<'ast> Visit<'ast> for MergeProviderCallCounter {
-    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-        if attrs_may_be_production(&item.attrs) {
-            syn::visit::visit_item_mod(self, item);
-        }
-    }
-
-    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        if attrs_may_be_production(&item.attrs) {
-            syn::visit::visit_item_fn(self, item);
-        }
-    }
-
-    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-        if attrs_may_be_production(&item.attrs) {
-            syn::visit::visit_impl_item_fn(self, item);
-        }
-    }
-
-    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if call.method == "merge_provider" {
-            self.calls += 1;
-        }
-        syn::visit::visit_expr_method_call(self, call);
-    }
-
-    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if expr_path_last(&call.func).is_some_and(|ident| ident == "merge_provider") {
-            self.calls += 1;
-        }
-        syn::visit::visit_expr_call(self, call);
-    }
 }
 
 fn expr_path_last(expr: &syn::Expr) -> Option<&syn::Ident> {
@@ -10850,133 +10454,6 @@ fn is_exact_path(expr: &syn::Expr, expected: &[&str]) -> bool {
             .iter()
             .zip(expected)
             .all(|(segment, expected)| segment.ident == *expected)
-}
-
-fn is_canonical_provider_constructor(item: &syn::ItemFn) -> bool {
-    item.sig.inputs.len() == 1
-        && matches!(item.sig.inputs.first(), Some(syn::FnArg::Typed(input))
-            if matches!(input.pat.as_ref(), syn::Pat::Ident(pat)
-                if pat.ident == "deps" && pat.mutability.is_none() && pat.by_ref.is_none())
-                && matches!(input.ty.as_ref(), syn::Type::Reference(reference)
-                    if reference.mutability.is_none()
-                        && type_last_ident(&reference.elem).is_some_and(|ident| ident == "SharedRuntimeDeps")))
-        && return_type_is(&item.sig.output, "DomainModuleResult")
-        && item.block.stmts.len() == 5
-        && is_provider_module_init(&item.block.stmts[0])
-        && is_provider_merge_stmt(&item.block.stmts[1], "redis")
-        && is_provider_merge_stmt(&item.block.stmts[2], "s3")
-        && is_provider_merge_stmt(&item.block.stmts[3], "vault")
-        && matches!(&item.block.stmts[4], syn::Stmt::Expr(expr, None)
-            if expr_path_last(expr).is_some_and(|ident| ident == "provider_module"))
-}
-
-fn is_provider_module_init(stmt: &syn::Stmt) -> bool {
-    let syn::Stmt::Local(local) = stmt else {
-        return false;
-    };
-    let syn::Pat::Ident(pat) = &local.pat else {
-        return false;
-    };
-    let Some(init) = &local.init else {
-        return false;
-    };
-    pat.ident == "provider_module"
-        && pat.mutability.is_some()
-        && pat.by_ref.is_none()
-        && init.diverge.is_none()
-        && matches!(init.expr.as_ref(), syn::Expr::Call(call)
-            if call.args.is_empty() && is_exact_path(&call.func, &["DomainModuleResult", "default"]))
-}
-
-fn is_provider_merge_stmt(stmt: &syn::Stmt, provider: &str) -> bool {
-    let syn::Stmt::Expr(syn::Expr::MethodCall(call), Some(_)) = stmt else {
-        return false;
-    };
-    call.method == "merge_provider"
-        && expr_path_last(&call.receiver).is_some_and(|ident| ident == "provider_module")
-        && call.args.len() == 1
-        && call.args.first().is_some_and(|arg| {
-            let syn::Expr::Reference(reference) = arg else {
-                return false;
-            };
-            matches!(reference.expr.as_ref(), syn::Expr::Field(field)
-                if expr_path_last(&field.base).is_some_and(|ident| ident == "deps")
-                    && matches!(&field.member, syn::Member::Named(member) if member == provider))
-        })
-}
-
-fn direct_provider_registrations(block: &syn::Block) -> usize {
-    block
-        .stmts
-        .iter()
-        .filter(|stmt| {
-            let syn::Stmt::Local(local) = stmt else {
-                return false;
-            };
-            let Some(init) = &local.init else {
-                return false;
-            };
-            is_provider_assembly_call(&init.expr)
-        })
-        .count()
-}
-
-fn direct_provider_constructors(block: &syn::Block) -> usize {
-    block
-        .stmts
-        .iter()
-        .filter(|stmt| {
-            let syn::Stmt::Local(local) = stmt else {
-                return false;
-            };
-            let syn::Pat::Ident(pat) = &local.pat else {
-                return false;
-            };
-            let Some(init) = &local.init else {
-                return false;
-            };
-            pat.ident == "provider_module"
-                && pat.mutability.is_none()
-                && pat.by_ref.is_none()
-                && init.diverge.is_none()
-                && matches!(init.expr.as_ref(), syn::Expr::Call(call)
-                    if is_exact_path(&call.func, &["crate", "provider_output", "build_provider_module"])
-                        && call.args.len() == 1
-                        && call.args.first().is_some_and(|arg| matches!(arg, syn::Expr::Reference(reference)
-                            if reference.mutability.is_none()
-                                && expr_path_last(&reference.expr).is_some_and(|ident| ident == "deps"))))
-        })
-        .count()
-}
-
-fn direct_provider_declarations(block: &syn::Block) -> usize {
-    block
-        .stmts
-        .iter()
-        .filter(|stmt| {
-            matches!(stmt, syn::Stmt::Local(local)
-                if matches!(&local.pat, syn::Pat::Ident(pat) if pat.ident == "provider_module"))
-        })
-        .count()
-}
-
-fn provider_module_path_uses(block: &syn::Block) -> usize {
-    struct Counter(usize);
-    impl<'ast> Visit<'ast> for Counter {
-        fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
-            if path.qself.is_none()
-                && path.path.leading_colon.is_none()
-                && path.path.segments.len() == 1
-                && path.path.segments[0].ident == "provider_module"
-            {
-                self.0 += 1;
-            }
-            syn::visit::visit_expr_path(self, path);
-        }
-    }
-    let mut counter = Counter(0);
-    counter.visit_block(block);
-    counter.0
 }
 
 fn exact_named_path_call_count(block: &syn::Block, path: &[&str]) -> usize {
@@ -11057,586 +10534,6 @@ fn production_exact_path_call_count_in_file(file: &syn::File, path: &[&str]) -> 
     counter.calls
 }
 
-fn is_provider_assembly_call(expr: &syn::Expr) -> bool {
-    let syn::Expr::Call(call) = expr else {
-        return false;
-    };
-    if !is_exact_path(&call.func, &["assemble_runtime_module_outputs"])
-        && !is_exact_path(&call.func, &["crate", "assemble_runtime_module_outputs"])
-    {
-        return false;
-    }
-    call.args.iter().any(|arg| {
-        let syn::Expr::Struct(struct_expr) = arg else {
-            return false;
-        };
-        struct_expr
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "RuntimeModuleAssemblyInputs")
-            && struct_expr.fields.iter().any(|field| {
-                matches!(&field.member, syn::Member::Named(member) if member == "provider_module")
-                    && expr_path_last(&field.expr).is_some_and(|ident| ident == "provider_module")
-            })
-    })
-}
-
-fn direct_assembly_provider_merges(block: &syn::Block) -> usize {
-    block
-        .stmts
-        .iter()
-        .filter(|stmt| {
-            let syn::Stmt::Expr(syn::Expr::MethodCall(call), Some(_)) = stmt else {
-                return false;
-            };
-            call.method == "merge"
-                && expr_path_last(&call.receiver).is_some_and(|ident| ident == "module")
-                && call.args.first().is_some_and(|arg| {
-                    matches!(arg, syn::Expr::Field(field)
-                        if expr_path_last(&field.base).is_some_and(|ident| ident == "inputs")
-                            && matches!(&field.member, syn::Member::Named(member) if member == "provider_module"))
-                })
-        })
-        .count()
-}
-
-#[derive(Default)]
-struct ProviderPrimitiveCalls {
-    forbidden: bool,
-    amqp_runtime_resources: usize,
-}
-
-#[derive(Default)]
-struct LocalProviderSymbols {
-    aliases: BTreeMap<String, String>,
-    fields: BTreeMap<(String, String), String>,
-    returns: BTreeMap<String, String>,
-}
-
-impl LocalProviderSymbols {
-    const AMBIGUOUS: &'static str = "__AMBIGUOUS_PROVIDER_TYPE__";
-
-    fn insert_unique(map: &mut BTreeMap<String, String>, name: String, target: String) {
-        match map.entry(name) {
-            Entry::Vacant(entry) => {
-                entry.insert(target);
-            }
-            Entry::Occupied(mut entry) if entry.get() != &target => {
-                entry.insert(Self::AMBIGUOUS.to_string());
-            }
-            Entry::Occupied(_) => {}
-        }
-    }
-
-    fn resolve_type(&self, ty: &str) -> String {
-        let mut current = ty.to_string();
-        let mut seen = BTreeSet::new();
-        while seen.insert(current.clone()) {
-            let segments = current.split("::").collect::<Vec<_>>();
-            let Some((prefix_len, next)) = (1..=segments.len()).rev().find_map(|prefix_len| {
-                self.aliases
-                    .get(&segments[..prefix_len].join("::"))
-                    .map(|next| (prefix_len, next))
-            }) else {
-                break;
-            };
-            let suffix = &segments[prefix_len..];
-            current = if suffix.is_empty() {
-                next.clone()
-            } else {
-                format!("{next}::{}", suffix.join("::"))
-            };
-        }
-        current
-    }
-
-    fn collect(file: &syn::File) -> Self {
-        #[derive(Default)]
-        struct Collector(LocalProviderSymbols);
-        impl Collector {
-            fn collect_use(&mut self, tree: &syn::UseTree, prefix: &mut Vec<String>) {
-                match tree {
-                    syn::UseTree::Path(path) => {
-                        prefix.push(path.ident.to_string());
-                        self.collect_use(&path.tree, prefix);
-                        prefix.pop();
-                    }
-                    syn::UseTree::Rename(rename) => {
-                        let is_self = rename.ident == "self";
-                        if !is_self {
-                            prefix.push(rename.ident.to_string());
-                        }
-                        LocalProviderSymbols::insert_unique(
-                            &mut self.0.aliases,
-                            rename.rename.to_string(),
-                            prefix.join("::"),
-                        );
-                        if !is_self {
-                            prefix.pop();
-                        }
-                    }
-                    syn::UseTree::Name(name) => {
-                        prefix.push(name.ident.to_string());
-                        LocalProviderSymbols::insert_unique(
-                            &mut self.0.aliases,
-                            name.ident.to_string(),
-                            prefix.join("::"),
-                        );
-                        prefix.pop();
-                    }
-                    syn::UseTree::Group(group) => {
-                        for item in &group.items {
-                            self.collect_use(item, prefix);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        impl<'ast> Visit<'ast> for Collector {
-            fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-                if attrs_may_be_production(&item.attrs) {
-                    syn::visit::visit_item_mod(self, item);
-                }
-            }
-
-            fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
-                if attrs_may_be_production(&item.attrs) {
-                    let target = if item.generics.params.is_empty() {
-                        type_identity(&item.ty)
-                            .unwrap_or_else(|| LocalProviderSymbols::AMBIGUOUS.to_string())
-                    } else {
-                        LocalProviderSymbols::AMBIGUOUS.to_string()
-                    };
-                    LocalProviderSymbols::insert_unique(
-                        &mut self.0.aliases,
-                        item.ident.to_string(),
-                        target,
-                    );
-                }
-            }
-
-            fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-                if attrs_may_be_production(&item.attrs) {
-                    self.collect_use(&item.tree, &mut Vec::new());
-                }
-            }
-
-            fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
-                if attrs_may_be_production(&item.attrs) {
-                    let alias = item
-                        .rename
-                        .as_ref()
-                        .map_or_else(|| item.ident.to_string(), |(_, alias)| alias.to_string());
-                    LocalProviderSymbols::insert_unique(
-                        &mut self.0.aliases,
-                        alias,
-                        item.ident.to_string(),
-                    );
-                }
-            }
-
-            fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
-                if attrs_may_be_production(&item.attrs) {
-                    for field in &item.fields {
-                        if let (Some(name), Some(ty)) = (&field.ident, type_identity(&field.ty)) {
-                            let target = if item.generics.params.is_empty() {
-                                ty
-                            } else {
-                                LocalProviderSymbols::AMBIGUOUS.to_string()
-                            };
-                            let key = (item.ident.to_string(), name.to_string());
-                            match self.0.fields.entry(key) {
-                                Entry::Vacant(entry) => {
-                                    entry.insert(target);
-                                }
-                                Entry::Occupied(mut entry) if entry.get() != &target => {
-                                    entry.insert(LocalProviderSymbols::AMBIGUOUS.to_string());
-                                }
-                                Entry::Occupied(_) => {}
-                            }
-                        }
-                    }
-                }
-            }
-
-            fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-                if !attrs_may_be_production(&item.attrs) {
-                    return;
-                }
-                if let syn::ReturnType::Type(_, ty) = &item.sig.output
-                    && let Some(return_ty) = type_identity(ty)
-                    && !item.sig.generics.params.iter().any(|param| {
-                        matches!(param, syn::GenericParam::Type(param) if param.ident == return_ty)
-                    })
-                {
-                    LocalProviderSymbols::insert_unique(
-                        &mut self.0.returns,
-                        item.sig.ident.to_string(),
-                        return_ty,
-                    );
-                }
-                syn::visit::visit_item_fn(self, item);
-            }
-        }
-        let mut collector = Collector::default();
-        collector.visit_file(file);
-        for item in &file.items {
-            if let syn::Item::Struct(item) = item
-                && is_protected_provider_owner(&item.ident.to_string())
-            {
-                LocalProviderSymbols::insert_unique(
-                    &mut collector.0.aliases,
-                    item.ident.to_string(),
-                    format!("__LOCAL__::{}", item.ident),
-                );
-            }
-        }
-        collector.0
-    }
-}
-
-struct ProviderPrimitiveVisitor<'a> {
-    symbols: &'a LocalProviderSymbols,
-    bindings: BTreeMap<String, String>,
-    local_shadows: BTreeSet<String>,
-    self_type: Option<String>,
-    allow_amqp: bool,
-    calls: ProviderPrimitiveCalls,
-}
-
-impl ProviderPrimitiveVisitor<'_> {
-    fn resolve_type(&self, ty: &str) -> String {
-        let resolved = self.symbols.resolve_type(ty);
-        if !resolved.contains("::") && self.local_shadows.contains(&resolved) {
-            format!("__LOCAL__::{resolved}")
-        } else {
-            resolved
-        }
-    }
-
-    fn add_item_shadows(&mut self, items: &[syn::Item]) {
-        for item in items {
-            if let syn::Item::Struct(item) = item
-                && is_protected_provider_owner(&item.ident.to_string())
-            {
-                self.local_shadows.insert(item.ident.to_string());
-            }
-        }
-    }
-
-    fn expr_type(&self, expr: &syn::Expr) -> Option<String> {
-        match expr {
-            syn::Expr::Path(path) => path
-                .path
-                .segments
-                .last()
-                .and_then(|segment| self.bindings.get(&segment.ident.to_string()))
-                .map(|ty| self.resolve_type(ty)),
-            syn::Expr::Reference(reference) => self.expr_type(&reference.expr),
-            syn::Expr::Paren(paren) => self.expr_type(&paren.expr),
-            syn::Expr::Field(field) => {
-                let base = self.expr_type(&field.base)?;
-                let syn::Member::Named(member) = &field.member else {
-                    return None;
-                };
-                if base.rsplit("::").next() == Some("SharedRuntimeDeps") {
-                    return match member.to_string().as_str() {
-                        "redis" => Some("redis::RedisRuntimeDeps".to_string()),
-                        "s3" => Some("s3::S3RuntimeDeps".to_string()),
-                        "vault" => Some("vault::VaultRuntimeDeps".to_string()),
-                        _ => None,
-                    };
-                }
-                self.symbols
-                    .fields
-                    .get(&(base, member.to_string()))
-                    .map(|ty| self.resolve_type(ty))
-            }
-            syn::Expr::Call(call) => {
-                let syn::Expr::Path(path) = call.func.as_ref() else {
-                    return None;
-                };
-                let segments = path.path.segments.iter().collect::<Vec<_>>();
-                if segments.len() >= 2
-                    && segments.last().is_some_and(|segment| {
-                        matches!(
-                            segment.ident.to_string().as_str(),
-                            "new" | "default" | "connect"
-                        )
-                    })
-                {
-                    Some(
-                        self.resolve_type(
-                            &segments[..segments.len() - 1]
-                                .iter()
-                                .map(|segment| segment.ident.to_string())
-                                .collect::<Vec<_>>()
-                                .join("::"),
-                        ),
-                    )
-                } else {
-                    segments
-                        .last()
-                        .and_then(|segment| self.symbols.returns.get(&segment.ident.to_string()))
-                        .map(|ty| self.resolve_type(ty))
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn classify(&mut self, method: &str, owner: Option<String>) {
-        let owner = owner.map(|ty| self.resolve_type(&ty));
-        if method == "runtime_resources"
-            && owner.as_deref() == Some("AmqpRuntimeDeps")
-            && self.allow_amqp
-        {
-            self.calls.amqp_runtime_resources += 1;
-            return;
-        }
-        if owner
-            .as_deref()
-            .is_some_and(|owner| !is_protected_provider_owner(owner))
-        {
-            return;
-        }
-        self.calls.forbidden = true;
-    }
-}
-
-fn is_protected_provider_owner(owner: &str) -> bool {
-    if owner == LocalProviderSymbols::AMBIGUOUS {
-        return true;
-    }
-    let segments = owner.split("::").collect::<Vec<_>>();
-    matches!(
-        segments.as_slice(),
-        ["RedisRuntimeDeps"
-            | "S3RuntimeDeps"
-            | "VaultRuntimeDeps"
-            | "AmqpRuntimeDeps"
-            | "PgRuntimeDeps"
-            | "PgReadinessSamplerFactory"]
-            | ["DomainModuleResult" | "DomainModuleResultExt"]
-            | ["redis" | "redis_adapter", "RedisRuntimeDeps"]
-            | ["s3", "S3RuntimeDeps"]
-            | ["vault", "VaultRuntimeDeps"]
-            | ["amqp", "AmqpRuntimeDeps"]
-            | ["postgres", "PgRuntimeDeps" | "PgReadinessSamplerFactory"]
-            | ["bootstrap", "DomainModuleResult"]
-            | ["provider_output", "DomainModuleResultExt"]
-            | ["crate", "provider_output", "DomainModuleResultExt"]
-    )
-}
-
-impl<'ast> Visit<'ast> for ProviderPrimitiveVisitor<'_> {
-    fn visit_file(&mut self, file: &'ast syn::File) {
-        let saved = self.local_shadows.clone();
-        self.add_item_shadows(&file.items);
-        for item in &file.items {
-            self.visit_item(item);
-        }
-        self.local_shadows = saved;
-    }
-
-    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-        if !attrs_may_be_production(&item.attrs) {
-            return;
-        }
-        if let Some((_, items)) = &item.content {
-            let saved = self.local_shadows.clone();
-            self.add_item_shadows(items);
-            for item in items {
-                self.visit_item(item);
-            }
-            self.local_shadows = saved;
-        }
-    }
-
-    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        if !attrs_may_be_production(&item.attrs) {
-            return;
-        }
-        let saved = self.bindings.clone();
-        for input in &item.sig.inputs {
-            if let syn::FnArg::Typed(input) = input
-                && let syn::Pat::Ident(pat) = input.pat.as_ref()
-                && let Some(ty) = type_identity(&input.ty)
-            {
-                self.bindings
-                    .insert(pat.ident.to_string(), self.resolve_type(&ty));
-            }
-        }
-        self.visit_block(&item.block);
-        self.bindings = saved;
-    }
-
-    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
-        if !attrs_may_be_production(&item.attrs) {
-            return;
-        }
-        let saved = self.self_type.clone();
-        self.self_type = type_identity(&item.self_ty);
-        syn::visit::visit_item_impl(self, item);
-        self.self_type = saved;
-    }
-
-    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-        if !attrs_may_be_production(&item.attrs) {
-            return;
-        }
-        let saved = self.bindings.clone();
-        if let Some(self_type) = &self.self_type {
-            self.bindings
-                .insert("self".to_string(), self.resolve_type(self_type));
-        }
-        for input in &item.sig.inputs {
-            if let syn::FnArg::Typed(input) = input
-                && let syn::Pat::Ident(pat) = input.pat.as_ref()
-                && let Some(ty) = type_identity(&input.ty)
-            {
-                self.bindings
-                    .insert(pat.ident.to_string(), self.resolve_type(&ty));
-            }
-        }
-        self.visit_block(&item.block);
-        self.bindings = saved;
-    }
-
-    fn visit_block(&mut self, block: &'ast syn::Block) {
-        let saved = self.bindings.clone();
-        let saved_shadows = self.local_shadows.clone();
-        for stmt in &block.stmts {
-            if let syn::Stmt::Item(syn::Item::Struct(item)) = stmt
-                && is_protected_provider_owner(&item.ident.to_string())
-            {
-                self.local_shadows.insert(item.ident.to_string());
-            }
-        }
-        for stmt in &block.stmts {
-            self.visit_stmt(stmt);
-        }
-        self.bindings = saved;
-        self.local_shadows = saved_shadows;
-    }
-
-    fn visit_local(&mut self, local: &'ast syn::Local) {
-        if let Some(init) = &local.init {
-            self.visit_expr(&init.expr);
-        }
-        let (name, declared_ty) = match &local.pat {
-            syn::Pat::Ident(pat) => (Some(pat.ident.to_string()), None),
-            syn::Pat::Type(pat) => {
-                let name = match pat.pat.as_ref() {
-                    syn::Pat::Ident(ident) => Some(ident.ident.to_string()),
-                    _ => None,
-                };
-                (name, type_identity(&pat.ty))
-            }
-            _ => (None, None),
-        };
-        if let Some(name) = name {
-            let inferred = declared_ty
-                .or_else(|| {
-                    local
-                        .init
-                        .as_ref()
-                        .and_then(|init| self.expr_type(&init.expr))
-                })
-                .or_else(|| {
-                    local.init.as_ref().and_then(|init| {
-                        (exact_path_call_count_in_expr(
-                            &init.expr,
-                            &["amqp", "AmqpRuntimeDeps", "connect"],
-                        ) == 1)
-                            .then(|| "AmqpRuntimeDeps".to_string())
-                    })
-                });
-            if let Some(ty) = inferred {
-                self.bindings.insert(name, self.resolve_type(&ty));
-            } else {
-                self.bindings.remove(&name);
-            }
-        }
-    }
-
-    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        let method = call.method.to_string();
-        let owner = self.expr_type(&call.receiver);
-        if matches!(
-            method.as_str(),
-            "runtime_resources"
-                | "merge_provider"
-                | "into_runtime_parts"
-                | "store_guard"
-                | "audit_admin_store_guard"
-                | "spawn_readiness_sampler"
-        ) || method == "spawn"
-            && owner.as_deref().is_some_and(|owner| {
-                self.resolve_type(owner).rsplit("::").next() == Some("PgReadinessSamplerFactory")
-            })
-        {
-            self.classify(&method, owner);
-        }
-        syn::visit::visit_expr_method_call(self, call);
-    }
-
-    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(path) = call.func.as_ref()
-            && let Some(method) = path
-                .path
-                .segments
-                .last()
-                .map(|segment| segment.ident.to_string())
-            && matches!(
-                method.as_str(),
-                "runtime_resources"
-                    | "merge_provider"
-                    | "into_runtime_parts"
-                    | "store_guard"
-                    | "audit_admin_store_guard"
-                    | "spawn_readiness_sampler"
-                    | "spawn"
-            )
-        {
-            let segments = path.path.segments.iter().collect::<Vec<_>>();
-            let owner = path
-                .qself
-                .as_ref()
-                .and_then(|qself| type_identity(&qself.ty))
-                .or_else(|| {
-                    (segments.len() >= 2).then(|| {
-                        segments[..segments.len() - 1]
-                            .iter()
-                            .map(|segment| segment.ident.to_string())
-                            .collect::<Vec<_>>()
-                            .join("::")
-                    })
-                });
-            if owner.is_some() {
-                self.classify(&method, owner);
-            }
-        }
-        syn::visit::visit_expr_call(self, call);
-    }
-}
-
-fn provider_primitive_calls(file: &syn::File, allow_amqp: bool) -> ProviderPrimitiveCalls {
-    let symbols = LocalProviderSymbols::collect(file);
-    let mut visitor = ProviderPrimitiveVisitor {
-        symbols: &symbols,
-        bindings: BTreeMap::new(),
-        local_shadows: BTreeSet::new(),
-        self_type: None,
-        allow_amqp,
-        calls: ProviderPrimitiveCalls::default(),
-    };
-    visitor.visit_file(file);
-    visitor.calls
-}
-
 fn has_only_canonical_amqp_runtime_resources(file: &syn::File) -> bool {
     let wire_durable = file
         .items
@@ -11660,18 +10557,22 @@ fn has_only_canonical_amqp_runtime_resources(file: &syn::File) -> bool {
         })
         .count()
         == 1
-        && wire_durable_returns_owned_module(wire_durable)
+        && wire_durable_returns_owned_or_rolls_back(wire_durable)
         && !wire_durable_discards_module_output(wire_durable)
 }
 
-fn wire_durable_returns_owned_module(wire_durable: &syn::ItemFn) -> bool {
-    matches!(wire_durable.block.stmts.last(),
-    Some(syn::Stmt::Expr(syn::Expr::Call(call), None))
-        if is_exact_path(&call.func, &["Ok"])
-            && call.args.len() == 1
-            && call.args.first().is_some_and(|arg| {
-                expr_path_last(arg).is_some_and(|ident| ident == "module")
-            }))
+fn wire_durable_returns_owned_or_rolls_back(wire_durable: &syn::ItemFn) -> bool {
+    exact_named_path_call_count(
+        &wire_durable.block,
+        &["crate", "provider_output", "abort_uncommitted"],
+    ) == 5
+        && matches!(wire_durable.block.stmts.last(),
+        Some(syn::Stmt::Expr(syn::Expr::Call(call), None))
+            if is_exact_path(&call.func, &["Ok"])
+                && call.args.len() == 1
+                && call.args.first().is_some_and(|arg| {
+                    expr_path_last(arg).is_some_and(|ident| ident == "module")
+                }))
 }
 
 fn wire_durable_discards_module_output(wire_durable: &syn::ItemFn) -> bool {
@@ -11743,7 +10644,8 @@ fn is_canonical_amqp_connection_loop(loop_: &syn::ExprForLoop) -> bool {
             && matches!(&tuple.elems[1], syn::Pat::Ident(pat) if pat.ident == "url"));
     let canonical_iter = matches!(loop_.expr.as_ref(), syn::Expr::Reference(reference)
         if reference.mutability.is_none()
-            && expr_path_last(&reference.expr).is_some_and(|ident| ident == "per_domain"));
+            && expr_path_last(&reference.expr).is_some_and(|ident| ident == "per_domain"))
+        || expr_path_last(&loop_.expr).is_some_and(|ident| ident == "per_domain");
     if !canonical_pattern || !canonical_iter {
         return false;
     }
@@ -11815,22 +10717,6 @@ fn type_last_ident(ty: &syn::Type) -> Option<&syn::Ident> {
     match ty {
         syn::Type::Path(path) => path.path.segments.last().map(|segment| &segment.ident),
         syn::Type::Reference(reference) => type_last_ident(&reference.elem),
-        _ => None,
-    }
-}
-
-fn type_identity(ty: &syn::Type) -> Option<String> {
-    match ty {
-        syn::Type::Path(path) if path.qself.is_none() => Some(
-            path.path
-                .segments
-                .iter()
-                .map(|segment| segment.ident.to_string())
-                .collect::<Vec<_>>()
-                .join("::"),
-        ),
-        syn::Type::Reference(reference) => type_identity(&reference.elem),
-        syn::Type::Paren(paren) => type_identity(&paren.elem),
         _ => None,
     }
 }
@@ -12381,9 +11267,19 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "build_rss_access_provider(",
     },
     AnchorSpec {
+        id: "run.resources.rss-access-token",
+        path: RUNTIME_PHASE_PROVIDER_PATH,
+        pattern: "if let Some(provider) = runtime_rss_access.as_ref() {",
+    },
+    AnchorSpec {
         id: "run.provider.federated-access",
         path: RUNTIME_PHASE_PROVIDER_PATH,
         pattern: "build_federated_access_provider(",
+    },
+    AnchorSpec {
+        id: "run.resources.federated-access-token",
+        path: RUNTIME_PHASE_PROVIDER_PATH,
+        pattern: "if let Some(provider) = runtime_federated_access.as_ref() {",
     },
     AnchorSpec {
         id: "run.config.s3",
@@ -12416,14 +11312,29 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "PgRuntimeDeps::setup_with_audit_admin_config",
     },
     AnchorSpec {
-        id: "run.shared-deps",
-        path: RUNTIME_PHASE_INFRA_PATH,
-        pattern: "let deps = SharedRuntimeDeps {",
-    },
-    AnchorSpec {
         id: "run.provider.service-token",
         path: RUNTIME_PHASE_INFRA_PATH,
         pattern: "build_service_token_provider(",
+    },
+    AnchorSpec {
+        id: "run.provider-output.pg",
+        path: RUNTIME_PHASE_INFRA_PATH,
+        pattern: "crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period)",
+    },
+    AnchorSpec {
+        id: "run.resources.service-token",
+        path: RUNTIME_PHASE_INFRA_PATH,
+        pattern: "if let Some(provider) = runtime_service_token.as_ref() {",
+    },
+    AnchorSpec {
+        id: "run.module.output.domain-transport",
+        path: RUNTIME_PHASE_INFRA_PATH,
+        pattern: "provider_build.record_domain(domain_transport.module_result());",
+    },
+    AnchorSpec {
+        id: "run.shared-deps",
+        path: RUNTIME_PHASE_INFRA_PATH,
+        pattern: "let deps = SharedRuntimeDeps {",
     },
     AnchorSpec {
         id: "run.wire.generated-domains",
@@ -12441,6 +11352,11 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "bootstrap::compose_bindings(&mut domain_bindings)",
     },
     AnchorSpec {
+        id: "run.module.output.domains",
+        path: RUNTIME_PHASE_DOMAINS_PATH,
+        pattern: "provider_build.record_domain(domains_module);",
+    },
+    AnchorSpec {
         id: "run.module.input.auth-grant-sweeper",
         path: RUNTIME_PHASE_DOMAINS_PATH,
         pattern: "let auth_grant_sweeper_module =",
@@ -12449,26 +11365,6 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         id: "run.module.input.s3-canary",
         path: RUNTIME_PHASE_DOMAINS_PATH,
         pattern: "let s3_canary_module =",
-    },
-    AnchorSpec {
-        id: "run.provider-output.module",
-        path: RUNTIME_PHASE_DOMAINS_PATH,
-        pattern: "let provider_module = crate::provider_output::build_provider_module(&deps)",
-    },
-    AnchorSpec {
-        id: "run.resources.rss-access-token",
-        path: RUNTIME_PHASE_DOMAINS_PATH,
-        pattern: "if let Some(provider) = runtime_rss_access.as_ref() {\n                token_verifier_resources.push(provider.managed_resource());\n            }",
-    },
-    AnchorSpec {
-        id: "run.resources.federated-access-token",
-        path: RUNTIME_PHASE_DOMAINS_PATH,
-        pattern: "if let Some(provider) = runtime_federated_access.as_ref() {\n                token_verifier_resources.push(provider.managed_resource());\n            }",
-    },
-    AnchorSpec {
-        id: "run.resources.service-token",
-        path: RUNTIME_PHASE_DOMAINS_PATH,
-        pattern: "if let Some(provider) = runtime_service_token.as_ref() {\n                token_verifier_resources.push(provider.managed_resource());\n            }",
     },
     AnchorSpec {
         id: "run.probe.rss-access-token-jwks-name",
@@ -12491,11 +11387,6 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "Box::new(AccessTokenJwksReadyProbe::federated_access(",
     },
     AnchorSpec {
-        id: "run.module.input.domain-transport",
-        path: RUNTIME_PHASE_DOMAINS_PATH,
-        pattern: "let domain_transport_module = domain_transport",
-    },
-    AnchorSpec {
         id: "run.wire.distributed",
         path: RUNTIME_PHASE_DOMAINS_PATH,
         pattern: "distributed_runtime::wire_distributed(&deps, distributed_worker)",
@@ -12511,24 +11402,19 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "event_transport::wire_event_transport(",
     },
     AnchorSpec {
-        id: "run.module.assemble",
+        id: "run.provider-output.module",
         path: RUNTIME_PHASE_DOMAINS_PATH,
-        pattern: "assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {",
+        pattern: "provider_build.finish()",
     },
     AnchorSpec {
-        id: "run.probe.drain",
+        id: "run.probe.transaction-drain",
         path: RUNTIME_PHASE_DOMAINS_PATH,
-        pattern: "for (name, probe) in std::mem::take(&mut module.probes)",
+        pattern: "completed.register_probes(&mut wired.registry)",
     },
     AnchorSpec {
         id: "run.listener.finalizer",
         path: RUNTIME_PHASE_FINALIZE_PATH,
         pattern: "let listeners = finalize_listener_plan(",
-    },
-    AnchorSpec {
-        id: "run.provider-output.pg",
-        path: RUNTIME_PHASE_LAUNCH_PATH,
-        pattern: "crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period)",
     },
     AnchorSpec {
         id: "run.launch-capability",
@@ -12541,9 +11427,9 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "if let Some(exporter) = trace_exporter",
     },
     AnchorSpec {
-        id: "launch.shutdown.pg-output",
+        id: "launch.shutdown.provider-output",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "let pg_result = Self::register_module_output(stack, pg_runtime_module);",
+        pattern: "let provider_result = Self::register_module_output(stack, provider_module);",
     },
     AnchorSpec {
         id: "launch.shutdown.domain-output",
@@ -12551,9 +11437,9 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "let domain_result = Self::register_module_output(stack, domain_module);",
     },
     AnchorSpec {
-        id: "launch.shutdown.pg-result",
+        id: "launch.shutdown.provider-result",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "pg_result?;",
+        pattern: "provider_result?;",
     },
     AnchorSpec {
         id: "launch.shutdown.domain-result",
@@ -13168,6 +12054,135 @@ mod tests {
         ))
     }
 
+    fn postgres_setup_fixture(name: &str) -> Result<PathBuf> {
+        let root = unique_tmp(name);
+        write(&root.join("Cargo.toml"), "[workspace]\n")?;
+        let workspace = workspace_root()?;
+        write(
+            &root.join(POSTGRES_BUNDLE_PATH),
+            &fs::read_to_string(workspace.join(POSTGRES_BUNDLE_PATH))?,
+        )?;
+        Ok(root)
+    }
+
+    #[test]
+    fn postgres_setup_transaction_accepts_live_workspace() -> Result<()> {
+        let root = postgres_setup_fixture("postgres-setup-transaction-live")?;
+        assert_eq!(
+            postgres_setup_transaction_live_findings(&root)?,
+            Vec::<Finding<Rule>>::new(),
+            "the real production setup AST is the anti-vacuity green"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn postgres_setup_transaction_rejects_missing_live_edges() -> Result<()> {
+        let missing_root = postgres_setup_fixture("postgres-setup-transaction-missing-carrier")?;
+        fs::remove_file(missing_root.join(POSTGRES_BUNDLE_PATH))?;
+        assert!(
+            !postgres_setup_transaction_live_findings(&missing_root)?.is_empty(),
+            "removing the protected production carrier must fail closed"
+        );
+
+        let cases = [
+            (
+                "migrator immediate register",
+                "migrator_transaction.register(PgStoreGuard::new_named(",
+                "migrator_transaction.skip_register(PgStoreGuard::new_named(",
+                0,
+            ),
+            (
+                "migrator outcome close",
+                "migrator_transaction.close(migration_result).await?",
+                "migration_result?",
+                0,
+            ),
+            (
+                "writer immediate register",
+                "serving_transaction.register(PgStoreGuard::new_named(",
+                "serving_transaction.skip_register(PgStoreGuard::new_named(",
+                0,
+            ),
+            (
+                "reader failure close",
+                "return serving_transaction.close(Err(primary)).await",
+                "return Err(primary)",
+                0,
+            ),
+            (
+                "reader immediate register",
+                "serving_transaction.register(PgStoreGuard::new_named(",
+                "serving_transaction.skip_register(PgStoreGuard::new_named(",
+                1,
+            ),
+            (
+                "audit-admin failure close",
+                "return serving_transaction.close(Err(primary)).await",
+                "return Err(primary)",
+                1,
+            ),
+            (
+                "audit-admin immediate register",
+                "serving_transaction.register(PgStoreGuard::new_named(",
+                "serving_transaction.skip_register(PgStoreGuard::new_named(",
+                2,
+            ),
+            (
+                "success commit",
+                "serving_transaction.commit();",
+                "drop(serving_transaction);",
+                0,
+            ),
+            (
+                "dummy success owner",
+                "handle: PgRuntimeHandle {\n                stores,\n                audit_admin_store,",
+                "handle: PgRuntimeHandle {\n                stores: stores.clone(),\n                audit_admin_store: None,",
+                0,
+            ),
+        ];
+        for (label, needle, replacement, occurrence) in cases {
+            let root = postgres_setup_fixture(&format!(
+                "postgres-setup-transaction-red-{}",
+                label.replace(' ', "-")
+            ))?;
+            let target = root.join(POSTGRES_BUNDLE_PATH);
+            let canonical = fs::read_to_string(&target)?;
+            let mutated = replace_nth(&canonical, needle, occurrence, replacement)?;
+            assert_ne!(canonical, mutated, "{label} mutation must be live");
+            write(&target, &mutated)?;
+            assert!(
+                !postgres_setup_transaction_live_findings(&root)?.is_empty(),
+                "{label} must fail closed"
+            );
+        }
+
+        for (label, occurrence) in [
+            ("reader dead close bait", 0),
+            ("audit-admin dead close bait", 1),
+        ] {
+            let root = postgres_setup_fixture(&format!(
+                "postgres-setup-transaction-red-{}",
+                label.replace(' ', "-")
+            ))?;
+            let target = root.join(POSTGRES_BUNDLE_PATH);
+            let canonical = fs::read_to_string(&target)?;
+            let mutated = replace_nth(
+                &canonical,
+                "Err(primary) => return serving_transaction.close(Err(primary)).await,",
+                occurrence,
+                "Err(primary) => {\n                        if false {\n                            return serving_transaction.close(Err(primary)).await;\n                        }\n                        return Err(primary);\n                    },",
+            )?;
+            assert_ne!(canonical, mutated, "{label} mutation must be live");
+            write(&target, &mutated)?;
+            assert!(
+                !postgres_setup_transaction_live_findings(&root)?.is_empty(),
+                "{label} must fail closed"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn runtime_service_token_replay_live_accepts_typed_pg_composition() -> Result<()> {
         let (runtime, oidc, infra) = repository_replay_sources()?;
@@ -13527,23 +12542,14 @@ impl crate::phase::RuntimePhaseState for Skipped {
         let root = phase_transition_fixture("runtime-phase-transition-red-late-budget-bait")?;
         let target = root.join(RUNTIME_PHASE_LAUNCH_PATH);
         let source = fs::read_to_string(&target)?;
-        let canonical = r#"            let request_budget = crate::launch::server_request_budget(context.config())
-                .context("resolve HTTP server request budget")?;
-
-            // This is the only Finalized consumer and the only phase allowed to construct
-            // LaunchPlan. The top-level launch executor remains the sole ShutdownStack owner.
-            let trace_exporter = context.take_trace_export().map(DynManagedResource::new_box);"#;
-        let bait = r#"            if false {
-                let _ = crate::launch::server_request_budget(context.config());
-            }
-            // The real budget validation is late and hidden behind an alias.
-            let trace_exporter = context.take_trace_export().map(DynManagedResource::new_box);
-            let request_budget = late_budget(context.config())
-                .context("resolve HTTP server request budget")?;"#;
+        let canonical = "crate::launch::server_request_budget(context.config())";
         assert!(source.contains(canonical), "late budget mutation anchor");
         let mutated = format!(
-            "use crate::launch::server_request_budget as late_budget;\n{}",
-            source.replacen(canonical, bait, 1)
+            "use crate::launch::server_request_budget as late_budget;\n{}\n\
+             fn dead_budget_bait(context: Context) {{\n\
+             \x20   if false {{ let _ = crate::launch::server_request_budget(context.config()); }}\n\
+             }}\n",
+            source.replacen(canonical, "late_budget(context.config())", 1)
         );
         write(&target, &mutated)?;
         let findings = runtime_phase_transition_findings(&root)?;
@@ -13833,11 +12839,17 @@ impl DomainModuleResult {
 "#,
         )?;
         write(&root.join(RUNTIME_LIB_PATH), &runtime_lib_fixture(None))?;
-        write(&root.join(PROVIDER_OUTPUT_PATH), provider_adapter_fixture())?;
-        write(
-            &root.join(RUNTIME_LAUNCH_PATH),
-            &runtime_launch_fixture(None),
-        )?;
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .context("xtask workspace root")?;
+        for path in [
+            PROVIDER_OUTPUT_PATH,
+            GENERATED_PROVIDERS_PATH,
+            RUNTIME_LAUNCH_PATH,
+            POSTGRES_BUNDLE_PATH,
+        ] {
+            write(&root.join(path), &fs::read_to_string(workspace.join(path))?)?;
+        }
         for phase_path in [
             RUNTIME_PHASE_PATH,
             RUNTIME_PHASE_PROVIDER_PATH,
@@ -13846,10 +12858,7 @@ impl DomainModuleResult {
             RUNTIME_PHASE_FINALIZE_PATH,
             RUNTIME_PHASE_LAUNCH_PATH,
         ] {
-            let canonical_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .context("xtask workspace root")?
-                .join(phase_path);
+            let canonical_path = workspace.join(phase_path);
             write(
                 &root.join(phase_path),
                 &fs::read_to_string(&canonical_path)
@@ -14185,8 +13194,8 @@ domains = []
         let domains_path = root.join(RUNTIME_PHASE_DOMAINS_PATH);
         let canonical_domains = fs::read_to_string(&domains_path)?;
         let handwritten = canonical_domains.replacen(
-            "        let result = async move {",
-            "        let result = async move {\n            wire_settings(&deps);",
+            "        let result = async {",
+            "        let result = async {\n            wire_settings(&deps);",
             1,
         );
         write(&domains_path, &handwritten)?;
@@ -14199,8 +13208,8 @@ domains = []
         );
 
         let qualified = canonical_domains.replacen(
-            "        let result = async move {",
-            "        let result = async move {\n            crate::wire_settings(&deps);",
+            "        let result = async {",
+            "        let result = async {\n            crate::wire_settings(&deps);",
             1,
         );
         write(&domains_path, &qualified)?;
@@ -14309,9 +13318,9 @@ domains = []
         fs::remove_file(&extra_source)?;
 
         let missing_merge = canonical_domains.replace(
-            "module.merge(inputs.domains_module);",
-            "let _ = inputs.domains_module;",
-        ) + "\nfn dead_merge_bait(inputs: RuntimeModuleAssemblyInputs) {\nlet mut module = DomainModuleResult::default();\nmodule.merge(inputs.domains_module);\n}\n";
+            "provider_build.record_domain(domains_module);",
+            "drop(domains_module);",
+        ) + "\nfn dead_merge_bait(provider_build: &mut ProviderBuild, domains_module: DomainModuleResult) {\nprovider_build.record_domain(domains_module);\n}\n";
         write(&domains_path, &missing_merge)?;
         let report = collect_report(&root)?;
         assert!(report.findings.iter().any(|finding| {
@@ -14321,113 +13330,23 @@ domains = []
         Ok(())
     }
 
-    fn provider_output_fixture() -> String {
-        r#"
-struct InfraBuilt;
-impl InfraBuilt {
-async fn wire_domains(self) {
-    let provider_module = crate::provider_output::build_provider_module(&deps);
-    let _module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
-        provider_module,
-    });
-}
-}
-
-fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) {
-    let mut module = DomainModuleResult::default();
-    module.merge(inputs.provider_module);
-}
-"#
-        .to_string()
-    }
-
-    fn provider_phase_launch_fixture() -> String {
-        r#"
-struct Finalized;
-impl Finalized {
-async fn launch(self) {
-    let pg_runtime_module = crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
-    let _launch_plan = LaunchPlanParts { pg_runtime_module };
-}
-}
-"#
-        .to_string()
-    }
-
-    fn write_event_output_fixture(root: &Path) -> Result<()> {
+    fn event_output_fixture(name: &str) -> Result<PathBuf> {
+        let root = unique_tmp(name);
         write(&root.join("Cargo.toml"), "[workspace]\n")?;
-        write(
-            &root.join("assemblies/runtime/src/event_transport.rs"),
-            r#"
-pub(crate) async fn wire_event_transport() -> anyhow::Result<DomainModuleResult> { result }
-async fn wire_durable() {
-    let mut module = DomainModuleResult::default();
-    let mut amqp_map = BTreeMap::new();
-    for (domain_upper, url) in &per_domain {
-        let domain = domain_upper.to_ascii_lowercase();
-        let amqp_deps = amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain, publish_timeout).await?;
-        module.resources.extend(amqp_deps.runtime_resources());
-        amqp_map.insert(domain, amqp_deps);
-    }
-    Ok(module)
-}
-"#,
-        )?;
-        write(
-            &root.join(RUNTIME_PHASE_DOMAINS_PATH),
-            r#"
-struct InfraBuilt;
-impl InfraBuilt {
-async fn wire_domains(self) {
-        let event_module = crate::event_transport::wire_event_transport()
-            .await
-            .context("wire event transport")?;
-        let _module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
-            event_module,
-        });
-}
-}
-fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> DomainModuleResult {
-    let mut module = DomainModuleResult::default();
-    module.merge(inputs.event_module);
-    module
-}
-"#,
-        )?;
-        write(
-            &root.join(RUNTIME_LAUNCH_PATH),
-            r#"
-struct LaunchPlanParts { pg_runtime_module: DomainModuleResult, domain_module: DomainModuleResult }
-struct LaunchPlan { pg_runtime_module: DomainModuleResult, domain_module: DomainModuleResult }
-impl LaunchPlan {
-    fn register(self, stack: &mut ShutdownStack) {
-        let Self { trace_exporter, pg_runtime_module, domain_module } = self;
-        if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }
-        let pg_result = Self::register_module_output(stack, pg_runtime_module);
-        let domain_result = Self::register_module_output(stack, domain_module);
-        pg_result?;
-        domain_result?;
-    }
-    fn register_module_output(stack: &mut ShutdownStack, output: DomainModuleResult) {
-        for resource in output.resources { stack.register_detached(resource); }
-        for worker in output.workers { stack.register_with_token(worker); }
-    }
-}
-struct BoundListener;
-impl BoundListener {
-    fn activate(self, stack: &mut ShutdownStack) {
-        stack.register_with_token(plain_server);
-        stack.register_with_token(mtls_server);
-    }
-}
-"#,
-        )
+        let workspace = workspace_root()?;
+        for path in [
+            RUNTIME_EVENT_PATH,
+            RUNTIME_PHASE_DOMAINS_PATH,
+            RUNTIME_LAUNCH_PATH,
+        ] {
+            write(&root.join(path), &fs::read_to_string(workspace.join(path))?)?;
+        }
+        Ok(root)
     }
 
     #[test]
     fn event_transport_output_funnel_accepts_unified_live_path() -> Result<()> {
-        let root = fixture_root("event-transport-output-green")?;
-        write_event_output_fixture(&root)?;
+        let root = event_output_fixture("event-transport-output-live")?;
         assert_eq!(
             event_transport_output_findings(&root)?,
             Vec::<Finding<Rule>>::new()
@@ -14437,871 +13356,152 @@ impl BoundListener {
 
     #[test]
     fn event_transport_output_funnel_rejects_legacy_and_bypasses() -> Result<()> {
-        let root = fixture_root("event-transport-output-red")?;
-        write_event_output_fixture(&root)?;
-        let event_path = root.join("assemblies/runtime/src/event_transport.rs");
-        let runtime_path = root.join(RUNTIME_PHASE_DOMAINS_PATH);
-        let launch_path = root.join(RUNTIME_LAUNCH_PATH);
-        let event = fs::read_to_string(&event_path)?;
-        let runtime = fs::read_to_string(&runtime_path)?;
-        let launch = fs::read_to_string(&launch_path)?;
-
-        for (label, path, mutated) in [
+        let root = event_output_fixture("event-transport-output-red")?;
+        for (label, path, needle, replacement) in [
             (
-                "public output API",
-                &event_path,
-                event.replacen(
-                    "pub(crate) async fn wire_event_transport",
-                    "pub async fn wire_event_transport",
-                    1,
-                ),
+                "public event output API",
+                RUNTIME_EVENT_PATH,
+                "pub(crate) async fn wire_event_transport",
+                "pub async fn wire_event_transport",
             ),
             (
-                "legacy wrapper",
-                &event_path,
-                format!("struct EventRuntime {{ module: DomainModuleResult }}\n{event}"),
+                "missing publisher receipt",
+                RUNTIME_PHASE_DOMAINS_PATH,
+                "provider_factories.event_publisher()?",
+                "provider_factories.event_subscriber()?",
             ),
             (
-                "dead resource branch",
-                &event_path,
-                event.replace(
-                    "module.resources.extend(amqp_deps.runtime_resources());",
-                    "if false { module.resources.extend(amqp_deps.runtime_resources()); }",
-                ),
-            ),
-            (
-                "discard unified output",
-                &event_path,
-                event.replace("Ok(module)", "Ok(DomainModuleResult::default())"),
-            ),
-            (
-                "clear unified resources",
-                &event_path,
-                event.replace(
-                    "Ok(module)",
-                    "module.resources.clear();\n    Ok(module)",
-                ),
-            ),
-            (
-                "take unified resources",
-                &event_path,
-                event.replace(
-                    "Ok(module)",
-                    "let _ = std::mem::take(&mut module.resources);\n    Ok(module)",
-                ),
-            ),
-            (
-                "clear unified workers",
-                &event_path,
-                event.replace("Ok(module)", "module.workers.clear();\n    Ok(module)"),
-            ),
-            (
-                "take unified probes",
-                &event_path,
-                event.replace(
-                    "Ok(module)",
-                    "let _ = std::mem::take(&mut module.probes);\n    Ok(module)",
-                ),
-            ),
-            (
-                "wrapped event output",
-                &runtime_path,
-                runtime.replace(
-                    "let event_module = crate::event_transport::wire_event_transport()\n            .await\n            .context(\"wire event transport\")?;",
-                    "let event_module = discard(crate::event_transport::wire_event_transport()\n            .await\n            .context(\"wire event transport\")?);",
-                ),
-            ),
-            (
-                "output field projection",
-                &runtime_path,
-                runtime.replace(
-                    "let _module = assemble_runtime_module_outputs",
-                    "let _ = event_module.resources;\n        let _module = crate::assemble_runtime_module_outputs",
-                ),
-            ),
-            (
-                "duplicate event merge",
-                &runtime_path,
-                runtime.replace(
-                    "module.merge(inputs.event_module);",
-                    "module.merge(inputs.event_module);\n    module.merge(inputs.event_module);",
-                ),
-            ),
-            (
-                "preconsume event module",
-                &runtime_path,
-                runtime.replace(
-                    "module.merge(inputs.event_module);",
-                    "inputs.event_module.workers.clear();\n    module.merge(inputs.event_module);",
-                ),
-            ),
-            (
-                "event launch field",
-                &launch_path,
-                launch.replacen(
-                    "struct LaunchPlanParts {",
-                    "struct LaunchPlanParts { event_infra_guards: Vec<Resource>,",
-                    1,
-                ),
+                "parallel receiptless event output",
+                RUNTIME_PHASE_DOMAINS_PATH,
+                "provider_build\n                .record(crate::provider_output::ProviderOutput::event(",
+                "provider_build.record_domain(event_module);\n            provider_build\n                .record(crate::provider_output::ProviderOutput::event(",
             ),
             (
                 "direct lifecycle bypass",
-                &launch_path,
-                launch.replace(
-                    "let domain_result = Self::register_module_output(stack, domain_module);",
-                    "let domain_result = Self::register_module_output(stack, domain_module);\n        stack.register_detached(event_guard);",
-                ),
+                RUNTIME_LAUNCH_PATH,
+                "let domain_result = Self::register_module_output(stack, domain_module);",
+                "let domain_result = Self::register_module_output(stack, domain_module);\n        stack.register_detached(event_guard);",
             ),
             (
-                "renamed lifecycle carrier helper bypass",
-                &launch_path,
-                format!(
-                    "{}\nfn register_event_lifecycle(stack: &mut ShutdownStack, event_lifecycle: Vec<Resource>) {{\n    for guard in event_lifecycle {{ stack.register_detached(guard); }}\n}}\n",
-                    launch
-                        .replacen(
-                            "struct LaunchPlanParts {",
-                            "struct LaunchPlanParts { event_lifecycle: Vec<Resource>,",
-                            1,
-                        )
-                        .replacen(
-                            "struct LaunchPlan {",
-                            "struct LaunchPlan { event_lifecycle: Vec<Resource>,",
-                            1,
-                        )
-                        .replace(
-                            "let Self { trace_exporter, pg_runtime_module, domain_module } = self;",
-                            "let Self { trace_exporter, pg_runtime_module, domain_module, event_lifecycle } = self;",
-                        )
-                        .replace(
-                            "let domain_result = Self::register_module_output(stack, domain_module);",
-                            "let domain_result = Self::register_module_output(stack, domain_module);\n        register_event_lifecycle(stack, event_lifecycle);",
-                        )
-                ),
+                "event-specific launch field",
+                RUNTIME_LAUNCH_PATH,
+                "pub(crate) struct LaunchPlanParts {",
+                "pub(crate) struct LaunchPlanParts {\n    event_infra_guards: Vec<Resource>,",
             ),
         ] {
-            write(path, &mutated)?;
+            let target = root.join(path);
+            let canonical = fs::read_to_string(&target)?;
+            let mutated = canonical.replacen(needle, replacement, 1);
+            assert_ne!(canonical, mutated, "{label} mutation must be live");
+            write(&target, &mutated)?;
             assert!(
                 !event_transport_output_findings(&root)?.is_empty(),
-                "{label} must fail"
+                "{label} must fail closed"
             );
-            write(&event_path, &event)?;
-            write(&runtime_path, &runtime)?;
-            write(&launch_path, &launch)?;
+            write(&target, &canonical)?;
         }
         Ok(())
     }
 
-    fn provider_adapter_fixture() -> &'static str {
-        r#"
-trait ProviderOutput { const OUTPUT_BINDINGS: &'static [ProviderOutputBinding]; fn provider_output(&self) -> DomainModuleResult; }
-impl ProviderOutput for RedisRuntimeDeps { const OUTPUT_BINDINGS: &'static [ProviderOutputBinding] = &[ProviderOutputBinding { port: "redis", provider: "redis", consumer: "runtime", channels: &[LifecycleChannel::Resources] }]; fn provider_output(&self) -> DomainModuleResult { DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() } } }
-impl ProviderOutput for S3RuntimeDeps { const OUTPUT_BINDINGS: &'static [ProviderOutputBinding] = &[ProviderOutputBinding { port: "s3", provider: "s3", consumer: "runtime", channels: &[LifecycleChannel::Resources] }]; fn provider_output(&self) -> DomainModuleResult { DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() } } }
-impl ProviderOutput for VaultRuntimeDeps { const OUTPUT_BINDINGS: &'static [ProviderOutputBinding] = &[ProviderOutputBinding { port: "vault", provider: "vault", consumer: "runtime", channels: &[LifecycleChannel::Resources] }]; fn provider_output(&self) -> DomainModuleResult { DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() } } }
-fn build_provider_module(deps: &SharedRuntimeDeps) -> DomainModuleResult {
-    let mut provider_module = DomainModuleResult::default();
-    provider_module.merge_provider(&deps.redis);
-    provider_module.merge_provider(&deps.s3);
-    provider_module.merge_provider(&deps.vault);
-    provider_module
-}
-fn build_pg_runtime_module(owner: PgRuntimeDeps, period: Duration) -> DomainModuleResult {
-    let (resources, sampler_factory) = owner.into_runtime_parts(period);
-    let readiness_sampler: WorkerSpec =
-        Box::new(move |token| DynManagedResource::new_box(sampler_factory.spawn(token)));
-    DomainModuleResult { resources, workers: vec![readiness_sampler], ..DomainModuleResult::default() }
-}
-"#
-    }
-
-    fn write_provider_fixture(root: &Path) -> Result<()> {
-        write(
-            &root.join(PROVIDER_OUTPUT_FIXTURE_MARKER),
-            "provider-output\n",
-        )?;
-        write(
-            &root.join(RUNTIME_LIB_PATH),
-            "pub fn prepare_runtime() {}\npub async fn run() {}\n",
-        )?;
-        write(
-            &root.join(RUNTIME_PHASE_DOMAINS_PATH),
-            &provider_output_fixture(),
-        )?;
-        write(
-            &root.join(RUNTIME_PHASE_LAUNCH_PATH),
-            &provider_phase_launch_fixture(),
-        )?;
-        write(&root.join(PROVIDER_OUTPUT_PATH), provider_adapter_fixture())?;
-        write(
-            &root.join(RUNTIME_LAUNCH_PATH),
-            r#"
-impl LaunchPlan {
-    fn register(self, stack: &mut ShutdownStack) {
-        let Self { trace_exporter, pg_runtime_module, domain_module } = self;
-        if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }
-        let pg_result = Self::register_module_output(stack, pg_runtime_module);
-        let domain_result = Self::register_module_output(stack, domain_module);
-        pg_result?;
-        domain_result?;
-    }
-    fn register_module_output(stack: &mut ShutdownStack, output: DomainModuleResult) {
-        for resource in output.resources { stack.register_detached(resource); }
-        for worker in output.workers { stack.register_with_token(worker); }
-    }
-}
-"#,
-        )
+    fn provider_bijection_fixture(name: &str) -> Result<PathBuf> {
+        let root = unique_tmp(name);
+        write(&root.join("Cargo.toml"), "[workspace]\n")?;
+        let workspace = workspace_root()?;
+        for path in [
+            PROVIDER_OUTPUT_PATH,
+            GENERATED_PROVIDERS_PATH,
+            RUNTIME_PHASE_PROVIDER_PATH,
+            RUNTIME_PHASE_INFRA_PATH,
+            RUNTIME_PHASE_DOMAINS_PATH,
+            RUNTIME_PHASE_FINALIZE_PATH,
+            RUNTIME_PHASE_LAUNCH_PATH,
+            RUNTIME_LAUNCH_PATH,
+        ] {
+            write(&root.join(path), &fs::read_to_string(workspace.join(path))?)?;
+        }
+        Ok(root)
     }
 
     #[test]
-    fn runtime_provider_outputs_accept_unified_live_path() -> Result<()> {
-        let root = fixture_root("runtime-provider-outputs-green")?;
-        write_provider_fixture(&root)?;
-
-        write(
-            &root.join("assemblies/runtime/src/event_transport.rs"),
-            r#"
-async fn wire_durable() {
-    let mut module = DomainModuleResult::default();
-    for (domain_upper, url) in &per_domain {
-        let domain = domain_upper.to_ascii_lowercase();
-        let amqp_deps = amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain, publish_timeout).await?;
-        module.resources.extend(amqp_deps.runtime_resources());
-        amqp_map.insert(domain, amqp_deps);
-    }
-    Ok(module)
-}
-"#,
-        )?;
-
+    fn runtime_provider_bijection_gate_accepts_live_workspace() -> Result<()> {
+        let root = provider_bijection_fixture("runtime-provider-bijection-live")?;
         assert_eq!(
-            provider_outputs_live_findings(&root)?,
-            Vec::<Finding<Rule>>::new()
+            provider_plan_output_bijection_findings(&root)?,
+            Vec::<Finding<Rule>>::new(),
+            "real generated catalog → typed permits → transaction → launch path is the green proof"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_provider_bijection_gate_rejects_drift_and_bypasses() -> Result<()> {
+        let root = provider_bijection_fixture("runtime-provider-bijection-red")?;
+        for (label, path, needle, replacement) in [
+            (
+                "generated factory drift",
+                GENERATED_PROVIDERS_PATH,
+                "ProviderFactorySymbol::HttpservePostgresAuthAuditSink",
+                "ProviderFactorySymbol::SettingsVaultKeyProvider",
+            ),
+            (
+                "duplicate typed permit consumption",
+                RUNTIME_PHASE_PROVIDER_PATH,
+                "provider_factories.listener_pdp()?",
+                "provider_factories.listener_rate_limiter()?",
+            ),
+            (
+                "missing transaction finish",
+                RUNTIME_PHASE_DOMAINS_PATH,
+                "provider_build.finish()",
+                "provider_build.finish_bypass()",
+            ),
+            (
+                "missing finish-failure abort",
+                RUNTIME_PHASE_DOMAINS_PATH,
+                "failure.abort().await",
+                "failure.drop_without_abort().await",
+            ),
+            (
+                "missing completed-probe abort",
+                RUNTIME_PHASE_DOMAINS_PATH,
+                "completed.abort(error).await",
+                "completed.drop_without_abort(error).await",
+            ),
+            (
+                "missing domains rollback abort",
+                RUNTIME_PHASE_DOMAINS_PATH,
+                "provider_build.abort(error).await",
+                "provider_build.drop_without_abort(error).await",
+            ),
+            (
+                "missing late rollback",
+                RUNTIME_PHASE_FINALIZE_PATH,
+                "provider_build.abort(error).await",
+                "provider_build.drop_without_abort(error).await",
+            ),
+        ] {
+            let target = root.join(path);
+            let canonical = fs::read_to_string(&target)?;
+            let mutated = canonical.replacen(needle, replacement, 1);
+            assert_ne!(canonical, mutated, "{label} mutation must be live");
+            write(&target, &mutated)?;
+            assert!(
+                !provider_plan_output_bijection_findings(&root)?.is_empty(),
+                "{label} must fail closed"
+            );
+            write(&target, &canonical)?;
+        }
 
         let provider_output = root.join(PROVIDER_OUTPUT_PATH);
-        let canonical_provider = fs::read_to_string(&provider_output)?;
-        let three_channel_provider = canonical_provider.replacen(
-            "DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() }",
-            "DomainModuleResult { probes: Vec::new(), resources: self.runtime_resources(), workers: Vec::new(), ..DomainModuleResult::default() }",
-            1,
-        );
-        write(&provider_output, &three_channel_provider)?;
-        assert_eq!(
-            provider_outputs_live_findings(&root)?,
-            Vec::<Finding<Rule>>::new(),
-            "ProviderOutput gate 不得把 DomainModuleResult 冻结成 resources-only"
-        );
-        write(&provider_output, &canonical_provider)?;
-
-        let event_transport = root.join("assemblies/runtime/src/event_transport.rs");
-        let canonical = fs::read_to_string(&event_transport)?;
-        for (label, mutated) in [
-            (
-                "dead branch",
-                canonical.replace(
-                    "        module.resources.extend(amqp_deps.runtime_resources());",
-                    "        if false { module.resources.extend(amqp_deps.runtime_resources()); }",
-                ),
-            ),
-            (
-                "dead closure",
-                canonical.replace(
-                    "        module.resources.extend(amqp_deps.runtime_resources());",
-                    "        let _dead = || module.resources.extend(amqp_deps.runtime_resources());",
-                ),
-            ),
-            (
-                "outside connection loop",
-                canonical.replace(
-                    "        module.resources.extend(amqp_deps.runtime_resources());",
-                    "",
-                ) + "\nfn bypass() { module.resources.extend(amqp_deps.runtime_resources()); }\n",
-            ),
-        ] {
-            write(&event_transport, &mutated)?;
-            assert_provider_gate_fails(&root, label)?;
-        }
-        write(&event_transport, &canonical)?;
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_provider_outputs_reject_parallel_pg_output_type() -> Result<()> {
-        let root = fixture_root("runtime-provider-outputs-pg-output-red")?;
-        write_provider_fixture(&root)?;
-        let adapter =
-            fs::read_to_string(root.join(PROVIDER_OUTPUT_PATH))? + "\nstruct PgRuntimeOutput;\n";
-        write(&root.join(PROVIDER_OUTPUT_PATH), &adapter)?;
-
-        let findings = provider_outputs_live_findings(&root)?;
+        let canonical = fs::read_to_string(&provider_output)?;
+        write(
+            &provider_output,
+            &format!("{canonical}\ntrait ProviderOutput {{}}\n"),
+        )?;
         assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::ForbiddenWiring
-                    && finding.detail.contains("DomainModuleResult")
-            }),
-            "PgRuntimeOutput parallel seam must be rejected: {findings:?}"
+            !provider_plan_output_bijection_findings(&root)?.is_empty(),
+            "legacy self-proof trait bait must fail closed"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_provider_outputs_allow_pg_local_renames_and_helper_return() -> Result<()> {
-        let root = fixture_root("runtime-provider-outputs-pg-semantic-green")?;
-        write_provider_fixture(&root)?;
-        let adapter = provider_adapter_fixture()
-            .replace("resources, sampler_factory", "guards, readiness_factory")
-            .replace("readiness_sampler", "sampler_worker")
-            .replace("sampler_factory.spawn(token)", "readiness_factory.spawn(cancel)")
-            .replace("move |token|", "move |cancel|")
-            .replace(
-                "DomainModuleResult { resources, workers: vec![sampler_worker], ..DomainModuleResult::default() }",
-                "identity(DomainModuleResult { resources: guards, workers: vec![sampler_worker], ..DomainModuleResult::default() })",
-            )
-            + "\nfn identity(output: DomainModuleResult) -> DomainModuleResult { output }\n";
-        write(&root.join(PROVIDER_OUTPUT_PATH), &adapter)?;
-
-        assert_eq!(
-            provider_outputs_live_findings(&root)?,
-            Vec::<Finding<Rule>>::new(),
-            "semantic PG lifecycle gate must not freeze local names or a transparent return helper"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_provider_outputs_reject_noncanonical_ast_shapes() -> Result<()> {
-        let root = fixture_root("runtime-provider-outputs-ast-red")?;
-        write_provider_fixture(&root)?;
-        fs::remove_file(root.join(PROVIDER_OUTPUT_PATH))?;
-        assert_provider_gate_fails(&root, "missing provider_output.rs")?;
-
-        let adapter = provider_adapter_fixture();
-        for (label, mutated) in [
-            (
-                "helper return",
-                adapter.replace(
-                    "    provider_module\n}",
-                    "    identity(provider_module)\n}\nfn identity(output: DomainModuleResult) -> DomainModuleResult { output }",
-                ),
-            ),
-            (
-                "builder reset",
-                adapter.replace(
-                    "    provider_module\n}",
-                    "    provider_module = DomainModuleResult::default();\n    provider_module\n}",
-                ),
-            ),
-            (
-                "builder clear",
-                adapter.replace(
-                    "    provider_module\n}",
-                    "    provider_module.resources.clear();\n    provider_module\n}",
-                ),
-            ),
-            (
-                "wrong constructor return",
-                adapter.replace(
-                    "    provider_module\n}",
-                    "    DomainModuleResult::default()\n}",
-                ),
-            ),
-            (
-                "discard runtime resources",
-                adapter.replacen(
-                    "resources: self.runtime_resources()",
-                    "resources: { let _ = self.runtime_resources(); Vec::new() }",
-                    1,
-                ),
-            ),
-            (
-                "identity wrapped runtime resources",
-                adapter.replacen(
-                    "resources: self.runtime_resources()",
-                    "resources: identity(self.runtime_resources())",
-                    1,
-                ) + "\nfn identity<T>(value: T) -> T { value }\n",
-            ),
-            (
-                "wrong provider output",
-                adapter.replacen(
-                    "resources: self.runtime_resources()",
-                    "resources: Vec::new()",
-                    1,
-                ),
-            ),
-            (
-                "default trait method",
-                adapter.replace(
-                    "fn provider_output(&self) -> DomainModuleResult;",
-                    "fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() }",
-                ),
-            ),
-            (
-                "missing typed output evidence",
-                adapter.replacen(
-                    "const OUTPUT_BINDINGS: &'static [ProviderOutputBinding] = &[ProviderOutputBinding { port: \"redis\", provider: \"redis\", consumer: \"runtime\", channels: &[LifecycleChannel::Resources] }]; ",
-                    "",
-                    1,
-                ),
-            ),
-            (
-                "extra provider impl",
-                adapter.to_string()
-                    + "\nimpl ProviderOutput for PgRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } }\n",
-            ),
-            (
-                "nested extra provider impl",
-                adapter.to_string()
-                    + "\nmod extra { impl ProviderOutput for PgRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } } }\n",
-            ),
-        ] {
-            write(&root.join(PROVIDER_OUTPUT_PATH), &mutated)?;
-            assert_provider_gate_fails(&root, label)?;
-        }
-        write(&root.join(PROVIDER_OUTPUT_PATH), adapter)?;
-
-        let runtime = provider_output_fixture();
-        for (label, mutated) in [
-            (
-                "destructured constructor",
-                runtime.replace(
-                    "let provider_module = crate::provider_output::build_provider_module(&deps);",
-                    "let (provider_module,) = (crate::provider_output::build_provider_module(&deps),);",
-                ),
-            ),
-            (
-                "mutable run binding",
-                runtime.replace("let provider_module =", "let mut provider_module ="),
-            ),
-            (
-                "assigned run binding",
-                runtime.replace(
-                    "let provider_module = crate::provider_output::build_provider_module(&deps);",
-                    "let provider_module = crate::provider_output::build_provider_module(&deps);\nprovider_module = DomainModuleResult::default();",
-                ),
-            ),
-            (
-                "local shadow constructor",
-                runtime.replace(
-                    "let provider_module = crate::provider_output::build_provider_module(&deps);",
-                    "fn build_provider_module(_: &SharedRuntimeDeps) -> DomainModuleResult { DomainModuleResult::default() }\nlet provider_module = build_provider_module(&deps);",
-                ),
-            ),
-            (
-                "local module shadow constructor",
-                runtime.replace(
-                    "let provider_module = crate::provider_output::build_provider_module(&deps);",
-                    "mod provider_output { pub(super) fn build_provider_module(_: &super::SharedRuntimeDeps) -> super::DomainModuleResult { super::DomainModuleResult::default() } }\nlet provider_module = provider_output::build_provider_module(&deps);",
-                ),
-            ),
-            (
-                "local shadow assembler",
-                runtime.replace(
-                    "let _module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {",
-                    "fn assemble_runtime_module_outputs(_: RuntimeModuleAssemblyInputs) -> DomainModuleResult { DomainModuleResult::default() }\nlet _module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {",
-                ),
-            ),
-        ] {
-            write(&root.join(RUNTIME_PHASE_DOMAINS_PATH), &mutated)?;
-            assert_provider_gate_fails(&root, label)?;
-        }
-        Ok(())
-    }
-
-    fn assert_provider_gate_fails(root: &Path, label: &str) -> Result<()> {
-        let findings = provider_outputs_live_findings(root)?;
-        assert!(!findings.is_empty(), "{label} 必须失败");
-        Ok(())
-    }
-
-    fn assert_unrelated_provider_method_names_allowed(
-        root: &Path,
-        source_path: &Path,
-    ) -> Result<()> {
-        for (source, message) in [
-            (
-                "fn runtime_resources() {}\nfn unrelated() { runtime_resources(); }\n",
-                "无关同名本地函数不得误报",
-            ),
-            (
-                r#"
-struct LocalResources;
-impl LocalResources {
-    fn runtime_resources(&self) {}
-    fn delegates(&self) { self.runtime_resources(); }
-}
-struct LocalModule;
-impl LocalModule { fn merge_provider(&mut self) {} }
-struct Wrapper { redis: LocalResources }
-fn local_resources() -> LocalResources { LocalResources }
-fn unrelated(resources: &LocalResources, module: &mut LocalModule, wrapper: &Wrapper) {
-    resources.runtime_resources();
-    LocalResources::runtime_resources(resources);
-    local_resources().runtime_resources();
-    wrapper.redis.runtime_resources();
-    module.merge_provider();
-}
-fn external_unrelated(resources: &ExternalResources) { resources.runtime_resources(); }
-mod fake { pub struct RedisRuntimeDeps; }
-use fake::RedisRuntimeDeps as FakeRedis;
-fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
-    resources.runtime_resources();
-    alias.runtime_resources();
-}
-"#,
-                "有本地类型/方法来源的同名 API 不得误报",
-            ),
-            (
-                "mod fake { pub struct RedisRuntimeDeps; }\nuse fake::RedisRuntimeDeps;\nfn unrelated(resources: &RedisRuntimeDeps) { resources.runtime_resources(); }\n",
-                "非 provider 模块的未重命名同名类型不得误报",
-            ),
-            (
-                "struct RedisRuntimeDeps;\nimpl RedisRuntimeDeps { fn runtime_resources(&self) {} }\nfn unrelated(resources: &RedisRuntimeDeps) { resources.runtime_resources(); }\n",
-                "本地同名类型声明必须遮蔽 provider 裸名",
-            ),
-            (
-                "mod local { struct RedisRuntimeDeps; impl RedisRuntimeDeps { fn runtime_resources(&self) {} } fn unrelated(resources: &RedisRuntimeDeps) { resources.runtime_resources(); } }\n",
-                "inline module 的本地同名类型必须按作用域遮蔽",
-            ),
-            (
-                "fn unrelated() { struct RedisRuntimeDeps; impl RedisRuntimeDeps { fn runtime_resources(&self) {} } let resources: RedisRuntimeDeps = todo!(); resources.runtime_resources(); }\n",
-                "block-local 同名类型必须按作用域遮蔽",
-            ),
-        ] {
-            write(source_path, source)?;
-            let findings = provider_outputs_live_findings(root)?;
-            assert!(
-                findings.iter().all(|finding| {
-                    finding.subject != "assemblies/runtime/src/legacy_provider.rs"
-                }),
-                "{message}: {findings:?}"
-            );
-        }
-        Ok(())
-    }
-
-    fn assert_test_only_provider_items_allowed(root: &Path, source_path: &Path) -> Result<()> {
-        for source in [
-            "#[cfg(test)] fn test_only(module: &mut DomainModuleResult, deps: &SharedRuntimeDeps) { module.merge_provider(&deps.redis); }\n",
-            "#[cfg(test)] impl crate::provider_output::ProviderOutput for PgRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } }\n",
-            "#[cfg(all(test, feature = \"fixture\"))] impl crate::provider_output::ProviderOutput for PgRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } }\n",
-            "#[cfg(test)] mod tests;\n",
-        ] {
-            write(source_path, source)?;
-            let findings = provider_outputs_live_findings(root)?;
-            assert!(
-                findings.iter().all(|finding| {
-                    finding.subject != "assemblies/runtime/src/legacy_provider.rs"
-                }),
-                "test=false 时恒假的 cfg 必须排除生产扫描: {findings:?}"
-            );
-        }
-        let out_of_line = source_path
-            .parent()
-            .context("legacy provider fixture parent")?
-            .join("legacy_provider/tests.rs");
-        write(
-            &out_of_line,
-            "fn test_only(deps: &SharedRuntimeDeps) { deps.redis.runtime_resources(); }\n",
-        )?;
-        write(source_path, "#[cfg(test)] mod tests;\n")?;
-        let mut sources = Vec::new();
-        collect_rust_sources(&root.join(RUNTIME_SRC_PATH), &mut sources)?;
-        let production = production_module_sources(&sources)?;
-        assert!(
-            !production.contains(&normalize_path(&out_of_line)),
-            "out-of-line test module 仍被判为生产可达: source={} child={} production={production:?}",
-            source_path.display(),
-            out_of_line.display()
-        );
-        let findings = provider_outputs_live_findings(root)?;
-        assert!(
-            findings
-                .iter()
-                .all(|finding| finding.subject != "assemblies/runtime/src/legacy_provider/tests.rs"),
-            "test-only out-of-line module 必须排除生产扫描: {findings:?}"
-        );
-        fs::remove_file(out_of_line)?;
-
-        let inline_test_child = source_path
-            .parent()
-            .context("legacy provider fixture parent")?
-            .join("legacy_provider/tests/helper.rs");
-        write(
-            &inline_test_child,
-            "fn test_only(deps: &SharedRuntimeDeps) { deps.redis.runtime_resources(); }\n",
-        )?;
-        write(source_path, "#[cfg(test)] mod tests { mod helper; }\n")?;
-        let findings = provider_outputs_live_findings(root)?;
-        assert!(
-            findings.iter().all(|finding| {
-                finding.subject != "assemblies/runtime/src/legacy_provider/tests/helper.rs"
-            }),
-            "inline test module 的 out-of-line child 必须继承 test-only: {findings:?}"
-        );
-        fs::remove_file(inline_test_child)?;
-
-        let shared = source_path
-            .parent()
-            .context("legacy provider fixture parent")?
-            .join("legacy_provider/prod/shared.rs");
-        write(
-            &shared,
-            "fn bypass(deps: &SharedRuntimeDeps) { deps.redis.runtime_resources(); }\n",
-        )?;
-        write(
-            source_path,
-            "mod prod { #[path = \"shared.rs\"] mod helper; }\n#[cfg(test)] #[path = \"prod/shared.rs\"] mod bait;\n",
-        )?;
-        let findings = provider_outputs_live_findings(root)?;
-        assert!(
-            findings.iter().any(|finding| {
-                finding.subject == "assemblies/runtime/src/legacy_provider/prod/shared.rs"
-                    && finding.rule == Rule::ForbiddenWiring
-            }),
-            "同一文件兼具 production/test 路径时 production 可达必须优先: {findings:?}"
-        );
-        fs::remove_file(shared)?;
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_provider_outputs_reject_missing_reordered_legacy_and_bait() -> Result<()> {
-        let root = fixture_root("runtime-provider-outputs-red")?;
-        write_provider_fixture(&root)?;
-        let adapter = provider_adapter_fixture();
-        let reordered = adapter.replace(
-            "    provider_module.merge_provider(&deps.redis);\n    provider_module.merge_provider(&deps.s3);",
-            "    provider_module.merge_provider(&deps.s3);\n    provider_module.merge_provider(&deps.redis);",
-        );
-        write(&root.join(PROVIDER_OUTPUT_PATH), &reordered)?;
-        let findings = provider_outputs_live_findings(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ForbiddenWiring),
-            "Redis/S3/Vault 顺序漂移必须失败: {findings:?}"
-        );
-        write(
-            &root.join(PROVIDER_OUTPUT_PATH),
-            &(adapter.to_string()
-                + "\nfn extra(deps: &RedisRuntimeDeps) { RedisRuntimeDeps::runtime_resources(deps); }\n"),
-        )?;
-        let findings = provider_outputs_live_findings(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ForbiddenWiring),
-            "provider_output.rs 内 UFCS 额外直连必须失败: {findings:?}"
-        );
-        write(&root.join(PROVIDER_OUTPUT_PATH), adapter)?;
-        for (label, mutated) in [
-            (
-                "borrowed pg owner",
-                adapter.replace(
-                    "owner: PgRuntimeDeps, period: Duration",
-                    "owner: &PgRuntimeDeps, period: Duration",
-                ),
-            ),
-            (
-                "borrowed pg period",
-                adapter.replace(
-                    "owner: PgRuntimeDeps, period: Duration",
-                    "owner: PgRuntimeDeps, period: &Duration",
-                ),
-            ),
-            (
-                "missing pg constructor",
-                adapter.replace("fn build_pg_runtime_module", "fn removed_pg_runtime_module"),
-            ),
-            ("duplicate pg constructor", format!("{adapter}\n{adapter}")),
-            (
-                "legacy pg lifecycle direct call",
-                format!(
-                    "{adapter}\nfn legacy(owner: &PgRuntimeDeps) {{ owner.spawn_readiness_sampler(); }}\n"
-                ),
-            ),
-            (
-                "discard pg resources",
-                adapter.replace(
-                    "DomainModuleResult { resources, workers: vec![readiness_sampler], ..DomainModuleResult::default() }",
-                    "DomainModuleResult { resources: Vec::new(), workers: vec![readiness_sampler], ..DomainModuleResult::default() }",
-                ),
-            ),
-            (
-                "discard sampler factory result",
-                adapter.replace(
-                    "let readiness_sampler: WorkerSpec =\n        Box::new(move |token| DynManagedResource::new_box(sampler_factory.spawn(token)));",
-                    "let readiness_sampler: WorkerSpec =\n        Box::new(move |token| { let _ = sampler_factory.spawn(token); DynManagedResource::new_box(fake_worker) });",
-                ),
-            ),
-            (
-                "fake readiness worker",
-                adapter.replace(
-                    "let readiness_sampler: WorkerSpec =\n        Box::new(move |token| DynManagedResource::new_box(sampler_factory.spawn(token)));",
-                    "let readiness_sampler: WorkerSpec = { let _bait = Box::new(move |token| DynManagedResource::new_box(sampler_factory.spawn(token))); fake_worker };",
-                ),
-            ),
-            (
-                "pg output field substitution",
-                adapter.replace(
-                    "DomainModuleResult { resources, workers: vec![readiness_sampler], ..DomainModuleResult::default() }",
-                    "DomainModuleResult { resources, workers: vec![fake_worker], ..DomainModuleResult::default() }",
-                ),
-            ),
-        ] {
-            write(&root.join(PROVIDER_OUTPUT_PATH), &mutated)?;
-            assert_provider_gate_fails(&root, label)?;
-        }
-        write(&root.join(PROVIDER_OUTPUT_PATH), adapter)?;
-        let missing_assembly_merge = provider_output_fixture().replace(
-            "    module.merge(inputs.provider_module);",
-            "    let _ = inputs.provider_module;",
-        );
-        write(
-            &root.join(RUNTIME_PHASE_DOMAINS_PATH),
-            &missing_assembly_merge,
-        )?;
-        let findings = provider_outputs_live_findings(&root)?;
-        assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::MissingAnchor && finding.detail.contains("provider_module")
-            }),
-            "assemble 函数外的 merge bait 不能满足门禁: {findings:?}"
-        );
-
-        for extra in [
-            "    let provider_module = DomainModuleResult::default();\n",
-            "    let provider_alias = crate::provider_output::build_provider_module(&deps);\n",
-        ] {
-            let reset = provider_output_fixture().replace(
-                "    let provider_module = crate::provider_output::build_provider_module(&deps);\n",
-                &format!(
-                    "    let provider_module = crate::provider_output::build_provider_module(&deps);\n{extra}"
-                ),
-            );
-            write(&root.join(RUNTIME_PHASE_DOMAINS_PATH), &reset)?;
-            let findings = provider_outputs_live_findings(&root)?;
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::MissingAnchor),
-                "constructor 后 reset/alias 必须失败: {findings:?}"
-            );
-        }
-        write(
-            &root.join(RUNTIME_PHASE_DOMAINS_PATH),
-            &provider_output_fixture(),
-        )?;
-        for (label, mutated) in [
-            (
-                "borrowed pg owner at run",
-                provider_phase_launch_fixture().replace(
-                    "build_pg_runtime_module(pg_owner, pg_readiness_period)",
-                    "build_pg_runtime_module(&pg_owner, pg_readiness_period)",
-                ),
-            ),
-            (
-                "duplicate pg build outside run",
-                provider_phase_launch_fixture()
-                    + "\nfn bait() { crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period); }\n",
-            ),
-            (
-                "pg output not handed to launch plan",
-                provider_phase_launch_fixture().replace(
-                    "let _launch_plan = LaunchPlanParts { pg_runtime_module };",
-                    "let _ = pg_runtime_module;",
-                ),
-            ),
-        ] {
-            write(&root.join(RUNTIME_PHASE_LAUNCH_PATH), &mutated)?;
-            assert_provider_gate_fails(&root, label)?;
-        }
-        write(
-            &root.join(RUNTIME_PHASE_LAUNCH_PATH),
-            &provider_phase_launch_fixture(),
-        )?;
-        let legacy_source = root.join("assemblies/runtime/src/legacy_provider.rs");
-        for source in [
-            "fn legacy(deps: &SharedRuntimeDeps) { let redis = &deps.redis; redis.runtime_resources(); }\n",
-            "fn typed() { let redis: RedisRuntimeDeps = todo!(); redis.runtime_resources(); }\n",
-            "fn ufcs(redis: &RedisRuntimeDeps) { RedisRuntimeDeps::runtime_resources(redis); }\n",
-            "fn qualified_self_ufcs(redis: &redis_adapter::RedisRuntimeDeps) { <redis_adapter::RedisRuntimeDeps>::runtime_resources(redis); }\n",
-            "fn get(deps: &SharedRuntimeDeps) -> &RedisRuntimeDeps { &deps.redis }\nfn helper_return(deps: &SharedRuntimeDeps) { get(deps).runtime_resources(); }\n",
-            "fn identity<T>(value: T) -> T { value }\nfn generic_helper(deps: &SharedRuntimeDeps) { identity(&deps.redis).runtime_resources(); }\n",
-            "mod helpers { fn get(deps: &SharedRuntimeDeps) -> &RedisRuntimeDeps { &deps.redis } }\nfn qualified_helper(deps: &SharedRuntimeDeps) { helpers::get(deps).runtime_resources(); }\n",
-            "type Cache<T> = T;\nfn generic_alias(deps: &SharedRuntimeDeps) { let redis: Cache<&RedisRuntimeDeps> = &deps.redis; redis.runtime_resources(); }\n",
-            "fn merge(module: &mut DomainModuleResult, deps: &SharedRuntimeDeps) { module.merge_provider(&deps.redis); }\n",
-            "fn merge_ufcs(module: &mut DomainModuleResult, deps: &SharedRuntimeDeps) { DomainModuleResultExt::merge_provider(module, &deps.redis); }\n",
-            "fn merge_qualified(module: &mut DomainModuleResult, deps: &SharedRuntimeDeps) { crate::provider_output::DomainModuleResultExt::merge_provider(module, &deps.redis); }\n",
-            "impl crate::provider_output::ProviderOutput for PgRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } }\n",
-            "#[cfg(any(test, unix))] impl crate::provider_output::ProviderOutput for PgRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } }\n",
-            concat!(
-                "use redis_adapter::RedisRuntimeDeps as CacheDeps;\n",
-                "fn legacy_alias(deps: &CacheDeps) { deps.runtime_resources(); }\n",
-            ),
-            "use redis_adapter as cache;\nfn module_alias(deps: &cache::RedisRuntimeDeps) { deps.runtime_resources(); }\n",
-            "use redis_adapter::{self as cache};\nfn grouped_module_alias(deps: &cache::RedisRuntimeDeps) { deps.runtime_resources(); }\n",
-            "extern crate redis_adapter as cache;\nfn extern_crate_alias(deps: &cache::RedisRuntimeDeps) { deps.runtime_resources(); }\n",
-        ] {
-            write(&legacy_source, source)?;
-            let findings = provider_outputs_live_findings(&root)?;
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::ForbiddenWiring),
-                "production helper/alias 中的 runtime_resources 直连必须失败: {findings:?}"
-            );
-        }
-        assert_unrelated_provider_method_names_allowed(&root, &legacy_source)?;
-        assert_test_only_provider_items_allowed(&root, &legacy_source)?;
-        write(
-            &legacy_source,
-            "fn spawn(factory: postgres::PgReadinessSamplerFactory, token: CancellationToken) { factory.spawn(token); }\n",
-        )?;
-        assert_provider_gate_fails(&root, "factory spawn outside canonical helper")?;
-        fs::remove_file(&legacy_source)?;
-
-        let launch_path = root.join(RUNTIME_LAUNCH_PATH);
-        let canonical_launch = fs::read_to_string(&launch_path)?;
-        for (label, mutated) in [
-            (
-                "pg registration before trace",
-                canonical_launch.replace(
-                    "        if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }\n        let pg_result = Self::register_module_output(stack, pg_runtime_module);",
-                    "        let pg_result = Self::register_module_output(stack, pg_runtime_module);\n        if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }",
-                ),
-            ),
-            (
-                "duplicate pg registration",
-                canonical_launch.replace(
-                    "        let pg_result = Self::register_module_output(stack, pg_runtime_module);",
-                    "        let pg_result = Self::register_module_output(stack, pg_runtime_module);\n        let _duplicate_pg_result = Self::register_module_output(stack, pg_runtime_module);",
-                ),
-            ),
-            (
-                "legacy direct pg registration",
-                canonical_launch.replace(
-                    "        let pg_result = Self::register_module_output(stack, pg_runtime_module);",
-                    "        stack.register_detached(pg_store_guard);\n        let pg_result = Ok(());",
-                ),
-            ),
-        ] {
-            write(&launch_path, &mutated)?;
-            assert_provider_gate_fails(&root, label)?;
-        }
-        write(&launch_path, &canonical_launch)?;
-        write(
-            &root.join(RUNTIME_PHASE_DOMAINS_PATH),
-            "impl InfraBuilt { async fn wire_domains( {\n",
-        )?;
-        assert!(!provider_outputs_live_findings(&root)?.is_empty());
-        write(
-            &root.join(RUNTIME_PHASE_DOMAINS_PATH),
-            &provider_output_fixture(),
-        )?;
-        write(&legacy_source, "fn broken( {\n")?;
-        assert!(!provider_outputs_live_findings(&root)?.is_empty());
         Ok(())
     }
 
@@ -15574,14 +13774,13 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
         dlx_archive: s3_dlx_archive_config,
     } = s3_config.into_parts();
     let vault_config = VaultRuntimeConfig::from_snapshot(config)?;
-    let (vault, settings_key_name) = vault_config.into_runtime()?;
+    let (vault, identity_signer, settings_key_name) = vault_config.into_runtime()?;
     let redis = build_redis_runtime_deps(redis_config);
     let s3 = build_s3_runtime_deps(s3_general_config);
     wire_domain_transport(domain_transport);
     let wiring_inputs = RuntimeWiringInputs {
         event_transport,
         event_worker,
-        dlx_worker,
         distributed_worker,
         domain_modules,
         audit_consumer_key,
@@ -15590,7 +13789,6 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
     let RuntimeWiringInputs {
         event_transport,
         event_worker,
-        dlx_worker,
         distributed_worker,
         domain_modules,
         audit_consumer_key,
@@ -15732,8 +13930,8 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
             (
                 "serving fields swapped before transfer",
                 canonical.replace(
-                    "    let wiring_inputs = RuntimeWiringInputs {\n        event_transport,\n        event_worker,\n        dlx_worker,",
-                    "    let wiring_inputs = RuntimeWiringInputs {\n        event_transport,\n        event_worker: dlx_worker,\n        dlx_worker: event_worker,",
+                    "    let wiring_inputs = RuntimeWiringInputs {\n        event_transport,\n        event_worker,\n        distributed_worker,",
+                    "    let wiring_inputs = RuntimeWiringInputs {\n        event_transport: distributed_worker,\n        event_worker,\n        distributed_worker: event_transport,",
                 ),
             ),
             (
@@ -15788,8 +13986,8 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
             (
                 "duplicate Vault consume",
                 canonical.replace(
-                    "let (vault, settings_key_name) = vault_config.into_runtime()?;",
-                    "let _vault_bait = vault_config.into_runtime()?;\n    let (vault, settings_key_name) = vault_config.into_runtime()?;",
+                    "let (vault, identity_signer, settings_key_name) = vault_config.into_runtime()?;",
+                    "let _vault_bait = vault_config.into_runtime()?;\n    let (vault, identity_signer, settings_key_name) = vault_config.into_runtime()?;",
                 ),
             ),
             (
@@ -15913,7 +14111,7 @@ pub(crate) fn build_vault_runtime_from_values(
     token: String,
     transit_mount: String,
     settings_key_name: String,
-) -> anyhow::Result<(VaultRuntimeDeps, KeyName)> {
+) -> anyhow::Result<(VaultRuntimeDeps, std::sync::Arc<VaultSigner>, KeyName)> {
     let config = VaultRuntimeConfig::from_values(VaultConfigValues {
         addr: Some(addr),
         token: Some(token.as_str()),
@@ -15955,7 +14153,11 @@ pub mod test_support {
         token: String,
         transit_mount: String,
         settings_key_name: String,
-    ) -> anyhow::Result<(vault::VaultRuntimeDeps, diport::KeyName)> {
+    ) -> anyhow::Result<(
+        vault::VaultRuntimeDeps,
+        Arc<vault::VaultSigner>,
+        diport::KeyName,
+    )> {
         crate::infra::vault::build_vault_runtime_from_values(
             addr, token, transit_mount, settings_key_name,
         )
@@ -16222,7 +14424,7 @@ pub async fn run(mut runtime_inputs: ServingRuntimeInputs) {
         dlx_archive: s3_dlx_archive_config,
     } = s3_config.into_parts();
     let vault_config = VaultRuntimeConfig::from_snapshot(config);
-    let (vault, settings_key_name) = vault_config.into_runtime();
+    let (vault, identity_signer, settings_key_name) = vault_config.into_runtime();
     let redis = build_redis_runtime_deps(redis_config);
     let s3 = build_s3_runtime_deps(s3_general_config);
     build_dlx_lifecycle_bootstrap_config_from(
@@ -16502,14 +14704,13 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         dlx_archive: s3_dlx_archive_config,
     } = s3_config.into_parts();
     let vault_config = VaultRuntimeConfig::from_snapshot(config)?;
-    let (vault, settings_key_name) = vault_config.into_runtime()?;
+    let (vault, identity_signer, settings_key_name) = vault_config.into_runtime()?;
     let redis = build_redis_runtime_deps(redis_config);
     let s3 = build_s3_runtime_deps(s3_general_config);
     wire_domain_transport(domain_transport);
     let wiring_inputs = RuntimeWiringInputs {
         event_transport,
         event_worker,
-        dlx_worker,
         distributed_worker,
         domain_modules,
         audit_consumer_key,
@@ -16518,7 +14719,6 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
     let RuntimeWiringInputs {
         event_transport,
         event_worker,
-        dlx_worker,
         distributed_worker,
         domain_modules,
         audit_consumer_key,
@@ -18123,6 +16323,33 @@ impl DomainModuleResult {
                     .iter()
                     .any(|finding| finding.rule == Rule::ForbiddenWiring),
                 "{case} must fail listener-plan execution AST gate"
+            );
+        }
+
+        for (case, path, from, to) in [
+            (
+                "misbound-finalizer-input",
+                RUNTIME_PHASE_FINALIZE_PATH,
+                "metrics: metrics_exporter,",
+                "metrics: other_metrics,",
+            ),
+            (
+                "drifted-finalizer-input-type",
+                RUNTIME_ROUTES_PATH,
+                "pub(crate) metrics: Arc<dyn diport::MetricsExporter>,",
+                "pub(crate) metrics: Arc<NoopMetrics>,",
+            ),
+        ] {
+            let root = listener_plan_fixture(&format!("runtime-listener-plan-{case}"))?;
+            let source = fs::read_to_string(root.join(path))?;
+            let mutated = source.replacen(from, to, 1);
+            anyhow::ensure!(mutated != source, "{case} mutation must be live");
+            write(&root.join(path), &mutated)?;
+            assert!(
+                listener_plan_execution_findings(&root)?
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ForbiddenWiring),
+                "{case} must fail the exact named-input gate"
             );
         }
         Ok(())

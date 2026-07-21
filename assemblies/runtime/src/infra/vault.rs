@@ -87,11 +87,12 @@ impl VaultRuntimeConfig {
     }
 
     /// Consume this generation into the serving Vault capability bundle and its bound settings
-    /// key. The only secret copy is transferred immediately into the resolver's zeroizing owner;
-    /// the original allocation is transferred into the key provider's zeroizing owner.
+    /// key. Two explicit secret copies move into the signer/resolver zeroizing owners; the original
+    /// allocation moves into the key provider's zeroizing owner.
     pub(crate) fn into_runtime(
         self,
-    ) -> Result<(VaultRuntimeDeps, KeyName), VaultRuntimeConfigError> {
+    ) -> Result<(VaultRuntimeDeps, std::sync::Arc<VaultSigner>, KeyName), VaultRuntimeConfigError>
+    {
         let Self {
             client,
             addr,
@@ -102,6 +103,19 @@ impl VaultRuntimeConfig {
         let stores =
             empty_vault_store_allowlist().map_err(VaultRuntimeConfigError::VaultClientConfig)?;
         warn_vault_startup_security(&stores);
+        let signer = VaultSigner::new(
+            client.clone(),
+            addr.clone(),
+            token.copy_secret_allocation(),
+            transit_mount.clone(),
+            DEFAULT_VAULT_TIMEOUT,
+            vault::SignatureMarshaling::Jws,
+        )
+        .map_err(|e| {
+            VaultRuntimeConfigError::VaultClientConfig(anyhow::anyhow!(
+                "vault signer config error: {e}"
+            ))
+        })?;
         let resolver = VaultSecretResolver::new(
             client.clone(),
             addr.clone(),
@@ -131,6 +145,7 @@ impl VaultRuntimeConfig {
                 .map_err(VaultRuntimeConfigError::SettingsKeyNameConfig)?;
         Ok((
             VaultRuntimeDeps::new(resolver, key_provider),
+            std::sync::Arc::new(signer),
             settings_key_name,
         ))
     }
@@ -185,7 +200,7 @@ pub(crate) fn build_vault_runtime_from_values(
     token: String,
     transit_mount: String,
     settings_key_name: String,
-) -> anyhow::Result<(VaultRuntimeDeps, KeyName)> {
+) -> anyhow::Result<(VaultRuntimeDeps, std::sync::Arc<VaultSigner>, KeyName)> {
     let config = VaultRuntimeConfig::from_values(VaultConfigValues {
         addr: Some(addr),
         token: Some(token.as_str()),
@@ -266,6 +281,7 @@ const RSS_ACCESS_TOKEN_KEY_ID_ENV: &str = crate::config::RSS_ACCESS_TOKEN_SIGNIN
 ///   同 rustls client（兼处理 http 连接，保持 client 构造一致）。
 ///
 /// 两路均用 `Jws` marshaling：JWT/JWS 需 raw `r‖s`（vault 默认 asn1=DER 会让 oidc 验签失败，OIDC-ALG-KEYPATH-01）。
+#[cfg(test)]
 pub(crate) fn build_vault_signer_with(
     get: impl Fn(&str) -> Option<String>,
     allow_http: bool,
@@ -508,6 +524,7 @@ struct VaultTransitKeyVersion {
     public_key: Option<String>,
 }
 
+#[cfg(test)]
 fn vault_transit_key_response_to_rss_access_jwks(
     kid: &str,
     body: &[u8],
@@ -655,8 +672,9 @@ mod tests {
         let config =
             VaultRuntimeConfig::from_snapshot(snapshot.view()).expect("valid snapshot config");
         assert_eq!(format!("{config:?}"), "VaultRuntimeConfig(<redacted>)");
-        let (runtime, key_name) = config.into_runtime().expect("valid runtime adapters");
+        let (runtime, signer, key_name) = config.into_runtime().expect("valid runtime adapters");
         assert_eq!(runtime.runtime_resources().len(), 2);
+        assert_eq!(diport::ManagedResource::name(signer.as_ref()), "vault");
         assert_eq!(key_name.as_str(), "settings-snapshot-key");
 
         let maintenance =
@@ -666,7 +684,7 @@ mod tests {
             .expect("valid settings key provider");
         assert_eq!(key_name.as_str(), "settings-snapshot-key");
 
-        let (runtime, key_name) = build_vault_runtime_from_values(
+        let (runtime, signer, key_name) = build_vault_runtime_from_values(
             "https://vault.explicit.test:8200".to_owned(),
             "vault-explicit-token".to_owned(),
             "transit".to_owned(),
@@ -674,6 +692,7 @@ mod tests {
         )
         .expect("valid explicit integration values");
         assert_eq!(runtime.runtime_resources().len(), 2);
+        assert_eq!(diport::ManagedResource::name(signer.as_ref()), "vault");
         assert_eq!(key_name.as_str(), "settings-explicit-key");
     }
 
@@ -862,7 +881,7 @@ mod tests {
             VaultRuntimeConfigError::VaultClientConfig(_)
         ));
         let chain = format!("{error:#}");
-        assert!(chain.contains("vault resolver config error"));
+        assert!(chain.contains("vault signer config error"));
         assert!(!chain.contains(endpoint));
         assert!(!chain.contains(token));
         Ok(())

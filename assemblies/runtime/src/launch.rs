@@ -39,7 +39,7 @@ pub(crate) fn server_request_budget(
 pub(crate) struct LaunchPlanParts {
     pub(crate) listeners: routes::FinalizedListenerSet,
     pub(crate) trace_exporter: Option<Box<DynManagedResource<'static>>>,
-    pub(crate) pg_runtime_module: DomainModuleResult,
+    pub(crate) provider_module: DomainModuleResult,
     pub(crate) domain_module: DomainModuleResult,
 }
 
@@ -47,7 +47,7 @@ pub(crate) struct LaunchPlanParts {
 pub(crate) struct LaunchPlan {
     listeners: routes::FinalizedListenerSet,
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
-    pg_runtime_module: DomainModuleResult,
+    provider_module: DomainModuleResult,
     domain_module: DomainModuleResult,
 }
 
@@ -56,7 +56,7 @@ impl LaunchPlan {
         Self {
             listeners: parts.listeners,
             trace_exporter: parts.trace_exporter,
-            pg_runtime_module: parts.pg_runtime_module,
+            provider_module: parts.provider_module,
             domain_module: parts.domain_module,
         }
     }
@@ -69,7 +69,7 @@ impl LaunchPlan {
         let Self {
             listeners,
             trace_exporter,
-            pg_runtime_module,
+            provider_module,
             domain_module,
         } = self;
 
@@ -77,14 +77,15 @@ impl LaunchPlan {
         if let Some(exporter) = trace_exporter {
             stack.register_detached(exporter);
         }
-        // PG guards outlive their sampler and all downstream workers.
-        let pg_result = Self::register_module_output(stack, pg_runtime_module);
-        // Event infra lives in domain_module.resources and outlives all module workers.
+        // Provider resources outlive their workers and every downstream domain worker.
+        let provider_result = Self::register_module_output(stack, provider_module);
+        // Event infra is recorded into provider_module (ProviderOutput::event) and therefore
+        // registers with provider resources before domain workers.
         let domain_result = Self::register_module_output(stack, domain_module);
         // Both owned output batches must cross into the async shutdown stack before validation can
         // return an error; otherwise a later batch would be synchronously dropped on an earlier
         // validation failure.
-        pg_result?;
+        provider_result?;
         domain_result?;
 
         Ok(listeners.into_listeners())
@@ -394,14 +395,14 @@ fn report_shutdown_failures(
     failures: Vec<bootstrap::shutdown::ResourceShutdownError>,
 ) -> anyhow::Result<()> {
     if failures.is_empty() {
-        tracing::info!("all listeners drained; exiting");
+        tracing::info!("all runtime resources drained; exiting");
         return Ok(());
     }
     for f in &failures {
-        tracing::error!(error = %f, "listener shutdown failure");
+        tracing::error!(error = %f, "runtime resource shutdown failure");
     }
     anyhow::bail!(
-        "graceful shutdown completed with {} listener failure(s)",
+        "graceful shutdown completed with {} runtime resource failure(s)",
         failures.len()
     )
 }
@@ -545,7 +546,7 @@ mod tests {
         Box::new(move |_token| resource(name))
     }
 
-    fn pg_runtime_module(audit_guard: bool) -> DomainModuleResult {
+    fn provider_module(audit_guard: bool) -> DomainModuleResult {
         let mut resources = vec![resource("pg-store")];
         if audit_guard {
             resources.push(resource("pg-audit"));
@@ -634,7 +635,7 @@ mod tests {
         LaunchPlan::new(LaunchPlanParts {
             listeners: routes::FinalizedListenerSet::for_test(listeners),
             trace_exporter: None,
-            pg_runtime_module: pg_runtime_module(false),
+            provider_module: provider_module(false),
             domain_module: DomainModuleResult::default(),
         })
     }
@@ -643,7 +644,7 @@ mod tests {
         LaunchPlan::new(LaunchPlanParts {
             listeners: routes::FinalizedListenerSet::for_test(vec![test_health_assembled()]),
             trace_exporter: trace.then(|| resource("trace-exporter")),
-            pg_runtime_module: pg_runtime_module(audit_guard),
+            provider_module: provider_module(audit_guard),
             domain_module: DomainModuleResult {
                 resources: vec![
                     resource("domain-resource-a"),
@@ -747,7 +748,7 @@ mod tests {
 
         let failures = vec![
             ResourceShutdownError {
-                name: "http-primary".to_owned(),
+                name: "vault-signer".to_owned(),
                 kind: ShutdownFailureKind::Panicked,
             },
             ResourceShutdownError {
@@ -756,7 +757,7 @@ mod tests {
             },
         ];
         let err = report_shutdown_failures(failures).expect_err("non-empty failures -> Err");
-        assert!(err.to_string().contains("2 listener failure"));
+        assert!(err.to_string().contains("2 runtime resource failure"));
     }
 
     #[tokio::test]
@@ -1188,7 +1189,7 @@ mod tests {
                 "trace-exporter",
                 Arc::clone(&trace_shutdowns),
             )),
-            pg_runtime_module: DomainModuleResult {
+            provider_module: DomainModuleResult {
                 probes: vec![(probe_name, Box::new(NoopProbe))],
                 resources: vec![recording_resource(
                     "pg-owned-resource",

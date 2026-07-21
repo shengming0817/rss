@@ -189,6 +189,199 @@ pub struct PgReadinessSamplerFactory {
     period: Duration,
 }
 
+/// Owns every pool created by one fallible setup segment until that segment either commits the
+/// resources to its caller or explicitly closes them.
+///
+/// Registration order is construction order. [`Self::close`] consumes the transaction and delegates
+/// to [`bootstrap::shutdown::ShutdownStack`], making LIFO, continue-on-error, and single-shot cleanup
+/// structural rather than conventions repeated at each `?` site.
+struct PgSetupTransaction {
+    stack: bootstrap::shutdown::ShutdownStack,
+}
+
+impl PgSetupTransaction {
+    fn new() -> Self {
+        Self {
+            stack: bootstrap::shutdown::ShutdownStack::new(CancellationToken::new()),
+        }
+    }
+
+    fn register<R>(&mut self, resource: R)
+    where
+        R: ManagedResource + 'static,
+    {
+        self.stack
+            .register_detached(DynManagedResource::new_box(resource));
+    }
+
+    /// Transfers lifecycle ownership to the typed runtime owner without closing its pools.
+    fn commit(self) {}
+
+    /// Closes every resource once in reverse construction order while preserving the setup outcome.
+    ///
+    /// Cleanup diagnostics are always secondary: in particular, an error returned by a later setup
+    /// stage remains the function's primary error even if one or more rollback operations fail.
+    async fn close<T, E>(self, outcome: Result<T, E>) -> Result<T, E> {
+        for failure in self.stack.shutdown().await {
+            tracing::warn!(
+                target: "postgres",
+                error = %secure::redact_error(&failure),
+                "postgres startup cleanup failed; preserving primary setup outcome"
+            );
+        }
+        outcome
+    }
+}
+
+#[cfg(test)]
+mod setup_transaction_tests {
+    use std::sync::{Arc, Mutex};
+
+    use diport::{ManagedResource, ShutdownError};
+
+    use super::PgSetupTransaction;
+
+    struct RecordingResource {
+        name: &'static str,
+        shutdowns: Arc<Mutex<Vec<&'static str>>>,
+        fail: bool,
+    }
+
+    impl ManagedResource for RecordingResource {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        async fn shutdown(&self) -> Result<(), ShutdownError> {
+            self.shutdowns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(self.name);
+            if self.fail {
+                Err(ShutdownError::new(std::io::Error::other(
+                    "injected setup cleanup failure",
+                )))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn resource(
+        name: &'static str,
+        shutdowns: &Arc<Mutex<Vec<&'static str>>>,
+        fail: bool,
+    ) -> RecordingResource {
+        RecordingResource {
+            name,
+            shutdowns: Arc::clone(shutdowns),
+            fail,
+        }
+    }
+
+    #[tokio::test]
+    async fn every_migrator_stage_failure_closes_once_and_preserves_primary() {
+        for stage in [
+            "run-migrations",
+            "load-delivery-policy",
+            "verify-legacy-plaintext-policy",
+            "register-projection-bindings",
+        ] {
+            let shutdowns = Arc::new(Mutex::new(Vec::new()));
+            let mut transaction = PgSetupTransaction::new();
+            transaction.register(resource("postgres-migrator", &shutdowns, false));
+
+            let result = transaction.close(Err::<(), _>(stage)).await;
+
+            assert_eq!(result, Err(stage));
+            assert_eq!(
+                *shutdowns
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ["postgres-migrator"],
+                "stage {stage} must close the migrator exactly once"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_migrator_setup_still_closes_once() {
+        let shutdowns = Arc::new(Mutex::new(Vec::new()));
+        let mut transaction = PgSetupTransaction::new();
+        transaction.register(resource("postgres-migrator", &shutdowns, false));
+
+        assert_eq!(
+            transaction.close(Ok::<_, &'static str>("ready")).await,
+            Ok("ready")
+        );
+        assert_eq!(
+            *shutdowns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["postgres-migrator"]
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_failure_closes_writer_once_and_preserves_primary() {
+        let shutdowns = Arc::new(Mutex::new(Vec::new()));
+        let mut transaction = PgSetupTransaction::new();
+        transaction.register(resource("postgres-writer", &shutdowns, false));
+
+        let result = transaction
+            .close(Err::<(), _>("reader-connect-primary"))
+            .await;
+
+        assert_eq!(result, Err("reader-connect-primary"));
+        assert_eq!(
+            *shutdowns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["postgres-writer"]
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_failure_closes_reader_then_writer_and_cleanup_failure_is_secondary() {
+        let shutdowns = Arc::new(Mutex::new(Vec::new()));
+        let mut transaction = PgSetupTransaction::new();
+        transaction.register(resource("postgres-writer", &shutdowns, false));
+        transaction.register(resource("postgres-reader", &shutdowns, true));
+
+        let result = transaction
+            .close(Err::<(), _>("audit-admin-connect-primary"))
+            .await;
+
+        assert_eq!(result, Err("audit-admin-connect-primary"));
+        assert_eq!(
+            *shutdowns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["postgres-reader", "postgres-writer"],
+            "cleanup must remain LIFO and continue after a cleanup error"
+        );
+    }
+
+    #[test]
+    fn successful_serving_commit_does_not_close_transferred_resources() {
+        let shutdowns = Arc::new(Mutex::new(Vec::new()));
+        let mut transaction = PgSetupTransaction::new();
+        transaction.register(resource("postgres-writer", &shutdowns, false));
+        transaction.register(resource("postgres-reader", &shutdowns, false));
+        transaction.register(resource("postgres-audit-admin", &shutdowns, false));
+
+        transaction.commit();
+
+        assert!(
+            shutdowns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "commit transfers lifecycle ownership without early shutdown"
+        );
+    }
+}
+
 impl PgReadinessSamplerFactory {
     /// 使用 `ShutdownStack` 注入的 token 启动 sampler，并消费本 factory。
     #[must_use]
@@ -336,26 +529,57 @@ impl PgRuntimeDeps {
         projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> Result<Self, PgError> {
-        let migrator = PgStore::connect_migrator(migrator_config).await?;
-        migrator.run_migrations().await?;
-        let delivery_policy = migrator.load_event_delivery_policy().await?;
-        migrator
-            .verify_config_legacy_plaintext_policy(legacy_config_plaintext_policy)
-            .await?;
-        migrator
-            .register_projection_input_bindings(projection_generation, projection_inputs)
-            .await
-            .map_err(PgError::ProjectionBindings)?;
-        migrator.shutdown().await.ok();
+        let migrator = Arc::new(PgStore::connect_migrator(migrator_config).await?);
+        let mut migrator_transaction = PgSetupTransaction::new();
+        migrator_transaction.register(PgStoreGuard::new_named(
+            Arc::clone(&migrator),
+            "postgres-migrator",
+        ));
+        let migration_result = async {
+            migrator.run_migrations().await?;
+            let delivery_policy = migrator.load_event_delivery_policy().await?;
+            migrator
+                .verify_config_legacy_plaintext_policy(legacy_config_plaintext_policy)
+                .await?;
+            migrator
+                .register_projection_input_bindings(projection_generation, projection_inputs)
+                .await
+                .map_err(PgError::ProjectionBindings)?;
+            Ok(delivery_policy)
+        }
+        .await;
+        let delivery_policy = migrator_transaction.close(migration_result).await?;
 
+        let mut serving_transaction = PgSetupTransaction::new();
         let writer = PgStore::connect_verified_writer(serving_config).await?;
-        let reader = PgStore::connect_verified_read(tenant_read_config).await?;
+        serving_transaction.register(PgStoreGuard::new_named(
+            writer.store_arc(),
+            "postgres-writer",
+        ));
+        let reader = match PgStore::connect_verified_read(tenant_read_config).await {
+            Ok(reader) => reader,
+            Err(primary) => return serving_transaction.close(Err(primary)).await,
+        };
+        serving_transaction.register(PgStoreGuard::new_named(
+            reader.store_arc(),
+            "postgres-reader",
+        ));
         let stores = Arc::new(PgRuntimeStores::new(writer, reader));
         let audit_admin_store = match audit_admin_config {
-            Some(config) => Some(PgStore::connect_verified_audit_admin(config).await?),
+            Some(config) => {
+                let store = match PgStore::connect_verified_audit_admin(config).await {
+                    Ok(store) => store,
+                    Err(primary) => return serving_transaction.close(Err(primary)).await,
+                };
+                serving_transaction.register(PgStoreGuard::new_named(
+                    store.store_arc(),
+                    "postgres-audit-admin",
+                ));
+                Some(store)
+            }
             None => None,
         };
-        Ok(Self {
+        let owner = Self {
             handle: PgRuntimeHandle {
                 stores,
                 audit_admin_store,
@@ -364,7 +588,9 @@ impl PgRuntimeDeps {
                 readiness: Arc::new(PgDbReadiness::new()),
                 rls_ready: Arc::new(AtomicBool::new(true)),
             },
-        })
+        };
+        serving_transaction.commit();
+        Ok(owner)
     }
 
     /// 连接离线维护能力包，但绝不运行 migration。

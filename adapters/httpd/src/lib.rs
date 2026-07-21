@@ -180,17 +180,13 @@ impl DomainHttpTransport {
             return Err(DomainHttpTransportBuildError::EmptyTargets);
         }
         let source = x509_source(endpoint, initial_sync_timeout).await?;
-        let mut mapped = BTreeMap::new();
-        for target in targets {
-            let client = mtls_reqwest_client(&source, &target.policy)?;
-            mapped.insert(
-                target.domain,
-                DomainHttpTarget {
-                    endpoint: target.endpoint,
-                    client,
-                },
-            );
-        }
+        let (mapped, source) = build_domain_http_targets(
+            source,
+            targets,
+            mtls_reqwest_client,
+            shutdown_uncommitted_x509_source,
+        )
+        .await?;
         Ok(Self {
             targets: mapped,
             mtls_source: Some(source),
@@ -426,6 +422,51 @@ async fn x509_source(
         .build()
         .await
         .map_err(DomainHttpTransportBuildError::SpiffeSource)
+}
+
+async fn build_domain_http_targets<Source, BuildClient, Rollback, RollbackFuture, CleanupError>(
+    source: Source,
+    targets: Vec<DomainHttpTargetConfig>,
+    mut build_client: BuildClient,
+    rollback: Rollback,
+) -> Result<(BTreeMap<String, DomainHttpTarget>, Source), DomainHttpTransportBuildError>
+where
+    BuildClient: FnMut(
+        &Source,
+        &authn::OutboundMtlsPolicy,
+    ) -> Result<reqwest::Client, DomainHttpTransportBuildError>,
+    Rollback: FnOnce(Source) -> RollbackFuture,
+    RollbackFuture: Future<Output = Result<(), CleanupError>>,
+{
+    let mut mapped = BTreeMap::new();
+    for target in targets {
+        let client = match build_client(&source, &target.policy) {
+            Ok(client) => client,
+            Err(primary) => {
+                if rollback(source).await.is_err() {
+                    tracing::error!(
+                        cleanup_failed = true,
+                        "domain HTTP transport X509 source rollback failed; preserving client build error"
+                    );
+                }
+                return Err(primary);
+            }
+        };
+        mapped.insert(
+            target.domain,
+            DomainHttpTarget {
+                endpoint: target.endpoint,
+                client,
+            },
+        );
+    }
+    Ok((mapped, source))
+}
+
+async fn shutdown_uncommitted_x509_source(
+    source: spiffe::X509Source,
+) -> Result<(), spiffe::X509SourceError> {
+    source.shutdown_configured().await
 }
 
 fn mtls_reqwest_client(
@@ -1024,7 +1065,7 @@ mod tests {
     use super::*;
     use std::num::NonZeroU64;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use axum::Router;
     use axum::body::Bytes;
@@ -1557,6 +1598,81 @@ mod tests {
             matches!(result, Err(DomainHttpTransportBuildError::SpiffeSource(_))),
             "invalid SPIFFE endpoint must fail before runtime starts"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_target_client_failure_awaits_source_rollback_and_preserves_primary() {
+        struct TestSource;
+        struct TestCleanupFailure;
+
+        for failure_at in [0, 1] {
+            let targets = vec![
+                DomainHttpTargetConfig::new(
+                    "identity",
+                    "https://identity.internal/rpc",
+                    outbound_policy(),
+                )
+                .expect("identity target"),
+                DomainHttpTargetConfig::new(
+                    "audit",
+                    "https://audit.internal/rpc",
+                    outbound_policy(),
+                )
+                .expect("audit target"),
+            ];
+            let client_builds = Arc::new(AtomicUsize::new(0));
+            let rollback_started = Arc::new(AtomicBool::new(false));
+            let rollback_completed = Arc::new(AtomicBool::new(false));
+
+            let result = build_domain_http_targets(
+                TestSource,
+                targets,
+                {
+                    let client_builds = Arc::clone(&client_builds);
+                    move |_, _| {
+                        let current = client_builds.fetch_add(1, Ordering::SeqCst);
+                        if current == failure_at {
+                            Err(DomainHttpTransportBuildError::LocalSvidMismatch)
+                        } else {
+                            Ok(reqwest::Client::new())
+                        }
+                    }
+                },
+                {
+                    let rollback_started = Arc::clone(&rollback_started);
+                    let rollback_completed = Arc::clone(&rollback_completed);
+                    move |_| async move {
+                        rollback_started.store(true, Ordering::SeqCst);
+                        tokio::task::yield_now().await;
+                        rollback_completed.store(true, Ordering::SeqCst);
+                        Err(TestCleanupFailure)
+                    }
+                },
+            )
+            .await;
+
+            assert!(
+                matches!(
+                    result,
+                    Err(DomainHttpTransportBuildError::LocalSvidMismatch)
+                ),
+                "cleanup failure must not replace target {failure_at} client error"
+            );
+            assert_eq!(
+                client_builds.load(Ordering::SeqCst),
+                failure_at + 1,
+                "construction must stop at the failing target"
+            );
+            assert!(
+                rollback_started.load(Ordering::SeqCst),
+                "successful source construction must enter rollback"
+            );
+            assert!(
+                rollback_completed.load(Ordering::SeqCst),
+                "constructor must await source rollback before returning"
+            );
+        }
     }
 
     #[tokio::test]

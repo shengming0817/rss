@@ -1,6 +1,6 @@
 use super::{DomainsWired, Finalized, RuntimePhaseState, phase_result};
 use crate::SystemClock;
-use crate::routes::finalize_listener_plan;
+use crate::routes::{FinalizeListenerPlanInputs, finalize_listener_plan};
 use anyhow::Context as _;
 use postgres::caps;
 use std::sync::Arc;
@@ -10,7 +10,7 @@ impl<'a> DomainsWired<'a> {
         let DomainsWired {
             context,
             listener_execution_plan,
-            pg_owner,
+            rate_limiter,
             deps,
             runtime_rss_access,
             runtime_federated_access,
@@ -18,9 +18,8 @@ impl<'a> DomainsWired<'a> {
             domain_transport,
             command_idempotency_keyring,
             metrics_exporter,
-            pg_readiness_period,
             mut registry,
-            domain_module,
+            provider_build,
         } = self;
         let result = (|| {
             // Auth decision audit is a flat durable sink, not the audit ledger hash-chain actor
@@ -40,31 +39,34 @@ impl<'a> DomainsWired<'a> {
                     .as_ref()
                     .map(|provider| provider.provider()),
             );
-            let listeners = finalize_listener_plan(
-                listener_execution_plan,
-                context.config(),
-                &mut registry,
-                &token_provider_bindings,
-                auth_audit_sink,
-                auth_audit_clock,
-                metrics_exporter,
-            )
+            let listeners = finalize_listener_plan(FinalizeListenerPlanInputs {
+                execution_plan: listener_execution_plan,
+                config: context.config(),
+                registry: &mut registry,
+                providers: &token_provider_bindings,
+                audit_sink: auth_audit_sink,
+                audit_clock: auth_audit_clock,
+                rate_limiter,
+                metrics: metrics_exporter,
+            })
             .context("finalize RuntimePlan listeners")?;
 
-            Ok(Finalized {
+            Ok(listeners)
+        })();
+        let result = match result {
+            Ok(listeners) => Ok(Finalized {
                 context,
-                pg_owner,
+                provider_build,
                 deps,
                 runtime_rss_access,
                 runtime_federated_access,
                 runtime_service_token,
                 domain_transport,
                 command_idempotency_keyring,
-                pg_readiness_period,
-                domain_module,
                 listeners,
-            })
-        })();
+            }),
+            Err(error) => Err(provider_build.abort(error).await),
+        };
 
         phase_result(<Self as RuntimePhaseState>::PHASE, result)
     }

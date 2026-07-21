@@ -53,6 +53,7 @@ impl LocalClock for SystemLocalClock {
 const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/ops/0069-account-security-capacity-gate.selftest.sh",
     "docs/ops/0069-account-security-capacity-gate.sh",
+    "docs/ops/202606271438-003-container-image.md",
     "docs/ops/localtx-alerts.rules.yaml",
     "docs/ops/202607082104-1642-consistency-dashboard-checklist.md",
     "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
