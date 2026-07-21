@@ -382,6 +382,7 @@ fn es256_provider() -> OidcProvider<diport::RssAccessProfile> {
         audience: AUD,
         trusted_kinds: &["superAdmin", "user", "device", "admin"],
         keys: &keys,
+        retirement_schedule: None,
         clock: Box::new(FixedClock(NOW)),
     })
     .expect("es256 production provider")

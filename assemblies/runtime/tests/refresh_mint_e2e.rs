@@ -165,6 +165,7 @@ fn oidc_provider(trusted_kinds: &str) -> OidcProvider<diport::RssAccessProfile> 
         audience: AUD,
         trusted_kinds: &trusted_kinds,
         keys: &keys,
+        retirement_schedule: None,
         clock: Box::new(FixedClock(NOW)),
     })
     .expect("es256 production provider")

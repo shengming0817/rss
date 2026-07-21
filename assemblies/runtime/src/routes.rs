@@ -786,6 +786,7 @@ mod tests {
                 audience: "rss-test",
                 trusted_kinds: &["admin", "superAdmin"],
                 keys: &keys,
+                retirement_schedule: None,
                 clock: Box::new(SystemClock),
             })
             .expect("provider"),

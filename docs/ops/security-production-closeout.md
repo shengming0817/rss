@@ -15,9 +15,94 @@ The current `assemblies/runtime/assembly.toml` remains `profile = "demo"` until 
 
 - Flip an assembly to `profile = "production"` only in the same PR that proves the above gates.
 - Rotate each access profile's JWKS independently and atomically; failed refresh must keep last-good keys and lower only that profile's readyz signal.
-- For Vault Transit RSS Access signing, export the current public key for `RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID` into `RSS_ACCESS_TOKEN_JWKS_PATH` before starting server.
+- For Vault Transit RSS Access signing, `export-vault-transit` must merge **Active + Retiring (and optional
+  Next)** public keys into `RSS_ACCESS_TOKEN_JWKS_PATH` before starting server. When Retiring is configured,
+  do not single-key or Active-only whole-file overwrite.
 - Reject deployment if active RSS/Federated issuer, audience or canonical JWKS path overlaps, if Service issuer/audience overlaps either access profile, or if an unselected profile namespace is present.
 - Remove any deployment use of `RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET` or `RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX`; they are no longer supported.
+
+## RSS Access Signing Key Rotation
+
+Planned rotation keeps verify overlap so in-flight access tokens remain valid while JWKS propagates.
+Mint is always Active-only: Next and Retiring never sign. Coordinate Vault Transit key provisioning,
+JWKS publication, and runtime env as one audited change set per replica generation.
+
+### Environment
+
+| Variable | Required | Meaning |
+|----------|----------|---------|
+| `RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID` | ✔ (rss-access) | Sole mint `kid` (Active). |
+| `RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID` | optional | Staged Next `kid` (not used for mint). Publish its public key to JWKS before promoting. |
+| `RSS_ACCESS_TOKEN_SIGNING_RETIRING` | optional | Comma-separated `kid=unixSeconds` entries. Each `unixSeconds` is `verify_until` for that Retiring kid. |
+| `RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT` | required when Retiring is set | Unix seconds when Active/Retiring cutover started; overlap is measured from this instant. |
+| `RSS_ACCESS_TOKEN_TTL_SECS` | ✔ (rss-access) | Max access-token TTL (`1..=900`). Feeds planned overlap as `ttl`. |
+| `RSS_ACCESS_TOKEN_ROTATION_CLOCK_SKEW_SECS` | optional | Clock skew budget (default `60`, max `86400`). |
+| `RSS_ACCESS_TOKEN_ROTATION_JWKS_PROPAGATION_SLO_SECS` | optional | JWKS propagation SLO (default `300`, max `86400`). |
+| `RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS` | optional | Extra safety margin (default `60`, max `86400`). |
+| `RSS_ACCESS_TOKEN_ROTATION_MODE` | optional | Exactly `planned` (default) or `emergency`. |
+
+### Overlap (planned)
+
+Startup rejects planned rotation when any Retiring entry fails:
+
+```text
+verify_until - rotated_at >= ttl + clock_skew + jwks_propagation_slo + margin
+```
+
+Exact equality passes; one second short fails. Defaults with `ttl=900` yield a minimum overlap of
+`900 + 60 + 300 + 60 = 1320` seconds unless operators raise the policy knobs.
+
+### Planned steps
+
+1. **Prepare Next** — Create the new Vault Transit signing key (or new version / key name). Set
+   `RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID` to that `kid`. Do not promote Active yet.
+2. **Publish public key to JWKS** — Run `export-vault-transit` to merge Active + Retiring (if any) + Next
+   into `RSS_ACCESS_TOKEN_JWKS_PATH` (atomic rename / Secret projection). Ensure the Next `kid` is included
+   before promotion. Wait until every verifier replica has refreshed and `rss_access_token_jwks_ready` stays
+   healthy with the Next `kid` present.
+3. **Switch Active / Retiring** — Promote Next → Active. Move the previous Active into
+   `RSS_ACCESS_TOKEN_SIGNING_RETIRING` as `oldKid=verifyUntilUnix`. Clear or leave Next empty / set
+   the following staged key. Set `RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT` to the cutover unix time and
+   `RSS_ACCESS_TOKEN_ROTATION_MODE=planned`. Choose `verify_until` so the overlap formula holds.
+4. **Wait overlap** — Keep Retiring keys in the merged JWKS export and in `SIGNING_RETIRING` until
+   `now >= verify_until` for every entry. Do not remove public keys early; clients may still present
+   tokens signed by Retiring kids. After any Retiring `verify_until` passes,
+   `rss_access_token_signing_rotation` reports **Degraded** (readyz still 200; operator cleanup debt;
+   traffic continues). During overlap, a Retiring kid missing from JWKS makes the probe **Unhealthy**
+   (503) under `planned` mode or **Degraded** (200) under `emergency` mode.
+5. **Remove Retired** — After every Retiring deadline, re-run `export-vault-transit` without retired kids
+   (Active + any remaining Retiring/Next only) and clear them from `RSS_ACCESS_TOKEN_SIGNING_RETIRING`
+   (and `SIGNING_ROTATED_AT` when no Retiring remains). Confirm `rss_access_token_jwks_ready` and
+   `rss_access_token_signing_rotation` return to **Healthy**.
+
+### Emergency mode
+
+Set `RSS_ACCESS_TOKEN_ROTATION_MODE=emergency` only under incident approval when the Active private
+key is compromised or must be abandoned immediately.
+
+- Overlap validation is **exempt**: startup does not require `verify_until - rotated_at >= min_overlap`.
+- Immediately retire the compromised Active: mint only on the replacement Active; do **not** keep the
+  old kid in Retiring for a long verify window unless incident policy explicitly requires brief
+  forensic acceptance.
+- Expect abrupt invalidation of in-flight tokens signed by the abandoned key; force re-auth /
+  refresh as needed and record the blast radius.
+- Still publish the replacement public key to JWKS **before** traffic trusts the new Active, and keep
+  `rss_access_token_jwks_ready` / `rss_access_token_signing_rotation` healthy on the replacement set.
+- Return to `planned` for the next routine rotation; do not leave production permanently in emergency.
+
+### Readiness
+
+| Probe | Role during rotation |
+|-------|----------------------|
+| `rss_access_token_jwks_ready` | Profile JWKS load/watch healthy (last-good retained on refresh failure). |
+| `federated_access_token_jwks_ready` | Federated JWKS only; independent of RSS Access signing rotation. |
+| `rss_access_token_signing_rotation` | Active `kid` present in JWKS. Retiring past `verify_until` → **Degraded** (readyz still 200; operator cleanup debt; traffic continues). In overlap window, Retiring kid missing from JWKS → **Unhealthy** (503) in `planned` mode or **Degraded** (200) in `emergency` mode. Next missing from JWKS remains **Healthy** with detail `next signing key not yet in jwks`. |
+
+Keep new replicas out of the serving pool until selected JWKS ready probes and
+`rss_access_token_signing_rotation` are **not Unhealthy** (HTTP 200). **Degraded** cleanup debt
+(Retiring past `verify_until`) does **not** block traffic—only Unhealthy (503) must keep a replica out of
+the pool. Metric `authn_rotation_verify_until_timestamp` exposes the nearest Retiring `verify_until` as a
+**unix timestamp gauge** (not remaining seconds); alerts may derive `(timestamp - now)` for time-to-deadline.
 
 ## Atomic Token Profile Cutover
 

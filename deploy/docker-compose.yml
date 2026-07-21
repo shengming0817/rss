@@ -173,7 +173,7 @@ services:
     depends_on:
       vault-init:
         condition: service_completed_successfully
-    # init job writes the generated JWKS volume, then server consumes it read-only.
+    # init job writes merged JWKS (Active+Retiring+Next per env) to the volume; server consumes read-only.
     user: "0:0"
     read_only: true
     tmpfs:

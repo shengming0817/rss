@@ -258,6 +258,7 @@ integration_shard_catalog! {
             ("runtime", "infra_builders_api", Test, Parallel),
             ("runtime", "listener_plan_trybuild", Test, Parallel),
             ("runtime", "refresh_mint_e2e", Test, Parallel),
+            ("runtime", "key_rotation_e2e", Test, Parallel),
             ("runtime", "runtime_outputs_trybuild", Test, Parallel),
             ("runtime", "runtime_serve_e2e", Test, Parallel),
             ("runtime", "service_token_replay_e2e", Test, Serial),

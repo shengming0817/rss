@@ -328,6 +328,7 @@ fn test_provider() -> oidc::OidcProvider<diport::RssAccessProfile> {
         audience: "rss",
         trusted_kinds: &["user", "admin"],
         keys: &keys,
+        retirement_schedule: None,
         clock: Box::new(SystemClock),
     })
     .expect("test provider")

@@ -533,6 +533,8 @@ pub struct RssAccessStaticProviderConfig<'a> {
     pub audience: &'a str,
     pub trusted_kinds: &'a [&'a str],
     pub keys: &'a [KeyedEs256StaticKey<'a>],
+    /// Optional Retiring deadlines; `None` keeps the legacy weak verify path (no schedule).
+    pub retirement_schedule: Option<oidc::RetirementSchedule>,
     pub clock: Box<dyn diport::Clock>,
 }
 
@@ -561,6 +563,10 @@ pub fn rss_access_provider_from_static_config(
         .iter()
         .copied()
         .fold(builder, |builder, kind| builder.trust_kind(kind));
+    let builder = match config.retirement_schedule {
+        Some(schedule) => builder.retirement_schedule(schedule),
+        None => builder,
+    };
     finish_provider(builder.build(), config.clock)
 }
 
@@ -874,6 +880,7 @@ mod tests {
             audience: "rss-audience",
             trusted_kinds: &["user"],
             keys: &keys,
+            retirement_schedule: None,
             clock: Box::new(SystemClock),
         })
         .expect("strict RSS static provider");
