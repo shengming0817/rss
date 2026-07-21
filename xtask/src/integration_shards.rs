@@ -275,6 +275,7 @@ integration_shard_catalog! {
             ("testkit", "harness", Test, Parallel),
             ("testkit", "local_only", Test, Parallel),
             ("testkit", "postgres_test_login_governance", Test, Serial),
+            ("testkit", "provider_catalog_trybuild", Test, Parallel),
             ("redis-adapter", "redis", Lib, Parallel),
             ("redis-adapter", "integration_claimer", Test, Serial),
             ("journeys", "device_command_ack_timeout_journey", Test, Parallel),

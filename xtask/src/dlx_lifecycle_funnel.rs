@@ -4,6 +4,7 @@
 //! hot DLX 只能经 typed lifecycle repository 与不可删除的 verified WORM provider 归档后清理；旧
 //! retention/env/decoder 与 raw DELETE 不得回流，runtime 必须显式注入独立 PG/S3/Vault provider。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -11,6 +12,10 @@ use quote::ToTokens as _;
 use syn::visit::Visit as _;
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
+use crate::phase_helper_expand::{
+    PhaseExpandError, inherent_entry_method, private_production_methods, production_inherent_impl,
+    self_or_owner_call, self_receiver_helper_call,
+};
 use crate::workspace_root;
 
 const LIFECYCLE_REPOSITORY: &str = "adapters/postgres/src/dlx_lifecycle.rs";
@@ -25,7 +30,7 @@ const RUNTIME_INFRA_REQUIRED: &[&str] = &[
     "archive_store.verify()",
     "verify_dlx_vault_key_capability(&hot_vault_provider",
     "verify_dlx_vault_key_capability(&archive_vault_provider",
-    "Ok((dlx_archiver_pg_config,dlx_verifier_pg_config,dlx_purger_pg_config,archive_store,archive_vault_provider,))",
+    "Ok(PhaseADlxVerified{dlx_archiver_pg_config,dlx_verifier_pg_config,dlx_purger_pg_config,archive_store,archive_vault_provider,})",
     "PgRuntimeDeps::setup_with_audit_admin_config(",
     "PgDlxLifecycleRuntime::setup(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,hot_payload_protector,)",
     "DlxLifecycleRuntimeDeps::new(dlx_pg_owner,archive_store,archive_vault_provider,archive_key",
@@ -158,41 +163,65 @@ fn runtime_phase_owner_findings(
             )];
         }
     };
-    let methods = file
-        .items
-        .iter()
-        .filter_map(|item| {
-            let syn::Item::Impl(item_impl) = item else {
-                return None;
-            };
-            (item_impl.trait_.is_none()
-                && !has_test_attribute(&item_impl.attrs)
-                && type_last_ident(&item_impl.self_ty).as_deref() == Some(owner))
-            .then_some(item_impl)
-        })
-        .flat_map(|item_impl| &item_impl.items)
-        .filter_map(|item| {
-            let syn::ImplItem::Fn(function) = item else {
-                return None;
-            };
-            (function.sig.ident == method
-                && function.sig.asyncness.is_some()
-                && !has_test_attribute(&function.attrs))
-            .then_some(function)
-        })
-        .collect::<Vec<_>>();
-    let [selected_method] = methods.as_slice() else {
+    let implementation = match production_inherent_impl(&file, owner) {
+        Ok(implementation) => implementation,
+        Err(error) => {
+            return vec![finding(
+                Rule::MissingRuntimeProvider,
+                path.display().to_string(),
+                production_phase_helper_expansion_failed(owner, method, &error),
+            )];
+        }
+    };
+    let methods = match private_production_methods(implementation) {
+        Ok(methods) => methods,
+        Err(error) => {
+            return vec![finding(
+                Rule::MissingRuntimeProvider,
+                path.display().to_string(),
+                production_phase_helper_expansion_failed(owner, method, &error),
+            )];
+        }
+    };
+    let selected_method = match inherent_entry_method(implementation, method) {
+        Ok(selected) if selected.sig.asyncness.is_some() => selected,
+        Ok(_) => {
+            return vec![finding(
+                Rule::MissingRuntimeProvider,
+                path.display().to_string(),
+                format!(
+                    "生产 async phase owner `{owner}::{method}` 必须且只能存在一个；实际非 async"
+                ),
+            )];
+        }
+        Err(error) => {
+            return vec![finding(
+                Rule::MissingRuntimeProvider,
+                path.display().to_string(),
+                production_phase_helper_expansion_failed(owner, method, &error),
+            )];
+        }
+    };
+    let mut evidence = RuntimePhaseEvidence::new(required);
+    let mut stack = Vec::new();
+    let mut error = None;
+    {
+        let mut expanding = ExpandingRuntimePhaseEvidence {
+            inner: &mut evidence,
+            owner,
+            methods: &methods,
+            stack: &mut stack,
+            error: &mut error,
+        };
+        expanding.visit_block(&selected_method.block);
+    }
+    if let Some(error) = error {
         return vec![finding(
             Rule::MissingRuntimeProvider,
             path.display().to_string(),
-            format!(
-                "生产 async phase owner `{owner}::{method}` 必须且只能存在一个；实际 {}",
-                methods.len()
-            ),
+            production_phase_helper_expansion_failed(owner, method, &error),
         )];
-    };
-    let mut evidence = RuntimePhaseEvidence::new(required);
-    evidence.visit_block(&selected_method.block);
+    }
     let expected = (0..required.len()).collect::<Vec<_>>();
     if evidence.observed != expected {
         let first_missing = expected
@@ -243,13 +272,56 @@ impl<'a> RuntimePhaseEvidence<'a> {
     }
 }
 
-impl<'ast> syn::visit::Visit<'ast> for RuntimePhaseEvidence<'_> {
+fn production_phase_helper_expansion_failed(
+    owner: &str,
+    method: &str,
+    error: &impl std::fmt::Display,
+) -> String {
+    format!("生产 async phase owner `{owner}::{method}` helper expansion failed: {error}")
+}
+
+struct ExpandingRuntimePhaseEvidence<'a, 'm, 'ast> {
+    inner: &'a mut RuntimePhaseEvidence<'m>,
+    owner: &'a str,
+    methods: &'a BTreeMap<String, &'ast syn::ImplItemFn>,
+    stack: &'a mut Vec<String>,
+    error: &'a mut Option<PhaseExpandError>,
+}
+
+impl<'a, 'm, 'ast> ExpandingRuntimePhaseEvidence<'a, 'm, 'ast> {
+    fn expand_helper(
+        &mut self,
+        helper: &'ast syn::ImplItemFn,
+        args: &'ast syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+    ) -> bool {
+        let name = helper.sig.ident.to_string();
+        if self.stack.iter().any(|frame| frame == &name) {
+            *self.error = Some(PhaseExpandError::Cycle(name));
+            return false;
+        }
+        for arg in args {
+            self.visit_expr(arg);
+            if self.error.is_some() {
+                return false;
+            }
+        }
+        self.stack.push(name);
+        self.visit_block(&helper.block);
+        self.stack.pop();
+        self.error.is_none()
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ExpandingRuntimePhaseEvidence<'_, '_, 'ast> {
     fn visit_block(&mut self, block: &'ast syn::Block) {
         for statement in &block.stmts {
             if dlx_statement_has_test_attr(statement) {
                 continue;
             }
             self.visit_stmt(statement);
+            if self.error.is_some() {
+                return;
+            }
             if matches!(
                 statement,
                 syn::Stmt::Expr(
@@ -289,13 +361,27 @@ impl<'ast> syn::visit::Visit<'ast> for RuntimePhaseEvidence<'_> {
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        self.record(call);
+        if self.error.is_some() {
+            return;
+        }
+        if let Some((helper, args)) = self_or_owner_call(call, self.owner, self.methods) {
+            let _ = self.expand_helper(helper, args);
+            return;
+        }
+        self.inner.record(call);
         syn::visit::visit_expr_call(self, call);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if self.error.is_some() {
+            return;
+        }
+        if let Some((helper, args)) = self_receiver_helper_call(call, self.methods) {
+            let _ = self.expand_helper(helper, args);
+            return;
+        }
         if call.method == "verify" {
-            self.record(call);
+            self.inner.record(call);
         }
         syn::visit::visit_expr_method_call(self, call);
     }
@@ -317,16 +403,6 @@ fn dlx_statement_has_test_attr(statement: &syn::Stmt) -> bool {
         syn::Stmt::Macro(statement) => has_test_attribute(&statement.attrs),
         syn::Stmt::Expr(_, _) => false,
     }
-}
-
-fn type_last_ident(ty: &syn::Type) -> Option<String> {
-    let syn::Type::Path(path) = ty else {
-        return None;
-    };
-    path.path
-        .segments
-        .last()
-        .map(|segment| segment.ident.to_string())
 }
 
 fn has_test_attribute(attrs: &[syn::Attribute]) -> bool {
@@ -1351,13 +1427,13 @@ mod tests {
                     archive_store.verify();
                     verify_dlx_vault_key_capability(&hot_vault_provider);
                     verify_dlx_vault_key_capability(&archive_vault_provider);
-                    Ok((
+                    Ok(PhaseADlxVerified {
                         dlx_archiver_pg_config,
                         dlx_verifier_pg_config,
                         dlx_purger_pg_config,
                         archive_store,
                         archive_vault_provider,
-                    ));
+                    });
                     PgRuntimeDeps::setup_with_audit_admin_config();
                     PgDlxLifecycleRuntime::setup(
                         &dlx_archiver_pg_config,
@@ -1372,6 +1448,59 @@ mod tests {
                         archive_key,
                     );
                     wire_dlx_lifecycle(dlx_lifecycle, dlx_worker);
+                }
+            }
+        "#
+    }
+
+    fn helper_expanded_runtime_infra_phase_fixture() -> &'static str {
+        r#"
+            impl<'a> ProvidersBuilt<'a> {
+                async fn build_infra(self) {
+                    after_required_preflight(
+                        Self::phase_a_run_dlx_preflight(),
+                        |verified| Self::phase_b_setup_postgres_after_preflight(verified),
+                    );
+                    PgDlxLifecycleRuntime::setup(
+                        &dlx_archiver_pg_config,
+                        &dlx_verifier_pg_config,
+                        &dlx_purger_pg_config,
+                        hot_payload_protector,
+                    );
+                    DlxLifecycleRuntimeDeps::new(
+                        dlx_pg_owner,
+                        archive_store,
+                        archive_vault_provider,
+                        archive_key,
+                    );
+                    wire_dlx_lifecycle(dlx_lifecycle, dlx_worker);
+                }
+
+                async fn phase_a_run_dlx_preflight() {
+                    PgDlxLifecycleRuntime::preflight_identities(
+                        &dlx_archiver_pg_config,
+                        &dlx_verifier_pg_config,
+                        &dlx_purger_pg_config,
+                    );
+                    archive_store.verify();
+                    verify_dlx_vault_key_capability(&hot_vault_provider);
+                    verify_dlx_vault_key_capability(&archive_vault_provider);
+                    Ok(PhaseADlxVerified {
+                        dlx_archiver_pg_config,
+                        dlx_verifier_pg_config,
+                        dlx_purger_pg_config,
+                        archive_store,
+                        archive_vault_provider,
+                    });
+                }
+
+                async fn phase_b_setup_postgres_after_preflight(verified: ()) {
+                    Self::phase_b_setup_postgres();
+                    verified
+                }
+
+                async fn phase_b_setup_postgres() {
+                    PgRuntimeDeps::setup_with_audit_admin_config();
                 }
             }
         "#
@@ -1981,7 +2110,7 @@ pub(crate) async fn build_s3_dlx_archive_store(
     }
 
     #[test]
-    fn runtime_phase_gate_rejects_missing_reordered_comment_string_and_test_bait() {
+    fn runtime_phase_gate_rejects_missing_reordered_comment_string_and_test_bait() -> Result<()> {
         let canonical = canonical_runtime_infra_phase_fixture();
         assert!(
             runtime_phase_owner_findings(
@@ -1994,6 +2123,95 @@ pub(crate) async fn build_s3_dlx_archive_store(
             )
             .is_empty(),
             "canonical synthetic phase fixture must stay green",
+        );
+
+        let helper_expanded = helper_expanded_runtime_infra_phase_fixture();
+        assert!(
+            runtime_phase_owner_findings(
+                Path::new(RUNTIME_INFRA_PHASE),
+                helper_expanded,
+                "ProvidersBuilt",
+                "build_infra",
+                RUNTIME_INFRA_REQUIRED,
+                RUNTIME_INFRA_FLOW,
+            )
+            .is_empty(),
+            "required tokens in Phase A/B helpers must pass after expansion",
+        );
+        let helper_uncalled = r#"
+            impl<'a> ProvidersBuilt<'a> {
+                async fn build_infra(self) {
+                    after_required_preflight();
+                    PgDlxLifecycleRuntime::setup(
+                        &dlx_archiver_pg_config,
+                        &dlx_verifier_pg_config,
+                        &dlx_purger_pg_config,
+                        hot_payload_protector,
+                    );
+                    DlxLifecycleRuntimeDeps::new(
+                        dlx_pg_owner,
+                        archive_store,
+                        archive_vault_provider,
+                        archive_key,
+                    );
+                    wire_dlx_lifecycle(dlx_lifecycle, dlx_worker);
+                }
+
+                async fn phase_a_run_dlx_preflight() {
+                    PgDlxLifecycleRuntime::preflight_identities(
+                        &dlx_archiver_pg_config,
+                        &dlx_verifier_pg_config,
+                        &dlx_purger_pg_config,
+                    );
+                    archive_store.verify();
+                    verify_dlx_vault_key_capability(&hot_vault_provider);
+                    verify_dlx_vault_key_capability(&archive_vault_provider);
+                    Ok(PhaseADlxVerified {
+                        dlx_archiver_pg_config,
+                        dlx_verifier_pg_config,
+                        dlx_purger_pg_config,
+                        archive_store,
+                        archive_vault_provider,
+                    });
+                }
+
+                async fn phase_b_setup_postgres() {
+                    PgRuntimeDeps::setup_with_audit_admin_config();
+                }
+            }
+        "#;
+        assert!(
+            !runtime_phase_owner_findings(
+                Path::new(RUNTIME_INFRA_PHASE),
+                helper_uncalled,
+                "ProvidersBuilt",
+                "build_infra",
+                RUNTIME_INFRA_REQUIRED,
+                RUNTIME_INFRA_FLOW,
+            )
+            .is_empty(),
+            "tokens only in uncalled helpers must fail closed without expansion reachability",
+        );
+
+        let helper_reordered_verify = helper_expanded.replace(
+            "archive_store.verify();\n                    verify_dlx_vault_key_capability(&hot_vault_provider);",
+            "verify_dlx_vault_key_capability(&hot_vault_provider);\n                    archive_store.verify();",
+        );
+        assert_ne!(
+            helper_reordered_verify, helper_expanded,
+            "helper-expanded verify reorder must change fixture text"
+        );
+        assert!(
+            !runtime_phase_owner_findings(
+                Path::new(RUNTIME_INFRA_PHASE),
+                &helper_reordered_verify,
+                "ProvidersBuilt",
+                "build_infra",
+                RUNTIME_INFRA_REQUIRED,
+                RUNTIME_INFRA_FLOW,
+            )
+            .is_empty(),
+            "verify reorder inside Phase A helper must fail closed after expansion",
         );
 
         let reordered = canonical
@@ -2026,10 +2244,10 @@ pub(crate) async fn build_s3_dlx_archive_store(
         );
         let body_start = canonical
             .find("                    after_required_preflight();")
-            .unwrap_or_else(|| unreachable!("canonical body start"));
+            .ok_or_else(|| anyhow::anyhow!("canonical body start"))?;
         let body_end = canonical
             .rfind("                }\n            }")
-            .unwrap_or_else(|| unreachable!("canonical body end"));
+            .ok_or_else(|| anyhow::anyhow!("canonical body end"))?;
         let nested_test_bait = format!(
             "{}                    #[cfg(test)] {{\n{}                    }}\n{}",
             &canonical[..body_start],
@@ -2061,5 +2279,6 @@ pub(crate) async fn build_s3_dlx_archive_store(
             );
             assert!(!findings.is_empty(), "{name} must fail closed");
         }
+        Ok(())
     }
 }

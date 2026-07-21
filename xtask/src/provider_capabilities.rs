@@ -8,6 +8,7 @@
 //! INVARIANT: L2-PROVIDER-CAPABILITY-ENROLLMENT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "declared_capability_without_behavior_fails|duplicate_unknown_or_wrong_order_enrollment_fails|noop_unrelated_and_decorated_behaviors_fail|testkit_catalog_projection_drift_fails|untracked_invocation_is_outside_canonical_scan|detached_carrier_and_feature_drift_fail_closed|tracked_nonordinary_or_oversized_sources_fail_closed", anti_vacuity = "workspace_provider_capability_wrappers_and_behaviors_are_exact_and_live" }.
 //! INVARIANT: L2-PROVIDER-CAPABILITY-WIRE-01 { level = "Medium", exec = "verify", source = "codegen", golden = "generated/provider-capability-matrix.json", synthetic_red = "check_rejects_missing_tampered_and_crlf_without_writing", anti_vacuity = "render_twice_is_byte_identical" }.
 
+use crate::cmd::{ExternalProgram, external_cmd};
 use crate::generated_file;
 use crate::integration_shards::{IntegrationShard, TargetKind};
 use anyhow::{Context, Result, bail, ensure};
@@ -18,7 +19,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
@@ -840,12 +840,14 @@ fn discover_invocations(root: &Path) -> Result<Vec<DiscoveredInvocation>> {
 }
 
 fn tracked_rust_paths(root: &Path) -> Result<Vec<PathBuf>> {
-    let output = Command::new("/usr/bin/git")
-        .arg("-C")
-        .arg(root)
-        .args(["ls-files", "-z", "--", "*.rs"])
-        .output()
-        .context("enumerate tracked Rust sources for provider catalog")?;
+    let output = external_cmd(
+        ExternalProgram::SystemGit,
+        &["ls-files", "-z", "--", "*.rs"],
+        &[],
+        Some(root),
+    )
+    .output()
+    .context("enumerate tracked Rust sources for provider catalog")?;
     ensure!(
         output.status.success(),
         "`/usr/bin/git ls-files` failed while enumerating provider catalog inputs: {}",
@@ -1851,17 +1853,16 @@ mod tests {
         let cache = root.join(".cache");
         fs::create_dir_all(&cache)?;
         fs::write(root.join("tracked.rs"), "fn tracked() {}\n")?;
-        let init = Command::new("/usr/bin/git")
-            .arg("-C")
-            .arg(&root)
-            .arg("init")
-            .output()?;
+        let init =
+            external_cmd(ExternalProgram::SystemGit, &["init"], &[], Some(&root)).output()?;
         assert!(init.status.success());
-        let add = Command::new("/usr/bin/git")
-            .arg("-C")
-            .arg(&root)
-            .args(["add", "tracked.rs"])
-            .output()?;
+        let add = external_cmd(
+            ExternalProgram::SystemGit,
+            &["add", "tracked.rs"],
+            &[],
+            Some(&root),
+        )
+        .output()?;
         assert!(add.status.success());
         fs::write(
             cache.join("bait.rs"),
@@ -1935,20 +1936,19 @@ mod tests {
         let source = root.join("tracked.rs");
         fs::write(&source, "fn tracked() {}\n")?;
         assert!(
-            Command::new("/usr/bin/git")
-                .arg("-C")
-                .arg(&root)
-                .arg("init")
+            external_cmd(ExternalProgram::SystemGit, &["init"], &[], Some(&root))
                 .status()?
                 .success()
         );
         assert!(
-            Command::new("/usr/bin/git")
-                .arg("-C")
-                .arg(&root)
-                .args(["add", "tracked.rs"])
-                .status()?
-                .success()
+            external_cmd(
+                ExternalProgram::SystemGit,
+                &["add", "tracked.rs"],
+                &[],
+                Some(&root)
+            )
+            .status()?
+            .success()
         );
 
         fs::write(&source, vec![b'x'; MAX_RUST_SOURCE_BYTES as usize + 1])?;

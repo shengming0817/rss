@@ -12,7 +12,7 @@
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- the runtime phase must consume the committed generated domain list through `compose_bindings`, retain partial bindings on constructor/compose failure, record every output in `ProviderBuild`'s startup transaction, and must not restore per-domain handwritten wiring.
 //!
-//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring" } -- the unique production `prepare_runtime()` calls exactly one closed process snapshot factory and seals the password blocklist into `ServingRuntimeInputs`, while `prepare_operator_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes one typed Vault generation. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring" } -- the unique production `prepare_runtime()` calls exactly one closed process snapshot factory and seals the password blocklist into `ServingRuntimeInputs`, while `prepare_operator_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes one typed Vault generation. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
 //! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, while operator commands prepare only `OperatorRuntimeInputs`, every operator arm receives that exact binding, and the sole operator shutdown consumes it. No shared input type, pre-consumption early return, alias, macro, shadow path, or unreachable bait is accepted.
 //!
@@ -32,6 +32,11 @@
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::localtx_coverage::attrs_may_be_production;
+use crate::phase_helper_expand::{
+    PhaseExpandError, binding_remaps_for_call, expand_inherent_phase_method, inherent_entry_method,
+    mask_comments_and_strings, private_production_methods, production_inherent_impl,
+    self_or_owner_call, self_receiver_helper_call,
+};
 use crate::workspace_root;
 use anyhow::{Context, Result};
 use assembly_schema::AssemblyManifest;
@@ -213,15 +218,24 @@ fn collect_report(root: &Path) -> Result<Report> {
         }
     }
     for anchor in &anchors {
-        if anchor.status != AnchorStatus::Ok {
-            findings.push(finding(
+        match &anchor.status {
+            AnchorStatus::Ok => {}
+            AnchorStatus::ExpansionFailed(detail) => findings.push(finding(
+                Rule::MissingAnchor,
+                anchor.path,
+                format!(
+                    "required runtime wiring anchor `{}` helper expansion failed: {detail}",
+                    anchor.id
+                ),
+            )),
+            AnchorStatus::Missing | AnchorStatus::OutOfOrder => findings.push(finding(
                 Rule::MissingAnchor,
                 anchor.path,
                 format!(
                     "required runtime wiring anchor `{}` missing or out of order",
                     anchor.id
                 ),
-            ));
+            )),
         }
     }
     findings.extend(runtime_config_snapshot_live_findings(root)?);
@@ -936,6 +950,28 @@ fn canonical_password_preload_local(
     .then_some((password_blocklist, trace_export))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingRemapMapKind {
+    Pg,
+    S3,
+    Serving,
+}
+
+#[derive(Debug)]
+enum BindingRemapUndo {
+    Slot {
+        slot: usize,
+        previous: syn::Ident,
+    },
+    Map {
+        kind: BindingRemapMapKind,
+        key: String,
+        previous: syn::Ident,
+    },
+}
+
+const TRACKED_BINDING_SLOT_COUNT: usize = 8;
+
 #[derive(Debug, Default)]
 struct RunRuntimeConfigWiring {
     runtime_inputs_calls: usize,
@@ -1000,6 +1036,134 @@ impl RunRuntimeConfigWiring {
         Self {
             runtime_inputs_binding: Some(runtime_inputs_binding),
             ..Self::default()
+        }
+    }
+
+    fn push_binding_remaps(
+        &mut self,
+        remaps: &[(syn::Ident, syn::Ident)],
+    ) -> Vec<BindingRemapUndo> {
+        let mut undo = Vec::new();
+        // `binding_remaps_for_call` yields `(param, arg)`; remap tracked bindings arg → param.
+        for (param, arg) in remaps {
+            self.remap_tracked_binding(arg, param, &mut undo);
+        }
+        undo
+    }
+
+    fn pop_binding_remaps(&mut self, undo: Vec<BindingRemapUndo>) {
+        for entry in undo.into_iter().rev() {
+            match entry {
+                BindingRemapUndo::Slot { slot, previous } => {
+                    self.set_tracked_binding_slot(slot, Some(previous));
+                }
+                BindingRemapUndo::Map {
+                    kind,
+                    key,
+                    previous,
+                } => match kind {
+                    BindingRemapMapKind::Pg => {
+                        self.pg_part_bindings.insert(key, previous);
+                    }
+                    BindingRemapMapKind::S3 => {
+                        self.s3_part_bindings.insert(key, previous);
+                    }
+                    BindingRemapMapKind::Serving => {
+                        self.serving_part_bindings.insert(key, previous);
+                    }
+                },
+            }
+        }
+    }
+
+    fn remap_tracked_binding(
+        &mut self,
+        from: &syn::Ident,
+        to: &syn::Ident,
+        undo: &mut Vec<BindingRemapUndo>,
+    ) {
+        for slot in 0..TRACKED_BINDING_SLOT_COUNT {
+            if self.tracked_binding_slot(slot).as_ref() == Some(from) {
+                undo.push(BindingRemapUndo::Slot {
+                    slot,
+                    previous: from.clone(),
+                });
+                self.set_tracked_binding_slot(slot, Some(to.clone()));
+            }
+        }
+        for (key, binding) in &mut self.pg_part_bindings {
+            if binding == from {
+                undo.push(BindingRemapUndo::Map {
+                    kind: BindingRemapMapKind::Pg,
+                    key: key.clone(),
+                    previous: from.clone(),
+                });
+                *binding = to.clone();
+            }
+        }
+        for (key, binding) in &mut self.s3_part_bindings {
+            if binding == from {
+                undo.push(BindingRemapUndo::Map {
+                    kind: BindingRemapMapKind::S3,
+                    key: key.clone(),
+                    previous: from.clone(),
+                });
+                *binding = to.clone();
+            }
+        }
+        for (key, binding) in &mut self.serving_part_bindings {
+            if binding == from {
+                undo.push(BindingRemapUndo::Map {
+                    kind: BindingRemapMapKind::Serving,
+                    key: key.clone(),
+                    previous: from.clone(),
+                });
+                *binding = to.clone();
+            }
+        }
+    }
+
+    fn tracked_binding_slot(&self, slot: usize) -> &Option<syn::Ident> {
+        match slot {
+            0 => &self.runtime_inputs_binding,
+            1 => &self.config_binding,
+            2 => &self.pg_config_binding,
+            3 => &self.redis_config_binding,
+            4 => &self.vault_config_binding,
+            5 => &self.s3_config_binding,
+            6 => &self.s3_canary_module_binding,
+            7 => &self.serving_parts_binding,
+            _ => {
+                debug_assert!(
+                    false,
+                    "tracked binding slot {slot} out of range (expected 0..{TRACKED_BINDING_SLOT_COUNT})"
+                );
+                unreachable!(
+                    "tracked binding slot {slot} out of range (expected 0..{TRACKED_BINDING_SLOT_COUNT})"
+                )
+            }
+        }
+    }
+
+    fn set_tracked_binding_slot(&mut self, slot: usize, value: Option<syn::Ident>) {
+        match slot {
+            0 => self.runtime_inputs_binding = value,
+            1 => self.config_binding = value,
+            2 => self.pg_config_binding = value,
+            3 => self.redis_config_binding = value,
+            4 => self.vault_config_binding = value,
+            5 => self.s3_config_binding = value,
+            6 => self.s3_canary_module_binding = value,
+            7 => self.serving_parts_binding = value,
+            _ => {
+                debug_assert!(
+                    false,
+                    "tracked binding slot {slot} out of range (expected 0..{TRACKED_BINDING_SLOT_COUNT})"
+                );
+                unreachable!(
+                    "tracked binding slot {slot} out of range (expected 0..{TRACKED_BINDING_SLOT_COUNT})"
+                )
+            }
         }
     }
 
@@ -1263,8 +1427,8 @@ impl RunRuntimeConfigWiring {
     }
 }
 
-impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
-    fn visit_local(&mut self, local: &'ast syn::Local) {
+impl RunRuntimeConfigWiring {
+    fn observe_local(&mut self, local: &syn::Local) {
         let binding = immutable_pat_ident(&local.pat);
         let initializer = local.init.as_ref().map(|init| init.expr.as_ref());
         if let (Some(binding), Some(initializer), Some(runtime_inputs)) =
@@ -1322,10 +1486,9 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
         {
             self.s3_part_bindings = bindings;
         }
-        syn::visit::visit_local(self, local);
     }
 
-    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+    fn observe_expr_call(&mut self, call: &syn::ExprCall) {
         self.record_serving_sink_call(call);
         if path_ends_with(&call.func, &["RuntimeInputs", "new"]) {
             self.runtime_inputs_calls += 1;
@@ -1414,10 +1577,9 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
             self.pg_setup_after_serving_config +=
                 usize::from(canonical && self.canonical_serving_into_parts_calls == 1);
         }
-        syn::visit::visit_expr_call(self, call);
     }
 
-    fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
+    fn observe_expr_struct(&mut self, item: &syn::ExprStruct) {
         if path_last_ident(&item.path).is_some_and(|ident| ident == "RuntimeWiringInputs") {
             self.serving_wiring_inputs_calls += 1;
             self.canonical_serving_wiring_inputs_calls += usize::from(
@@ -1437,10 +1599,9 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
                 }
             }
         }
-        syn::visit::visit_expr_struct(self, item);
     }
 
-    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+    fn observe_expr_method_call(&mut self, call: &syn::ExprMethodCall) {
         if call.method == "config"
             && call.args.is_empty()
             && self
@@ -1493,6 +1654,27 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
                     .is_some_and(|vault_config| is_exact_ident_path(&call.receiver, vault_config)),
             );
         }
+    }
+}
+
+impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        self.observe_local(local);
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        self.observe_expr_call(call);
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
+        self.observe_expr_struct(item);
+        syn::visit::visit_expr_struct(self, item);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.observe_expr_method_call(call);
         syn::visit::visit_expr_method_call(self, call);
     }
 
@@ -1500,6 +1682,87 @@ impl<'ast> Visit<'ast> for RunRuntimeConfigWiring {
         self.closure_depth += 1;
         syn::visit::visit_expr_closure(self, closure);
         self.closure_depth -= 1;
+    }
+}
+
+struct HelperExpandingVisit<'a, 'ast> {
+    inner: &'a mut RunRuntimeConfigWiring,
+    owner: &'a str,
+    methods: &'a BTreeMap<String, &'ast syn::ImplItemFn>,
+    stack: &'a mut Vec<String>,
+    error: &'a mut Option<PhaseExpandError>,
+}
+
+impl<'a, 'ast> Visit<'ast> for HelperExpandingVisit<'a, 'ast> {
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        self.inner.observe_local(local);
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if self.error.is_some() {
+            return;
+        }
+        if let Some((helper, args)) = self_or_owner_call(call, self.owner, self.methods) {
+            if !self.expand_helper(helper, args) {
+                return;
+            }
+            return;
+        }
+        self.inner.observe_expr_call(call);
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
+        self.inner.observe_expr_struct(item);
+        syn::visit::visit_expr_struct(self, item);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if self.error.is_some() {
+            return;
+        }
+        if let Some((helper, args)) = self_receiver_helper_call(call, self.methods) {
+            if !self.expand_helper(helper, args) {
+                return;
+            }
+            return;
+        }
+        self.inner.observe_expr_method_call(call);
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+        self.inner.closure_depth += 1;
+        syn::visit::visit_expr_closure(self, closure);
+        self.inner.closure_depth -= 1;
+    }
+}
+
+impl<'a, 'ast> HelperExpandingVisit<'a, 'ast> {
+    fn expand_helper(
+        &mut self,
+        helper: &'ast syn::ImplItemFn,
+        args: &'ast syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+    ) -> bool {
+        let name = helper.sig.ident.to_string();
+        if self.stack.iter().any(|frame| frame == &name) {
+            *self.error = Some(PhaseExpandError::Cycle(name));
+            return false;
+        }
+        for arg in args {
+            self.visit_expr(arg);
+            if self.error.is_some() {
+                return false;
+            }
+        }
+        let remaps = binding_remaps_for_call(helper, args);
+        let undo = self.inner.push_binding_remaps(&remaps);
+        self.stack.push(name);
+        self.visit_block(&helper.block);
+        self.stack.pop();
+        self.inner.pop_binding_remaps(undo);
+        self.error.is_none()
     }
 }
 
@@ -3274,10 +3537,54 @@ fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule
     let mut findings = if legacy_fixture {
         production_runtime_config_snapshot_findings(&file)
     } else {
-        let provider = parse_rust_file(&root.join(RUNTIME_PHASE_PROVIDER_PATH))?;
-        let infra = parse_rust_file(&root.join(RUNTIME_PHASE_INFRA_PATH))?;
-        let domains = parse_rust_file(&root.join(RUNTIME_PHASE_DOMAINS_PATH))?;
-        production_runtime_phase_config_snapshot_findings(&file, &provider, &infra, &domains)
+        let provider_path = root.join(RUNTIME_PHASE_PROVIDER_PATH);
+        let infra_path = root.join(RUNTIME_PHASE_INFRA_PATH);
+        let domains_path = root.join(RUNTIME_PHASE_DOMAINS_PATH);
+        let provider_source = fs::read_to_string(&provider_path)
+            .with_context(|| format!("读 {} 失败", provider_path.display()))?;
+        let infra_source = fs::read_to_string(&infra_path)
+            .with_context(|| format!("读 {} 失败", infra_path.display()))?;
+        let domains_source = fs::read_to_string(&domains_path)
+            .with_context(|| format!("读 {} 失败", domains_path.display()))?;
+        let provider = match syn::parse_file(&provider_source) {
+            Ok(file) => file,
+            Err(error) => {
+                return Ok(vec![finding(
+                    Rule::ForbiddenWiring,
+                    RUNTIME_PHASE_PROVIDER_PATH,
+                    format!("runtime configuration snapshot gate 无法解析生产 Rust: {error}"),
+                )]);
+            }
+        };
+        let infra = match syn::parse_file(&infra_source) {
+            Ok(file) => file,
+            Err(error) => {
+                return Ok(vec![finding(
+                    Rule::ForbiddenWiring,
+                    RUNTIME_PHASE_INFRA_PATH,
+                    format!("runtime configuration snapshot gate 无法解析生产 Rust: {error}"),
+                )]);
+            }
+        };
+        let domains = match syn::parse_file(&domains_source) {
+            Ok(file) => file,
+            Err(error) => {
+                return Ok(vec![finding(
+                    Rule::ForbiddenWiring,
+                    RUNTIME_PHASE_DOMAINS_PATH,
+                    format!("runtime configuration snapshot gate 无法解析生产 Rust: {error}"),
+                )]);
+            }
+        };
+        production_runtime_phase_config_snapshot_findings(
+            &file,
+            &provider_source,
+            &provider,
+            &infra_source,
+            &infra,
+            &domains_source,
+            &domains,
+        )
     };
     if root.join(RSS_MAIN_PATH).exists() && !pg_operator_definitions_are_exact(&file) {
         findings.push(finding(
@@ -3296,8 +3603,11 @@ fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule
 
 fn production_runtime_phase_config_snapshot_findings(
     runtime: &syn::File,
+    provider_source: &str,
     provider: &syn::File,
+    infra_source: &str,
     infra: &syn::File,
+    domains_source: &str,
     domains: &syn::File,
 ) -> Vec<Finding<Rule>> {
     let prepares = production_functions_named(runtime, "prepare_runtime");
@@ -3324,41 +3634,65 @@ fn production_runtime_phase_config_snapshot_findings(
             "runtime configuration snapshot gate requires one production run_startup",
         )];
     };
-    let Some(build_providers) =
-        unique_production_inherent_method(provider, "Planned", "build_providers")
-    else {
+    if let Err(error) =
+        expand_inherent_phase_method(provider_source, provider, "Planned", "build_providers")
+    {
         return vec![finding(
             Rule::MissingAnchor,
             RUNTIME_PHASE_PROVIDER_PATH,
-            "typed BuildProvider owner missing",
+            format!("typed BuildProvider helper expansion failed: {error}"),
         )];
-    };
-    let Some(build_infra) =
-        unique_production_inherent_method(infra, "ProvidersBuilt", "build_infra")
-    else {
+    }
+    if let Err(error) =
+        expand_inherent_phase_method(infra_source, infra, "ProvidersBuilt", "build_infra")
+    {
         return vec![finding(
             Rule::MissingAnchor,
             RUNTIME_PHASE_INFRA_PATH,
-            "typed BuildInfra owner missing",
+            format!("typed BuildInfra helper expansion failed: {error}"),
         )];
-    };
-    let Some(wire_domains) =
-        unique_production_inherent_method(domains, "InfraBuilt", "wire_domains")
-    else {
+    }
+    if let Err(error) =
+        expand_inherent_phase_method(domains_source, domains, "InfraBuilt", "wire_domains")
+    {
         return vec![finding(
             Rule::MissingAnchor,
             RUNTIME_PHASE_DOMAINS_PATH,
-            "typed WireDomains owner missing",
+            format!("typed WireDomains helper expansion failed: {error}"),
         )];
-    };
+    }
 
     let mut prepare_wiring = PrepareRuntimeConfigWiring::default();
     prepare_wiring.visit_block(&prepare.block);
     let mut run_wiring =
         RunRuntimeConfigWiring::new(syn::Ident::new("context", proc_macro2::Span::call_site()));
-    run_wiring.visit_block(&build_providers.block);
-    run_wiring.visit_block(&build_infra.block);
-    run_wiring.visit_block(&wire_domains.block);
+    if let Err(error) =
+        visit_expanded_phase_method(&mut run_wiring, provider, "Planned", "build_providers")
+    {
+        return vec![finding(
+            Rule::MissingAnchor,
+            RUNTIME_PHASE_PROVIDER_PATH,
+            format!("typed BuildProvider helper expansion visitor failed: {error}"),
+        )];
+    }
+    if let Err(error) =
+        visit_expanded_phase_method(&mut run_wiring, infra, "ProvidersBuilt", "build_infra")
+    {
+        return vec![finding(
+            Rule::MissingAnchor,
+            RUNTIME_PHASE_INFRA_PATH,
+            format!("typed BuildInfra helper expansion visitor failed: {error}"),
+        )];
+    }
+    if let Err(error) =
+        visit_expanded_phase_method(&mut run_wiring, domains, "InfraBuilt", "wire_domains")
+    {
+        return vec![finding(
+            Rule::MissingAnchor,
+            RUNTIME_PHASE_DOMAINS_PATH,
+            format!("typed WireDomains helper expansion visitor failed: {error}"),
+        )];
+    }
     let mut inventory = ProductionRuntimeConfigInventory::default();
     inventory.visit_file(runtime);
     inventory.visit_file(provider);
@@ -11198,11 +11532,12 @@ struct AnchorSpec {
     pattern: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum AnchorStatus {
     Ok,
     Missing,
     OutOfOrder,
+    ExpansionFailed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11473,8 +11808,45 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     },
 ];
 
+fn phase_method_expand_target(path: &str) -> Option<(&'static str, &'static str)> {
+    match path {
+        RUNTIME_PHASE_PROVIDER_PATH => Some(("Planned", "build_providers")),
+        RUNTIME_PHASE_INFRA_PATH => Some(("ProvidersBuilt", "build_infra")),
+        RUNTIME_PHASE_DOMAINS_PATH => Some(("InfraBuilt", "wire_domains")),
+        RUNTIME_PHASE_FINALIZE_PATH => Some(("DomainsWired", "finalize")),
+        RUNTIME_PHASE_LAUNCH_PATH => Some(("Finalized", "launch")),
+        _ => None,
+    }
+}
+
+fn visit_expanded_phase_method(
+    visitor: &mut RunRuntimeConfigWiring,
+    file: &syn::File,
+    owner: &str,
+    entry: &str,
+) -> Result<(), PhaseExpandError> {
+    let implementation = production_inherent_impl(file, owner)?;
+    let methods = private_production_methods(implementation)?;
+    let entry_method = inherent_entry_method(implementation, entry)?;
+    let mut stack = Vec::new();
+    let mut error = None;
+    let mut expanding = HelperExpandingVisit {
+        inner: visitor,
+        owner,
+        methods: &methods,
+        stack: &mut stack,
+        error: &mut error,
+    };
+    expanding.visit_block(&entry_method.block);
+    if let Some(err) = error {
+        return Err(err);
+    }
+    Ok(())
+}
+
 fn wiring_anchors(root: &Path) -> Result<Vec<AnchorEntry>> {
     let mut file_cache = BTreeMap::<&str, String>::new();
+    let mut expanded_cache = BTreeMap::<&str, Result<String, PhaseExpandError>>::new();
     let mut last_pos = BTreeMap::<(&str, &str), usize>::new();
     let mut entries = Vec::new();
 
@@ -11489,18 +11861,38 @@ fn wiring_anchors(root: &Path) -> Result<Vec<AnchorEntry>> {
             }
         };
 
-        let scope = anchor_search_scope(spec, text);
-        let masked_scope = mask_comments_and_strings(scope.body);
-        let status = match masked_scope.find(spec.pattern) {
-            None => AnchorStatus::Missing,
-            Some(pos) => {
-                let absolute_pos = scope.start + pos;
-                let previous = last_pos.entry(anchor_order_key(spec)).or_insert(0);
-                if absolute_pos < *previous {
-                    AnchorStatus::OutOfOrder
-                } else {
-                    *previous = absolute_pos;
-                    AnchorStatus::Ok
+        let (search_body, offset_base, expand_error) =
+            if let Some((owner, method)) = phase_method_expand_target(spec.path) {
+                let expanded = expanded_cache.entry(spec.path).or_insert_with(|| {
+                    match syn::parse_file(text) {
+                        Ok(file) => expand_inherent_phase_method(text, &file, owner, method)
+                            .map(|expanded| expanded.virtual_source),
+                        Err(error) => Err(PhaseExpandError::Parse(error.to_string())),
+                    }
+                });
+                match expanded {
+                    Ok(body) => (body.as_str(), 0usize, None),
+                    Err(error) => ("", 0usize, Some(error.clone())),
+                }
+            } else {
+                let scope = anchor_search_scope(spec, text);
+                (scope.body, scope.start, None)
+            };
+        let masked_scope = mask_comments_and_strings(search_body);
+        let status = if let Some(error) = expand_error {
+            AnchorStatus::ExpansionFailed(error.to_string())
+        } else {
+            match masked_scope.find(spec.pattern) {
+                None => AnchorStatus::Missing,
+                Some(pos) => {
+                    let absolute_pos = offset_base + pos;
+                    let previous = last_pos.entry(anchor_order_key(spec)).or_insert(0);
+                    if absolute_pos < *previous {
+                        AnchorStatus::OutOfOrder
+                    } else {
+                        *previous = absolute_pos;
+                        AnchorStatus::Ok
+                    }
                 }
             }
         };
@@ -11525,31 +11917,6 @@ fn anchor_search_scope<'a>(spec: &AnchorSpec, text: &'a str) -> AnchorSearchScop
             return extract_braced_body_at(text, 0, function).unwrap_or_else(|| empty_scope(text));
         }
         return production_async_function_scope(text, "run_startup", "async fn run_startup(");
-    }
-    if spec.path == RUNTIME_PHASE_PROVIDER_PATH {
-        let start = text.find("impl<'a> Planned<'a>").unwrap_or(0);
-        return extract_braced_body_at(text, start, "async fn build_providers(")
-            .unwrap_or_else(|| empty_scope(text));
-    }
-    if spec.path == RUNTIME_PHASE_INFRA_PATH {
-        let start = text.find("impl<'a> ProvidersBuilt<'a>").unwrap_or(0);
-        return extract_braced_body_at(text, start, "async fn build_infra(")
-            .unwrap_or_else(|| empty_scope(text));
-    }
-    if spec.path == RUNTIME_PHASE_DOMAINS_PATH {
-        let start = text.find("impl<'a> InfraBuilt<'a>").unwrap_or(0);
-        return extract_braced_body_at(text, start, "async fn wire_domains(")
-            .unwrap_or_else(|| empty_scope(text));
-    }
-    if spec.path == RUNTIME_PHASE_FINALIZE_PATH {
-        let start = text.find("impl<'a> DomainsWired<'a>").unwrap_or(0);
-        return extract_braced_body_at(text, start, "async fn finalize(")
-            .unwrap_or_else(|| empty_scope(text));
-    }
-    if spec.path == RUNTIME_PHASE_LAUNCH_PATH {
-        let start = text.find("impl Finalized<'_>").unwrap_or(0);
-        return extract_braced_body_at(text, start, "async fn launch(")
-            .unwrap_or_else(|| empty_scope(text));
     }
     if spec.path == RUNTIME_LAUNCH_PATH {
         if matches!(
@@ -11725,138 +12092,6 @@ fn empty_scope(text: &str) -> AnchorSearchScope<'_> {
     }
 }
 
-fn mask_comments_and_strings(src: &str) -> String {
-    let bytes = src.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0usize;
-
-    while index < bytes.len() {
-        if let Some(end) = raw_string_end(bytes, index) {
-            mask_range(bytes, index, end, &mut out);
-            index = end;
-            continue;
-        }
-
-        if is_prefixed_string_start(bytes, index) {
-            let end = quoted_string_end(bytes, index + 2);
-            mask_range(bytes, index, end, &mut out);
-            index = end;
-            continue;
-        }
-
-        if bytes[index] == b'"' {
-            let end = quoted_string_end(bytes, index + 1);
-            mask_range(bytes, index, end, &mut out);
-            index = end;
-            continue;
-        }
-
-        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
-            let end = bytes[index..]
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map(|offset| index + offset)
-                .unwrap_or(bytes.len());
-            mask_range(bytes, index, end, &mut out);
-            index = end;
-            continue;
-        }
-
-        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            let end = block_comment_end(bytes, index);
-            mask_range(bytes, index, end, &mut out);
-            index = end;
-            continue;
-        }
-
-        out.push(bytes[index]);
-        index += 1;
-    }
-
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn raw_string_end(bytes: &[u8], index: usize) -> Option<usize> {
-    let mut cursor = match bytes.get(index) {
-        Some(b'r') => index + 1,
-        Some(b'b' | b'c') if bytes.get(index + 1) == Some(&b'r') => index + 2,
-        _ => return None,
-    };
-    let hashes_start = cursor;
-    while bytes.get(cursor) == Some(&b'#') {
-        cursor += 1;
-    }
-    if bytes.get(cursor) != Some(&b'"') {
-        return None;
-    }
-    let hashes = cursor - hashes_start;
-    cursor += 1;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'"' && has_raw_string_hashes(bytes, cursor + 1, hashes) {
-            return Some(cursor + 1 + hashes);
-        }
-        cursor += 1;
-    }
-    Some(bytes.len())
-}
-
-fn has_raw_string_hashes(bytes: &[u8], start: usize, hashes: usize) -> bool {
-    start + hashes <= bytes.len()
-        && bytes[start..start + hashes]
-            .iter()
-            .all(|byte| *byte == b'#')
-}
-
-fn is_prefixed_string_start(bytes: &[u8], index: usize) -> bool {
-    matches!(bytes.get(index), Some(b'b' | b'c')) && bytes.get(index + 1) == Some(&b'"')
-}
-
-fn quoted_string_end(bytes: &[u8], mut index: usize) -> usize {
-    let mut escaped = false;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if escaped {
-            escaped = false;
-        } else if byte == b'\\' {
-            escaped = true;
-        } else if byte == b'"' {
-            return index + 1;
-        }
-        index += 1;
-    }
-    bytes.len()
-}
-
-fn block_comment_end(bytes: &[u8], mut index: usize) -> usize {
-    let mut depth = 0usize;
-    while index < bytes.len() {
-        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            depth += 1;
-            index += 2;
-            continue;
-        }
-        if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
-            depth = depth.saturating_sub(1);
-            index += 2;
-            if depth == 0 {
-                return index;
-            }
-            continue;
-        }
-        index += 1;
-    }
-    bytes.len()
-}
-
-fn mask_range(bytes: &[u8], start: usize, end: usize, out: &mut Vec<u8>) {
-    for byte in &bytes[start..end] {
-        match byte {
-            b'\n' | b'\r' => out.push(*byte),
-            _ => out.push(b' '),
-        }
-    }
-}
-
 fn render_baseline(
     dependencies: &[DependencyEntry],
     intent: &AssemblyIntentEntry,
@@ -11968,7 +12203,7 @@ fn render_baseline(
                 anchor.id,
                 anchor.path,
                 anchor.pattern,
-                anchor_status(anchor.status)
+                anchor_status(&anchor.status)
             ),
         );
     }
@@ -11992,11 +12227,12 @@ fn render_string_list(items: &[String]) -> String {
     }
 }
 
-fn anchor_status(status: AnchorStatus) -> &'static str {
+fn anchor_status(status: &AnchorStatus) -> &str {
     match status {
         AnchorStatus::Ok => "ok",
         AnchorStatus::Missing => "missing",
         AnchorStatus::OutOfOrder => "out-of-order",
+        AnchorStatus::ExpansionFailed(_) => "expansion-failed",
     }
 }
 
@@ -16453,6 +16689,514 @@ impl DomainModuleResult {
                 "{case} must fail listener-plan public re-export gate"
             );
         }
+        Ok(())
+    }
+
+    fn infra_anchor_status(root: &Path, id: &str) -> Result<AnchorStatus> {
+        let anchors = wiring_anchors(root)?;
+        anchors
+            .into_iter()
+            .find(|anchor| anchor.id == id)
+            .map(|anchor| anchor.status)
+            .ok_or_else(|| anyhow::anyhow!("missing anchor {id}"))
+    }
+
+    fn build_infra_helper_fixture(body: &str) -> String {
+        format!("impl<'a> ProvidersBuilt<'a> {{\n{body}\n}}\n")
+    }
+
+    #[test]
+    fn runtime_baseline_build_infra_helper_nested_ordered_ok() -> Result<()> {
+        let root = fixture_root("runtime-baseline-build-infra-helper-nested-ok")?;
+        write(
+            &root.join(RUNTIME_PHASE_INFRA_PATH),
+            &build_infra_helper_fixture(
+                r#"
+async fn build_infra(self) {
+    S3RuntimeConfig::from_snapshot(config);
+    VaultRuntimeConfig::from_snapshot(config);
+    Self::phase_a_prove_external_capabilities();
+    Self::phase_b_setup_postgres();
+    build_service_token_provider();
+    crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
+    if let Some(provider) = runtime_service_token.as_ref() {}
+    provider_build.record_domain(domain_transport.module_result());
+    let deps = SharedRuntimeDeps {};
+}
+fn phase_a_prove_external_capabilities() {
+    Self::record_vault_redis_s3();
+}
+fn record_vault_redis_s3() {
+    vault_config.into_runtime();
+    build_redis_runtime_deps(redis_config);
+    build_s3_runtime_deps(s3_general_config);
+}
+fn phase_b_setup_postgres() {
+    PgRuntimeDeps::setup_with_audit_admin_config();
+}
+"#,
+            ),
+        )?;
+        for id in [
+            "run.provider.vault",
+            "run.provider.redis",
+            "run.provider.s3",
+            "run.provider.pg",
+        ] {
+            assert_eq!(
+                infra_anchor_status(&root, id)?,
+                AnchorStatus::Ok,
+                "{id} must remain ordered through nested helper expansion"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_build_infra_helper_missing_pattern() -> Result<()> {
+        let root = fixture_root("runtime-baseline-build-infra-helper-missing")?;
+        write(
+            &root.join(RUNTIME_PHASE_INFRA_PATH),
+            &build_infra_helper_fixture(
+                r#"
+async fn build_infra(self) {
+    S3RuntimeConfig::from_snapshot(config);
+    VaultRuntimeConfig::from_snapshot(config);
+    Self::phase_a();
+    PgRuntimeDeps::setup_with_audit_admin_config();
+    build_service_token_provider();
+    crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
+    if let Some(provider) = runtime_service_token.as_ref() {}
+    provider_build.record_domain(domain_transport.module_result());
+    let deps = SharedRuntimeDeps {};
+}
+fn phase_a() {
+    build_redis_runtime_deps(redis_config);
+    build_s3_runtime_deps(s3_general_config);
+}
+"#,
+            ),
+        )?;
+        assert_eq!(
+            infra_anchor_status(&root, "run.provider.vault")?,
+            AnchorStatus::Missing,
+            "missing helper pattern must fail closed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_build_infra_helper_out_of_order() -> Result<()> {
+        let root = fixture_root("runtime-baseline-build-infra-helper-ooo")?;
+        write(
+            &root.join(RUNTIME_PHASE_INFRA_PATH),
+            &build_infra_helper_fixture(
+                r#"
+async fn build_infra(self) {
+    S3RuntimeConfig::from_snapshot(config);
+    VaultRuntimeConfig::from_snapshot(config);
+    Self::phase_a();
+    PgRuntimeDeps::setup_with_audit_admin_config();
+    build_service_token_provider();
+    crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
+    if let Some(provider) = runtime_service_token.as_ref() {}
+    provider_build.record_domain(domain_transport.module_result());
+    let deps = SharedRuntimeDeps {};
+}
+fn phase_a() {
+    build_redis_runtime_deps(redis_config);
+    vault_config.into_runtime();
+    build_s3_runtime_deps(s3_general_config);
+}
+"#,
+            ),
+        )?;
+        assert_eq!(
+            infra_anchor_status(&root, "run.provider.redis")?,
+            AnchorStatus::OutOfOrder,
+            "redis before vault inside helper must be out-of-order"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_build_infra_helper_cycle_fail_closed() -> Result<()> {
+        let root = fixture_root("runtime-baseline-build-infra-helper-cycle")?;
+        write(
+            &root.join(RUNTIME_PHASE_INFRA_PATH),
+            &build_infra_helper_fixture(
+                r#"
+async fn build_infra(self) {
+    S3RuntimeConfig::from_snapshot(config);
+    VaultRuntimeConfig::from_snapshot(config);
+    Self::phase_a();
+    PgRuntimeDeps::setup_with_audit_admin_config();
+    build_service_token_provider();
+    crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
+    if let Some(provider) = runtime_service_token.as_ref() {}
+    provider_build.record_domain(domain_transport.module_result());
+    let deps = SharedRuntimeDeps {};
+}
+fn phase_a() {
+    Self::phase_b();
+    vault_config.into_runtime();
+    build_redis_runtime_deps(redis_config);
+    build_s3_runtime_deps(s3_general_config);
+}
+fn phase_b() {
+    Self::phase_a();
+}
+"#,
+            ),
+        )?;
+        let status = infra_anchor_status(&root, "run.provider.vault")?;
+        assert!(
+            matches!(
+                status,
+                AnchorStatus::ExpansionFailed(ref detail)
+                    if detail.contains("helper expansion cycle involving `phase_a`")
+            ),
+            "Self:: helper cycle must fail closed with PhaseExpandError detail, got {status:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_build_infra_helper_visitor_cycle_fail_closed() -> Result<()> {
+        let source = r#"
+impl<'a> ProvidersBuilt<'a> {
+    async fn build_infra(self) {
+        Self::phase_a();
+    }
+    fn phase_a() {
+        Self::phase_b();
+    }
+    fn phase_b() {
+        Self::phase_a();
+    }
+}
+"#;
+        let file = syn::parse_file(source)?;
+        let err = match expand_inherent_phase_method(source, &file, "ProvidersBuilt", "build_infra")
+        {
+            Err(err) => err,
+            Ok(_) => anyhow::bail!("expand path must fail closed on cycle"),
+        };
+        assert!(
+            matches!(err, PhaseExpandError::Cycle(_)),
+            "expand cycle: {err:?}"
+        );
+        let mut wiring =
+            RunRuntimeConfigWiring::new(syn::Ident::new("context", proc_macro2::Span::call_site()));
+        let visit_err = match visit_expanded_phase_method(
+            &mut wiring,
+            &file,
+            "ProvidersBuilt",
+            "build_infra",
+        ) {
+            Err(err) => err,
+            Ok(()) => anyhow::bail!("visitor path must fail closed on cycle"),
+        };
+        assert!(
+            matches!(visit_err, PhaseExpandError::Cycle(_)),
+            "visitor cycle: {visit_err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_build_infra_helper_ignores_bait() -> Result<()> {
+        let root = fixture_root("runtime-baseline-build-infra-helper-bait")?;
+        write(
+            &root.join(RUNTIME_PHASE_INFRA_PATH),
+            &build_infra_helper_fixture(
+                r#"
+async fn build_infra(self) {
+    S3RuntimeConfig::from_snapshot(config);
+    VaultRuntimeConfig::from_snapshot(config);
+    PgRuntimeDeps::setup_with_audit_admin_config();
+    build_service_token_provider();
+    crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
+    if let Some(provider) = runtime_service_token.as_ref() {}
+    provider_build.record_domain(domain_transport.module_result());
+    let deps = SharedRuntimeDeps {};
+}
+fn dead_helper() {
+    vault_config.into_runtime();
+    build_redis_runtime_deps(redis_config);
+    build_s3_runtime_deps(s3_general_config);
+}
+#[cfg(test)]
+fn phase_a_prove_external_capabilities() {
+    vault_config.into_runtime();
+}
+fn unused() {
+    // vault_config.into_runtime()
+    let _ = "vault_config.into_runtime()";
+}
+"#,
+            ),
+        )?;
+        assert_eq!(
+            infra_anchor_status(&root, "run.provider.vault")?,
+            AnchorStatus::Missing,
+            "dead/cfg(test)/comment/string bait must not satisfy vault anchor"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_build_infra_helper_comment_string_steal_span_fail_closed() -> Result<()> {
+        let source = r#"
+impl<'a> ProvidersBuilt<'a> {
+    async fn build_infra(self) {
+        let _ = "Self::phase_a(";
+        // Self::phase_a(
+        Self :: phase_a();
+    }
+    fn phase_a() {
+        vault_config.into_runtime();
+    }
+}
+"#;
+        let file = syn::parse_file(source)?;
+        let err = match expand_inherent_phase_method(source, &file, "ProvidersBuilt", "build_infra")
+        {
+            Err(err) => err,
+            Ok(_) => anyhow::bail!("AST/text dual-path miss must fail closed"),
+        };
+        assert!(
+            matches!(err, PhaseExpandError::MissingCallSpan(_)),
+            "expected MissingCallSpan, got {err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_build_infra_helper_comment_string_masked_ok() -> Result<()> {
+        let root = fixture_root("runtime-baseline-build-infra-helper-mask-ok")?;
+        write(
+            &root.join(RUNTIME_PHASE_INFRA_PATH),
+            &build_infra_helper_fixture(
+                r#"
+async fn build_infra(self) {
+    S3RuntimeConfig::from_snapshot(config);
+    VaultRuntimeConfig::from_snapshot(config);
+    let _ = "Self::phase_a()";
+    // Self::phase_a()
+    Self::phase_a();
+    Self::phase_b_setup_postgres();
+    build_service_token_provider();
+    crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
+    if let Some(provider) = runtime_service_token.as_ref() {}
+    provider_build.record_domain(domain_transport.module_result());
+    let deps = SharedRuntimeDeps {};
+}
+fn phase_a() {
+    vault_config.into_runtime();
+    build_redis_runtime_deps(redis_config);
+    build_s3_runtime_deps(s3_general_config);
+}
+fn phase_b_setup_postgres() {
+    PgRuntimeDeps::setup_with_audit_admin_config();
+}
+"#,
+            ),
+        )?;
+        for id in [
+            "run.provider.vault",
+            "run.provider.redis",
+            "run.provider.s3",
+            "run.provider.pg",
+        ] {
+            assert_eq!(
+                infra_anchor_status(&root, id)?,
+                AnchorStatus::Ok,
+                "{id} must survive comment/string bait when real Self:: call remains"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_build_infra_helper_renamed_param_anchors_and_visitor() -> Result<()> {
+        let root = fixture_root("runtime-baseline-build-infra-helper-renamed-param")?;
+        write(
+            &root.join(RUNTIME_PHASE_INFRA_PATH),
+            &build_infra_helper_fixture(
+                r#"
+async fn build_infra(self) {
+    let config = context.config();
+    S3RuntimeConfig::from_snapshot(config);
+    let vault_config = VaultRuntimeConfig::from_snapshot(config)?;
+    let redis_config = RedisRuntimeConfig::from_snapshot(config)?;
+    let s3_general_config = s3_general;
+    Self::phase_a(vault_config, redis_config, s3_general_config);
+    Self::phase_b_setup_postgres();
+    build_service_token_provider();
+    crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
+    if let Some(provider) = runtime_service_token.as_ref() {}
+    provider_build.record_domain(domain_transport.module_result());
+    let deps = SharedRuntimeDeps {};
+}
+fn phase_a(renamed_vault: VaultRuntimeConfig, renamed_redis: RedisRuntimeConfig, renamed_s3: S3GeneralConfig) {
+    renamed_vault.into_runtime();
+    build_redis_runtime_deps(renamed_redis);
+    build_s3_runtime_deps(renamed_s3);
+}
+fn phase_b_setup_postgres() {
+    PgRuntimeDeps::setup_with_audit_admin_config();
+}
+"#,
+            ),
+        )?;
+        for id in [
+            "run.provider.vault",
+            "run.provider.redis",
+            "run.provider.s3",
+            "run.provider.pg",
+        ] {
+            assert_eq!(
+                infra_anchor_status(&root, id)?,
+                AnchorStatus::Ok,
+                "{id} must match after param→arg rewrite in virtual source"
+            );
+        }
+
+        let source = fs::read_to_string(root.join(RUNTIME_PHASE_INFRA_PATH))?;
+        let file = syn::parse_file(&source)?;
+        let expanded =
+            expand_inherent_phase_method(&source, &file, "ProvidersBuilt", "build_infra")
+                .map_err(|error| anyhow::anyhow!("helper expansion: {error}"))?;
+        assert!(
+            expanded
+                .virtual_source
+                .contains("vault_config.into_runtime()"),
+            "virtual buffer must rewrite renamed params to call args: {}",
+            expanded.virtual_source
+        );
+        let mut wiring =
+            RunRuntimeConfigWiring::new(syn::Ident::new("context", proc_macro2::Span::call_site()));
+        visit_expanded_phase_method(&mut wiring, &file, "ProvidersBuilt", "build_infra")
+            .map_err(|error| anyhow::anyhow!("visitor expansion: {error}"))?;
+        assert_eq!(
+            wiring.canonical_vault_into_runtime_calls, 1,
+            "visitor remaps must keep renamed helper receiver canonical: {wiring:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_build_infra_helper_method_call_expanded() -> Result<()> {
+        let root = fixture_root("runtime-baseline-build-infra-helper-method-call")?;
+        write(
+            &root.join(RUNTIME_PHASE_INFRA_PATH),
+            &build_infra_helper_fixture(
+                r#"
+async fn build_infra(self) {
+    S3RuntimeConfig::from_snapshot(config);
+    VaultRuntimeConfig::from_snapshot(config);
+    self.phase_a();
+    Self::phase_b_setup_postgres();
+    build_service_token_provider();
+    crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
+    if let Some(provider) = runtime_service_token.as_ref() {}
+    provider_build.record_domain(domain_transport.module_result());
+    let deps = SharedRuntimeDeps {};
+}
+fn phase_a(&self) {
+    vault_config.into_runtime();
+    build_redis_runtime_deps(redis_config);
+    build_s3_runtime_deps(s3_general_config);
+}
+fn phase_b_setup_postgres() {
+    PgRuntimeDeps::setup_with_audit_admin_config();
+}
+"#,
+            ),
+        )?;
+        for id in [
+            "run.provider.vault",
+            "run.provider.redis",
+            "run.provider.s3",
+            "run.provider.pg",
+        ] {
+            assert_eq!(
+                infra_anchor_status(&root, id)?,
+                AnchorStatus::Ok,
+                "{id} must expand through self.helper method-call form"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_build_infra_helper_ambiguous_private_method_fail_closed() -> Result<()> {
+        let source = r#"
+impl<'a> ProvidersBuilt<'a> {
+    async fn build_infra(self) {
+        Self::phase_a();
+    }
+    fn phase_a() {
+        vault_config.into_runtime();
+    }
+    fn phase_a() {
+        vault_config.into_runtime();
+    }
+}
+"#;
+        let file = syn::parse_file(source)?;
+        let err = match expand_inherent_phase_method(source, &file, "ProvidersBuilt", "build_infra")
+        {
+            Err(err) => err,
+            Ok(_) => anyhow::bail!("duplicate private helpers must fail closed"),
+        };
+        assert_eq!(err, PhaseExpandError::AmbiguousImpl);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_build_infra_helper_visitor_binding_remap() -> Result<()> {
+        let source = r#"
+impl<'a> ProvidersBuilt<'a> {
+    async fn build_infra(self) {
+        let config = context.config();
+        let vault_config = VaultRuntimeConfig::from_snapshot(config)?;
+        Self::phase_a(vault_config);
+    }
+    fn phase_a(renamed_vault: VaultRuntimeConfig) {
+        let _ = renamed_vault.into_runtime()?;
+    }
+}
+"#;
+        let file = syn::parse_file(source)?;
+        let expanded = expand_inherent_phase_method(source, &file, "ProvidersBuilt", "build_infra")
+            .map_err(|error| anyhow::anyhow!("helper expansion: {error}"))?;
+        assert!(
+            expanded
+                .virtual_source
+                .contains("vault_config.into_runtime()"),
+            "virtual buffer must rewrite param→arg for anchors: {}",
+            expanded.virtual_source
+        );
+        let mut wiring =
+            RunRuntimeConfigWiring::new(syn::Ident::new("context", proc_macro2::Span::call_site()));
+        visit_expanded_phase_method(&mut wiring, &file, "ProvidersBuilt", "build_infra")
+            .map_err(|error| anyhow::anyhow!("visitor expansion: {error}"))?;
+        assert_eq!(
+            wiring.canonical_vault_into_runtime_calls, 1,
+            "arg→param remap must keep renamed helper receiver canonical: {wiring:?}"
+        );
+
+        let mut no_expand =
+            RunRuntimeConfigWiring::new(syn::Ident::new("context", proc_macro2::Span::call_site()));
+        let build_infra = unique_production_inherent_method(&file, "ProvidersBuilt", "build_infra")
+            .ok_or_else(|| anyhow::anyhow!("missing ProvidersBuilt::build_infra"))?;
+        no_expand.visit_block(&build_infra.block);
+        assert_eq!(
+            no_expand.canonical_vault_into_runtime_calls, 0,
+            "without expansion, helper body must not count as canonical"
+        );
         Ok(())
     }
 }

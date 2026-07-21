@@ -118,6 +118,7 @@ mod outbox_same_id_guard;
 mod pathsafe;
 mod pdpallow;
 mod pg_tenant_tx_guard;
+mod phase_helper_expand;
 mod postgres_feature_matrix;
 mod producer_assurance;
 mod production_composition;

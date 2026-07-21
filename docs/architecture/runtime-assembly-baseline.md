@@ -113,6 +113,8 @@ provider resources, with tracing flushed last. Exact registration anchors and th
 - runtime dependencies or assembly providers are empty
 - the exact outer `runtime::run()` owner, sole `run_startup() → phase::execute` entry, typed
   transition chain, phase-owner anchors, or `launch.rs` anchors are missing or out of order
+  (phase-method anchors expand same-impl private `Self::helper` calls in call order before
+  ordering; `launch.rs` keeps its separate multi-lane order keys)
 - the generated 14-factory exact set drifts, the plan/catalog join is not unique, a typed permit is
   missing/duplicated, one of the eight sealed output batches disappears, `finish`/async rollback/handoff
   becomes non-unique, or a legacy static binding/trait/fallback seam returns
