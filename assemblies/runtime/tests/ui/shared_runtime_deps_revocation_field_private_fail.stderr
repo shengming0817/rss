@@ -1,0 +1,8 @@
+error[E0451]: field `revocation_store` of struct `SharedRuntimeDeps` is private
+ --> tests/ui/shared_runtime_deps_revocation_field_private_fail.rs:8:9
+  |
+5 |     let _forged = SharedRuntimeDeps {
+  |                   ----------------- in this type
+...
+8 |         revocation_store: todo!(),
+  |         ^^^^^^^^^^^^^^^^ private field

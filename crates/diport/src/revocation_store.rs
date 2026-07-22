@@ -8,6 +8,7 @@
 
 use dynosaur::dynosaur;
 use ids::DeviceId;
+use std::time::{Duration, SystemTime};
 use vocab::TenantId;
 
 use crate::redacted::RedactedSource;
@@ -35,6 +36,54 @@ impl RevocationStoreError {
             source: RedactedSource::new(source),
         }
     }
+}
+
+/// 证书 `notAfter` 的 UTC 秒级边界。
+///
+/// 私有字段把证书到期时间与撤销发生时间分成互不可换的类型；唯一构造入口拒绝 epoch 前、亚秒和
+/// PostgreSQL `bigint` 无法表达的值。X.509 `notAfter` 本身为秒级时间，禁止 adapter 各自截断可避免同键
+/// expiry 冲突在持久层被错误合并。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CertNotAfter(i64);
+
+impl CertNotAfter {
+    /// 从秒精度 [`SystemTime`] 构造证书到期边界。
+    pub fn try_from_system_time(value: SystemTime) -> Result<Self, CertNotAfterError> {
+        let duration = value
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|_| CertNotAfterError::BeforeUnixEpoch)?;
+        if duration.subsec_nanos() != 0 {
+            return Err(CertNotAfterError::SubsecondPrecision);
+        }
+        let seconds =
+            i64::try_from(duration.as_secs()).map_err(|_| CertNotAfterError::OutOfRange)?;
+        Ok(Self(seconds))
+    }
+
+    /// 返回 canonical UNIX epoch 秒；PostgreSQL adapter 必须原样持久化，不得再次归一化。
+    pub fn unix_seconds(self) -> i64 {
+        self.0
+    }
+
+    /// 还原为秒精度 [`SystemTime`]。
+    pub fn as_system_time(self) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(self.0 as u64)
+    }
+}
+
+/// [`CertNotAfter::try_from_system_time`] 构造失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CertNotAfterError {
+    /// X.509 / PostgreSQL canonical 时间不接受 UNIX epoch 前值。
+    #[error("certificate not-after must not precede the unix epoch")]
+    BeforeUnixEpoch,
+    /// X.509 `notAfter` 为秒精度；拒绝静默截断亚秒。
+    #[error("certificate not-after must have whole-second precision")]
+    SubsecondPrecision,
+    /// epoch 秒超出持久层 `bigint` 范围。
+    #[error("certificate not-after is out of range")]
+    OutOfRange,
 }
 
 /// 证书序列号（RFC 5280 `serialNumber` 八位组）——撤销 ledger 的查找键。typed fallible funnel
@@ -122,16 +171,19 @@ impl CertScope {
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `RevocationStore` 变体 +
 // dynosaur `DynRevocationStore` 承载（DI 注入走 Send wrapper）。这是 ADR-003 既定 dyn-port 范式。
 pub trait RevocationStoreLocal {
-    /// 在给定 [`CertScope`] 下撤销 `serial` 标识的证书（**幂等**：重复撤销同一 `(scope, serial)` 不报错，
-    /// provider 戳 / 保留首次撤销时刻）。
+    /// 在给定 [`CertScope`] 下撤销 `serial` 标识的证书。
+    ///
+    /// 同键且同 `not_after` 的重复/并发写幂等并保留首次撤销时刻；同键不同 expiry 是数据冲突，必须返回
+    /// 错误。`not_after` 不晚于 provider authoritative now 时也必须返回错误。
     async fn revoke(
         &self,
         serial: CertSerial,
         scope: CertScope,
+        not_after: CertNotAfter,
     ) -> Result<(), RevocationStoreError>;
 
-    /// 查询给定 [`CertScope`] 下 `serial` 标识的证书是否已撤销。scope 不匹配（异租户 / 异设备）一律
-    /// 返回 `false`——租户 / 设备隔离（对标 webpki `find_serial` 返回 `None` = 未命中 = 未撤销）。
+    /// 查询给定 [`CertScope`] 下 `serial` 标识的证书是否已撤销。scope 不匹配（异租户 / 异设备）、未命中
+    /// 或记录已到 `not_after` 一律返回 `false`。provider 故障必须返回错误，禁止降级为未撤销。
     async fn is_revoked(
         &self,
         serial: CertSerial,
@@ -150,10 +202,11 @@ pub trait RevocationStoreLocal {
 mod smoke {
     //! build smoke：证明 async DI port 可 native AFIT impl + 经 `Box<DynRevocationStore>` 动态注入。
     use super::{
-        CertScope, CertSerial, CertSerialError, DynRevocationStore, RevocationStore,
-        RevocationStoreError,
+        CertNotAfter, CertNotAfterError, CertScope, CertSerial, CertSerialError,
+        DynRevocationStore, RevocationStore, RevocationStoreError,
     };
     use ids::DeviceId;
+    use std::time::SystemTime;
     use vocab::TenantId;
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -195,6 +248,14 @@ mod smoke {
         CertSerial::try_new(bytes).unwrap()
     }
 
+    #[allow(clippy::expect_used)]
+    fn sample_not_after() -> CertNotAfter {
+        CertNotAfter::try_from_system_time(
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
+        )
+        .expect("canonical time")
+    }
+
     #[test]
     fn cert_serial_try_new_validates_rfc5280_length() {
         // 空 → Empty（非合法 serialNumber）
@@ -226,6 +287,25 @@ mod smoke {
         );
     }
 
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn cert_not_after_is_a_strict_second_precision_funnel() {
+        let canonical = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let not_after = CertNotAfter::try_from_system_time(canonical).expect("canonical time");
+        assert_eq!(not_after.unix_seconds(), 1_700_000_000);
+        assert_eq!(not_after.as_system_time(), canonical);
+        assert_eq!(
+            CertNotAfter::try_from_system_time(
+                SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1)
+            ),
+            Err(CertNotAfterError::BeforeUnixEpoch)
+        );
+        assert_eq!(
+            CertNotAfter::try_from_system_time(canonical + std::time::Duration::from_nanos(1)),
+            Err(CertNotAfterError::SubsecondPrecision)
+        );
+    }
+
     // noop store（is_revoked 恒 false）：本 smoke 只验 **dyn 注入形态 + Send**，不验业务语义；
     // revoke→is_revoked round-trip / scope 隔离 / 幂等等语义由 adapters/softca `revocation_tests` 覆盖。
     struct NoopRevocationStore;
@@ -234,6 +314,7 @@ mod smoke {
             &self,
             _serial: CertSerial,
             _scope: CertScope,
+            _not_after: CertNotAfter,
         ) -> Result<(), RevocationStoreError> {
             Ok(())
         }
@@ -256,7 +337,10 @@ mod smoke {
         let store: Box<DynRevocationStore> = DynRevocationStore::new_box(NoopRevocationStore);
         let scope = sample_scope();
         let joined = tokio::spawn(async move {
-            store.revoke(sample_serial(vec![0xAA]), scope).await.is_ok()
+            store
+                .revoke(sample_serial(vec![0xAA]), scope, sample_not_after())
+                .await
+                .is_ok()
                 && !store
                     .is_revoked(sample_serial(vec![0xAA]), scope)
                     .await
@@ -272,7 +356,7 @@ mod smoke {
     mockall::mock! {
         TestStore {}
         impl RevocationStore for TestStore {
-            async fn revoke(&self, serial: CertSerial, scope: CertScope) -> Result<(), RevocationStoreError>;
+            async fn revoke(&self, serial: CertSerial, scope: CertScope, not_after: CertNotAfter) -> Result<(), RevocationStoreError>;
             async fn is_revoked(&self, serial: CertSerial, scope: CertScope) -> Result<bool, RevocationStoreError>;
             async fn shutdown(&self) -> Result<(), RevocationStoreError>;
         }

@@ -33,6 +33,7 @@ mod response;
 
 pub mod crash_matrix;
 pub mod local_only;
+pub mod revocation;
 
 pub use request::ContractRequest;
 pub use response::{ContractResponse, WireError};

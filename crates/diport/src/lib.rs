@@ -193,8 +193,8 @@ pub use rate_limiter::{
 pub use redacted::RedactedSource;
 pub use redacted_bytes::RedactedBytes;
 pub use revocation_store::{
-    CertScope, CertSerial, CertSerialError, DynRevocationStore, RevocationStore,
-    RevocationStoreError,
+    CertNotAfter, CertNotAfterError, CertScope, CertSerial, CertSerialError, DynRevocationStore,
+    RevocationStore, RevocationStoreError,
 };
 pub use saga_instance_store::{
     DynSagaInstanceStore, DynSagaTenantSource, SagaContractId, SagaContractIdError,

@@ -73,7 +73,7 @@ domains = [settings,identity,audit]
 listeners = [primary,internal,admin,health]
 
 [assembly.diportProviders]
-01 | id=device-revocation-store | port=diport::RevocationStore | provider=softca::InMemRevocationLedger | providerCrate=softca | requiredFeatures=[backend] | consumer=deviceloop | lifecycle=draft | durability=ephemeral-memory | scope=unset | failurePosture=unset | purpose=device-certificate-revocation
+01 | id=device-revocation-store | port=diport::RevocationStore | provider=postgres::PgRevocationStore | providerCrate=postgres | requiredFeatures=[] | consumer=deviceloop | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=device-certificate-revocation
 02 | id=event-publisher | port=diport::Publisher | provider=amqp::AmqpPublisher | providerCrate=amqp | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=outbox-relay-amqp-publish
 03 | id=event-subscriber | port=diport::AckableSubscriber | provider=amqp::AmqpSubscriber | providerCrate=amqp | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=event-consume-at-least-once
 04 | id=identity-signer | port=diport::Signer | provider=vault::VaultSigner | providerCrate=vault | requiredFeatures=[backend] | consumer=identity | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=jwt-access-token-signing
@@ -138,7 +138,7 @@ mergeExtends = probes,resources,workers
                 &crate::config::ServingConfigMapper::new(config),
             ) | status=ok
 26 | run.module.output.domain-transport | assemblies/runtime/src/phase/infra.rs | provider_build.record_domain(domain_transport.module_result()); | status=ok
-27 | run.shared-deps | assemblies/runtime/src/phase/infra.rs | let deps = SharedRuntimeDeps { | status=ok
+27 | run.shared-deps | assemblies/runtime/src/phase/infra.rs | let deps = SharedRuntimeDeps::from_built_provider( | status=ok
 28 | run.wire.generated-domains | assemblies/runtime/src/phase/domains.rs | crate::modules_gen::wire_domains(
                 &deps,
                 domain_modules,

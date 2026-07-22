@@ -24,7 +24,13 @@ use observ::LocalTxObservation;
 #[cfg(feature = "domain-settings")]
 use settings::ports::{ConfigRepoError, SecretRepoError};
 
-use crate::cotx::{LocalTxAttempt, LocalTxRetryError};
+use crate::cotx::LocalTxAttempt;
+#[cfg(any(
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
+use crate::cotx::LocalTxRetryError;
 
 /// Absolute monotonic deadlines minted once by the retry runner and shared by every attempt.
 ///
@@ -418,6 +424,11 @@ pub(crate) trait PgLocalTxObservation {
     );
 }
 
+#[cfg(any(
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
 impl<M> PgLocalTxObservation for LocalTxObservation<M>
 where
     M: PgLocalTxOperation,
@@ -662,6 +673,11 @@ where
     result
 }
 
+#[cfg(any(
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
 async fn run_pg_tx_retry_core<T, E, Op, OpFut, Classify, OnFailed, OnDeadline>(
     boundary: PgTxRetryBoundary,
     mut op: Op,

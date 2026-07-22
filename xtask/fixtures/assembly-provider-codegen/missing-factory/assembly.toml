@@ -9,13 +9,13 @@ kind = "primary"
 domains = ["identity"]
 
 [[diportProviders]]
-id = "device-revocation-store"
-port = "diport::RevocationStore"
-provider = "softca::InMemRevocationLedger"
-providerCrate = "softca"
+id = "distributed-cas-store-alternative"
+port = "diport::CasStore"
+provider = "redis::RedisCasStore"
+providerCrate = "redis"
 requiredFeatures = ["backend"]
-consumer = "deviceloop"
+consumer = "distributed"
 lifecycle = "active"
-durability = "ephemeral-memory"
+durability = "persistent"
 purpose = "draft-only-role-promoted-without-factory"
-outputs = []
+outputs = ["resources"]

@@ -360,13 +360,13 @@ pub assembly_schema::ProviderConstructor::OidcProvider
 pub assembly_schema::ProviderConstructor::PostgresAuthAuditSink
 pub assembly_schema::ProviderConstructor::PostgresCasStore
 pub assembly_schema::ProviderConstructor::PostgresDlxLifecycleRepository
+pub assembly_schema::ProviderConstructor::PostgresRevocationStore
 pub assembly_schema::ProviderConstructor::PostgresServiceTokenReplayStore
 pub assembly_schema::ProviderConstructor::RatelimitGovernorLimiter
 pub assembly_schema::ProviderConstructor::RedisCasStore
 pub assembly_schema::ProviderConstructor::RedisLockStore
 pub assembly_schema::ProviderConstructor::S3Store
 pub assembly_schema::ProviderConstructor::S3VerifiedDlxArchiveStore
-pub assembly_schema::ProviderConstructor::SoftcaInMemRevocationLedger
 pub assembly_schema::ProviderConstructor::VaultKeyProvider
 pub assembly_schema::ProviderConstructor::VaultSigner
 impl assembly_schema::ProviderConstructor
@@ -482,6 +482,7 @@ impl core::marker::UnsafeUnpin for assembly_schema::ProviderDurability
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderDurability
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderDurability
 #[repr(u8)] pub enum assembly_schema::ProviderFactorySymbol
+pub assembly_schema::ProviderFactorySymbol::DeviceloopPostgresRevocationStore
 pub assembly_schema::ProviderFactorySymbol::DistributedPostgresCasStore
 pub assembly_schema::ProviderFactorySymbol::DistributedRedisLockStore
 pub assembly_schema::ProviderFactorySymbol::EventexecAmqpPublisher

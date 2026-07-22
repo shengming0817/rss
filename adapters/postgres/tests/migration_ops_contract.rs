@@ -9,6 +9,8 @@ const SERVICE_TOKEN_REPLAY_MIGRATION: &str =
 const ACCOUNT_SECURITY_MIGRATION: &str =
     include_str!("../migrations/0069_create_account_security_states.sql");
 const AUTH_GRANT_MIGRATION: &str = include_str!("../migrations/0070_create_auth_grants.sql");
+const SECURITY_PRODUCTION_CLOSEOUT: &str =
+    include_str!("../../../docs/ops/security-production-closeout.md");
 const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
 const ACCOUNT_SECURITY_CAPACITY_SELFTEST: &str =
@@ -181,6 +183,100 @@ fn auth_grant_cutover_runbook_is_non_rolling_and_executable() -> Result<(), &'st
             .all(|pair| matches!(pair, [Some(left), Some(right)] if left < right)),
         "0070 cutover steps are not in executable order: {positions:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn certificate_revocation_cutover_is_non_rolling_and_forward_only() -> Result<(), &'static str> {
+    let runbook = MIGRATION_README
+        .split_once("### 0072 persistent certificate revocations")
+        .and_then(|(_, tail)| {
+            tail.split_once("## Append-only 表（REVOKE 强制）")
+                .map(|(runbook, _)| runbook)
+        })
+        .ok_or("0072 runbook must be a non-empty, independently scoped section")?;
+
+    for required in [
+        "非滚动 hard cutover",
+        "保持撤销入口关闭",
+        "SELECT max(version) FROM public._sqlx_migrations",
+        "停止全部旧 binary",
+        "禁止旧/新 generation 滚动混跑",
+        "OLD_REVOCATION_GENERATION",
+        "EXPECTED_OLD_REPLICAS=0",
+        "禁用旧 workload/controller/job 的自动重启",
+        "pg_catalog.pg_stat_activity",
+        "rss-postgres-writer",
+        "rss-postgres-reader",
+        "rss-postgres-audit-admin",
+        "rss-postgres-maintenance",
+        "rss-postgres-migrator",
+        "all_static_lanes_drained",
+        "任何新 binary 启动前",
+        "只启动新 binary",
+        "capability gate",
+        "再次证明旧 process inventory 为 `0`",
+        "不得再用静态 `application_name` 区分旧/新 generation",
+        "最后开放撤销流量",
+        "SELECT count(*) AS persisted_revocations FROM public.certificate_revocations",
+        "严禁回退到读取进程内 ledger 的旧 binary",
+        "新的前向修复 migration",
+        "不得修改 `0072`、增加双读/双写或恢复",
+    ] {
+        assert!(
+            runbook.contains(required),
+            "0072 cutover runbook omits executable evidence token: {required}"
+        );
+    }
+
+    let ordered_steps = [
+        "1. **先应用 additive migration，保持撤销入口关闭。**",
+        "2. **quiesce 撤销入口并停止全部旧 binary。**",
+        "3. **在任何新 binary 启动前证明全部静态连接 lane 为零。**",
+        "4. **只启动新 binary。**",
+        "5. **完成新世界探针。**",
+        "6. **最后开放撤销流量。**",
+        "7. **执行 rollback fence。**",
+    ];
+    let positions = ordered_steps
+        .iter()
+        .map(|step| runbook.find(step))
+        .collect::<Vec<_>>();
+    assert!(
+        positions.iter().all(Option::is_some),
+        "0072 runbook must contain every ordered non-rolling step: {positions:?}"
+    );
+    assert!(
+        positions
+            .windows(2)
+            .all(|pair| matches!(pair, [Some(left), Some(right)] if left < right)),
+        "0072 cutover steps are not in executable order: {positions:?}"
+    );
+    let process_zero = runbook
+        .find("EXPECTED_OLD_REPLICAS=0")
+        .ok_or("old process inventory gate missing")?;
+    let connection_zero = runbook
+        .find("all_static_lanes_drained")
+        .ok_or("static lane drain gate missing")?;
+    let new_binary = runbook
+        .find("4. **只启动新 binary。**")
+        .ok_or("new binary start gate missing")?;
+    assert!(
+        process_zero < connection_zero && connection_zero < new_binary,
+        "hard cutover must prove process=0, then all five static lanes=0, before starting new binary"
+    );
+    for closeout_evidence in [
+        "old generation process inventory is zero",
+        "Before any new binary starts",
+        "rss-postgres-{writer,reader,audit-admin,maintenance,migrator}",
+        "zero total connections",
+        "continue proving old-generation zero only from deployment process inventory",
+    ] {
+        assert!(
+            SECURITY_PRODUCTION_CLOSEOUT.contains(closeout_evidence),
+            "production closeout omits hard-cutover evidence: {closeout_evidence}"
+        );
+    }
     Ok(())
 }
 

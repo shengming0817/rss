@@ -244,6 +244,10 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ),
     ("adapters/postgres/src/outbox/settlement.rs", "execute_dlx"),
     ("adapters/postgres/src/outbox_cdc.rs", "emit"),
+    (
+        "adapters/postgres/src/revocation.rs",
+        "verify_revocation_capability",
+    ),
     ("adapters/postgres/src/reconcile.rs", "acquire_lease"),
     ("adapters/postgres/src/reconcile.rs", "append_attempt"),
     (
@@ -744,6 +748,11 @@ mod tests {
             (
                 "adapters/postgres/src/dlq.rs".to_string(),
                 "async fn resolve_expired_outbox() { infra_tenant_scope(tenant); }".to_string(),
+            ),
+            (
+                "adapters/postgres/src/revocation.rs".to_string(),
+                "async fn verify_revocation_capability() { infra_tenant_scope(tenant); }"
+                    .to_string(),
             ),
         ];
         let (_, findings) = scan_infra_tenant_scope(&files);

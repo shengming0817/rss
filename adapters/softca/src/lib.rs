@@ -13,9 +13,9 @@
 //!
 //! **两级 CA / 共享 Ledger / CRL 仍不在本切片**：root→intermediate split、signer/revocation 同源共享 Ledger、
 //!   DER CRL 单调 Number 导出 + `revoked_at` 生产读路径属 P0-2 后续 wave（epic #991）；本切片
-//!   `InMemRevocationLedger` 是非持久 dev/demo store（重启清空），生产撤销走持久 CRL/OCSP 后端（同 port 可替换）。
-//!   demo assembly 声明层以 `lifecycle="draft" + durability="ephemeral-memory"` 登记该 provider；
-//!   `cargo xtask assembly validate` 拒绝 production `diport::RevocationStore` 使用非持久后端。
+//!   `InMemRevocationLedger` 是独立测试/开发用的非持久 store（重启清空）；runtime assembly 固定使用
+//!   PostgreSQL 持久 provider。
+//!   `InMemRevocationLedger` 不在 runtime provider catalog 中提供 constructor 或 fallback。
 //!
 //! **CA 私钥 custody（软件 CA 固有边界——诚实声明，勿夸大）**：
 //!   - **进程内裸持是软件 CA 固有的**：CA 私钥 scalar 由 ring `EcdsaKeyPair` 持有**进程生命周期**，ring 不提供
@@ -34,8 +34,8 @@
 
 #[cfg(feature = "backend")]
 use diport::{
-    CertScope, CertSerial, Clock, KeyId, RevocationStore, RevocationStoreError, SignRequest,
-    Signature, Signer, SignerError, SigningPurpose,
+    CertNotAfter, CertScope, CertSerial, Clock, KeyId, RevocationStore, RevocationStoreError,
+    SignRequest, Signature, Signer, SignerError, SigningPurpose,
 };
 use diport::{ManagedResource, ShutdownError};
 #[cfg(feature = "backend")]
@@ -95,6 +95,17 @@ pub enum SoftCaError {
     /// 签名运算失败。
     #[error("softca signing operation failed")]
     SignFailed,
+}
+
+/// In-memory revocation validation failures. Messages are static and are wrapped by
+/// [`RevocationStoreError`], so provider details never cross the port boundary.
+#[cfg(feature = "backend")]
+#[derive(Debug, thiserror::Error)]
+enum SoftCaRevocationError {
+    #[error("certificate not-after is not in the future")]
+    ExpiredNotAfter,
+    #[error("certificate revocation expiry conflicts with the existing record")]
+    ConflictingExpiry,
 }
 
 #[cfg(feature = "backend")]
@@ -264,8 +275,8 @@ impl ManagedResource for SoftCaSigner {
 /// 是键的一部分，跨租户 / 跨设备的 `is_revoked` 天然返回 `false`（webpki `find_serial` 未命中语义），无需运行期
 /// scope gate。**幂等**：重复撤销同一 `(scope, serial)` 经 `entry().or_insert` 保留首次撤销时刻。
 ///
-/// **dev / demo 边界**：进程内、非持久（重启即清空撤销集）——demo/test assembly 只能把该 provider 声明为
-/// `draft` / `ephemeral-memory`；production 撤销必须走持久 CRL / OCSP 后端（同 port 可替换）。
+/// **测试 / 开发边界**：进程内、非持久（重启即清空撤销集），仅作为独立 adapter/conformance
+/// 实现；runtime assembly 不提供可选 constructor 或 fallback，固定使用 PostgreSQL 持久 provider。
 /// 与 [`SoftCaSigner`] 解耦（独立 struct）：本切片只落 store，signer / revocation 共享 Ledger（同源、两级 CA）
 /// 属 P0-2 后续 wave。
 #[cfg(feature = "backend")]
@@ -274,7 +285,14 @@ pub struct InMemRevocationLedger {
     // value = 首次撤销时刻（Clock 戳）。**CRL 前瞻**：本切片只记不经 port 暴露——`revoked_at` 读路径 + DER CRL
     // 单调 Number 导出由 P0-2 后续 wave 落地（届时 is_revoked 之外增 revocation-list 查询）。当前由
     // `#[cfg(test)]` 的 `revoked_at` 断言记录正确，非死状态。
-    revoked: Mutex<HashMap<(CertScope, CertSerial), SystemTime>>,
+    revoked: Mutex<HashMap<(CertScope, CertSerial), InMemRevocation>>,
+}
+
+#[cfg(feature = "backend")]
+#[derive(Clone, Copy)]
+struct InMemRevocation {
+    revoked_at: SystemTime,
+    not_after: CertNotAfter,
 }
 
 #[cfg(feature = "backend")]
@@ -282,8 +300,8 @@ impl InMemRevocationLedger {
     /// 构造空 Ledger。`clock` 是**必填构造器位置参**（rust-standards：Clock 禁 builder / 禁默认系统时钟）——
     /// revoke 据此戳撤销时刻；组合根注入 `SystemClock`，测试注入确定性替身。
     ///
-    /// **⚠ 非持久（仅 dev / demo）**：撤销集存进程内存，**重启即清空所有撤销记录**——退役 / 泄漏的证书在重启后
-    /// 重新被判定为「未撤销」。生产环境须替换为持久 CRL / OCSP provider（同 [`diport::RevocationStore`] port 可替换）。
+    /// **⚠ 非持久（仅独立测试 / 开发）**：撤销集存进程内存，**重启即清空所有撤销记录**——退役 / 泄漏的证书在重启后
+    /// 重新被判定为「未撤销」。runtime assembly 不允许选择该实现或回退到该实现。
     pub fn new(clock: Box<dyn Clock>) -> Self {
         Self {
             clock,
@@ -303,13 +321,33 @@ impl RevocationStore for InMemRevocationLedger {
         &self,
         serial: CertSerial,
         scope: CertScope,
+        not_after: CertNotAfter,
     ) -> Result<(), RevocationStoreError> {
         let at = self.clock.now();
+        if not_after.as_system_time() <= at {
+            return Err(RevocationStoreError::new(
+                SoftCaRevocationError::ExpiredNotAfter,
+            ));
+        }
         // lock poison 恢复（不 panic）：当前撤销集（HashMap）无跨操作一致性不变式，毒化的内层状态仍可安全续用
         // （unwrap_or_else，禁 unwrap）；若将来撤销集引入不变式（如 CRL 单调 Number），须重评此恢复语义。
         let mut guard = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
-        // 幂等：重复撤销保留首次时刻（对标 webpki CRL 撤销记录的 revocation_date 不可变）。CertScope Copy。
-        guard.entry((scope, serial)).or_insert(at);
+        // 同 expiry 幂等且保留首次时间；不同 expiry 是调用方数据冲突，禁止覆盖、延长或截短。
+        match guard.entry((scope, serial)) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(InMemRevocation {
+                    revoked_at: at,
+                    not_after,
+                });
+            }
+            std::collections::hash_map::Entry::Occupied(entry)
+                if entry.get().not_after == not_after => {}
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(RevocationStoreError::new(
+                    SoftCaRevocationError::ConflictingExpiry,
+                ));
+            }
+        }
         // 撤销是安全相关事件——留审计轨迹；仅记 tenant / device 非机密标识（device 取 uuid，DeviceId 无 Display）。
         tracing::info!(
             tenant = %scope.tenant(),
@@ -332,8 +370,11 @@ impl RevocationStore for InMemRevocationLedger {
         serial: CertSerial,
         scope: CertScope,
     ) -> Result<bool, RevocationStoreError> {
+        let now = self.clock.now();
         let guard = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
-        let revoked = guard.contains_key(&(scope, serial));
+        let revoked = guard
+            .get(&(scope, serial))
+            .is_some_and(|record| record.not_after.as_system_time() > now);
         tracing::debug!(revoked, "softca: revocation status checked");
         Ok(revoked)
     }
@@ -364,7 +405,7 @@ impl InMemRevocationLedger {
     /// `#[cfg(test)]`：生产读路径（CRL 导出）属 P0-2 后续 wave，不在本切片暴露。
     pub(crate) fn revoked_at(&self, serial: CertSerial, scope: CertScope) -> Option<SystemTime> {
         let guard = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
-        guard.get(&(scope, serial)).copied()
+        guard.get(&(scope, serial)).map(|record| record.revoked_at)
     }
 
     /// 测试支持：故意毒化撤销集 `Mutex`（同线程持锁 `panic` + `catch_unwind` 同帧捕获，不外传）——驱动
@@ -624,7 +665,7 @@ mod revocation_tests {
     //! InMemRevocationLedger：revoke→is_revoked round-trip + (tenant,device) scope 隔离 + 幂等（保留首次
     //! 撤销时刻）+ Clock 戳撤销时间 + shutdown，全进程内、无外部 infra（无 `#[ignore]`）。
     use super::InMemRevocationLedger;
-    use diport::{CertScope, CertSerial, Clock, RevocationStore};
+    use diport::{CertNotAfter, CertScope, CertSerial, Clock, RevocationStore};
     use ids::DeviceId;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime};
@@ -657,6 +698,30 @@ mod revocation_tests {
         }
     }
 
+    #[derive(Clone)]
+    struct SharedClock {
+        secs: std::sync::Arc<AtomicU64>,
+    }
+
+    impl Clock for SharedClock {
+        fn now(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH + Duration::from_secs(self.secs.load(Ordering::SeqCst))
+        }
+    }
+
+    struct ConformanceHarness {
+        ledger: InMemRevocationLedger,
+        clock: std::sync::Arc<AtomicU64>,
+    }
+
+    fn conformance_harness() -> ConformanceHarness {
+        let clock = std::sync::Arc::new(AtomicU64::new(10));
+        let ledger = InMemRevocationLedger::new(Box::new(SharedClock {
+            secs: std::sync::Arc::clone(&clock),
+        }));
+        ConformanceHarness { ledger, clock }
+    }
+
     fn ledger() -> InMemRevocationLedger {
         InMemRevocationLedger::new(Box::new(AdvancingClock::starting_at(REVOKED_AT_SECS)))
     }
@@ -674,10 +739,66 @@ mod revocation_tests {
         serial_bytes(vec![0x01, 0x02, 0x03, 0x04])
     }
 
+    #[allow(clippy::unwrap_used)]
+    fn not_after() -> CertNotAfter {
+        CertNotAfter::try_from_system_time(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(REVOKED_AT_SECS + 3_600),
+        )
+        .unwrap()
+    }
+
     // unwrap carve-out 集中此 helper（item-level）：canonical 1–20 字节 serial 必构造成功。
     #[allow(clippy::unwrap_used)]
     fn serial_bytes(bytes: impl Into<Vec<u8>>) -> CertSerial {
         CertSerial::try_new(bytes).unwrap()
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn expiry(seconds: u64) -> CertNotAfter {
+        CertNotAfter::try_from_system_time(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn revocation_provider_conformance() {
+        let cases = testkit::revocation::RevocationCases {
+            primary_scope: scope(TENANT_A, DEVICE_1),
+            other_tenant_scope: scope(TENANT_B, DEVICE_1),
+            other_device_scope: scope(TENANT_A, DEVICE_2),
+            primary_serial: serial_bytes(vec![0x01]),
+            rotated_serial: serial_bytes(vec![0x02]),
+            concurrent_serial: serial_bytes(vec![0x03]),
+            concurrent_conflict_serial: serial_bytes(vec![0x04]),
+            expired_serial: serial_bytes(vec![0x05]),
+            valid_expiry: expiry(20),
+            conflicting_expiry: expiry(21),
+            expired_expiry: expiry(10),
+        };
+        let result = testkit::revocation::assert_revocation_semantics(
+            conformance_harness,
+            cases,
+            |store, serial, scope, not_after| {
+                Box::pin(store.ledger.revoke(serial, scope, not_after))
+            },
+            |store, serial, scope| Box::pin(store.ledger.is_revoked(serial, scope)),
+            |store, serial, scope| {
+                Box::pin(async move {
+                    let marker = store.ledger.revoked_at(serial, scope);
+                    Ok::<_, diport::RevocationStoreError>(testkit::revocation::RevocationEvidence {
+                        record_count: usize::from(marker.is_some()),
+                        first_revoked_marker: marker,
+                    })
+                })
+            },
+            |store| {
+                Box::pin(async move {
+                    store.clock.store(20, Ordering::SeqCst);
+                })
+            },
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -687,7 +808,7 @@ mod revocation_tests {
         let s = scope(TENANT_A, DEVICE_1);
         // 撤销前：未命中（anti-vacuity 前置）。
         assert!(!l.is_revoked(serial(), s).await.unwrap());
-        l.revoke(serial(), s).await.unwrap();
+        l.revoke(serial(), s, not_after()).await.unwrap();
         // 撤销后：命中。
         assert!(l.is_revoked(serial(), s).await.unwrap());
     }
@@ -709,7 +830,9 @@ mod revocation_tests {
     async fn scope_isolation_tenant_and_device() {
         let l = ledger();
         let revoked_scope = scope(TENANT_A, DEVICE_1);
-        l.revoke(serial(), revoked_scope).await.unwrap();
+        l.revoke(serial(), revoked_scope, not_after())
+            .await
+            .unwrap();
         // anti-vacuity：同 (tenant, device, serial) 命中。
         assert!(l.is_revoked(serial(), revoked_scope).await.unwrap());
         // 异 device（同 tenant）→ 隔离，false。
@@ -737,8 +860,8 @@ mod revocation_tests {
     async fn revoke_is_idempotent_and_preserves_first_time() {
         let l = ledger();
         let s = scope(TENANT_A, DEVICE_1);
-        l.revoke(serial(), s).await.unwrap(); // 首次：戳 REVOKED_AT_SECS。
-        l.revoke(serial(), s).await.unwrap(); // 二次：or_insert no-op（clock 已推进，但不覆盖首次戳）。
+        l.revoke(serial(), s, not_after()).await.unwrap(); // 首次：戳 REVOKED_AT_SECS。
+        l.revoke(serial(), s, not_after()).await.unwrap(); // 二次：不覆盖首次戳。
         assert!(l.is_revoked(serial(), s).await.unwrap());
         let first = SystemTime::UNIX_EPOCH + Duration::from_secs(REVOKED_AT_SECS);
         assert_eq!(
@@ -755,7 +878,7 @@ mod revocation_tests {
         let s = scope(TENANT_A, DEVICE_1);
         // 撤销前无记录。
         assert_eq!(l.revoked_at(serial(), s), None);
-        l.revoke(serial(), s).await.unwrap();
+        l.revoke(serial(), s, not_after()).await.unwrap();
         // Clock 戳的首次时刻被正确记录（REVOKED_AT_SECS）。
         let expected = SystemTime::UNIX_EPOCH + Duration::from_secs(REVOKED_AT_SECS);
         assert_eq!(l.revoked_at(serial(), s), Some(expected));
@@ -775,7 +898,7 @@ mod revocation_tests {
         // 不静默丢撤销记录、不 panic）——撤销是安全语义，毒化不得导致已撤销证书被误判未撤销。
         let l = ledger();
         let s = scope(TENANT_A, DEVICE_1);
-        l.revoke(serial(), s).await.unwrap();
+        l.revoke(serial(), s, not_after()).await.unwrap();
         l.poison_lock_for_test();
         // 毒化后：已撤销记录仍可见。
         assert!(
@@ -784,7 +907,7 @@ mod revocation_tests {
         );
         // 毒化后：仍可继续撤销新证书。
         let other = serial_bytes(vec![0x09, 0x09]);
-        l.revoke(other.clone(), s).await.unwrap();
+        l.revoke(other.clone(), s, not_after()).await.unwrap();
         assert!(
             l.is_revoked(other, s).await.unwrap(),
             "poison 后须仍可继续撤销"

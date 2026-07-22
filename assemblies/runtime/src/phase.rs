@@ -43,6 +43,8 @@ mod launch;
 mod maintenance;
 mod provider;
 
+pub(crate) use maintenance::wire_revocation_sweeper;
+
 use crate::config::{RuntimeConfigSnapshot, SnapshotConfig};
 use bootstrap::DomainModuleResult;
 use infra::domain_transport::DomainTransportRuntime;
@@ -109,9 +111,11 @@ pub(crate) mod test_support {
     };
     pub(crate) use super::maintenance::{
         AUTH_GRANT_SWEEPER_PROBE_NAME, AUTH_GRANT_SWEEPER_WORKER_NAME, AuthGrantSweepFuture,
-        AuthGrantSweepRunner, RLS_READY_PROBE_NAME, RlsReadyProbe,
-        SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME, SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME,
-        SweeperHealth, run_auth_grant_sweeper_loop, sweeper_module_result,
+        AuthGrantSweepRunner, REVOCATION_SWEEPER_PROBE_NAME, REVOCATION_SWEEPER_WORKER_NAME,
+        RLS_READY_PROBE_NAME, RevocationSweepFuture, RevocationSweepObservation,
+        RevocationSweepRunner, RlsReadyProbe, SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME,
+        SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME, SweeperHealth, run_auth_grant_sweeper_loop,
+        run_revocation_sweeper_loop, sweeper_module_result, wire_revocation_sweeper,
     };
 }
 

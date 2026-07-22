@@ -5757,6 +5757,7 @@ dependencies = [
  "diport",
  "ids",
  "ring",
+ "testkit",
  "thiserror",
  "tokio",
  "tracing",
@@ -6273,6 +6274,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "futures",
  "serde",
  "serde_json",
  "sqlx",

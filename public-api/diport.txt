@@ -3116,6 +3116,29 @@ impl<TraitVariantBlanketType: diport::rate_limiter::RateLimiter> diport::rate_li
 pub async fn TraitVariantBlanketType::check(&self, diport::rate_limiter::RateLimitKey) -> core::result::Result<diport::rate_limiter::RateLimitDecision, diport::rate_limiter::RateLimitError>
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::rate_limiter::RateLimitError>
 pub mod diport::revocation_store
+#[non_exhaustive] pub enum diport::revocation_store::CertNotAfterError
+pub diport::revocation_store::CertNotAfterError::BeforeUnixEpoch
+pub diport::revocation_store::CertNotAfterError::OutOfRange
+pub diport::revocation_store::CertNotAfterError::SubsecondPrecision
+impl core::clone::Clone for diport::revocation_store::CertNotAfterError
+pub fn diport::revocation_store::CertNotAfterError::clone(&self) -> diport::revocation_store::CertNotAfterError
+impl core::cmp::Eq for diport::revocation_store::CertNotAfterError
+impl core::cmp::PartialEq for diport::revocation_store::CertNotAfterError
+pub fn diport::revocation_store::CertNotAfterError::eq(&self, &diport::revocation_store::CertNotAfterError) -> bool
+impl core::error::Error for diport::revocation_store::CertNotAfterError
+impl core::fmt::Debug for diport::revocation_store::CertNotAfterError
+pub fn diport::revocation_store::CertNotAfterError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::revocation_store::CertNotAfterError
+pub fn diport::revocation_store::CertNotAfterError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::revocation_store::CertNotAfterError
+impl core::marker::StructuralPartialEq for diport::revocation_store::CertNotAfterError
+impl core::marker::Freeze for diport::revocation_store::CertNotAfterError
+impl core::marker::Send for diport::revocation_store::CertNotAfterError
+impl core::marker::Sync for diport::revocation_store::CertNotAfterError
+impl core::marker::Unpin for diport::revocation_store::CertNotAfterError
+impl core::marker::UnsafeUnpin for diport::revocation_store::CertNotAfterError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::revocation_store::CertNotAfterError
+impl core::panic::unwind_safe::UnwindSafe for diport::revocation_store::CertNotAfterError
 #[non_exhaustive] pub enum diport::revocation_store::CertSerialError
 pub diport::revocation_store::CertSerialError::Empty
 pub diport::revocation_store::CertSerialError::TooLong
@@ -3137,6 +3160,33 @@ impl core::marker::Unpin for diport::revocation_store::CertSerialError
 impl core::marker::UnsafeUnpin for diport::revocation_store::CertSerialError
 impl core::panic::unwind_safe::RefUnwindSafe for diport::revocation_store::CertSerialError
 impl core::panic::unwind_safe::UnwindSafe for diport::revocation_store::CertSerialError
+pub struct diport::revocation_store::CertNotAfter(_)
+impl diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::as_system_time(self) -> std::time::SystemTime
+pub fn diport::revocation_store::CertNotAfter::try_from_system_time(std::time::SystemTime) -> core::result::Result<Self, diport::revocation_store::CertNotAfterError>
+pub fn diport::revocation_store::CertNotAfter::unix_seconds(self) -> i64
+impl core::clone::Clone for diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::clone(&self) -> diport::revocation_store::CertNotAfter
+impl core::cmp::Eq for diport::revocation_store::CertNotAfter
+impl core::cmp::Ord for diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::cmp(&self, &diport::revocation_store::CertNotAfter) -> core::cmp::Ordering
+impl core::cmp::PartialEq for diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::eq(&self, &diport::revocation_store::CertNotAfter) -> bool
+impl core::cmp::PartialOrd for diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::partial_cmp(&self, &diport::revocation_store::CertNotAfter) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::revocation_store::CertNotAfter
+impl core::marker::StructuralPartialEq for diport::revocation_store::CertNotAfter
+impl core::marker::Freeze for diport::revocation_store::CertNotAfter
+impl core::marker::Send for diport::revocation_store::CertNotAfter
+impl core::marker::Sync for diport::revocation_store::CertNotAfter
+impl core::marker::Unpin for diport::revocation_store::CertNotAfter
+impl core::marker::UnsafeUnpin for diport::revocation_store::CertNotAfter
+impl core::panic::unwind_safe::RefUnwindSafe for diport::revocation_store::CertNotAfter
+impl core::panic::unwind_safe::UnwindSafe for diport::revocation_store::CertNotAfter
 pub struct diport::revocation_store::CertScope
 impl diport::revocation_store::CertScope
 pub fn diport::revocation_store::CertScope::device(&self) -> ids::DeviceId
@@ -3194,19 +3244,19 @@ pub type diport::DynRevocationStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynRevocationStore<'_>::Privilege = diport::LocalPrivilege
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for &diport::DynRevocationStore<'dynosaur_struct> where Self: core::marker::Send
 pub fn &diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn &diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn &diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn &diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for &mut diport::DynRevocationStore<'dynosaur_struct> where Self: core::marker::Send
 pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>> where Self: core::marker::Send
 pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for diport::DynRevocationStore<'dynosaur_struct>
 pub fn diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynRevocationStore<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynRevocationStore<'dynosaur_struct>
@@ -3234,31 +3284,31 @@ impl !core::panic::unwind_safe::RefUnwindSafe for diport::revocation_store::Revo
 impl !core::panic::unwind_safe::UnwindSafe for diport::revocation_store::RevocationStoreError
 pub trait diport::revocation_store::RevocationStore: core::marker::Send
 pub fn diport::revocation_store::RevocationStore::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn diport::revocation_store::RevocationStore::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn diport::revocation_store::RevocationStore::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn diport::revocation_store::RevocationStore::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for &diport::DynRevocationStore<'dynosaur_struct> where Self: core::marker::Send
 pub fn &diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn &diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn &diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn &diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for &mut diport::DynRevocationStore<'dynosaur_struct> where Self: core::marker::Send
 pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>> where Self: core::marker::Send
 pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for diport::DynRevocationStore<'dynosaur_struct>
 pub fn diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub trait diport::revocation_store::RevocationStoreLocal
 pub async fn diport::revocation_store::RevocationStoreLocal::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> core::result::Result<bool, diport::revocation_store::RevocationStoreError>
-pub async fn diport::revocation_store::RevocationStoreLocal::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> core::result::Result<(), diport::revocation_store::RevocationStoreError>
+pub async fn diport::revocation_store::RevocationStoreLocal::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> core::result::Result<(), diport::revocation_store::RevocationStoreError>
 pub async fn diport::revocation_store::RevocationStoreLocal::shutdown(&self) -> core::result::Result<(), diport::revocation_store::RevocationStoreError>
 impl<TraitVariantBlanketType: diport::revocation_store::RevocationStore> diport::revocation_store::RevocationStoreLocal for TraitVariantBlanketType
 pub async fn TraitVariantBlanketType::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> core::result::Result<bool, diport::revocation_store::RevocationStoreError>
-pub async fn TraitVariantBlanketType::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> core::result::Result<(), diport::revocation_store::RevocationStoreError>
+pub async fn TraitVariantBlanketType::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> core::result::Result<(), diport::revocation_store::RevocationStoreError>
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::revocation_store::RevocationStoreError>
 pub mod diport::saga_instance_store
 #[non_exhaustive] pub enum diport::saga_instance_store::SagaContractIdError
@@ -4117,6 +4167,29 @@ impl core::marker::Unpin for diport::cas_store::CasStoreOutcome
 impl core::marker::UnsafeUnpin for diport::cas_store::CasStoreOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for diport::cas_store::CasStoreOutcome
 impl core::panic::unwind_safe::UnwindSafe for diport::cas_store::CasStoreOutcome
+#[non_exhaustive] pub enum diport::CertNotAfterError
+pub diport::CertNotAfterError::BeforeUnixEpoch
+pub diport::CertNotAfterError::OutOfRange
+pub diport::CertNotAfterError::SubsecondPrecision
+impl core::clone::Clone for diport::revocation_store::CertNotAfterError
+pub fn diport::revocation_store::CertNotAfterError::clone(&self) -> diport::revocation_store::CertNotAfterError
+impl core::cmp::Eq for diport::revocation_store::CertNotAfterError
+impl core::cmp::PartialEq for diport::revocation_store::CertNotAfterError
+pub fn diport::revocation_store::CertNotAfterError::eq(&self, &diport::revocation_store::CertNotAfterError) -> bool
+impl core::error::Error for diport::revocation_store::CertNotAfterError
+impl core::fmt::Debug for diport::revocation_store::CertNotAfterError
+pub fn diport::revocation_store::CertNotAfterError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::revocation_store::CertNotAfterError
+pub fn diport::revocation_store::CertNotAfterError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::revocation_store::CertNotAfterError
+impl core::marker::StructuralPartialEq for diport::revocation_store::CertNotAfterError
+impl core::marker::Freeze for diport::revocation_store::CertNotAfterError
+impl core::marker::Send for diport::revocation_store::CertNotAfterError
+impl core::marker::Sync for diport::revocation_store::CertNotAfterError
+impl core::marker::Unpin for diport::revocation_store::CertNotAfterError
+impl core::marker::UnsafeUnpin for diport::revocation_store::CertNotAfterError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::revocation_store::CertNotAfterError
+impl core::panic::unwind_safe::UnwindSafe for diport::revocation_store::CertNotAfterError
 #[non_exhaustive] pub enum diport::CertSerialError
 pub diport::CertSerialError::Empty
 pub diport::CertSerialError::TooLong
@@ -5119,6 +5192,33 @@ impl core::marker::Unpin for diport::cas_store::CasStoreRequest
 impl core::marker::UnsafeUnpin for diport::cas_store::CasStoreRequest
 impl core::panic::unwind_safe::RefUnwindSafe for diport::cas_store::CasStoreRequest
 impl core::panic::unwind_safe::UnwindSafe for diport::cas_store::CasStoreRequest
+pub struct diport::CertNotAfter(_)
+impl diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::as_system_time(self) -> std::time::SystemTime
+pub fn diport::revocation_store::CertNotAfter::try_from_system_time(std::time::SystemTime) -> core::result::Result<Self, diport::revocation_store::CertNotAfterError>
+pub fn diport::revocation_store::CertNotAfter::unix_seconds(self) -> i64
+impl core::clone::Clone for diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::clone(&self) -> diport::revocation_store::CertNotAfter
+impl core::cmp::Eq for diport::revocation_store::CertNotAfter
+impl core::cmp::Ord for diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::cmp(&self, &diport::revocation_store::CertNotAfter) -> core::cmp::Ordering
+impl core::cmp::PartialEq for diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::eq(&self, &diport::revocation_store::CertNotAfter) -> bool
+impl core::cmp::PartialOrd for diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::partial_cmp(&self, &diport::revocation_store::CertNotAfter) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::revocation_store::CertNotAfter
+pub fn diport::revocation_store::CertNotAfter::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::revocation_store::CertNotAfter
+impl core::marker::StructuralPartialEq for diport::revocation_store::CertNotAfter
+impl core::marker::Freeze for diport::revocation_store::CertNotAfter
+impl core::marker::Send for diport::revocation_store::CertNotAfter
+impl core::marker::Sync for diport::revocation_store::CertNotAfter
+impl core::marker::Unpin for diport::revocation_store::CertNotAfter
+impl core::marker::UnsafeUnpin for diport::revocation_store::CertNotAfter
+impl core::panic::unwind_safe::RefUnwindSafe for diport::revocation_store::CertNotAfter
+impl core::panic::unwind_safe::UnwindSafe for diport::revocation_store::CertNotAfter
 pub struct diport::CertScope
 impl diport::revocation_store::CertScope
 pub fn diport::revocation_store::CertScope::device(&self) -> ids::DeviceId
@@ -6002,19 +6102,19 @@ pub type diport::DynRevocationStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynRevocationStore<'_>::Privilege = diport::LocalPrivilege
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for &diport::DynRevocationStore<'dynosaur_struct> where Self: core::marker::Send
 pub fn &diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn &diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn &diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn &diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for &mut diport::DynRevocationStore<'dynosaur_struct> where Self: core::marker::Send
 pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>> where Self: core::marker::Send
 pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for diport::DynRevocationStore<'dynosaur_struct>
 pub fn diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynRevocationStore<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynRevocationStore<'dynosaur_struct>
@@ -7866,23 +7966,23 @@ pub fn diport::DynRateLimiter<'dynosaur_struct>::check(&self, diport::rate_limit
 pub fn diport::DynRateLimiter<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::rate_limiter::RateLimitError>> + core::marker::Send
 pub trait diport::RevocationStore: core::marker::Send
 pub fn diport::RevocationStore::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn diport::RevocationStore::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn diport::RevocationStore::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn diport::RevocationStore::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for &diport::DynRevocationStore<'dynosaur_struct> where Self: core::marker::Send
 pub fn &diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn &diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn &diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn &diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for &mut diport::DynRevocationStore<'dynosaur_struct> where Self: core::marker::Send
 pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn &mut diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>> where Self: core::marker::Send
 pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::revocation_store::RevocationStore for diport::DynRevocationStore<'dynosaur_struct>
 pub fn diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
-pub fn diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub fn diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope, diport::revocation_store::CertNotAfter) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub trait diport::SagaInstanceStore: core::marker::Send
 pub fn diport::SagaInstanceStore::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send

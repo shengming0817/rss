@@ -3,11 +3,11 @@ error[E0080]: evaluation panicked: draft provider roles cannot enter an active c
    |
  6 |   const DRAFT: ProviderCatalogEntry = ProviderCatalogEntry::checked(
    |  _____________________________________^
- 7 | |     ProviderRole::DeviceRevocationStore,
- 8 | |     DiportPort::RevocationStore,
- 9 | |     ProviderConstructor::SoftcaInMemRevocationLedger,
+ 7 | |     ProviderRole::DistributedCasStoreAlternative,
+ 8 | |     DiportPort::Cas,
+ 9 | |     ProviderConstructor::RedisCasStore,
 ...  |
-17 | |     &[],
+17 | |     &[LifecycleChannel::Resources],
 18 | | );
    | |_^ evaluation of `DRAFT` failed inside this call
    |

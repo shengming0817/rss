@@ -734,6 +734,59 @@ CHECK 存在、`rss_app`/`rss_app_read` 无 UPDATE/DELETE，并用真实 lifecyc
 mutation/mapping/outbox 三者同在，pre-commit failure 时三者同无。回滚只允许新的 forward migration，
 不得修改 `0071` 或删除已发布 mapping。
 
+### 0072 persistent certificate revocations
+
+`0072` 纯新增 `certificate_revocations`，精确键为 `(tenant_id, device_id, serial)`；serial 长度、
+`revoked_at < not_after`、FORCE RLS 与 canonical tenant policy 在同一 migration 固化。`revoked_at` 只能由
+数据库默认值生成。`rss_app` 只有 SELECT 与 tenant/device/serial/not_after 四列 INSERT，
+`rss_app_read` 只有 SELECT；两者均无 UPDATE/DELETE。
+
+到期是逻辑判断：`not_after <= authoritative database now` 立即不再命中。物理删除只经零参数
+`rss_sweep_expired_certificate_revocations()`；同 transaction 的零参
+`rss_certificate_revocation_retention_backlog()` 在 FORCE RLS 后返回全局 eligible depth 与 grace 后 oldest
+age。两者由独立 NOLOGIN/BYPASSRLS owner 固定 search path；删除单批最多 1,000 行、`SKIP LOCKED`，并保留
+5 分钟 grace。runtime role 对两个固定函数只有 EXECUTE，没有 raw DELETE；backlog sample 失败会回滚同 tick
+删除并发出 transient/NaN 证据。
+
+该 migration additive、forward-only，可在新 binary 前应用，但 binary 切换必须是非滚动 hard cutover：
+
+1. **先应用 additive migration，保持撤销入口关闭。** 唯一 migration runner 完成后核验
+   `SELECT max(version) FROM public._sqlx_migrations` 为 `72`；此时不得让新 binary 接受撤销流量。
+2. **quiesce 撤销入口并停止全部旧 binary。** 禁止旧/新 generation 滚动混跑；先禁用旧 workload/controller/job 的自动重启，
+   再从部署平台导出 `OLD_REVOCATION_GENERATION` 的完整进程
+   inventory，断言 `EXPECTED_OLD_REPLICAS=0`。该 inventory 必须覆盖常驻 workload、一次性 job 和定时
+   controller；任一旧进程仍可重启即停止 rollout。
+3. **在任何新 binary 启动前证明全部静态连接 lane 为零。** migration runner 已退出且旧 process
+   inventory 为零后，保存下列同一时点的 PostgreSQL 快照；`all_static_lanes_drained` 必须为 `true`：
+
+   ```sql
+   SELECT count(*) = 0 AS all_static_lanes_drained
+   FROM pg_catalog.pg_stat_activity
+   WHERE backend_type = 'client backend'
+     AND application_name IN (
+       'rss-postgres-writer',
+       'rss-postgres-reader',
+       'rss-postgres-audit-admin',
+       'rss-postgres-maintenance',
+       'rss-postgres-migrator'
+     );
+   ```
+
+   五个名字表达连接职责而非 release generation；本快照与步骤 2 的 process inventory 共同构成时间
+   围栏。两份证据缺一、或快照后有旧 workload 恢复能力，均停止 rollout。
+4. **只启动新 binary。** 启动必须先通过 table/RLS/ACL/maintenance-role/function capability gate，
+   再铸造 receipt、构造 store+sweeper；失败时保持入口关闭。
+5. **完成新世界探针。** 保存 ledger=72、表/RLS/ACL/role/function catalog、pool 重建后仍命中，
+   以及 `1000 + 1 + 0` retention 证据，并再次证明旧 process inventory 为 `0`。新连接此时会复用上述
+   静态 lane 名，故不得再用静态 `application_name` 区分旧/新 generation；启动后的代际证据只来自已
+   禁用自动重启的部署 inventory。
+6. **最后开放撤销流量。** 只有上述证据完整后才解除 quiesce；开放后持续禁止旧 binary 回池。
+7. **执行 rollback fence。** 记录
+   `SELECT count(*) AS persisted_revocations FROM public.certificate_revocations`；一旦新 binary 接受首个
+   撤销写入（计数或审计证据非零），严禁回退到读取进程内 ledger 的旧 binary。若 capability gate、ACL
+   或函数探针失败，保持流量停止并提交新的前向修复 migration；不得修改 `0072`、增加双读/双写或恢复
+   SoftCA assembly fallback。
+
 ## Append-only 表（REVOKE 强制）
 
 append-only 表（如 `projection_events`）在前向迁移内用 `REVOKE UPDATE, DELETE ON <table> FROM <role>` 强制 DB

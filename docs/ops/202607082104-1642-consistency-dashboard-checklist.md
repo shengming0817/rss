@@ -36,6 +36,9 @@ Dashboard 不是 enforcement carrier。metric 名、label 闭值集、PII 边界
 | DLX archive pending | `dead_letter_archive_pending_depth` | none | 与 oldest age 一起看；NaN/缺失不是 0 |
 | DLX archive oldest pending | `dead_letter_archive_oldest_pending_age_seconds` | none | `DlxArchiveOldestPendingHigh`；查 `dlx_lifecycle` / `dlx_archive_ready` 与独立依赖 |
 | DLX lifecycle outcome | `sum by (outcome) (increase(retention_sweep_ticks_total{target="dead_letter"}[5m]))` | `outcome` | `DlxArchiveLifecycleFailure`；transient/invariant 均已停止 purge |
+| Certificate revocation retention outcome | `sum by (outcome) (increase(retention_sweep_ticks_total{target="certificate_revocations"}[5m]))` | `outcome` | `CertificateRevocationRetentionFailure`；查 sweeper readyz / PG maintenance capability |
+| Certificate revocation expired backlog | `retention_expired_backlog_depth{target="certificate_revocations"}` | `target`（闭值） | 与 oldest age 一起看；NaN/缺失不是 0 |
+| Certificate revocation expired oldest age | `retention_expired_oldest_age_seconds{target="certificate_revocations"}` | `target`（闭值） | `CertificateRevocationRetentionBacklogHigh`；年龄从固定 5min grace 结束后起算 |
 | Outbox publish disposition | `sum by (domain, status) (rate(outbox_publish_total[5m]))` | `domain`, `status` | Requeue storm / reject path diagnosis |
 | Outbox DLX rate | `sum by (domain) (rate(outbox_dlx_total[5m]))` | `domain` | `OutboxDlxGrowth`; identify tenant before tenant-scoped DLQ CLI |
 | Outbox same-ID window expiry | `sum by (domain, phase) ((increase(outbox_same_id_window_expired_total[10m]) > 0) or ((outbox_same_id_window_expired_total > 0) unless (outbox_same_id_window_expired_total offset 10m)))` | `domain`, `phase` (`automatic`/`redrive`) | `OutboxSameIdWindowExpired`; filtering zero increase prevents it from masking the `unless offset` first-series arm; broker publish was skipped, inspect DLX and maintenance audit |

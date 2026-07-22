@@ -7,5 +7,6 @@ exactExceptions = [
   "Arc<secure::DigestPasswordBlocklist>",
   "Arc<dyn distributed::DomainTransport>",
   "Arc<oidc::OidcProvider>",
+  "postgres::PgRevocationStore",
   "Arc<vault::VaultSigner>",
 ]

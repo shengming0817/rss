@@ -20,11 +20,13 @@ const STRUCT_NAME: &str = "SharedRuntimeDeps";
 const EXACT_DOMAIN_TRANSPORT_ARC: &str = "Arc<dyn distributed::DomainTransport>";
 const EXACT_PASSWORD_BLOCKLIST_ARC: &str = "Arc<secure::DigestPasswordBlocklist>";
 const EXACT_OIDC_PROVIDER_ARC: &str = "Arc<oidc::OidcProvider>";
+const EXACT_POSTGRES_REVOCATION_STORE: &str = "postgres::PgRevocationStore";
 const EXACT_VAULT_SIGNER_ARC: &str = "Arc<vault::VaultSigner>";
 const SUPPORTED_EXACT_EXCEPTIONS: &[&str] = &[
     EXACT_DOMAIN_TRANSPORT_ARC,
     EXACT_PASSWORD_BLOCKLIST_ARC,
     EXACT_OIDC_PROVIDER_ARC,
+    EXACT_POSTGRES_REVOCATION_STORE,
     EXACT_VAULT_SIGNER_ARC,
 ];
 const FORBIDDEN_BROAD_ROOTS: &[&str] = &["std", "core", "alloc"];
@@ -414,7 +416,10 @@ fn is_allowed_field_type(ty: &Type, resolver: &TypeResolver, policy: &RuntimeDep
     if let Some(segments) = resolved_type_path_segments(ty, resolver, &mut Vec::new())
         && segments.first().is_some_and(|root| root == "postgres")
     {
-        return policy.allows_root("postgres") && segments == ["postgres", "PgRuntimeHandle"];
+        return policy.allows_root("postgres")
+            && (segments == ["postgres", "PgRuntimeHandle"]
+                || (segments == ["postgres", "PgRevocationStore"]
+                    && policy.allows_exact_exception(EXACT_POSTGRES_REVOCATION_STORE)));
     }
     if contains_forbidden_runtime_dep_type(ty, resolver, &mut Vec::new()) {
         return false;
@@ -794,7 +799,8 @@ mod tests {
                 "Arc<dyn distributed::DomainTransport>",
                 "Arc<oidc::OidcProvider>",
                 "Arc<secure::DigestPasswordBlocklist>",
-                "Arc<vault::VaultSigner>"
+                "Arc<vault::VaultSigner>",
+                "postgres::PgRevocationStore"
             ]
         );
         Ok(())
@@ -959,6 +965,20 @@ exactExceptions = ["Arc<dyn distributed::Other>"]
                 findings[0]
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn postgres_revocation_store_is_the_only_concrete_postgres_store_exception() -> Result<()> {
+        let accepted = findings_with_policy(
+            "pub struct SharedRuntimeDeps { pub revocation: postgres::PgRevocationStore }\n",
+        )?;
+        assert!(accepted.is_empty(), "{accepted:?}");
+
+        let rejected =
+            findings_with_policy("pub struct SharedRuntimeDeps { pub raw: postgres::PgStore }\n")?;
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert_eq!(rejected[0].rule, Rule::DisallowedFieldType);
         Ok(())
     }
 

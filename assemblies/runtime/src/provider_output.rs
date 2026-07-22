@@ -20,7 +20,7 @@ use assembly_schema::{
 };
 use bootstrap::{DomainModuleResult, WorkerSpec};
 use diport::{DynManagedResource, ManagedResource, ShutdownError};
-use postgres::PgRuntimeDeps;
+use postgres::{PgRuntimeDeps, PgRuntimeHandle};
 
 /// Consumes the postgres lifecycle owner into the runtime's sole lifecycle output type.
 pub(crate) fn build_pg_runtime_module(
@@ -45,6 +45,69 @@ pub(crate) fn identity_signer_resource(
 
 struct IdentitySignerGuard {
     signer: Arc<vault::VaultSigner>,
+}
+
+/// Non-forgeable store half of the active device-revocation provider construction.
+///
+/// The wrapper can only be minted together with [`DeviceRevocationProviderOutput`], so production
+/// shared dependencies and catalog evidence consume two halves of the same PostgreSQL handle build.
+pub(crate) struct ReceiptBackedRevocationStore(postgres::PgRevocationStore);
+
+impl ReceiptBackedRevocationStore {
+    pub(crate) fn into_inner(self) -> postgres::PgRevocationStore {
+        self.0
+    }
+}
+
+/// The dedicated lifecycle half of a device-revocation provider construction.
+///
+/// Private fields prevent an aggregate PostgreSQL module plus a raw catalog permit from standing
+/// in for the required revocation probe and retention worker.
+pub(crate) struct DeviceRevocationProviderOutput {
+    module: DomainModuleResult,
+    permit: DeviceRevocationStorePermit,
+}
+
+/// Atomic construction result for the persistent store and its retention lifecycle.
+pub(crate) struct BuiltDeviceRevocationProvider {
+    store: ReceiptBackedRevocationStore,
+    output: DeviceRevocationProviderOutput,
+}
+
+impl BuiltDeviceRevocationProvider {
+    pub(crate) fn build(
+        pg: &PgRuntimeHandle,
+        permit: DeviceRevocationStorePermit,
+    ) -> anyhow::Result<Self> {
+        let module = crate::phase::wire_revocation_sweeper(pg)
+            .context("wire certificate revocation sweeper")?;
+        Self::from_module(pg, permit, module).map_err(anyhow::Error::new)
+    }
+
+    fn from_module(
+        pg: &PgRuntimeHandle,
+        permit: DeviceRevocationStorePermit,
+        module: DomainModuleResult,
+    ) -> Result<Self, ProviderBuildError> {
+        let actual = module_channels(&module);
+        if !same_channels(&actual, CHANNELS_PROBES_WORKERS) {
+            return Err(ProviderBuildError::ProviderBatchChannelsMismatch {
+                batch: "device-revocation-store",
+                expected: CHANNELS_PROBES_WORKERS,
+                actual,
+            });
+        }
+        Ok(Self {
+            store: ReceiptBackedRevocationStore(pg.infra().revocation_store()),
+            output: DeviceRevocationProviderOutput { module, permit },
+        })
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (ReceiptBackedRevocationStore, DeviceRevocationProviderOutput) {
+        (self.store, self.output)
+    }
 }
 
 impl ManagedResource for IdentitySignerGuard {
@@ -136,14 +199,21 @@ impl ProviderOutput {
     }
 
     pub(crate) fn postgres(
-        module: DomainModuleResult,
+        mut module: DomainModuleResult,
+        device_revocation_store: DeviceRevocationProviderOutput,
         auth_audit_sink: AuthAuditSinkPermit,
         distributed_cas_store: DistributedCasStorePermit,
         service_token_replay_store: ServiceTokenReplayStorePermit,
     ) -> Self {
+        let DeviceRevocationProviderOutput {
+            module: revocation_module,
+            permit: device_revocation_store,
+        } = device_revocation_store;
+        module.merge(revocation_module);
         Self::new(
             module,
             vec![
+                ProviderReceipt::DeviceRevocationStore(device_revocation_store.0),
                 ProviderReceipt::AuthAuditSink(auth_audit_sink.0),
                 ProviderReceipt::DistributedCasStore(distributed_cas_store.0),
                 ProviderReceipt::ServiceTokenReplayStore(service_token_replay_store.0),
@@ -323,6 +393,12 @@ macro_rules! provider_permits {
 }
 
 provider_permits! {
+    DeviceRevocationStorePermit {
+        field: device_revocation_store,
+        factory: DeviceloopPostgresRevocationStore,
+        receipt: DeviceRevocationStore,
+        channels: CHANNELS_PROBES_WORKERS,
+    },
     AuthAuditSinkPermit {
         field: auth_audit_sink,
         factory: HttpservePostgresAuthAuditSink,
@@ -756,9 +832,10 @@ pub(crate) enum ProviderBuildError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHANNELS_ALL, CHANNELS_RESOURCES, DistributedLockStorePermit, ListenerPdpPermit,
-        ProviderBuild, ProviderBuildError, ProviderFactoryDispatch, ProviderFactoryPermit,
-        ProviderOutput, RuntimeObjectStorePermit, build_pg_runtime_module,
+        BuiltDeviceRevocationProvider, CHANNELS_ALL, CHANNELS_RESOURCES,
+        DeviceRevocationStorePermit, DistributedLockStorePermit, ListenerPdpPermit, ProviderBuild,
+        ProviderBuildError, ProviderFactoryDispatch, ProviderFactoryPermit, ProviderOutput,
+        RuntimeObjectStorePermit, build_pg_runtime_module,
     };
 
     use assembly_schema::{
@@ -775,9 +852,9 @@ mod tests {
 
     use crate::providers_gen::PROVIDER_CATALOG;
 
-    #[test]
+    #[tokio::test]
     #[allow(clippy::expect_used)]
-    fn provider_plan_active_catalog_claims_all_factories_exactly_once() {
+    async fn provider_plan_active_catalog_claims_all_factories_exactly_once() {
         let (mut build, mut dispatch) = provider_build_and_dispatch();
         record_all_batches(&mut build, &mut dispatch, true, true);
         let completed = build
@@ -785,17 +862,18 @@ mod tests {
             .expect("all active factories produced exact receipts");
         // finish() already required one receipt per active catalog factory; pin occupancy shape.
         assert!(!PROVIDER_CATALOG.is_empty());
-        assert_eq!(completed.provider_module.probes.len(), 3);
+        assert_eq!(completed.provider_module.probes.len(), 4);
         assert_eq!(completed.provider_module.resources.len(), 7);
-        assert_eq!(completed.provider_module.workers.len(), 3);
+        assert_eq!(completed.provider_module.workers.len(), 4);
         assert!(completed.domain_module.probes.is_empty());
         assert!(completed.domain_module.resources.is_empty());
         assert!(completed.domain_module.workers.is_empty());
     }
 
-    #[test]
+    #[tokio::test]
     #[allow(clippy::expect_used)]
-    fn provider_plan_rejects_missing_extra_duplicate_and_draft_production() -> anyhow::Result<()> {
+    async fn provider_plan_rejects_missing_extra_duplicate_and_draft_production()
+    -> anyhow::Result<()> {
         let plan = bundled_provider_plan();
         let plans = plan.as_typed().provider_plans();
 
@@ -891,17 +969,14 @@ mod tests {
     }
 
     #[test]
-    fn provider_plan_keeps_draft_roles_out_of_active_dispatch() {
+    fn provider_plan_keeps_remaining_draft_role_out_of_active_dispatch() {
         let plan = bundled_provider_plan();
         let plans = plan.as_typed().provider_plans();
         let plan_ids = plans
             .iter()
             .map(assembly_schema::ProviderPlan::id)
             .collect::<BTreeSet<_>>();
-        for draft in [
-            ProviderRole::DeviceRevocationStore,
-            ProviderRole::DistributedCasStoreAlternative,
-        ] {
+        for draft in [ProviderRole::DistributedCasStoreAlternative] {
             assert!(plan_ids.contains(draft.as_str()));
             assert!(
                 draft.factory_symbol().is_none(),
@@ -1128,6 +1203,7 @@ mod tests {
         static_assertions::assert_not_impl_any!(ListenerPdpPermit: Clone, Copy);
         static_assertions::assert_type_ne_all!(
             ListenerPdpPermit,
+            DeviceRevocationStorePermit,
             DistributedLockStorePermit,
             RuntimeObjectStorePermit
         );
@@ -1272,9 +1348,19 @@ mod tests {
                     .expect("settings key-provider permit"),
             ))
             .expect("vault output");
+        let pg = postgres::PgRuntimeHandle::for_module_test();
+        let built_revocation = BuiltDeviceRevocationProvider::build(
+            &pg,
+            dispatch
+                .device_revocation_store()
+                .expect("device revocation-store permit"),
+        )
+        .expect("typed device revocation provider");
+        let (_store, revocation_output) = built_revocation.into_parts();
         build
             .record(ProviderOutput::postgres(
                 module_for_channels("postgres", CHANNELS_ALL),
+                revocation_output,
                 dispatch.auth_audit_sink().expect("audit sink permit"),
                 dispatch
                     .distributed_cas_store()
@@ -1303,6 +1389,35 @@ mod tests {
                 dispatch.event_subscriber().expect("subscriber permit"),
             ))
             .expect("event output");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn device_revocation_funnel_rejects_aggregate_module_as_dedicated_evidence() {
+        let (build, mut dispatch) = provider_build_and_dispatch();
+        let pg = postgres::PgRuntimeHandle::for_module_test();
+        let error = BuiltDeviceRevocationProvider::from_module(
+            &pg,
+            dispatch
+                .device_revocation_store()
+                .expect("device revocation-store permit"),
+            module_for_channels("aggregate-postgres", CHANNELS_ALL),
+        )
+        .err()
+        .expect("aggregate module must not satisfy dedicated revocation lifecycle");
+
+        assert!(matches!(
+            error,
+            ProviderBuildError::ProviderBatchChannelsMismatch {
+                batch: "device-revocation-store",
+                expected: super::CHANNELS_PROBES_WORKERS,
+                actual,
+            } if actual == CHANNELS_ALL
+        ));
+        assert!(
+            build.finish().is_err(),
+            "rejected permit cannot mint a receipt"
+        );
     }
 
     fn module_for_channels(

@@ -25,6 +25,7 @@ pub enum RetentionTarget {
     OutboxPublished,
     InboxReceipts,
     DeadLetter,
+    CertificateRevocations,
 }
 
 impl RetentionTarget {
@@ -33,8 +34,40 @@ impl RetentionTarget {
             Self::OutboxPublished => "outbox_published",
             Self::InboxReceipts => "inbox_receipts",
             Self::DeadLetter => "dead_letter",
+            Self::CertificateRevocations => "certificate_revocations",
         }
     }
+}
+
+/// One low-cardinality observation of rows that remain beyond their retention grace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionBacklog {
+    depth: u64,
+    oldest_age_seconds: u64,
+}
+
+impl RetentionBacklog {
+    pub const fn new(depth: u64, oldest_age_seconds: u64) -> Self {
+        Self {
+            depth,
+            oldest_age_seconds,
+        }
+    }
+
+    pub const fn depth(self) -> u64 {
+        self.depth
+    }
+
+    pub const fn oldest_age_seconds(self) -> u64 {
+        self.oldest_age_seconds
+    }
+}
+
+/// Backlog gauges must explicitly distinguish a real empty sample from an unavailable sampler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionBacklogObservation {
+    Available(RetentionBacklog),
+    Unavailable,
 }
 
 /// Stable lifecycle outcome labels.

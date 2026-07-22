@@ -29,7 +29,7 @@
         "constructor": {
           "type": "string",
           "enum": [
-            "softca::InMemRevocationLedger",
+            "postgres::PgRevocationStore",
             "ratelimit::GovernorLimiter",
             "amqp::AmqpPublisher",
             "amqp::AmqpSubscriber",

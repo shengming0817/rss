@@ -97,6 +97,12 @@ impl TenantScopeHandle for InfraTenantScope {
     }
 }
 
+impl TenantScopeHandle for diport::CertScope {
+    fn tenant(self) -> TenantId {
+        diport::CertScope::tenant(&self)
+    }
+}
+
 pub(crate) fn infra_tenant_scope(tenant: TenantId) -> InfraTenantScope {
     InfraTenantScope::from_infra_capability(tenant)
 }
@@ -425,6 +431,27 @@ impl PgWritePool<ServingWriteLane> {
             projection_registry,
             _lane: std::marker::PhantomData,
         }
+    }
+
+    /// Run the receipt-gated, fail-closed revocation lookup on the authoritative writer lane.
+    ///
+    /// This is deliberately narrower than a generic writer-side read API: only the private
+    /// startup receipt can select this lane, so independent repositories cannot bypass
+    /// [`PgTenantReadPool`].
+    pub(crate) async fn revocation_read<S, T, F, E>(
+        &self,
+        _receipt: &crate::revocation::RevocationCapabilityReceipt,
+        scope: S,
+        read: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> Result<T, E>
+    where
+        S: TenantScopeHandle,
+        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        T: Send,
+    {
+        self.write(scope, read, map_storage).await
     }
 
     #[cfg(any(test, feature = "fault-matrix-test-support"))]

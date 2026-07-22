@@ -39,11 +39,10 @@ use identity::ports::{
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
-use runtime::SharedRuntimeDeps;
 use runtime::support::{SystemClock, TracingAuthAuditSink};
 use runtime::test_support::{
-    IdentityTestValues, build_s3_runtime_deps_from_values, finalize_federated_listener,
-    finalize_rss_listener, wire_identity_with, wire_settings,
+    IdentityTestValues, build_s3_runtime_deps_from_values, build_shared_runtime_deps,
+    finalize_federated_listener, finalize_rss_listener, wire_identity_with, wire_settings,
 };
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -639,16 +638,16 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         true,
         true,
     )?;
-    let deps = SharedRuntimeDeps {
-        password_blocklist: test_password_blocklist(),
-        pg: pg.clone(),
+    let deps = build_shared_runtime_deps(
+        test_password_blocklist(),
+        pg.clone(),
         redis,
         s3,
         vault,
-        identity_signer: identity_signer(&vault_uri)?,
-        settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
-        domain_transport: noop_domain_transport(),
-    };
+        identity_signer(&vault_uri)?,
+        diport::KeyName::try_new("settings-config")?,
+        noop_domain_transport(),
+    );
 
     // 4. wire_identity_with（复用 SharedRuntimeDeps 中的 mock-Vault signer，仅注入显式 JWT/AuthGrant 配置）。
     let identity_binding = wire_identity_with(&deps, identity_test_values())?;
@@ -974,16 +973,16 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         true,
         true,
     )?;
-    let deps = SharedRuntimeDeps {
-        password_blocklist: test_password_blocklist(),
-        pg: pg.clone(),
+    let deps = build_shared_runtime_deps(
+        test_password_blocklist(),
+        pg.clone(),
         redis,
         s3,
         vault,
-        identity_signer: identity_signer(&vault_uri)?,
-        settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
-        domain_transport: noop_domain_transport(),
-    };
+        identity_signer(&vault_uri)?,
+        diport::KeyName::try_new("settings-config")?,
+        noop_domain_transport(),
+    );
     let identity_binding = wire_identity_with(&deps, identity_test_values())?;
     let settings_binding = wire_settings(&deps).await?;
     let mut bindings = vec![identity_binding, settings_binding];

@@ -2,10 +2,10 @@
 
 use diport::DlxArchiveBacklog;
 
-use crate::{RetentionOutcome, RetentionTarget};
+use crate::{RetentionBacklogObservation, RetentionOutcome, RetentionTarget};
 
 /// Lifecycle metrics port. Every label is a closed enum owned by eventexec.
-pub trait DlxLifecycleMetrics: Send + Sync {
+pub trait RetentionMetrics: Send + Sync {
     fn record_sweep(
         &self,
         target: RetentionTarget,
@@ -15,12 +15,18 @@ pub trait DlxLifecycleMetrics: Send + Sync {
     );
 
     fn record_archive_backlog(&self, backlog: DlxArchiveBacklog);
+
+    fn record_retention_backlog(
+        &self,
+        target: RetentionTarget,
+        observation: RetentionBacklogObservation,
+    );
 }
 
 /// `metrics` facade-backed production emitter.
-pub struct MetricsDlxLifecycleMetrics;
+pub struct MetricsRetentionMetrics;
 
-impl DlxLifecycleMetrics for MetricsDlxLifecycleMetrics {
+impl RetentionMetrics for MetricsRetentionMetrics {
     fn record_sweep(
         &self,
         target: RetentionTarget,
@@ -52,12 +58,35 @@ impl DlxLifecycleMetrics for MetricsDlxLifecycleMetrics {
         metrics::gauge!("dead_letter_archive_oldest_pending_age_seconds")
             .set(backlog.oldest_age_seconds() as f64);
     }
+
+    fn record_retention_backlog(
+        &self,
+        target: RetentionTarget,
+        observation: RetentionBacklogObservation,
+    ) {
+        let (depth, oldest_age_seconds) = match observation {
+            RetentionBacklogObservation::Available(backlog) => {
+                (backlog.depth() as f64, backlog.oldest_age_seconds() as f64)
+            }
+            RetentionBacklogObservation::Unavailable => (f64::NAN, f64::NAN),
+        };
+        metrics::gauge!(
+            "retention_expired_backlog_depth",
+            "target" => target.as_label()
+        )
+        .set(depth);
+        metrics::gauge!(
+            "retention_expired_oldest_age_seconds",
+            "target" => target.as_label()
+        )
+        .set(oldest_age_seconds);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DlxLifecycleMetrics, MetricsDlxLifecycleMetrics};
-    use crate::{RetentionOutcome, RetentionTarget};
+    use super::{MetricsRetentionMetrics, RetentionMetrics};
+    use crate::{RetentionBacklog, RetentionBacklogObservation, RetentionOutcome, RetentionTarget};
     use diport::DlxArchiveBacklog;
 
     #[test]
@@ -72,7 +101,7 @@ mod tests {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
-            let metrics = MetricsDlxLifecycleMetrics;
+            let metrics = MetricsRetentionMetrics;
             metrics.record_sweep(
                 RetentionTarget::DeadLetter,
                 RetentionOutcome::Success,
@@ -80,6 +109,16 @@ mod tests {
                 0.25,
             );
             metrics.record_archive_backlog(DlxArchiveBacklog::new(11, 37));
+            metrics.record_retention_backlog(
+                RetentionTarget::CertificateRevocations,
+                RetentionBacklogObservation::Available(RetentionBacklog::new(13, 41)),
+            );
+            metrics.record_sweep(
+                RetentionTarget::CertificateRevocations,
+                RetentionOutcome::Transient,
+                0,
+                0.5,
+            );
         });
         let rendered = handle.render();
         for metric in [
@@ -88,10 +127,16 @@ mod tests {
             "retention_sweep_duration_seconds_count",
             "dead_letter_archive_pending_depth",
             "dead_letter_archive_oldest_pending_age_seconds",
+            "retention_expired_backlog_depth",
+            "retention_expired_oldest_age_seconds",
         ] {
             assert!(rendered.contains(metric), "missing {metric}: {rendered}");
         }
-        for label in ["target=\"dead_letter\"", "outcome=\"success\""] {
+        for label in [
+            "target=\"dead_letter\"",
+            "target=\"certificate_revocations\"",
+            "outcome=\"success\"",
+        ] {
             assert!(rendered.contains(label), "missing {label}: {rendered}");
         }
         for forbidden in ["tenant_id=", "dead_letter_id=", "payload=", "error="] {
@@ -100,5 +145,36 @@ mod tests {
                 "high-cardinality label {forbidden} leaked: {rendered}"
             );
         }
+        assert!(
+            rendered.contains(
+                "retention_sweep_ticks_total{target=\"certificate_revocations\",outcome=\"transient\"} 1"
+            ),
+            "revocation failure outcome must use the shared typed family: {rendered}"
+        );
+    }
+
+    #[test]
+    fn unavailable_retention_backlog_is_nan_instead_of_zero() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            MetricsRetentionMetrics.record_retention_backlog(
+                RetentionTarget::CertificateRevocations,
+                RetentionBacklogObservation::Unavailable,
+            );
+        });
+        let rendered = handle.render();
+        assert!(
+            rendered.contains(
+                "retention_expired_backlog_depth{target=\"certificate_revocations\"} NaN"
+            ),
+            "unavailable backlog must not be rendered as zero: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "retention_expired_oldest_age_seconds{target=\"certificate_revocations\"} NaN"
+            ),
+            "unavailable backlog age must not be rendered as zero: {rendered}"
+        );
     }
 }

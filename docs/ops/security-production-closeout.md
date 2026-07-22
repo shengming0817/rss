@@ -11,6 +11,7 @@ The current `assemblies/runtime/assembly.toml` remains `profile = "demo"` until 
 | RSS User grant currency | Every protected RSS request verifies the JWT first, then checks the exact signed grant/User/tenant/auth-time/epoch against one tenant-scoped durable grant/account snapshot. | Missing, terminal, expired or mismatched state returns 401 before the handler; store failure returns 503 and never falls back to JWT-only evidence. |
 | Vault | Access-token signing and settings ConfigValue encryption must use active persistent Vault providers. | `cargo xtask assembly validate` requires active/persistent/backend `vault::VaultSigner` and `vault::VaultKeyProvider`. |
 | SPIFFE / mTLS | Internal non-loopback traffic must use SPIFFE/mTLS. `service-token` is loopback local-test only. | `cargo xtask assembly validate` requires `run()`-reachable AST evidence for `MtlsServerConfig::from_spire`, `DomainHttpTransport::from_spire`, and `domain_transport_ready`; legacy Internal service-token migration env constants are rejected. |
+| Device certificate revocation | Runtime assembly uses the persistent PostgreSQL provider with exact tenant/device/serial scope, logical expiry, fail-closed reads and fixed bounded retention. No SoftCA fallback is deployable. | Startup must mint the private revocation capability receipt only after table/RLS/ACL/maintenance-role/function verification; `device-revocation-store` is active/persistent and produces its real probe + worker. |
 
 ## Triggers
 
@@ -22,6 +23,16 @@ The current `assemblies/runtime/assembly.toml` remains `profile = "demo"` until 
 - Reject deployment if active RSS/Federated issuer, audience or canonical JWKS path overlaps, if Service issuer/audience overlaps either access profile, or if an unselected profile namespace is present.
 - Remove `RSS_ACCESS_TOKEN_TRUSTED_KINDS` from every release bundle. It is no longer a supported RSS key; configure non-User kinds only through `RSS_FEDERATED_ACCESS_TOKEN_TRUSTED_KINDS` on a Federated listener.
 - Remove any deployment use of `RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET` or `RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX`; they are no longer supported.
+- Treat migration `0072` as a non-rolling, forward-only cutover. Apply the additive migration with
+  revocation traffic disabled, quiesce the revocation entry points, disable every old
+  workload/controller/job restart path, and prove the old generation process inventory is zero.
+  Before any new binary starts, save one PostgreSQL snapshot proving the five static
+  `rss-postgres-{writer,reader,audit-admin,maintenance,migrator}` lanes have zero total connections;
+  only then start the new binary and reopen traffic. After startup those lane names identify duties,
+  not generations, so continue proving old-generation zero only from deployment process inventory.
+  After the new binary accepts its first certificate revocation, never roll back to a binary that
+  reads an in-memory ledger; keep traffic stopped and roll forward with a corrected migration/runtime
+  instead.
 
 ## RSS Access Signing Key Rotation
 

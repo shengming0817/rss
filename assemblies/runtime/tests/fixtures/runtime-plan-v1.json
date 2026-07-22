@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "assemblyFingerprint": "sha256:2b1d8e38a09161b5c535d77126b154dfd5a4d3a4af64fc38ed8217878dcfb03b",
-  "runtimePlanFingerprint": "sha256:35cac2855f7a127a3530e6d80d38c024fe3a84b76fb1f7b2f26be424d613c0ba",
+  "assemblyFingerprint": "sha256:122cf409e7f463584e0f1b577e6f779d5d8e5f179dc0e6e91746de0977201220",
+  "runtimePlanFingerprint": "sha256:7547b240b279a71c6bc4bef25dc04a2234e62d6906140923e36b189928e00b48",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
@@ -13,8 +13,11 @@
     },
     {
       "id": "device-revocation-store",
-      "constructor": "softca::InMemRevocationLedger",
-      "outputs": []
+      "constructor": "postgres::PgRevocationStore",
+      "outputs": [
+        "probes",
+        "workers"
+      ]
     },
     {
       "id": "distributed-cas-store",

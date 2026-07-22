@@ -24,10 +24,11 @@ use base64::Engine as _;
 use bootstrap::compose_bindings;
 use diport::ManagedResource;
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig};
+use runtime::CONFIGS_READY_PROBE_NAME;
 use runtime::test_support::{
-    build_redis_runtime_deps_from_values, build_s3_runtime_deps_from_values, wire_settings,
+    build_redis_runtime_deps_from_values, build_s3_runtime_deps_from_values,
+    build_shared_runtime_deps, wire_settings,
 };
-use runtime::{CONFIGS_READY_PROBE_NAME, SharedRuntimeDeps};
 use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 use vault::{
     SignatureMarshaling, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps,
@@ -199,17 +200,17 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         true,
     )?;
 
-    let deps = SharedRuntimeDeps {
-        password_blocklist: Arc::new(crypto::load_password_blocklist_from_reader(
+    let deps = build_shared_runtime_deps(
+        Arc::new(crypto::load_password_blocklist_from_reader(
             std::io::Cursor::new(include_bytes!(
                 "../../../deploy/password-blocklist.demo.sha256"
             )),
         )?),
-        pg: pg.handle(),
+        pg.handle(),
         redis,
         s3,
         vault,
-        identity_signer: Arc::new(VaultSigner::new_allow_http(
+        Arc::new(VaultSigner::new_allow_http(
             reqwest::Client::new(),
             vault_server.uri(),
             "s.testtoken",
@@ -217,9 +218,9 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
             Duration::from_secs(5),
             SignatureMarshaling::Jws,
         )?),
-        settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
-        domain_transport: noop_domain_transport(),
-    };
+        diport::KeyName::try_new("settings-config")?,
+        noop_domain_transport(),
+    );
 
     // wire_settings env-独立（resolver 经 bundle dispatch 注入）→ 返回唯一 DomainBinding；
     // compose_bindings 是 module output 的唯一转换出口。

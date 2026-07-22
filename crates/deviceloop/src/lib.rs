@@ -212,6 +212,7 @@ mod smoke {
             &self,
             _serial: diport::CertSerial,
             _scope: diport::CertScope,
+            _not_after: diport::CertNotAfter,
         ) -> Result<(), diport::RevocationStoreError> {
             todo!()
         }

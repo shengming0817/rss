@@ -36,3 +36,5 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # RevocationStore 测试构造 CertScope 的强类型标识（TenantId / DeviceId）；仅测试用。
 vocab = { path = "../../crates/vocab" }
 ids = { path = "../../crates/ids" }
+# Provider-neutral revocation behavior contract; dev-only keeps the shipped adapter graph unchanged.
+testkit = { path = "../../crates/testkit" }

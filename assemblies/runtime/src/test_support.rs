@@ -159,6 +159,33 @@ pub async fn build_redis_runtime_deps_from_values(
     crate::infra::redis::build_redis_runtime_deps_from_values(url, allow_plaintext).await
 }
 
+/// Builds the shared parameter object for focused integration wiring tests.
+///
+/// This seam is compiled only with the `integration` feature. Live runtime construction remains
+/// confined to the provider build transaction and its typed lifecycle output.
+#[allow(clippy::too_many_arguments)]
+pub fn build_shared_runtime_deps(
+    password_blocklist: Arc<secure::DigestPasswordBlocklist>,
+    pg: postgres::PgRuntimeHandle,
+    redis: redis::RedisRuntimeDeps,
+    s3: s3::S3RuntimeDeps,
+    vault: vault::VaultRuntimeDeps,
+    identity_signer: Arc<vault::VaultSigner>,
+    settings_config_value_key_name: diport::KeyName,
+    domain_transport: Arc<dyn distributed::DomainTransport>,
+) -> SharedRuntimeDeps {
+    SharedRuntimeDeps::from_integration_parts(
+        password_blocklist,
+        pg,
+        redis,
+        s3,
+        vault,
+        identity_signer,
+        settings_config_value_key_name,
+        domain_transport,
+    )
+}
+
 /// Wires the production event transport through an integration-only seam.
 pub async fn wire_event_transport(
     pg: &postgres::PgRuntimeHandle,

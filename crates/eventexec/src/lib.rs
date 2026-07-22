@@ -56,7 +56,8 @@ pub mod dlx_lifecycle;
 pub use dlx_lifecycle::{
     DLX_HOT_RETENTION_SECONDS, DlxArchiveKeyName, DlxArchiveObjectKey, DlxHotKeyName, DlxLifecycle,
     DlxLifecycleHealth, DlxLifecycleTickReport, ExpiredArchiveReceipt, MissingArchiveProof,
-    RetentionOutcome, RetentionTarget, VerifiedArchiveReceipt, apply_dlx_lifecycle_health,
+    RetentionBacklog, RetentionBacklogObservation, RetentionOutcome, RetentionTarget,
+    VerifiedArchiveReceipt, apply_dlx_lifecycle_health,
 };
 mod dlx_archive_record;
 pub use dlx_archive_record::{
@@ -65,7 +66,7 @@ pub use dlx_archive_record::{
 };
 mod dlx_archive_cipher;
 pub mod dlx_lifecycle_metrics;
-pub use dlx_lifecycle_metrics::{DlxLifecycleMetrics, MetricsDlxLifecycleMetrics};
+pub use dlx_lifecycle_metrics::{MetricsRetentionMetrics, RetentionMetrics};
 
 pub mod reconcile;
 pub use reconcile::{

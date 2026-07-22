@@ -36,6 +36,10 @@ fn closed_labels_cover_every_variant() {
         (RetentionTarget::OutboxPublished, "outbox_published"),
         (RetentionTarget::InboxReceipts, "inbox_receipts"),
         (RetentionTarget::DeadLetter, "dead_letter"),
+        (
+            RetentionTarget::CertificateRevocations,
+            "certificate_revocations",
+        ),
     ];
     for (value, expected) in targets {
         assert_eq!(value.as_label(), expected);

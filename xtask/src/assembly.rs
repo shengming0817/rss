@@ -2966,12 +2966,12 @@ domains = []
 [[diportProviders]]
 id = "device-revocation-store"
 port = "diport::RevocationStore"
-provider = "softca::InMemRevocationLedger"
-providerCrate = "softca"
-requiredFeatures = ["backend"]
+provider = "postgres::PgRevocationStore"
+providerCrate = "postgres"
+requiredFeatures = []
 consumer = "deviceloop"
 purpose = "device-certificate-revocation"
-outputs = []
+outputs = ["probes", "workers"]
 {provider_extra}
 "#
         )
@@ -3008,14 +3008,14 @@ domains = []
 [[diportProviders]]
 id = "device-revocation-store"
 port = "diport::RevocationStore"
-provider = "softca::InMemRevocationLedger"
-providerCrate = "softca"
-requiredFeatures = ["backend"]
+provider = "postgres::PgRevocationStore"
+providerCrate = "postgres"
+requiredFeatures = []
 consumer = "deviceloop"
-lifecycle = "draft"
-durability = "ephemeral-memory"
+lifecycle = "active"
+durability = "persistent"
 purpose = "device-certificate-revocation"
-outputs = []
+outputs = ["probes", "workers"]
 "#
         .to_string()
     }
@@ -4437,13 +4437,13 @@ profile = "demo"
 [[diportProviders]]
 id = "device-revocation-store"
 port = "diport::RevocationStore"
-provider = "softca::InMemRevocationLedger"
-providerCrate = "softca"
+provider = "postgres::PgRevocationStore"
+providerCrate = "postgres"
 consumer = "deviceloop"
-lifecycle = "draft"
-durability = "ephemeral-memory"
+lifecycle = "active"
+durability = "persistent"
 purpose = "device-certificate-revocation"
-outputs = []
+outputs = ["probes", "workers"]
 "#
             )
             .is_err()
@@ -4937,7 +4937,7 @@ durability = "ephemeral-memory""#,
 name = "runtime"
 
 [dependencies]
-softca = { path = "../../adapters/softca" }
+postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
 
@@ -5755,17 +5755,31 @@ deviceloop = { path = "../../crates/deviceloop" }
     #[test]
     fn active_provider_required_feature_must_be_enabled() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-missing-provider-feature");
+        let manifest = format!(
+            "{}\n{}",
+            manifest_with_intent(),
+            r#"[[diportProviders]]
+id = "event-publisher"
+port = "diport::Publisher"
+provider = "amqp::AmqpPublisher"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "outbox-relay-amqp-publish"
+outputs = ["probes", "resources", "workers"]
+"#,
+        );
         write_assembly(
             &root,
-            &valid_manifest(
-                r#"lifecycle = "active"
-durability = "persistent""#,
-            ),
+            &manifest,
             r#"[package]
 name = "runtime"
 
 [dependencies]
-softca = { path = "../../adapters/softca" }
+postgres = { path = "../../adapters/postgres" }
+amqp = { path = "../../adapters/amqp" }
 "#,
         )?;
 
@@ -5774,7 +5788,7 @@ softca = { path = "../../adapters/softca" }
             findings
                 .iter()
                 .any(|f| f.rule == Rule::ActiveProviderFeature),
-            "active softca provider without backend feature must be rejected: {findings:?}"
+            "active AMQP provider without backend feature must be rejected: {findings:?}"
         );
         Ok(())
     }
@@ -5782,20 +5796,16 @@ softca = { path = "../../adapters/softca" }
     #[test]
     fn unknown_provider_is_rejected_by_typed_manifest() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-unknown-active-provider");
+        let manifest = manifest_with_intent()
+            .replace("postgres::PgRevocationStore", "postgres::MissingProvider");
         write_assembly(
             &root,
-            &valid_manifest_with_profile(
-                "demo",
-                r#"provider = "softca::MissingProvider"
-lifecycle = "active"
-durability = "ephemeral-memory""#,
-            )
-            .replace("provider = \"softca::InMemRevocationLedger\"\n", ""),
+            &manifest,
             r#"[package]
 name = "runtime"
 
 [dependencies]
-softca = { path = "../../adapters/softca", features = ["backend"] }
+postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
 
@@ -5803,7 +5813,7 @@ softca = { path = "../../adapters/softca", features = ["backend"] }
             bail!("unknown typed provider must fail to parse");
         };
         assert!(
-            format!("{error:#}").contains("softca::MissingProvider"),
+            format!("{error:#}").contains("postgres::MissingProvider"),
             "typed provider diagnostic lost the rejected constructor: {error:#}"
         );
         Ok(())
@@ -5817,13 +5827,13 @@ softca = { path = "../../adapters/softca", features = ["backend"] }
             &valid_manifest_with_profile(
                 "demo",
                 r#"lifecycle = "active"
-durability = "persistent""#,
+durability = "ephemeral-memory""#,
             ),
             r#"[package]
 name = "runtime"
 
 [dependencies]
-softca = { path = "../../adapters/softca", features = ["backend"] }
+postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
 
@@ -5832,7 +5842,7 @@ softca = { path = "../../adapters/softca", features = ["backend"] }
             findings
                 .iter()
                 .any(|f| f.rule == Rule::ProviderDurabilityMismatch),
-            "known ephemeral provider must not be declared persistent: {findings:?}"
+            "known persistent provider must not be declared ephemeral: {findings:?}"
         );
         Ok(())
     }
@@ -5840,18 +5850,28 @@ softca = { path = "../../adapters/softca", features = ["backend"] }
     #[test]
     fn draft_only_provider_cannot_be_activated_even_with_dependency() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-draft-only-provider-active");
+        let manifest = manifest_with_intent()
+            .replace(
+                "device-revocation-store",
+                "distributed-cas-store-alternative",
+            )
+            .replace("diport::RevocationStore", "diport::CasStore")
+            .replace("postgres::PgRevocationStore", "redis::RedisCasStore")
+            .replace("providerCrate = \"postgres\"", "providerCrate = \"redis\"")
+            .replace("requiredFeatures = []", "requiredFeatures = [\"backend\"]")
+            .replace("consumer = \"deviceloop\"", "consumer = \"distributed\"")
+            .replace(
+                "outputs = [\"probes\", \"workers\"]",
+                "outputs = [\"resources\"]",
+            );
         write_assembly(
             &root,
-            &valid_manifest_with_profile(
-                "demo",
-                r#"lifecycle = "active"
-durability = "ephemeral-memory""#,
-            ),
+            &manifest,
             r#"[package]
 name = "runtime"
 
 [dependencies]
-softca = { path = "../../adapters/softca", features = ["backend"] }
+redis = { path = "../../adapters/redis", features = ["backend"] }
 "#,
         )?;
 
@@ -5896,14 +5916,14 @@ domains = []
 [[diportProviders]]
 id = "device-revocation-store"
 port = "diport::RevocationStore"
-provider = "softca::InMemRevocationLedger"
-providerCrate = "softca"
-requiredFeatures = ["backend"]
+provider = "postgres::PgRevocationStore"
+providerCrate = "postgres"
+requiredFeatures = []
 consumer = "deviceloop"
-lifecycle = "draft"
-durability = "ephemeral-memory"
+lifecycle = "active"
+durability = "persistent"
 purpose = "device-certificate-revocation"
-outputs = []
+outputs = ["probes", "workers"]
 
 [[diportProviders]]
 id = "listener-rate-limiter"
@@ -5920,6 +5940,7 @@ outputs = []
 name = "runtime"
 
 [dependencies]
+postgres = { path = "../../adapters/postgres" }
 ratelimit = { path = "../../adapters/ratelimit" }
 "#,
         )?;

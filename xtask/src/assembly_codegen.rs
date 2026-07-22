@@ -821,7 +821,7 @@ const fn port_variant(port: DiportPort) -> &'static str {
 
 const fn constructor_variant(constructor: ProviderConstructor) -> &'static str {
     match constructor {
-        ProviderConstructor::SoftcaInMemRevocationLedger => "SoftcaInMemRevocationLedger",
+        ProviderConstructor::PostgresRevocationStore => "PostgresRevocationStore",
         ProviderConstructor::RatelimitGovernorLimiter => "RatelimitGovernorLimiter",
         ProviderConstructor::AmqpPublisher => "AmqpPublisher",
         ProviderConstructor::AmqpSubscriber => "AmqpSubscriber",
@@ -841,6 +841,9 @@ const fn constructor_variant(constructor: ProviderConstructor) -> &'static str {
 
 const fn factory_variant(factory: ProviderFactorySymbol) -> &'static str {
     match factory {
+        ProviderFactorySymbol::DeviceloopPostgresRevocationStore => {
+            "DeviceloopPostgresRevocationStore"
+        }
         ProviderFactorySymbol::EventexecAmqpPublisher => "EventexecAmqpPublisher",
         ProviderFactorySymbol::EventexecAmqpSubscriber => "EventexecAmqpSubscriber",
         ProviderFactorySymbol::IdentityVaultSigner => "IdentityVaultSigner",

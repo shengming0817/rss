@@ -28,7 +28,7 @@ use vocab::DomainName;
 
 use crate::relay_config::{RelayConfig, SamplerConfig, SweeperConfig};
 use crate::relay_metrics::{OutboxMetricScope, OutboxMetrics, RelayPhase};
-use crate::{DlxLifecycleMetrics, MetricsDlxLifecycleMetrics, RetentionOutcome, RetentionTarget};
+use crate::{MetricsRetentionMetrics, RetentionMetrics, RetentionOutcome, RetentionTarget};
 
 // ── probe 名常量 ────────────────────────────────────────────────────────────
 
@@ -433,7 +433,7 @@ async fn sweeper_tick<S>(
     S: RetentionSweeper,
 {
     let started = clock.now();
-    let metrics = MetricsDlxLifecycleMetrics;
+    let metrics = MetricsRetentionMetrics;
     match store.sweep(retain_seconds).await {
         Ok(deleted) => {
             metrics.record_sweep(

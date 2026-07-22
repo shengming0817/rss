@@ -11,14 +11,14 @@
       "path": "assemblies/runtime/assembly.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "3a537b690aff17efb45c6dee6cae5b3e31b219533012f016d09ddb0d098332a2"
+        "value": "c5365666ddf52ca3cb2e92de3dbc09c1d5101ad6730b12ca27abc61f7b2c707c"
       }
     },
     {
       "path": "assemblies/runtime/src/generated/modules_gen.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "e7210e8d54b1f8ce56249b3caa10bae281dd8bdd91f6f1c7afe51e51493627c6"
+        "value": "b031439d4722be496f6a340f2301b852ecb5b93611be96d4901aa263b604c2f6"
       }
     },
     {
@@ -126,16 +126,13 @@
       "label": "probes channel"
     },
     {
-      "id": "n_fd5ba12eb0baefb73664149f",
+      "id": "n_8f68a09f33baa36a7592a234",
       "kind": "provider",
-      "label": "softca::InMemRevocationLedger (softca)",
+      "label": "postgres::PgRevocationStore (postgres)",
       "port": "diport::RevocationStore",
-      "lifecycle": "draft",
-      "durability": "ephemeral-memory",
-      "purpose": "device-certificate-revocation",
-      "requiredFeatures": [
-        "backend"
-      ]
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "device-certificate-revocation"
     },
     {
       "id": "n_3faf7a7cf7b7c75bd2462f92",
@@ -448,13 +445,23 @@
     },
     {
       "from": "n_3faf7a7cf7b7c75bd2462f92",
-      "to": "n_fd5ba12eb0baefb73664149f",
+      "to": "n_8f68a09f33baa36a7592a234",
       "kind": "requires-capability"
     },
     {
       "from": "n_d954278a62814c4c97d6a2ee",
-      "to": "n_fd5ba12eb0baefb73664149f",
+      "to": "n_8f68a09f33baa36a7592a234",
       "kind": "declares-provider"
+    },
+    {
+      "from": "n_8f68a09f33baa36a7592a234",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_8f68a09f33baa36a7592a234",
+      "to": "n_b07dcd04ac2a96bb91f67966",
+      "kind": "contributes-output"
     },
     {
       "from": "n_2d40160c3e8818e1b7b6ae73",

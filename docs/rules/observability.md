@@ -283,7 +283,7 @@ label 闭值集纪律：
 新增或改名上述 metric / label 必须同步 schema、tests、dashboard、`docs/ops/outbox-relay-alerts.rules.yaml`
 与 emit site。
 
-### DLX Lifecycle Metrics（#1168）
+### Retention Lifecycle Metrics（#1168，#1799）
 
 DLX archive-before-purge worker 发射：
 
@@ -292,14 +292,22 @@ DLX archive-before-purge worker 发射：
 | `retention_sweep_deleted_total` | Counter | `target` | 已删除的 terminal durable rows；DLX 只记 verified hot purge |
 | `retention_sweep_ticks_total` | Counter | `target`,`outcome` | 有界 sweep/lifecycle tick 结果 |
 | `retention_sweep_duration_seconds` | Histogram | `target`,`outcome` | 完整 tick 耗时 |
+| `retention_expired_backlog_depth` | Gauge | `target` | 已越过目标固定 eligibility grace、仍待物理清理的行数 |
+| `retention_expired_oldest_age_seconds` | Gauge | `target` | 最老 eligible 行越过固定 grace 后的滞留秒数；刚 eligible 为 0 |
 | `dead_letter_archive_pending_depth` | Gauge | none | 尚无 verified receipt 的 HOT DLX 数量 |
 | `dead_letter_archive_oldest_pending_age_seconds` | Gauge | none | 最早待归档 HOT DLX 的年龄 |
 
-- DLX lifecycle 只使用 `target="dead_letter"`；`outcome` 闭合于
+- `target` 闭合于 `outbox_published|inbox_receipts|dead_letter|certificate_revocations`；
+  certificate revocation worker 只使用 `target="certificate_revocations"`，DLX lifecycle 只使用
+  `target="dead_letter"`。`outcome` 闭合于
   `success|transient|invariant`，由 `RetentionTarget` / `RetentionOutcome` 类型产出。不存在任意
   phase/error label，禁止 tenant、dead-letter id、object key、payload、checksum 或错误文本进入 label。
 - backlog 查询失败时 runtime 把两个 gauge 设为 `NaN`，并把最终 tick outcome 记为
   `transient`；不得把 stale sample 或缺失 series 解释为 0。
+- certificate revocation backlog 由与 sweep 同一 transaction/absolute deadline 的固定
+  `SECURITY DEFINER` aggregate function 采样；采样失败回滚删除、tick 记 `transient`，两个 generic
+  backlog gauge 写 `NaN`。depth 只计 `not_after <= database clock - 5min`；oldest age 定义为
+  `database clock - (oldest not_after + 5min)`，不把固定 grace 自身伪报为积压。
 - `DlxArchiveLifecycleFailure` 对 transient/invariant 分页。transient 仍遵守全局 Degraded
   readyz 语义（HTTP 200），但删除已 fail-closed 停止；告警是运维响应面，不得为了摘流
   把 transient 伪报为 Unhealthy。

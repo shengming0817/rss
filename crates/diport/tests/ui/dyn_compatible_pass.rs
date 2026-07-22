@@ -2,8 +2,8 @@
 //! 覆盖 async DI port（DIPORT-DYN-COMPAT-01 回归锁随新增端口同步扩展）。
 use consistency::{EventEntry, EventTopic, IdemKey};
 use diport::{
-    AuditSink, AuditSinkError, CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest, CertScope,
-    CertSerial, DynAuditSink, DynCasStore, DynLockStore, DynManagedResource, DynObjectStore,
+    AuditSink, AuditSinkError, CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest,
+    CertNotAfter, CertScope, CertSerial, DynAuditSink, DynCasStore, DynLockStore, DynManagedResource, DynObjectStore,
     DynOutboxEmitter, DynPdp, DynPublisher, DynRateLimiter, DynRevocationStore, DynSigner,
     DynServiceTokenReplayStore, DynSubscriber, KeyId, LockAcquireOutcome, LockRenewOutcome,
     LockStore, LockStoreError, LockStoreKey, ManagedResource, MessageStream, ObjectKey,
@@ -153,6 +153,7 @@ impl RevocationStore for OkRevocationStore {
         &self,
         _serial: CertSerial,
         _scope: CertScope,
+        _not_after: CertNotAfter,
     ) -> Result<(), RevocationStoreError> {
         Ok(())
     }

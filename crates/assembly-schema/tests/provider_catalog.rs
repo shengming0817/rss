@@ -105,7 +105,7 @@ fn factory_symbol_serde_and_schema_use_the_display_id() {
     let schema =
         serde_json::to_value(schemars::schema_for!(ProviderFactorySymbol)).expect("factory schema");
     let values = schema["enum"].as_array().expect("factory enum values");
-    assert_eq!(values.len(), 14);
+    assert_eq!(values.len(), 15);
     for value in values {
         let factory: ProviderFactorySymbol =
             serde_json::from_value(value.clone()).expect("schema factory ID deserializes");
@@ -117,10 +117,10 @@ fn factory_symbol_serde_and_schema_use_the_display_id() {
 }
 
 #[test]
-fn draft_role_cannot_be_promoted_without_a_factory_registry_change() {
+fn active_revocation_role_cannot_be_demoted_without_a_registry_change() {
     let changed = RUNTIME_MANIFEST.replacen(
-        "id = \"device-revocation-store\"\nport = \"diport::RevocationStore\"\nprovider = \"softca::InMemRevocationLedger\"\nproviderCrate = \"softca\"\nrequiredFeatures = [\"backend\"]\nconsumer = \"deviceloop\"\nlifecycle = \"draft\"",
-        "id = \"device-revocation-store\"\nport = \"diport::RevocationStore\"\nprovider = \"softca::InMemRevocationLedger\"\nproviderCrate = \"softca\"\nrequiredFeatures = [\"backend\"]\nconsumer = \"deviceloop\"\nlifecycle = \"active\"",
+        "id = \"device-revocation-store\"\nport = \"diport::RevocationStore\"\nprovider = \"postgres::PgRevocationStore\"\nproviderCrate = \"postgres\"\nrequiredFeatures = []\nconsumer = \"deviceloop\"\nlifecycle = \"active\"",
+        "id = \"device-revocation-store\"\nport = \"diport::RevocationStore\"\nprovider = \"postgres::PgRevocationStore\"\nproviderCrate = \"postgres\"\nrequiredFeatures = []\nconsumer = \"deviceloop\"\nlifecycle = \"draft\"",
         1,
     );
     let manifest = AssemblyManifest::from_toml_str(&changed).expect("typed manifest");

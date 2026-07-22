@@ -287,6 +287,7 @@ macro_rules! provider_factory_symbols {
 }
 
 provider_factory_symbols! {
+    DeviceloopPostgresRevocationStore => "deviceloop::postgres-revocation-store",
     EventexecAmqpPublisher => "eventexec::amqp-publisher",
     EventexecAmqpSubscriber => "eventexec::amqp-subscriber",
     IdentityVaultSigner => "identity::vault-signer",
@@ -309,8 +310,8 @@ provider_factory_symbols! {
 )]
 #[repr(u8)]
 pub enum ProviderConstructor {
-    #[serde(rename = "softca::InMemRevocationLedger")]
-    SoftcaInMemRevocationLedger,
+    #[serde(rename = "postgres::PgRevocationStore")]
+    PostgresRevocationStore,
     #[serde(rename = "ratelimit::GovernorLimiter")]
     RatelimitGovernorLimiter,
     #[serde(rename = "amqp::AmqpPublisher")]
@@ -344,7 +345,7 @@ pub enum ProviderConstructor {
 impl ProviderConstructor {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::SoftcaInMemRevocationLedger => "softca::InMemRevocationLedger",
+            Self::PostgresRevocationStore => "postgres::PgRevocationStore",
             Self::RatelimitGovernorLimiter => "ratelimit::GovernorLimiter",
             Self::AmqpPublisher => "amqp::AmqpPublisher",
             Self::AmqpSubscriber => "amqp::AmqpSubscriber",
@@ -366,7 +367,7 @@ impl ProviderConstructor {
     /// identity is validated by the role registry, not by this helper.
     pub const fn port(self) -> DiportPort {
         match self {
-            Self::SoftcaInMemRevocationLedger => DiportPort::RevocationStore,
+            Self::PostgresRevocationStore => DiportPort::RevocationStore,
             Self::RatelimitGovernorLimiter => DiportPort::RateLimiter,
             Self::AmqpPublisher => DiportPort::Publisher,
             Self::AmqpSubscriber => DiportPort::AckableSubscriber,
@@ -386,8 +387,7 @@ impl ProviderConstructor {
     /// Provider-crate feature requirements used by Cargo graph validation.
     pub const fn required_features(self) -> &'static [&'static str] {
         match self {
-            Self::SoftcaInMemRevocationLedger
-            | Self::AmqpPublisher
+            Self::AmqpPublisher
             | Self::AmqpSubscriber
             | Self::RedisLockStore
             | Self::RedisCasStore
@@ -397,6 +397,7 @@ impl ProviderConstructor {
             | Self::S3Store
             | Self::S3VerifiedDlxArchiveStore => &["backend"],
             Self::RatelimitGovernorLimiter
+            | Self::PostgresRevocationStore
             | Self::PostgresCasStore
             | Self::PostgresAuthAuditSink
             | Self::PostgresServiceTokenReplayStore
@@ -406,20 +407,18 @@ impl ProviderConstructor {
 
     pub const fn durability(self) -> ProviderDurability {
         match self {
-            Self::SoftcaInMemRevocationLedger | Self::RatelimitGovernorLimiter => {
-                ProviderDurability::EphemeralMemory
-            }
+            Self::RatelimitGovernorLimiter => ProviderDurability::EphemeralMemory,
             _ => ProviderDurability::Persistent,
         }
     }
 
     pub const fn provider_crate(self) -> &'static str {
         match self {
-            Self::SoftcaInMemRevocationLedger => "softca",
             Self::RatelimitGovernorLimiter => "ratelimit",
             Self::AmqpPublisher | Self::AmqpSubscriber => "amqp",
             Self::RedisLockStore | Self::RedisCasStore => "redis",
-            Self::PostgresCasStore
+            Self::PostgresRevocationStore
+            | Self::PostgresCasStore
             | Self::PostgresAuthAuditSink
             | Self::PostgresServiceTokenReplayStore
             | Self::PostgresDlxLifecycleRepository => "postgres",
@@ -633,17 +632,17 @@ const W: LifecycleChannel = LifecycleChannel::Workers;
 const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     ProviderRoleSpec {
         role: ProviderRole::DeviceRevocationStore,
-        lifecycle: ProviderLifecycle::Draft,
+        lifecycle: ProviderLifecycle::Active,
         port: DiportPort::RevocationStore,
-        constructor: ProviderConstructor::SoftcaInMemRevocationLedger,
-        provider_crate: "softca",
-        required_features: &["backend"],
+        constructor: ProviderConstructor::PostgresRevocationStore,
+        provider_crate: "postgres",
+        required_features: &[],
         consumer: ProviderConsumer::Deviceloop,
-        durability: ProviderDurability::EphemeralMemory,
+        durability: ProviderDurability::Persistent,
         scope: None,
         failure_posture: None,
-        outputs: &[],
-        factory: None,
+        outputs: &[P, W],
+        factory: Some(ProviderFactorySymbol::DeviceloopPostgresRevocationStore),
     },
     ProviderRoleSpec {
         role: ProviderRole::EventPublisher,
@@ -1135,7 +1134,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_fourteen_unique_active_factories_and_two_drafts() {
+    fn registry_has_fifteen_unique_active_factories_and_one_draft() {
         assert_eq!(PROVIDER_ROLE_SPECS.len(), ProviderRole::COUNT);
         assert_eq!(
             PROVIDER_ROLE_SPECS
@@ -1152,8 +1151,8 @@ mod tests {
             .iter()
             .filter(|spec| spec.lifecycle == ProviderLifecycle::Draft)
             .count();
-        assert_eq!(active, 14);
-        assert_eq!(drafts, 2);
+        assert_eq!(active, 15);
+        assert_eq!(drafts, 1);
         assert_registry_invariants(&PROVIDER_ROLE_SPECS);
     }
 

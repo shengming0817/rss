@@ -32,7 +32,7 @@
 //!
 //! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- the only production service-token constructor accepts the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps` plus `PgMaintenanceDeps`. Serving and the five operator paths call that typed constructor directly at their run-reachable sites. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 //!
-//! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::setup_with_audit_admin_config` must register each constructed pool immediately, close the migrator after every post-connect outcome, roll back writer/reader partial construction on reader or audit-admin failure, and commit only after the typed owner holds all serving pools. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
+//! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::setup_with_audit_admin_config` must register each constructed pool immediately, mint the revocation capability receipt before constructing the reader, close the migrator after every post-connect outcome, roll back writer/reader partial construction on capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools and the receipt. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::localtx_coverage::attrs_may_be_production;
@@ -11627,7 +11627,7 @@ fn postgres_setup_transaction_live_findings(root: &Path) -> Result<Vec<Finding<R
 
 fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
     let statements = block.stmts.as_slice();
-    if statements.len() != 15 {
+    if statements.len() != 16 {
         return false;
     }
     let Some(migrator) = exact_local_initializer(&statements[0], "migrator", false) else {
@@ -11654,18 +11654,23 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
     let Some(writer) = exact_local_initializer(&statements[6], "writer", false) else {
         return false;
     };
-    let Some(reader) = exact_local_initializer(&statements[8], "reader", false) else {
-        return false;
-    };
-    let Some(stores) = exact_local_initializer(&statements[10], "stores", false) else {
-        return false;
-    };
-    let Some(audit_admin_store) =
-        exact_local_initializer(&statements[11], "audit_admin_store", false)
+    let Some(revocation_receipt) =
+        exact_local_initializer(&statements[8], "revocation_receipt", false)
     else {
         return false;
     };
-    let Some(owner) = exact_local_initializer(&statements[12], "owner", false) else {
+    let Some(reader) = exact_local_initializer(&statements[9], "reader", false) else {
+        return false;
+    };
+    let Some(stores) = exact_local_initializer(&statements[11], "stores", false) else {
+        return false;
+    };
+    let Some(audit_admin_store) =
+        exact_local_initializer(&statements[12], "audit_admin_store", false)
+    else {
+        return false;
+    };
+    let Some(owner) = exact_local_initializer(&statements[13], "owner", false) else {
         return false;
     };
 
@@ -11693,9 +11698,10 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
             "writer.store_arc()",
             "postgres-writer",
         )
+        && revocation_receipt_is_canonical(revocation_receipt)
         && reader_connect_is_canonical(reader)
         && exact_register_statement(
-            &statements[9],
+            &statements[10],
             "serving_transaction",
             "reader.store_arc()",
             "postgres-reader",
@@ -11703,8 +11709,8 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
         && compact_tokens(stores) == "Arc::new(PgRuntimeStores::new(writer,reader))"
         && audit_connect_is_canonical(audit_admin_store)
         && postgres_runtime_owner_is_canonical(owner)
-        && exact_method_statement(&statements[13], "serving_transaction", "commit", &[])
-        && exact_path_call_statement(&statements[14], "Ok", &["owner"])
+        && exact_method_statement(&statements[14], "serving_transaction", "commit", &[])
+        && exact_path_call_statement(&statements[15], "Ok", &["owner"])
 }
 
 fn exact_local_initializer<'a>(
@@ -11882,6 +11888,18 @@ fn reader_connect_is_canonical(expression: &syn::Expr) -> bool {
         && returned_failure_close_is_exact(&match_.arms[1].body)
 }
 
+fn revocation_receipt_is_canonical(expression: &syn::Expr) -> bool {
+    let syn::Expr::Match(match_) = transparent_expr(expression) else {
+        return false;
+    };
+    compact_tokens(&match_.expr) == "writer.verify_revocation_capability().await"
+        && match_.arms.len() == 2
+        && compact_tokens(&match_.arms[0].pat) == "Ok(receipt)"
+        && compact_tokens(&match_.arms[0].body) == "receipt"
+        && compact_tokens(&match_.arms[1].pat) == "Err(primary)"
+        && returned_failure_close_is_exact(&match_.arms[1].body)
+}
+
 fn audit_connect_is_canonical(expression: &syn::Expr) -> bool {
     let syn::Expr::Match(match_) = transparent_expr(expression) else {
         return false;
@@ -11994,6 +12012,7 @@ fn postgres_runtime_owner_is_canonical(expression: &syn::Expr) -> bool {
     field_names
         == BTreeSet::from([
             "stores".to_owned(),
+            "revocation_receipt".to_owned(),
             "audit_admin_store".to_owned(),
             "delivery_policy".to_owned(),
             "projection_registry".to_owned(),
@@ -12001,6 +12020,7 @@ fn postgres_runtime_owner_is_canonical(expression: &syn::Expr) -> bool {
             "rls_ready".to_owned(),
         ])
         && exact_field("stores", "stores")
+        && exact_field("revocation_receipt", "revocation_receipt")
         && exact_field("audit_admin_store", "audit_admin_store")
 }
 
@@ -12103,6 +12123,10 @@ fn provider_plan_output_bijection_findings(root: &Path) -> Result<Vec<Finding<Ru
 
     const FACTORIES: &[(&str, &str)] = &[
         ("HttpservePostgresAuthAuditSink", "auth_audit_sink"),
+        (
+            "DeviceloopPostgresRevocationStore",
+            "device_revocation_store",
+        ),
         ("DistributedPostgresCasStore", "distributed_cas_store"),
         ("DistributedRedisLockStore", "distributed_lock_store"),
         (
@@ -13323,7 +13347,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.shared-deps",
         path: RUNTIME_PHASE_INFRA_PATH,
-        pattern: "let deps = SharedRuntimeDeps {",
+        pattern: "let deps = SharedRuntimeDeps::from_built_provider(",
     },
     AnchorSpec {
         id: "run.wire.generated-domains",
@@ -14088,10 +14112,16 @@ mod tests {
                 0,
             ),
             (
-                "reader failure close",
+                "revocation capability failure close",
                 "return serving_transaction.close(Err(primary)).await",
                 "return Err(primary)",
                 0,
+            ),
+            (
+                "reader failure close",
+                "return serving_transaction.close(Err(primary)).await",
+                "return Err(primary)",
+                1,
             ),
             (
                 "reader immediate register",
@@ -14103,7 +14133,7 @@ mod tests {
                 "audit-admin failure close",
                 "return serving_transaction.close(Err(primary)).await",
                 "return Err(primary)",
-                1,
+                2,
             ),
             (
                 "audit-admin immediate register",
@@ -14119,8 +14149,8 @@ mod tests {
             ),
             (
                 "dummy success owner",
-                "handle: PgRuntimeHandle {\n                stores,\n                audit_admin_store,",
-                "handle: PgRuntimeHandle {\n                stores: stores.clone(),\n                audit_admin_store: None,",
+                "handle: PgRuntimeHandle {\n                stores,\n                revocation_receipt,\n                audit_admin_store,",
+                "handle: PgRuntimeHandle {\n                stores: stores.clone(),\n                revocation_receipt: revocation_receipt.clone(),\n                audit_admin_store: None,",
                 0,
             ),
         ];
@@ -14141,8 +14171,9 @@ mod tests {
         }
 
         for (label, occurrence) in [
-            ("reader dead close bait", 0),
-            ("audit-admin dead close bait", 1),
+            ("revocation capability dead close bait", 0),
+            ("reader dead close bait", 1),
+            ("audit-admin dead close bait", 2),
         ] {
             let root = postgres_setup_fixture(&format!(
                 "postgres-setup-transaction-red-{}",

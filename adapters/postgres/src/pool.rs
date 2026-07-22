@@ -98,6 +98,21 @@ pub enum PgError {
     /// 也不得作为生产 serving pool，避免测试替身 / owner-like 角色漂进 bootstrap。
     #[error("postgres rls capability: serving role must be rss_app")]
     RlsUnexpectedServingRole,
+    /// Certificate-revocation capability catalog/ACL probe failed.
+    #[error("postgres certificate revocation capability probe failed")]
+    RevocationCapability(#[source] sqlx::Error),
+    /// Certificate-revocation table, constraints, index, or RLS shape is incomplete.
+    #[error("postgres certificate revocation schema capability is not exact")]
+    RevocationSchema,
+    /// Certificate-revocation serving/reader/maintenance ACLs are not the fixed minimum set.
+    #[error("postgres certificate revocation privileges are not exact")]
+    RevocationPrivileges,
+    /// The fixed revocation maintenance role is absent or has widened attributes/membership.
+    #[error("postgres certificate revocation maintenance role is not exact")]
+    RevocationMaintenanceRole,
+    /// The fixed revocation sweeper function is absent or has widened ownership/configuration/ACL.
+    #[error("postgres certificate revocation maintenance function is not exact")]
+    RevocationMaintenanceFunction,
     /// tenant reader 能力门 catalog / GUC / ACL 探测失败。
     #[error("postgres tenant reader capability probe failed")]
     TenantReadCapability(#[source] sqlx::Error),

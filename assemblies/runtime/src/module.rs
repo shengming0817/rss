@@ -19,7 +19,7 @@
 //! - **INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "code" }（Medium，xtask 字段扫描）**：
 //!   `SharedRuntimeDeps` 字段类型只允许 provider bundle / infra value object 允许列表，以及精确例外
 //!   `Arc<secure::DigestPasswordBlocklist>`、`Arc<dyn distributed::DomainTransport>`、
-//!   `Arc<oidc::OidcProvider>`、`Arc<vault::VaultSigner>`；
+//!   `Arc<oidc::OidcProvider>`、`postgres::PgRevocationStore`、`Arc<vault::VaultSigner>`；
 //!   域 service / repo 类型不得经 deps bag 跨 module handoff。
 //!
 //! # 开源对标
@@ -56,6 +56,14 @@ pub struct SharedRuntimeDeps {
     /// 投影；sampler/pool guard 只经 lifecycle owner 的 consuming output 交接，不进入共享参数对象。
     pub pg: PgRuntimeHandle,
 
+    /// Receipt-backed concrete certificate revocation provider.
+    ///
+    /// Private and non-optional: runtime construction cannot represent a PostgreSQL capability
+    /// handle without also constructing the active persistent provider. `deviceloop` consumption
+    /// remains blocked on its existing reconcile implementation task.
+    #[allow(dead_code)]
+    revocation_store: postgres::PgRevocationStore,
+
     /// 共享 redis capability bundle，生产必配；distributed runtime 通过此唯一入口取得 lock provider。
     ///
     /// 不暴露 `deadpool_redis::Pool`，保持 REDIS-BUNDLE-FUNNEL-01：pool guard、distlock、CAS、idempotency
@@ -86,6 +94,89 @@ pub struct SharedRuntimeDeps {
     /// object，后续域/运行时消费者只能经 `distributed::DomainTransport` 发起跨域同步调用；底层 HTTP
     /// adapter 的 mTLS source 生命周期另由 `DomainModuleResult.resources` 托管。
     pub domain_transport: Arc<dyn distributed::DomainTransport>,
+}
+
+impl SharedRuntimeDeps {
+    /// Production construction path consuming the store half of the typed provider funnel.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_built_provider(
+        password_blocklist: Arc<secure::DigestPasswordBlocklist>,
+        pg: PgRuntimeHandle,
+        revocation_store: crate::provider_output::ReceiptBackedRevocationStore,
+        redis: RedisRuntimeDeps,
+        s3: S3RuntimeDeps,
+        vault: VaultRuntimeDeps,
+        identity_signer: Arc<vault::VaultSigner>,
+        settings_config_value_key_name: KeyName,
+        domain_transport: Arc<dyn distributed::DomainTransport>,
+    ) -> Self {
+        Self::from_parts(
+            password_blocklist,
+            pg,
+            revocation_store.into_inner(),
+            redis,
+            s3,
+            vault,
+            identity_signer,
+            settings_config_value_key_name,
+            domain_transport,
+        )
+    }
+
+    /// Integration-only construction path for focused domain wiring tests.
+    ///
+    /// Production construction remains confined to [`Self::from_built_provider`], where the
+    /// provider permit and its lifecycle output are consumed in the same build transaction.
+    #[cfg(feature = "integration")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_integration_parts(
+        password_blocklist: Arc<secure::DigestPasswordBlocklist>,
+        pg: PgRuntimeHandle,
+        redis: RedisRuntimeDeps,
+        s3: S3RuntimeDeps,
+        vault: VaultRuntimeDeps,
+        identity_signer: Arc<vault::VaultSigner>,
+        settings_config_value_key_name: KeyName,
+        domain_transport: Arc<dyn distributed::DomainTransport>,
+    ) -> Self {
+        let revocation_store = pg.infra().revocation_store();
+        Self::from_parts(
+            password_blocklist,
+            pg,
+            revocation_store,
+            redis,
+            s3,
+            vault,
+            identity_signer,
+            settings_config_value_key_name,
+            domain_transport,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        password_blocklist: Arc<secure::DigestPasswordBlocklist>,
+        pg: PgRuntimeHandle,
+        revocation_store: postgres::PgRevocationStore,
+        redis: RedisRuntimeDeps,
+        s3: S3RuntimeDeps,
+        vault: VaultRuntimeDeps,
+        identity_signer: Arc<vault::VaultSigner>,
+        settings_config_value_key_name: KeyName,
+        domain_transport: Arc<dyn distributed::DomainTransport>,
+    ) -> Self {
+        Self {
+            password_blocklist,
+            pg,
+            revocation_store,
+            redis,
+            s3,
+            vault,
+            identity_signer,
+            settings_config_value_key_name,
+            domain_transport,
+        }
+    }
 }
 
 #[cfg(test)]

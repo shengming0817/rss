@@ -4,17 +4,17 @@ use assembly_schema::{
 };
 
 const DRAFT: ProviderCatalogEntry = ProviderCatalogEntry::checked(
-    ProviderRole::DeviceRevocationStore,
-    DiportPort::RevocationStore,
-    ProviderConstructor::SoftcaInMemRevocationLedger,
+    ProviderRole::DistributedCasStoreAlternative,
+    DiportPort::Cas,
+    ProviderConstructor::RedisCasStore,
     ProviderFactorySymbol::EventexecAmqpPublisher,
-    "softca",
+    "redis",
     &["backend"],
-    ProviderConsumer::Deviceloop,
-    ProviderDurability::EphemeralMemory,
+    ProviderConsumer::Distributed,
+    ProviderDurability::Persistent,
     None,
     None,
-    &[],
+    &[LifecycleChannel::Resources],
 );
 
 const CONSTRUCTOR: ProviderCatalogEntry = ProviderCatalogEntry::checked(

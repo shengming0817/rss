@@ -42,6 +42,14 @@ mod command_journal;
 mod config_repo;
 #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 mod consumer_tx;
+#[cfg_attr(
+    not(any(
+        feature = "domain-settings",
+        feature = "domain-identity",
+        feature = "domain-audit"
+    )),
+    allow(dead_code, unused_imports)
+)]
 mod cotx;
 #[cfg(feature = "domain-identity")]
 mod credential_repo;
@@ -70,6 +78,8 @@ mod reconcile;
 mod refresh_token_store;
 #[cfg(feature = "domain-identity")]
 mod resource_attribute_repo;
+mod revocation;
+mod revocation_sweeper;
 #[cfg(feature = "domain-identity")]
 mod role_binding_lifecycle;
 #[cfg(feature = "domain-identity")]
@@ -82,11 +92,14 @@ mod saga_candidates;
 mod secret_repo;
 mod service_token_replay;
 mod tx;
-#[cfg(any(
-    feature = "domain-settings",
-    feature = "domain-identity",
-    feature = "domain-audit"
-))]
+#[cfg_attr(
+    not(any(
+        feature = "domain-settings",
+        feature = "domain-identity",
+        feature = "domain-audit"
+    )),
+    allow(dead_code, unused_imports)
+)]
 mod tx_retry;
 
 #[cfg(feature = "domain-audit")]
@@ -159,6 +172,11 @@ pub use reconcile::{
 pub use refresh_token_store::PgRefreshTokenStore;
 #[cfg(feature = "domain-identity")]
 pub use resource_attribute_repo::PgResourceAttributeRepo;
+pub use revocation::PgRevocationStore;
+pub use revocation_sweeper::{
+    PgRevocationSweeper, RevocationRetentionBacklog, RevocationRetentionReport,
+    RevocationSweepDeadline,
+};
 #[cfg(feature = "domain-identity")]
 pub use role_binding_lifecycle::PgRoleBindingLifecycle;
 #[cfg(feature = "domain-identity")]

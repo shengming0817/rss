@@ -168,3 +168,47 @@ tests:
             exp_annotations:
               summary: "DLX 最老待归档记录超过 5min"
               description: "dead_letter_archive_oldest_pending_age_seconds=360s；检查 pending depth、lifecycle failure 告警、archive bucket readiness 与 receipt CAS。该 gauge 为 NaN/缺失时先恢复 backlog sampler，不能按 0 解释。"
+
+  - interval: 1m
+    input_series:
+      - series: 'retention_sweep_ticks_total{target="certificate_revocations",outcome="transient"}'
+        values: '_x5 1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CertificateRevocationRetentionFailure
+        exp_alerts:
+          - exp_labels:
+              outcome: transient
+              severity: critical
+            exp_annotations:
+              summary: "证书撤销 retention 失败（outcome=transient）"
+              description: "近 5min certificate_revocations retention tick 失败信号 1；检查 certificate_revocation_sweeper readyz、PostgreSQL 连接/锁等待、maintenance function capability 与 worker 日志。"
+
+  - interval: 1m
+    input_series:
+      - series: 'retention_expired_oldest_age_seconds{target="certificate_revocations"}'
+        values: '360x12'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: CertificateRevocationRetentionBacklogHigh
+        exp_alerts:
+          - exp_labels:
+              target: certificate_revocations
+              severity: critical
+            exp_annotations:
+              summary: "证书撤销过期证据滞留超过 eligibility grace 后 5min"
+              description: "retention_expired_oldest_age_seconds=360s；检查 backlog depth、retention failure 告警、sweeper readyz 与 PostgreSQL maintenance function。NaN/缺失表示 sampler 不可用，不能按 0 解释。"
+
+  - interval: 1m
+    input_series:
+      - series: 'retention_expired_oldest_age_seconds{target="certificate_revocations"}'
+        values: '300x12'
+      - series: 'retention_sweep_ticks_total{target="certificate_revocations",outcome="success"}'
+        values: '0+1x12'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: CertificateRevocationRetentionBacklogHigh
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: CertificateRevocationRetentionFailure
+        exp_alerts: []

@@ -75,6 +75,7 @@ use crate::consumer_tx::PgAuditConsumerTx;
 use crate::delivery_policy::EventDeliveryPolicy;
 use crate::pool::{PgRuntimeStores, VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore};
 use crate::projection_events::ProjectionWriteRegistry;
+use crate::revocation::RevocationCapabilityReceipt;
 #[cfg(feature = "domain-settings")]
 use crate::{
     ConfigValueMaintenanceCapability, ConfigValueProtection, ConfigValueProtections, PgConfigRepo,
@@ -84,9 +85,9 @@ use crate::{
     DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuthGrantSweeper, PgCheckpointStore,
     PgCommandJournal, PgConfig, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
     PgInboxStore, PgInboxSweeper, PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionControl,
-    PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgSagaInstanceStore, PgSagaJournal,
-    PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgStore, PgStoreGuard,
-    PgTenantReadConfig,
+    PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgRevocationStore,
+    PgRevocationSweeper, PgSagaInstanceStore, PgSagaJournal, PgServiceTokenReplayStore,
+    PgServiceTokenReplaySweeper, PgStore, PgStoreGuard, PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo, PgAuthAuditSink};
@@ -173,6 +174,7 @@ pub struct PgRuntimeDeps {
 #[derive(Clone)]
 pub struct PgRuntimeHandle {
     stores: Arc<PgRuntimeStores>,
+    revocation_receipt: RevocationCapabilityReceipt,
     audit_admin_store: Option<VerifiedPgAuditAdminStore>,
     delivery_policy: EventDeliveryPolicy,
     projection_registry: ProjectionWriteRegistry,
@@ -557,6 +559,10 @@ impl PgRuntimeDeps {
             writer.store_arc(),
             "postgres-writer",
         ));
+        let revocation_receipt = match writer.verify_revocation_capability().await {
+            Ok(receipt) => receipt,
+            Err(primary) => return serving_transaction.close(Err(primary)).await,
+        };
         let reader = match PgStore::connect_verified_read(tenant_read_config).await {
             Ok(reader) => reader,
             Err(primary) => return serving_transaction.close(Err(primary)).await,
@@ -583,6 +589,7 @@ impl PgRuntimeDeps {
         let owner = Self {
             handle: PgRuntimeHandle {
                 stores,
+                revocation_receipt,
                 audit_admin_store,
                 delivery_policy,
                 projection_registry: ProjectionWriteRegistry::from_generated(projection_inputs),
@@ -652,6 +659,7 @@ impl PgRuntimeDeps {
     ) {
         let PgRuntimeHandle {
             stores,
+            revocation_receipt: _,
             audit_admin_store,
             delivery_policy: _,
             projection_registry: _,
@@ -712,6 +720,7 @@ impl PgRuntimeHandle {
     pub fn infra(&self) -> PgInfraDeps {
         PgInfraDeps {
             stores: Arc::clone(&self.stores),
+            revocation_receipt: self.revocation_receipt.clone(),
             projection_registry: self.projection_registry,
             delivery_policy: self.delivery_policy,
         }
@@ -757,6 +766,7 @@ impl PgRuntimeHandle {
                 Arc::new(PgStore { pool: writer_pool }),
                 Arc::new(PgStore { pool: reader_pool }),
             )),
+            revocation_receipt: RevocationCapabilityReceipt::for_test(),
             audit_admin_store: None,
             delivery_policy: EventDeliveryPolicy::release(),
             projection_registry: ProjectionWriteRegistry::empty(),
@@ -790,6 +800,7 @@ impl PgRuntimeDeps {
                     writer_store,
                     reader_store,
                 )),
+                revocation_receipt: RevocationCapabilityReceipt::for_test(),
                 audit_admin_store: audit_admin_store
                     .map(VerifiedPgAuditAdminStore::from_unverified_for_test),
                 delivery_policy: EventDeliveryPolicy::release(),
@@ -815,6 +826,7 @@ impl PgRuntimeHandle {
                 Arc::clone(&store),
                 store,
             )),
+            revocation_receipt: RevocationCapabilityReceipt::for_test(),
             audit_admin_store: None,
             delivery_policy: EventDeliveryPolicy::release(),
             projection_registry: ProjectionWriteRegistry::empty(),
@@ -1521,11 +1533,30 @@ impl PgDomainDeps<caps::Audit> {
 #[derive(Clone)]
 pub struct PgInfraDeps {
     stores: Arc<PgRuntimeStores>,
+    revocation_receipt: RevocationCapabilityReceipt,
     projection_registry: ProjectionWriteRegistry,
     delivery_policy: EventDeliveryPolicy,
 }
 
 impl PgInfraDeps {
+    /// Persistent certificate revocation provider backed by the authoritative writer lane.
+    #[must_use]
+    pub fn revocation_store(&self) -> PgRevocationStore {
+        PgRevocationStore::new(
+            self.stores.writer_capability(),
+            self.revocation_receipt.clone(),
+        )
+    }
+
+    /// Fixed, bounded physical retention for expired certificate revocation evidence.
+    #[must_use]
+    pub fn revocation_sweeper(&self) -> PgRevocationSweeper {
+        PgRevocationSweeper::new(
+            self.stores.writer_capability(),
+            self.revocation_receipt.clone(),
+        )
+    }
+
     /// outbox emitter（envelope `occurred_at` 时间源经 `clock` 注入，构造器位置参）。
     #[must_use]
     pub fn emitter(&self, clock: Box<dyn Clock>) -> PgEmitter {

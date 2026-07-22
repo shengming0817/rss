@@ -234,9 +234,15 @@ outbox/inbox 使用 bounded retention sweep；dead_letter 使用独立 archive-b
   reconcile；归档 transient failure 保留 hot row并继续本批、health 为 Degraded，AAD/格式/既有对象语义冲突为
   Invariant、health 为 Unhealthy 且本轮禁止 purge。
 - 低基数指标固定为 `retention_sweep_deleted_total{target}`、`retention_sweep_ticks_total{target,outcome}`、
-  `retention_sweep_duration_seconds{target,outcome}`，以及 archive pending depth/oldest age/outcome/duration；
+  `retention_sweep_duration_seconds{target,outcome}`、
+  `retention_expired_backlog_depth{target}`、`retention_expired_oldest_age_seconds{target}`，以及 archive
+  pending depth/oldest age/outcome/duration；
   `target/outcome` 来自闭枚举；不伪造未单独计时的 phase 粒度，并禁止
   tenant/id/object key/payload/error text 标签。
+
+`certificate_revocations` retention 使用同一闭值 metric family；其 backlog 只计越过数据库固定 5 分钟
+grace 后仍存在的行，oldest age 从 grace 结束时的 0 秒起算。aggregate sample 与删除共享 transaction 和
+absolute deadline；sample 失败必须回滚删除、tick 记 transient，并把两个 backlog gauge 写 `NaN`。
 
 ## AuthGrant expiry sweeper（#1233，#1834）
 

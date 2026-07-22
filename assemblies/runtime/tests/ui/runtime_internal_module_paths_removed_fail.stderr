@@ -1,3 +1,9 @@
+error[E0432]: unresolved import `runtime::phase::RuntimeOutputs`
+ --> tests/ui/runtime_internal_module_paths_removed_fail.rs:2:22
+  |
+2 | use runtime::phase::{RuntimeOutputs, RuntimePhase, ServingRuntimeInputs};
+  |                      ^^^^^^^^^^^^^^ no `RuntimeOutputs` in `phase`
+
 error[E0603]: module `module` is private
  --> tests/ui/runtime_internal_module_paths_removed_fail.rs:1:14
   |

@@ -161,6 +161,35 @@ groups:
           summary: "DLX 最老待归档记录超过 5min"
           description: "dead_letter_archive_oldest_pending_age_seconds={{ $value }}s；检查 pending depth、lifecycle failure 告警、archive bucket readiness 与 receipt CAS。该 gauge 为 NaN/缺失时先恢复 backlog sampler，不能按 0 解释。"
 
+      # 证书撤销 retention 与 DLX 一样在 Degraded 时保持 HTTP 200；失败 counter 是值班分页面。
+      - alert: CertificateRevocationRetentionFailure
+        expr: |
+          sum by (outcome) (
+            (increase(retention_sweep_ticks_total{target="certificate_revocations",outcome=~"transient|invariant"}[5m]) > 0)
+            or
+            (
+              (retention_sweep_ticks_total{target="certificate_revocations",outcome=~"transient|invariant"} > 0)
+              unless
+              (retention_sweep_ticks_total{target="certificate_revocations",outcome=~"transient|invariant"} offset 5m)
+            )
+          ) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "证书撤销 retention 失败（outcome={{ $labels.outcome }}）"
+          description: "近 5min certificate_revocations retention tick 失败信号 {{ $value }}；检查 certificate_revocation_sweeper readyz、PostgreSQL 连接/锁等待、maintenance function capability 与 worker 日志。"
+
+      # oldest age 从超过固定 5min eligibility grace 后开始计时；再滞留 5min 且持续 5min 才分页。
+      - alert: CertificateRevocationRetentionBacklogHigh
+        expr: retention_expired_oldest_age_seconds{target="certificate_revocations"} > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "证书撤销过期证据滞留超过 eligibility grace 后 5min"
+          description: "retention_expired_oldest_age_seconds={{ $value }}s；检查 backlog depth、retention failure 告警、sweeper readyz 与 PostgreSQL maintenance function。NaN/缺失表示 sampler 不可用，不能按 0 解释。"
+
       # 重试风暴（次级早期信号）：broker 抖动引发批量 Requeue，pending 上涨但 DLX 未增（预算未耗尽）的
       # 窗口期，oldest-age 超阈前的领先指标。阈值按部署基线调（此处 5/s 兜底）。
       - alert: OutboxRequeueStorm

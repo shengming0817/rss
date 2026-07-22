@@ -39,9 +39,9 @@ use diport::{
 };
 use eventexec::{
     ConsumerMeta, DlxArchiveKeyName, DlxHotKeyName, DlxLifecycle, DlxLifecycleHealth,
-    DlxLifecycleMetrics, DlxLifecycleTickReport, EVENT_CONSUMER_PROBE, LeaseConfig,
-    MetricsDlxLifecycleMetrics, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE,
-    OUTBOX_SWEEPER_PROBE, RelayBudget, RelayConfig, RetentionOutcome, RetentionTarget,
+    DlxLifecycleTickReport, EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics,
+    MetricsRetentionMetrics, OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE,
+    RelayBudget, RelayConfig, RetentionMetrics, RetentionOutcome, RetentionTarget,
     SWEEPER_WORKER_NAME, SamplerConfig, SweeperConfig, SweeperWorker, TenantAuthority,
     WorkerHealth, apply_dlx_lifecycle_health, backlog_sampler_loop, spawn_relay, sweeper_loop,
 };
@@ -1107,7 +1107,7 @@ where
                     backlog_repository,
                     thread_token,
                     Arc::clone(&health),
-                    Arc::new(MetricsDlxLifecycleMetrics),
+                    Arc::new(MetricsRetentionMetrics),
                     Arc::new(SystemClock),
                     config,
                 ));
@@ -1181,7 +1181,7 @@ async fn dlx_lifecycle_loop<L, B>(
     backlog_repository: B,
     token: tokio_util::sync::CancellationToken,
     health: Arc<WorkerHealth>,
-    metrics: Arc<dyn DlxLifecycleMetrics>,
+    metrics: Arc<dyn RetentionMetrics>,
     clock: Arc<dyn Clock>,
     config: DlxWorkerConfig,
 ) where
@@ -1221,7 +1221,7 @@ async fn run_bounded_dlx_lifecycle_tick<L, B>(
     backlog_repository: &B,
     token: &tokio_util::sync::CancellationToken,
     health: &WorkerHealth,
-    metrics: &dyn DlxLifecycleMetrics,
+    metrics: &dyn RetentionMetrics,
     clock: &dyn Clock,
     config: DlxWorkerConfig,
 ) -> DlxLoopStep
@@ -1255,7 +1255,7 @@ async fn run_dlx_lifecycle_tick<L, B>(
     lifecycle: &L,
     backlog_repository: &B,
     health: &WorkerHealth,
-    metrics: &dyn DlxLifecycleMetrics,
+    metrics: &dyn RetentionMetrics,
     clock: &dyn Clock,
 ) where
     L: DlxTickRunner,
@@ -3227,7 +3227,7 @@ mod tests {
         backlogs: std::sync::Mutex<Vec<DlxArchiveBacklog>>,
     }
 
-    impl DlxLifecycleMetrics for RecordingDlxMetrics {
+    impl RetentionMetrics for RecordingDlxMetrics {
         fn record_sweep(
             &self,
             target: RetentionTarget,
@@ -3251,6 +3251,13 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(backlog);
+        }
+
+        fn record_retention_backlog(
+            &self,
+            _target: RetentionTarget,
+            _observation: eventexec::RetentionBacklogObservation,
+        ) {
         }
     }
 
@@ -3492,7 +3499,7 @@ mod tests {
             FakeDlxBacklogReader(Ok(DlxArchiveBacklog::new(0, 0))),
             token.clone(),
             Arc::clone(&health),
-            Arc::clone(&metrics) as Arc<dyn DlxLifecycleMetrics>,
+            Arc::clone(&metrics) as Arc<dyn RetentionMetrics>,
             Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH])),
             DlxWorkerConfig::canonical(),
         ));

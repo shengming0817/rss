@@ -111,6 +111,7 @@ struct PhaseACarried {
     hot_payload_protector: postgres::DlxPayloadProtector,
     archive_key: eventexec::DlxArchiveKeyName,
     auth_audit_sink_permit: crate::provider_output::AuthAuditSinkPermit,
+    device_revocation_store_permit: crate::provider_output::DeviceRevocationStorePermit,
     distributed_cas_store_permit: crate::provider_output::DistributedCasStorePermit,
     service_token_replay_store_permit: crate::provider_output::ServiceTokenReplayStorePermit,
     dlx_lifecycle_repository_permit: crate::provider_output::DlxLifecycleRepositoryPermit,
@@ -190,6 +191,7 @@ impl<'a> ProvidersBuilt<'a> {
                 hot_payload_protector,
                 archive_key,
                 auth_audit_sink_permit,
+                device_revocation_store_permit,
                 distributed_cas_store_permit,
                 service_token_replay_store_permit,
                 dlx_lifecycle_repository_permit,
@@ -225,6 +227,14 @@ impl<'a> ProvidersBuilt<'a> {
                 })
                 .transpose();
             let pg = pg_owner.handle();
+            // The unique permit builds both the concrete store and exact probes+workers output
+            // from this same verified PostgreSQL handle.
+            let revocation_provider = crate::provider_output::BuiltDeviceRevocationProvider::build(
+                &pg,
+                device_revocation_store_permit,
+            )
+            .context("build typed device revocation provider")?;
+            let (revocation_store, revocation_output) = revocation_provider.into_parts();
             let pg_provider_module =
                 crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
             *uncommitted_provider_module.get_mut() = pg_provider_module;
@@ -248,6 +258,7 @@ impl<'a> ProvidersBuilt<'a> {
             provider_build
                 .record(crate::provider_output::ProviderOutput::postgres(
                     pg_provider_module,
+                    revocation_output,
                     auth_audit_sink_permit,
                     distributed_cas_store_permit,
                     service_token_replay_store_permit,
@@ -298,16 +309,17 @@ impl<'a> ProvidersBuilt<'a> {
             let command_idempotency_keyring = build_command_idempotency_keyring_from(config_value)
                 .context("build command idempotency keyring")?;
 
-            let deps = SharedRuntimeDeps {
+            let deps = SharedRuntimeDeps::from_built_provider(
                 password_blocklist,
                 pg,
+                revocation_store,
                 redis,
                 s3,
                 vault,
                 identity_signer,
                 settings_config_value_key_name,
-                domain_transport: domain_transport.dispatch_handle(),
-            };
+                domain_transport.dispatch_handle(),
+            );
 
             // Pull metrics have no shutdown lifecycle and therefore never enter ShutdownStack.
             let metrics_exporter: Arc<dyn diport::MetricsExporter> = Arc::new(
@@ -495,6 +507,7 @@ impl<'a> ProvidersBuilt<'a> {
             .context("durable DLX hot payload protector missing")?;
         let archive_key_for_preflight = archive_key.clone();
         let auth_audit_sink_permit = provider_factories.auth_audit_sink()?;
+        let device_revocation_store_permit = provider_factories.device_revocation_store()?;
         let distributed_cas_store_permit = provider_factories.distributed_cas_store()?;
         let service_token_replay_store_permit = provider_factories.service_token_replay_store()?;
         let dlx_lifecycle_repository_permit = provider_factories.dlx_lifecycle_repository()?;
@@ -530,6 +543,7 @@ impl<'a> ProvidersBuilt<'a> {
                 hot_payload_protector,
                 archive_key,
                 auth_audit_sink_permit,
+                device_revocation_store_permit,
                 distributed_cas_store_permit,
                 service_token_replay_store_permit,
                 dlx_lifecycle_repository_permit,

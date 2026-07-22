@@ -54,14 +54,14 @@ use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
-use runtime::SharedRuntimeDeps;
 use runtime::event_transport::{
     EventTransportTestValues, EventWorkerTestValues, bridge_generated_subscriptions,
 };
 use runtime::support::SystemClock;
 use runtime::test_support::{
     build_redis_runtime_deps_from_values, build_s3_runtime_deps_from_values,
-    build_vault_runtime_from_values, wire_distributed, wire_event_transport,
+    build_shared_runtime_deps, build_vault_runtime_from_values, wire_distributed,
+    wire_event_transport,
 };
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 
@@ -727,16 +727,16 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "transit".to_string(),
         "settings-config".to_string(),
     )?;
-    let deps = SharedRuntimeDeps {
-        password_blocklist: test_password_blocklist()?,
-        pg: pg.clone(),
+    let deps = build_shared_runtime_deps(
+        test_password_blocklist()?,
+        pg.clone(),
         redis,
         s3,
         vault,
         identity_signer,
         settings_config_value_key_name,
-        domain_transport: noop_domain_transport(),
-    };
+        noop_domain_transport(),
+    );
     let demo_cfg = EventTransportTestValues::demo().build()?;
     let demo_worker = EventWorkerTestValues::canonical()?.build()?;
     let demo_module = wire_event_transport(

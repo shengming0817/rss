@@ -16,11 +16,13 @@ use crate::phase::test_support::{
     AUTH_GRANT_SWEEPER_PROBE_NAME, AUTH_GRANT_SWEEPER_WORKER_NAME, AuthGrantSweepFuture,
     AuthGrantSweepRunner, DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV, DOMAIN_TRANSPORT_READY_PROBE_NAME,
     DomainTransportRuntime, DomainTransportRuntimeInner, InProcDomainTransport,
-    RLS_READY_PROBE_NAME, RlsReadyProbe, RuntimeDomainTransport,
-    SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME, SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME,
-    SPIFFE_ENDPOINT_SOCKET_ENV, SweeperHealth, build_dlx_lifecycle_bootstrap_config_from,
-    build_domain_transport_targets_from, required_spiffe_endpoint_from_value,
-    run_auth_grant_sweeper_loop, sweeper_module_result,
+    REVOCATION_SWEEPER_PROBE_NAME, REVOCATION_SWEEPER_WORKER_NAME, RLS_READY_PROBE_NAME,
+    RevocationSweepFuture, RevocationSweepObservation, RevocationSweepRunner, RlsReadyProbe,
+    RuntimeDomainTransport, SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME,
+    SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME, SPIFFE_ENDPOINT_SOCKET_ENV, SweeperHealth,
+    build_dlx_lifecycle_bootstrap_config_from, build_domain_transport_targets_from,
+    required_spiffe_endpoint_from_value, run_auth_grant_sweeper_loop, run_revocation_sweeper_loop,
+    sweeper_module_result, wire_revocation_sweeper,
 };
 use crate::support::{SystemClock, TracingAuthAuditSink};
 use anyhow::Context as _;
@@ -232,11 +234,11 @@ fn runtime_module_output_harness_captures_merge_and_probe_drain_order() {
         runtime_module_harness_transcript(),
         [
             "phase-order: build_provider -> build_infra -> wire_domains -> finalize -> launch",
-            "module-probes: configs_ready, keyprovider_ready, auth_grant_sweeper, service_token_replay_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
+            "module-probes: configs_ready, keyprovider_ready, auth_grant_sweeper, service_token_replay_sweeper, certificate_revocation_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
             "module-resources: redis, s3, vault-secret-resolver, vault-key-provider, rss_access_token_verifier, federated_access_token_verifier, service_token_verifier, domain-http-transport, identity-pub, identity-sub, settings-pub, settings-sub, postgres-dlx-lifecycle",
-            "module-workers: keyprovider-readiness-sampler, auth-grant-sweeper, service-token-replay-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, dlx-lifecycle, dlx-archive-readiness, redis-readiness-sampler",
-            "readyz-probes-before-reporter: rls_ready, redis_ready, rss_access_token_jwks_ready, federated_access_token_jwks_ready, configs_ready, keyprovider_ready, auth_grant_sweeper, service_token_replay_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
-            "reporter-probe-count: 22",
+            "module-workers: keyprovider-readiness-sampler, auth-grant-sweeper, service-token-replay-sweeper, certificate-revocation-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, dlx-lifecycle, dlx-archive-readiness, redis-readiness-sampler",
+            "readyz-probes-before-reporter: rls_ready, redis_ready, rss_access_token_jwks_ready, federated_access_token_jwks_ready, configs_ready, keyprovider_ready, auth_grant_sweeper, service_token_replay_sweeper, certificate_revocation_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
+            "reporter-probe-count: 23",
             "registry-probe-count-after-take: 0",
         ]
         .join("\n")
@@ -304,6 +306,11 @@ fn runtime_module_output_harness() -> DomainModuleResult {
         &[SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME],
         &[],
         &[SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME],
+    ));
+    module.merge(harness_module(
+        &[REVOCATION_SWEEPER_PROBE_NAME],
+        &[],
+        &[REVOCATION_SWEEPER_WORKER_NAME],
     ));
     module.merge(harness_module(
         &[crate::infra::s3::S3_READY_PROBE_NAME],
@@ -1235,9 +1242,63 @@ fn identity_maintenance_module_emits_auth_grant_sweeper_probe_and_worker() {
     );
 }
 
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn revocation_provider_module_registers_exact_probe_and_managed_worker() {
+    let pg = ::postgres::PgRuntimeHandle::for_module_test();
+    let mut result =
+        wire_revocation_sweeper(&pg).expect("receipt-backed revocation sweeper module result");
+    assert_eq!(result.probes.len(), 1);
+    assert_eq!(result.probes[0].0.as_str(), REVOCATION_SWEEPER_PROBE_NAME);
+    assert!(result.resources.is_empty());
+    assert_eq!(result.workers.len(), 1);
+
+    let worker = result.workers.pop().expect("one revocation worker");
+    let root = CancellationToken::new();
+    let resource = worker(root.clone());
+    assert_eq!(resource.name(), REVOCATION_SWEEPER_WORKER_NAME);
+    root.cancel();
+    assert!(resource.shutdown().await.is_ok());
+}
+
 struct ScriptedAuthGrantSweeper {
     calls: Arc<AtomicUsize>,
     outcomes: VecDeque<tokio::sync::oneshot::Receiver<Result<u64, consistency::EngineError>>>,
+}
+
+struct ScriptedRevocationSweeper {
+    calls: Arc<AtomicUsize>,
+    outcomes: VecDeque<
+        tokio::sync::oneshot::Receiver<
+            Result<RevocationSweepObservation, consistency::EngineError>,
+        >,
+    >,
+}
+
+fn revocation_retention_report(deleted: u64) -> RevocationSweepObservation {
+    RevocationSweepObservation::new(deleted, eventexec::RetentionBacklog::new(0, 0))
+}
+
+impl RevocationSweepRunner for ScriptedRevocationSweeper {
+    fn sweep(
+        &mut self,
+        _deadline: ::postgres::RevocationSweepDeadline,
+    ) -> RevocationSweepFuture<'_> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let receiver = self.outcomes.pop_front();
+        Box::pin(async move {
+            let Some(receiver) = receiver else {
+                return Err(consistency::EngineError::new(
+                    consistency::EngineErrorKind::Invariant,
+                ));
+            };
+            receiver.await.unwrap_or_else(|_| {
+                Err(consistency::EngineError::new(
+                    consistency::EngineErrorKind::Invariant,
+                ))
+            })
+        })
+    }
 }
 
 impl AuthGrantSweepRunner for ScriptedAuthGrantSweeper {
@@ -1369,19 +1430,111 @@ async fn auth_grant_sweeper_delays_missed_ticks_instead_of_bursting() {
     assert_eq!(health.status_detail(), (HealthStatus::Unhealthy, "stopped"));
 }
 
-#[test]
-#[allow(clippy::expect_used)]
-// reason: 静态回归守卫切分当前源码；缺目标函数时测试应硬失败。
-fn service_token_sweeper_delays_missed_ticks() {
-    let source = include_str!("phase/maintenance.rs");
-    let service_token = source
-        .split("fn wire_service_token_replay_sweeper(")
-        .nth(1)
-        .expect("service-token sweeper source slice");
+#[tokio::test(start_paused = true)]
+async fn revocation_sweeper_health_tracks_success_error_recovery_and_exit() {
+    let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+    let (second_tx, second_rx) = tokio::sync::oneshot::channel();
+    let (third_tx, third_rx) = tokio::sync::oneshot::channel();
+    let (_fourth_tx, fourth_rx) = tokio::sync::oneshot::channel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let health = Arc::new(SweeperHealth::starting());
+    let token = CancellationToken::new();
+    let handle = tokio::spawn(run_revocation_sweeper_loop(
+        ScriptedRevocationSweeper {
+            calls: Arc::clone(&calls),
+            outcomes: VecDeque::from([first_rx, second_rx, third_rx, fourth_rx]),
+        },
+        Duration::from_secs(10),
+        Duration::from_secs(100),
+        token.clone(),
+        Arc::clone(&health),
+    ));
+
+    wait_for_sweeper_calls(&calls, 1).await;
+    assert_eq!(
+        health.status_detail(),
+        (HealthStatus::Unhealthy, "starting"),
+        "readiness must fail closed while the initial retention sweep is in flight"
+    );
+    assert!(first_tx.send(Ok(revocation_retention_report(1))).is_ok());
+    wait_for_sweeper_health(&health, (HealthStatus::Healthy, "worker")).await;
+
+    tokio::time::advance(Duration::from_secs(10)).await;
+    wait_for_sweeper_calls(&calls, 2).await;
     assert!(
-        service_token
-            .contains("ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay)"),
-        "service-token sweeper must not burst missed maintenance ticks"
+        second_tx
+            .send(Err(consistency::EngineError::new(
+                consistency::EngineErrorKind::Transient,
+            )))
+            .is_ok()
+    );
+    wait_for_sweeper_health(&health, (HealthStatus::Degraded, "degraded")).await;
+
+    tokio::time::advance(Duration::from_secs(10)).await;
+    wait_for_sweeper_calls(&calls, 3).await;
+    assert!(third_tx.send(Ok(revocation_retention_report(2))).is_ok());
+    wait_for_sweeper_health(&health, (HealthStatus::Healthy, "worker")).await;
+
+    tokio::time::advance(Duration::from_secs(10)).await;
+    wait_for_sweeper_calls(&calls, 4).await;
+    token.cancel();
+    assert!(handle.await.is_ok());
+    assert_eq!(health.status_detail(), (HealthStatus::Unhealthy, "stopped"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn revocation_sweeper_delays_missed_ticks_instead_of_bursting() {
+    let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+    let (_second_tx, second_rx) = tokio::sync::oneshot::channel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let health = Arc::new(SweeperHealth::starting());
+    let token = CancellationToken::new();
+    let handle = tokio::spawn(run_revocation_sweeper_loop(
+        ScriptedRevocationSweeper {
+            calls: Arc::clone(&calls),
+            outcomes: VecDeque::from([first_rx, second_rx]),
+        },
+        Duration::from_secs(10),
+        Duration::from_secs(100),
+        token.clone(),
+        Arc::clone(&health),
+    ));
+
+    wait_for_sweeper_calls(&calls, 1).await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert!(first_tx.send(Ok(revocation_retention_report(1))).is_ok());
+    tokio::task::yield_now().await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "Delay policy must not issue a catch-up burst after a long retention sweep"
+    );
+
+    tokio::time::advance(Duration::from_secs(9)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    wait_for_sweeper_calls(&calls, 2).await;
+
+    token.cancel();
+    assert!(handle.await.is_ok());
+    assert_eq!(health.status_detail(), (HealthStatus::Unhealthy, "stopped"));
+}
+
+#[test]
+fn maintenance_sweepers_share_one_control_loop() {
+    let source = include_str!("phase/maintenance.rs");
+    assert_eq!(
+        source.matches("tokio::time::interval(").count(),
+        1,
+        "maintenance sweepers must share one interval/cancellation/health control loop"
+    );
+    assert_eq!(
+        source
+            .matches("set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay)")
+            .count(),
+        1,
+        "the shared control loop must own the single Delay policy"
     );
 }
 

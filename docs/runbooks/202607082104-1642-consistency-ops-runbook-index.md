@@ -112,6 +112,28 @@ RSS 不得 DeleteObject/list/replay cold archive。Object Lock 到期后，只�
 确认 lifecycle 已删对象，才能产生 `MissingArchiveProof` 删 receipt；HOT row 尚在时会在下一轮
 重新归档。
 
+## Certificate Revocation Retention
+
+Operational signals:
+
+- `retention_sweep_ticks_total{target="certificate_revocations",outcome="success|transient|invariant"}`
+- `retention_sweep_deleted_total{target="certificate_revocations"}`
+- `retention_sweep_duration_seconds{target="certificate_revocations",outcome}`
+- `retention_expired_backlog_depth{target="certificate_revocations"}`
+- `retention_expired_oldest_age_seconds{target="certificate_revocations"}`
+- readyz probe `certificate_revocation_sweeper`
+
+On-call flow:
+
+1. `CertificateRevocationRetentionFailure` 触发时先查 readyz、PostgreSQL 连接/锁等待、migration ledger=72，
+   以及两个固定 maintenance function 的 owner/search_path/EXECUTE capability；不要给 serving role raw DELETE。
+2. `CertificateRevocationRetentionBacklogHigh` 表示最老证据在固定 5 分钟 grace 结束后又滞留超过 5 分钟；
+   对照 depth 和 tick duration 判断是持续写入超过每批 1000 行，还是 sweeper/DB 卡住。
+3. backlog gauge 为 `NaN` 或缺失表示同 transaction aggregate sampler 不可用；该 tick 的删除已回滚，
+   不得把 gauge 当 0，也不得绕过固定 function 手工清表。
+4. 恢复后观察 outcome 转 `success`、oldest age 与 depth 下降。物理 retention 失败不改变
+   `not_after <= authoritative database now` 的逻辑过期语义。
+
 ## Saga
 
 Saga compensation failures use the unified dead-letter table for diagnostics. There is no saga

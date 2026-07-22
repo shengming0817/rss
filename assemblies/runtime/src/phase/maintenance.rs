@@ -3,6 +3,10 @@
 use anyhow::Context as _;
 use bootstrap::DomainModuleResult;
 use diport::{DynManagedResource, ManagedResource, ShutdownError};
+use eventexec::{
+    MetricsRetentionMetrics, RetentionBacklog, RetentionBacklogObservation, RetentionMetrics,
+    RetentionOutcome, RetentionTarget,
+};
 use postgres::PgRuntimeHandle;
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 use std::sync::Arc;
@@ -18,6 +22,13 @@ pub(crate) const SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME: &str = "service_token_
 pub(crate) const SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME: &str = "service-token-replay-sweeper";
 const SERVICE_TOKEN_REPLAY_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const SERVICE_TOKEN_REPLAY_SWEEP_TIMEOUT: Duration = Duration::from_secs(25);
+pub(crate) const REVOCATION_SWEEPER_PROBE_NAME: &str = "certificate_revocation_sweeper";
+pub(crate) const REVOCATION_SWEEPER_WORKER_NAME: &str = "certificate-revocation-sweeper";
+const REVOCATION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+const REVOCATION_SWEEP_TIMEOUT: Duration = Duration::from_secs(25);
+const AUTH_GRANT_TARGET_TABLE: &str = "auth_grants";
+const SERVICE_TOKEN_REPLAY_TARGET_TABLE: &str = "service_token_replay_keys";
+const REVOCATION_TARGET_TABLE: &str = "certificate_revocations";
 
 // ── RlsReadyProbe ──────────────────────────────────────────────────────────────────────────────
 
@@ -88,14 +99,6 @@ impl SweeperHealth {
             .store(SWEEPER_STOPPED, std::sync::atomic::Ordering::Release);
     }
 
-    fn observe_result<T, E>(&self, result: &Result<T, E>) {
-        if result.is_ok() {
-            self.mark_healthy();
-        } else {
-            self.mark_degraded();
-        }
-    }
-
     pub(crate) fn status_detail(&self) -> (HealthStatus, &'static str) {
         match self.0.load(std::sync::atomic::Ordering::Acquire) {
             SWEEPER_HEALTHY => (HealthStatus::Healthy, "worker"),
@@ -153,6 +156,27 @@ pub(crate) type AuthGrantSweepFuture<'a> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<u64, consistency::EngineError>> + Send + 'a>,
 >;
 
+pub(crate) type RevocationSweepFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<RevocationSweepObservation, consistency::EngineError>,
+            > + Send
+            + 'a,
+    >,
+>;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RevocationSweepObservation {
+    deleted: u64,
+    backlog: RetentionBacklog,
+}
+
+impl RevocationSweepObservation {
+    pub(crate) const fn new(deleted: u64, backlog: RetentionBacklog) -> Self {
+        Self { deleted, backlog }
+    }
+}
+
 pub(crate) trait AuthGrantSweepRunner: Send {
     fn sweep(&mut self, deadline: postgres::AuthGrantSweepDeadline) -> AuthGrantSweepFuture<'_>;
 }
@@ -163,8 +187,219 @@ impl AuthGrantSweepRunner for postgres::PgAuthGrantSweeper {
     }
 }
 
-pub(crate) async fn run_auth_grant_sweeper_loop(
-    mut sweeper: impl AuthGrantSweepRunner,
+pub(crate) trait RevocationSweepRunner: Send {
+    fn sweep(&mut self, deadline: postgres::RevocationSweepDeadline) -> RevocationSweepFuture<'_>;
+}
+
+impl RevocationSweepRunner for postgres::PgRevocationSweeper {
+    fn sweep(&mut self, deadline: postgres::RevocationSweepDeadline) -> RevocationSweepFuture<'_> {
+        Box::pin(async move {
+            let report = self.sweep_expired(deadline).await?;
+            Ok(RevocationSweepObservation::new(
+                report.deleted(),
+                RetentionBacklog::new(
+                    report.backlog().depth(),
+                    report.backlog().oldest_age_seconds(),
+                ),
+            ))
+        })
+    }
+}
+
+type MaintenanceSweepFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = MaintenanceSweepResult> + Send + 'a>>;
+
+#[derive(Debug)]
+enum MaintenanceSweepResult {
+    Success {
+        deleted: u64,
+        backlog: Option<RetentionBacklog>,
+    },
+    Failure {
+        outcome: RetentionOutcome,
+        stage: MaintenanceSweepFailureStage,
+    },
+}
+
+impl MaintenanceSweepResult {
+    fn is_success(&self) -> bool {
+        matches!(self, Self::Success { .. })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MaintenanceSweepFailureStage {
+    Deadline,
+    Sweep,
+}
+
+impl MaintenanceSweepFailureStage {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Deadline => "deadline",
+            Self::Sweep => "sweep",
+        }
+    }
+}
+
+trait MaintenanceSweepTask: Send {
+    fn target_table(&self) -> &'static str;
+
+    fn sweep(&mut self, timeout: Duration) -> MaintenanceSweepFuture<'_>;
+
+    fn observe(&self, _result: &MaintenanceSweepResult, _duration_seconds: f64) {}
+}
+
+struct AuthGrantSweepTask<R> {
+    runner: R,
+}
+
+impl<R: AuthGrantSweepRunner> MaintenanceSweepTask for AuthGrantSweepTask<R> {
+    fn target_table(&self) -> &'static str {
+        AUTH_GRANT_TARGET_TABLE
+    }
+
+    fn sweep(&mut self, timeout: Duration) -> MaintenanceSweepFuture<'_> {
+        Box::pin(async move {
+            let deadline = match postgres::AuthGrantSweepDeadline::from_timeout(timeout) {
+                Ok(deadline) => deadline,
+                Err(error) => {
+                    return MaintenanceSweepResult::Failure {
+                        outcome: retention_outcome(&error),
+                        stage: MaintenanceSweepFailureStage::Deadline,
+                    };
+                }
+            };
+            match self.runner.sweep(deadline).await {
+                Ok(deleted) => MaintenanceSweepResult::Success {
+                    deleted,
+                    backlog: None,
+                },
+                Err(error) => MaintenanceSweepResult::Failure {
+                    outcome: retention_outcome(&error),
+                    stage: MaintenanceSweepFailureStage::Sweep,
+                },
+            }
+        })
+    }
+}
+
+struct RevocationSweepTask<R> {
+    runner: R,
+}
+
+impl<R: RevocationSweepRunner> MaintenanceSweepTask for RevocationSweepTask<R> {
+    fn target_table(&self) -> &'static str {
+        REVOCATION_TARGET_TABLE
+    }
+
+    fn sweep(&mut self, timeout: Duration) -> MaintenanceSweepFuture<'_> {
+        Box::pin(async move {
+            let deadline = match postgres::RevocationSweepDeadline::from_timeout(timeout) {
+                Ok(deadline) => deadline,
+                Err(error) => {
+                    return MaintenanceSweepResult::Failure {
+                        outcome: retention_outcome(&error),
+                        stage: MaintenanceSweepFailureStage::Deadline,
+                    };
+                }
+            };
+            match self.runner.sweep(deadline).await {
+                Ok(report) => MaintenanceSweepResult::Success {
+                    deleted: report.deleted,
+                    backlog: Some(report.backlog),
+                },
+                Err(error) => MaintenanceSweepResult::Failure {
+                    outcome: retention_outcome(&error),
+                    stage: MaintenanceSweepFailureStage::Sweep,
+                },
+            }
+        })
+    }
+
+    fn observe(&self, result: &MaintenanceSweepResult, duration_seconds: f64) {
+        let metrics = MetricsRetentionMetrics;
+        match result {
+            MaintenanceSweepResult::Success {
+                deleted,
+                backlog: Some(backlog),
+            } => {
+                metrics.record_sweep(
+                    RetentionTarget::CertificateRevocations,
+                    RetentionOutcome::Success,
+                    *deleted,
+                    duration_seconds,
+                );
+                metrics.record_retention_backlog(
+                    RetentionTarget::CertificateRevocations,
+                    RetentionBacklogObservation::Available(*backlog),
+                );
+            }
+            MaintenanceSweepResult::Failure { outcome, .. } => {
+                metrics.record_sweep(
+                    RetentionTarget::CertificateRevocations,
+                    *outcome,
+                    0,
+                    duration_seconds,
+                );
+                metrics.record_retention_backlog(
+                    RetentionTarget::CertificateRevocations,
+                    RetentionBacklogObservation::Unavailable,
+                );
+            }
+            MaintenanceSweepResult::Success { backlog: None, .. } => {
+                unreachable!("revocation sweep success must include its atomic backlog sample")
+            }
+        }
+    }
+}
+
+struct ServiceTokenReplaySweepTask {
+    sweeper: postgres::PgServiceTokenReplaySweeper,
+}
+
+impl MaintenanceSweepTask for ServiceTokenReplaySweepTask {
+    fn target_table(&self) -> &'static str {
+        SERVICE_TOKEN_REPLAY_TARGET_TABLE
+    }
+
+    fn sweep(&mut self, timeout: Duration) -> MaintenanceSweepFuture<'_> {
+        Box::pin(async move {
+            let deadline = match diport::ServiceTokenReplayDeadline::from_timeout(timeout) {
+                Ok(deadline) => deadline,
+                Err(_) => {
+                    return MaintenanceSweepResult::Failure {
+                        outcome: RetentionOutcome::Invariant,
+                        stage: MaintenanceSweepFailureStage::Deadline,
+                    };
+                }
+            };
+            match self.sweeper.sweep_expired(deadline).await {
+                Ok(deleted) => MaintenanceSweepResult::Success {
+                    deleted,
+                    backlog: None,
+                },
+                Err(_) => MaintenanceSweepResult::Failure {
+                    outcome: RetentionOutcome::Transient,
+                    stage: MaintenanceSweepFailureStage::Sweep,
+                },
+            }
+        })
+    }
+}
+
+fn retention_outcome(error: &consistency::EngineError) -> RetentionOutcome {
+    match error.kind() {
+        consistency::EngineErrorKind::Transient => RetentionOutcome::Transient,
+        consistency::EngineErrorKind::Permanent | consistency::EngineErrorKind::Invariant => {
+            RetentionOutcome::Invariant
+        }
+        _ => RetentionOutcome::Invariant,
+    }
+}
+
+async fn run_sweeper_loop(
+    mut task: impl MaintenanceSweepTask,
     period: Duration,
     timeout: Duration,
     worker_token: CancellationToken,
@@ -178,78 +413,71 @@ pub(crate) async fn run_auth_grant_sweeper_loop(
             biased;
             () = worker_token.cancelled() => break,
             _ = ticker.tick() => {
-                let Some(deadline) = auth_grant_sweep_deadline(timeout, &health) else {
-                    ticker.reset();
-                    continue;
+                let started = tokio::time::Instant::now();
+                let result = tokio::select! {
+                    biased;
+                    () = worker_token.cancelled() => break,
+                    result = task.sweep(timeout) => result,
                 };
-                if run_auth_grant_sweep_tick(&mut sweeper, deadline, &worker_token, &health).await {
-                    break;
+                if result.is_success() {
+                    health.mark_healthy();
+                } else {
+                    health.mark_degraded();
                 }
+                match &result {
+                    MaintenanceSweepResult::Success { deleted, backlog } => tracing::debug!(
+                        target_table = task.target_table(),
+                        deleted,
+                        backlog_depth = backlog.map(RetentionBacklog::depth),
+                        backlog_oldest_age_seconds = backlog.map(RetentionBacklog::oldest_age_seconds),
+                        "maintenance sweeper tick completed"
+                    ),
+                    MaintenanceSweepResult::Failure { outcome, stage } => tracing::warn!(
+                        target_table = task.target_table(),
+                        outcome = outcome.as_label(),
+                        stage = stage.as_label(),
+                        "maintenance sweeper tick failed; backing off to next tick"
+                    ),
+                }
+                task.observe(&result, started.elapsed().as_secs_f64());
                 ticker.reset();
             }
         }
     }
 }
 
-fn auth_grant_sweep_deadline(
+pub(crate) async fn run_auth_grant_sweeper_loop(
+    sweeper: impl AuthGrantSweepRunner,
+    period: Duration,
     timeout: Duration,
-    health: &SweeperHealth,
-) -> Option<postgres::AuthGrantSweepDeadline> {
-    match postgres::AuthGrantSweepDeadline::from_timeout(timeout) {
-        Ok(deadline) => Some(deadline),
-        Err(error) => {
-            tracing::warn!(
-                target_table = "auth_grants",
-                error = %error,
-                "auth-grant sweeper: deadline setup failed"
-            );
-            health.mark_degraded();
-            None
-        }
-    }
-}
-
-async fn run_auth_grant_sweep_tick(
-    sweeper: &mut impl AuthGrantSweepRunner,
-    deadline: postgres::AuthGrantSweepDeadline,
-    worker_token: &CancellationToken,
-    health: &SweeperHealth,
-) -> bool {
-    tokio::select! {
-        biased;
-        () = worker_token.cancelled() => true,
-        result = sweeper.sweep(deadline) => {
-            report_auth_grant_sweep_result(result, health);
-            false
-        }
-    }
-}
-
-fn report_auth_grant_sweep_result(
-    result: Result<u64, consistency::EngineError>,
-    health: &SweeperHealth,
+    worker_token: CancellationToken,
+    health: Arc<SweeperHealth>,
 ) {
-    health.observe_result(&result);
-    match result {
-        Ok(deleted) => log_auth_grant_sweep_success(deleted),
-        Err(error) => log_auth_grant_sweep_error(&error),
-    }
+    run_sweeper_loop(
+        AuthGrantSweepTask { runner: sweeper },
+        period,
+        timeout,
+        worker_token,
+        health,
+    )
+    .await;
 }
 
-fn log_auth_grant_sweep_success(deleted: u64) {
-    tracing::debug!(
-        target_table = "auth_grants",
-        deleted,
-        "auth-grant sweeper: tick completed"
-    );
-}
-
-fn log_auth_grant_sweep_error(error: &consistency::EngineError) {
-    tracing::warn!(
-        target_table = "auth_grants",
-        error = %error,
-        "auth-grant sweeper: sweep failed, marking worker degraded; backing off to next tick"
-    );
+pub(crate) async fn run_revocation_sweeper_loop(
+    sweeper: impl RevocationSweepRunner,
+    period: Duration,
+    timeout: Duration,
+    worker_token: CancellationToken,
+    health: Arc<SweeperHealth>,
+) {
+    run_sweeper_loop(
+        RevocationSweepTask { runner: sweeper },
+        period,
+        timeout,
+        worker_token,
+        health,
+    )
+    .await;
 }
 
 fn spawn_auth_grant_sweeper(
@@ -325,51 +553,13 @@ pub(crate) fn wire_service_token_replay_sweeper(
         let child = token.child_token();
         let worker_token = child.clone();
         let health = worker_health;
-        let handle = tokio::spawn(async move {
-            let _stopped = SweeperStoppedGuard(Arc::clone(&health));
-            let mut ticker = tokio::time::interval(SERVICE_TOKEN_REPLAY_SWEEP_INTERVAL);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tokio::select! {
-                    biased;
-                    () = worker_token.cancelled() => break,
-                    _ = ticker.tick() => {
-                        tokio::select! {
-                            biased;
-                            () = worker_token.cancelled() => break,
-                            result = sweeper.sweep_expired(
-                                match diport::ServiceTokenReplayDeadline::from_timeout(
-                                    SERVICE_TOKEN_REPLAY_SWEEP_TIMEOUT,
-                                ) {
-                                    Ok(deadline) => deadline,
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            target_table = "service_token_replay_keys",
-                                            error = %error,
-                                            "replay sweeper: deadline setup failed"
-                                        );
-                                        health.mark_degraded();
-                                        ticker.reset();
-                                        continue;
-                                    }
-                                }
-                            ) => {
-                                health.observe_result(&result);
-                                match result {
-                                    Ok(deleted) => {
-                                        tracing::debug!(target_table = "service_token_replay_keys", deleted, "replay sweeper: tick completed");
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(target_table = "service_token_replay_keys", error = %error, "replay sweeper: sweep failed");
-                                    }
-                                }
-                                ticker.reset();
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        let handle = tokio::spawn(run_sweeper_loop(
+            ServiceTokenReplaySweepTask { sweeper },
+            SERVICE_TOKEN_REPLAY_SWEEP_INTERVAL,
+            SERVICE_TOKEN_REPLAY_SWEEP_TIMEOUT,
+            worker_token,
+            health,
+        ));
         DynManagedResource::new_box(SweeperWorker {
             name: SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME,
             handle: tokio::sync::Mutex::new(Some(handle)),
@@ -377,4 +567,29 @@ pub(crate) fn wire_service_token_replay_sweeper(
         })
     });
     sweeper_module_result(worker, health, SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME)
+}
+
+/// Wire the receipt-backed, fixed certificate-revocation retention function into one real probe
+/// and one managed worker. There is no runtime batch/grace override: both remain migration-owned.
+pub(crate) fn wire_revocation_sweeper(pg: &PgRuntimeHandle) -> anyhow::Result<DomainModuleResult> {
+    let sweeper = pg.infra().revocation_sweeper();
+    let health = Arc::new(SweeperHealth::starting());
+    let worker_health = Arc::clone(&health);
+    let worker: bootstrap::WorkerSpec = Box::new(move |token| {
+        let child = token.child_token();
+        let worker_token = child.clone();
+        let handle = tokio::spawn(run_revocation_sweeper_loop(
+            sweeper,
+            REVOCATION_SWEEP_INTERVAL,
+            REVOCATION_SWEEP_TIMEOUT,
+            worker_token,
+            worker_health,
+        ));
+        DynManagedResource::new_box(SweeperWorker {
+            name: REVOCATION_SWEEPER_WORKER_NAME,
+            handle: tokio::sync::Mutex::new(Some(handle)),
+            token: child,
+        })
+    });
+    sweeper_module_result(worker, health, REVOCATION_SWEEPER_PROBE_NAME)
 }
