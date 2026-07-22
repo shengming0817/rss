@@ -1,8 +1,8 @@
 # Runtime Assembly Baseline
 
 This document records the current runtime assembly shape after the `runtime::run()` decomposition,
-#1677 PG lifecycle-ownership hardening, the startup owner funnel, and #1790 plan-driven listener
-execution. The machine-readable inventory lives in `runtime-baseline/runtime.txt` and is
+#1677 PG lifecycle-ownership hardening, the startup owner funnel, and #1794 full RuntimePlan live
+closure. The machine-readable inventory lives in `runtime-baseline/runtime.txt` and is
 regenerated with:
 
 ```bash
@@ -32,7 +32,10 @@ cleanup. `run_startup()` contains no assembly body or compatibility path: it ent
 The private `PhaseContext` retains the same mutable serving input and owned `RuntimePlan` through
 launch. The provider transition projects the sole private `ListenerExecutionPlan`; the mandatory
 carrier then moves through `ProvidersBuilt → InfraBuilt → DomainsWired` and is consumed by the
-single listener finalizer. Each phase file owns one transition: plan-selected RSS/Federated
+single listener finalizer. It also mints the private `DomainExecutionPlan`, which crosses
+`InfraBuilt` and consumes generated domain bindings into a private validated wrapper before the
+canonical composition helper. Exact declaration order and local placement are mandatory; rejected
+bindings remain owned for transactional rollback. Each phase file owns one transition: plan-selected RSS/Federated
 access-token provider preflight, infrastructure construction plus Service Token replay-store
 completion, domain wiring, listener finalization, then launch. The selected profiles retain distinct typed providers,
 resources, and readiness signals throughout that chain. Infrastructure capabilities are complete
@@ -53,6 +56,11 @@ This catalog does not construct instances or read configuration/secrets, and it 
 for the current `modules_gen.rs` live output carrier. #1792 owns live dispatch and bypass removal.
 `runtime-baseline verify` prevents later runtime-root movement from silently changing the derived
 inventory.
+
+The aggregate live inventory freezes all four plan families together: provider declarations,
+generated active catalog, and consumed outputs; listener declarations and generated/live
+membership; domain declarations, local projection, and live bindings; placement declarations and
+local/remote projections. This is one closure proof, not four summary counts.
 
 ## Shared Inputs And Module Outputs
 
@@ -123,9 +131,18 @@ provider resources, with tracing flushed last. Exact registration anchors and th
 - event transport restores a parallel output type, exposes its production wiring API outside the
   crate, bypasses the publisher/subscriber receipts, or registers lifecycle primitives outside the
   common helper
+
 - `DomainModuleResult::merge` is absent or stops merging a field
 - listener execution gains a second projection/finalizer, loses its mandatory private carrier,
   accepts a plain listener vector at launch, restores raw-value/config auth decisions or manual
   Health construction, or stops enforcing exact plan/generated/live domain evidence
+
+`cargo xtask runtime-root guard` is the independent root-responsibility ratchet. Its closed,
+append-only policy records the pre-#1794 baseline and every accepted revision. #1794 moves raw root
+LOC from 9,428 to 260; its frozen responsibility vector is
+`11 functions / 1 type / 2 const-static / 3 impl methods / 8 public modules / 10 public re-export leaves / 0 inline production modules`.
+Every later revision must be component-wise non-increasing. Policy deletion, truncation, metric
+increases, unknown fields, Rust or TOML parse failures, and comment/string/dead-helper bait fail
+closed.
 
 `cargo xtask verify --fast` and `cargo xtask ci full` run this gate before `archrules`, so `RUNTIME-BASELINE-DRIFT-01` is indexed by `cargo xtask archrules verify`.

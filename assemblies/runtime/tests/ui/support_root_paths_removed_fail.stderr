@@ -1,0 +1,7 @@
+error[E0432]: unresolved imports `runtime::SystemClock`, `runtime::TracingAuthAuditSink`
+ --> tests/ui/support_root_paths_removed_fail.rs:1:15
+  |
+1 | use runtime::{SystemClock, TracingAuthAuditSink};
+  |               ^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^ no `TracingAuthAuditSink` in the root
+  |               |
+  |               no `SystemClock` in the root

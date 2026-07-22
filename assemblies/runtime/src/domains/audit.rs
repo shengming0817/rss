@@ -10,8 +10,9 @@ use bootstrap::DomainBinding;
 use crypto::RustCryptoMacVerifier;
 use primitives::MacKey;
 
+use crate::SharedRuntimeDeps;
 use crate::config::{ServingConfigMapper, SnapshotConfig};
-use crate::{SharedRuntimeDeps, SystemClock};
+use crate::support::SystemClock;
 
 const AUDIT_CHAIN_KEY_ENV: &str = "RSS_AUDIT_CHAIN_KEY_B64URL";
 

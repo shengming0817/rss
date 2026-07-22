@@ -70,6 +70,8 @@ cargo xtask assembly validate                          # assembly 声明与依�
 cargo xtask assembly generate-modules --check          # domain modules 生成物漂移门
 cargo xtask assembly generate-providers --check        # typed provider catalog 独立漂移门
 cargo xtask assembly lock check                        # 全仓 AssemblyLock raw-byte 漂移门
+cargo xtask runtime-baseline verify                    # RuntimePlan 四族 live closure 与 wiring golden
+cargo xtask runtime-root guard                         # runtime root 单调职责/LOC ratchet
 cargo xtask layer-deps                                 # source-centric 分层依赖 lint
 cargo xtask codegen --check                            # 契约 codegen 漂移门
 ./hack/cargo.sh xtask l2-assurance                     # 生成 9 producer + 5 fact 的 L2 assurance inventory
@@ -81,6 +83,11 @@ cargo clippy --workspace --all-targets -- -D warnings  # lint（clock 注入 / p
 cargo deny check                                       # 分层禁依赖 + license + advisory
 cargo dylint --all                                     # AST 级自写 lint（domain 禁 derive serde 等）
 ```
+
+`runtime::operator::*` 是 operator 命令的唯一 Rust API 路径，serving 继续只使用
+`runtime::{prepare_runtime, run, shutdown_runtime}`。共享时钟与审计 sink 只从
+`runtime::support::{SystemClock, TracingAuthAuditSink}` 导入。旧 root operator/support 路径没有 alias 或兼容 shim；
+`runtime-root guard` 的 append-only policy 会拒绝 root LOC、职责或 public surface 回涨。
 
 `providers_gen.rs` 是每个 assembly crate 内部编译的 provider constructor catalog，不是外部
 SDK/API，也不读取环境、配置或 secret。它只收 active provider，并通过闭合 role、consumer、factory

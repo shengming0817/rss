@@ -336,7 +336,7 @@ fn domain_placement_demo_with_remote_fails_closed() {
     let snapshot = profile_snapshot(&[("RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD", "peer-cell")]);
     let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled plan");
     let placement = runtime_plan.placement_execution_plan(snapshot.view());
-    let error = match crate::DomainTransportConfig::from_placement(
+    let error = match crate::phase::test_support::DomainTransportConfig::from_placement(
         bootstrap::Topology::Demo,
         &placement,
         &crate::config::ServingConfigMapper::for_test(snapshot.view()),
@@ -361,14 +361,17 @@ fn domain_placement_all_local_demo_yields_inproc() {
     let snapshot = profile_snapshot(&[]);
     let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled plan");
     let placement = runtime_plan.placement_execution_plan(snapshot.view());
-    let config = crate::DomainTransportConfig::from_placement(
+    let config = crate::phase::test_support::DomainTransportConfig::from_placement(
         bootstrap::Topology::Demo,
         &placement,
         &crate::config::ServingConfigMapper::for_test(snapshot.view()),
     )
     .expect("all-local demo must be InProc");
     assert!(
-        matches!(config, crate::DomainTransportConfig::InProc),
+        matches!(
+            config,
+            crate::phase::test_support::DomainTransportConfig::InProc
+        ),
         "expected InProc for all-local demo"
     );
 }
@@ -383,7 +386,7 @@ fn domain_placement_transport_targets_bijection_with_remote_set() {
         .map(|domain| domain.as_str().to_ascii_uppercase())
         .collect::<Vec<_>>();
     assert_eq!(remotes, vec!["IDENTITY".to_owned()]);
-    let targets = crate::build_domain_transport_targets_from(
+    let targets = crate::phase::test_support::build_domain_transport_targets_from(
         bootstrap::Topology::DurableShared,
         &remotes,
         |name| match name {
@@ -404,7 +407,7 @@ fn domain_placement_transport_targets_bijection_with_remote_set() {
 #[test]
 fn domain_placement_isolated_shared_url_with_remote_fails_closed() {
     let remotes = vec!["IDENTITY".to_owned()];
-    let error = crate::build_domain_transport_targets_from(
+    let error = crate::phase::test_support::build_domain_transport_targets_from(
         bootstrap::Topology::DurableIsolated,
         &remotes,
         |name| match name {

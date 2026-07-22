@@ -38,6 +38,7 @@
 //!                                      deterministic L2 provider conformance enrollment matrix
 //!   `cargo xtask runtime-baseline list|verify`
 //!                                      runtime assembly baseline 清单 / 漂移门（#1656，CI 门）
+//!   `cargo xtask runtime-root guard`    runtime composition-root 单调职责 ratchet（RUNTIME-ROOT-RATCHET-01）
 //!   `cargo xtask runtime-deps guard`    SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）
 //!   `cargo xtask runtime-env guard`     runtime ambient environment single-funnel guard（RUNTIME-ENV-FUNNEL-01）
 //!   `cargo xtask runtime-deployment-spec [--selftest] [--against <git-ref>]`
@@ -131,6 +132,7 @@ mod runtime_baseline;
 mod runtime_deployment_spec;
 mod runtime_deps_guard;
 mod runtime_env_guard;
+mod runtime_root_guard;
 mod schema_rls;
 mod setlocal_funnel;
 mod shipped_feature_guard;
@@ -172,6 +174,7 @@ enum Command {
     RuntimeBaselineList,
     RuntimeBaselineVerify,
     RuntimeDeploymentSpec(runtime_deployment_spec::Options),
+    RuntimeRootGuard,
     RuntimeDepsGuard,
     RuntimeEnvGuard,
     ContractBreaking {
@@ -273,6 +276,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["runtime-deployment-spec", rest @ ..] => {
             runtime_deployment_spec::parse_options(rest).map(Command::RuntimeDeploymentSpec)
         }
+        ["runtime-root", rest @ ..] => parse_runtime_root(rest),
         ["runtime-deps", rest @ ..] => parse_runtime_deps(rest),
         ["runtime-env", rest @ ..] => parse_runtime_env(rest),
         ["contract", rest @ ..] => parse_contract(rest),
@@ -458,6 +462,14 @@ fn parse_runtime_baseline(args: &[&str]) -> Result<Command> {
         other => bail!(
             "未知 runtime-baseline 子命令: {other:?}；用法: cargo xtask runtime-baseline <list | verify>"
         ),
+    }
+}
+
+/// 解析 `runtime-root guard` 子命令（fail-closed：只接受 guard，不提供 alias/尾参）。
+fn parse_runtime_root(args: &[&str]) -> Result<Command> {
+    match args {
+        ["guard"] => Ok(Command::RuntimeRootGuard),
+        other => bail!("未知 runtime-root 子命令: {other:?}；用法: cargo xtask runtime-root guard"),
     }
 }
 
@@ -677,6 +689,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::RuntimeBaselineList => runtime_baseline::list(),
         Command::RuntimeBaselineVerify => diagnostic::run_check(&runtime_baseline::RuntimeBaseline),
         Command::RuntimeDeploymentSpec(options) => runtime_deployment_spec::run(&options),
+        Command::RuntimeRootGuard => diagnostic::run_check(&runtime_root_guard::RuntimeRootGuard),
         Command::RuntimeDepsGuard => diagnostic::run_check(&runtime_deps_guard::RuntimeDepsGuard),
         Command::RuntimeEnvGuard => diagnostic::run_check(&runtime_env_guard::RuntimeEnvGuard),
         Command::ContractBreaking { against } => {
@@ -1111,6 +1124,23 @@ mod tests {
         assert!(parse_command(&s(&["runtime-deps", "--guard"])).is_err());
         assert!(parse_command(&s(&["runtime-deps", "guard", "extra"])).is_err());
         assert!(parse_command(&s(&["runtime-deps", "bogus"])).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_runtime_root_guard_is_exact() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["runtime-root", "guard"]))?,
+            Command::RuntimeRootGuard
+        );
+        for bad in [
+            s(&["runtime-root"]),
+            s(&["runtime-root", "--guard"]),
+            s(&["runtime-root", "guard", "extra"]),
+            s(&["runtime_root", "guard"]),
+        ] {
+            assert!(parse_command(&bad).is_err(), "accepted {bad:?}");
+        }
         Ok(())
     }
 

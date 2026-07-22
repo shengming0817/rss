@@ -1,6 +1,7 @@
 //! Bundled RuntimePlan compiler.
 
 mod domain;
+mod domain_exec;
 mod listener;
 mod placement;
 mod placement_exec;
@@ -17,6 +18,7 @@ use std::fmt;
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
 const BUNDLED_ASSEMBLY_LOCK: &[u8] = include_bytes!("../assembly.lock.json");
 
+pub(crate) use domain_exec::DomainExecutionPlan;
 pub(crate) use placement_exec::PlacementExecutionPlan;
 #[cfg(test)]
 pub(crate) use placement_exec::{PlacementExecutionSpec, PlacementMode};
@@ -133,6 +135,14 @@ impl RuntimePlan {
         config: SnapshotConfig<'_>,
     ) -> PlacementExecutionPlan {
         placement_exec::mint(&self.plan, &self.assembly_identity, config)
+    }
+
+    /// Project the exact locally composed domain sequence from plan declarations and placement.
+    pub(crate) fn domain_execution_plan(
+        &self,
+        placement: &PlacementExecutionPlan,
+    ) -> DomainExecutionPlan {
+        domain_exec::mint(&self.plan, placement)
     }
 }
 

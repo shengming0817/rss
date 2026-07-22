@@ -2,22 +2,33 @@ use super::{
     InfraBuilt, PG_MODULE_COMMITTED_ONCE, ProvidersBuilt, RuntimePhaseState, UncommittedModule,
     phase_result,
 };
+pub(super) mod dlx;
+pub(super) mod domain_transport;
+pub(super) mod keyring;
+
+use self::dlx::{
+    DlxLifecycleBootstrapConfig, build_dlx_lifecycle_bootstrap_config_from,
+    verify_dlx_vault_key_capability,
+};
+use self::domain_transport::{
+    DomainTransportConfig, DomainTransportRuntime, topology_label, wire_domain_transport,
+};
+use self::keyring::build_command_idempotency_keyring_from;
+use super::maintenance::wire_service_token_replay_sweeper;
+use crate::SharedRuntimeDeps;
 use crate::config::RuntimeServingConfigParts;
 use crate::infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
 use crate::infra::redis::{RedisRuntimeConfig, build_redis_runtime_deps};
 use crate::infra::s3::{S3RuntimeConfig, S3RuntimeConfigParts, build_s3_runtime_deps};
 use crate::infra::vault::VaultRuntimeConfig;
-use crate::{
-    DlxLifecycleBootstrapConfig, SharedRuntimeDeps, SystemClock,
-    build_command_idempotency_keyring_from, build_dlx_lifecycle_bootstrap_config_from,
-    topology_label, verify_dlx_vault_key_capability, wire_domain_transport,
-    wire_service_token_replay_sweeper,
-};
+use crate::support::SystemClock;
 use anyhow::Context as _;
 use bootstrap::DomainModuleResult;
 use postgres::{PgDlxLifecycleRuntime, PgRuntimeDeps};
 use std::sync::Arc;
 use std::time::Duration;
+
+const SERVICE_TOKEN_REPLAY_STORE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) struct RuntimeWiringInputs {
     pub(super) event_transport: crate::event_transport::EventTransportConfig,
@@ -32,7 +43,7 @@ struct BuiltInfra {
     deps: SharedRuntimeDeps,
     s3_canary_config: crate::infra::s3::S3CanaryConfig,
     wiring_inputs: RuntimeWiringInputs,
-    domain_transport: crate::DomainTransportRuntime,
+    domain_transport: DomainTransportRuntime,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
     redis_readiness_period: Duration,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
@@ -208,7 +219,7 @@ impl<'a> ProvidersBuilt<'a> {
                     crate::infra::oidc::build_service_token_provider(
                         config,
                         &pg_owner,
-                        crate::SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+                        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
                     )
                     .context("build service-token verifier with durable replay")
                 })
@@ -274,7 +285,7 @@ impl<'a> ProvidersBuilt<'a> {
                     dlx_archive_key_provider_permit,
                 ))
                 .context("record DLX provider output")?;
-            let domain_transport_config = crate::DomainTransportConfig::from_placement(
+            let domain_transport_config = DomainTransportConfig::from_placement(
                 event_transport.topology(),
                 &placement_execution_plan,
                 &crate::config::ServingConfigMapper::new(config),

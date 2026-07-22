@@ -34,6 +34,7 @@ pub(crate) enum Rule {
 
 #[derive(Clone, Copy)]
 struct GrantException {
+    path: &'static str,
     owner: &'static str,
     caller: &'static str,
     constant: &'static str,
@@ -41,21 +42,25 @@ struct GrantException {
 
 const GRANT_EXCEPTIONS: &[GrantException] = &[
     GrantException {
+        path: "assemblies/runtime/src/operator/projection.rs",
         owner: "load_projection_maintenance_grants_from_command_env",
         caller: "projection_maintenance_operator_receipt",
         constant: "PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV",
     },
     GrantException {
+        path: "assemblies/runtime/src/operator/audit_ledger.rs",
         owner: "load_audit_ledger_verify_grants_from_command_env",
         caller: "audit_ledger_verify_operator_subject",
         constant: "AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV",
     },
     GrantException {
+        path: "assemblies/runtime/src/operator/dlq.rs",
         owner: "load_dlq_operator_grants_from_command_env",
         caller: "dlq_operator_receipt",
         constant: "DLQ_OPERATOR_GRANTS_ENV",
     },
     GrantException {
+        path: "assemblies/runtime/src/operator/reconcile.rs",
         owner: "load_reconcile_operator_grants_from_command_env",
         caller: "run_reconcile_target_command",
         constant: "RECONCILE_OPERATOR_GRANTS_ENV",
@@ -664,7 +669,7 @@ impl ExpectedInventory {
             let fallback = inventory
                 .owner_sites
                 .first()
-                .map_or(LIB_PATH, |site| site.path.as_str());
+                .map_or(grant.path, |site| site.path.as_str());
             for (kind, sites, suffix) in [
                 (
                     InventoryKind::GrantSignature,
@@ -706,7 +711,7 @@ impl ExpectedInventory {
                     .collect::<Vec<_>>()
                     .join(",");
                 let subject = inventory.constants.first().map_or_else(
-                    || format!("{LIB_PATH} ({})", grant.constant),
+                    || format!("{} ({})", grant.path, grant.constant),
                     |constant| format!("{} ({})", constant.site.render(), grant.constant),
                 );
                 findings.push(finding(
@@ -761,15 +766,12 @@ fn render_sites(sites: &[ObservedSite]) -> String {
 }
 
 fn collect_constants(file: &syn::File, path: &str, expected: &mut ExpectedInventory) {
-    if path != LIB_PATH {
-        return;
-    }
     for item in &file.items {
         if let syn::Item::Const(item) = item
             && attrs_may_be_runtime_production(&item.attrs)
             && let Some(grant) = GRANT_EXCEPTIONS
                 .iter()
-                .find(|grant| item.ident == grant.constant)
+                .find(|grant| path == grant.path && item.ident == grant.constant)
             && let syn::Expr::Lit(syn::ExprLit {
                 lit: syn::Lit::Str(value),
                 ..
@@ -880,7 +882,7 @@ impl FileScanner<'_> {
         let grant = GRANT_EXCEPTIONS.iter().find(|grant| {
             self.module_depth == 0
                 && self.function_depth == 1
-                && self.path == LIB_PATH
+                && self.path == grant.path
                 && self.owner == grant.owner
         })?;
         let exact = canonical_path
@@ -1138,16 +1140,15 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
         }
         if top_level
             && self.module_depth == 0
-            && self.path == LIB_PATH
             && let Some(grant) = GRANT_EXCEPTIONS
                 .iter()
-                .find(|grant| self.owner == grant.owner)
+                .find(|grant| self.path == grant.path && self.owner == grant.owner)
         {
             let inventory = self.expected.grants.entry(grant.owner).or_default();
             inventory
                 .owner_sites
                 .push(ObservedSite::new(self.path, item.span()));
-            if matches!(item.vis, syn::Visibility::Inherited)
+            if grant_owner_visibility_is_canonical(&item.vis)
                 && signature_has_operator_capability(&item.sig)
             {
                 inventory
@@ -1300,7 +1301,7 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
         {
             let exact = path.path.leading_colon.is_none()
                 && path.path.segments.len() == 1
-                && self.path == LIB_PATH
+                && self.path == grant.path
                 && self.module_depth == 0
                 && self.function_depth == 1
                 && self.owner == grant.caller
@@ -1358,7 +1359,7 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
                 || GRANT_EXCEPTIONS.iter().any(|grant| {
                     self.module_depth == 0
                         && self.function_depth == 1
-                        && self.path == LIB_PATH
+                        && self.path == grant.path
                         && self.owner == grant.owner
                 });
             push(
@@ -1487,6 +1488,14 @@ fn signature_has_operator_capability(signature: &syn::Signature) -> bool {
         })
 }
 
+fn grant_owner_visibility_is_canonical(visibility: &syn::Visibility) -> bool {
+    matches!(visibility, syn::Visibility::Restricted(restricted)
+        if restricted.in_token.is_none()
+            && restricted.path.leading_colon.is_none()
+            && restricted.path.segments.len() == 1
+            && restricted.path.segments[0].ident == "super")
+}
+
 fn is_exact_operator_capability(expr: &syn::Expr) -> bool {
     matches!(transparent(expr), syn::Expr::MethodCall(call)
         if call.method == "operator_capability"
@@ -1569,7 +1578,7 @@ mod tests {
     use super::*;
 
     fn canonical_sources() -> Vec<(String, String)> {
-        vec![
+        let mut sources = vec![
             (
                 CONFIG_PATH.to_owned(),
                 include_str!("../fixtures/runtime-env-guard/canonical-config.rs").to_owned(),
@@ -1578,7 +1587,33 @@ mod tests {
                 LIB_PATH.to_owned(),
                 include_str!("../fixtures/runtime-env-guard/canonical-lib.rs").to_owned(),
             ),
-        ]
+        ];
+        for grant in GRANT_EXCEPTIONS {
+            let (caller_parameter, caller_argument) =
+                if grant.caller == "run_reconcile_target_command" {
+                    (
+                        "runtime_inputs: &OperatorRuntimeInputs",
+                        "runtime_inputs.operator_capability()",
+                    )
+                } else {
+                    ("operator: OperatorRuntimeCapability<'_>", "operator")
+                };
+            sources.push((
+                grant.path.to_owned(),
+                format!(
+                    "const {constant}: &str = \"RSS_{literal}\";\n\
+                     struct OperatorRuntimeCapability<'a>(&'a ());\n\
+                     struct OperatorRuntimeInputs;\n\
+                     pub(super) fn {owner}(_operator: OperatorRuntimeCapability<'_>) {{ let _ = std::env::var({constant}); }}\n\
+                     fn {caller}({caller_parameter}) {{ {owner}({caller_argument}); }}\n",
+                    constant = grant.constant,
+                    literal = grant.constant.trim_end_matches("_ENV"),
+                    owner = grant.owner,
+                    caller = grant.caller,
+                ),
+            ));
+        }
+        sources
     }
 
     fn with_source(path: &str, source: impl Into<String>) -> Vec<(String, String)> {
@@ -1587,15 +1622,16 @@ mod tests {
         sources
     }
 
-    fn with_mutated(path: &str, needle: &str, replacement: &str) -> Vec<(String, String)> {
+    fn with_mutated(path: &str, needle: &str, replacement: &str) -> Result<Vec<(String, String)>> {
         let mut sources = canonical_sources();
-        let index = usize::from(path == LIB_PATH);
-        assert_eq!(sources[index].0, path, "canonical source missing");
-        let source = &mut sources[index].1;
+        let (_, source) = sources
+            .iter_mut()
+            .find(|(candidate, _)| candidate == path)
+            .with_context(|| format!("canonical source missing: {path}"))?;
         let mutated = source.replacen(needle, replacement, 1);
         assert_ne!(*source, mutated, "synthetic red must mutate");
         *source = mutated;
-        sources
+        Ok(sources)
     }
 
     fn assert_rule(sources: &[(String, String)], rule: Rule) -> Result<Vec<Finding>> {
@@ -1676,7 +1712,7 @@ mod tests {
             "std::env::var_os(\"RSS_WRONG\")",
         ] {
             assert_rule(
-                &with_mutated(CONFIG_PATH, "std::env::var_os(key.as_str())", replacement),
+                &with_mutated(CONFIG_PATH, "std::env::var_os(key.as_str())", replacement)?,
                 Rule::MissingCapture,
             )?;
         }
@@ -1702,7 +1738,7 @@ mod tests {
                 CONFIG_PATH,
                 "std::env::var_os(key.as_str())",
                 "std::env::var_os(key.as_str());\nlet _ = std::env::var_os(key.as_str())",
-            ),
+            )?,
             Rule::MissingCapture,
         )?;
         let inventory = duplicate
@@ -1781,7 +1817,7 @@ mod tests {
             .enumerate()
             {
                 let findings = assert_rule(
-                    &with_mutated(LIB_PATH, &reader, &replacement),
+                    &with_mutated(grant.path, &reader, &replacement)?,
                     Rule::NonCanonicalException,
                 )?;
                 assert!(
@@ -1797,19 +1833,24 @@ mod tests {
                 );
             }
         }
+        let projection = &GRANT_EXCEPTIONS[0];
         let mut detached = with_mutated(
-            LIB_PATH,
+            projection.path,
             "let _ = std::env::var(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV);",
             "let _ = ();",
-        );
-        detached[1].1.push_str("\nmod bait { fn load_projection_maintenance_grants_from_command_env() { let _ = std::env::var(super::PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); } }");
+        )?;
+        let (_, projection_source) = detached
+            .iter_mut()
+            .find(|(path, _)| path == projection.path)
+            .context("projection canonical source missing")?;
+        projection_source.push_str("\nmod bait { fn load_projection_maintenance_grants_from_command_env() { let _ = std::env::var(super::PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); } }");
         assert_rule(&detached, Rule::NonCanonicalException)?;
         assert_rule(&detached, Rule::AmbientRead)?;
         let extra_call = with_mutated(
-            LIB_PATH,
+            projection.path,
             "fn projection_maintenance_operator_receipt",
             "fn serving(operator: OperatorRuntimeCapability<'_>) { load_projection_maintenance_grants_from_command_env(operator); }\nfn projection_maintenance_operator_receipt",
-        );
+        )?;
         assert_rule(&extra_call, Rule::NonCanonicalException)?;
         for replacement in [
             "crate::load_projection_maintenance_grants_from_command_env(operator)",
@@ -1819,18 +1860,18 @@ mod tests {
         ] {
             assert_rule(
                 &with_mutated(
-                    LIB_PATH,
+                    projection.path,
                     "load_projection_maintenance_grants_from_command_env(operator)",
                     replacement,
-                ),
+                )?,
                 Rule::NonCanonicalException,
             )?;
         }
         let nested = with_mutated(
-            LIB_PATH,
+            projection.path,
             "fn load_projection_maintenance_grants_from_command_env(_operator: OperatorRuntimeCapability<'_>) { let _ = std::env::var(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); }",
             "fn decoy() { fn load_projection_maintenance_grants_from_command_env(_operator: OperatorRuntimeCapability<'_>) { let _ = std::env::var(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); } }",
-        );
+        )?;
         assert_rule(&nested, Rule::NonCanonicalException)?;
         assert_rule(&nested, Rule::AmbientRead)?;
         Ok(())
@@ -1842,7 +1883,7 @@ mod tests {
             LIB_PATH,
             "struct OperatorRuntimeCapability",
             "#[cfg(test)] mod config_tests;\nstruct OperatorRuntimeCapability",
-        );
+        )?;
         sources.push((
             "assemblies/runtime/src/config_tests.rs".to_owned(),
             "fn test_only() { let _ = std::env::var(\"RSS_TEST\"); }".to_owned(),
@@ -1865,7 +1906,7 @@ mod tests {
                 &format!(
                     "{declaration}\n#[cfg(test)] #[path = \"./shared.rs\"] mod test_shared;\nstruct OperatorRuntimeCapability"
                 ),
-            );
+            )?;
             shared.push((
                 "assemblies/runtime/src/shared.rs".to_owned(),
                 "fn live() { let _ = std::env::var(\"RSS_LIVE\"); }".to_owned(),

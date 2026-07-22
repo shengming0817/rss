@@ -14,7 +14,8 @@ pub enum RuntimePhase {
 }
 
 impl RuntimePhase {
-    /// Stable phase order used by tests and low-cardinality logs.
+    /// Stable phase order used by transition and low-cardinality log tests.
+    #[cfg(test)]
     pub const ALL: [Self; 5] = [
         Self::BuildProvider,
         Self::BuildInfra,
@@ -39,10 +40,12 @@ mod domains;
 mod finalize;
 mod infra;
 mod launch;
+mod maintenance;
 mod provider;
 
 use crate::config::{RuntimeConfigSnapshot, SnapshotConfig};
 use bootstrap::DomainModuleResult;
+use infra::domain_transport::DomainTransportRuntime;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -88,6 +91,29 @@ impl UncommittedModule {
 pub(crate) use domains::validate_domain_listener_evidence;
 #[cfg(test)]
 pub(crate) use infra::after_required_preflight;
+pub(crate) use infra::domain_transport::{
+    SPIFFE_ENDPOINT_SOCKET_ENV, required_spiffe_endpoint_from_value,
+};
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) use super::infra::dlx::build_dlx_lifecycle_bootstrap_config_from;
+    pub(crate) use super::infra::domain_transport::{
+        DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV, DOMAIN_TRANSPORT_READY_PROBE_NAME,
+        DomainTransportConfig, DomainTransportRuntime, DomainTransportRuntimeInner,
+        InProcDomainTransport, RuntimeDomainTransport, SPIFFE_ENDPOINT_SOCKET_ENV,
+        build_domain_transport_targets_from, required_spiffe_endpoint_from_value,
+    };
+    pub(crate) use super::infra::keyring::{
+        COMMAND_IDEMPOTENCY_KEYS_ENV, build_command_idempotency_keyring_from,
+    };
+    pub(crate) use super::maintenance::{
+        AUTH_GRANT_SWEEPER_PROBE_NAME, AUTH_GRANT_SWEEPER_WORKER_NAME, AuthGrantSweepFuture,
+        AuthGrantSweepRunner, RLS_READY_PROBE_NAME, RlsReadyProbe,
+        SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME, SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME,
+        SweeperHealth, run_auth_grant_sweeper_loop, sweeper_module_result,
+    };
+}
 
 /// Process-wide inputs shared by the mutually exclusive serving and operator preparations.
 pub(crate) struct PreparedRuntimeInputs {
@@ -208,17 +234,41 @@ struct PhaseContext<'a> {
     runtime_plan: crate::plan::RuntimePlan,
 }
 
-impl<'a> PhaseContext<'a> {
+/// Pre-domain phase context that linearly carries the plan-owned composition capability.
+struct DomainPhaseContext<'a> {
+    context: PhaseContext<'a>,
+    domain_execution_plan: crate::plan::DomainExecutionPlan,
+}
+
+impl<'a> DomainPhaseContext<'a> {
     fn new(
         runtime_inputs: &'a mut ServingRuntimeInputs,
         runtime_plan: crate::plan::RuntimePlan,
+        domain_execution_plan: crate::plan::DomainExecutionPlan,
     ) -> Self {
         Self {
-            runtime_inputs,
-            runtime_plan,
+            context: PhaseContext {
+                runtime_inputs,
+                runtime_plan,
+            },
+            domain_execution_plan,
         }
     }
 
+    fn into_parts(self) -> (PhaseContext<'a>, crate::plan::DomainExecutionPlan) {
+        (self.context, self.domain_execution_plan)
+    }
+}
+
+impl<'a> std::ops::Deref for DomainPhaseContext<'a> {
+    type Target = PhaseContext<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.context
+    }
+}
+
+impl PhaseContext<'_> {
     fn config(&self) -> SnapshotConfig<'_> {
         self.runtime_inputs.config()
     }
@@ -249,7 +299,7 @@ pub(crate) struct Planned<'a> {
 
 #[must_use]
 pub(crate) struct ProvidersBuilt<'a> {
-    context: PhaseContext<'a>,
+    context: DomainPhaseContext<'a>,
     provider_build: crate::provider_output::ProviderBuild,
     provider_factories: crate::provider_output::ProviderFactoryDispatch,
     listener_execution_plan: crate::plan::ListenerExecutionPlan,
@@ -263,7 +313,7 @@ pub(crate) struct ProvidersBuilt<'a> {
 
 #[must_use]
 pub(crate) struct InfraBuilt<'a> {
-    context: PhaseContext<'a>,
+    context: DomainPhaseContext<'a>,
     provider_build: crate::provider_output::ProviderBuild,
     provider_factories: crate::provider_output::ProviderFactoryDispatch,
     listener_execution_plan: crate::plan::ListenerExecutionPlan,
@@ -272,7 +322,7 @@ pub(crate) struct InfraBuilt<'a> {
     deps: crate::SharedRuntimeDeps,
     s3_canary_config: crate::infra::s3::S3CanaryConfig,
     wiring_inputs: infra::RuntimeWiringInputs,
-    domain_transport: crate::DomainTransportRuntime,
+    domain_transport: DomainTransportRuntime,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
     redis_readiness_period: Duration,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
@@ -293,7 +343,7 @@ pub(crate) struct DomainsWired<'a> {
     runtime_federated_access:
         Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
     runtime_service_token: Option<crate::infra::oidc::RuntimeServiceTokenProvider>,
-    domain_transport: crate::DomainTransportRuntime,
+    domain_transport: DomainTransportRuntime,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
     registry: bootstrap::Registry,
@@ -309,7 +359,7 @@ pub(crate) struct Finalized<'a> {
     runtime_federated_access:
         Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
     runtime_service_token: Option<crate::infra::oidc::RuntimeServiceTokenProvider>,
-    domain_transport: crate::DomainTransportRuntime,
+    domain_transport: DomainTransportRuntime,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
     listeners: crate::routes::FinalizedListenerSet,
 }
@@ -698,6 +748,8 @@ mod tests {
         );
 
         assert_not_impl_any!(Planned<'static>: Clone, Copy, std::fmt::Debug, Default);
+        assert_not_impl_any!(crate::plan::DomainExecutionPlan: Clone, Copy, std::fmt::Debug, Default);
+        assert_not_impl_any!(DomainPhaseContext<'static>: Clone, Copy, std::fmt::Debug, Default);
         assert_not_impl_any!(ProvidersBuilt<'static>: Clone, Copy, std::fmt::Debug, Default);
         assert_not_impl_any!(InfraBuilt<'static>: Clone, Copy, std::fmt::Debug, Default);
         assert_not_impl_any!(DomainsWired<'static>: Clone, Copy, std::fmt::Debug, Default);

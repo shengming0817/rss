@@ -4,7 +4,8 @@ use bootstrap::DomainBinding;
 use settings_composition::{KeyProviderReadinessInterval, SettingsModuleDeps};
 use vault::caps as vault_caps;
 
-use crate::{SharedRuntimeDeps, SystemClock};
+use crate::SharedRuntimeDeps;
+use crate::support::SystemClock;
 
 pub use settings_composition::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
 

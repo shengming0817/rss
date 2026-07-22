@@ -45,7 +45,8 @@ use rustc_span::Span;
 
 /// 仅这些 crate 可调用认证证据 / 审计 subject funnel——单一 greppable 真源，扩项须治理评审。
 /// 组合根（assembly / bin）的验签桥在凭据校验通过后构造 `Authenticated` 并经外层 `.layer()` 注入，是唯一合法构造点。
-/// 当前生产 runtime 验签桥构造 access/mTLS 与 service-token evidence；allowlist 精确覆盖该组合根。
+/// 当前生产 runtime 验签桥构造 access/mTLS 与 service-token evidence；allowlist 精确覆盖
+/// `auth_bridge` 与 `operator::{projection,dlq,settings}` 的 nested def-path。
 /// assemblies/runtime → package name "runtime"（#1309 单一组合根；薄 bin bins/server、bins/rss 已移出）。
 /// 定义 crate `httpserve` 不入 allowlist：其生产代码不构造 `Authenticated`（仅 `#[cfg(test)]` 调，不被扫）。
 const ALLOWED_AUTHENTICATED_MINT_FUNCTIONS: &[(&str, &str)] = &[
@@ -56,23 +57,29 @@ const ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS: &[(&str, &str)] = &[
     ("allow_evidence", "auth_bridge::allow_evidence"),
     (
         "verified_service_maintenance_operator_subject",
-        "verified_service_maintenance_operator_subject",
+        "operator::projection::verified_service_maintenance_operator_subject",
     ),
     (
         "verified_projection_maintenance_operator_subject",
-        "verified_projection_maintenance_operator_subject",
+        "operator::projection::verified_projection_maintenance_operator_subject",
     ),
     (
         "projection_maintenance_operator_receipt",
-        "projection_maintenance_operator_receipt",
+        "operator::projection::projection_maintenance_operator_receipt",
     ),
     (
         "authenticate_dlq_operator_principal",
-        "authenticate_dlq_operator_principal",
+        "operator::dlq::authenticate_dlq_operator_principal",
     ),
-    ("dlq_operator_receipt", "dlq_operator_receipt"),
+    (
+        "dlq_operator_receipt",
+        "operator::dlq::dlq_operator_receipt",
+    ),
 ];
-const ALLOWED_CONFIG_VALUE_CAPABILITY_FUNCTION: &str = "run_settings_config_value_maintenance";
+const ALLOWED_CONFIG_VALUE_CAPABILITY_FUNCTION: (&str, &str) = (
+    "run_settings_config_value_maintenance",
+    "operator::settings::run_settings_config_value_maintenance",
+);
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
@@ -168,8 +175,8 @@ fn config_value_capability_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId
     let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
     let item_name = cx.tcx.item_name(parent);
     let def_path = cx.tcx.def_path_str(parent);
-    item_name.as_str() == ALLOWED_CONFIG_VALUE_CAPABILITY_FUNCTION
-        && def_path == ALLOWED_CONFIG_VALUE_CAPABILITY_FUNCTION
+    item_name.as_str() == ALLOWED_CONFIG_VALUE_CAPABILITY_FUNCTION.0
+        && is_exact_runtime_path(&def_path, ALLOWED_CONFIG_VALUE_CAPABILITY_FUNCTION.1)
 }
 
 fn authenticated_mint_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
@@ -182,7 +189,7 @@ fn authenticated_mint_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> 
     ALLOWED_AUTHENTICATED_MINT_FUNCTIONS
         .iter()
         .any(|(expected_name, expected_path)| {
-            item_name.as_str() == *expected_name && def_path == *expected_path
+            item_name.as_str() == *expected_name && is_exact_runtime_path(&def_path, expected_path)
         })
 }
 
@@ -207,18 +214,12 @@ fn restricted_service_capability_funnel(
     let self_name = self_ty
         .ty_adt_def()
         .map(|adt| cx.tcx.item_name(adt.did()))?;
-    match (
-        crate_name.as_str(),
-        self_name.as_str(),
-        item_name.as_str(),
-    ) {
-        (
-            "postgres",
-            "ConfigValueMaintenanceCapability",
-            "from_verified_service_caller",
-        ) => Some(RestrictedFunnel {
-            help: "仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability",
-        }),
+    match (crate_name.as_str(), self_name.as_str(), item_name.as_str()) {
+        ("postgres", "ConfigValueMaintenanceCapability", "from_verified_service_caller") => {
+            Some(RestrictedFunnel {
+                help: "仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability",
+            })
+        }
         _ => None,
     }
 }
@@ -287,8 +288,15 @@ fn principal_accessor_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> 
     ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS
         .iter()
         .any(|(expected_name, expected_path)| {
-            item_name.as_str() == *expected_name && def_path == *expected_path
+            item_name.as_str() == *expected_name && is_exact_runtime_path(&def_path, expected_path)
         })
+}
+
+fn is_exact_runtime_path(actual: &str, expected_without_crate: &str) -> bool {
+    actual == expected_without_crate
+        || actual
+            .strip_prefix("runtime::")
+            .is_some_and(|path| path == expected_without_crate)
 }
 
 /// 在调用处报告；用调用 expr 的 `HirId` 解析 lint 级别，使 item/expr 级
@@ -322,7 +330,7 @@ fn ui_disallowed() {
 #[test]
 fn ui_runtime_exact_settings_wrapper() {
     // example target 名 `runtime`（= 唯一合法组合根 crate）验证 Authenticated/Principal 的 crate
-    // allowlist，同时用 settings exact top-level wrapper 绿与 direct/nested 红锁住 capability 分支。
+    // allowlist，同时用 settings exact nested wrapper 绿与 direct/nested 红锁住 capability 分支。
     // "runtime" 不与 rss_authplan_callsite 的 "primitives" 在共享 lints workspace 撞 target 名。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "runtime");
 }

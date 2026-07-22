@@ -29,6 +29,7 @@
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
 //! INVARIANT: ASSEMBLY-LOCK-FAST-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_lock_fast_gate_is_typed_and_fail_closed", anti_vacuity = "lock::tests::shared_child_vectors_freeze_bytes_universes_and_final_fingerprint" }—— `verify --fast` executes the complete AssemblyLock protocol crate test carrier.
 //! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once between modules drift and AssemblyLock in every aggregate plan.
+//! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans", anti_vacuity = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans" }—— the three runtime Dylint UI carriers run as one typed `cargo test --locked` gate from the fixed `lints` workspace in full verify, compatibility CI, and core prerequisites, while fast remains no-compile.
 //! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }—— L2 assurance drift check is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
 //! INVARIANT: CI-ADAPTIVE-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— GitHub CI workflow
 //!   精确委托闭合 xtask job，Meta/Security 并行，Core tests 仅依赖单次 prerequisites；门归属由
@@ -61,7 +62,8 @@ use crate::workspace_root;
 use crate::{
     archrules, assembly, assembly_lock, codegen, consistency_effects, consistency_fixtures,
     contract, doc_contracts, layerdeps, reconcile_outbox_command_guard, repo_scope_guard,
-    runtime_baseline, runtime_deps_guard, runtime_env_guard, shipped_feature_guard, wsdeps,
+    runtime_baseline, runtime_deps_guard, runtime_env_guard, runtime_root_guard,
+    shipped_feature_guard, wsdeps,
 };
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -117,6 +119,8 @@ enum InternalCheck {
     DlxLifecycleFunnel,
     /// runtime assembly baseline 漂移门（RUNTIME-BASELINE-DRIFT-01）。
     RuntimeBaseline,
+    /// runtime composition-root 单调职责 ratchet（RUNTIME-ROOT-RATCHET-01）。
+    RuntimeRootGuard,
     /// runtime production ambient environment reader closure（RUNTIME-ENV-FUNNEL-01）。
     RuntimeEnvGuard,
     /// Runtime Deployment SpecKit schemas/tasks/fingerprints + synthetic-red closure（#1779）。
@@ -174,6 +178,9 @@ enum StepKind {
     Internal(InternalCheck),
     LocalOnlyExecution,
     Cargo,
+    /// The three runtime governance lints live in the nested nightly workspace; cwd and package
+    /// closure are represented by this variant instead of caller-controlled argv.
+    LintWorkspaceTests,
     Nextest(crate::nextest::CoreTestScope),
 }
 
@@ -367,6 +374,14 @@ fn step_runtime_baseline() -> Step {
         id: GateId::RuntimeBaseline,
         args: &[],
         kind: StepKind::Internal(InternalCheck::RuntimeBaseline),
+        env: &[],
+    }
+}
+fn step_runtime_root_guard() -> Step {
+    Step {
+        id: GateId::RuntimeRootGuard,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::RuntimeRootGuard),
         env: &[],
     }
 }
@@ -612,6 +627,24 @@ fn step_dylint() -> Step {
         // 注册 lint）升为 deny ⇒ 违例即非零退出，使 dylint 成 fail-closed 门（#1023 的核心诉求）。
         // 已验证干净树下 exit 0、无 nightly 误报。
         env: &[("DYLINT_RUSTFLAGS", "-D warnings")],
+    }
+}
+
+fn step_runtime_dylint_ui_tests() -> Step {
+    Step {
+        id: GateId::RuntimeDylintUiTests,
+        args: &[
+            "test",
+            "--locked",
+            "-p",
+            "rss_runtime_env_funnel",
+            "-p",
+            "rss_dlq_operator_callsite",
+            "-p",
+            "rss_authenticated_callsite",
+        ],
+        kind: StepKind::LintWorkspaceTests,
+        env: &[],
     }
 }
 
@@ -901,6 +934,7 @@ fn selected_for(target: PlanTarget, id: GateId) -> bool {
             GateId::BuildAllFeatures
                 | GateId::ClippyAllFeatures
                 | GateId::Dylint
+                | GateId::RuntimeDylintUiTests
                 | GateId::PostgresFeatureMatrix
                 | GateId::SecureProductionTrybuild
         ),
@@ -1128,6 +1162,21 @@ fn run_one(
             crate::nextest::NextestInvocation::for_core(scope, opts.nextest_lane, opts.partition)
                 .run(root, step.env)
         }
+        StepKind::LintWorkspaceTests => {
+            let subcommand = crate::cmd::CargoSubcommand::Test;
+            let args = step
+                .args
+                .strip_prefix(&[subcommand.as_str()])
+                .context("runtime Dylint UI gate typed test prefix drift")?;
+            run_step(
+                lane,
+                step.label(),
+                subcommand,
+                args,
+                step.env,
+                &root.join("lints"),
+            )
+        }
         StepKind::Cargo => {
             let subcommand = match step.id.spec().tool() {
                 ToolRequirement::CargoTool { tool, .. } => tool,
@@ -1281,6 +1330,7 @@ fn run_internal(check: InternalCheck, contract_against: &str) -> Result<()> {
             run_check(&crate::dlx_lifecycle_funnel::DlxLifecycleFunnel)
         }
         InternalCheck::RuntimeBaseline => run_check(&runtime_baseline::RuntimeBaseline),
+        InternalCheck::RuntimeRootGuard => run_check(&runtime_root_guard::RuntimeRootGuard),
         InternalCheck::RuntimeEnvGuard => run_check(&runtime_env_guard::RuntimeEnvGuard),
         InternalCheck::RuntimeDeploymentSpec => crate::runtime_deployment_spec::run_selftest_gate(),
         InternalCheck::RuntimeDepsGuard => run_check(&runtime_deps_guard::RuntimeDepsGuard),
@@ -1995,7 +2045,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 40);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 41);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -2049,7 +2099,7 @@ mod tests {
         let full = plan_for(PlanTarget::Core(CoreExecution::Full));
         let prerequisites = plan_for(PlanTarget::Core(CoreExecution::Prerequisites));
         let tests = plan_for(PlanTarget::Core(CoreExecution::Tests));
-        assert_eq!(prerequisites.len(), 5);
+        assert_eq!(prerequisites.len(), 6);
         assert_eq!(tests.len(), 11);
         let prereq_ids = prerequisites
             .iter()
@@ -2079,6 +2129,56 @@ mod tests {
     }
 
     #[test]
+    fn runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans() -> anyhow::Result<()> {
+        let validate = |plan: &[Step]| -> anyhow::Result<()> {
+            let gates = plan
+                .iter()
+                .filter(|step| step.id == GateId::RuntimeDylintUiTests)
+                .collect::<Vec<_>>();
+            anyhow::ensure!(gates.len() == 1, "expected one runtime Dylint UI gate");
+            let gate = gates[0];
+            anyhow::ensure!(gate.label() == "runtime-dylint-ui-tests");
+            anyhow::ensure!(matches!(gate.kind, StepKind::LintWorkspaceTests));
+            anyhow::ensure!(
+                gate.args
+                    == [
+                        "test",
+                        "--locked",
+                        "-p",
+                        "rss_runtime_env_funnel",
+                        "-p",
+                        "rss_dlq_operator_callsite",
+                        "-p",
+                        "rss_authenticated_callsite",
+                    ]
+            );
+            Ok(())
+        };
+
+        validate(&plan_for(PlanTarget::Verify))?;
+        validate(&plan_for(PlanTarget::CompatibilityCi))?;
+        validate(&plan_for(PlanTarget::Lane(CiLane::Core)))?;
+        validate(&plan_for(PlanTarget::Core(CoreExecution::Prerequisites)))?;
+        assert!(
+            verify_plan(&opts(true, false))
+                .iter()
+                .all(|step| step.id != GateId::RuntimeDylintUiTests)
+        );
+
+        let mut omitted = plan_for(PlanTarget::Verify);
+        omitted.retain(|step| step.id != GateId::RuntimeDylintUiTests);
+        assert!(validate(&omitted).is_err());
+        let mut weakened = plan_for(PlanTarget::Verify);
+        weakened
+            .iter_mut()
+            .find(|step| step.id == GateId::RuntimeDylintUiTests)
+            .context("runtime Dylint UI gate")?
+            .args = &["test", "-p", "rss_runtime_env_funnel"];
+        assert!(validate(&weakened).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn secure_production_trybuild_gate_is_feature_isolated() -> anyhow::Result<()> {
         let prerequisites = plan_for(PlanTarget::Core(CoreExecution::Prerequisites));
         let production = prerequisites
@@ -2104,14 +2204,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_59_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_61_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 59);
+        assert_eq!(plan.len(), 61);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 59);
+        assert_eq!(ids.len(), 61);
     }
 
     #[test]
@@ -2148,6 +2248,7 @@ mod tests {
                 "inbox-cutover-guard",
                 "dlx-lifecycle-funnel",
                 "runtime-baseline",
+                "runtime-root-guard",
                 "runtime-env-guard",
                 "runtime-deployment-spec",
                 "runtime-deps-guard",
@@ -2189,6 +2290,7 @@ mod tests {
                 "testkit-container-tests",
                 "deny",
                 "dylint",
+                "runtime-dylint-ui-tests",
             ]
         );
     }
@@ -2370,11 +2472,71 @@ mod tests {
                 StepKind::Internal(InternalCheck::RuntimeEnvGuard)
             )
             && index.checked_sub(1).is_some_and(|before| {
-                plan[before].id == GateId::RuntimeBaseline
+                plan[before].id == GateId::RuntimeRootGuard
                     && plan
                         .get(index + 1)
                         .is_some_and(|after| after.id == GateId::RuntimeDeploymentSpec)
             })
+    }
+
+    fn runtime_root_guard_membership_is_exact(plan: &[Step]) -> bool {
+        let members = plan
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| step.id == GateId::RuntimeRootGuard)
+            .collect::<Vec<_>>();
+        let [(index, step)] = members.as_slice() else {
+            return false;
+        };
+        step.label() == "runtime-root-guard"
+            && !step.needs_compile()
+            && step.carrier_file() == Some("xtask/src/runtime_root_guard.rs")
+            && matches!(
+                step.kind,
+                StepKind::Internal(InternalCheck::RuntimeRootGuard)
+            )
+            && index.checked_sub(1).is_some_and(|before| {
+                plan[before].id == GateId::RuntimeBaseline
+                    && plan
+                        .get(index + 1)
+                        .is_some_and(|after| after.id == GateId::RuntimeEnvGuard)
+            })
+    }
+
+    #[test]
+    fn runtime_root_guard_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
+        for plan in [
+            plan_for(PlanTarget::Verify),
+            verify_plan(&opts(true, false)),
+            plan_for(PlanTarget::Lane(CiLane::Meta)),
+            plan_for(PlanTarget::CompatibilityCi),
+        ] {
+            assert!(runtime_root_guard_membership_is_exact(&plan));
+        }
+
+        let real_plan = verify_plan(&opts(true, false));
+        let mut omitted = real_plan.clone();
+        omitted.retain(|step| step.id != GateId::RuntimeRootGuard);
+        assert!(!runtime_root_guard_membership_is_exact(&omitted));
+
+        let mut duplicated = real_plan.clone();
+        duplicated.push(
+            real_plan
+                .iter()
+                .find(|step| step.id == GateId::RuntimeRootGuard)
+                .context("committed fast plan lacks runtime-root-guard")?
+                .clone(),
+        );
+        assert!(!runtime_root_guard_membership_is_exact(&duplicated));
+
+        let mut wrong_executor = real_plan;
+        wrong_executor
+            .iter_mut()
+            .find(|step| step.id == GateId::RuntimeRootGuard)
+            .context("committed fast plan lacks runtime-root-guard")?
+            .kind = StepKind::Internal(InternalCheck::RuntimeBaseline);
+        assert!(!runtime_root_guard_membership_is_exact(&wrong_executor));
+        Ok(())
     }
 
     #[test]
@@ -2474,6 +2636,7 @@ mod tests {
                 "inbox-cutover-guard",
                 "dlx-lifecycle-funnel",
                 "runtime-baseline",
+                "runtime-root-guard",
                 "runtime-env-guard",
                 "runtime-deployment-spec",
                 "runtime-deps-guard",
@@ -2506,7 +2669,7 @@ mod tests {
 
     /// meta checks（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
     /// doc-contracts / consistency-fixtures / event-transport-guard / inbox-cutover-guard /
-    /// runtime-baseline / runtime-env-guard / runtime-deployment-spec / runtime-deps-guard / archrules / codegen / L2 assurance / pdp-allow-guard / contract-binding-guard /
+    /// runtime-baseline / runtime-root-guard / runtime-env-guard / runtime-deployment-spec / runtime-deps-guard / archrules / codegen / L2 assurance / pdp-allow-guard / contract-binding-guard /
     /// schema-rls / setlocal-funnel / pg-tenant-tx-guard / repo-scope-guard / tenancy-closeout / migrations-serial / command-symmetry /
     /// reconcile-outbox-command-guard / defer-gate）在两种模式恒在。
     #[test]
@@ -2539,6 +2702,7 @@ mod tests {
                     "inbox-cutover-guard",
                     "dlx-lifecycle-funnel",
                     "runtime-baseline",
+                    "runtime-root-guard",
                     "runtime-env-guard",
                     "runtime-deployment-spec",
                     "runtime-deps-guard",
@@ -3401,6 +3565,7 @@ mod tests {
                 "inbox-cutover-guard",
                 "dlx-lifecycle-funnel",
                 "runtime-baseline",
+                "runtime-root-guard",
                 "runtime-env-guard",
                 "runtime-deployment-spec",
                 "runtime-deps-guard",
@@ -3440,6 +3605,7 @@ mod tests {
                 "deny",
                 "audit",
                 "dylint",
+                "runtime-dylint-ui-tests",
                 "public-api",
             ]
         );
@@ -3527,6 +3693,7 @@ mod tests {
             "inbox-cutover-guard",
             "dlx-lifecycle-funnel",
             "runtime-baseline",
+            "runtime-root-guard",
             "runtime-env-guard",
             "runtime-deployment-spec",
             "runtime-deps-guard",

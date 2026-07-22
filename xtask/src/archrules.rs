@@ -727,6 +727,13 @@ fn build_index(root: &Path) -> Result<Index> {
         "runtime-deps-config",
         "verify,ci",
     )?;
+    scan_config(
+        root,
+        &mut index,
+        "xtask/runtime-root-ratchet.toml",
+        "runtime-root-ratchet-config",
+        "verify,ci",
+    )?;
     scan_public_api(root, &mut index)?;
     scan_source_invariants(root, &mut index)?;
     scan_trybuild_and_native(root, &mut index)?;
@@ -2388,7 +2395,9 @@ impl SourceKind {
         match carrier {
             "xtask" => matches!(self, Self::Code | Self::Codegen),
             "dylint" => self == Self::Dylint,
-            "deny" | "clippy" | "runtime-deps-config" => self == Self::Config,
+            "deny" | "clippy" | "runtime-deps-config" | "runtime-root-ratchet-config" => {
+                self == Self::Config
+            }
             "public-api" => self == Self::PublicApi,
             "native-hard" => matches!(self, Self::Code | Self::Rustdoc | Self::Trybuild),
             _ => false,
@@ -2923,6 +2932,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
     },
     GateDeclaration {
         path: "xtask/src/runtime_baseline.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/runtime_root_guard.rs",
         tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,
     },
@@ -4327,6 +4341,10 @@ members = ["rss_demo"]
             "# INVARIANT: RUNTIME-DEPS-CONFIG-DEMO-01 { level = \"Medium\", exec = \"verify\", source = \"config\" }\n",
         )?;
         write(
+            &root.join("xtask/runtime-root-ratchet.toml"),
+            "# INVARIANT: RUNTIME-ROOT-CONFIG-DEMO-01 { level = \"Medium\", exec = \"verify\", source = \"config\" }\n",
+        )?;
+        write(
             &root.join("xtask/src/layerdeps.rs"),
             "//! INVARIANT: XTASK-DEMO-01 { level = \"Medium\", exec = \"verify\", source = \"code\" }\n",
         )?;
@@ -4355,6 +4373,7 @@ members = ["rss_demo"]
             "LINT-DEMO-01",
             "PUBLICAPI-DEMO-01",
             "RUNTIME-DEPS-CONFIG-DEMO-01",
+            "RUNTIME-ROOT-CONFIG-DEMO-01",
             "XTASK-DEMO-01",
         ] {
             assert!(index.records.iter().any(|r| r.id == id), "missing {id}");

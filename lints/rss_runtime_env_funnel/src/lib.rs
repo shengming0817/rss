@@ -9,7 +9,7 @@
 //! and cross-file macro re-exports resolve to the same governed definition or expansion.
 //!
 //! Only the `runtime` crate is governed. Direct `std::env` reads are allowed solely in the exact
-//! `config::RuntimeConfigSource for config::EnvConfigSource` implementation and four top-level
+//! `config::RuntimeConfigSource for config::EnvConfigSource` implementation and four exact nested
 //! operator-grant readers. Compile-time `env!`, `option_env!`, and `include!` are forbidden
 //! everywhere in production runtime code. The sole process factory may be referenced only by the
 //! top-level `prepare_runtime_kernel` owner.
@@ -36,11 +36,23 @@ use rustc_span::{ExpnId, Span};
 const RUNTIME_CRATE: &str = "runtime";
 const ENV_READERS: &[&str] = &["var", "var_os", "vars", "vars_os"];
 const COMPILE_ENV_MACROS: &[&str] = &["env", "option_env", "include"];
-const OPERATOR_GRANT_READERS: &[&str] = &[
-    "load_projection_maintenance_grants_from_command_env",
-    "load_audit_ledger_verify_grants_from_command_env",
-    "load_dlq_operator_grants_from_command_env",
-    "load_reconcile_operator_grants_from_command_env",
+const OPERATOR_GRANT_READERS: &[(&str, &str)] = &[
+    (
+        "load_projection_maintenance_grants_from_command_env",
+        "operator::projection::load_projection_maintenance_grants_from_command_env",
+    ),
+    (
+        "load_audit_ledger_verify_grants_from_command_env",
+        "operator::audit_ledger::load_audit_ledger_verify_grants_from_command_env",
+    ),
+    (
+        "load_dlq_operator_grants_from_command_env",
+        "operator::dlq::load_dlq_operator_grants_from_command_env",
+    ),
+    (
+        "load_reconcile_operator_grants_from_command_env",
+        "operator::reconcile::load_reconcile_operator_grants_from_command_env",
+    ),
 ];
 
 #[derive(Default)]
@@ -205,7 +217,7 @@ fn canonical_env_read_is_allowed(cx: &LateContext<'_>, expr: &Expr<'_>, reader: 
         || (reader == "var"
             && OPERATOR_GRANT_READERS
                 .iter()
-                .any(|owner| is_top_level_owner(cx, expr.hir_id, owner)))
+                .any(|(owner, path)| is_exact_local_owner(cx, expr.hir_id, owner, path)))
 }
 
 fn is_direct_call_callee(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
@@ -275,6 +287,17 @@ fn is_exact_local_path(actual: &str, expected_without_crate: &str) -> bool {
 fn is_top_level_owner(cx: &LateContext<'_>, hir_id: HirId, expected: &str) -> bool {
     let owner = cx.tcx.hir_get_parent_item(hir_id).def_id;
     cx.tcx.item_name(owner).as_str() == expected && cx.tcx.local_parent(owner) == CRATE_DEF_ID
+}
+
+fn is_exact_local_owner(
+    cx: &LateContext<'_>,
+    hir_id: HirId,
+    expected_name: &str,
+    expected_path: &str,
+) -> bool {
+    let owner = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
+    cx.tcx.item_name(owner).as_str() == expected_name
+        && is_exact_local_path(&cx.tcx.def_path_str(owner), expected_path)
 }
 
 fn emit(

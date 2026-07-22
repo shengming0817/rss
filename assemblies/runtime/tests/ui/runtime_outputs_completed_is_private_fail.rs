@@ -1,4 +1,4 @@
-use runtime::phase::RuntimeOutputs;
+use runtime::RuntimeOutputs;
 
 fn main() {
     let _forged = RuntimeOutputs::completed();

@@ -21,11 +21,20 @@ use rustc_span::Span;
 
 /// 仅 admin/PDP 边界可签发 DLQ mutation capability；runtime 只允许精确 wrapper。
 const ALLOWED_CALLER_CRATES: &[&str] = &["httpserve"];
-const ALLOWED_RUNTIME_FUNCTIONS: &[&str] = &[
-    "issue_authorized_dlq_capability",
-    "issue_authorized_reconcile_capability",
+const ALLOWED_RUNTIME_FUNCTIONS: &[(&str, &str)] = &[
+    (
+        "issue_authorized_dlq_capability",
+        "operator::dlq::issue_authorized_dlq_capability",
+    ),
+    (
+        "issue_authorized_reconcile_capability",
+        "operator::reconcile::issue_authorized_reconcile_capability",
+    ),
 ];
-const ALLOWED_RUNTIME_RECEIPT_FUNCTION: &str = "dlq_operator_receipt";
+const ALLOWED_RUNTIME_RECEIPT_FUNCTION: (&str, &str) = (
+    "dlq_operator_receipt",
+    "operator::dlq::dlq_operator_receipt",
+);
 
 #[derive(Clone, Copy)]
 enum Funnel {
@@ -95,8 +104,7 @@ fn impl_self_type_named(cx: &LateContext<'_>, did: DefId, expected: &str) -> boo
 
 fn caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId, funnel: Funnel) -> bool {
     let crate_name = cx.tcx.crate_name(LOCAL_CRATE);
-    if matches!(funnel, Funnel::Capability)
-        && ALLOWED_CALLER_CRATES.contains(&crate_name.as_str())
+    if matches!(funnel, Funnel::Capability) && ALLOWED_CALLER_CRATES.contains(&crate_name.as_str())
     {
         return true;
     }
@@ -108,15 +116,21 @@ fn caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId, funnel: Funnel) -> boo
     let item_name = cx.tcx.item_name(parent_def_id);
     let def_path = cx.tcx.def_path_str(parent_def_id);
     match funnel {
-        Funnel::Capability => {
-            ALLOWED_RUNTIME_FUNCTIONS.contains(&item_name.as_str())
-                && ALLOWED_RUNTIME_FUNCTIONS.contains(&def_path.as_str())
-        }
+        Funnel::Capability => ALLOWED_RUNTIME_FUNCTIONS.iter().any(|(name, path)| {
+            item_name.as_str() == *name && is_exact_runtime_path(&def_path, path)
+        }),
         Funnel::AuthorizedReceipt => {
-            item_name.as_str() == ALLOWED_RUNTIME_RECEIPT_FUNCTION
-                && def_path == ALLOWED_RUNTIME_RECEIPT_FUNCTION
+            item_name.as_str() == ALLOWED_RUNTIME_RECEIPT_FUNCTION.0
+                && is_exact_runtime_path(&def_path, ALLOWED_RUNTIME_RECEIPT_FUNCTION.1)
         }
     }
+}
+
+fn is_exact_runtime_path(actual: &str, expected_without_crate: &str) -> bool {
+    actual == expected_without_crate
+        || actual
+            .strip_prefix("runtime::")
+            .is_some_and(|path| path == expected_without_crate)
 }
 
 fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span, funnel: Funnel) {
@@ -127,7 +141,7 @@ fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span, funnel: Funnel) {
         ),
         Funnel::AuthorizedReceipt => (
             "authorized DLQ operator receipt 仅认证/PDP 边界可构造：`from_authenticated_and_authorized` 不得在此调用",
-            "仅 runtime 可在完成 service-token 验证与精确 action/tenant grant 授权后，经 top-level `dlq_operator_receipt` wrapper 构造 private-field typed receipt",
+            "仅 runtime 可在完成 service-token 验证与精确 action/tenant grant 授权后，经 `operator::dlq::dlq_operator_receipt` 精确 wrapper 构造 private-field typed receipt",
         ),
     };
     span_lint_hir_and_then(

@@ -38,11 +38,12 @@ use identity::ports::{
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
+use runtime::SharedRuntimeDeps;
+use runtime::support::{SystemClock, TracingAuthAuditSink};
 use runtime::test_support::{
     IdentityTestValues, build_s3_runtime_deps_from_values, finalize_rss_listener,
     wire_identity_with, wire_settings,
 };
-use runtime::{SharedRuntimeDeps, SystemClock, TracingAuthAuditSink};
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tower::ServiceExt as _;

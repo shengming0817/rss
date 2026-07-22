@@ -1,9 +1,10 @@
-# Runtime composition-root monotonic responsibility ratchet seed.
+# Runtime composition-root monotonic responsibility ratchet.
 #
-# This prerequisite freezes the protected pre-#1794 baseline outside the
-# refactor subject. #1794 appends the landed revision and installs the guard.
+# INVARIANT: RUNTIME-ROOT-RATCHET-01 { level = "Medium", exec = "verify", source = "config" }.
+# Every landed revision is also committed to `LANDED_HISTORY` in the guard. Append both ledgers in
+# the same change; deleting or rewriting any earlier entry is forbidden.
 schemaVersion = 1
-currentRevision = "pre-1794"
+currentRevision = "issue-1794"
 
 [[history]]
 revision = "pre-1794"
@@ -14,4 +15,16 @@ topLevelConstStatic = 28
 implMethods = 59
 publicModules = 8
 publicReexports = 12
+inlineProductionModules = 0
+
+[[history]]
+revision = "issue-1794"
+previousRevision = "pre-1794"
+rawLines = 260
+topLevelFunctions = 11
+topLevelTypes = 1
+topLevelConstStatic = 2
+implMethods = 3
+publicModules = 8
+publicReexports = 10
 inlineProductionModules = 0

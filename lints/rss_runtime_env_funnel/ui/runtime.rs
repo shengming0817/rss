@@ -66,20 +66,37 @@ fn ambient_function_item_alias() {
     let _ = read_later("RSS_ALIAS");
 }
 
-fn load_projection_maintenance_grants_from_command_env() {
-    let _ = std::env::var("RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS");
+mod operator {
+    pub(super) mod projection {
+        pub(crate) fn load_projection_maintenance_grants_from_command_env() {
+            let _ = std::env::var("RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS");
+        }
+    }
+
+    pub(super) mod audit_ledger {
+        pub(crate) fn load_audit_ledger_verify_grants_from_command_env() {
+            let _ = std::env::var("RSS_AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS");
+        }
+    }
+
+    pub(super) mod dlq {
+        pub(crate) fn load_dlq_operator_grants_from_command_env() {
+            let _ = std::env::var("RSS_DLQ_OPERATOR_GRANTS");
+        }
+    }
+
+    pub(super) mod reconcile {
+        pub(crate) fn load_reconcile_operator_grants_from_command_env() {
+            let _ = std::env::var("RSS_RECONCILE_OPERATOR_GRANTS");
+        }
+    }
 }
 
-fn load_audit_ledger_verify_grants_from_command_env() {
-    let _ = std::env::var("RSS_AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS");
-}
-
-fn load_dlq_operator_grants_from_command_env() {
-    let _ = std::env::var("RSS_DLQ_OPERATOR_GRANTS");
-}
-
-fn load_reconcile_operator_grants_from_command_env() {
-    let _ = std::env::var("RSS_RECONCILE_OPERATOR_GRANTS");
+mod wrong_operator_path {
+    fn load_projection_maintenance_grants_from_command_env() {
+        // R4: the right item name outside its exact nested owner remains forbidden.
+        let _ = std::env::var("RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS");
+    }
 }
 
 struct UnrelatedSnapshot;

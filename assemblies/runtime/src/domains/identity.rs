@@ -8,12 +8,13 @@ use bootstrap::DomainBinding;
 use identity_composition::{FederatedIdentityModuleDeps, IdentityModuleDeps};
 use postgres::{PgDomainDeps, caps};
 
+use crate::SharedRuntimeDeps;
 use crate::config::{ServingConfigMapper, SnapshotConfig};
 #[cfg(test)]
 use crate::infra::vault::{
     VAULT_ADDR_ENV, VAULT_TOKEN_ENV, VAULT_TRANSIT_MOUNT_ENV, build_vault_signer_with,
 };
-use crate::{SharedRuntimeDeps, SystemClock};
+use crate::support::SystemClock;
 
 const DEFAULT_IDENTITY_AUTH_GRANT_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const MAX_IDENTITY_AUTH_GRANT_TTL_SECS: u64 = 365 * 24 * 60 * 60;

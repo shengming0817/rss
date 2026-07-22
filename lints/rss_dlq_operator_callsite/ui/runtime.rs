@@ -2,25 +2,32 @@
 #![allow(unused)]
 
 fn main() {
-    let _cap = issue_authorized_dlq_capability();
-    let _reconcile = issue_authorized_reconcile_capability();
-    let _receipt = dlq_operator_receipt();
+    let _cap = operator::dlq::issue_authorized_dlq_capability();
+    let _reconcile = operator::reconcile::issue_authorized_reconcile_capability();
+    let _receipt = operator::dlq::dlq_operator_receipt();
     nested_runtime_module::call_same_named_non_boundary();
     non_boundary_runtime_call();
 }
 
-fn issue_authorized_reconcile_capability() -> eventexec::OperatorReconcileCapability {
-    eventexec::OperatorReconcileCapability::issue_for_authorized_operator()
-}
+mod operator {
+    pub(super) mod reconcile {
+        pub(crate) fn issue_authorized_reconcile_capability()
+        -> eventexec::OperatorReconcileCapability {
+            eventexec::OperatorReconcileCapability::issue_for_authorized_operator()
+        }
+    }
 
-fn issue_authorized_dlq_capability() -> eventexec::OperatorDlqCapability {
-    eventexec::OperatorDlqCapability::issue_for_authorized_operator()
-}
+    pub(super) mod dlq {
+        pub(crate) fn issue_authorized_dlq_capability() -> eventexec::OperatorDlqCapability {
+            eventexec::OperatorDlqCapability::issue_for_authorized_operator()
+        }
 
-fn dlq_operator_receipt() -> eventexec::AuthorizedDlqOperatorReceipt {
-    eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
-        vocab::ServiceCallerDomain::MaintenanceOperator,
-    )
+        pub(crate) fn dlq_operator_receipt() -> eventexec::AuthorizedDlqOperatorReceipt {
+            eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            )
+        }
+    }
 }
 
 fn non_boundary_runtime_call() {

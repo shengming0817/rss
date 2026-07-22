@@ -165,7 +165,7 @@ const CARRIERS: &[Carrier] = &[
         ],
     },
     Carrier {
-        path: "assemblies/runtime/src/lib.rs",
+        path: "assemblies/runtime/src/operator/dlq.rs",
         purpose: "operator CLI exposes terminal resolution only after authentication and exact grant mint a typed receipt",
         anchors: &[
             "\"resolve-expired-outbox\" =>",
@@ -203,10 +203,10 @@ const CARRIERS: &[Carrier] = &[
         path: "lints/rss_dlq_operator_callsite/src/lib.rs",
         purpose: "authorized operator receipt construction remains at the auth/PDP boundary",
         anchors: &[
-            "ALLOWED_RUNTIME_RECEIPT_FUNCTION: &str = \"dlq_operator_receipt\"",
+            "\"operator::dlq::dlq_operator_receipt\"",
             "impl_self_type_named(cx, did, \"AuthorizedDlqOperatorReceipt\")",
             "Funnel::AuthorizedReceipt",
-            "def_path == ALLOWED_RUNTIME_RECEIPT_FUNCTION",
+            "is_exact_runtime_path(&def_path, ALLOWED_RUNTIME_RECEIPT_FUNCTION.1)",
         ],
     },
     Carrier {
@@ -224,8 +224,8 @@ const CARRIERS: &[Carrier] = &[
         purpose: "UI golden proves both direct and same-named nested runtime calls are rejected",
         anchors: &[
             "authorized DLQ operator receipt 仅认证/PDP 边界可构造",
-            "runtime.rs:28:20",
-            "runtime.rs:44:9",
+            "runtime.rs:35:20",
+            "runtime.rs:51:9",
             "warning: 4 warnings emitted",
         ],
     },

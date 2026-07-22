@@ -144,7 +144,7 @@ There is no migration graph in this baseline. Consumers will accept version 1 an
 | AssemblyLock | #1780–#1781 | Hard model/codegen/golden; Medium drift check |
 | RuntimeConfigSnapshot | #1782–#1787 | Hard required input; Medium ambient-read guard |
 | RuntimePlan identity and diagnostics | #1788 | Hard private fields/validated compiler/strict reader/schema/golden |
-| RuntimePlan-driven live transition | #1789–#1794 | Hard typestate/catalog; Medium closure ratchets |
+| RuntimePlan-driven live transition | #1789–#1794 | Landed Hard typestate/catalog/domain capability; Medium closure and root ratchets |
 | runtimeexec and subset artifacts | #1795–#1798 | Hard launch graph; Medium artifact matrix |
 | production security state | #1799–#1801 | Hard type/database/manifest constraints |
 | DeploymentPlan and Helm | #1802–#1805 | Hard schema/render; Medium deployment acceptance |

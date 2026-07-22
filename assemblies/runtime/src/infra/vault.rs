@@ -12,6 +12,7 @@ use vault::{
 
 use crate::EnvSecret;
 use crate::config::SnapshotConfig;
+use crate::phase::OperatorRuntimeCapability;
 
 // ── Vault secret resolver wiring ─────────────────────────────────────────────────────────────
 
@@ -315,41 +316,15 @@ pub(crate) fn build_vault_signer_with(
     .map_err(|e| anyhow::anyhow!("vault signer config error: {e}"))
 }
 
-const RSS_ACCESS_JWKS_CLI: &str = "rss-access-jwks";
-const RSS_ACCESS_JWKS_EXPORT_VAULT_TRANSIT_CLI: &str = "export-vault-transit";
 const RSS_ACCESS_TOKEN_JWKS_PATH_ENV: &str = "RSS_ACCESS_TOKEN_JWKS_PATH";
 
-pub fn is_rss_access_jwks_export_command(args: &[String]) -> bool {
-    matches!(
-        args,
-        [cmd, sub, ..]
-            if cmd == RSS_ACCESS_JWKS_CLI
-                && sub == RSS_ACCESS_JWKS_EXPORT_VAULT_TRANSIT_CLI
-    )
-}
-
-pub async fn run_rss_access_jwks_export_command(
+pub(crate) async fn export_rss_access_jwks(
     args: &[String],
-    runtime_inputs: &crate::OperatorRuntimeInputs,
+    config: SnapshotConfig<'_>,
+    _operator: OperatorRuntimeCapability<'_>,
 ) -> anyhow::Result<()> {
-    run_rss_access_jwks_export_command_from(
-        args,
-        |name| runtime_inputs.config().value(name).map(str::to_owned),
-        false,
-    )
-    .await
-}
-
-async fn run_rss_access_jwks_export_command_from(
-    args: &[String],
-    get: impl Fn(&str) -> Option<String>,
-    allow_http: bool,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        is_rss_access_jwks_export_command(args),
-        "usage: rss rss-access-jwks export-vault-transit [--out <path>]"
-    );
-    let out = rss_access_jwks_export_output_path(args, &get)?;
+    let get = |name: &str| config.value(name).map(str::to_owned);
+    let out = rss_access_jwks_export_output_path(args, get)?;
     let addr = get(VAULT_ADDR_ENV)
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_ADDR_ENV}"))?;
     let token = get(VAULT_TOKEN_ENV)
@@ -357,10 +332,10 @@ async fn run_rss_access_jwks_export_command_from(
     let mount = get(VAULT_TRANSIT_MOUNT_ENV)
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TRANSIT_MOUNT_ENV}"))?;
     let export_kids = rss_access_jwks_export_kids(&get)?;
-    let client = build_vault_tls_client_from(&get)?;
+    let client = build_vault_tls_client_from(get)?;
     let mut keys = Vec::with_capacity(export_kids.len());
     for kid in &export_kids {
-        let url = vault_transit_key_metadata_url(&addr, &mount, kid, allow_http)?;
+        let url = vault_transit_key_metadata_url(&addr, &mount, kid)?;
         let response = client
             .get(url)
             .header("X-Vault-Token", token.trim())
@@ -470,14 +445,9 @@ fn vault_transit_key_metadata_url(
     addr: &str,
     mount: &str,
     key_id: &str,
-    allow_http: bool,
 ) -> anyhow::Result<reqwest::Url> {
     let mut url = reqwest::Url::parse(addr.trim()).context("parse Vault base URL")?;
-    match url.scheme() {
-        "https" => {}
-        "http" if allow_http => {}
-        _ => anyhow::bail!("Vault base URL must use https"),
-    }
+    anyhow::ensure!(url.scheme() == "https", "Vault base URL must use https");
     let mount_segments = vault_path_segments(mount, VAULT_TRANSIT_MOUNT_ENV)?;
     let key_segments = vault_path_segments(key_id, RSS_ACCESS_TOKEN_KEY_ID_ENV)?;
     {
@@ -615,6 +585,28 @@ fn write_jwks_atomic(path: &Path, jwks: &[u8]) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(dead_code)]
+    async fn production_jwks_export_requires_snapshot_and_operator_capability(
+        args: &[String],
+        config: crate::config::SnapshotConfig<'_>,
+        operator: crate::phase::OperatorRuntimeCapability<'_>,
+    ) -> anyhow::Result<()> {
+        super::export_rss_access_jwks(args, config, operator).await
+    }
+
+    #[test]
+    fn production_jwks_metadata_url_rejects_http_without_escape_hatch() -> anyhow::Result<()> {
+        let Err(error) = super::vault_transit_key_metadata_url(
+            "http://vault.test:8200",
+            "transit",
+            "rss-access-es256",
+        ) else {
+            anyhow::bail!("production JWKS export must require HTTPS");
+        };
+        assert_eq!(error.to_string(), "Vault base URL must use https");
+        Ok(())
+    }
+
     use super::*;
 
     static TEMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -948,13 +940,9 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn rss_access_jwks_export_command_and_profile_path_are_exact() {
         let command = vec![
-            RSS_ACCESS_JWKS_CLI.to_owned(),
-            RSS_ACCESS_JWKS_EXPORT_VAULT_TRANSIT_CLI.to_owned(),
+            "rss-access-jwks".to_owned(),
+            "export-vault-transit".to_owned(),
         ];
-        assert!(is_rss_access_jwks_export_command(&command));
-        assert!(!is_rss_access_jwks_export_command(&[
-            RSS_ACCESS_JWKS_CLI.to_owned()
-        ]));
 
         let expected = std::path::PathBuf::from("/run/rss/rss-access.json");
         let path = rss_access_jwks_export_output_path(&command, |name| {
@@ -967,8 +955,8 @@ mod tests {
     #[test]
     fn rss_access_jwks_export_rejects_duplicate_output_override() {
         let command = vec![
-            RSS_ACCESS_JWKS_CLI.to_owned(),
-            RSS_ACCESS_JWKS_EXPORT_VAULT_TRANSIT_CLI.to_owned(),
+            "rss-access-jwks".to_owned(),
+            "export-vault-transit".to_owned(),
             "--out".to_owned(),
             "/run/rss/first.json".to_owned(),
             "--out".to_owned(),

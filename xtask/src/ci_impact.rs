@@ -2065,10 +2065,11 @@ fn run_snapshot_verify(context: &LocalExecutionContext, fast: bool) -> Result<()
     }
     args.extend(["--against", context.base.as_str()]);
     let target = context.cargo_target_text()?;
+    let environment = snapshot_verify_environment(context, target);
     let status = cargo_cmd(
         CargoSubcommand::Xtask,
         &args,
-        &[("CARGO_TARGET_DIR", target)],
+        &environment,
         Some(context.root()),
     )
     .status()?;
@@ -2076,6 +2077,16 @@ fn run_snapshot_verify(context: &LocalExecutionContext, fast: bool) -> Result<()
         bail!("ci local snapshot verify failed");
     }
     Ok(())
+}
+
+fn snapshot_verify_environment<'a>(
+    context: &'a LocalExecutionContext,
+    cargo_target: &'a str,
+) -> [(&'static str, &'a str); 2] {
+    [
+        ("CARGO_TARGET_DIR", cargo_target),
+        (crate::runtime_root_guard::BASE_ENV, context.base.as_str()),
+    ]
 }
 
 fn run_package_operation(
@@ -3484,6 +3495,14 @@ mod tests {
         assert_eq!(context.base, base);
         assert_eq!(context.head, head);
         assert_eq!(context.merge_base, context.base);
+        assert_eq!(
+            snapshot_verify_environment(&context, "/tmp/isolated-target"),
+            [
+                ("CARGO_TARGET_DIR", "/tmp/isolated-target"),
+                (crate::runtime_root_guard::BASE_ENV, base.as_str()),
+            ],
+            "snapshot verify must bind the root ratchet to the same resolved base commit as --against"
+        );
         assert_ne!(context.root(), root);
         assert_eq!(
             git_stdout(context.root(), ["rev-parse", "HEAD"])?.trim(),

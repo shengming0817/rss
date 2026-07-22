@@ -55,8 +55,7 @@ fn main() {
     let _config = postgres::ConfigValueMaintenanceCapability::from_verified_service_caller(
         vocab::ServiceCallerDomain::MaintenanceOperator,
     );
-    let config_mint =
-        postgres::ConfigValueMaintenanceCapability::from_verified_service_caller;
+    let config_mint = postgres::ConfigValueMaintenanceCapability::from_verified_service_caller;
     let _config_fn: fn(vocab::ServiceCallerDomain) -> postgres::ConfigValueMaintenanceCapability =
         postgres::ConfigValueMaintenanceCapability::from_verified_service_caller;
     let _ = config_mint;

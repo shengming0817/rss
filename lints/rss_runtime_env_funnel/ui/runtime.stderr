@@ -55,5 +55,13 @@ LL |     let read_later = read;
    |
    = help: 把 serving/runtime 配置加入 closed catalog 并从 SnapshotConfig 消费；operator grant 仅保留四个带 typed capability 的精确 reader
 
-warning: 7 warnings emitted
+warning: runtime 不得在封闭配置入口之外读取进程环境
+  --> $DIR/runtime.rs:98:17
+   |
+LL |         let _ = std::env::var("RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS");
+   |                 ^^^^^^^^^^^^^
+   |
+   = help: 把 serving/runtime 配置加入 closed catalog 并从 SnapshotConfig 消费；operator grant 仅保留四个带 typed capability 的精确 reader
+
+warning: 8 warnings emitted
 

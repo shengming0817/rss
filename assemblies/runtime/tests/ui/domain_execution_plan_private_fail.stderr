@@ -1,0 +1,11 @@
+error[E0603]: struct `DomainExecutionPlan` is private
+ --> tests/ui/domain_execution_plan_private_fail.rs:2:27
+  |
+2 |     let _: runtime::plan::DomainExecutionPlan;
+  |                           ^^^^^^^^^^^^^^^^^^^ private struct
+  |
+note: the struct `DomainExecutionPlan` is defined here
+ --> src/plan.rs
+  |
+  | pub(crate) use domain_exec::DomainExecutionPlan;
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -5,7 +5,7 @@ This rule governs how runtime-deployment target constraints select enforcement c
 ## 当前事实
 
 - Assembly manifest validation, generated domain ordering, generated typed provider constructor catalogs, and committed v1 AssemblyLock drift are governed by typed repository gates. The assembly-crate-internal provider catalog drives live construction through one-shot typed permits and sealed lifecycle-output batches.
-- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `prepare_runtime()`; RSS operators enter through `prepare_operator_runtime()` and cannot carry the serving-only password-policy capability. Tracing/serving-OIDC, the operator OIDC static provider, provider material, listener addresses and mTLS material, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is typed, fingerprinted, retained by the unique consuming runtime phase chain, and is now the sole source of listener membership, ordered domain placement, and auth selection. Subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
+- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `runtime::prepare_runtime()`; RSS operators enter through `runtime::operator::prepare_runtime()` and cannot carry the serving-only password-policy capability. Tracing/serving-OIDC, the operator OIDC static provider, provider material, listener addresses and mTLS material, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is typed, fingerprinted, retained by the unique consuming runtime phase chain, and is now the sole source of listener membership, ordered domain placement, and auth selection. Subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
 - `cargo xtask archrules list` and its generated matrix derive implemented rules from real carrier anchors. Planning documents are not a second index.
 - The active forge does not make the existing `ci-gate` a required check.
 
@@ -14,8 +14,8 @@ This rule governs how runtime-deployment target constraints select enforcement c
 The private runtime preparation kernel consumes `EnvConfigSource` once into an owned
 `RuntimeConfigSnapshot`, derives the `RUST_LOG` filter and optional OTLP exporter from that same
 generation, and installs the subscriber. It then returns one of two opaque, mutually exclusive
-carriers: `ServingRuntimeInputs` from `prepare_runtime()` or `OperatorRuntimeInputs` from
-`prepare_operator_runtime()`. The source is passed by value and is not retained as a closure,
+carriers: `ServingRuntimeInputs` from `runtime::prepare_runtime()` or `OperatorRuntimeInputs` from
+`runtime::operator::prepare_runtime()`. The source is passed by value and is not retained as a closure,
 trait object, reload handle, or fallback. Both carriers have private fields and crate-private
 constructors and always own a non-optional snapshot; only `ServingRuntimeInputs` owns the mandatory
 password blocklist and type-checks at `run()`. A
@@ -25,7 +25,7 @@ shuts down any exporter still owned. Launch registers every owned lifecycle outp
 return a validation, bind, or shutdown-trigger error, and every launch result drains the one
 `ShutdownStack` exactly once. The RSS binary classifies its closed command family before acquiring
 profile input; serving transfers ownership to `run()`, while all operator arms converge on one
-explicit `shutdown_operator_runtime()` call.
+explicit `runtime::operator::shutdown_runtime()` call.
 
 `SnapshotConfig<'_>` is a crate-private borrowed capability with a private field. Only
 `RuntimeConfigSnapshot::view()` can mint it. Serving OIDC/JWKS and provider construction, listener
@@ -206,6 +206,15 @@ local listeners. The remote placement set is the exclusive transport required-do
 `RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS` is deleted. Placement workloads are non-secret funnel facts
 (`RSS_<DOMAIN>_DOMAIN_PLACEMENT_WORKLOAD`) that change the RuntimePlan fingerprint.
 
+The landed #1794 Hard carrier is `DomainExecutionPlan`. `RuntimePlan` alone mints it from the
+declared domain plans and the already-validated placement projection. The capability is carried
+through `InfraBuilt`, consumes the generated `Vec<DomainBinding>`, and admits only the exact local
+domain projection in declaration order. Missing, extra, duplicate, reordered, or remotely placed
+bindings fail before composition; the failed capability returns the owned bindings so their
+`DomainModuleResult`s remain inside the existing asynchronous LIFO provider rollback. Only the
+private `ValidatedDomainBindings` wrapper can reach the canonical composition helper. No public
+constructor, domain loop, root re-export, alias, or compatibility path exists.
+
 Medium `RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01` binds the type proof to dynamic facts. Domain
 wiring validates plan, generated `DOMAIN_LISTENER_BINDINGS`, and live registry membership and
 per-listener order exactly. Finalization rejects undeclared live groups, missing declared
@@ -236,7 +245,16 @@ dead branches, and compliant comment/test bait. The lifecycle contract remains u
 pre-launch trace cleanup stays in `RuntimeLifecycleOwner`, while the top-level launch executor
 creates and consumes the only `ShutdownStack`.
 
-#1790 changes no RuntimePlan schema, fingerprint, AssemblyLock, generated module/provider catalog,
+Medium `RUNTIME-PLAN-LIVE-CLOSURE-01` joins the four RuntimePlan declaration families to the one
+production phase chain and freezes the aggregate declaration/projection/live inventories for
+providers, listeners, domains, and placements. Its AST evidence rejects summary `.len()` calls,
+dead helpers, macro expansion, comments/strings, and test bait. `RUNTIME-ROOT-RATCHET-01` separately
+parses the runtime root and an append-only schema-v1 history policy, requiring every recorded LOC,
+responsibility, and public-surface metric to be component-wise non-increasing. A missing, truncated,
+raised, unknown-field, or unparsable policy/root fails closed through the sole
+`cargo xtask runtime-root guard` command.
+
+#1794 changes no RuntimePlan schema, fingerprint, AssemblyLock, generated module/provider catalog,
 wire contract, database, configuration, or deployment artifact. Rollback is one whole-change
 revert; it must not add an old reader, dual path, alias, fallback, or compatibility feature.
 

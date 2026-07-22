@@ -385,18 +385,63 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
     };
     ensure!(
         binding.ident == "domain_bindings"
-            && binding.mutability.is_some()
+            && binding.mutability.is_none()
             && binding.subpat.is_none()
             && *wire_drains == 1
             && *into_parts == 1,
-        "{RUNTIME_DOMAINS_PHASE}: generated failure must retain and drain prior bindings into the mutable `domain_bindings` carrier"
+        "{RUNTIME_DOMAINS_PHASE}: generated failure must retain and drain prior bindings before the immutable `domain_bindings` carrier enters plan validation"
     );
 
-    let compose_path = ["bootstrap", "compose_bindings"];
+    let validations = block
+        .stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, statement)| {
+            let Stmt::Local(local) = statement else {
+                return None;
+            };
+            let Pat::Ident(binding) = &local.pat else {
+                return None;
+            };
+            let initializer = local.init.as_ref()?;
+            let Expr::Match(validation) = peel_expr(&initializer.expr) else {
+                return None;
+            };
+            let Expr::MethodCall(call) = peel_expr(&validation.expr) else {
+                return None;
+            };
+            (call.method == "validate"
+                && simple_expr_ident(&call.receiver).as_deref() == Some("domain_execution_plan")
+                && call.args.len() == 1
+                && call.args.first().and_then(simple_expr_ident).as_deref()
+                    == Some("domain_bindings"))
+            .then(|| {
+                (
+                    index,
+                    binding,
+                    exact_path_call_count(&initializer.expr, &drain_path),
+                    method_call_count_expr(&initializer.expr, "into_parts"),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let [(validation_index, validated_binding, validation_drains, validation_into_parts)] =
+        validations.as_slice()
+    else {
+        bail!(
+            "{RUNTIME_DOMAINS_PHASE}: domain_execution_plan must validate the generated bindings into one direct matched carrier"
+        )
+    };
     ensure!(
-        exact_path_call_count_block(block, &compose_path) == 1,
-        "{RUNTIME_DOMAINS_PHASE}: WireDomains phase must contain exactly one compose_bindings call"
+        validation_index > wire_index
+            && validated_binding.ident == "validated_domain_bindings"
+            && validated_binding.mutability.is_none()
+            && validated_binding.subpat.is_none()
+            && *validation_drains == 1
+            && *validation_into_parts == 1,
+        "{RUNTIME_DOMAINS_PHASE}: plan validation must consume `domain_bindings`, retain failures for rollback, and mint immutable `validated_domain_bindings`"
     );
+
     let consumers = block
         .stmts
         .iter()
@@ -409,13 +454,13 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
             let Expr::Match(composition) = peel_expr(&initializer.expr) else {
                 return None;
             };
-            direct_call(&composition.expr, &compose_path, |call| {
-                call.args.len() == 1
-                    && call
-                        .args
-                        .first()
-                        .is_some_and(|argument| expr_is_mut_ref_ident(argument, "domain_bindings"))
-            })
+            let Expr::MethodCall(call) = peel_expr(&composition.expr) else {
+                return None;
+            };
+            (call.method == "compose"
+                && call.args.is_empty()
+                && simple_expr_ident(&call.receiver).as_deref()
+                    == Some("validated_domain_bindings"))
             .then(|| {
                 (
                     index,
@@ -427,11 +472,11 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
         .collect::<Vec<_>>();
     let [(consumer_index, Pat::Tuple(result), compose_drains)] = consumers.as_slice() else {
         bail!(
-            "{RUNTIME_DOMAINS_PHASE}: domain_bindings must enter one directly matched compose_bindings tuple"
+            "{RUNTIME_DOMAINS_PHASE}: validated_domain_bindings must enter one directly matched private compose tuple"
         )
     };
     ensure!(
-        consumer_index > wire_index
+        consumer_index > validation_index
             && *compose_drains == 1
             && result.elems.len() == 2
             && matches!(
@@ -444,11 +489,17 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
                 Some(Pat::Ident(module))
                     if module.ident == "domains_module" && module.mutability.is_none()
             ),
-        "{RUNTIME_DOMAINS_PHASE}: compose_bindings must produce `(mut registry, domains_module)` and drain retained outputs on failure"
+        "{RUNTIME_DOMAINS_PHASE}: private validated composition must produce `(mut registry, domains_module)` and drain retained outputs on failure"
     );
     ensure!(
-        exact_path_call_count_block(block, &drain_path) == 2,
-        "{RUNTIME_DOMAINS_PHASE}: constructor and compose failures must each drain retained domain outputs exactly once"
+        method_call_count_block(block, "validate") == 1
+            && method_call_count_block(block, "compose") == 1
+            && exact_path_call_count_block(block, &["bootstrap", "compose_bindings"]) == 0,
+        "{RUNTIME_DOMAINS_PHASE}: only one capability validation and one private wrapper composition may consume generated domain bindings"
+    );
+    ensure!(
+        exact_path_call_count_block(block, &drain_path) == 3,
+        "{RUNTIME_DOMAINS_PHASE}: constructor, validation, and composition failures must each drain retained domain outputs exactly once"
     );
     Ok(())
 }
@@ -1209,15 +1260,6 @@ fn expr_is_shared_ref_ident(expression: &Expr, expected: &str) -> bool {
         expression,
         Expr::Reference(reference)
             if reference.mutability.is_none()
-                && simple_expr_ident(&reference.expr).as_deref() == Some(expected)
-    )
-}
-
-fn expr_is_mut_ref_ident(expression: &Expr, expected: &str) -> bool {
-    matches!(
-        expression,
-        Expr::Reference(reference)
-            if reference.mutability.is_some()
                 && simple_expr_ident(&reference.expr).as_deref() == Some(expected)
     )
 }

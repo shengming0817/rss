@@ -9,8 +9,9 @@
 - `RuntimePlan` is a closed typed v1 protocol with an exhaustive provider-constructor registry,
   internally derived listener IDs/lifecycle, strict redacted parsing diagnostics, stable
   provider/listener/domain/placement facts, an upstream AssemblyFingerprint, and a domain-separated
-  RuntimePlanFingerprint. Startup consumes the bundled plan for identity/diagnostics, while
-  #1789–#1794 still own plan-driven live wiring.
+  RuntimePlanFingerprint. Startup consumes all four plan families through the sole typed phase
+  chain; #1789–#1794 now close live provider, listener, domain, and placement execution without a
+  handwritten compatibility path.
 - serving and operator paths capture one immutable process-wide RuntimeConfigSnapshot; the runtime environment funnel rejects serving ambient reads outside named maintenance boundaries.
 - `settingsonly` and `identityaudit` are build closures without launch, probe, config-schema, image, or journey closure.
 - deployment is Compose-oriented and not derived from assembly identity; protected inventory and same-head deployment/release receipts do not exist.

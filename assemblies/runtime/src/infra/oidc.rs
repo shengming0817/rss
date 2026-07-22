@@ -11,8 +11,8 @@ use oidc::{AccessJwksKeyIsolation, IsolatedJwksKeySource, JwksReadinessHandle, O
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 use tokio_util::sync::CancellationToken;
 
-use crate::SystemClock;
 use crate::config::{FederatedAccessTokenConfig, RssAccessTokenConfig, ServiceTokenConfig};
+use crate::support::SystemClock;
 
 pub(crate) const RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME: &str = "rss_access_token_jwks_ready";
 pub(crate) const FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME: &str =

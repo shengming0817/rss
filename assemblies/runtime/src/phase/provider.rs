@@ -1,5 +1,5 @@
 use super::{
-    PhaseContext, Planned, ProvidersBuilt, RuntimePhaseState, TOKEN_MODULE_COMMITTED_ONCE,
+    DomainPhaseContext, Planned, ProvidersBuilt, RuntimePhaseState, TOKEN_MODULE_COMMITTED_ONCE,
     UncommittedModule, phase_result,
 };
 use crate::config::RuntimeServingConfig;
@@ -17,7 +17,9 @@ impl<'a> Planned<'a> {
         placement_execution_plan
             .reject_remote_on_local_listeners(&listener_execution_plan)
             .context("validate placement against local listeners")?;
-        let context = PhaseContext::new(self.runtime_inputs, runtime_plan);
+        let domain_execution_plan = runtime_plan.domain_execution_plan(&placement_execution_plan);
+        let context =
+            DomainPhaseContext::new(self.runtime_inputs, runtime_plan, domain_execution_plan);
         let typed_runtime_plan = context.runtime_plan.as_typed();
         tracing::info!(
             assembly.fingerprint = typed_runtime_plan.assembly_fingerprint().as_str(),

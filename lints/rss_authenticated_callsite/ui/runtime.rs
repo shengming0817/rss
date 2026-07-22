@@ -13,11 +13,11 @@ use vocab::PrincipalKind;
 fn main() {
     let _ev = auth_bridge::allow_evidence();
     let _mtls = auth_bridge::mtls_evidence();
-    verified_service_maintenance_operator_subject();
-    verified_projection_maintenance_operator_subject();
-    projection_maintenance_operator_receipt();
-    authenticate_dlq_operator_principal();
-    dlq_operator_receipt();
+    operator::projection::verified_service_maintenance_operator_subject();
+    operator::projection::verified_projection_maintenance_operator_subject();
+    operator::projection::projection_maintenance_operator_receipt();
+    operator::dlq::authenticate_dlq_operator_principal();
+    operator::dlq::dlq_operator_receipt();
     // R：runtime 非 verification wrapper 不能降维 Principal。
     let _direct_subject = authn::Principal::audit_subject;
     let _direct_caller = authn::Principal::service_caller_domain;
@@ -32,7 +32,7 @@ fn main() {
         vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
         vocab::ServiceCallerDomain::MaintenanceOperator,
     );
-    let _config = run_settings_config_value_maintenance();
+    let _config = operator::settings::run_settings_config_value_maintenance();
     let _direct = postgres::ConfigValueMaintenanceCapability::from_verified_service_caller(
         vocab::ServiceCallerDomain::MaintenanceOperator,
     );
@@ -63,31 +63,40 @@ mod auth_bridge {
     }
 }
 
-fn verified_service_maintenance_operator_subject() {
-    let _ = authn::Principal::service_caller_domain;
-}
+mod operator {
+    pub(super) mod projection {
+        pub(crate) fn verified_service_maintenance_operator_subject() {
+            let _ = authn::Principal::service_caller_domain;
+        }
 
-fn verified_projection_maintenance_operator_subject() {
-    let _ = authn::Principal::service_caller_domain;
-}
+        pub(crate) fn verified_projection_maintenance_operator_subject() {
+            let _ = authn::Principal::service_caller_domain;
+        }
 
-fn projection_maintenance_operator_receipt() {
-    let _ = authn::Principal::audit_subject;
-}
+        pub(crate) fn projection_maintenance_operator_receipt() {
+            let _ = authn::Principal::audit_subject;
+        }
+    }
 
-fn authenticate_dlq_operator_principal() {
-    let _ = authn::Principal::service_caller_domain;
-}
+    pub(super) mod dlq {
+        pub(crate) fn authenticate_dlq_operator_principal() {
+            let _ = authn::Principal::service_caller_domain;
+        }
 
-fn dlq_operator_receipt() {
-    let _ = authn::Principal::audit_subject;
-    let _ = authn::Principal::service_caller_domain;
-}
+        pub(crate) fn dlq_operator_receipt() {
+            let _ = authn::Principal::audit_subject;
+            let _ = authn::Principal::service_caller_domain;
+        }
+    }
 
-fn run_settings_config_value_maintenance() -> postgres::ConfigValueMaintenanceCapability {
-    postgres::ConfigValueMaintenanceCapability::from_verified_service_caller(
-        vocab::ServiceCallerDomain::MaintenanceOperator,
-    )
+    pub(super) mod settings {
+        pub(crate) fn run_settings_config_value_maintenance()
+        -> postgres::ConfigValueMaintenanceCapability {
+            postgres::ConfigValueMaintenanceCapability::from_verified_service_caller(
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            )
+        }
+    }
 }
 
 mod nested {

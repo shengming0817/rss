@@ -1,11 +1,9 @@
 //! Runtime listener route finalization and auth wiring.
 
-use crate::{
-    SPIFFE_ENDPOINT_SOCKET_ENV,
-    auth_bridge::{self, ProfileBinding},
-    config::SnapshotConfig,
-    plan::{ListenerExecutionPlan, ListenerExecutionSpec},
-};
+use crate::auth_bridge::{self, ProfileBinding};
+use crate::config::SnapshotConfig;
+use crate::phase::SPIFFE_ENDPOINT_SOCKET_ENV;
+use crate::plan::{ListenerExecutionPlan, ListenerExecutionSpec};
 
 use std::future::Future;
 use std::pin::Pin;
@@ -631,7 +629,7 @@ pub(crate) fn mtls_allow_set_from_value(
 }
 
 fn mtls_spiffe_endpoint_from_value(raw: Option<&str>) -> anyhow::Result<String> {
-    crate::required_spiffe_endpoint_from_value(raw)
+    crate::phase::required_spiffe_endpoint_from_value(raw)
 }
 
 #[cfg(feature = "integration")]
@@ -698,9 +696,9 @@ pub(crate) fn finalize_health_fixture(
 mod tests {
     use super::*;
     use crate::config::test_snapshot;
+    use crate::support::{SystemClock, TracingAuthAuditSink};
     use crate::{
-        KeyedEs256StaticKey, RssAccessStaticProviderConfig, SystemClock, TracingAuthAuditSink,
-        rss_access_provider_from_static_config,
+        KeyedEs256StaticKey, RssAccessStaticProviderConfig, rss_access_provider_from_static_config,
     };
 
     use axum::body::Body;

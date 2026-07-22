@@ -1,0 +1,39 @@
+error[E0432]: unresolved imports `runtime::OperatorRuntimeInputs`, `runtime::is_audit_ledger_verify_command`, `runtime::is_dlq_command`, `runtime::is_postgres_command`, `runtime::is_projection_command`, `runtime::is_reconcile_target_command`, `runtime::is_rss_access_jwks_export_command`, `runtime::is_settings_config_value_maintenance_command`, `runtime::prepare_operator_runtime`, `runtime::run_audit_ledger_verify_command`, `runtime::run_dlq_control_command`, `runtime::run_postgres_reader_migration_command`, `runtime::run_projection_control_command`, `runtime::run_reconcile_target_command`, `runtime::run_rss_access_jwks_export_command`, `runtime::run_settings_config_value_maintenance`, `runtime::shutdown_operator_runtime`
+ --> tests/ui/operator_root_paths_removed_fail.rs:2:5
+  |
+2 |     OperatorRuntimeInputs, is_audit_ledger_verify_command, is_dlq_command, is_postgres_command,
+  |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^ no `is_postgres_command` in the root
+  |     |                      |                               |
+  |     |                      |                               no `is_dlq_command` in the root
+  |     |                      no `is_audit_ledger_verify_command` in the root
+  |     no `OperatorRuntimeInputs` in the root
+3 |     is_projection_command, is_reconcile_target_command, is_rss_access_jwks_export_command,
+  |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `is_rss_access_jwks_export_command` in the root
+  |     |                      |
+  |     |                      no `is_reconcile_target_command` in the root
+  |     no `is_projection_command` in the root
+4 |     is_settings_config_value_maintenance_command, prepare_operator_runtime,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^ no `prepare_operator_runtime` in the root
+  |     |
+  |     no `is_settings_config_value_maintenance_command` in the root
+5 |     run_audit_ledger_verify_command, run_dlq_control_command,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+  |     |
+  |     no `run_audit_ledger_verify_command` in the root
+6 |     run_postgres_reader_migration_command, run_projection_control_command,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+7 |     run_reconcile_target_command, run_rss_access_jwks_export_command,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+8 |     run_settings_config_value_maintenance, shutdown_operator_runtime,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+help: a similar name exists in the module
+  |
+2 -     OperatorRuntimeInputs, is_audit_ledger_verify_command, is_dlq_command, is_postgres_command,
+2 +     ServingRuntimeInputs, is_audit_ledger_verify_command, is_dlq_command, is_postgres_command,
+  |
+help: a similar name exists in the module
+  |
+4 -     is_settings_config_value_maintenance_command, prepare_operator_runtime,
+4 +     is_settings_config_value_maintenance_command, prepare_operator_local,
+  |

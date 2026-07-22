@@ -10,9 +10,9 @@
 //! and fails on missing baseline, content drift, empty dependency/provider inventories, or missing
 //! required wiring anchors. Synthetic red/green tests cover every failure class.
 //!
-//! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- the runtime phase must consume the committed generated domain list through `compose_bindings`, retain partial bindings on constructor/compose failure, record every output in `ProviderBuild`'s startup transaction, and must not restore per-domain handwritten wiring.
+//! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- the runtime phase must consume the committed generated domain list through the plan-owned validator and private `ValidatedDomainBindings` handoff into `compose_bindings`, retain partial bindings on constructor/validation/compose failure, record every output in `ProviderBuild`'s startup transaction, and must not restore per-domain handwritten wiring.
 //!
-//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring" } -- the unique production `prepare_runtime()` calls exactly one closed process snapshot factory and seals the password blocklist into `ServingRuntimeInputs`, while `prepare_operator_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes one typed Vault generation. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring + tests::runtime_jwks_export_requires_snapshot_and_operator_capability", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring + tests::runtime_jwks_export_requires_snapshot_and_operator_capability" } -- the unique serving `prepare_runtime()` calls exactly one closed process snapshot factory and seals the password blocklist into `ServingRuntimeInputs`, while `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes one typed Vault generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
 //! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, while operator commands prepare only `OperatorRuntimeInputs`, every operator arm receives that exact binding, and the sole operator shutdown consumes it. No shared input type, pre-consumption early return, alias, macro, shadow path, or unreachable bait is accepted.
 //!
@@ -25,6 +25,8 @@
 //! INVARIANT: RUNTIME-PHASE-TRANSITION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_phase_transition_rejects_missing_reordered_drop_plan_and_bait", anti_vacuity = "tests::runtime_phase_transition_accepts_canonical_live_path" } -- the unique production `run_startup()` delegates only to `phase::execute`; that executor consumes the exact five associated-`Next` transitions in order, every transition uses its associated `RuntimePhaseState::PHASE` through the directly redacting private `phase_result` funnel, the runtime plan stays owned by `PhaseContext` while its single listener execution projection is carried as a mandatory phase-state field into Finalize, state trait impls are closed across the complete production module graph, and launch inputs validate before the sole launch phase constructs `LaunchPlan`. Tuple/drop/skip/reorder paths, direct or aliased `LaunchPlan`/`ShutdownStack` access, legacy root phase bodies, cross-file impls, macros, dead branches, comments, strings, and test-only bait fail closed.
 //!
 //! INVARIANT: RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_listener_plan_execution_rejects_legacy_and_structural_bypasses + tests::runtime_placement_plan_execution_rejects_missing_anchors", anti_vacuity = "tests::runtime_listener_plan_execution_accepts_workspace" } -- across the complete production module graph, AST must expose exactly one RuntimePlan listener projection call, one consuming finalizer and phase call, and one `FinalizedListenerSet` construction expression in their canonical owners with no constructor/trait seam; `ListenerExecutionPlan`, `ListenerExecutionSpec`, `AssembledListener`, and `FinalizedListenerSet` remain exact `pub(crate)` types with inherited-private fields and no public re-export; launch accepts only that set, while raw-value auth assemblers, manual Health append, legacy config auth accessors, public listener/routes modules, and ordinary `Vec<AssembledListener>` launch inputs remain forbidden. PlacementExecutionPlan must mint once and reach outbound transport only through `reject_remote_on_local_listeners` + `from_placement`.
+//!
+//! INVARIANT: RUNTIME-PLAN-LIVE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_plan_live_closure_rejects_missing_consumption_and_bait + tests::runtime_plan_live_inventory_artifact_and_test_membership_fail_closed", anti_vacuity = "tests::runtime_plan_live_closure_accepts_workspace + tests::runtime_plan_live_inventory_artifact_and_test_membership_fail_closed" } -- the sole production BuildProvider phase must mint the private, consuming DomainExecutionPlan from RuntimePlan plus PlacementExecutionPlan and carry it linearly through ProvidersBuilt/InfraBuilt. Across the complete production module graph, bootstrap::compose_bindings may appear only as the exact call owned by ValidatedDomainBindings::compose, and crate::modules_gen::wire_domains only as the exact call owned by InfraBuilt::wire_domains; imports, aliases, function-item references, dead helpers, and macro bait fail closed. WireDomains must consume generated bindings through exact validation and the private wrapper, and each generated/validation/composition failure arm must structurally execute failure.into_parts -> drain_binding_outputs -> ProviderBuild::record_domain -> return Err. The aggregate runtime golden freezes complete provider declaration/catalog/output, listener declaration/generated/live, domain declaration/local/live, and placement declaration/local/remote inventories, while AST membership pins its unique renderer and exact live test. Summary `.len()`, comments/strings, dead helpers, macro bait, and test-only decoys cannot satisfy this evidence.
 //!
 //! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- the only production service-token constructor accepts the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps` plus `PgMaintenanceDeps`. Serving and the five operator paths call that typed constructor directly at their run-reachable sites. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 //!
@@ -67,12 +69,27 @@ const RUNTIME_OIDC_PATH: &str = "assemblies/runtime/src/infra/oidc.rs";
 const RUNTIME_PHASE_PATH: &str = "assemblies/runtime/src/phase.rs";
 const RUNTIME_PHASE_PROVIDER_PATH: &str = "assemblies/runtime/src/phase/provider.rs";
 const RUNTIME_PHASE_INFRA_PATH: &str = "assemblies/runtime/src/phase/infra.rs";
+const RUNTIME_PHASE_DOMAIN_TRANSPORT_PATH: &str =
+    "assemblies/runtime/src/phase/infra/domain_transport.rs";
 const RUNTIME_PHASE_DOMAINS_PATH: &str = "assemblies/runtime/src/phase/domains.rs";
 const RUNTIME_PHASE_FINALIZE_PATH: &str = "assemblies/runtime/src/phase/finalize.rs";
 const RUNTIME_PHASE_LAUNCH_PATH: &str = "assemblies/runtime/src/phase/launch.rs";
 const RUNTIME_SECRET_CONFIG_PATH: &str = "assemblies/runtime/src/secret_config.rs";
 const RUNTIME_PLAN_PATH: &str = "assemblies/runtime/src/plan.rs";
+const RUNTIME_DOMAIN_EXEC_PATH: &str = "assemblies/runtime/src/plan/domain_exec.rs";
 const RUNTIME_PLACEMENT_EXEC_PATH: &str = "assemblies/runtime/src/plan/placement_exec.rs";
+const RUNTIME_OPERATOR_PATH: &str = "assemblies/runtime/src/operator/mod.rs";
+const RUNTIME_OPERATOR_JWKS_PATH: &str = "assemblies/runtime/src/operator/jwks.rs";
+const RUNTIME_PLAN_LIVE_INVENTORY_PATH: &str =
+    "assemblies/runtime/tests/fixtures/runtime-plan-live-inventory-v1.txt";
+const RUNTIME_OPERATOR_POSTGRES_PATH: &str = "assemblies/runtime/src/operator/postgres.rs";
+const RUNTIME_OPERATOR_PROJECTION_PATH: &str = "assemblies/runtime/src/operator/projection.rs";
+const RUNTIME_OPERATOR_AUDIT_PATH: &str = "assemblies/runtime/src/operator/audit_ledger.rs";
+const RUNTIME_OPERATOR_DLQ_PATH: &str = "assemblies/runtime/src/operator/dlq.rs";
+const RUNTIME_OPERATOR_RECONCILE_PATH: &str = "assemblies/runtime/src/operator/reconcile.rs";
+const RUNTIME_OPERATOR_SETTINGS_PATH: &str = "assemblies/runtime/src/operator/settings.rs";
+const RUNTIME_TEST_SUPPORT_PATH: &str = "assemblies/runtime/src/test_support.rs";
+const RUNTIME_PHASE_DLX_PATH: &str = "assemblies/runtime/src/phase/infra/dlx.rs";
 const RUNTIME_ROUTES_PATH: &str = "assemblies/runtime/src/routes.rs";
 #[cfg(test)]
 const RUNTIME_LISTENERS_PATH: &str = "assemblies/runtime/src/listeners.rs";
@@ -248,6 +265,8 @@ fn collect_report(root: &Path) -> Result<Report> {
     findings.extend(generated_domains_live_findings(root)?);
     findings.extend(provider_outputs_live_findings(root)?);
     findings.extend(event_transport_output_findings(root)?);
+    findings.extend(runtime_plan_live_inventory_findings(root)?);
+    findings.extend(runtime_plan_live_closure_findings(root)?);
     findings.extend(listener_plan_execution_findings(root)?);
 
     Ok(Report {
@@ -266,6 +285,732 @@ fn collect_report(root: &Path) -> Result<Report> {
         anchors: anchors.len(),
         findings,
     })
+}
+
+fn runtime_plan_live_closure_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    if !root.join(RUNTIME_PLAN_PATH).exists() {
+        return Ok(Vec::new());
+    }
+    let required = [
+        RUNTIME_DOMAIN_EXEC_PATH,
+        RUNTIME_PHASE_PATH,
+        RUNTIME_PHASE_PROVIDER_PATH,
+        RUNTIME_PHASE_DOMAINS_PATH,
+    ];
+    for path in required {
+        if !root.join(path).exists() {
+            return Ok(vec![finding(
+                Rule::MissingAnchor,
+                path,
+                "RuntimePlan live closure owner is missing",
+            )]);
+        }
+    }
+
+    let domain_exec = parse_rust_file(&root.join(RUNTIME_DOMAIN_EXEC_PATH))?;
+    let phase = parse_rust_file(&root.join(RUNTIME_PHASE_PATH))?;
+    let provider = parse_rust_file(&root.join(RUNTIME_PHASE_PROVIDER_PATH))?;
+    let domains = parse_rust_file(&root.join(RUNTIME_PHASE_DOMAINS_PATH))?;
+    let build_providers =
+        unique_production_inherent_method(&provider, "Planned", "build_providers");
+    let wire_domains = unique_production_inherent_method(&domains, "InfraBuilt", "wire_domains");
+    let validate =
+        unique_production_inherent_method(&domain_exec, "DomainExecutionPlan", "validate");
+    let compose =
+        unique_production_inherent_method(&domain_exec, "ValidatedDomainBindings", "compose");
+    let mint = production_functions_named(&domain_exec, "mint");
+
+    let phase_shape = compact_tokens(&phase);
+    let provider_shape = build_providers.map(compact_tokens).unwrap_or_default();
+    let domains_shape = wire_domains.map(compact_tokens).unwrap_or_default();
+    let validate_is_consuming = validate.is_some_and(|method| {
+        matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver))
+            if receiver.reference.is_none())
+            && compact_tokens(&method.block).contains("bindings.iter().map(DomainBinding::name)")
+    });
+    let compose_is_consuming = compose.is_some_and(|method| {
+        matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver))
+            if receiver.reference.is_none())
+            && exact_named_path_call_count(&method.block, &["bootstrap", "compose_bindings"]) == 1
+    });
+    let capability_shapes_are_closed = ["DomainExecutionPlan", "ValidatedDomainBindings"]
+        .into_iter()
+        .all(|name| {
+            let declarations = domain_exec
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Struct(item)
+                        if item.ident == name && attrs_may_be_production(&item.attrs) =>
+                    {
+                        Some(item)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            declarations.len() == 1
+                && is_exact_pub_crate(&declarations[0].vis)
+                && declarations[0]
+                    .fields
+                    .iter()
+                    .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+        });
+    let mint_is_closed = mint.len() == 1
+        && matches!(&mint[0].vis, syn::Visibility::Restricted(restricted)
+            if restricted.path.is_ident("super"))
+        && method_call_count_in_block(&mint[0].block, "domain_plans") == 1
+        && method_call_count_in_block(&mint[0].block, "is_local") == 1;
+
+    let production_files = runtime_production_source_files(root)?;
+    let mut calls = RuntimePlanClosureCalls::default();
+    let mut exclusive_calls = RuntimePlanExclusiveCallInventory::default();
+    for file in production_files.values() {
+        calls.visit_file(file);
+        exclusive_calls.visit_file(file);
+    }
+
+    let mut findings = Vec::new();
+    let wire_validate_calls = wire_domains
+        .map(|method| method_call_count_in_block(&method.block, "validate"))
+        .unwrap_or_default();
+    let wire_compose_calls = wire_domains
+        .map(|method| method_call_count_in_block(&method.block, "compose"))
+        .unwrap_or_default();
+    let wire_direct_compose_calls = wire_domains
+        .map(|method| {
+            exact_named_path_call_count(&method.block, &["bootstrap", "compose_bindings"])
+        })
+        .unwrap_or_default();
+    let failure_proof = wire_domains
+        .map(|method| wire_domain_failure_proof(&method.block))
+        .unwrap_or_default();
+    let checks = [
+        (
+            capability_shapes_are_closed && validate_is_consuming && compose_is_consuming,
+            RUNTIME_DOMAIN_EXEC_PATH,
+            "DomainExecutionPlan/ValidatedDomainBindings must remain private-field, consuming capabilities and the latter must own the sole canonical compose handoff",
+        ),
+        (
+            mint_is_closed,
+            RUNTIME_DOMAIN_EXEC_PATH,
+            "only the plan module may mint DomainExecutionPlan from domain declarations and PlacementExecutionPlan local projection",
+        ),
+        (
+            compose_is_consuming
+                && exclusive_calls.compose_bindings.is_exact_single_call()
+                && compose.is_some_and(|method| {
+                    exact_named_path_call_count(
+                        &method.block,
+                        &["bootstrap", "compose_bindings"],
+                    ) == 1
+                }),
+            RUNTIME_DOMAIN_EXEC_PATH,
+            "the complete production graph must contain exactly one bootstrap::compose_bindings function reference/call, owned by consuming ValidatedDomainBindings::compose, with no import, alias, dead helper, or macro seam",
+        ),
+        (
+            exclusive_calls.generated_wire_domains.is_exact_single_call()
+                && wire_domains.is_some_and(|method| {
+                    exact_named_path_call_count(
+                        &method.block,
+                        &["crate", "modules_gen", "wire_domains"],
+                    ) == 1
+                }),
+            RUNTIME_PHASE_DOMAINS_PATH,
+            "the complete production graph must contain exactly one crate::modules_gen::wire_domains function reference/call, owned by InfraBuilt::wire_domains, with no import, alias, dead helper, or macro seam",
+        ),
+        (
+            calls.domain_execution_plan == 1
+                && calls.listener_execution_plan == 1
+                && calls.placement_execution_plan == 1,
+            RUNTIME_PHASE_PROVIDER_PATH,
+            "the production module graph must contain exactly one domain/listener/placement RuntimePlan execution projection",
+        ),
+        (
+            build_providers.is_some()
+                && provider_shape.contains(
+                    "runtime_plan.domain_execution_plan(&placement_execution_plan)",
+                )
+                && provider_shape.contains("DomainPhaseContext::new(self.runtime_inputs,runtime_plan,domain_execution_plan)"),
+            RUNTIME_PHASE_PROVIDER_PATH,
+            "BuildProvider must mint and linearly seal DomainExecutionPlan into DomainPhaseContext",
+        ),
+        (
+            phase_shape.contains("structDomainPhaseContext<'a>")
+                && phase_shape.contains("domain_execution_plan:crate::plan::DomainExecutionPlan")
+                && phase_shape.contains("pub(crate)structProvidersBuilt<'a>{context:DomainPhaseContext<'a>")
+                && phase_shape.contains("pub(crate)structInfraBuilt<'a>{context:DomainPhaseContext<'a>"),
+            RUNTIME_PHASE_PATH,
+            "ProvidersBuilt and InfraBuilt must carry the mandatory domain execution capability",
+        ),
+        (
+            wire_domains.is_some()
+                && wire_validate_calls == 1
+                && wire_compose_calls == 1
+                && wire_direct_compose_calls == 0
+                && domains_shape.contains("domain_execution_plan.validate(domain_bindings)")
+                && domains_shape.contains("validated_domain_bindings.compose()")
+                && failure_proof.is_exact(),
+            RUNTIME_PHASE_DOMAINS_PATH,
+            "WireDomains must validate once, compose only the private wrapper, and structurally preserve generated/validation/composition failure bindings through into_parts -> drain_binding_outputs -> record_domain -> return Err",
+        ),
+        (
+            calls.public_domain_capability_reexports == 0,
+            RUNTIME_SRC_PATH,
+            "domain execution capabilities must not have a public re-export",
+        ),
+    ];
+    for (accepted, path, detail) in checks {
+        if !accepted {
+            findings.push(finding(Rule::ForbiddenWiring, path, detail));
+        }
+    }
+    Ok(findings)
+}
+
+const RUNTIME_PLAN_LIVE_INVENTORY_FIELDS: &[&str] = &[
+    "provider.declared",
+    "provider.active",
+    "provider.live-consumers",
+    "listener.plan",
+    "listener.generated",
+    "listener.live",
+    "domain.declared",
+    "domain.local",
+    "domain.live",
+    "placement.declared",
+    "placement.local",
+    "placement.remote",
+];
+
+fn validate_runtime_plan_live_inventory(raw: &str) -> Result<()> {
+    let mut lines = raw.lines();
+    anyhow::ensure!(
+        lines.next() == Some("runtime-plan-live-inventory-v1"),
+        "live inventory schema header drift"
+    );
+    for expected in RUNTIME_PLAN_LIVE_INVENTORY_FIELDS {
+        let line = lines
+            .next()
+            .with_context(|| format!("live inventory field `{expected}` missing"))?;
+        let (field, values) = line
+            .split_once('=')
+            .with_context(|| format!("live inventory field `{expected}` is malformed"))?;
+        anyhow::ensure!(
+            field == *expected,
+            "live inventory field `{expected}` drift"
+        );
+        let values = values
+            .strip_prefix('[')
+            .and_then(|values| values.strip_suffix(']'))
+            .with_context(|| format!("live inventory field `{expected}` lacks closed brackets"))?;
+        let members = if values.is_empty() {
+            Vec::new()
+        } else {
+            values.split(',').collect::<Vec<_>>()
+        };
+        anyhow::ensure!(
+            *expected == "placement.remote" || !members.is_empty(),
+            "live inventory field `{expected}` must be non-empty"
+        );
+        anyhow::ensure!(
+            members
+                .iter()
+                .all(|member| !member.trim().is_empty() && *member == member.trim()),
+            "live inventory field `{expected}` contains an empty or padded member"
+        );
+        let unique = members.iter().copied().collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            unique.len() == members.len(),
+            "live inventory field `{expected}` contains duplicate members"
+        );
+    }
+    anyhow::ensure!(
+        lines.next().is_none(),
+        "live inventory has unknown trailing fields"
+    );
+    anyhow::ensure!(raw.ends_with('\n'), "live inventory must end with LF");
+    Ok(())
+}
+
+#[derive(Default)]
+struct RuntimePlanLiveInventoryTestInventory {
+    matching_tests: usize,
+    matching_renderers: usize,
+}
+
+impl<'ast> Visit<'ast> for RuntimePlanLiveInventoryTestInventory {
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if item.sig.ident == "render_live_inventory_for_test" {
+            self.matching_renderers += usize::from(
+                item.attrs.iter().any(|attribute| {
+                    attribute.path().is_ident("cfg") && compact_tokens(attribute).contains("test")
+                }) && matches!(item.vis, syn::Visibility::Restricted(_)),
+            );
+        }
+        if item.sig.ident == "runtime_plan_live_inventory_freezes_complete_plan_to_live_closure" {
+            let shape = compact_tokens(&item.block);
+            let tokio_test = item
+                .attrs
+                .iter()
+                .any(|attribute| compact_tokens(attribute).contains("tokio::test"));
+            let exact_fixture = shape
+                .matches(
+                    "include_str!(\"../../tests/fixtures/runtime-plan-live-inventory-v1.txt\")",
+                )
+                .count()
+                == 1;
+            let exact_live_chain = [
+                "crate::modules_gen::wire_test_domains().await",
+                "domain_execution_plan.validate(live_bindings)",
+                "validated.compose()",
+                "super::render_live_inventory_for_test(",
+            ]
+            .into_iter()
+            .all(|anchor| shape.matches(anchor).count() == 1);
+            self.matching_tests += usize::from(tokio_test && exact_fixture && exact_live_chain);
+        }
+        syn::visit::visit_item_fn(self, item);
+    }
+}
+
+fn runtime_plan_live_inventory_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let golden_path = root.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH);
+    let owner_path = root.join(RUNTIME_DOMAIN_EXEC_PATH);
+    if !golden_path.is_file() || !owner_path.is_file() {
+        return Ok(vec![finding(
+            Rule::MissingAnchor,
+            RUNTIME_PLAN_LIVE_INVENTORY_PATH,
+            "runtime plan live inventory golden or canonical test owner is missing",
+        )]);
+    }
+    let raw = fs::read_to_string(&golden_path)
+        .with_context(|| format!("read {}", golden_path.display()))?;
+    let mut findings = Vec::new();
+    if let Err(error) = validate_runtime_plan_live_inventory(&raw) {
+        findings.push(finding(
+            Rule::MissingAnchor,
+            RUNTIME_PLAN_LIVE_INVENTORY_PATH,
+            format!("strict runtime plan live inventory drift: {error:#}"),
+        ));
+    }
+    let owner = parse_rust_file(&owner_path)?;
+    let mut inventory = RuntimePlanLiveInventoryTestInventory::default();
+    inventory.visit_file(&owner);
+    if inventory.matching_tests != 1 || inventory.matching_renderers != 1 {
+        findings.push(finding(
+            Rule::MissingAnchor,
+            RUNTIME_DOMAIN_EXEC_PATH,
+            format!(
+                "live inventory must have one cfg(test) renderer and one canonical tokio execution test consuming generated domains, validation, composition and the exact golden; renderers={}, tests={}",
+                inventory.matching_renderers, inventory.matching_tests
+            ),
+        ));
+    }
+    Ok(findings)
+}
+
+#[derive(Default)]
+struct ExclusiveFunctionUse {
+    expression_references: usize,
+    exact_calls: usize,
+    imports: usize,
+    macro_mentions: usize,
+}
+
+impl ExclusiveFunctionUse {
+    fn is_exact_single_call(&self) -> bool {
+        self.expression_references == 1
+            && self.exact_calls == 1
+            && self.imports == 0
+            && self.macro_mentions == 0
+    }
+}
+
+#[derive(Default)]
+struct RuntimePlanExclusiveCallInventory {
+    compose_bindings: ExclusiveFunctionUse,
+    generated_wire_domains: ExclusiveFunctionUse,
+}
+
+impl RuntimePlanExclusiveCallInventory {
+    fn record_expr_path(&mut self, path: &syn::Path) {
+        match path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        {
+            Some(name) if name == "compose_bindings" => {
+                self.compose_bindings.expression_references += 1;
+            }
+            Some(name) if name == "wire_domains" => {
+                self.generated_wire_domains.expression_references += 1;
+            }
+            _ => {}
+        }
+    }
+
+    fn record_use(&mut self, tree: &syn::UseTree) {
+        let tokens = compact_tokens(tree);
+        self.compose_bindings.imports += usize::from(tokens.contains("compose_bindings"));
+        self.generated_wire_domains.imports += usize::from(tokens.contains("wire_domains"));
+    }
+
+    fn record_macro(&mut self, mac: &syn::Macro) {
+        fn contains_ident(tokens: proc_macro2::TokenStream, expected: &str) -> bool {
+            tokens.into_iter().any(|token| match token {
+                proc_macro2::TokenTree::Ident(ident) => ident == expected,
+                proc_macro2::TokenTree::Group(group) => contains_ident(group.stream(), expected),
+                _ => false,
+            })
+        }
+        self.compose_bindings.macro_mentions +=
+            usize::from(contains_ident(mac.tokens.clone(), "compose_bindings"));
+        self.generated_wire_domains.macro_mentions +=
+            usize::from(contains_ident(mac.tokens.clone(), "wire_domains"));
+    }
+}
+
+impl<'ast> Visit<'ast> for RuntimePlanExclusiveCallInventory {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_impl(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        self.compose_bindings.exact_calls += usize::from(is_exact_path(
+            &call.func,
+            &["bootstrap", "compose_bindings"],
+        ));
+        self.generated_wire_domains.exact_calls += usize::from(is_exact_path(
+            &call.func,
+            &["crate", "modules_gen", "wire_domains"],
+        ));
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        self.record_expr_path(&path.path);
+        syn::visit::visit_expr_path(self, path);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if attrs_may_be_production(&item.attrs) {
+            self.record_use(&item.tree);
+        }
+    }
+
+    fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+        if attrs_may_be_production(&item.attrs) {
+            self.record_macro(&item.mac);
+        }
+    }
+
+    fn visit_expr_macro(&mut self, item: &'ast syn::ExprMacro) {
+        if attrs_may_be_production(&item.attrs) {
+            self.record_macro(&item.mac);
+        }
+    }
+
+    fn visit_stmt_macro(&mut self, item: &'ast syn::StmtMacro) {
+        if attrs_may_be_production(&item.attrs) {
+            self.record_macro(&item.mac);
+        }
+    }
+}
+
+#[derive(Default)]
+struct WireDomainFailureProof {
+    generated_matches: usize,
+    generated_rollbacks: usize,
+    validation_matches: usize,
+    validation_rollbacks: usize,
+    composition_matches: usize,
+    composition_rollbacks: usize,
+}
+
+impl WireDomainFailureProof {
+    fn is_exact(&self) -> bool {
+        self.generated_matches == 1
+            && self.generated_rollbacks == 1
+            && self.validation_matches == 1
+            && self.validation_rollbacks == 1
+            && self.composition_matches == 1
+            && self.composition_rollbacks == 1
+    }
+}
+
+fn wire_domain_failure_proof(block: &syn::Block) -> WireDomainFailureProof {
+    struct Visitor {
+        proof: WireDomainFailureProof,
+    }
+    impl Visit<'_> for Visitor {
+        fn visit_expr_match(&mut self, match_: &syn::ExprMatch) {
+            let rollback = match_
+                .arms
+                .iter()
+                .find(|arm| pat_is_single_tuple_variant(&arm.pat, "Err", "failure"))
+                .is_some_and(|arm| domain_failure_arm_is_exact(&arm.body));
+            if generated_domain_match_scrutinee(&match_.expr) {
+                self.proof.generated_matches += 1;
+                self.proof.generated_rollbacks += usize::from(rollback);
+            } else if method_match_scrutinee(
+                &match_.expr,
+                "domain_execution_plan",
+                "validate",
+                Some("domain_bindings"),
+            ) {
+                self.proof.validation_matches += 1;
+                self.proof.validation_rollbacks += usize::from(rollback);
+            } else if method_match_scrutinee(
+                &match_.expr,
+                "validated_domain_bindings",
+                "compose",
+                None,
+            ) {
+                self.proof.composition_matches += 1;
+                self.proof.composition_rollbacks += usize::from(rollback);
+            }
+            syn::visit::visit_expr_match(self, match_);
+        }
+    }
+    let mut visitor = Visitor {
+        proof: WireDomainFailureProof::default(),
+    };
+    visitor.visit_block(block);
+    visitor.proof
+}
+
+fn generated_domain_match_scrutinee(expr: &syn::Expr) -> bool {
+    let syn::Expr::Await(await_) = transparent_expr(expr) else {
+        return false;
+    };
+    let syn::Expr::Call(call) = transparent_expr(&await_.base) else {
+        return false;
+    };
+    is_exact_path(&call.func, &["crate", "modules_gen", "wire_domains"])
+}
+
+fn method_match_scrutinee(
+    expr: &syn::Expr,
+    receiver: &str,
+    method: &str,
+    argument: Option<&str>,
+) -> bool {
+    let syn::Expr::MethodCall(call) = transparent_expr(expr) else {
+        return false;
+    };
+    call.method == method
+        && expr_is_ident(&call.receiver, receiver)
+        && match argument {
+            Some(argument) => {
+                call.args.len() == 1
+                    && call
+                        .args
+                        .first()
+                        .is_some_and(|arg| expr_is_ident(arg, argument))
+            }
+            None => call.args.is_empty(),
+        }
+}
+
+fn pat_is_single_tuple_variant(pat: &syn::Pat, variant: &str, binding: &str) -> bool {
+    let syn::Pat::TupleStruct(tuple) = pat else {
+        return false;
+    };
+    is_exact_syn_path(&tuple.path, &[variant])
+        && tuple.elems.len() == 1
+        && tuple
+            .elems
+            .first()
+            .and_then(pat_ident)
+            .is_some_and(|ident| ident == binding)
+}
+
+fn domain_failure_arm_is_exact(expr: &syn::Expr) -> bool {
+    let syn::Expr::Block(block) = transparent_expr(expr) else {
+        return false;
+    };
+    let [syn::Stmt::Local(parts), record, returned] = block.block.stmts.as_slice() else {
+        return false;
+    };
+    failure_parts_local_is_exact(parts)
+        && stmt_expr(record).is_some_and(record_failed_domain_bindings_is_exact)
+        && stmt_expr(returned).is_some_and(return_failed_domain_source_is_exact)
+}
+
+fn failure_parts_local_is_exact(local: &syn::Local) -> bool {
+    let syn::Pat::Tuple(tuple) = &local.pat else {
+        return false;
+    };
+    let Some(source) = tuple.elems.first().and_then(pat_ident) else {
+        return false;
+    };
+    let Some(syn::Pat::Ident(bindings)) = tuple.elems.iter().nth(1) else {
+        return false;
+    };
+    let Some(init) = &local.init else {
+        return false;
+    };
+    let syn::Expr::MethodCall(call) = transparent_expr(&init.expr) else {
+        return false;
+    };
+    tuple.elems.len() == 2
+        && source == "source"
+        && bindings.ident == "bindings"
+        && bindings.by_ref.is_none()
+        && bindings.mutability.is_some()
+        && call.method == "into_parts"
+        && call.args.is_empty()
+        && expr_is_ident(&call.receiver, "failure")
+        && init.diverge.is_none()
+}
+
+fn record_failed_domain_bindings_is_exact(expr: &syn::Expr) -> bool {
+    let syn::Expr::MethodCall(record) = transparent_expr(expr) else {
+        return false;
+    };
+    let Some(argument) = record.args.first() else {
+        return false;
+    };
+    let syn::Expr::Call(drain) = transparent_expr(argument) else {
+        return false;
+    };
+    let Some(syn::Expr::Reference(bindings)) = drain.args.first().map(transparent_expr) else {
+        return false;
+    };
+    record.method == "record_domain"
+        && record.args.len() == 1
+        && expr_is_ident(&record.receiver, "provider_build")
+        && is_exact_path(&drain.func, &["bootstrap", "drain_binding_outputs"])
+        && drain.args.len() == 1
+        && bindings.mutability.is_some()
+        && expr_is_ident(&bindings.expr, "bindings")
+}
+
+fn return_failed_domain_source_is_exact(expr: &syn::Expr) -> bool {
+    let syn::Expr::Return(return_) = transparent_expr(expr) else {
+        return false;
+    };
+    let Some(returned) = &return_.expr else {
+        return false;
+    };
+    let syn::Expr::MethodCall(context) = transparent_expr(returned) else {
+        return false;
+    };
+    let syn::Expr::Call(error) = transparent_expr(&context.receiver) else {
+        return false;
+    };
+    context.method == "context"
+        && context.args.len() == 1
+        && context
+            .args
+            .first()
+            .is_some_and(|argument| matches!(transparent_expr(argument), syn::Expr::Lit(lit) if matches!(lit.lit, syn::Lit::Str(_))))
+        && is_exact_path(&error.func, &["Err"])
+        && error.args.len() == 1
+        && error
+            .args
+            .first()
+            .is_some_and(|argument| expr_is_ident(argument, "source"))
+}
+
+fn stmt_expr(stmt: &syn::Stmt) -> Option<&syn::Expr> {
+    match stmt {
+        syn::Stmt::Expr(expr, _) => Some(expr),
+        _ => None,
+    }
+}
+
+fn expr_is_ident(expr: &syn::Expr, expected: &str) -> bool {
+    let syn::Expr::Path(path) = transparent_expr(expr) else {
+        return false;
+    };
+    path.qself.is_none()
+        && path.path.leading_colon.is_none()
+        && path.path.segments.len() == 1
+        && path
+            .path
+            .segments
+            .first()
+            .is_some_and(|segment| segment.ident == expected)
+}
+
+#[derive(Default)]
+struct RuntimePlanClosureCalls {
+    domain_execution_plan: usize,
+    listener_execution_plan: usize,
+    placement_execution_plan: usize,
+    public_domain_capability_reexports: usize,
+}
+
+impl<'ast> Visit<'ast> for RuntimePlanClosureCalls {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_impl(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        match call.method.to_string().as_str() {
+            "domain_execution_plan" => self.domain_execution_plan += 1,
+            "listener_execution_plan" => self.listener_execution_plan += 1,
+            "placement_execution_plan" => self.placement_execution_plan += 1,
+            _ => {}
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if !attrs_may_be_production(&item.attrs) || !matches!(item.vis, syn::Visibility::Public(_))
+        {
+            return;
+        }
+        let tokens = compact_tokens(&item.tree);
+        self.public_domain_capability_reexports += usize::from(
+            tokens.contains("DomainExecutionPlan") || tokens.contains("ValidatedDomainBindings"),
+        );
+    }
+
+    fn visit_macro(&mut self, _item: &'ast syn::Macro) {
+        // Macro tokens are deliberately never accepted as live closure evidence.
+    }
 }
 
 fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
@@ -293,6 +1038,7 @@ fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     let lib = source(RUNTIME_LIB_PATH);
     let provider = source(RUNTIME_PHASE_PROVIDER_PATH);
     let infra = source(RUNTIME_PHASE_INFRA_PATH);
+    let domain_transport = source(RUNTIME_PHASE_DOMAIN_TRANSPORT_PATH);
     let inventories = production_files
         .iter()
         .map(|(path, file)| (path.clone(), listener_plan_execution_inventory(file)))
@@ -390,7 +1136,7 @@ fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
                     == 1
                 && provider.contains("runtime_plan.placement_execution_plan(")
                 && provider.contains("reject_remote_on_local_listeners(")
-                && lib.matches("fn from_placement(").count() == 1
+                && domain_transport.matches("fn from_placement(").count() == 1
                 && infra.contains("DomainTransportConfig::from_placement("),
             RUNTIME_PLACEMENT_EXEC_PATH,
             "RuntimePlan 必须唯一 mint PlacementExecutionPlan，并经 reject_remote_on_local_listeners + from_placement 进入 outbound transport",
@@ -775,7 +1521,7 @@ impl<'ast> Visit<'ast> for ListenerPlanExecutionInventory {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct PrepareRuntimeConfigWiring {
     snapshot_calls: usize,
     canonical_snapshot_calls: usize,
@@ -2680,6 +3426,38 @@ fn vault_s3_test_support_wrappers_are_exact(file: &syn::File) -> bool {
     })
 }
 
+fn vault_s3_test_support_file_is_exact(file: &syn::File) -> bool {
+    VALUES_SEAM_SPECS.iter().all(|spec| {
+        let wrappers = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(function) if function.sig.ident == spec.name => Some(function),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        wrappers.len() == 1 && public_values_wrapper_is_exact(wrappers[0], spec)
+    })
+}
+
+fn integration_test_support_module_is_exact(file: &syn::File) -> bool {
+    let modules = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module) if module.ident == "test_support" => Some(module),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    matches!(modules.as_slice(), [module]
+    if matches!(module.vis, syn::Visibility::Public(_))
+        && module.content.is_none()
+        && has_one_exact_cfg(&module.attrs, cfg_is_exact_integration)
+        && module.attrs.iter().all(|attribute| {
+            attribute.path().is_ident("cfg") || attribute.path().is_ident("doc")
+        }))
+}
+
 fn ident_is_protected_config(ident: &syn::Ident) -> bool {
     let ident = ident.to_string();
     PROTECTED_CONFIG_SYMBOLS.contains(&ident.as_str())
@@ -3165,12 +3943,13 @@ fn classifier_if_is_canonical(
     let Some(condition) = direct_call_behind_runtime_context(&branch.cond) else {
         return false;
     };
-    let condition_is_canonical = is_exact_path(&condition.func, &["runtime", predicate])
-        && condition.args.len() == 1
-        && condition
-            .args
-            .first()
-            .is_some_and(|arg| is_exact_ident_path(arg, args));
+    let condition_is_canonical =
+        is_exact_path(&condition.func, &["runtime", "operator", predicate])
+            && condition.args.len() == 1
+            && condition
+                .args
+                .first()
+                .is_some_and(|arg| is_exact_ident_path(arg, args));
     let return_is_canonical = match branch.then_branch.stmts.as_slice() {
         [syn::Stmt::Expr(expr, Some(_))] | [syn::Stmt::Expr(expr, None)] => {
             let syn::Expr::Return(returned) = transparent_expr(expr) else {
@@ -3435,8 +4214,10 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     else {
         return false;
     };
-    if !is_exact_path(&prepare_call.func, &["runtime", "prepare_operator_runtime"])
-        || !prepare_call.args.is_empty()
+    if !is_exact_path(
+        &prepare_call.func,
+        &["runtime", "operator", "prepare_runtime"],
+    ) || !prepare_call.args.is_empty()
     {
         return false;
     }
@@ -3483,7 +4264,7 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         let Some(call) = direct_awaited_call(&arm.body) else {
             return false;
         };
-        if !is_exact_path(&call.func, &["runtime", runner])
+        if !is_exact_path(&call.func, &["runtime", "operator", runner])
             || call.args.len() != 2
             || !call
                 .args
@@ -3509,7 +4290,7 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     };
     if !is_exact_path(
         &shutdown_call.func,
-        &["runtime", "shutdown_operator_runtime"],
+        &["runtime", "operator", "shutdown_runtime"],
     ) || shutdown_call.args.len() != 1
         || !shutdown_call
             .args
@@ -3587,22 +4368,32 @@ fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule
                 )]);
             }
         };
+        let operator = parse_rust_file(&root.join(RUNTIME_OPERATOR_PATH))?;
+        let settings = parse_rust_file(&root.join(RUNTIME_OPERATOR_SETTINGS_PATH))?;
+        let dlx = parse_rust_file(&root.join(RUNTIME_PHASE_DLX_PATH))?;
         production_runtime_phase_config_snapshot_findings(
             &file,
-            &provider_source,
-            &provider,
-            &infra_source,
-            &infra,
-            &domains_source,
-            &domains,
+            &operator,
+            ProductionRuntimePhaseConfig {
+                provider_source: &provider_source,
+                provider: &provider,
+                infra_source: &infra_source,
+                infra: &infra,
+                domains_source: &domains_source,
+                domains: &domains,
+                additional_inventory_files: &[&settings, &dlx],
+            },
         )
     };
-    if root.join(RSS_MAIN_PATH).exists() && !pg_operator_definitions_are_exact(&file) {
-        findings.push(finding(
-            Rule::ForbiddenWiring,
-            RUNTIME_LIB_PATH,
-            "the six PG operator definitions must expose the exact &OperatorRuntimeInputs parameter and flow its .config() view into the typed PG maintenance builder/runtime without ignored, wrong-binding, ambient-wrapper, or compliant-bait paths",
-        ));
+    if root.join(RSS_MAIN_PATH).exists() {
+        let production_files = runtime_production_source_files(root)?;
+        if !pg_operator_module_graph_is_exact(&production_files) {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                "assemblies/runtime/src/operator",
+                "the six PG operator definitions must live in their canonical operator modules, expose the exact &OperatorRuntimeInputs parameter, and flow its .config() view into the typed PG maintenance builder/runtime without ignored, wrong-binding, ambient-wrapper, or compliant-bait paths",
+            ));
+        }
     }
     findings.extend(runtime_profile_inputs_findings(root)?);
     findings.extend(runtime_config_global_capture_findings(root)?);
@@ -3612,14 +4403,20 @@ fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule
     Ok(findings)
 }
 
+struct ProductionRuntimePhaseConfig<'a> {
+    provider_source: &'a str,
+    provider: &'a syn::File,
+    infra_source: &'a str,
+    infra: &'a syn::File,
+    domains_source: &'a str,
+    domains: &'a syn::File,
+    additional_inventory_files: &'a [&'a syn::File],
+}
+
 fn production_runtime_phase_config_snapshot_findings(
     runtime: &syn::File,
-    provider_source: &str,
-    provider: &syn::File,
-    infra_source: &str,
-    infra: &syn::File,
-    domains_source: &str,
-    domains: &syn::File,
+    operator: &syn::File,
+    phase: ProductionRuntimePhaseConfig<'_>,
 ) -> Vec<Finding<Rule>> {
     let prepares = production_functions_named(runtime, "prepare_runtime");
     let runs = production_functions_named(runtime, "run");
@@ -3645,27 +4442,36 @@ fn production_runtime_phase_config_snapshot_findings(
             "runtime configuration snapshot gate requires one production run_startup",
         )];
     };
-    if let Err(error) =
-        expand_inherent_phase_method(provider_source, provider, "Planned", "build_providers")
-    {
+    if let Err(error) = expand_inherent_phase_method(
+        phase.provider_source,
+        phase.provider,
+        "Planned",
+        "build_providers",
+    ) {
         return vec![finding(
             Rule::MissingAnchor,
             RUNTIME_PHASE_PROVIDER_PATH,
             format!("typed BuildProvider helper expansion failed: {error}"),
         )];
     }
-    if let Err(error) =
-        expand_inherent_phase_method(infra_source, infra, "ProvidersBuilt", "build_infra")
-    {
+    if let Err(error) = expand_inherent_phase_method(
+        phase.infra_source,
+        phase.infra,
+        "ProvidersBuilt",
+        "build_infra",
+    ) {
         return vec![finding(
             Rule::MissingAnchor,
             RUNTIME_PHASE_INFRA_PATH,
             format!("typed BuildInfra helper expansion failed: {error}"),
         )];
     }
-    if let Err(error) =
-        expand_inherent_phase_method(domains_source, domains, "InfraBuilt", "wire_domains")
-    {
+    if let Err(error) = expand_inherent_phase_method(
+        phase.domains_source,
+        phase.domains,
+        "InfraBuilt",
+        "wire_domains",
+    ) {
         return vec![finding(
             Rule::MissingAnchor,
             RUNTIME_PHASE_DOMAINS_PATH,
@@ -3677,18 +4483,24 @@ fn production_runtime_phase_config_snapshot_findings(
     prepare_wiring.visit_block(&prepare.block);
     let mut run_wiring =
         RunRuntimeConfigWiring::new(syn::Ident::new("context", proc_macro2::Span::call_site()));
-    if let Err(error) =
-        visit_expanded_phase_method(&mut run_wiring, provider, "Planned", "build_providers")
-    {
+    if let Err(error) = visit_expanded_phase_method(
+        &mut run_wiring,
+        phase.provider,
+        "Planned",
+        "build_providers",
+    ) {
         return vec![finding(
             Rule::MissingAnchor,
             RUNTIME_PHASE_PROVIDER_PATH,
             format!("typed BuildProvider helper expansion visitor failed: {error}"),
         )];
     }
-    if let Err(error) =
-        visit_expanded_phase_method(&mut run_wiring, infra, "ProvidersBuilt", "build_infra")
-    {
+    if let Err(error) = visit_expanded_phase_method(
+        &mut run_wiring,
+        phase.infra,
+        "ProvidersBuilt",
+        "build_infra",
+    ) {
         return vec![finding(
             Rule::MissingAnchor,
             RUNTIME_PHASE_INFRA_PATH,
@@ -3696,7 +4508,7 @@ fn production_runtime_phase_config_snapshot_findings(
         )];
     }
     if let Err(error) =
-        visit_expanded_phase_method(&mut run_wiring, domains, "InfraBuilt", "wire_domains")
+        visit_expanded_phase_method(&mut run_wiring, phase.domains, "InfraBuilt", "wire_domains")
     {
         return vec![finding(
             Rule::MissingAnchor,
@@ -3706,10 +4518,13 @@ fn production_runtime_phase_config_snapshot_findings(
     }
     let mut inventory = ProductionRuntimeConfigInventory::default();
     inventory.visit_file(runtime);
-    inventory.visit_file(provider);
-    inventory.visit_file(infra);
-    inventory.visit_file(domains);
-    let password_preload = PasswordPreloadStatus::inspect(runtime);
+    inventory.visit_file(phase.provider);
+    inventory.visit_file(phase.infra);
+    inventory.visit_file(phase.domains);
+    for file in phase.additional_inventory_files {
+        inventory.visit_file(file);
+    }
+    let password_preload = PasswordPreloadStatus::inspect_production(runtime, operator);
 
     if prepare.sig.asyncness.is_none()
         && run.sig.asyncness.is_some()
@@ -3717,7 +4532,6 @@ fn production_runtime_phase_config_snapshot_findings(
         && runtime_inputs_mut_parameter(startup).is_some()
         && password_preload.is_canonical()
         && run_wiring.is_phase_canonical()
-        && settings_vault_snapshot_definition_is_exact(runtime)
         && runtime_lifecycle_outer_is_canonical(runtime, run)
         && inventory.is_exact()
     {
@@ -3775,30 +4589,104 @@ fn runtime_profile_inputs_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         ));
     }
 
-    let vault_path = root.join(RUNTIME_VAULT_PATH);
-    if vault_path.exists() {
-        let vault_source = fs::read_to_string(&vault_path)
-            .with_context(|| format!("读 {} 失败", vault_path.display()))?;
-        let vault_file = match syn::parse_file(&vault_source) {
+    let jwks_path = root.join(RUNTIME_OPERATOR_JWKS_PATH);
+    if jwks_path.exists() {
+        let jwks_source = fs::read_to_string(&jwks_path)
+            .with_context(|| format!("读 {} 失败", jwks_path.display()))?;
+        let jwks_file = match syn::parse_file(&jwks_source) {
             Ok(file) => file,
             Err(error) => {
                 findings.push(finding(
                     Rule::ForbiddenWiring,
-                    RUNTIME_VAULT_PATH,
+                    RUNTIME_OPERATOR_JWKS_PATH,
                     format!("RSS access JWKS operator profile gate 无法解析 Rust: {error}"),
                 ));
                 return Ok(findings);
             }
         };
-        if !rss_access_jwks_operator_signature_is_exact(&vault_file) {
+        if !rss_access_jwks_operator_signature_is_exact(&jwks_file) {
             findings.push(finding(
                 Rule::ForbiddenWiring,
-                RUNTIME_VAULT_PATH,
-                "run_rss_access_jwks_export_command must accept the exact &[String] and &crate::OperatorRuntimeInputs inputs; serving inputs and ambient configuration are forbidden",
+                RUNTIME_OPERATOR_JWKS_PATH,
+                "run_rss_access_jwks_export_command must accept the exact &[String] and &OperatorRuntimeInputs inputs in the canonical operator owner; serving inputs and ambient configuration are forbidden",
             ));
+        }
+        let vault_path = root.join(RUNTIME_VAULT_PATH);
+        if vault_path.is_file() {
+            let vault_file = parse_rust_file(&vault_path)?;
+            if !rss_access_jwks_capability_flow_is_exact(&vault_file, &jwks_file) {
+                findings.push(finding(
+                    Rule::ForbiddenWiring,
+                    RUNTIME_OPERATOR_JWKS_PATH,
+                    "RSS access JWKS production flow must call the sole capability-bound Vault export with exact args + SnapshotConfig + OperatorRuntimeCapability; getter/allow-http/alias/dead-helper seams are forbidden",
+                ));
+            }
         }
     }
     Ok(findings)
+}
+
+fn rss_access_jwks_capability_flow_is_exact(vault: &syn::File, operator: &syn::File) -> bool {
+    let exports = production_functions_named(vault, "export_rss_access_jwks");
+    let urls = production_functions_named(vault, "vault_transit_key_metadata_url");
+    let wrappers = production_functions_named(operator, "run_rss_access_jwks_export_command");
+    let [export] = exports.as_slice() else {
+        return false;
+    };
+    let [url] = urls.as_slice() else {
+        return false;
+    };
+    let [wrapper] = wrappers.as_slice() else {
+        return false;
+    };
+    let export_inputs = compact_tokens(&export.sig.inputs);
+    let export_shape = compact_tokens(&export.block);
+    let url_inputs = compact_tokens(&url.sig.inputs);
+    let url_shape = compact_tokens(&url.block);
+    let wrapper_shape = compact_tokens(&wrapper.block);
+    let production_export_calls = operator
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if attrs_may_be_production(&function.attrs) => Some(function),
+            _ => None,
+        })
+        .map(|function| {
+            exact_named_path_call_count(
+                &function.block,
+                &["crate", "infra", "vault", "export_rss_access_jwks"],
+            )
+        })
+        .sum::<usize>();
+    let forbidden_alias = operator.items.iter().any(|item| {
+        matches!(item, syn::Item::Use(use_) if attrs_may_be_production(&use_.attrs)
+            && compact_tokens(&use_.tree).contains("export_rss_access_jwks"))
+    });
+
+    is_exact_pub_crate(&export.vis)
+        && export.sig.asyncness.is_some()
+        && export_inputs
+            == "args:&[String],config:SnapshotConfig<'_>,_operator:OperatorRuntimeCapability<'_>,"
+        && compact_tokens(&export.sig.output) == "->anyhow::Result<()>"
+        && !export_shape.contains("allow_http")
+        && exact_named_path_call_count(&export.block, &["vault_transit_key_metadata_url"]) == 1
+        && matches!(url.vis, syn::Visibility::Inherited)
+        && url_inputs == "addr:&str,mount:&str,key_id:&str,"
+        && !url_shape.contains("allow_http")
+        && url_shape.contains("url.scheme()==\"https\"")
+        && production_functions_named(vault, "export_rss_access_jwks_from").is_empty()
+        && wrapper.sig.asyncness.is_some()
+        && compact_tokens(&wrapper.sig.inputs)
+            == "args:&[String],runtime_inputs:&OperatorRuntimeInputs,"
+        && exact_named_path_call_count(
+            &wrapper.block,
+            &["crate", "infra", "vault", "export_rss_access_jwks"],
+        ) == 1
+        && production_export_calls == 1
+        && wrapper_shape.contains(
+            "crate::infra::vault::export_rss_access_jwks(args,runtime_inputs.config(),runtime_inputs.operator_capability(),).await",
+        )
+        && !forbidden_alias
 }
 
 fn runtime_profile_input_structs_are_exact(file: &syn::File) -> bool {
@@ -3874,7 +4762,7 @@ fn rss_access_jwks_operator_signature_is_exact(file: &syn::File) -> bool {
         && matches!(inputs[0], syn::FnArg::Typed(input)
             if compact_type_tokens(input.ty.as_ref()) == "&[String]")
         && matches!(inputs[1], syn::FnArg::Typed(input)
-            if compact_type_tokens(input.ty.as_ref()) == "&crate::OperatorRuntimeInputs")
+            if compact_type_tokens(input.ty.as_ref()) == "&OperatorRuntimeInputs")
         && matches!(&function.sig.output, syn::ReturnType::Type(_, ty)
             if compact_type_tokens(ty.as_ref()) == "anyhow::Result<()>")
 }
@@ -3933,6 +4821,22 @@ fn redis_test_support_wrapper_is_exact(file: &syn::File) -> bool {
         return false;
     };
     let wrappers = items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function)
+                if function.sig.ident == "build_redis_runtime_deps_from_values" =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    wrappers.len() == 1 && public_redis_values_wrapper_is_exact(wrappers[0])
+}
+
+fn redis_test_support_file_is_exact(file: &syn::File) -> bool {
+    let wrappers = file
+        .items
         .iter()
         .filter_map(|item| match item {
             syn::Item::Fn(function)
@@ -4113,9 +5017,17 @@ fn redis_snapshot_boundary_findings(
             _ => None,
         })
         .collect::<Vec<_>>();
+    let support_path = root.join(RUNTIME_TEST_SUPPORT_PATH);
+    let wrapper_is_exact = if support_path.exists() {
+        redis_test_support_file_is_exact(&parse_rust_file(&support_path)?)
+            && (!root.join("Cargo.toml").exists()
+                || integration_test_support_module_is_exact(runtime_file))
+    } else {
+        !root.join("Cargo.toml").exists() && redis_test_support_wrapper_is_exact(runtime_file)
+    };
     if internal.len() == 1
         && internal_redis_values_seam_is_exact(internal[0])
-        && redis_test_support_wrapper_is_exact(runtime_file)
+        && wrapper_is_exact
         && redis_pool_flow_is_exact(&redis_file)
     {
         return Ok(Vec::new());
@@ -4168,7 +5080,14 @@ fn vault_s3_values_boundary_findings(
         return Ok(Vec::new());
     }
     exact_internal &= observed_internal_files == VALUES_SEAM_SPECS.len();
-    let exact_wrappers = vault_s3_test_support_wrappers_are_exact(runtime_file);
+    let support_path = root.join(RUNTIME_TEST_SUPPORT_PATH);
+    let exact_wrappers = if support_path.exists() {
+        vault_s3_test_support_file_is_exact(&parse_rust_file(&support_path)?)
+            && (!root.join("Cargo.toml").exists()
+                || integration_test_support_module_is_exact(runtime_file))
+    } else {
+        !root.join("Cargo.toml").exists() && vault_s3_test_support_wrappers_are_exact(runtime_file)
+    };
     if exact_internal && exact_wrappers {
         return Ok(Vec::new());
     }
@@ -4926,6 +5845,7 @@ fn settings_vault_snapshot_definition_is_exact(file: &syn::File) -> bool {
     settings_vault_snapshot_flow_is_exact(file, run, &runtime_inputs)
 }
 
+#[cfg(test)]
 fn pg_operator_definitions_are_exact(file: &syn::File) -> bool {
     let specs = [
         ("run_postgres_reader_migration_command", None),
@@ -4959,42 +5879,106 @@ fn pg_operator_definitions_are_exact(file: &syn::File) -> bool {
         ("run_reconcile_target_command", None),
         ("run_settings_config_value_maintenance", None),
     ];
-    specs.iter().all(|(name, wrapper)| {
-        let functions = file
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                syn::Item::Fn(function)
-                    if function.sig.ident == *name && attrs_may_be_production(&function.attrs) =>
-                {
-                    Some(function)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let Some(function) = (functions.len() == 1).then_some(functions[0]) else {
-            return false;
-        };
-        let Some((_, runtime_inputs)) = pg_operator_signature_bindings(function, name) else {
-            return false;
-        };
-        match wrapper {
-            Some((runtime_type, runtime_trait, builder, with_runtime)) => {
-                pg_operator_wrapper_is_exact(
-                    file,
-                    function,
-                    &runtime_inputs,
-                    runtime_type,
-                    runtime_trait,
-                    builder,
-                    with_runtime,
-                )
+    specs
+        .iter()
+        .all(|(name, wrapper)| pg_operator_definition_is_exact(file, name, *wrapper))
+}
+
+type PgOperatorWrapperSpec = (&'static str, &'static str, &'static str, &'static str);
+
+fn pg_operator_definition_is_exact(
+    file: &syn::File,
+    name: &str,
+    wrapper: Option<PgOperatorWrapperSpec>,
+) -> bool {
+    let functions = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function)
+                if function.sig.ident == name && attrs_may_be_production(&function.attrs) =>
+            {
+                Some(function)
             }
-            None if *name == "run_settings_config_value_maintenance" => {
-                settings_config_value_maintenance_is_exact(file, function, &runtime_inputs)
-            }
-            None => direct_pg_operator_is_exact(function, &runtime_inputs, 1),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(function) = (functions.len() == 1).then(|| functions.first()).flatten() else {
+        return false;
+    };
+    let Some((_, runtime_inputs)) = pg_operator_signature_bindings(function, name) else {
+        return false;
+    };
+    match wrapper {
+        Some((runtime_type, runtime_trait, builder, with_runtime)) => pg_operator_wrapper_is_exact(
+            file,
+            function,
+            &runtime_inputs,
+            runtime_type,
+            runtime_trait,
+            builder,
+            with_runtime,
+        ),
+        None if name == "run_settings_config_value_maintenance" => {
+            settings_config_value_maintenance_is_exact(file, function, &runtime_inputs)
         }
+        None => direct_pg_operator_is_exact(function, &runtime_inputs, 1),
+    }
+}
+
+fn pg_operator_module_graph_is_exact(files: &BTreeMap<String, syn::File>) -> bool {
+    [
+        (
+            RUNTIME_OPERATOR_POSTGRES_PATH,
+            "run_postgres_reader_migration_command",
+            None,
+        ),
+        (
+            RUNTIME_OPERATOR_PROJECTION_PATH,
+            "run_projection_control_command",
+            Some((
+                "ProductionProjectionControlRuntime",
+                "ProjectionControlRuntime",
+                "build_pg_migrator_config",
+                "run_projection_control_command_with_runtime",
+            )),
+        ),
+        (
+            RUNTIME_OPERATOR_AUDIT_PATH,
+            "run_audit_ledger_verify_command",
+            Some((
+                "ProductionAuditLedgerVerifyRuntime",
+                "AuditLedgerVerifyRuntime",
+                "build_pg_audit_maintenance_config",
+                "run_audit_ledger_verify_command_with_runtime",
+            )),
+        ),
+        (
+            RUNTIME_OPERATOR_DLQ_PATH,
+            "run_dlq_control_command",
+            Some((
+                "ProductionDlqControlRuntime",
+                "DlqControlRuntime",
+                "build_pg_migrator_config",
+                "run_dlq_control_command_with_runtime",
+            )),
+        ),
+        (
+            RUNTIME_OPERATOR_RECONCILE_PATH,
+            "run_reconcile_target_command",
+            None,
+        ),
+        (
+            RUNTIME_OPERATOR_SETTINGS_PATH,
+            "run_settings_config_value_maintenance",
+            None,
+        ),
+    ]
+    .into_iter()
+    .all(|(path, name, wrapper)| {
+        files
+            .get(path)
+            .is_some_and(|file| pg_operator_definition_is_exact(file, name, wrapper))
     })
 }
 
@@ -5003,6 +5987,7 @@ fn runtime_config_global_capture_findings(root: &Path) -> Result<Vec<Finding<Rul
     collect_rust_sources(&root.join(RUNTIME_SRC_PATH), &mut paths)?;
     let production_sources = production_module_sources(&paths)?;
     let mut inventory = ProductionRuntimeConfigInventory::default();
+    let mut forbidden_paths = Vec::new();
     let runtime_source = fs::read_to_string(root.join(RUNTIME_LIB_PATH))?;
     let legacy_fixture = root.join(RUNTIME_CONFIG_FIXTURE_MARKER).exists()
         && !root.join("Cargo.toml").exists()
@@ -5046,6 +6031,9 @@ fn runtime_config_global_capture_findings(root: &Path) -> Result<Vec<Finding<Rul
         };
         let mut observed = ProductionRuntimeConfigInventory::default();
         observed.visit_file(&file);
+        if observed.forbidden_indirections != 0 {
+            forbidden_paths.push(relative.display().to_string());
+        }
         inventory.add(observed);
     }
     if inventory.is_exact() {
@@ -5055,8 +6043,8 @@ fn runtime_config_global_capture_findings(root: &Path) -> Result<Vec<Finding<Rul
         Rule::ForbiddenWiring,
         RUNTIME_SRC_PATH,
         format!(
-            "runtime production module graph cardinality mismatch; protected aliases, UFCS, local function aliases, and macro indirection fail closed: {}",
-            inventory.diagnostic()
+            "runtime production module graph cardinality mismatch; protected aliases, UFCS, local function aliases, and macro indirection fail closed: {}; forbidden_paths={forbidden_paths:?}",
+            inventory.diagnostic(),
         ),
     )])
 }
@@ -6287,7 +7275,8 @@ fn profile_local_functions_are_canonical(file: &syn::File) -> bool {
 fn profile_prepare_function_is_canonical(
     file: &syn::File,
     function_name: &str,
-    local_function: &str,
+    kernel_path: &[&str],
+    local_path: &[&str],
     output_type: &str,
     carries_password_blocklist: bool,
 ) -> bool {
@@ -6349,12 +7338,12 @@ fn profile_prepare_function_is_canonical(
                     .is_some_and(|arg| is_exact_ident_path(arg, password))
             }));
 
-    is_exact_path(&kernel_call.func, &["prepare_runtime_kernel"])
+    is_exact_path(&kernel_call.func, kernel_path)
         && kernel_call.args.len() == 1
         && kernel_call
             .args
             .first()
-            .is_some_and(|arg| is_exact_path(arg, &[local_function]))
+            .is_some_and(|arg| is_exact_path(arg, local_path))
         && is_exact_path(&ok.func, &["Ok"])
         && ok.args.len() == 1
         && is_exact_path(&constructor.func, &[output_type, "new"])
@@ -6418,14 +7407,16 @@ impl PasswordPreloadStatus {
                 && profile_prepare_function_is_canonical(
                     file,
                     "prepare_runtime",
-                    "prepare_serving_local",
+                    &["prepare_runtime_kernel"],
+                    &["prepare_serving_local"],
                     "ServingRuntimeInputs",
                     true,
                 )
                 && profile_prepare_function_is_canonical(
                     file,
                     "prepare_operator_runtime",
-                    "prepare_operator_local",
+                    &["prepare_runtime_kernel"],
+                    &["prepare_operator_local"],
                     "OperatorRuntimeInputs",
                     false,
                 ),
@@ -6433,6 +7424,34 @@ impl PasswordPreloadStatus {
                 && runtime_kernel_uses_ordered_helper(file),
             calls: production_exact_path_call_count_in_file(
                 file,
+                &["prepare_local_before_external"],
+            ),
+        }
+    }
+
+    fn inspect_production(runtime: &syn::File, operator: &syn::File) -> Self {
+        Self {
+            prepare_wiring: profile_local_functions_are_canonical(runtime)
+                && profile_prepare_function_is_canonical(
+                    runtime,
+                    "prepare_runtime",
+                    &["prepare_runtime_kernel"],
+                    &["prepare_serving_local"],
+                    "ServingRuntimeInputs",
+                    true,
+                )
+                && profile_prepare_function_is_canonical(
+                    operator,
+                    "prepare_runtime",
+                    &["crate", "prepare_runtime_kernel"],
+                    &["crate", "prepare_operator_local"],
+                    "OperatorRuntimeInputs",
+                    false,
+                ),
+            helper_shape: password_policy_preload_helper_is_canonical(runtime)
+                && runtime_kernel_uses_ordered_helper(runtime),
+            calls: production_exact_path_call_count_in_file(
+                runtime,
                 &["prepare_local_before_external"],
             ),
         }
@@ -6537,14 +7556,18 @@ fn runtime_config_snapshot_findings(
         !require_password_policy || password_preload.helper_shape;
     let password_preload_calls_are_canonical =
         !require_password_policy || password_preload.is_canonical();
+    let run_wiring_is_canonical = run_wiring.is_canonical();
+    let settings_wiring_is_canonical = settings_vault_snapshot_definition_is_exact(file);
+    let lifecycle_owner_is_canonical = runtime_lifecycle_outer_is_canonical(file, runs[0]);
+    let inventory_is_canonical = inventory.is_exact();
 
     if prepare_wiring_is_canonical
         && password_preload_helper_is_canonical
         && password_preload_calls_are_canonical
-        && run_wiring.is_canonical()
-        && settings_vault_snapshot_definition_is_exact(file)
-        && runtime_lifecycle_outer_is_canonical(file, runs[0])
-        && inventory.is_exact()
+        && run_wiring_is_canonical
+        && settings_wiring_is_canonical
+        && lifecycle_owner_is_canonical
+        && inventory_is_canonical
     {
         Vec::new()
     } else {
@@ -6552,7 +7575,7 @@ fn runtime_config_snapshot_findings(
             Rule::ForbiddenWiring,
             RUNTIME_LIB_PATH,
             format!(
-                "prepare_runtime() must seal its sole process snapshot and password blocklist into ServingRuntimeInputs while prepare_operator_runtime() constructs capability-free OperatorRuntimeInputs; the exact serving lifecycle owner must finish one run_startup result; run_startup must map exact PG/Redis/Vault/S3 generations, consume Vault/Redis and named S3 parts by value, preserve canonical PG setup, and route the DLX S3 part without aliases or bait; {}; run={run_wiring:?}, inventory={} ",
+                "prepare_runtime() must seal its sole process snapshot and password blocklist into ServingRuntimeInputs while runtime::operator::prepare_runtime() constructs capability-free OperatorRuntimeInputs; the exact serving lifecycle owner must finish one run_startup result; run_startup must map exact PG/Redis/Vault/S3 generations, consume Vault/Redis and named S3 parts by value, preserve canonical PG setup, and route the DLX S3 part without aliases or bait; {}; prepare_ok={prepare_wiring_is_canonical}, password_helper_ok={password_preload_helper_is_canonical}, password_calls_ok={password_preload_calls_are_canonical}, run_ok={run_wiring_is_canonical}, settings_ok={settings_wiring_is_canonical}, lifecycle_ok={lifecycle_owner_is_canonical}, inventory_ok={inventory_is_canonical}; prepare={prepare_wiring:?}, run={run_wiring:?}, inventory={} ",
                 password_preload.diagnostic(),
                 inventory.diagnostic()
             ),
@@ -6615,7 +7638,7 @@ fn runtime_binary_config_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
                 Rule::ForbiddenWiring,
                 relative,
                 if rss {
-                    "rss main must classify the closed command family before preparation; serving must inline the sole prepare_runtime -> run path, while operators must acquire exact OperatorRuntimeInputs once, pass it to every closed operator arm, and consume it in the sole shutdown_operator_runtime call without aliases, macros, or bait"
+                    "rss main must classify the closed command family before preparation; serving must inline the sole prepare_runtime -> run path, while operators must use the exact runtime::operator prepare/run/shutdown surface once without aliases, macros, or bait"
                 } else {
                     "server main must bind its sole runtime::prepare_runtime result and pass that exact binding exactly once to runtime::run, with no shutdown or alias side path"
                 },
@@ -7942,7 +8965,7 @@ fn runtime_phase_transition_findings(root: &Path) -> Result<Vec<Finding<Rule>>> 
         findings.push(finding(
             Rule::ForbiddenWiring,
             RUNTIME_PHASE_PROVIDER_PATH,
-            "predicate=runtime_plan_flow expected=RuntimePlan::bundled result moves exactly once into PhaseContext::new actual=non-canonical",
+            "predicate=runtime_plan_flow expected=RuntimePlan::bundled and DomainExecutionPlan results move exactly once into DomainPhaseContext::new actual=non-canonical",
         ));
     }
     findings.extend(runtime_transition_method_findings(
@@ -8017,8 +9040,18 @@ fn runtime_lifecycle_ownership_findings(
     production_files: &BTreeMap<String, syn::File>,
 ) -> Vec<Finding<Rule>> {
     let mut findings = Vec::new();
+    if production_files
+        .get(RUNTIME_OPERATOR_PATH)
+        .is_none_or(|file| !operator_module_ownership_is_closed(file))
+    {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_OPERATOR_PATH,
+            "predicate=operator_module_ownership expected=exact external command modules, no production private prelude, and explicit imports only; unresolved globs fail closed",
+        ));
+    }
     for (path, file) in production_files {
-        let uses = production_lifecycle_primitive_uses(file);
+        let uses = production_lifecycle_primitive_uses(file, &[]);
         let is_canonical = if path == RUNTIME_PHASE_LAUNCH_PATH {
             uses.phase_execute == 0
                 && uses.launch_plan == 1
@@ -8048,7 +9081,7 @@ fn runtime_lifecycle_ownership_findings(
     }
     let launch_primitive_uses = production_files
         .get(RUNTIME_PHASE_LAUNCH_PATH)
-        .map(production_lifecycle_primitive_uses)
+        .map(|file| production_lifecycle_primitive_uses(file, &[]))
         .unwrap_or_default();
     if launch_primitive_uses.launch_plan != 1
         || launch_primitive_uses.launch_plan_parts != 1
@@ -8067,6 +9100,47 @@ fn runtime_lifecycle_ownership_findings(
         ));
     }
     findings
+}
+
+fn operator_module_ownership_is_closed(file: &syn::File) -> bool {
+    fn contains_glob(tree: &syn::UseTree) -> bool {
+        match tree {
+            syn::UseTree::Path(path) => contains_glob(&path.tree),
+            syn::UseTree::Group(group) => group.items.iter().any(contains_glob),
+            syn::UseTree::Glob(_) => true,
+            syn::UseTree::Name(_) | syn::UseTree::Rename(_) => false,
+        }
+    }
+
+    let modules = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module) if attrs_may_be_production(&module.attrs) => Some(module),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let module_names = modules
+        .iter()
+        .map(|module| module.ident.to_string())
+        .collect::<Vec<_>>();
+    module_names
+        == [
+            "audit_ledger",
+            "dlq",
+            "jwks",
+            "postgres",
+            "projection",
+            "reconcile",
+            "settings",
+        ]
+        && modules.iter().all(|module| {
+            matches!(module.vis, syn::Visibility::Inherited) && module.content.is_none()
+        })
+        && file.items.iter().all(|item| {
+            !matches!(item, syn::Item::Use(item)
+                if attrs_may_be_production(&item.attrs) && contains_glob(&item.tree))
+        })
 }
 
 fn startup_phase_delegation_is_canonical(file: &syn::File) -> bool {
@@ -8664,6 +9738,8 @@ fn runtime_plan_flow_is_canonical(provider: &syn::File) -> bool {
     #[derive(Default)]
     struct PlanFlow {
         runtime_plan_bindings: usize,
+        placement_plan_bindings: usize,
+        domain_plan_bindings: usize,
         context_constructors: usize,
     }
     impl<'ast> Visit<'ast> for PlanFlow {
@@ -8684,19 +9760,47 @@ fn runtime_plan_flow_is_canonical(provider: &syn::File) -> bool {
             {
                 self.runtime_plan_bindings += 1;
             }
+            let method = local.init.as_ref().map(|init| transparent_expr(&init.expr));
+            if binding == "placement_execution_plan"
+                && matches!(method, Some(syn::Expr::MethodCall(call))
+                    if call.method == "placement_execution_plan"
+                        && is_exact_path(&call.receiver, &["runtime_plan"]))
+            {
+                self.placement_plan_bindings += 1;
+            }
+            if binding == "domain_execution_plan"
+                && matches!(method, Some(syn::Expr::MethodCall(call))
+                if call.method == "domain_execution_plan"
+                    && is_exact_path(&call.receiver, &["runtime_plan"])
+                    && call.args.len() == 1
+                    && call.args.first().is_some_and(|argument| {
+                        reference_to_binding(argument, &syn::Ident::new(
+                            "placement_execution_plan",
+                            proc_macro2::Span::call_site(),
+                        ))
+                    }))
+            {
+                self.domain_plan_bindings += 1;
+            }
             let constructor = local
                 .init
                 .as_ref()
                 .and_then(|init| direct_call_behind_runtime_context(&init.expr));
             if binding == "context"
                 && constructor.is_some_and(|call| {
-                    is_exact_path(&call.func, &["PhaseContext", "new"])
-                        && call.args.len() == 2
+                    is_exact_path(&call.func, &["DomainPhaseContext", "new"])
+                        && call.args.len() == 3
+                        && call.args.first().is_some_and(|argument| {
+                            compact_tokens(argument) == "self.runtime_inputs"
+                        })
                         && call
                             .args
                             .iter()
                             .nth(1)
                             .is_some_and(|argument| is_exact_path(argument, &["runtime_plan"]))
+                        && call.args.iter().nth(2).is_some_and(|argument| {
+                            is_exact_path(argument, &["domain_execution_plan"])
+                        })
                 })
             {
                 self.context_constructors += 1;
@@ -8707,10 +9811,14 @@ fn runtime_plan_flow_is_canonical(provider: &syn::File) -> bool {
     let mut flow = PlanFlow::default();
     flow.visit_block(&build.block);
     flow.runtime_plan_bindings == 1
+        && flow.placement_plan_bindings == 1
+        && flow.domain_plan_bindings == 1
         && flow.context_constructors == 1
         && exact_named_path_call_count(&build.block, &["crate", "plan", "RuntimePlan", "bundled"])
             == 1
-        && exact_named_path_call_count(&build.block, &["PhaseContext", "new"]) == 1
+        && exact_named_path_call_count(&build.block, &["DomainPhaseContext", "new"]) == 1
+        && method_call_count_in_block(&build.block, "placement_execution_plan") == 1
+        && method_call_count_in_block(&build.block, "domain_execution_plan") == 1
 }
 
 fn phase_result_redaction_is_canonical(file: &syn::File) -> bool {
@@ -8973,11 +10081,15 @@ impl LifecyclePrimitiveUses {
     }
 }
 
-fn production_lifecycle_primitive_uses(file: &syn::File) -> LifecyclePrimitiveUses {
-    struct Counter {
+fn production_lifecycle_primitive_uses(
+    file: &syn::File,
+    allowed_glob_prefixes: &[&[&str]],
+) -> LifecyclePrimitiveUses {
+    struct Counter<'a> {
         uses: LifecyclePrimitiveUses,
+        allowed_glob_prefixes: &'a [&'a [&'a str]],
     }
-    impl Counter {
+    impl Counter<'_> {
         fn record_path(&mut self, path: &syn::Path) {
             for segment in &path.segments {
                 match segment.ident.to_string().as_str() {
@@ -9026,10 +10138,18 @@ fn production_lifecycle_primitive_uses(file: &syn::File) -> LifecyclePrimitiveUs
                     }
                 }
                 syn::UseTree::Glob(_) => {
-                    self.uses.launch_plan += 1;
-                    self.uses.launch_plan_parts += 1;
-                    self.uses.shutdown_stack += 1;
-                    self.uses.phase_execute += 1;
+                    let allowed = self.allowed_glob_prefixes.iter().any(|allowed| {
+                        prefix
+                            .iter()
+                            .map(String::as_str)
+                            .eq(allowed.iter().copied())
+                    });
+                    if !allowed {
+                        self.uses.launch_plan += 1;
+                        self.uses.launch_plan_parts += 1;
+                        self.uses.shutdown_stack += 1;
+                        self.uses.phase_execute += 1;
+                    }
                 }
             }
         }
@@ -9072,7 +10192,7 @@ fn production_lifecycle_primitive_uses(file: &syn::File) -> LifecyclePrimitiveUs
             }
         }
     }
-    impl<'ast> Visit<'ast> for Counter {
+    impl<'ast> Visit<'ast> for Counter<'_> {
         fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
             if attrs_may_be_production(&item.attrs) {
                 syn::visit::visit_item_mod(self, item);
@@ -9116,6 +10236,7 @@ fn production_lifecycle_primitive_uses(file: &syn::File) -> LifecyclePrimitiveUs
     }
     let mut counter = Counter {
         uses: LifecyclePrimitiveUses::default(),
+        allowed_glob_prefixes,
     };
     counter.visit_file(file);
     counter.uses
@@ -9151,17 +10272,20 @@ fn generated_domains_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     }
     let canonical_wire = wire.is_some_and(|method| {
         exact_named_path_call_count(&method.block, &["crate", "modules_gen", "wire_domains"]) == 1
-            && exact_named_path_call_count(&method.block, &["bootstrap", "compose_bindings"]) == 1
-            && exact_named_path_call_count(
-                &method.block,
-                &["bootstrap", "drain_binding_outputs"],
-            ) == 2
-            && compact_tokens(&method.block).contains(
-                "provider_build.record_domain(bootstrap::drain_binding_outputs(&mutbindings))",
-            )
-            && compact_tokens(&method.block).contains(
-                "provider_build.record_domain(bootstrap::drain_binding_outputs(&mutdomain_bindings))",
-            )
+            && exact_named_path_call_count(&method.block, &["bootstrap", "compose_bindings"]) == 0
+            && exact_named_path_call_count(&method.block, &["bootstrap", "drain_binding_outputs"])
+                == 3
+            && method_call_count_in_block(&method.block, "validate") == 1
+            && method_call_count_in_block(&method.block, "compose") == 1
+            && compact_tokens(&method.block)
+                .contains("domain_execution_plan.validate(domain_bindings)")
+            && compact_tokens(&method.block).contains("validated_domain_bindings.compose()")
+            && compact_tokens(&method.block)
+                .matches(
+                    "provider_build.record_domain(bootstrap::drain_binding_outputs(&mutbindings))",
+                )
+                .count()
+                == 3
             && compact_tokens(&method.block)
                 .contains("provider_build.record_domain(domains_module)")
     });
@@ -9169,7 +10293,7 @@ fn generated_domains_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         findings.push(finding(
             Rule::MissingAnchor,
             RUNTIME_PHASE_DOMAINS_PATH,
-            "WireDomains 必须将唯一 generated domain 结果直接交给 compose_bindings",
+            "WireDomains 必须将唯一 generated domain 结果交给 plan-owned validator，并仅通过 ValidatedDomainBindings 进入 compose_bindings",
         ));
     }
     if wire.is_none_or(|method| {
@@ -9371,18 +10495,15 @@ fn out_of_line_module_candidates(base: &Path, module: &syn::ItemMod) -> Vec<Path
 }
 
 fn runtime_service_token_replay_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
-    let root_path = root.join(RUNTIME_LIB_PATH);
     let oidc_path = root.join(RUNTIME_OIDC_PATH);
     let infra_path = root.join(RUNTIME_PHASE_INFRA_PATH);
-    if !root_path.exists() || !oidc_path.exists() || !infra_path.exists() {
+    if !root.join("Cargo.toml").exists() && (!oidc_path.exists() || !infra_path.exists()) {
         // Generic runtime-baseline fixtures do not model OIDC. The real workspace cannot delete
         // any of these compiled modules without failing native compilation.
         return Ok(Vec::new());
     }
-    let runtime = parse_rust_file(&root_path)?;
-    let oidc = parse_rust_file(&oidc_path)?;
-    let infra = parse_rust_file(&infra_path)?;
-    if service_token_replay_live_is_canonical(&runtime, &oidc, &infra) {
+    let production_files = runtime_production_source_files(root)?;
+    if service_token_replay_live_is_canonical(&production_files) {
         Ok(Vec::new())
     } else {
         Ok(vec![finding(
@@ -9393,13 +10514,30 @@ fn runtime_service_token_replay_live_findings(root: &Path) -> Result<Vec<Finding
     }
 }
 
-fn service_token_replay_live_is_canonical(
-    runtime: &syn::File,
-    oidc: &syn::File,
-    infra: &syn::File,
-) -> bool {
+fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -> bool {
+    let required = [
+        RUNTIME_OPERATOR_PATH,
+        RUNTIME_OPERATOR_PROJECTION_PATH,
+        RUNTIME_OPERATOR_AUDIT_PATH,
+        RUNTIME_OPERATOR_DLQ_PATH,
+        RUNTIME_OPERATOR_RECONCILE_PATH,
+        RUNTIME_OPERATOR_SETTINGS_PATH,
+        RUNTIME_OIDC_PATH,
+        RUNTIME_PHASE_INFRA_PATH,
+    ];
+    if !required.iter().all(|path| files.contains_key(*path)) {
+        return false;
+    }
+    let operator = &files[RUNTIME_OPERATOR_PATH];
+    let projection = &files[RUNTIME_OPERATOR_PROJECTION_PATH];
+    let audit = &files[RUNTIME_OPERATOR_AUDIT_PATH];
+    let dlq = &files[RUNTIME_OPERATOR_DLQ_PATH];
+    let reconcile = &files[RUNTIME_OPERATOR_RECONCILE_PATH];
+    let settings = &files[RUNTIME_OPERATOR_SETTINGS_PATH];
+    let oidc = &files[RUNTIME_OIDC_PATH];
+    let infra = &files[RUNTIME_PHASE_INFRA_PATH];
     let operator_builders =
-        production_functions_named(runtime, "build_operator_service_token_provider");
+        production_functions_named(operator, "build_operator_service_token_provider");
     let service_builders = production_functions_named(oidc, "build_service_token_provider");
     let Some(operator_builder) = (operator_builders.len() == 1).then(|| operator_builders[0])
     else {
@@ -9432,22 +10570,29 @@ fn service_token_replay_live_is_canonical(
         return false;
     }
 
-    let operator_receipts = production_impl_methods_named(runtime, "operator_receipt");
-    let operator_subjects = production_impl_methods_named(runtime, "operator_subject");
-    if operator_receipts.len() != 1
-        || operator_subjects.len() != 2
+    let operator_receipts = production_impl_methods_named(projection, "operator_receipt");
+    let audit_subjects = production_impl_methods_named(audit, "operator_subject");
+    let dlq_subjects = production_impl_methods_named(dlq, "operator_subject");
+    if ![projection, audit, dlq, reconcile, settings]
+        .iter()
+        .all(|file| {
+            production_has_exact_super_import(file, "build_operator_service_token_provider")
+        })
+        || operator_receipts.len() != 1
+        || audit_subjects.len() != 1
+        || dlq_subjects.len() != 1
         || operator_receipts.iter().any(|method| {
             exact_path_call_argument_count(
                 &method.block,
-                &["crate", "build_operator_service_token_provider"],
+                &["build_operator_service_token_provider"],
                 2,
                 "session",
             ) != 1
         })
-        || operator_subjects.iter().any(|method| {
+        || audit_subjects.iter().chain(&dlq_subjects).any(|method| {
             exact_path_call_argument_count(
                 &method.block,
-                &["crate", "build_operator_service_token_provider"],
+                &["build_operator_service_token_provider"],
                 2,
                 "session",
             ) != 1
@@ -9455,15 +10600,19 @@ fn service_token_replay_live_is_canonical(
     {
         return false;
     }
-    for (function_name, owner) in [
-        ("run_reconcile_target_command", "&pg"),
-        ("settings_config_value_maintenance_operator_subject", "pg"),
+    for (file, function_name, owner) in [
+        (reconcile, "run_reconcile_target_command", "&pg"),
+        (
+            settings,
+            "settings_config_value_maintenance_operator_subject",
+            "pg",
+        ),
     ] {
-        let functions = production_functions_named(runtime, function_name);
+        let functions = production_functions_named(file, function_name);
         if functions.len() != 1
             || exact_path_call_argument_count(
                 &functions[0].block,
-                &["crate", "build_operator_service_token_provider"],
+                &["build_operator_service_token_provider"],
                 2,
                 owner,
             ) != 1
@@ -9477,12 +10626,18 @@ fn service_token_replay_live_is_canonical(
     else {
         return false;
     };
-    let exact_inventory = production_exact_path_call_count_in_file(
-        runtime,
-        &["crate", "build_operator_service_token_provider"],
-    ) == 5
+    let exact_inventory = files
+        .values()
+        .map(|file| production_call_last_ident_count(file, "build_operator_service_token_provider"))
+        .sum::<usize>()
+        == 5
+        && files
+            .values()
+            .map(|file| production_call_last_ident_count(file, "build_service_token_provider"))
+            .sum::<usize>()
+            == 2
         && production_exact_path_call_count_in_file(
-            runtime,
+            operator,
             &["crate", "infra", "oidc", "build_service_token_provider"],
         ) == 1
         && production_exact_path_call_count_in_file(
@@ -9495,7 +10650,77 @@ fn service_token_replay_live_is_canonical(
             1,
             "&pg_owner",
         ) == 1;
-    exact_inventory && !production_replay_bypass_present(&[runtime, oidc, infra])
+    let production = files.values().collect::<Vec<_>>();
+    exact_inventory && !production_replay_bypass_present(&production)
+}
+
+fn production_has_exact_super_import(file: &syn::File, expected: &str) -> bool {
+    fn count(tree: &syn::UseTree, prefix: &mut Vec<String>, expected: &str) -> usize {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                let result = count(&path.tree, prefix, expected);
+                prefix.pop();
+                result
+            }
+            syn::UseTree::Name(name)
+                if name.ident == expected && prefix.as_slice() == ["super"] =>
+            {
+                1
+            }
+            syn::UseTree::Group(group) => group
+                .items
+                .iter()
+                .map(|tree| count(tree, prefix, expected))
+                .sum(),
+            syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => 0,
+        }
+    }
+    file.items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Use(item) if attrs_may_be_production(&item.attrs) => Some(item),
+            _ => None,
+        })
+        .map(|item| count(&item.tree, &mut Vec::new(), expected))
+        .sum::<usize>()
+        == 1
+}
+
+fn production_call_last_ident_count(file: &syn::File, expected: &str) -> usize {
+    struct Counter<'a> {
+        expected: &'a str,
+        calls: usize,
+    }
+    impl<'ast> Visit<'ast> for Counter<'_> {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if attrs_may_be_production(&item.attrs) {
+                syn::visit::visit_item_mod(self, item);
+            }
+        }
+
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            if attrs_may_be_production(&item.attrs) {
+                syn::visit::visit_item_fn(self, item);
+            }
+        }
+
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            if attrs_may_be_production(&item.attrs) {
+                syn::visit::visit_impl_item_fn(self, item);
+            }
+        }
+
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if expr_path_last(&call.func).is_some_and(|ident| ident == self.expected) {
+                self.calls += 1;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut counter = Counter { expected, calls: 0 };
+    counter.visit_file(file);
+    counter.calls
 }
 
 fn exact_named_typed_input(
@@ -11613,6 +12838,11 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: ".reject_remote_on_local_listeners(&listener_execution_plan)",
     },
     AnchorSpec {
+        id: "run.domain.execution-plan",
+        path: RUNTIME_PHASE_PROVIDER_PATH,
+        pattern: "runtime_plan.domain_execution_plan(&placement_execution_plan)",
+    },
+    AnchorSpec {
         id: "run.config.serving",
         path: RUNTIME_PHASE_PROVIDER_PATH,
         pattern: "RuntimeServingConfig::from_snapshot(config)",
@@ -11685,7 +12915,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.domain-transport.from-placement",
         path: RUNTIME_PHASE_INFRA_PATH,
-        pattern: "crate::DomainTransportConfig::from_placement(\n                event_transport.topology(),\n                &placement_execution_plan,\n                &crate::config::ServingConfigMapper::new(config),\n            )",
+        pattern: "DomainTransportConfig::from_placement(\n                event_transport.topology(),\n                &placement_execution_plan,\n                &crate::config::ServingConfigMapper::new(config),\n            )",
     },
     AnchorSpec {
         id: "run.module.output.domain-transport",
@@ -11703,6 +12933,11 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "crate::modules_gen::wire_domains(\n                &deps,\n                domain_modules,\n                &placement_execution_plan,\n            )",
     },
     AnchorSpec {
+        id: "run.validate.generated-domains",
+        path: RUNTIME_PHASE_DOMAINS_PATH,
+        pattern: "domain_execution_plan.validate(domain_bindings)",
+    },
+    AnchorSpec {
         id: "run.module.input.domains",
         path: RUNTIME_PHASE_DOMAINS_PATH,
         pattern: "let (mut registry, domains_module) =",
@@ -11710,7 +12945,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.compose.generated-domains",
         path: RUNTIME_PHASE_DOMAINS_PATH,
-        pattern: "bootstrap::compose_bindings(&mut domain_bindings)",
+        pattern: "validated_domain_bindings.compose()",
     },
     AnchorSpec {
         id: "run.module.output.domains",
@@ -12276,23 +13511,47 @@ mod tests {
         Ok(())
     }
 
-    fn repository_replay_sources() -> Result<(String, String, String)> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("xtask manifest must have a repository parent"))?;
-        Ok((
-            fs::read_to_string(root.join(RUNTIME_LIB_PATH))?,
-            fs::read_to_string(root.join(RUNTIME_OIDC_PATH))?,
-            fs::read_to_string(root.join(RUNTIME_PHASE_INFRA_PATH))?,
+    fn copy_runtime_sources(root: &Path) -> Result<()> {
+        let workspace = workspace_root()?;
+        let mut sources = Vec::new();
+        collect_rust_sources(&workspace.join(RUNTIME_SRC_PATH), &mut sources)?;
+        for source in sources {
+            let relative = source.strip_prefix(&workspace)?;
+            write(&root.join(relative), &fs::read_to_string(&source)?)?;
+        }
+        Ok(())
+    }
+
+    fn replay_fixture(name: &str) -> Result<PathBuf> {
+        let root = unique_tmp(name);
+        copy_runtime_sources(&root)?;
+        write(&root.join("Cargo.toml"), "[workspace]\n")?;
+        Ok(root)
+    }
+
+    fn replay_fixture_is_canonical(root: &Path) -> Result<bool> {
+        Ok(service_token_replay_live_is_canonical(
+            &runtime_production_source_files(root)?,
         ))
     }
 
-    fn replay_sources_are_canonical(runtime: &str, oidc: &str, infra: &str) -> Result<bool> {
-        Ok(service_token_replay_live_is_canonical(
-            &syn::parse_file(runtime)?,
-            &syn::parse_file(oidc)?,
-            &syn::parse_file(infra)?,
-        ))
+    fn mutate_replay_file(
+        root: &Path,
+        path: &str,
+        needle: &str,
+        occurrence: usize,
+        replacement: &str,
+        append: &str,
+    ) -> Result<()> {
+        let target = root.join(path);
+        let source = fs::read_to_string(&target)?;
+        let mutated = format!(
+            "{}{}",
+            replace_nth(&source, needle, occurrence, replacement)?,
+            append
+        );
+        anyhow::ensure!(source != mutated, "replay mutation must be live for {path}");
+        write(&target, &mutated)
     }
 
     fn replace_nth(
@@ -12447,9 +13706,9 @@ mod tests {
 
     #[test]
     fn runtime_service_token_replay_live_accepts_typed_pg_composition() -> Result<()> {
-        let (runtime, oidc, infra) = repository_replay_sources()?;
+        let root = workspace_root()?;
         assert!(
-            replay_sources_are_canonical(&runtime, &oidc, &infra)?,
+            service_token_replay_live_is_canonical(&runtime_production_source_files(&root)?),
             "real runtime service-token composition is the anti-vacuity green"
         );
         Ok(())
@@ -12458,65 +13717,87 @@ mod tests {
     #[test]
     fn runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards()
     -> Result<()> {
-        let (runtime, oidc, infra) = repository_replay_sources()?;
-        assert!(replay_sources_are_canonical(&runtime, &oidc, &infra)?);
-
-        let missing_live_call = replace_nth(
-            &runtime,
+        let root = replay_fixture("service-token-replay-missing-call")?;
+        assert!(replay_fixture_is_canonical(&root)?);
+        mutate_replay_file(
+            &root,
+            RUNTIME_OPERATOR_PROJECTION_PATH,
             "build_operator_service_token_provider(",
-            1,
+            0,
             "missing_operator_service_token_provider(",
-        )? + r#"
+            r#"
 const REPLAY_STRING_BAIT: &str = "build_operator_service_token_provider(";
 // build_operator_service_token_provider(
-"#;
+"#,
+        )?;
+        assert!(!replay_fixture_is_canonical(&root)?);
+
+        let root = replay_fixture("service-token-replay-dead-helper")?;
+        let operator = root.join(RUNTIME_OPERATOR_PATH);
+        let source = fs::read_to_string(&operator)?;
+        write(
+            &operator,
+            &format!(
+                "{source}\nfn dead_replay_bait(config: Config, operator: Operator, owner: Owner) {{ let _ = build_operator_service_token_provider(config, operator, owner); }}\n"
+            ),
+        )?;
         assert!(
-            !replay_sources_are_canonical(&missing_live_call, &oidc, &infra)?,
-            "comments and strings must not replace a missing live call"
+            !replay_fixture_is_canonical(&root)?,
+            "a dead helper must violate the closed production inventory"
         );
 
-        let dead_helper = format!(
-            "{runtime}\nfn dead_replay_bait(config: Config, operator: Operator, owner: Owner) {{\n\
-             let _ = crate::build_operator_service_token_provider(config, operator, owner);\n}}\n"
-        );
+        let root = replay_fixture("service-token-replay-test-bait")?;
+        let operator = root.join(RUNTIME_OPERATOR_PATH);
+        let source = fs::read_to_string(&operator)?;
+        write(
+            &operator,
+            &format!(
+                "{source}\n#[cfg(test)] fn test_only_replay_bait(config: Config, operator: Operator, owner: Owner) {{ struct RuntimeServiceTokenReplayGuard; let _ = build_operator_service_token_provider(config, operator, owner); }}\n"
+            ),
+        )?;
         assert!(
-            !replay_sources_are_canonical(&dead_helper, &oidc, &infra)?,
-            "a dead helper must violate the closed call inventory"
-        );
-
-        let test_only = format!(
-            "{runtime}\n#[cfg(test)] fn test_only_replay_bait(config: Config, operator: Operator, owner: Owner) {{\n\
-             struct RuntimeServiceTokenReplayGuard;\n\
-             let _ = crate::build_operator_service_token_provider(config, operator, owner);\n}}\n"
-        );
-        assert!(
-            replay_sources_are_canonical(&test_only, &oidc, &infra)?,
+            replay_fixture_is_canonical(&root)?,
             "test-only evidence must be ignored rather than counted as production"
         );
 
-        let process_local = format!("{runtime}\nstruct RuntimeServiceTokenReplayGuard;\n");
+        let root = replay_fixture("service-token-replay-process-local")?;
+        let operator = root.join(RUNTIME_OPERATOR_PATH);
+        let source = fs::read_to_string(&operator)?;
+        write(
+            &operator,
+            &format!("{source}\nstruct RuntimeServiceTokenReplayGuard;\n"),
+        )?;
         assert!(
-            !replay_sources_are_canonical(&process_local, &oidc, &infra)?,
+            !replay_fixture_is_canonical(&root)?,
             "a production process-local replay guard must fail closed"
         );
 
-        let widened_owner_set = replace_nth(
-            &oidc,
+        let root = replay_fixture("service-token-replay-widened-owner")?;
+        mutate_replay_file(
+            &root,
+            RUNTIME_OIDC_PATH,
             "impl Sealed for postgres::PgMaintenanceDeps {}",
             0,
             "impl Sealed for postgres::PgMaintenanceDeps {}\n\
              impl Sealed for memory::RuntimeServiceTokenReplayGuard {}",
+            "",
         )?;
         assert!(
-            !replay_sources_are_canonical(&runtime, &widened_owner_set, &infra)?,
+            !replay_fixture_is_canonical(&root)?,
             "the native sealed owner set must remain exactly the two PostgreSQL owners"
         );
 
-        let macro_bypass = format!(
-            "{runtime}\nfn replay_macro_bypass() {{ replay!(build_operator_service_token_provider); }}\n"
-        );
+        let root = replay_fixture("service-token-replay-macro")?;
+        let operator = root.join(RUNTIME_OPERATOR_PATH);
+        let source = fs::read_to_string(&operator)?;
+        write(
+            &operator,
+            &format!(
+                "{source}\nfn replay_macro_bypass() {{ replay!(build_operator_service_token_provider); }}\n"
+            ),
+        )?;
         assert!(
-            !replay_sources_are_canonical(&macro_bypass, &oidc, &infra)?,
+            !replay_fixture_is_canonical(&root)?,
             "macro indirection around a protected constructor must fail closed"
         );
         Ok(())
@@ -12524,24 +13805,8 @@ const REPLAY_STRING_BAIT: &str = "build_operator_service_token_provider(";
 
     fn phase_transition_fixture(name: &str) -> Result<std::path::PathBuf> {
         let root = unique_tmp(name);
+        copy_runtime_sources(&root)?;
         write(&root.join("Cargo.toml"), "[workspace]\n")?;
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("xtask manifest must have a repository parent"))?;
-        for path in [
-            RUNTIME_LIB_PATH,
-            RUNTIME_PHASE_PATH,
-            RUNTIME_PHASE_PROVIDER_PATH,
-            RUNTIME_PHASE_INFRA_PATH,
-            RUNTIME_PHASE_DOMAINS_PATH,
-            RUNTIME_PHASE_FINALIZE_PATH,
-            RUNTIME_PHASE_LAUNCH_PATH,
-        ] {
-            write(
-                &root.join(path),
-                &fs::read_to_string(repository.join(path))?,
-            )?;
-        }
         Ok(root)
     }
 
@@ -12646,9 +13911,9 @@ impl crate::phase::RuntimePhaseState for Skipped {
             (
                 "early RuntimePlan drop",
                 RUNTIME_PHASE_PROVIDER_PATH,
-                "        let context = PhaseContext::new(self.runtime_inputs, runtime_plan);",
+                "        let context =\n            DomainPhaseContext::new(self.runtime_inputs, runtime_plan, domain_execution_plan);",
                 "        drop(runtime_plan);\n\
-                 \x20       let context = PhaseContext::new(self.runtime_inputs, runtime_plan);",
+                 \x20       let context =\n            DomainPhaseContext::new(self.runtime_inputs, runtime_plan, domain_execution_plan);",
             ),
             (
                 "caller-forgeable phase label",
@@ -12732,6 +13997,18 @@ impl crate::phase::RuntimePhaseState for Skipped {
                 "    phase::execute(runtime_inputs).await.map(|_| ())",
                 "    let _legacy = (runtime_inputs.config(), runtime_inputs.password_blocklist());\n\
                  \x20   phase::execute(runtime_inputs).await.map(|_| ())",
+            ),
+            (
+                "operator glob import",
+                RUNTIME_OPERATOR_PATH,
+                "",
+                "\nuse crate::phase::*;\n",
+            ),
+            (
+                "operator inline private prelude revival",
+                RUNTIME_OPERATOR_PATH,
+                "",
+                "\nmod private { use crate::phase::OperatorRuntimeInputs; }\n",
             ),
         ];
 
@@ -12929,7 +14206,7 @@ pub struct OperatorRuntimeInputs {
         let rss_access_jwks = r#"
 pub async fn run_rss_access_jwks_export_command(
     args: &[String],
-    runtime_inputs: &crate::OperatorRuntimeInputs,
+    runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> { todo!() }
 "#;
         assert!(rss_access_jwks_operator_signature_is_exact(
@@ -14054,7 +15331,7 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
         audit_consumer_key,
         auth_grant_sweep_interval,
     } = wiring_inputs;
-    modules_gen::wire_domains(&deps, domain_modules);
+    modules_gen::wire_domains(&deps, domain_modules, &placement_execution_plan);
     wire_auth_grant_sweeper(&pg, auth_grant_sweep_interval);
     let distributed = wire_distributed(&deps, distributed_worker);
     wire_event_transport(
@@ -14981,7 +16258,7 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         audit_consumer_key,
         auth_grant_sweep_interval,
     } = wiring_inputs;
-    modules_gen::wire_domains(&deps, domain_modules);
+    modules_gen::wire_domains(&deps, domain_modules, &placement_execution_plan);
     wire_auth_grant_sweeper(&pg, auth_grant_sweep_interval);
     let distributed = wire_distributed(&deps, distributed_worker);
     wire_event_transport(
@@ -15142,25 +16419,25 @@ enum OperatorCommand {
 }
 
 fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
-    if runtime::is_postgres_command(args) {
+    if runtime::operator::is_postgres_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::Postgres));
     }
-    if runtime::is_projection_command(args) {
+    if runtime::operator::is_projection_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::Projection));
     }
-    if runtime::is_audit_ledger_verify_command(args) {
+    if runtime::operator::is_audit_ledger_verify_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::AuditLedgerVerify));
     }
-    if runtime::is_dlq_command(args) {
+    if runtime::operator::is_dlq_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::Dlq));
     }
-    if runtime::is_reconcile_target_command(args) {
+    if runtime::operator::is_reconcile_target_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::ReconcileTarget));
     }
-    if runtime::is_settings_config_value_maintenance_command(args) {
+    if runtime::operator::is_settings_config_value_maintenance_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::SettingsConfigValueMaintenance));
     }
-    if runtime::is_rss_access_jwks_export_command(args) {
+    if runtime::operator::is_rss_access_jwks_export_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::RssAccessJwksExport));
     }
     anyhow::ensure!(args.is_empty(), "unknown rss command: {args:?}");
@@ -15174,17 +16451,17 @@ async fn main() -> anyhow::Result<()> {
     let CommandFamily::Operator(command) = command else {
         return runtime::run(runtime::prepare_runtime()?).await;
     };
-    let runtime_inputs = runtime::prepare_operator_runtime()?;
+    let runtime_inputs = runtime::operator::prepare_runtime()?;
     let operator_result = match command {
-        OperatorCommand::Postgres => runtime::run_postgres_reader_migration_command(&args, &runtime_inputs).await,
-        OperatorCommand::Projection => runtime::run_projection_control_command(&args, &runtime_inputs).await,
-        OperatorCommand::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await,
-        OperatorCommand::Dlq => runtime::run_dlq_control_command(&args, &runtime_inputs).await,
-        OperatorCommand::ReconcileTarget => runtime::run_reconcile_target_command(&args, &runtime_inputs).await,
-        OperatorCommand::SettingsConfigValueMaintenance => runtime::run_settings_config_value_maintenance(&args, &runtime_inputs).await,
-        OperatorCommand::RssAccessJwksExport => runtime::run_rss_access_jwks_export_command(&args, &runtime_inputs).await,
+        OperatorCommand::Postgres => runtime::operator::run_postgres_reader_migration_command(&args, &runtime_inputs).await,
+        OperatorCommand::Projection => runtime::operator::run_projection_control_command(&args, &runtime_inputs).await,
+        OperatorCommand::AuditLedgerVerify => runtime::operator::run_audit_ledger_verify_command(&args, &runtime_inputs).await,
+        OperatorCommand::Dlq => runtime::operator::run_dlq_control_command(&args, &runtime_inputs).await,
+        OperatorCommand::ReconcileTarget => runtime::operator::run_reconcile_target_command(&args, &runtime_inputs).await,
+        OperatorCommand::SettingsConfigValueMaintenance => runtime::operator::run_settings_config_value_maintenance(&args, &runtime_inputs).await,
+        OperatorCommand::RssAccessJwksExport => runtime::operator::run_rss_access_jwks_export_command(&args, &runtime_inputs).await,
     };
-    runtime::shutdown_operator_runtime(runtime_inputs).await?;
+    runtime::operator::shutdown_runtime(runtime_inputs).await?;
     operator_result
 }
 "#
@@ -15239,15 +16516,15 @@ async fn main() -> anyhow::Result<()> {
             (
                 "rss duplicate prepare through module alias",
                 canonical_rss.replace(
-                    "let runtime_inputs = runtime::prepare_operator_runtime()?;",
-                    "use runtime as rt;\n    let _bait = rt::prepare_operator_runtime()?;\n    let runtime_inputs = runtime::prepare_operator_runtime()?;",
+                    "let runtime_inputs = runtime::operator::prepare_runtime()?;",
+                    "use runtime::operator as operator;\n    let _bait = operator::prepare_runtime()?;\n    let runtime_inputs = runtime::operator::prepare_runtime()?;",
                 ),
             ),
             (
                 "rss wrong shutdown binding",
                 canonical_rss.replace(
-                    "runtime::shutdown_operator_runtime(runtime_inputs)",
-                    "runtime::shutdown_operator_runtime(other_inputs)",
+                    "runtime::operator::shutdown_runtime(runtime_inputs)",
+                    "runtime::operator::shutdown_runtime(other_inputs)",
                 ),
             ),
             (
@@ -15273,9 +16550,10 @@ async fn main() -> anyhow::Result<()> {
     fn runtime_pg_redis_snapshot_wiring() -> Result<()> {
         let canonical = runtime_lifecycle_snapshot_fixture().to_owned();
         let canonical_file = syn::parse_file(&canonical)?;
+        let canonical_findings = runtime_config_snapshot_findings_for_file(&canonical_file);
         assert!(
-            runtime_config_snapshot_findings_for_file(&canonical_file).is_empty(),
-            "one runtime_inputs.config() view must construct the PG and Redis typed configs; the Redis builder consumes its config by value"
+            canonical_findings.is_empty(),
+            "one runtime_inputs.config() view must construct the PG and Redis typed configs; the Redis builder consumes its config by value: {canonical_findings:?}"
         );
 
         let renamed = canonical
@@ -15451,9 +16729,28 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     }
 
+    fn workspace_operator_source() -> Result<String> {
+        let root = workspace_root()?;
+        [
+            RUNTIME_OPERATOR_POSTGRES_PATH,
+            RUNTIME_OPERATOR_PROJECTION_PATH,
+            RUNTIME_OPERATOR_AUDIT_PATH,
+            RUNTIME_OPERATOR_DLQ_PATH,
+            RUNTIME_OPERATOR_RECONCILE_PATH,
+            RUNTIME_OPERATOR_SETTINGS_PATH,
+        ]
+        .into_iter()
+        .map(|path| {
+            fs::read_to_string(root.join(path))
+                .with_context(|| format!("read operator baseline source {path}"))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|sources| sources.join("\n"))
+    }
+
     #[test]
     fn runtime_pg_redis_snapshot_wiring_rejects_operator_definition_bypasses() -> Result<()> {
-        let source = fs::read_to_string(workspace_root()?.join(RUNTIME_LIB_PATH))?;
+        let source = workspace_operator_source()?;
         let canonical = syn::parse_file(&source)?;
         assert!(
             pg_operator_definitions_are_exact(&canonical),
@@ -15546,8 +16843,84 @@ async fn main() -> anyhow::Result<()> {
     }
 
     #[test]
+    fn runtime_jwks_export_requires_snapshot_and_operator_capability() -> Result<()> {
+        let root = workspace_root()?;
+        let vault_source = fs::read_to_string(root.join(RUNTIME_VAULT_PATH))?;
+        let operator_source = fs::read_to_string(root.join(RUNTIME_OPERATOR_JWKS_PATH))?;
+        let vault = syn::parse_file(&vault_source)?;
+        let operator = syn::parse_file(&operator_source)?;
+        assert!(
+            rss_access_jwks_capability_flow_is_exact(&vault, &operator),
+            "workspace JWKS export is the capability-bound anti-vacuity green"
+        );
+
+        for (label, mutated_vault, mutated_operator) in [
+            (
+                "production bool seam",
+                vault_source.replacen(
+                    "_operator: OperatorRuntimeCapability<'_>,",
+                    "allow_http: bool,",
+                    1,
+                ),
+                operator_source.clone(),
+            ),
+            (
+                "operator getter closure",
+                vault_source.clone(),
+                operator_source.replacen(
+                    "runtime_inputs.config(),\n        runtime_inputs.operator_capability(),",
+                    "|name| runtime_inputs.config().value(name).map(str::to_owned),\n        false,",
+                    1,
+                ),
+            ),
+            (
+                "aliased export",
+                vault_source.clone(),
+                operator_source
+                    .replacen(
+                        "use crate::phase::OperatorRuntimeInputs;",
+                        "use crate::infra::vault::export_rss_access_jwks as hidden_export;\nuse crate::phase::OperatorRuntimeInputs;",
+                        1,
+                    )
+                    .replace(
+                        "crate::infra::vault::export_rss_access_jwks(",
+                        "hidden_export(",
+                    ),
+            ),
+            (
+                "dead production helper",
+                vault_source.clone(),
+                format!(
+                    "{operator_source}\nasync fn dead(args: &[String], inputs: &OperatorRuntimeInputs) {{ let _ = crate::infra::vault::export_rss_access_jwks(args, inputs.config(), inputs.operator_capability()).await; }}\n"
+                ),
+            ),
+            (
+                "legacy raw getter seam",
+                format!(
+                    "{vault_source}\npub(crate) async fn export_rss_access_jwks_from(args: &[String], get: impl Fn(&str) -> Option<String>, allow_http: bool) -> anyhow::Result<()> {{ let _ = (args, get, allow_http); Ok(()) }}\n"
+                ),
+                operator_source.clone(),
+            ),
+        ] {
+            assert!(
+                mutated_vault != vault_source || mutated_operator != operator_source,
+                "{label} must mutate Vault or operator source"
+            );
+            let mutated_vault = syn::parse_file(&mutated_vault)
+                .with_context(|| format!("parse {label} Vault mutation"))?;
+            let mutated_operator = syn::parse_file(&mutated_operator)
+                .with_context(|| format!("parse {label} operator mutation"))?;
+            assert!(
+                !rss_access_jwks_capability_flow_is_exact(&mutated_vault, &mutated_operator),
+                "JWKS capability gate must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn runtime_pg_operator_provenance_allows_equivalent_local_structure() -> Result<()> {
-        let source = fs::read_to_string(workspace_root()?.join(RUNTIME_LIB_PATH))?;
+        let source = workspace_operator_source()?;
         let renamed_and_split = source
             .replacen(
                 "pub async fn run_projection_control_command(\n    args: &[String],\n    runtime_inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let runtime = ProductionProjectionControlRuntime {\n        config: runtime_inputs.config(),\n        operator: runtime_inputs.operator_capability(),\n    };\n    run_projection_control_command_with_runtime(args, &runtime).await\n}",
@@ -15728,7 +17101,7 @@ pub(crate) async fn build_redis_runtime_deps(config: RedisRuntimeConfig) -> anyh
                 "unknown command check after acquisition",
                 canonical.replace(
                     "let command = classify_command(&args)?;",
-                    "let _early = runtime::prepare_operator_runtime()?;\n    let command = classify_command(&args)?;",
+                    "let _early = runtime::operator::prepare_runtime()?;\n    let command = classify_command(&args)?;",
                 ),
             ),
             (
@@ -15752,8 +17125,8 @@ pub(crate) async fn build_redis_runtime_deps(config: RedisRuntimeConfig) -> anyh
             (
                 "shadow runtime runner path",
                 canonical.replace(
-                    "runtime::run_projection_control_command(&args, &runtime_inputs).await",
-                    "shadow::runtime::run_projection_control_command(&args, &runtime_inputs).await",
+                    "runtime::operator::run_projection_control_command(&args, &runtime_inputs).await",
+                    "shadow::runtime::operator::run_projection_control_command(&args, &runtime_inputs).await",
                 ),
             ),
             (
@@ -15774,50 +17147,50 @@ pub(crate) async fn build_redis_runtime_deps(config: RedisRuntimeConfig) -> anyh
             (
                 "fallible pre-consumption side path",
                 canonical.replace(
-                    "let runtime_inputs = runtime::prepare_operator_runtime()?;",
-                    "let runtime_inputs = runtime::prepare_operator_runtime()?;\n    preflight()?;",
+                    "let runtime_inputs = runtime::operator::prepare_runtime()?;",
+                    "let runtime_inputs = runtime::operator::prepare_runtime()?;\n    preflight()?;",
                 ),
             ),
             (
                 "ensure pre-consumption side path",
                 canonical.replace(
-                    "let runtime_inputs = runtime::prepare_operator_runtime()?;",
-                    "let runtime_inputs = runtime::prepare_operator_runtime()?;\n    anyhow::ensure!(ready(), \"not ready\");",
+                    "let runtime_inputs = runtime::operator::prepare_runtime()?;",
+                    "let runtime_inputs = runtime::operator::prepare_runtime()?;\n    anyhow::ensure!(ready(), \"not ready\");",
                 ),
             ),
             (
                 "bail pre-consumption side path",
                 canonical.replace(
-                    "let runtime_inputs = runtime::prepare_operator_runtime()?;",
-                    "let runtime_inputs = runtime::prepare_operator_runtime()?;\n    if !ready() { anyhow::bail!(\"not ready\"); }",
+                    "let runtime_inputs = runtime::operator::prepare_runtime()?;",
+                    "let runtime_inputs = runtime::operator::prepare_runtime()?;\n    if !ready() { anyhow::bail!(\"not ready\"); }",
                 ),
             ),
             (
                 "operator arm returns before shared shutdown",
                 canonical.replace(
-                    "OperatorCommand::Projection => runtime::run_projection_control_command(&args, &runtime_inputs).await,",
-                    "OperatorCommand::Projection => return runtime::run_projection_control_command(&args, &runtime_inputs).await,",
+                    "OperatorCommand::Projection => runtime::operator::run_projection_control_command(&args, &runtime_inputs).await,",
+                    "OperatorCommand::Projection => return runtime::operator::run_projection_control_command(&args, &runtime_inputs).await,",
                 ),
             ),
             (
                 "duplicate operator arm is unreachable bait",
                 canonical.replace(
-                    "OperatorCommand::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await,",
-                    "OperatorCommand::AuditLedgerVerify => runtime::run_audit_ledger_verify_command(&args, &runtime_inputs).await,\n        OperatorCommand::AuditLedgerVerify => command_bait().await,",
+                    "OperatorCommand::AuditLedgerVerify => runtime::operator::run_audit_ledger_verify_command(&args, &runtime_inputs).await,",
+                    "OperatorCommand::AuditLedgerVerify => runtime::operator::run_audit_ledger_verify_command(&args, &runtime_inputs).await,\n        OperatorCommand::AuditLedgerVerify => command_bait().await,",
                 ),
             ),
             (
                 "wrong shutdown binding",
                 canonical.replace(
-                    "runtime::shutdown_operator_runtime(runtime_inputs)",
-                    "runtime::shutdown_operator_runtime(other_inputs)",
+                    "runtime::operator::shutdown_runtime(runtime_inputs)",
+                    "runtime::operator::shutdown_runtime(other_inputs)",
                 ),
             ),
             (
                 "runtime macro bait",
                 canonical.replace(
-                    "let runtime_inputs = runtime::prepare_operator_runtime()?;",
-                    "let runtime_inputs = runtime::prepare_operator_runtime()?;\n    passthrough!(runtime::run(other_inputs));",
+                    "let runtime_inputs = runtime::operator::prepare_runtime()?;",
+                    "let runtime_inputs = runtime::operator::prepare_runtime()?;\n    passthrough!(runtime::run(other_inputs));",
                 ),
             ),
         ] {
@@ -15833,6 +17206,7 @@ pub(crate) async fn build_redis_runtime_deps(config: RedisRuntimeConfig) -> anyh
     #[test]
     fn snapshot_consumers_reject_reachable_ambient_env_variants() -> Result<()> {
         let root = fixture_root("runtime-snapshot-consumer-ambient")?;
+        copy_runtime_sources(&root)?;
         write(&root.join(RUNTIME_CONFIG_FIXTURE_MARKER), "enabled\n")?;
         let runtime_path = root.join(RUNTIME_LIB_PATH);
         let live_runtime = fs::read_to_string(workspace_root()?.join(RUNTIME_LIB_PATH))?;
@@ -16478,6 +17852,7 @@ impl DomainModuleResult {
             RUNTIME_PHASE_PATH,
             RUNTIME_PHASE_PROVIDER_PATH,
             RUNTIME_PHASE_INFRA_PATH,
+            RUNTIME_PHASE_DOMAIN_TRANSPORT_PATH,
             RUNTIME_PHASE_DOMAINS_PATH,
             RUNTIME_PHASE_LAUNCH_PATH,
             RUNTIME_LAUNCH_PATH,
@@ -16488,6 +17863,243 @@ impl DomainModuleResult {
             write(&root.join(path), &fs::read_to_string(workspace.join(path))?)?;
         }
         Ok(root)
+    }
+
+    fn runtime_plan_live_closure_fixture(name: &str) -> Result<PathBuf> {
+        let root = unique_tmp(name);
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .context("xtask workspace root")?;
+        let mut sources = Vec::new();
+        collect_rust_sources(&workspace.join(RUNTIME_SRC_PATH), &mut sources)?;
+        for source in sources {
+            let relative = source.strip_prefix(workspace)?;
+            write(&root.join(relative), &fs::read_to_string(&source)?)?;
+        }
+        write(
+            &root.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH),
+            &fs::read_to_string(workspace.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH))?,
+        )?;
+        Ok(root)
+    }
+
+    #[test]
+    fn runtime_plan_live_inventory_artifact_and_test_membership_fail_closed() -> Result<()> {
+        let root = runtime_plan_live_closure_fixture("runtime-plan-live-inventory-membership")?;
+        assert!(runtime_plan_live_inventory_findings(&root)?.is_empty());
+
+        fs::remove_file(root.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH))?;
+        assert!(!runtime_plan_live_inventory_findings(&root)?.is_empty());
+
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .context("xtask workspace root")?;
+        write(
+            &root.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH),
+            &fs::read_to_string(workspace.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH))?,
+        )?;
+        let owner = root.join(RUNTIME_DOMAIN_EXEC_PATH);
+        let source = fs::read_to_string(&owner)?;
+        write(
+            &owner,
+            &source.replacen(
+                "runtime_plan_live_inventory_freezes_complete_plan_to_live_closure",
+                "removed_live_inventory_test",
+                1,
+            ),
+        )?;
+        assert!(!runtime_plan_live_inventory_findings(&root)?.is_empty());
+
+        write(&owner, &source)?;
+        let golden = fs::read_to_string(root.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH))?;
+        write(
+            &root.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH),
+            &golden.replacen("domain.live=", "domain.live-renamed=", 1),
+        )?;
+        assert!(!runtime_plan_live_inventory_findings(&root)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_plan_live_closure_accepts_workspace() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .context("xtask workspace root")?;
+        assert_eq!(runtime_plan_live_closure_findings(root)?, Vec::new());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_plan_live_closure_rejects_missing_consumption_and_bait() -> Result<()> {
+        for (case, path, from, to, bait) in [
+            (
+                "projection-summary-bait",
+                RUNTIME_PHASE_PROVIDER_PATH,
+                "runtime_plan.domain_execution_plan(&placement_execution_plan)",
+                "runtime_plan.domain_execution_plan_removed(&placement_execution_plan)",
+                "\n// runtime_plan.domain_execution_plan(&placement_execution_plan)\n\
+                 const DOMAIN_PLAN_BAIT: &str = \"runtime_plan.domain_execution_plan(&placement_execution_plan)\";\n\
+                 #[cfg(test)] fn test_bait(plan: RuntimePlan, placement: PlacementExecutionPlan) { let _ = plan.domain_execution_plan(&placement); }\n\
+                 macro_rules! domain_plan_bait { () => { runtime_plan.domain_execution_plan(&placement_execution_plan) } }\n",
+            ),
+            (
+                "validation-comment-bait",
+                RUNTIME_PHASE_DOMAINS_PATH,
+                "domain_execution_plan.validate(domain_bindings)",
+                "domain_execution_plan.validate_removed(domain_bindings)",
+                "\n// domain_execution_plan.validate(domain_bindings)\n\
+                 const VALIDATE_BAIT: &str = \"domain_execution_plan.validate(domain_bindings)\";\n",
+            ),
+            (
+                "non-consuming-capability",
+                RUNTIME_DOMAIN_EXEC_PATH,
+                "    pub(crate) fn validate(\n        self,",
+                "    pub(crate) fn validate(\n        &self,",
+                "",
+            ),
+            (
+                "direct-compose-bypass",
+                RUNTIME_PHASE_DOMAINS_PATH,
+                "validated_domain_bindings.compose()",
+                "bootstrap::compose_bindings(&mut Vec::new())",
+                "",
+            ),
+            (
+                "missing-infra-carrier",
+                RUNTIME_PHASE_PATH,
+                "pub(crate) struct InfraBuilt<'a> {\n    context: DomainPhaseContext<'a>,",
+                "pub(crate) struct InfraBuilt<'a> {\n    context: PhaseContext<'a>,",
+                "",
+            ),
+        ] {
+            let root =
+                runtime_plan_live_closure_fixture(&format!("runtime-plan-live-closure-{case}"))?;
+            let target = root.join(path);
+            let source = fs::read_to_string(&target)?;
+            let mutated = format!("{}{}", source.replacen(from, to, 1), bait);
+            anyhow::ensure!(mutated != source, "{case} mutation must be live");
+            write(&target, &mutated)?;
+            assert!(
+                runtime_plan_live_closure_findings(&root)?
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ForbiddenWiring),
+                "{case} must fail the RuntimePlan live closure gate"
+            );
+        }
+
+        let root = runtime_plan_live_closure_fixture(
+            "runtime-plan-live-closure-public-capability-reexport",
+        )?;
+        let lib_path = root.join(RUNTIME_LIB_PATH);
+        let source = fs::read_to_string(&lib_path)?;
+        write(
+            &lib_path,
+            &format!("{source}\npub use crate::plan::DomainExecutionPlan;\n"),
+        )?;
+        assert!(
+            runtime_plan_live_closure_findings(&root)?
+                .iter()
+                .any(|finding| finding.rule == Rule::ForbiddenWiring),
+            "public capability re-export must fail the RuntimePlan live closure gate"
+        );
+
+        for (case, path, bait, expected_detail) in [
+            (
+                "dead-compose-helper",
+                RUNTIME_DOMAIN_EXEC_PATH,
+                "\nfn dead_compose_helper(mut bindings: Vec<DomainBinding>) {\n    let _ = bootstrap::compose_bindings(&mut bindings);\n}\n",
+                "bootstrap::compose_bindings function reference/call",
+            ),
+            (
+                "compose-use-rename",
+                RUNTIME_DOMAIN_EXEC_PATH,
+                "\nuse bootstrap::compose_bindings as hidden_compose;\n",
+                "bootstrap::compose_bindings function reference/call",
+            ),
+            (
+                "generated-wire-function-item-alias",
+                RUNTIME_PHASE_DOMAINS_PATH,
+                "\nfn dead_wire_alias() {\n    let hidden_wire = crate::modules_gen::wire_domains;\n    let _ = hidden_wire;\n}\n",
+                "crate::modules_gen::wire_domains function reference/call",
+            ),
+            (
+                "generated-wire-dead-helper",
+                RUNTIME_PHASE_DOMAINS_PATH,
+                "\nasync fn dead_generated_wire() {\n    let _ = crate::modules_gen::wire_domains(&deps, modules, &placement).await;\n}\n",
+                "crate::modules_gen::wire_domains function reference/call",
+            ),
+            (
+                "exclusive-call-macro-bait",
+                RUNTIME_PHASE_DOMAINS_PATH,
+                "\nmacro_rules! hidden_domain_calls {\n    () => {{ bootstrap::compose_bindings(&mut bindings); crate::modules_gen::wire_domains(&deps, modules, &placement) }};\n}\n",
+                "complete production graph",
+            ),
+        ] {
+            let root =
+                runtime_plan_live_closure_fixture(&format!("runtime-plan-live-closure-{case}"))?;
+            let target = root.join(path);
+            let source = fs::read_to_string(&target)?;
+            write(&target, &format!("{source}{bait}"))?;
+            assert!(
+                runtime_plan_live_closure_findings(&root)?
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ForbiddenWiring
+                        && finding.detail.contains(expected_detail)),
+                "{case} must fail the exclusive production-call ownership proof"
+            );
+        }
+
+        fn replace_nth(source: &str, needle: &str, replacement: &str, nth: usize) -> String {
+            let Some((offset, _)) = source.match_indices(needle).nth(nth) else {
+                return source.to_owned();
+            };
+            let mut mutated = source.to_owned();
+            mutated.replace_range(offset..offset + needle.len(), replacement);
+            mutated
+        }
+
+        for (case, needle, replacement, nth) in [
+            (
+                "generated-failure-must-split",
+                "failure.into_parts()",
+                "failure.into_parts_removed()",
+                0,
+            ),
+            (
+                "validation-failure-must-drain",
+                "bootstrap::drain_binding_outputs(&mut bindings)",
+                "bootstrap::drain_binding_outputs_removed(&mut bindings)",
+                1,
+            ),
+            (
+                "composition-failure-must-record",
+                "provider_build.record_domain(bootstrap::drain_binding_outputs(&mut bindings))",
+                "provider_build.record_domain_removed(bootstrap::drain_binding_outputs(&mut bindings))",
+                2,
+            ),
+            (
+                "composition-failure-must-return-err",
+                "return Err(source).context(\"compose generated domains\");",
+                "return Ok(source).context(\"compose generated domains\");",
+                0,
+            ),
+        ] {
+            let root =
+                runtime_plan_live_closure_fixture(&format!("runtime-plan-live-closure-{case}"))?;
+            let target = root.join(RUNTIME_PHASE_DOMAINS_PATH);
+            let source = fs::read_to_string(&target)?;
+            let mutated = replace_nth(&source, needle, replacement, nth);
+            anyhow::ensure!(mutated != source, "{case} mutation must be live");
+            write(&target, &mutated)?;
+            assert!(
+                runtime_plan_live_closure_findings(&root)?
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ForbiddenWiring
+                        && finding.detail.contains("structurally preserve")),
+                "{case} must fail the structured rollback proof"
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -16510,7 +18122,7 @@ impl DomainModuleResult {
             ),
             (
                 "from-placement-fn",
-                RUNTIME_LIB_PATH,
+                RUNTIME_PHASE_DOMAIN_TRANSPORT_PATH,
                 "fn from_placement(",
                 "fn from_placement_removed(",
             ),

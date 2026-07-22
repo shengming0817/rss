@@ -662,6 +662,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            RuntimeRootGuard => (step_runtime_root_guard, Some("xtask/src/runtime_root_guard.rs"),
+                gate(
+                        GateId::RuntimeRootGuard,
+                        "runtime-root-guard",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             RuntimeEnvGuard => (step_runtime_env_guard, Some("xtask/src/runtime_env_guard.rs"),
                 gate(
                         GateId::RuntimeEnvGuard,
@@ -1169,6 +1180,17 @@ macro_rules! gate_catalog {
                             install_hint: DYLINT_HINT,
                         },
                         SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
+            RuntimeDylintUiTests => (step_runtime_dylint_ui_tests, None,
+                expensive_gate(
+                        GateId::RuntimeDylintUiTests,
+                        "runtime-dylint-ui-tests",
+                        CORE,
+                        CompileKind::Workspace,
+                        ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test),
+                        EvidenceKind::Test,
                         BOTH_INCLUDED,
                     )
             ),

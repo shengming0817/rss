@@ -64,15 +64,15 @@ LL |     let _config = postgres::ConfigValueMaintenanceCapability::from_verified
    = help: 仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability
 
 warning: verified maintenance capability 仅组合根可 mint
-  --> $DIR/disallowed.rs:59:9
+  --> $DIR/disallowed.rs:58:23
    |
-LL |         postgres::ConfigValueMaintenanceCapability::from_verified_service_caller;
-   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+LL |     let config_mint = postgres::ConfigValueMaintenanceCapability::from_verified_service_caller;
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: 仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability
 
 warning: verified maintenance capability 仅组合根可 mint
-  --> $DIR/disallowed.rs:61:9
+  --> $DIR/disallowed.rs:60:9
    |
 LL |         postgres::ConfigValueMaintenanceCapability::from_verified_service_caller;
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -80,7 +80,7 @@ LL |         postgres::ConfigValueMaintenanceCapability::from_verified_service_c
    = help: 仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability
 
 warning: Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用
-  --> $DIR/disallowed.rs:69:13
+  --> $DIR/disallowed.rs:68:13
    |
 LL |     let _ = principal.service_caller_domain();
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

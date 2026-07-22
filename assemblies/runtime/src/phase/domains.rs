@@ -1,3 +1,4 @@
+use super::maintenance::{RLS_READY_PROBE_NAME, RlsReadyProbe, wire_auth_grant_sweeper};
 use super::{DomainsWired, InfraBuilt, RuntimePhaseState, phase_result};
 use crate::infra::oidc::{
     AccessTokenJwksReadyProbe, FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
@@ -6,7 +7,6 @@ use crate::infra::oidc::{
 use crate::infra::redis::{REDIS_READY_PROBE_NAME, RedisReadyProbe, spawn_redis_readiness_sampler};
 use crate::infra::s3::wire_s3_canary;
 use crate::infra::signing_rotation::RSS_ACCESS_TOKEN_SIGNING_ROTATION_PROBE_NAME;
-use crate::{RLS_READY_PROBE_NAME, RlsReadyProbe, wire_auth_grant_sweeper};
 use anyhow::{Context as _, Result};
 use bootstrap::DomainModuleResult;
 use diport::DynManagedResource;
@@ -113,6 +113,7 @@ impl<'a> InfraBuilt<'a> {
             runtime_federated_access,
             runtime_service_token,
         } = self;
+        let (context, domain_execution_plan) = context.into_parts();
         let result = async {
             let super::infra::RuntimeWiringInputs {
                 event_transport,
@@ -127,7 +128,7 @@ impl<'a> InfraBuilt<'a> {
             // and subscriber handles enter Registry, never SharedRuntimeDeps or a service bag.
             // bootstrap 启动 tail-verify（跨租户全量巡检）defer 到 Part B；本 phase 仍只收窄
             // request/subscriber capability。
-            let mut domain_bindings = match crate::modules_gen::wire_domains(
+            let domain_bindings = match crate::modules_gen::wire_domains(
                 &deps,
                 domain_modules,
                 &placement_execution_plan,
@@ -141,15 +142,22 @@ impl<'a> InfraBuilt<'a> {
                     return Err(source).context("wire generated domains");
                 }
             };
-            let (mut registry, domains_module) =
-                match bootstrap::compose_bindings(&mut domain_bindings) {
-                    Ok(composed) => composed,
-                    Err(source) => {
-                        provider_build
-                            .record_domain(bootstrap::drain_binding_outputs(&mut domain_bindings));
-                        return Err(source).context("compose generated domains");
-                    }
-                };
+            let validated_domain_bindings = match domain_execution_plan.validate(domain_bindings) {
+                Ok(bindings) => bindings,
+                Err(failure) => {
+                    let (source, mut bindings) = failure.into_parts();
+                    provider_build.record_domain(bootstrap::drain_binding_outputs(&mut bindings));
+                    return Err(source).context("validate generated domains against RuntimePlan");
+                }
+            };
+            let (mut registry, domains_module) = match validated_domain_bindings.compose() {
+                Ok(composed) => composed,
+                Err(failure) => {
+                    let (source, mut bindings) = failure.into_parts();
+                    provider_build.record_domain(bootstrap::drain_binding_outputs(&mut bindings));
+                    return Err(source).context("compose generated domains");
+                }
+            };
             provider_build.record_domain(domains_module);
             validate_domain_listener_evidence(
                 &listener_execution_plan,

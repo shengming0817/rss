@@ -75,7 +75,7 @@ their renderers, endpoints, or gates already exist.
 | RFC 8785 canonical assembly identity, exact input universe, and drift check | #1780–#1781 | Hard type/schema/codegen/golden; Medium generate/check |
 | one configuration read and no serving ambient reads | #1782–#1787 | Hard snapshot and required inputs; Medium AST guard |
 | fingerprinted typed plan identity | #1788 | Hard private protocol/compiler/reader/schema/golden |
-| plan-driven live cutover | #1792–#1794 | Hard typed dispatch; Medium bijection and root ratchet |
+| plan-driven live cutover | #1792–#1794 | Landed: Hard typed dispatch/domain capability; Medium bijection, aggregate closure, and root ratchet |
 | reusable launch and runnable subset closure | #1795–#1798 | Hard runtimeexec graph; Medium artifact closure |
 | production security posture | #1799–#1801 | Hard types, database constraints, and manifest validation |
 | Kubernetes deployment fact chain | #1802–#1805 | Hard plan schema-to-golden; Medium Helm drift/policy/kind acceptance |
@@ -87,5 +87,5 @@ Until each owner lands its carrier, the row describes a planned capability only 
 ## Consequences
 
 - 007 directly replaces 001 as the active plan, while 001 remains unchanged for audit lineage.
-- DeploymentPlan cannot precede the #1794 live RuntimePlan cutover; the tracker and 52-edge DAG carry this dependency.
+- DeploymentPlan follows the landed #1794 live RuntimePlan cutover; the tracker and 52-edge DAG retain this dependency for audit lineage.
 - #1779 implements the repository specification carrier, registers its selftest in the typed `verify --fast` Meta aggregate, and supplies schemas, fixtures, and target documents only. Runtime Rust types, generated deployment output, Helm, workflows, active-PR scheduling, and branch protection remain with downstream owners.

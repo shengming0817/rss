@@ -56,13 +56,15 @@ use primitives::{HealthCheck, MacKey, ProbeName};
 use vault::VaultKeyProvider;
 use vocab::ExternalEffectPolicy;
 
+use crate::EnvSecret;
+use crate::config::{ServingConfigMapper, SnapshotConfig};
 use crate::consumer_tx::{ConsumerTxHandler, policy, spawn_consumer_ackable_tx_subscriber};
 use crate::distributed_runtime::{
     CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, DistributedRuntimeDeps,
 };
 use crate::infra::plaintext_endpoint_policy_from;
 use crate::infra::vault::{DEFAULT_VAULT_TIMEOUT, build_vault_tls_client_from};
-use crate::{EnvSecret, ServingConfigMapper, SnapshotConfig, SystemClock};
+use crate::support::SystemClock;
 
 // ── 对外类型 ──────────────────────────────────────────────────────────────────
 
